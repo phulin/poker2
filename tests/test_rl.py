@@ -120,3 +120,48 @@ def test_self_play_trainer_basic():
         signal.alarm(0)
         # If it times out, just check that trainer was created successfully
         assert trainer is not None
+
+
+def test_dynamic_delta_bounds():
+    """Test dynamic delta bounds computation from chips placed."""
+    from alphaholdem.rl.replay import compute_delta_bounds, Trajectory, Transition
+    import torch
+    
+    # Create a trajectory with some chips placed
+    transitions = [
+        Transition(
+            observation=torch.randn(6 * 4 * 13 + 24 * 4 * 9),  # cards + actions
+            action=1,
+            log_prob=-1.0,
+            reward=0.0,
+            done=False,
+            legal_mask=torch.ones(9),
+            chips_placed=50,  # Small bet
+        ),
+        Transition(
+            observation=torch.randn(6 * 4 * 13 + 24 * 4 * 9),
+            action=4,
+            log_prob=-1.5,
+            reward=100.0,
+            done=True,
+            legal_mask=torch.ones(9),
+            chips_placed=200,  # Larger bet
+        ),
+    ]
+    
+    trajectory = Trajectory(transitions=transitions, final_value=0.0)
+    
+    # Compute delta bounds
+    delta2, delta3 = compute_delta_bounds(trajectory)
+    
+    # Verify bounds are computed correctly
+    assert delta2 == -250, f"Expected delta2=-250, got {delta2}"  # Total chips placed
+    assert delta3 == 250, f"Expected delta3=250, got {delta3}"    # Total chips placed
+    
+    # Test empty trajectory
+    empty_trajectory = Trajectory(transitions=[], final_value=0.0)
+    delta2_empty, delta3_empty = compute_delta_bounds(empty_trajectory)
+    assert delta2_empty == 0.0, "Empty trajectory should have delta2=0"
+    assert delta3_empty == 0.0, "Empty trajectory should have delta3=0"
+    
+    print("✅ Dynamic delta bounds computation test passed!")

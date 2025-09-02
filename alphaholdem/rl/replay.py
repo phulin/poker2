@@ -81,16 +81,30 @@ def compute_gae_returns(
 
 
 def compute_delta_bounds(trajectory: Trajectory) -> tuple[float, float]:
-    """Compute δ2 and δ3 bounds from chips placed in trajectory."""
+    """Compute δ2 and δ3 bounds from chips placed in trajectory.
+    
+    According to the paper:
+    - δ2: negative bound representing opponent chips placed
+    - δ3: positive bound representing our chips placed
+    
+    These bounds are used to clip the returns in the value loss function
+    to reduce variance in imperfect information games.
+    """
     chips_placed = [t.chips_placed for t in trajectory.transitions]
     if not chips_placed:
         return 0.0, 0.0
     
-    # δ2: negative bound (opponent chips)
-    # δ3: positive bound (our chips)
-    # For simplicity, use max chips placed as bounds
-    max_chips = max(chips_placed)
-    return -max_chips, max_chips
+    # Calculate total chips placed by both players
+    total_chips = sum(chips_placed)
+    
+    # δ2: negative bound (opponent chips) - typically negative
+    # δ3: positive bound (our chips) - typically positive
+    # For simplicity, use symmetric bounds based on total chips
+    # In a more sophisticated implementation, we could track per-player chips
+    delta2 = -total_chips
+    delta3 = total_chips
+    
+    return delta2, delta3
 
 
 def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:

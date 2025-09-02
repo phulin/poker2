@@ -152,6 +152,22 @@ class SelfPlayTrainer:
         # Prepare batch
         batch = prepare_ppo_batch(trajectories)
         
+        # Compute dynamic delta2 and delta3 bounds from chips placed
+        all_chips_placed = []
+        for trajectory in trajectories:
+            for transition in trajectory.transitions:
+                all_chips_placed.append(transition.chips_placed)
+        
+        if all_chips_placed:
+            max_chips = max(all_chips_placed)
+            # δ2: negative bound (opponent chips), δ3: positive bound (our chips)
+            # According to paper: δ2 and δ3 represent total chips placed by players
+            delta2 = -max_chips
+            delta3 = max_chips
+        else:
+            delta2 = 0.0
+            delta3 = 0.0
+        
         # Multiple epochs of updates
         total_loss = 0.0
         for epoch in range(self.num_epochs):
@@ -163,7 +179,7 @@ class SelfPlayTrainer:
             
             logits, values = self.model(cards, actions_tensor)
             
-            # Compute loss
+            # Compute loss with dynamic delta bounds
             loss_dict = trinal_clip_ppo_loss(
                 logits=logits,
                 values=values,
@@ -174,6 +190,8 @@ class SelfPlayTrainer:
                 legal_masks=batch['legal_masks'],
                 epsilon=self.epsilon,
                 delta1=self.delta1,
+                delta2=delta2,
+                delta3=delta3,
                 value_coef=self.value_coef,
                 entropy_coef=self.entropy_coef,
             )
@@ -189,6 +207,8 @@ class SelfPlayTrainer:
         return {
             'avg_loss': total_loss / self.num_epochs,
             'num_trajectories': len(trajectories),
+            'delta2': delta2,
+            'delta3': delta3,
         }
 
     def train_step(self, num_trajectories: int = 4) -> dict:
