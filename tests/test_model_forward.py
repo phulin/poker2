@@ -4,9 +4,11 @@ import torch
 
 from alphaholdem.encoding.cards_encoder import CardsPlanesV1
 from alphaholdem.encoding.actions_encoder import ActionsHUEncoderV1
+from alphaholdem.encoding.action_mapping import bin_to_action, get_legal_mask
 from alphaholdem.models.siamese_convnet import SiameseConvNetV1
 from alphaholdem.models.heads import CategoricalPolicyV1
 from alphaholdem.env.types import GameState, PlayerState
+from alphaholdem.env.hunl_env import HUNLEnv
 
 
 def make_state(street: str, board: list[int]) -> GameState:
@@ -45,3 +47,21 @@ def test_siamese_convnet_forward_and_policy_action():
     a, logp = policy.action(logits.squeeze(0))
     assert 0 <= a < nb
     assert torch.isfinite(torch.tensor(logp))
+
+
+def test_action_mapping_with_env():
+    env = HUNLEnv(starting_stack=1000, sb=50, bb=100)
+    state = env.reset()
+    nb = 9
+    
+    # Test legal mask
+    legal_mask = get_legal_mask(state, nb)
+    assert legal_mask.shape == (nb,)
+    assert legal_mask.sum() > 0  # should have some legal actions
+    
+    # Test bin to action mapping
+    for bin_idx in range(nb):
+        action = bin_to_action(bin_idx, state, nb)
+        assert action.kind in ["fold", "check", "call", "bet", "raise", "allin"]
+        if action.kind in ["bet", "raise", "call", "allin"]:
+            assert action.amount >= 0

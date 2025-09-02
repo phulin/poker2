@@ -55,6 +55,8 @@ class HUNLEnv:
             players=(p_states[0], p_states[1]),
             terminal=False,
         )
+        # Attach env reference to state for legal action lookup
+        self.state.env = self
         return self.state
 
     def legal_actions(self) -> List[Action]:
@@ -133,6 +135,7 @@ class HUNLEnv:
                 terminal=True,
                 winner=winner,
             )
+            new_state.env = self
             self.state = new_state
             reward = self._terminal_rewards(new_state, me)
             return new_state, reward, True, {}
@@ -247,6 +250,7 @@ class HUNLEnv:
             terminal=terminal,
             winner=winner,
         )
+        new_state.env = self
         self.state = new_state
         done = terminal
         reward = self._terminal_rewards(new_state, me) if done else 0
