@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Optional
+import torch
+
+
+@dataclass
+class Transition:
+    """Single transition in a trajectory."""
+    observation: torch.Tensor  # encoded state
+    action: int  # discrete action index
+    log_prob: float  # log probability of action
+    reward: float
+    done: bool
+    legal_mask: torch.Tensor  # legal action mask
+    chips_placed: int  # for δ2/δ3 computation
+
+
+@dataclass
+class Trajectory:
+    """Complete trajectory from reset to terminal."""
+    transitions: List[Transition]
+    final_value: float  # V(s_T) for GAE
+
+
+class ReplayBuffer:
+    def __init__(self, capacity: int = 10000):
+        self.capacity = capacity
+        self.trajectories: List[Trajectory] = []
+        self.position = 0
+
+    def add_trajectory(self, trajectory: Trajectory) -> None:
+        if len(self.trajectories) < self.capacity:
+            self.trajectories.append(trajectory)
+        else:
+            self.trajectories[self.position] = trajectory
+            self.position = (self.position + 1) % self.capacity
+
+    def sample_trajectories(self, num_trajectories: int) -> List[Trajectory]:
+        """Sample trajectories for PPO updates."""
+        if len(self.trajectories) == 0:
+            return []
+        indices = torch.randint(0, len(self.trajectories), (num_trajectories,))
+        return [self.trajectories[i] for i in indices]
+
+    def clear(self) -> None:
+        self.trajectories.clear()
+        self.position = 0
+
+
+def compute_gae_returns(
+    rewards: List[float],
+    values: List[float],
+    gamma: float = 0.999,
+    lambda_: float = 0.95,
+) -> tuple[List[float], List[float]]:
+    """Compute GAE advantages and returns."""
+    advantages = []
+    returns = []
+    
+    # Compute advantages using GAE
+    gae = 0
+    for t in reversed(range(len(rewards))):
+        if t == len(rewards) - 1:
+            # Terminal state
+            delta = rewards[t] - values[t]
+        else:
+            delta = rewards[t] + gamma * values[t + 1] - values[t]
+        
+        gae = delta + gamma * lambda_ * gae
+        advantages.insert(0, gae)
+    
+    # Compute returns from advantages
+    for t in range(len(rewards)):
+        returns.append(advantages[t] + values[t])
+    
+    return advantages, returns
+
+
+def compute_delta_bounds(trajectory: Trajectory) -> tuple[float, float]:
+    """Compute δ2 and δ3 bounds from chips placed in trajectory."""
+    chips_placed = [t.chips_placed for t in trajectory.transitions]
+    if not chips_placed:
+        return 0.0, 0.0
+    
+    # δ2: negative bound (opponent chips)
+    # δ3: positive bound (our chips)
+    # For simplicity, use max chips placed as bounds
+    max_chips = max(chips_placed)
+    return -max_chips, max_chips
+
+
+def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
+    """Prepare batch for PPO updates."""
+    observations = []
+    actions = []
+    log_probs_old = []
+    advantages = []
+    returns = []
+    legal_masks = []
+    
+    for trajectory in trajectories:
+        rewards = [t.reward for t in trajectory.transitions]
+        values = [0.0] * len(trajectory.transitions)  # Placeholder, will be computed by model
+        values.append(trajectory.final_value)
+        
+        traj_advantages, traj_returns = compute_gae_returns(rewards, values)
+        
+        for i, transition in enumerate(trajectory.transitions):
+            observations.append(transition.observation)
+            actions.append(transition.action)
+            log_probs_old.append(transition.log_prob)
+            advantages.append(traj_advantages[i])
+            returns.append(traj_returns[i])
+            legal_masks.append(transition.legal_mask)
+    
+    return {
+        'observations': torch.stack(observations),
+        'actions': torch.tensor(actions, dtype=torch.long),
+        'log_probs_old': torch.tensor(log_probs_old, dtype=torch.float32),
+        'advantages': torch.tensor(advantages, dtype=torch.float32),
+        'returns': torch.tensor(returns, dtype=torch.float32),
+        'legal_masks': torch.stack(legal_masks),
+    }
