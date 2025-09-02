@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import torch
+
+from alphaholdem.encoding.cards_encoder import CardsPlanesV1
+from alphaholdem.encoding.actions_encoder import ActionsHUEncoderV1
+from alphaholdem.env.types import GameState, PlayerState
+
+
+def make_state(street: str, board: list[int]) -> GameState:
+    p0 = PlayerState(stack=1000, hole_cards=[0, 1])  # ranks 0,1 suits 0
+    p1 = PlayerState(stack=1000, hole_cards=[2, 3])
+    return GameState(
+        button=0,
+        street=street,
+        deck=list(range(4, 52)),
+        board=board,
+        pot=0,
+        to_act=0,
+        small_blind=50,
+        big_blind=100,
+        min_raise=100,
+        last_aggressive_amount=100,
+        players=(p0, p1),
+    )
+
+
+def test_cards_planes_v1_values_and_shapes():
+    enc = CardsPlanesV1()
+    # Board: ranks 4,5,6,7 suit 0
+    s = make_state("turn", [4, 5, 6, 7])
+    t = enc.encode_cards(s, seat=0)
+    assert isinstance(t, torch.Tensor)
+    assert t.shape == (6, 4, 13)
+    assert t.dtype == torch.float32
+
+    hole, flop, turn, river, public, all_cards = t
+
+    # Hole cards [0,1] → suit 0, ranks 0 and 1
+    assert hole.sum().item() == 2
+    assert hole[0, 0].item() == 1.0
+    assert hole[0, 1].item() == 1.0
+    assert hole[0].sum().item() == 2
+
+    # Flop from board [4,5,6]
+    assert flop.sum().item() == 3
+    assert flop[0, 4].item() == 1.0
+    assert flop[0, 5].item() == 1.0
+    assert flop[0, 6].item() == 1.0
+
+    # Turn from board [7]
+    assert turn.sum().item() == 1
+    assert turn[0, 7].item() == 1.0
+
+    # River empty at turn
+    assert river.sum().item() == 0
+
+    # Public shows all 4 board cards
+    assert public.sum().item() == 4
+    for r in [4, 5, 6, 7]:
+        assert public[0, r].item() == 1.0
+
+    # All cards = hole + board (6 ones total)
+    assert all_cards.sum().item() == 6
+    for r in [0, 1, 4, 5, 6, 7]:
+        assert all_cards[0, r].item() == 1.0
+
+
+def test_actions_hu_v1_values_and_shapes():
+    enc = ActionsHUEncoderV1(history_actions_per_round=6)
+    s = make_state("flop", [4, 5, 6])
+    nb = 9
+    a = enc.encode_actions(s, seat=0, num_bet_bins=nb)
+    assert isinstance(a, torch.Tensor)
+    assert a.shape == (24, 4, nb)
+    assert a.dtype == torch.float32
+
+    # As currently implemented, encoder is zero-initialized scaffold; validate zeros
+    assert a.sum().item() == 0.0
+    # Legal row for current round's last slot should be zeros for now
+    round_slot = 1 * 6 + 5  # flop last slot
+    assert torch.all(a[round_slot, 3, :] == 0)

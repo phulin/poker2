@@ -47,28 +47,25 @@ def evaluate_7(cards: Iterable[int]) -> Tuple[int, Tuple[int, ...]]:
 
     # Straight detection helper (with wheel A-2-3-4-5)
     def best_straight(mask: List[bool]) -> int | None:
-        # mask[r] indicates presence of rank r
-        # consider A as high and low (rank 12 as Ace)
-        run = 0
-        best_high = None
-        for r in list(range(13)) + [12]:  # wrap Ace low
-            present = mask[r if r < 13 else 0]
-            if present:
-                run += 1
-                if run >= 5:
-                    best_high = r if r < 13 else 3  # high rank index of straight
-            else:
-                run = 0
-        return best_high
+        present = {i for i, v in enumerate(mask) if v}
+        # High-to-low search; return highest straight high-card index
+        for high in range(12, 3, -1):
+            needed = {high, high - 1, high - 2, high - 3, high - 4}
+            if needed.issubset(present):
+                return high
+        # Wheel
+        if {12, 0, 1, 2, 3}.issubset(present):
+            return 3
+        return None
 
     rank_mask = [rc[r] > 0 for r in range(13)]
     straight_high = best_straight(rank_mask)
 
     # Straight flush
     if flush_suit is not None:
-        flush_ranks = [rank(c) for c in cs if suit(c) == flush_suit]
+        flush_rs = [rank(c) for c in cs if suit(c) == flush_suit]
         mask = [False] * 13
-        for r in flush_ranks:
+        for r in flush_rs:
             mask[r] = True
         sf_high = best_straight(mask)
         if sf_high is not None:
@@ -90,9 +87,9 @@ def evaluate_7(cards: Iterable[int]) -> Tuple[int, Tuple[int, ...]]:
 
     # Flush
     if flush_suit is not None:
-        flush_cards = sorted([r for r in ranks if suit(cs[ranks.index(r)]) == flush_suit], reverse=True)
-        top5 = sorted(flush_ranks, reverse=True)[:5]  # type: ignore[name-defined]
-        return (5, tuple(top5))
+        flush_rs = sorted([rank(c) for c in cs if suit(c) == flush_suit], reverse=True)
+        top5 = tuple(flush_rs[:5])
+        return (5, top5)
 
     # Straight
     if straight_high is not None:
