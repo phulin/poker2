@@ -1,0 +1,30 @@
+# Pluggable component selection
+card_encoder:
+  name: cards_planes_v1
+  kwargs: {}
+action_encoder:
+  name: actions_hu_v1
+  kwargs:
+    history_actions_per_round: 6
+model:
+  name: siamese_convnet_v1
+  kwargs:
+    cards_channels: 6
+    actions_channels: 24
+    fusion_hidden: 256
+policy:
+  name: categorical_v1
+  kwargs: {}
+
+# Action space
+nb: 9
+
+# Training hyperparameters (Trinal-Clip PPO)
+ppo_eps: 0.2
+ppo_delta1: 3.0
+gae_lambda: 0.95
+gamma: 0.999
+entropy_coef: 0.01
+value_coef: 0.5
+grad_clip: 1.0
+seed: 0
