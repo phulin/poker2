@@ -97,9 +97,6 @@ celerybeat.pid
 .venv*/
 venv/
 venv*/
-ENV/
-env/
-env*/
 .python-version
 
 # Poetry
