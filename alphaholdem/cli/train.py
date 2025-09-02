@@ -30,7 +30,7 @@ def main():
     for step in range(args.steps):
         stats = trainer.train_step(num_trajectories=args.trajectories_per_step)
         
-        if step % 10 == 0:
+        if step % 1 == 0:
             elapsed = time.time() - start_time
             print(f"Step {step}/{args.steps} | "
                   f"Episodes: {stats['episode_count']} | "

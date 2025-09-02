@@ -15,6 +15,8 @@ class Transition:
     done: bool
     legal_mask: torch.Tensor  # legal action mask
     chips_placed: int  # for δ2/δ3 computation
+    advantage: float = 0.0  # GAE advantage (computed later)
+    return_: float = 0.0  # GAE return (computed later)
 
 
 @dataclass
@@ -101,18 +103,12 @@ def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
     legal_masks = []
     
     for trajectory in trajectories:
-        rewards = [t.reward for t in trajectory.transitions]
-        values = [0.0] * len(trajectory.transitions)  # Placeholder, will be computed by model
-        values.append(trajectory.final_value)
-        
-        traj_advantages, traj_returns = compute_gae_returns(rewards, values)
-        
-        for i, transition in enumerate(trajectory.transitions):
+        for transition in trajectory.transitions:
             observations.append(transition.observation)
             actions.append(transition.action)
             log_probs_old.append(transition.log_prob)
-            advantages.append(traj_advantages[i])
-            returns.append(traj_returns[i])
+            advantages.append(transition.advantage)
+            returns.append(transition.return_)
             legal_masks.append(transition.legal_mask)
     
     return {

@@ -60,8 +60,12 @@ class SelfPlayTrainer:
         """Collect a single trajectory from self-play."""
         state = self.env.reset()
         transitions = []
+        max_steps = 50  # Safety limit to prevent infinite loops
         
-        while not state.terminal:
+        step_count = 0
+        while not state.terminal and step_count < max_steps:
+            step_count += 1
+            
             # Encode state
             cards = self.cards_encoder.encode_cards(state, seat=state.to_act)
             actions_tensor = self.actions_encoder.encode_actions(state, seat=state.to_act, num_bet_bins=self.num_bet_bins)
@@ -94,6 +98,13 @@ class SelfPlayTrainer:
             
             state = next_state
         
+        if step_count >= max_steps:
+            print(f"Warning: Trajectory reached max steps ({max_steps}), forcing termination")
+            # Force termination by setting final reward
+            if transitions:
+                transitions[-1].reward = 0.0
+                transitions[-1].done = True
+        
         # Compute final value for GAE
         final_value = 0.0  # Terminal state value is 0
         
@@ -106,6 +117,37 @@ class SelfPlayTrainer:
         
         # Sample trajectories
         trajectories = self.replay_buffer.sample_trajectories(self.batch_size)
+        
+        # Compute values for GAE
+        for trajectory in trajectories:
+            rewards = [t.reward for t in trajectory.transitions]
+            values = []
+            
+            # Compute values for each transition
+            for transition in trajectory.transitions:
+                # Split observation back to cards and actions
+                obs = transition.observation
+                cards = obs[:(6 * 4 * 13)].reshape(1, 6, 4, 13)
+                actions_tensor = obs[(6 * 4 * 13):].reshape(1, 24, 4, self.num_bet_bins)
+                
+                with torch.no_grad():
+                    _, value = self.model(cards, actions_tensor)
+                    values.append(value.item())
+            
+            # Add final value (0 for terminal state)
+            values.append(0.0)
+            
+            # Compute GAE advantages and returns
+            advantages, returns = compute_gae_returns(
+                rewards, values, 
+                gamma=self.gamma, 
+                lambda_=self.gae_lambda
+            )
+            
+            # Update trajectory with computed advantages/returns
+            for i, transition in enumerate(trajectory.transitions):
+                transition.advantage = advantages[i]
+                transition.return_ = returns[i]
         
         # Prepare batch
         batch = prepare_ppo_batch(trajectories)

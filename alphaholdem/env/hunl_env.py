@@ -262,7 +262,9 @@ class HUNLEnv:
             return True
         if players[0].is_allin and players[1].is_allin:
             return True
-        return players[0].committed == players[1].committed and players[0].committed > 0
+        # Round is closed when both players have equal committed amounts
+        # (including when both are 0 after checking)
+        return players[0].committed == players[1].committed
 
     def _terminal_rewards(self, s: GameState, perspective: int) -> int:
         # Positive if perspective player wins chips
