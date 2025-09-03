@@ -13,6 +13,7 @@ from ..models.siamese_convnet import SiameseConvNetV1
 from ..models.heads import CategoricalPolicyV1
 from ..rl.replay import ReplayBuffer, Transition, Trajectory, compute_gae_returns, prepare_ppo_batch
 from ..rl.losses import trinal_clip_ppo_loss
+from ..rl.k_best_pool import KBestOpponentPool, AgentSnapshot
 
 
 class SelfPlayTrainer:
@@ -29,6 +30,8 @@ class SelfPlayTrainer:
         value_coef: float = 0.1,  # Reasonable value coefficient
         entropy_coef: float = 0.01,
         grad_clip: float = 1.0,
+        k_best_pool_size: int = 5,  # K-Best pool size
+        min_elo_diff: float = 50.0,  # Minimum ELO difference for pool updates
     ):
         self.num_bet_bins = num_bet_bins
         self.batch_size = batch_size
@@ -50,12 +53,16 @@ class SelfPlayTrainer:
         self.policy = CategoricalPolicyV1()
         self.replay_buffer = ReplayBuffer(capacity=1000)
         
+        # K-Best opponent pool
+        self.opponent_pool = KBestOpponentPool(k=k_best_pool_size, min_elo_diff=min_elo_diff)
+        
         # Optimizer
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         
         # Training stats
         self.episode_count = 0
         self.total_reward = 0.0
+        self.current_elo = 1200.0  # Starting ELO rating
 
     def _initialize_weights(self):
         """Initialize model weights to prevent dead neurons."""
@@ -74,8 +81,14 @@ class SelfPlayTrainer:
                 nn.init.constant_(module.weight, 1)
                 nn.init.constant_(module.bias, 0)
 
-    def collect_trajectory(self) -> Trajectory:
-        """Collect a single trajectory from self-play."""
+    def collect_trajectory(self, opponent_snapshot: Optional[AgentSnapshot] = None) -> Trajectory:
+        """
+        Collect a single trajectory from self-play or against an opponent.
+        
+        Args:
+            opponent_snapshot: Optional opponent snapshot to play against.
+                             If None, plays against self (self-play).
+        """
         state = self.env.reset()
         transitions = []
         max_steps = 50  # Safety limit to prevent infinite loops
@@ -84,13 +97,22 @@ class SelfPlayTrainer:
         while not state.terminal and step_count < max_steps:
             step_count += 1
             
-            # Encode state
-            cards = self.cards_encoder.encode_cards(state, seat=state.to_act)
-            actions_tensor = self.actions_encoder.encode_actions(state, seat=state.to_act, num_bet_bins=self.num_bet_bins)
+            # Determine which player's turn it is
+            current_player = state.to_act
+            
+            # Encode state for current player
+            cards = self.cards_encoder.encode_cards(state, seat=current_player)
+            actions_tensor = self.actions_encoder.encode_actions(state, seat=current_player, num_bet_bins=self.num_bet_bins)
             
             # Get model prediction
             with torch.no_grad():
-                logits, value = self.model(cards.unsqueeze(0), actions_tensor.unsqueeze(0))
+                if opponent_snapshot is not None and current_player != 0:  # Opponent's turn
+                    # Use opponent's model
+                    logits, value = opponent_snapshot.model(cards.unsqueeze(0), actions_tensor.unsqueeze(0))
+                else:
+                    # Use current model (our turn or self-play)
+                    logits, value = self.model(cards.unsqueeze(0), actions_tensor.unsqueeze(0))
+                
                 legal_mask = get_legal_mask(state, self.num_bet_bins)
                 
                 # Sample action
@@ -102,17 +124,18 @@ class SelfPlayTrainer:
             # Take step
             next_state, reward, done, _ = self.env.step(action)
             
-            # Record transition
-            transition = Transition(
-                observation=torch.cat([cards.flatten(), actions_tensor.flatten()]),  # Simplified obs
-                action=action_idx,
-                log_prob=log_prob,
-                reward=reward,
-                done=done,
-                legal_mask=legal_mask,
-                chips_placed=action.amount,
-            )
-            transitions.append(transition)
+            # Record transition (only for our player's actions)
+            if current_player == 0:  # Our player
+                transition = Transition(
+                    observation=torch.cat([cards.flatten(), actions_tensor.flatten()]),  # Simplified obs
+                    action=action_idx,
+                    log_prob=log_prob,
+                    reward=reward,
+                    done=done,
+                    legal_mask=legal_mask,
+                    chips_placed=action.amount,
+                )
+                transitions.append(transition)
             
             state = next_state
         
@@ -232,29 +255,63 @@ class SelfPlayTrainer:
         }
 
     def train_step(self, num_trajectories: int = 4) -> dict:
-        """Single training step: collect trajectories and update model."""
+        """
+        Single training step: collect trajectories against K-Best opponents and update model.
+        
+        Args:
+            num_trajectories: Number of trajectories to collect
+            
+        Returns:
+            Dictionary with training statistics
+        """
+        # Sample opponents from K-Best pool
+        opponents = self.opponent_pool.sample(k=num_trajectories)
+        
         # Collect trajectories
-        for _ in range(num_trajectories):
-            trajectory = self.collect_trajectory()
+        for i in range(num_trajectories):
+            opponent = opponents[i] if i < len(opponents) else None
+            trajectory = self.collect_trajectory(opponent_snapshot=opponent)
             self.replay_buffer.add_trajectory(trajectory)
             self.episode_count += 1
             self.total_reward += sum(t.reward for t in trajectory.transitions)
+            
+            # Update ELO if we played against an opponent
+            if opponent is not None:
+                # Calculate game result based on final reward
+                final_reward = sum(t.reward for t in trajectory.transitions)
+                if final_reward > 0:
+                    result = 'win'
+                elif final_reward < 0:
+                    result = 'loss'
+                else:
+                    result = 'draw'
+                
+                # Update ELO ratings
+                self.opponent_pool.update_elo_after_game(opponent, result)
+                self.current_elo = self.opponent_pool.current_elo
         
         # Update model
         update_stats = self.update_model()
         
+        # Check if we should add current model to opponent pool
+        if self.opponent_pool.should_add_snapshot(self.current_elo):
+            self.opponent_pool.add_snapshot(self, self.current_elo)
+        
         return {
             'episode_count': self.episode_count,
             'avg_reward': self.total_reward / max(1, self.episode_count),
+            'current_elo': self.current_elo,
+            'pool_stats': self.opponent_pool.get_pool_stats(),
             **update_stats,
         }
 
     def save_checkpoint(self, path: str, step: int) -> None:
-        """Save model checkpoint."""
+        """Save model checkpoint and opponent pool."""
         checkpoint = {
             'step': step,
             'episode_count': self.episode_count,
             'total_reward': self.total_reward,
+            'current_elo': self.current_elo,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'config': {
@@ -272,18 +329,78 @@ class SelfPlayTrainer:
         }
         torch.save(checkpoint, path)
         print(f"Checkpoint saved to {path}")
+        
+        # Save opponent pool separately
+        pool_path = path.replace('.pt', '_pool.pt')
+        self.opponent_pool.save_pool(pool_path)
+        print(f"Opponent pool saved to {pool_path}")
 
     def load_checkpoint(self, path: str) -> int:
-        """Load model checkpoint. Returns the step number."""
+        """Load model checkpoint and opponent pool. Returns the step number."""
         checkpoint = torch.load(path)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.episode_count = checkpoint['episode_count']
         self.total_reward = checkpoint['total_reward']
+        self.current_elo = checkpoint.get('current_elo', 1200.0)
         
         print(f"Checkpoint loaded from {path}")
+        
+        # Load opponent pool if it exists
+        pool_path = path.replace('.pt', '_pool.pt')
+        try:
+            from ..models.siamese_convnet import SiameseConvNetV1
+            self.opponent_pool.load_pool(pool_path, SiameseConvNetV1)
+            print(f"Opponent pool loaded from {pool_path}")
+        except FileNotFoundError:
+            print(f"No opponent pool found at {pool_path}, starting with empty pool")
+        
         return checkpoint['step']
+
+    def evaluate_against_pool(self, num_games: int = 100) -> dict:
+        """
+        Evaluate current model against all opponents in the pool.
+        
+        Args:
+            num_games: Number of games to play against each opponent
+            
+        Returns:
+            Dictionary with evaluation results
+        """
+        if not self.opponent_pool.snapshots:
+            return {'error': 'No opponents in pool'}
+        
+        results = {}
+        total_wins = 0
+        total_games = 0
+        
+        for i, opponent in enumerate(self.opponent_pool.snapshots):
+            wins = 0
+            for _ in range(num_games):
+                trajectory = self.collect_trajectory(opponent_snapshot=opponent)
+                final_reward = sum(t.reward for t in trajectory.transitions)
+                if final_reward > 0:
+                    wins += 1
+            
+            win_rate = wins / num_games
+            results[f'opponent_{i}_step_{opponent.step}'] = {
+                'win_rate': win_rate,
+                'opponent_elo': opponent.elo,
+                'wins': wins,
+                'total_games': num_games
+            }
+            total_wins += wins
+            total_games += num_games
+        
+        overall_win_rate = total_wins / total_games if total_games > 0 else 0.0
+        
+        return {
+            'overall_win_rate': overall_win_rate,
+            'total_games': total_games,
+            'opponent_results': results,
+            'pool_stats': self.opponent_pool.get_pool_stats()
+        }
 
     def get_preflop_range_grid(self, seat: int = 0) -> str:
         """Get preflop range as a grid showing action probabilities for button play."""
