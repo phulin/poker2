@@ -61,16 +61,6 @@ def main():
 
     # Initialize trainer
     trainer = SelfPlayTrainer(
-        learning_rate=cfg.learning_rate,
-        batch_size=cfg.batch_size,
-        num_epochs=cfg.num_epochs,
-        epsilon=cfg.ppo_eps,
-        delta1=cfg.ppo_delta1,
-        gamma=cfg.gamma,
-        gae_lambda=cfg.gae_lambda,
-        value_coef=cfg.value_coef,
-        entropy_coef=cfg.entropy_coef,
-        grad_clip=cfg.grad_clip,
         config=args.config,
     )
 

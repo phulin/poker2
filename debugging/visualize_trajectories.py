@@ -14,11 +14,7 @@ def visualize_trajectories_per_step():
     print("=== Understanding trajectories_per_step ===\n")
 
     # Create trainer
-    trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=1e-4,
-        batch_size=8,
-    )
+    trainer = SelfPlayTrainer()
 
     print("Training Flow:")
     print("1. Each training step collects N trajectories (games)")
@@ -58,11 +54,7 @@ def visualize_trajectories_per_step():
 def show_training_cycle():
     print("\n=== Training Cycle Visualization ===\n")
 
-    trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=1e-4,
-        batch_size=4,  # Small batch for demo
-    )
+    trainer = SelfPlayTrainer()
 
     print("Step-by-step training cycle:")
 

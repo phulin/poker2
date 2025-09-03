@@ -4,7 +4,14 @@ from typing import List, Optional, Union
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from line_profiler import profile
+
+try:
+    from line_profiler import profile
+except Exception:  # pragma: no cover
+
+    def profile(f):
+        return f
+
 
 from alphaholdem.core.config_loader import get_config
 
@@ -30,34 +37,39 @@ from ..core.builders import build_components_from_config
 class SelfPlayTrainer:
     def __init__(
         self,
-        num_bet_bins: int,
-        learning_rate: float,
-        batch_size: int,
-        mini_batch_size: int,
-        num_epochs: int,
-        gamma: float,
-        gae_lambda: float,
-        epsilon: float,
-        delta1: float,
-        value_coef: float,
-        entropy_coef: float,
-        grad_clip: float,
-        k_best_pool_size: int,
-        min_elo_diff: float,
+        learning_rate: float = None,
+        batch_size: int = None,
+        mini_batch_size: int = None,
+        num_epochs: int = None,
+        gamma: float = None,
+        gae_lambda: float = None,
+        epsilon: float = None,
+        delta1: float = None,
+        value_coef: float = None,
+        entropy_coef: float = None,
+        grad_clip: float = None,
+        k_best_pool_size: int = 5,
+        min_elo_diff: float = 30.0,
         device: torch.device = None,
         config: Union[RootConfig, str, None] = None,
     ):
-        # batch_size is the number of samples per update (not trajectories)
-        self.batch_size = batch_size
-        self.mini_batch_size = mini_batch_size
-        self.num_epochs = num_epochs
-        self.gamma = gamma
-        self.gae_lambda = gae_lambda
-        self.epsilon = epsilon
-        self.delta1 = delta1
-        self.value_coef = value_coef
-        self.entropy_coef = entropy_coef
-        self.grad_clip = grad_clip
+        cfg = get_config(config) if config is not None else get_config(None)
+
+        # Use provided args if not None, else use config defaults
+        self.batch_size = batch_size if batch_size is not None else cfg.batch_size
+        self.mini_batch_size = (
+            mini_batch_size if mini_batch_size is not None else cfg.mini_batch_size
+        )
+        self.num_epochs = num_epochs if num_epochs is not None else cfg.num_epochs
+        self.gamma = gamma if gamma is not None else cfg.gamma
+        self.gae_lambda = gae_lambda if gae_lambda is not None else cfg.gae_lambda
+        self.epsilon = epsilon if epsilon is not None else cfg.ppo_eps
+        self.delta1 = delta1 if delta1 is not None else cfg.ppo_delta1
+        self.value_coef = value_coef if value_coef is not None else cfg.value_coef
+        self.entropy_coef = (
+            entropy_coef if entropy_coef is not None else cfg.entropy_coef
+        )
+        self.grad_clip = grad_clip if grad_clip is not None else cfg.grad_clip
 
         # Set device
         self.device = (
@@ -69,15 +81,20 @@ class SelfPlayTrainer:
         # Initialize components
         self.env = HUNLEnv(starting_stack=1000, sb=50, bb=100)
 
-        # Config-driven components (default to configs/default.yaml when config is None)
-        cfg = get_config(config)
+        # Config-driven components
         ce, ae, model, policy = build_components_from_config(cfg)
         self.cards_encoder = ce
         self.actions_encoder = ae
         self.model = model
         self.policy = policy
-        # Ensure internal bins align to constant (model is built from cfg)
-        self.num_bet_bins = len(cfg.bet_bins) + 3
+
+        # Ensure bins align with model output size to avoid mask/logit mismatch
+        if hasattr(self.model, "policy_head") and hasattr(
+            self.model.policy_head, "out_features"
+        ):
+            self.num_bet_bins = int(self.model.policy_head.out_features)
+        else:
+            self.num_bet_bins = len(cfg.bet_bins) + 3
 
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights
@@ -89,7 +106,8 @@ class SelfPlayTrainer:
         )
 
         # Optimizer
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+        lr = learning_rate if learning_rate is not None else cfg.learning_rate
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
 
         # Training stats
         self.episode_count = 0
@@ -115,6 +133,7 @@ class SelfPlayTrainer:
                 nn.init.constant_(module.weight, 1)
                 nn.init.constant_(module.bias, 0)
 
+    @profile
     def collect_trajectory(
         self, opponent_snapshot: Optional[AgentSnapshot] = None
     ) -> Trajectory:
@@ -137,9 +156,14 @@ class SelfPlayTrainer:
             current_player = state.to_act
 
             # Encode state for current player
-            cards = self.cards_encoder.encode_cards(state, seat=current_player)
+            cards = self.cards_encoder.encode_cards(
+                state, seat=current_player, device=self.device
+            )
             actions_tensor = self.actions_encoder.encode_actions(
-                state, seat=current_player, num_bet_bins=self.num_bet_bins
+                state,
+                seat=current_player,
+                num_bet_bins=self.num_bet_bins,
+                device=self.device,
             )
 
             # Move tensors to device
@@ -148,21 +172,35 @@ class SelfPlayTrainer:
 
             # Get model prediction
             with torch.no_grad():
-                if (
-                    opponent_snapshot is not None and current_player != 0
-                ):  # Opponent's turn
-                    # Use opponent's model
-                    logits, value = opponent_snapshot.model(
-                        cards.unsqueeze(0), actions_tensor.unsqueeze(0)
+                autocast_enabled = (
+                    torch.cuda.is_available() or torch.backends.mps.is_available()
+                )
+                dtype = (
+                    torch.float16
+                    if torch.cuda.is_available()
+                    else torch.bfloat16 if torch.backends.mps.is_available() else None
+                )
+                cm = (
+                    torch.autocast(
+                        device_type=("cuda" if torch.cuda.is_available() else "cpu"),
+                        dtype=dtype,
                     )
-                else:
-                    # Use current model (our turn or self-play)
-                    logits, value = self.model(
-                        cards.unsqueeze(0), actions_tensor.unsqueeze(0)
-                    )
+                    if autocast_enabled
+                    else torch.cpu.amp.autocast(enabled=False)
+                )
+                with cm:
+                    if opponent_snapshot is not None and current_player != 0:
+                        logits, value = opponent_snapshot.model(
+                            cards.unsqueeze(0), actions_tensor.unsqueeze(0)
+                        )
+                    else:
+                        logits, value = self.model(
+                            cards.unsqueeze(0), actions_tensor.unsqueeze(0)
+                        )
 
-                legal_mask = get_legal_mask(state, self.num_bet_bins)
-                legal_mask = legal_mask.to(self.device)  # Move legal mask to device
+                legal_mask = get_legal_mask(
+                    state, self.num_bet_bins, device=self.device
+                )
 
                 # Sample action
                 action_idx, log_prob = self.policy.action(logits.squeeze(0), legal_mask)
@@ -212,7 +250,6 @@ class SelfPlayTrainer:
     #     prof.export_chrome_trace("update_model.json")
     #     return result
 
-    @profile
     def update_model(self) -> dict:
         """Perform PPO update on collected trajectories."""
         # Require enough samples (transitions) across buffer
@@ -244,6 +281,12 @@ class SelfPlayTrainer:
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
                 batch[key] = batch[key].to(self.device)
+
+        # Normalize advantages across the batch for stability (mean=0, std=1)
+        adv = batch["advantages"]
+        adv_mean = adv.mean()
+        adv_std = adv.std().clamp_min(1e-8)
+        batch["advantages"] = (adv - adv_mean) / adv_std
 
         # Subsample to target sample batch size if necessary (indexing on same device)
         num_samples = batch["actions"].shape[0]
@@ -323,22 +366,26 @@ class SelfPlayTrainer:
         # Collect fresh rollouts until we have at least batch_size steps
         # (timesteps from our player). Use small batches of trajectories per loop.
         while self.replay_buffer.num_steps() < self.batch_size:
-            opponent = self.opponent_pool.sample(k=1)[0]
-            trajectory = self.collect_trajectory(opponent_snapshot=opponent)
-            self.replay_buffer.add_trajectory(trajectory)
-            self.episode_count += 1
-            ep_reward = sum(t.reward for t in trajectory.transitions)
-            self.total_reward += ep_reward
-
-            if opponent is not None:
-                if ep_reward > 0:
-                    result = "win"
-                elif ep_reward < 0:
-                    result = "loss"
-                else:
-                    result = "draw"
-                self.opponent_pool.update_elo_after_game(opponent, result)
-                self.current_elo = self.opponent_pool.current_elo
+            # Collect a batch of trajectories in parallel to amortize device calls
+            chunk_envs = 16
+            trajs, opps, rewards = self.collect_trajectories_batch(
+                batch_size=chunk_envs
+            )
+            for trajectory, opponent, ep_reward in zip(trajs, opps, rewards):
+                if len(trajectory.transitions) == 0:
+                    continue
+                self.replay_buffer.add_trajectory(trajectory)
+                self.episode_count += 1
+                self.total_reward += ep_reward
+                if opponent is not None:
+                    if ep_reward > 0:
+                        result = "win"
+                    elif ep_reward < 0:
+                        result = "loss"
+                    else:
+                        result = "draw"
+                    self.opponent_pool.update_elo_after_game(opponent, result)
+                    self.current_elo = self.opponent_pool.current_elo
 
         # Update model
         update_stats = self.update_model()
@@ -357,6 +404,154 @@ class SelfPlayTrainer:
             "pool_stats": self.opponent_pool.get_pool_stats(),
             **update_stats,
         }
+
+    def collect_trajectories_batch(
+        self, batch_size: int
+    ) -> tuple[list[Trajectory], list[AgentSnapshot | None], list[float]]:
+        """Collect multiple trajectories in parallel with batched model inference.
+
+        Returns (trajectories, opponents_used, final_rewards)
+        """
+        # Create independent envs for parallel collection
+        envs = [HUNLEnv(starting_stack=1000, sb=50, bb=100) for _ in range(batch_size)]
+        states = [env.reset() for env in envs]
+        done = [False] * batch_size
+        step_limits = [0] * batch_size
+        max_steps = 50
+
+        # Sample opponents once (may be fewer than batch_size)
+        opponents = self.opponent_pool.sample(k=batch_size)
+        opponents = opponents + [None] * (batch_size - len(opponents))
+
+        # Per-episode storage
+        transitions_per_ep: list[list[Transition]] = [[] for _ in range(batch_size)]
+        final_rewards = [0.0 for _ in range(batch_size)]
+
+        # Inference precision
+        autocast_enabled = (
+            torch.cuda.is_available() or torch.backends.mps.is_available()
+        )
+        device_type = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = (
+            torch.float16
+            if torch.cuda.is_available()
+            else (torch.bfloat16 if torch.backends.mps.is_available() else None)
+        )
+
+        was_training = self.model.training
+        self.model.eval()
+
+        while not all(done) and max(step_limits) < max_steps:
+            active_indices: list[int] = []
+            batch_cards: list[torch.Tensor] = []
+            batch_actions: list[torch.Tensor] = []
+            legal_masks: list[torch.Tensor] = []
+
+            # Build batch for active envs
+            for i, (env, s) in enumerate(zip(envs, states)):
+                if done[i] or s.terminal:
+                    done[i] = True
+                    continue
+                step_limits[i] += 1
+                active_indices.append(i)
+
+                current_player = s.to_act
+                cards = self.cards_encoder.encode_cards(
+                    s, seat=current_player, device=self.device
+                )
+                actions_tensor = self.actions_encoder.encode_actions(
+                    s,
+                    seat=current_player,
+                    num_bet_bins=self.num_bet_bins,
+                    device=self.device,
+                )
+                batch_cards.append(cards.unsqueeze(0))
+                batch_actions.append(actions_tensor.unsqueeze(0))
+                legal_masks.append(
+                    get_legal_mask(s, self.num_bet_bins, device=self.device)
+                )
+
+            if not active_indices:
+                break
+
+            cards_batch = torch.cat(batch_cards, dim=0)
+            actions_batch = torch.cat(batch_actions, dim=0)
+
+            with torch.no_grad():
+                cm = (
+                    torch.autocast(device_type=device_type, dtype=dtype)
+                    if autocast_enabled
+                    else torch.cpu.amp.autocast(enabled=False)
+                )
+                with cm:
+                    logits_batch, values_batch = self.model(cards_batch, actions_batch)
+
+            # Step each active env
+            for j, i in enumerate(active_indices):
+                s = states[i]
+                env = envs[i]
+                current_player = s.to_act
+
+                # If it's opponent's turn and we have a snapshot, use opponent's model for logits; else our model
+                if current_player != 0 and opponents[i] is not None:
+                    with torch.no_grad():
+                        cm2 = (
+                            torch.autocast(device_type=device_type, dtype=dtype)
+                            if autocast_enabled
+                            else torch.cpu.amp.autocast(enabled=False)
+                        )
+                        with cm2:
+                            opp_logits, _ = opponents[i].model(
+                                cards_batch[j].unsqueeze(0),
+                                actions_batch[j].unsqueeze(0),
+                            )
+                    logits = opp_logits.squeeze(0)
+                else:
+                    logits = logits_batch[j]
+                legal_mask = legal_masks[j]
+
+                # On-device sampling
+                masked_logits = logits.clone()
+                masked_logits[legal_mask == 0] = -1e9
+                probs = torch.softmax(masked_logits, dim=-1)
+                a = torch.multinomial(probs, num_samples=1)
+                action_idx = int(a.item())
+                logp = torch.log_softmax(masked_logits, dim=-1)[action_idx]
+                log_prob = float(logp.item())
+                action = bin_to_action(action_idx, s, self.num_bet_bins)
+
+                # Env step
+                next_state, reward, is_done, _ = env.step(action)
+
+                # Record our player's transition
+                if current_player == 0:
+                    transition = Transition(
+                        observation=torch.cat(
+                            [cards_batch[j].flatten(), actions_batch[j].flatten()]
+                        ),
+                        action=action_idx,
+                        log_prob=log_prob,
+                        value=float(values_batch[j].item()),
+                        reward=reward,
+                        done=is_done,
+                        legal_mask=legal_mask,
+                        chips_placed=action.amount,
+                    )
+                    transitions_per_ep[i].append(transition)
+
+                states[i] = next_state
+                done[i] = is_done
+                if is_done:
+                    final_rewards[i] = sum(t.reward for t in transitions_per_ep[i])
+
+        if was_training:
+            self.model.train()
+
+        trajectories = [
+            Trajectory(transitions=transitions_per_ep[i], final_value=0.0)
+            for i in range(batch_size)
+        ]
+        return trajectories, opponents, final_rewards
 
     def save_checkpoint(self, path: str, step: int) -> None:
         """Save model checkpoint and opponent pool."""

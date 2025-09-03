@@ -27,9 +27,9 @@ def test_kbest_pool():
     pool = KBestOpponentPool(k=3, min_elo_diff=50.0)
 
     # Create some dummy models
-    model1 = SiameseConvNetV1(num_actions=9)
-    model2 = SiameseConvNetV1(num_actions=9)
-    model3 = SiameseConvNetV1(num_actions=9)
+    model1 = SiameseConvNetV1(num_actions=8)
+    model2 = SiameseConvNetV1(num_actions=8)
+    model3 = SiameseConvNetV1(num_actions=8)
 
     # Create snapshots
     snapshot1 = AgentSnapshot(model1, step=100, elo=1200.0)
@@ -63,10 +63,8 @@ def test_selfplay_with_kbest():
 
     # Create trainer with small pool
     trainer = SelfPlayTrainer(
-        num_bet_bins=9,
         learning_rate=1e-3,
-        batch_size=64,  # Smaller batch for testing
-        num_epochs=2,
+        batch_size=32,  # Smaller batch for testing
         k_best_pool_size=3,
         min_elo_diff=30.0,
     )
@@ -76,7 +74,7 @@ def test_selfplay_with_kbest():
 
     # Run a few training steps
     for step in range(5):
-        stats = trainer.train_step(num_trajectories=2)
+        stats = trainer.train_step()
         print(
             f"Step {step + 1}: ELO={stats['current_elo']:.1f}, "
             f"Pool size={stats['pool_stats']['pool_size']}, "
@@ -107,6 +105,7 @@ def test_opponent_sampling():
     print("Testing opponent sampling...")
 
     trainer = SelfPlayTrainer(
+        batch_size=16,
         k_best_pool_size=5,
         min_elo_diff=20.0,
     )
@@ -117,7 +116,7 @@ def test_opponent_sampling():
         class DummyAgent:
             def __init__(self, episode_count):
                 self.episode_count = episode_count
-                self.model = SiameseConvNetV1(num_actions=9)
+                self.model = SiameseConvNetV1(num_actions=8)
 
         dummy_agent = DummyAgent(episode_count=(i + 1) * 100)
         trainer.opponent_pool.add_snapshot(dummy_agent, 1200.0 + i * 50)

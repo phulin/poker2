@@ -7,7 +7,7 @@ def test_choose_bin_and_amount_mapping():
     pot = 100
     to_call = 20
     stack = 200
-    nb = 9
+    nb = 8
 
     # Desired around pot-sized should pick bin with mult=1.0 (index 4)
     idx = choose_bin(pot, stack, nb, desired=1.0)

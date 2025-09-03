@@ -15,7 +15,6 @@ def verify_gradient_clipping():
 
     # Initialize trainer
     trainer = SelfPlayTrainer(
-        num_bet_bins=9,
         learning_rate=1e-4,
         batch_size=4,
         grad_clip=0.5,

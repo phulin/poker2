@@ -7,9 +7,9 @@ from .config_loader import get_config
 from . import registry
 
 
-def build_components_from_config(cfg: RootConfig) -> Tuple[Any, Any, Any, Any, int]:
+def build_components_from_config(cfg: RootConfig) -> Tuple[Any, Any, Any, Any]:
     """
-    Build (card_encoder, action_encoder, model, policy, nb) from a RootConfig.
+    Build (card_encoder, action_encoder, model, policy) from a RootConfig.
     """
     card_encoder = registry.build_card_encoder(
         cfg.card_encoder.name, **cfg.card_encoder.kwargs

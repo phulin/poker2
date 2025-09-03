@@ -14,12 +14,7 @@ def simple_gradient_clipping_test():
     print("=== Simple Gradient Clipping Test ===\n")
 
     # Initialize trainer
-    trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=1e-4,
-        batch_size=4,
-        grad_clip=0.5,
-    )
+    trainer = SelfPlayTrainer()
 
     # Create a simple loss for testing
     dummy_input = torch.randn(1, 6, 4, 13, requires_grad=True)

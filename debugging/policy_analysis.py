@@ -60,7 +60,7 @@ def analyze_policy_diversity(trainer):
             # Encode state
             cards_tensor = cards_encoder.encode_cards(state, seat=state.to_act)
             actions_tensor = actions_encoder.encode_actions(
-                state, seat=state.to_act, num_bet_bins=9
+                state, seat=state.to_act, num_bet_bins=8
             )
 
             # Model forward pass
@@ -153,7 +153,7 @@ def analyze_model_sensitivity(trainer):
 
         cards_tensor = cards_encoder.encode_cards(state, seat=state.to_act)
         actions_tensor = actions_encoder.encode_actions(
-            state, seat=state.to_act, num_bet_bins=9
+            state, seat=state.to_act, num_bet_bins=8
         )
 
         with torch.no_grad():
@@ -220,12 +220,7 @@ def main():
     print()
 
     # Initialize trainer
-    trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=1e-4,
-        batch_size=256,
-        grad_clip=0.5,
-    )
+    trainer = SelfPlayTrainer()
 
     # Train the model briefly
     print("Training model for 20 steps...")

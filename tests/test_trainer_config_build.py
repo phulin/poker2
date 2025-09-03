@@ -14,7 +14,6 @@ def test_trainer_builds_components_from_config():
     )
 
     trainer = SelfPlayTrainer(
-        num_bet_bins=7,  # should be overridden by config (9)
         batch_size=8,
         learning_rate=3e-4,
         config=cfg_path,

@@ -17,12 +17,7 @@ def detailed_training_analysis():
     print("=== Detailed Training Analysis ===\n")
 
     # Initialize trainer with conservative settings
-    trainer = SelfPlayTrainer(
-        num_bet_bins=9,  # Match the default in SelfPlayTrainer
-        learning_rate=1e-4,
-        batch_size=16384,
-        grad_clip=0.5,
-    )
+    trainer = SelfPlayTrainer()
 
     print("Initial Model State:")
     print(f"  Total parameters: {sum(p.numel() for p in trainer.model.parameters()):,}")

@@ -12,11 +12,11 @@ class Transition:
     observation: torch.Tensor  # encoded state
     action: int  # discrete action index
     log_prob: float  # log probability of action
-    value: float  # V(s_t) computed at action time
     reward: float
     done: bool
     legal_mask: torch.Tensor  # legal action mask
     chips_placed: int  # for δ2/δ3 computation
+    value: float = 0.0  # V(s_t) computed at action time
     advantage: float = 0.0  # GAE advantage (computed later)
     return_: float = 0.0  # GAE return (computed later)
 

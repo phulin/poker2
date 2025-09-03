@@ -32,7 +32,7 @@ def debug_model_internals(trainer):
     # Encode state
     cards_tensor = cards_encoder.encode_cards(state, seat=state.to_act)
     actions_tensor = actions_encoder.encode_actions(
-        state, seat=state.to_act, num_bet_bins=9
+        state, seat=state.to_act, num_bet_bins=8
     )
 
     print(f"Input shapes:")
@@ -130,7 +130,7 @@ def debug_gradient_flow(trainer):
 
     cards_tensor = cards_encoder.encode_cards(state, seat=state.to_act)
     actions_tensor = actions_encoder.encode_actions(
-        state, seat=state.to_act, num_bet_bins=9
+        state, seat=state.to_act, num_bet_bins=8
     )
 
     # Get legal actions
@@ -191,12 +191,7 @@ def main():
     print()
 
     # Initialize trainer
-    trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=1e-4,
-        batch_size=256,
-        grad_clip=0.5,
-    )
+    trainer = SelfPlayTrainer()
 
     # Debug model internals
     debug_model_internals(trainer)

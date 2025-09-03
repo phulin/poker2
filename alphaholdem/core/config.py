@@ -21,20 +21,21 @@ class RootConfig:
     action_encoder: ComponentSpec
     model: ComponentSpec
     policy: ComponentSpec
-    seed: int
-    ppo_eps: float
-    ppo_delta1: float
-    gamma: float
-    gae_lambda: float
-    entropy_coef: float
-    value_coef: float
-    grad_clip: float
+    nb: int = 9
+    seed: int = 0
+    ppo_eps: float = 0.2
+    ppo_delta1: float = 3.0
+    gamma: float = 0.999
+    gae_lambda: float = 0.95
+    entropy_coef: float = 0.01
+    value_coef: float = 0.5
+    grad_clip: float = 1.0
     # Training scale knobs
-    learning_rate: float
-    batch_size: int
-    mini_batch_size: int
-    num_epochs: int
-    trajectories_per_step: int
+    learning_rate: float = 3e-4
+    batch_size: int = 256
+    mini_batch_size: int = 256
+    num_epochs: int = 4
+    trajectories_per_step: int = 4
     # Betting bins expressed as fractions of total_committed reference
     bet_bins: List[float] = field(default_factory=lambda: [0.5, 0.75, 1.0, 1.5, 2.0])
 
@@ -61,18 +62,19 @@ def load_config(
         action_encoder=_to_component_spec(data, "action_encoder"),
         model=_to_component_spec(data, "model"),
         policy=_to_component_spec(data, "policy"),
-        seed=int(data["seed"]),
-        ppo_eps=float(data["ppo_eps"]),
-        ppo_delta1=float(data["ppo_delta1"]),
-        gamma=float(data["gamma"]),
-        gae_lambda=float(data["gae_lambda"]),
-        entropy_coef=float(data["entropy_coef"]),
-        value_coef=float(data["value_coef"]),
-        grad_clip=float(data["grad_clip"]),
-        learning_rate=float(data["learning_rate"]),
-        batch_size=int(data["batch_size"]),
-        mini_batch_size=int(data["mini_batch_size"]),
-        num_epochs=int(data["num_epochs"]),
-        trajectories_per_step=int(data["trajectories_per_step"]),
+        nb=int(data.get("nb", 9)),
+        seed=int(data.get("seed", 0)),
+        ppo_eps=float(data.get("ppo_eps", 0.2)),
+        ppo_delta1=float(data.get("ppo_delta1", 3.0)),
+        gamma=float(data.get("gamma", 0.999)),
+        gae_lambda=float(data.get("gae_lambda", 0.95)),
+        entropy_coef=float(data.get("entropy_coef", 0.01)),
+        value_coef=float(data.get("value_coef", 0.5)),
+        grad_clip=float(data.get("grad_clip", 1.0)),
+        learning_rate=float(data.get("learning_rate", 3e-4)),
+        batch_size=int(data.get("batch_size", 256)),
+        mini_batch_size=int(data.get("mini_batch_size", 256)),
+        num_epochs=int(data.get("num_epochs", 4)),
+        trajectories_per_step=int(data.get("trajectories_per_step", 4)),
         bet_bins=list(data["bet_bins"]),
     )

@@ -70,7 +70,7 @@ def test_cards_planes_v1_values_and_shapes():
 def test_actions_hu_v1_values_and_shapes():
     enc = ActionsHUEncoderV1(history_actions_per_round=6)
     s = make_state("flop", [4, 5, 6])
-    nb = 9
+    nb = 8
     a = enc.encode_actions(s, seat=0, num_bet_bins=nb)
     assert isinstance(a, torch.Tensor)
     assert a.shape == (24, 4, nb)

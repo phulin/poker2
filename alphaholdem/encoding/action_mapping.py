@@ -125,7 +125,7 @@ def _action_to_bin_idx(
         raise_part = max(0, action.amount - max(0, to_call))
         fraction = raise_part / total_committed if total_committed > 0 else 0.0
     elif action.kind == "allin":
-        return 7
+        return num_bet_bins - 1
     else:
         return None
 

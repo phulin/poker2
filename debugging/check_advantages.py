@@ -14,11 +14,7 @@ from alphaholdem.rl.replay import compute_gae_returns
 def check_advantages():
     print("=== Checking Advantage Distribution ===\n")
 
-    trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=3e-4,
-        batch_size=8,
-    )
+    trainer = SelfPlayTrainer()
 
     all_advantages = []
     all_returns = []

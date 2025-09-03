@@ -22,21 +22,7 @@ def demonstrate_kbest():
     print("=== AlphaHoldem K-Best Self-Play Demonstration ===\n")
 
     # Initialize trainer with K-Best pool
-    trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=1e-3,
-        batch_size=128,
-        num_epochs=3,
-        gamma=0.999,
-        gae_lambda=0.95,
-        epsilon=0.2,
-        delta1=3.0,
-        value_coef=0.1,
-        entropy_coef=0.01,
-        grad_clip=1.0,
-        k_best_pool_size=5,  # Maintain 5 best opponents
-        min_elo_diff=30.0,  # Add new snapshot if ELO differs by 30+
-    )
+    trainer = SelfPlayTrainer()
 
     print("Initial setup:")
     print(f"  - K-Best pool size: {trainer.opponent_pool.k}")

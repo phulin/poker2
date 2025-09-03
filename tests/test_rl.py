@@ -23,7 +23,7 @@ def test_replay_buffer_and_gae():
             log_prob=-1.0,
             reward=0.0,
             done=False,
-            legal_mask=torch.ones(9),
+            legal_mask=torch.ones(8),
             chips_placed=50,
         ),
         Transition(
@@ -32,7 +32,7 @@ def test_replay_buffer_and_gae():
             log_prob=-1.5,
             reward=100.0,
             done=True,
-            legal_mask=torch.ones(9),
+            legal_mask=torch.ones(8),
             chips_placed=100,
         ),
     ]
@@ -52,7 +52,7 @@ def test_replay_buffer_and_gae():
 
 def test_trinal_clip_ppo_loss():
     batch_size = 4
-    num_actions = 9
+    num_actions = 8
 
     # Mock batch data
     logits = torch.randn(batch_size, num_actions)
@@ -86,9 +86,7 @@ def test_self_play_trainer_basic():
     from alphaholdem.rl.self_play import SelfPlayTrainer
 
     trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=3e-4,
-        batch_size=8,  # Small batch for testing
+        batch_size=8,
     )
 
     # Test that trainer initializes correctly
@@ -137,21 +135,21 @@ def test_dynamic_delta_bounds():
     # Create a trajectory with some chips placed
     transitions = [
         Transition(
-            observation=torch.randn(6 * 4 * 13 + 24 * 4 * 9),  # cards + actions
+            observation=torch.randn(6 * 4 * 13 + 24 * 4 * 8),  # cards + actions
             action=1,
             log_prob=-1.0,
             reward=0.0,
             done=False,
-            legal_mask=torch.ones(9),
+            legal_mask=torch.ones(8),
             chips_placed=50,  # Small bet
         ),
         Transition(
-            observation=torch.randn(6 * 4 * 13 + 24 * 4 * 9),
+            observation=torch.randn(6 * 4 * 13 + 24 * 4 * 8),
             action=4,
             log_prob=-1.5,
             reward=100.0,
             done=True,
-            legal_mask=torch.ones(9),
+            legal_mask=torch.ones(8),
             chips_placed=200,  # Larger bet
         ),
     ]
@@ -183,14 +181,12 @@ def test_checkpoint_save_load():
     # Create a temporary directory for checkpoints
     with tempfile.TemporaryDirectory() as temp_dir:
         trainer = SelfPlayTrainer(
-            num_bet_bins=9,
-            learning_rate=3e-4,
             batch_size=8,  # Small batch for testing
         )
 
         # Run a few training steps
         for _ in range(3):
-            trainer.train_step(num_trajectories=2)
+            trainer.train_step()
 
         # Save checkpoint
         checkpoint_path = os.path.join(temp_dir, "test_checkpoint.pt")
@@ -201,7 +197,6 @@ def test_checkpoint_save_load():
 
         # Create new trainer and load checkpoint
         new_trainer = SelfPlayTrainer(
-            num_bet_bins=9,
             learning_rate=3e-4,
             batch_size=8,
         )
@@ -234,7 +229,6 @@ def test_preflop_range_grid():
     from alphaholdem.rl.self_play import SelfPlayTrainer
 
     trainer = SelfPlayTrainer(
-        num_bet_bins=9,
         learning_rate=3e-4,
         batch_size=8,  # Small batch for testing
     )
@@ -274,7 +268,6 @@ def test_basic_training_step():
     from alphaholdem.rl.self_play import SelfPlayTrainer
 
     trainer = SelfPlayTrainer(
-        num_bet_bins=9,
         learning_rate=3e-4,
         batch_size=4,  # Small batch for testing
     )
@@ -282,7 +275,7 @@ def test_basic_training_step():
     # Run a few training steps
     for step in range(3):
         print(f"\n=== Training Step {step} ===")
-        stats = trainer.train_step(num_trajectories=2)
+        stats = trainer.train_step()
 
         print(f"Step {step} stats: {stats}")
 

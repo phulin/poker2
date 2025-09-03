@@ -30,7 +30,7 @@ def make_state(street: str, board: list[int]) -> GameState:
 
 
 def test_siamese_convnet_forward_and_policy_action():
-    nb = 9
+    nb = 8
     cards_enc = CardsPlanesV1()
     actions_enc = ActionsHUEncoderV1(history_actions_per_round=6)
     model = SiameseConvNetV1(
@@ -42,7 +42,7 @@ def test_siamese_convnet_forward_and_policy_action():
     cards = cards_enc.encode_cards(s, seat=0).unsqueeze(0)  # (1, 6, 4, 13)
     actions = actions_enc.encode_actions(s, seat=0, num_bet_bins=nb).unsqueeze(
         0
-    )  # (1, 24, 4, 9)
+    )  # (1, 24, 4, 8)
 
     logits, value = model(cards, actions)
     assert logits.shape == (1, nb)
@@ -56,7 +56,7 @@ def test_siamese_convnet_forward_and_policy_action():
 def test_action_mapping_with_env():
     env = HUNLEnv(starting_stack=1000, sb=50, bb=100)
     state = env.reset()
-    nb = 9
+    nb = 8
 
     # Test legal mask
     legal_mask = get_legal_mask(state, nb)

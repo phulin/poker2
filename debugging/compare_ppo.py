@@ -16,11 +16,7 @@ def compare_ppo_losses():
 
     # Create trainer
     torch.manual_seed(42)  # For reproducible comparison
-    trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=1e-4,
-        batch_size=16,
-    )
+    trainer = SelfPlayTrainer()
 
     # Collect trajectories
     trajectories = []

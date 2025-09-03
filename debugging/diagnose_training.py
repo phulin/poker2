@@ -14,11 +14,7 @@ def main():
     print("=== AlphaHoldem Training Diagnostics ===\n")
 
     # Initialize trainer
-    trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=3e-4,
-        batch_size=8,
-    )
+    trainer = SelfPlayTrainer()
 
     # 1. Check model health
     print("1. Model Health Check:")

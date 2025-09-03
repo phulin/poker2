@@ -54,18 +54,6 @@ def train_kbest(
 
     # Initialize trainer with K-Best pool
     trainer = SelfPlayTrainer(
-        num_bet_bins=len(cfg.bet_bins) + 3,
-        learning_rate=cfg.learning_rate,
-        batch_size=cfg.batch_size,
-        mini_batch_size=cfg.mini_batch_size,
-        num_epochs=cfg.num_epochs,
-        gamma=cfg.gamma,
-        gae_lambda=cfg.gae_lambda,
-        epsilon=cfg.ppo_eps,
-        delta1=cfg.ppo_delta1,
-        value_coef=cfg.value_coef,
-        entropy_coef=cfg.entropy_coef,
-        grad_clip=cfg.grad_clip,
         k_best_pool_size=k_best_pool_size,
         min_elo_diff=min_elo_diff,
         device=device,
