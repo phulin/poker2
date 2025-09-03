@@ -52,13 +52,25 @@ def train_model(trainer, num_steps=50):
 
 
 def load_checkpoint(trainer, checkpoint_path="checkpoints/final_checkpoint.pt"):
-    """Load a trained model from checkpoint."""
+    """Load a trained model from checkpoint (CPU/MPS compatible)."""
     print(f"Loading model from {checkpoint_path}...")
 
     if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        # Map to trainer device (e.g., MPS on Apple, else CPU)
+        device = trainer.device if hasattr(trainer, "device") else torch.device("cpu")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+        # Load model and optimizer
         trainer.model.load_state_dict(checkpoint["model_state_dict"])
+        trainer.model.to(device)
         trainer.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        # Ensure optimizer state tensors are on the correct device
+        for state in trainer.optimizer.state.values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.to(device)
+
         print(f"Model loaded successfully!")
         print(f"  Training step: {checkpoint.get('step', 'Unknown')}")
         print(f"  Episode count: {checkpoint.get('episode_count', 'Unknown')}")
@@ -80,6 +92,9 @@ def analyze_hand(trainer):
     )  # Different seed for variety
     cards_encoder = CardsPlanesV1()
     actions_encoder = ActionsHUEncoderV1()
+    # Ensure model is on the trainer's device
+    device = trainer.device if hasattr(trainer, "device") else torch.device("cpu")
+    trainer.model.to(device)
 
     # Reset environment
     state = env.reset()
@@ -104,6 +119,9 @@ def analyze_hand(trainer):
         actions_tensor = actions_encoder.encode_actions(
             state, seat=state.to_act, num_bet_bins=9
         )
+        # Move inputs to model device
+        cards_tensor = cards_tensor.to(device)
+        actions_tensor = actions_tensor.to(device)
 
         # Get legal actions and convert to indices
         legal_actions = env.legal_actions()
@@ -127,8 +145,9 @@ def analyze_hand(trainer):
             logits, value = trainer.model(
                 cards_tensor.unsqueeze(0), actions_tensor.unsqueeze(0)
             )
-            logits = logits.squeeze(0)
-            value = value.squeeze(0)
+            # Bring outputs to CPU for analysis and masking with CPU tensors
+            logits = logits.squeeze(0).detach().cpu()
+            value = value.squeeze(0).detach().cpu()
 
         # Apply legal mask
         masked_logits = logits.clone()
