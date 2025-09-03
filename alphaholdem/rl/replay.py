@@ -117,8 +117,12 @@ def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
     advantages = []
     returns = []
     legal_masks = []
+    delta2_list: List[float] = []
+    delta3_list: List[float] = []
 
     for trajectory in trajectories:
+        # Per-trajectory clipping bounds
+        d2, d3 = compute_delta_bounds(trajectory)
         for transition in trajectory.transitions:
             observations.append(transition.observation)
             actions.append(transition.action)
@@ -126,6 +130,8 @@ def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
             advantages.append(transition.advantage)
             returns.append(transition.return_)
             legal_masks.append(transition.legal_mask)
+            delta2_list.append(d2)
+            delta3_list.append(d3)
 
     return {
         "observations": torch.stack(observations),
@@ -134,4 +140,6 @@ def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
         "advantages": torch.tensor(advantages, dtype=torch.float32),
         "returns": torch.tensor(returns, dtype=torch.float32),
         "legal_masks": torch.stack(legal_masks),
+        "delta2": torch.tensor(delta2_list, dtype=torch.float32),
+        "delta3": torch.tensor(delta3_list, dtype=torch.float32),
     }

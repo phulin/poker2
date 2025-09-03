@@ -257,23 +257,14 @@ class SelfPlayTrainer:
             if isinstance(batch[key], torch.Tensor):
                 batch[key] = batch[key].to(self.device)
 
-        # Compute dynamic delta2 and delta3 bounds from chips placed
-        # According to AlphaHoldem paper: δ2 and δ3 represent total chips placed by players
-        # They should be dynamically calculated from the actual chips in the trajectory
-        total_chips_placed = 0
-        for trajectory in trajectories:
-            for transition in trajectory.transitions:
-                total_chips_placed += transition.chips_placed
-
-        if total_chips_placed > 0:
-            # δ2: negative bound (opponent chips), δ3: positive bound (our chips)
-            # Use total chips placed as the bound, similar to paper's approach
-            delta2 = -total_chips_placed
-            delta3 = total_chips_placed
-        else:
-            # Fallback to reasonable bounds if no chips placed
-            delta2 = -1000.0
-            delta3 = 1000.0
+        # Per-sample value clipping bounds computed in prepare_ppo_batch
+        # batch['delta2'] and batch['delta3'] are length-N tensors aligned with samples
+        delta2_vec = batch.get("delta2")
+        delta3_vec = batch.get("delta3")
+        # Fallback if not present (should not happen after our change)
+        if delta2_vec is None or delta3_vec is None:
+            delta2_vec = torch.full_like(batch["returns"], -1000.0)
+            delta3_vec = torch.full_like(batch["returns"], 1000.0)
 
         # Multiple epochs of updates
         total_loss = 0.0
@@ -288,7 +279,7 @@ class SelfPlayTrainer:
 
             logits, values = self.model(cards, actions_tensor)
 
-            # Compute loss with dynamic delta bounds
+            # Compute loss with per-sample delta bounds
             loss_dict = trinal_clip_ppo_loss(
                 logits=logits,
                 values=values,
@@ -299,8 +290,8 @@ class SelfPlayTrainer:
                 legal_masks=batch["legal_masks"],
                 epsilon=self.epsilon,
                 delta1=self.delta1,
-                delta2=delta2,
-                delta3=delta3,
+                delta2=delta2_vec,
+                delta3=delta3_vec,
                 value_coef=self.value_coef,
                 entropy_coef=self.entropy_coef,
             )
@@ -316,8 +307,8 @@ class SelfPlayTrainer:
         return {
             "avg_loss": total_loss / self.num_epochs,
             "num_trajectories": len(trajectories),
-            "delta2": delta2,
-            "delta3": delta3,
+            "delta2_mean": float(delta2_vec.mean().item()),
+            "delta3_mean": float(delta3_vec.mean().item()),
         }
 
     def train_step(self, num_trajectories: int = 4) -> dict:
