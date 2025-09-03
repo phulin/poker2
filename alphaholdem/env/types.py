@@ -38,3 +38,7 @@ class GameState:
     )
     terminal: bool = False
     winner: Optional[int] = None  # 0/1 or None for split
+    # (street, actor, kind, amount, to_call_at_time, total_committed_at_time)
+    action_history: List[Tuple[str, int, str, int, int, int]] = field(
+        default_factory=list
+    )

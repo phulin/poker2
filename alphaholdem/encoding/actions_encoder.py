@@ -6,6 +6,7 @@ import torch
 from ..core.interfaces import Encoder
 from ..core.registry import register_action_encoder
 from ..env.types import GameState, Action
+from ..encoding.action_mapping import _action_to_bin_idx
 
 
 NUM_BET_BINS = 9
@@ -27,6 +28,25 @@ class ActionsHUEncoderV1(Encoder):
         for _ in rounds:
             for _ in range(self.history_actions_per_round):
                 channels.append(torch.zeros((4, num_bet_bins), dtype=torch.float32))
+
+        # Populate historical planes per round: player-specific and sum
+        if hasattr(game_state, "action_history") and game_state.action_history:
+            slots = self.history_actions_per_round
+            for street_i, street in enumerate(rounds):
+                events = [e for e in game_state.action_history if e[0] == street]
+                events = events[-slots:]
+                for idx, evt in enumerate(reversed(events)):
+                    _, actor, kind, amount, _, _ = evt
+                    bin_idx = _action_to_bin_idx(
+                        Action(kind, amount), game_state, num_bet_bins
+                    )
+                    if bin_idx is None:
+                        continue
+                    ch = street_i * slots + (slots - 1 - idx)
+                    mat = channels[ch]
+                    mat[actor, bin_idx] = 1.0
+                    mat[2, bin_idx] = 1.0  # sum plane
+                    channels[ch] = mat
 
         # Fill current legal actions for the next action slot in current round
         legal = self._get_legal_mask(game_state, seat, num_bet_bins)

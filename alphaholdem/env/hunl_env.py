@@ -143,12 +143,21 @@ class HUNLEnv:
 
         to_call = opp_p.committed - me_p.committed
 
+        # Capture action context BEFORE applying effects
+        total_committed_before = pot + me_p.committed + opp_p.committed
+        action_amount = 0
+
         if action.kind == "fold":
             me_p.has_folded = True
             pot += me_p.committed + opp_p.committed
             me_p.committed = 0
             opp_p.committed = 0
             winner = opp
+            # append to history
+            history = list(s.action_history)
+            history.append(
+                (street, me, "fold", action_amount, to_call, total_committed_before)
+            )
             new_state = GameState(
                 button=s.button,
                 street=street,
@@ -163,6 +172,7 @@ class HUNLEnv:
                 players=(me_p, opp_p) if me == 0 else (opp_p, me_p),
                 terminal=True,
                 winner=winner,
+                action_history=history,
             )
             new_state.env = self
             self.state = new_state
@@ -181,6 +191,7 @@ class HUNLEnv:
             me_p.committed += call_amt
             pot += call_amt
             next_to_act = opp
+            action_amount = call_amt
         elif action.kind in ("bet", "raise", "allin"):
             # determine total to put in now (for unopened, treat as bet; else raise over to_call)
             target = action.amount
@@ -197,6 +208,7 @@ class HUNLEnv:
             me_p.stack -= put_in
             me_p.committed += put_in
             pot += put_in
+            action_amount = target
             # update min_raise and last aggressive amount
             # last_aggr should track the total amount bet/raised, not just the raise increment
             total_bet = (
@@ -278,6 +290,20 @@ class HUNLEnv:
                 )
             terminal = True
 
+        # Append action to history (after computing updates above)
+        history = list(s.action_history)
+        action_kind = action.kind
+        history.append(
+            (
+                street,
+                me,
+                action_kind,
+                int(action_amount),
+                int(to_call),
+                int(total_committed_before),
+            )
+        )
+
         new_state = GameState(
             button=s.button,
             street=street,
@@ -292,6 +318,7 @@ class HUNLEnv:
             players=(players[0], players[1]),
             terminal=terminal,
             winner=winner,
+            action_history=history,
         )
         new_state.env = self
         self.state = new_state

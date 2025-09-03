@@ -4,6 +4,7 @@ import torch
 
 from alphaholdem.encoding.cards_encoder import CardsPlanesV1
 from alphaholdem.encoding.actions_encoder import ActionsHUEncoderV1
+from alphaholdem.env.types import Action
 from alphaholdem.env.types import GameState, PlayerState
 
 
@@ -75,8 +76,16 @@ def test_actions_hu_v1_values_and_shapes():
     assert a.shape == (24, 4, nb)
     assert a.dtype == torch.float32
 
-    # As currently implemented, encoder is zero-initialized scaffold; validate zeros
-    assert a.sum().item() == 0.0
-    # Legal row for current round's last slot should be zeros for now
-    round_slot = 1 * 6 + 5  # flop last slot
-    assert torch.all(a[round_slot, 3, :] == 0)
+    # Inject simple action history and verify population
+    s.action_history = [
+        ("preflop", 0, "raise", 40, 20, 60),
+        ("preflop", 1, "call", 40, 20, 60),
+        ("flop", 0, "bet", 20, 0, 40),
+    ]
+    a = enc.encode_actions(s, seat=0, num_bet_bins=nb)
+    # Preflop first slot should reflect player0 raise in one of the latest slots
+    preflop_slot_last = 0 * 6 + 5
+    assert a[preflop_slot_last, 2].sum().item() >= 1.0  # sum plane marks events
+    # Flop last slot has legal plane filled
+    flop_slot_last = 1 * 6 + 5
+    assert a[flop_slot_last, 3].sum().item() > 0
