@@ -15,8 +15,8 @@ def trinal_clip_ppo_loss(
     legal_masks: torch.Tensor,
     epsilon: float = 0.2,
     delta1: float = 3.0,
-    delta2: float = 0.0,
-    delta3: float = 0.0,
+    delta2: torch.Tensor | float = 0.0,
+    delta3: torch.Tensor | float = 0.0,
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
 ) -> Dict[str, torch.Tensor]:
@@ -73,7 +73,21 @@ def trinal_clip_ppo_loss(
     policy_loss = -torch.min(ratio * advantages, final_clipped * advantages)
 
     # Value loss with clipping (as per AlphaHoldem paper)
-    if delta2 != 0.0 or delta3 != 0.0:
+    # Support scalar or per-sample tensors for delta2/delta3
+    if isinstance(delta2, torch.Tensor) or isinstance(delta3, torch.Tensor):
+        # Broadcast to returns shape as needed
+        d2 = (
+            delta2
+            if isinstance(delta2, torch.Tensor)
+            else torch.full_like(returns, float(delta2))
+        )
+        d3 = (
+            delta3
+            if isinstance(delta3, torch.Tensor)
+            else torch.full_like(returns, float(delta3))
+        )
+        clipped_returns = torch.clamp(returns, d2, d3)
+    elif delta2 != 0.0 or delta3 != 0.0:
         # Apply clipping bounds to returns
         clipped_returns = torch.clamp(returns, delta2, delta3)
     else:

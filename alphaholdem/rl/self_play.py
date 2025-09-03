@@ -257,20 +257,20 @@ class SelfPlayTrainer:
         # Prepare batch
         batch = prepare_ppo_batch(trajectories)
 
-        # Subsample to target sample batch size if necessary
+        # Move batch tensors to device FIRST for consistent indexing on device tensors
+        for key in batch:
+            if isinstance(batch[key], torch.Tensor):
+                batch[key] = batch[key].to(self.device)
+
+        # Subsample to target sample batch size if necessary (indexing on same device)
         num_samples = batch["actions"].shape[0]
         if num_samples > self.batch_size:
-            idx = torch.randperm(num_samples)[: self.batch_size]
+            idx = torch.randperm(num_samples, device=self.device)[: self.batch_size]
 
             def take(d):
                 return d.index_select(0, idx) if isinstance(d, torch.Tensor) else d
 
             batch = {k: take(v) for k, v in batch.items()}
-
-        # Move batch tensors to device
-        for key in batch:
-            if isinstance(batch[key], torch.Tensor):
-                batch[key] = batch[key].to(self.device)
 
         # Per-sample value clipping bounds computed in prepare_ppo_batch
         # batch['delta2'] and batch['delta3'] are length-N tensors aligned with samples
@@ -278,8 +278,8 @@ class SelfPlayTrainer:
         delta3_vec = batch.get("delta3")
         # Fallback if not present (should not happen after our change)
         if delta2_vec is None or delta3_vec is None:
-            delta2_vec = torch.full_like(batch["returns"], -1000.0)
-            delta3_vec = torch.full_like(batch["returns"], 1000.0)
+            delta2_vec = torch.full_like(batch["returns"], -1000.0, device=self.device)
+            delta3_vec = torch.full_like(batch["returns"], 1000.0, device=self.device)
 
         # Multiple epochs of updates
         total_loss = 0.0
@@ -380,6 +380,25 @@ class SelfPlayTrainer:
 
     def save_checkpoint(self, path: str, step: int) -> None:
         """Save model checkpoint and opponent pool."""
+        # Serialize opponent pool inline
+        pool_data = {
+            "k": self.opponent_pool.k,
+            "min_elo_diff": self.opponent_pool.min_elo_diff,
+            "current_elo": self.opponent_pool.current_elo,
+            "snapshots": [],
+        }
+        for snapshot in self.opponent_pool.snapshots:
+            snapshot_data = {
+                "step": snapshot.step,
+                "elo": snapshot.elo,
+                "games_played": snapshot.games_played,
+                "wins": snapshot.wins,
+                "losses": snapshot.losses,
+                "draws": snapshot.draws,
+                "model_state_dict": snapshot.model.state_dict(),
+            }
+            pool_data["snapshots"].append(snapshot_data)
+
         checkpoint = {
             "step": step,
             "episode_count": self.episode_count,
@@ -387,6 +406,10 @@ class SelfPlayTrainer:
             "current_elo": self.current_elo,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            # Store replay buffer to resume training seamlessly
+            "replay_buffer": self.replay_buffer,
+            # Store opponent pool inline for single-file checkpoints
+            "opponent_pool": pool_data,
             "config": {
                 "num_bet_bins": self.num_bet_bins,
                 "batch_size": self.batch_size,
@@ -403,14 +426,12 @@ class SelfPlayTrainer:
         torch.save(checkpoint, path)
         print(f"Checkpoint saved to {path}")
 
-        # Save opponent pool separately
-        pool_path = path.replace(".pt", "_pool.pt")
-        self.opponent_pool.save_pool(pool_path)
-        print(f"Opponent pool saved to {pool_path}")
-
     def load_checkpoint(self, path: str) -> int:
         """Load model checkpoint and opponent pool. Returns the step number."""
-        checkpoint = torch.load(path)
+        # PyTorch 2.6 defaults to weights_only=True which blocks unpickling
+        # custom classes like our ReplayBuffer. We trust our local checkpoints,
+        # so explicitly allow full load.
+        checkpoint = torch.load(path, weights_only=False, map_location=self.device)
 
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -418,17 +439,55 @@ class SelfPlayTrainer:
         self.total_reward = checkpoint["total_reward"]
         self.current_elo = checkpoint.get("current_elo", 1200.0)
 
+        # Restore replay buffer if present
+        if "replay_buffer" in checkpoint and checkpoint["replay_buffer"] is not None:
+            self.replay_buffer = checkpoint["replay_buffer"]
+
         print(f"Checkpoint loaded from {path}")
 
-        # Load opponent pool if it exists
-        pool_path = path.replace(".pt", "_pool.pt")
-        try:
+        # Restore opponent pool from inline data if available; fallback to old separate file
+        pool_data = checkpoint.get("opponent_pool")
+        if pool_data is not None:
             from ..models.siamese_convnet import SiameseConvNetV1
 
-            self.opponent_pool.load_pool(pool_path, SiameseConvNetV1)
-            print(f"Opponent pool loaded from {pool_path}")
-        except FileNotFoundError:
-            print(f"No opponent pool found at {pool_path}, starting with empty pool")
+            self.opponent_pool.k = pool_data.get("k", self.opponent_pool.k)
+            self.opponent_pool.min_elo_diff = pool_data.get(
+                "min_elo_diff", self.opponent_pool.min_elo_diff
+            )
+            self.opponent_pool.current_elo = pool_data.get(
+                "current_elo", self.opponent_pool.current_elo
+            )
+            self.opponent_pool.snapshots = []
+            for snapshot_data in pool_data.get("snapshots", []):
+                model = SiameseConvNetV1()
+                model.load_state_dict(snapshot_data["model_state_dict"])
+                model.to(self.device)
+                snapshot = AgentSnapshot(
+                    model=model,
+                    step=snapshot_data.get("step", 0),
+                    elo=snapshot_data.get("elo", 1200.0),
+                )
+                snapshot.games_played = snapshot_data.get("games_played", 0)
+                snapshot.wins = snapshot_data.get("wins", 0)
+                snapshot.losses = snapshot_data.get("losses", 0)
+                snapshot.draws = snapshot_data.get("draws", 0)
+                self.opponent_pool.snapshots.append(snapshot)
+            print("Opponent pool restored from checkpoint file")
+        else:
+            # Backward-compatibility path: load separate pool file if present
+            pool_path = path.replace(".pt", "_pool.pt")
+            try:
+                from ..models.siamese_convnet import SiameseConvNetV1
+
+                self.opponent_pool.load_pool(pool_path, SiameseConvNetV1)
+                # Ensure snapshot models are on the correct device
+                for snap in self.opponent_pool.snapshots:
+                    snap.model.to(self.device)
+                print(f"Opponent pool loaded from {pool_path}")
+            except FileNotFoundError:
+                print(
+                    f"No opponent pool found at {pool_path}; starting with empty pool"
+                )
 
         return checkpoint["step"]
 
@@ -476,8 +535,11 @@ class SelfPlayTrainer:
             "pool_stats": self.opponent_pool.get_pool_stats(),
         }
 
-    def get_preflop_range_grid(self, seat: int = 0) -> str:
-        """Get preflop range as a grid showing action probabilities for button play."""
+    def get_preflop_range_grid(self, seat: int = 0, metric: str = "allin") -> str:
+        """Get preflop range as a grid showing selected action probabilities for button play.
+
+        metric: "allin" or "fold"
+        """
         # Create a 13x13 grid representing all possible hole card combinations
         # Rows/cols: A, K, Q, J, T, 9, 8, 7, 6, 5, 4, 3, 2
         ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
@@ -502,25 +564,31 @@ class SelfPlayTrainer:
                     card1, card2 = f"{rank2}s", f"{rank1}d"  # Off-suit
 
                 # Get action probability for this hand
-                prob = self._get_preflop_action_probability(card1, card2, seat)
+                prob = self._get_preflop_action_probability(card1, card2, seat, metric)
                 row.append(f"{prob:>2}")
 
             grid.append(" ".join(row))
 
         return "\n".join(grid)
 
-    def _get_preflop_action_probability(self, card1: str, card2: str, seat: int) -> str:
-        """Get action probability for a specific hole card combination."""
-        # Create a minimal game state for preflop button play
+    def _get_preflop_action_probability(
+        self, card1: str, card2: str, seat: int, metric: str
+    ) -> str:
+        """Get action probability for a specific hole card combination.
+
+        metric: "allin" or "fold"
+        """
+        # Create a minimal game state for preflop small blind (first to act) play
         from ..env.types import GameState, PlayerState
 
         # Create players
         p0 = PlayerState(stack=1000)
         p1 = PlayerState(stack=1000)
 
-        # Set up preflop state (button acts last preflop)
-        button = 1 - seat  # If seat=0 (button), then button=1
-        p_sb = 0 if button == 0 else 1
+        # In heads-up, the small blind is on the button and acts first preflop.
+        # Make the analyzed seat both button and small blind, and set it to act.
+        button = seat
+        p_sb = button
         p_bb = 1 - p_sb
 
         # Post blinds
@@ -536,7 +604,7 @@ class SelfPlayTrainer:
             self._card_str_to_int(card2),
         ]
 
-        # Create game state
+        # Create game state with the small blind (our seat) first to act
         state = GameState(
             button=button,
             street="preflop",
@@ -566,14 +634,21 @@ class SelfPlayTrainer:
         with torch.no_grad():
             logits, _ = self.model(cards.unsqueeze(0), actions_tensor.unsqueeze(0))
 
-            # For preflop button play, we know the legal actions:
-            # fold, call, raise (pot-sized), all-in
-            # Create a simple legal mask
+            # Preflop small blind (first to act) legal actions based on to_call
             legal_mask = torch.zeros(self.num_bet_bins)
-            legal_mask[0] = 1.0  # fold
-            legal_mask[1] = 1.0  # call/check
-            legal_mask[4] = 1.0  # pot-sized bet
-            legal_mask[7] = 1.0  # all-in
+            me = seat
+            opp = 1 - me
+            to_call = state.players[opp].committed - state.players[me].committed
+            if to_call > 0:
+                # Facing a bet (the big blind): fold, call, raises, all-in
+                legal_mask[0] = 1.0  # fold
+                legal_mask[1] = 1.0  # call
+            else:
+                # No bet to call: check, bets, all-in
+                legal_mask[1] = 1.0  # check
+            # Enable all configured bet/raise bins (2..6) and all-in (7)
+            for idx in range(2, min(7, self.num_bet_bins - 1) + 1):
+                legal_mask[idx] = 1.0
             legal_mask = legal_mask.to(self.device)  # Move legal mask to device
 
             # Apply legal mask
@@ -583,11 +658,20 @@ class SelfPlayTrainer:
             # Get probabilities
             probs = torch.softmax(masked_logits, dim=-1).squeeze(0)
 
-            # Get probability of all-in (all-in is action 7)
-            all_in_prob = probs[7].item()
+            # Select metric index
+            if metric == "allin":
+                idx = 7
+            elif metric == "fold":
+                idx = 0
+            else:
+                idx = 7
+
+            selected_prob = probs[idx].item()
 
             # Convert to percentage and format
-            percentage = round(all_in_prob * 100)
+            percentage = round(selected_prob * 100)
+            if percentage >= 100:
+                return "██"  # Two filled boxes to keep 2-char width
             return f"{percentage:2d}"
 
     def _card_str_to_int(self, card_str: str) -> int:

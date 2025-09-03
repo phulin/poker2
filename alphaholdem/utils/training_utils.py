@@ -22,10 +22,31 @@ def print_preflop_range_grid(
         title = f"Preflop Range Grid (Step {step})"
 
     print(f"\n--- {title} ---")
-    print("Button play - probability of all-in (%)")
-    print("Higher numbers = more likely to go all-in")
-    print()
-    print(trainer.get_preflop_range_grid(seat=seat))  # Button seat
+    # Generate both grids
+    left = trainer.get_preflop_range_grid(seat=seat, metric="allin").splitlines()
+    right = trainer.get_preflop_range_grid(seat=seat, metric="fold").splitlines()
+
+    # Align lengths
+    max_lines = max(len(left), len(right))
+    while len(left) < max_lines:
+        left.append("")
+    while len(right) < max_lines:
+        right.append("")
+
+    # Compute left column width for padding
+    left_width = max((len(line) for line in left), default=0)
+
+    # Headers
+    left_hdr = "Small blind (first) - all-in (%)"
+    right_hdr = "Small blind (first) - fold (%)"
+    print(left_hdr.ljust(left_width) + "   |   " + right_hdr)
+
+    # Separator under headers
+    print(("-" * len(left_hdr)).ljust(left_width) + "   |   " + ("-" * len(right_hdr)))
+
+    # Rows side-by-side
+    for i in range(max_lines):
+        print(left[i].ljust(left_width) + "   |   " + right[i])
     print()
 
 
