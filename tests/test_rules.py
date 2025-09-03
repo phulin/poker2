@@ -4,6 +4,7 @@ from alphaholdem.env import rules
 
 # Helper to make card by rank/suit (r: 0..12 for 2..A, s: 0..3)
 
+
 def C(r: int, s: int) -> int:
     return s * 13 + r
 

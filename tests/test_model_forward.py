@@ -33,12 +33,16 @@ def test_siamese_convnet_forward_and_policy_action():
     nb = 9
     cards_enc = CardsPlanesV1()
     actions_enc = ActionsHUEncoderV1(history_actions_per_round=6)
-    model = SiameseConvNetV1(cards_channels=6, actions_channels=24, fusion_hidden=128, num_actions=nb)
+    model = SiameseConvNetV1(
+        cards_channels=6, actions_channels=24, fusion_hidden=128, num_actions=nb
+    )
     policy = CategoricalPolicyV1()
 
     s = make_state("turn", [4, 5, 6, 7])
     cards = cards_enc.encode_cards(s, seat=0).unsqueeze(0)  # (1, 6, 4, 13)
-    actions = actions_enc.encode_actions(s, seat=0, num_bet_bins=nb).unsqueeze(0)  # (1, 24, 4, 9)
+    actions = actions_enc.encode_actions(s, seat=0, num_bet_bins=nb).unsqueeze(
+        0
+    )  # (1, 24, 4, 9)
 
     logits, value = model(cards, actions)
     assert logits.shape == (1, nb)
@@ -53,12 +57,12 @@ def test_action_mapping_with_env():
     env = HUNLEnv(starting_stack=1000, sb=50, bb=100)
     state = env.reset()
     nb = 9
-    
+
     # Test legal mask
     legal_mask = get_legal_mask(state, nb)
     assert legal_mask.shape == (nb,)
     assert legal_mask.sum() > 0  # should have some legal actions
-    
+
     # Test bin to action mapping
     for bin_idx in range(nb):
         action = bin_to_action(bin_idx, state, nb)

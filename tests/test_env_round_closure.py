@@ -29,5 +29,3 @@ def test_check_check_closes_round_and_advances_street():
     s, r2, d2, _ = env.step(Action("check", amount=0))
     assert d2
     assert s.street == "showdown"
-
-

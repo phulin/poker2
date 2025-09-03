@@ -23,5 +23,3 @@ def test_choose_bin_and_amount_mapping():
 
     # All-in maps to stack+to_call
     assert bin_to_amount(pot, to_call, stack, 7) == stack + to_call
-
-

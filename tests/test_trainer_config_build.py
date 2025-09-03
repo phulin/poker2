@@ -9,7 +9,9 @@ from alphaholdem.models.heads import CategoricalPolicyV1
 
 
 def test_trainer_builds_components_from_config():
-    cfg_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "default.yaml")
+    cfg_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "configs", "default.yaml"
+    )
 
     trainer = SelfPlayTrainer(
         num_bet_bins=7,  # should be overridden by config (9)
@@ -24,5 +26,3 @@ def test_trainer_builds_components_from_config():
     assert isinstance(trainer.model, SiameseConvNetV1)
     assert isinstance(trainer.policy, CategoricalPolicyV1)
     assert trainer.num_bet_bins == 9
-
-

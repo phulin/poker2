@@ -6,7 +6,9 @@ from alphaholdem.core import registry
 
 
 def test_load_default_config_values():
-    cfg_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "default.yaml")
+    cfg_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "configs", "default.yaml"
+    )
     cfg = load_config(path=cfg_path)
 
     assert cfg.nb == 9
@@ -30,5 +32,3 @@ def test_registries_have_required_components():
     assert "actions_hu_v1" in registry.ACTION_ENCODERS
     assert "siamese_convnet_v1" in registry.MODELS
     assert "categorical_v1" in registry.POLICIES
-
-

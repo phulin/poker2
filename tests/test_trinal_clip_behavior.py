@@ -48,10 +48,17 @@ def test_value_clipping_symmetry():
     legal_masks = torch.ones(batch, 9)
 
     out = trinal_clip_ppo_loss(
-        logits, values, actions, log_probs_old, advantages, returns, legal_masks,
-        epsilon=0.2, delta1=3.0, delta2=-100.0, delta3=100.0
+        logits,
+        values,
+        actions,
+        log_probs_old,
+        advantages,
+        returns,
+        legal_masks,
+        epsilon=0.2,
+        delta1=3.0,
+        delta2=-100.0,
+        delta3=100.0,
     )
     # Value loss computed vs clipped returns; ensure finite
-    assert torch.isfinite(out["value_loss"]) 
-
-
+    assert torch.isfinite(out["value_loss"])
