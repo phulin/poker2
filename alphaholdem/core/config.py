@@ -44,7 +44,9 @@ def _to_component_spec(data: Dict[str, Any], key: str) -> ComponentSpec:
     return ComponentSpec(name=sub.get("name"), kwargs=sub.get("kwargs", {}))
 
 
-def load_config(path: Optional[str] = None, data: Optional[Dict[str, Any]] = None) -> RootConfig:
+def load_config(
+    path: Optional[str] = None, data: Optional[Dict[str, Any]] = None
+) -> RootConfig:
     if data is None:
         if path is None:
             raise ValueError("Either path or data must be provided")

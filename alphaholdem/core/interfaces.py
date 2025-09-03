@@ -11,22 +11,18 @@ class Env(ABC):
         ...
 
     @abstractmethod
-    def step(self, action: Any) -> Tuple[Any, float, bool, Dict[str, Any]]:
-        ...
+    def step(self, action: Any) -> Tuple[Any, float, bool, Dict[str, Any]]: ...
 
     @abstractmethod
-    def legal_actions(self) -> Any:
-        ...
+    def legal_actions(self) -> Any: ...
 
 
 class Encoder(ABC):
     @abstractmethod
-    def encode_cards(self, game_state: Any, seat: int) -> Any:
-        ...
+    def encode_cards(self, game_state: Any, seat: int) -> Any: ...
 
     @abstractmethod
-    def encode_actions(self, game_state: Any, seat: int, num_bet_bins: int) -> Any:
-        ...
+    def encode_actions(self, game_state: Any, seat: int, num_bet_bins: int) -> Any: ...
 
 
 class Model(ABC):
@@ -38,37 +34,33 @@ class Model(ABC):
 
 class Policy(ABC):
     @abstractmethod
-    def action(self, logits: Any, legal_mask: Optional[Any] = None) -> Tuple[int, float]:
+    def action(
+        self, logits: Any, legal_mask: Optional[Any] = None
+    ) -> Tuple[int, float]:
         """Select an action id and return (action_id, log_prob)."""
         ...
 
 
 class OpponentPool(ABC):
     @abstractmethod
-    def sample(self, k: int = 1) -> Iterable[Any]:
-        ...
+    def sample(self, k: int = 1) -> Iterable[Any]: ...
 
     @abstractmethod
-    def add_snapshot(self, agent: Any, rating: float) -> None:
-        ...
+    def add_snapshot(self, agent: Any, rating: float) -> None: ...
 
 
 class League(ABC):
     @abstractmethod
-    def sample_lineup(self, num_seats: int) -> Tuple[Any, ...]:
-        ...
+    def sample_lineup(self, num_seats: int) -> Tuple[Any, ...]: ...
 
     @abstractmethod
-    def update_meta_mix(self, scores: Mapping[Tuple[int, int], float]) -> None:
-        ...
+    def update_meta_mix(self, scores: Mapping[Tuple[int, int], float]) -> None: ...
 
     @abstractmethod
-    def maybe_add_snapshot(self, agent: Any) -> None:
-        ...
+    def maybe_add_snapshot(self, agent: Any) -> None: ...
 
     @abstractmethod
-    def spawn_best_response(self, base_agent: Any, steps: int) -> None:
-        ...
+    def spawn_best_response(self, base_agent: Any, steps: int) -> None: ...
 
 
 @dataclass

@@ -74,12 +74,16 @@ def evaluate_7(cards: Iterable[int]) -> Tuple[int, Tuple[int, ...]]:
     # Four of a kind
     if 4 in rc:
         four = max(r for r in range(13) if rc[r] == 4)
-        kickers = sorted([r for r in range(13) if r != four and rc[r] > 0], reverse=True)
+        kickers = sorted(
+            [r for r in range(13) if r != four and rc[r] > 0], reverse=True
+        )
         return (7, (four, kickers[0]))
 
     # Full house
     trips = sorted([r for r in range(13) if rc[r] == 3], reverse=True)
-    pairs = sorted([r for r in range(13) if rc[r] >= 2 and r not in trips], reverse=True)
+    pairs = sorted(
+        [r for r in range(13) if rc[r] >= 2 and r not in trips], reverse=True
+    )
     if trips and (len(trips) >= 2 or pairs):
         three = trips[0]
         two = trips[1] if len(trips) >= 2 else pairs[0]
@@ -98,7 +102,9 @@ def evaluate_7(cards: Iterable[int]) -> Tuple[int, Tuple[int, ...]]:
     # Three of a kind
     if trips:
         three = trips[0]
-        kickers = sorted([r for r in range(13) if r != three and rc[r] > 0], reverse=True)[:2]
+        kickers = sorted(
+            [r for r in range(13) if r != three and rc[r] > 0], reverse=True
+        )[:2]
         return (3, (three, *kickers))
 
     # Two pair
@@ -110,7 +116,9 @@ def evaluate_7(cards: Iterable[int]) -> Tuple[int, Tuple[int, ...]]:
     # One pair
     if len(pairs) == 1:
         p = pairs[0]
-        kickers = sorted([r for r in range(13) if r != p and rc[r] > 0], reverse=True)[:3]
+        kickers = sorted([r for r in range(13) if r != p and rc[r] > 0], reverse=True)[
+            :3
+        ]
         return (1, (p, *kickers))
 
     # High card

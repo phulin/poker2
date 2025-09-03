@@ -11,8 +11,12 @@ def build_components_from_config(cfg: RootConfig) -> Tuple[Any, Any, Any, Any, i
     """
     Build (card_encoder, action_encoder, model, policy, nb) from a RootConfig.
     """
-    card_encoder = registry.build_card_encoder(cfg.card_encoder.name, **cfg.card_encoder.kwargs)
-    action_encoder = registry.build_action_encoder(cfg.action_encoder.name, **cfg.action_encoder.kwargs)
+    card_encoder = registry.build_card_encoder(
+        cfg.card_encoder.name, **cfg.card_encoder.kwargs
+    )
+    action_encoder = registry.build_action_encoder(
+        cfg.action_encoder.name, **cfg.action_encoder.kwargs
+    )
 
     # Ensure model receives num_actions (nb)
     model_kwargs = dict(cfg.model.kwargs)
@@ -23,4 +27,3 @@ def build_components_from_config(cfg: RootConfig) -> Tuple[Any, Any, Any, Any, i
     policy = registry.build_policy(cfg.policy.name, **cfg.policy.kwargs)
 
     return card_encoder, action_encoder, model, policy, cfg.nb
-

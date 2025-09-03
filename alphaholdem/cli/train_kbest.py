@@ -12,7 +12,12 @@ import argparse
 import torch
 import torch.nn as nn
 from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.utils.training_utils import print_preflop_range_grid, print_training_stats, print_evaluation_results, print_checkpoint_info
+from alphaholdem.utils.training_utils import (
+    print_preflop_range_grid,
+    print_training_stats,
+    print_evaluation_results,
+    print_checkpoint_info,
+)
 from alphaholdem.core.config_loader import get_config
 
 
@@ -30,7 +35,7 @@ def train_kbest(
 ):
     """
     Train AlphaHoldem agent using K-Best self-play.
-    
+
     Args:
         num_steps: Number of training steps
         trajectories_per_step: Number of trajectories to collect per step
@@ -41,10 +46,10 @@ def train_kbest(
         checkpoint_dir: Directory to save checkpoints
         resume_from: Path to checkpoint to resume from
     """
-    
+
     # Create checkpoint directory
     os.makedirs(checkpoint_dir, exist_ok=True)
-    
+
     # Load optional config (centralized defaults)
     cfg = get_config(config)
 
@@ -66,104 +71,147 @@ def train_kbest(
         device=device,
         config=config,
     )
-    
+
     # Resume from checkpoint if specified
     start_step = 0
     if resume_from and os.path.exists(resume_from):
         print(f"Resuming from checkpoint: {resume_from}")
         start_step = trainer.load_checkpoint(resume_from)
-    
+
     # Record training start time
     training_start_time = time.time()
-    
+
     print(f"Starting K-Best training from step {start_step}")
     print(f"K-Best pool size: {k_best_pool_size}")
     print(f"Min ELO difference: {min_elo_diff}")
     print(f"Trajectories per step: {trajectories_per_step}")
-    print(f"Training start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))}")
+    print(
+        f"Training start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))}"
+    )
     print()
-    
+
     # Training loop
     for step in range(start_step, num_steps):
         step_start_time = time.time()
-        
+
         # Training step
-        stats = trainer.train_step(num_trajectories=(cfg.trajectories_per_step if cfg else trajectories_per_step))
-        
+        stats = trainer.train_step(
+            num_trajectories=(
+                cfg.trajectories_per_step if cfg else trajectories_per_step
+            )
+        )
+
         # Calculate times
         step_elapsed_time = time.time() - step_start_time
         total_elapsed_time = time.time() - training_start_time
-        
+
         # Format times
         step_time_str = f"{step_elapsed_time:.2f}s"
         total_time_str = f"{total_elapsed_time:.1f}s"
-        
+
         # Logging
         print_training_stats(stats, step, num_steps, step_time_str, total_time_str)
-        
+
         # Show preflop range grid every 50 steps
         if (step + 1) % 50 == 0:
             print_preflop_range_grid(trainer, step + 1, seat=0)
-        
+
         # Evaluation against pool
         if (step + 1) % eval_interval == 0:
             eval_results = trainer.evaluate_against_pool(num_games=50)
             print_evaluation_results(eval_results)
-        
+
         # Checkpointing
         if (step + 1) % checkpoint_interval == 0:
-            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_step_{step + 1}.pt")
+            checkpoint_path = os.path.join(
+                checkpoint_dir, f"checkpoint_step_{step + 1}.pt"
+            )
             trainer.save_checkpoint(checkpoint_path, step + 1)
-            
+
             # Also save the best model if it has the highest ELO
             best_checkpoint_path = os.path.join(checkpoint_dir, "best_model.pt")
-            if not os.path.exists(best_checkpoint_path) or stats['current_elo'] > trainer.opponent_pool.get_best_snapshot().elo:
+            if (
+                not os.path.exists(best_checkpoint_path)
+                or stats["current_elo"] > trainer.opponent_pool.get_best_snapshot().elo
+            ):
                 trainer.save_checkpoint(best_checkpoint_path, step + 1)
-                print_checkpoint_info(best_checkpoint_path, stats['current_elo'], is_best=True)
-    
+                print_checkpoint_info(
+                    best_checkpoint_path, stats["current_elo"], is_best=True
+                )
+
     # Final evaluation
     final_total_time = time.time() - training_start_time
     print(f"\nFinal evaluation against opponent pool...")
     final_eval = trainer.evaluate_against_pool(num_games=100)
     print_evaluation_results(final_eval)
-    print(f"Total training time: {final_total_time:.1f}s ({final_total_time/3600:.2f} hours)")
-    
+    print(
+        f"Total training time: {final_total_time:.1f}s ({final_total_time/3600:.2f} hours)"
+    )
+
     # Save final checkpoint
     final_checkpoint_path = os.path.join(checkpoint_dir, "final_checkpoint.pt")
     trainer.save_checkpoint(final_checkpoint_path, num_steps)
-    
+
     # Print preflop range grid
-    print_preflop_range_grid(trainer, num_steps, seat=0, title="Final Preflop Range Grid")
-    
+    print_preflop_range_grid(
+        trainer, num_steps, seat=0, title="Final Preflop Range Grid"
+    )
+
     return trainer
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train AlphaHoldem with K-Best self-play")
-    parser.add_argument("--steps", type=int, default=1000, help="Number of training steps")
-    parser.add_argument("--trajectories-per-step", type=int, default=4, help="Trajectories per training step")
-    parser.add_argument("--k-best-pool-size", type=int, default=5, help="Size of K-Best opponent pool")
-    parser.add_argument("--min-elo-diff", type=float, default=50.0, help="Minimum ELO difference for pool updates")
-    parser.add_argument("--checkpoint-interval", type=int, default=100, help="Checkpoint save interval")
-    parser.add_argument("--eval-interval", type=int, default=50, help="Evaluation interval")
-    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoint directory")
-    parser.add_argument("--resume-from", type=str, help="Path to checkpoint to resume from")
-    parser.add_argument("--config", type=str, help="Path to YAML config for components/hparams")
-    
+    parser = argparse.ArgumentParser(
+        description="Train AlphaHoldem with K-Best self-play"
+    )
+    parser.add_argument(
+        "--steps", type=int, default=1000, help="Number of training steps"
+    )
+    parser.add_argument(
+        "--trajectories-per-step",
+        type=int,
+        default=4,
+        help="Trajectories per training step",
+    )
+    parser.add_argument(
+        "--k-best-pool-size", type=int, default=5, help="Size of K-Best opponent pool"
+    )
+    parser.add_argument(
+        "--min-elo-diff",
+        type=float,
+        default=50.0,
+        help="Minimum ELO difference for pool updates",
+    )
+    parser.add_argument(
+        "--checkpoint-interval", type=int, default=100, help="Checkpoint save interval"
+    )
+    parser.add_argument(
+        "--eval-interval", type=int, default=50, help="Evaluation interval"
+    )
+    parser.add_argument(
+        "--checkpoint-dir", type=str, default="checkpoints", help="Checkpoint directory"
+    )
+    parser.add_argument(
+        "--resume-from", type=str, help="Path to checkpoint to resume from"
+    )
+    parser.add_argument(
+        "--config", type=str, help="Path to YAML config for components/hparams"
+    )
+
     args = parser.parse_args()
-    
+
     # Set random seeds for reproducibility
     torch.manual_seed(42)
-    
+
     # Set up device (GPU if available)
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
-    
+
     if device.type == "mps":
         print("✅ Using Apple M3 GPU (MPS)")
     else:
         print("⚠️  Using CPU (MPS not available)")
-    
+
     # Train the agent
     trainer = train_kbest(
         num_steps=args.steps,
@@ -177,7 +225,7 @@ def main():
         device=device,
         config=args.config,
     )
-    
+
     print("Training completed!")
 
 

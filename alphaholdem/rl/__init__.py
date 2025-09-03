@@ -1,6 +1,6 @@
 __all__ = [
     "losses",
-    "replay", 
+    "replay",
     "self_play",
     "k_best_pool",
 ]

@@ -10,7 +10,9 @@ from ..core.registry import register_policy
 
 @register_policy("categorical_v1")
 class CategoricalPolicyV1(Policy):
-    def action(self, logits: torch.Tensor, legal_mask: Optional[torch.Tensor] = None) -> Tuple[int, float]:
+    def action(
+        self, logits: torch.Tensor, legal_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[int, float]:
         if legal_mask is not None:
             # mask out illegal by setting to large negative
             logits = logits.clone()

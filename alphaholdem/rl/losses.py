@@ -22,11 +22,11 @@ def trinal_clip_ppo_loss(
 ) -> Dict[str, torch.Tensor]:
     """
     Trinal-Clip PPO loss with policy and value clipping.
-    
+
     According to the paper:
     - Policy loss: clip(ratio, clip(ratio, 1-ε, 1+ε), δ1) * advantages
     - Value loss: clip(returns, -δ2, δ3) - values
-    
+
     Args:
         logits: Policy logits (B, num_actions)
         values: Value predictions (B,)
@@ -44,18 +44,18 @@ def trinal_clip_ppo_loss(
     # Mask illegal actions
     masked_logits = logits.clone()
     masked_logits[legal_masks == 0] = -1e9
-    
+
     # Compute new log probabilities
     log_probs = F.log_softmax(masked_logits, dim=-1)
     action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
-    
+
     # Compute ratio
     ratio = torch.exp(action_log_probs - log_probs_old)
-    
+
     # Policy loss with Trinal-Clip
     # First clip: standard PPO clip (1-ε, 1+ε)
     first_clipped = torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
-    
+
     # Second clip: additional upper bound δ1 when advantage < 0
     # This is the "Trinal-Clip" part from the paper
     negative_adv_mask = advantages < 0
@@ -63,46 +63,42 @@ def trinal_clip_ppo_loss(
         # For negative advantages, apply additional upper bound
         second_clipped = torch.clamp(ratio, 0, delta1)
         # Use the more restrictive of the two clips
-        final_clipped = torch.where(negative_adv_mask, 
-                                   torch.min(first_clipped, second_clipped),
-                                   first_clipped)
+        final_clipped = torch.where(
+            negative_adv_mask, torch.min(first_clipped, second_clipped), first_clipped
+        )
     else:
         final_clipped = first_clipped
-    
+
     # Policy loss: min(ratio * advantages, clipped_ratio * advantages)
     policy_loss = -torch.min(ratio * advantages, final_clipped * advantages)
-    
+
     # Value loss with clipping (as per AlphaHoldem paper)
     if delta2 != 0.0 or delta3 != 0.0:
         # Apply clipping bounds to returns
         clipped_returns = torch.clamp(returns, delta2, delta3)
     else:
         clipped_returns = returns
-    
+
     value_loss = F.mse_loss(values, clipped_returns)
-    
+
     # Entropy regularization
     probs = F.softmax(masked_logits, dim=-1)
     entropy = -(probs * log_probs).sum(dim=-1).mean()
-    
+
     # Total loss
-    total_loss = (
-        policy_loss.mean() +
-        value_coef * value_loss -
-        entropy_coef * entropy
-    )
-    
+    total_loss = policy_loss.mean() + value_coef * value_loss - entropy_coef * entropy
+
     return {
-        'total_loss': total_loss,
-        'policy_loss': policy_loss.mean(),
-        'value_loss': value_loss,
-        'entropy': entropy,
-        'ratio_mean': ratio.mean(),
-        'ratio_std': ratio.std(),
-        'advantage_mean': advantages.mean(),
-        'advantage_std': advantages.std(),
-        'clipped_ratio_mean': final_clipped.mean(),
-        'clipped_ratio_std': final_clipped.std(),
+        "total_loss": total_loss,
+        "policy_loss": policy_loss.mean(),
+        "value_loss": value_loss,
+        "entropy": entropy,
+        "ratio_mean": ratio.mean(),
+        "ratio_std": ratio.std(),
+        "advantage_mean": advantages.mean(),
+        "advantage_std": advantages.std(),
+        "clipped_ratio_mean": final_clipped.mean(),
+        "clipped_ratio_std": final_clipped.std(),
     }
 
 
@@ -122,37 +118,33 @@ def standard_ppo_loss(
     # Mask illegal actions
     masked_logits = logits.clone()
     masked_logits[legal_masks == 0] = -1e9
-    
+
     # Compute new log probabilities
     log_probs = F.log_softmax(masked_logits, dim=-1)
     action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
-    
+
     # Compute ratio
     ratio = torch.exp(action_log_probs - log_probs_old)
-    
+
     # Standard PPO policy loss
     clipped_ratio = torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
     policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
-    
+
     # Value loss
     value_loss = F.mse_loss(values, returns)
-    
+
     # Entropy regularization
     probs = F.softmax(masked_logits, dim=-1)
     entropy = -(probs * log_probs).sum(dim=-1).mean()
-    
+
     # Total loss
-    total_loss = (
-        policy_loss.mean() +
-        value_coef * value_loss -
-        entropy_coef * entropy
-    )
-    
+    total_loss = policy_loss.mean() + value_coef * value_loss - entropy_coef * entropy
+
     return {
-        'total_loss': total_loss,
-        'policy_loss': policy_loss.mean(),
-        'value_loss': value_loss,
-        'entropy': entropy,
-        'ratio_mean': ratio.mean(),
-        'ratio_std': ratio.std(),
+        "total_loss": total_loss,
+        "policy_loss": policy_loss.mean(),
+        "value_loss": value_loss,
+        "entropy": entropy,
+        "ratio_mean": ratio.mean(),
+        "ratio_std": ratio.std(),
     }

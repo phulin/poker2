@@ -30,7 +30,13 @@ class ConvTrunk(nn.Module):
 
 @register_model("siamese_convnet_v1")
 class SiameseConvNetV1(nn.Module, Model):
-    def __init__(self, cards_channels: int = 6, actions_channels: int = 24, fusion_hidden: int = 256, num_actions: int = 9):
+    def __init__(
+        self,
+        cards_channels: int = 6,
+        actions_channels: int = 24,
+        fusion_hidden: int = 256,
+        num_actions: int = 9,
+    ):
         super().__init__()
         self.cards_trunk = ConvTrunk(cards_channels, hidden=64)
         self.actions_trunk = ConvTrunk(actions_channels, hidden=64)
@@ -44,7 +50,9 @@ class SiameseConvNetV1(nn.Module, Model):
         self.policy_head = nn.Linear(fusion_hidden, num_actions)
         self.value_head = nn.Linear(fusion_hidden, 1)
 
-    def forward(self, cards_tensor: torch.Tensor, actions_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, cards_tensor: torch.Tensor, actions_tensor: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Expect input shapes: (B, C, 4, 13) for both
         x_cards = self.cards_trunk(cards_tensor)
         x_actions = self.actions_trunk(actions_tensor)

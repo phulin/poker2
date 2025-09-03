@@ -8,6 +8,7 @@ import torch
 @dataclass
 class Transition:
     """Single transition in a trajectory."""
+
     observation: torch.Tensor  # encoded state
     action: int  # discrete action index
     log_prob: float  # log probability of action
@@ -22,6 +23,7 @@ class Transition:
 @dataclass
 class Trajectory:
     """Complete trajectory from reset to terminal."""
+
     transitions: List[Transition]
     final_value: float  # V(s_T) for GAE
 
@@ -60,7 +62,7 @@ def compute_gae_returns(
     """Compute GAE advantages and returns."""
     advantages = []
     returns = []
-    
+
     # Compute advantages using GAE
     gae = 0
     for t in reversed(range(len(rewards))):
@@ -69,41 +71,41 @@ def compute_gae_returns(
             delta = rewards[t] - values[t]
         else:
             delta = rewards[t] + gamma * values[t + 1] - values[t]
-        
+
         gae = delta + gamma * lambda_ * gae
         advantages.insert(0, gae)
-    
+
     # Compute returns from advantages
     for t in range(len(rewards)):
         returns.append(advantages[t] + values[t])
-    
+
     return advantages, returns
 
 
 def compute_delta_bounds(trajectory: Trajectory) -> tuple[float, float]:
     """Compute δ2 and δ3 bounds from chips placed in trajectory.
-    
+
     According to the paper:
     - δ2: negative bound representing opponent chips placed
     - δ3: positive bound representing our chips placed
-    
+
     These bounds are used to clip the returns in the value loss function
     to reduce variance in imperfect information games.
     """
     chips_placed = [t.chips_placed for t in trajectory.transitions]
     if not chips_placed:
         return 0.0, 0.0
-    
+
     # Calculate total chips placed by both players
     total_chips = sum(chips_placed)
-    
+
     # δ2: negative bound (opponent chips) - typically negative
     # δ3: positive bound (our chips) - typically positive
     # For simplicity, use symmetric bounds based on total chips
     # In a more sophisticated implementation, we could track per-player chips
     delta2 = -total_chips
     delta3 = total_chips
-    
+
     return delta2, delta3
 
 
@@ -115,7 +117,7 @@ def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
     advantages = []
     returns = []
     legal_masks = []
-    
+
     for trajectory in trajectories:
         for transition in trajectory.transitions:
             observations.append(transition.observation)
@@ -124,12 +126,12 @@ def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
             advantages.append(transition.advantage)
             returns.append(transition.return_)
             legal_masks.append(transition.legal_mask)
-    
+
     return {
-        'observations': torch.stack(observations),
-        'actions': torch.tensor(actions, dtype=torch.long),
-        'log_probs_old': torch.tensor(log_probs_old, dtype=torch.float32),
-        'advantages': torch.tensor(advantages, dtype=torch.float32),
-        'returns': torch.tensor(returns, dtype=torch.float32),
-        'legal_masks': torch.stack(legal_masks),
+        "observations": torch.stack(observations),
+        "actions": torch.tensor(actions, dtype=torch.long),
+        "log_probs_old": torch.tensor(log_probs_old, dtype=torch.float32),
+        "advantages": torch.tensor(advantages, dtype=torch.float32),
+        "returns": torch.tensor(returns, dtype=torch.float32),
+        "legal_masks": torch.stack(legal_masks),
     }

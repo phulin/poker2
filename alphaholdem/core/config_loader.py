@@ -23,5 +23,3 @@ def get_config(config_or_path: Optional[Union[str, RootConfig]] = None) -> RootC
     if isinstance(config_or_path, str):
         return load_config(path=config_or_path)
     return config_or_path
-
-

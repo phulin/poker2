@@ -8,19 +8,19 @@ from ..env.types import GameState, Action
 
 def bin_to_action(bin_idx: int, game_state: GameState, num_bet_bins: int) -> Action:
     """Convert discrete bin index to concrete Action with snapping."""
-    legal_actions = game_state.env.legal_actions() if hasattr(game_state, 'env') else []
-    
+    legal_actions = game_state.env.legal_actions() if hasattr(game_state, "env") else []
+
     # Direct mapping for special actions
     if bin_idx == 0:  # fold
         return Action("fold")
-    
+
     # For betting actions, find closest legal match
     target_action = _bin_to_target_action(bin_idx, game_state, num_bet_bins)
-    
+
     # Find closest legal action
     best_action = None
-    best_distance = float('inf')
-    
+    best_distance = float("inf")
+
     for legal in legal_actions:
         if legal.kind == target_action.kind:
             if legal.kind in ["check", "call"]:
@@ -31,17 +31,19 @@ def bin_to_action(bin_idx: int, game_state: GameState, num_bet_bins: int) -> Act
                 if dist < best_distance:
                     best_distance = dist
                     best_action = legal
-    
+
     # Fallback: return first legal action that's not fold
     for legal in legal_actions:
         if legal.kind != "fold":
             return legal
-    
+
     # Last resort: fold
     return Action("fold")
 
 
-def _bin_to_target_action(bin_idx: int, game_state: GameState, num_bet_bins: int) -> Action:
+def _bin_to_target_action(
+    bin_idx: int, game_state: GameState, num_bet_bins: int
+) -> Action:
     """Convert bin to target Action (may not be legal)."""
     pot = game_state.pot
     to_call = 0
@@ -49,7 +51,7 @@ def _bin_to_target_action(bin_idx: int, game_state: GameState, num_bet_bins: int
         me = game_state.to_act
         opp = 1 - me
         to_call = game_state.players[opp].committed - game_state.players[me].committed
-    
+
     if bin_idx == 1:  # check/call
         if to_call > 0:
             return Action("call", amount=to_call)
@@ -80,9 +82,9 @@ def _bin_to_target_action(bin_idx: int, game_state: GameState, num_bet_bins: int
 
 def get_legal_mask(game_state: GameState, num_bet_bins: int) -> torch.Tensor:
     """Get legal action mask for current state."""
-    legal_actions = game_state.env.legal_actions() if hasattr(game_state, 'env') else []
+    legal_actions = game_state.env.legal_actions() if hasattr(game_state, "env") else []
     mask = torch.zeros(num_bet_bins, dtype=torch.float32)
-    
+
     for action in legal_actions:
         bin_idx = _action_to_bin_idx(action, game_state, num_bet_bins)
         if bin_idx is not None:
@@ -90,7 +92,9 @@ def get_legal_mask(game_state: GameState, num_bet_bins: int) -> torch.Tensor:
     return mask
 
 
-def _action_to_bin_idx(action: Action, game_state: GameState, num_bet_bins: int) -> int | None:
+def _action_to_bin_idx(
+    action: Action, game_state: GameState, num_bet_bins: int
+) -> int | None:
     """Map Action to discrete bin index."""
     if action.kind == "fold":
         return 0

@@ -33,6 +33,8 @@ class GameState:
     big_blind: int = 100
     min_raise: int = 0
     last_aggressive_amount: int = 0
-    players: Tuple[PlayerState, PlayerState] = field(default_factory=lambda: (PlayerState(0), PlayerState(0)))
+    players: Tuple[PlayerState, PlayerState] = field(
+        default_factory=lambda: (PlayerState(0), PlayerState(0))
+    )
     terminal: bool = False
     winner: Optional[int] = None  # 0/1 or None for split

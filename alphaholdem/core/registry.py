@@ -18,31 +18,37 @@ def _register(table: Dict[str, Any], name: str, obj: Any) -> Any:
 
 # Decorators for registration
 
+
 def register_card_encoder(name: str) -> Callable[[Any], Any]:
     def deco(cls_or_fn: Any) -> Any:
         return _register(CARD_ENCODERS, name, cls_or_fn)
+
     return deco
 
 
 def register_action_encoder(name: str) -> Callable[[Any], Any]:
     def deco(cls_or_fn: Any) -> Any:
         return _register(ACTION_ENCODERS, name, cls_or_fn)
+
     return deco
 
 
 def register_model(name: str) -> Callable[[Any], Any]:
     def deco(cls_or_fn: Any) -> Any:
         return _register(MODELS, name, cls_or_fn)
+
     return deco
 
 
 def register_policy(name: str) -> Callable[[Any], Any]:
     def deco(cls_or_fn: Any) -> Any:
         return _register(POLICIES, name, cls_or_fn)
+
     return deco
 
 
 # Builders
+
 
 def build_card_encoder(name: str, **kwargs: Any) -> Any:
     if name not in CARD_ENCODERS:

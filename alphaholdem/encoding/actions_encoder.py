@@ -19,27 +19,39 @@ class ActionsHUEncoderV1(Encoder):
     def encode_cards(self, game_state: Any, seat: int) -> Any:
         raise NotImplementedError("Use card encoder for cards tensor")
 
-    def encode_actions(self, game_state: Any, seat: int, num_bet_bins: int = NUM_BET_BINS) -> Any:
+    def encode_actions(
+        self, game_state: Any, seat: int, num_bet_bins: int = NUM_BET_BINS
+    ) -> Any:
         rounds = ["preflop", "flop", "turn", "river"]
         channels: List[torch.Tensor] = []
         for _ in rounds:
             for _ in range(self.history_actions_per_round):
                 channels.append(torch.zeros((4, num_bet_bins), dtype=torch.float32))
-        
+
         # Fill current legal actions for the next action slot in current round
         legal = self._get_legal_mask(game_state, seat, num_bet_bins)
-        round_idx = max(0, rounds.index(game_state.street)) if game_state.street in rounds else 0
-        ch_idx = round_idx * self.history_actions_per_round + (self.history_actions_per_round - 1)
+        round_idx = (
+            max(0, rounds.index(game_state.street))
+            if game_state.street in rounds
+            else 0
+        )
+        ch_idx = round_idx * self.history_actions_per_round + (
+            self.history_actions_per_round - 1
+        )
         mat = channels[ch_idx]
         mat[3, :] = legal
         channels[ch_idx] = mat
         return torch.stack(channels, dim=0)
 
-    def _get_legal_mask(self, game_state: GameState, seat: int, num_bet_bins: int = NUM_BET_BINS) -> torch.Tensor:
+    def _get_legal_mask(
+        self, game_state: GameState, seat: int, num_bet_bins: int = NUM_BET_BINS
+    ) -> torch.Tensor:
         """Generate legal action mask for current state."""
-        legal_actions = game_state.env.legal_actions() if hasattr(game_state, 'env') else []
+        legal_actions = (
+            game_state.env.legal_actions() if hasattr(game_state, "env") else []
+        )
         mask = torch.zeros(num_bet_bins, dtype=torch.float32)
-        
+
         # Map legal actions to bins
         for action in legal_actions:
             bin_idx = self._action_to_bin(action, game_state, num_bet_bins)
@@ -47,7 +59,9 @@ class ActionsHUEncoderV1(Encoder):
                 mask[bin_idx] = 1.0
         return mask
 
-    def _action_to_bin(self, action: Action, game_state: GameState, num_bet_bins: int = NUM_BET_BINS) -> int | None:
+    def _action_to_bin(
+        self, action: Action, game_state: GameState, num_bet_bins: int = NUM_BET_BINS
+    ) -> int | None:
         """Map Action to discrete bin index."""
         if action.kind == "fold":
             return 0
