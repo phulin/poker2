@@ -8,6 +8,9 @@ from ..core.registry import register_action_encoder
 from ..env.types import GameState, Action
 
 
+NUM_BET_BINS = 9
+
+
 @register_action_encoder("actions_hu_v1")
 class ActionsHUEncoderV1(Encoder):
     def __init__(self, history_actions_per_round: int = 6):
@@ -16,7 +19,7 @@ class ActionsHUEncoderV1(Encoder):
     def encode_cards(self, game_state: Any, seat: int) -> Any:
         raise NotImplementedError("Use card encoder for cards tensor")
 
-    def encode_actions(self, game_state: Any, seat: int, num_bet_bins: int) -> Any:
+    def encode_actions(self, game_state: Any, seat: int, num_bet_bins: int = NUM_BET_BINS) -> Any:
         rounds = ["preflop", "flop", "turn", "river"]
         channels: List[torch.Tensor] = []
         for _ in rounds:
@@ -32,7 +35,7 @@ class ActionsHUEncoderV1(Encoder):
         channels[ch_idx] = mat
         return torch.stack(channels, dim=0)
 
-    def _get_legal_mask(self, game_state: GameState, seat: int, num_bet_bins: int) -> torch.Tensor:
+    def _get_legal_mask(self, game_state: GameState, seat: int, num_bet_bins: int = NUM_BET_BINS) -> torch.Tensor:
         """Generate legal action mask for current state."""
         legal_actions = game_state.env.legal_actions() if hasattr(game_state, 'env') else []
         mask = torch.zeros(num_bet_bins, dtype=torch.float32)
@@ -44,7 +47,7 @@ class ActionsHUEncoderV1(Encoder):
                 mask[bin_idx] = 1.0
         return mask
 
-    def _action_to_bin(self, action: Action, game_state: GameState, num_bet_bins: int) -> int | None:
+    def _action_to_bin(self, action: Action, game_state: GameState, num_bet_bins: int = NUM_BET_BINS) -> int | None:
         """Map Action to discrete bin index."""
         if action.kind == "fold":
             return 0

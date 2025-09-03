@@ -20,10 +20,14 @@ from ..core.config import RootConfig
 from ..core.builders import build_components_from_config
 
 
+# Fixed number of betting bins used across trainer components
+NUM_BET_BINS = 9
+
+
 class SelfPlayTrainer:
     def __init__(
         self,
-        num_bet_bins: int = 9,
+        num_bet_bins: int = NUM_BET_BINS,
         learning_rate: float = 1e-3,  # Increased from 3e-4 for better learning
         batch_size: int = 256,  # Larger batch size like AlphaHoldem (they used 16,384)
         num_epochs: int = 4,
@@ -39,7 +43,8 @@ class SelfPlayTrainer:
         device: torch.device = None,
         config: Union[RootConfig, str, None] = None,
     ):
-        self.num_bet_bins = num_bet_bins
+        # Use constant for number of betting bins
+        self.num_bet_bins = NUM_BET_BINS
         self.batch_size = batch_size
         self.num_epochs = num_epochs
         self.gamma = gamma
@@ -63,7 +68,8 @@ class SelfPlayTrainer:
         self.actions_encoder = ae
         self.model = model
         self.policy = policy
-        self.num_bet_bins = nb
+        # Ensure internal bins align to constant (model is built from cfg)
+        self.num_bet_bins = NUM_BET_BINS
 
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights

@@ -15,7 +15,6 @@ def main():
     parser.add_argument("--trajectories-per-step", type=int, default=4, help="Trajectories per training step")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size for PPO updates")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--num-bet-bins", type=int, default=9, help="Number of betting bins")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--save-interval", type=int, default=50, help="Save checkpoint every N steps")
     parser.add_argument("--resume", type=str, help="Resume training from checkpoint file")
@@ -31,22 +30,22 @@ def main():
         print(f"Using config: {args.config}")
 
     print(f"Starting AlphaHoldem training for {args.steps} steps...")
-    print(f"Config: {args.trajectories_per_step} trajectories/step, batch_size={args.batch_size}, lr={args.lr}, nb={(cfg.nb if cfg else args.num_bet_bins)}")
+    print(f"Config: {args.trajectories_per_step} trajectories/step, batch_size={args.batch_size}, lr={args.lr}{(f', nb={cfg.nb}' if cfg else '')}")
     print(f"Checkpoints: {args.checkpoint_dir} (every {args.save_interval} steps)")
     
     # Initialize trainer
     trainer = SelfPlayTrainer(
-        num_bet_bins=(cfg.nb if cfg else args.num_bet_bins),
-        learning_rate=(cfg.learning_rate if cfg else args.lr),
-        batch_size=(cfg.batch_size if cfg else args.batch_size),
-        num_epochs=(cfg.num_epochs if cfg else 4),
-        epsilon=(cfg.ppo_eps if cfg else 0.2),
-        delta1=(cfg.ppo_delta1 if cfg else 3.0),
-        gamma=(cfg.gamma if cfg else 0.999),
-        gae_lambda=(cfg.gae_lambda if cfg else 0.95),
-        value_coef=(cfg.value_coef if cfg else 0.5),
-        entropy_coef=(cfg.entropy_coef if cfg else 0.01),
-        grad_clip=(cfg.grad_clip if cfg else 1.0),
+        num_bet_bins=(cfg.nb),
+        learning_rate=(cfg.learning_rate),
+        batch_size=(cfg.batch_size),
+        num_epochs=(cfg.num_epochs),
+        epsilon=(cfg.ppo_eps),
+        delta1=(cfg.ppo_delta1),
+        gamma=(cfg.gamma),
+        gae_lambda=(cfg.gae_lambda),
+        value_coef=(cfg.value_coef),
+        entropy_coef=(cfg.entropy_coef),
+        grad_clip=(cfg.grad_clip),
         config=args.config,
     )
     

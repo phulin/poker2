@@ -46,21 +46,21 @@ def train_kbest(
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Load optional config (centralized defaults)
-    cfg = get_config(config) if config else None
+    cfg = get_config(config)
 
     # Initialize trainer with K-Best pool
     trainer = SelfPlayTrainer(
-        num_bet_bins=(cfg.nb if cfg else 9),
-        learning_rate=(cfg.learning_rate if cfg else 3e-4),
-        batch_size=(cfg.batch_size if cfg else 256),
-        num_epochs=(cfg.num_epochs if cfg else 4),
-        gamma=(cfg.gamma if cfg else 0.999),
-        gae_lambda=(cfg.gae_lambda if cfg else 0.95),
-        epsilon=(cfg.ppo_eps if cfg else 0.2),
-        delta1=(cfg.ppo_delta1 if cfg else 3.0),
-        value_coef=(cfg.value_coef if cfg else 0.1),
-        entropy_coef=(cfg.entropy_coef if cfg else 0.01),
-        grad_clip=(cfg.grad_clip if cfg else 1.0),
+        num_bet_bins=(cfg.nb),
+        learning_rate=(cfg.learning_rate),
+        batch_size=(cfg.batch_size),
+        num_epochs=(cfg.num_epochs),
+        gamma=(cfg.gamma),
+        gae_lambda=(cfg.gae_lambda),
+        epsilon=(cfg.ppo_eps),
+        delta1=(cfg.ppo_delta1),
+        value_coef=(cfg.value_coef),
+        entropy_coef=(cfg.entropy_coef),
+        grad_clip=(cfg.grad_clip),
         k_best_pool_size=k_best_pool_size,
         min_elo_diff=min_elo_diff,
         device=device,
