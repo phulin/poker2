@@ -26,32 +26,26 @@ from ..core.config import RootConfig
 from ..core.builders import build_components_from_config
 
 
-# Fixed number of betting bins used across trainer components
-NUM_BET_BINS = 9
-
-
 class SelfPlayTrainer:
     def __init__(
         self,
-        num_bet_bins: int = NUM_BET_BINS,
-        learning_rate: float = 1e-3,  # Increased from 3e-4 for better learning
-        batch_size: int = 256,  # Larger batch size like AlphaHoldem (they used 16,384)
-        mini_batch_size: int = 256,  # Per-optimizer-step minibatch size over samples
-        num_epochs: int = 4,
-        gamma: float = 0.999,
-        gae_lambda: float = 0.95,
-        epsilon: float = 0.2,
-        delta1: float = 3.0,
-        value_coef: float = 0.1,  # Reasonable value coefficient
-        entropy_coef: float = 0.01,
-        grad_clip: float = 1.0,
-        k_best_pool_size: int = 5,  # K-Best pool size
-        min_elo_diff: float = 50.0,  # Minimum ELO difference for pool updates
+        num_bet_bins: int,
+        learning_rate: float,
+        batch_size: int,
+        mini_batch_size: int,
+        num_epochs: int,
+        gamma: float,
+        gae_lambda: float,
+        epsilon: float,
+        delta1: float,
+        value_coef: float,
+        entropy_coef: float,
+        grad_clip: float,
+        k_best_pool_size: int,
+        min_elo_diff: float,
         device: torch.device = None,
         config: Union[RootConfig, str, None] = None,
     ):
-        # Use constant for number of betting bins
-        self.num_bet_bins = NUM_BET_BINS
         # batch_size is the number of samples per update (not trajectories)
         self.batch_size = batch_size
         self.mini_batch_size = mini_batch_size
@@ -82,7 +76,7 @@ class SelfPlayTrainer:
         self.model = model
         self.policy = policy
         # Ensure internal bins align to constant (model is built from cfg)
-        self.num_bet_bins = NUM_BET_BINS
+        self.num_bet_bins = len(cfg.bet_bins) + 3
 
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights

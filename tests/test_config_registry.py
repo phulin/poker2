@@ -11,7 +11,7 @@ def test_load_default_config_values():
     )
     cfg = load_config(path=cfg_path)
 
-    assert cfg.nb == 9
+    assert cfg.bet_bins == [0.5, 0.75, 1.0, 1.5, 2.0]
     assert cfg.ppo_eps == 0.2
     assert cfg.ppo_delta1 == 3.0
     assert cfg.gae_lambda == 0.95

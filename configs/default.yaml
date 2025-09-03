@@ -11,13 +11,10 @@ model:
   kwargs:
     cards_channels: 6
     actions_channels: 24
-    fusion_hidden: 256
+    fusion_hidden: [2048, 2048]
 policy:
   name: categorical_v1
   kwargs: {}
-
-# Action space
-nb: 9
 
 # Betting bin multipliers over total_committed
 bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]

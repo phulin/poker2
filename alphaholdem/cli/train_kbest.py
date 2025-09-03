@@ -55,7 +55,6 @@ def train_kbest(
 
     # Initialize trainer with K-Best pool
     trainer = SelfPlayTrainer(
-        num_bet_bins=cfg.nb,
         learning_rate=cfg.learning_rate,
         batch_size=cfg.batch_size,
         num_epochs=cfg.num_epochs,

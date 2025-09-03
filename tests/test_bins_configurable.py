@@ -31,17 +31,19 @@ policy:
     env = HUNLEnv(starting_stack=1000, sb=10, bb=20, seed=42)
     s = env.reset()
 
+    num_bet_bins = len(cfg.bet_bins) + 3
+
     # Map each bin (excluding fold/call and all-in) to target action and back
-    for bin_idx in range(2, cfg.nb - 1):
-        target = _bin_to_target_action(bin_idx, s, cfg.nb)
+    for bin_idx in range(2, num_bet_bins - 1):
+        target = _bin_to_target_action(bin_idx, s, num_bet_bins)
         assert target.kind in ("bet", "raise")
-        back = _action_to_bin_idx(target, s, cfg.nb)
+        back = _action_to_bin_idx(target, s, num_bet_bins)
         # Allow nearest-bin behavior; should map back to the same or adjacent when rounding tiny diffs
         assert abs(back - bin_idx) <= 1
 
     # All-in should still be the last index
-    allin_idx = cfg.nb - 1
-    target = _bin_to_target_action(allin_idx, s, cfg.nb)
+    allin_idx = num_bet_bins - 1
+    target = _bin_to_target_action(allin_idx, s, num_bet_bins)
     assert target.kind == "allin"
-    back = _action_to_bin_idx(target, s, cfg.nb)
+    back = _action_to_bin_idx(target, s, num_bet_bins)
     assert back == allin_idx

@@ -55,13 +55,12 @@ def main():
 
     print(f"Starting AlphaHoldem training for {args.steps} steps...")
     print(
-        f"Config: {args.trajectories_per_step} trajectories/step, batch_size={args.batch_size}, lr={args.lr}{(f', nb={cfg.nb}' if cfg else '')}"
+        f"Config: {args.trajectories_per_step} trajectories/step, batch_size={args.batch_size}, lr={args.lr}"
     )
     print(f"Checkpoints: {args.checkpoint_dir} (every {args.save_interval} steps)")
 
     # Initialize trainer
     trainer = SelfPlayTrainer(
-        num_bet_bins=cfg.nb,
         learning_rate=cfg.learning_rate,
         batch_size=cfg.batch_size,
         num_epochs=cfg.num_epochs,
