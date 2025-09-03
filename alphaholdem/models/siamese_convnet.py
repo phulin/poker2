@@ -14,10 +14,10 @@ class ConvTrunk(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(in_channels, hidden, kernel_size=3, padding=1),
-            nn.BatchNorm2d(hidden),
+            nn.GroupNorm(8, hidden),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
-            nn.BatchNorm2d(hidden),
+            nn.GroupNorm(8, hidden),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((1, 1)),
         )

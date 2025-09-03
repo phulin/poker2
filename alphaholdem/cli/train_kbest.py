@@ -114,7 +114,7 @@ def train_kbest(
 
         # Evaluation against pool
         if (step + 1) % eval_interval == 0:
-            eval_results = trainer.evaluate_against_pool(num_games=50)
+            eval_results = trainer.evaluate_against_pool(num_games=20)
             print_evaluation_results(eval_results)
 
         # Checkpointing
