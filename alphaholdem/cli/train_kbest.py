@@ -22,14 +22,14 @@ from alphaholdem.core.config_loader import get_config
 
 
 def train_kbest(
-    num_steps: int = 1000,
-    trajectories_per_step: int = 4,
-    k_best_pool_size: int = 5,
-    min_elo_diff: float = 50.0,
-    checkpoint_interval: int = 100,
-    eval_interval: int = 50,
-    checkpoint_dir: str = "checkpoints",
-    resume_from: str = None,
+    num_steps: int,
+    trajectories_per_step: int,
+    k_best_pool_size: int,
+    min_elo_diff: float,
+    checkpoint_interval: int,
+    eval_interval: int,
+    checkpoint_dir: str,
+    resume_from: str | None = None,
     device: torch.device = None,
     config: str | None = None,
 ):
@@ -112,10 +112,6 @@ def train_kbest(
         # Logging
         print_training_stats(stats, step, num_steps, step_time_str, total_time_str)
 
-        # Show preflop range grid every 50 steps
-        if (step + 1) % 50 == 0:
-            print_preflop_range_grid(trainer, step + 1, seat=0)
-
         # Evaluation against pool
         if (step + 1) % eval_interval == 0:
             eval_results = trainer.evaluate_against_pool(num_games=50)
@@ -138,6 +134,8 @@ def train_kbest(
                 print_checkpoint_info(
                     best_checkpoint_path, stats["current_elo"], is_best=True
                 )
+
+            print_preflop_range_grid(trainer, step + 1, seat=0)
 
     # Final evaluation
     final_total_time = time.time() - training_start_time
@@ -183,7 +181,7 @@ def main():
         help="Minimum ELO difference for pool updates",
     )
     parser.add_argument(
-        "--checkpoint-interval", type=int, default=100, help="Checkpoint save interval"
+        "--checkpoint-interval", type=int, default=20, help="Checkpoint save interval"
     )
     parser.add_argument(
         "--eval-interval", type=int, default=50, help="Evaluation interval"
