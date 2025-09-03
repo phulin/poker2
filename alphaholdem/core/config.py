@@ -71,6 +71,7 @@ def load_config(
         grad_clip=float(data["grad_clip"]),
         learning_rate=float(data["learning_rate"]),
         batch_size=int(data["batch_size"]),
+        mini_batch_size=int(data["mini_batch_size"]),
         num_epochs=int(data["num_epochs"]),
         trajectories_per_step=int(data["trajectories_per_step"]),
         bet_bins=list(data["bet_bins"]),

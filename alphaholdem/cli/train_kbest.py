@@ -11,14 +11,14 @@ import time
 import argparse
 import torch
 import torch.nn as nn
-from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.utils.training_utils import (
+from ..rl.self_play import SelfPlayTrainer
+from ..utils.training_utils import (
     print_preflop_range_grid,
     print_training_stats,
     print_evaluation_results,
     print_checkpoint_info,
 )
-from alphaholdem.core.config_loader import get_config
+from ..core.config_loader import get_config
 
 
 def train_kbest(
@@ -55,8 +55,10 @@ def train_kbest(
 
     # Initialize trainer with K-Best pool
     trainer = SelfPlayTrainer(
+        num_bet_bins=len(cfg.bet_bins) + 3,
         learning_rate=cfg.learning_rate,
         batch_size=cfg.batch_size,
+        mini_batch_size=cfg.mini_batch_size,
         num_epochs=cfg.num_epochs,
         gamma=cfg.gamma,
         gae_lambda=cfg.gae_lambda,

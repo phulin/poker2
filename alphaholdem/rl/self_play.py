@@ -4,6 +4,7 @@ from typing import List, Optional, Union
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from line_profiler import profile
 
 from alphaholdem.core.config_loader import get_config
 
@@ -70,7 +71,7 @@ class SelfPlayTrainer:
 
         # Config-driven components (default to configs/default.yaml when config is None)
         cfg = get_config(config)
-        ce, ae, model, policy, nb = build_components_from_config(cfg)
+        ce, ae, model, policy = build_components_from_config(cfg)
         self.cards_encoder = ce
         self.actions_encoder = ae
         self.model = model
@@ -180,6 +181,7 @@ class SelfPlayTrainer:
                     ),  # Simplified obs
                     action=action_idx,
                     log_prob=log_prob,
+                    value=float(value.item()),
                     reward=reward,
                     done=done,
                     legal_mask=legal_mask,
@@ -203,6 +205,14 @@ class SelfPlayTrainer:
 
         return Trajectory(transitions=transitions, final_value=final_value)
 
+    # def update_model(self) -> dict:
+    #     with profile(record_shapes=True) as prof:
+    #         result = self.update_model_internal()
+    #     print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+    #     prof.export_chrome_trace("update_model.json")
+    #     return result
+
+    @profile
     def update_model(self) -> dict:
         """Perform PPO update on collected trajectories."""
         # Require enough samples (transitions) across buffer
@@ -213,37 +223,16 @@ class SelfPlayTrainer:
         # Use all trajectories available for better mixing
         trajectories = list(self.replay_buffer.trajectories)
 
-        # Compute values for GAE
+        # Compute GAE using stored V(s_t) values collected during rollout
         for trajectory in trajectories:
             rewards = [t.reward for t in trajectory.transitions]
-            values = []
+            values = [t.value for t in trajectory.transitions]
+            values.append(0.0)  # bootstrap at terminal
 
-            # Compute values for each transition
-            for transition in trajectory.transitions:
-                # Split observation back to cards and actions
-                obs = transition.observation
-                cards = obs[: (6 * 4 * 13)].reshape(1, 6, 4, 13)
-                actions_tensor = obs[(6 * 4 * 13) :].reshape(
-                    1, 24, 4, self.num_bet_bins
-                )
-
-                # Move tensors to device
-                cards = cards.to(self.device)
-                actions_tensor = actions_tensor.to(self.device)
-
-                with torch.no_grad():
-                    _, value = self.model(cards, actions_tensor)
-                    values.append(value.item())
-
-            # Add final value (0 for terminal state)
-            values.append(0.0)
-
-            # Compute GAE advantages and returns
             advantages, returns = compute_gae_returns(
                 rewards, values, gamma=self.gamma, lambda_=self.gae_lambda
             )
 
-            # Update trajectory with computed advantages/returns
             for i, transition in enumerate(trajectory.transitions):
                 transition.advantage = advantages[i]
                 transition.return_ = returns[i]

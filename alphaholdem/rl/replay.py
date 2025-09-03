@@ -12,6 +12,7 @@ class Transition:
     observation: torch.Tensor  # encoded state
     action: int  # discrete action index
     log_prob: float  # log probability of action
+    value: float  # V(s_t) computed at action time
     reward: float
     done: bool
     legal_mask: torch.Tensor  # legal action mask

@@ -12,6 +12,7 @@ model:
     cards_channels: 6
     actions_channels: 24
     fusion_hidden: [2048, 2048]
+    num_actions: 8
 policy:
   name: categorical_v1
   kwargs: {}
@@ -32,5 +33,6 @@ seed: 0
 # Training scale knobs
 learning_rate: 0.0003
 batch_size: 2048
+mini_batch_size: 2048
 num_epochs: 1
 trajectories_per_step: 4
