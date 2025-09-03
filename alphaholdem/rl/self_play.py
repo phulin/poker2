@@ -36,6 +36,7 @@ class SelfPlayTrainer:
         num_bet_bins: int = NUM_BET_BINS,
         learning_rate: float = 1e-3,  # Increased from 3e-4 for better learning
         batch_size: int = 256,  # Larger batch size like AlphaHoldem (they used 16,384)
+        mini_batch_size: int = 256,  # Per-optimizer-step minibatch size over samples
         num_epochs: int = 4,
         gamma: float = 0.999,
         gae_lambda: float = 0.95,
@@ -51,7 +52,9 @@ class SelfPlayTrainer:
     ):
         # Use constant for number of betting bins
         self.num_bet_bins = NUM_BET_BINS
+        # batch_size is the number of samples per update (not trajectories)
         self.batch_size = batch_size
+        self.mini_batch_size = mini_batch_size
         self.num_epochs = num_epochs
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -208,11 +211,13 @@ class SelfPlayTrainer:
 
     def update_model(self) -> dict:
         """Perform PPO update on collected trajectories."""
-        if len(self.replay_buffer.trajectories) < self.batch_size:
+        # Require enough samples (transitions) across buffer
+        total_samples = sum(len(t.transitions) for t in self.replay_buffer.trajectories)
+        if total_samples < self.batch_size:
             return {}
 
-        # Sample trajectories
-        trajectories = self.replay_buffer.sample_trajectories(self.batch_size)
+        # Use all trajectories available for better mixing
+        trajectories = list(self.replay_buffer.trajectories)
 
         # Compute values for GAE
         for trajectory in trajectories:
@@ -252,6 +257,16 @@ class SelfPlayTrainer:
         # Prepare batch
         batch = prepare_ppo_batch(trajectories)
 
+        # Subsample to target sample batch size if necessary
+        num_samples = batch["actions"].shape[0]
+        if num_samples > self.batch_size:
+            idx = torch.randperm(num_samples)[: self.batch_size]
+
+            def take(d):
+                return d.index_select(0, idx) if isinstance(d, torch.Tensor) else d
+
+            batch = {k: take(v) for k, v in batch.items()}
+
         # Move batch tensors to device
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
@@ -269,40 +284,41 @@ class SelfPlayTrainer:
         # Multiple epochs of updates
         total_loss = 0.0
         for epoch in range(self.num_epochs):
-            # Forward pass
-            observations = batch["observations"]
-            # Split observations back to cards and actions
-            cards = observations[:, : (6 * 4 * 13)].reshape(-1, 6, 4, 13)
-            actions_tensor = observations[:, (6 * 4 * 13) :].reshape(
-                -1, 24, 4, self.num_bet_bins
-            )
+            N = batch["actions"].shape[0]
+            order = torch.randperm(N, device=self.device)
+            for start in range(0, N, self.mini_batch_size):
+                mb_idx = order[start : start + self.mini_batch_size]
 
-            logits, values = self.model(cards, actions_tensor)
+                observations = batch["observations"].index_select(0, mb_idx)
+                cards = observations[:, : (6 * 4 * 13)].reshape(-1, 6, 4, 13)
+                actions_tensor = observations[:, (6 * 4 * 13) :].reshape(
+                    -1, 24, 4, self.num_bet_bins
+                )
 
-            # Compute loss with per-sample delta bounds
-            loss_dict = trinal_clip_ppo_loss(
-                logits=logits,
-                values=values,
-                actions=batch["actions"],
-                log_probs_old=batch["log_probs_old"],
-                advantages=batch["advantages"],
-                returns=batch["returns"],
-                legal_masks=batch["legal_masks"],
-                epsilon=self.epsilon,
-                delta1=self.delta1,
-                delta2=delta2_vec,
-                delta3=delta3_vec,
-                value_coef=self.value_coef,
-                entropy_coef=self.entropy_coef,
-            )
+                logits, values = self.model(cards, actions_tensor)
 
-            # Backward pass
-            self.optimizer.zero_grad()
-            loss_dict["total_loss"].backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-            self.optimizer.step()
+                loss_dict = trinal_clip_ppo_loss(
+                    logits=logits,
+                    values=values,
+                    actions=batch["actions"].index_select(0, mb_idx),
+                    log_probs_old=batch["log_probs_old"].index_select(0, mb_idx),
+                    advantages=batch["advantages"].index_select(0, mb_idx),
+                    returns=batch["returns"].index_select(0, mb_idx),
+                    legal_masks=batch["legal_masks"].index_select(0, mb_idx),
+                    epsilon=self.epsilon,
+                    delta1=self.delta1,
+                    delta2=delta2_vec.index_select(0, mb_idx),
+                    delta3=delta3_vec.index_select(0, mb_idx),
+                    value_coef=self.value_coef,
+                    entropy_coef=self.entropy_coef,
+                )
 
-            total_loss += loss_dict["total_loss"].item()
+                self.optimizer.zero_grad()
+                loss_dict["total_loss"].backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                self.optimizer.step()
+
+                total_loss += loss_dict["total_loss"].item()
 
         return {
             "avg_loss": total_loss / self.num_epochs,
