@@ -71,51 +71,55 @@ class HUNLEnv:
         opp_p = s.players[opp]
         to_call = opp_p.committed - me_p.committed
         actions: List[Action] = []
+        
+        # Calculate total committed chips (pot + both players' committed amounts)
+        total_committed = s.pot + me_p.committed + opp_p.committed
+        
+        # Always can check if no bet to call
         if to_call <= 0:
             actions.append(Action("check"))
-            # can bet if stacks allow
-            if me_p.stack > 0 and opp_p.stack > 0:
-                # Offer multiple bet sizes based on pot
-                pot = s.pot
-                if pot > 0:
-                    # Calculate different bet sizes
-                    bet_sizes = [
-                        int(pot * 0.5),   # 1/2 pot
-                        int(pot * 0.75),  # 3/4 pot
-                        pot,              # pot
-                        int(pot * 1.5),  # 1.5x pot
-                        int(pot * 2.0),  # 2x pot
-                    ]
-                    
-                    # Add valid bet sizes
-                    for bet_size in bet_sizes:
-                        if bet_size > 0 and bet_size <= me_p.stack:
-                            actions.append(Action("bet", amount=bet_size))
-                
-                # all-in as an option
-                if me_p.stack > 0:
-                    actions.append(Action("allin", amount=me_p.stack))
-        else:
-            # can fold or call
+        
+        # Always can fold if there's a bet to call
+        if to_call > 0:
             actions.append(Action("fold"))
             call_amt = min(to_call, me_p.stack)
             if call_amt > 0:
                 actions.append(Action("call", amount=call_amt))
-            # can raise if both players have chips
-            if me_p.stack > call_amt and opp_p.stack > 0:
-                # Calculate total pot including committed chips
-                total_pot = s.pot + me_p.committed + opp_p.committed
-                
-                # Minimum raise should be the size of the previous bet/raise
-                # In poker, you must raise by at least the size of the previous bet
-                min_raise_amt = s.last_aggressive_amount
-                
-                # The total amount to commit (call + raise)
-                raise_amt = call_amt + min_raise_amt
-                if raise_amt <= me_p.stack:
-                    actions.append(Action("raise", amount=raise_amt))
-                # all-in raise
-                actions.append(Action("allin", amount=me_p.stack))
+        
+        # Can bet/raise if both players have chips
+        can_bet_raise = me_p.stack > 0 and opp_p.stack > 0
+        if can_bet_raise and total_committed > 0:
+            # Calculate bet/raise sizes as fractions of total committed
+            if to_call <= 0:
+                # Betting - no call amount needed
+                bet_sizes = [
+                    int(total_committed * 0.5),   # 1/2 total committed
+                    int(total_committed * 0.75),  # 3/4 total committed
+                    total_committed,              # total committed
+                    int(total_committed * 1.5),   # 1.5x total committed
+                    int(total_committed * 2.0),  # 2x total committed
+                ]
+                for bet_size in bet_sizes:
+                    if 0 < bet_size <= me_p.stack:
+                        actions.append(Action("bet", amount=bet_size))
+            else:
+                # Raising - need to include call amount
+                call_amt = min(to_call, me_p.stack)
+                raise_sizes = [
+                    call_amt + int(total_committed * 0.5),   # call + 1/2 total committed
+                    call_amt + int(total_committed * 0.75),  # call + 3/4 total committed
+                    call_amt + total_committed,              # call + total committed
+                    call_amt + int(total_committed * 1.5),  # call + 1.5x total committed
+                    call_amt + int(total_committed * 2.0),  # call + 2x total committed
+                ]
+                for raise_size in raise_sizes:
+                    if raise_size > call_amt and raise_size <= me_p.stack:
+                        actions.append(Action("raise", amount=raise_size))
+        
+        # Always can all-in if player has chips
+        if me_p.stack > 0:
+            actions.append(Action("allin", amount=me_p.stack))
+        
         return actions
 
     def step(self, action: Action) -> Tuple[GameState, int, bool, Dict[str, Any]]:
