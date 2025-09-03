@@ -126,6 +126,47 @@ class HUNLEnv:
 
         return actions
 
+    def legal_action_bins(self, num_bet_bins: int) -> List[int]:
+        """Return legal discrete action bin indices without constructing concrete amounts.
+
+        Bins: 0=fold, 1=check/call, 2..(nb-2)=bet/raise presets, (nb-1)=all-in
+        """
+        s = self._require_state()
+        if s.terminal:
+            return []
+        me = s.to_act
+        opp = 1 - me
+        me_p = s.players[me]
+        opp_p = s.players[opp]
+        to_call = opp_p.committed - me_p.committed
+
+        bins: List[int] = []
+
+        # Fold only when facing a bet
+        if to_call > 0:
+            bins.append(0)
+
+        # Check or call
+        if to_call <= 0:
+            bins.append(1)  # check
+        else:
+            call_amt = min(to_call, me_p.stack)
+            if call_amt > 0:
+                bins.append(1)  # call
+
+        # Bet/Raise options are available if both players have chips
+        can_bet_raise = me_p.stack > 0 and opp_p.stack > 0
+        if can_bet_raise:
+            # Require stack above call to allow a raise when facing a bet
+            if to_call <= 0 or me_p.stack > to_call:
+                bins.extend(range(2, max(2, num_bet_bins - 1)))
+
+        # All-in if chips remain
+        if me_p.stack > 0:
+            bins.append(num_bet_bins - 1)
+
+        return bins
+
     def step(self, action: Action) -> Tuple[GameState, int, bool, Dict[str, Any]]:
         s = self._require_state()
         if s.terminal:

@@ -5,6 +5,7 @@ import torch
 
 from ..env.types import GameState, Action
 from ..core.config_loader import get_config
+from typing import Optional
 
 
 def bin_to_action(bin_idx: int, game_state: GameState, num_bet_bins: int) -> Action:
@@ -64,7 +65,7 @@ def _bin_to_target_action(
             return Action("check")
     elif bin_idx >= 2 and bin_idx < (num_bet_bins - 1):
         # Read multipliers from config; fall back to defaults if needed
-        cfg = get_config(None)
+        cfg = get_config()
         bins = cfg.bet_bins
         # Map indices 2..(2+len(bins)-1) to bins[0..len(bins)-1]
         idx = bin_idx - 2
@@ -84,15 +85,17 @@ def _bin_to_target_action(
         return Action("fold")
 
 
-def get_legal_mask(game_state: GameState, num_bet_bins: int) -> torch.Tensor:
-    """Get legal action mask for current state."""
-    legal_actions = game_state.env.legal_actions() if hasattr(game_state, "env") else []
-    mask = torch.zeros(num_bet_bins, dtype=torch.float32)
+def get_legal_mask(
+    game_state: GameState, num_bet_bins: int, device: Optional[torch.device] = None
+) -> torch.Tensor:
+    """Get legal action mask for current state.
 
-    for action in legal_actions:
-        bin_idx = _action_to_bin_idx(action, game_state, num_bet_bins)
-        if bin_idx is not None:
-            mask[bin_idx] = 1.0
+    Uses env.legal_action_bins if available to avoid Action construction.
+    """
+    mask = torch.zeros(num_bet_bins, dtype=torch.float32, device=device)
+    env = game_state.env
+    bins = env.legal_action_bins(num_bet_bins)
+    mask[bins] = 1.0
     return mask
 
 

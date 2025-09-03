@@ -195,6 +195,13 @@ def main():
     parser.add_argument(
         "--config", type=str, help="Path to YAML config for components/hparams"
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="mps",
+        choices=["mps", "cpu"],
+        help="Device to use for training",
+    )
 
     args = parser.parse_args()
 
@@ -202,13 +209,17 @@ def main():
     torch.manual_seed(42)
 
     # Set up device (GPU if available)
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device(
+        "mps" if args.device == "mps" and torch.backends.mps.is_available() else "cpu"
+    )
     print(f"Using device: {device}")
 
     if device.type == "mps":
         print("✅ Using Apple M3 GPU (MPS)")
+    elif args.device == "cpu":
+        print("✅ Using CPU (selected)")
     else:
-        print("⚠️  Using CPU (MPS not available)")
+        print("⚠️ Using CPU (MPS not available)")
 
     # Train the agent
     trainer = train_kbest(
