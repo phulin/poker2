@@ -165,3 +165,118 @@ def test_dynamic_delta_bounds():
     assert delta3_empty == 0.0, "Empty trajectory should have delta3=0"
     
     print("✅ Dynamic delta bounds computation test passed!")
+
+
+def test_checkpoint_save_load():
+    """Test checkpoint saving and loading functionality."""
+    import tempfile
+    import os
+    from alphaholdem.rl.self_play import SelfPlayTrainer
+    
+    # Create a temporary directory for checkpoints
+    with tempfile.TemporaryDirectory() as temp_dir:
+        trainer = SelfPlayTrainer(
+            num_bet_bins=9,
+            learning_rate=3e-4,
+            batch_size=8,  # Small batch for testing
+        )
+        
+        # Run a few training steps
+        for _ in range(3):
+            trainer.train_step(num_trajectories=2)
+        
+        # Save checkpoint
+        checkpoint_path = os.path.join(temp_dir, "test_checkpoint.pt")
+        trainer.save_checkpoint(checkpoint_path, step=3)
+        
+        # Verify file exists
+        assert os.path.exists(checkpoint_path), "Checkpoint file not created"
+        
+        # Create new trainer and load checkpoint
+        new_trainer = SelfPlayTrainer(
+            num_bet_bins=9,
+            learning_rate=3e-4,
+            batch_size=8,
+        )
+        
+        # Load checkpoint
+        loaded_step = new_trainer.load_checkpoint(checkpoint_path)
+        
+        # Verify loaded state
+        assert loaded_step == 3, f"Expected step 3, got {loaded_step}"
+        assert new_trainer.episode_count == trainer.episode_count, "Episode count not restored"
+        assert abs(new_trainer.total_reward - trainer.total_reward) < 1e-6, "Total reward not restored"
+        
+        # Verify model parameters are the same
+        for param1, param2 in zip(trainer.model.parameters(), new_trainer.model.parameters()):
+            assert torch.allclose(param1, param2), "Model parameters not restored correctly"
+        
+        print("✅ Checkpoint save/load test passed!")
+
+
+def test_preflop_range_grid():
+    """Test preflop range grid generation."""
+    from alphaholdem.rl.self_play import SelfPlayTrainer
+    
+    trainer = SelfPlayTrainer(
+        num_bet_bins=9,
+        learning_rate=3e-4,
+        batch_size=8,  # Small batch for testing
+    )
+    
+    # Generate range grid
+    grid = trainer.get_preflop_range_grid(seat=0)
+    
+    # Basic checks
+    assert isinstance(grid, str), "Grid should be a string"
+    assert len(grid.split('\n')) >= 15, "Grid should have at least 15 lines (13 ranks + header + separator)"
+    
+    # Check header format
+    lines = grid.split('\n')
+    assert 'A' in lines[0], "Header should contain rank A"
+    assert 'K' in lines[0], "Header should contain rank K"
+    assert '2' in lines[0], "Header should contain rank 2"
+    
+    # Check that we have probability values (numbers)
+    for line in lines[2:]:  # Skip header and separator
+        if line.strip() and '|' in line:
+            # Should contain numbers (percentages)
+            parts = line.split()
+            if len(parts) > 1:
+                # Check that we have numeric values
+                values = [p for p in parts[1:] if p.isdigit()]
+                assert len(values) > 0, f"Line should contain numeric values: {line}"
+    
+    print("✅ Preflop range grid test passed!")
+    print("Sample grid:")
+    print(grid[:500] + "..." if len(grid) > 500 else grid)
+
+
+def test_basic_training_step():
+    """Test that a basic training step works and produces reasonable outputs."""
+    from alphaholdem.rl.self_play import SelfPlayTrainer
+    
+    trainer = SelfPlayTrainer(
+        num_bet_bins=9,
+        learning_rate=3e-4,
+        batch_size=4,  # Small batch for testing
+    )
+    
+    # Run a few training steps
+    for step in range(3):
+        print(f"\n=== Training Step {step} ===")
+        stats = trainer.train_step(num_trajectories=2)
+        
+        print(f"Step {step} stats: {stats}")
+        
+        # Check that we have reasonable values
+        assert 'avg_reward' in stats, "Missing avg_reward in stats"
+        assert 'episode_count' in stats, "Missing episode_count in stats"
+        
+        # Check that episodes are being counted
+        assert stats['episode_count'] > 0, "No episodes counted"
+        
+        # Check that we have some reward signal
+        assert not torch.isnan(torch.tensor(stats['avg_reward'])), "NaN in avg_reward"
+    
+    print("✅ Basic training step test passed!")

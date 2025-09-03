@@ -17,6 +17,7 @@ class HUNLEnv:
         self.bb = bb
         self.rng = random.Random(seed)
         self.state: GameState | None = None
+        self.actions_this_round = 0  # Count actions in current betting round
 
     def reset(self, seed: int | None = None) -> GameState:
         if seed is not None:
@@ -57,6 +58,7 @@ class HUNLEnv:
         )
         # Attach env reference to state for legal action lookup
         self.state.env = self
+        self.actions_this_round = 0  # Reset action counter
         return self.state
 
     def legal_actions(self) -> List[Action]:
@@ -73,11 +75,23 @@ class HUNLEnv:
             actions.append(Action("check"))
             # can bet if stacks allow
             if me_p.stack > 0 and opp_p.stack > 0:
-                # minimum bet is big blind on preflop when unopened, otherwise min_raise
-                min_bet = max(s.big_blind, s.min_raise) if s.street == "preflop" else max(1, s.min_raise)
-                min_bet = min(min_bet, me_p.stack)
-                if min_bet > 0:
-                    actions.append(Action("bet", amount=min_bet))
+                # Offer multiple bet sizes based on pot
+                pot = s.pot
+                if pot > 0:
+                    # Calculate different bet sizes
+                    bet_sizes = [
+                        int(pot * 0.5),   # 1/2 pot
+                        int(pot * 0.75),  # 3/4 pot
+                        pot,              # pot
+                        int(pot * 1.5),  # 1.5x pot
+                        int(pot * 2.0),  # 2x pot
+                    ]
+                    
+                    # Add valid bet sizes
+                    for bet_size in bet_sizes:
+                        if bet_size > 0 and bet_size <= me_p.stack:
+                            actions.append(Action("bet", amount=bet_size))
+                
                 # all-in as an option
                 if me_p.stack > 0:
                     actions.append(Action("allin", amount=me_p.stack))
@@ -89,8 +103,15 @@ class HUNLEnv:
                 actions.append(Action("call", amount=call_amt))
             # can raise if both players have chips
             if me_p.stack > call_amt and opp_p.stack > 0:
-                min_raise = max(s.min_raise, s.last_aggressive_amount)
-                raise_amt = call_amt + min_raise
+                # Calculate total pot including committed chips
+                total_pot = s.pot + me_p.committed + opp_p.committed
+                
+                # Minimum raise should be the size of the previous bet/raise
+                # In poker, you must raise by at least the size of the previous bet
+                min_raise_amt = s.last_aggressive_amount
+                
+                # The total amount to commit (call + raise)
+                raise_amt = call_amt + min_raise_amt
                 if raise_amt <= me_p.stack:
                     actions.append(Action("raise", amount=raise_amt))
                 # all-in raise
@@ -169,7 +190,9 @@ class HUNLEnv:
             me_p.committed += put_in
             pot += put_in
             # update min_raise and last aggressive amount
-            last_aggr = max(last_aggr, put_in)
+            # last_aggr should track the total amount bet/raised, not just the raise increment
+            total_bet = me_p.committed  # This is the total amount committed by the current player
+            last_aggr = max(last_aggr, total_bet)
             min_raise = max(min_raise, last_aggr)
             if me_p.stack == 0:
                 me_p.is_allin = True
@@ -182,13 +205,16 @@ class HUNLEnv:
         players[me] = me_p
         players[opp] = opp_p
 
+        # Increment action counter BEFORE checking if round is closed
+        self.actions_this_round += 1
+
         # Determine if betting round is closed
         round_closed = self._round_closed(players)
 
         # Advance street if closed
         if round_closed:
-            # move committed to pot and reset committed
-            pot += players[0].committed + players[1].committed
+            # Note: committed chips are already in the pot from the action step
+            # We just need to reset committed amounts for the new street
             players[0].committed = 0
             players[1].committed = 0
             # next street
@@ -198,18 +224,21 @@ class HUNLEnv:
                 next_to_act = 1 - s.button  # postflop, button acts last
                 min_raise = s.big_blind
                 last_aggr = 0
+                self.actions_this_round = 0  # Reset for new street
             elif street == "flop":
                 street = "turn"
                 board.append(deck.pop())
                 next_to_act = 1 - s.button
                 min_raise = s.big_blind
                 last_aggr = 0
+                self.actions_this_round = 0  # Reset for new street
             elif street == "turn":
                 street = "river"
                 board.append(deck.pop())
                 next_to_act = 1 - s.button
                 min_raise = s.big_blind
                 last_aggr = 0
+                self.actions_this_round = 0  # Reset for new street
             elif street == "river":
                 street = "showdown"
             else:
@@ -263,8 +292,8 @@ class HUNLEnv:
         if players[0].is_allin and players[1].is_allin:
             return True
         # Round is closed when both players have equal committed amounts
-        # (including when both are 0 after checking)
-        return players[0].committed == players[1].committed
+        # AND at least 2 actions have been taken (both players have acted)
+        return players[0].committed == players[1].committed and self.actions_this_round >= 2
 
     def _terminal_rewards(self, s: GameState, perspective: int) -> int:
         # Positive if perspective player wins chips

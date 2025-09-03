@@ -3,6 +3,7 @@
 
 import argparse
 import time
+import os
 from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
@@ -13,10 +14,17 @@ def main():
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size for PPO updates")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--num-bet-bins", type=int, default=9, help="Number of betting bins")
+    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Directory to save checkpoints")
+    parser.add_argument("--save-interval", type=int, default=50, help="Save checkpoint every N steps")
+    parser.add_argument("--resume", type=str, help="Resume training from checkpoint file")
     args = parser.parse_args()
+    
+    # Create checkpoint directory
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
     
     print(f"Starting AlphaHoldem training for {args.steps} steps...")
     print(f"Config: {args.trajectories_per_step} trajectories/step, batch_size={args.batch_size}, lr={args.lr}")
+    print(f"Checkpoints: {args.checkpoint_dir} (every {args.save_interval} steps)")
     
     # Initialize trainer
     trainer = SelfPlayTrainer(
@@ -25,10 +33,32 @@ def main():
         batch_size=args.batch_size,
     )
     
+    # Resume from checkpoint if specified
+    start_step = 0
+    if args.resume:
+        if os.path.exists(args.resume):
+            start_step = trainer.load_checkpoint(args.resume)
+            print(f"Resuming from step {start_step}")
+        else:
+            print(f"Warning: Checkpoint {args.resume} not found, starting from scratch")
+    
     # Training loop
     start_time = time.time()
-    for step in range(args.steps):
+    for step in range(start_step, args.steps):
         stats = trainer.train_step(num_trajectories=args.trajectories_per_step)
+        
+        # Save checkpoint periodically
+        if (step + 1) % args.save_interval == 0:
+            checkpoint_path = os.path.join(args.checkpoint_dir, f"checkpoint_step_{step+1}.pt")
+            trainer.save_checkpoint(checkpoint_path, step + 1)
+            
+            # Output preflop range grid to stdout
+            print(f"\n--- Preflop Range Grid (Step {step+1}) ---")
+            print("Button play - probability of not folding (%)")
+            print("Higher numbers = more likely to play the hand")
+            print()
+            print(trainer.get_preflop_range_grid(seat=0))  # Button seat
+            print()
         
         if step % 10 == 0:
             elapsed = time.time() - start_time
@@ -38,7 +68,12 @@ def main():
                   f"Loss: {stats.get('avg_loss', 0):.4f} | "
                   f"Time: {elapsed:.1f}s")
     
+    # Save final checkpoint
+    final_checkpoint_path = os.path.join(args.checkpoint_dir, "final_checkpoint.pt")
+    trainer.save_checkpoint(final_checkpoint_path, args.steps)
+    
     print(f"Training completed! Total episodes: {trainer.episode_count}")
+    print(f"Final checkpoint saved to: {final_checkpoint_path}")
 
 
 if __name__ == "__main__":

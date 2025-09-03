@@ -144,3 +144,4 @@ cython_debug/
 # Project-specific
 # Ignore the included virtual environment directory
 /venv/
+/checkpoints/

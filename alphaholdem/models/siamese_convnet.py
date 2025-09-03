@@ -14,8 +14,10 @@ class ConvTrunk(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(in_channels, hidden, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((1, 1)),
         )
@@ -35,7 +37,9 @@ class SiameseConvNetV1(nn.Module, Model):
         fusion_in = 64 + 64
         self.fusion = nn.Sequential(
             nn.Linear(fusion_in, fusion_hidden),
+            nn.LayerNorm(fusion_hidden),  # Use LayerNorm instead of BatchNorm1d
             nn.ReLU(inplace=True),
+            nn.Dropout(0.1),  # Add dropout for regularization
         )
         self.policy_head = nn.Linear(fusion_hidden, num_actions)
         self.value_head = nn.Linear(fusion_hidden, 1)

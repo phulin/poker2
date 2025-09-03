@@ -19,14 +19,14 @@ class SelfPlayTrainer:
     def __init__(
         self,
         num_bet_bins: int = 9,
-        learning_rate: float = 3e-4,
-        batch_size: int = 64,
+        learning_rate: float = 1e-3,  # Increased from 3e-4 for better learning
+        batch_size: int = 256,  # Larger batch size like AlphaHoldem (they used 16,384)
         num_epochs: int = 4,
         gamma: float = 0.999,
         gae_lambda: float = 0.95,
         epsilon: float = 0.2,
         delta1: float = 3.0,
-        value_coef: float = 0.5,
+        value_coef: float = 0.1,  # Reasonable value coefficient
         entropy_coef: float = 0.01,
         grad_clip: float = 1.0,
     ):
@@ -46,6 +46,7 @@ class SelfPlayTrainer:
         self.cards_encoder = CardsPlanesV1()
         self.actions_encoder = ActionsHUEncoderV1()
         self.model = SiameseConvNetV1(num_actions=num_bet_bins)
+        self._initialize_weights()  # Initialize with better weights
         self.policy = CategoricalPolicyV1()
         self.replay_buffer = ReplayBuffer(capacity=1000)
         
@@ -55,6 +56,23 @@ class SelfPlayTrainer:
         # Training stats
         self.episode_count = 0
         self.total_reward = 0.0
+
+    def _initialize_weights(self):
+        """Initialize model weights to prevent dead neurons."""
+        for module in self.model.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.BatchNorm2d):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
 
     def collect_trajectory(self) -> Trajectory:
         """Collect a single trajectory from self-play."""
@@ -153,20 +171,22 @@ class SelfPlayTrainer:
         batch = prepare_ppo_batch(trajectories)
         
         # Compute dynamic delta2 and delta3 bounds from chips placed
-        all_chips_placed = []
+        # According to AlphaHoldem paper: δ2 and δ3 represent total chips placed by players
+        # They should be dynamically calculated from the actual chips in the trajectory
+        total_chips_placed = 0
         for trajectory in trajectories:
             for transition in trajectory.transitions:
-                all_chips_placed.append(transition.chips_placed)
+                total_chips_placed += transition.chips_placed
         
-        if all_chips_placed:
-            max_chips = max(all_chips_placed)
+        if total_chips_placed > 0:
             # δ2: negative bound (opponent chips), δ3: positive bound (our chips)
-            # According to paper: δ2 and δ3 represent total chips placed by players
-            delta2 = -max_chips
-            delta3 = max_chips
+            # Use total chips placed as the bound, similar to paper's approach
+            delta2 = -total_chips_placed
+            delta3 = total_chips_placed
         else:
-            delta2 = 0.0
-            delta3 = 0.0
+            # Fallback to reasonable bounds if no chips placed
+            delta2 = -1000.0
+            delta3 = 1000.0
         
         # Multiple epochs of updates
         total_loss = 0.0
@@ -228,3 +248,200 @@ class SelfPlayTrainer:
             'avg_reward': self.total_reward / max(1, self.episode_count),
             **update_stats,
         }
+
+    def save_checkpoint(self, path: str, step: int) -> None:
+        """Save model checkpoint."""
+        checkpoint = {
+            'step': step,
+            'episode_count': self.episode_count,
+            'total_reward': self.total_reward,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'config': {
+                'num_bet_bins': self.num_bet_bins,
+                'batch_size': self.batch_size,
+                'num_epochs': self.num_epochs,
+                'gamma': self.gamma,
+                'gae_lambda': self.gae_lambda,
+                'epsilon': self.epsilon,
+                'delta1': self.delta1,
+                'value_coef': self.value_coef,
+                'entropy_coef': self.entropy_coef,
+                'grad_clip': self.grad_clip,
+            }
+        }
+        torch.save(checkpoint, path)
+        print(f"Checkpoint saved to {path}")
+
+    def load_checkpoint(self, path: str) -> int:
+        """Load model checkpoint. Returns the step number."""
+        checkpoint = torch.load(path)
+        
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.episode_count = checkpoint['episode_count']
+        self.total_reward = checkpoint['total_reward']
+        
+        print(f"Checkpoint loaded from {path}")
+        return checkpoint['step']
+
+    def get_preflop_range_grid(self, seat: int = 0) -> str:
+        """Get preflop range as a grid showing action probabilities for button play."""
+        # Create a 13x13 grid representing all possible hole card combinations
+        # Rows/cols: A, K, Q, J, T, 9, 8, 7, 6, 5, 4, 3, 2
+        ranks = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2']
+        
+        # Initialize grid with action probabilities
+        grid = []
+        header = "    " + " ".join(f"{rank:>2}" for rank in ranks)
+        grid.append(header)
+        grid.append("   " + "-" * 39)  # Separator line
+        
+        for i, rank1 in enumerate(ranks):
+            row = [f"{rank1:>2} |"]
+            for j, rank2 in enumerate(ranks):
+                if i == j:
+                    # Same rank (pairs)
+                    card1, card2 = f"{rank1}s", f"{rank1}h"  # Suited pair
+                elif i < j:
+                    # First rank higher (e.g., AK, AQ)
+                    card1, card2 = f"{rank1}s", f"{rank2}h"  # Suited
+                else:
+                    # Second rank higher (e.g., KA, QA)
+                    card1, card2 = f"{rank2}s", f"{rank1}h"  # Suited
+                
+                # Get action probability for this hand
+                prob = self._get_preflop_action_probability(card1, card2, seat)
+                row.append(f"{prob:>2}")
+            
+            grid.append(" ".join(row))
+        
+        return "\n".join(grid)
+    
+    def _get_preflop_action_probability(self, card1: str, card2: str, seat: int) -> str:
+        """Get action probability for a specific hole card combination."""
+        # Create a minimal game state for preflop button play
+        from ..env.types import GameState, PlayerState
+        
+        # Create players
+        p0 = PlayerState(stack=1000)
+        p1 = PlayerState(stack=1000)
+        
+        # Set up preflop state (button acts last preflop)
+        button = 1 - seat  # If seat=0 (button), then button=1
+        p_sb = 0 if button == 0 else 1
+        p_bb = 1 - p_sb
+        
+        # Post blinds
+        p_states = [p0, p1]
+        p_states[p_sb].stack -= 50  # small blind
+        p_states[p_sb].committed += 50
+        p_states[p_bb].stack -= 100  # big blind
+        p_states[p_bb].committed += 100
+        
+        # Set hole cards for the seat we're analyzing
+        p_states[seat].hole_cards = [self._card_str_to_int(card1), self._card_str_to_int(card2)]
+        
+        # Create game state
+        state = GameState(
+            button=button,
+            street="preflop",
+            deck=[],  # Not needed for this analysis
+            board=[],
+            pot=150,
+            to_act=seat,
+            small_blind=50,
+            big_blind=100,
+            min_raise=100,
+            last_aggressive_amount=100,
+            players=(p_states[0], p_states[1]),
+            terminal=False,
+        )
+        
+        # Encode state
+        cards = self.cards_encoder.encode_cards(state, seat=seat)
+        actions_tensor = self.actions_encoder.encode_actions(state, seat=seat, num_bet_bins=self.num_bet_bins)
+        
+        # Get model prediction
+        with torch.no_grad():
+            logits, _ = self.model(cards.unsqueeze(0), actions_tensor.unsqueeze(0))
+            
+            # For preflop button play, we know the legal actions:
+            # fold, call, raise (pot-sized), all-in
+            # Create a simple legal mask
+            legal_mask = torch.zeros(self.num_bet_bins)
+            legal_mask[0] = 1.0  # fold
+            legal_mask[1] = 1.0  # call/check
+            legal_mask[4] = 1.0  # pot-sized bet
+            legal_mask[7] = 1.0  # all-in
+            
+            # Apply legal mask
+            masked_logits = logits.clone()
+            masked_logits[0, legal_mask == 0] = -1e9
+            
+            # Get probabilities
+            probs = torch.softmax(masked_logits, dim=-1).squeeze(0)
+            
+            # Get probability of not folding (fold is action 0)
+            not_fold_prob = 1.0 - probs[0].item()
+            
+            # Convert to percentage and format
+            percentage = round(not_fold_prob * 100)
+            return f"{percentage:2d}"
+    
+    def _card_str_to_int(self, card_str: str) -> int:
+        """Convert card string (e.g., 'As', 'Kh') to integer representation."""
+        rank_map = {'A': 12, 'K': 11, 'Q': 10, 'J': 9, 'T': 8, 
+                   '9': 7, '8': 6, '7': 5, '6': 4, '5': 3, '4': 2, '3': 1, '2': 0}
+        suit_map = {'s': 0, 'h': 1, 'd': 2, 'c': 3}
+        
+        rank = card_str[0]
+        suit = card_str[1]
+        
+        return rank_map[rank] * 4 + suit_map[suit]
+
+    def diagnose_model_health(self) -> dict:
+        """Diagnose potential issues with the model and training setup."""
+        diagnostics = {}
+        
+        # Check model parameters
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        diagnostics['total_params'] = total_params
+        diagnostics['trainable_params'] = trainable_params
+        
+        # Check parameter norms
+        param_norms = []
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                norm = torch.norm(param).item()
+                param_norms.append((name, norm))
+        diagnostics['param_norms'] = param_norms
+        
+        # Check if parameters are all zero or NaN
+        has_nan = any(torch.isnan(param).any() for param in self.model.parameters())
+        has_inf = any(torch.isinf(param).any() for param in self.model.parameters())
+        diagnostics['has_nan'] = has_nan
+        diagnostics['has_inf'] = has_inf
+        
+        # Test forward pass with dummy data
+        dummy_cards = torch.randn(1, 6, 4, 13)
+        dummy_actions = torch.randn(1, 24, 4, self.num_bet_bins)
+        
+        with torch.no_grad():
+            logits, values = self.model(dummy_cards, dummy_actions)
+            diagnostics['logits_shape'] = list(logits.shape)
+            diagnostics['values_shape'] = list(values.shape)
+            diagnostics['logits_norm'] = torch.norm(logits).item()
+            diagnostics['values_norm'] = torch.norm(values).item()
+            diagnostics['logits_has_nan'] = torch.isnan(logits).any().item()
+            diagnostics['values_has_nan'] = torch.isnan(values).any().item()
+        
+        # Check optimizer state
+        diagnostics['optimizer_lr'] = self.optimizer.param_groups[0]['lr']
+        diagnostics['optimizer_momentum'] = self.optimizer.param_groups[0].get('betas', (0.9, 0.999))
+        
+        # Check replay buffer
+        diagnostics['replay_buffer_size'] = len(self.replay_buffer.trajectories)
+        
+        return diagnostics
