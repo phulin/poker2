@@ -310,7 +310,7 @@ class SelfPlayTrainer:
             "delta3_mean": float(delta3_vec.mean().item()),
         }
 
-    def train_step(self, num_trajectories: int = 4) -> dict:
+    def train_step(self) -> dict:
         """
         Single training step: collect trajectories against K-Best opponents and update model.
 
@@ -320,29 +320,23 @@ class SelfPlayTrainer:
         Returns:
             Dictionary with training statistics
         """
-        # Sample opponents from K-Best pool
-        opponents = self.opponent_pool.sample(k=num_trajectories)
-
-        # Collect trajectories
-        for i in range(num_trajectories):
-            opponent = opponents[i] if i < len(opponents) else None
+        # Collect fresh rollouts until we have at least batch_size steps
+        # (timesteps from our player). Use small batches of trajectories per loop.
+        while self.replay_buffer.num_steps() < self.batch_size:
+            opponent = self.opponent_pool.sample(k=1)[0]
             trajectory = self.collect_trajectory(opponent_snapshot=opponent)
             self.replay_buffer.add_trajectory(trajectory)
             self.episode_count += 1
-            self.total_reward += sum(t.reward for t in trajectory.transitions)
+            ep_reward = sum(t.reward for t in trajectory.transitions)
+            self.total_reward += ep_reward
 
-            # Update ELO if we played against an opponent
             if opponent is not None:
-                # Calculate game result based on final reward
-                final_reward = sum(t.reward for t in trajectory.transitions)
-                if final_reward > 0:
+                if ep_reward > 0:
                     result = "win"
-                elif final_reward < 0:
+                elif ep_reward < 0:
                     result = "loss"
                 else:
                     result = "draw"
-
-                # Update ELO ratings
                 self.opponent_pool.update_elo_after_game(opponent, result)
                 self.current_elo = self.opponent_pool.current_elo
 
@@ -352,6 +346,9 @@ class SelfPlayTrainer:
         # Check if we should add current model to opponent pool
         if self.opponent_pool.should_add_snapshot(self.current_elo):
             self.opponent_pool.add_snapshot(self, self.current_elo)
+
+        # Strict on-policy: clear buffer so next update uses only fresh rollouts
+        self.replay_buffer.clear()
 
         return {
             "episode_count": self.episode_count,

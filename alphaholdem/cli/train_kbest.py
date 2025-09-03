@@ -23,7 +23,6 @@ from ..core.config_loader import get_config
 
 def train_kbest(
     num_steps: int,
-    trajectories_per_step: int,
     k_best_pool_size: int,
     min_elo_diff: float,
     checkpoint_interval: int,
@@ -85,7 +84,7 @@ def train_kbest(
     print(f"Starting K-Best training from step {start_step}")
     print(f"K-Best pool size: {k_best_pool_size}")
     print(f"Min ELO difference: {min_elo_diff}")
-    print(f"Trajectories per step: {trajectories_per_step}")
+    # Collection runs until batch_size steps; no fixed trajectories per step
     print(
         f"Training start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))}"
     )
@@ -95,12 +94,8 @@ def train_kbest(
     for step in range(start_step, num_steps):
         step_start_time = time.time()
 
-        # Training step
-        stats = trainer.train_step(
-            num_trajectories=(
-                cfg.trajectories_per_step if cfg else trajectories_per_step
-            )
-        )
+        # Training step: collects until batch_size steps
+        stats = trainer.train_step()
 
         # Calculate times
         step_elapsed_time = time.time() - step_start_time
@@ -167,12 +162,6 @@ def main():
         "--steps", type=int, default=1000, help="Number of training steps"
     )
     parser.add_argument(
-        "--trajectories-per-step",
-        type=int,
-        default=4,
-        help="Trajectories per training step",
-    )
-    parser.add_argument(
         "--k-best-pool-size", type=int, default=5, help="Size of K-Best opponent pool"
     )
     parser.add_argument(
@@ -225,7 +214,7 @@ def main():
     # Train the agent
     trainer = train_kbest(
         num_steps=args.steps,
-        trajectories_per_step=args.trajectories_per_step,
+        # trajectories_per_step removed; collection loops until batch_size steps
         k_best_pool_size=args.k_best_pool_size,
         min_elo_diff=args.min_elo_diff,
         checkpoint_interval=args.checkpoint_interval,

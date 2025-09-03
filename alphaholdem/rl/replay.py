@@ -53,6 +53,10 @@ class ReplayBuffer:
         self.trajectories.clear()
         self.position = 0
 
+    def num_steps(self) -> int:
+        """Total number of transitions (steps) stored across all trajectories."""
+        return sum(len(t.transitions) for t in self.trajectories)
+
 
 def compute_gae_returns(
     rewards: List[float],
