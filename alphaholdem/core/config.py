@@ -30,6 +30,11 @@ class RootConfig:
     entropy_coef: float = 0.01
     value_coef: float = 0.5
     grad_clip: float = 1.0
+    # Training scale knobs
+    learning_rate: float = 3e-4
+    batch_size: int = 256
+    num_epochs: int = 4
+    trajectories_per_step: int = 4
 
 
 def _to_component_spec(data: Dict[str, Any], key: str) -> ComponentSpec:
@@ -61,4 +66,8 @@ def load_config(path: Optional[str] = None, data: Optional[Dict[str, Any]] = Non
         entropy_coef=float(data.get("entropy_coef", 0.01)),
         value_coef=float(data.get("value_coef", 0.5)),
         grad_clip=float(data.get("grad_clip", 1.0)),
+        learning_rate=float(data.get("learning_rate", 3e-4)),
+        batch_size=int(data.get("batch_size", 256)),
+        num_epochs=int(data.get("num_epochs", 4)),
+        trajectories_per_step=int(data.get("trajectories_per_step", 4)),
     )

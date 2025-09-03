@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.utils.training_utils import print_preflop_range_grid, print_training_stats, print_evaluation_results, print_checkpoint_info
+from alphaholdem.core.config_loader import get_config
 
 
 def train_kbest(
@@ -24,6 +25,8 @@ def train_kbest(
     eval_interval: int = 50,
     checkpoint_dir: str = "checkpoints",
     resume_from: str = None,
+    device: torch.device = None,
+    config: str | None = None,
 ):
     """
     Train AlphaHoldem agent using K-Best self-play.
@@ -42,21 +45,26 @@ def train_kbest(
     # Create checkpoint directory
     os.makedirs(checkpoint_dir, exist_ok=True)
     
+    # Load optional config (centralized defaults)
+    cfg = get_config(config) if config else None
+
     # Initialize trainer with K-Best pool
     trainer = SelfPlayTrainer(
-        num_bet_bins=9,
-        learning_rate=1e-3,
-        batch_size=256,
-        num_epochs=4,
-        gamma=0.999,
-        gae_lambda=0.95,
-        epsilon=0.2,
-        delta1=3.0,
-        value_coef=0.1,
-        entropy_coef=0.01,
-        grad_clip=1.0,
+        num_bet_bins=(cfg.nb if cfg else 9),
+        learning_rate=(cfg.learning_rate if cfg else 3e-4),
+        batch_size=(cfg.batch_size if cfg else 256),
+        num_epochs=(cfg.num_epochs if cfg else 4),
+        gamma=(cfg.gamma if cfg else 0.999),
+        gae_lambda=(cfg.gae_lambda if cfg else 0.95),
+        epsilon=(cfg.ppo_eps if cfg else 0.2),
+        delta1=(cfg.ppo_delta1 if cfg else 3.0),
+        value_coef=(cfg.value_coef if cfg else 0.1),
+        entropy_coef=(cfg.entropy_coef if cfg else 0.01),
+        grad_clip=(cfg.grad_clip if cfg else 1.0),
         k_best_pool_size=k_best_pool_size,
         min_elo_diff=min_elo_diff,
+        device=device,
+        config=config,
     )
     
     # Resume from checkpoint if specified
@@ -80,7 +88,7 @@ def train_kbest(
         step_start_time = time.time()
         
         # Training step
-        stats = trainer.train_step(num_trajectories=trajectories_per_step)
+        stats = trainer.train_step(num_trajectories=(cfg.trajectories_per_step if cfg else trajectories_per_step))
         
         # Calculate times
         step_elapsed_time = time.time() - step_start_time
@@ -140,12 +148,21 @@ def main():
     parser.add_argument("--eval-interval", type=int, default=50, help="Evaluation interval")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoint directory")
     parser.add_argument("--resume-from", type=str, help="Path to checkpoint to resume from")
+    parser.add_argument("--config", type=str, help="Path to YAML config for components/hparams")
     
     args = parser.parse_args()
     
     # Set random seeds for reproducibility
     torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    
+    # Set up device (GPU if available)
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    if device.type == "mps":
+        print("✅ Using Apple M3 GPU (MPS)")
+    else:
+        print("⚠️  Using CPU (MPS not available)")
     
     # Train the agent
     trainer = train_kbest(
@@ -157,6 +174,8 @@ def main():
         eval_interval=args.eval_interval,
         checkpoint_dir=args.checkpoint_dir,
         resume_from=args.resume_from,
+        device=device,
+        config=args.config,
     )
     
     print("Training completed!")

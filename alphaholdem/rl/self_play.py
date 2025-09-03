@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Union
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+from alphaholdem.core.config_loader import get_config
 
 from ..env.hunl_env import HUNLEnv
 from ..encoding.cards_encoder import CardsPlanesV1
@@ -14,6 +16,8 @@ from ..models.heads import CategoricalPolicyV1
 from ..rl.replay import ReplayBuffer, Transition, Trajectory, compute_gae_returns, prepare_ppo_batch
 from ..rl.losses import trinal_clip_ppo_loss
 from ..rl.k_best_pool import KBestOpponentPool, AgentSnapshot
+from ..core.config import RootConfig
+from ..core.builders import build_components_from_config
 
 
 class SelfPlayTrainer:
@@ -32,6 +36,8 @@ class SelfPlayTrainer:
         grad_clip: float = 1.0,
         k_best_pool_size: int = 5,  # K-Best pool size
         min_elo_diff: float = 50.0,  # Minimum ELO difference for pool updates
+        device: torch.device = None,
+        config: Union[RootConfig, str, None] = None,
     ):
         self.num_bet_bins = num_bet_bins
         self.batch_size = batch_size
@@ -44,13 +50,23 @@ class SelfPlayTrainer:
         self.entropy_coef = entropy_coef
         self.grad_clip = grad_clip
         
+        # Set device
+        self.device = device if device is not None else torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        
         # Initialize components
         self.env = HUNLEnv(starting_stack=1000, sb=50, bb=100)
-        self.cards_encoder = CardsPlanesV1()
-        self.actions_encoder = ActionsHUEncoderV1()
-        self.model = SiameseConvNetV1(num_actions=num_bet_bins)
+
+        # Config-driven components (default to configs/default.yaml when config is None)
+        cfg = get_config(config)
+        ce, ae, model, policy, nb = build_components_from_config(cfg)
+        self.cards_encoder = ce
+        self.actions_encoder = ae
+        self.model = model
+        self.policy = policy
+        self.num_bet_bins = nb
+
+        self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights
-        self.policy = CategoricalPolicyV1()
         self.replay_buffer = ReplayBuffer(capacity=1000)
         
         # K-Best opponent pool
@@ -104,6 +120,10 @@ class SelfPlayTrainer:
             cards = self.cards_encoder.encode_cards(state, seat=current_player)
             actions_tensor = self.actions_encoder.encode_actions(state, seat=current_player, num_bet_bins=self.num_bet_bins)
             
+            # Move tensors to device
+            cards = cards.to(self.device)
+            actions_tensor = actions_tensor.to(self.device)
+            
             # Get model prediction
             with torch.no_grad():
                 if opponent_snapshot is not None and current_player != 0:  # Opponent's turn
@@ -114,6 +134,7 @@ class SelfPlayTrainer:
                     logits, value = self.model(cards.unsqueeze(0), actions_tensor.unsqueeze(0))
                 
                 legal_mask = get_legal_mask(state, self.num_bet_bins)
+                legal_mask = legal_mask.to(self.device)  # Move legal mask to device
                 
                 # Sample action
                 action_idx, log_prob = self.policy.action(logits.squeeze(0), legal_mask)
@@ -171,6 +192,10 @@ class SelfPlayTrainer:
                 cards = obs[:(6 * 4 * 13)].reshape(1, 6, 4, 13)
                 actions_tensor = obs[(6 * 4 * 13):].reshape(1, 24, 4, self.num_bet_bins)
                 
+                # Move tensors to device
+                cards = cards.to(self.device)
+                actions_tensor = actions_tensor.to(self.device)
+                
                 with torch.no_grad():
                     _, value = self.model(cards, actions_tensor)
                     values.append(value.item())
@@ -192,6 +217,11 @@ class SelfPlayTrainer:
         
         # Prepare batch
         batch = prepare_ppo_batch(trajectories)
+        
+        # Move batch tensors to device
+        for key in batch:
+            if isinstance(batch[key], torch.Tensor):
+                batch[key] = batch[key].to(self.device)
         
         # Compute dynamic delta2 and delta3 bounds from chips placed
         # According to AlphaHoldem paper: δ2 and δ3 represent total chips placed by players
@@ -479,6 +509,10 @@ class SelfPlayTrainer:
         cards = self.cards_encoder.encode_cards(state, seat=seat)
         actions_tensor = self.actions_encoder.encode_actions(state, seat=seat, num_bet_bins=self.num_bet_bins)
         
+        # Move tensors to device
+        cards = cards.to(self.device)
+        actions_tensor = actions_tensor.to(self.device)
+        
         # Get model prediction
         with torch.no_grad():
             logits, _ = self.model(cards.unsqueeze(0), actions_tensor.unsqueeze(0))
@@ -491,6 +525,7 @@ class SelfPlayTrainer:
             legal_mask[1] = 1.0  # call/check
             legal_mask[4] = 1.0  # pot-sized bet
             legal_mask[7] = 1.0  # all-in
+            legal_mask = legal_mask.to(self.device)  # Move legal mask to device
             
             # Apply legal mask
             masked_logits = logits.clone()

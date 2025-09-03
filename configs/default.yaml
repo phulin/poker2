@@ -28,3 +28,9 @@ entropy_coef: 0.01
 value_coef: 0.5
 grad_clip: 1.0
 seed: 0
+
+# Training scale knobs
+learning_rate: 0.0003
+batch_size: 256
+num_epochs: 4
+trajectories_per_step: 4
