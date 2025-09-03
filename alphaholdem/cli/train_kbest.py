@@ -12,6 +12,7 @@ import argparse
 import torch
 import torch.nn as nn
 from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.utils.training_utils import print_preflop_range_grid, print_training_stats, print_evaluation_results, print_checkpoint_info
 
 
 def train_kbest(
@@ -90,22 +91,16 @@ def train_kbest(
         total_time_str = f"{total_elapsed_time:.1f}s"
         
         # Logging
-        print(f"Step {step + 1}/{num_steps} | "
-              f"Avg Reward: {stats['avg_reward']:.2f} | "
-              f"ELO: {stats['current_elo']:.1f} | "
-              f"Step Time: {step_time_str} | "
-              f"Total Time: {total_time_str}")
+        print_training_stats(stats, step, num_steps, step_time_str, total_time_str)
+        
+        # Show preflop range grid every 50 steps
+        if (step + 1) % 50 == 0:
+            print_preflop_range_grid(trainer, step + 1, seat=0)
         
         # Evaluation against pool
         if (step + 1) % eval_interval == 0:
-            print("Evaluating against opponent pool...")
             eval_results = trainer.evaluate_against_pool(num_games=50)
-            print(f"Overall win rate: {eval_results['overall_win_rate']:.3f}")
-            
-            # Print individual opponent results
-            for opponent_key, result in eval_results['opponent_results'].items():
-                print(f"  {opponent_key}: {result['win_rate']:.3f} "
-                      f"(ELO: {result['opponent_elo']:.1f})")
+            print_evaluation_results(eval_results)
         
         # Checkpointing
         if (step + 1) % checkpoint_interval == 0:
@@ -116,13 +111,13 @@ def train_kbest(
             best_checkpoint_path = os.path.join(checkpoint_dir, "best_model.pt")
             if not os.path.exists(best_checkpoint_path) or stats['current_elo'] > trainer.opponent_pool.get_best_snapshot().elo:
                 trainer.save_checkpoint(best_checkpoint_path, step + 1)
-                print(f"New best model saved with ELO: {stats['current_elo']:.1f}")
+                print_checkpoint_info(best_checkpoint_path, stats['current_elo'], is_best=True)
     
     # Final evaluation
     final_total_time = time.time() - training_start_time
     print(f"\nFinal evaluation against opponent pool...")
     final_eval = trainer.evaluate_against_pool(num_games=100)
-    print(f"Final overall win rate: {final_eval['overall_win_rate']:.3f}")
+    print_evaluation_results(final_eval)
     print(f"Total training time: {final_total_time:.1f}s ({final_total_time/3600:.2f} hours)")
     
     # Save final checkpoint
@@ -130,15 +125,14 @@ def train_kbest(
     trainer.save_checkpoint(final_checkpoint_path, num_steps)
     
     # Print preflop range grid
-    print("\nPreflop range grid (button play):")
-    print(trainer.get_preflop_range_grid(seat=0))
+    print_preflop_range_grid(trainer, num_steps, seat=0, title="Final Preflop Range Grid")
     
     return trainer
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train AlphaHoldem with K-Best self-play")
-    parser.add_argument("--num-steps", type=int, default=1000, help="Number of training steps")
+    parser.add_argument("--steps", type=int, default=1000, help="Number of training steps")
     parser.add_argument("--trajectories-per-step", type=int, default=4, help="Trajectories per training step")
     parser.add_argument("--k-best-pool-size", type=int, default=5, help="Size of K-Best opponent pool")
     parser.add_argument("--min-elo-diff", type=float, default=50.0, help="Minimum ELO difference for pool updates")
@@ -155,7 +149,7 @@ def main():
     
     # Train the agent
     trainer = train_kbest(
-        num_steps=args.num_steps,
+        num_steps=args.steps,
         trajectories_per_step=args.trajectories_per_step,
         k_best_pool_size=args.k_best_pool_size,
         min_elo_diff=args.min_elo_diff,

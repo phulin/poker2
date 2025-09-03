@@ -418,14 +418,14 @@ class SelfPlayTrainer:
             row = [f"{rank1:>2} |"]
             for j, rank2 in enumerate(ranks):
                 if i == j:
-                    # Same rank (pairs)
+                    # Same rank (pairs) - always suited
                     card1, card2 = f"{rank1}s", f"{rank1}h"  # Suited pair
                 elif i < j:
-                    # First rank higher (e.g., AK, AQ)
+                    # Top-right triangle: suited hands (e.g., AKs, AQs)
                     card1, card2 = f"{rank1}s", f"{rank2}h"  # Suited
                 else:
-                    # Second rank higher (e.g., KA, QA)
-                    card1, card2 = f"{rank2}s", f"{rank1}h"  # Suited
+                    # Bottom-left triangle: off-suit hands (e.g., KAs, QAs)
+                    card1, card2 = f"{rank2}s", f"{rank1}d"  # Off-suit
                 
                 # Get action probability for this hand
                 prob = self._get_preflop_action_probability(card1, card2, seat)
@@ -499,11 +499,11 @@ class SelfPlayTrainer:
             # Get probabilities
             probs = torch.softmax(masked_logits, dim=-1).squeeze(0)
             
-            # Get probability of not folding (fold is action 0)
-            not_fold_prob = 1.0 - probs[0].item()
+            # Get probability of all-in (all-in is action 7)
+            all_in_prob = probs[7].item()
             
             # Convert to percentage and format
-            percentage = round(not_fold_prob * 100)
+            percentage = round(all_in_prob * 100)
             return f"{percentage:2d}"
     
     def _card_str_to_int(self, card_str: str) -> int:

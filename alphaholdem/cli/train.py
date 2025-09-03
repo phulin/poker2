@@ -5,6 +5,7 @@ import argparse
 import time
 import os
 from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.utils.training_utils import print_preflop_range_grid, print_training_stats, print_checkpoint_info
 
 
 def main():
@@ -53,20 +54,11 @@ def main():
             trainer.save_checkpoint(checkpoint_path, step + 1)
             
             # Output preflop range grid to stdout
-            print(f"\n--- Preflop Range Grid (Step {step+1}) ---")
-            print("Button play - probability of not folding (%)")
-            print("Higher numbers = more likely to play the hand")
-            print()
-            print(trainer.get_preflop_range_grid(seat=0))  # Button seat
-            print()
+            print_preflop_range_grid(trainer, step + 1, seat=0)
         
         if step % 10 == 0:
             elapsed = time.time() - start_time
-            print(f"Step {step}/{args.steps} | "
-                  f"Episodes: {stats['episode_count']} | "
-                  f"Avg Reward: {stats['avg_reward']:.2f} | "
-                  f"Loss: {stats.get('avg_loss', 0):.4f} | "
-                  f"Time: {elapsed:.1f}s")
+            print_training_stats(stats, step, args.steps, f"{elapsed:.1f}s", f"{elapsed:.1f}s")
     
     # Save final checkpoint
     final_checkpoint_path = os.path.join(args.checkpoint_dir, "final_checkpoint.pt")
