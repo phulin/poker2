@@ -19,6 +19,9 @@ policy:
 # Action space
 nb: 9
 
+# Betting bin multipliers over total_committed
+bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]
+
 # Training hyperparameters (Trinal-Clip PPO)
 ppo_eps: 0.2
 ppo_delta1: 3.0

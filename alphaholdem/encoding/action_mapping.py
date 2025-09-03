@@ -4,6 +4,7 @@ from typing import List
 import torch
 
 from ..env.types import GameState, Action
+from ..core.config_loader import get_config
 
 
 def bin_to_action(bin_idx: int, game_state: GameState, num_bet_bins: int) -> Action:
@@ -44,36 +45,39 @@ def bin_to_action(bin_idx: int, game_state: GameState, num_bet_bins: int) -> Act
 def _bin_to_target_action(
     bin_idx: int, game_state: GameState, num_bet_bins: int
 ) -> Action:
-    """Convert bin to target Action (may not be legal)."""
-    pot = game_state.pot
-    to_call = 0
-    if len(game_state.players) >= 2:
-        me = game_state.to_act
-        opp = 1 - me
-        to_call = game_state.players[opp].committed - game_state.players[me].committed
+    """Convert bin to target Action (may not be legal) using total_committed reference.
+    For raises, include the call amount; for bets, use pure fraction of total_committed.
+    """
+    me = game_state.to_act
+    opp = 1 - me
+    to_call = game_state.players[opp].committed - game_state.players[me].committed
+    total_committed = (
+        game_state.pot
+        + game_state.players[0].committed
+        + game_state.players[1].committed
+    )
 
     if bin_idx == 1:  # check/call
         if to_call > 0:
             return Action("call", amount=to_call)
         else:
             return Action("check")
-    elif bin_idx == 2:  # 1/2 pot
-        amount = max(to_call, int(pot * 0.5))
-        return Action("bet", amount=amount)
-    elif bin_idx == 3:  # 3/4 pot
-        amount = max(to_call, int(pot * 0.75))
-        return Action("bet", amount=amount)
-    elif bin_idx == 4:  # pot
-        amount = max(to_call, pot)
-        return Action("bet", amount=amount)
-    elif bin_idx == 5:  # 1.5x pot
-        amount = max(to_call, int(pot * 1.5))
-        return Action("bet", amount=amount)
-    elif bin_idx == 6:  # 2x pot
-        amount = max(to_call, pot * 2)
-        return Action("bet", amount=amount)
-    elif bin_idx == 7:  # all-in
-        me = game_state.to_act
+    elif bin_idx >= 2 and bin_idx < (num_bet_bins - 1):
+        # Read multipliers from config; fall back to defaults if needed
+        cfg = get_config(None)
+        bins = cfg.bet_bins
+        # Map indices 2..(2+len(bins)-1) to bins[0..len(bins)-1]
+        idx = bin_idx - 2
+        idx = max(0, min(idx, len(bins) - 1))
+        mult = bins[idx]
+        base = int(total_committed * mult) if total_committed > 0 else 0
+        if to_call > 0:
+            amount = to_call + base
+            return Action("raise", amount=amount)
+        else:
+            amount = base
+            return Action("bet", amount=amount)
+    elif bin_idx == (num_bet_bins - 1):  # all-in
         stack = game_state.players[me].stack
         return Action("allin", amount=stack)
     else:
@@ -95,37 +99,36 @@ def get_legal_mask(game_state: GameState, num_bet_bins: int) -> torch.Tensor:
 def _action_to_bin_idx(
     action: Action, game_state: GameState, num_bet_bins: int
 ) -> int | None:
-    """Map Action to discrete bin index."""
+    """Map Action to discrete bin index using total_committed reference."""
     if action.kind == "fold":
         return 0
     elif action.kind in ["check", "call"]:
         return 1
-    elif action.kind == "bet":
-        pot = game_state.pot
-        if pot == 0:
-            return 1  # check
-        fraction = action.amount / pot
-        if fraction <= 0.6:
-            return 2  # 1/2 pot
-        elif fraction <= 0.8:
-            return 3  # 3/4 pot
-        elif fraction <= 1.2:
-            return 4  # pot
-        elif fraction <= 1.8:
-            return 5  # 1.5x pot
-        else:
-            return 6  # 2x pot
+
+    total_committed = (
+        game_state.pot
+        + game_state.players[0].committed
+        + game_state.players[1].committed
+    )
+    if total_committed == 0:
+        return 1
+
+    if action.kind == "bet":
+        fraction = action.amount / total_committed
     elif action.kind == "raise":
-        pot = game_state.pot
-        if pot == 0:
-            return 4  # pot-sized
-        fraction = action.amount / pot
-        if fraction <= 1.2:
-            return 4  # pot
-        elif fraction <= 1.8:
-            return 5  # 1.5x pot
-        else:
-            return 6  # 2x pot
+        me = game_state.to_act
+        opp = 1 - me
+        to_call = game_state.players[opp].committed - game_state.players[me].committed
+        raise_part = max(0, action.amount - max(0, to_call))
+        fraction = raise_part / total_committed if total_committed > 0 else 0.0
     elif action.kind == "allin":
-        return 7  # all-in
-    return None
+        return 7
+    else:
+        return None
+
+    # Determine closest configured bin
+    cfg = get_config(None)
+    bins = cfg.bet_bins
+    # Choose nearest multiplier index
+    nearest = min(range(len(bins)), key=lambda i: abs(fraction - bins[i]))
+    return 2 + nearest

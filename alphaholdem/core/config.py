@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 try:
     import yaml  # type: ignore
@@ -35,6 +35,8 @@ class RootConfig:
     batch_size: int = 256
     num_epochs: int = 4
     trajectories_per_step: int = 4
+    # Betting bins expressed as fractions of total_committed reference
+    bet_bins: List[float] = field(default_factory=lambda: [0.5, 0.75, 1.0, 1.5, 2.0])
 
 
 def _to_component_spec(data: Dict[str, Any], key: str) -> ComponentSpec:
@@ -72,4 +74,5 @@ def load_config(
         batch_size=int(data.get("batch_size", 256)),
         num_epochs=int(data.get("num_epochs", 4)),
         trajectories_per_step=int(data.get("trajectories_per_step", 4)),
+        bet_bins=list(data.get("bet_bins", [0.5, 0.75, 1.0, 1.5, 2.0])),
     )
