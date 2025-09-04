@@ -4,6 +4,8 @@ from dataclasses import replace
 from typing import Any, Dict, List, Tuple
 import random
 
+from line_profiler import profile
+
 from .types import Action, GameState, PlayerState
 from . import rules
 
@@ -167,6 +169,7 @@ class HUNLEnv:
 
         return bins
 
+    @profile
     def step(self, action: Action) -> Tuple[GameState, int, bool, Dict[str, Any]]:
         s = self._require_state()
         if s.terminal:

@@ -134,15 +134,6 @@ class SelfPlayTrainer:
                 nn.init.constant_(module.bias, 0)
 
     @profile
-    def collect_trajectory(self) -> Trajectory:
-        """
-        Collect a single trajectory from self-play or against an opponent.
-
-        Args:
-            opponent_snapshot: Optional opponent snapshot to play against.
-                             If None, plays against self (self-play).
-        """
-
     def collect_trajectory(
         self, opponent_snapshot: Optional[AgentSnapshot] = None
     ) -> Trajectory:
@@ -248,7 +239,7 @@ class SelfPlayTrainer:
             transitions=transitions,
             our_chips_committed=our_chips,
             opp_chips_committed=opp_chips,
-        )
+        ), (reward if current_player == 0 else -reward)
 
     # def update_model(self) -> dict:
     #     with profile(record_shapes=True) as prof:
@@ -257,6 +248,7 @@ class SelfPlayTrainer:
     #     prof.export_chrome_trace("update_model.json")
     #     return result
 
+    @profile
     def update_model(self) -> dict:
         """Perform PPO update on collected trajectories."""
         # Require enough samples (transitions) across buffer
@@ -411,14 +403,16 @@ class SelfPlayTrainer:
         # (timesteps from our player). Use small batches of trajectories per loop.
         while self.replay_buffer.num_steps() < self.batch_size:
             # Collect a batch of trajectories in parallel to amortize device calls
-            trajectory, opponent, ep_reward = self.collect_trajectory()
+            sampled_opponent = self.opponent_pool.sample(k=1)
+            opponent = sampled_opponent[0] if sampled_opponent else None
+            trajectory, reward = self.collect_trajectory(opponent)
             self.replay_buffer.add_trajectory(trajectory)
             self.episode_count += 1
-            self.total_reward += ep_reward
+            self.total_reward += reward
             if opponent is not None:
-                if ep_reward > 0:
+                if reward > 0:
                     result = "win"
-                elif ep_reward < 0:
+                elif reward < 0:
                     result = "loss"
                 else:
                     result = "draw"
