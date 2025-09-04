@@ -12,7 +12,7 @@ STREETS = ("preflop", "flop", "turn", "river", "showdown")
 
 class HUNLEnv:
     def __init__(
-        self, starting_stack: int = 20000, sb: int = 50, bb: int = 100, seed: int = 0
+        self, starting_stack: int = 20000, sb: int = 50, bb: int = 100, seed: int = None
     ):
         self.starting_stack = starting_stack
         self.sb = sb

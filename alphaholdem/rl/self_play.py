@@ -79,7 +79,7 @@ class SelfPlayTrainer:
         )
 
         # Initialize components
-        self.env = HUNLEnv(starting_stack=1000, sb=50, bb=100)
+        self.env = HUNLEnv(starting_stack=1000, sb=5, bb=10)
 
         # Config-driven components
         ce, ae, model, policy = build_components_from_config(cfg)
@@ -134,9 +134,7 @@ class SelfPlayTrainer:
                 nn.init.constant_(module.bias, 0)
 
     @profile
-    def collect_trajectory(
-        self, opponent_snapshot: Optional[AgentSnapshot] = None
-    ) -> Trajectory:
+    def collect_trajectory(self) -> Trajectory:
         """
         Collect a single trajectory from self-play or against an opponent.
 
@@ -144,104 +142,8 @@ class SelfPlayTrainer:
             opponent_snapshot: Optional opponent snapshot to play against.
                              If None, plays against self (self-play).
         """
-        state = self.env.reset()
-        transitions = []
-        max_steps = 50  # Safety limit to prevent infinite loops
-
-        step_count = 0
-        while not state.terminal and step_count < max_steps:
-            step_count += 1
-
-            # Determine which player's turn it is
-            current_player = state.to_act
-
-            # Encode state for current player
-            cards = self.cards_encoder.encode_cards(
-                state, seat=current_player, device=self.device
-            )
-            actions_tensor = self.actions_encoder.encode_actions(
-                state,
-                seat=current_player,
-                num_bet_bins=self.num_bet_bins,
-                device=self.device,
-            )
-
-            # Move tensors to device
-            cards = cards.to(self.device)
-            actions_tensor = actions_tensor.to(self.device)
-
-            # Get model prediction
-            with torch.no_grad():
-                autocast_enabled = (
-                    torch.cuda.is_available() or torch.backends.mps.is_available()
-                )
-                dtype = (
-                    torch.float16
-                    if torch.cuda.is_available()
-                    else torch.bfloat16 if torch.backends.mps.is_available() else None
-                )
-                cm = (
-                    torch.autocast(
-                        device_type=("cuda" if torch.cuda.is_available() else "cpu"),
-                        dtype=dtype,
-                    )
-                    if autocast_enabled
-                    else torch.cpu.amp.autocast(enabled=False)
-                )
-                with cm:
-                    if opponent_snapshot is not None and current_player != 0:
-                        logits, value = opponent_snapshot.model(
-                            cards.unsqueeze(0), actions_tensor.unsqueeze(0)
-                        )
-                    else:
-                        logits, value = self.model(
-                            cards.unsqueeze(0), actions_tensor.unsqueeze(0)
-                        )
-
-                legal_mask = get_legal_mask(
-                    state, self.num_bet_bins, device=self.device
-                )
-
-                # Sample action
-                action_idx, log_prob = self.policy.action(logits.squeeze(0), legal_mask)
-
-                # Convert to concrete action
-                action = bin_to_action(action_idx, state, self.num_bet_bins)
-
-            # Take step
-            next_state, reward, done, _ = self.env.step(action)
-
-            # Record transition (only for our player's actions)
-            if current_player == 0:  # Our player
-                transition = Transition(
-                    observation=torch.cat(
-                        [cards.flatten(), actions_tensor.flatten()]
-                    ),  # Simplified obs
-                    action=action_idx,
-                    log_prob=log_prob,
-                    value=float(value.item()),
-                    reward=reward,
-                    done=done,
-                    legal_mask=legal_mask,
-                    chips_placed=action.amount,
-                )
-                transitions.append(transition)
-
-            state = next_state
-
-        if step_count >= max_steps:
-            print(
-                f"Warning: Trajectory reached max steps ({max_steps}), forcing termination"
-            )
-            # Force termination by setting final reward
-            if transitions:
-                transitions[-1].reward = 0.0
-                transitions[-1].done = True
-
-        # Compute final value for GAE
-        final_value = 0.0  # Terminal state value is 0
-
-        return Trajectory(transitions=transitions, final_value=final_value)
+        trajs, _, _ = self.collect_trajectories_batch(1)
+        return trajs[0]
 
     # def update_model(self) -> dict:
     #     with profile(record_shapes=True) as prof:
@@ -300,16 +202,19 @@ class SelfPlayTrainer:
 
         # Per-sample value clipping bounds computed in prepare_ppo_batch
         # batch['delta2'] and batch['delta3'] are length-N tensors aligned with samples
-        delta2_vec = batch.get("delta2")
-        delta3_vec = batch.get("delta3")
-        # Fallback if not present (should not happen after our change)
-        if delta2_vec is None or delta3_vec is None:
-            delta2_vec = torch.full_like(batch["returns"], -1000.0, device=self.device)
-            delta3_vec = torch.full_like(batch["returns"], 1000.0, device=self.device)
+        delta2_vec = batch["delta2"]
+        delta3_vec = batch["delta3"]
 
         # Multiple epochs of updates
         total_loss = 0.0
-        for epoch in range(self.num_epochs):
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_entropy = 0.0
+        total_approx_kl = 0.0
+        total_clipfrac = 0.0
+        total_explained_var = 0.0
+        total_minibatches = 0
+        for _ in range(self.num_epochs):
             N = batch["actions"].shape[0]
             order = torch.randperm(N, device=self.device)
             for start in range(0, N, self.mini_batch_size):
@@ -339,18 +244,52 @@ class SelfPlayTrainer:
                     entropy_coef=self.entropy_coef,
                 )
 
+                # Debugging metrics: approx KL, clipfrac, explained variance
+                with torch.no_grad():
+                    legal_mb = batch["legal_masks"].index_select(0, mb_idx)
+                    masked_logits = logits.clone()
+                    masked_logits[legal_mb == 0] = -1e9
+                    log_probs_new = torch.log_softmax(masked_logits, dim=-1)
+                    a_mb = batch["actions"].index_select(0, mb_idx)
+                    logp_new = log_probs_new.gather(1, a_mb.unsqueeze(1)).squeeze(1)
+                    logp_old = batch["log_probs_old"].index_select(0, mb_idx)
+                    ratio = torch.exp(logp_new - logp_old)
+                    approx_kl = (logp_old - logp_new).mean()
+                    clip_low, clip_high = 1.0 - self.epsilon, 1.0 + self.epsilon
+                    clipped = torch.clamp(ratio, clip_low, clip_high)
+                    clipfrac = (torch.abs(clipped - ratio) > 1e-8).float().mean()
+                    ret_mb = batch["returns"].index_select(0, mb_idx)
+                    # Explained variance of value predictions
+                    var_y = torch.var(ret_mb)
+                    var_err = torch.var(ret_mb - values.detach())
+                    explained_var = 1.0 - (var_err / (var_y + 1e-8))
+
                 self.optimizer.zero_grad()
                 loss_dict["total_loss"].backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
 
                 total_loss += loss_dict["total_loss"].item()
+                total_policy_loss += float(loss_dict["policy_loss"].item())
+                total_value_loss += float(loss_dict["value_loss"].item())
+                total_entropy += float(loss_dict["entropy"].item())
+                total_approx_kl += float(approx_kl.item())
+                total_clipfrac += float(clipfrac.item())
+                total_explained_var += float(explained_var.item())
+                total_minibatches += 1
 
+        denom = max(1, total_minibatches)
         return {
             "avg_loss": total_loss / self.num_epochs,
             "num_trajectories": len(trajectories),
             "delta2_mean": float(delta2_vec.mean().item()),
             "delta3_mean": float(delta3_vec.mean().item()),
+            "policy_loss": total_policy_loss / denom,
+            "value_loss": total_value_loss / denom,
+            "entropy": total_entropy / denom,
+            "approx_kl": total_approx_kl / denom,
+            "clipfrac": total_clipfrac / denom,
+            "explained_var": total_explained_var / denom,
         }
 
     def train_step(self) -> dict:
@@ -412,8 +351,8 @@ class SelfPlayTrainer:
 
         Returns (trajectories, opponents_used, final_rewards)
         """
-        # Create independent envs for parallel collection
-        envs = [HUNLEnv(starting_stack=1000, sb=50, bb=100) for _ in range(batch_size)]
+        # Create independent envs for parallel collection (randomized seeds to avoid deterministic first actor)
+        envs = [HUNLEnv(starting_stack=1000, sb=5, bb=10) for _ in range(batch_size)]
         states = [env.reset() for env in envs]
         done = [False] * batch_size
         step_limits = [0] * batch_size
@@ -425,7 +364,10 @@ class SelfPlayTrainer:
 
         # Per-episode storage
         transitions_per_ep: list[list[Transition]] = [[] for _ in range(batch_size)]
+        actions_per_ep: list[list[Transition]] = [[] for _ in range(batch_size)]
         final_rewards = [0.0 for _ in range(batch_size)]
+        our_chips_committed = [0 for _ in range(batch_size)]
+        opp_chips_committed = [0 for _ in range(batch_size)]
 
         # Inference precision
         autocast_enabled = (
@@ -519,6 +461,7 @@ class SelfPlayTrainer:
                 logp = torch.log_softmax(masked_logits, dim=-1)[action_idx]
                 log_prob = float(logp.item())
                 action = bin_to_action(action_idx, s, self.num_bet_bins)
+                actions_per_ep[i].append((current_player, action))
 
                 # Env step
                 next_state, reward, is_done, _ = env.step(action)
@@ -538,17 +481,36 @@ class SelfPlayTrainer:
                         chips_placed=action.amount,
                     )
                     transitions_per_ep[i].append(transition)
+                    our_chips_committed[i] += int(action.amount)
+                else:
+                    # Track opponent chips; if opponent ends the hand, attach terminal reward
+                    opp_chips_committed[i] += int(action.amount)
+                    if is_done and transitions_per_ep[i]:
+                        pot = next_state.pot
+                        if next_state.winner is None:
+                            final_r = 0
+                        else:
+                            final_r = pot if next_state.winner == 0 else -pot
+                        transitions_per_ep[i][-1].reward += final_r
+                        transitions_per_ep[i][-1].done = True
 
                 states[i] = next_state
                 done[i] = is_done
-                if is_done:
-                    final_rewards[i] = sum(t.reward for t in transitions_per_ep[i])
 
         if was_training:
             self.model.train()
 
+        for i in range(len(transitions_per_ep)):
+            chip_sequence = [t.chips_placed for t in transitions_per_ep[i]]
+            # print(f"Episode {i} action sequence: {actions_per_ep[i]}")
+            # print(f"Episode {i} chip sequence: {chip_sequence}")
+            # print(f"Our chips committed: {our_chips_committed[i]}, Opponent chips committed: {opp_chips_committed[i]}")
         trajectories = [
-            Trajectory(transitions=transitions_per_ep[i], final_value=0.0)
+            Trajectory(
+                transitions=transitions_per_ep[i],
+                our_chips_committed=our_chips_committed[i],
+                opp_chips_committed=opp_chips_committed[i],
+            )
             for i in range(batch_size)
         ]
         return trajectories, opponents, final_rewards
@@ -822,7 +784,7 @@ class SelfPlayTrainer:
                 # No bet to call: check, bets, all-in
                 legal_mask[1] = 1.0  # check
             # Enable all configured bet/raise bins (2..6) and all-in (7)
-            for idx in range(2, min(7, self.num_bet_bins - 1) + 1):
+            for idx in range(2, self.num_bet_bins):
                 legal_mask[idx] = 1.0
             legal_mask = legal_mask.to(self.device)  # Move legal mask to device
 

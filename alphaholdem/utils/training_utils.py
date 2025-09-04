@@ -75,6 +75,33 @@ def print_training_stats(
         f"Total Time: {total_time}"
     )
 
+    # Detailed PPO metrics (if present)
+    pol = stats.get("policy_loss")
+    val = stats.get("value_loss")
+    ent = stats.get("entropy")
+    kl = stats.get("approx_kl")
+    clip = stats.get("clipfrac")
+    ev = stats.get("explained_var")
+    d2 = stats.get("delta2_mean")
+    d3 = stats.get("delta3_mean")
+    parts = []
+    if pol is not None:
+        parts.append(f"policy {pol:.4f}")
+    if val is not None:
+        parts.append(f"value {val:.4f}")
+    if ent is not None:
+        parts.append(f"entropy {ent:.4f}")
+    if kl is not None:
+        parts.append(f"kl {kl:.4f}")
+    if clip is not None:
+        parts.append(f"clip {clip:.3f}")
+    if ev is not None:
+        parts.append(f"ev {ev:.3f}")
+    if d2 is not None and d3 is not None:
+        parts.append(f"d2 {d2:.1f} d3 {d3:.1f}")
+    if parts:
+        print("  " + " | ".join(parts))
+
 
 def print_evaluation_results(eval_results: dict):
     """

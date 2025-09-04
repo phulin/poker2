@@ -26,7 +26,8 @@ class Trajectory:
     """Complete trajectory from reset to terminal."""
 
     transitions: List[Transition]
-    final_value: float  # V(s_T) for GAE
+    our_chips_committed: int = 0
+    opp_chips_committed: int = 0
 
 
 class ReplayBuffer:
@@ -97,17 +98,16 @@ def compute_delta_bounds(trajectory: Trajectory) -> tuple[float, float]:
     These bounds are used to clip the returns in the value loss function
     to reduce variance in imperfect information games.
     """
+    # Prefer trajectory-level per-player totals if available
+    delta2 = -float(trajectory.opp_chips_committed)
+    delta3 = float(trajectory.our_chips_committed)
+    if delta2 != 0.0 or delta3 != 0.0:
+        return delta2, delta3
+
     chips_placed = [t.chips_placed for t in trajectory.transitions]
     if not chips_placed:
         return 0.0, 0.0
-
-    # Calculate total chips placed by both players
     total_chips = sum(chips_placed)
-
-    # δ2: negative bound (opponent chips) - typically negative
-    # δ3: positive bound (our chips) - typically positive
-    # For simplicity, use symmetric bounds based on total chips
-    # In a more sophisticated implementation, we could track per-player chips
     delta2 = -total_chips
     delta3 = total_chips
 
