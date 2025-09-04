@@ -7,6 +7,7 @@ import random
 from line_profiler import profile
 
 from .types import Action, GameState, PlayerState
+from ..core.config_loader import get_config
 from . import rules
 
 STREETS = ("preflop", "flop", "turn", "river", "showdown")
@@ -161,12 +162,50 @@ class HUNLEnv:
         # Bet/Raise options are available if both players have chips
         can_bet_raise = me_p.stack > 0 and opp_p.stack > 0
         if can_bet_raise:
-            # Require stack above call to allow a raise when facing a bet
-            if to_call <= 0 or me_p.stack > to_call:
-                bins.extend(range(2, max(2, num_bet_bins - 1)))
+            cfg = get_config(None)
+            bet_mults = list(cfg.bet_bins)
+            total_committed = s.pot + me_p.committed + opp_p.committed
+            candidate_bins: List[int] = []
+            realized_actions: set[tuple] = set()
+            for i, mult in enumerate(bet_mults):
+                bin_idx = 2 + i
+                if bin_idx >= num_bet_bins - 1:
+                    break
+                # Compute target amount for this bin
+                base = int(total_committed * mult) if total_committed > 0 else 0
+                if to_call <= 0:
+                    amount = base
+                    kind = "bet"
+                    # Legal if amount is between 1 and stack-1 (stack goes to all-in bin)
+                    if amount <= 0 or amount >= me_p.stack:
+                        continue
+                else:
+                    amount = base + to_call
+                    kind = "raise"
+                    # Must have chips beyond call
+                    if me_p.stack <= to_call:
+                        continue
+                    # Must exceed call and satisfy min-raise unless only all-in is possible
+                    min_raise_inc = max(1, s.min_raise)
+                    if amount <= to_call:
+                        continue
+                    raise_inc = amount - to_call
+                    if raise_inc < min_raise_inc:
+                        # allow only if this bin equals all-in, otherwise skip
+                        if amount < me_p.stack:
+                            continue
+                # Do not exceed stack (those map to all-in bin)
+                if amount >= me_p.stack:
+                    continue
+                # Deduplicate bins mapping to identical concrete action
+                key = (kind, amount)
+                if key in realized_actions:
+                    continue
+                realized_actions.add(key)
+                candidate_bins.append(bin_idx)
+            bins.extend(candidate_bins)
 
-        # All-in if chips remain
-        if me_p.stack > 0:
+            # All-in if chips remain for both us and opponent
             bins.append(num_bet_bins - 1)
 
         return bins

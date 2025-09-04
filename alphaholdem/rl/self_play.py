@@ -4,6 +4,7 @@ from typing import List, Optional, Union
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 
 try:
     from line_profiler import profile
@@ -28,7 +29,7 @@ from ..rl.replay import (
     compute_gae_returns,
     prepare_ppo_batch,
 )
-from ..rl.losses import trinal_clip_ppo_loss
+from ..rl.losses import dual_clip_ppo_loss
 from ..rl.k_best_pool import KBestOpponentPool, AgentSnapshot
 from ..core.config import RootConfig
 from ..core.builders import build_components_from_config
@@ -230,9 +231,9 @@ class SelfPlayTrainer:
                     delta3=float(our_chips + action.amount),
                 )
                 transitions.append(transition)
-                cum_chips_me += action.amount
+                our_chips += action.amount
             else:
-                cum_chips_opp += action.amount
+                opp_chips += action.amount
 
                 # If the opponent's action ended the hand, record the final reward for our last transition
                 if done and transitions:
@@ -351,7 +352,7 @@ class SelfPlayTrainer:
 
                 logits, values = self.model(cards, actions_tensor)
 
-                loss_dict = trinal_clip_ppo_loss(
+                loss_dict = dual_clip_ppo_loss(
                     logits=logits,
                     values=values,
                     actions=batch["actions"].index_select(0, mb_idx),
@@ -360,9 +361,7 @@ class SelfPlayTrainer:
                     returns=batch["returns"].index_select(0, mb_idx),
                     legal_masks=batch["legal_masks"].index_select(0, mb_idx),
                     epsilon=self.epsilon,
-                    delta1=self.delta1,
-                    delta2=delta2_vec.index_select(0, mb_idx),
-                    delta3=delta3_vec.index_select(0, mb_idx),
+                    dual_clip=self.delta1,
                     value_coef=self.value_coef,
                     entropy_coef=self.entropy_coef,
                 )
@@ -382,14 +381,14 @@ class SelfPlayTrainer:
                     clipped = torch.clamp(ratio, clip_low, clip_high)
                     clipfrac = (torch.abs(clipped - ratio) > 1e-8).float().mean()
                     # Use the same target as the loss for EV: clipped returns
-                    ret_mb = batch["returns"].index_select(0, mb_idx)
-                    d2_mb = delta2_vec.index_select(0, mb_idx)
-                    d3_mb = delta3_vec.index_select(0, mb_idx)
-                    ret_clipped_mb = torch.clamp(ret_mb, d2_mb, d3_mb)
-                    # Explained variance of value predictions against clipped targets
-                    var_y = torch.var(ret_clipped_mb)
-                    var_err = torch.var(ret_clipped_mb - values.detach())
-                    explained_var = 1.0 - (var_err / (var_y + 1e-8))
+                    # # Ensure per-sample bounds are ordered to avoid clamp warnings
+                    # min_b = torch.minimum(d2_mb, d3_mb)
+                    # max_b = torch.maximum(d2_mb, d3_mb)
+                    # ret_clipped_mb = torch.clamp(ret_mb, min=min_b, max=max_b)
+                    # # Explained variance of value predictions against clipped targets
+                    # var_y = torch.var(ret_clipped_mb)
+                    # var_err = torch.var(ret_clipped_mb - values.detach())
+                    # explained_var = 1.0 - (var_err / (var_y + 1e-8))
 
                 self.optimizer.zero_grad()
                 loss_dict["total_loss"].backward()
@@ -402,7 +401,7 @@ class SelfPlayTrainer:
                 total_entropy += float(loss_dict["entropy"].item())
                 total_approx_kl += float(approx_kl.item())
                 total_clipfrac += float(clipfrac.item())
-                total_explained_var += float(explained_var.item())
+                # total_explained_var += float(explained_var.item())
                 total_minibatches += 1
 
         denom = max(1, total_minibatches)
@@ -416,7 +415,7 @@ class SelfPlayTrainer:
             "entropy": total_entropy / denom,
             "approx_kl": total_approx_kl / denom,
             "clipfrac": total_clipfrac / denom,
-            "explained_var": total_explained_var / denom,
+            # "explained_var": total_explained_var / denom,
         }
 
     def train_step(self) -> dict:
@@ -433,10 +432,11 @@ class SelfPlayTrainer:
         target_steps = self.batch_size * max(self.cfg.replay_buffer_batches, 1)
 
         # Warmup: fill buffer to target_steps
-        print(f"Warmup: filling replay buffer to {target_steps} steps...")
+        if len(self.replay_buffer.trajectories) == 0:
+            print(f"Warmup: filling replay buffer to {target_steps} steps...")
+
         i = 0
         while self.replay_buffer.num_steps() < target_steps:
-            # Collect a batch of trajectories in parallel to amortize device calls
             sampled_opponent = self.opponent_pool.sample(k=1)
             opponent = sampled_opponent[0] if sampled_opponent else None
             trajectory, reward = self.collect_trajectory(opponent)

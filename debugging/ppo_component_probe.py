@@ -48,7 +48,7 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
     traj = None
     for _ in range(max_tries):
         t, _ = trainer.collect_trajectory()
-        if len(t.transitions) > 4:
+        if len(t.transitions) > 0:
             traj = t
             break
     if traj is None:

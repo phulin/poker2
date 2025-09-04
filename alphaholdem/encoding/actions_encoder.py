@@ -45,7 +45,7 @@ class ActionsHUEncoderV1(Encoder):
                 )
 
         # Populate historical planes per round: player-specific and sum
-        if hasattr(game_state, "action_history") and game_state.action_history:
+        if game_state.action_history:
             slots = self.history_actions_per_round
             for street_i, street in enumerate(rounds):
                 events = [e for e in game_state.action_history if e[0] == street]
