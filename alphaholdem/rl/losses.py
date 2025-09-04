@@ -13,12 +13,12 @@ def trinal_clip_ppo_loss(
     advantages: torch.Tensor,
     returns: torch.Tensor,
     legal_masks: torch.Tensor,
-    epsilon: float = 0.2,
-    delta1: float = 3.0,
-    delta2: torch.Tensor | float = 0.0,
-    delta3: torch.Tensor | float = 0.0,
-    value_coef: float = 0.5,
-    entropy_coef: float = 0.01,
+    epsilon: float,
+    delta1: float,
+    delta2: torch.Tensor,
+    delta3: torch.Tensor,
+    value_coef: float,
+    entropy_coef: float,
 ) -> Dict[str, torch.Tensor]:
     """
     Trinal-Clip PPO loss with policy and value clipping.
@@ -58,40 +58,13 @@ def trinal_clip_ppo_loss(
 
     # Second clip: additional upper bound δ1 when advantage < 0
     # This is the "Trinal-Clip" part from the paper
-    negative_adv_mask = advantages < 0
-    if negative_adv_mask.any():
-        # For negative advantages, apply additional upper bound
-        second_clipped = torch.clamp(ratio, 0, delta1)
-        # Use the more restrictive of the two clips
-        final_clipped = torch.where(
-            negative_adv_mask, torch.min(first_clipped, second_clipped), first_clipped
-        )
-    else:
-        final_clipped = first_clipped
+    final_clipped = torch.clamp(ratio, first_clipped, torch.full_like(ratio, delta1))
 
     # Policy loss: min(ratio * advantages, clipped_ratio * advantages)
-    policy_loss = -torch.min(ratio * advantages, final_clipped * advantages)
+    policy_loss = -final_clipped * advantages
 
     # Value loss with clipping (as per AlphaHoldem paper)
-    # Support scalar or per-sample tensors for delta2/delta3
-    if isinstance(delta2, torch.Tensor) or isinstance(delta3, torch.Tensor):
-        # Broadcast to returns shape as needed
-        d2 = (
-            delta2
-            if isinstance(delta2, torch.Tensor)
-            else torch.full_like(returns, float(delta2))
-        )
-        d3 = (
-            delta3
-            if isinstance(delta3, torch.Tensor)
-            else torch.full_like(returns, float(delta3))
-        )
-        clipped_returns = torch.clamp(returns, d2, d3)
-    elif delta2 != 0.0 or delta3 != 0.0:
-        # Apply clipping bounds to returns
-        clipped_returns = torch.clamp(returns, delta2, delta3)
-    else:
-        clipped_returns = returns
+    clipped_returns = torch.clamp(returns, delta2, delta3)
 
     value_loss = F.mse_loss(values, clipped_returns)
 

@@ -6,6 +6,7 @@ Trains the model for 50 steps, then runs through a complete poker hand
 showing value and policy calculations at each decision point.
 """
 
+import argparse
 import sys
 import os
 
@@ -18,6 +19,7 @@ from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.encoding.cards_encoder import CardsPlanesV1
 from alphaholdem.encoding.actions_encoder import ActionsHUEncoderV1
 from alphaholdem.env import rules
+from alphaholdem.encoding.action_mapping import get_legal_mask, bin_to_action
 
 
 def card_number_to_name(card_num):
@@ -41,7 +43,7 @@ def train_model(trainer, num_steps=50):
     print(f"Training model for {num_steps} steps...")
 
     for step in range(num_steps):
-        stats = trainer.train_step(num_trajectories=4)
+        stats = trainer.train_step()
         if step % 10 == 0:
             print(
                 f"Step {step:2d}: Reward: {stats['avg_reward']:6.2f}, "
@@ -56,24 +58,10 @@ def load_checkpoint(trainer, checkpoint_path="checkpoints/final_checkpoint.pt"):
     print(f"Loading model from {checkpoint_path}...")
 
     if os.path.exists(checkpoint_path):
-        # Map to trainer device (e.g., MPS on Apple, else CPU)
-        device = trainer.device if hasattr(trainer, "device") else torch.device("cpu")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-
-        # Load model and optimizer
-        trainer.model.load_state_dict(checkpoint["model_state_dict"])
-        trainer.model.to(device)
-        trainer.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-        # Ensure optimizer state tensors are on the correct device
-        for state in trainer.optimizer.state.values():
-            for k, v in state.items():
-                if torch.is_tensor(v):
-                    state[k] = v.to(device)
-
+        step = trainer.load_checkpoint(checkpoint_path)
         print(f"Model loaded successfully!")
-        print(f"  Training step: {checkpoint.get('step', 'Unknown')}")
-        print(f"  Episode count: {checkpoint.get('episode_count', 'Unknown')}")
+        print(f"  Training step: {step}")
+        print(f"  Episode count: {trainer.episode_count}")
     else:
         print(f"Warning: Checkpoint file {checkpoint_path} not found!")
         print("Training model from scratch...")
@@ -88,10 +76,11 @@ def analyze_hand(trainer):
 
     # Create a fresh environment for analysis
     env = HUNLEnv(
-        starting_stack=400, sb=1, bb=2, seed=123
-    )  # Different seed for variety
-    cards_encoder = CardsPlanesV1()
-    actions_encoder = ActionsHUEncoderV1()
+        starting_stack=trainer.cfg.stack, sb=trainer.cfg.sb, bb=trainer.cfg.bb, seed=123
+    )
+    # Use trainer's encoders to respect config (e.g., bet_bins)
+    cards_encoder = trainer.cards_encoder
+    actions_encoder = trainer.actions_encoder
     # Ensure model is on the trainer's device
     device = trainer.device if hasattr(trainer, "device") else torch.device("cpu")
     trainer.model.to(device)
@@ -115,24 +104,26 @@ def analyze_hand(trainer):
         print(f"--- Step {step_count} ---")
 
         # Encode current state
+        num_bet_bins = trainer.num_bet_bins
         cards_tensor = cards_encoder.encode_cards(state, seat=state.to_act)
         actions_tensor = actions_encoder.encode_actions(
-            state, seat=state.to_act, num_bet_bins=8
+            state, seat=state.to_act, num_bet_bins=num_bet_bins
         )
         # Move inputs to model device
         cards_tensor = cards_tensor.to(device)
         actions_tensor = actions_tensor.to(device)
 
-        # Get legal actions and convert to indices
-        legal_actions = env.legal_actions()
-        legal_mask = torch.zeros(9)
-        for action in legal_actions:
-            bin_idx = actions_encoder._action_to_bin(action, state, 9)
-            if bin_idx is not None:
-                legal_mask[bin_idx] = 1.0
+        # Legal mask aligned with training/inference
+        legal_mask = get_legal_mask(state, num_bet_bins).cpu()
 
         print(f"Player {state.to_act} to act")
-        print(f"Legal actions: {legal_actions}")
+        # Build names from config bet_bins (needed now to print legal actions)
+        bin_labels = [f"bet/raise {m:g}x total" for m in trainer.cfg.bet_bins]
+        action_names = ["fold", "check/call", *bin_labels, "all-in"]
+        legal_idxs = [i for i in range(num_bet_bins) if legal_mask[i] == 1]
+        print(
+            f"Legal actions: {[action_names[i] if i < len(action_names) else i for i in legal_idxs]}"
+        )
         print(f"Current pot: {state.pot}")
         print(f"Player {state.to_act} stack: {state.players[state.to_act].stack}")
 
@@ -142,9 +133,13 @@ def analyze_hand(trainer):
 
         # Model forward pass
         with torch.no_grad():
+            was_training = trainer.model.training
+            trainer.model.eval()
             logits, value = trainer.model(
                 cards_tensor.unsqueeze(0), actions_tensor.unsqueeze(0)
             )
+            if was_training:
+                trainer.model.train()
             # Bring outputs to CPU for analysis and masking with CPU tensors
             logits = logits.squeeze(0).detach().cpu()
             value = value.squeeze(0).detach().cpu()
@@ -162,16 +157,6 @@ def analyze_hand(trainer):
         print(f"  Value interpretation: {value.item():.2f} chips expected")
 
         print(f"\nPolicy (action probabilities):")
-        action_names = [
-            "fold",
-            "check/call",
-            "bet 1/2",
-            "bet 3/4",
-            "bet pot",
-            "bet 1.5x",
-            "bet 2x",
-            "all-in",
-        ]
 
         for i, (name, prob) in enumerate(zip(action_names, probs)):
             if legal_mask[i] == 1:
@@ -181,7 +166,11 @@ def analyze_hand(trainer):
 
         # Find best action
         best_action = torch.argmax(masked_logits).item()
-        best_action_name = action_names[best_action]
+        best_action_name = (
+            action_names[best_action]
+            if best_action < len(action_names)
+            else str(best_action)
+        )
         best_prob = probs[best_action].item()
 
         print(f"\nBest action: {best_action_name} (prob: {best_prob:.3f})")
@@ -190,15 +179,9 @@ def analyze_hand(trainer):
         )
 
         # Take the best action
-        print(f"Taking action: {best_action}")
-        # Convert index back to Action object
-        best_action_obj = legal_actions[0]  # Default to first legal action
-        for action in legal_actions:
-            bin_idx = actions_encoder._action_to_bin(action, state, 9)
-            if bin_idx == best_action:
-                best_action_obj = action
-                break
-
+        print(f"Taking action index: {best_action}")
+        # Convert index back to Action object using same mapping as training
+        best_action_obj = bin_to_action(best_action, state, num_bet_bins)
         state, reward, done, _ = env.step(best_action_obj)
 
         if done:
@@ -218,7 +201,17 @@ def analyze_hand(trainer):
 
 
 def main():
-    """Main function."""
+    parser = argparse.ArgumentParser(
+        description="Analyze a poker hand using a trained model checkpoint."
+    )
+    parser.add_argument(
+        "checkpoint",
+        nargs="?",
+        default=None,
+        help="Path to model checkpoint (optional, will use default if not provided)",
+    )
+    args = parser.parse_args()
+
     print("=== Hand Analysis Script ===")
     print("This script will:")
     print("1. Load a trained model from checkpoint")
@@ -230,7 +223,7 @@ def main():
     trainer = SelfPlayTrainer()
 
     # Load trained model from checkpoint
-    load_checkpoint(trainer)
+    load_checkpoint(trainer, args.checkpoint)
 
     # Analyze a hand
     analyze_hand(trainer)

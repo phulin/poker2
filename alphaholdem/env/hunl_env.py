@@ -387,7 +387,7 @@ class HUNLEnv:
         # For simplicity, assign whole pot to winner or split evenly on tie
         if s.winner is None:
             return 0
-        return s.pot if s.winner == perspective else -s.pot
+        return s.players[perspective].stack - self.starting_stack
 
     def _require_state(self) -> GameState:
         if self.state is None:

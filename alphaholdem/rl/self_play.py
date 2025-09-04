@@ -98,7 +98,7 @@ class SelfPlayTrainer:
 
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights
-        self.replay_buffer = ReplayBuffer(capacity=1000)
+        self.replay_buffer = ReplayBuffer(capacity=self.batch_size)
 
         # K-Best opponent pool
         self.opponent_pool = KBestOpponentPool(
@@ -151,6 +151,7 @@ class SelfPlayTrainer:
         max_steps = 50  # Safety limit to prevent infinite loops
 
         step_count = 0
+        final_reward_from_our_perspective = 0.0
         while not state.terminal and step_count < max_steps:
             step_count += 1
 
@@ -180,7 +181,7 @@ class SelfPlayTrainer:
                         dtype=dtype,
                     )
                     if autocast_enabled
-                    else torch.amp.autocast(enabled=False)
+                    else torch.amp.autocast("cpu", enabled=False)
                 )
                 with cm:
                     if opponent_snapshot is not None and current_player != 0:
@@ -224,6 +225,12 @@ class SelfPlayTrainer:
             else:
                 opp_chips += action.amount
 
+            # Track final reward from our perspective if episode ends
+            if done:
+                final_reward_from_our_perspective = (
+                    float(reward) if current_player == 0 else float(-reward)
+                )
+
             state = next_state
 
         if step_count >= max_steps:
@@ -234,12 +241,16 @@ class SelfPlayTrainer:
             if transitions:
                 transitions[-1].reward = 0.0
                 transitions[-1].done = True
+            final_reward_from_our_perspective = 0.0
 
-        return Trajectory(
-            transitions=transitions,
-            our_chips_committed=our_chips,
-            opp_chips_committed=opp_chips,
-        ), (reward if current_player == 0 else -reward)
+        return (
+            Trajectory(
+                transitions=transitions,
+                our_chips_committed=our_chips,
+                opp_chips_committed=opp_chips,
+            ),
+            final_reward_from_our_perspective,
+        )
 
     # def update_model(self) -> dict:
     #     with profile(record_shapes=True) as prof:
@@ -355,10 +366,14 @@ class SelfPlayTrainer:
                     clip_low, clip_high = 1.0 - self.epsilon, 1.0 + self.epsilon
                     clipped = torch.clamp(ratio, clip_low, clip_high)
                     clipfrac = (torch.abs(clipped - ratio) > 1e-8).float().mean()
+                    # Use the same target as the loss for EV: clipped returns
                     ret_mb = batch["returns"].index_select(0, mb_idx)
-                    # Explained variance of value predictions
-                    var_y = torch.var(ret_mb)
-                    var_err = torch.var(ret_mb - values.detach())
+                    d2_mb = delta2_vec.index_select(0, mb_idx)
+                    d3_mb = delta3_vec.index_select(0, mb_idx)
+                    ret_clipped_mb = torch.clamp(ret_mb, d2_mb, d3_mb)
+                    # Explained variance of value predictions against clipped targets
+                    var_y = torch.var(ret_clipped_mb)
+                    var_err = torch.var(ret_clipped_mb - values.detach())
                     explained_var = 1.0 - (var_err / (var_y + 1e-8))
 
                 self.optimizer.zero_grad()
@@ -401,11 +416,16 @@ class SelfPlayTrainer:
         """
         # Collect fresh rollouts until we have at least batch_size steps
         # (timesteps from our player). Use small batches of trajectories per loop.
+        i = 0
         while self.replay_buffer.num_steps() < self.batch_size:
             # Collect a batch of trajectories in parallel to amortize device calls
             sampled_opponent = self.opponent_pool.sample(k=1)
             opponent = sampled_opponent[0] if sampled_opponent else None
             trajectory, reward = self.collect_trajectory(opponent)
+            if len(trajectory.transitions) == 0:
+                # opponent went first and folded. no decisions to train on. skip
+                continue
+            i += 1
             self.replay_buffer.add_trajectory(trajectory)
             self.episode_count += 1
             self.total_reward += reward
@@ -436,184 +456,6 @@ class SelfPlayTrainer:
             "pool_stats": self.opponent_pool.get_pool_stats(),
             **update_stats,
         }
-
-    def collect_trajectories_batch(
-        self, batch_size: int
-    ) -> tuple[list[Trajectory], list[AgentSnapshot | None], list[float]]:
-        """Collect multiple trajectories in parallel with batched model inference.
-
-        Returns (trajectories, opponents_used, final_rewards)
-        """
-        # Create independent envs for parallel collection (randomized seeds to avoid deterministic first actor)
-        envs = [
-            HUNLEnv(starting_stack=self.cfg.stack, sb=self.cfg.sb, bb=self.cfg.bb)
-            for _ in range(batch_size)
-        ]
-        states = [env.reset() for env in envs]
-        done = [False] * batch_size
-        step_limits = [0] * batch_size
-        max_steps = 50
-
-        # Sample opponents once (may be fewer than batch_size)
-        opponents = self.opponent_pool.sample(k=batch_size)
-        opponents = opponents + [None] * (batch_size - len(opponents))
-
-        # Per-episode storage
-        transitions_per_ep: list[list[Transition]] = [[] for _ in range(batch_size)]
-        actions_per_ep: list[list[Transition]] = [[] for _ in range(batch_size)]
-        final_rewards = [0.0 for _ in range(batch_size)]
-        our_chips_committed = [0 for _ in range(batch_size)]
-        opp_chips_committed = [0 for _ in range(batch_size)]
-
-        # Inference precision
-        autocast_enabled = (
-            torch.cuda.is_available() or torch.backends.mps.is_available()
-        )
-        device_type = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = (
-            torch.float16
-            if torch.cuda.is_available()
-            else (torch.bfloat16 if torch.backends.mps.is_available() else None)
-        )
-
-        was_training = self.model.training
-        self.model.eval()
-
-        while not all(done) and max(step_limits) < max_steps:
-            active_indices: list[int] = []
-            batch_cards: list[torch.Tensor] = []
-            batch_actions: list[torch.Tensor] = []
-            legal_masks: list[torch.Tensor] = []
-
-            # Build batch for active envs
-            for i, (env, s) in enumerate(zip(envs, states)):
-                if done[i] or s.terminal:
-                    done[i] = True
-                    continue
-                step_limits[i] += 1
-                active_indices.append(i)
-
-                current_player = s.to_act
-                cards = self.cards_encoder.encode_cards(
-                    s, seat=current_player, device=self.device
-                )
-                actions_tensor = self.actions_encoder.encode_actions(
-                    s,
-                    seat=current_player,
-                    num_bet_bins=self.num_bet_bins,
-                    device=self.device,
-                )
-                batch_cards.append(cards.unsqueeze(0))
-                batch_actions.append(actions_tensor.unsqueeze(0))
-                legal_masks.append(
-                    get_legal_mask(s, self.num_bet_bins, device=self.device)
-                )
-
-            if not active_indices:
-                break
-
-            cards_batch = torch.cat(batch_cards, dim=0)
-            actions_batch = torch.cat(batch_actions, dim=0)
-
-            with torch.no_grad():
-                cm = (
-                    torch.autocast(device_type=device_type, dtype=dtype)
-                    if autocast_enabled
-                    else torch.cpu.amp.autocast(enabled=False)
-                )
-                with cm:
-                    logits_batch, values_batch = self.model(cards_batch, actions_batch)
-
-            # Step each active env
-            for j, i in enumerate(active_indices):
-                s = states[i]
-                env = envs[i]
-                current_player = s.to_act
-
-                # If it's opponent's turn and we have a snapshot, use opponent's model for logits; else our model
-                if current_player != 0 and opponents[i] is not None:
-                    with torch.no_grad():
-                        cm2 = (
-                            torch.autocast(device_type=device_type, dtype=dtype)
-                            if autocast_enabled
-                            else torch.cpu.amp.autocast(enabled=False)
-                        )
-                        with cm2:
-                            opp_logits, _ = opponents[i].model(
-                                cards_batch[j].unsqueeze(0),
-                                actions_batch[j].unsqueeze(0),
-                            )
-                    logits = opp_logits.squeeze(0)
-                else:
-                    logits = logits_batch[j]
-                legal_mask = legal_masks[j]
-
-                # On-device fast sampling: log_softmax -> exp -> multinomial
-                masked_logits = logits.clone()
-                masked_logits[legal_mask == 0] = float("-inf")
-                log_probs_vec = torch.log_softmax(masked_logits.float(), dim=-1)
-                probs_vec = log_probs_vec.exp()
-                a = torch.multinomial(probs_vec, num_samples=1)
-                action_idx = int(a.item())
-                log_prob = float(log_probs_vec[action_idx].item())
-                action = bin_to_action(action_idx, s, self.num_bet_bins)
-                actions_per_ep[i].append((current_player, action))
-
-                # Env step
-                next_state, reward, is_done, _ = env.step(action)
-
-                # Record our player's transition
-                if current_player == 0:
-                    transition = Transition(
-                        observation=torch.cat(
-                            [cards_batch[j].flatten(), actions_batch[j].flatten()]
-                        ),
-                        action=action_idx,
-                        log_prob=log_prob,
-                        value=float(values_batch[j].item()),
-                        reward=reward,
-                        done=is_done,
-                        legal_mask=legal_mask,
-                        chips_placed=action.amount,
-                    )
-                    transitions_per_ep[i].append(transition)
-                    our_chips_committed[i] += int(action.amount)
-                    if is_done:
-                        final_rewards[i] = reward
-                else:
-                    # Track opponent chips; if opponent ends the hand, attach terminal reward
-                    opp_chips_committed[i] += int(action.amount)
-                    if is_done:
-                        final_rewards[i] = -reward
-                    if is_done and transitions_per_ep[i]:
-                        pot = next_state.pot
-                        if next_state.winner is None:
-                            final_r = 0
-                        else:
-                            final_r = pot if next_state.winner == 0 else -pot
-                        transitions_per_ep[i][-1].reward += final_r
-                        transitions_per_ep[i][-1].done = True
-
-                states[i] = next_state
-                done[i] = is_done
-
-        if was_training:
-            self.model.train()
-
-        for i in range(len(transitions_per_ep)):
-            chip_sequence = [t.chips_placed for t in transitions_per_ep[i]]
-            # print(f"Episode {i} action sequence: {actions_per_ep[i]}")
-            # print(f"Episode {i} chip sequence: {chip_sequence}")
-            # print(f"Our chips committed: {our_chips_committed[i]}, Opponent chips committed: {opp_chips_committed[i]}")
-        trajectories = [
-            Trajectory(
-                transitions=transitions_per_ep[i],
-                our_chips_committed=our_chips_committed[i],
-                opp_chips_committed=opp_chips_committed[i],
-            )
-            for i in range(batch_size)
-        ]
-        return trajectories, opponents, final_rewards
 
     def save_checkpoint(self, path: str, step: int) -> None:
         """Save model checkpoint and opponent pool."""
@@ -748,8 +590,7 @@ class SelfPlayTrainer:
         for i, opponent in enumerate(self.opponent_pool.snapshots):
             wins = 0
             for _ in range(num_games):
-                trajectory = self.collect_trajectory(opponent_snapshot=opponent)
-                final_reward = sum(t.reward for t in trajectory.transitions)
+                _, final_reward = self.collect_trajectory(opponent_snapshot=opponent)
                 if final_reward > 0:
                     wins += 1
 
@@ -934,53 +775,3 @@ class SelfPlayTrainer:
         suit = card_str[1]
 
         return rank_map[rank] * 4 + suit_map[suit]
-
-    def diagnose_model_health(self) -> dict:
-        """Diagnose potential issues with the model and training setup."""
-        diagnostics = {}
-
-        # Check model parameters
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(
-            p.numel() for p in self.model.parameters() if p.requires_grad
-        )
-        diagnostics["total_params"] = total_params
-        diagnostics["trainable_params"] = trainable_params
-
-        # Check parameter norms
-        param_norms = []
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                norm = torch.norm(param).item()
-                param_norms.append((name, norm))
-        diagnostics["param_norms"] = param_norms
-
-        # Check if parameters are all zero or NaN
-        has_nan = any(torch.isnan(param).any() for param in self.model.parameters())
-        has_inf = any(torch.isinf(param).any() for param in self.model.parameters())
-        diagnostics["has_nan"] = has_nan
-        diagnostics["has_inf"] = has_inf
-
-        # Test forward pass with dummy data
-        dummy_cards = torch.randn(1, 6, 4, 13)
-        dummy_actions = torch.randn(1, 24, 4, self.num_bet_bins)
-
-        with torch.no_grad():
-            logits, values = self.model(dummy_cards, dummy_actions)
-            diagnostics["logits_shape"] = list(logits.shape)
-            diagnostics["values_shape"] = list(values.shape)
-            diagnostics["logits_norm"] = torch.norm(logits).item()
-            diagnostics["values_norm"] = torch.norm(values).item()
-            diagnostics["logits_has_nan"] = torch.isnan(logits).any().item()
-            diagnostics["values_has_nan"] = torch.isnan(values).any().item()
-
-        # Check optimizer state
-        diagnostics["optimizer_lr"] = self.optimizer.param_groups[0]["lr"]
-        diagnostics["optimizer_momentum"] = self.optimizer.param_groups[0].get(
-            "betas", (0.9, 0.999)
-        )
-
-        # Check replay buffer
-        diagnostics["replay_buffer_size"] = len(self.replay_buffer.trajectories)
-
-        return diagnostics
