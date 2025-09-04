@@ -31,12 +31,12 @@ ppo_delta1: 3.0
 gae_lambda: 0.95
 gamma: 0.999
 entropy_coef: 0.05
-value_coef: 1e-8
+value_coef: 1e-6
 grad_clip: 1.0
 seed: 0
 
 # Training scale knobs
-learning_rate: 3e-4
+learning_rate: 1e-4
 batch_size: 1024
 mini_batch_size: 1024
 num_epochs: 1

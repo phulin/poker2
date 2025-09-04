@@ -157,6 +157,7 @@ class SelfPlayTrainer:
 
         step_count = 0
         final_reward_from_our_perspective = 0.0
+
         while not state.terminal and step_count < max_steps:
             step_count += 1
 
@@ -224,11 +225,14 @@ class SelfPlayTrainer:
                     done=done,
                     legal_mask=legal_mask,
                     chips_placed=action.amount,
+                    # Per-sample clipping bounds: δ2 = -opp_cum, δ3 = our_cum
+                    delta2=float(-opp_chips),
+                    delta3=float(our_chips + action.amount),
                 )
                 transitions.append(transition)
-                our_chips += action.amount
+                cum_chips_me += action.amount
             else:
-                opp_chips += action.amount
+                cum_chips_opp += action.amount
 
                 # If the opponent's action ended the hand, record the final reward for our last transition
                 if done and transitions:
@@ -426,11 +430,10 @@ class SelfPlayTrainer:
             Dictionary with training statistics
         """
         # Target total steps in replay buffer
-        target_steps = self.batch_size * max(
-            1, int(getattr(self.cfg, "replay_buffer_batches", 1))
-        )
+        target_steps = self.batch_size * max(self.cfg.replay_buffer_batches, 1)
 
         # Warmup: fill buffer to target_steps
+        print(f"Warmup: filling replay buffer to {target_steps} steps...")
         i = 0
         while self.replay_buffer.num_steps() < target_steps:
             # Collect a batch of trajectories in parallel to amortize device calls

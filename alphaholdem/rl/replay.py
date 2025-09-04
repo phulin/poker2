@@ -16,6 +16,9 @@ class Transition:
     done: bool
     legal_mask: torch.Tensor  # legal action mask
     chips_placed: int  # for δ2/δ3 computation
+    # Per-sample clipping bounds
+    delta2: float = 0.0
+    delta3: float = 0.0
     value: float = 0.0  # V(s_t) computed at action time
     advantage: float = 0.0  # GAE advantage (computed later)
     return_: float = 0.0  # GAE return (computed later)
@@ -132,8 +135,6 @@ def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
     delta3_list: List[float] = []
 
     for trajectory in trajectories:
-        # Per-trajectory clipping bounds
-        d2, d3 = compute_delta_bounds(trajectory)
         for transition in trajectory.transitions:
             observations.append(transition.observation)
             actions.append(transition.action)
@@ -141,8 +142,8 @@ def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
             advantages.append(transition.advantage)
             returns.append(transition.return_)
             legal_masks.append(transition.legal_mask)
-            delta2_list.append(d2)
-            delta3_list.append(d3)
+            delta2_list.append(transition.delta2)
+            delta3_list.append(transition.delta3)
 
     return {
         "observations": torch.stack(observations),
