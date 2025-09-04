@@ -11,11 +11,12 @@ def build_components_from_config(cfg: RootConfig) -> Tuple[Any, Any, Any, Any]:
     """
     Build (card_encoder, action_encoder, model, policy) from a RootConfig.
     """
+    # Inject the config into encoders so they can access bet_bins and other settings
     card_encoder = registry.build_card_encoder(
-        cfg.card_encoder.name, **cfg.card_encoder.kwargs
+        cfg.card_encoder.name, config=cfg, **cfg.card_encoder.kwargs
     )
     action_encoder = registry.build_action_encoder(
-        cfg.action_encoder.name, **cfg.action_encoder.kwargs
+        cfg.action_encoder.name, config=cfg, **cfg.action_encoder.kwargs
     )
 
     model = registry.build_model(cfg.model.name, **cfg.model.kwargs)

@@ -169,7 +169,6 @@ class HUNLEnv:
 
         return bins
 
-    @profile
     def step(self, action: Action) -> Tuple[GameState, int, bool, Dict[str, Any]]:
         s = self._require_state()
         if s.terminal:

@@ -7,12 +7,18 @@ from ..core.interfaces import Encoder
 from ..core.registry import register_action_encoder
 from ..env.types import GameState, Action
 from ..encoding.action_mapping import _action_to_bin_idx
+from ..core.config import RootConfig
+from ..core.config_loader import get_config
 
 
 @register_action_encoder("actions_hu_v1")
 class ActionsHUEncoderV1(Encoder):
-    def __init__(self, history_actions_per_round: int = 6):
+    def __init__(
+        self, history_actions_per_round: int = 6, config: RootConfig | None = None
+    ):
         self.history_actions_per_round = history_actions_per_round
+        # Allow explicit config injection; default to global config
+        self.cfg: RootConfig = config if config is not None else get_config(None)
 
     def encode_cards(
         self, game_state: Any, seat: int, device: Optional[torch.device] = None
@@ -26,6 +32,10 @@ class ActionsHUEncoderV1(Encoder):
         num_bet_bins: int,
         device: Optional[torch.device] = None,
     ) -> Any:
+        # Derive num_bet_bins from config if caller passes a mismatched size
+        cfg_bins = len(self.cfg.bet_bins) + 3
+        if num_bet_bins != cfg_bins:
+            num_bet_bins = cfg_bins
         rounds = ["preflop", "flop", "turn", "river"]
         channels: List[torch.Tensor] = []
         for _ in rounds:
@@ -81,59 +91,48 @@ class ActionsHUEncoderV1(Encoder):
         """Generate legal action mask for current state."""
         mask = torch.zeros(num_bet_bins, dtype=torch.float32, device=device)
         if hasattr(game_state, "env") and game_state.env is not None:
-            legal_actions = game_state.env.legal_actions()
-            for action in legal_actions:
-                bin_idx = self._action_to_bin(action, game_state, num_bet_bins)
-                if bin_idx is not None:
-                    mask[bin_idx] = 1.0
-        else:
-            # Fallback when no env is attached (e.g., in unit tests): allow basic options
-            # fold (0), check/call (1), pot-sized (4) if available, and all-in (last bin)
-            mask[0] = 1.0
-            mask[1] = 1.0
-            if num_bet_bins > 4:
-                mask[4] = 1.0
-            mask[num_bet_bins - 1] = 1.0
+            # Prefer env-provided legal bins for consistency and speed
+            legal_bins = game_state.env.legal_action_bins(num_bet_bins)
+            if len(legal_bins) > 0:
+                mask[legal_bins] = 1.0
+            return mask
+        # Fallback when no env is attached (e.g., unit tests)
+        mask[1] = 1.0  # check/call
+        mask[num_bet_bins - 1] = 1.0  # all-in
         return mask
 
     def _action_to_bin(
         self, action: Action, game_state: GameState, num_bet_bins: int
     ) -> int | None:
-        """Map Action to discrete bin index."""
+        """Map Action to discrete bin index using total_committed and config bet_bins."""
         if action.kind == "fold":
             return 0
-        elif action.kind == "check":
+        elif action.kind in ("check", "call"):
             return 1
-        elif action.kind == "call":
-            return 1  # check/call share bin
-        elif action.kind == "bet":
-            # Map bet amount to pot fraction
-            pot = game_state.pot
-            if pot == 0:
-                return 1  # check
-            fraction = action.amount / pot
-            if fraction <= 0.6:
-                return 2  # 1/2 pot
-            elif fraction <= 0.8:
-                return 3  # 3/4 pot
-            elif fraction <= 1.2:
-                return 4  # pot
-            elif fraction <= 1.8:
-                return 5  # 1.5x pot
-            else:
-                return 6  # 2x pot
-        elif action.kind == "raise":
-            # Similar mapping for raises
-            pot = game_state.pot
-            if pot == 0:
-                return 4  # pot-sized
-            fraction = action.amount / pot
-            if fraction <= 1.2:
-                return 4  # pot
-            elif fraction <= 1.8:
-                return 5  # 1.5x pot
-            else:
-                return 6  # 2x pot
         elif action.kind == "allin":
-            return 7  # all-in
-        return None
+            return num_bet_bins - 1
+
+        total_committed = (
+            game_state.pot
+            + game_state.players[0].committed
+            + game_state.players[1].committed
+        )
+        if total_committed == 0:
+            return 1
+
+        if action.kind == "bet":
+            fraction = action.amount / total_committed
+        elif action.kind == "raise":
+            me = game_state.to_act
+            opp = 1 - me
+            to_call = (
+                game_state.players[opp].committed - game_state.players[me].committed
+            )
+            raise_part = max(0, action.amount - max(0, to_call))
+            fraction = raise_part / total_committed if total_committed > 0 else 0.0
+        else:
+            return None
+
+        bins = list(self.cfg.bet_bins)
+        nearest = min(range(len(bins)), key=lambda i: abs(fraction - bins[i]))
+        return 2 + nearest

@@ -9,38 +9,57 @@ from typing import Optional
 
 
 def bin_to_action(bin_idx: int, game_state: GameState, num_bet_bins: int) -> Action:
-    """Convert discrete bin index to concrete Action with snapping."""
-    legal_actions = game_state.env.legal_actions() if hasattr(game_state, "env") else []
+    """Convert discrete bin index to concrete Action with direct legality clamping.
+
+    Avoids constructing full legal action lists. We compute the target action
+    and clamp amounts to be executable by env.step given current to_call/stack.
+    """
+    me = game_state.to_act
+    opp = 1 - me
+    me_p = game_state.players[me]
+    opp_p = game_state.players[opp]
+    to_call = max(0, opp_p.committed - me_p.committed)
+    stack = me_p.stack
 
     # Direct mapping for special actions
-    if bin_idx == 0:  # fold
+    if (
+        bin_idx == 0
+    ):  # fold (only meaningful when to_call>0; env will accept regardless)
         return Action("fold")
 
-    # For betting actions, find closest legal match
-    target_action = _bin_to_target_action(bin_idx, game_state, num_bet_bins)
+    # Check/Call
+    if bin_idx == 1:
+        if to_call > 0:
+            return Action("call", amount=min(to_call, stack))
+        else:
+            return Action("check")
 
-    # Find closest legal action
-    best_action = None
-    best_distance = float("inf")
+    # All-in
+    if bin_idx == (num_bet_bins - 1):
+        return Action("allin", amount=stack)
 
-    for legal in legal_actions:
-        if legal.kind == target_action.kind:
-            if legal.kind in ["check", "call"]:
-                return legal  # exact match
-            else:
-                # For bet/raise/allin, find closest amount
-                dist = abs(legal.amount - target_action.amount)
-                if dist < best_distance:
-                    best_distance = dist
-                    best_action = legal
-
-    # Fallback: return first legal action that's not fold
-    for legal in legal_actions:
-        if legal.kind != "fold":
-            return legal
-
-    # Last resort: fold
-    return Action("fold")
+    # Bet/Raise bins -> compute target and clamp
+    target = _bin_to_target_action(bin_idx, game_state, num_bet_bins)
+    if target.kind == "bet":
+        # Valid when no bet to call and stack > 0
+        if stack <= 0:
+            return Action("check")
+        amt = max(1, min(target.amount, stack))
+        return Action("bet", amount=int(amt))
+    elif target.kind == "raise":
+        # Need stack > to_call to raise; otherwise call or all-in handled above
+        if stack <= to_call:
+            # Cannot raise; fallback to call
+            return Action("call", amount=min(to_call, stack))
+        # Ensure strictly greater than to_call and within stack
+        min_raise_total = to_call + 1
+        amt = max(min_raise_total, min(target.amount, stack))
+        return Action("raise", amount=int(amt))
+    else:
+        # Fallbacks already handled; default to check/call behavior
+        if to_call > 0:
+            return Action("call", amount=min(to_call, stack))
+        return Action("check")
 
 
 def _bin_to_target_action(

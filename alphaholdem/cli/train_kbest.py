@@ -37,7 +37,6 @@ def train_kbest(
 
     Args:
         num_steps: Number of training steps
-        trajectories_per_step: Number of trajectories to collect per step
         k_best_pool_size: Size of K-Best opponent pool
         min_elo_diff: Minimum ELO difference for pool updates
         checkpoint_interval: How often to save checkpoints

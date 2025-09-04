@@ -53,23 +53,23 @@ class SelfPlayTrainer:
         device: torch.device = None,
         config: Union[RootConfig, str, None] = None,
     ):
-        cfg = get_config(config) if config is not None else get_config(None)
+        self.cfg = get_config(config) if config is not None else get_config(None)
 
         # Use provided args if not None, else use config defaults
-        self.batch_size = batch_size if batch_size is not None else cfg.batch_size
+        self.batch_size = batch_size if batch_size is not None else self.cfg.batch_size
         self.mini_batch_size = (
-            mini_batch_size if mini_batch_size is not None else cfg.mini_batch_size
+            mini_batch_size if mini_batch_size is not None else self.cfg.mini_batch_size
         )
-        self.num_epochs = num_epochs if num_epochs is not None else cfg.num_epochs
-        self.gamma = gamma if gamma is not None else cfg.gamma
-        self.gae_lambda = gae_lambda if gae_lambda is not None else cfg.gae_lambda
-        self.epsilon = epsilon if epsilon is not None else cfg.ppo_eps
-        self.delta1 = delta1 if delta1 is not None else cfg.ppo_delta1
-        self.value_coef = value_coef if value_coef is not None else cfg.value_coef
+        self.num_epochs = num_epochs if num_epochs is not None else self.cfg.num_epochs
+        self.gamma = gamma if gamma is not None else self.cfg.gamma
+        self.gae_lambda = gae_lambda if gae_lambda is not None else self.cfg.gae_lambda
+        self.epsilon = epsilon if epsilon is not None else self.cfg.ppo_eps
+        self.delta1 = delta1 if delta1 is not None else self.cfg.ppo_delta1
+        self.value_coef = value_coef if value_coef is not None else self.cfg.value_coef
         self.entropy_coef = (
-            entropy_coef if entropy_coef is not None else cfg.entropy_coef
+            entropy_coef if entropy_coef is not None else self.cfg.entropy_coef
         )
-        self.grad_clip = grad_clip if grad_clip is not None else cfg.grad_clip
+        self.grad_clip = grad_clip if grad_clip is not None else self.cfg.grad_clip
 
         # Set device
         self.device = (
@@ -82,7 +82,7 @@ class SelfPlayTrainer:
         self.env = HUNLEnv(starting_stack=1000, sb=5, bb=10)
 
         # Config-driven components
-        ce, ae, model, policy = build_components_from_config(cfg)
+        ce, ae, model, policy = build_components_from_config(self.cfg)
         self.cards_encoder = ce
         self.actions_encoder = ae
         self.model = model
@@ -94,7 +94,7 @@ class SelfPlayTrainer:
         ):
             self.num_bet_bins = int(self.model.policy_head.out_features)
         else:
-            self.num_bet_bins = len(cfg.bet_bins) + 3
+            self.num_bet_bins = len(self.cfg.bet_bins) + 3
 
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights
@@ -106,7 +106,7 @@ class SelfPlayTrainer:
         )
 
         # Optimizer
-        lr = learning_rate if learning_rate is not None else cfg.learning_rate
+        lr = learning_rate if learning_rate is not None else self.cfg.learning_rate
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
 
         # Training stats
@@ -445,7 +445,10 @@ class SelfPlayTrainer:
         Returns (trajectories, opponents_used, final_rewards)
         """
         # Create independent envs for parallel collection (randomized seeds to avoid deterministic first actor)
-        envs = [HUNLEnv(starting_stack=1000, sb=5, bb=10) for _ in range(batch_size)]
+        envs = [
+            HUNLEnv(starting_stack=self.cfg.stack, sb=self.cfg.sb, bb=self.cfg.bb)
+            for _ in range(batch_size)
+        ]
         states = [env.reset() for env in envs]
         done = [False] * batch_size
         step_limits = [0] * batch_size
@@ -545,14 +548,14 @@ class SelfPlayTrainer:
                     logits = logits_batch[j]
                 legal_mask = legal_masks[j]
 
-                # On-device sampling
+                # On-device fast sampling: log_softmax -> exp -> multinomial
                 masked_logits = logits.clone()
-                masked_logits[legal_mask == 0] = -1e9
-                probs = torch.softmax(masked_logits, dim=-1)
-                a = torch.multinomial(probs, num_samples=1)
+                masked_logits[legal_mask == 0] = float("-inf")
+                log_probs_vec = torch.log_softmax(masked_logits.float(), dim=-1)
+                probs_vec = log_probs_vec.exp()
+                a = torch.multinomial(probs_vec, num_samples=1)
                 action_idx = int(a.item())
-                logp = torch.log_softmax(masked_logits, dim=-1)[action_idx]
-                log_prob = float(logp.item())
+                log_prob = float(log_probs_vec[action_idx].item())
                 action = bin_to_action(action_idx, s, self.num_bet_bins)
                 actions_per_ep[i].append((current_player, action))
 
@@ -816,8 +819,8 @@ class SelfPlayTrainer:
         from ..env.types import GameState, PlayerState
 
         # Create players
-        p0 = PlayerState(stack=1000)
-        p1 = PlayerState(stack=1000)
+        p0 = PlayerState(stack=self.cfg.stack)
+        p1 = PlayerState(stack=self.cfg.stack)
 
         # In heads-up, the small blind is on the button and acts first preflop.
         # Make the analyzed seat both button and small blind, and set it to act.
@@ -827,10 +830,10 @@ class SelfPlayTrainer:
 
         # Post blinds
         p_states = [p0, p1]
-        p_states[p_sb].stack -= 50  # small blind
-        p_states[p_sb].committed += 50
-        p_states[p_bb].stack -= 100  # big blind
-        p_states[p_bb].committed += 100
+        p_states[p_sb].stack -= self.cfg.sb  # small blind
+        p_states[p_sb].committed += self.cfg.sb
+        p_states[p_bb].stack -= self.cfg.bb  # big blind
+        p_states[p_bb].committed += self.cfg.bb
 
         # Set hole cards for the seat we're analyzing
         p_states[seat].hole_cards = [

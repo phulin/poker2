@@ -159,8 +159,8 @@ def detailed_training_analysis():
             total_chips_placed += transition.chips_placed
 
     if total_chips_placed > 0:
-        delta2 = -total_chips_placed
-        delta3 = total_chips_placed
+        delta2 = -trajectory.our_chips_committed
+        delta3 = trajectory.opp_chips_committed
     else:
         delta2 = -1000.0
         delta3 = 1000.0
