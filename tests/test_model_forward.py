@@ -40,9 +40,7 @@ def test_siamese_convnet_forward_and_policy_action():
 
     s = make_state("turn", [4, 5, 6, 7])
     cards = cards_enc.encode_cards(s, seat=0).unsqueeze(0)  # (1, 6, 4, 13)
-    actions = actions_enc.encode_actions(s, seat=0, num_bet_bins=nb).unsqueeze(
-        0
-    )  # (1, 24, 4, 8)
+    actions = actions_enc.encode_actions(s, seat=0).unsqueeze(0)  # (1, 24, 4, 8)
 
     logits, value = model(cards, actions)
     assert logits.shape == (1, nb)

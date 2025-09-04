@@ -29,13 +29,10 @@ class ActionsHUEncoderV1(Encoder):
         self,
         game_state: Any,
         seat: int,
-        num_bet_bins: int,
         device: Optional[torch.device] = None,
     ) -> Any:
         # Derive num_bet_bins from config if caller passes a mismatched size
-        cfg_bins = len(self.cfg.bet_bins) + 3
-        if num_bet_bins != cfg_bins:
-            num_bet_bins = cfg_bins
+        num_bet_bins = len(self.cfg.bet_bins) + 3
         rounds = ["preflop", "flop", "turn", "river"]
         channels: List[torch.Tensor] = []
         for _ in rounds:

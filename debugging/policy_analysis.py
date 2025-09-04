@@ -59,9 +59,7 @@ def analyze_policy_diversity(trainer):
 
             # Encode state
             cards_tensor = cards_encoder.encode_cards(state, seat=state.to_act)
-            actions_tensor = actions_encoder.encode_actions(
-                state, seat=state.to_act, num_bet_bins=8
-            )
+            actions_tensor = actions_encoder.encode_actions(state, seat=state.to_act)
 
             # Model forward pass
             with torch.no_grad():
@@ -152,9 +150,7 @@ def analyze_model_sensitivity(trainer):
                 legal_mask[bin_idx] = 1.0
 
         cards_tensor = cards_encoder.encode_cards(state, seat=state.to_act)
-        actions_tensor = actions_encoder.encode_actions(
-            state, seat=state.to_act, num_bet_bins=8
-        )
+        actions_tensor = actions_encoder.encode_actions(state, seat=state.to_act)
 
         with torch.no_grad():
             logits, value = trainer.model(

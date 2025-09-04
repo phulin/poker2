@@ -71,7 +71,7 @@ def test_actions_hu_v1_values_and_shapes():
     enc = ActionsHUEncoderV1(history_actions_per_round=6)
     s = make_state("flop", [4, 5, 6])
     nb = 8
-    a = enc.encode_actions(s, seat=0, num_bet_bins=nb)
+    a = enc.encode_actions(s, seat=0)
     assert isinstance(a, torch.Tensor)
     assert a.shape == (24, 4, nb)
     assert a.dtype == torch.float32
@@ -82,7 +82,7 @@ def test_actions_hu_v1_values_and_shapes():
         ("preflop", 1, "call", 40, 20, 60),
         ("flop", 0, "bet", 20, 0, 40),
     ]
-    a = enc.encode_actions(s, seat=0, num_bet_bins=nb)
+    a = enc.encode_actions(s, seat=0)
     # Preflop first slot should reflect player0 raise in one of the latest slots
     preflop_slot_last = 0 * 6 + 5
     assert a[preflop_slot_last, 2].sum().item() >= 1.0  # sum plane marks events

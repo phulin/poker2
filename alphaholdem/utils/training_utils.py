@@ -102,6 +102,21 @@ def print_training_stats(
     if parts:
         print("  " + " | ".join(parts))
 
+    # Minibatch verification metrics (if present)
+    mb_ir = stats.get("mb_improve_rate")
+    mb_lb = stats.get("mb_loss_before")
+    mb_la = stats.get("mb_loss_after")
+    if mb_ir is not None or mb_lb is not None or mb_la is not None:
+        segs = []
+        if mb_ir is not None:
+            segs.append(f"verify {mb_ir:.2f}")
+        if mb_lb is not None:
+            segs.append(f"mb_before {mb_lb:.4f}")
+        if mb_la is not None:
+            segs.append(f"mb_after {mb_la:.4f}")
+        if segs:
+            print("  " + " | ".join(segs))
+
 
 def print_evaluation_results(eval_results: dict):
     """

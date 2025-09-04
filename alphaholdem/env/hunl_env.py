@@ -437,7 +437,10 @@ class HUNLEnv:
         pot_share = (
             s.pot if s.winner == perspective else s.pot / 2 if s.winner is None else 0
         )
-        return s.players[perspective].stack + pot_share - self.starting_stack
+        raw_reward = s.players[perspective].stack + pot_share - self.starting_stack
+        # Scale rewards by 100 big blinds to stabilize learning
+        scale = float(self.bb) * 100.0
+        return float(raw_reward) / scale
 
     def _require_state(self) -> GameState:
         if self.state is None:

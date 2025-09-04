@@ -29,7 +29,7 @@ from ..rl.replay import (
     compute_gae_returns,
     prepare_ppo_batch,
 )
-from ..rl.losses import dual_clip_ppo_loss
+from ..rl.losses import trinal_clip_ppo_loss
 from ..rl.k_best_pool import KBestOpponentPool, AgentSnapshot
 from ..core.config import RootConfig
 from ..core.builders import build_components_from_config
@@ -172,7 +172,6 @@ class SelfPlayTrainer:
             actions_tensor = self.actions_encoder.encode_actions(
                 state,
                 seat=current_player,
-                num_bet_bins=self.num_bet_bins,
                 device=self.device,
             )
 
@@ -215,6 +214,9 @@ class SelfPlayTrainer:
 
             # Record transition (only for our player's actions)
             if current_player == 0:  # Our player
+                # Scale factor for reward/targets: 100 big blinds
+                scale = float(self.env.bb) * 100.0
+
                 transition = Transition(
                     observation=torch.cat(
                         [cards.flatten(), actions_tensor.flatten()]
@@ -227,8 +229,8 @@ class SelfPlayTrainer:
                     legal_mask=legal_mask,
                     chips_placed=action.amount,
                     # Per-sample clipping bounds: δ2 = -opp_cum, δ3 = our_cum
-                    delta2=float(-opp_chips),
-                    delta3=float(our_chips + action.amount),
+                    delta2=float(-opp_chips) / scale,
+                    delta3=float(our_chips + action.amount) / scale,
                 )
                 transitions.append(transition)
                 our_chips += action.amount
@@ -338,6 +340,9 @@ class SelfPlayTrainer:
         total_clipfrac = 0.0
         total_explained_var = 0.0
         total_minibatches = 0
+        total_mb_improved = 0
+        total_loss_before = 0.0
+        total_loss_after = 0.0
         for _ in range(self.num_epochs):
             N = batch["actions"].shape[0]
             order = torch.randperm(N, device=self.device)
@@ -352,7 +357,25 @@ class SelfPlayTrainer:
 
                 logits, values = self.model(cards, actions_tensor)
 
-                loss_dict = dual_clip_ppo_loss(
+                # Compute loss on this exact minibatch BEFORE the step (for verification)
+                with torch.no_grad():
+                    loss_before_dict = trinal_clip_ppo_loss(
+                        logits=logits,
+                        values=values,
+                        actions=batch["actions"].index_select(0, mb_idx),
+                        log_probs_old=batch["log_probs_old"].index_select(0, mb_idx),
+                        advantages=batch["advantages"].index_select(0, mb_idx),
+                        returns=batch["returns"].index_select(0, mb_idx),
+                        legal_masks=batch["legal_masks"].index_select(0, mb_idx),
+                        epsilon=self.epsilon,
+                        delta1=self.delta1,
+                        delta2=delta2_vec.index_select(0, mb_idx),
+                        delta3=delta3_vec.index_select(0, mb_idx),
+                        value_coef=self.value_coef,
+                        entropy_coef=self.entropy_coef,
+                    )
+
+                loss_dict = trinal_clip_ppo_loss(
                     logits=logits,
                     values=values,
                     actions=batch["actions"].index_select(0, mb_idx),
@@ -361,7 +384,9 @@ class SelfPlayTrainer:
                     returns=batch["returns"].index_select(0, mb_idx),
                     legal_masks=batch["legal_masks"].index_select(0, mb_idx),
                     epsilon=self.epsilon,
-                    dual_clip=self.delta1,
+                    delta1=self.delta1,
+                    delta2=delta2_vec.index_select(0, mb_idx),
+                    delta3=delta3_vec.index_select(0, mb_idx),
                     value_coef=self.value_coef,
                     entropy_coef=self.entropy_coef,
                 )
@@ -395,6 +420,25 @@ class SelfPlayTrainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
 
+                # Recompute loss on the SAME minibatch AFTER the update to verify improvement
+                with torch.no_grad():
+                    logits_after, values_after = self.model(cards, actions_tensor)
+                    loss_after_dict = trinal_clip_ppo_loss(
+                        logits=logits_after,
+                        values=values_after,
+                        actions=batch["actions"].index_select(0, mb_idx),
+                        log_probs_old=batch["log_probs_old"].index_select(0, mb_idx),
+                        advantages=batch["advantages"].index_select(0, mb_idx),
+                        returns=batch["returns"].index_select(0, mb_idx),
+                        legal_masks=batch["legal_masks"].index_select(0, mb_idx),
+                        epsilon=self.epsilon,
+                        delta1=self.delta1,
+                        delta2=delta2_vec.index_select(0, mb_idx),
+                        delta3=delta3_vec.index_select(0, mb_idx),
+                        value_coef=self.value_coef,
+                        entropy_coef=self.entropy_coef,
+                    )
+
                 total_loss += loss_dict["total_loss"].item()
                 total_policy_loss += float(loss_dict["policy_loss"].item())
                 total_value_loss += float(loss_dict["value_loss"].item())
@@ -403,6 +447,14 @@ class SelfPlayTrainer:
                 total_clipfrac += float(clipfrac.item())
                 # total_explained_var += float(explained_var.item())
                 total_minibatches += 1
+                # Track minibatch verification metrics
+                total_loss_before += float(loss_before_dict["total_loss"].item())
+                total_loss_after += float(loss_after_dict["total_loss"].item())
+                if (
+                    loss_after_dict["total_loss"].item()
+                    <= loss_before_dict["total_loss"].item()
+                ):
+                    total_mb_improved += 1
 
         denom = max(1, total_minibatches)
         return {
@@ -416,6 +468,9 @@ class SelfPlayTrainer:
             "approx_kl": total_approx_kl / denom,
             "clipfrac": total_clipfrac / denom,
             # "explained_var": total_explained_var / denom,
+            "mb_improve_rate": (total_mb_improved / denom) if denom > 0 else 0.0,
+            "mb_loss_before": (total_loss_before / denom) if denom > 0 else 0.0,
+            "mb_loss_after": (total_loss_after / denom) if denom > 0 else 0.0,
         }
 
     def train_step(self) -> dict:
@@ -740,9 +795,7 @@ class SelfPlayTrainer:
 
         # Encode state
         cards = self.cards_encoder.encode_cards(state, seat=seat)
-        actions_tensor = self.actions_encoder.encode_actions(
-            state, seat=seat, num_bet_bins=self.num_bet_bins
-        )
+        actions_tensor = self.actions_encoder.encode_actions(state, seat=seat)
 
         # Move tensors to device
         cards = cards.to(self.device)

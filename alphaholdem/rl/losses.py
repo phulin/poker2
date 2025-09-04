@@ -71,8 +71,8 @@ def trinal_clip_ppo_loss(
     entropy = -(probs * log_probs).sum(dim=-1).mean()
 
     # Total loss
-    # total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
-    total_loss = value_coef * value_loss
+    total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+    # total_loss = value_coef * value_loss
 
     return {
         "total_loss": total_loss,

@@ -106,9 +106,7 @@ def analyze_hand(trainer):
         # Encode current state
         num_bet_bins = trainer.num_bet_bins
         cards_tensor = cards_encoder.encode_cards(state, seat=state.to_act)
-        actions_tensor = actions_encoder.encode_actions(
-            state, seat=state.to_act, num_bet_bins=num_bet_bins
-        )
+        actions_tensor = actions_encoder.encode_actions(state, seat=state.to_act)
         # Move inputs to model device
         cards_tensor = cards_tensor.to(device)
         actions_tensor = actions_tensor.to(device)

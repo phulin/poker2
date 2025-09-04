@@ -106,6 +106,8 @@ def train_kbest(
                 checkpoint_dir, f"checkpoint_step_{step + 1}.pt"
             )
             trainer.save_checkpoint(checkpoint_path, step + 1)
+            checkpoint_path = os.path.join(checkpoint_dir, f"latest_model.pt")
+            trainer.save_checkpoint(checkpoint_path, step + 1)
 
             # Also save the best model if it has the highest ELO
             best_checkpoint_path = os.path.join(checkpoint_dir, "best_model.pt")
