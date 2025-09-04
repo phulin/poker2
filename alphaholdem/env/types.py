@@ -15,6 +15,7 @@ class Action:
 @dataclass
 class PlayerState:
     stack: int
+    stack_after_posting: int = 0
     committed: int = 0
     hole_cards: List[int] = field(default_factory=list)
     has_folded: bool = False

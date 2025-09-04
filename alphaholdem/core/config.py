@@ -39,6 +39,8 @@ class RootConfig:
     num_epochs: int = 4
     # Betting bins expressed as fractions of total_committed reference
     bet_bins: List[float] = field(default_factory=lambda: [0.5, 0.75, 1.0, 1.5, 2.0])
+    # Replay buffer batches: how many batches of steps to retain in replay
+    replay_buffer_batches: int = 1
 
 
 def _to_component_spec(data: Dict[str, Any], key: str) -> ComponentSpec:
@@ -79,4 +81,5 @@ def load_config(
         mini_batch_size=int(data["mini_batch_size"]),
         num_epochs=int(data["num_epochs"]),
         bet_bins=list(data["bet_bins"]),
+        replay_buffer_batches=int(data["replay_buffer_batches"]),
     )

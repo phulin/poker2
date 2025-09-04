@@ -149,12 +149,12 @@ def main():
         "--steps", type=int, default=1000, help="Number of training steps"
     )
     parser.add_argument(
-        "--k-best-pool-size", type=int, default=5, help="Size of K-Best opponent pool"
+        "--k-best-pool-size", type=int, default=10, help="Size of K-Best opponent pool"
     )
     parser.add_argument(
         "--min-elo-diff",
         type=float,
-        default=50.0,
+        default=250.0,
         help="Minimum ELO difference for pool updates",
     )
     parser.add_argument(

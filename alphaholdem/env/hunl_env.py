@@ -39,8 +39,10 @@ class HUNLEnv:
         p_bb = 1 - p_sb
         p_states = [p0, p1]
         p_states[p_sb].stack -= self.sb
+        p_states[p_sb].stack_after_posting = p_states[p_sb].stack
         p_states[p_sb].committed += self.sb
         p_states[p_bb].stack -= self.bb
+        p_states[p_bb].stack_after_posting = p_states[p_bb].stack
         p_states[p_bb].committed += self.bb
         pot = self.sb + self.bb
         to_act = p_sb  # SB acts first pre-flop in heads-up after posting
@@ -385,9 +387,10 @@ class HUNLEnv:
     def _terminal_rewards(self, s: GameState, perspective: int) -> int:
         # Positive if perspective player wins chips
         # For simplicity, assign whole pot to winner or split evenly on tie
-        if s.winner is None:
-            return 0
-        return s.players[perspective].stack - self.starting_stack
+        pot_share = (
+            s.pot if s.winner == perspective else s.pot / 2 if s.winner is None else 0
+        )
+        return s.players[perspective].stack + pot_share - self.starting_stack
 
     def _require_state(self) -> GameState:
         if self.state is None:

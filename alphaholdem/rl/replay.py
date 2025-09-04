@@ -58,6 +58,12 @@ class ReplayBuffer:
         """Total number of transitions (steps) stored across all trajectories."""
         return sum(len(t.transitions) for t in self.trajectories)
 
+    def trim_to_steps(self, max_steps: int) -> None:
+        """Trim oldest trajectories until total steps <= max_steps."""
+        while self.num_steps() > max_steps and self.trajectories:
+            # Remove the oldest trajectory (FIFO semantics)
+            self.trajectories.pop(0)
+
 
 def compute_gae_returns(
     rewards: List[float],

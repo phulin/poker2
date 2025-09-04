@@ -98,7 +98,12 @@ class SelfPlayTrainer:
 
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights
-        self.replay_buffer = ReplayBuffer(capacity=self.batch_size)
+        # Replay buffer capacity in steps is batch_size * replay_buffer_batches
+        # Keep trajectory container capacity large; we'll trim by step count later
+        self.replay_buffer = ReplayBuffer(
+            capacity=self.batch_size
+            * max(1, int(getattr(self.cfg, "replay_buffer_batches", 1)))
+        )
 
         # K-Best opponent pool
         self.opponent_pool = KBestOpponentPool(
@@ -225,6 +230,12 @@ class SelfPlayTrainer:
             else:
                 opp_chips += action.amount
 
+                # If the opponent's action ended the hand, record the final reward for our last transition
+                if done and transitions:
+                    # The reward is from our perspective, so it's -reward if opp ended the hand
+                    transitions[-1].reward = -reward
+                    transitions[-1].done = True
+
             # Track final reward from our perspective if episode ends
             if done:
                 final_reward_from_our_perspective = (
@@ -268,7 +279,7 @@ class SelfPlayTrainer:
             return {}
 
         # Use all trajectories available for better mixing
-        trajectories = list(self.replay_buffer.trajectories)
+        trajectories = self.replay_buffer.sample_trajectories(self.batch_size)
 
         # Compute GAE using stored V(s_t) values collected during rollout
         for trajectory in trajectories:
@@ -414,10 +425,14 @@ class SelfPlayTrainer:
         Returns:
             Dictionary with training statistics
         """
-        # Collect fresh rollouts until we have at least batch_size steps
-        # (timesteps from our player). Use small batches of trajectories per loop.
+        # Target total steps in replay buffer
+        target_steps = self.batch_size * max(
+            1, int(getattr(self.cfg, "replay_buffer_batches", 1))
+        )
+
+        # Warmup: fill buffer to target_steps
         i = 0
-        while self.replay_buffer.num_steps() < self.batch_size:
+        while self.replay_buffer.num_steps() < target_steps:
             # Collect a batch of trajectories in parallel to amortize device calls
             sampled_opponent = self.opponent_pool.sample(k=1)
             opponent = sampled_opponent[0] if sampled_opponent else None
@@ -446,8 +461,30 @@ class SelfPlayTrainer:
         if self.opponent_pool.should_add_snapshot(self.current_elo):
             self.opponent_pool.add_snapshot(self, self.current_elo)
 
-        # Strict on-policy: clear buffer so next update uses only fresh rollouts
-        self.replay_buffer.clear()
+        # After update, add one more batch worth of fresh steps
+        added_steps = 0
+        while added_steps < self.batch_size:
+            sampled_opponent = self.opponent_pool.sample(k=1)
+            opponent = sampled_opponent[0] if sampled_opponent else None
+            trajectory, reward = self.collect_trajectory(opponent)
+            if len(trajectory.transitions) == 0:
+                continue
+            self.replay_buffer.add_trajectory(trajectory)
+            added_steps += len(trajectory.transitions)
+            self.episode_count += 1
+            self.total_reward += reward
+            if opponent is not None:
+                if reward > 0:
+                    result = "win"
+                elif reward < 0:
+                    result = "loss"
+                else:
+                    result = "draw"
+                self.opponent_pool.update_elo_after_game(opponent, result)
+                self.current_elo = self.opponent_pool.current_elo
+
+        # Trim buffer back to target_steps
+        self.replay_buffer.trim_to_steps(target_steps)
 
         return {
             "episode_count": self.episode_count,
