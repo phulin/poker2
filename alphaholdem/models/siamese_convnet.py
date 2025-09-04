@@ -54,11 +54,16 @@ class SiameseConvNetV1(nn.Module, Model):
             layers.append(nn.Linear(in_dim, h))
             layers.append(nn.LayerNorm(h))
             layers.append(nn.ReLU(inplace=True))
-            layers.append(nn.Dropout(0.1))
             in_dim = h
         self.fusion = nn.Sequential(*layers)
         self.policy_head = nn.Linear(in_dim, num_actions)
-        self.value_head = nn.Linear(in_dim, 1)
+        # Critic MLP head for more stable value learning
+        self.value_head = nn.Sequential(
+            nn.Linear(in_dim, 256),
+            nn.LayerNorm(256),
+            nn.SiLU(),
+            nn.Linear(256, 1),
+        )
 
     def forward(
         self, cards_tensor: torch.Tensor, actions_tensor: torch.Tensor
