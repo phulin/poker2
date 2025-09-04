@@ -185,6 +185,7 @@ class HUNLEnv:
         min_raise = s.min_raise
         last_aggr = s.last_aggressive_amount
         street = s.street
+        street_at_action = street  # capture street before any potential advancement
 
         to_call = opp_p.committed - me_p.committed
 
@@ -201,7 +202,14 @@ class HUNLEnv:
             # append to history
             history = list(s.action_history)
             history.append(
-                (street, me, "fold", action_amount, to_call, total_committed_before)
+                (
+                    street_at_action,
+                    me,
+                    "fold",
+                    action_amount,
+                    to_call,
+                    total_committed_before,
+                )
             )
             new_state = GameState(
                 button=s.button,
@@ -340,7 +348,7 @@ class HUNLEnv:
         action_kind = action.kind
         history.append(
             (
-                street,
+                street_at_action,
                 me,
                 action_kind,
                 int(action_amount),
