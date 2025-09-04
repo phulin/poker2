@@ -142,8 +142,113 @@ class SelfPlayTrainer:
             opponent_snapshot: Optional opponent snapshot to play against.
                              If None, plays against self (self-play).
         """
-        trajs, _, _ = self.collect_trajectories_batch(1)
-        return trajs[0]
+
+    def collect_trajectory(
+        self, opponent_snapshot: Optional[AgentSnapshot] = None
+    ) -> Trajectory:
+        """
+        Collect a single trajectory from self-play or against an opponent.
+
+        Args:
+            opponent_snapshot: Optional opponent snapshot to play against.
+                             If None, plays against self (self-play).
+        """
+        state = self.env.reset()
+        transitions = []
+        our_chips = 0
+        opp_chips = 0
+        max_steps = 50  # Safety limit to prevent infinite loops
+
+        step_count = 0
+        while not state.terminal and step_count < max_steps:
+            step_count += 1
+
+            # Determine which player's turn it is
+            current_player = state.to_act
+
+            # Encode state for current player
+            cards = self.cards_encoder.encode_cards(
+                state, seat=current_player, device=self.device
+            )
+            actions_tensor = self.actions_encoder.encode_actions(
+                state,
+                seat=current_player,
+                num_bet_bins=self.num_bet_bins,
+                device=self.device,
+            )
+
+            # Get model prediction
+            with torch.no_grad():
+                autocast_enabled = (
+                    self.device.type == "cuda" or self.device.type == "mps"
+                )
+                dtype = torch.bfloat16 if autocast_enabled else torch.float16
+                cm = (
+                    torch.autocast(
+                        device_type=self.device.type,
+                        dtype=dtype,
+                    )
+                    if autocast_enabled
+                    else torch.amp.autocast(enabled=False)
+                )
+                with cm:
+                    if opponent_snapshot is not None and current_player != 0:
+                        logits, value = opponent_snapshot.model(
+                            cards.unsqueeze(0), actions_tensor.unsqueeze(0)
+                        )
+                    else:
+                        logits, value = self.model(
+                            cards.unsqueeze(0), actions_tensor.unsqueeze(0)
+                        )
+
+                legal_mask = get_legal_mask(
+                    state, self.num_bet_bins, device=self.device
+                )
+
+                # Sample action
+                action_idx, log_prob = self.policy.action(logits.squeeze(0), legal_mask)
+
+                # Convert to concrete action
+                action = bin_to_action(action_idx, state, self.num_bet_bins)
+
+            # Take step
+            next_state, reward, done, _ = self.env.step(action)
+
+            # Record transition (only for our player's actions)
+            if current_player == 0:  # Our player
+                transition = Transition(
+                    observation=torch.cat(
+                        [cards.flatten(), actions_tensor.flatten()]
+                    ),  # Simplified obs
+                    action=action_idx,
+                    log_prob=log_prob,
+                    value=float(value.item()),
+                    reward=reward,
+                    done=done,
+                    legal_mask=legal_mask,
+                    chips_placed=action.amount,
+                )
+                transitions.append(transition)
+                our_chips += action.amount
+            else:
+                opp_chips += action.amount
+
+            state = next_state
+
+        if step_count >= max_steps:
+            print(
+                f"Warning: Trajectory reached max steps ({max_steps}), forcing termination"
+            )
+            # Force termination by setting final reward
+            if transitions:
+                transitions[-1].reward = 0.0
+                transitions[-1].done = True
+
+        return Trajectory(
+            transitions=transitions,
+            our_chips_committed=our_chips,
+            opp_chips_committed=opp_chips,
+        )
 
     # def update_model(self) -> dict:
     #     with profile(record_shapes=True) as prof:
@@ -306,25 +411,19 @@ class SelfPlayTrainer:
         # (timesteps from our player). Use small batches of trajectories per loop.
         while self.replay_buffer.num_steps() < self.batch_size:
             # Collect a batch of trajectories in parallel to amortize device calls
-            chunk_envs = 16
-            trajs, opps, rewards = self.collect_trajectories_batch(
-                batch_size=chunk_envs
-            )
-            for trajectory, opponent, ep_reward in zip(trajs, opps, rewards):
-                if len(trajectory.transitions) == 0:
-                    continue
-                self.replay_buffer.add_trajectory(trajectory)
-                self.episode_count += 1
-                self.total_reward += ep_reward
-                if opponent is not None:
-                    if ep_reward > 0:
-                        result = "win"
-                    elif ep_reward < 0:
-                        result = "loss"
-                    else:
-                        result = "draw"
-                    self.opponent_pool.update_elo_after_game(opponent, result)
-                    self.current_elo = self.opponent_pool.current_elo
+            trajectory, opponent, ep_reward = self.collect_trajectory()
+            self.replay_buffer.add_trajectory(trajectory)
+            self.episode_count += 1
+            self.total_reward += ep_reward
+            if opponent is not None:
+                if ep_reward > 0:
+                    result = "win"
+                elif ep_reward < 0:
+                    result = "loss"
+                else:
+                    result = "draw"
+                self.opponent_pool.update_elo_after_game(opponent, result)
+                self.current_elo = self.opponent_pool.current_elo
 
         # Update model
         update_stats = self.update_model()
@@ -482,9 +581,13 @@ class SelfPlayTrainer:
                     )
                     transitions_per_ep[i].append(transition)
                     our_chips_committed[i] += int(action.amount)
+                    if is_done:
+                        final_rewards[i] = reward
                 else:
                     # Track opponent chips; if opponent ends the hand, attach terminal reward
                     opp_chips_committed[i] += int(action.amount)
+                    if is_done:
+                        final_rewards[i] = -reward
                     if is_done and transitions_per_ep[i]:
                         pot = next_state.pot
                         if next_state.winner is None:
