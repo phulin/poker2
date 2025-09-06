@@ -160,6 +160,8 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
         delta3=d3,
         value_coef=trainer.value_coef,
         entropy_coef=trainer.entropy_coef,
+        value_loss_type=trainer.cfg.value_loss_type,
+        huber_delta=trainer.cfg.huber_delta,
     )
 
     print("\nBatch metrics:")

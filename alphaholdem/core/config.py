@@ -41,6 +41,9 @@ class RootConfig:
     bet_bins: List[float] = field(default_factory=lambda: [0.5, 0.75, 1.0, 1.5, 2.0])
     # Replay buffer batches: how many batches of steps to retain in replay
     replay_buffer_batches: int = 1
+    # Value loss configuration
+    value_loss_type: str = "mse"  # "mse" or "huber"
+    huber_delta: float = 1.0
 
 
 def _to_component_spec(data: Dict[str, Any], key: str) -> ComponentSpec:
@@ -82,4 +85,6 @@ def load_config(
         num_epochs=int(data["num_epochs"]),
         bet_bins=list(data["bet_bins"]),
         replay_buffer_batches=int(data["replay_buffer_batches"]),
+        value_loss_type=str(data["value_loss_type"]),
+        huber_delta=float(data["huber_delta"]),
     )

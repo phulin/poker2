@@ -41,3 +41,5 @@ batch_size: 1024
 mini_batch_size: 1024
 num_epochs: 1
 replay_buffer_batches: 16
+value_loss_type: huber
+huber_delta: 1.0

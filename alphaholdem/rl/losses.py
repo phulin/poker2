@@ -19,6 +19,9 @@ def trinal_clip_ppo_loss(
     delta3: torch.Tensor,
     value_coef: float,
     entropy_coef: float,
+    *,
+    value_loss_type: str = "mse",
+    huber_delta: float = 1.0,
 ) -> Dict[str, torch.Tensor]:
     """
     Trinal-Clip PPO loss with policy and value clipping.
@@ -64,7 +67,10 @@ def trinal_clip_ppo_loss(
     # Value loss with clipping (as per AlphaHoldem paper)
     clipped_returns = torch.clamp(returns, delta2, delta3)
 
-    value_loss = F.mse_loss(values, clipped_returns)
+    if value_loss_type == "huber":
+        value_loss = F.smooth_l1_loss(values, clipped_returns, beta=huber_delta)
+    else:
+        value_loss = F.mse_loss(values, clipped_returns)
 
     # Entropy regularization
     probs = F.softmax(masked_logits, dim=-1)

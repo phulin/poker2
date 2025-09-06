@@ -391,6 +391,8 @@ class SelfPlayTrainer:
                         delta3=delta3_vec.index_select(0, mb_idx),
                         value_coef=self.value_coef,
                         entropy_coef=self.entropy_coef,
+                        value_loss_type=self.cfg.value_loss_type,
+                        huber_delta=self.cfg.huber_delta,
                     )
 
                 loss_dict = trinal_clip_ppo_loss(
@@ -407,6 +409,8 @@ class SelfPlayTrainer:
                     delta3=delta3_vec.index_select(0, mb_idx),
                     value_coef=self.value_coef,
                     entropy_coef=self.entropy_coef,
+                    value_loss_type=self.cfg.value_loss_type,
+                    huber_delta=self.cfg.huber_delta,
                 )
 
                 # Debugging metrics: approx KL, clipfrac, explained variance
@@ -455,6 +459,8 @@ class SelfPlayTrainer:
                         delta3=delta3_vec.index_select(0, mb_idx),
                         value_coef=self.value_coef,
                         entropy_coef=self.entropy_coef,
+                        value_loss_type=self.cfg.value_loss_type,
+                        huber_delta=self.cfg.huber_delta,
                     )
 
                 total_loss += loss_dict["total_loss"].item()
