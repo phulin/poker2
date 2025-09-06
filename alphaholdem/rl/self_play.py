@@ -658,7 +658,7 @@ class SelfPlayTrainer:
             )
             self.opponent_pool.snapshots = []
             for snapshot_data in pool_data.get("snapshots", []):
-                model = SiameseConvNetV1()
+                model = SiameseConvNetV1(**self.cfg.model.kwargs)
                 model.load_state_dict(snapshot_data["model_state_dict"])
                 model.to(self.device)
                 snapshot = AgentSnapshot(

@@ -35,10 +35,10 @@ class ConvTrunk(nn.Module):
 class SiameseConvNetV1(nn.Module, Model):
     def __init__(
         self,
-        cards_channels: int = 6,
-        actions_channels: int = 24,
-        fusion_hidden: int | Sequence[int] = (2048, 2048),
-        num_actions: int = 8,
+        cards_channels,
+        actions_channels,
+        fusion_hidden: int | Sequence[int],
+        num_actions: int,
     ):
         super().__init__()
         self.cards_trunk = ConvTrunk(cards_channels, hidden=256)
