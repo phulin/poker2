@@ -4,8 +4,6 @@ from typing import Optional, Tuple
 
 import torch
 
-from line_profiler import profile
-
 from . import rules
 
 
@@ -138,7 +136,6 @@ class HUNLTensorEnv:
 
     # --- Reset -----------------------------------------------------------------
 
-    @profile
     def reset(
         self, seed: Optional[int] = None, mask: Optional[torch.Tensor] = None
     ) -> None:
@@ -218,7 +215,6 @@ class HUNLTensorEnv:
 
     # --- Legality ---------------------------------------------------------------
 
-    @profile
     def _compute_bin_amounts_and_mask(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute (amounts, mask) for discrete bins, allowing non-integer bets, no deduplication.
 
@@ -329,16 +325,16 @@ class HUNLTensorEnv:
 
     def active_indices(self) -> torch.Tensor:
         """Return [M] tensor of indices for environments that are not done."""
-        return torch.nonzero(~self.done, as_tuple=False).squeeze(1)
+        return torch.where(~self.done)[0]
 
     def states_summary(self) -> dict:
         """Lightweight snapshot for debugging/logging (avoids large tensors)."""
         return {
-            "street": self.street.clone(),
-            "to_act": self.to_act.clone(),
-            "pot": self.pot.clone(),
-            "min_raise": self.min_raise.clone(),
-            "done": self.done.clone(),
+            "street": self.street,
+            "to_act": self.to_act,
+            "pot": self.pot,
+            "min_raise": self.min_raise,
+            "done": self.done,
         }
 
     def get_action_history(self) -> torch.Tensor | None:
@@ -347,7 +343,6 @@ class HUNLTensorEnv:
 
     # --- Step ------------------------------------------------------------------
 
-    @profile
     def step_bins(
         self, bin_indices: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
@@ -391,7 +386,7 @@ class HUNLTensorEnv:
 
         # Fold: immediate terminal, award pot to opp
         if is_fold.any():
-            idx = is_fold.nonzero(as_tuple=False).squeeze(1)
+            idx = torch.where(is_fold)[0]
             # Winner is opp
             self.winner[idx] = opp[idx]
             self.done[idx] = True
@@ -403,7 +398,7 @@ class HUNLTensorEnv:
 
         # Check/Call
         if is_check_call.any():
-            idx = is_check_call.nonzero(as_tuple=False).squeeze(1)
+            idx = torch.where(is_check_call)[0]
             call_amt = torch.minimum(to_call[idx], me_stack[idx])
             self.stacks[idx, me[idx]] -= call_amt
             self.committed[idx, me[idx]] += call_amt
@@ -411,7 +406,7 @@ class HUNLTensorEnv:
 
         # All-in
         if is_allin.any():
-            idx = is_allin.nonzero(as_tuple=False).squeeze(1)
+            idx = torch.where(is_allin)[0]
             amt = me_stack[idx]
             # Pay call first if needed
             # Avoid mixed scalar/tensor clamp; clamp to non-negative, then cap by amt
@@ -429,7 +424,7 @@ class HUNLTensorEnv:
 
         # Bet/Raise bins: approximate mapping using total_committed * mult
         if is_bet_raise.any():
-            idx = is_bet_raise.nonzero(as_tuple=False).squeeze(1)
+            idx = torch.where(is_bet_raise)[0]
             bin_local = bin_indices[idx]
             mult_idx = (bin_local - 2).clamp(min=0, max=len(self.bet_bins) - 1)
             mult = self.bet_bins_t[mult_idx]
@@ -490,7 +485,7 @@ class HUNLTensorEnv:
         # Round closure: equal committed and both acted
         equal_committed = self.committed[:, 0] == self.committed[:, 1]
         round_closed = equal_committed & (self.actions_this_round >= 2)
-        rc_idx = round_closed.nonzero(as_tuple=False).squeeze(1)
+        rc_idx = torch.where(round_closed)[0]
         if rc_idx.numel() > 0:
             # Reset committed
             self.pot[rc_idx] += 0  # already in pot
@@ -602,11 +597,11 @@ class HUNLTensorEnv:
         # Note: no auto-runout. When any player is all-in, subsequent legal actions
         # are restricted to check/call only by legal_action_bins_mask, which runs out the board.
 
-        return rewards, self.done.clone(), self.to_act.clone(), {}
+        return rewards, self.done, self.to_act, {}
 
     def reset_done(self, seed: Optional[int] = None) -> None:
         """Reset only environments with done=True; keeps others unchanged."""
-        ids = torch.nonzero(self.done, as_tuple=False).squeeze(1)
+        ids = torch.where(self.done)[0]
         if ids.numel() == 0:
             return  # Nothing to reset
         self.reset(seed=seed, mask=ids)

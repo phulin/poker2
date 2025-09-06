@@ -5,6 +5,7 @@ import time
 from typing import List
 
 import torch
+from torch.profiler import profile, record_function, ProfilerActivity
 
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
@@ -37,7 +38,9 @@ def pick_bin_scalar(env: HUNLEnv, num_bet_bins: int) -> int:
     return bins[0]
 
 
-def bench_tensor_env(N: int, iters: int, device: str) -> float:
+def bench_tensor_env(
+    N: int, iters: int, device: str, profile_enabled: bool = False
+) -> float:
     env = HUNLTensorEnv(
         num_envs=N,
         starting_stack=1000,
@@ -48,12 +51,68 @@ def bench_tensor_env(N: int, iters: int, device: str) -> float:
     )
     env.reset(seed=123)
     B = env.num_bet_bins
-    start = time.perf_counter()
-    for _ in range(iters):
-        mask = env.legal_action_bins_mask()
-        a = pick_bin_tensor(mask)
-        env.step_bins(a)
-    elapsed = time.perf_counter() - start
+
+    if profile_enabled:
+        # Determine activities based on device
+        activities = [ProfilerActivity.CPU]
+        if device == "cuda":
+            activities.append(ProfilerActivity.CUDA)
+        elif device == "mps":
+            activities.append(ProfilerActivity.CPU)  # MPS uses CPU profiler
+
+        print(f"\n=== PROFILING TensorEnv with device={device} ===")
+        with profile(
+            activities=activities,
+            record_shapes=True,
+            with_stack=True,
+            profile_memory=True,
+        ) as prof:
+            start = time.perf_counter()
+            for i in range(iters):
+                with record_function(f"iteration_{i}"):
+                    mask = env.legal_action_bins_mask()
+                    a = pick_bin_tensor(mask)
+                    env.step_bins(a)
+            elapsed = time.perf_counter() - start
+
+        # Print profiling results
+        print("\n--- Profiling Summary Table ---")
+        try:
+            print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20))
+        except Exception as e:
+            print(f"Could not generate table: {e}")
+
+        print("\n--- Top operations by CPU time ---")
+        cpu_ops = prof.key_averages()
+        cpu_ops.sort(key=lambda x: x.cpu_time_total, reverse=True)
+        for op in cpu_ops[:15]:
+            gpu_time = getattr(op, "cuda_time_total", 0)
+            print(f"{op.key}: CPU={op.cpu_time_total:.4f}ms, GPU={gpu_time:.4f}ms")
+
+        print("\n--- Operations with high CPU overhead (potential syncs) ---")
+        high_cpu_ops = [op for op in cpu_ops if op.cpu_time_total > 0.001]  # > 1ms
+        high_cpu_ops.sort(key=lambda x: x.cpu_time_total, reverse=True)
+        for op in high_cpu_ops[:10]:
+            gpu_time = getattr(op, "cuda_time_total", 0)
+            print(f"{op.key}: CPU={op.cpu_time_total:.4f}ms, GPU={gpu_time:.4f}ms")
+
+        print("\n--- Memory operations ---")
+        mem_ops = [
+            op
+            for op in cpu_ops
+            if "memcpy" in op.key.lower() or "memory" in op.key.lower()
+        ]
+        for op in mem_ops[:5]:
+            print(f"{op.key}: CPU={op.cpu_time_total:.4f}ms")
+
+    else:
+        start = time.perf_counter()
+        for _ in range(iters):
+            mask = env.legal_action_bins_mask()
+            a = pick_bin_tensor(mask)
+            env.step_bins(a)
+        elapsed = time.perf_counter() - start
+
     env_steps = N * iters
     sps = env_steps / elapsed
     print(
@@ -94,12 +153,18 @@ def main() -> None:
     parser.add_argument("--num_envs", type=int, default=256)
     parser.add_argument("--iters", type=int, default=200)
     parser.add_argument("--device", type=str, default="cpu", help="cpu|mps|cuda")
+    parser.add_argument(
+        "--profile", action="store_true", help="Enable PyTorch profiler"
+    )
     args = parser.parse_args()
 
     print(
         f"Running benchmarks with N={args.num_envs}, iters={args.iters}, device={args.device}"
     )
-    sps_tensor = bench_tensor_env(args.num_envs, args.iters, args.device)
+    if args.profile:
+        print("Profiling enabled - this will show device sync points")
+
+    sps_tensor = bench_tensor_env(args.num_envs, args.iters, args.device, args.profile)
     sps_scalar = bench_scalar_envs(args.num_envs, args.iters)
     if sps_scalar > 0:
         print(f"Speedup (Tensor/List): {sps_tensor / sps_scalar:.2f}x")
