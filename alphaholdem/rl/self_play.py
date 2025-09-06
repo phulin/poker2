@@ -152,8 +152,8 @@ class SelfPlayTrainer:
         """
         state = self.env.reset()
         transitions = []
-        our_chips = 0
-        opp_chips = 0
+        our_chips = self.env.sb if state.to_act == 0 else self.env.bb
+        opp_chips = self.env.bb if state.to_act == 0 else self.env.sb
         max_steps = 50  # Safety limit to prevent infinite loops
 
         step_count = 0
@@ -264,8 +264,6 @@ class SelfPlayTrainer:
         return (
             Trajectory(
                 transitions=transitions,
-                our_chips_committed=our_chips,
-                opp_chips_committed=opp_chips,
             ),
             final_reward_from_our_perspective,
         )
@@ -330,6 +328,26 @@ class SelfPlayTrainer:
         # batch['delta2'] and batch['delta3'] are length-N tensors aligned with samples
         delta2_vec = batch["delta2"]
         delta3_vec = batch["delta3"]
+
+        # Debug: verify first sample clipping behavior on the exact batch
+        try:
+            ret0 = float(batch["returns"][0].item())
+            d2_0 = float(delta2_vec[0].item())
+            d3_0 = float(delta3_vec[0].item())
+            min_b0 = min(d2_0, d3_0)
+            max_b0 = max(d2_0, d3_0)
+            clipped0 = max(min(ret0, max_b0), min_b0)
+            first_clip_debug = {
+                "first_ret": ret0,
+                "first_d2": d2_0,
+                "first_d3": d3_0,
+                "first_min_b": min_b0,
+                "first_max_b": max_b0,
+                "first_ret_clipped": clipped0,
+                "first_ret_out_of_bounds": not (min_b0 <= ret0 <= max_b0),
+            }
+        except Exception:
+            first_clip_debug = {}
 
         # Multiple epochs of updates
         total_loss = 0.0
@@ -471,6 +489,7 @@ class SelfPlayTrainer:
             "mb_improve_rate": (total_mb_improved / denom) if denom > 0 else 0.0,
             "mb_loss_before": (total_loss_before / denom) if denom > 0 else 0.0,
             "mb_loss_after": (total_loss_after / denom) if denom > 0 else 0.0,
+            **first_clip_debug,
         }
 
     def train_step(self) -> dict:

@@ -94,6 +94,16 @@ def train_kbest(
 
         # Logging
         print_training_stats(stats, step, num_steps, step_time_str, total_time_str)
+        # Optional clipping debug of first sample in batch
+        if "first_ret" in stats:
+            print(
+                "  clip_debug "
+                f"ret0 {stats['first_ret']:.4f} "
+                f"d2 {stats['first_d2']:.4f} d3 {stats['first_d3']:.4f} "
+                f"min {stats['first_min_b']:.4f} max {stats['first_max_b']:.4f} "
+                f"retc {stats['first_ret_clipped']:.4f} "
+                f"out_of_bounds {bool(stats['first_ret_out_of_bounds'])}"
+            )
 
         # Evaluation against pool
         if (step + 1) % eval_interval == 0:

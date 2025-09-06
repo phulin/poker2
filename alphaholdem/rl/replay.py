@@ -29,8 +29,6 @@ class Trajectory:
     """Complete trajectory from reset to terminal."""
 
     transitions: List[Transition]
-    our_chips_committed: int = 0
-    opp_chips_committed: int = 0
 
 
 class ReplayBuffer:
@@ -95,32 +93,6 @@ def compute_gae_returns(
         returns.append(advantages[t] + values[t])
 
     return advantages, returns
-
-
-def compute_delta_bounds(trajectory: Trajectory) -> tuple[float, float]:
-    """Compute δ2 and δ3 bounds from chips placed in trajectory.
-
-    According to the paper:
-    - δ2: negative bound representing opponent chips placed
-    - δ3: positive bound representing our chips placed
-
-    These bounds are used to clip the returns in the value loss function
-    to reduce variance in imperfect information games.
-    """
-    # Prefer trajectory-level per-player totals if available
-    delta2 = -float(trajectory.opp_chips_committed)
-    delta3 = float(trajectory.our_chips_committed)
-    if delta2 != 0.0 or delta3 != 0.0:
-        return delta2, delta3
-
-    chips_placed = [t.chips_placed for t in trajectory.transitions]
-    if not chips_placed:
-        return 0.0, 0.0
-    total_chips = sum(chips_placed)
-    delta2 = -total_chips
-    delta3 = total_chips
-
-    return delta2, delta3
 
 
 def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
