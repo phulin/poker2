@@ -24,6 +24,21 @@ def suit(card: int) -> int:
     return card // 13
 
 
+# Tensor helpers
+
+
+def cards_to_onehot_indices(cards: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert numeric card tensor to (suit_idx, rank_idx) tensors.
+
+    cards: tensor of any shape with integral dtype; returns tensors of same shape
+    containing suit indices [0..3] and rank indices [0..12].
+    """
+    cards = cards.to(torch.long)
+    suits = cards // 13
+    ranks = cards % 13
+    return suits, ranks
+
+
 # 7-card evaluator (simple, deterministic; optimized enough for HU env)
 # Hand strength as a tuple: (category, tiebreakers...) where higher is better
 # Categories (high to low): 8=StraightFlush,7=FourKind,6=FullHouse,5=Flush,4=Straight,3=ThreeKind,2=TwoPair,1=OnePair,0=HighCard

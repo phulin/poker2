@@ -5,6 +5,9 @@ import random
 
 import torch
 
+
+from line_profiler import profile
+
 from . import rules
 
 
@@ -61,7 +64,6 @@ class HUNLTensorEnv:
         bet_bins: list[float],
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
-        shuffle_mode: str = "torch",
     ) -> None:
         assert num_envs > 0
         self.N = num_envs
@@ -72,11 +74,14 @@ class HUNLTensorEnv:
             "mps" if torch.backends.mps.is_available() else "cpu"
         )
         self.bet_bins = bet_bins
-        self.shuffle_mode = shuffle_mode
+        # Cache bet bins as tensor for fast indexing
+        self.bet_bins_t = torch.tensor(
+            self.bet_bins, dtype=torch.float32, device=self.device
+        )
         # Number of discrete bins: 0=fold, 1=check/call, 2..(B-2)=presets, (B-1)=all-in
         self.num_bet_bins = len(self.bet_bins) + 3
 
-        self.rng = torch.Generator(device="cpu")
+        self.rng = torch.Generator(device=self.device)
         if seed is not None:
             self.rng.manual_seed(int(seed))
 
@@ -105,20 +110,24 @@ class HUNLTensorEnv:
         self.board_onehot = torch.zeros(
             (self.N, 5, 4, 13), dtype=torch.float32, device=self.device
         )
+        self.hole_onehot = torch.zeros(
+            (self.N, 2, 2, 4, 13), dtype=torch.float32, device=self.device
+        )
         self.done = torch.zeros(self.N, dtype=torch.bool, device=self.device)
         self.winner = torch.full(
             (self.N,), -1, dtype=torch.long, device=self.device
         )  # -1 split
-        # Hole cards one-hot
-        self.hole_onehot = torch.zeros(
-            (self.N, 2, 2, 4, 13), dtype=torch.float32, device=self.device
-        )
         # history config
         self.history_slots = 6
-        self.action_history = None
+        self.action_history = torch.zeros(
+            (self.N, 4, self.history_slots, 4, self.num_bet_bins),
+            dtype=torch.float32,
+            device=self.device,
+        )
 
     # --- Reset -----------------------------------------------------------------
 
+    @profile
     def reset(self, seed: Optional[int] = None) -> None:
         if seed is not None:
             self.rng.manual_seed(int(seed))
@@ -127,31 +136,14 @@ class HUNLTensorEnv:
         # Vectorized reset for all environments
 
         # Shuffle decks for all envs and reset draw positions
-        if self.shuffle_mode == "python":
-            # Use Python RNG to match HUNLEnv shuffles for parity tests
-            base_seed = int(seed) if seed is not None else random.randrange(1 << 30)
-            decks = []
-            for i in range(self.N):
-                rng = random.Random(base_seed + i * 9973)
-                d = rules.new_shuffled_deck(rng)
-                decks.append(d)
-            self.deck = torch.tensor(decks, dtype=torch.long, device=self.device)
-        else:
-            self.deck = torch.stack(
-                [torch.randperm(52, generator=self.rng) for _ in range(self.N)], dim=0
-            ).to(self.device)
+        random_vals = torch.rand(self.N, 52, generator=self.rng, device=self.device)
+        self.deck = torch.argsort(random_vals, dim=1)
         self.deck_pos[:] = 0
 
         # Randomize button for all envs
-        button = torch.randint(0, 2, (self.N,), generator=self.rng)
-        p_sb = (button == 0).long() * 0 + (
-            button == 1
-        ).long() * 1  # 0 if button==0 else 1
+        button = torch.randint(0, 2, (self.N,), generator=self.rng, device=self.device)
+        p_sb = button
         p_bb = 1 - p_sb
-
-        # Stacks and committed
-        stacks = torch.full((self.N, 2), self.starting_stack, dtype=torch.long)
-        committed = torch.zeros((self.N, 2), dtype=torch.long)
 
         # Deal hole cards: for each env, assign 4 cards in deck order
         # [N, 4] indices into deck for each env
@@ -169,13 +161,13 @@ class HUNLTensorEnv:
         _c1_1 = cards[:, 2]
         _c1_2 = cards[:, 3]
 
-        # Post blinds (vectorized)
+        # Reset stacks and post blinds (vectorized)
         # For each env, subtract sb/bb from correct player
         # p_sb and p_bb are [N] with values 0 or 1
-        stacks[torch.arange(self.N), p_sb] -= self.sb
-        committed[torch.arange(self.N), p_sb] += self.sb
-        stacks[torch.arange(self.N), p_bb] -= self.bb
-        committed[torch.arange(self.N), p_bb] += self.bb
+        self.stacks[:, p_sb] = self.starting_stack - self.sb
+        self.committed[:, p_sb] = self.sb
+        self.stacks[:, p_bb] = self.starting_stack - self.bb
+        self.committed[:, p_bb] = self.bb
 
         # Write per-env scalars
         self.button[:] = button
@@ -185,17 +177,13 @@ class HUNLTensorEnv:
         self.min_raise[:] = self.bb
         self.last_aggr[:] = self.bb
         self.actions_this_round[:] = 0
-        self.stacks[:, 0] = stacks[:, 0]
-        self.stacks[:, 1] = stacks[:, 1]
-        self.committed[:, 0] = committed[:, 0]
-        self.committed[:, 1] = committed[:, 1]
         self.has_folded[:, :] = False
         self.is_allin[:, :] = False
-        self.board_onehot[:, :, :, :] = 0.0
         self.done[:] = False
         self.winner[:] = -1
 
-        # Zero out hole_onehot
+        # Zero out board_onehot and hole_onehot
+        self.board_onehot[:, :, :, :] = 0.0
         self.hole_onehot[:, :, :, :, :] = 0.0
 
         # Set hole_onehot for all envs
@@ -204,19 +192,13 @@ class HUNLTensorEnv:
         s0_2, r0_2 = _c0_2 // 13, _c0_2 % 13
         s1_1, r1_1 = _c1_1 // 13, _c1_1 % 13
         s1_2, r1_2 = _c1_2 // 13, _c1_2 % 13
-        n_idx = torch.arange(self.N, device=self.device)
-        self.hole_onehot[n_idx, 0, 0, s0_1, r0_1] = 1.0
-        self.hole_onehot[n_idx, 0, 1, s0_2, r0_2] = 1.0
-        self.hole_onehot[n_idx, 1, 0, s1_1, r1_1] = 1.0
-        self.hole_onehot[n_idx, 1, 1, s1_2, r1_2] = 1.0
+        self.hole_onehot[:, 0, 0, s0_1, r0_1] = 1.0
+        self.hole_onehot[:, 0, 1, s0_2, r0_2] = 1.0
+        self.hole_onehot[:, 1, 0, s1_1, r1_1] = 1.0
+        self.hole_onehot[:, 1, 1, s1_2, r1_2] = 1.0
+
         # Reset history planes if already allocated
-        if (
-            isinstance(self.action_history, torch.Tensor)
-            and self.action_history.numel() > 0
-        ):
-            self.action_history.zero_()
-        # Note: Hole cards are implicit in deck/history; full tensorization of hole cards
-        # can be added later (e.g., hole_cards tensor [N, 2, 2]).
+        self.action_history.zero_()
 
     # --- Legality ---------------------------------------------------------------
 
@@ -308,6 +290,13 @@ class HUNLTensorEnv:
         # All-in always available if we have chips
         mask[:, B - 1] = me_stack > 0
 
+        # If any player is all-in in an env, restrict to check/call only
+        any_allin = self.is_allin[:, 0] | self.is_allin[:, 1]
+        if any_allin.any():
+            rows = any_allin
+            mask[rows, :] = False
+            mask[rows, 1] = True
+
         return amounts, mask
 
     def legal_action_bins_mask(self) -> torch.Tensor:
@@ -342,6 +331,7 @@ class HUNLTensorEnv:
 
     # --- Step ------------------------------------------------------------------
 
+    @profile
     def step_bins(
         self, bin_indices: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
@@ -364,18 +354,6 @@ class HUNLTensorEnv:
         to_call = opp_comm - me_comm
 
         rewards = torch.zeros(N, dtype=torch.float32, device=device)
-
-        # Lazily allocate action history tensor when num_bet_bins is known
-        if (
-            (not isinstance(self.action_history, torch.Tensor))
-            or self.action_history.numel() == 0
-            or self.action_history.size(-1) != self.num_bet_bins
-        ):
-            self.action_history = torch.zeros(
-                (self.N, 4, self.history_slots, 4, self.num_bet_bins),
-                dtype=torch.float32,
-                device=self.device,
-            )
 
         # Group masks by action type
         is_fold = bin_indices == 0
@@ -438,11 +416,7 @@ class HUNLTensorEnv:
             idx = is_bet_raise.nonzero(as_tuple=False).squeeze(1)
             bin_local = bin_indices[idx]
             mult_idx = (bin_local - 2).clamp(min=0, max=len(self.bet_bins) - 1)
-            mult = torch.tensor(
-                [self.bet_bins[j] for j in mult_idx.tolist()],
-                dtype=torch.float32,
-                device=device,
-            )
+            mult = self.bet_bins_t[mult_idx]
             total_committed = (self.pot[idx] + me_comm[idx] + opp_comm[idx]).to(
                 torch.float32
             )
@@ -567,7 +541,6 @@ class HUNLTensorEnv:
                     ~self.has_folded[ids, 1]
                 )
                 ids_showdown = ids[not_folded_mask]
-                ids_folded = ids[~not_folded_mask]
 
                 # Build one-hot 7-card planes for each player: 2 hole + 5 board
                 # Shape: [num_ids, 4, 13]
@@ -614,60 +587,8 @@ class HUNLTensorEnv:
                     torch.where(winner_ids == -1, pot / 2.0, torch.zeros_like(pot)),
                 )
                 rewards[ids] = (stacks + pot_share - float(self.starting_stack)) / scale
-        # Auto-runout: if any env has a player all-in and not done, deal to river and resolve
-        auto_mask = (self.is_allin[:, 0] | self.is_allin[:, 1]) & (~self.done)
-        auto_ids = torch.nonzero(auto_mask, as_tuple=False).squeeze(1)
-        if auto_ids.numel() > 0:
-            for i in auto_ids.tolist():
-                # Deal remaining community cards to reach 5
-                current_cards = int(
-                    self.board_onehot[i].sum().item()
-                )  # equals num cards
-                while current_cards < 5:
-                    c = int(self.deck[i, self.deck_pos[i]].item())
-                    self.deck_pos[i] += 1
-                    # place into first empty slot
-                    for k in range(5):
-                        if self.board_onehot[i, k].sum().item() == 0.0:
-                            self.board_onehot[i, k, rules.suit(c), rules.rank(c)] = 1.0
-                            break
-                    current_cards += 1
-                # Set river street and resolve showdown if not folded
-                self.street[i] = 3
-                if not self.has_folded[i, 0] and not self.has_folded[i, 1]:
-                    a_plane = (
-                        self.hole_onehot[i, 0, 0]
-                        + self.hole_onehot[i, 0, 1]
-                        + self.board_onehot[i].sum(dim=0)
-                    )
-                    b_plane = (
-                        self.hole_onehot[i, 1, 0]
-                        + self.hole_onehot[i, 1, 1]
-                        + self.board_onehot[i].sum(dim=0)
-                    )
-                    a_plane = (a_plane > 0.5).to(torch.float32).unsqueeze(0)
-                    b_plane = (b_plane > 0.5).to(torch.float32).unsqueeze(0)
-                    cmp = rules.compare_7_batch_onehot(a_plane, b_plane)[0].item()
-                    if cmp > 0:
-                        self.winner[i] = 0
-                    elif cmp < 0:
-                        self.winner[i] = 1
-                    else:
-                        self.winner[i] = -1
-                # Mark done and assign reward for current actor perspective
-                self.done[i] = True
-                m = int(me[i].item())
-                scale = float(self.bb) * 100.0
-                pot_share = 0.0
-                if self.winner[i] == m:
-                    pot_share = float(self.pot[i].item())
-                elif self.winner[i] == -1:
-                    pot_share = float(self.pot[i].item()) / 2.0
-                rewards[i] = (
-                    float(self.stacks[i, m].item())
-                    + pot_share
-                    - float(self.starting_stack)
-                ) / scale
+        # Note: no auto-runout. When any player is all-in, subsequent legal actions
+        # are restricted to check/call only by legal_action_bins_mask, which runs out the board.
 
         return rewards, self.done.clone(), self.to_act.clone(), {}
 
@@ -675,57 +596,77 @@ class HUNLTensorEnv:
         """Reset only environments with done=True; keeps others unchanged."""
         if seed is not None:
             self.rng.manual_seed(int(seed))
-        ids = torch.nonzero(self.done, as_tuple=False).squeeze(1).tolist()
-        for i in ids:
-            # Shuffle deck tensor and reset draw pos
-            if self.shuffle_mode == "python":
-                base_seed = int(seed) if seed is not None else random.randrange(1 << 30)
-                rng = random.Random(base_seed + i * 9973)
-                self.deck[i] = torch.tensor(
-                    rules.new_shuffled_deck(rng), dtype=torch.long, device=self.device
-                )
-            else:
-                self.deck[i] = torch.randperm(52, generator=self.rng).to(self.device)
-            self.deck_pos[i] = 0
-            button = int(torch.randint(0, 2, (), generator=self.rng).item())
-            p_sb = 0 if button == 0 else 1
-            p_bb = 1 - p_sb
-            stacks = [self.starting_stack, self.starting_stack]
-            committed = [0, 0]
-            # Deal
-            _c0_1 = int(self.deck[i, self.deck_pos[i]].item())
-            self.deck_pos[i] += 1
-            _c0_2 = int(self.deck[i, self.deck_pos[i]].item())
-            self.deck_pos[i] += 1
-            _c1_1 = int(self.deck[i, self.deck_pos[i]].item())
-            self.deck_pos[i] += 1
-            _c1_2 = int(self.deck[i, self.deck_pos[i]].item())
-            self.deck_pos[i] += 1
-            # Blinds
-            stacks[p_sb] -= self.sb
-            committed[p_sb] += self.sb
-            stacks[p_bb] -= self.bb
-            committed[p_bb] += self.bb
-            # Write
-            self.button[i] = button
-            self.street[i] = 0
-            self.to_act[i] = p_sb
-            self.pot[i] = self.sb + self.bb
-            self.min_raise[i] = self.bb
-            self.last_aggr[i] = self.bb
-            self.actions_this_round[i] = 0
-            self.stacks[i, 0] = stacks[0]
-            self.stacks[i, 1] = stacks[1]
-            self.committed[i, 0] = committed[0]
-            self.committed[i, 1] = committed[1]
-            self.has_folded[i, :] = False
-            self.is_allin[i, :] = False
-            self.board_onehot[i, :, :, :] = 0.0
-            self.hole_onehot[i, :, :, :, :] = 0.0
-            self.hole_onehot[i, 0, 0, rules.suit(_c0_1), rules.rank(_c0_1)] = 1.0
-            self.hole_onehot[i, 0, 1, rules.suit(_c0_2), rules.rank(_c0_2)] = 1.0
-            self.hole_onehot[i, 1, 0, rules.suit(_c1_1), rules.rank(_c1_1)] = 1.0
-            self.hole_onehot[i, 1, 1, rules.suit(_c1_2), rules.rank(_c1_2)] = 1.0
-            self.done[i] = False
-            self.winner[i] = -1
-            # deck handled via tensorized storage
+        ids = torch.nonzero(self.done, as_tuple=False).squeeze(1)
+        # Vectorized reset for all done environments in ids
+        num_reset = ids.numel()
+        if num_reset == 0:
+            # Nothing to do
+            return
+
+        # Shuffle decks
+        # Use torch.randperm for each env
+        self.deck[ids] = torch.stack(
+            [
+                torch.randperm(52, generator=self.rng).to(self.device)
+                for _ in range(num_reset)
+            ],
+            dim=0,
+        )
+
+        # Reset deck positions
+        self.deck_pos[ids] = 0
+
+        # Assign button randomly for each env
+        buttons = torch.randint(
+            0, 2, (num_reset,), generator=self.rng, device=self.device
+        )
+        p_sb = (buttons == 0).long()  # 0 if button==0 else 1
+        p_bb = 1 - p_sb
+
+        # Set stacks and committed
+        stacks = torch.full(
+            (num_reset, 2), self.starting_stack, dtype=torch.long, device=self.device
+        )
+        committed = torch.zeros((num_reset, 2), dtype=torch.long, device=self.device)
+        # Blinds
+        stacks[torch.arange(num_reset, device=self.device), p_sb] -= self.sb
+        committed[torch.arange(num_reset, device=self.device), p_sb] += self.sb
+        stacks[torch.arange(num_reset, device=self.device), p_bb] -= self.bb
+        committed[torch.arange(num_reset, device=self.device), p_bb] += self.bb
+
+        # Deal cards: get first 4 cards from each deck row
+        # [num_reset, 52] -> [num_reset, 4]
+        cards = self.deck[ids, :4]  # [num_reset, 4]
+        _c0_1 = cards[:, 0]
+        _c0_2 = cards[:, 1]
+        _c1_1 = cards[:, 2]
+        _c1_2 = cards[:, 3]
+        self.deck_pos[ids] = 4
+
+        # Write state
+        self.button[ids] = buttons
+        self.street[ids] = 0
+        self.to_act[ids] = p_sb
+        self.pot[ids] = self.sb + self.bb
+        self.min_raise[ids] = self.bb
+        self.last_aggr[ids] = self.bb
+        self.actions_this_round[ids] = 0
+        self.stacks[ids, :] = stacks[:]
+        self.committed[ids, :] = committed[:]
+        self.has_folded[ids, :] = False
+        self.is_allin[ids, :] = False
+        self.board_onehot[ids, :, :, :] = 0.0
+        self.hole_onehot[ids, :, :, :, :] = 0.0
+
+        # Set hole cards one-hot using vectorized conversion
+        s00, r00 = rules.cards_to_onehot_indices(_c0_1)
+        s01, r01 = rules.cards_to_onehot_indices(_c0_2)
+        s10, r10 = rules.cards_to_onehot_indices(_c1_1)
+        s11, r11 = rules.cards_to_onehot_indices(_c1_2)
+        self.hole_onehot[ids, 0, 0, s00, r00] = 1.0
+        self.hole_onehot[ids, 0, 1, s01, r01] = 1.0
+        self.hole_onehot[ids, 1, 0, s10, r10] = 1.0
+        self.hole_onehot[ids, 1, 1, s11, r11] = 1.0
+        self.done[ids] = False
+        self.winner[ids] = -1
+        # deck handled via tensorized storage

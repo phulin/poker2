@@ -13,7 +13,6 @@ def _make_env(
     bet_bins=None,
     device=None,
     seed=123,
-    shuffle_mode="python",
 ):
     if bet_bins is None:
         bet_bins = [0.5, 0.75, 1.0, 1.5, 2.0]
@@ -25,7 +24,6 @@ def _make_env(
         bet_bins=bet_bins,
         device=device,
         seed=seed,
-        shuffle_mode=shuffle_mode,
     )
     env.reset(seed=seed)
     return env

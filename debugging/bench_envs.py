@@ -54,7 +54,6 @@ def bench_tensor_env(N: int, iters: int, device: str) -> float:
         mask = env.legal_action_bins_mask()
         a = pick_bin_tensor(mask)
         env.step_bins(a)
-        env.reset_done()
     elapsed = time.perf_counter() - start
     env_steps = N * iters
     sps = env_steps / elapsed
