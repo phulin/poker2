@@ -99,25 +99,15 @@ def compute_gae_returns(
 
 def prepare_ppo_batch(trajectories: List[Trajectory]) -> dict:
     """Prepare batch for PPO updates."""
-    observations = []
-    actions = []
-    log_probs_old = []
-    advantages = []
-    returns = []
-    legal_masks = []
-    delta2_list: List[float] = []
-    delta3_list: List[float] = []
-
     for trajectory in trajectories:
-        for transition in trajectory.transitions:
-            observations.append(transition.observation)
-            actions.append(transition.action)
-            log_probs_old.append(transition.log_prob)
-            advantages.append(transition.advantage)
-            returns.append(transition.return_)
-            legal_masks.append(transition.legal_mask)
-            delta2_list.append(transition.delta2)
-            delta3_list.append(transition.delta3)
+        observations = [t.observation for t in trajectory.transitions]
+        actions = [t.action for t in trajectory.transitions]
+        log_probs_old = [t.log_prob for t in trajectory.transitions]
+        advantages = [t.advantage for t in trajectory.transitions]
+        returns = [t.return_ for t in trajectory.transitions]
+        legal_masks = [t.legal_mask for t in trajectory.transitions]
+        delta2_list = [t.delta2 for t in trajectory.transitions]
+        delta3_list = [t.delta3 for t in trajectory.transitions]
 
     return {
         "observations": torch.stack(observations),

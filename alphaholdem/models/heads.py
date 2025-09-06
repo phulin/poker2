@@ -42,12 +42,14 @@ class CategoricalPolicyV1(Policy):
             Tuple of (action_indices, log_probs) both of shape [N]
         """
         if legal_masks is not None:
-            # Mask out illegal actions
-            logits = logits.clone()
-            logits[legal_masks == 0] = float("-inf")
+            # Mask out illegal actions more efficiently
+            # Use torch.where instead of boolean indexing for better performance
+            masked_logits = torch.where(legal_masks.bool(), logits, float("-inf"))
+        else:
+            masked_logits = logits
 
         # Compute log probabilities
-        log_probs = F.log_softmax(logits.float(), dim=-1)
+        log_probs = F.log_softmax(masked_logits.float(), dim=-1)
 
         # Sample actions
         probs = log_probs.exp()

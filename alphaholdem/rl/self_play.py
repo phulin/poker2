@@ -398,32 +398,51 @@ class SelfPlayTrainer:
             our_indices = torch.where(our_turn_mask)[0]
 
             # Create transitions for our actions and add to per-env lists
-            for i, env_idx in enumerate(our_indices):
+            if our_indices.numel() > 0:
                 # Scale factor for reward/targets: 100 big blinds
                 scale = float(self.tensor_env.bb) * 100.0
 
                 # Get action amount and delta bounds from tensor environment
                 delta2, delta3 = self.tensor_env.get_delta_bounds(scale)
 
-                transition = Transition(
-                    observation=torch.cat(
-                        [
-                            states["cards"][env_idx].flatten(),
-                            states["actions"][env_idx].flatten(),
-                        ]
-                    ),
-                    action=action_indices[env_idx].item(),
-                    log_prob=log_probs[env_idx].item(),
-                    value=values[env_idx].item(),
-                    reward=rewards[env_idx].item(),
-                    done=dones[env_idx].item(),
-                    legal_mask=legal_masks[env_idx],
-                    chips_placed=placed_chips[env_idx].item(),
-                    delta2=delta2[env_idx].item(),
-                    delta3=delta3[env_idx].item(),
-                )
-                per_env_transitions[env_idx].append(transition)
-                per_env_rewards[env_idx] += rewards[env_idx].item()
+                # Pre-compute flattened observations for all our environments at once
+                our_cards_flat = states["cards"][our_indices].flatten(
+                    1
+                )  # [N_our, 6*4*13]
+                our_actions_flat = states["actions"][our_indices].flatten(
+                    1
+                )  # [N_our, 24*4*num_bet_bins]
+                our_observations = torch.cat(
+                    [our_cards_flat, our_actions_flat], dim=1
+                )  # [N_our, total_obs_size]
+
+                # Extract scalar values efficiently
+                our_actions = action_indices[our_indices]
+                our_log_probs = log_probs[our_indices]
+                our_values = values[our_indices]
+                our_rewards = rewards[our_indices]
+                our_dones = dones[our_indices]
+                our_legal_masks = legal_masks[our_indices]
+                our_placed_chips = placed_chips[our_indices]
+                our_delta2 = delta2[our_indices]
+                our_delta3 = delta3[our_indices]
+
+                # Create transitions in batch
+                for i, env_idx in enumerate(our_indices):
+                    transition = Transition(
+                        observation=our_observations[i],
+                        action=our_actions[i].item(),
+                        log_prob=our_log_probs[i].item(),
+                        value=our_values[i].item(),
+                        reward=our_rewards[i].item(),
+                        done=our_dones[i].item(),
+                        legal_mask=our_legal_masks[i],
+                        chips_placed=our_placed_chips[i].item(),
+                        delta2=our_delta2[i].item(),
+                        delta3=our_delta3[i].item(),
+                    )
+                    per_env_transitions[env_idx].append(transition)
+                    per_env_rewards[env_idx] += our_rewards[i].item()
 
             # Update step counts for active environments
             per_traj_step_count += (~dones).long()
@@ -469,38 +488,30 @@ class SelfPlayTrainer:
         """
         batch_size = self.num_envs
 
-        # Encode cards for all tensor_environments - need 6 channels like CardsPlanesV1
+        # Vectorized card encoding - much faster than Python loops
+        hole_cards = self.tensor_env.hole_onehot[:, 0]  # [N, 2, 4, 13]
+        board_cards = self.tensor_env.board_onehot  # [N, 5, 4, 13]
+
+        # Initialize cards tensor
         cards = torch.zeros(batch_size, 6, 4, 13, device=self.device)
 
-        # For each tensor_environment, encode cards in 6 channels
-        for i in range(batch_size):
-            # Get hole cards for player 0 (our player)
-            hole_cards = self.tensor_env.hole_onehot[i, 0]  # [2, 4, 13]
-            board_cards = self.tensor_env.board_onehot[i]  # [5, 4, 13]
+        # Channel 0: hole cards (sum over 2 hole cards)
+        cards[:, 0] = hole_cards.sum(dim=1)  # [N, 4, 13]
 
-            # Channel 0: hole cards
-            cards[i, 0] = hole_cards.sum(dim=0)
+        # Channel 1: flop cards (first 3 board cards)
+        cards[:, 1] = board_cards[:, :3].sum(dim=1)  # [N, 4, 13]
 
-            # Channel 1: flop cards (first 3 board cards)
-            if board_cards.shape[0] >= 3:
-                cards[i, 1] = board_cards[:3].sum(dim=0)
+        # Channel 2: turn card (4th board card)
+        cards[:, 2] = board_cards[:, 3]  # [N, 4, 13]
 
-            # Channel 2: turn card (4th board card)
-            if board_cards.shape[0] >= 4:
-                cards[i, 2] = board_cards[3]
+        # Channel 3: river card (5th board card)
+        cards[:, 3] = board_cards[:, 4]  # [N, 4, 13]
 
-            # Channel 3: river card (5th board card)
-            if board_cards.shape[0] >= 5:
-                cards[i, 3] = board_cards[4]
+        # Channel 4: public cards (all board cards)
+        cards[:, 4] = board_cards.sum(dim=1)  # [N, 4, 13]
 
-            # Channel 4: public cards (all board cards)
-            cards[i, 4] = board_cards.sum(dim=0)
-
-            # Channel 5: all cards (hole + board)
-            cards[i, 5] = hole_cards.sum(dim=0) + board_cards.sum(dim=0)
-
-            # Ensure binary (clamp to 0-1)
-            cards[i] = torch.clamp(cards[i], 0, 1)
+        # Channel 5: all cards (hole + board)
+        cards[:, 5] = hole_cards.sum(dim=1) + board_cards.sum(dim=1)  # [N, 4, 13]
 
         # Get action history directly from tensor environment
         # Shape: [N, 4_streets, 6_slots, 4_players, num_bet_bins]
