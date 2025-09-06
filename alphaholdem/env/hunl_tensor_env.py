@@ -9,18 +9,16 @@ from . import rules
 
 
 class HUNLTensorEnv:
-    """Tensorized, batched HUNL environment (first pass).
+    """Tensorized, batched HUNL environment.
 
     Maintains key game scalars/vectors as tensors of shape [N] or [N, 2]:
       - stacks, committed, has_folded, is_allin: [N, 2]
       - pot, to_act, street, actions_this_round, min_raise, last_aggr: [N]
-      - board: [N, 5] (card ints, -1 for empty)
-      - done mask: [N] bool
+      - board_onehot: [N, 5, 4, 13], hole_onehot: [N, 2, 2, 4, 13]
+      - done mask: [N] bool, winner: [N] in {0,1,-1}
 
-    Non-tensor state kept per-env where variable-length is needed:
-      - deck: list of lists of ints (shuffled), one per env
-
-    This initial version supports discrete bin stepping compatible with bet_bins.
+    Decks are stored as a tensor [N, 52] with per-env draw positions [N].
+    Discrete bin stepping is compatible with bet_bins.
     """
 
     # Type signatures for fields
@@ -75,6 +73,8 @@ class HUNLTensorEnv:
         )
         self.bet_bins = bet_bins
         self.shuffle_mode = shuffle_mode
+        # Number of discrete bins: 0=fold, 1=check/call, 2..(B-2)=presets, (B-1)=all-in
+        self.num_bet_bins = len(self.bet_bins) + 3
 
         self.rng = torch.Generator(device="cpu")
         if seed is not None:
@@ -220,17 +220,16 @@ class HUNLTensorEnv:
 
     # --- Legality ---------------------------------------------------------------
 
-    def _compute_bin_amounts_and_mask(
-        self, num_bet_bins: int
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _compute_bin_amounts_and_mask(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute (amounts, mask) for discrete bins with per-env deduplication.
 
-        amounts: [N, num_bet_bins] with -1 for non-preset bins or illegal presets
-        mask:    [N, num_bet_bins] bool mask of legal bins (fold/check-call/presets/all-in)
+        amounts: [N, B] with -1 for non-preset bins or illegal presets
+        mask:    [N, B] bool mask of legal bins (fold/check-call/presets/all-in)
         """
         N = self.N
         device = self.device
-        mask = torch.zeros(N, num_bet_bins, dtype=torch.bool, device=device)
+        B = self.num_bet_bins
+        mask = torch.zeros(N, B, dtype=torch.bool, device=device)
 
         me = self.to_act.clone()
         opp = 1 - me
@@ -250,12 +249,12 @@ class HUNLTensorEnv:
         can_call = (to_call > 0) & (me_stack > 0)
         mask[:, 1] = can_check | can_call
 
-        # Pre-compute candidate concrete amounts for preset bins 2..nb-2
+        # Pre-compute candidate concrete amounts for preset bins 2..B-2
         can_bet_raise = (me_stack > 0) & (opp_stack > 0)
-        amounts = torch.full((N, num_bet_bins), -1, dtype=torch.long, device=device)
+        amounts = torch.full((N, B), -1, dtype=torch.long, device=device)
         for i, mult in enumerate(self.bet_bins):
             b = 2 + i
-            if b >= num_bet_bins - 1:
+            if b >= B - 1:
                 break
             base = (total_committed.to(torch.float32) * float(mult)).to(torch.long)
             # Start with illegal by default
@@ -292,11 +291,9 @@ class HUNLTensorEnv:
             amounts[:, b] = amt
 
         # Deduplicate by concrete amount per environment, keep first occurrence
-        seen_amounts = torch.full(
-            (N, num_bet_bins), -1, dtype=torch.long, device=device
-        )
+        seen_amounts = torch.full((N, B), -1, dtype=torch.long, device=device)
         seen_ptr = torch.zeros(N, dtype=torch.long, device=device)
-        for b in range(2, max(2, num_bet_bins - 1)):
+        for b in range(2, max(2, B - 1)):
             cand = amounts[:, b]
             is_candidate = cand >= 0
             # cand equals any previously seen amount?
@@ -309,18 +306,18 @@ class HUNLTensorEnv:
                 seen_ptr[idx] = seen_ptr[idx] + 1
 
         # All-in always available if we have chips
-        mask[:, num_bet_bins - 1] = me_stack > 0
+        mask[:, B - 1] = me_stack > 0
 
         return amounts, mask
 
-    def legal_action_bins_mask(self, num_bet_bins: int) -> torch.Tensor:
-        """Return [N, num_bet_bins] mask of legal bins with deduplication."""
-        _, mask = self._compute_bin_amounts_and_mask(num_bet_bins)
+    def legal_action_bins_mask(self) -> torch.Tensor:
+        """Return [N, B] mask of legal bins with deduplication."""
+        _, mask = self._compute_bin_amounts_and_mask()
         return mask
 
-    def bin_amounts(self, num_bet_bins: int) -> torch.Tensor:
-        """Return [N, num_bet_bins] concrete amounts for bins; -1 where not applicable."""
-        amounts, _ = self._compute_bin_amounts_and_mask(num_bet_bins)
+    def bin_amounts(self) -> torch.Tensor:
+        """Return [N, B] concrete amounts for bins; -1 where not applicable."""
+        amounts, _ = self._compute_bin_amounts_and_mask()
         return amounts
 
     # --- Helper APIs -----------------------------------------------------------
@@ -346,7 +343,7 @@ class HUNLTensorEnv:
     # --- Step ------------------------------------------------------------------
 
     def step_bins(
-        self, bin_indices: torch.Tensor, num_bet_bins: int
+        self, bin_indices: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         """Step all envs using discrete bin indices tensor [N].
 
@@ -372,10 +369,10 @@ class HUNLTensorEnv:
         if (
             (not isinstance(self.action_history, torch.Tensor))
             or self.action_history.numel() == 0
-            or self.action_history.size(-1) != num_bet_bins
+            or self.action_history.size(-1) != self.num_bet_bins
         ):
             self.action_history = torch.zeros(
-                (self.N, 4, self.history_slots, 4, num_bet_bins),
+                (self.N, 4, self.history_slots, 4, self.num_bet_bins),
                 dtype=torch.float32,
                 device=self.device,
             )
@@ -383,7 +380,7 @@ class HUNLTensorEnv:
         # Group masks by action type
         is_fold = bin_indices == 0
         is_check_call = bin_indices == 1
-        is_allin = bin_indices == (num_bet_bins - 1)
+        is_allin = bin_indices == (self.num_bet_bins - 1)
         is_bet_raise = ~(is_fold | is_check_call | is_allin)
 
         # Record current action into history (actor rows and sum row)
@@ -423,7 +420,9 @@ class HUNLTensorEnv:
             idx = is_allin.nonzero(as_tuple=False).squeeze(1)
             amt = me_stack[idx]
             # Pay call first if needed
-            call_amt = torch.clamp(to_call[idx], min=0, max=amt)
+            # Avoid mixed scalar/tensor clamp; clamp to non-negative, then cap by amt
+            call_amt = torch.clamp(to_call[idx], min=0)
+            call_amt = torch.minimum(call_amt, amt)
             self.stacks[idx, me[idx]] -= call_amt
             self.committed[idx, me[idx]] += call_amt
             self.pot[idx] += call_amt
@@ -497,7 +496,7 @@ class HUNLTensorEnv:
         # Write legal mask for next decision into history legal row
         next_round = self.street.clamp(min=0, max=3)
         next_slot = torch.clamp(self.actions_this_round, max=self.history_slots - 1)
-        legal_mask = self.legal_action_bins_mask(num_bet_bins).to(torch.float32)
+        legal_mask = self.legal_action_bins_mask().to(torch.float32)
         self.action_history[n_idx, next_round, next_slot, 3, :] = legal_mask
 
         # Round closure: equal committed and both acted
@@ -683,10 +682,10 @@ class HUNLTensorEnv:
                 base_seed = int(seed) if seed is not None else random.randrange(1 << 30)
                 rng = random.Random(base_seed + i * 9973)
                 self.deck[i] = torch.tensor(
-                    rules.new_shuffled_deck(rng), dtype=torch.long
+                    rules.new_shuffled_deck(rng), dtype=torch.long, device=self.device
                 )
             else:
-                self.deck[i] = torch.randperm(52, generator=self.rng)
+                self.deck[i] = torch.randperm(52, generator=self.rng).to(self.device)
             self.deck_pos[i] = 0
             button = int(torch.randint(0, 2, (), generator=self.rng).item())
             p_sb = 0 if button == 0 else 1
