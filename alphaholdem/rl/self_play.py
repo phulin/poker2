@@ -288,107 +288,6 @@ class SelfPlayTrainer:
         )
 
     @profile
-    def collect_tensor_trajectory(
-        self, opponent_snapshot: Optional[AgentSnapshot] = None
-    ) -> Trajectory:
-        """
-        Collect trajectories from multiple tensor_environments in parallel using HUNLTensorEnv.
-
-        Args:
-            opponent_snapshot: Optional opponent snapshot to play against.
-                             If None, plays against self (self-play).
-
-        Returns:
-            Combined trajectory from all tensor_environments
-        """
-        if not self.use_tensor_env:
-            raise ValueError("collect_tensor_trajectory requires use_tensor_env=True")
-
-        # Reset all tensor_environments
-        self.tensor_env.reset(seed=123)
-
-        all_transitions = []
-        total_reward = 0.0
-        max_steps = 50  # Safety limit
-
-        step_count = 0
-        while not self.tensor_env.done.all() and step_count < max_steps:
-            step_count += 1
-
-            # Get legal action masks for all tensor_environments
-            legal_masks = self.tensor_env.legal_action_bins_mask()  # [N, B]
-
-            # Encode states for all tensor_environments
-            states = self._encode_tensor_states()
-
-            # Get model predictions for all tensor_environments
-            with torch.no_grad():
-                autocast_enabled = (
-                    self.device.type == "cuda" or self.device.type == "mps"
-                )
-                dtype = torch.bfloat16 if autocast_enabled else torch.float16
-                cm = (
-                    torch.autocast(
-                        device_type=self.device.type,
-                        dtype=dtype,
-                    )
-                    if autocast_enabled
-                    else torch.amp.autocast("cpu", enabled=False)
-                )
-                with cm:
-                    logits, values = self.model(states["cards"], states["actions"])
-
-                    # Sample actions for all tensor_environments
-                    action_indices, log_probs = self.policy.action_batch(
-                        logits, legal_masks
-                    )
-
-            # Take steps in all tensor_environments
-            rewards, dones, to_act, info = self.tensor_env.step_bins(action_indices)
-
-            # Record transitions for tensor_environments where we acted (player 0)
-            our_turn_mask = to_act == 0
-
-            if our_turn_mask.any():
-                our_indices = torch.where(our_turn_mask)[0]
-
-                # Create transitions for our actions
-                for i, tensor_env_idx in enumerate(our_indices):
-                    # Scale factor for reward/targets: 100 big blinds
-                    scale = float(self.tensor_env.bb) * 100.0
-
-                    transition = Transition(
-                        observation=torch.cat(
-                            [
-                                states["cards"][tensor_env_idx].flatten(),
-                                states["actions"][tensor_env_idx].flatten(),
-                            ]
-                        ),
-                        action=action_indices[tensor_env_idx].item(),
-                        log_prob=log_probs[tensor_env_idx].item(),
-                        value=values[tensor_env_idx].item(),
-                        reward=rewards[tensor_env_idx].item(),
-                        done=dones[tensor_env_idx].item(),
-                        legal_mask=legal_masks[tensor_env_idx],
-                        chips_placed=0,  # TODO: Calculate from action
-                        delta2=0.0,  # TODO: Calculate per-sample bounds
-                        delta3=0.0,  # TODO: Calculate per-sample bounds
-                    )
-                    all_transitions.append(transition)
-                    total_reward += rewards[tensor_env_idx].item()
-
-            # Reset done tensor_environments
-            if dones.any():
-                self.tensor_env.reset_done(seed=123 + step_count * 9973)
-
-        return (
-            Trajectory(
-                transitions=all_transitions,
-            ),
-            total_reward,
-        )
-
-    @profile
     def collect_tensor_trajectories(
         self, min_steps: int
     ) -> tuple[list[Trajectory], float]:
@@ -409,82 +308,98 @@ class SelfPlayTrainer:
         total_reward = 0.0
         steps_collected = 0
 
+        # Initialize all environments
+        self.tensor_env.reset(seed=123)
+
+        # Per-environment transition lists and step counts
+        per_env_transitions = [[] for _ in range(self.num_envs)]
+        per_env_rewards = torch.zeros(self.num_envs, device=self.device)
+        per_traj_step_count = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        max_steps = 50  # Safety limit per trajectory
+
         # Outer loop: collect complete trajectories until we have enough steps
         while steps_collected < min_steps:
-            # Initialize all environments for new trajectory
-            self.tensor_env.reset(seed=123 + len(all_trajectories) * 9973)
+            # Get legal action masks for all environments
+            legal_masks = self.tensor_env.legal_action_bins_mask()  # [N, B]
 
-            trajectory_transitions = []
-            episode_reward = 0.0
-            max_steps = 50  # Safety limit
+            # Encode states for all environments
+            states = self._encode_tensor_states()
 
-            # Inner loop: run trajectory until all environments are done
-            step_count = 0
-            while not self.tensor_env.done.all() and step_count < max_steps:
-                step_count += 1
+            # Get model predictions for all environments
+            with torch.no_grad():
+                logits, values = self.model(states["cards"], states["actions"])
 
-                # Get legal action masks for all environments
-                legal_masks = self.tensor_env.legal_action_bins_mask()  # [N, B]
+                # Sample actions for all environments
+                action_indices, log_probs = self.policy.action_batch(
+                    logits, legal_masks
+                )
 
-                # Encode states for all environments
-                states = self._encode_tensor_states()
+            # Take steps in all environments
+            rewards, dones, to_act, _ = self.tensor_env.step_bins(action_indices)
 
-                # Get model predictions for all environments
-                with torch.no_grad():
-                    logits, values = self.model(states["cards"], states["actions"])
+            # Record transitions for environments where we acted (player 0)
+            our_turn_mask = to_act == 0
+            our_indices = torch.where(our_turn_mask)[0]
 
-                    # Sample actions for all environments
-                    action_indices, log_probs = self.policy.action_batch(
-                        logits, legal_masks
-                    )
+            # Create transitions for our actions and add to per-env lists
+            for i, env_idx in enumerate(our_indices):
+                # Scale factor for reward/targets: 100 big blinds
+                scale = float(self.tensor_env.bb) * 100.0
 
-                # Take steps in all environments
-                rewards, dones, to_act, info = self.tensor_env.step_bins(action_indices)
+                transition = Transition(
+                    observation=torch.cat(
+                        [
+                            states["cards"][env_idx].flatten(),
+                            states["actions"][env_idx].flatten(),
+                        ]
+                    ),
+                    action=action_indices[env_idx].item(),
+                    log_prob=log_probs[env_idx].item(),
+                    value=values[env_idx].item(),
+                    reward=rewards[env_idx].item(),
+                    done=dones[env_idx].item(),
+                    legal_mask=legal_masks[env_idx],
+                    chips_placed=0,  # TODO: Calculate from action
+                    delta2=0.0,  # TODO: Calculate per-sample bounds
+                    delta3=0.0,  # TODO: Calculate per-sample bounds
+                )
+                per_env_transitions[env_idx].append(transition)
+                per_env_rewards[env_idx] += rewards[env_idx].item()
 
-                # Record transitions for environments where we acted (player 0)
-                our_turn_mask = to_act == 0
+            # Update step counts for active environments
+            per_traj_step_count += (~dones).long()
 
-                if our_turn_mask.any():
-                    our_indices = torch.where(our_turn_mask)[0]
+            # Handle environments that exceed max steps
+            over_limit = (per_traj_step_count >= max_steps) & (~self.tensor_env.done)
+            if over_limit.any():
+                env_indices = torch.where(over_limit)[0].tolist()
+                print(
+                    f"Warning: Environments {env_indices} reached max steps ({max_steps}), forcing termination"
+                )
+                # Mark them as done
+                self.tensor_env.done[env_indices] = True
 
-                    # Create transitions for our actions
-                    for i, env_idx in enumerate(our_indices):
-                        # Scale factor for reward/targets: 100 big blinds
-                        scale = float(self.tensor_env.bb) * 100.0
+            # Create trajectories for done environments
+            done_indices = torch.where(dones)[0]
+            for env_idx in done_indices:
+                if per_env_transitions[
+                    env_idx
+                ]:  # Only create trajectory if we have transitions
+                    trajectory = Trajectory(transitions=per_env_transitions[env_idx])
+                    all_trajectories.append(trajectory)
+                    total_reward += per_env_rewards[env_idx].item()
+                    steps_collected += len(per_env_transitions[env_idx])
 
-                        transition = Transition(
-                            observation=torch.cat(
-                                [
-                                    states["cards"][env_idx].flatten(),
-                                    states["actions"][env_idx].flatten(),
-                                ]
-                            ),
-                            action=action_indices[env_idx].item(),
-                            log_prob=log_probs[env_idx].item(),
-                            value=values[env_idx].item(),
-                            reward=rewards[env_idx].item(),
-                            done=dones[env_idx].item(),
-                            legal_mask=legal_masks[env_idx],
-                            chips_placed=0,  # TODO: Calculate from action
-                            delta2=0.0,  # TODO: Calculate per-sample bounds
-                            delta3=0.0,  # TODO: Calculate per-sample bounds
-                        )
-                        trajectory_transitions.append(transition)
-                        episode_reward += rewards[env_idx].item()
+                    # Clear the environment's transition list and reset counters
+                    per_env_transitions[env_idx] = []
+                    per_env_rewards[env_idx] = 0.0
+                    per_traj_step_count[env_idx] = 0
 
-                # Reset done environments at the end of each step
-                if dones.any():
-                    self.tensor_env.reset_done(
-                        seed=123 + len(all_trajectories) * 9973 + step_count
-                    )
-
-            # Create trajectory from collected transitions
-            if trajectory_transitions:
-                trajectory = Trajectory(transitions=trajectory_transitions)
-                all_trajectories.append(trajectory)
-                total_reward += episode_reward
-                steps_collected += len(trajectory_transitions)
-
+            # Reset done environments
+            if dones.any():
+                self.tensor_env.reset_done()
         return all_trajectories, total_reward
 
     @profile
