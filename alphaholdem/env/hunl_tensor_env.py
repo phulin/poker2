@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional, Tuple
+import random
 
 import torch
 
@@ -47,6 +48,11 @@ class HUNLTensorEnv:
     board_onehot: torch.Tensor
     done: torch.Tensor
     winner: torch.Tensor
+    # action history (allocated lazily when num_bet_bins known)
+    # shape: [N, 4 rounds, S slots, 4 rows (p0,p1,sum,legal), num_bins]
+    # rows: 0=p0 action one-hot, 1=p1 action one-hot, 2=sum, 3=legal mask
+    action_history: object
+    history_slots: int
 
     def __init__(
         self,
@@ -54,9 +60,10 @@ class HUNLTensorEnv:
         starting_stack: int,
         sb: int,
         bb: int,
+        bet_bins: list[float],
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
-        bet_bins: Optional[list[float]] = None,
+        shuffle_mode: str = "torch",
     ) -> None:
         assert num_envs > 0
         self.N = num_envs
@@ -66,15 +73,16 @@ class HUNLTensorEnv:
         self.device = device or torch.device(
             "mps" if torch.backends.mps.is_available() else "cpu"
         )
-        self.bet_bins = bet_bins or [0.5, 0.75, 1.0, 1.5, 2.0]
+        self.bet_bins = bet_bins
+        self.shuffle_mode = shuffle_mode
 
         self.rng = torch.Generator(device="cpu")
         if seed is not None:
             self.rng.manual_seed(int(seed))
 
         # Per-env decks as tensor and draw positions
-        self.deck = torch.empty(self.N, 52, dtype=torch.long)
-        self.deck_pos = torch.zeros(self.N, dtype=torch.long)
+        self.deck = torch.empty(self.N, 52, dtype=torch.long, device=self.device)
+        self.deck_pos = torch.zeros(self.N, dtype=torch.long, device=self.device)
 
         # Tensors (initialized in reset)
         self.button = torch.zeros(self.N, dtype=torch.long, device=self.device)
@@ -105,6 +113,9 @@ class HUNLTensorEnv:
         self.hole_onehot = torch.zeros(
             (self.N, 2, 2, 4, 13), dtype=torch.float32, device=self.device
         )
+        # history config
+        self.history_slots = 6
+        self.action_history = None
 
     # --- Reset -----------------------------------------------------------------
 
@@ -116,9 +127,19 @@ class HUNLTensorEnv:
         # Vectorized reset for all environments
 
         # Shuffle decks for all envs and reset draw positions
-        self.deck = torch.stack(
-            [torch.randperm(52, generator=self.rng) for _ in range(self.N)], dim=0
-        )
+        if self.shuffle_mode == "python":
+            # Use Python RNG to match HUNLEnv shuffles for parity tests
+            base_seed = int(seed) if seed is not None else random.randrange(1 << 30)
+            decks = []
+            for i in range(self.N):
+                rng = random.Random(base_seed + i * 9973)
+                d = rules.new_shuffled_deck(rng)
+                decks.append(d)
+            self.deck = torch.tensor(decks, dtype=torch.long, device=self.device)
+        else:
+            self.deck = torch.stack(
+                [torch.randperm(52, generator=self.rng) for _ in range(self.N)], dim=0
+            ).to(self.device)
         self.deck_pos[:] = 0
 
         # Randomize button for all envs
@@ -134,8 +155,12 @@ class HUNLTensorEnv:
 
         # Deal hole cards: for each env, assign 4 cards in deck order
         # [N, 4] indices into deck for each env
-        card_indices = torch.arange(4).unsqueeze(0).expand(self.N, 4)
-        cards = self.deck[torch.arange(self.N).unsqueeze(1), card_indices]  # [N, 4]
+        card_indices = (
+            torch.arange(4, device=self.device).unsqueeze(0).expand(self.N, 4)
+        )
+        cards = self.deck[
+            torch.arange(self.N, device=self.device).unsqueeze(1), card_indices
+        ]  # [N, 4]
         self.deck_pos[:] = 4
 
         # Assign hole cards
@@ -174,25 +199,38 @@ class HUNLTensorEnv:
         self.hole_onehot[:, :, :, :, :] = 0.0
 
         # Set hole_onehot for all envs
-        for idx, (c0_1, c0_2, c1_1, c1_2) in enumerate(
-            zip(_c0_1.tolist(), _c0_2.tolist(), _c1_1.tolist(), _c1_2.tolist())
+        # Vectorized set of hole one-hots
+        s0_1, r0_1 = _c0_1 // 13, _c0_1 % 13
+        s0_2, r0_2 = _c0_2 // 13, _c0_2 % 13
+        s1_1, r1_1 = _c1_1 // 13, _c1_1 % 13
+        s1_2, r1_2 = _c1_2 // 13, _c1_2 % 13
+        n_idx = torch.arange(self.N, device=self.device)
+        self.hole_onehot[n_idx, 0, 0, s0_1, r0_1] = 1.0
+        self.hole_onehot[n_idx, 0, 1, s0_2, r0_2] = 1.0
+        self.hole_onehot[n_idx, 1, 0, s1_1, r1_1] = 1.0
+        self.hole_onehot[n_idx, 1, 1, s1_2, r1_2] = 1.0
+        # Reset history planes if already allocated
+        if (
+            isinstance(self.action_history, torch.Tensor)
+            and self.action_history.numel() > 0
         ):
-            self.hole_onehot[idx, 0, 0, rules.suit(c0_1), rules.rank(c0_1)] = 1.0
-            self.hole_onehot[idx, 0, 1, rules.suit(c0_2), rules.rank(c0_2)] = 1.0
-            self.hole_onehot[idx, 1, 0, rules.suit(c1_1), rules.rank(c1_1)] = 1.0
-            self.hole_onehot[idx, 1, 1, rules.suit(c1_2), rules.rank(c1_2)] = 1.0
+            self.action_history.zero_()
         # Note: Hole cards are implicit in deck/history; full tensorization of hole cards
         # can be added later (e.g., hole_cards tensor [N, 2, 2]).
 
     # --- Legality ---------------------------------------------------------------
 
-    def legal_action_bins_mask(self, num_bet_bins: int) -> torch.Tensor:
-        """Return [N, num_bet_bins] mask of legal bins.
+    def _compute_bin_amounts_and_mask(
+        self, num_bet_bins: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute (amounts, mask) for discrete bins with per-env deduplication.
 
-        Follows the single-env improved logic approximately.
+        amounts: [N, num_bet_bins] with -1 for non-preset bins or illegal presets
+        mask:    [N, num_bet_bins] bool mask of legal bins (fold/check-call/presets/all-in)
         """
         N = self.N
-        mask = torch.zeros(N, num_bet_bins, dtype=torch.bool, device=self.device)
+        device = self.device
+        mask = torch.zeros(N, num_bet_bins, dtype=torch.bool, device=device)
 
         me = self.to_act.clone()
         opp = 1 - me
@@ -212,35 +250,98 @@ class HUNLTensorEnv:
         can_call = (to_call > 0) & (me_stack > 0)
         mask[:, 1] = can_check | can_call
 
-        # Bet/Raise bins 2..nb-2
+        # Pre-compute candidate concrete amounts for preset bins 2..nb-2
         can_bet_raise = (me_stack > 0) & (opp_stack > 0)
-        # Candidate base sizes per bin using total_committed * mult
+        amounts = torch.full((N, num_bet_bins), -1, dtype=torch.long, device=device)
         for i, mult in enumerate(self.bet_bins):
             b = 2 + i
             if b >= num_bet_bins - 1:
                 break
             base = (total_committed.to(torch.float32) * float(mult)).to(torch.long)
-            if_mask = can_bet_raise.clone()
-            if_mask &= total_committed > 0
+            # Start with illegal by default
+            amt = torch.full((N,), -1, dtype=torch.long, device=device)
             # Bet case
-            bet_ok = (to_call <= 0) & (base >= self.bb) & (base < me_stack)
-            # Raise case: include call amount, must exceed to_call
+            bet_case = (to_call <= 0) & can_bet_raise & (total_committed > 0)
+            bet_amt = base.clamp(min=self.bb)
+            # Cap bet to opponent's effective stack to avoid unmatched excess in HU
+            bet_amt = torch.minimum(bet_amt, opp_stack)
+            bet_amt = torch.minimum(bet_amt, me_stack - 1)  # strictly below all-in
+            bet_legal = bet_case & (bet_amt > 0)
+            amt = torch.where(bet_legal, bet_amt, amt)
+            # Raise case
+            raise_case = (
+                (to_call > 0)
+                & can_bet_raise
+                & (me_stack > to_call)
+                & (total_committed > 0)
+            )
             raise_amt = base + to_call
             raise_inc = base
             meets_min = raise_inc >= self.min_raise
             can_only_allin = me_stack <= (to_call + self.min_raise)
-            raise_ok = (
-                (to_call > 0)
-                & (me_stack > to_call)
-                & (raise_amt > to_call)
-                & (meets_min | can_only_allin)
+            # Legal if exceeds call and either meets min-raise or only all-in remains
+            raise_legal = (
+                raise_case & (raise_amt > to_call) & (meets_min | can_only_allin)
             )
-            mask[:, b] = if_mask & (bet_ok | raise_ok)
+            # Do not exceed stack (those map to all-in bin)
+            # Cap raise to both our stack and opponent's stack (HU, no side-pot)
+            raise_amt = torch.minimum(raise_amt, me_stack - 1)
+            raise_amt = torch.minimum(raise_amt, opp_stack)
+            raise_legal = raise_legal & (raise_amt > to_call)
+            amt = torch.where(raise_legal, raise_amt, amt)
+            amounts[:, b] = amt
 
-        # All-in
+        # Deduplicate by concrete amount per environment, keep first occurrence
+        seen_amounts = torch.full(
+            (N, num_bet_bins), -1, dtype=torch.long, device=device
+        )
+        seen_ptr = torch.zeros(N, dtype=torch.long, device=device)
+        for b in range(2, max(2, num_bet_bins - 1)):
+            cand = amounts[:, b]
+            is_candidate = cand >= 0
+            # cand equals any previously seen amount?
+            dup = (cand.view(N, 1) == seen_amounts).any(dim=1)
+            is_new = is_candidate & (~dup)
+            mask[:, b] = is_new
+            if is_new.any():
+                idx = torch.nonzero(is_new, as_tuple=False).squeeze(1)
+                seen_amounts[idx, seen_ptr[idx]] = cand[idx]
+                seen_ptr[idx] = seen_ptr[idx] + 1
+
+        # All-in always available if we have chips
         mask[:, num_bet_bins - 1] = me_stack > 0
 
+        return amounts, mask
+
+    def legal_action_bins_mask(self, num_bet_bins: int) -> torch.Tensor:
+        """Return [N, num_bet_bins] mask of legal bins with deduplication."""
+        _, mask = self._compute_bin_amounts_and_mask(num_bet_bins)
         return mask
+
+    def bin_amounts(self, num_bet_bins: int) -> torch.Tensor:
+        """Return [N, num_bet_bins] concrete amounts for bins; -1 where not applicable."""
+        amounts, _ = self._compute_bin_amounts_and_mask(num_bet_bins)
+        return amounts
+
+    # --- Helper APIs -----------------------------------------------------------
+
+    def active_indices(self) -> torch.Tensor:
+        """Return [M] tensor of indices for environments that are not done."""
+        return torch.nonzero(~self.done, as_tuple=False).squeeze(1)
+
+    def states_summary(self) -> dict:
+        """Lightweight snapshot for debugging/logging (avoids large tensors)."""
+        return {
+            "street": self.street.clone(),
+            "to_act": self.to_act.clone(),
+            "pot": self.pot.clone(),
+            "min_raise": self.min_raise.clone(),
+            "done": self.done.clone(),
+        }
+
+    def get_action_history(self) -> torch.Tensor | None:
+        """Return action history planes tensor if allocated, else None."""
+        return self.action_history
 
     # --- Step ------------------------------------------------------------------
 
@@ -267,11 +368,35 @@ class HUNLTensorEnv:
 
         rewards = torch.zeros(N, dtype=torch.float32, device=device)
 
+        # Lazily allocate action history tensor when num_bet_bins is known
+        if (
+            (not isinstance(self.action_history, torch.Tensor))
+            or self.action_history.numel() == 0
+            or self.action_history.size(-1) != num_bet_bins
+        ):
+            self.action_history = torch.zeros(
+                (self.N, 4, self.history_slots, 4, num_bet_bins),
+                dtype=torch.float32,
+                device=self.device,
+            )
+
         # Group masks by action type
         is_fold = bin_indices == 0
         is_check_call = bin_indices == 1
         is_allin = bin_indices == (num_bet_bins - 1)
         is_bet_raise = ~(is_fold | is_check_call | is_allin)
+
+        # Record current action into history (actor rows and sum row)
+        n_idx = torch.arange(N, device=self.device)
+        round_idx = self.street.clamp(min=0, max=3)
+        slot_idx = torch.clamp(self.actions_this_round, max=self.history_slots - 1)
+        # clear actor rows at this slot
+        self.action_history[n_idx, round_idx, slot_idx, 0, :] = 0.0
+        self.action_history[n_idx, round_idx, slot_idx, 1, :] = 0.0
+        # set actor-specific one-hot
+        self.action_history[n_idx, round_idx, slot_idx, me, bin_indices] = 1.0
+        # sum row
+        self.action_history[n_idx, round_idx, slot_idx, 2, bin_indices] = 1.0
 
         # Fold: immediate terminal, award pot to opp
         if is_fold.any():
@@ -328,6 +453,9 @@ class HUNLTensorEnv:
             if idx_bet.numel() > 0:
                 amt = base[to_call[idx] <= 0]
                 amt = amt.clamp(min=self.bb)
+                # Cap to opponent's effective stack to avoid over-betting beyond coverage
+                amt = torch.minimum(amt, self.stacks[idx_bet, 1 - me[idx_bet]])
+                # Also cannot exceed our own stack (non-allin path)
                 amt = torch.minimum(amt, self.stacks[idx_bet, me[idx_bet]])
                 self.stacks[idx_bet, me[idx_bet]] -= amt
                 self.committed[idx_bet, me[idx_bet]] += amt
@@ -346,8 +474,12 @@ class HUNLTensorEnv:
                 self.pot[idx_raise] += call_amt
                 # Raise part
                 avail = self.stacks[idx_raise, me[idx_raise]]
+                # Opponent coverage after call
+                opp_avail = self.stacks[idx_raise, 1 - me[idx_raise]]
                 min_req = self.min_raise[idx_raise]
                 raise_part = torch.minimum(base_r, avail)
+                # Cap to opponent coverage (HU, no side-pot)
+                raise_part = torch.minimum(raise_part, opp_avail)
                 need = (raise_part < min_req) & (avail > min_req)
                 raise_part = torch.where(need, min_req, raise_part)
                 self.stacks[idx_raise, me[idx_raise]] -= raise_part
@@ -362,6 +494,12 @@ class HUNLTensorEnv:
         self.to_act = 1 - self.to_act
         self.actions_this_round += (~self.done).to(torch.long)
 
+        # Write legal mask for next decision into history legal row
+        next_round = self.street.clamp(min=0, max=3)
+        next_slot = torch.clamp(self.actions_this_round, max=self.history_slots - 1)
+        legal_mask = self.legal_action_bins_mask(num_bet_bins).to(torch.float32)
+        self.action_history[n_idx, next_round, next_slot, 3, :] = legal_mask
+
         # Round closure: equal committed and both acted
         equal_committed = self.committed[:, 0] == self.committed[:, 1]
         round_closed = equal_committed & (self.actions_this_round >= 2)
@@ -373,42 +511,51 @@ class HUNLTensorEnv:
             self.actions_this_round[rc_idx] = 0
             # Advance street and deal
             s = self.street[rc_idx]
-            # flop
+            # flop (vectorized dealing of 3 cards)
             flop_mask = s == 0
             if flop_mask.any():
                 ids = rc_idx[flop_mask]
-                for i in ids.tolist():
-                    c0 = int(self.deck[i, self.deck_pos[i]].item())
-                    self.deck_pos[i] += 1
-                    c1 = int(self.deck[i, self.deck_pos[i]].item())
-                    self.deck_pos[i] += 1
-                    c2 = int(self.deck[i, self.deck_pos[i]].item())
-                    self.deck_pos[i] += 1
-                    self.board_onehot[i, 0, rules.suit(c0), rules.rank(c0)] = 1.0
-                    self.board_onehot[i, 1, rules.suit(c1), rules.rank(c1)] = 1.0
-                    self.board_onehot[i, 2, rules.suit(c2), rules.rank(c2)] = 1.0
+                pos = self.deck_pos[ids]
+                a = self.deck[ids, pos]
+                b = self.deck[ids, pos + 1]
+                c = self.deck[ids, pos + 2]
+                self.deck_pos[ids] = pos + 3
+                a_s, a_r = a // 13, a % 13
+                b_s, b_r = b // 13, b % 13
+                c_s, c_r = c // 13, c % 13
+                self.board_onehot[ids, 0, a_s, a_r] = 1.0
+                self.board_onehot[ids, 1, b_s, b_r] = 1.0
+                self.board_onehot[ids, 2, c_s, c_r] = 1.0
                 self.street[ids] = 1
                 self.to_act[ids] = 1 - self.button[ids]
+                self.min_raise[ids] = self.bb
+                self.last_aggr[ids] = 0
             # turn
             turn_mask = s == 1
             if turn_mask.any():
                 ids = rc_idx[turn_mask]
-                for i in ids.tolist():
-                    c = int(self.deck[i, self.deck_pos[i]].item())
-                    self.deck_pos[i] += 1
-                    self.board_onehot[i, 3, rules.suit(c), rules.rank(c)] = 1.0
+                pos = self.deck_pos[ids]
+                c = self.deck[ids, pos]
+                self.deck_pos[ids] = pos + 1
+                c_s, c_r = c // 13, c % 13
+                self.board_onehot[ids, 3, c_s, c_r] = 1.0
                 self.street[ids] = 2
                 self.to_act[ids] = 1 - self.button[ids]
+                self.min_raise[ids] = self.bb
+                self.last_aggr[ids] = 0
             # river
             river_mask = s == 2
             if river_mask.any():
                 ids = rc_idx[river_mask]
-                for i in ids.tolist():
-                    c = int(self.deck[i, self.deck_pos[i]].item())
-                    self.deck_pos[i] += 1
-                    self.board_onehot[i, 4, rules.suit(c), rules.rank(c)] = 1.0
+                pos = self.deck_pos[ids]
+                c = self.deck[ids, pos]
+                self.deck_pos[ids] = pos + 1
+                c_s, c_r = c // 13, c % 13
+                self.board_onehot[ids, 4, c_s, c_r] = 1.0
                 self.street[ids] = 3
                 self.to_act[ids] = 1 - self.button[ids]
+                self.min_raise[ids] = self.bb
+                self.last_aggr[ids] = 0
             # showdown
             sd_mask = s == 3
             if sd_mask.any():
@@ -468,6 +615,61 @@ class HUNLTensorEnv:
                     torch.where(winner_ids == -1, pot / 2.0, torch.zeros_like(pot)),
                 )
                 rewards[ids] = (stacks + pot_share - float(self.starting_stack)) / scale
+        # Auto-runout: if any env has a player all-in and not done, deal to river and resolve
+        auto_mask = (self.is_allin[:, 0] | self.is_allin[:, 1]) & (~self.done)
+        auto_ids = torch.nonzero(auto_mask, as_tuple=False).squeeze(1)
+        if auto_ids.numel() > 0:
+            for i in auto_ids.tolist():
+                # Deal remaining community cards to reach 5
+                current_cards = int(
+                    self.board_onehot[i].sum().item()
+                )  # equals num cards
+                while current_cards < 5:
+                    c = int(self.deck[i, self.deck_pos[i]].item())
+                    self.deck_pos[i] += 1
+                    # place into first empty slot
+                    for k in range(5):
+                        if self.board_onehot[i, k].sum().item() == 0.0:
+                            self.board_onehot[i, k, rules.suit(c), rules.rank(c)] = 1.0
+                            break
+                    current_cards += 1
+                # Set river street and resolve showdown if not folded
+                self.street[i] = 3
+                if not self.has_folded[i, 0] and not self.has_folded[i, 1]:
+                    a_plane = (
+                        self.hole_onehot[i, 0, 0]
+                        + self.hole_onehot[i, 0, 1]
+                        + self.board_onehot[i].sum(dim=0)
+                    )
+                    b_plane = (
+                        self.hole_onehot[i, 1, 0]
+                        + self.hole_onehot[i, 1, 1]
+                        + self.board_onehot[i].sum(dim=0)
+                    )
+                    a_plane = (a_plane > 0.5).to(torch.float32).unsqueeze(0)
+                    b_plane = (b_plane > 0.5).to(torch.float32).unsqueeze(0)
+                    cmp = rules.compare_7_batch_onehot(a_plane, b_plane)[0].item()
+                    if cmp > 0:
+                        self.winner[i] = 0
+                    elif cmp < 0:
+                        self.winner[i] = 1
+                    else:
+                        self.winner[i] = -1
+                # Mark done and assign reward for current actor perspective
+                self.done[i] = True
+                m = int(me[i].item())
+                scale = float(self.bb) * 100.0
+                pot_share = 0.0
+                if self.winner[i] == m:
+                    pot_share = float(self.pot[i].item())
+                elif self.winner[i] == -1:
+                    pot_share = float(self.pot[i].item()) / 2.0
+                rewards[i] = (
+                    float(self.stacks[i, m].item())
+                    + pot_share
+                    - float(self.starting_stack)
+                ) / scale
+
         return rewards, self.done.clone(), self.to_act.clone(), {}
 
     def reset_done(self, seed: Optional[int] = None) -> None:
@@ -476,17 +678,30 @@ class HUNLTensorEnv:
             self.rng.manual_seed(int(seed))
         ids = torch.nonzero(self.done, as_tuple=False).squeeze(1).tolist()
         for i in ids:
-            deck = rules.new_shuffled_deck()
+            # Shuffle deck tensor and reset draw pos
+            if self.shuffle_mode == "python":
+                base_seed = int(seed) if seed is not None else random.randrange(1 << 30)
+                rng = random.Random(base_seed + i * 9973)
+                self.deck[i] = torch.tensor(
+                    rules.new_shuffled_deck(rng), dtype=torch.long
+                )
+            else:
+                self.deck[i] = torch.randperm(52, generator=self.rng)
+            self.deck_pos[i] = 0
             button = int(torch.randint(0, 2, (), generator=self.rng).item())
             p_sb = 0 if button == 0 else 1
             p_bb = 1 - p_sb
             stacks = [self.starting_stack, self.starting_stack]
             committed = [0, 0]
             # Deal
-            _c0_1 = deck.pop()
-            _c0_2 = deck.pop()
-            _c1_1 = deck.pop()
-            _c1_2 = deck.pop()
+            _c0_1 = int(self.deck[i, self.deck_pos[i]].item())
+            self.deck_pos[i] += 1
+            _c0_2 = int(self.deck[i, self.deck_pos[i]].item())
+            self.deck_pos[i] += 1
+            _c1_1 = int(self.deck[i, self.deck_pos[i]].item())
+            self.deck_pos[i] += 1
+            _c1_2 = int(self.deck[i, self.deck_pos[i]].item())
+            self.deck_pos[i] += 1
             # Blinds
             stacks[p_sb] -= self.sb
             committed[p_sb] += self.sb
@@ -514,4 +729,4 @@ class HUNLTensorEnv:
             self.hole_onehot[i, 1, 1, rules.suit(_c1_2), rules.rank(_c1_2)] = 1.0
             self.done[i] = False
             self.winner[i] = -1
-            self._decks[i] = deck
+            # deck handled via tensorized storage
