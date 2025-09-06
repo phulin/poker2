@@ -45,7 +45,6 @@ def bench_tensor_env(N: int, iters: int, device: str) -> float:
         bb=10,
         bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0],
         device=torch.device(device),
-        shuffle_mode="torch",
     )
     env.reset(seed=123)
     B = env.num_bet_bins

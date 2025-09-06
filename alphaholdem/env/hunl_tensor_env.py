@@ -86,7 +86,7 @@ class HUNLTensorEnv:
             self.rng.manual_seed(int(seed))
 
         # Per-env decks as tensor and draw positions
-        self.deck = torch.empty(self.N, 52, dtype=torch.long, device=self.device)
+        self.deck = torch.empty(self.N, 9, dtype=torch.long, device=self.device)
         self.deck_pos = torch.zeros(self.N, dtype=torch.long, device=self.device)
 
         # Tensors (initialized in reset)
@@ -137,23 +137,18 @@ class HUNLTensorEnv:
 
         # Shuffle decks for all envs and reset draw positions
         random_vals = torch.rand(self.N, 52, generator=self.rng, device=self.device)
-        self.deck = torch.argsort(random_vals, dim=1)
-        self.deck_pos[:] = 0
+        # Only need 9 cards.
+        _, self.deck[:] = torch.topk(random_vals, 9)
+
+        # Deal hole cards: for each env, assign 4 cards in deck order
+        # [N, 4] indices into deck for each env
+        cards = self.deck[:, :4]
+        self.deck_pos[:] = 4
 
         # Randomize button for all envs
         button = torch.randint(0, 2, (self.N,), generator=self.rng, device=self.device)
         p_sb = button
         p_bb = 1 - p_sb
-
-        # Deal hole cards: for each env, assign 4 cards in deck order
-        # [N, 4] indices into deck for each env
-        card_indices = (
-            torch.arange(4, device=self.device).unsqueeze(0).expand(self.N, 4)
-        )
-        cards = self.deck[
-            torch.arange(self.N, device=self.device).unsqueeze(1), card_indices
-        ]  # [N, 4]
-        self.deck_pos[:] = 4
 
         # Assign hole cards
         _c0_1 = cards[:, 0]
