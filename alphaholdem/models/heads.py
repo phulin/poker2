@@ -44,7 +44,14 @@ class CategoricalPolicyV1(Policy):
         if legal_masks is not None:
             # Mask out illegal actions more efficiently
             # Use torch.where instead of boolean indexing for better performance
-            masked_logits = torch.where(legal_masks.bool(), logits, float("-inf"))
+            masked_logits = torch.where(legal_masks.bool(), logits, -1e9)
+
+            # Ensure at least one action is legal to avoid numerical issues
+            # If all actions are illegal, make the first action legal
+            all_illegal = legal_masks.sum(dim=1) == 0
+            if all_illegal.any():
+                print("WARNING: All actions are illegal")
+                masked_logits[all_illegal, 0] = logits[all_illegal, 0]
         else:
             masked_logits = logits
 
@@ -53,6 +60,35 @@ class CategoricalPolicyV1(Policy):
 
         # Sample actions
         probs = log_probs.exp()
+
+        # Debug: Check for invalid probabilities
+        if torch.isnan(probs).any() or torch.isinf(probs).any() or (probs < 0).any():
+            print(f"WARNING: Invalid probabilities detected!")
+            print(f"  NaN: {torch.isnan(probs).any()}")
+            print(f"  Inf: {torch.isinf(probs).any()}")
+            print(f"  Negative: {(probs < 0).any()}")
+            print(f"  Probs min/max: {probs.min():.6f}/{probs.max():.6f}")
+            print(
+                f"  Logits min/max: {masked_logits.min():.6f}/{masked_logits.max():.6f}"
+            )
+            print(
+                f"  Legal masks sum: {legal_masks.sum(dim=1) if legal_masks is not None else 'None'}"
+            )
+
+            # Fallback: use uniform probabilities for problematic rows
+            invalid_rows = (
+                torch.isnan(probs).any(dim=1)
+                | torch.isinf(probs).any(dim=1)
+                | (probs < 0).any(dim=1)
+            )
+            if invalid_rows.any():
+                print(
+                    f"  Fixing {invalid_rows.sum()} invalid rows with uniform probabilities"
+                )
+                probs[invalid_rows] = (
+                    torch.ones_like(probs[invalid_rows]) / probs.shape[1]
+                )
+
         action_indices = torch.multinomial(probs, num_samples=1).squeeze(1)
 
         # Get log probabilities for selected actions

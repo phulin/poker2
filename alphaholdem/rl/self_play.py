@@ -130,9 +130,25 @@ class SelfPlayTrainer:
             k=k_best_pool_size, min_elo_diff=min_elo_diff
         )
 
-        # Optimizer
+        # Optimizer with different learning rates for different components
+        # CNN layers (cards_trunk) need lower learning rate to prevent gradient explosion
         lr = learning_rate if learning_rate is not None else self.cfg.learning_rate
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+
+        cards_params = []
+        other_params = []
+
+        for name, param in self.model.named_parameters():
+            if "cards_trunk" in name:
+                cards_params.append(param)
+            else:
+                other_params.append(param)
+
+        self.optimizer = torch.optim.Adam(
+            [
+                {"params": cards_params, "lr": lr * 0.1},  # 10x lower for CNN
+                {"params": other_params, "lr": lr},
+            ]
+        )
 
         # Training stats
         self.episode_count = 0
@@ -332,6 +348,21 @@ class SelfPlayTrainer:
             # Encode states for all environments
             states = self._encode_tensor_states()
 
+            # Debug: Check for NaN values in states
+            if (
+                torch.isnan(states["cards"]).any()
+                or torch.isnan(states["actions"]).any()
+            ):
+                print(f"WARNING: NaN detected in state tensors!")
+                print(f"  Cards NaN: {torch.isnan(states['cards']).any()}")
+                print(f"  Actions NaN: {torch.isnan(states['actions']).any()}")
+                print(
+                    f"  Cards min/max: {states['cards'].min():.6f}/{states['cards'].max():.6f}"
+                )
+                print(
+                    f"  Actions min/max: {states['actions'].min():.6f}/{states['actions'].max():.6f}"
+                )
+
             # Get model predictions for all environments
             with torch.no_grad():
                 # Determine which environments need our model vs opponent models
@@ -347,9 +378,49 @@ class SelfPlayTrainer:
                 # Get predictions from our model for our turns
                 if our_turn_mask.any():
                     our_indices = torch.where(our_turn_mask)[0]
-                    our_logits, our_values = self.model(
-                        states["cards"][our_indices], states["actions"][our_indices]
-                    )
+                    our_cards = states["cards"][our_indices]
+                    our_actions = states["actions"][our_indices]
+
+                    # Diagnostic: Check for NaN in model inputs
+                    if torch.isnan(our_cards).any() or torch.isnan(our_actions).any():
+                        print(f"WARNING: NaN detected in model inputs!")
+                        print(f"  Cards NaN: {torch.isnan(our_cards).any()}")
+                        print(f"  Actions NaN: {torch.isnan(our_actions).any()}")
+                        print(
+                            f"  Cards min/max: {our_cards.min():.6f}/{our_cards.max():.6f}"
+                        )
+                        print(
+                            f"  Actions min/max: {our_actions.min():.6f}/{our_actions.max():.6f}"
+                        )
+                        print(f"  Cards shape: {our_cards.shape}")
+                        print(f"  Actions shape: {our_actions.shape}")
+                        print(f"  Environment indices: {our_indices}")
+
+                    our_logits, our_values = self.model(our_cards, our_actions)
+
+                    # Debug: Check for NaN in model outputs
+                    if torch.isnan(our_logits).any() or torch.isnan(our_values).any():
+                        print(f"WARNING: NaN in model outputs!")
+                        print(f"  Logits NaN: {torch.isnan(our_logits).any()}")
+                        print(f"  Values NaN: {torch.isnan(our_values).any()}")
+                        print(
+                            f"  Logits min/max: {our_logits.min():.6f}/{our_logits.max():.6f}"
+                        )
+                        print(
+                            f"  Values min/max: {our_values.min():.6f}/{our_values.max():.6f}"
+                        )
+
+                        # Check if model weights contain NaN
+                        model_has_nan = False
+                        for name, param in self.model.named_parameters():
+                            if torch.isnan(param).any():
+                                print(f"  Model parameter {name} contains NaN!")
+                                model_has_nan = True
+                        if not model_has_nan:
+                            print(
+                                f"  Model weights are clean - NaN likely from forward pass"
+                            )
+
                     logits[our_indices] = our_logits
                     values[our_indices] = our_values.squeeze(-1)
 
@@ -369,17 +440,58 @@ class SelfPlayTrainer:
                             if env_idxs_tensor.numel() == 0:
                                 continue
                             opponent = all_opponent_snapshots[opponent_idx]
+                            opp_cards = states["cards"][env_idxs_tensor]
+                            opp_actions = states["actions"][env_idxs_tensor]
+
+                            # Diagnostic: Check for NaN in opponent model inputs
+                            if (
+                                torch.isnan(opp_cards).any()
+                                or torch.isnan(opp_actions).any()
+                            ):
+                                print(
+                                    f"WARNING: NaN detected in opponent model inputs!"
+                                )
+                                print(
+                                    f"  Opponent {opponent_idx}, Cards NaN: {torch.isnan(opp_cards).any()}"
+                                )
+                                print(
+                                    f"  Actions NaN: {torch.isnan(opp_actions).any()}"
+                                )
+                                print(
+                                    f"  Cards min/max: {opp_cards.min():.6f}/{opp_cards.max():.6f}"
+                                )
+                                print(
+                                    f"  Actions min/max: {opp_actions.min():.6f}/{opp_actions.max():.6f}"
+                                )
+                                print(f"  Environment indices: {env_idxs_tensor}")
+
                             opp_logits, opp_values = opponent.model(
-                                states["cards"][env_idxs_tensor],
-                                states["actions"][env_idxs_tensor],
+                                opp_cards, opp_actions
                             )
                             logits[env_idxs_tensor] = opp_logits
                             values[env_idxs_tensor] = opp_values.squeeze(-1)
                     else:
                         # Self-play: use our model for opponent turns too
-                        opp_logits, opp_values = self.model(
-                            states["cards"][opp_indices], states["actions"][opp_indices]
-                        )
+                        opp_cards = states["cards"][opp_indices]
+                        opp_actions = states["actions"][opp_indices]
+
+                        # Diagnostic: Check for NaN in self-play model inputs
+                        if (
+                            torch.isnan(opp_cards).any()
+                            or torch.isnan(opp_actions).any()
+                        ):
+                            print(f"WARNING: NaN detected in self-play model inputs!")
+                            print(f"  Cards NaN: {torch.isnan(opp_cards).any()}")
+                            print(f"  Actions NaN: {torch.isnan(opp_actions).any()}")
+                            print(
+                                f"  Cards min/max: {opp_cards.min():.6f}/{opp_cards.max():.6f}"
+                            )
+                            print(
+                                f"  Actions min/max: {opp_actions.min():.6f}/{opp_actions.max():.6f}"
+                            )
+                            print(f"  Environment indices: {opp_indices}")
+
+                        opp_logits, opp_values = self.model(opp_cards, opp_actions)
                         logits[opp_indices] = opp_logits
                         values[opp_indices] = opp_values.squeeze(-1)
 
@@ -417,32 +529,32 @@ class SelfPlayTrainer:
                 )  # [N_our, total_obs_size]
 
                 # Extract scalar values efficiently
-                our_actions = action_indices[our_indices]
-                our_log_probs = log_probs[our_indices]
-                our_values = values[our_indices]
-                our_rewards = rewards[our_indices]
-                our_dones = dones[our_indices]
+                our_actions = action_indices[our_indices].tolist()
+                our_log_probs = log_probs[our_indices].tolist()
+                our_values = values[our_indices].tolist()
+                our_rewards = rewards[our_indices].tolist()
+                our_dones = dones[our_indices].tolist()
                 our_legal_masks = legal_masks[our_indices]
-                our_placed_chips = placed_chips[our_indices]
-                our_delta2 = delta2[our_indices]
-                our_delta3 = delta3[our_indices]
+                our_placed_chips = placed_chips[our_indices].tolist()
+                our_delta2 = delta2[our_indices].tolist()
+                our_delta3 = delta3[our_indices].tolist()
 
                 # Create transitions in batch
                 for i, env_idx in enumerate(our_indices):
                     transition = Transition(
                         observation=our_observations[i],
-                        action=our_actions[i].item(),
-                        log_prob=our_log_probs[i].item(),
-                        value=our_values[i].item(),
-                        reward=our_rewards[i].item(),
-                        done=our_dones[i].item(),
+                        action=our_actions[i],
+                        log_prob=our_log_probs[i],
+                        value=our_values[i],
+                        reward=our_rewards[i],
+                        done=our_dones[i],
                         legal_mask=our_legal_masks[i],
-                        chips_placed=our_placed_chips[i].item(),
-                        delta2=our_delta2[i].item(),
-                        delta3=our_delta3[i].item(),
+                        chips_placed=our_placed_chips[i],
+                        delta2=our_delta2[i],
+                        delta3=our_delta3[i],
                     )
                     per_env_transitions[env_idx].append(transition)
-                    per_env_rewards[env_idx] += our_rewards[i].item()
+                    per_env_rewards[env_idx] += our_rewards[i]
 
             # Update step counts for active environments
             per_traj_step_count += (~dones).long()
@@ -699,7 +811,66 @@ class SelfPlayTrainer:
 
                 self.optimizer.zero_grad()
                 loss_dict["total_loss"].backward()
+
+                # Diagnostic: Check gradients before clipping and optimizer step
+                total_grad_norm = 0.0
+                param_count = 0
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        param_grad_norm = param.grad.data.norm(2).item()
+                        total_grad_norm += param_grad_norm**2
+                        param_count += 1
+                        if (
+                            torch.isnan(param.grad).any()
+                            or torch.isinf(param.grad).any()
+                        ):
+                            print(f"WARNING: NaN/Inf gradient detected in parameter!")
+                            print(f"  Parameter shape: {param.shape}")
+                            print(f"  Gradient norm: {param_grad_norm}")
+                            print(
+                                f"  Gradient min/max: {param.grad.min():.6f}/{param.grad.max():.6f}"
+                            )
+                            print(f"  SKIPPING OPTIMIZER STEP due to NaN gradients!")
+                            return {
+                                "total_loss": float("inf"),
+                                "policy_loss": float("inf"),
+                                "value_loss": float("inf"),
+                                "entropy": 0.0,
+                                "kl_divergence": 0.0,
+                                "clip_fraction": 0.0,
+                                "explained_variance": 0.0,
+                                "delta2": 0.0,
+                                "delta3": 0.0,
+                                "verify_improvement": 0.0,
+                                "mb_loss_before": float("inf"),
+                                "mb_loss_after": float("inf"),
+                            }
+
+                if param_count > 0:
+                    total_grad_norm = total_grad_norm**0.5
+                    # print(f"Total gradient norm (before clipping): {total_grad_norm:.6f}")
+                    if total_grad_norm > 100.0:
+                        print(
+                            f"WARNING: Very large gradient norm detected: {total_grad_norm:.6f}"
+                        )
+
+                # Apply stricter gradient clipping to CNN layers to prevent explosion
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None and "cards_trunk" in name:
+                        torch.nn.utils.clip_grad_norm_(
+                            [param], 0.5
+                        )  # Stricter clipping for CNN
+
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+                # Check gradient norm after clipping
+                # total_grad_norm_after = 0.0
+                # for param in self.model.parameters():
+                #     if param.grad is not None:
+                #         total_grad_norm_after += param.grad.data.norm(2).item() ** 2
+                # total_grad_norm_after = total_grad_norm_after ** 0.5
+                # print(f"Total gradient norm (after clipping): {total_grad_norm_after:.6f}")
+
                 self.optimizer.step()
 
                 # Recompute loss on the SAME minibatch AFTER the update to verify improvement
