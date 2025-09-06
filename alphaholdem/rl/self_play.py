@@ -376,112 +376,57 @@ class SelfPlayTrainer:
                 values = torch.zeros(self.num_envs, device=self.device)
 
                 # Get predictions from our model for our turns
-                if our_turn_mask.any():
-                    our_indices = torch.where(our_turn_mask)[0]
-                    our_cards = states["cards"][our_indices]
-                    our_actions = states["actions"][our_indices]
+                our_indices = torch.where(our_turn_mask)[0]
+                our_cards = states["cards"][our_indices]
+                our_actions = states["actions"][our_indices]
 
-                    # Diagnostic: Check for NaN in model inputs
-                    if torch.isnan(our_cards).any() or torch.isnan(our_actions).any():
-                        print(f"WARNING: NaN detected in model inputs!")
-                        print(f"  Cards NaN: {torch.isnan(our_cards).any()}")
-                        print(f"  Actions NaN: {torch.isnan(our_actions).any()}")
-                        print(
-                            f"  Cards min/max: {our_cards.min():.6f}/{our_cards.max():.6f}"
-                        )
-                        print(
-                            f"  Actions min/max: {our_actions.min():.6f}/{our_actions.max():.6f}"
-                        )
-                        print(f"  Cards shape: {our_cards.shape}")
-                        print(f"  Actions shape: {our_actions.shape}")
-                        print(f"  Environment indices: {our_indices}")
+                # Diagnostic: Check for NaN in model inputs
+                if torch.isnan(our_cards).any() or torch.isnan(our_actions).any():
+                    print(f"WARNING: NaN detected in model inputs!")
+                    print(f"  Cards NaN: {torch.isnan(our_cards).any()}")
+                    print(f"  Actions NaN: {torch.isnan(our_actions).any()}")
+                    print(
+                        f"  Cards min/max: {our_cards.min():.6f}/{our_cards.max():.6f}"
+                    )
+                    print(
+                        f"  Actions min/max: {our_actions.min():.6f}/{our_actions.max():.6f}"
+                    )
+                    print(f"  Cards shape: {our_cards.shape}")
+                    print(f"  Actions shape: {our_actions.shape}")
+                    print(f"  Environment indices: {our_indices}")
 
-                    our_logits, our_values = self.model(our_cards, our_actions)
+                our_logits, our_values = self.model(our_cards, our_actions)
 
-                    # Debug: Check for NaN in model outputs
-                    if torch.isnan(our_logits).any() or torch.isnan(our_values).any():
-                        print(f"WARNING: NaN in model outputs!")
-                        print(f"  Logits NaN: {torch.isnan(our_logits).any()}")
-                        print(f"  Values NaN: {torch.isnan(our_values).any()}")
-                        print(
-                            f"  Logits min/max: {our_logits.min():.6f}/{our_logits.max():.6f}"
-                        )
-                        print(
-                            f"  Values min/max: {our_values.min():.6f}/{our_values.max():.6f}"
-                        )
-
-                        # Check if model weights contain NaN
-                        model_has_nan = False
-                        for name, param in self.model.named_parameters():
-                            if torch.isnan(param).any():
-                                print(f"  Model parameter {name} contains NaN!")
-                                model_has_nan = True
-                        if not model_has_nan:
-                            print(
-                                f"  Model weights are clean - NaN likely from forward pass"
-                            )
-
-                    logits[our_indices] = our_logits
-                    values[our_indices] = our_values.squeeze(-1)
+                logits[our_indices] = our_logits
+                values[our_indices] = our_values.squeeze(-1)
 
                 # Get predictions from opponent models for opponent turns
-                if opp_turn_mask.any():
-                    opp_indices = torch.where(opp_turn_mask)[0]
+                opp_indices = torch.where(opp_turn_mask)[0]
 
-                    if (
-                        all_opponent_snapshots is not None
-                        and len(all_opponent_snapshots) > 0
-                    ):
-                        # Use opponent models - assign opponents to environments
-                        num_opps = len(all_opponent_snapshots)
-                        # Split opp_indices into num_opps approximately equal groups using torch.chunk
-                        opp_env_groups = torch.chunk(opp_indices, num_opps)
-                        for opponent_idx, env_idxs_tensor in enumerate(opp_env_groups):
-                            if env_idxs_tensor.numel() == 0:
-                                continue
-                            opponent = all_opponent_snapshots[opponent_idx]
-                            opp_cards = states["cards"][env_idxs_tensor]
-                            opp_actions = states["actions"][env_idxs_tensor]
+                if (
+                    all_opponent_snapshots is not None
+                    and len(all_opponent_snapshots) > 0
+                ):
+                    # Use opponent models - assign opponents to environments
+                    num_opps = len(all_opponent_snapshots)
+                    # Split opp_indices into num_opps approximately equal groups using torch.chunk
+                    opp_env_groups = torch.chunk(opp_indices, num_opps)
+                    for opponent_idx, env_idxs_tensor in enumerate(opp_env_groups):
+                        if env_idxs_tensor.numel() == 0:
+                            continue
+                        opponent = all_opponent_snapshots[opponent_idx]
+                        opp_cards = states["cards"][env_idxs_tensor]
+                        opp_actions = states["actions"][env_idxs_tensor]
 
-                            # Diagnostic: Check for NaN in opponent model inputs
-                            if (
-                                torch.isnan(opp_cards).any()
-                                or torch.isnan(opp_actions).any()
-                            ):
-                                print(
-                                    f"WARNING: NaN detected in opponent model inputs!"
-                                )
-                                print(
-                                    f"  Opponent {opponent_idx}, Cards NaN: {torch.isnan(opp_cards).any()}"
-                                )
-                                print(
-                                    f"  Actions NaN: {torch.isnan(opp_actions).any()}"
-                                )
-                                print(
-                                    f"  Cards min/max: {opp_cards.min():.6f}/{opp_cards.max():.6f}"
-                                )
-                                print(
-                                    f"  Actions min/max: {opp_actions.min():.6f}/{opp_actions.max():.6f}"
-                                )
-                                print(f"  Environment indices: {env_idxs_tensor}")
-
-                            opp_logits, opp_values = opponent.model(
-                                opp_cards, opp_actions
-                            )
-                            logits[env_idxs_tensor] = opp_logits
-                            values[env_idxs_tensor] = opp_values.squeeze(-1)
-                    else:
-                        # Self-play: use our model for opponent turns too
-                        opp_cards = states["cards"][opp_indices]
-                        opp_actions = states["actions"][opp_indices]
-
-                        # Diagnostic: Check for NaN in self-play model inputs
+                        # Diagnostic: Check for NaN in opponent model inputs
                         if (
                             torch.isnan(opp_cards).any()
                             or torch.isnan(opp_actions).any()
                         ):
-                            print(f"WARNING: NaN detected in self-play model inputs!")
-                            print(f"  Cards NaN: {torch.isnan(opp_cards).any()}")
+                            print(f"WARNING: NaN detected in opponent model inputs!")
+                            print(
+                                f"  Opponent {opponent_idx}, Cards NaN: {torch.isnan(opp_cards).any()}"
+                            )
                             print(f"  Actions NaN: {torch.isnan(opp_actions).any()}")
                             print(
                                 f"  Cards min/max: {opp_cards.min():.6f}/{opp_cards.max():.6f}"
@@ -489,11 +434,32 @@ class SelfPlayTrainer:
                             print(
                                 f"  Actions min/max: {opp_actions.min():.6f}/{opp_actions.max():.6f}"
                             )
-                            print(f"  Environment indices: {opp_indices}")
+                            print(f"  Environment indices: {env_idxs_tensor}")
 
-                        opp_logits, opp_values = self.model(opp_cards, opp_actions)
-                        logits[opp_indices] = opp_logits
-                        values[opp_indices] = opp_values.squeeze(-1)
+                        opp_logits, opp_values = opponent.model(opp_cards, opp_actions)
+                        logits[env_idxs_tensor] = opp_logits
+                        values[env_idxs_tensor] = opp_values.squeeze(-1)
+                else:
+                    # Self-play: use our model for opponent turns too
+                    opp_cards = states["cards"][opp_indices]
+                    opp_actions = states["actions"][opp_indices]
+
+                    # Diagnostic: Check for NaN in self-play model inputs
+                    if torch.isnan(opp_cards).any() or torch.isnan(opp_actions).any():
+                        print(f"WARNING: NaN detected in self-play model inputs!")
+                        print(f"  Cards NaN: {torch.isnan(opp_cards).any()}")
+                        print(f"  Actions NaN: {torch.isnan(opp_actions).any()}")
+                        print(
+                            f"  Cards min/max: {opp_cards.min():.6f}/{opp_cards.max():.6f}"
+                        )
+                        print(
+                            f"  Actions min/max: {opp_actions.min():.6f}/{opp_actions.max():.6f}"
+                        )
+                        print(f"  Environment indices: {opp_indices}")
+
+                    opp_logits, opp_values = self.model(opp_cards, opp_actions)
+                    logits[opp_indices] = opp_logits
+                    values[opp_indices] = opp_values.squeeze(-1)
 
                 # Sample actions for all environments
                 action_indices, log_probs = self.policy.action_batch(
@@ -590,7 +556,6 @@ class SelfPlayTrainer:
                 self.tensor_env.reset_done()
         return all_trajectories, total_reward
 
-    @profile
     def _encode_tensor_states(self) -> dict:
         """
         Encode states for all tensor_environments in the tensorized environment.

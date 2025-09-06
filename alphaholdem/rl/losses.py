@@ -4,7 +4,10 @@ import torch
 import torch.nn.functional as F
 from typing import Dict
 
+from line_profiler import profile
 
+
+@profile
 def trinal_clip_ppo_loss(
     logits: torch.Tensor,
     values: torch.Tensor,
