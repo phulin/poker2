@@ -138,250 +138,255 @@ def compare_7(a: Iterable[int], b: Iterable[int]) -> int:
 
 
 def compare_7_batch(
-    a_batch: Sequence[Sequence[int]] | torch.Tensor,
-    b_batch: Sequence[Sequence[int]] | torch.Tensor,
+    a_batch: torch.Tensor,
+    b_batch: torch.Tensor,
 ) -> torch.Tensor:
-    """Vectorized comparison for batches of 7-card hands using torch ops.
+    """Vectorized comparison for batches of 7-card hands using one-hot planes.
 
-    Inputs may be tensors [N,7] or sequences; outputs tensor [N] with 1/-1/0.
+    Inputs must be one-hot planes [N,4,13]; returns [N] in {1, -1, 0}.
+    The score layout per hand is [category, t1, t2, t3, t4, t5] where
+    category is in {8:SF, 7:4K, 6:FH, 5:F, 4:S, 3:3K, 2:2P, 1:1P, 0:HC} and
+    t1..t5 are tiebreaker ranks in descending priority for that category.
     """
-    if not isinstance(a_batch, torch.Tensor):
-        a_batch = torch.tensor(a_batch, dtype=torch.long)
-    if not isinstance(b_batch, torch.Tensor):
-        b_batch = torch.tensor(b_batch, dtype=torch.long)
+    assert isinstance(a_batch, torch.Tensor) and isinstance(b_batch, torch.Tensor)
     assert (
-        a_batch.shape == b_batch.shape and a_batch.dim() == 2 and a_batch.size(1) == 7
+        a_batch.shape == b_batch.shape
+        and a_batch.dim() == 3
+        and a_batch.shape[1:] == (4, 13)
     )
     device = a_batch.device
 
-    def eval_batch(cards: torch.Tensor) -> torch.Tensor:
-        # cards: [N,7]
-        N = cards.size(0)
-        ranks = cards % 13  # [N,7]
-        suits = cards // 13  # [N,7]
-        ar = torch.arange(13, device=device).view(1, 1, 13)
-        # Rank counts [N,13]
-        rc = (
-            torch.nn.functional.one_hot(ranks, num_classes=13).sum(dim=1).to(torch.long)
-        )
-        present = rc > 0  # [N,13]
-        # Suit counts [N,4]
-        sc = torch.nn.functional.one_hot(suits, num_classes=4).sum(dim=1).to(torch.long)
-        flush_suit_counts, flush_suit_idx = sc.max(dim=1)
-        has_flush = flush_suit_counts >= 5
+    def eval_from_counts(
+        rank_counts: torch.Tensor, suit_counts: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute category/tiebreakers from rank/suit counts.
 
-        # Straight high via conv over present mask
-        x = present.to(torch.float32).unsqueeze(1)  # [N,1,13]
-        w = torch.ones(1, 1, 5, device=device)
-        conv = torch.nn.functional.conv1d(x, w)  # [N,1,9]
-        five = conv.squeeze(1) == 5  # [N,9], window ending at index i+4
-        # Highest high = i+4 for True positions
-        highs = torch.arange(4, 13, device=device)  # 4..12
-        # Mask multiply to get candidate highs, -1 where false
-        cand = torch.where(
-            five,
-            highs.view(1, -1).expand_as(five),
-            torch.full_like(five, -1, dtype=torch.long),
+        rank_counts: [N,13] (# of each rank present)
+        suit_counts: [N,4]  (# of cards per suit)
+        """
+        N = rank_counts.size(0)
+        rank_present = rank_counts > 0  # [N,13]
+        num_suit_cards, flush_suit_index = suit_counts.max(dim=1)
+        has_flush = num_suit_cards >= 5
+
+        # Straight detection (highest straight high rank index)
+        x = rank_present.to(torch.float32).unsqueeze(1)  # [N,1,13]
+        window = torch.ones(1, 1, 5, device=device)
+        conv = torch.nn.functional.conv1d(x, window).squeeze(1)  # [N,9]
+        five_in_window = conv == 5
+        highs_range = torch.arange(4, 13, device=device)  # 4..12
+        straight_candidates = torch.where(
+            five_in_window,
+            highs_range.view(1, -1).expand_as(five_in_window),
+            torch.full_like(five_in_window, -1, dtype=torch.long),
         )
-        straight_high, _ = cand.max(dim=1)  # [-1 or 4..12]
-        # Wheel check: A-2-3-4-5
-        wheel = (
-            present[:, 12]
-            & present[:, 0]
-            & present[:, 1]
-            & present[:, 2]
-            & present[:, 3]
+        straight_high, _ = straight_candidates.max(dim=1)
+        # Wheel straight (A-2-3-4-5)
+        has_wheel = (
+            rank_present[:, 12]
+            & rank_present[:, 0]
+            & rank_present[:, 1]
+            & rank_present[:, 2]
+            & rank_present[:, 3]
         )
         straight_high = torch.where(
-            (straight_high < 0) & wheel,
+            (straight_high < 0) & has_wheel,
             torch.full_like(straight_high, 3),
             straight_high,
         )
         has_straight = straight_high >= 0
 
-        # Straight flush
-        # Mask cards of flush suit
-        suits_eq = suits == flush_suit_idx.view(-1, 1)
-        suits_eq = suits_eq & has_flush.view(-1, 1)
-        # Present ranks in flush suit: any over cards
-        present_flush = (
-            torch.nn.functional.one_hot(ranks, 13).bool() & suits_eq.unsqueeze(-1)
-        ).any(
-            dim=1
-        )  # [N,13]
-        xf = present_flush.to(torch.float32).unsqueeze(1)
-        convf = torch.nn.functional.conv1d(xf, w).squeeze(1) == 5
-        candf = torch.where(
-            convf,
-            highs.view(1, -1).expand_as(convf),
-            torch.full_like(convf, -1, dtype=torch.long),
-        )
-        sf_high, _ = candf.max(dim=1)
-        wheelf = (
-            present_flush[:, 12]
-            & present_flush[:, 0]
-            & present_flush[:, 1]
-            & present_flush[:, 2]
-            & present_flush[:, 3]
-        )
-        sf_high = torch.where(
-            (sf_high < 0) & wheelf, torch.full_like(sf_high, 3), sf_high
-        )
-        has_sf = has_flush & (sf_high >= 0)
-
-        # Categories and tiebreakers packed into [N,6]
+        # Score tensor [N,6]
         score = torch.full((N, 6), -1, dtype=torch.long, device=device)
 
         # Four of a kind
-        four_mask = rc == 4
+        is_four_mask = rank_counts == 4
         four_rank = (
             torch.where(
-                four_mask,
-                torch.arange(13, device=device).view(1, -1).expand_as(rc),
-                torch.full_like(rc, -1),
+                is_four_mask,
+                torch.arange(13, device=device).view(1, -1).expand_as(rank_counts),
+                torch.full_like(rank_counts, -1),
             )
             .max(dim=1)
             .values
         )
         has_four = four_rank >= 0
-
-        # Trips and pairs
-        trips_mask = rc == 3
-        pair_mask = rc >= 2
-        rank_idx = torch.arange(13, device=device).view(1, -1).expand_as(rc)
-        trips_vals = torch.where(trips_mask, rank_idx, torch.full_like(rank_idx, -1))
-        trips_sorted, _ = torch.sort(trips_vals, dim=1, descending=True)
-        pairs_vals = torch.where(pair_mask, rank_idx, torch.full_like(rank_idx, -1))
-        pairs_sorted, _ = torch.sort(pairs_vals, dim=1, descending=True)
-
-        # Flush top5 ranks
-        # Build ranks present for flush suit already computed (present_flush)
-        top5_flush = torch.full((N, 5), -1, dtype=torch.long, device=device)
-        if has_flush.any():
-            # Convert present_flush to rank list by masking ranks
-            ranks_all = (
-                torch.arange(13, device=device).view(1, -1).expand_as(present_flush)
-            )
-            flush_rank_vals = torch.where(
-                present_flush, ranks_all, torch.full_like(ranks_all, -1)
-            )
-            flush_sorted, _ = torch.sort(flush_rank_vals, dim=1, descending=True)
-            top5_flush = flush_sorted[:, :5]
-
-        # High card top5
-        ranks_all = torch.arange(13, device=device).view(1, -1).expand_as(present)
-        present_vals = torch.where(present, ranks_all, torch.full_like(ranks_all, -1))
-        high_sorted, _ = torch.sort(present_vals, dim=1, descending=True)
-        top5 = high_sorted[:, :5]
-
-        # Category selection priority
-        # 8 Straight Flush
-        sel = has_sf
-        score[sel, 0] = 8
-        score[sel, 1] = sf_high[sel]
-
-        # 7 Four of a Kind
-        sel = (~sel) & has_four
-        score[sel, 0] = 7
-        score[sel, 1] = four_rank[sel]
-        # best kicker = highest rank present excluding four_rank
-        excl = torch.zeros_like(present)
-        excl[torch.arange(N, device=device), four_rank.clamp(min=0)] = True
-        kicker_mask = present & (~excl)
+        is_four = has_four
+        score[is_four, 0] = 7
+        score[is_four, 1] = four_rank[is_four]
+        # best kicker excluding quads rank
+        ranks_all = torch.arange(13, device=device).view(1, -1).expand_as(rank_present)
+        exclude_quads = torch.zeros_like(rank_present)
+        exclude_quads[torch.arange(N, device=device), four_rank.clamp(min=0)] = True
+        kicker_mask = rank_present & (~exclude_quads)
         kicker_vals = torch.where(
             kicker_mask, ranks_all, torch.full_like(ranks_all, -1)
         )
         kicker_sorted, _ = torch.sort(kicker_vals, dim=1, descending=True)
-        score[sel, 2] = kicker_sorted[sel, 0]
+        score[is_four, 2] = kicker_sorted[is_four, 0]
 
-        # 6 Full House: trips and then pair
-        has_trip = trips_mask.any(dim=1)
-        # choose top trip
+        # Trips and pairs
+        is_trip_mask = rank_counts == 3
+        is_pair_or_better = rank_counts >= 2
+        rank_idx = torch.arange(13, device=device).view(1, -1).expand_as(rank_counts)
+        trips_vals = torch.where(is_trip_mask, rank_idx, torch.full_like(rank_idx, -1))
+        trips_sorted, _ = torch.sort(trips_vals, dim=1, descending=True)
+        pairs_vals = torch.where(
+            is_pair_or_better, rank_idx, torch.full_like(rank_idx, -1)
+        )
+        pairs_sorted, _ = torch.sort(pairs_vals, dim=1, descending=True)
+
+        # Full house
+        has_trip_any = is_trip_mask.any(dim=1)
         top_trip = trips_sorted[:, 0]
-        # For pair part: either second trip or any pair excluding top_trip
-        # Build pairs excluding top_trip
-        exclude_top_trip = pair_mask.clone()
-        exclude_top_trip[torch.arange(N, device=device), top_trip.clamp(min=0)] = False
+        pairs_excl_top_trip = is_pair_or_better.clone()
+        pairs_excl_top_trip[torch.arange(N, device=device), top_trip.clamp(min=0)] = (
+            False
+        )
         pairs_excl_vals = torch.where(
-            exclude_top_trip, rank_idx, torch.full_like(rank_idx, -1)
+            pairs_excl_top_trip, rank_idx, torch.full_like(rank_idx, -1)
         )
         pairs_excl_sorted, _ = torch.sort(pairs_excl_vals, dim=1, descending=True)
         has_pair_excl = pairs_excl_sorted[:, 0] >= 0
         second_trip = trips_sorted[:, 1]
         has_second_trip = second_trip >= 0
-        full_mask = has_trip & (has_second_trip | has_pair_excl)
-        sel2 = (score[:, 0] < 0) & full_mask
-        score[sel2, 0] = 6
-        score[sel2, 1] = top_trip[sel2]
-        # choose best of second_trip vs pair_excl
-        pair_choice = torch.where(has_second_trip, second_trip, pairs_excl_sorted[:, 0])
-        score[sel2, 2] = pair_choice[sel2]
+        is_full = has_trip_any & (has_second_trip | has_pair_excl)
+        need_full = (score[:, 0] < 0) & is_full
+        score[need_full, 0] = 6
+        score[need_full, 1] = top_trip[need_full]
+        best_pair_or_trip = torch.where(
+            has_second_trip, second_trip, pairs_excl_sorted[:, 0]
+        )
+        score[need_full, 2] = best_pair_or_trip[need_full]
 
-        # 5 Flush
-        sel3 = (score[:, 0] < 0) & has_flush
-        score[sel3, 0] = 5
-        score[sel3, 1:6] = top5_flush[sel3, :]
+        # Flush: category filled later in one-hot path with exact tiebreakers
+        # Straight
+        is_straight = (score[:, 0] < 0) & has_straight
+        score[is_straight, 0] = 4
+        score[is_straight, 1] = straight_high[is_straight]
 
-        # 4 Straight
-        sel4 = (score[:, 0] < 0) & has_straight
-        score[sel4, 0] = 4
-        score[sel4, 1] = straight_high[sel4]
-
-        # 3 Three of a kind
-        sel5 = (score[:, 0] < 0) & has_trip
-        score[sel5, 0] = 3
-        score[sel5, 1] = top_trip[sel5]
-        # kickers: top two excluding trip rank
-        excl_trip = present.clone()
-        excl_trip[torch.arange(N, device=device), top_trip.clamp(min=0)] = False
-        kick_vals = torch.where(excl_trip, ranks_all, torch.full_like(ranks_all, -1))
+        # Three of a kind
+        is_trips = (score[:, 0] < 0) & has_trip_any
+        score[is_trips, 0] = 3
+        score[is_trips, 1] = top_trip[is_trips]
+        exclude_trip = rank_present.clone()
+        exclude_trip[torch.arange(N, device=device), top_trip.clamp(min=0)] = False
+        kick_vals = torch.where(exclude_trip, ranks_all, torch.full_like(ranks_all, -1))
         kick_sorted, _ = torch.sort(kick_vals, dim=1, descending=True)
-        score[sel5, 2] = kick_sorted[sel5, 0]
-        score[sel5, 3] = kick_sorted[sel5, 1]
+        score[is_trips, 2] = kick_sorted[is_trips, 0]
+        score[is_trips, 3] = kick_sorted[is_trips, 1]
 
-        # 2 Two Pair
+        # Two pair
         has_two_pairs = (pairs_sorted[:, 0] >= 0) & (pairs_sorted[:, 1] >= 0)
-        sel6 = (score[:, 0] < 0) & has_two_pairs
-        score[sel6, 0] = 2
-        score[sel6, 1] = pairs_sorted[sel6, 0]
-        score[sel6, 2] = pairs_sorted[sel6, 1]
-        # kicker excluding those pairs
-        excl_pairs = present.clone()
-        excl_pairs[torch.arange(N, device=device), pairs_sorted[:, 0].clamp(min=0)] = (
-            False
-        )
-        excl_pairs[torch.arange(N, device=device), pairs_sorted[:, 1].clamp(min=0)] = (
-            False
-        )
-        kp_vals = torch.where(excl_pairs, ranks_all, torch.full_like(ranks_all, -1))
+        is_two_pair = (score[:, 0] < 0) & has_two_pairs
+        score[is_two_pair, 0] = 2
+        score[is_two_pair, 1] = pairs_sorted[is_two_pair, 0]
+        score[is_two_pair, 2] = pairs_sorted[is_two_pair, 1]
+        exclude_pairs = rank_present.clone()
+        exclude_pairs[
+            torch.arange(N, device=device), pairs_sorted[:, 0].clamp(min=0)
+        ] = False
+        exclude_pairs[
+            torch.arange(N, device=device), pairs_sorted[:, 1].clamp(min=0)
+        ] = False
+        kp_vals = torch.where(exclude_pairs, ranks_all, torch.full_like(ranks_all, -1))
         kp_sorted, _ = torch.sort(kp_vals, dim=1, descending=True)
-        score[sel6, 3] = kp_sorted[sel6, 0]
+        score[is_two_pair, 3] = kp_sorted[is_two_pair, 0]
 
-        # 1 One Pair
+        # One pair
         has_one_pair = pairs_sorted[:, 0] >= 0
-        sel7 = (score[:, 0] < 0) & has_one_pair
-        score[sel7, 0] = 1
-        score[sel7, 1] = pairs_sorted[sel7, 0]
-        # three kickers excluding pair rank
-        excl_pair = present.clone()
+        is_one_pair = (score[:, 0] < 0) & has_one_pair
+        score[is_one_pair, 0] = 1
+        score[is_one_pair, 1] = pairs_sorted[is_one_pair, 0]
+        excl_pair = rank_present.clone()
         excl_pair[torch.arange(N, device=device), pairs_sorted[:, 0].clamp(min=0)] = (
             False
         )
         kp3_vals = torch.where(excl_pair, ranks_all, torch.full_like(ranks_all, -1))
         kp3_sorted, _ = torch.sort(kp3_vals, dim=1, descending=True)
-        score[sel7, 2:5] = kp3_sorted[sel7, :3]
+        score[is_one_pair, 2:5] = kp3_sorted[is_one_pair, :3]
 
-        # 0 High Card
-        sel8 = score[:, 0] < 0
-        score[sel8, 0] = 0
-        score[sel8, 1:6] = top5[sel8, :]
-
+        # High card
+        is_high = score[:, 0] < 0
+        score[is_high, 0] = 0
+        high_sorted, _ = torch.sort(
+            torch.where(rank_present, ranks_all, torch.full_like(ranks_all, -1)),
+            dim=1,
+            descending=True,
+        )
+        score[is_high, 1:6] = high_sorted[is_high, :5]
         return score
 
-    sa = eval_batch(a_batch)
-    sb = eval_batch(b_batch)
+    # One-hot path: compute counts and exact flush/straight-flush information
+    def eval_onehot_full(onehot_planes: torch.Tensor) -> torch.Tensor:
+        """Evaluate scores from one-hot planes with exact flush and straight-flush handling."""
+        N = onehot_planes.size(0)
+        rank_counts = onehot_planes.sum(dim=1).to(torch.long)  # [N,13]
+        suit_counts = onehot_planes.sum(dim=2).to(torch.long)  # [N,4]
+        rank_present = rank_counts > 0
+        score = eval_from_counts(rank_counts, suit_counts)
 
-    # Lexicographic compare across columns
+        # Exact flush tiebreakers and straight-flush override
+        num_suit_cards, _ = suit_counts.max(dim=1)
+        has_flush = num_suit_cards >= 5
+        if has_flush.any():
+            ranks_all = (
+                torch.arange(13, device=device).view(1, -1).expand_as(rank_present)
+            )
+            flush_suit_index = suit_counts.argmax(dim=1)
+            suit_mask = torch.nn.functional.one_hot(flush_suit_index, num_classes=4).to(
+                onehot_planes.dtype
+            )
+            suit_mask = suit_mask.view(N, 4, 1)
+            present_flush = (onehot_planes > 0.5) & (suit_mask > 0.5)
+            present_flush_ranks = present_flush.any(dim=1)  # [N,13]
+            # Top-5 flush ranks for tiebreakers
+            flush_rank_vals = torch.where(
+                present_flush_ranks, ranks_all, torch.full_like(ranks_all, -1)
+            )
+            flush_sorted, _ = torch.sort(flush_rank_vals, dim=1, descending=True)
+            top5_flush = flush_sorted[:, :5]
+            # Upgrade any category below flush to flush
+            need_flush = has_flush & (score[:, 0] < 5)
+            score[need_flush, 0] = 5
+            # Fill tiebreakers for flush rows
+            is_flush_now = has_flush & (score[:, 0] == 5)
+            score[is_flush_now, 1:6] = top5_flush[is_flush_now, :]
+            # Straight-flush high
+            xf = present_flush_ranks.to(torch.float32).unsqueeze(1)
+            convf = (
+                torch.nn.functional.conv1d(
+                    xf, torch.ones(1, 1, 5, device=device)
+                ).squeeze(1)
+                == 5
+            )
+            highs = torch.arange(4, 13, device=device)
+            candf = torch.where(
+                convf,
+                highs.view(1, -1).expand_as(convf),
+                torch.full_like(convf, -1, dtype=torch.long),
+            )
+            sf_high, _ = candf.max(dim=1)
+            wheelf = (
+                present_flush_ranks[:, 12]
+                & present_flush_ranks[:, 0]
+                & present_flush_ranks[:, 1]
+                & present_flush_ranks[:, 2]
+                & present_flush_ranks[:, 3]
+            )
+            sf_high = torch.where(
+                (sf_high < 0) & wheelf, torch.full_like(sf_high, 3), sf_high
+            )
+            has_sf = has_flush & (sf_high >= 0)
+            upgrade_to_sf = has_sf & (score[:, 0] <= 5)
+            score[upgrade_to_sf, 0] = 8
+            score[upgrade_to_sf, 1] = sf_high[upgrade_to_sf]
+        return score
+
+    sa = eval_onehot_full(a_batch.to(torch.float32))
+    sb = eval_onehot_full(b_batch.to(torch.float32))
+
+    # Lexicographic compare
     res = torch.zeros(sa.size(0), dtype=torch.int64, device=device)
     eq = torch.ones(sa.size(0), dtype=torch.bool, device=device)
     for k in range(sa.size(1)):
@@ -398,30 +403,8 @@ def compare_7_batch_onehot(
 ) -> torch.Tensor:
     """Compare batched 7-card hands given as one-hot [N, 4, 13] planes.
 
-    Expects exactly 7 cards set per sample; returns [N] in {1, -1, 0}.
+    Returns [N] in {1, -1, 0}.
     """
     assert a_onehot.dim() == 3 and a_onehot.shape[1:] == (4, 13)
     assert b_onehot.shape == a_onehot.shape
-    device = a_onehot.device
-    N = a_onehot.size(0)
-
-    # Convert one-hot to list of card ints [N,7] for reuse of vector evaluator
-    def planes_to_cards(x: torch.Tensor) -> torch.Tensor:
-        # x: [N,4,13] -> gather suit/rank indices
-        # Find positions where x==1
-        idxs = (x > 0.5).nonzero(as_tuple=False)  # [K, 3]: (n, s, r)
-        # Bucket by n
-        cards = [[] for _ in range(N)]
-        for n, s, r in idxs.tolist():
-            cards[n].append(s * 13 + r)
-        # Pad/truncate to 7
-        out = torch.full((N, 7), -1, dtype=torch.long, device=device)
-        for n in range(N):
-            vals = cards[n][:7]
-            assert len(vals) == 7, "Each sample must have 7 cards set"
-            out[n, :] = torch.tensor(vals, dtype=torch.long, device=device)
-        return out
-
-    a_cards = planes_to_cards(a_onehot)
-    b_cards = planes_to_cards(b_onehot)
-    return compare_7_batch(a_cards, b_cards)
+    return compare_7_batch(a_onehot, b_onehot)

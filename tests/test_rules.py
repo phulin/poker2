@@ -20,12 +20,13 @@ def onehot_plane(cards: list[int]) -> torch.Tensor:
 def assert_all_compares(a: list[int], b: list[int], expected: int) -> None:
     # Scalar compare
     assert rules.compare_7(a, b) == expected
-    # Batched int compare
-    bat = rules.compare_7_batch([a], [b])
-    assert int(bat[0].item()) == expected
-    # Batched onehot compare
+    # Batched onehot compare (two paths)
     ao = onehot_plane(a).unsqueeze(0)
     bo = onehot_plane(b).unsqueeze(0)
+    # via primary onehot batch API
+    bat = rules.compare_7_batch(ao, bo)
+    assert int(bat[0].item()) == expected
+    # via legacy wrapper
     boh = rules.compare_7_batch_onehot(ao, bo)
     assert int(boh[0].item()) == expected
 
