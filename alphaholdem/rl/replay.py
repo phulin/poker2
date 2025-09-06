@@ -86,7 +86,9 @@ def compute_gae_returns(
             delta = rewards[t] + gamma * values[t + 1] - values[t]
 
         gae = delta + gamma * lambda_ * gae
-        advantages.insert(0, gae)
+        advantages.append(gae)
+
+    advantages.reverse()
 
     # Compute returns from advantages
     for t in range(len(rewards)):

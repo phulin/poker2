@@ -31,6 +31,8 @@ def train_kbest(
     resume_from: str | None = None,
     device: torch.device = None,
     config: str | None = None,
+    use_tensor_env: bool = False,
+    num_envs: int = 256,
 ):
     """
     Train AlphaHoldem agent using K-Best self-play.
@@ -57,6 +59,8 @@ def train_kbest(
         min_elo_diff=min_elo_diff,
         device=device,
         config=config,
+        use_tensor_env=use_tensor_env,
+        num_envs=num_envs,
     )
 
     # Resume from checkpoint if specified
@@ -71,6 +75,10 @@ def train_kbest(
     print(f"Starting K-Best training from step {start_step}")
     print(f"K-Best pool size: {k_best_pool_size}")
     print(f"Min ELO difference: {min_elo_diff}")
+    if use_tensor_env:
+        print(f"Using tensorized environment with {num_envs} parallel environments")
+    else:
+        print("Using scalar environment")
     # Collection runs until batch_size steps; no fixed trajectories per step
     print(
         f"Training start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))}"
@@ -191,6 +199,17 @@ def main():
         choices=["mps", "cpu"],
         help="Device to use for training",
     )
+    parser.add_argument(
+        "--use-tensor-env",
+        action="store_true",
+        help="Use tensorized environment for faster training",
+    )
+    parser.add_argument(
+        "--num-envs",
+        type=int,
+        default=256,
+        help="Number of parallel environments for tensorized training",
+    )
 
     args = parser.parse_args()
 
@@ -222,6 +241,8 @@ def main():
         resume_from=args.resume_from,
         device=device,
         config=args.config,
+        use_tensor_env=args.use_tensor_env,
+        num_envs=args.num_envs,
     )
 
     print("Training completed!")

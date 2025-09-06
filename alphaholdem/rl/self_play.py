@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover
 from alphaholdem.core.config_loader import get_config
 
 from ..env.hunl_env import HUNLEnv
+from ..env.hunl_tensor_env import HUNLTensorEnv
 from ..encoding.cards_encoder import CardsPlanesV1
 from ..encoding.actions_encoder import ActionsHUEncoderV1
 from ..encoding.action_mapping import bin_to_action, get_legal_mask
@@ -53,6 +54,8 @@ class SelfPlayTrainer:
         min_elo_diff: float = 30.0,
         device: torch.device = None,
         config: Union[RootConfig, str, None] = None,
+        use_tensor_env: bool = False,
+        num_envs: int = 256,
     ):
         self.cfg = get_config(config) if config is not None else get_config(None)
 
@@ -79,8 +82,24 @@ class SelfPlayTrainer:
             else torch.device("mps" if torch.backends.mps.is_available() else "cpu")
         )
 
+        # Store tensorized environment settings
+        self.use_tensor_env = use_tensor_env
+        self.num_envs = num_envs
+
         # Initialize components
-        self.env = HUNLEnv(starting_stack=1000, sb=5, bb=10)
+        if use_tensor_env:
+            self.tensor_env = HUNLTensorEnv(
+                num_envs=num_envs,
+                starting_stack=self.cfg.stack,
+                sb=self.cfg.sb,
+                bb=self.cfg.bb,
+                bet_bins=self.cfg.bet_bins,
+                device=self.device,
+            )
+        else:
+            self.env = HUNLEnv(
+                starting_stack=self.cfg.stack, sb=self.cfg.sb, bb=self.cfg.bb
+            )
 
         # Config-driven components
         ce, ae, model, policy = build_components_from_config(self.cfg)
@@ -268,6 +287,262 @@ class SelfPlayTrainer:
             final_reward_from_our_perspective,
         )
 
+    @profile
+    def collect_tensor_trajectory(
+        self, opponent_snapshot: Optional[AgentSnapshot] = None
+    ) -> Trajectory:
+        """
+        Collect trajectories from multiple tensor_environments in parallel using HUNLTensorEnv.
+
+        Args:
+            opponent_snapshot: Optional opponent snapshot to play against.
+                             If None, plays against self (self-play).
+
+        Returns:
+            Combined trajectory from all tensor_environments
+        """
+        if not self.use_tensor_env:
+            raise ValueError("collect_tensor_trajectory requires use_tensor_env=True")
+
+        # Reset all tensor_environments
+        self.tensor_env.reset(seed=123)
+
+        all_transitions = []
+        total_reward = 0.0
+        max_steps = 50  # Safety limit
+
+        step_count = 0
+        while not self.tensor_env.done.all() and step_count < max_steps:
+            step_count += 1
+
+            # Get legal action masks for all tensor_environments
+            legal_masks = self.tensor_env.legal_action_bins_mask()  # [N, B]
+
+            # Encode states for all tensor_environments
+            states = self._encode_tensor_states()
+
+            # Get model predictions for all tensor_environments
+            with torch.no_grad():
+                autocast_enabled = (
+                    self.device.type == "cuda" or self.device.type == "mps"
+                )
+                dtype = torch.bfloat16 if autocast_enabled else torch.float16
+                cm = (
+                    torch.autocast(
+                        device_type=self.device.type,
+                        dtype=dtype,
+                    )
+                    if autocast_enabled
+                    else torch.amp.autocast("cpu", enabled=False)
+                )
+                with cm:
+                    logits, values = self.model(states["cards"], states["actions"])
+
+                    # Sample actions for all tensor_environments
+                    action_indices, log_probs = self.policy.action_batch(
+                        logits, legal_masks
+                    )
+
+            # Take steps in all tensor_environments
+            rewards, dones, to_act, info = self.tensor_env.step_bins(action_indices)
+
+            # Record transitions for tensor_environments where we acted (player 0)
+            our_turn_mask = to_act == 0
+
+            if our_turn_mask.any():
+                our_indices = torch.where(our_turn_mask)[0]
+
+                # Create transitions for our actions
+                for i, tensor_env_idx in enumerate(our_indices):
+                    # Scale factor for reward/targets: 100 big blinds
+                    scale = float(self.tensor_env.bb) * 100.0
+
+                    transition = Transition(
+                        observation=torch.cat(
+                            [
+                                states["cards"][tensor_env_idx].flatten(),
+                                states["actions"][tensor_env_idx].flatten(),
+                            ]
+                        ),
+                        action=action_indices[tensor_env_idx].item(),
+                        log_prob=log_probs[tensor_env_idx].item(),
+                        value=values[tensor_env_idx].item(),
+                        reward=rewards[tensor_env_idx].item(),
+                        done=dones[tensor_env_idx].item(),
+                        legal_mask=legal_masks[tensor_env_idx],
+                        chips_placed=0,  # TODO: Calculate from action
+                        delta2=0.0,  # TODO: Calculate per-sample bounds
+                        delta3=0.0,  # TODO: Calculate per-sample bounds
+                    )
+                    all_transitions.append(transition)
+                    total_reward += rewards[tensor_env_idx].item()
+
+            # Reset done tensor_environments
+            if dones.any():
+                self.tensor_env.reset_done(seed=123 + step_count * 9973)
+
+        return (
+            Trajectory(
+                transitions=all_transitions,
+            ),
+            total_reward,
+        )
+
+    @profile
+    def collect_tensor_trajectories(
+        self, min_steps: int
+    ) -> tuple[list[Trajectory], float]:
+        """
+        Collect trajectories from tensorized environments until we have at least min_steps.
+        Uses all environments continuously, resetting done ones at the end of each step.
+
+        Args:
+            min_steps: Minimum number of steps to collect across all trajectories
+
+        Returns:
+            Tuple of (list of trajectories, total reward)
+        """
+        if not self.use_tensor_env:
+            raise ValueError("collect_tensor_trajectories requires use_tensor_env=True")
+
+        all_trajectories = []
+        total_reward = 0.0
+        steps_collected = 0
+
+        # Outer loop: collect complete trajectories until we have enough steps
+        while steps_collected < min_steps:
+            # Initialize all environments for new trajectory
+            self.tensor_env.reset(seed=123 + len(all_trajectories) * 9973)
+
+            trajectory_transitions = []
+            episode_reward = 0.0
+            max_steps = 50  # Safety limit
+
+            # Inner loop: run trajectory until all environments are done
+            step_count = 0
+            while not self.tensor_env.done.all() and step_count < max_steps:
+                step_count += 1
+
+                # Get legal action masks for all environments
+                legal_masks = self.tensor_env.legal_action_bins_mask()  # [N, B]
+
+                # Encode states for all environments
+                states = self._encode_tensor_states()
+
+                # Get model predictions for all environments
+                with torch.no_grad():
+                    logits, values = self.model(states["cards"], states["actions"])
+
+                    # Sample actions for all environments
+                    action_indices, log_probs = self.policy.action_batch(
+                        logits, legal_masks
+                    )
+
+                # Take steps in all environments
+                rewards, dones, to_act, info = self.tensor_env.step_bins(action_indices)
+
+                # Record transitions for environments where we acted (player 0)
+                our_turn_mask = to_act == 0
+
+                if our_turn_mask.any():
+                    our_indices = torch.where(our_turn_mask)[0]
+
+                    # Create transitions for our actions
+                    for i, env_idx in enumerate(our_indices):
+                        # Scale factor for reward/targets: 100 big blinds
+                        scale = float(self.tensor_env.bb) * 100.0
+
+                        transition = Transition(
+                            observation=torch.cat(
+                                [
+                                    states["cards"][env_idx].flatten(),
+                                    states["actions"][env_idx].flatten(),
+                                ]
+                            ),
+                            action=action_indices[env_idx].item(),
+                            log_prob=log_probs[env_idx].item(),
+                            value=values[env_idx].item(),
+                            reward=rewards[env_idx].item(),
+                            done=dones[env_idx].item(),
+                            legal_mask=legal_masks[env_idx],
+                            chips_placed=0,  # TODO: Calculate from action
+                            delta2=0.0,  # TODO: Calculate per-sample bounds
+                            delta3=0.0,  # TODO: Calculate per-sample bounds
+                        )
+                        trajectory_transitions.append(transition)
+                        episode_reward += rewards[env_idx].item()
+
+                # Reset done environments at the end of each step
+                if dones.any():
+                    self.tensor_env.reset_done(
+                        seed=123 + len(all_trajectories) * 9973 + step_count
+                    )
+
+            # Create trajectory from collected transitions
+            if trajectory_transitions:
+                trajectory = Trajectory(transitions=trajectory_transitions)
+                all_trajectories.append(trajectory)
+                total_reward += episode_reward
+                steps_collected += len(trajectory_transitions)
+
+        return all_trajectories, total_reward
+
+    @profile
+    def _encode_tensor_states(self) -> dict:
+        """
+        Encode states for all tensor_environments in the tensorized environment.
+
+        Returns:
+            Dictionary with 'cards' and 'actions' tensors
+        """
+        batch_size = self.num_envs
+
+        # Encode cards for all tensor_environments - need 6 channels like CardsPlanesV1
+        cards = torch.zeros(batch_size, 6, 4, 13, device=self.device)
+
+        # For each tensor_environment, encode cards in 6 channels
+        for i in range(batch_size):
+            # Get hole cards for player 0 (our player)
+            hole_cards = self.tensor_env.hole_onehot[i, 0]  # [2, 4, 13]
+            board_cards = self.tensor_env.board_onehot[i]  # [5, 4, 13]
+
+            # Channel 0: hole cards
+            cards[i, 0] = hole_cards.sum(dim=0)
+
+            # Channel 1: flop cards (first 3 board cards)
+            if board_cards.shape[0] >= 3:
+                cards[i, 1] = board_cards[:3].sum(dim=0)
+
+            # Channel 2: turn card (4th board card)
+            if board_cards.shape[0] >= 4:
+                cards[i, 2] = board_cards[3]
+
+            # Channel 3: river card (5th board card)
+            if board_cards.shape[0] >= 5:
+                cards[i, 3] = board_cards[4]
+
+            # Channel 4: public cards (all board cards)
+            cards[i, 4] = board_cards.sum(dim=0)
+
+            # Channel 5: all cards (hole + board)
+            cards[i, 5] = hole_cards.sum(dim=0) + board_cards.sum(dim=0)
+
+            # Ensure binary (clamp to 0-1)
+            cards[i] = torch.clamp(cards[i], 0, 1)
+
+        # Get action history directly from tensor environment
+        # Shape: [N, 4_streets, 6_slots, 4_players, num_bet_bins]
+        action_history = self.tensor_env.get_action_history()
+
+        # Reshape to match ActionsHUEncoderV1 format: [N, 24_channels, 4_players, num_bet_bins]
+        # Flatten streets and slots: [N, 4*6, 4, num_bet_bins] = [N, 24, 4, num_bet_bins]
+        actions = action_history.view(batch_size, 24, 4, self.num_bet_bins).float()
+
+        return {
+            "cards": cards,
+            "actions": actions,
+        }
+
     # def update_model(self) -> dict:
     #     with profile(record_shapes=True) as prof:
     #         result = self.update_model_internal()
@@ -281,7 +556,9 @@ class SelfPlayTrainer:
         # Require enough samples (transitions) across buffer
         total_samples = sum(len(t.transitions) for t in self.replay_buffer.trajectories)
         if total_samples < self.batch_size:
-            return {}
+            raise ValueError(
+                f"Not enough samples in replay buffer: {total_samples} < {self.batch_size}"
+            )
 
         # Use all trajectories available for better mixing
         trajectories = self.replay_buffer.sample_trajectories(self.batch_size)
@@ -498,6 +775,7 @@ class SelfPlayTrainer:
             **first_clip_debug,
         }
 
+    @profile
     def train_step(self) -> dict:
         """
         Single training step: collect trajectories against K-Best opponents and update model.
@@ -508,34 +786,18 @@ class SelfPlayTrainer:
         Returns:
             Dictionary with training statistics
         """
-        # Target total steps in replay buffer
         target_steps = self.batch_size * max(self.cfg.replay_buffer_batches, 1)
-
-        # Warmup: fill buffer to target_steps
         if len(self.replay_buffer.trajectories) == 0:
-            print(f"Warmup: filling replay buffer to {target_steps} steps...")
+            # Warmup: fill replay buffer with minimum required samples
+            min_steps = target_steps - self.batch_size
+            print(f"Warmup: filling replay buffer to {min_steps} steps...")
+            self._fill_replay_buffer(min_steps)
 
-        i = 0
-        while self.replay_buffer.num_steps() < target_steps:
-            sampled_opponent = self.opponent_pool.sample(k=1)
-            opponent = sampled_opponent[0] if sampled_opponent else None
-            trajectory, reward = self.collect_trajectory(opponent)
-            if len(trajectory.transitions) == 0:
-                # opponent went first and folded. no decisions to train on. skip
-                continue
-            i += 1
-            self.replay_buffer.add_trajectory(trajectory)
-            self.episode_count += 1
-            self.total_reward += reward
-            if opponent is not None:
-                if reward > 0:
-                    result = "win"
-                elif reward < 0:
-                    result = "loss"
-                else:
-                    result = "draw"
-                self.opponent_pool.update_elo_after_game(opponent, result)
-                self.current_elo = self.opponent_pool.current_elo
+        # Before update, add one more batch worth of fresh steps
+        self._fill_replay_buffer(self.batch_size)
+
+        # Trim buffer back to target_steps
+        self.replay_buffer.trim_to_steps(target_steps)
 
         # Update model
         update_stats = self.update_model()
@@ -544,31 +806,6 @@ class SelfPlayTrainer:
         if self.opponent_pool.should_add_snapshot(self.current_elo):
             self.opponent_pool.add_snapshot(self, self.current_elo)
 
-        # After update, add one more batch worth of fresh steps
-        added_steps = 0
-        while added_steps < self.batch_size:
-            sampled_opponent = self.opponent_pool.sample(k=1)
-            opponent = sampled_opponent[0] if sampled_opponent else None
-            trajectory, reward = self.collect_trajectory(opponent)
-            if len(trajectory.transitions) == 0:
-                continue
-            self.replay_buffer.add_trajectory(trajectory)
-            added_steps += len(trajectory.transitions)
-            self.episode_count += 1
-            self.total_reward += reward
-            if opponent is not None:
-                if reward > 0:
-                    result = "win"
-                elif reward < 0:
-                    result = "loss"
-                else:
-                    result = "draw"
-                self.opponent_pool.update_elo_after_game(opponent, result)
-                self.current_elo = self.opponent_pool.current_elo
-
-        # Trim buffer back to target_steps
-        self.replay_buffer.trim_to_steps(target_steps)
-
         return {
             "episode_count": self.episode_count,
             "avg_reward": self.total_reward / max(1, self.episode_count),
@@ -576,6 +813,53 @@ class SelfPlayTrainer:
             "pool_stats": self.opponent_pool.get_pool_stats(),
             **update_stats,
         }
+
+    @profile
+    def _fill_replay_buffer(self, min_steps: int) -> None:
+        """
+        Fill replay buffer with at least min_steps samples.
+
+        Args:
+            min_steps: Minimum number of steps to add to replay buffer
+        """
+        steps_added = 0
+        while steps_added < min_steps:
+            if self.use_tensor_env:
+                # Use tensorized collection for faster data gathering
+                trajectories, total_reward = self.collect_tensor_trajectories(
+                    min_steps - steps_added
+                )
+
+                # Add all trajectories to replay buffer
+                for trajectory in trajectories:
+                    if len(trajectory.transitions) > 0:
+                        self.replay_buffer.add_trajectory(trajectory)
+                        self.episode_count += 1
+                        steps_added += len(trajectory.transitions)
+
+                self.total_reward += total_reward
+            else:
+                # Use scalar collection
+                sampled_opponent = self.opponent_pool.sample(k=1)
+                opponent = sampled_opponent[0] if sampled_opponent else None
+                trajectory, reward = self.collect_trajectory(opponent)
+
+                if len(trajectory.transitions) > 0:
+                    self.replay_buffer.add_trajectory(trajectory)
+                    self.episode_count += 1
+                    steps_added += len(trajectory.transitions)
+                    self.total_reward += reward
+
+                    # Update opponent pool for scalar environment
+                    if opponent is not None:
+                        if reward > 0:
+                            result = "win"
+                        elif reward < 0:
+                            result = "loss"
+                        else:
+                            result = "draw"
+                        self.opponent_pool.update_elo_after_game(opponent, result)
+                        self.current_elo = self.opponent_pool.current_elo
 
     def save_checkpoint(self, path: str, step: int) -> None:
         """Save model checkpoint and opponent pool."""

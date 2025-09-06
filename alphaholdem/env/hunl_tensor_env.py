@@ -45,10 +45,10 @@ class HUNLTensorEnv:
     board_onehot: torch.Tensor
     done: torch.Tensor
     winner: torch.Tensor
-    # action history (allocated lazily when num_bet_bins known)
+    # action history
     # shape: [N, 4 streets, S rounds per street, 4 rows (p0,p1,sum,legal), num_bins]
     # rows: 0=p0 action one-hot, 1=p1 action one-hot, 2=sum, 3=legal mask
-    action_history: object
+    action_history: torch.Tensor
     history_slots: int
 
     def __init__(
@@ -337,7 +337,7 @@ class HUNLTensorEnv:
             "done": self.done,
         }
 
-    def get_action_history(self) -> torch.Tensor | None:
+    def get_action_history(self) -> torch.Tensor:
         """Return action history planes tensor if allocated, else None."""
         return self.action_history
 
