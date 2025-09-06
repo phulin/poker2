@@ -107,6 +107,12 @@ class HUNLTensorEnv:
         self.board_onehot = torch.zeros(
             (self.N, 5, 4, 13), dtype=torch.float32, device=self.device
         )
+
+        # Chip tracking for delta calculations - single tensor for both players
+        # chips_placed[env_idx, player] = total chips placed by that player in that environment
+        self.chips_placed = torch.zeros(
+            self.N, 2, dtype=torch.float32, device=self.device
+        )
         self.hole_onehot = torch.zeros(
             (self.N, 2, 2, 4, 13), dtype=torch.float32, device=self.device
         )
@@ -212,6 +218,9 @@ class HUNLTensorEnv:
 
         # Reset history planes for specified environments
         self.action_history[ids].zero_()
+
+        # Reset chip tracking for specified environments
+        self.chips_placed[ids] = 0.0
 
     # --- Legality ---------------------------------------------------------------
 
@@ -341,14 +350,58 @@ class HUNLTensorEnv:
         """Return action history planes tensor if allocated, else None."""
         return self.action_history
 
+    def bet(self, env_indices: torch.Tensor, chips: torch.Tensor) -> None:
+        """
+        Place a bet for the current player in specified environments.
+
+        Args:
+            env_indices: Environment indices to update [M]
+            chips: Amount of chips to bet [M]
+        """
+
+        player = self.to_act[env_indices]
+
+        # Update stacks: subtract chips from player's stack
+        self.stacks[env_indices, player] -= chips
+
+        # Update committed: add chips to player's committed amount
+        self.committed[env_indices, player] += chips
+
+        # Update pot: add chips to pot
+        self.pot[env_indices] += chips
+
+        # Update chips_placed: track total chips placed by this player
+        self.chips_placed[env_indices, player] += chips
+
+    def get_delta_bounds(self, scale: float) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Calculate delta2 and delta3 bounds for PPO clipping.
+
+        Args:
+            action_amounts: Action amounts [N]
+            scale: Scaling factor (typically bb * 100)
+
+        Returns:
+            Tuple of (delta2 [N], delta3 [N])
+        """
+        # Get current player (who is acting)
+        me = self.to_act
+        opp = 1 - me
+
+        # delta2 = -opponent's chips placed, delta3 = our chips placed + current action
+        delta2 = -self.chips_placed.gather(1, opp.view(self.N, 1)).squeeze(1) / scale
+        delta3 = (self.chips_placed.gather(1, me.view(self.N, 1)).squeeze(1)) / scale
+
+        return delta2, delta3
+
     # --- Step ------------------------------------------------------------------
 
     def step_bins(
         self, bin_indices: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Step all envs using discrete bin indices tensor [N].
 
-        Returns (rewards [N], dones [N], to_act [N], info dict)
+        Returns (rewards [N], dones [N], to_act [N], chips_placed [N])
         Rewards are scaled by 100bb consistent with HUNLEnv.
         """
         assert bin_indices.shape[0] == self.N
@@ -363,6 +416,8 @@ class HUNLTensorEnv:
         me_comm = self.committed.gather(1, me.view(N, 1)).squeeze(1)
         opp_comm = self.committed.gather(1, opp.view(N, 1)).squeeze(1)
         to_call = opp_comm - me_comm
+
+        committed_before = me_comm.clone()
 
         rewards = torch.zeros(N, dtype=torch.float32, device=device)
 
@@ -400,26 +455,21 @@ class HUNLTensorEnv:
         if is_check_call.any():
             idx = torch.where(is_check_call)[0]
             call_amt = torch.minimum(to_call[idx], me_stack[idx])
-            self.stacks[idx, me[idx]] -= call_amt
-            self.committed[idx, me[idx]] += call_amt
-            self.pot[idx] += call_amt
+            self.bet(idx, call_amt)
 
         # All-in
         if is_allin.any():
             idx = torch.where(is_allin)[0]
             amt = me_stack[idx]
             # Pay call first if needed
-            # Avoid mixed scalar/tensor clamp; clamp to non-negative, then cap by amt
             call_amt = torch.clamp(to_call[idx], min=0)
             call_amt = torch.minimum(call_amt, amt)
-            self.stacks[idx, me[idx]] -= call_amt
-            self.committed[idx, me[idx]] += call_amt
-            self.pot[idx] += call_amt
-            amt = amt - call_amt
+            if call_amt.any():
+                self.bet(idx, call_amt)
             # Then shove remaining
-            self.stacks[idx, me[idx]] -= amt
-            self.committed[idx, me[idx]] += amt
-            self.pot[idx] += amt
+            remaining_amt = amt - call_amt
+            if remaining_amt.any():
+                self.bet(idx, remaining_amt)
             self.is_allin[idx, me[idx]] = True
 
         # Bet/Raise bins: approximate mapping using total_committed * mult
@@ -439,9 +489,7 @@ class HUNLTensorEnv:
                 amt = torch.minimum(amt, self.stacks[idx_bet, 1 - me[idx_bet]])
                 # Also cannot exceed our own stack (non-allin path)
                 amt = torch.minimum(amt, self.stacks[idx_bet, me[idx_bet]])
-                self.stacks[idx_bet, me[idx_bet]] -= amt
-                self.committed[idx_bet, me[idx_bet]] += amt
-                self.pot[idx_bet] += amt
+                self.bet(idx_bet, amt)
                 self.last_aggr[idx_bet] = amt
                 self.min_raise[idx_bet] = torch.maximum(self.min_raise[idx_bet], amt)
             idx_raise = idx[to_call[idx] > 0]
@@ -451,9 +499,7 @@ class HUNLTensorEnv:
                     to_call[idx_raise], self.stacks[idx_raise, me[idx_raise]]
                 )
                 # Pay call
-                self.stacks[idx_raise, me[idx_raise]] -= call_amt
-                self.committed[idx_raise, me[idx_raise]] += call_amt
-                self.pot[idx_raise] += call_amt
+                self.bet(idx_raise, call_amt)
                 # Raise part
                 avail = self.stacks[idx_raise, me[idx_raise]]
                 # Opponent coverage after call
@@ -464,9 +510,7 @@ class HUNLTensorEnv:
                 raise_part = torch.minimum(raise_part, opp_avail)
                 need = (raise_part < min_req) & (avail > min_req)
                 raise_part = torch.where(need, min_req, raise_part)
-                self.stacks[idx_raise, me[idx_raise]] -= raise_part
-                self.committed[idx_raise, me[idx_raise]] += raise_part
-                self.pot[idx_raise] += raise_part
+                self.bet(idx_raise, raise_part)
                 self.last_aggr[idx_raise] = raise_part
                 self.min_raise[idx_raise] = torch.maximum(
                     self.min_raise[idx_raise], raise_part
@@ -481,6 +525,8 @@ class HUNLTensorEnv:
         next_slot = torch.clamp(self.actions_this_round, max=self.history_slots - 1)
         legal_mask = self.legal_action_bins_mask()
         self.action_history[n_idx, next_street, next_slot, 3, :] = legal_mask
+
+        placed_chips = me_comm - committed_before
 
         # Round closure: equal committed and both acted
         equal_committed = self.committed[:, 0] == self.committed[:, 1]
@@ -597,7 +643,7 @@ class HUNLTensorEnv:
         # Note: no auto-runout. When any player is all-in, subsequent legal actions
         # are restricted to check/call only by legal_action_bins_mask, which runs out the board.
 
-        return rewards, self.done, self.to_act, {}
+        return rewards, self.done, self.to_act, placed_chips
 
     def reset_done(self, seed: Optional[int] = None) -> None:
         """Reset only environments with done=True; keeps others unchanged."""

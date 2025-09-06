@@ -337,7 +337,9 @@ class SelfPlayTrainer:
                 )
 
             # Take steps in all environments
-            rewards, dones, to_act, _ = self.tensor_env.step_bins(action_indices)
+            rewards, dones, to_act, placed_chips = self.tensor_env.step_bins(
+                action_indices
+            )
 
             # Record transitions for environments where we acted (player 0)
             our_turn_mask = to_act == 0
@@ -347,6 +349,9 @@ class SelfPlayTrainer:
             for i, env_idx in enumerate(our_indices):
                 # Scale factor for reward/targets: 100 big blinds
                 scale = float(self.tensor_env.bb) * 100.0
+
+                # Get action amount and delta bounds from tensor environment
+                delta2, delta3 = self.tensor_env.get_delta_bounds(scale)
 
                 transition = Transition(
                     observation=torch.cat(
@@ -361,9 +366,9 @@ class SelfPlayTrainer:
                     reward=rewards[env_idx].item(),
                     done=dones[env_idx].item(),
                     legal_mask=legal_masks[env_idx],
-                    chips_placed=0,  # TODO: Calculate from action
-                    delta2=0.0,  # TODO: Calculate per-sample bounds
-                    delta3=0.0,  # TODO: Calculate per-sample bounds
+                    chips_placed=placed_chips[env_idx].item(),
+                    delta2=delta2[env_idx].item(),
+                    delta3=delta3[env_idx].item(),
                 )
                 per_env_transitions[env_idx].append(transition)
                 per_env_rewards[env_idx] += rewards[env_idx].item()

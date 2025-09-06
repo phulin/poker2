@@ -40,6 +40,6 @@ learning_rate: 1e-4
 batch_size: 2048
 mini_batch_size: 2048
 num_epochs: 4
-replay_buffer_batches: 8
+replay_buffer_batches: 2
 value_loss_type: huber
 huber_delta: 1.0
