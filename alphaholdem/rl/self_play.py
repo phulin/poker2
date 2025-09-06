@@ -289,7 +289,9 @@ class SelfPlayTrainer:
 
     @profile
     def collect_tensor_trajectories(
-        self, min_steps: int
+        self,
+        min_steps: int,
+        all_opponent_snapshots: Optional[list[AgentSnapshot]] = None,
     ) -> tuple[list[Trajectory], float]:
         """
         Collect trajectories from tensorized environments until we have at least min_steps.
@@ -297,6 +299,9 @@ class SelfPlayTrainer:
 
         Args:
             min_steps: Minimum number of steps to collect across all trajectories
+            opponent_snapshots: Optional list of opponent snapshots to play against.
+                              If None, plays against self (self-play).
+                              If provided, should have length <= num_envs.
 
         Returns:
             Tuple of (list of trajectories, total reward)
@@ -329,7 +334,54 @@ class SelfPlayTrainer:
 
             # Get model predictions for all environments
             with torch.no_grad():
-                logits, values = self.model(states["cards"], states["actions"])
+                # Determine which environments need our model vs opponent models
+                our_turn_mask = self.tensor_env.to_act == 0
+                opp_turn_mask = self.tensor_env.to_act == 1
+
+                # Initialize logits and values tensors
+                logits = torch.zeros(
+                    self.num_envs, self.num_bet_bins, device=self.device
+                )
+                values = torch.zeros(self.num_envs, device=self.device)
+
+                # Get predictions from our model for our turns
+                if our_turn_mask.any():
+                    our_indices = torch.where(our_turn_mask)[0]
+                    our_logits, our_values = self.model(
+                        states["cards"][our_indices], states["actions"][our_indices]
+                    )
+                    logits[our_indices] = our_logits
+                    values[our_indices] = our_values.squeeze(-1)
+
+                # Get predictions from opponent models for opponent turns
+                if opp_turn_mask.any():
+                    opp_indices = torch.where(opp_turn_mask)[0]
+
+                    if (
+                        all_opponent_snapshots is not None
+                        and len(all_opponent_snapshots) > 0
+                    ):
+                        # Use opponent models - assign opponents to environments
+                        num_opps = len(all_opponent_snapshots)
+                        # Split opp_indices into num_opps approximately equal groups using torch.chunk
+                        opp_env_groups = torch.chunk(opp_indices, num_opps)
+                        for opponent_idx, env_idxs_tensor in enumerate(opp_env_groups):
+                            if env_idxs_tensor.numel() == 0:
+                                continue
+                            opponent = all_opponent_snapshots[opponent_idx]
+                            opp_logits, opp_values = opponent.model(
+                                states["cards"][env_idxs_tensor],
+                                states["actions"][env_idxs_tensor],
+                            )
+                            logits[env_idxs_tensor] = opp_logits
+                            values[env_idxs_tensor] = opp_values.squeeze(-1)
+                    else:
+                        # Self-play: use our model for opponent turns too
+                        opp_logits, opp_values = self.model(
+                            states["cards"][opp_indices], states["actions"][opp_indices]
+                        )
+                        logits[opp_indices] = opp_logits
+                        values[opp_indices] = opp_values.squeeze(-1)
 
                 # Sample actions for all environments
                 action_indices, log_probs = self.policy.action_batch(
@@ -745,9 +797,9 @@ class SelfPlayTrainer:
         steps_added = 0
         while steps_added < min_steps:
             if self.use_tensor_env:
-                # Use tensorized collection for faster data gathering
                 trajectories, total_reward = self.collect_tensor_trajectories(
-                    min_steps - steps_added
+                    min_steps - steps_added,
+                    all_opponent_snapshots=self.opponent_pool.snapshots,
                 )
 
                 # Add all trajectories to replay buffer
@@ -913,10 +965,29 @@ class SelfPlayTrainer:
 
         for i, opponent in enumerate(self.opponent_pool.snapshots):
             wins = 0
-            for _ in range(num_games):
-                _, final_reward = self.collect_trajectory(opponent_snapshot=opponent)
-                if final_reward > 0:
-                    wins += 1
+
+            if self.use_tensor_env:
+                # Use tensorized evaluation for faster evaluation
+                # For each opponent, create a batch where all environments play against that opponent
+                trajectories, _ = self.collect_tensor_trajectories(
+                    min_steps=num_games,
+                    all_opponent_snapshots=[opponent] * self.num_envs,
+                )
+
+                # Count wins from trajectories
+                for trajectory in trajectories:
+                    if trajectory.transitions:
+                        final_reward = trajectory.transitions[-1].reward
+                        if final_reward > 0:
+                            wins += 1
+            else:
+                # Use scalar evaluation
+                for _ in range(num_games):
+                    _, final_reward = self.collect_trajectory(
+                        opponent_snapshot=opponent
+                    )
+                    if final_reward > 0:
+                        wins += 1
 
             win_rate = wins / num_games
             results[f"opponent_{i}_step_{opponent.step}"] = {
