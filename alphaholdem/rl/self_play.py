@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional, Union
+from typing import Optional, Union
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -24,11 +24,8 @@ from ..encoding.action_mapping import bin_to_action, get_legal_mask
 from ..models.siamese_convnet import SiameseConvNetV1
 from ..models.heads import CategoricalPolicyV1
 from ..rl.replay import (
-    ReplayBuffer,
     Transition,
     Trajectory,
-    compute_gae_returns,
-    prepare_ppo_batch,
 )
 from ..rl.vectorized_replay import VectorizedReplayBuffer
 from ..rl.losses import trinal_clip_ppo_loss
@@ -362,21 +359,6 @@ class SelfPlayTrainer:
             # Encode states for all environments
             states = self._encode_tensor_states()
 
-            # Debug: Check for NaN values in states
-            if (
-                torch.isnan(states["cards"]).any()
-                or torch.isnan(states["actions"]).any()
-            ):
-                print(f"WARNING: NaN detected in state tensors!")
-                print(f"  Cards NaN: {torch.isnan(states['cards']).any()}")
-                print(f"  Actions NaN: {torch.isnan(states['actions']).any()}")
-                print(
-                    f"  Cards min/max: {states['cards'].min():.6f}/{states['cards'].max():.6f}"
-                )
-                print(
-                    f"  Actions min/max: {states['actions'].min():.6f}/{states['actions'].max():.6f}"
-                )
-
             # Get model predictions for all environments
             with torch.no_grad():
                 # Determine which environments need our model vs opponent models
@@ -393,21 +375,6 @@ class SelfPlayTrainer:
                 our_indices = torch.where(our_turn_mask)[0]
                 our_cards = states["cards"][our_indices]
                 our_actions = states["actions"][our_indices]
-
-                # Diagnostic: Check for NaN in model inputs
-                if torch.isnan(our_cards).any() or torch.isnan(our_actions).any():
-                    print(f"WARNING: NaN detected in model inputs!")
-                    print(f"  Cards NaN: {torch.isnan(our_cards).any()}")
-                    print(f"  Actions NaN: {torch.isnan(our_actions).any()}")
-                    print(
-                        f"  Cards min/max: {our_cards.min():.6f}/{our_cards.max():.6f}"
-                    )
-                    print(
-                        f"  Actions min/max: {our_actions.min():.6f}/{our_actions.max():.6f}"
-                    )
-                    print(f"  Cards shape: {our_cards.shape}")
-                    print(f"  Actions shape: {our_actions.shape}")
-                    print(f"  Environment indices: {our_indices}")
 
                 our_logits, our_values = self.model(our_cards, our_actions)
 
@@ -704,26 +671,6 @@ class SelfPlayTrainer:
 
                 logits, values = self.model(cards, actions_tensor)
 
-                # Compute loss on this exact minibatch BEFORE the step (for verification)
-                with torch.no_grad():
-                    loss_before_dict = trinal_clip_ppo_loss(
-                        logits=logits,
-                        values=values,
-                        actions=batch["actions"].index_select(0, mb_idx),
-                        log_probs_old=batch["log_probs_old"].index_select(0, mb_idx),
-                        advantages=batch["advantages"].index_select(0, mb_idx),
-                        returns=batch["returns"].index_select(0, mb_idx),
-                        legal_masks=batch["legal_masks"].index_select(0, mb_idx),
-                        epsilon=self.epsilon,
-                        delta1=self.delta1,
-                        delta2=delta2_vec.index_select(0, mb_idx),
-                        delta3=delta3_vec.index_select(0, mb_idx),
-                        value_coef=self.value_coef,
-                        entropy_coef=self.entropy_coef,
-                        value_loss_type=self.cfg.value_loss_type,
-                        huber_delta=self.cfg.huber_delta,
-                    )
-
                 loss_dict = trinal_clip_ppo_loss(
                     logits=logits,
                     values=values,
@@ -741,12 +688,14 @@ class SelfPlayTrainer:
                     value_loss_type=self.cfg.value_loss_type,
                     huber_delta=self.cfg.huber_delta,
                 )
+                loss_before_dict = {k: v for k, v in loss_dict.items()}
 
                 # Debugging metrics: approx KL, clipfrac, explained variance
                 with torch.no_grad():
                     legal_mb = batch["legal_masks"].index_select(0, mb_idx)
-                    masked_logits = logits.clone()
-                    masked_logits[legal_mb == 0] = -1e9
+                    masked_logits = torch.where(
+                        legal_mb.bool(), logits, torch.full_like(logits, -1e9)
+                    )
                     log_probs_new = torch.log_softmax(masked_logits, dim=-1)
                     a_mb = batch["actions"].index_select(0, mb_idx)
                     logp_new = log_probs_new.gather(1, a_mb.unsqueeze(1)).squeeze(1)
@@ -777,14 +726,6 @@ class SelfPlayTrainer:
                         )  # Stricter clipping for CNN
 
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-
-                # Check gradient norm after clipping
-                # total_grad_norm_after = 0.0
-                # for param in self.model.parameters():
-                #     if param.grad is not None:
-                #         total_grad_norm_after += param.grad.data.norm(2).item() ** 2
-                # total_grad_norm_after = total_grad_norm_after ** 0.5
-                # print(f"Total gradient norm (after clipping): {total_grad_norm_after:.6f}")
 
                 self.optimizer.step()
 

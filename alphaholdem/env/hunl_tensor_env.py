@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
+from line_profiler import profile
 import torch
 
 from . import rules
@@ -396,6 +397,7 @@ class HUNLTensorEnv:
 
     # --- Step ------------------------------------------------------------------
 
+    @profile
     def step_bins(
         self, bin_indices: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -440,37 +442,34 @@ class HUNLTensorEnv:
         self.action_history[n_idx, round_idx, slot_idx, 2, bin_indices] = 1
 
         # Fold: immediate terminal, award pot to opp
-        if is_fold.any():
-            idx = torch.where(is_fold)[0]
-            # Winner is opp
-            self.winner[idx] = opp[idx]
-            self.done[idx] = True
-            # Reward equals current stack - starting_stack (committed lost to pot/opponent)
-            scale = float(self.bb) * 100.0
-            rewards[idx] = (
-                self.stacks[idx, me[idx]].to(torch.float32) - float(self.starting_stack)
-            ) / scale
+        idx = torch.where(is_fold)[0]
+        # Winner is opp
+        self.winner[idx] = opp[idx]
+        self.done[idx] = True
+        # Reward equals current stack - starting_stack (committed lost to pot/opponent)
+        scale = float(self.bb) * 100.0
+        rewards[idx] = (
+            self.stacks[idx, me[idx]].to(torch.float32) - float(self.starting_stack)
+        ) / scale
 
         # Check/Call
-        if is_check_call.any():
-            idx = torch.where(is_check_call)[0]
-            call_amt = torch.minimum(to_call[idx], me_stack[idx])
-            self.bet(idx, call_amt)
+        idx = torch.where(is_check_call)[0]
+        call_amt = torch.minimum(to_call[idx], me_stack[idx])
+        self.bet(idx, call_amt)
 
         # All-in
-        if is_allin.any():
-            idx = torch.where(is_allin)[0]
-            amt = me_stack[idx]
-            # Pay call first if needed
-            call_amt = torch.clamp(to_call[idx], min=0)
-            call_amt = torch.minimum(call_amt, amt)
-            if call_amt.any():
-                self.bet(idx, call_amt)
-            # Then shove remaining
-            remaining_amt = amt - call_amt
-            if remaining_amt.any():
-                self.bet(idx, remaining_amt)
-            self.is_allin[idx, me[idx]] = True
+        idx = torch.where(is_allin)[0]
+        amt = me_stack[idx]
+        # Pay call first if needed
+        call_amt = torch.clamp(to_call[idx], min=0)
+        call_amt = torch.minimum(call_amt, amt)
+        if call_amt.any():
+            self.bet(idx, call_amt)
+        # Then shove remaining
+        remaining_amt = amt - call_amt
+        if remaining_amt.any():
+            self.bet(idx, remaining_amt)
+        self.is_allin[idx, me[idx]] = True
 
         # Bet/Raise bins: approximate mapping using total_committed * mult
         if is_bet_raise.any():
@@ -539,109 +538,102 @@ class HUNLTensorEnv:
             self.actions_this_round[rc_idx] = 0
             # Advance street and deal
             s = self.street[rc_idx]
+
             # flop (vectorized dealing of 3 cards)
             flop_mask = s == 0
-            if flop_mask.any():
-                ids = rc_idx[flop_mask]
-                pos = self.deck_pos[ids]
-                a = self.deck[ids, pos]
-                b = self.deck[ids, pos + 1]
-                c = self.deck[ids, pos + 2]
-                self.deck_pos[ids] = pos + 3
-                # Use cached one-hot matrices for flop cards
-                self.board_onehot[ids, 0] = self.card_onehot_cache[a]
-                self.board_onehot[ids, 1] = self.card_onehot_cache[b]
-                self.board_onehot[ids, 2] = self.card_onehot_cache[c]
-                self.street[ids] = 1
-                self.to_act[ids] = 1 - self.button[ids]
-                self.min_raise[ids] = self.bb
-                self.last_aggr[ids] = 0
+            ids = rc_idx[flop_mask]
+            pos = self.deck_pos[ids]
+            a = self.deck[ids, pos]
+            b = self.deck[ids, pos + 1]
+            c = self.deck[ids, pos + 2]
+            self.deck_pos[ids] = pos + 3
+            self.board_onehot[ids, 0] = self.card_onehot_cache[self.deck[ids, pos]]
+            self.board_onehot[ids, 1] = self.card_onehot_cache[self.deck[ids, pos + 1]]
+            self.board_onehot[ids, 2] = self.card_onehot_cache[self.deck[ids, pos + 2]]
+            self.street[ids] = 1
+            self.to_act[ids] = 1 - self.button[ids]
+            self.min_raise[ids] = self.bb
+            self.last_aggr[ids] = 0
+
             # turn
             turn_mask = s == 1
-            if turn_mask.any():
-                ids = rc_idx[turn_mask]
-                pos = self.deck_pos[ids]
-                c = self.deck[ids, pos]
-                self.deck_pos[ids] = pos + 1
-                # Use cached one-hot matrix for turn card
-                self.board_onehot[ids, 3] = self.card_onehot_cache[c]
-                self.street[ids] = 2
-                self.to_act[ids] = 1 - self.button[ids]
-                self.min_raise[ids] = self.bb
-                self.last_aggr[ids] = 0
+            ids = rc_idx[turn_mask]
+            pos = self.deck_pos[ids]
+            c = self.deck[ids, pos]
+            self.deck_pos[ids] = pos + 1
+            # Use cached one-hot matrix for turn card
+            self.board_onehot[ids, 3] = self.card_onehot_cache[c]
+            self.street[ids] = 2
+            self.to_act[ids] = 1 - self.button[ids]
+            self.min_raise[ids] = self.bb
+            self.last_aggr[ids] = 0
+
             # river
             river_mask = s == 2
-            if river_mask.any():
-                ids = rc_idx[river_mask]
-                pos = self.deck_pos[ids]
-                c = self.deck[ids, pos]
-                self.deck_pos[ids] = pos + 1
-                # Use cached one-hot matrix for river card
-                self.board_onehot[ids, 4] = self.card_onehot_cache[c]
-                self.street[ids] = 3
-                self.to_act[ids] = 1 - self.button[ids]
-                self.min_raise[ids] = self.bb
-                self.last_aggr[ids] = 0
+            ids = rc_idx[river_mask]
+            pos = self.deck_pos[ids]
+            c = self.deck[ids, pos]
+            self.deck_pos[ids] = pos + 1
+            # Use cached one-hot matrix for river card
+            self.board_onehot[ids, 4] = self.card_onehot_cache[c]
+            self.street[ids] = 3
+            self.to_act[ids] = 1 - self.button[ids]
+            self.min_raise[ids] = self.bb
+            self.last_aggr[ids] = 0
+
             # showdown
             sd_mask = s == 3
-            if sd_mask.any():
-                ids = rc_idx[sd_mask]
-                # Evaluate winners or award folds
-                # Vectorized showdown resolution for all ids at once
+            ids = rc_idx[sd_mask]
+            # Evaluate winners or award folds
+            # Vectorized showdown resolution for all ids at once
 
-                # Only consider ids where neither player has folded
-                not_folded_mask = (~self.has_folded[ids, 0]) & (
-                    ~self.has_folded[ids, 1]
+            # Only consider ids where neither player has folded
+            not_folded_mask = (~self.has_folded[ids, 0]) & (~self.has_folded[ids, 1])
+            ids_showdown = ids[not_folded_mask]
+
+            # Build one-hot 7-card planes for each player: 2 hole + 5 board
+            # Shape: [num_ids, 4, 13]
+            num_sd = ids_showdown.shape[0]
+            if num_sd > 0:
+                # Player 0
+                a_plane = (
+                    self.hole_onehot[ids_showdown, 0, 0]
+                    + self.hole_onehot[ids_showdown, 0, 1]
+                    + self.board_onehot[ids_showdown].sum(dim=1)
                 )
-                ids_showdown = ids[not_folded_mask]
-
-                # Build one-hot 7-card planes for each player: 2 hole + 5 board
-                # Shape: [num_ids, 4, 13]
-                num_sd = ids_showdown.shape[0]
-                if num_sd > 0:
-                    # Player 0
-                    a_plane = (
-                        self.hole_onehot[ids_showdown, 0, 0]
-                        + self.hole_onehot[ids_showdown, 0, 1]
-                        + self.board_onehot[ids_showdown].sum(dim=1)
-                    )
-                    # Player 1
-                    b_plane = (
-                        self.hole_onehot[ids_showdown, 1, 0]
-                        + self.hole_onehot[ids_showdown, 1, 1]
-                        + self.board_onehot[ids_showdown].sum(dim=1)
-                    )
-                    # Clamp planes to 0/1
-                    a_plane = (a_plane > 0.5).to(torch.float32)
-                    b_plane = (b_plane > 0.5).to(torch.float32)
-                    # Compare hands in batch
-                    cmp = rules.compare_7_batch_onehot(
-                        a_plane, b_plane
-                    )  # shape [num_sd]
-                    # Set winners
-                    self.winner[ids_showdown[cmp > 0]] = 0
-                    self.winner[ids_showdown[cmp < 0]] = 1
-                    self.winner[ids_showdown[cmp == 0]] = -1
-
-                # Mark all as done
-                self.done[ids] = True
-
-                # Compute scaled reward for actor of this step
-                m = me[ids].long()
-                scale = float(self.bb) * 100.0
-                # Pot shares
-                winner_ids = self.winner[ids]
-                pot = self.pot[ids].float()
-                stacks = self.stacks[ids, m].float()
-                # pot_share: full pot if winner == m, half if tie, else 0
-                pot_share = torch.where(
-                    winner_ids == m,
-                    pot,
-                    torch.where(winner_ids == -1, pot / 2.0, torch.zeros_like(pot)),
+                # Player 1
+                b_plane = (
+                    self.hole_onehot[ids_showdown, 1, 0]
+                    + self.hole_onehot[ids_showdown, 1, 1]
+                    + self.board_onehot[ids_showdown].sum(dim=1)
                 )
-                rewards[ids] = (stacks + pot_share - float(self.starting_stack)) / scale
-        # Note: no auto-runout. When any player is all-in, subsequent legal actions
-        # are restricted to check/call only by legal_action_bins_mask, which runs out the board.
+                # Clamp planes to 0/1
+                a_plane = (a_plane > 0.5).to(torch.float32)
+                b_plane = (b_plane > 0.5).to(torch.float32)
+                # Compare hands in batch
+                cmp = rules.compare_7_batch_onehot(a_plane, b_plane)  # shape [num_sd]
+                # Set winners
+                self.winner[ids_showdown[cmp > 0]] = 0
+                self.winner[ids_showdown[cmp < 0]] = 1
+                self.winner[ids_showdown[cmp == 0]] = -1
+
+            # Mark all as done
+            self.done[ids] = True
+
+            # Compute scaled reward for actor of this step
+            m = me[ids].long()
+            scale = float(self.bb) * 100.0
+            # Pot shares
+            winner_ids = self.winner[ids]
+            pot = self.pot[ids].float()
+            stacks = self.stacks[ids, m].float()
+            # pot_share: full pot if winner == m, half if tie, else 0
+            pot_share = torch.where(
+                winner_ids == m,
+                pot,
+                torch.where(winner_ids == -1, pot / 2.0, torch.zeros_like(pot)),
+            )
+            rewards[ids] = (stacks + pot_share - float(self.starting_stack)) / scale
 
         return rewards, self.done, self.to_act, placed_chips
 
