@@ -161,7 +161,7 @@ class SelfPlayTrainer:
         # Training stats
         self.episode_count = 0
         self.total_reward = 0.0
-        self.current_elo = 1200.0  # Starting ELO rating
+        self.opponent_pool.current_elo = 1200.0  # Starting ELO rating
 
     def _initialize_weights(self):
         """Initialize model weights to prevent dead neurons."""
@@ -319,7 +319,8 @@ class SelfPlayTrainer:
     ) -> tuple[float, int]:
         """
         Collect trajectories from tensorized environments until we have at least min_steps.
-        Uses all environments continuously, resetting done ones at the end of each step.
+        Only processes non-done environments in each iteration to avoid bias towards short episodes.
+        Resets all environments only when every environment is done.
 
         Args:
             min_steps: Minimum number of steps to collect across all trajectories
@@ -350,90 +351,110 @@ class SelfPlayTrainer:
 
         # Outer loop: collect complete trajectories until we have enough steps
         while steps_collected < min_steps:
-            # Get legal action masks for all environments
-            legal_masks = self.tensor_env.legal_action_bins_mask()  # [N, B]
+            # Only process non-done environments to avoid bias towards short episodes
+            active_mask = ~self.tensor_env.done
+            active_indices = torch.where(active_mask)[0]
 
-            # Encode states for all environments
+            # Get legal action masks for active environments only
+            legal_masks = self.tensor_env.legal_action_bins_mask()[
+                active_indices
+            ]  # [N_active, B]
+
+            # Encode states for active environments only
             states = self._encode_tensor_states()
+            active_cards = states["cards"][active_indices]
+            active_actions = states["actions"][active_indices]
 
-            # Get model predictions for all environments
+            # Get model predictions for active environments only
             with torch.no_grad():
-                # Determine which environments need our model vs opponent models
+                # Determine which active environments need our model vs opponent models
                 # Save actor mask BEFORE stepping; these are the envs where we act now
-                actor_is_ours = self.tensor_env.to_act == 0
-                our_indices = torch.where(actor_is_ours)[0]
-                opp_turn_mask = self.tensor_env.to_act == 1
+                active_to_act = self.tensor_env.to_act[active_indices]
+                actor_is_ours = active_to_act == 0
+                our_active_indices = active_indices[actor_is_ours]
+                opp_active_indices = active_indices[active_to_act == 1]
 
-                # Initialize logits and values tensors
-                logits = torch.zeros(
-                    self.num_envs, self.num_bet_bins, device=self.device
+                # Initialize logits and values tensors for active environments only
+                active_logits = torch.zeros(
+                    active_indices.numel(), self.num_bet_bins, device=self.device
                 )
-                values = torch.zeros(self.num_envs, device=self.device)
+                active_values = torch.zeros(active_indices.numel(), device=self.device)
 
                 # Get predictions from our model for our turns
-                our_cards = states["cards"][our_indices]
-                our_actions = states["actions"][our_indices]
+                if our_active_indices.numel() > 0:
+                    our_cards = active_cards[actor_is_ours]
+                    our_actions = active_actions[actor_is_ours]
 
-                our_logits, our_values = self.model(our_cards, our_actions)
+                    our_logits, our_values = self.model(our_cards, our_actions)
 
-                logits[our_indices] = our_logits
-                values[our_indices] = our_values.squeeze(-1)
+                    active_logits[actor_is_ours] = our_logits
+                    active_values[actor_is_ours] = our_values.squeeze(-1)
 
                 # Get predictions from opponent models for opponent turns
-                opp_indices = torch.where(opp_turn_mask)[0]
-
                 opp_env_groups: Tuple[torch.Tensor, ...] | None = None
                 if (
                     all_opponent_snapshots is not None
                     and len(all_opponent_snapshots) > 0
+                    and opp_active_indices.numel() > 0
                 ):
                     # Use opponent models - assign opponents to environments
                     num_opps = len(all_opponent_snapshots)
-                    # Split opp_indices into num_opps approximately equal groups using torch.chunk
-                    opp_env_groups = torch.chunk(opp_indices, num_opps)
+                    # Split opp_active_indices into num_opps approximately equal groups using torch.chunk
+                    opp_env_groups = torch.chunk(opp_active_indices, num_opps)
                     for opponent_idx, env_idxs_tensor in enumerate(opp_env_groups):
                         if env_idxs_tensor.numel() == 0:
                             continue
                         opponent = all_opponent_snapshots[opponent_idx]
-                        opp_cards = states["cards"][env_idxs_tensor]
-                        opp_actions = states["actions"][env_idxs_tensor]
+
+                        # Map back to active indices for tensor slicing
+                        active_idx_mask = torch.isin(active_indices, env_idxs_tensor)
+                        opp_cards = active_cards[active_idx_mask]
+                        opp_actions = active_actions[active_idx_mask]
 
                         opp_logits, opp_values = opponent.model(opp_cards, opp_actions)
-                        logits[env_idxs_tensor] = opp_logits
-                        values[env_idxs_tensor] = opp_values.squeeze(-1)
-                else:
+                        active_logits[active_idx_mask] = opp_logits
+                        active_values[active_idx_mask] = opp_values.squeeze(-1)
+                elif opp_active_indices.numel() > 0:
                     # Self-play: use our model for opponent turns too
-                    opp_cards = states["cards"][opp_indices]
-                    opp_actions = states["actions"][opp_indices]
+                    opp_cards = active_cards[active_to_act == 1]
+                    opp_actions = active_actions[active_to_act == 1]
 
                     opp_logits, opp_values = self.model(opp_cards, opp_actions)
-                    logits[opp_indices] = opp_logits
-                    values[opp_indices] = opp_values.squeeze(-1)
+                    active_logits[active_to_act == 1] = opp_logits
+                    active_values[active_to_act == 1] = opp_values.squeeze(-1)
 
-                # Sample actions for all environments
-                action_indices, log_probs = self.policy.action_batch(
-                    logits, legal_masks
+                # Sample actions for active environments only
+                action_indices_active, log_probs_active = self.policy.action_batch(
+                    active_logits, legal_masks
                 )
 
-            # Take steps in all environments
+            # Create full-size tensors for stepping (needed by tensor_env.step_bins)
+            action_indices = torch.zeros(
+                self.num_envs, dtype=torch.long, device=self.device
+            )
+            action_indices[active_indices] = action_indices_active
+
+            # Take steps in all environments (tensor_env expects full-size tensors)
             rewards, dones, _, placed_chips = self.tensor_env.step_bins(action_indices)
 
             # Create transitions for our actions and add to vectorized buffer
-            if our_indices.numel() > 0:
+            if our_active_indices.numel() > 0:
                 # Scale factor for reward/targets: 100 big blinds
                 scale = float(self.tensor_env.bb) * 100.0
 
                 # Compute delta bounds from actor perspective AFTER step
                 # For our acting envs, actor is player 0
                 chips = self.tensor_env.chips_placed.to(torch.float32)
-                our_delta2_tensor = -chips[our_indices, 1] / scale  # -opponent chips
-                our_delta3_tensor = chips[our_indices, 0] / scale  # our chips
+                our_delta2_tensor = (
+                    -chips[our_active_indices, 1] / scale
+                )  # -opponent chips
+                our_delta3_tensor = chips[our_active_indices, 0] / scale  # our chips
 
                 # Pre-compute flattened observations for all our environments at once
-                our_cards_flat = states["cards"][our_indices].flatten(
+                our_cards_flat = active_cards[actor_is_ours].flatten(
                     1
                 )  # [N_our, 6*4*13]
-                our_actions_flat = states["actions"][our_indices].flatten(
+                our_actions_flat = active_actions[actor_is_ours].flatten(
                     1
                 )  # [N_our, 24*4*num_bet_bins]
                 our_observations = torch.cat(
@@ -441,13 +462,13 @@ class SelfPlayTrainer:
                 )  # [N_our, total_obs_size]
 
                 # Extract tensor values efficiently (no .tolist() calls)
-                our_actions_tensor = action_indices[our_indices]
-                our_log_probs_tensor = log_probs[our_indices]
-                our_values_tensor = values[our_indices]
-                our_rewards_tensor = rewards[our_indices]
-                our_dones_tensor = dones[our_indices]
-                our_legal_masks_tensor = legal_masks[our_indices]
-                our_placed_chips_tensor = placed_chips[our_indices]
+                our_actions_tensor = action_indices_active[actor_is_ours]
+                our_log_probs_tensor = log_probs_active[actor_is_ours]
+                our_values_tensor = active_values[actor_is_ours]
+                our_rewards_tensor = rewards[our_active_indices]
+                our_dones_tensor = dones[our_active_indices]
+                our_legal_masks_tensor = legal_masks[actor_is_ours]
+                our_placed_chips_tensor = placed_chips[our_active_indices]
 
                 # Add batch to vectorized replay buffer
                 self.replay_buffer.add_batch(
@@ -464,9 +485,10 @@ class SelfPlayTrainer:
                 )
 
                 # Update per-environment reward tracking
-                per_env_rewards[our_indices] += our_rewards_tensor
+                per_env_rewards[our_active_indices] += our_rewards_tensor
+
             # Update step counts for active environments
-            per_traj_step_count += (~dones).long()
+            per_traj_step_count[active_indices] += 1
 
             # Handle environments that exceed max steps
             over_limit = (per_traj_step_count >= max_steps) & (~self.tensor_env.done)
@@ -486,44 +508,37 @@ class SelfPlayTrainer:
             episode_count += done_indices.numel()
 
             # Update ELO ratings for done environments (vectorized by opponent)
-            if done_indices.numel() > 0:
-                # Use premade chunking to efficiently group done environments by opponent
-                if opp_env_groups is not None:
-                    # Vectorized ELO update per opponent using existing chunking
-                    for opponent_idx, env_idxs_tensor in enumerate(opp_env_groups):
-                        if env_idxs_tensor.numel() == 0:
-                            continue
+            # Use premade chunking to efficiently group done environments by opponent
+            if opp_env_groups is not None:
+                # Vectorized ELO update per opponent using existing chunking
+                for opponent_idx, env_idxs_tensor in enumerate(opp_env_groups):
+                    if env_idxs_tensor.numel() == 0:
+                        continue
 
-                        opponent = all_opponent_snapshots[opponent_idx]
+                    opponent = all_opponent_snapshots[opponent_idx]
 
-                        # Find which environments in this opponent's group are done
-                        done_env_idxs_for_opponent = env_idxs_tensor[
-                            dones[env_idxs_tensor]
-                        ]
+                    # Find which environments in this opponent's group are done
+                    done_env_idxs_for_opponent = env_idxs_tensor[dones[env_idxs_tensor]]
 
-                        if done_env_idxs_for_opponent.numel() > 0:
-                            # Slice rewards tensor directly - no .item() calls needed
-                            opponent_rewards = per_env_rewards[
-                                done_env_idxs_for_opponent
-                            ]
+                    if done_env_idxs_for_opponent.numel() > 0:
+                        # Slice rewards tensor directly - no .item() calls needed
+                        opponent_rewards = per_env_rewards[done_env_idxs_for_opponent]
 
-                            # Update ELO for this opponent with all their games
-                            self.opponent_pool.update_elo_batch_vectorized(
-                                opponent, opponent_rewards
-                            )
-                else:
-                    # Fallback for self-play case (no opponents, so no ELO tracking)
-                    pass
+                        # Update ELO for this opponent with all their games
+                        self.opponent_pool.update_elo_batch_vectorized(
+                            opponent, opponent_rewards
+                        )
+            else:
+                # Fallback for self-play case (no opponents, so no ELO tracking)
+                pass
 
-                # Update our current ELO to match the pool's current ELO
-                self.current_elo = self.opponent_pool.current_elo
+            # If all environments are done, reset all of them
+            if active_indices.numel() == 0:
+                self.tensor_env.reset()
+                per_env_rewards[:] = 0.0
+                per_traj_step_count[:] = 0
+                continue
 
-            # Reset counters for these environments
-            per_env_rewards[done_indices] = 0.0
-            per_traj_step_count[done_indices] = 0
-
-            # Reset done environments
-            self.tensor_env.reset_done()
         return total_reward, episode_count
 
     def _encode_tensor_states(self) -> dict:
@@ -798,13 +813,13 @@ class SelfPlayTrainer:
         update_stats = self.update_model()
 
         # Check if we should add current model to opponent pool
-        if self.opponent_pool.should_add_snapshot(self.current_elo):
-            self.opponent_pool.add_snapshot(self, self.current_elo)
+        if self.opponent_pool.should_add_snapshot():
+            self.opponent_pool.add_snapshot(self.model, self.episode_count)
 
         return {
             "episode_count": self.episode_count,
             "avg_reward": self.total_reward / max(1, self.episode_count),
-            "current_elo": self.current_elo,
+            "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
             **update_stats,
         }
@@ -851,7 +866,6 @@ class SelfPlayTrainer:
                         else:
                             result = "draw"
                         self.opponent_pool.update_elo_after_game(opponent, result)
-                        self.current_elo = self.opponent_pool.current_elo
 
     def save_checkpoint(self, path: str, step: int) -> None:
         """Save model checkpoint and opponent pool."""
@@ -878,7 +892,7 @@ class SelfPlayTrainer:
             "step": step,
             "episode_count": self.episode_count,
             "total_reward": self.total_reward,
-            "current_elo": self.current_elo,
+            "current_elo": self.opponent_pool.current_elo,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             # Store replay buffer to resume training seamlessly
@@ -912,7 +926,7 @@ class SelfPlayTrainer:
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.episode_count = checkpoint["episode_count"]
         self.total_reward = checkpoint["total_reward"]
-        self.current_elo = checkpoint.get("current_elo", 1200.0)
+        self.opponent_pool.current_elo = checkpoint.get("current_elo", 1200.0)
 
         # Restore replay buffer if present
         if "replay_buffer" in checkpoint and checkpoint["replay_buffer"] is not None:
@@ -1025,7 +1039,6 @@ class SelfPlayTrainer:
                 result = "draw"
 
             self.opponent_pool.update_elo_after_game(opponent, result)
-            self.current_elo = self.opponent_pool.current_elo
 
         overall_win_rate = total_wins / total_games if total_games > 0 else 0.0
 

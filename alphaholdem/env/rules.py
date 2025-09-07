@@ -236,6 +236,38 @@ def debug_comparison_vector(compare: torch.Tensor, hand_index: int = 0) -> str:
     return result
 
 
+def compare_7(a_cards: List[int], b_cards: List[int]) -> int:
+    """Compare two 7-card hands and return comparison result.
+
+    Args:
+        a_cards: List of 7 card integers for hand A
+        b_cards: List of 7 card integers for hand B
+
+    Returns:
+        int: 1 if hand A wins, -1 if hand B wins, 0 if tie
+    """
+    assert len(a_cards) == 7, f"Expected 7 cards for hand A, got {len(a_cards)}"
+    assert len(b_cards) == 7, f"Expected 7 cards for hand B, got {len(b_cards)}"
+
+    # Convert card lists to one-hot planes
+    a_onehot = torch.zeros(4, 13, dtype=torch.long)
+    b_onehot = torch.zeros(4, 13, dtype=torch.long)
+
+    for card in a_cards:
+        suit_idx = card // 13
+        rank_idx = card % 13
+        a_onehot[suit_idx, rank_idx] = 1
+
+    for card in b_cards:
+        suit_idx = card // 13
+        rank_idx = card % 13
+        b_onehot[suit_idx, rank_idx] = 1
+
+    # Use batch comparison with single hand
+    result = compare_7_batch(a_onehot.unsqueeze(0), b_onehot.unsqueeze(0))
+    return int(result[0].item())
+
+
 def compare_7_batch(
     a_batch: torch.Tensor,
     b_batch: torch.Tensor,

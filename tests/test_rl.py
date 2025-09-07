@@ -7,7 +7,6 @@ from alphaholdem.rl.replay import (
     Transition,
     Trajectory,
     compute_gae_returns,
-    prepare_ppo_batch,
 )
 from alphaholdem.rl.losses import trinal_clip_ppo_loss
 

@@ -43,9 +43,9 @@ def test_kbest_pool():
     snapshot3 = AgentSnapshot(model3, step=300, elo=1300.0)
 
     # Add snapshots
-    pool.add_snapshot(None, 1200.0)  # This should create a snapshot with model=None
-    pool.add_snapshot(None, 1250.0)
-    pool.add_snapshot(None, 1300.0)
+    pool.add_snapshot(model1, 100, rating=1200.0)
+    pool.add_snapshot(model2, 200, rating=1250.0)
+    pool.add_snapshot(model3, 300, rating=1300.0)
 
     # Test sampling
     opponents = pool.sample(k=2)
@@ -78,7 +78,7 @@ def test_selfplay_with_kbest():
         num_envs=16,  # Much smaller than default 256
     )
 
-    print(f"Initial ELO: {trainer.current_elo}")
+    print(f"Initial ELO: {trainer.opponent_pool.current_elo}")
     print(f"Initial pool size: {trainer.opponent_pool.get_pool_stats()['pool_size']}")
 
     # Run fewer training steps for faster testing
@@ -123,19 +123,14 @@ def test_opponent_sampling():
 
     # Add some snapshots with different ELOs
     for i in range(5):
-        # Create a dummy agent with episode_count
-        class DummyAgent:
-            def __init__(self, episode_count):
-                self.episode_count = episode_count
-                self.model = SiameseConvNetV1(
-                    cards_channels=6,
-                    actions_channels=24,
-                    fusion_hidden=[256, 256],
-                    num_actions=8,
-                )
+        model = SiameseConvNetV1(
+            cards_channels=6,
+            actions_channels=24,
+            fusion_hidden=[256, 256],
+            num_actions=8,
+        )
 
-        dummy_agent = DummyAgent(episode_count=(i + 1) * 100)
-        trainer.opponent_pool.add_snapshot(dummy_agent, 1200.0 + i * 50)
+        trainer.opponent_pool.add_snapshot(model, (i + 1) * 100, rating=1200.0 + i * 50)
 
     print(f"Pool size: {trainer.opponent_pool.get_pool_stats()['pool_size']}")
 

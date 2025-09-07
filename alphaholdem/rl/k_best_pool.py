@@ -98,7 +98,9 @@ class KBestOpponentPool(OpponentPool):
 
         return [self.snapshots[i] for i in sampled_indices]
 
-    def add_snapshot(self, agent: Any, rating: float) -> None:
+    def add_snapshot(
+        self, model: Any, episode_count: int, rating: Optional[float] = None
+    ) -> None:
         """
         Add a new snapshot to the pool.
 
@@ -107,11 +109,10 @@ class KBestOpponentPool(OpponentPool):
             rating: ELO rating of the agent
         """
         # Create new snapshot
-        model = agent.model if agent is not None else None
         new_snapshot = AgentSnapshot(
             model=model,
-            step=getattr(agent, "episode_count", 0) if agent is not None else 0,
-            elo=rating,
+            step=episode_count,
+            elo=rating if rating is not None else self.current_elo,
         )
 
         # Reduce memory footprint of snapshot models on accelerators
@@ -129,9 +130,6 @@ class KBestOpponentPool(OpponentPool):
         # Keep only the top K snapshots
         if len(self.snapshots) > self.k:
             self.snapshots = self.snapshots[: self.k]
-
-        # Update current ELO
-        self.current_elo = rating
 
     def update_elo_after_game(
         self, opponent: AgentSnapshot, result: str, k_factor: float = 32.0
@@ -253,7 +251,7 @@ class KBestOpponentPool(OpponentPool):
             "best_snapshot_elo": self.snapshots[0].elo,
         }
 
-    def should_add_snapshot(self, new_elo: float) -> bool:
+    def should_add_snapshot(self) -> bool:
         """
         Determine if a new snapshot should be added to the pool.
 
@@ -268,7 +266,7 @@ class KBestOpponentPool(OpponentPool):
 
         # Check if new ELO is significantly different from existing snapshots
         for snapshot in self.snapshots:
-            if abs(new_elo - snapshot.elo) >= self.min_elo_diff:
+            if abs(self.current_elo - snapshot.elo) >= self.min_elo_diff:
                 return True
 
         return False

@@ -13,14 +13,9 @@ def test_kbest_add_and_sample():
         cards_channels=6, actions_channels=24, fusion_hidden=[1024, 1024], num_actions=8
     )
 
-    class Dummy:
-        def __init__(self, model, ep):
-            self.model = model
-            self.episode_count = ep
-
-    pool.add_snapshot(Dummy(model, 10), rating=1200)
-    pool.add_snapshot(Dummy(model, 20), rating=1250)
-    pool.add_snapshot(Dummy(model, 30), rating=1300)
+    pool.add_snapshot(model, 10, rating=1200)
+    pool.add_snapshot(model, 20, rating=1250)
+    pool.add_snapshot(model, 30, rating=1300)
 
     stats = pool.get_pool_stats()
     assert stats["pool_size"] == 3
@@ -37,12 +32,7 @@ def test_kbest_save_and_load(tmp_path):
         cards_channels=6, actions_channels=24, fusion_hidden=[1024, 1024], num_actions=8
     )
 
-    class Dummy:
-        def __init__(self, model, ep):
-            self.model = model
-            self.episode_count = ep
-
-    pool.add_snapshot(Dummy(model, 100), rating=1275)
+    pool.add_snapshot(model, 100, rating=1275)
 
     path = tmp_path / "pool.pt"
     pool.save_pool(str(path))
