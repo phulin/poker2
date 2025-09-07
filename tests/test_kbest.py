@@ -28,13 +28,13 @@ def test_kbest_pool():
 
     # Create some dummy models
     model1 = SiameseConvNetV1(
-        cards_channels=6, actions_channels=24, fusion_hidden=[1024, 1024], num_actions=8
+        cards_channels=6, actions_channels=24, fusion_hidden=[256, 256], num_actions=8
     )
     model2 = SiameseConvNetV1(
-        cards_channels=6, actions_channels=24, fusion_hidden=[1024, 1024], num_actions=8
+        cards_channels=6, actions_channels=24, fusion_hidden=[256, 256], num_actions=8
     )
     model3 = SiameseConvNetV1(
-        cards_channels=6, actions_channels=24, fusion_hidden=[1024, 1024], num_actions=8
+        cards_channels=6, actions_channels=24, fusion_hidden=[256, 256], num_actions=8
     )
 
     # Create snapshots
@@ -67,19 +67,22 @@ def test_selfplay_with_kbest():
     """Test self-play training with K-Best opponents."""
     print("Testing self-play with K-Best opponents...")
 
-    # Create trainer with small pool
+    # Create trainer with very small parameters for fast testing
     trainer = SelfPlayTrainer(
         learning_rate=1e-3,
-        batch_size=32,  # Smaller batch for testing
-        k_best_pool_size=3,
-        min_elo_diff=30.0,
+        batch_size=32,  # Small batch for testing
+        num_epochs=1,  # Only 1 epoch instead of 4
+        k_best_pool_size=2,  # Smaller pool
+        min_elo_diff=20.0,  # Lower threshold
+        use_tensor_env=True,  # Use faster tensor environment
+        num_envs=16,  # Much smaller than default 256
     )
 
     print(f"Initial ELO: {trainer.current_elo}")
     print(f"Initial pool size: {trainer.opponent_pool.get_pool_stats()['pool_size']}")
 
-    # Run a few training steps
-    for step in range(5):
+    # Run fewer training steps for faster testing
+    for step in range(2):  # Reduced from 5 to 2
         stats = trainer.train_step()
         print(
             f"Step {step + 1}: ELO={stats['current_elo']:.1f}, "
@@ -87,14 +90,14 @@ def test_selfplay_with_kbest():
             f"Avg reward={stats['avg_reward']:.2f}"
         )
 
-    # Test evaluation
+    # Test evaluation with fewer games
     print("Testing evaluation against pool...")
-    eval_results = trainer.evaluate_against_pool(num_games=10)
+    eval_results = trainer.evaluate_against_pool(num_games=3)  # Reduced from 10 to 3
     print(f"Evaluation results: {eval_results}")
 
     # Test checkpointing
     print("Testing checkpointing...")
-    trainer.save_checkpoint("test_checkpoint.pt", 5)
+    trainer.save_checkpoint("test_checkpoint.pt", 2)
     trainer.load_checkpoint("test_checkpoint.pt")
 
     # Cleanup
@@ -111,9 +114,11 @@ def test_opponent_sampling():
     print("Testing opponent sampling...")
 
     trainer = SelfPlayTrainer(
-        batch_size=16,
-        k_best_pool_size=5,
-        min_elo_diff=20.0,
+        batch_size=32,  # Smaller batch
+        k_best_pool_size=3,  # Smaller pool
+        min_elo_diff=15.0,  # Lower threshold
+        use_tensor_env=True,  # Use faster tensor environment
+        num_envs=16,  # Very small for testing
     )
 
     # Add some snapshots with different ELOs
@@ -125,7 +130,7 @@ def test_opponent_sampling():
                 self.model = SiameseConvNetV1(
                     cards_channels=6,
                     actions_channels=24,
-                    fusion_hidden=[1024, 1024],
+                    fusion_hidden=[256, 256],
                     num_actions=8,
                 )
 

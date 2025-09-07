@@ -608,10 +608,10 @@ class HUNLTensorEnv:
                     + self.board_onehot[ids_showdown].sum(dim=1)
                 )
                 # Clamp planes to 0/1
-                a_plane = (a_plane > 0.5).to(torch.float32)
-                b_plane = (b_plane > 0.5).to(torch.float32)
+                a_plane = a_plane.clamp(0, 1)
+                b_plane = b_plane.clamp(0, 1)
                 # Compare hands in batch
-                cmp = rules.compare_7_batch_onehot(a_plane, b_plane)  # shape [num_sd]
+                cmp = rules.compare_7_batch(a_plane, b_plane)  # shape [num_sd]
                 # Set winners
                 self.winner[ids_showdown[cmp > 0]] = 0
                 self.winner[ids_showdown[cmp < 0]] = 1

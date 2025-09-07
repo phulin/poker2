@@ -339,7 +339,7 @@ class SelfPlayTrainer:
         steps_collected = 0
 
         # Initialize all environments
-        self.tensor_env.reset(seed=123)
+        self.tensor_env.reset()
 
         # Per-environment reward tracking and step counts
         per_env_rewards = torch.zeros(self.num_envs, device=self.device)
@@ -993,7 +993,7 @@ class SelfPlayTrainer:
             if self.use_tensor_env:
                 # Use tensorized evaluation for faster evaluation
                 # For each opponent, create a batch where all environments play against that opponent
-                total_reward = self.collect_tensor_trajectories(
+                total_reward, _ = self.collect_tensor_trajectories(
                     min_steps=num_games,
                     all_opponent_snapshots=[opponent] * self.num_envs,
                 )
