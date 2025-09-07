@@ -106,16 +106,14 @@ class HUNLTensorEnv:
         # Board and hole cards stored as one-hot [4,13]
         # board_onehot: [N, 5, 4, 13], hole_onehot: [N, 2 players, 2 cards, 4, 13]
         self.board_onehot = torch.zeros(
-            (self.N, 5, 4, 13), dtype=torch.float32, device=self.device
+            (self.N, 5, 4, 13), dtype=torch.long, device=self.device
         )
 
         # Chip tracking for delta calculations - single tensor for both players
         # chips_placed[env_idx, player] = total chips placed by that player in that environment
-        self.chips_placed = torch.zeros(
-            self.N, 2, dtype=torch.float32, device=self.device
-        )
+        self.chips_placed = torch.zeros(self.N, 2, dtype=torch.long, device=self.device)
         self.hole_onehot = torch.zeros(
-            (self.N, 2, 2, 4, 13), dtype=torch.float32, device=self.device
+            (self.N, 2, 2, 4, 13), dtype=torch.long, device=self.device
         )
         self.done = torch.zeros(self.N, dtype=torch.bool, device=self.device)
         self.winner = torch.full(
@@ -137,9 +135,9 @@ class HUNLTensorEnv:
 
         # Create full one-hot cache: [52, 4, 13]
         self.card_onehot_cache = torch.zeros(
-            52, 4, 13, dtype=torch.float32, device=self.device
+            52, 4, 13, dtype=torch.long, device=self.device
         )
-        self.card_onehot_cache[all_cards, suits, ranks] = 1.0
+        self.card_onehot_cache[all_cards, suits, ranks] = 1
 
     # --- Reset -----------------------------------------------------------------
 

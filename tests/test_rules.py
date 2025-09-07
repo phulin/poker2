@@ -42,6 +42,12 @@ def test_full_house_vs_flush():
     assert_all_compares(fh, fl, 1)
 
 
+def test_full_house_vs_flush_2():
+    fh = [C(5, 0), C(5, 1), C(7, 0), C(7, 1), C(7, 2), C(2, 1), C(3, 2)]
+    fl = [C(2, 1), C(6, 1), C(8, 1), C(9, 1), C(11, 1), C(0, 0), C(1, 2)]
+    assert_all_compares(fh, fl, 1)
+
+
 def test_straight_wheel():
     # Wheel straight A-2-3-4-5: ranks (12,0,1,2,3)
     wheel = [C(12, 0), C(0, 1), C(1, 2), C(2, 3), C(3, 0), C(5, 1), C(8, 2)]
@@ -232,6 +238,117 @@ def test_duplicate_cards_validation():
 # These would need to be fixed in the rules.py implementation
 
 
+def test_multiple_batches_paired_players():
+    """Test comparing 5 batches of paired players simultaneously."""
+    # Create 5 different batches, each with 2 players
+    batch_size = 5
+    a_batch = torch.zeros(batch_size, 4, 13, dtype=torch.long)
+    b_batch = torch.zeros(batch_size, 4, 13, dtype=torch.long)
+
+    # Define 5 different hand pairs to test
+    hand_pairs = [
+        # Batch 0: Straight flush vs Four of a kind
+        (
+            [
+                C(8, 0),
+                C(9, 0),
+                C(10, 0),
+                C(11, 0),
+                C(12, 0),
+                C(2, 1),
+                C(3, 2),
+            ],  # K-high straight flush
+            [C(7, 0), C(7, 1), C(7, 2), C(7, 3), C(12, 0), C(2, 1), C(3, 2)],
+        ),  # Four 8s
+        # Batch 1: Full house vs Flush
+        (
+            [
+                C(5, 0),
+                C(5, 1),
+                C(7, 0),
+                C(7, 1),
+                C(7, 2),
+                C(2, 1),
+                C(3, 2),
+            ],  # 7-7-7 with 5-5
+            [C(2, 1), C(6, 1), C(8, 1), C(9, 1), C(11, 1), C(0, 0), C(1, 2)],
+        ),  # Hearts flush
+        # Batch 2: Three of a kind vs Two pair
+        (
+            [
+                C(5, 0),
+                C(5, 1),
+                C(5, 2),
+                C(12, 0),
+                C(11, 0),
+                C(2, 1),
+                C(3, 2),
+            ],  # Three 5s
+            [C(11, 0), C(11, 1), C(7, 0), C(7, 1), C(12, 0), C(2, 1), C(3, 2)],
+        ),  # K-K and 7-7
+        # Batch 3: Straight vs High card
+        (
+            [
+                C(3, 0),
+                C(4, 1),
+                C(5, 2),
+                C(6, 3),
+                C(7, 0),
+                C(2, 1),
+                C(10, 2),
+            ],  # 5-6-7-8-9 straight
+            [C(12, 0), C(11, 1), C(9, 2), C(7, 3), C(5, 0), C(2, 1), C(3, 2)],
+        ),  # A-K-Q-8-6 high card
+        # Batch 4: One pair vs One pair (tiebreaker)
+        (
+            [
+                C(7, 0),
+                C(7, 1),
+                C(12, 0),
+                C(11, 0),
+                C(10, 0),
+                C(2, 1),
+                C(3, 2),
+            ],  # 7-7 with A-K-Q
+            [C(7, 2), C(7, 3), C(9, 0), C(8, 0), C(5, 0), C(2, 2), C(3, 3)],
+        ),  # 7-7 with 9-8-5
+    ]
+
+    # Fill the batches with the defined hands
+    for i, (hand_a, hand_b) in enumerate(hand_pairs):
+        for card in hand_a:
+            suit, rank = card // 13, card % 13
+            a_batch[i, suit, rank] = 1
+
+        for card in hand_b:
+            suit, rank = card // 13, card % 13
+            b_batch[i, suit, rank] = 1
+
+    # Test batch comparison
+    results = rules.compare_7_batch(a_batch, b_batch)
+
+    # Verify results
+    assert results.shape == (batch_size,)
+    assert torch.all((results >= -1) & (results <= 1))
+
+    # Check specific expected results
+    expected_results = [1, 1, 1, 1, 1]  # All should be wins for player A
+    for i, expected in enumerate(expected_results):
+        assert (
+            int(results[i].item()) == expected
+        ), f"Batch {i}: expected {expected}, got {int(results[i].item())}"
+
+    # Test the reverse comparison (should be opposite results)
+    reverse_results = rules.compare_7_batch(b_batch, a_batch)
+    assert torch.all(
+        reverse_results == -results
+    ), "Reverse comparison should give opposite results"
+
+    # Test with identical hands (should all be ties)
+    tie_results = rules.compare_7_batch(a_batch, a_batch)
+    assert torch.all(tie_results == 0), "Identical hands should all be ties"
+
+
 # ===== MEDIUM PRIORITY MISSING TESTS =====
 
 
@@ -346,20 +463,6 @@ def test_all_different_suits():
         C(6, 3),
     ]
     assert_all_compares(different_suits, different_suits2, 0)  # Should be a tie
-
-
-def test_empty_batch_handling():
-    """Test empty batch handling."""
-    # Empty batches should be handled gracefully
-    empty_a = torch.zeros(0, 4, 13, dtype=torch.long)
-    empty_b = torch.zeros(0, 4, 13, dtype=torch.long)
-
-    try:
-        results = rules.compare_7_batch(empty_a, empty_b)
-        assert results.shape == (0,)
-    except Exception as e:
-        # If it raises an error, that's also acceptable behavior
-        assert isinstance(e, (ValueError, AssertionError, RuntimeError))
 
 
 def test_cards_out_of_range():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, List, Tuple, Sequence
 import random
+from line_profiler import profile
 import torch
 
 # Card encoding: 0..51, rank = c % 13 (2..A), suit = c // 13 (0..3)
@@ -39,6 +40,13 @@ def cards_to_onehot_indices(cards: torch.Tensor) -> tuple[torch.Tensor, torch.Te
     return suits, ranks
 
 
+def unfold_conv1d_ones(input_tensor: torch.Tensor, kernel_size: int) -> torch.Tensor:
+    """Simple unfold-based convolution with ones kernel"""
+    unfolded = input_tensor.unfold(-1, kernel_size, 1)
+    return torch.sum(unfolded, dim=-1)
+
+
+@profile
 def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     """Create comparison vector for poker hand evaluation.
 
@@ -67,12 +75,7 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     ab_ext_straight = torch.cat(
         [ab_batch[..., 12:13], ab_batch], dim=-1
     )  # [N, P, 4, 14]
-    straight_window = torch.ones(1, 1, 5, dtype=torch.long, device=device)
-    conv_sf = torch.nn.functional.conv1d(
-        ab_ext_straight.view(N * P * 4, 1, 14), straight_window
-    ).view(
-        N, P, 4, 10
-    )  # [N, P, 4, 10]
+    conv_sf = unfold_conv1d_ones(ab_ext_straight, 5)  # [N, P, 4, 10]
     sf_mask = (conv_sf == 5).any(dim=2)  # [N, P, 10]
     sf_ranks_spread = torch.where(
         sf_mask,
@@ -83,9 +86,9 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
 
     # == 2. FOUR OF A KIND ==
     four_with_kickers = torch.where(
-        top_ranks_values[:, :, 0] >= 4,
+        (top_ranks_values[:, :, 0] >= 4).view(N, P, 1),
         top_ranks_indices[:, :, :2],
-        torch.tensor([-1, -1], device=device).view(1, 1, 2).expand(N, P, 2),
+        -1,
     )
 
     # == 3. FULL HOUSE ==
@@ -94,7 +97,7 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
             N, P, 1
         ),
         top_ranks_indices[:, :, :2],
-        torch.tensor([-1, -1], device=device).view(1, 1, 2).expand(N, P, 2),
+        -1,
     )
 
     # == 4. FLUSH ==
@@ -123,9 +126,7 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     # == 5. STRAIGHT ==
     # Straight: take rank presence, convolve like with straight-flush
     rank_presence_straight = ab_ext_straight.sum(dim=2).clamp(0, 1)  # [N, P, 14]
-    conv_straight = torch.nn.functional.conv1d(
-        rank_presence_straight.view(N * 2, 1, 14), straight_window
-    ).view(N, P, 10)
+    conv_straight = unfold_conv1d_ones(rank_presence_straight, 5)
     straight_mask = (conv_straight == 5).any(dim=2)  # [N, P]
     straight_high = conv_straight.argmax(dim=2)  # [N, P]
     straight = torch.where(
