@@ -596,177 +596,163 @@ class SelfPlayTrainer:
             gamma=self.gamma, lambda_=self.gae_lambda
         )
 
-        # Sample batch from vectorized buffer
-        batch = self.replay_buffer.sample_batch(self.batch_size)
-
-        # Move batch tensors to device FIRST for consistent indexing on device tensors
-        for key in batch:
-            if isinstance(batch[key], torch.Tensor):
-                batch[key] = batch[key].to(self.device)
-
-        # Normalize advantages across the batch for stability (mean=0, std=1)
-        adv = batch["advantages"]
-        adv_mean = adv.mean()
-        adv_std = adv.std().clamp_min(1e-8)
-        batch["advantages"] = (adv - adv_mean) / adv_std
-
-        # Subsample to target sample batch size if necessary (indexing on same device)
-        num_samples = batch["actions"].shape[0]
-        if num_samples > self.batch_size:
-            idx = torch.randperm(num_samples, device=self.device)[: self.batch_size]
-
-            def take(d):
-                return d.index_select(0, idx) if isinstance(d, torch.Tensor) else d
-
-            batch = {k: take(v) for k, v in batch.items()}
-
-        # Per-sample value clipping bounds computed in prepare_ppo_batch
-        # batch['delta2'] and batch['delta3'] are length-N tensors aligned with samples
-        delta2_vec = batch["delta2"]
-        delta3_vec = batch["delta3"]
-
-        # Debug: verify first sample clipping behavior on the exact batch
-        try:
-            ret0 = float(batch["returns"][0].item())
-            d2_0 = float(delta2_vec[0].item())
-            d3_0 = float(delta3_vec[0].item())
-            min_b0 = min(d2_0, d3_0)
-            max_b0 = max(d2_0, d3_0)
-            clipped0 = max(min(ret0, max_b0), min_b0)
-            first_clip_debug = {
-                "first_ret": ret0,
-                "first_d2": d2_0,
-                "first_d3": d3_0,
-                "first_min_b": min_b0,
-                "first_max_b": max_b0,
-                "first_ret_clipped": clipped0,
-                "first_ret_out_of_bounds": not (min_b0 <= ret0 <= max_b0),
-            }
-        except Exception:
-            first_clip_debug = {}
-
-        # Multiple epochs of updates
-        total_loss = 0.0
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
-        total_entropy = 0.0
-        total_approx_kl = 0.0
-        total_clipfrac = 0.0
-        total_explained_var = 0.0
-        total_minibatches = 0
-        total_mb_improved = 0
-        total_loss_before = 0.0
-        total_loss_after = 0.0
         for _ in range(self.num_epochs):
-            N = batch["actions"].shape[0]
-            order = torch.randperm(N, device=self.device)
-            for start in range(0, N, self.mini_batch_size):
-                mb_idx = order[start : start + self.mini_batch_size]
+            # Sample batch from vectorized buffer
+            batch = self.replay_buffer.sample_batch(self.batch_size)
 
-                observations = batch["observations"].index_select(0, mb_idx)
-                cards = observations[:, : (6 * 4 * 13)].reshape(-1, 6, 4, 13)
-                actions_tensor = observations[:, (6 * 4 * 13) :].reshape(
-                    -1, 24, 4, self.num_bet_bins
+            # Move batch tensors to device FIRST for consistent indexing on device tensors
+            for key in batch:
+                if isinstance(batch[key], torch.Tensor):
+                    batch[key] = batch[key].to(self.device)
+
+            # Normalize advantages across the batch for stability (mean=0, std=1)
+            adv = batch["advantages"]
+            adv_mean = adv.mean()
+            adv_std = adv.std().clamp_min(1e-8)
+            batch["advantages"] = (adv - adv_mean) / adv_std
+
+            # Per-sample value clipping bounds computed in prepare_ppo_batch
+            # batch['delta2'] and batch['delta3'] are length-N tensors aligned with samples
+            delta2_vec = batch["delta2"]
+            delta3_vec = batch["delta3"]
+
+            # Debug: verify first sample clipping behavior on the exact batch
+            try:
+                ret0 = float(batch["returns"][0].item())
+                d2_0 = float(delta2_vec[0].item())
+                d3_0 = float(delta3_vec[0].item())
+                min_b0 = min(d2_0, d3_0)
+                max_b0 = max(d2_0, d3_0)
+                clipped0 = max(min(ret0, max_b0), min_b0)
+                first_clip_debug = {
+                    "first_ret": ret0,
+                    "first_d2": d2_0,
+                    "first_d3": d3_0,
+                    "first_min_b": min_b0,
+                    "first_max_b": max_b0,
+                    "first_ret_clipped": clipped0,
+                    "first_ret_out_of_bounds": not (min_b0 <= ret0 <= max_b0),
+                }
+            except Exception:
+                first_clip_debug = {}
+
+            # Multiple epochs of updates
+            total_loss = 0.0
+            total_policy_loss = 0.0
+            total_value_loss = 0.0
+            total_entropy = 0.0
+            total_approx_kl = 0.0
+            total_clipfrac = 0.0
+            total_explained_var = 0.0
+            total_minibatches = 0
+            total_mb_improved = 0
+            total_loss_before = 0.0
+            total_loss_after = 0.0
+
+            # No minibatches: operate on the full batch at once
+            observations = batch["observations"]
+            cards = observations[:, : (6 * 4 * 13)].reshape(-1, 6, 4, 13)
+            actions_tensor = observations[:, (6 * 4 * 13) :].reshape(
+                -1, 24, 4, self.num_bet_bins
+            )
+
+            logits, values = self.model(cards, actions_tensor)
+
+            loss_dict = trinal_clip_ppo_loss(
+                logits=logits,
+                values=values,
+                actions=batch["actions"],
+                log_probs_old=batch["log_probs_old"],
+                advantages=batch["advantages"],
+                returns=batch["returns"],
+                legal_masks=batch["legal_masks"],
+                epsilon=self.epsilon,
+                delta1=self.delta1,
+                delta2=delta2_vec,
+                delta3=delta3_vec,
+                value_coef=self.value_coef,
+                entropy_coef=self.entropy_coef,
+                value_loss_type=self.cfg.value_loss_type,
+                huber_delta=self.cfg.huber_delta,
+            )
+            loss_before_dict = {k: v for k, v in loss_dict.items()}
+
+            # Debugging metrics: approx KL, clipfrac, explained variance
+            with torch.no_grad():
+                legal_mb = batch["legal_masks"]
+                masked_logits = torch.where(
+                    legal_mb.bool(), logits, torch.full_like(logits, -1e9)
                 )
+                log_probs_new = torch.log_softmax(masked_logits, dim=-1)
+                a_mb = batch["actions"]
+                logp_new = log_probs_new.gather(1, a_mb.unsqueeze(1)).squeeze(1)
+                logp_old = batch["log_probs_old"]
+                ratio = torch.exp(logp_new - logp_old)
+                approx_kl = (logp_old - logp_new).mean()
+                clip_low, clip_high = 1.0 - self.epsilon, 1.0 + self.epsilon
+                clipped = torch.clamp(ratio, clip_low, clip_high)
+                clipfrac = (torch.abs(clipped - ratio) > 1e-8).float().mean()
+                # Use the same target as the loss for EV: clipped returns
+                # # Ensure per-sample bounds are ordered to avoid clamp warnings
+                # min_b = torch.minimum(d2_mb, d3_mb)
+                # max_b = torch.maximum(d2_mb, d3_mb)
+                # ret_clipped_mb = torch.clamp(ret_mb, min=min_b, max=max_b)
+                # # Explained variance of value predictions against clipped targets
+                # var_y = torch.var(ret_clipped_mb)
+                # var_err = torch.var(ret_clipped_mb - values.detach())
+                # explained_var = 1.0 - (var_err / (var_y + 1e-8))
 
-                logits, values = self.model(cards, actions_tensor)
+            self.optimizer.zero_grad()
+            loss_dict["total_loss"].backward()
 
-                loss_dict = trinal_clip_ppo_loss(
-                    logits=logits,
-                    values=values,
-                    actions=batch["actions"].index_select(0, mb_idx),
-                    log_probs_old=batch["log_probs_old"].index_select(0, mb_idx),
-                    advantages=batch["advantages"].index_select(0, mb_idx),
-                    returns=batch["returns"].index_select(0, mb_idx),
-                    legal_masks=batch["legal_masks"].index_select(0, mb_idx),
+            # Apply stricter gradient clipping to CNN layers to prevent explosion
+            for name, param in self.model.named_parameters():
+                if param.grad is not None and "cards_trunk" in name:
+                    torch.nn.utils.clip_grad_norm_(
+                        [param], 0.5
+                    )  # Stricter clipping for CNN
+
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+            self.optimizer.step()
+
+            # Recompute loss on the SAME batch AFTER the update to verify improvement
+            with torch.no_grad():
+                logits_after, values_after = self.model(cards, actions_tensor)
+                loss_after_dict = trinal_clip_ppo_loss(
+                    logits=logits_after,
+                    values=values_after,
+                    actions=batch["actions"],
+                    log_probs_old=batch["log_probs_old"],
+                    advantages=batch["advantages"],
+                    returns=batch["returns"],
+                    legal_masks=batch["legal_masks"],
                     epsilon=self.epsilon,
                     delta1=self.delta1,
-                    delta2=delta2_vec.index_select(0, mb_idx),
-                    delta3=delta3_vec.index_select(0, mb_idx),
+                    delta2=delta2_vec,
+                    delta3=delta3_vec,
                     value_coef=self.value_coef,
                     entropy_coef=self.entropy_coef,
                     value_loss_type=self.cfg.value_loss_type,
                     huber_delta=self.cfg.huber_delta,
                 )
-                loss_before_dict = {k: v for k, v in loss_dict.items()}
 
-                # Debugging metrics: approx KL, clipfrac, explained variance
-                with torch.no_grad():
-                    legal_mb = batch["legal_masks"].index_select(0, mb_idx)
-                    masked_logits = torch.where(
-                        legal_mb.bool(), logits, torch.full_like(logits, -1e9)
-                    )
-                    log_probs_new = torch.log_softmax(masked_logits, dim=-1)
-                    a_mb = batch["actions"].index_select(0, mb_idx)
-                    logp_new = log_probs_new.gather(1, a_mb.unsqueeze(1)).squeeze(1)
-                    logp_old = batch["log_probs_old"].index_select(0, mb_idx)
-                    ratio = torch.exp(logp_new - logp_old)
-                    approx_kl = (logp_old - logp_new).mean()
-                    clip_low, clip_high = 1.0 - self.epsilon, 1.0 + self.epsilon
-                    clipped = torch.clamp(ratio, clip_low, clip_high)
-                    clipfrac = (torch.abs(clipped - ratio) > 1e-8).float().mean()
-                    # Use the same target as the loss for EV: clipped returns
-                    # # Ensure per-sample bounds are ordered to avoid clamp warnings
-                    # min_b = torch.minimum(d2_mb, d3_mb)
-                    # max_b = torch.maximum(d2_mb, d3_mb)
-                    # ret_clipped_mb = torch.clamp(ret_mb, min=min_b, max=max_b)
-                    # # Explained variance of value predictions against clipped targets
-                    # var_y = torch.var(ret_clipped_mb)
-                    # var_err = torch.var(ret_clipped_mb - values.detach())
-                    # explained_var = 1.0 - (var_err / (var_y + 1e-8))
-
-                self.optimizer.zero_grad()
-                loss_dict["total_loss"].backward()
-
-                # Apply stricter gradient clipping to CNN layers to prevent explosion
-                for name, param in self.model.named_parameters():
-                    if param.grad is not None and "cards_trunk" in name:
-                        torch.nn.utils.clip_grad_norm_(
-                            [param], 0.5
-                        )  # Stricter clipping for CNN
-
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-
-                self.optimizer.step()
-
-                # Recompute loss on the SAME minibatch AFTER the update to verify improvement
-                with torch.no_grad():
-                    logits_after, values_after = self.model(cards, actions_tensor)
-                    loss_after_dict = trinal_clip_ppo_loss(
-                        logits=logits_after,
-                        values=values_after,
-                        actions=batch["actions"].index_select(0, mb_idx),
-                        log_probs_old=batch["log_probs_old"].index_select(0, mb_idx),
-                        advantages=batch["advantages"].index_select(0, mb_idx),
-                        returns=batch["returns"].index_select(0, mb_idx),
-                        legal_masks=batch["legal_masks"].index_select(0, mb_idx),
-                        epsilon=self.epsilon,
-                        delta1=self.delta1,
-                        delta2=delta2_vec.index_select(0, mb_idx),
-                        delta3=delta3_vec.index_select(0, mb_idx),
-                        value_coef=self.value_coef,
-                        entropy_coef=self.entropy_coef,
-                        value_loss_type=self.cfg.value_loss_type,
-                        huber_delta=self.cfg.huber_delta,
-                    )
-
-                total_loss += loss_dict["total_loss"].item()
-                total_policy_loss += float(loss_dict["policy_loss"].item())
-                total_value_loss += float(loss_dict["value_loss"].item())
-                total_entropy += float(loss_dict["entropy"].item())
-                total_approx_kl += float(approx_kl.item())
-                total_clipfrac += float(clipfrac.item())
-                # total_explained_var += float(explained_var.item())
-                total_minibatches += 1
-                # Track minibatch verification metrics
-                total_loss_before += float(loss_before_dict["total_loss"].item())
-                total_loss_after += float(loss_after_dict["total_loss"].item())
-                if (
-                    loss_after_dict["total_loss"].item()
-                    <= loss_before_dict["total_loss"].item()
-                ):
-                    total_mb_improved += 1
-
+            total_loss += loss_dict["total_loss"].item()
+            total_policy_loss += float(loss_dict["policy_loss"].item())
+            total_value_loss += float(loss_dict["value_loss"].item())
+            total_entropy += float(loss_dict["entropy"].item())
+            total_approx_kl += float(approx_kl.item())
+            total_clipfrac += float(clipfrac.item())
+            # total_explained_var += float(explained_var.item())
+            total_minibatches += 1
+            # Track batch verification metrics
+            total_loss_before += float(loss_before_dict["total_loss"].item())
+            total_loss_after += float(loss_after_dict["total_loss"].item())
+            if (
+                loss_after_dict["total_loss"].item()
+                <= loss_before_dict["total_loss"].item()
+            ):
+                total_mb_improved += 1
         denom = max(1, total_minibatches)
         return {
             "avg_loss": total_loss / self.num_epochs,

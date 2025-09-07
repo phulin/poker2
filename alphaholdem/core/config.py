@@ -35,7 +35,6 @@ class RootConfig:
     # Training scale knobs
     learning_rate: float = 3e-4
     batch_size: int = 2048
-    mini_batch_size: int = 2048
     num_epochs: int = 4
     # Betting bins expressed as fractions of total_committed reference
     bet_bins: List[float] = field(default_factory=lambda: [0.5, 0.75, 1.0, 1.5, 2.0])
@@ -81,7 +80,6 @@ def load_config(
         grad_clip=float(data["grad_clip"]),
         learning_rate=float(data["learning_rate"]),
         batch_size=int(data["batch_size"]),
-        mini_batch_size=int(data["mini_batch_size"]),
         num_epochs=int(data["num_epochs"]),
         bet_bins=list(data["bet_bins"]),
         replay_buffer_batches=int(data["replay_buffer_batches"]),
