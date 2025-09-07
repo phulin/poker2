@@ -49,7 +49,9 @@ def trinal_clip_ppo_loss(
     """
     # Mask illegal actions
     masked_logits = logits.clone()
-    masked_logits[legal_masks == 0] = -1e9
+    masked_logits = torch.where(
+        legal_masks.bool(), masked_logits, torch.full_like(masked_logits, -1e9)
+    )
 
     # Compute new log probabilities
     log_probs = F.log_softmax(masked_logits, dim=-1)

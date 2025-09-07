@@ -30,6 +30,7 @@ from ..rl.replay import (
     compute_gae_returns,
     prepare_ppo_batch,
 )
+from ..rl.vectorized_replay import VectorizedReplayBuffer
 from ..rl.losses import trinal_clip_ppo_loss
 from ..rl.k_best_pool import KBestOpponentPool, AgentSnapshot
 from ..core.config import RootConfig
@@ -119,10 +120,24 @@ class SelfPlayTrainer:
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights
         # Replay buffer capacity in steps is batch_size * replay_buffer_batches
-        # Keep trajectory container capacity large; we'll trim by step count later
-        self.replay_buffer = ReplayBuffer(
-            capacity=self.batch_size
-            * max(1, int(getattr(self.cfg, "replay_buffer_batches", 1)))
+        buffer_capacity = self.batch_size * max(
+            1, int(getattr(self.cfg, "replay_buffer_batches", 1))
+        )
+
+        # Calculate observation dimensions
+        # Cards: 6 channels * 4 suits * 13 ranks = 312
+        # Actions: 24 channels * 4 players * num_bet_bins = 24 * 4 * num_bet_bins
+        cards_dim = 6 * 4 * 13  # 312
+        actions_dim = 24 * 4 * self.num_bet_bins
+        observation_dim = cards_dim + actions_dim
+        legal_mask_dim = self.num_bet_bins
+
+        # Use vectorized replay buffer for efficient tensor operations
+        self.replay_buffer = VectorizedReplayBuffer(
+            capacity=buffer_capacity,
+            observation_dim=observation_dim,
+            legal_mask_dim=legal_mask_dim,
+            device=self.device,
         )
 
         # K-Best opponent pool
@@ -308,7 +323,7 @@ class SelfPlayTrainer:
         self,
         min_steps: int,
         all_opponent_snapshots: Optional[list[AgentSnapshot]] = None,
-    ) -> tuple[list[Trajectory], float]:
+    ) -> float:
         """
         Collect trajectories from tensorized environments until we have at least min_steps.
         Uses all environments continuously, resetting done ones at the end of each step.
@@ -332,8 +347,7 @@ class SelfPlayTrainer:
         # Initialize all environments
         self.tensor_env.reset(seed=123)
 
-        # Per-environment transition lists and step counts
-        per_env_transitions = [[] for _ in range(self.num_envs)]
+        # Per-environment reward tracking and step counts
         per_env_rewards = torch.zeros(self.num_envs, device=self.device)
         per_traj_step_count = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device
@@ -475,7 +489,7 @@ class SelfPlayTrainer:
             our_turn_mask = to_act == 0
             our_indices = torch.where(our_turn_mask)[0]
 
-            # Create transitions for our actions and add to per-env lists
+            # Create transitions for our actions and add to vectorized buffer
             if our_indices.numel() > 0:
                 # Scale factor for reward/targets: 100 big blinds
                 scale = float(self.tensor_env.bb) * 100.0
@@ -494,34 +508,33 @@ class SelfPlayTrainer:
                     [our_cards_flat, our_actions_flat], dim=1
                 )  # [N_our, total_obs_size]
 
-                # Extract scalar values efficiently
-                our_actions = action_indices[our_indices].tolist()
-                our_log_probs = log_probs[our_indices].tolist()
-                our_values = values[our_indices].tolist()
-                our_rewards = rewards[our_indices].tolist()
-                our_dones = dones[our_indices].tolist()
-                our_legal_masks = legal_masks[our_indices]
-                our_placed_chips = placed_chips[our_indices].tolist()
-                our_delta2 = delta2[our_indices].tolist()
-                our_delta3 = delta3[our_indices].tolist()
+                # Extract tensor values efficiently (no .tolist() calls)
+                our_actions_tensor = action_indices[our_indices]
+                our_log_probs_tensor = log_probs[our_indices]
+                our_values_tensor = values[our_indices]
+                our_rewards_tensor = rewards[our_indices]
+                our_dones_tensor = dones[our_indices]
+                our_legal_masks_tensor = legal_masks[our_indices]
+                our_placed_chips_tensor = placed_chips[our_indices]
+                our_delta2_tensor = delta2[our_indices]
+                our_delta3_tensor = delta3[our_indices]
 
-                # Create transitions in batch
-                for i, env_idx in enumerate(our_indices):
-                    transition = Transition(
-                        observation=our_observations[i],
-                        action=our_actions[i],
-                        log_prob=our_log_probs[i],
-                        value=our_values[i],
-                        reward=our_rewards[i],
-                        done=our_dones[i],
-                        legal_mask=our_legal_masks[i],
-                        chips_placed=our_placed_chips[i],
-                        delta2=our_delta2[i],
-                        delta3=our_delta3[i],
-                    )
-                    per_env_transitions[env_idx].append(transition)
-                    per_env_rewards[env_idx] += our_rewards[i]
+                # Add batch to vectorized replay buffer
+                self.replay_buffer.add_batch(
+                    observations=our_observations,
+                    actions=our_actions_tensor,
+                    log_probs=our_log_probs_tensor,
+                    rewards=our_rewards_tensor,
+                    dones=our_dones_tensor,
+                    legal_masks=our_legal_masks_tensor,
+                    chips_placed=our_placed_chips_tensor,
+                    delta2=our_delta2_tensor,
+                    delta3=our_delta3_tensor,
+                    values=our_values_tensor,
+                )
 
+                # Update per-environment reward tracking
+                per_env_rewards[our_indices] += our_rewards_tensor
             # Update step counts for active environments
             per_traj_step_count += (~dones).long()
 
@@ -537,24 +550,16 @@ class SelfPlayTrainer:
 
             # Create trajectories for done environments
             done_indices = torch.where(dones)[0]
-            for env_idx in done_indices:
-                if per_env_transitions[
-                    env_idx
-                ]:  # Only create trajectory if we have transitions
-                    trajectory = Trajectory(transitions=per_env_transitions[env_idx])
-                    all_trajectories.append(trajectory)
-                    total_reward += per_env_rewards[env_idx].item()
-                    steps_collected += len(per_env_transitions[env_idx])
-
-                    # Clear the environment's transition list and reset counters
-                    per_env_transitions[env_idx] = []
-                    per_env_rewards[env_idx] = 0.0
-                    per_traj_step_count[env_idx] = 0
+            # Vectorized update of steps_collected and total_reward
+            steps_collected += per_traj_step_count[done_indices].sum().item()
+            total_reward += per_env_rewards[done_indices].sum().item()
+            # Reset counters for these environments
+            per_env_rewards[done_indices] = 0.0
+            per_traj_step_count[done_indices] = 0
 
             # Reset done environments
-            if dones.any():
-                self.tensor_env.reset_done()
-        return all_trajectories, total_reward
+            self.tensor_env.reset_done()
+        return total_reward
 
     def _encode_tensor_states(self) -> dict:
         """
@@ -613,32 +618,19 @@ class SelfPlayTrainer:
     @profile
     def update_model(self) -> dict:
         """Perform PPO update on collected trajectories."""
-        # Require enough samples (transitions) across buffer
-        total_samples = sum(len(t.transitions) for t in self.replay_buffer.trajectories)
-        if total_samples < self.batch_size:
+        # Require enough samples (transitions) in buffer
+        if self.replay_buffer.num_steps() < self.batch_size:
             raise ValueError(
-                f"Not enough samples in replay buffer: {total_samples} < {self.batch_size}"
+                f"Not enough samples in replay buffer: {self.replay_buffer.num_steps()} < {self.batch_size}"
             )
 
-        # Use all trajectories available for better mixing
-        trajectories = self.replay_buffer.sample_trajectories(self.batch_size)
+        # Compute GAE for all stored trajectories
+        self.replay_buffer.compute_gae_returns(
+            gamma=self.gamma, lambda_=self.gae_lambda
+        )
 
-        # Compute GAE using stored V(s_t) values collected during rollout
-        for trajectory in trajectories:
-            rewards = [t.reward for t in trajectory.transitions]
-            values = [t.value for t in trajectory.transitions]
-            values.append(0.0)  # bootstrap at terminal
-
-            advantages, returns = compute_gae_returns(
-                rewards, values, gamma=self.gamma, lambda_=self.gae_lambda
-            )
-
-            for i, transition in enumerate(trajectory.transitions):
-                transition.advantage = advantages[i]
-                transition.return_ = returns[i]
-
-        # Prepare batch
-        batch = prepare_ppo_batch(trajectories)
+        # Sample batch from vectorized buffer
+        batch = self.replay_buffer.sample_batch(self.batch_size)
 
         # Move batch tensors to device FIRST for consistent indexing on device tensors
         for key in batch:
@@ -777,48 +769,6 @@ class SelfPlayTrainer:
                 self.optimizer.zero_grad()
                 loss_dict["total_loss"].backward()
 
-                # Diagnostic: Check gradients before clipping and optimizer step
-                total_grad_norm = 0.0
-                param_count = 0
-                for param in self.model.parameters():
-                    if param.grad is not None:
-                        param_grad_norm = param.grad.data.norm(2).item()
-                        total_grad_norm += param_grad_norm**2
-                        param_count += 1
-                        if (
-                            torch.isnan(param.grad).any()
-                            or torch.isinf(param.grad).any()
-                        ):
-                            print(f"WARNING: NaN/Inf gradient detected in parameter!")
-                            print(f"  Parameter shape: {param.shape}")
-                            print(f"  Gradient norm: {param_grad_norm}")
-                            print(
-                                f"  Gradient min/max: {param.grad.min():.6f}/{param.grad.max():.6f}"
-                            )
-                            print(f"  SKIPPING OPTIMIZER STEP due to NaN gradients!")
-                            return {
-                                "total_loss": float("inf"),
-                                "policy_loss": float("inf"),
-                                "value_loss": float("inf"),
-                                "entropy": 0.0,
-                                "kl_divergence": 0.0,
-                                "clip_fraction": 0.0,
-                                "explained_variance": 0.0,
-                                "delta2": 0.0,
-                                "delta3": 0.0,
-                                "verify_improvement": 0.0,
-                                "mb_loss_before": float("inf"),
-                                "mb_loss_after": float("inf"),
-                            }
-
-                if param_count > 0:
-                    total_grad_norm = total_grad_norm**0.5
-                    # print(f"Total gradient norm (before clipping): {total_grad_norm:.6f}")
-                    if total_grad_norm > 100.0:
-                        print(
-                            f"WARNING: Very large gradient norm detected: {total_grad_norm:.6f}"
-                        )
-
                 # Apply stricter gradient clipping to CNN layers to prevent explosion
                 for name, param in self.model.named_parameters():
                     if param.grad is not None and "cards_trunk" in name:
@@ -879,7 +829,7 @@ class SelfPlayTrainer:
         denom = max(1, total_minibatches)
         return {
             "avg_loss": total_loss / self.num_epochs,
-            "num_trajectories": len(trajectories),
+            "num_samples": batch["actions"].shape[0],
             "delta2_mean": float(delta2_vec.mean().item()),
             "delta3_mean": float(delta3_vec.mean().item()),
             "policy_loss": total_policy_loss / denom,
@@ -906,7 +856,7 @@ class SelfPlayTrainer:
             Dictionary with training statistics
         """
         target_steps = self.batch_size * max(self.cfg.replay_buffer_batches, 1)
-        if len(self.replay_buffer.trajectories) == 0:
+        if self.replay_buffer.num_steps() == 0:
             # Warmup: fill replay buffer with minimum required samples
             min_steps = target_steps - self.batch_size
             print(f"Warmup: filling replay buffer to {min_steps} steps...")
@@ -944,17 +894,13 @@ class SelfPlayTrainer:
         steps_added = 0
         while steps_added < min_steps:
             if self.use_tensor_env:
-                trajectories, total_reward = self.collect_tensor_trajectories(
+                total_reward = self.collect_tensor_trajectories(
                     min_steps - steps_added,
                     all_opponent_snapshots=self.opponent_pool.snapshots,
                 )
 
-                # Add all trajectories to replay buffer
-                for trajectory in trajectories:
-                    if len(trajectory.transitions) > 0:
-                        self.replay_buffer.add_trajectory(trajectory)
-                        self.episode_count += 1
-                        steps_added += len(trajectory.transitions)
+                # Transitions are already added to vectorized buffer during collection
+                steps_added = self.replay_buffer.num_steps()
 
                 self.total_reward += total_reward
             else:
@@ -1116,17 +1062,14 @@ class SelfPlayTrainer:
             if self.use_tensor_env:
                 # Use tensorized evaluation for faster evaluation
                 # For each opponent, create a batch where all environments play against that opponent
-                trajectories, _ = self.collect_tensor_trajectories(
+                total_reward = self.collect_tensor_trajectories(
                     min_steps=num_games,
                     all_opponent_snapshots=[opponent] * self.num_envs,
                 )
 
-                # Count wins from trajectories
-                for trajectory in trajectories:
-                    if trajectory.transitions:
-                        final_reward = trajectory.transitions[-1].reward
-                        if final_reward > 0:
-                            wins += 1
+                # Count wins based on total reward
+                if total_reward > 0:
+                    wins += 1
             else:
                 # Use scalar evaluation
                 for _ in range(num_games):
@@ -1270,8 +1213,9 @@ class SelfPlayTrainer:
             legal_mask = legal_mask.to(self.device)  # Move legal mask to device
 
             # Apply legal mask
-            masked_logits = logits.clone()
-            masked_logits[0, legal_mask == 0] = -1e9
+            masked_logits = torch.where(
+                legal_mask.unsqueeze(0) == 0, torch.full_like(logits, -1e9), logits
+            )
 
             # Get probabilities
             probs = torch.softmax(masked_logits, dim=-1).squeeze(0)
