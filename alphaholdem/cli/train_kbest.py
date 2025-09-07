@@ -178,7 +178,7 @@ def main():
         help="Minimum ELO difference for pool updates",
     )
     parser.add_argument(
-        "--checkpoint-interval", type=int, default=20, help="Checkpoint save interval"
+        "--checkpoint-interval", type=int, default=5, help="Checkpoint save interval"
     )
     parser.add_argument(
         "--eval-interval", type=int, default=50, help="Evaluation interval"

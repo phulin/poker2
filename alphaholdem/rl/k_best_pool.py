@@ -114,6 +114,12 @@ class KBestOpponentPool(OpponentPool):
             elo=rating,
         )
 
+        # Reduce memory footprint of snapshot models on accelerators
+        if model is not None:
+            # Disable gradients for snapshot models
+            for p in new_snapshot.model.parameters():
+                p.requires_grad = False
+
         # Add to snapshots list
         self.snapshots.append(new_snapshot)
 

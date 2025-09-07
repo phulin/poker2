@@ -38,8 +38,8 @@ seed: 0
 # Training scale knobs
 learning_rate: 1e-4
 # Batches of 4096, replay buffer 4 * 4096 = 16384, sample 4 batches (=1 epoch) per iteration
-batch_size: 4096
-num_epochs: 4
+batch_size: 1024
+num_epochs: 2
 replay_buffer_batches: 4
 value_loss_type: huber
 huber_delta: 1.0

@@ -359,7 +359,9 @@ class SelfPlayTrainer:
             # Get model predictions for all environments
             with torch.no_grad():
                 # Determine which environments need our model vs opponent models
-                our_turn_mask = self.tensor_env.to_act == 0
+                # Save actor mask BEFORE stepping; these are the envs where we act now
+                actor_is_ours = self.tensor_env.to_act == 0
+                our_indices = torch.where(actor_is_ours)[0]
                 opp_turn_mask = self.tensor_env.to_act == 1
 
                 # Initialize logits and values tensors
@@ -369,7 +371,6 @@ class SelfPlayTrainer:
                 values = torch.zeros(self.num_envs, device=self.device)
 
                 # Get predictions from our model for our turns
-                our_indices = torch.where(our_turn_mask)[0]
                 our_cards = states["cards"][our_indices]
                 our_actions = states["actions"][our_indices]
 
@@ -415,21 +416,18 @@ class SelfPlayTrainer:
                 )
 
             # Take steps in all environments
-            rewards, dones, to_act, placed_chips = self.tensor_env.step_bins(
-                action_indices
-            )
-
-            # Record transitions for environments where we acted (player 0)
-            our_turn_mask = to_act == 0
-            our_indices = torch.where(our_turn_mask)[0]
+            rewards, dones, _, placed_chips = self.tensor_env.step_bins(action_indices)
 
             # Create transitions for our actions and add to vectorized buffer
             if our_indices.numel() > 0:
                 # Scale factor for reward/targets: 100 big blinds
                 scale = float(self.tensor_env.bb) * 100.0
 
-                # Get action amount and delta bounds from tensor environment
-                delta2, delta3 = self.tensor_env.get_delta_bounds(scale)
+                # Compute delta bounds from actor perspective AFTER step
+                # For our acting envs, actor is player 0
+                chips = self.tensor_env.chips_placed.to(torch.float32)
+                our_delta2_tensor = -chips[our_indices, 1] / scale  # -opponent chips
+                our_delta3_tensor = chips[our_indices, 0] / scale  # our chips
 
                 # Pre-compute flattened observations for all our environments at once
                 our_cards_flat = states["cards"][our_indices].flatten(
@@ -450,8 +448,6 @@ class SelfPlayTrainer:
                 our_dones_tensor = dones[our_indices]
                 our_legal_masks_tensor = legal_masks[our_indices]
                 our_placed_chips_tensor = placed_chips[our_indices]
-                our_delta2_tensor = delta2[our_indices]
-                our_delta3_tensor = delta3[our_indices]
 
                 # Add batch to vectorized replay buffer
                 self.replay_buffer.add_batch(

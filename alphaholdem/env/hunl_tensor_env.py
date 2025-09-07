@@ -218,8 +218,10 @@ class HUNLTensorEnv:
         # Reset history planes for specified environments
         self.action_history[ids].zero_()
 
-        # Reset chip tracking for specified environments
-        self.chips_placed[ids] = 0.0
+        # Reset chip tracking for specified environments and account for posted blinds
+        self.chips_placed[ids] = 0
+        self.chips_placed[ids, p_sb] = self.sb
+        self.chips_placed[ids, p_bb] = self.bb
 
     # --- Legality ---------------------------------------------------------------
 
@@ -372,27 +374,6 @@ class HUNLTensorEnv:
         # Update chips_placed: track total chips placed by this player
         self.chips_placed[env_indices, player] += chips
 
-    def get_delta_bounds(self, scale: float) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Calculate delta2 and delta3 bounds for PPO clipping.
-
-        Args:
-            action_amounts: Action amounts [N]
-            scale: Scaling factor (typically bb * 100)
-
-        Returns:
-            Tuple of (delta2 [N], delta3 [N])
-        """
-        # Get current player (who is acting)
-        me = self.to_act
-        opp = 1 - me
-
-        # delta2 = -opponent's chips placed, delta3 = our chips placed + current action
-        delta2 = -self.chips_placed.gather(1, opp.view(self.N, 1)).squeeze(1) / scale
-        delta3 = (self.chips_placed.gather(1, me.view(self.N, 1)).squeeze(1)) / scale
-
-        return delta2, delta3
-
     # --- Step ------------------------------------------------------------------
 
     @profile
@@ -523,7 +504,10 @@ class HUNLTensorEnv:
         legal_mask = self.legal_action_bins_mask()
         self.action_history[n_idx, next_street, next_slot, 3, :] = legal_mask
 
-        placed_chips = me_comm - committed_before
+        # Chips placed by the actor in this step (after updates)
+        placed_chips = (
+            self.committed.gather(1, me.view(N, 1)).squeeze(1) - committed_before
+        )
 
         # Round closure: equal committed and both acted
         equal_committed = self.committed[:, 0] == self.committed[:, 1]

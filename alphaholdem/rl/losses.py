@@ -56,17 +56,27 @@ def trinal_clip_ppo_loss(
 
     # Importance sampling ratio
     ratio = torch.exp(action_log_probs - log_probs_old)
-    ppo_clip = torch.clamp(ratio, 1.0 - epsilon, 1.0 + epsilon)
+    ppo_low = 1.0 - epsilon
+    ppo_high = 1.0 + epsilon
+    ppo_clip = torch.clamp(ratio, ppo_low, ppo_high)
 
-    # Apply δ1 cap only when advantages < 0; otherwise standard PPO clip
-    upper_cap = torch.where(advantages < 0.0, torch.full_like(ratio, delta1), ppo_clip)
-    r_tc = torch.minimum(ratio, upper_cap)
+    # Trinal-Clip policy:
+    #  - For A >= 0: use standard PPO min surrogate (min(ratio, clip(r)))
+    #  - For A < 0: clamp ratio into [1-ε, δ1]
+    is_neg_adv = advantages < 0.0
+    # A>=0 path
+    r_pos = torch.minimum(ratio, ppo_clip)
+    # A<0 path: clamp to [1-ε, δ1]
+    r_neg = torch.clamp(ratio, min=ppo_low, max=delta1)
+    r_tc = torch.where(is_neg_adv, r_neg, r_pos)
 
     # Policy loss
     policy_loss_vec = -(r_tc * advantages)
     policy_loss = policy_loss_vec.mean()
 
     # Value loss with clipping (as per AlphaHoldem paper)
+    # We store delta2 as a negative lower bound (i.e., -chips_opponent/scale),
+    # and delta3 as a positive upper bound (chips_self/scale), so clamp directly.
     clipped_returns = torch.clamp(returns, delta2, delta3)
 
     if value_loss_type == "huber":
