@@ -387,12 +387,20 @@ class VectorizedReplayBuffer:
 
     def sample_trajectories(self, num_trajectories: int) -> Dict[str, torch.Tensor]:
         """Sample complete trajectories for PPO updates."""
-        if len(self.trajectory_starts) == 0:
+        if self.size == 0:
+            raise ValueError("No trajectories available")
+
+        # Get current trajectory boundaries
+        trajectory_starts, trajectory_lengths = self._compute_trajectory_boundaries(
+            self.dones[: self.size]
+        )
+
+        if len(trajectory_starts) == 0:
             raise ValueError("No trajectories available")
 
         # Sample trajectory indices
         traj_indices = torch.randint(
-            0, len(self.trajectory_starts), (num_trajectories,), device=self.device
+            0, len(trajectory_starts), (num_trajectories,), device=self.device
         )
 
         # Collect all transitions from sampled trajectories
@@ -406,8 +414,8 @@ class VectorizedReplayBuffer:
         all_delta3 = []
 
         for traj_idx in traj_indices:
-            start_idx = self.trajectory_starts[traj_idx]
-            length = self.trajectory_lengths[traj_idx]
+            start_idx = trajectory_starts[traj_idx].item()
+            length = trajectory_lengths[traj_idx].item()
 
             if start_idx + length <= self.size:
                 # No wraparound
@@ -485,8 +493,7 @@ class VectorizedReplayBuffer:
         self.position = 0
         self.size = 0
         self.effective_start = 0
-        self.trajectory_starts.clear()
-        self.trajectory_lengths.clear()
+        # Note: trajectory boundaries are computed on-demand, no need to clear them
 
     def num_steps(self) -> int:
         """Total number of transitions stored."""
@@ -500,30 +507,34 @@ class VectorizedReplayBuffer:
         # Calculate how many steps to remove
         steps_to_remove = self.size - max_steps
 
+        # Get current trajectory boundaries
+        trajectory_starts, trajectory_lengths = self._compute_trajectory_boundaries(
+            self.dones[: self.size]
+        )
+
         # Remove trajectories from the beginning until we've removed enough steps
         removed_steps = 0
-        while removed_steps < steps_to_remove and len(self.trajectory_starts) > 0:
-            oldest_length = self.trajectory_lengths[0]
+        traj_idx = 0
+        while removed_steps < steps_to_remove and traj_idx < len(trajectory_starts):
+            oldest_length = trajectory_lengths[traj_idx].item()
 
             if removed_steps + oldest_length <= steps_to_remove:
                 # Remove entire trajectory
-                self.trajectory_starts.pop(0)
-                self.trajectory_lengths.pop(0)
                 removed_steps += oldest_length
                 self.size -= oldest_length
                 self.effective_start = (
                     self.effective_start + oldest_length
                 ) % self.capacity
+                traj_idx += 1
             else:
                 # Remove partial trajectory
                 partial_remove = steps_to_remove - removed_steps
-                self.trajectory_lengths[0] -= partial_remove
-                self.trajectory_starts[0] += partial_remove
                 removed_steps += partial_remove
                 self.size -= partial_remove
                 self.effective_start = (
                     self.effective_start + partial_remove
                 ) % self.capacity
+                break
 
     def add_trajectory(self, trajectory) -> None:
         """Add a trajectory for backward compatibility with scalar environment."""

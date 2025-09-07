@@ -159,24 +159,53 @@ class TestVectorizedReplayBuffer:
 
     def test_trim_to_steps(self, buffer):
         """Test trimming buffer to specified number of steps."""
-        # Skip this test as the implementation is incomplete
-        pytest.skip(
-            "trim_to_steps method requires trajectory_starts attribute that is not implemented"
-        )
+        # Add multiple batches
+        batch_sizes = [30, 40, 20]
+        for batch_size in batch_sizes:
+            batch = self._create_test_batch(batch_size, buffer.device)
+            buffer.add_batch(**batch)
+
+        total_size = sum(batch_sizes)
+        assert buffer.size == total_size
+
+        # Trim to 50 steps
+        buffer.trim_to_steps(50)
+
+        assert buffer.size == 50
+        assert buffer.effective_start == total_size - 50  # Should move forward
 
     def test_trim_with_wraparound(self, buffer):
         """Test trimming when buffer has wraparound."""
-        # Skip this test as the implementation is incomplete
-        pytest.skip(
-            "trim_to_steps method requires trajectory_starts attribute that is not implemented"
-        )
+        # Fill buffer and cause wraparound
+        batch1 = self._create_test_batch(60, buffer.device)
+        buffer.add_batch(**batch1)
+
+        batch2 = self._create_test_batch(50, buffer.device)
+        buffer.add_batch(**batch2)
+
+        assert buffer.size == 100
+        assert buffer.effective_start == 10
+
+        # Trim to 30 steps
+        buffer.trim_to_steps(30)
+
+        assert buffer.size == 30
+        assert buffer.effective_start == 80  # 10 + (100 - 30) = 80
 
     def test_clear(self, buffer):
         """Test clearing buffer."""
-        # Skip this test as the implementation is incomplete
-        pytest.skip(
-            "clear method requires trajectory_starts attribute that is not implemented"
-        )
+        # Add some data
+        batch = self._create_test_batch(30, buffer.device)
+        buffer.add_batch(**batch)
+
+        assert buffer.size == 30
+
+        # Clear buffer
+        buffer.clear()
+
+        assert buffer.size == 0
+        assert buffer.position == 0
+        assert buffer.effective_start == 0
 
     def test_trajectory_boundaries(self, buffer):
         """Test trajectory boundary computation with done flags."""
@@ -225,10 +254,21 @@ class TestVectorizedReplayBuffer:
 
     def test_sample_trajectories(self, buffer):
         """Test sampling complete trajectories."""
-        # Skip this test as the implementation is incomplete
-        pytest.skip(
-            "sample_trajectories method requires trajectory_starts attribute that is not implemented"
-        )
+        # Add multiple trajectories
+        batch1 = self._create_test_batch(20, buffer.device)
+        batch1["dones"][10] = True  # Split into 2 trajectories
+        buffer.add_batch(**batch1)
+
+        batch2 = self._create_test_batch(15, buffer.device)
+        buffer.add_batch(**batch2)
+
+        # Sample trajectories
+        sampled = buffer.sample_trajectories(2)
+
+        # Check that we get concatenated data from multiple trajectories
+        assert sampled["observations"].shape[0] > 0
+        assert sampled["actions"].shape[0] > 0
+        assert sampled["observations"].shape[0] == sampled["actions"].shape[0]
 
     def test_device_consistency(self, buffer):
         """Test that all tensors are on the correct device."""
