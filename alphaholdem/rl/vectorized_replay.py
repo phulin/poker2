@@ -279,76 +279,87 @@ class VectorizedReplayBuffer:
         lambda_: float,
     ) -> torch.Tensor:
         """
-        Fully vectorized GAE computation using scan algorithm across all trajectories.
-        This collapses the previous helper functions into a single function.
+        GAE computation using flat sequence algorithm.
+        Works directly on concatenated trajectories without padding.
         """
         T = len(rewards)
         if T == 0:
             return torch.zeros_like(rewards)
 
-        # Compute deltas for all transitions
-        deltas = torch.zeros_like(rewards)
+        rewards = rewards.float()
+        values = values.float()
+        dones = dones.float()
 
-        # Non-terminal states: δ_t = r_t + γ * V_{t+1} - V_t
-        if T > 1:
-            deltas[:-1] = rewards[:-1] + gamma * values[1:] - values[:-1]
-
-        # Terminal states: δ_t = r_t - V_t
-        deltas = torch.where(dones, rewards - values, deltas)
-        deltas[-1] = rewards[-1] - values[-1]  # Last timestep is always terminal
-
-        # Use torch.where to find trajectory starts and lengths
-        trajectory_starts, trajectory_lengths = self._compute_trajectory_boundaries(
-            dones
-        )
-
-        # Pad trajectories to same length for vectorized processing
-        max_length = trajectory_lengths.max().item()
-        num_trajectories = len(trajectory_starts)
-
-        device = deltas.device
-        dtype = deltas.dtype
-
-        # Create padded deltas and dones tensors [num_trajectories, max_length]
-        padded_deltas = torch.zeros(
-            num_trajectories, max_length, device=device, dtype=dtype
-        )
-        padded_dones = torch.zeros(
-            num_trajectories, max_length, device=device, dtype=torch.bool
-        )
-
-        # Vectorized padding
-        for i, (start, length) in enumerate(zip(trajectory_starts, trajectory_lengths)):
-            padded_deltas[i, :length] = deltas[start : start + length]
-            padded_dones[i, :length] = dones[start : start + length]
-
-        B, T_pad = padded_deltas.shape
-
+        device, dtype = rewards.device, rewards.dtype
         c = gamma * lambda_
-        rev_deltas = torch.flip(padded_deltas, dims=[1])  # [B, T_pad]
-        rev_notdone = torch.flip(1.0 - padded_dones.float(), dims=[1])  # [B, T_pad]
 
-        # Build the per-step multiplier m_t = c * (1 - done_t) in reversed order
-        m = c * rev_notdone  # [B, T_pad]
+        # Shift values to get V_{t+1}; zero out at true terminals
+        v_next = torch.empty_like(values)
+        v_next[:-1] = values[1:]
+        v_next[-1] = 0.0
+        v_next = v_next * (1.0 - dones)  # bootstrap only if not terminal
 
-        # We want: x_t = rev_deltas_t + m_t * x_{t-1}   (a scan)
-        # Turn this linear recurrence into a weighted cumulative sum using cumulative products.
-        # Compute cumulative product of m with an initial 1 to align offsets.
-        one = torch.ones(B, 1, device=device, dtype=dtype)
-        m_pad = torch.cat([one, m[:, :-1]], dim=1)  # shift-right for exclusive product
-        cumprod = torch.cumprod(m_pad, dim=1)  # [B, T_pad]
+        # One-step TD residuals: δ_t = r_t + γ V_{t+1} - V_t  (V_{t+1}=0 if terminal)
+        deltas = rewards + gamma * v_next - values
 
-        # The solution to x = rev_deltas ⊙ cumprod  scanned, then re-normalize:
-        # Let y = rev_deltas * cumprod; then x = cumsum(y, dim=1) / cumprod
-        y = rev_deltas * cumprod
-        x = torch.cumsum(y, dim=1) / torch.clamp_min(cumprod, 1e-8)  # [B, T_pad]
+        # print(f"\n=== FLAT SEQUENCE GAE DEBUG ===")
+        # print(f"Input: rewards={rewards.tolist()}")
+        # print(f"Input: values={values.tolist()}")
+        # print(f"Input: dones={dones.tolist()}")
+        # print(f"gamma={gamma}, lambda={lambda_}, c={c}")
+        # print(f"v_next={v_next.tolist()}")
+        # print(f"deltas={deltas.tolist()}")
 
-        padded_advantages = torch.flip(x, dims=[1])  # back to forward time
+        # Reverse-time linear recurrence: A_t = δ_t + c * (1-done_t) * A_{t+1}
+        # Implemented without Python loops using flips + cumulative products.
+        rev_deltas = torch.flip(deltas, dims=[0])  # [T]
+        rev_notdone = torch.flip(1.0 - dones, dims=[0])  # [T]
+        # m = c * rev_notdone  # [T], dims=0
 
-        # Extract advantages back to original format
-        advantages = torch.zeros_like(deltas)
-        for i, (start, length) in enumerate(zip(trajectory_starts, trajectory_lengths)):
-            advantages[start : start + length] = padded_advantages[i, :length]
+        # print(f"rev_deltas={rev_deltas.tolist()}")
+        # print(f"rev_notdone={rev_notdone.tolist()}")
+
+        # Correct segmented reverse scan that resets at terminals
+        rev_boundary = rev_notdone == 0
+        if T > 0:
+            rev_boundary[0] = True  # ensure first element starts a segment
+
+        group_id = torch.cumsum(rev_boundary.to(torch.long), dim=0) - 1  # [T]
+        group_starts = torch.where(rev_boundary)[0]  # [G]
+
+        arange_T = torch.arange(T, device=device, dtype=torch.long)
+        start_for_t = group_starts[group_id]
+        idx = arange_T - start_for_t  # within-segment index in reversed time
+
+        c_pow_idx = torch.pow(c, idx)
+        scaled = rev_deltas / torch.clamp_min(c_pow_idx, 1e-20)
+
+        s = torch.cumsum(scaled, dim=0)
+
+        num_groups = group_starts.numel()
+        offset_per_group = torch.zeros(num_groups, device=device, dtype=dtype)
+        valid = group_starts > 0
+        if valid.any():
+            offset_per_group[valid] = s[group_starts[valid] - 1]
+        offset_for_t = offset_per_group[group_id]
+        s_reset = s - offset_for_t
+
+        adv_rev = s_reset * c_pow_idx
+        advantages = torch.flip(adv_rev, dims=[0])
+
+        # Debug prints for segmented scan
+        # print(f"rev_boundary={rev_boundary.tolist()}")
+        # print(f"group_id={group_id.tolist()}")
+        # print(f"group_starts={group_starts.tolist()}")
+        # print(f"idx={idx.tolist()}")
+        # print(f"c_pow_idx={c_pow_idx.tolist()}")
+        # print(f"scaled={scaled.tolist()}")
+        # print(f"s={s.tolist()}")
+        # print(f"offset_per_group={offset_per_group.tolist()}")
+        # print(f"s_reset={s_reset.tolist()}")
+        # print(f"adv_rev={adv_rev.tolist()}")
+        # print(f"Final advantages: {advantages.tolist()}")
+        # print(f"=== END FLAT SEQUENCE GAE DEBUG ===\n")
 
         return advantages
 

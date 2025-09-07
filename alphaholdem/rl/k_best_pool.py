@@ -163,6 +163,57 @@ class KBestOpponentPool(OpponentPool):
         # Re-sort snapshots by ELO
         self.snapshots.sort(key=lambda x: x.elo, reverse=True)
 
+    def update_elo_batch_vectorized(
+        self,
+        opponents: List[AgentSnapshot],
+        rewards: torch.Tensor,
+        k_factor: float = 1.0,
+    ) -> None:
+        """
+        Vectorized ELO update for multiple opponents at once.
+
+        Args:
+            opponents: List of opponents that were fought
+            rewards: Tensor of rewards [num_games] where >0 = win, <0 = loss, =0 = draw
+            k_factor: ELO K-factor for rating changes
+        """
+        if len(opponents) == 0 or len(rewards) == 0:
+            return
+
+        # Convert rewards to actual scores (0.0, 0.5, 1.0)
+        actual_scores = torch.where(
+            rewards > 0, 1.0, torch.where(rewards < 0, 0.0, 0.5)  # win  # loss or draw
+        )
+
+        # Get opponent ELOs
+        opponent_elos = torch.tensor(
+            [opp.elo for opp in opponents], device=rewards.device, dtype=rewards.dtype
+        )
+
+        # Calculate expected scores for each opponent
+        expected_scores = 1.0 / (
+            1.0 + 10 ** ((opponent_elos - self.current_elo) / 400.0)
+        )
+
+        # Calculate ELO changes
+        elo_changes = k_factor * (actual_scores - expected_scores)
+
+        # Update current ELO (sum of all changes - this is correct for multiple games)
+        total_elo_change = elo_changes.sum().item()
+        self.current_elo += total_elo_change
+
+        # Update opponent ELOs (opposite changes)
+        for i, opponent in enumerate(opponents):
+            opponent.elo -= elo_changes[i].item()
+            opponent.update_stats(
+                "win"
+                if actual_scores[i] > 0.5
+                else ("loss" if actual_scores[i] < 0.5 else "draw")
+            )
+
+        # Re-sort snapshots by ELO
+        self.snapshots.sort(key=lambda x: x.elo, reverse=True)
+
     def get_best_snapshot(self) -> Optional[AgentSnapshot]:
         """Get the snapshot with the highest ELO rating."""
         if not self.snapshots:

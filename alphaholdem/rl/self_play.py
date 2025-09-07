@@ -39,7 +39,6 @@ class SelfPlayTrainer:
         self,
         learning_rate: float = None,
         batch_size: int = None,
-        mini_batch_size: int = None,
         num_epochs: int = None,
         gamma: float = None,
         gae_lambda: float = None,
@@ -59,9 +58,6 @@ class SelfPlayTrainer:
 
         # Use provided args if not None, else use config defaults
         self.batch_size = batch_size if batch_size is not None else self.cfg.batch_size
-        self.mini_batch_size = (
-            mini_batch_size if mini_batch_size is not None else self.cfg.mini_batch_size
-        )
         self.num_epochs = num_epochs if num_epochs is not None else self.cfg.num_epochs
         self.gamma = gamma if gamma is not None else self.cfg.gamma
         self.gae_lambda = gae_lambda if gae_lambda is not None else self.cfg.gae_lambda
@@ -351,6 +347,14 @@ class SelfPlayTrainer:
         )
         max_steps = 50  # Safety limit per trajectory
 
+        # Track which opponent each environment is fighting against
+        per_env_opponents = [
+            None
+        ] * self.num_envs  # List to track opponent per environment
+
+        # Track opponent assignments for vectorized ELO updates
+        opponent_env_mapping = {}  # opponent -> list of env indices
+
         # Outer loop: collect complete trajectories until we have enough steps
         while steps_collected < min_steps:
             # Get legal action masks for all environments
@@ -399,44 +403,21 @@ class SelfPlayTrainer:
                         opp_cards = states["cards"][env_idxs_tensor]
                         opp_actions = states["actions"][env_idxs_tensor]
 
-                        # Diagnostic: Check for NaN in opponent model inputs
-                        if (
-                            torch.isnan(opp_cards).any()
-                            or torch.isnan(opp_actions).any()
-                        ):
-                            print(f"WARNING: NaN detected in opponent model inputs!")
-                            print(
-                                f"  Opponent {opponent_idx}, Cards NaN: {torch.isnan(opp_cards).any()}"
-                            )
-                            print(f"  Actions NaN: {torch.isnan(opp_actions).any()}")
-                            print(
-                                f"  Cards min/max: {opp_cards.min():.6f}/{opp_cards.max():.6f}"
-                            )
-                            print(
-                                f"  Actions min/max: {opp_actions.min():.6f}/{opp_actions.max():.6f}"
-                            )
-                            print(f"  Environment indices: {env_idxs_tensor}")
-
                         opp_logits, opp_values = opponent.model(opp_cards, opp_actions)
                         logits[env_idxs_tensor] = opp_logits
                         values[env_idxs_tensor] = opp_values.squeeze(-1)
+
+                        # Track which opponent each environment is fighting against
+                        for env_idx in env_idxs_tensor.tolist():
+                            per_env_opponents[env_idx] = opponent
+                            # Track for vectorized updates
+                            if opponent not in opponent_env_mapping:
+                                opponent_env_mapping[opponent] = []
+                            opponent_env_mapping[opponent].append(env_idx)
                 else:
                     # Self-play: use our model for opponent turns too
                     opp_cards = states["cards"][opp_indices]
                     opp_actions = states["actions"][opp_indices]
-
-                    # Diagnostic: Check for NaN in self-play model inputs
-                    if torch.isnan(opp_cards).any() or torch.isnan(opp_actions).any():
-                        print(f"WARNING: NaN detected in self-play model inputs!")
-                        print(f"  Cards NaN: {torch.isnan(opp_cards).any()}")
-                        print(f"  Actions NaN: {torch.isnan(opp_actions).any()}")
-                        print(
-                            f"  Cards min/max: {opp_cards.min():.6f}/{opp_cards.max():.6f}"
-                        )
-                        print(
-                            f"  Actions min/max: {opp_actions.min():.6f}/{opp_actions.max():.6f}"
-                        )
-                        print(f"  Environment indices: {opp_indices}")
 
                     opp_logits, opp_values = self.model(opp_cards, opp_actions)
                     logits[opp_indices] = opp_logits
@@ -520,9 +501,47 @@ class SelfPlayTrainer:
             # Vectorized update of steps_collected and total_reward
             steps_collected += per_traj_step_count[done_indices].sum().item()
             total_reward += per_env_rewards[done_indices].sum().item()
+
+            # Update ELO ratings for done environments (vectorized by opponent)
+            if done_indices.numel() > 0:
+                # Group done environments by opponent for vectorized updates
+                done_env_indices = done_indices.tolist()
+                opponent_rewards = {}  # opponent -> list of rewards
+
+                for env_idx in done_env_indices:
+                    opponent = per_env_opponents[env_idx]
+                    if opponent is not None:
+                        if opponent not in opponent_rewards:
+                            opponent_rewards[opponent] = []
+                        opponent_rewards[opponent].append(
+                            per_env_rewards[env_idx].item()
+                        )
+
+                # Vectorized ELO update per opponent
+                for opponent, rewards_list in opponent_rewards.items():
+                    rewards_tensor = torch.tensor(rewards_list, device=self.device)
+                    # Create list of same opponent for batch update
+                    opponents_list = [opponent] * len(rewards_list)
+                    self.opponent_pool.update_elo_batch_vectorized(
+                        opponents_list, rewards_tensor
+                    )
+
+                # Update our current ELO to match the pool's current ELO
+                self.current_elo = self.opponent_pool.current_elo
+
             # Reset counters for these environments
             per_env_rewards[done_indices] = 0.0
             per_traj_step_count[done_indices] = 0
+            # Reset opponent tracking for done environments
+            for env_idx in done_indices.tolist():
+                opponent = per_env_opponents[env_idx]
+                per_env_opponents[env_idx] = None
+                # Clean up opponent mapping
+                if opponent is not None and opponent in opponent_env_mapping:
+                    if env_idx in opponent_env_mapping[opponent]:
+                        opponent_env_mapping[opponent].remove(env_idx)
+                    if not opponent_env_mapping[opponent]:  # Empty list
+                        del opponent_env_mapping[opponent]
 
             # Reset done environments
             self.tensor_env.reset_done()
@@ -1015,6 +1034,17 @@ class SelfPlayTrainer:
             }
             total_wins += wins
             total_games += num_games
+
+            # Update ELO ratings based on evaluation results
+            if wins > num_games // 2:  # Won majority of games
+                result = "win"
+            elif wins < num_games // 2:  # Lost majority of games
+                result = "loss"
+            else:  # Tied
+                result = "draw"
+
+            self.opponent_pool.update_elo_after_game(opponent, result)
+            self.current_elo = self.opponent_pool.current_elo
 
         overall_win_rate = total_wins / total_games if total_games > 0 else 0.0
 
