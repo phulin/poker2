@@ -167,7 +167,7 @@ class KBestOpponentPool(OpponentPool):
         self,
         opponents: List[AgentSnapshot],
         rewards: torch.Tensor,
-        k_factor: float = 1.0,
+        k_factor: float = 1.0 / 256,
     ) -> None:
         """
         Vectorized ELO update for multiple opponents at once.

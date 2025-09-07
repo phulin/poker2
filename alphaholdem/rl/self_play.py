@@ -316,7 +316,7 @@ class SelfPlayTrainer:
         self,
         min_steps: int,
         all_opponent_snapshots: Optional[list[AgentSnapshot]] = None,
-    ) -> float:
+    ) -> tuple[float, int]:
         """
         Collect trajectories from tensorized environments until we have at least min_steps.
         Uses all environments continuously, resetting done ones at the end of each step.
@@ -328,13 +328,14 @@ class SelfPlayTrainer:
                               If provided, should have length <= num_envs.
 
         Returns:
-            Tuple of (list of trajectories, total reward)
+            Tuple of (total reward, episode count)
         """
         if not self.use_tensor_env:
             raise ValueError("collect_tensor_trajectories requires use_tensor_env=True")
 
         all_trajectories = []
         total_reward = 0.0
+        episode_count = 0
         steps_collected = 0
 
         # Initialize all environments
@@ -498,9 +499,10 @@ class SelfPlayTrainer:
 
             # Create trajectories for done environments
             done_indices = torch.where(dones)[0]
-            # Vectorized update of steps_collected and total_reward
+            # Vectorized update of steps_collected, total_reward, and episode_count
             steps_collected += per_traj_step_count[done_indices].sum().item()
             total_reward += per_env_rewards[done_indices].sum().item()
+            episode_count += done_indices.numel()
 
             # Update ELO ratings for done environments (vectorized by opponent)
             if done_indices.numel() > 0:
@@ -545,7 +547,7 @@ class SelfPlayTrainer:
 
             # Reset done environments
             self.tensor_env.reset_done()
-        return total_reward
+        return total_reward, episode_count
 
     def _encode_tensor_states(self) -> dict:
         """
@@ -840,7 +842,7 @@ class SelfPlayTrainer:
         steps_added = 0
         while steps_added < min_steps:
             if self.use_tensor_env:
-                total_reward = self.collect_tensor_trajectories(
+                total_reward, episode_count = self.collect_tensor_trajectories(
                     min_steps - steps_added,
                     all_opponent_snapshots=self.opponent_pool.snapshots,
                 )
@@ -849,6 +851,7 @@ class SelfPlayTrainer:
                 steps_added = self.replay_buffer.num_steps()
 
                 self.total_reward += total_reward
+                self.episode_count += episode_count
             else:
                 # Use scalar collection
                 sampled_opponent = self.opponent_pool.sample(k=1)
