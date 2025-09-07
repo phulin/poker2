@@ -27,9 +27,15 @@ def test_kbest_pool():
     pool = KBestOpponentPool(k=3, min_elo_diff=50.0)
 
     # Create some dummy models
-    model1 = SiameseConvNetV1(num_actions=8)
-    model2 = SiameseConvNetV1(num_actions=8)
-    model3 = SiameseConvNetV1(num_actions=8)
+    model1 = SiameseConvNetV1(
+        cards_channels=6, actions_channels=24, fusion_hidden=[1024, 1024], num_actions=8
+    )
+    model2 = SiameseConvNetV1(
+        cards_channels=6, actions_channels=24, fusion_hidden=[1024, 1024], num_actions=8
+    )
+    model3 = SiameseConvNetV1(
+        cards_channels=6, actions_channels=24, fusion_hidden=[1024, 1024], num_actions=8
+    )
 
     # Create snapshots
     snapshot1 = AgentSnapshot(model1, step=100, elo=1200.0)
@@ -116,7 +122,12 @@ def test_opponent_sampling():
         class DummyAgent:
             def __init__(self, episode_count):
                 self.episode_count = episode_count
-                self.model = SiameseConvNetV1(num_actions=8)
+                self.model = SiameseConvNetV1(
+                    cards_channels=6,
+                    actions_channels=24,
+                    fusion_hidden=[1024, 1024],
+                    num_actions=8,
+                )
 
         dummy_agent = DummyAgent(episode_count=(i + 1) * 100)
         trainer.opponent_pool.add_snapshot(dummy_agent, 1200.0 + i * 50)

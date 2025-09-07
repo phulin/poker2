@@ -37,7 +37,7 @@ def test_replay_buffer_and_gae():
         ),
     ]
 
-    trajectory = Trajectory(transitions=transitions, final_value=0.0)
+    trajectory = Trajectory(transitions=transitions)
     buffer.add_trajectory(trajectory)
 
     # Test GAE computation
@@ -72,6 +72,12 @@ def test_trinal_clip_ppo_loss():
         advantages=advantages,
         returns=returns,
         legal_masks=legal_masks,
+        epsilon=0.2,
+        delta1=3.0,
+        delta2=torch.tensor(-100.0),
+        delta3=torch.tensor(100.0),
+        value_coef=0.5,
+        entropy_coef=0.01,
     )
 
     assert "total_loss" in loss_dict
@@ -104,12 +110,11 @@ def test_self_play_trainer_basic():
     signal.alarm(10)  # 10 second timeout
 
     try:
-        trajectory = trainer.collect_trajectory()
+        trajectory, final_reward = trainer.collect_trajectory()
         signal.alarm(0)  # Cancel alarm
 
         # Basic checks
         assert len(trajectory.transitions) > 0
-        assert trajectory.final_value == 0.0
 
         # Check that transitions have expected fields
         for t in trajectory.transitions:

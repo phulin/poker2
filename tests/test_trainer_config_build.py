@@ -24,4 +24,4 @@ def test_trainer_builds_components_from_config():
     assert isinstance(trainer.actions_encoder, ActionsHUEncoderV1)
     assert isinstance(trainer.model, SiameseConvNetV1)
     assert isinstance(trainer.policy, CategoricalPolicyV1)
-    assert trainer.num_bet_bins == 9
+    assert trainer.num_bet_bins == 8

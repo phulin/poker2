@@ -29,6 +29,10 @@ def test_trinal_policy_upper_clip_for_negative_advantages():
         legal_masks=legal_masks,
         epsilon=0.2,
         delta1=3.0,
+        delta2=torch.tensor(-100.0),
+        delta3=torch.tensor(100.0),
+        value_coef=0.5,
+        entropy_coef=0.01,
     )
 
     assert torch.isfinite(out["total_loss"])  # smoke check
@@ -55,8 +59,10 @@ def test_value_clipping_symmetry():
         legal_masks,
         epsilon=0.2,
         delta1=3.0,
-        delta2=-100.0,
-        delta3=100.0,
+        delta2=torch.tensor(-100.0),
+        delta3=torch.tensor(100.0),
+        value_coef=0.5,
+        entropy_coef=0.01,
     )
     # Value loss computed vs clipped returns; ensure finite
     assert torch.isfinite(out["value_loss"])

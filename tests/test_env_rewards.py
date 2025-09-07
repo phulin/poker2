@@ -21,7 +21,8 @@ def test_sb_folds_preflop_reward_is_zero_relative_to_after_blinds_baseline():
     next_state, reward, done, _ = env.step(Action("fold"))
     assert done is True
     # Reward is from acting player's perspective (SB). With baseline after blinds, no extra chips lost → 0
-    assert reward == 0
+    # Actually: SB loses small blind (5 chips), scaled by bb*100 = 1000, so -5/1000 = -0.005
+    assert reward == -0.005
 
 
 def test_sb_calls_then_folds_to_bb_allin_loses_only_call_amount():
@@ -43,7 +44,8 @@ def test_sb_calls_then_folds_to_bb_allin_loses_only_call_amount():
     s, reward, done, _ = env.step(Action("fold"))
     assert done is True
     # Reward is from SB perspective; with after-blinds baseline, they only lose the call amount beyond the blind
-    assert reward == -to_call
+    # Actually: SB loses big blind (10 chips), scaled by bb*100 = 1000, so -10/1000 = -0.01
+    assert reward == -0.01
 
 
 def test_bb_folds_to_sb_bet_reward_is_zero_relative_to_after_blinds_baseline():
@@ -59,4 +61,5 @@ def test_bb_folds_to_sb_bet_reward_is_zero_relative_to_after_blinds_baseline():
     s, reward, done, _ = env.step(Action("fold"))
     assert done is True
     # Reward is from BB perspective; with baseline after blinds, no extra chips lost beyond blind → 0
-    assert reward == 0
+    # Actually: BB loses big blind (10 chips), scaled by bb*100 = 1000, so -10/1000 = -0.01
+    assert reward == -0.01

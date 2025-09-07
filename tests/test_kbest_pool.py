@@ -9,7 +9,9 @@ def test_kbest_add_and_sample():
     pool = KBestOpponentPool(k=3, min_elo_diff=25.0)
 
     # Add three snapshots with increasing ELO
-    model = SiameseConvNetV1()
+    model = SiameseConvNetV1(
+        cards_channels=6, actions_channels=24, fusion_hidden=[1024, 1024], num_actions=8
+    )
 
     class Dummy:
         def __init__(self, model, ep):
@@ -31,7 +33,9 @@ def test_kbest_add_and_sample():
 
 def test_kbest_save_and_load(tmp_path):
     pool = KBestOpponentPool(k=2, min_elo_diff=25.0)
-    model = SiameseConvNetV1()
+    model = SiameseConvNetV1(
+        cards_channels=6, actions_channels=24, fusion_hidden=[1024, 1024], num_actions=8
+    )
 
     class Dummy:
         def __init__(self, model, ep):
@@ -45,7 +49,15 @@ def test_kbest_save_and_load(tmp_path):
     assert path.exists()
 
     new_pool = KBestOpponentPool(k=2)
-    new_pool.load_pool(str(path), SiameseConvNetV1)
+    new_pool.load_pool(
+        str(path),
+        lambda: SiameseConvNetV1(
+            cards_channels=6,
+            actions_channels=24,
+            fusion_hidden=[1024, 1024],
+            num_actions=8,
+        ),
+    )
 
     stats = new_pool.get_pool_stats()
     assert stats["pool_size"] == 1

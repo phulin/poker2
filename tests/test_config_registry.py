@@ -17,7 +17,7 @@ def test_load_default_config_values():
     assert cfg.gae_lambda == 0.95
     assert cfg.gamma == 0.999
     assert cfg.entropy_coef == 0.01
-    assert cfg.value_coef == 0.5
+    assert cfg.value_coef == 0.05
     assert cfg.grad_clip == 1.0
 
     assert cfg.card_encoder.name == "cards_planes_v1"
