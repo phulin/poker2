@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -348,14 +348,6 @@ class SelfPlayTrainer:
         )
         max_steps = 50  # Safety limit per trajectory
 
-        # Track which opponent each environment is fighting against
-        per_env_opponents = [
-            None
-        ] * self.num_envs  # List to track opponent per environment
-
-        # Track opponent assignments for vectorized ELO updates
-        opponent_env_mapping = {}  # opponent -> list of env indices
-
         # Outer loop: collect complete trajectories until we have enough steps
         while steps_collected < min_steps:
             # Get legal action masks for all environments
@@ -389,6 +381,7 @@ class SelfPlayTrainer:
                 # Get predictions from opponent models for opponent turns
                 opp_indices = torch.where(opp_turn_mask)[0]
 
+                opp_env_groups: Tuple[torch.Tensor, ...] | None = None
                 if (
                     all_opponent_snapshots is not None
                     and len(all_opponent_snapshots) > 0
@@ -407,14 +400,6 @@ class SelfPlayTrainer:
                         opp_logits, opp_values = opponent.model(opp_cards, opp_actions)
                         logits[env_idxs_tensor] = opp_logits
                         values[env_idxs_tensor] = opp_values.squeeze(-1)
-
-                        # Track which opponent each environment is fighting against
-                        for env_idx in env_idxs_tensor.tolist():
-                            per_env_opponents[env_idx] = opponent
-                            # Track for vectorized updates
-                            if opponent not in opponent_env_mapping:
-                                opponent_env_mapping[opponent] = []
-                            opponent_env_mapping[opponent].append(env_idx)
                 else:
                     # Self-play: use our model for opponent turns too
                     opp_cards = states["cards"][opp_indices]
@@ -506,27 +491,33 @@ class SelfPlayTrainer:
 
             # Update ELO ratings for done environments (vectorized by opponent)
             if done_indices.numel() > 0:
-                # Group done environments by opponent for vectorized updates
-                done_env_indices = done_indices.tolist()
-                opponent_rewards = {}  # opponent -> list of rewards
+                # Use premade chunking to efficiently group done environments by opponent
+                if opp_env_groups is not None:
+                    # Vectorized ELO update per opponent using existing chunking
+                    for opponent_idx, env_idxs_tensor in enumerate(opp_env_groups):
+                        if env_idxs_tensor.numel() == 0:
+                            continue
 
-                for env_idx in done_env_indices:
-                    opponent = per_env_opponents[env_idx]
-                    if opponent is not None:
-                        if opponent not in opponent_rewards:
-                            opponent_rewards[opponent] = []
-                        opponent_rewards[opponent].append(
-                            per_env_rewards[env_idx].item()
-                        )
+                        opponent = all_opponent_snapshots[opponent_idx]
 
-                # Vectorized ELO update per opponent
-                for opponent, rewards_list in opponent_rewards.items():
-                    rewards_tensor = torch.tensor(rewards_list, device=self.device)
-                    # Create list of same opponent for batch update
-                    opponents_list = [opponent] * len(rewards_list)
-                    self.opponent_pool.update_elo_batch_vectorized(
-                        opponents_list, rewards_tensor
-                    )
+                        # Find which environments in this opponent's group are done
+                        done_env_idxs_for_opponent = env_idxs_tensor[
+                            dones[env_idxs_tensor]
+                        ]
+
+                        if done_env_idxs_for_opponent.numel() > 0:
+                            # Slice rewards tensor directly - no .item() calls needed
+                            opponent_rewards = per_env_rewards[
+                                done_env_idxs_for_opponent
+                            ]
+
+                            # Update ELO for this opponent with all their games
+                            self.opponent_pool.update_elo_batch_vectorized(
+                                opponent, opponent_rewards
+                            )
+                else:
+                    # Fallback for self-play case (no opponents, so no ELO tracking)
+                    pass
 
                 # Update our current ELO to match the pool's current ELO
                 self.current_elo = self.opponent_pool.current_elo
@@ -534,16 +525,6 @@ class SelfPlayTrainer:
             # Reset counters for these environments
             per_env_rewards[done_indices] = 0.0
             per_traj_step_count[done_indices] = 0
-            # Reset opponent tracking for done environments
-            for env_idx in done_indices.tolist():
-                opponent = per_env_opponents[env_idx]
-                per_env_opponents[env_idx] = None
-                # Clean up opponent mapping
-                if opponent is not None and opponent in opponent_env_mapping:
-                    if env_idx in opponent_env_mapping[opponent]:
-                        opponent_env_mapping[opponent].remove(env_idx)
-                    if not opponent_env_mapping[opponent]:  # Empty list
-                        del opponent_env_mapping[opponent]
 
             # Reset done environments
             self.tensor_env.reset_done()
@@ -774,6 +755,7 @@ class SelfPlayTrainer:
                 <= loss_before_dict["total_loss"].item()
             ):
                 total_mb_improved += 1
+
         denom = max(1, total_minibatches)
         return {
             "avg_loss": total_loss / self.num_epochs,

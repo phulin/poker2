@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import random
 from typing import List, Optional, Tuple, Any
+from line_profiler import profile
 import torch
 import torch.nn as nn
 
@@ -163,53 +164,57 @@ class KBestOpponentPool(OpponentPool):
         # Re-sort snapshots by ELO
         self.snapshots.sort(key=lambda x: x.elo, reverse=True)
 
+    @profile
     def update_elo_batch_vectorized(
         self,
-        opponents: List[AgentSnapshot],
+        opponent: AgentSnapshot,
         rewards: torch.Tensor,
-        k_factor: float = 1.0 / 256,
+        k_factor: float = 1.0 / 64,
     ) -> None:
         """
-        Vectorized ELO update for multiple opponents at once.
+        Vectorized ELO update for a single opponent over multiple games.
 
         Args:
-            opponents: List of opponents that were fought
+            opponent: The opponent that was fought
             rewards: Tensor of rewards [num_games] where >0 = win, <0 = loss, =0 = draw
             k_factor: ELO K-factor for rating changes
         """
-        if len(opponents) == 0 or len(rewards) == 0:
+        if opponent is None or rewards.numel() == 0:
             return
 
         # Convert rewards to actual scores (0.0, 0.5, 1.0)
-        actual_scores = torch.where(
-            rewards > 0, 1.0, torch.where(rewards < 0, 0.0, 0.5)  # win  # loss or draw
+        wins = rewards > 0
+        losses = rewards < 0
+        actual_scores = torch.where(wins, 1.0, torch.where(losses, 0.0, 0.5))
+
+        # Get opponent ELO (scalar)
+        opponent_elo = torch.tensor(
+            opponent.elo, device=rewards.device, dtype=rewards.dtype
         )
 
-        # Get opponent ELOs
-        opponent_elos = torch.tensor(
-            [opp.elo for opp in opponents], device=rewards.device, dtype=rewards.dtype
-        )
-
-        # Calculate expected scores for each opponent
+        # Calculate expected scores for each game
         expected_scores = 1.0 / (
-            1.0 + 10 ** ((opponent_elos - self.current_elo) / 400.0)
+            1.0 + 10 ** ((opponent_elo - self.current_elo) / 400.0)
         )
 
         # Calculate ELO changes
         elo_changes = k_factor * (actual_scores - expected_scores)
 
-        # Update current ELO (sum of all changes - this is correct for multiple games)
+        # Update current ELO (sum of all changes)
         total_elo_change = elo_changes.sum().item()
         self.current_elo += total_elo_change
 
-        # Update opponent ELOs (opposite changes)
-        for i, opponent in enumerate(opponents):
-            opponent.elo -= elo_changes[i].item()
-            opponent.update_stats(
-                "win"
-                if actual_scores[i] > 0.5
-                else ("loss" if actual_scores[i] < 0.5 else "draw")
-            )
+        # Update opponent ELO (opposite change)
+        opponent.elo -= total_elo_change
+
+        # Update opponent stats for each game
+        # Vectorized update of opponent stats using wins/losses tensors
+        num_wins = wins.sum().item()
+        num_losses = losses.sum().item()
+        opponent.games_played += rewards.numel()
+        opponent.wins += num_wins
+        opponent.losses += num_wins
+        opponent.draws += rewards.numel() - num_wins - num_losses
 
         # Re-sort snapshots by ELO
         self.snapshots.sort(key=lambda x: x.elo, reverse=True)

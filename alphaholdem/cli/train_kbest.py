@@ -174,7 +174,7 @@ def main():
     parser.add_argument(
         "--min-elo-diff",
         type=float,
-        default=250.0,
+        default=50.0,
         help="Minimum ELO difference for pool updates",
     )
     parser.add_argument(
