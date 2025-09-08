@@ -124,6 +124,12 @@ class KBestOpponentPool(OpponentPool):
         # Add to snapshots list
         self.snapshots.append(new_snapshot)
 
+        # If this is the first snapshot, give it a slightly different ELO to create initial variation
+        if len(self.snapshots) == 1:
+            new_snapshot.elo = (
+                self.current_elo + 10.0
+            )  # Give first opponent a slight advantage
+
         # Sort by ELO rating (descending)
         self.snapshots.sort(key=lambda x: x.elo, reverse=True)
 
@@ -173,7 +179,8 @@ class KBestOpponentPool(OpponentPool):
         self,
         opponent: AgentSnapshot,
         rewards: torch.Tensor,
-        k_factor: float = 1.0 / 64,
+        k_factor: float = 1.0
+        / 16,  # Increased from 1.0/64 to make changes more visible
     ) -> None:
         """
         Vectorized ELO update for a single opponent over multiple games.
@@ -217,7 +224,7 @@ class KBestOpponentPool(OpponentPool):
         num_losses = losses.sum().item()
         opponent.games_played += rewards.numel()
         opponent.wins += num_wins
-        opponent.losses += num_wins
+        opponent.losses += num_losses
         opponent.draws += rewards.numel() - num_wins - num_losses
 
         # Re-sort snapshots by ELO

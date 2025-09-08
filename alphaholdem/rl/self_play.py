@@ -127,7 +127,8 @@ class SelfPlayTrainer:
 
         # Use vectorized replay buffer for efficient tensor operations
         self.replay_buffer = VectorizedReplayBuffer(
-            capacity=buffer_capacity,
+            capacity=buffer_capacity,  # Number of trajectories
+            max_trajectory_length=50,  # Maximum steps per trajectory
             observation_dim=observation_dim,
             legal_mask_dim=legal_mask_dim,
             device=self.device,
@@ -321,6 +322,7 @@ class SelfPlayTrainer:
         Collect trajectories from tensorized environments until we have at least min_steps.
         Only processes non-done environments in each iteration to avoid bias towards short episodes.
         Resets all environments only when every environment is done.
+        Collects complete trajectories before adding them to the replay buffer.
 
         Args:
             min_steps: Minimum number of steps to collect across all trajectories
@@ -334,7 +336,6 @@ class SelfPlayTrainer:
         if not self.use_tensor_env:
             raise ValueError("collect_tensor_trajectories requires use_tensor_env=True")
 
-        all_trajectories = []
         total_reward = 0.0
         episode_count = 0
         steps_collected = 0
@@ -348,6 +349,13 @@ class SelfPlayTrainer:
             self.num_envs, dtype=torch.long, device=self.device
         )
         max_steps = 50  # Safety limit per trajectory
+
+        # Track trajectory assignments for vectorized buffer operations
+        trajectory_assignments = {}  # env_idx -> trajectory_idx in buffer
+        next_trajectory_idx = 0
+
+        # Initialize trajectory collection
+        self.replay_buffer.start_adding_trajectories(self.num_envs)
 
         # Outer loop: collect complete trajectories until we have enough steps
         while steps_collected < min_steps:
@@ -437,7 +445,7 @@ class SelfPlayTrainer:
             # Take steps in all environments (tensor_env expects full-size tensors)
             rewards, dones, _, placed_chips = self.tensor_env.step_bins(action_indices)
 
-            # Create transitions for our actions and add to vectorized buffer
+            # Store transitions for our actions (don't add to replay buffer yet)
             if our_active_indices.numel() > 0:
                 # Scale factor for reward/targets: 100 big blinds
                 scale = float(self.tensor_env.bb) * 100.0
@@ -470,7 +478,24 @@ class SelfPlayTrainer:
                 our_legal_masks_tensor = legal_masks[actor_is_ours]
                 our_placed_chips_tensor = placed_chips[our_active_indices]
 
-                # Add batch to vectorized replay buffer
+                # Assign trajectory indices for new environments
+                for i, env_idx in enumerate(our_active_indices):
+                    env_idx_int = env_idx.item()
+                    if env_idx_int not in trajectory_assignments:
+                        trajectory_assignments[env_idx_int] = next_trajectory_idx
+                        next_trajectory_idx += 1
+
+                # Create trajectory indices tensor for vectorized operations
+                trajectory_indices = torch.tensor(
+                    [
+                        trajectory_assignments[env_idx.item()]
+                        for env_idx in our_active_indices
+                    ],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+
+                # Add transitions immediately using vectorized operations
                 self.replay_buffer.add_batch(
                     observations=our_observations,
                     actions=our_actions_tensor,
@@ -482,6 +507,7 @@ class SelfPlayTrainer:
                     delta2=our_delta2_tensor,
                     delta3=our_delta3_tensor,
                     values=our_values_tensor,
+                    trajectory_indices=trajectory_indices,
                 )
 
                 # Update per-environment reward tracking
@@ -506,6 +532,9 @@ class SelfPlayTrainer:
             steps_collected += per_traj_step_count[done_indices].sum().item()
             total_reward += per_env_rewards[done_indices].sum().item()
             episode_count += done_indices.numel()
+
+            # Trajectories are now added immediately via vectorized operations
+            # No need for separate trajectory completion logic
 
             # Update ELO ratings for done environments (vectorized by opponent)
             # Use premade chunking to efficiently group done environments by opponent
@@ -537,6 +566,11 @@ class SelfPlayTrainer:
                 self.tensor_env.reset()
                 per_env_rewards[:] = 0.0
                 per_traj_step_count[:] = 0
+                trajectory_assignments.clear()  # Clear trajectory assignments for next batch
+                next_trajectory_idx = 0  # Reset trajectory counter
+                self.replay_buffer.start_adding_trajectories(
+                    self.num_envs
+                )  # Prepare for next batch
                 continue
 
         return total_reward, episode_count
@@ -609,6 +643,19 @@ class SelfPlayTrainer:
             gamma=self.gamma, lambda_=self.gae_lambda
         )
 
+        # Initialize tracking variables once before the epoch loop
+        total_loss = 0.0
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_entropy = 0.0
+        total_approx_kl = 0.0
+        total_clipfrac = 0.0
+        total_explained_var = 0.0
+        total_minibatches = 0
+        total_mb_improved = 0
+        total_loss_before = 0.0
+        total_loss_after = 0.0
+
         for _ in range(self.num_epochs):
             # Sample batch from vectorized buffer
             batch = self.replay_buffer.sample_batch(self.batch_size)
@@ -648,19 +695,6 @@ class SelfPlayTrainer:
                 }
             except Exception:
                 first_clip_debug = {}
-
-            # Multiple epochs of updates
-            total_loss = 0.0
-            total_policy_loss = 0.0
-            total_value_loss = 0.0
-            total_entropy = 0.0
-            total_approx_kl = 0.0
-            total_clipfrac = 0.0
-            total_explained_var = 0.0
-            total_minibatches = 0
-            total_mb_improved = 0
-            total_loss_before = 0.0
-            total_loss_after = 0.0
 
             # No minibatches: operate on the full batch at once
             observations = batch["observations"]
@@ -763,7 +797,7 @@ class SelfPlayTrainer:
             total_loss_after += float(loss_after_dict["total_loss"].item())
             if (
                 loss_after_dict["total_loss"].item()
-                <= loss_before_dict["total_loss"].item()
+                < loss_before_dict["total_loss"].item()
             ):
                 total_mb_improved += 1
 
@@ -928,9 +962,9 @@ class SelfPlayTrainer:
         self.total_reward = checkpoint["total_reward"]
         self.opponent_pool.current_elo = checkpoint.get("current_elo", 1200.0)
 
-        # Restore replay buffer if present
-        if "replay_buffer" in checkpoint and checkpoint["replay_buffer"] is not None:
-            self.replay_buffer = checkpoint["replay_buffer"]
+        # Restore replay buffer if present (skip for now due to structure change)
+        # if "replay_buffer" in checkpoint and checkpoint["replay_buffer"] is not None:
+        #     self.replay_buffer = checkpoint["replay_buffer"]
 
         print(f"Checkpoint loaded from {path}")
 
@@ -1037,8 +1071,6 @@ class SelfPlayTrainer:
                 result = "loss"
             else:  # Tied
                 result = "draw"
-
-            self.opponent_pool.update_elo_after_game(opponent, result)
 
         overall_win_rate = total_wins / total_games if total_games > 0 else 0.0
 

@@ -2,7 +2,7 @@
 """
 PPO Component Probe
 
-Roll out a single trajectory with the batched collector, then print detailed
+Roll out a single trajectory with the tensorized environment, then print detailed
 per-step GAE and PPO components (advantages, returns, clipped returns, ratios,
 clips, entropy) to verify signs and scaling.
 """
@@ -43,30 +43,32 @@ def planes_to_card_strs(planes: torch.Tensor) -> list[str]:
 
 
 def probe_once(trainer: SelfPlayTrainer) -> None:
-    # Collect a single non-empty trajectory
-    max_tries = 1000
-    traj = None
-    for _ in range(max_tries):
-        t, _ = trainer.collect_trajectory()
-        if len(t.transitions) > 0:
-            traj = t
-            break
-    if traj is None:
-        print("Failed to collect a non-empty trajectory after retries.")
+    # Clear the replay buffer first
+    trainer.replay_buffer.clear()
+
+    # Collect a single trajectory using the tensorized environment
+    print("Collecting trajectory using tensorized environment...")
+    total_reward, episode_count = trainer.collect_tensor_trajectories(
+        min_steps=20,  # Need enough steps to complete trajectories
+        all_opponent_snapshots=trainer.opponent_pool.snapshots,
+    )
+
+    # Check if we got any data
+    if trainer.replay_buffer.num_steps() == 0:
+        print("Failed to collect any trajectory data.")
         return
 
-    # Compute GAE using the same gamma/lambda as trainer
-    rewards = [tr.reward for tr in traj.transitions]
-    values = [tr.value for tr in traj.transitions]
-    values.append(0.0)  # bootstrap at terminal
-    advs, rets = compute_gae_returns(rewards, values, trainer.gamma, trainer.gae_lambda)
+    print(
+        f"Collected {trainer.replay_buffer.num_steps()} steps from {episode_count} episodes"
+    )
 
-    for i, tr in enumerate(traj.transitions):
-        tr.advantage = advs[i]
-        tr.return_ = rets[i]
+    # Compute GAE for all stored trajectories
+    trainer.replay_buffer.compute_gae_returns(
+        gamma=trainer.gamma, lambda_=trainer.gae_lambda
+    )
 
     # Prepare batch as in training (includes delta2/delta3 per-trajectory)
-    batch = prepare_ppo_batch([traj])
+    batch = trainer.replay_buffer.sample_trajectories(1)  # Get one trajectory
 
     # Move to device
     for k, v in list(batch.items()):
@@ -116,7 +118,7 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
     bin_labels = [f"x{m:g}" for m in trainer.cfg.bet_bins]
     action_names = ["fold", "check", *bin_labels, "allin"]
 
-    print("Per-step:")
+    print("\nPer-step:")
     for i in range(N):
         # Decode hole/public cards from planes
         hole = planes_to_card_strs(cards[i, 0])  # channel 0 = hole
@@ -137,7 +139,7 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
         # Short line
         print(
             f"{i} hole={''.join(hole) or '----'} {''.join(public) or '--':<10} "
-            f"{act_name:<5} r={rewards[i] if i < len(rewards) else 0.0:9.3f} "
+            f"{act_name:<5} r={returns[i].item():9.3f} "
             f"V={values[i].item():9.3f} A={adv[i].item():9.3f} "
             f"retc={clipped_returns[i].item():9.3f} ratio={ratio[i].item():.3f} "
             f"pi={pi_term:9.3f}"
@@ -180,61 +182,50 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
         v = loss_dict.get(k)
         print(f"  {k:>18}: {float(v.item()) if hasattr(v, 'item') else v}")
 
-    # Show both players' hole cards and hand evaluations at the end if available
+    # Show final state summary from tensor environment
     print("\nFinal state summary:")
     try:
-        s = getattr(trainer, "env", None).state  # type: ignore[attr-defined]
-    except Exception:
-        s = None
-    if s is None:
-        print("  (final GameState unavailable)")
-        return
+        # Get final state from tensor environment
+        hole_cards = trainer.tensor_env.hole_onehot[:, 0]  # [N, 2, 4, 13]
+        board_cards = trainer.tensor_env.board_onehot  # [N, 5, 4, 13]
 
-    # Render cards
-    def cards_ints_to_strs(card_ints: list[int]) -> str:
-        ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"]
-        suits = ["♠", "♥", "♦", "♣"]
-        out: list[str] = []
-        for c in card_ints:
-            out.append(ranks[rules.rank(c)] + suits[rules.suit(c)])
-        return "".join(out) if out else "--"
+        # Get first environment's cards
+        p0_hole = planes_to_card_strs(hole_cards[0, 0])  # Player 0 hole cards
+        p1_hole = planes_to_card_strs(hole_cards[0, 1])  # Player 1 hole cards
+        board = planes_to_card_strs(board_cards[0, 0])  # Board cards (first card)
 
-    p0 = s.players[0]
-    p1 = s.players[1]
-    board = s.board
-    print(
-        f"  P0: {cards_ints_to_strs(p0.hole_cards)}  P1: {cards_ints_to_strs(p1.hole_cards)}  Board: {cards_ints_to_strs(board)}"
-    )
-
-    # Hand evaluations only make sense at showdown when board has 5 cards and no fold
-    if (
-        s.street == "showdown"
-        and len(board) == 5
-        and not p0.has_folded
-        and not p1.has_folded
-    ):
-        v0 = rules.evaluate_7(p0.hole_cards + board)
-        v1 = rules.evaluate_7(p1.hole_cards + board)
         print(
-            f"  Eval P0: {v0}  Eval P1: {v1}  Winner: {s.winner if s.winner is not None else 'split'}"
+            f"  P0: {''.join(p0_hole)}  P1: {''.join(p1_hole)}  Board: {''.join(board)}"
         )
-    else:
-        if p0.has_folded or p1.has_folded:
-            print(f"  Hand ended by fold. Winner: {s.winner}")
+
+        # Check if hand ended by fold
+        if trainer.tensor_env.done[0]:
+            print(
+                f"  Hand ended. Winner: {trainer.tensor_env.winner[0] if hasattr(trainer.tensor_env, 'winner') else 'Unknown'}"
+            )
         else:
-            print("  No showdown evaluation (board incomplete)")
+            print("  Hand still in progress")
+
+    except Exception as e:
+        print(f"  (Error getting final state: {e})")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Probe PPO components for a single trajectory."
+        description="Probe PPO components for a single trajectory using tensorized environment."
     )
     parser.add_argument(
         "checkpoint", nargs="?", default=None, help="Optional checkpoint path"
     )
     args = parser.parse_args()
 
-    trainer = SelfPlayTrainer()
+    trainer = SelfPlayTrainer(
+        use_tensor_env=True,
+        num_envs=4,  # Use small number of environments for debugging
+        batch_size=8,
+        k_best_pool_size=2,
+        min_elo_diff=20.0,
+    )
     if args.checkpoint:
         try:
             step = trainer.load_checkpoint(args.checkpoint)
