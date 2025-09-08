@@ -67,8 +67,9 @@ def debug_rewards():
     print("\n📊 Test 3: Inspect Replay Buffer Contents")
     if trainer.replay_buffer.num_steps() > 0:
         # Get a sample from the buffer
+        rng = torch.Generator(device=trainer.device)
         sample = trainer.replay_buffer.sample_batch(
-            min(10, trainer.replay_buffer.num_steps())
+            rng, min(10, trainer.replay_buffer.num_steps())
         )
 
         print(f"Sample batch size: {sample['observations'].shape[0]}")

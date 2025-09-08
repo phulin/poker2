@@ -60,7 +60,7 @@ class HUNLTensorEnv:
         bb: int,
         bet_bins: list[float],
         device: Optional[torch.device] = None,
-        seed: Optional[int] = None,
+        rng: Optional[torch.Generator] = None,
     ) -> None:
         assert num_envs > 0
         self.device = device or torch.device(
@@ -79,9 +79,11 @@ class HUNLTensorEnv:
         # Number of discrete bins: 0=fold, 1=check/call, 2..(B-2)=presets, (B-1)=all-in
         self.num_bet_bins = len(self.bet_bins) + 3
 
-        self.rng = torch.Generator(device=self.device)
-        if seed is not None:
-            self.rng.manual_seed(int(seed))
+        # Use provided RNG or create a new one
+        if rng is not None:
+            self.rng = rng
+        else:
+            self.rng = torch.Generator(device=self.device)
 
         # Per-env decks as tensor and draw positions
         self.deck = torch.empty(self.N, 9, dtype=torch.long, device=self.device)
@@ -144,11 +146,7 @@ class HUNLTensorEnv:
 
     # --- Reset -----------------------------------------------------------------
 
-    def reset(
-        self, seed: Optional[int] = None, mask: Optional[torch.Tensor] = None
-    ) -> None:
-        if seed is not None:
-            self.rng.manual_seed(int(seed))
+    def reset(self, mask: Optional[torch.Tensor] = None) -> None:
 
         # Determine which environments to reset
         if mask is None:
@@ -637,9 +635,9 @@ class HUNLTensorEnv:
 
         return rewards, self.done, self.to_act, placed_chips
 
-    def reset_done(self, seed: Optional[int] = None) -> None:
+    def reset_done(self) -> None:
         """Reset only environments with done=True; keeps others unchanged."""
         ids = torch.where(self.done)[0]
         if ids.numel() == 0:
             return  # Nothing to reset
-        self.reset(seed=seed, mask=ids)
+        self.reset(mask=ids)

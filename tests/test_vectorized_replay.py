@@ -447,7 +447,8 @@ class TestVectorizedReplayBuffer:
         buffer.compute_gae_returns()
 
         # Sample a batch
-        sampled = buffer.sample_batch(5)
+        rng = torch.Generator(device=buffer.device)
+        sampled = buffer.sample_batch(rng, 5)
 
         # Check that all required keys are present
         expected_keys = {
@@ -474,8 +475,9 @@ class TestVectorizedReplayBuffer:
 
     def test_sample_batch_empty_buffer(self, buffer):
         """Test sample_batch from empty buffer raises error."""
+        rng = torch.Generator(device=buffer.device)
         with pytest.raises(ValueError, match="No trajectories available"):
-            buffer.sample_batch(1)
+            buffer.sample_batch(rng, 1)
 
     def test_num_steps(self, buffer):
         """Test num_steps method."""

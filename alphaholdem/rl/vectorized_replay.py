@@ -471,8 +471,10 @@ class VectorizedReplayBuffer:
         else:
             raise ValueError("No valid trajectories found")
 
-    def sample_batch(self, batch_size: int) -> Dict[str, torch.Tensor]:
-        """Sample individual transitions for training."""
+    def sample_batch(
+        self, rng: torch.Generator, batch_size: int
+    ) -> Dict[str, torch.Tensor]:
+        """Sample individual transitions for training (vectorized)."""
         if self.size == 0:
             raise ValueError("No trajectories available")
 
@@ -482,45 +484,35 @@ class VectorizedReplayBuffer:
         if len(valid_indices) == 0:
             raise ValueError("No valid trajectories available")
 
-        # Sample random trajectories and steps
-        sampled_observations = []
-        sampled_actions = []
-        sampled_log_probs = []
-        sampled_advantages = []
-        sampled_returns = []
-        sampled_legal_masks = []
-        sampled_delta2 = []
-        sampled_delta3 = []
+        # Get lengths of valid trajectories
+        traj_lengths = self.trajectory_lengths[valid_indices]
 
-        for _ in range(batch_size):
-            # Sample a random trajectory
-            traj_idx = valid_indices[
-                torch.randint(0, len(valid_indices), (1,), device=self.device)
-            ].item()
-            length = self.trajectory_lengths[traj_idx].item()
+        # Sample random trajectories
+        # Sample trajectories weighted by their length (longer trajectories more likely)
+        traj_weights = traj_lengths.float()
+        traj_probs = traj_weights / traj_weights.sum()
+        traj_sample_indices = torch.multinomial(
+            traj_probs, batch_size, replacement=True, generator=rng
+        )
+        traj_indices = valid_indices[traj_sample_indices]  # [batch_size]
+        traj_lengths_sampled = traj_lengths[traj_sample_indices]  # [batch_size]
 
-            # Sample a random step within the trajectory
-            step_idx = torch.randint(0, length, (1,), device=self.device).item()
+        # For each sampled trajectory, sample a random step within its length (vectorized)
+        step_indices = torch.floor(
+            torch.rand(batch_size, device=self.device, generator=rng)
+            * traj_lengths_sampled.float()
+        ).long()
 
-            # Extract the transition
-            sampled_observations.append(self.observations[traj_idx, step_idx])
-            sampled_actions.append(self.actions[traj_idx, step_idx])
-            sampled_log_probs.append(self.log_probs[traj_idx, step_idx])
-            sampled_advantages.append(self.advantages[traj_idx, step_idx])
-            sampled_returns.append(self.returns[traj_idx, step_idx])
-            sampled_legal_masks.append(self.legal_masks[traj_idx, step_idx])
-            sampled_delta2.append(self.delta2[traj_idx, step_idx])
-            sampled_delta3.append(self.delta3[traj_idx, step_idx])
-
+        # Vectorized extraction (inlined variables)
         return {
-            "observations": torch.stack(sampled_observations),
-            "actions": torch.stack(sampled_actions),
-            "log_probs_old": torch.stack(sampled_log_probs),
-            "advantages": torch.stack(sampled_advantages),
-            "returns": torch.stack(sampled_returns),
-            "legal_masks": torch.stack(sampled_legal_masks),
-            "delta2": torch.stack(sampled_delta2),
-            "delta3": torch.stack(sampled_delta3),
+            "observations": self.observations[traj_indices, step_indices],
+            "actions": self.actions[traj_indices, step_indices],
+            "log_probs_old": self.log_probs[traj_indices, step_indices],
+            "advantages": self.advantages[traj_indices, step_indices],
+            "returns": self.returns[traj_indices, step_indices],
+            "legal_masks": self.legal_masks[traj_indices, step_indices],
+            "delta2": self.delta2[traj_indices, step_indices],
+            "delta3": self.delta3[traj_indices, step_indices],
         }
 
     def clear(self) -> None:

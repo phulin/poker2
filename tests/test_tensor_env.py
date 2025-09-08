@@ -16,6 +16,14 @@ def _make_env(
 ):
     if bet_bins is None:
         bet_bins = [0.5, 0.75, 1.0, 1.5, 2.0]
+
+    # Create RNG
+    if device is None:
+        device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    rng = torch.Generator(device=device)
+    if seed is not None:
+        rng.manual_seed(seed)
+
     env = HUNLTensorEnv(
         num_envs=N,
         starting_stack=starting_stack,
@@ -23,9 +31,9 @@ def _make_env(
         bb=bb,
         bet_bins=bet_bins,
         device=device,
-        seed=seed,
+        rng=rng,
     )
-    env.reset(seed=seed)
+    env.reset()
     return env
 
 
@@ -148,7 +156,7 @@ def test_n2_reset_done_partial():
         steps += 1
     # Reset only done envs
     before_done = env.done.clone()
-    env.reset_done(seed=99)
+    env.reset_done()
     after_done = env.done.clone()
     # Done envs should be reset to not done; others unchanged
     for i in range(env.N):

@@ -76,6 +76,9 @@ class SelfPlayTrainer:
             else torch.device("mps" if torch.backends.mps.is_available() else "cpu")
         )
 
+        # Initialize RNG
+        self.rng = torch.Generator(device=self.device)
+
         # Store tensorized environment settings
         self.use_tensor_env = use_tensor_env
         self.num_envs = num_envs
@@ -89,6 +92,7 @@ class SelfPlayTrainer:
                 bb=self.cfg.bb,
                 bet_bins=self.cfg.bet_bins,
                 device=self.device,
+                rng=self.rng,
             )
         else:
             self.env = HUNLEnv(
@@ -685,7 +689,7 @@ class SelfPlayTrainer:
 
         for _ in range(self.num_epochs):
             # Sample batch from vectorized buffer
-            batch = self.replay_buffer.sample_batch(self.batch_size)
+            batch = self.replay_buffer.sample_batch(self.rng, self.batch_size)
 
             # Move batch tensors to device FIRST for consistent indexing on device tensors
             for key in batch:

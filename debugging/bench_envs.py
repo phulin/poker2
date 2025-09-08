@@ -41,15 +41,21 @@ def pick_bin_scalar(env: HUNLEnv, num_bet_bins: int) -> int:
 def bench_tensor_env(
     N: int, iters: int, device: str, profile_enabled: bool = False
 ) -> float:
+    # Create RNG
+    device_tensor = torch.device(device)
+    rng = torch.Generator(device=device_tensor)
+    rng.manual_seed(123)
+
     env = HUNLTensorEnv(
         num_envs=N,
         starting_stack=1000,
         sb=5,
         bb=10,
         bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0],
-        device=torch.device(device),
+        device=device_tensor,
+        rng=rng,
     )
-    env.reset(seed=123)
+    env.reset()
     B = env.num_bet_bins
 
     if profile_enabled:
