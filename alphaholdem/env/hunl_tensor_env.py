@@ -516,9 +516,7 @@ class HUNLTensorEnv:
             self.actions_this_round[acting], max=self.history_slots - 1
         )
         legal_mask = self.legal_action_bins_mask()
-        self.action_history[acting, next_street[acting], next_slot[acting], 3, :] = (
-            legal_mask[acting]
-        )
+        self.action_history[acting, next_street, next_slot, 3, :] = legal_mask[acting]
 
         # Chips placed by the actor in this step (after updates)
         placed_chips = (
@@ -541,13 +539,11 @@ class HUNLTensorEnv:
             flop_mask = s == 0
             ids = rc_idx[flop_mask]
             pos = self.deck_pos[ids]
-            a = self.deck[ids, pos]
-            b = self.deck[ids, pos + 1]
-            c = self.deck[ids, pos + 2]
             self.deck_pos[ids] = pos + 3
             self.board_onehot[ids, 0] = self.card_onehot_cache[self.deck[ids, pos]]
             self.board_onehot[ids, 1] = self.card_onehot_cache[self.deck[ids, pos + 1]]
             self.board_onehot[ids, 2] = self.card_onehot_cache[self.deck[ids, pos + 2]]
+
             self.street[ids] = 1
             self.to_act[ids] = 1 - self.button[ids]
             self.min_raise[ids] = self.bb

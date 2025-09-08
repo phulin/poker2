@@ -49,7 +49,7 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
     # Collect a single trajectory using the tensorized environment
     print("Collecting trajectory using tensorized environment...")
     total_reward, episode_count = trainer.collect_tensor_trajectories(
-        min_steps=50,  # Need enough steps to complete trajectories
+        min_steps=200,  # Need enough steps to get meaningful statistics
         all_opponent_snapshots=trainer.opponent_pool.snapshots,
     )
 
@@ -68,22 +68,17 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
     )
 
     # Prepare batch as in training (includes delta2/delta3 per-trajectory)
-    batch = trainer.replay_buffer.sample_trajectories(1)  # Get one trajectory
-
-    # Move to device
-    for k, v in list(batch.items()):
-        if isinstance(v, torch.Tensor):
-            batch[k] = v.to(trainer.device)
+    longest_trajectory = trainer.replay_buffer.trajectory_lengths.argmax().item()
 
     # Re-run forward on stored observations to get current logits/values
-    obs = batch["observations"]  # shape (N, C_flat)
-    actions = batch["actions"]
-    log_probs_old = batch["log_probs_old"]
-    adv = batch["advantages"]
-    returns = batch["returns"]
-    legal_masks = batch["legal_masks"]
-    d2 = batch["delta2"]
-    d3 = batch["delta3"]
+    obs = trainer.replay_buffer.observations[longest_trajectory]  # shape (N, C_flat)
+    actions = trainer.replay_buffer.actions[longest_trajectory]
+    log_probs_old = trainer.replay_buffer.log_probs[longest_trajectory]
+    adv = trainer.replay_buffer.advantages[longest_trajectory]
+    returns = trainer.replay_buffer.returns[longest_trajectory]
+    legal_masks = trainer.replay_buffer.legal_masks[longest_trajectory]
+    d2 = trainer.replay_buffer.delta2[longest_trajectory]
+    d3 = trainer.replay_buffer.delta3[longest_trajectory]
 
     N = obs.shape[0]
     cards = obs[:, : (6 * 4 * 13)].reshape(-1, 6, 4, 13)
@@ -118,11 +113,20 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
     bin_labels = [f"x{m:g}" for m in trainer.cfg.bet_bins]
     action_names = ["fold", "check", *bin_labels, "allin"]
 
-    print("\nPer-step:")
-    for i in range(N):
-        # Decode hole/public cards from planes
+    print("\nPer-step (showing first 10 steps):")
+    steps_to_show = min(10, N)
+    for i in range(steps_to_show):
+        # Decode hole cards and board cards from planes
         hole = planes_to_card_strs(cards[i, 0])  # channel 0 = hole
-        public = planes_to_card_strs(cards[i, 4])  # channel 4 = public
+        if len(hole) == 0:
+            break
+
+        # Debug: show what's in each channel
+        public = planes_to_card_strs(cards[i, 4])  # channel 4 = public (all board)
+
+        # Use public channel for now to see what's actually there
+        board_str = "".join(public) if public else "--"
+
         act_idx = int(actions[i].item())
         act_name = (
             action_names[act_idx] if act_idx < len(action_names) else str(act_idx)
@@ -138,12 +142,40 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
         )
         # Short line
         print(
-            f"{i} hole={''.join(hole) or '----'} {''.join(public) or '--':<10} "
-            f"{act_name:<5} r={returns[i].item():9.3f} "
-            f"V={values[i].item():9.3f} A={adv[i].item():9.3f} "
-            f"retc={clipped_returns[i].item():9.3f} ratio={ratio[i].item():.3f} "
-            f"pi={pi_term:9.3f}"
+            f"{i} {''.join(hole) or '----'} {board_str:<10} "
+            f"{act_name:<5} r={returns[i].item():6.3f} rc={clipped_returns[i].item():6.3f} "
+            f"d2={d2[i].item():6.3f} d3={d3[i].item():6.3f} "
+            f"V={values[i].item():6.3f} A={adv[i].item():6.3f} "
+            f"ratio={ratio[i].item():.3f} "
+            f"pi={pi_term:6.3f}"
         )
+
+    # Show cards from the sampled trajectory (not from current env state)
+    print(f"\nSampled trajectory cards:")
+    if N > 0:
+        # Show cards from the first step of the sampled trajectory
+        first_hole = planes_to_card_strs(cards[0, 0])
+        first_flop = planes_to_card_strs(cards[0, 1])
+        first_turn = planes_to_card_strs(cards[0, 2])
+        first_river = planes_to_card_strs(cards[0, 3])
+        first_board = (
+            "".join(first_flop + first_turn + first_river)
+            if (first_flop + first_turn + first_river)
+            else "--"
+        )
+        print(f"  First step: hole={''.join(first_hole) or '----'} board={first_board}")
+
+        # Show cards from the last step of the sampled trajectory
+        last_hole = planes_to_card_strs(cards[-1, 0])
+        last_flop = planes_to_card_strs(cards[-1, 1])
+        last_turn = planes_to_card_strs(cards[-1, 2])
+        last_river = planes_to_card_strs(cards[-1, 3])
+        last_board = (
+            "".join(last_flop + last_turn + last_river)
+            if (last_flop + last_turn + last_river)
+            else "--"
+        )
+        print(f"  Last step:  hole={''.join(last_hole) or '----'} board={last_board}")
 
     # Also compute the loss dictionary for consistency
     loss_dict = trinal_clip_ppo_loss(
@@ -166,52 +198,18 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
         huber_delta=trainer.cfg.huber_delta,
     )
 
-    print("\nBatch metrics:")
-    for k in [
-        "total_loss",
-        "policy_loss",
-        "value_loss",
-        "entropy",
-        "ratio_mean",
-        "ratio_std",
-        "advantage_mean",
-        "advantage_std",
-        "clipped_ratio_mean",
-        "clipped_ratio_std",
-    ]:
-        v = loss_dict.get(k)
-        print(f"  {k:>18}: {float(v.item()) if hasattr(v, 'item') else v}")
-
-    # Show final state summary from tensor environment
-    print("\nFinal state summary:")
-    try:
-        # Get final state from tensor environment
-        hole_cards = trainer.tensor_env.hole_onehot[:, 0]  # [N, 2, 4, 13]
-        board_cards = trainer.tensor_env.board_onehot  # [N, 5, 4, 13]
-
-        # Get first environment's cards
-        p0_hole = planes_to_card_strs(hole_cards[0, 0])  # Player 0 hole cards
-        p1_hole = planes_to_card_strs(hole_cards[0, 1])  # Player 1 hole cards
-        board = planes_to_card_strs(board_cards[0, 0])  # Board cards (first card)
-
-        print(
-            f"  P0: {''.join(p0_hole)}  P1: {''.join(p1_hole)}  Board: {''.join(board)}"
-        )
-
-        # Check if hand ended by looking at trajectory completion in the replay buffer
-        # (env may have been reset after trajectory collection)
-        if (
-            trainer.replay_buffer.size > 0
-            and trainer.replay_buffer.valid_trajectories.any()
-        ):
-            print(
-                f"  Hand ended. Winner: {trainer.tensor_env.winner[0] if hasattr(trainer.tensor_env, 'winner') else 'Unknown'}"
-            )
-        else:
-            print("  Hand still in progress")
-
-    except Exception as e:
-        print(f"  (Error getting final state: {e})")
+    # Summary insights
+    print(f"\nSummary:")
+    print(f"  Total steps collected: {trainer.replay_buffer.num_steps()}")
+    print(f"  Episodes completed: {episode_count}")
+    print(
+        f"  Average steps per episode: {trainer.replay_buffer.num_steps() / episode_count:.1f}"
+    )
+    print(f"  Policy loss: {loss_dict['policy_loss'].item():.3f}")
+    print(f"  Value loss: {loss_dict['value_loss'].item():.3f}")
+    print(f"  Entropy: {loss_dict['entropy'].item():.3f}")
+    print(f"  Average advantage: {loss_dict['advantage_mean'].item():.3f}")
+    print(f"  Advantage std: {loss_dict['advantage_std'].item():.3f}")
 
 
 def main():
@@ -221,7 +219,17 @@ def main():
     parser.add_argument(
         "checkpoint", nargs="?", default=None, help="Optional checkpoint path"
     )
+    parser.add_argument(
+        "--device",
+        choices=["cpu", "mps"],
+        default="mps",
+        help="Device to use for computation (default: mps)",
+    )
     args = parser.parse_args()
+
+    # Convert device string to torch.device
+    device = torch.device(args.device)
+    print(f"Using device: {device}")
 
     trainer = SelfPlayTrainer(
         use_tensor_env=True,
@@ -229,6 +237,7 @@ def main():
         batch_size=8,
         k_best_pool_size=2,
         min_elo_diff=20.0,
+        device=device,
     )
     if args.checkpoint:
         try:
