@@ -364,7 +364,7 @@ class SelfPlayTrainer:
         self,
         min_steps: int,
         all_opponent_snapshots: Optional[list[AgentSnapshot]] = None,
-    ) -> tuple[float, int]:
+    ) -> tuple[float, int, list[float]]:
         """
         Collect trajectories from tensorized environments until we have at least min_steps.
         Only processes non-done environments in each iteration to avoid bias towards short episodes.
@@ -378,7 +378,7 @@ class SelfPlayTrainer:
                               If provided, should have length <= num_envs.
 
         Returns:
-            Tuple of (total reward, episode count)
+            Tuple of (total reward, episode count, tensor of individual episode rewards)
         """
         if not self.use_tensor_env:
             raise ValueError("collect_tensor_trajectories requires use_tensor_env=True")
@@ -386,6 +386,9 @@ class SelfPlayTrainer:
         total_reward = 0.0
         episode_count = 0
         steps_collected = 0
+        individual_episode_rewards = (
+            []
+        )  # Track individual episode rewards as list of tensors
 
         # Initialize all environments
         self.tensor_env.reset()
@@ -598,6 +601,11 @@ class SelfPlayTrainer:
             done_indices = torch.where(dones)[0]
             total_reward += per_env_rewards[done_indices].sum().item()
 
+            # Collect individual episode rewards for accurate win counting
+            if done_indices.numel() > 0:
+                episode_rewards = per_env_rewards[done_indices]  # Keep as tensor
+                individual_episode_rewards.append(episode_rewards)
+
             # Trajectories are now added immediately via vectorized operations
             # No need for separate trajectory completion logic
 
@@ -648,7 +656,15 @@ class SelfPlayTrainer:
             )
             print(f"Collected {steps_collected} steps out of {min_steps} requested")
 
-        return total_reward, episode_count
+        # Concatenate all episode rewards into a single tensor
+        if individual_episode_rewards:
+            individual_episode_rewards_tensor = torch.cat(
+                individual_episode_rewards, dim=0
+            )
+        else:
+            individual_episode_rewards_tensor = torch.tensor([], device=self.device)
+
+        return total_reward, episode_count, individual_episode_rewards_tensor
 
     def _encode_tensor_states(self) -> dict:
         """
@@ -964,7 +980,7 @@ class SelfPlayTrainer:
             min_steps: Minimum number of steps to add to replay buffer
         """
         if self.use_tensor_env:
-            total_reward, episode_count = self.collect_tensor_trajectories(
+            total_reward, episode_count, _ = self.collect_tensor_trajectories(
                 min_steps,
                 all_opponent_snapshots=self.opponent_pool.snapshots,
             )
@@ -1117,6 +1133,8 @@ class SelfPlayTrainer:
 
         Returns:
             Dictionary with evaluation results
+
+        Note: Uses tensorized evaluation with individual episode reward tracking for accurate win counting.
         """
         if not self.opponent_pool.snapshots:
             return {"error": "No opponents in pool"}
@@ -1129,16 +1147,16 @@ class SelfPlayTrainer:
             wins = 0
 
             if self.use_tensor_env:
-                # Use tensorized evaluation for faster evaluation
-                # For each opponent, create a batch where all environments play against that opponent
-                total_reward, _ = self.collect_tensor_trajectories(
-                    min_steps=num_games,
-                    all_opponent_snapshots=[opponent] * self.num_envs,
+                # Use tensorized evaluation with individual episode reward tracking
+                total_reward, episode_count, individual_rewards = (
+                    self.collect_tensor_trajectories(
+                        min_steps=num_games,
+                        all_opponent_snapshots=[opponent] * self.num_envs,
+                    )
                 )
 
-                # Count wins based on total reward
-                if total_reward > 0:
-                    wins += 1
+                # Count wins based on individual episode rewards (tensor operations)
+                wins = (individual_rewards > 0).sum().item()
             else:
                 # Use scalar evaluation
                 for _ in range(num_games):
