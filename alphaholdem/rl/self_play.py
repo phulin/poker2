@@ -354,7 +354,12 @@ class SelfPlayTrainer:
         self.replay_buffer.start_adding_trajectories(self.num_envs)
 
         # Outer loop: collect complete trajectories until we have enough steps
-        while steps_collected < min_steps:
+        loop_count = 0
+        max_loops = 1000  # Safety limit to prevent infinite loops
+
+        while steps_collected < min_steps and loop_count < max_loops:
+            loop_count += 1
+            print("loop", steps_collected, min_steps, f"(loop {loop_count})")
             # Only process non-done environments to avoid bias towards short episodes
             active_mask = ~self.tensor_env.done
             active_indices = torch.where(active_mask)[0]
@@ -532,10 +537,7 @@ class SelfPlayTrainer:
 
             # Create trajectories for done environments
             done_indices = torch.where(dones)[0]
-            # Vectorized update of steps_collected, total_reward, and episode_count
-            steps_collected += per_traj_step_count[done_indices].sum().item()
             total_reward += per_env_rewards[done_indices].sum().item()
-            episode_count += done_indices.numel()
 
             # Trajectories are now added immediately via vectorized operations
             # No need for separate trajectory completion logic
@@ -574,7 +576,17 @@ class SelfPlayTrainer:
                 self.tensor_env.reset()
                 per_env_rewards[:] = 0.0
                 per_traj_step_count[:] = 0
-                self.replay_buffer.finish_adding_trajectories(self.num_envs)
+                trajectories_added, steps_added = (
+                    self.replay_buffer.finish_adding_trajectories(self.num_envs)
+                )
+                episode_count += trajectories_added
+                steps_collected += steps_added
+
+        if loop_count >= max_loops:
+            print(
+                f"Warning: Reached maximum loop count ({max_loops}), stopping collection early"
+            )
+            print(f"Collected {steps_collected} steps out of {min_steps} requested")
 
         return total_reward, episode_count
 
@@ -836,12 +848,11 @@ class SelfPlayTrainer:
         target_steps = self.batch_size * max(self.cfg.replay_buffer_batches, 1)
         if self.replay_buffer.num_steps() == 0:
             # Warmup: fill replay buffer with minimum required samples
-            min_steps = target_steps - self.batch_size
-            print(f"Warmup: filling replay buffer to {min_steps} steps...")
-            self._fill_replay_buffer(min_steps)
-
-        # Before update, add one more batch worth of fresh steps
-        self._fill_replay_buffer(self.batch_size)
+            print(f"Warmup: filling replay buffer to {target_steps} steps...")
+            self._fill_replay_buffer(target_steps)
+        else:
+            # Before update, add one batch worth of fresh steps
+            self._fill_replay_buffer(self.batch_size)
 
         # Trim buffer back to target_steps
         self.replay_buffer.trim_to_steps(target_steps)
@@ -864,25 +875,22 @@ class SelfPlayTrainer:
     @profile
     def _fill_replay_buffer(self, min_steps: int) -> None:
         """
-        Fill replay buffer with at least min_steps samples.
+        Fill replay buffer with at least min_steps samples using either tensor or scalar envs.
 
         Args:
             min_steps: Minimum number of steps to add to replay buffer
         """
-        steps_added = 0
-        while steps_added < min_steps:
-            if self.use_tensor_env:
-                total_reward, episode_count = self.collect_tensor_trajectories(
-                    min_steps - steps_added,
-                    all_opponent_snapshots=self.opponent_pool.snapshots,
-                )
+        if self.use_tensor_env:
+            total_reward, episode_count = self.collect_tensor_trajectories(
+                min_steps,
+                all_opponent_snapshots=self.opponent_pool.snapshots,
+            )
 
-                # Transitions are already added to vectorized buffer during collection
-                steps_added = self.replay_buffer.num_steps()
-
-                self.total_reward += total_reward
-                self.episode_count += episode_count
-            else:
+            self.total_reward += total_reward
+            self.episode_count += episode_count
+        else:
+            steps_added = 0
+            while steps_added < min_steps:
                 # Use scalar collection
                 sampled_opponent = self.opponent_pool.sample(k=1)
                 opponent = sampled_opponent[0] if sampled_opponent else None

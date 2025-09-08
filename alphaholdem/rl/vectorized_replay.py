@@ -124,19 +124,85 @@ class VectorizedReplayBuffer:
         self.advantages[clear_indices] = 0
         self.returns[clear_indices] = 0
 
-    def finish_adding_trajectories(self, num_trajectories: int) -> None:
+    def finish_adding_trajectories(self, num_trajectories: int) -> tuple[int, int]:
         """
         Finish adding trajectories and advance the ring buffer position.
         This should be called when environments are reset.
 
         Args:
             num_trajectories: Number of trajectories that were added
+
+        Returns:
+            Number of trajectories of nonzero length that were added (this is the change in self.size)
         """
+
+        # Compute the indices in the ring buffer window [position, position + num_trajectories)
+        start = self.position
+        end = (self.position + num_trajectories) % self.capacity
+
+        if num_trajectories == 0:
+            return 0, 0
+
+        if end > start:
+            indices = torch.arange(start, end, device=self.device)
+        else:
+            # Wraparound
+            indices = torch.cat(
+                [
+                    torch.arange(start, self.capacity, device=self.device),
+                    torch.arange(0, end, device=self.device),
+                ]
+            )
+
+        # Find which indices have 0-length trajectories
+        zero_length_mask = self.trajectory_lengths[indices] == 0
+
+        # Remove (compact out) zero-length trajectories by shifting nonzero-length ones forward
+        nonzero_indices = indices[~zero_length_mask]
+        num_valid = nonzero_indices.numel()
+        # If all are zero-length, just skip
+        if num_valid == 0:
+            # Advance position and update size as if nothing was added
+            return 0, 0
+
+        unused_indices = indices[num_valid:]
+
+        # Compact nonzero-length trajectories to the front of the window
+        # For each field, move data from nonzero_indices to the front of indices
+        for attr in [
+            "trajectory_lengths",
+            "valid_trajectories",
+            "current_step_positions",
+            "observations",
+            "actions",
+            "log_probs",
+            "rewards",
+            "dones",
+            "legal_masks",
+            "chips_placed",
+            "delta2",
+            "delta3",
+            "values",
+            "advantages",
+            "returns",
+        ]:
+            buf = getattr(self, attr)
+            buf[indices[:num_valid]] = buf[nonzero_indices]
+            # Zero out the now-unused slots at the end of the window
+            buf[unused_indices] = 0
+
+        # Only advance position and size by the number of valid (nonzero-length) trajectories
+        trajectories_added = num_valid
+
         # Advance the ring buffer position
-        self.position = (self.position + num_trajectories) % self.capacity
+        self.position = (self.position + trajectories_added) % self.capacity
 
         # Update buffer size
-        self.size = min(self.size + num_trajectories, self.capacity)
+        self.size = min(self.size + trajectories_added, self.capacity)
+
+        steps_added = self.trajectory_lengths[:num_valid].sum().item()
+
+        return trajectories_added, steps_added
 
     def add_batch(
         self,

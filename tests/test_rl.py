@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tempfile
+import os
 import torch
 
 from alphaholdem.rl.replay import (
@@ -9,6 +11,7 @@ from alphaholdem.rl.replay import (
     compute_gae_returns,
 )
 from alphaholdem.rl.losses import trinal_clip_ppo_loss
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def test_replay_buffer_and_gae():
@@ -88,7 +91,6 @@ def test_trinal_clip_ppo_loss():
 
 def test_self_play_trainer_basic():
     """Test basic trainer initialization and single trajectory collection."""
-    from alphaholdem.rl.self_play import SelfPlayTrainer
 
     trainer = SelfPlayTrainer(
         batch_size=8,
@@ -133,9 +135,6 @@ def test_self_play_trainer_basic():
 
 def test_checkpoint_save_load():
     """Test checkpoint saving and loading functionality."""
-    import tempfile
-    import os
-    from alphaholdem.rl.self_play import SelfPlayTrainer
 
     # Create a temporary directory for checkpoints
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -188,7 +187,6 @@ def test_checkpoint_save_load():
 
 def test_preflop_range_grid():
     """Test preflop range grid generation."""
-    from alphaholdem.rl.self_play import SelfPlayTrainer
 
     trainer = SelfPlayTrainer(
         learning_rate=3e-4,
@@ -227,7 +225,6 @@ def test_preflop_range_grid():
 
 def test_basic_training_step():
     """Test that a basic training step works and produces reasonable outputs."""
-    from alphaholdem.rl.self_play import SelfPlayTrainer
 
     trainer = SelfPlayTrainer(
         learning_rate=3e-4,
