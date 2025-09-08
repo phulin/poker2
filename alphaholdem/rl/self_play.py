@@ -404,21 +404,20 @@ class SelfPlayTrainer:
                 ):
                     # Use opponent models - assign opponents to environments
                     num_opps = len(all_opponent_snapshots)
-                    # Split opp_active_indices into num_opps approximately equal groups using torch.chunk
+                    # Split active_opp_acts into num_opps approximately equal groups
                     opp_env_groups = torch.chunk(active_opp_acts, num_opps)
-                    for opponent_idx, env_idxs_tensor in enumerate(opp_env_groups):
-                        if env_idxs_tensor.numel() == 0:
+                    for opponent_idx, opp_active_indices in enumerate(opp_env_groups):
+                        if opp_active_indices.numel() == 0:
                             continue
                         opponent = all_opponent_snapshots[opponent_idx]
 
-                        # Map back to active indices for tensor slicing
-                        active_idx_mask = torch.isin(active_indices, env_idxs_tensor)
-                        opp_cards = active_cards[active_idx_mask]
-                        opp_actions = active_actions[active_idx_mask]
+                        # Use indices directly into active arrays
+                        opp_cards = active_cards[opp_active_indices]
+                        opp_actions = active_actions[opp_active_indices]
 
                         opp_logits, opp_values = opponent.model(opp_cards, opp_actions)
-                        active_logits[active_idx_mask] = opp_logits
-                        active_values[active_idx_mask] = opp_values.squeeze(-1)
+                        active_logits[opp_active_indices] = opp_logits
+                        active_values[opp_active_indices] = opp_values.squeeze(-1)
                 elif active_opp_acts.numel() > 0:
                     # Self-play: use our model for opponent turns too
                     opp_cards = active_cards[active_opp_acts]
@@ -454,8 +453,12 @@ class SelfPlayTrainer:
                 # Compute delta bounds from actor perspective AFTER step
                 # For our acting envs, actor is player 0
                 chips = self.tensor_env.chips_placed.to(torch.float32)
-                our_delta2_tensor = -chips[active_we_act, 1] / scale  # -opponent chips
-                our_delta3_tensor = chips[active_we_act, 0] / scale  # our chips
+                # Convert active_we_act to full environment indices
+                our_env_indices = active_indices[active_we_act]
+                our_delta2_tensor = (
+                    -chips[our_env_indices, 1] / scale
+                )  # -opponent chips
+                our_delta3_tensor = chips[our_env_indices, 0] / scale  # our chips
 
                 # Pre-compute flattened observations for all our environments at once
                 our_cards_flat = active_cards[active_we_act].flatten(
@@ -489,11 +492,11 @@ class SelfPlayTrainer:
                     delta2=our_delta2_tensor,
                     delta3=our_delta3_tensor,
                     values=our_values_tensor,
-                    trajectory_indices=active_we_act,
+                    trajectory_indices=our_env_indices,  # Use full environment indices
                 )
 
                 # Update per-environment reward tracking
-                per_env_rewards[active_we_act] += our_rewards_tensor
+                per_env_rewards[our_env_indices] += our_rewards_tensor
 
             if active_opp_acts.numel() > 0:
                 # Check if any opponent actions ended the hand
@@ -510,7 +513,9 @@ class SelfPlayTrainer:
                     )
 
                 # Update per-environment reward tracking
-                per_env_rewards[active_opp_acts] += active_rewards[active_opp_acts]
+                per_env_rewards[active_indices[active_opp_acts]] += active_rewards[
+                    active_opp_acts
+                ]
 
             # Update step counts for active environments
             per_traj_step_count[active_indices] += 1
@@ -539,14 +544,18 @@ class SelfPlayTrainer:
             # Use premade chunking to efficiently group done environments by opponent
             if opp_env_groups is not None:
                 # Vectorized ELO update per opponent using existing chunking
-                for opponent_idx, env_idxs_tensor in enumerate(opp_env_groups):
-                    if env_idxs_tensor.numel() == 0:
+                for opponent_idx, opp_active_indices in enumerate(opp_env_groups):
+                    if opp_active_indices.numel() == 0:
                         continue
 
                     opponent = all_opponent_snapshots[opponent_idx]
 
+                    # Convert active indices to full environment indices
+                    opp_env_indices = active_indices[opp_active_indices]
+
                     # Find which environments in this opponent's group are done
-                    done_env_idxs_for_opponent = env_idxs_tensor[dones[env_idxs_tensor]]
+                    done_mask = dones[opp_env_indices]
+                    done_env_idxs_for_opponent = opp_env_indices[done_mask]
 
                     if done_env_idxs_for_opponent.numel() > 0:
                         # Slice rewards tensor directly - no .item() calls needed

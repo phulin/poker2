@@ -198,8 +198,12 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
             f"  P0: {''.join(p0_hole)}  P1: {''.join(p1_hole)}  Board: {''.join(board)}"
         )
 
-        # Check if hand ended by fold
-        if trainer.tensor_env.done[0]:
+        # Check if hand ended by looking at trajectory completion in the replay buffer
+        # (env may have been reset after trajectory collection)
+        if (
+            trainer.replay_buffer.size > 0
+            and trainer.replay_buffer.valid_trajectories.any()
+        ):
             print(
                 f"  Hand ended. Winner: {trainer.tensor_env.winner[0] if hasattr(trainer.tensor_env, 'winner') else 'Unknown'}"
             )

@@ -281,7 +281,7 @@ class VectorizedReplayBuffer:
 
         Args:
             rewards: [B, T] - rewards for each trajectory
-            values: [B, T+1] - values including terminal values
+            values: [B, T] - values including terminal values
             dones: [B, T] - done flags (0/1)
             gamma: discount factor
             lam: GAE lambda parameter
@@ -292,36 +292,33 @@ class VectorizedReplayBuffer:
         """
         # rewards: [B, T], values: [B, T+1], dones: [B, T] (0/1)
         B, T = rewards.shape
-        device = rewards.device
-        dtype = rewards.dtype
+        device, dtype = rewards.device, rewards.dtype
 
+        # Compute lengths from dones: length is the first True in each row, or T if no True, all in torch
+        # Find first done (==1) in each row. There should always be one.
+        first_done_idx = dones.long().argmax(dim=1)
+        lengths = first_done_idx + 1
+        valid = torch.arange(T, device=device)[None, :] < lengths[:, None]
+        next_valid = torch.cat([valid[:, 1:], torch.zeros_like(valid[:, :1])], dim=1)
+        nonterminal = (1.0 - dones.to(dtype)) * next_valid.to(dtype)
+
+        # Mask deltas outside valid region
         deltas = (
-            rewards + gamma * values[:, 1:] * (1.0 - dones) - values[:, :-1]
-        )  # [B, T]
+            rewards + gamma * values[:, 1:] * (1.0 - dones.to(dtype)) - values[:, :-1]
+        )
+        deltas = deltas * valid.to(dtype)
 
-        # Work in reversed time to express: A_t = δ_t + c * (1-done_{t}) * A_{t+1},  c = γλ
-        c = gamma * lam
-        rev_deltas = torch.flip(deltas, dims=[1])  # [B, T]
-        rev_notdone = torch.flip(1.0 - dones, dims=[1])  # [B, T]
+        adv = torch.zeros(B, T, device=device, dtype=dtype)
+        gae = torch.zeros(B, device=device, dtype=dtype)
+        for t in reversed(range(T)):
+            gae = deltas[:, t] + gamma * lam * nonterminal[:, t] * gae
+            adv[:, t] = gae
 
-        # Build the per-step multiplier m_t = c * (1 - done_t) in reversed order
-        m = c * rev_notdone  # [B, T]
-
-        # We want: x_t = rev_deltas_t + m_t * x_{t-1}   (a scan)
-        # Turn this linear recurrence into a weighted cumulative sum using cumulative products.
-        # Compute cumulative product of m with an initial 1 to align offsets.
-        one = torch.ones(B, 1, device=device, dtype=dtype)
-        m_pad = torch.cat([one, m[:, :-1]], dim=1)  # shift-right for exclusive product
-        cumprod = torch.cumprod(m_pad, dim=1)  # [B, T]
-
-        # The solution to x = rev_deltas ⊙ cumprod  scanned, then re-normalize:
-        # Let y = rev_deltas * cumprod; then x = cumsum(y, dim=1) / cumprod
-        y = rev_deltas * cumprod
-        x = torch.cumsum(y, dim=1) / torch.clamp_min(cumprod, 1e-8)  # [B, T]
-
-        advantages = torch.flip(x, dims=[1])  # back to forward time
-        returns = advantages + values[:, :-1]
-        return advantages, returns
+        returns = adv + values[:, :-1]
+        # Optional: zero out padding positions
+        adv = adv * valid.to(dtype)
+        returns = returns * valid.to(dtype) + values[:, :-1] * (~valid).to(dtype)
+        return adv, returns
 
     def sample_trajectories(self, num_trajectories: int) -> Dict[str, torch.Tensor]:
         """Sample complete trajectories for PPO updates."""
