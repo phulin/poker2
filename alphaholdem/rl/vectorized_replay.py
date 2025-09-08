@@ -25,6 +25,10 @@ class VectorizedReplayBuffer:
         self.position = 0  # Next trajectory write position
         self.size = 0  # Total number of valid trajectories
 
+        self.open_batch = (
+            -1
+        )  # -1 if no batch is open, otherwise the nominal size of the open batch
+
         # Pre-allocate tensors for all transition fields: (capacity, max_trajectory_length, ...)
         self.observations = torch.zeros(
             capacity,
@@ -80,7 +84,7 @@ class VectorizedReplayBuffer:
             capacity, dtype=torch.long, device=device
         )
 
-    def start_adding_trajectories(self, num_trajectories: int) -> None:
+    def start_adding_trajectory_batches(self, num_trajectories: int) -> None:
         """
         Mark the start of new trajectories being added to the buffer.
         Clear out rows up to position + num_trajectories to prepare for new data.
@@ -88,6 +92,9 @@ class VectorizedReplayBuffer:
         Args:
             num_trajectories: Number of trajectories that will be added
         """
+
+        self.open_batch = num_trajectories
+
         # Clear out rows that will be used for new trajectories
         end_position = (self.position + num_trajectories) % self.capacity
 
@@ -124,7 +131,7 @@ class VectorizedReplayBuffer:
         self.advantages[clear_indices] = 0
         self.returns[clear_indices] = 0
 
-    def finish_adding_trajectories(self, num_trajectories: int) -> tuple[int, int]:
+    def finish_adding_trajectory_batches(self) -> tuple[int, int]:
         """
         Finish adding trajectories and advance the ring buffer position.
         This should be called when environments are reset.
@@ -135,6 +142,13 @@ class VectorizedReplayBuffer:
         Returns:
             Number of trajectories of nonzero length that were added (this is the change in self.size)
         """
+
+        assert (
+            self.open_batch > 0
+        ), "Must call start_adding_trajectories before finishing a batch"
+
+        num_trajectories = self.open_batch
+        self.open_batch = -1
 
         # Compute the indices in the ring buffer window [position, position + num_trajectories)
         start = self.position
@@ -235,6 +249,10 @@ class VectorizedReplayBuffer:
             values: [batch_size]
             trajectory_indices: [batch_size] - which trajectory each transition belongs to (in source space)
         """
+
+        assert (
+            self.open_batch > 0
+        ), "Must call start_adding_trajectories before adding a batch"
 
         # Convert user's source trajectory indices to ring buffer indices
         buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
@@ -530,7 +548,7 @@ class VectorizedReplayBuffer:
     def add_trajectory_legacy(self, trajectory) -> None:
         """Add a trajectory for backward compatibility with scalar environment."""
         if trajectory.transitions:
-            self.start_adding_trajectories(1)
+            self.start_adding_trajectory_batches(1)
 
             # Iterate over transitions directly
             for t in trajectory.transitions:
@@ -564,7 +582,7 @@ class VectorizedReplayBuffer:
                     ),
                 )
 
-            self.finish_adding_trajectories(1)
+            self.finish_adding_trajectory_batches()
 
     def __len__(self) -> int:
         return self.size

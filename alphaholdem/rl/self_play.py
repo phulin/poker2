@@ -357,7 +357,7 @@ class SelfPlayTrainer:
         while steps_collected < min_steps and loop_count < max_loops:
             if not adding_trajectories:
                 # Initialize trajectory collection; reserve space in buffer.
-                self.replay_buffer.start_adding_trajectories(self.num_envs)
+                self.replay_buffer.start_adding_trajectory_batches(self.num_envs)
                 adding_trajectories = True
 
             loop_count += 1
@@ -579,7 +579,7 @@ class SelfPlayTrainer:
                 per_env_rewards[:] = 0.0
                 per_traj_step_count[:] = 0
                 trajectories_added, steps_added = (
-                    self.replay_buffer.finish_adding_trajectories(self.num_envs)
+                    self.replay_buffer.finish_adding_trajectory_batches()
                 )
                 adding_trajectories = False
                 episode_count += trajectories_added
