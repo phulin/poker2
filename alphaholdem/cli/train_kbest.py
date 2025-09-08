@@ -37,6 +37,7 @@ def train_kbest(
     wandb_project: str = "poker-kbest",
     wandb_name: str = None,
     wandb_tags: list = None,
+    wandb_run_id: str = None,
 ):
     """
     Train AlphaHoldem agent using K-Best self-play.
@@ -57,6 +58,7 @@ def train_kbest(
         wandb_project: Wandb project name
         wandb_name: Wandb run name
         wandb_tags: Wandb tags
+        wandb_run_id: Wandb run ID to resume (if resuming from checkpoint)
     """
 
     # Create checkpoint directory
@@ -64,6 +66,18 @@ def train_kbest(
 
     # Load optional config (centralized defaults)
     cfg = get_config(config)
+
+    # Load checkpoint if specified to get wandb run ID
+    start_step = 0
+    wandb_run_id_from_checkpoint = None
+    if resume_from and os.path.exists(resume_from):
+        print(f"Loading checkpoint to extract wandb run ID: {resume_from}")
+        checkpoint = torch.load(resume_from, weights_only=False, map_location=device)
+        wandb_run_id_from_checkpoint = checkpoint.get("wandb_run_id")
+        if wandb_run_id_from_checkpoint:
+            print(f"Found wandb run ID in checkpoint: {wandb_run_id_from_checkpoint}")
+        else:
+            print("No wandb run ID found in checkpoint")
 
     # Initialize trainer with K-Best pool
     trainer = SelfPlayTrainer(
@@ -77,13 +91,13 @@ def train_kbest(
         wandb_project=wandb_project,
         wandb_name=wandb_name,
         wandb_tags=wandb_tags,
+        wandb_run_id=wandb_run_id or wandb_run_id_from_checkpoint,
     )
 
-    # Resume from checkpoint if specified
-    start_step = 0
+    # Load checkpoint if specified (after trainer initialization for wandb resumption)
     if resume_from and os.path.exists(resume_from):
-        print(f"Resuming from checkpoint: {resume_from}")
-        start_step = trainer.load_checkpoint(resume_from)
+        print(f"Loading checkpoint: {resume_from}")
+        start_step, _ = trainer.load_checkpoint(resume_from)
 
     # Record training start time
     training_start_time = time.time()
@@ -112,7 +126,7 @@ def train_kbest(
         step_start_time = time.time()
 
         # Training step: collects until batch_size steps
-        stats = trainer.train_step()
+        stats = trainer.train_step(step)
 
         # Calculate times
         step_elapsed_time = time.time() - step_start_time
@@ -254,6 +268,11 @@ def main():
         default=["kbest", "poker", "ppo"],
         help="Wandb tags for this run",
     )
+    parser.add_argument(
+        "--wandb-run-id",
+        type=str,
+        help="Wandb run ID to resume (overrides checkpoint wandb run ID)",
+    )
 
     args = parser.parse_args()
 
@@ -291,6 +310,7 @@ def main():
         wandb_project=args.wandb_project,
         wandb_name=args.wandb_name,
         wandb_tags=args.wandb_tags,
+        wandb_run_id=args.wandb_run_id,
     )
 
     print("Training completed!")

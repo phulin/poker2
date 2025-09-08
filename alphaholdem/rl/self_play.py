@@ -65,6 +65,7 @@ class SelfPlayTrainer:
         wandb_project: str = "poker-ppo",
         wandb_name: str = None,
         wandb_tags: list = None,
+        wandb_run_id: str = None,
     ):
         self.cfg = get_config(config) if config is not None else get_config(None)
 
@@ -183,11 +184,12 @@ class SelfPlayTrainer:
         self.use_wandb = use_wandb and WANDB_AVAILABLE
         self.wandb_step = 0
         if self.use_wandb:
-            wandb.init(
-                project=wandb_project,
-                name=wandb_name,
-                tags=wandb_tags or [],
-                config={
+            # Determine if we're resuming an existing run
+            wandb_init_kwargs = {
+                "project": wandb_project,
+                "name": wandb_name,
+                "tags": wandb_tags or [],
+                "config": {
                     "learning_rate": lr,
                     "batch_size": self.batch_size,
                     "num_epochs": self.num_epochs,
@@ -204,8 +206,15 @@ class SelfPlayTrainer:
                     "num_envs": num_envs,
                     "device": str(self.device),
                 },
-            )
-            print(f"Wandb initialized for project: {wandb_project}")
+            }
+            if wandb_run_id:
+                wandb_init_kwargs["id"] = wandb_run_id
+                wandb_init_kwargs["resume"] = "must"
+                wandb.init(**wandb_init_kwargs)
+                print(f"Wandb resumed run {wandb_run_id} for project: {wandb_project}")
+            else:
+                wandb.init(**wandb_init_kwargs)
+                print(f"Wandb initialized new run for project: {wandb_project}")
         elif use_wandb and not WANDB_AVAILABLE:
             print(
                 "Warning: wandb requested but not available. Install with: pip install wandb"
@@ -364,7 +373,8 @@ class SelfPlayTrainer:
         self,
         min_steps: int,
         all_opponent_snapshots: Optional[list[AgentSnapshot]] = None,
-    ) -> tuple[float, int, list[float]]:
+        add_to_replay_buffer: bool = True,
+    ) -> tuple[float, int, torch.Tensor]:
         """
         Collect trajectories from tensorized environments until we have at least min_steps.
         Only processes non-done environments in each iteration to avoid bias towards short episodes.
@@ -376,6 +386,8 @@ class SelfPlayTrainer:
             opponent_snapshots: Optional list of opponent snapshots to play against.
                               If None, plays against self (self-play).
                               If provided, should have length <= num_envs.
+            add_to_replay_buffer: If True, add collected trajectories to replay buffer.
+                                If False, only collect and return statistics (for evaluation).
 
         Returns:
             Tuple of (total reward, episode count, tensor of individual episode rewards)
@@ -386,9 +398,8 @@ class SelfPlayTrainer:
         total_reward = 0.0
         episode_count = 0
         steps_collected = 0
-        individual_episode_rewards = (
-            []
-        )  # Track individual episode rewards as list of tensors
+        # Track individual episode rewards as list of tensors
+        individual_episode_rewards = []
 
         # Initialize all environments
         self.tensor_env.reset()
@@ -406,7 +417,7 @@ class SelfPlayTrainer:
         adding_trajectories = False
 
         while steps_collected < min_steps and loop_count < max_loops:
-            if not adding_trajectories:
+            if not adding_trajectories and add_to_replay_buffer:
                 # Initialize trajectory collection; reserve space in buffer.
                 self.replay_buffer.start_adding_trajectory_batches(self.num_envs)
                 adding_trajectories = True
@@ -548,19 +559,20 @@ class SelfPlayTrainer:
                 our_placed_chips_tensor = active_placed_chips[active_we_act]
 
                 # Add transitions immediately using vectorized operations
-                self.replay_buffer.add_batch(
-                    observations=our_observations,
-                    actions=our_actions_tensor,
-                    log_probs=our_log_probs_tensor,
-                    rewards=our_rewards_tensor,
-                    dones=our_dones_tensor,
-                    legal_masks=our_legal_masks_tensor,
-                    chips_placed=our_placed_chips_tensor,
-                    delta2=our_delta2_tensor,
-                    delta3=our_delta3_tensor,
-                    values=our_values_tensor,
-                    trajectory_indices=our_env_indices,  # Use full environment indices
-                )
+                if add_to_replay_buffer:
+                    self.replay_buffer.add_batch(
+                        observations=our_observations,
+                        actions=our_actions_tensor,
+                        log_probs=our_log_probs_tensor,
+                        rewards=our_rewards_tensor,
+                        dones=our_dones_tensor,
+                        legal_masks=our_legal_masks_tensor,
+                        chips_placed=our_placed_chips_tensor,
+                        delta2=our_delta2_tensor,
+                        delta3=our_delta3_tensor,
+                        values=our_values_tensor,
+                        trajectory_indices=our_env_indices,  # Use full environment indices
+                    )
 
                 # Update per-environment reward tracking
                 per_env_rewards[our_env_indices] += our_rewards_tensor
@@ -573,7 +585,7 @@ class SelfPlayTrainer:
 
                 # For environments where opponent's action ended the hand,
                 # update the last transition's reward using vectorized method
-                if opp_ended_hands.numel() > 0:
+                if opp_ended_hands.numel() > 0 and add_to_replay_buffer:
                     # Use vectorized method to update rewards
                     self.replay_buffer.update_opponent_rewards(
                         opp_ended_hands, opp_rewards
@@ -641,14 +653,19 @@ class SelfPlayTrainer:
             # If all environments are done, reset all of them
             if active_indices.numel() == 0:
                 self.tensor_env.reset()
+                if add_to_replay_buffer:
+                    trajectories_added, steps_added = (
+                        self.replay_buffer.finish_adding_trajectory_batches()
+                    )
+                    episode_count += trajectories_added
+                    steps_collected += steps_added
+                else:
+                    # For evaluation, just count episodes without adding to buffer
+                    episode_count += self.num_envs
+                    steps_collected += per_traj_step_count.sum().item()
                 per_env_rewards[:] = 0.0
                 per_traj_step_count[:] = 0
-                trajectories_added, steps_added = (
-                    self.replay_buffer.finish_adding_trajectory_batches()
-                )
                 adding_trajectories = False
-                episode_count += trajectories_added
-                steps_collected += steps_added
 
         if loop_count >= max_loops:
             print(
@@ -911,12 +928,12 @@ class SelfPlayTrainer:
         }
 
     @profile
-    def train_step(self) -> dict:
+    def train_step(self, step: int = None) -> dict:
         """
         Single training step: collect trajectories against K-Best opponents and update model.
 
         Args:
-            num_trajectories: Number of trajectories to collect
+            step: Optional step number for wandb logging. If None, uses internal wandb_step counter.
 
         Returns:
             Dictionary with training statistics
@@ -951,9 +968,11 @@ class SelfPlayTrainer:
 
         # Log to wandb if enabled
         if self.use_wandb:
+            # Use passed step if provided, otherwise use internal counter
+            wandb_step = (step + 1) if step is not None else (self.wandb_step + 1)
             wandb.log(
                 {
-                    "step": self.wandb_step,
+                    "step": wandb_step,  # Match CLI display (1-indexed)
                     "episode_count": training_stats["episode_count"],
                     "avg_reward": training_stats["avg_reward"],
                     "current_elo": training_stats["current_elo"],
@@ -967,7 +986,9 @@ class SelfPlayTrainer:
                     "num_samples": training_stats["num_samples"],
                 }
             )
-            self.wandb_step += 1
+            # Only increment internal counter if no step was passed
+            if step is None:
+                self.wandb_step += 1
 
         return training_stats
 
@@ -1043,6 +1064,10 @@ class SelfPlayTrainer:
             "replay_buffer": self.replay_buffer,
             # Store opponent pool inline for single-file checkpoints
             "opponent_pool": pool_data,
+            # Store wandb run ID for resumption
+            "wandb_run_id": wandb.run.id if self.use_wandb and wandb.run else None,
+            # Store wandb step for consistent logging
+            "wandb_step": self.wandb_step,
             "config": {
                 "num_bet_bins": self.num_bet_bins,
                 "batch_size": self.batch_size,
@@ -1059,8 +1084,8 @@ class SelfPlayTrainer:
         torch.save(checkpoint, path)
         print(f"Checkpoint saved to {path}")
 
-    def load_checkpoint(self, path: str) -> int:
-        """Load model checkpoint and opponent pool. Returns the step number."""
+    def load_checkpoint(self, path: str) -> tuple[int, str | None]:
+        """Load model checkpoint and opponent pool. Returns (step_number, wandb_run_id)."""
         # PyTorch 2.6 defaults to weights_only=True which blocks unpickling
         # custom classes like our ReplayBuffer. We trust our local checkpoints,
         # so explicitly allow full load.
@@ -1071,6 +1096,10 @@ class SelfPlayTrainer:
         self.episode_count = checkpoint["episode_count"]
         self.total_reward = checkpoint["total_reward"]
         self.opponent_pool.current_elo = checkpoint.get("current_elo", 1200.0)
+
+        # Restore wandb step for consistent logging
+        # If wandb_step not in checkpoint (old checkpoint), set it to match step
+        self.wandb_step = checkpoint.get("wandb_step", checkpoint["step"])
 
         # Restore replay buffer if present (skip for now due to structure change)
         # if "replay_buffer" in checkpoint and checkpoint["replay_buffer"] is not None:
@@ -1122,7 +1151,10 @@ class SelfPlayTrainer:
                     f"No opponent pool found at {pool_path}; starting with empty pool"
                 )
 
-        return checkpoint["step"]
+        # Extract wandb run ID for resumption
+        wandb_run_id = checkpoint.get("wandb_run_id")
+
+        return checkpoint["step"], wandb_run_id
 
     def evaluate_against_pool(self, num_games: int = 100) -> dict:
         """
@@ -1143,46 +1175,39 @@ class SelfPlayTrainer:
         total_wins = 0
         total_games = 0
 
-        for i, opponent in enumerate(self.opponent_pool.snapshots):
-            wins = 0
+        # Use no_grad to prevent gradient computation during evaluation
+        with torch.no_grad():
+            for i, opponent in enumerate(self.opponent_pool.snapshots):
+                wins = 0
 
-            if self.use_tensor_env:
-                # Use tensorized evaluation with individual episode reward tracking
-                total_reward, episode_count, individual_rewards = (
-                    self.collect_tensor_trajectories(
+                if self.use_tensor_env:
+                    # Use tensorized evaluation with individual episode reward tracking
+                    _, _, individual_rewards = self.collect_tensor_trajectories(
                         min_steps=num_games,
                         all_opponent_snapshots=[opponent] * self.num_envs,
+                        add_to_replay_buffer=False,  # Don't pollute training data
                     )
-                )
 
-                # Count wins based on individual episode rewards (tensor operations)
-                wins = (individual_rewards > 0).sum().item()
-            else:
-                # Use scalar evaluation
-                for _ in range(num_games):
-                    _, final_reward = self.collect_trajectory(
-                        opponent_snapshot=opponent
-                    )
-                    if final_reward > 0:
-                        wins += 1
+                    # Count wins based on individual episode rewards (tensor operations)
+                    wins = (individual_rewards > 0).sum().item()
+                else:
+                    # Use scalar evaluation
+                    for _ in range(num_games):
+                        _, final_reward = self.collect_trajectory(
+                            opponent_snapshot=opponent
+                        )
+                        if final_reward > 0:
+                            wins += 1
 
-            win_rate = wins / num_games
-            results[f"opponent_{i}_step_{opponent.step}"] = {
-                "win_rate": win_rate,
-                "opponent_elo": opponent.elo,
-                "wins": wins,
-                "total_games": num_games,
-            }
-            total_wins += wins
-            total_games += num_games
-
-            # Update ELO ratings based on evaluation results
-            if wins > num_games // 2:  # Won majority of games
-                result = "win"
-            elif wins < num_games // 2:  # Lost majority of games
-                result = "loss"
-            else:  # Tied
-                result = "draw"
+                win_rate = wins / num_games
+                results[f"opponent_{i}_step_{opponent.step}"] = {
+                    "win_rate": win_rate,
+                    "opponent_elo": opponent.elo,
+                    "wins": wins,
+                    "total_games": num_games,
+                }
+                total_wins += wins
+                total_games += num_games
 
         overall_win_rate = total_wins / total_games if total_games > 0 else 0.0
 
