@@ -98,9 +98,8 @@ class TestVectorizedReplayBuffer:
         # Fill buffer with trajectories
         for i in range(12):  # More than capacity
             batch = self._create_test_batch(1, buffer.device)
-            trajectory_indices = torch.tensor(
-                [i % buffer.capacity], device=buffer.device
-            )
+            # Use source/env trajectory index (class offsets by position)
+            trajectory_indices = torch.tensor([0], device=buffer.device)
             batch["dones"][0] = True
             buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
             # Call finish_adding_trajectories to update position
@@ -341,7 +340,8 @@ class TestVectorizedReplayBuffer:
         # Fill buffer to near capacity
         for i in range(8):
             batch = self._create_test_batch(1, buffer.device)
-            trajectory_indices = torch.tensor([i], device=buffer.device)
+            # Use source/env trajectory index (class offsets by position)
+            trajectory_indices = torch.tensor([0], device=buffer.device)
             batch["dones"][0] = True
             buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
             buffer.finish_adding_trajectories(1)
@@ -470,7 +470,8 @@ class TestVectorizedReplayBuffer:
         # Fill buffer completely
         for i in range(10):
             batch = self._create_test_batch(1, buffer.device)
-            trajectory_indices = torch.tensor([i], device=buffer.device)
+            # Use source/env trajectory index (class offsets by position)
+            trajectory_indices = torch.tensor([0], device=buffer.device)
             batch["dones"][0] = True
             buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
             buffer.finish_adding_trajectories(1)

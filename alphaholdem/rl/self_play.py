@@ -113,9 +113,8 @@ class SelfPlayTrainer:
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights
         # Replay buffer capacity in steps is batch_size * replay_buffer_batches
-        buffer_capacity = self.batch_size * max(
-            1, int(getattr(self.cfg, "replay_buffer_batches", 1))
-        )
+        # Add an extra batch so we can reserve space for the next batch.
+        buffer_capacity = self.batch_size * max(1, 1 + self.cfg.replay_buffer_batches)
 
         # Calculate observation dimensions
         # Cards: 6 channels * 4 suits * 13 ranks = 312
@@ -350,14 +349,17 @@ class SelfPlayTrainer:
         )
         max_steps = 50  # Safety limit per trajectory
 
-        # Initialize trajectory collection
-        self.replay_buffer.start_adding_trajectories(self.num_envs)
-
         # Outer loop: collect complete trajectories until we have enough steps
         loop_count = 0
         max_loops = 1000  # Safety limit to prevent infinite loops
+        adding_trajectories = False
 
         while steps_collected < min_steps and loop_count < max_loops:
+            if not adding_trajectories:
+                # Initialize trajectory collection; reserve space in buffer.
+                self.replay_buffer.start_adding_trajectories(self.num_envs)
+                adding_trajectories = True
+
             loop_count += 1
             print("loop", steps_collected, min_steps, f"(loop {loop_count})")
             # Only process non-done environments to avoid bias towards short episodes
@@ -579,6 +581,7 @@ class SelfPlayTrainer:
                 trajectories_added, steps_added = (
                     self.replay_buffer.finish_adding_trajectories(self.num_envs)
                 )
+                adding_trajectories = False
                 episode_count += trajectories_added
                 steps_collected += steps_added
 

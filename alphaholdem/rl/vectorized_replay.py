@@ -165,6 +165,7 @@ class VectorizedReplayBuffer:
             # Advance position and update size as if nothing was added
             return 0, 0
 
+        compacted_indices = indices[:num_valid]
         unused_indices = indices[num_valid:]
 
         # Compact nonzero-length trajectories to the front of the window
@@ -187,7 +188,7 @@ class VectorizedReplayBuffer:
             "returns",
         ]:
             buf = getattr(self, attr)
-            buf[indices[:num_valid]] = buf[nonzero_indices]
+            buf[compacted_indices] = buf[nonzero_indices]
             # Zero out the now-unused slots at the end of the window
             buf[unused_indices] = 0
 
@@ -200,7 +201,7 @@ class VectorizedReplayBuffer:
         # Update buffer size
         self.size = min(self.size + trajectories_added, self.capacity)
 
-        steps_added = self.trajectory_lengths[:num_valid].sum().item()
+        steps_added = self.trajectory_lengths[compacted_indices].sum().item()
 
         return trajectories_added, steps_added
 
@@ -235,10 +236,11 @@ class VectorizedReplayBuffer:
             trajectory_indices: [batch_size] - which trajectory each transition belongs to (in source space)
         """
 
+        # Convert user's source trajectory indices to ring buffer indices
         buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
 
-        # Get current step positions for each trajectory
-        step_positions = self.current_step_positions[trajectory_indices]
+        # Get current step positions for each trajectory using buffer indices
+        step_positions = self.current_step_positions[buffer_trajectory_indices]
 
         # Check if any trajectories would exceed max length
         if (step_positions >= self.max_trajectory_length).any():
@@ -275,9 +277,6 @@ class VectorizedReplayBuffer:
 
             # Reset step positions for completed trajectories
             self.current_step_positions[completed_trajectories] = 0
-
-            # Update buffer metadata
-            self.size = min(self.size + len(completed_trajectories), self.capacity)
 
     def compute_gae_returns(self, gamma: float = 0.999, lambda_: float = 0.95) -> None:
         """Compute GAE advantages and returns for all stored trajectories using vectorized operations."""
