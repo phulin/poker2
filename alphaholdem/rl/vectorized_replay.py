@@ -243,16 +243,37 @@ class VectorizedReplayBuffer:
         )
 
         # Store computed values back to the buffer (vectorized)
-        lengths = self.trajectory_lengths[valid_indices]
-        mask = torch.arange(advantages.shape[1], device=self.device).unsqueeze(
-            0
-        ) < lengths.unsqueeze(1)
-        self.advantages[valid_indices] = torch.where(
-            mask, advantages, self.advantages[valid_indices]
-        )
-        self.returns[valid_indices] = torch.where(
-            mask, returns, self.returns[valid_indices]
-        )
+        self.advantages[valid_indices, :max_length] = advantages
+        self.returns[valid_indices, :max_length] = returns
+
+    def update_opponent_rewards(
+        self, trajectory_indices: torch.Tensor, opponent_rewards: torch.Tensor
+    ) -> None:
+        """
+        Update the last transition's reward for trajectories where opponent ended the hand.
+
+        Args:
+            trajectory_indices: [K] - trajectory indices to update
+            opponent_rewards: [K] - rewards from opponent's perspective (will be negated)
+        """
+        if trajectory_indices.numel() == 0:
+            return
+
+        # Get current step positions for each trajectory
+        step_positions = self.current_step_positions[trajectory_indices]
+
+        # Only update trajectories that have at least one step
+        valid_mask = step_positions > 0
+        if not valid_mask.any():
+            return
+
+        valid_trajectories = trajectory_indices[valid_mask]
+        valid_step_positions = step_positions[valid_mask] - 1  # Last step index
+        valid_rewards = -opponent_rewards[valid_mask]  # Negate for our perspective
+
+        # Vectorized update of rewards and done flags
+        self.rewards[valid_trajectories, valid_step_positions] = valid_rewards
+        self.dones[valid_trajectories, valid_step_positions] = True
 
     def _compute_gae_vectorized(self, rewards, values, dones, gamma=0.99, lam=0.95):
         """
@@ -321,7 +342,7 @@ class VectorizedReplayBuffer:
         ]
 
         # Vectorized collection of all transitions from sampled trajectories
-        lengths = self.trajectory_lengths[traj_indices].cpu()
+        lengths = self.trajectory_lengths[traj_indices]
         max_len = lengths.max()
         mask = torch.arange(max_len, device=self.device).unsqueeze(
             0
@@ -350,17 +371,17 @@ class VectorizedReplayBuffer:
         all_delta2 = d2.reshape(-1)[mask_flat]
         all_delta3 = d3.reshape(-1)[mask_flat]
 
-        # Concatenate all trajectories
-        if all_observations:
+        # Return the flattened data directly
+        if all_observations.numel() > 0:
             return {
-                "observations": torch.cat(all_observations, dim=0),
-                "actions": torch.cat(all_actions, dim=0),
-                "log_probs_old": torch.cat(all_log_probs, dim=0),
-                "advantages": torch.cat(all_advantages, dim=0),
-                "returns": torch.cat(all_returns, dim=0),
-                "legal_masks": torch.cat(all_legal_masks, dim=0),
-                "delta2": torch.cat(all_delta2, dim=0),
-                "delta3": torch.cat(all_delta3, dim=0),
+                "observations": all_observations,
+                "actions": all_actions,
+                "log_probs_old": all_log_probs,
+                "advantages": all_advantages,
+                "returns": all_returns,
+                "legal_masks": all_legal_masks,
+                "delta2": all_delta2,
+                "delta3": all_delta3,
             }
         else:
             raise ValueError("No valid trajectories found")
@@ -442,28 +463,16 @@ class VectorizedReplayBuffer:
     def add_trajectory_legacy(self, trajectory) -> None:
         """Add a trajectory for backward compatibility with scalar environment."""
         # Convert trajectory to batch format
-        observations = []
-        actions = []
-        log_probs = []
-        rewards = []
-        dones = []
-        legal_masks = []
-        chips_placed = []
-        delta2 = []
-        delta3 = []
-        values = []
-
-        for transition in trajectory.transitions:
-            observations.append(transition.observation)
-            actions.append(transition.action)
-            log_probs.append(transition.log_prob)
-            rewards.append(transition.reward)
-            dones.append(transition.done)
-            legal_masks.append(transition.legal_mask)
-            chips_placed.append(transition.chips_placed)
-            delta2.append(transition.delta2)
-            delta3.append(transition.delta3)
-            values.append(transition.value)
+        observations = [t.observation for t in trajectory.transitions]
+        actions = [t.action for t in trajectory.transitions]
+        log_probs = [t.log_prob for t in trajectory.transitions]
+        rewards = [t.reward for t in trajectory.transitions]
+        dones = [t.done for t in trajectory.transitions]
+        legal_masks = [t.legal_mask for t in trajectory.transitions]
+        chips_placed = [t.chips_placed for t in trajectory.transitions]
+        delta2 = [t.delta2 for t in trajectory.transitions]
+        delta3 = [t.delta3 for t in trajectory.transitions]
+        values = [t.value for t in trajectory.transitions]
 
         # Convert to tensors and add as batch
         if observations:

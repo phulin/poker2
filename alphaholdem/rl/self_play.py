@@ -350,10 +350,6 @@ class SelfPlayTrainer:
         )
         max_steps = 50  # Safety limit per trajectory
 
-        # Track trajectory assignments for vectorized buffer operations
-        trajectory_assignments = {}  # env_idx -> trajectory_idx in buffer
-        next_trajectory_idx = 0
-
         # Initialize trajectory collection
         self.replay_buffer.start_adding_trajectories(self.num_envs)
 
@@ -377,10 +373,11 @@ class SelfPlayTrainer:
             with torch.no_grad():
                 # Determine which active environments need our model vs opponent models
                 # Save actor mask BEFORE stepping; these are the envs where we act now
-                active_to_act = self.tensor_env.to_act[active_indices]
-                actor_is_ours = active_to_act == 0
-                our_active_indices = active_indices[actor_is_ours]
-                opp_active_indices = active_indices[active_to_act == 1]
+                original_to_act = self.tensor_env.to_act.clone()
+                active_who_acts = original_to_act[active_indices]
+                # these two are indices INTO THE ACTIVE ENV ARRAY only
+                active_we_act = torch.where(active_who_acts == 0)[0]
+                active_opp_acts = torch.where(active_who_acts == 1)[0]
 
                 # Initialize logits and values tensors for active environments only
                 active_logits = torch.zeros(
@@ -389,26 +386,26 @@ class SelfPlayTrainer:
                 active_values = torch.zeros(active_indices.numel(), device=self.device)
 
                 # Get predictions from our model for our turns
-                if our_active_indices.numel() > 0:
-                    our_cards = active_cards[actor_is_ours]
-                    our_actions = active_actions[actor_is_ours]
+                if active_we_act.numel() > 0:
+                    our_cards = active_cards[active_we_act]
+                    our_actions = active_actions[active_we_act]
 
                     our_logits, our_values = self.model(our_cards, our_actions)
 
-                    active_logits[actor_is_ours] = our_logits
-                    active_values[actor_is_ours] = our_values.squeeze(-1)
+                    active_logits[active_we_act] = our_logits
+                    active_values[active_we_act] = our_values.squeeze(-1)
 
                 # Get predictions from opponent models for opponent turns
                 opp_env_groups: Tuple[torch.Tensor, ...] | None = None
                 if (
                     all_opponent_snapshots is not None
                     and len(all_opponent_snapshots) > 0
-                    and opp_active_indices.numel() > 0
+                    and active_opp_acts.numel() > 0
                 ):
                     # Use opponent models - assign opponents to environments
                     num_opps = len(all_opponent_snapshots)
                     # Split opp_active_indices into num_opps approximately equal groups using torch.chunk
-                    opp_env_groups = torch.chunk(opp_active_indices, num_opps)
+                    opp_env_groups = torch.chunk(active_opp_acts, num_opps)
                     for opponent_idx, env_idxs_tensor in enumerate(opp_env_groups):
                         if env_idxs_tensor.numel() == 0:
                             continue
@@ -422,14 +419,14 @@ class SelfPlayTrainer:
                         opp_logits, opp_values = opponent.model(opp_cards, opp_actions)
                         active_logits[active_idx_mask] = opp_logits
                         active_values[active_idx_mask] = opp_values.squeeze(-1)
-                elif opp_active_indices.numel() > 0:
+                elif active_opp_acts.numel() > 0:
                     # Self-play: use our model for opponent turns too
-                    opp_cards = active_cards[active_to_act == 1]
-                    opp_actions = active_actions[active_to_act == 1]
+                    opp_cards = active_cards[active_opp_acts]
+                    opp_actions = active_actions[active_opp_acts]
 
                     opp_logits, opp_values = self.model(opp_cards, opp_actions)
-                    active_logits[active_to_act == 1] = opp_logits
-                    active_values[active_to_act == 1] = opp_values.squeeze(-1)
+                    active_logits[active_opp_acts] = opp_logits
+                    active_values[active_opp_acts] = opp_values.squeeze(-1)
 
                 # Sample actions for active environments only
                 action_indices_active, log_probs_active = self.policy.action_batch(
@@ -443,26 +440,28 @@ class SelfPlayTrainer:
             action_indices[active_indices] = action_indices_active
 
             # Take steps in all environments (tensor_env expects full-size tensors)
+            # NOTE: THIS CHANGES self.tensor_env.to_act!!
             rewards, dones, _, placed_chips = self.tensor_env.step_bins(action_indices)
+            active_rewards = rewards[active_indices]
+            active_dones = dones[active_indices]
+            active_placed_chips = placed_chips[active_indices]
 
             # Store transitions for our actions (don't add to replay buffer yet)
-            if our_active_indices.numel() > 0:
+            if active_we_act.numel() > 0:
                 # Scale factor for reward/targets: 100 big blinds
                 scale = float(self.tensor_env.bb) * 100.0
 
                 # Compute delta bounds from actor perspective AFTER step
                 # For our acting envs, actor is player 0
                 chips = self.tensor_env.chips_placed.to(torch.float32)
-                our_delta2_tensor = (
-                    -chips[our_active_indices, 1] / scale
-                )  # -opponent chips
-                our_delta3_tensor = chips[our_active_indices, 0] / scale  # our chips
+                our_delta2_tensor = -chips[active_we_act, 1] / scale  # -opponent chips
+                our_delta3_tensor = chips[active_we_act, 0] / scale  # our chips
 
                 # Pre-compute flattened observations for all our environments at once
-                our_cards_flat = active_cards[actor_is_ours].flatten(
+                our_cards_flat = active_cards[active_we_act].flatten(
                     1
                 )  # [N_our, 6*4*13]
-                our_actions_flat = active_actions[actor_is_ours].flatten(
+                our_actions_flat = active_actions[active_we_act].flatten(
                     1
                 )  # [N_our, 24*4*num_bet_bins]
                 our_observations = torch.cat(
@@ -470,30 +469,13 @@ class SelfPlayTrainer:
                 )  # [N_our, total_obs_size]
 
                 # Extract tensor values efficiently (no .tolist() calls)
-                our_actions_tensor = action_indices_active[actor_is_ours]
-                our_log_probs_tensor = log_probs_active[actor_is_ours]
-                our_values_tensor = active_values[actor_is_ours]
-                our_rewards_tensor = rewards[our_active_indices]
-                our_dones_tensor = dones[our_active_indices]
-                our_legal_masks_tensor = legal_masks[actor_is_ours]
-                our_placed_chips_tensor = placed_chips[our_active_indices]
-
-                # Assign trajectory indices for new environments
-                for i, env_idx in enumerate(our_active_indices):
-                    env_idx_int = env_idx.item()
-                    if env_idx_int not in trajectory_assignments:
-                        trajectory_assignments[env_idx_int] = next_trajectory_idx
-                        next_trajectory_idx += 1
-
-                # Create trajectory indices tensor for vectorized operations
-                trajectory_indices = torch.tensor(
-                    [
-                        trajectory_assignments[env_idx.item()]
-                        for env_idx in our_active_indices
-                    ],
-                    dtype=torch.long,
-                    device=self.device,
-                )
+                our_actions_tensor = action_indices_active[active_we_act]
+                our_log_probs_tensor = log_probs_active[active_we_act]
+                our_values_tensor = active_values[active_we_act]
+                our_rewards_tensor = active_rewards[active_we_act]
+                our_dones_tensor = active_dones[active_we_act]
+                our_legal_masks_tensor = legal_masks[active_we_act]
+                our_placed_chips_tensor = active_placed_chips[active_we_act]
 
                 # Add transitions immediately using vectorized operations
                 self.replay_buffer.add_batch(
@@ -507,11 +489,28 @@ class SelfPlayTrainer:
                     delta2=our_delta2_tensor,
                     delta3=our_delta3_tensor,
                     values=our_values_tensor,
-                    trajectory_indices=trajectory_indices,
+                    trajectory_indices=active_we_act,
                 )
 
                 # Update per-environment reward tracking
-                per_env_rewards[our_active_indices] += our_rewards_tensor
+                per_env_rewards[active_we_act] += our_rewards_tensor
+
+            if active_opp_acts.numel() > 0:
+                # Check if any opponent actions ended the hand
+                opp_ended_hands_mask = active_mask & dones & (original_to_act == 1)
+                opp_ended_hands = torch.where(opp_ended_hands_mask)[0]
+                opp_rewards = rewards[opp_ended_hands]
+
+                # For environments where opponent's action ended the hand,
+                # update the last transition's reward using vectorized method
+                if opp_ended_hands.numel() > 0:
+                    # Use vectorized method to update rewards
+                    self.replay_buffer.update_opponent_rewards(
+                        opp_ended_hands, opp_rewards
+                    )
+
+                # Update per-environment reward tracking
+                per_env_rewards[active_opp_acts] += active_rewards[active_opp_acts]
 
             # Update step counts for active environments
             per_traj_step_count[active_indices] += 1
@@ -566,12 +565,7 @@ class SelfPlayTrainer:
                 self.tensor_env.reset()
                 per_env_rewards[:] = 0.0
                 per_traj_step_count[:] = 0
-                trajectory_assignments.clear()  # Clear trajectory assignments for next batch
-                next_trajectory_idx = 0  # Reset trajectory counter
-                self.replay_buffer.start_adding_trajectories(
-                    self.num_envs
-                )  # Prepare for next batch
-                continue
+                self.replay_buffer.finish_adding_trajectories(self.num_envs)
 
         return total_reward, episode_count
 

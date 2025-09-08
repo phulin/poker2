@@ -124,12 +124,6 @@ class KBestOpponentPool(OpponentPool):
         # Add to snapshots list
         self.snapshots.append(new_snapshot)
 
-        # If this is the first snapshot, give it a slightly different ELO to create initial variation
-        if len(self.snapshots) == 1:
-            new_snapshot.elo = (
-                self.current_elo + 10.0
-            )  # Give first opponent a slight advantage
-
         # Sort by ELO rating (descending)
         self.snapshots.sort(key=lambda x: x.elo, reverse=True)
 

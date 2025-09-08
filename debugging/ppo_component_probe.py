@@ -49,7 +49,7 @@ def probe_once(trainer: SelfPlayTrainer) -> None:
     # Collect a single trajectory using the tensorized environment
     print("Collecting trajectory using tensorized environment...")
     total_reward, episode_count = trainer.collect_tensor_trajectories(
-        min_steps=20,  # Need enough steps to complete trajectories
+        min_steps=50,  # Need enough steps to complete trajectories
         all_opponent_snapshots=trainer.opponent_pool.snapshots,
     )
 
