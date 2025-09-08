@@ -33,6 +33,10 @@ def train_kbest(
     config: str | None = None,
     use_tensor_env: bool = False,
     num_envs: int = 256,
+    use_wandb: bool = False,
+    wandb_project: str = "poker-kbest",
+    wandb_name: str = None,
+    wandb_tags: list = None,
 ):
     """
     Train AlphaHoldem agent using K-Best self-play.
@@ -45,6 +49,14 @@ def train_kbest(
         eval_interval: How often to evaluate against pool
         checkpoint_dir: Directory to save checkpoints
         resume_from: Path to checkpoint to resume from
+        device: Device to use for training
+        config: Path to config file
+        use_tensor_env: Whether to use tensorized environment
+        num_envs: Number of parallel environments
+        use_wandb: Whether to enable wandb logging
+        wandb_project: Wandb project name
+        wandb_name: Wandb run name
+        wandb_tags: Wandb tags
     """
 
     # Create checkpoint directory
@@ -61,6 +73,10 @@ def train_kbest(
         config=config,
         use_tensor_env=use_tensor_env,
         num_envs=num_envs,
+        use_wandb=use_wandb,
+        wandb_project=wandb_project,
+        wandb_name=wandb_name,
+        wandb_tags=wandb_tags,
     )
 
     # Resume from checkpoint if specified
@@ -79,6 +95,12 @@ def train_kbest(
         print(f"Using tensorized environment with {num_envs} parallel environments")
     else:
         print("Using scalar environment")
+    if use_wandb:
+        print(f"📊 Wandb logging enabled - check https://wandb.ai for real-time plots!")
+        print(f"   Project: {wandb_project}")
+        if wandb_name:
+            print(f"   Run name: {wandb_name}")
+        print(f"   Tags: {wandb_tags}")
     # Collection runs until batch_size steps; no fixed trajectories per step
     print(
         f"Training start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))}"
@@ -210,6 +232,28 @@ def main():
         default=256,
         help="Number of parallel environments for tensorized training",
     )
+    parser.add_argument(
+        "--no-use-wandb",
+        action="store_true",
+        help="Enable Weights & Biases logging for experiment tracking",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="poker-kbest",
+        help="Wandb project name",
+    )
+    parser.add_argument(
+        "--wandb-name",
+        type=str,
+        help="Wandb run name (default: auto-generated)",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        nargs="*",
+        default=["kbest", "poker", "ppo"],
+        help="Wandb tags for this run",
+    )
 
     args = parser.parse_args()
 
@@ -243,6 +287,10 @@ def main():
         config=args.config,
         use_tensor_env=args.use_tensor_env,
         num_envs=args.num_envs,
+        use_wandb=not args.no_use_wandb,
+        wandb_project=args.wandb_project,
+        wandb_name=args.wandb_name,
+        wandb_tags=args.wandb_tags,
     )
 
     print("Training completed!")

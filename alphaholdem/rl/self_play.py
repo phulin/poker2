@@ -14,6 +14,14 @@ except Exception:  # pragma: no cover
         return f
 
 
+try:
+    import wandb
+
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
+
 from alphaholdem.core.config_loader import get_config
 
 from ..env.hunl_env import HUNLEnv
@@ -53,6 +61,10 @@ class SelfPlayTrainer:
         config: Union[RootConfig, str, None] = None,
         use_tensor_env: bool = False,
         num_envs: int = 256,
+        use_wandb: bool = False,
+        wandb_project: str = "poker-ppo",
+        wandb_name: str = None,
+        wandb_tags: list = None,
     ):
         self.cfg = get_config(config) if config is not None else get_config(None)
 
@@ -166,6 +178,38 @@ class SelfPlayTrainer:
         self.episode_count = 0
         self.total_reward = 0.0
         self.opponent_pool.current_elo = 1200.0  # Starting ELO rating
+
+        # Weights & Biases setup
+        self.use_wandb = use_wandb and WANDB_AVAILABLE
+        self.wandb_step = 0
+        if self.use_wandb:
+            wandb.init(
+                project=wandb_project,
+                name=wandb_name,
+                tags=wandb_tags or [],
+                config={
+                    "learning_rate": lr,
+                    "batch_size": self.batch_size,
+                    "num_epochs": self.num_epochs,
+                    "gamma": self.gamma,
+                    "gae_lambda": self.gae_lambda,
+                    "epsilon": self.epsilon,
+                    "delta1": self.delta1,
+                    "value_coef": self.value_coef,
+                    "entropy_coef": self.entropy_coef,
+                    "grad_clip": self.grad_clip,
+                    "k_best_pool_size": k_best_pool_size,
+                    "min_elo_diff": min_elo_diff,
+                    "use_tensor_env": use_tensor_env,
+                    "num_envs": num_envs,
+                    "device": str(self.device),
+                },
+            )
+            print(f"Wandb initialized for project: {wandb_project}")
+        elif use_wandb and not WANDB_AVAILABLE:
+            print(
+                "Warning: wandb requested but not available. Install with: pip install wandb"
+            )
 
     def _initialize_weights(self):
         """Initialize model weights to prevent dead neurons."""
@@ -880,13 +924,36 @@ class SelfPlayTrainer:
         if self.opponent_pool.should_add_snapshot():
             self.opponent_pool.add_snapshot(self.model, self.episode_count)
 
-        return {
+        # Prepare training stats for return and logging
+        training_stats = {
             "episode_count": self.episode_count,
             "avg_reward": self.total_reward / max(1, self.episode_count),
             "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
             **update_stats,
         }
+
+        # Log to wandb if enabled
+        if self.use_wandb:
+            wandb.log(
+                {
+                    "step": self.wandb_step,
+                    "episode_count": training_stats["episode_count"],
+                    "avg_reward": training_stats["avg_reward"],
+                    "current_elo": training_stats["current_elo"],
+                    "policy_loss": training_stats["policy_loss"],
+                    "value_loss": training_stats["value_loss"],
+                    "entropy": training_stats["entropy"],
+                    "approx_kl": training_stats["approx_kl"],
+                    "clipfrac": training_stats["clipfrac"],
+                    "mb_improve_rate": training_stats["mb_improve_rate"],
+                    "avg_loss": training_stats["avg_loss"],
+                    "num_samples": training_stats["num_samples"],
+                }
+            )
+            self.wandb_step += 1
+
+        return training_stats
 
     @profile
     def _fill_replay_buffer(self, min_steps: int) -> None:
