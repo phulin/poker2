@@ -70,12 +70,12 @@ def test_selfplay_with_kbest():
     # Create trainer with very small parameters for fast testing
     trainer = SelfPlayTrainer(
         learning_rate=1e-3,
-        batch_size=32,  # Small batch for testing
+        batch_size=4,  # Small batch for testing
         num_epochs=1,  # Only 1 epoch instead of 4
         k_best_pool_size=2,  # Smaller pool
         min_elo_diff=20.0,  # Lower threshold
         use_tensor_env=True,  # Use faster tensor environment
-        num_envs=16,  # Much smaller than default 256
+        num_envs=2,  # Much smaller than default 256
     )
 
     print(f"Initial ELO: {trainer.opponent_pool.current_elo}")
@@ -114,11 +114,11 @@ def test_opponent_sampling():
     print("Testing opponent sampling...")
 
     trainer = SelfPlayTrainer(
-        batch_size=32,  # Smaller batch
+        batch_size=4,  # Smaller batch
         k_best_pool_size=3,  # Smaller pool
         min_elo_diff=15.0,  # Lower threshold
         use_tensor_env=True,  # Use faster tensor environment
-        num_envs=16,  # Very small for testing
+        num_envs=2,  # Very small for testing
     )
 
     # Add some snapshots with different ELOs

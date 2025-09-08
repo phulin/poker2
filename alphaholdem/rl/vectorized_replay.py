@@ -166,9 +166,10 @@ class VectorizedReplayBuffer:
             delta2: [batch_size]
             delta3: [batch_size]
             values: [batch_size]
-            trajectory_indices: [batch_size] - which trajectory each transition belongs to
+            trajectory_indices: [batch_size] - which trajectory each transition belongs to (in source space)
         """
-        batch_size = observations.shape[0]
+
+        buffer_trajectory_indices = trajectory_indices + self.position
 
         # Get current step positions for each trajectory
         step_positions = self.current_step_positions[trajectory_indices]
@@ -179,22 +180,26 @@ class VectorizedReplayBuffer:
 
         # Use vectorized indexing to add transitions
         # This is the key vectorized operation - no loops!
-        self.observations[trajectory_indices, step_positions] = observations
-        self.actions[trajectory_indices, step_positions] = actions
-        self.log_probs[trajectory_indices, step_positions] = log_probs
-        self.rewards[trajectory_indices, step_positions] = rewards
-        self.dones[trajectory_indices, step_positions] = dones
-        self.legal_masks[trajectory_indices, step_positions] = legal_masks.float()
-        self.chips_placed[trajectory_indices, step_positions] = chips_placed.float()
-        self.delta2[trajectory_indices, step_positions] = delta2
-        self.delta3[trajectory_indices, step_positions] = delta3
-        self.values[trajectory_indices, step_positions] = values
+        self.observations[buffer_trajectory_indices, step_positions] = observations
+        self.actions[buffer_trajectory_indices, step_positions] = actions
+        self.log_probs[buffer_trajectory_indices, step_positions] = log_probs
+        self.rewards[buffer_trajectory_indices, step_positions] = rewards
+        self.dones[buffer_trajectory_indices, step_positions] = dones
+        self.legal_masks[buffer_trajectory_indices, step_positions] = (
+            legal_masks.float()
+        )
+        self.chips_placed[buffer_trajectory_indices, step_positions] = (
+            chips_placed.float()
+        )
+        self.delta2[buffer_trajectory_indices, step_positions] = delta2
+        self.delta3[buffer_trajectory_indices, step_positions] = delta3
+        self.values[buffer_trajectory_indices, step_positions] = values
 
         # Update trajectory step positions
-        self.current_step_positions[trajectory_indices] += 1
+        self.current_step_positions[buffer_trajectory_indices] += 1
 
         # Handle trajectory completion
-        completed_trajectories = trajectory_indices[dones]
+        completed_trajectories = buffer_trajectory_indices[dones]
         if len(completed_trajectories) > 0:
             # Mark completed trajectories as valid
             self.valid_trajectories[completed_trajectories] = True

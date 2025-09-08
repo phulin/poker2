@@ -158,6 +158,8 @@ def test_checkpoint_save_load():
         new_trainer = SelfPlayTrainer(
             learning_rate=3e-4,
             batch_size=8,
+            use_tensor_env=True,
+            max_trajectory_length=200,  # Increase for testing
         )
 
         # Load checkpoint

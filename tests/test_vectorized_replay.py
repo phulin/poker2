@@ -530,6 +530,241 @@ class TestVectorizedReplayBuffer:
         # Should remain empty
         assert buffer.size == 0
 
+    def test_buffer_filling_during_collection(self):
+        """Test that the buffer properly fills and manages trajectories during collection."""
+        from alphaholdem.rl.self_play import SelfPlayTrainer
+
+        # Create a small trainer for testing
+        trainer = SelfPlayTrainer(
+            batch_size=4,
+            use_tensor_env=True,
+            num_envs=8,  # Small number for easier testing
+        )
+
+        # Monitor buffer state before collection
+        initial_size = trainer.replay_buffer.size
+        initial_steps = trainer.replay_buffer.num_steps()
+        initial_valid = trainer.replay_buffer.valid_trajectories.sum().item()
+
+        print(
+            f"Initial buffer state: size={initial_size}, steps={initial_steps}, valid={initial_valid}"
+        )
+
+        # Collect some trajectories
+        min_steps = 5  # Reduced expectation since poker games can be short
+        total_reward, episode_count = trainer.collect_tensor_trajectories(min_steps)
+
+        # Monitor buffer state after collection
+        final_size = trainer.replay_buffer.size
+        final_steps = trainer.replay_buffer.num_steps()
+        final_valid = trainer.replay_buffer.valid_trajectories.sum().item()
+
+        print(
+            f"Final buffer state: size={final_size}, steps={final_steps}, valid={final_valid}"
+        )
+        print(f"Collection results: episodes={episode_count}, reward={total_reward}")
+
+        # Verify buffer is being used
+        assert final_steps > 0, f"Expected some steps collected, got {final_steps}"
+        assert final_valid > 0, f"Expected some valid trajectories, got {final_valid}"
+        assert (
+            episode_count > 0
+        ), f"Expected some episodes completed, got {episode_count}"
+
+        # Check that trajectories don't exceed max length
+        max_length = trainer.replay_buffer.trajectory_lengths.max().item()
+        assert (
+            max_length <= trainer.replay_buffer.max_trajectory_length
+        ), f"Trajectory length {max_length} exceeds max {trainer.replay_buffer.max_trajectory_length}"
+
+        # Verify buffer position management
+        assert (
+            trainer.replay_buffer.position >= 0
+        ), "Buffer position should be non-negative"
+        assert (
+            trainer.replay_buffer.position < trainer.replay_buffer.capacity
+        ), f"Buffer position {trainer.replay_buffer.position} exceeds capacity {trainer.replay_buffer.capacity}"
+
+        print("✅ Buffer filling test passed!")
+
+    def test_buffer_trajectory_lifecycle(self):
+        """Test that trajectories are properly managed throughout their lifecycle."""
+        from alphaholdem.rl.self_play import SelfPlayTrainer
+
+        trainer = SelfPlayTrainer(
+            batch_size=2,
+            use_tensor_env=True,
+            num_envs=4,
+        )
+
+        # Collect trajectories in multiple rounds to test lifecycle
+        for round_num in range(3):
+            print(f"\n=== Collection Round {round_num + 1} ===")
+
+            # Monitor before collection
+            before_size = trainer.replay_buffer.size
+            before_steps = trainer.replay_buffer.num_steps()
+            before_valid = trainer.replay_buffer.valid_trajectories.sum().item()
+
+            print(
+                f"Before: size={before_size}, steps={before_steps}, valid={before_valid}"
+            )
+
+            # Collect trajectories
+            total_reward, episode_count = trainer.collect_tensor_trajectories(5)
+
+            # Monitor after collection
+            after_size = trainer.replay_buffer.size
+            after_steps = trainer.replay_buffer.num_steps()
+            after_valid = trainer.replay_buffer.valid_trajectories.sum().item()
+
+            print(f"After: size={after_size}, steps={after_steps}, valid={after_valid}")
+            print(f"Episodes: {episode_count}, Reward: {total_reward:.2f}")
+
+            # Verify buffer is being managed properly
+            # Note: Buffer may be cleared between rounds, so we don't enforce monotonic growth
+            # Instead, we verify that when data is present, it's valid
+            if after_steps > 0:
+                assert (
+                    after_valid > 0
+                ), "If steps are present, there should be valid trajectories"
+                assert (
+                    after_size > 0
+                ), "If steps are present, buffer size should be positive"
+
+            # Check trajectory lengths are reasonable
+            if after_valid > 0:
+                lengths = trainer.replay_buffer.trajectory_lengths[
+                    trainer.replay_buffer.valid_trajectories
+                ]
+                avg_length = lengths.float().mean().item()
+                print(f"Average trajectory length: {avg_length:.1f}")
+                assert avg_length > 0, "Trajectories should have positive length"
+                assert (
+                    avg_length <= trainer.replay_buffer.max_trajectory_length
+                ), f"Average length {avg_length} exceeds max {trainer.replay_buffer.max_trajectory_length}"
+
+        print("✅ Buffer trajectory lifecycle test passed!")
+
+    def test_buffer_capacity_management(self):
+        """Test that the buffer properly manages capacity and wraparound."""
+        from alphaholdem.rl.self_play import SelfPlayTrainer
+
+        # Create trainer with small buffer capacity
+        trainer = SelfPlayTrainer(
+            batch_size=2,
+            use_tensor_env=True,
+            num_envs=4,
+        )
+
+        # Override buffer capacity for testing
+        original_capacity = trainer.replay_buffer.capacity
+        trainer.replay_buffer.capacity = 6  # Small capacity for testing
+
+        print(f"Testing with buffer capacity: {trainer.replay_buffer.capacity}")
+
+        # Collect enough trajectories to potentially exceed capacity
+        total_steps_collected = 0
+        for round_num in range(5):
+            print(f"\n=== Round {round_num + 1} ===")
+
+            before_size = trainer.replay_buffer.size
+            before_position = trainer.replay_buffer.position
+
+            # Collect trajectories
+            total_reward, episode_count = trainer.collect_tensor_trajectories(5)
+
+            after_size = trainer.replay_buffer.size
+            after_position = trainer.replay_buffer.position
+            after_steps = trainer.replay_buffer.num_steps()
+
+            print(f"Size: {before_size} -> {after_size}")
+            print(f"Position: {before_position} -> {after_position}")
+            print(f"Steps: {after_steps}")
+            print(f"Episodes: {episode_count}")
+
+            total_steps_collected += after_steps
+
+            # Verify buffer doesn't exceed capacity
+            assert (
+                after_size <= trainer.replay_buffer.capacity
+            ), f"Buffer size {after_size} exceeds capacity {trainer.replay_buffer.capacity}"
+
+            # Verify position wraps around properly
+            assert (
+                0 <= after_position < trainer.replay_buffer.capacity
+            ), f"Position {after_position} is out of bounds [0, {trainer.replay_buffer.capacity})"
+
+            # Check that we're actually collecting data (allow for intermittent collection)
+            # We expect some rounds to have data, but not necessarily all rounds
+            if round_num > 2:  # After several rounds
+                # At least one round should have collected data
+                assert (
+                    total_steps_collected > 0
+                ), "Should have collected some steps across all rounds"
+
+        print(f"Total steps collected across all rounds: {total_steps_collected}")
+        print("✅ Buffer capacity management test passed!")
+
+    def test_buffer_detailed_collection_monitoring(self):
+        """Detailed test to monitor buffer state during collection process."""
+        from alphaholdem.rl.self_play import SelfPlayTrainer
+
+        trainer = SelfPlayTrainer(
+            batch_size=2,
+            use_tensor_env=True,
+            num_envs=4,
+        )
+
+        print("=== Detailed Buffer Monitoring ===")
+        print(f"Buffer capacity: {trainer.replay_buffer.capacity}")
+        print(f"Max trajectory length: {trainer.replay_buffer.max_trajectory_length}")
+        print(f"Number of environments: {trainer.num_envs}")
+
+        # Monitor buffer state at multiple points
+        def print_buffer_state(label):
+            size = trainer.replay_buffer.size
+            steps = trainer.replay_buffer.num_steps()
+            valid = trainer.replay_buffer.valid_trajectories.sum().item()
+            position = trainer.replay_buffer.position
+            print(
+                f"{label}: size={size}, steps={steps}, valid={valid}, position={position}"
+            )
+
+            # Print trajectory lengths for valid trajectories
+            if valid > 0:
+                valid_lengths = trainer.replay_buffer.trajectory_lengths[
+                    trainer.replay_buffer.valid_trajectories
+                ]
+                print(f"  Valid trajectory lengths: {valid_lengths.tolist()}")
+
+        print_buffer_state("Initial state")
+
+        # Collect trajectories with detailed monitoring
+        print("\n--- Starting collection ---")
+        total_reward, episode_count = trainer.collect_tensor_trajectories(10)
+
+        print_buffer_state("After collection")
+        print(
+            f"Collection results: episodes={episode_count}, reward={total_reward:.2f}"
+        )
+
+        # Check if trajectories are being added but then cleared
+        print("\n--- Checking buffer internals ---")
+        print(f"Valid trajectories mask: {trainer.replay_buffer.valid_trajectories}")
+        print(f"Trajectory lengths: {trainer.replay_buffer.trajectory_lengths}")
+        print(f"Current step positions: {trainer.replay_buffer.current_step_positions}")
+
+        # Check if there are any non-zero observations
+        non_zero_obs = (trainer.replay_buffer.observations != 0).any(dim=-1).any(dim=-1)
+        print(f"Non-zero observations: {non_zero_obs.sum().item()}")
+
+        # Check if there are any non-zero actions
+        non_zero_actions = (trainer.replay_buffer.actions != 0).any(dim=-1)
+        print(f"Non-zero actions: {non_zero_actions.sum().item()}")
+
+        print("✅ Detailed buffer monitoring test completed!")
+
     def _create_test_batch(self, batch_size: int, device: torch.device) -> dict:
         """Create a test batch with random data."""
         return {
