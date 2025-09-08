@@ -141,6 +141,8 @@ def test_checkpoint_save_load():
     with tempfile.TemporaryDirectory() as temp_dir:
         trainer = SelfPlayTrainer(
             batch_size=8,  # Small batch for testing
+            use_tensor_env=True,
+            num_envs=4,
         )
 
         # Run a few training steps
@@ -159,7 +161,6 @@ def test_checkpoint_save_load():
             learning_rate=3e-4,
             batch_size=8,
             use_tensor_env=True,
-            max_trajectory_length=200,  # Increase for testing
         )
 
         # Load checkpoint
@@ -231,6 +232,8 @@ def test_basic_training_step():
     trainer = SelfPlayTrainer(
         learning_rate=3e-4,
         batch_size=4,  # Small batch for testing
+        use_tensor_env=True,
+        num_envs=2,
     )
 
     # Run a few training steps

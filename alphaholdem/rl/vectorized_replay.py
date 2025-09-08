@@ -169,7 +169,7 @@ class VectorizedReplayBuffer:
             trajectory_indices: [batch_size] - which trajectory each transition belongs to (in source space)
         """
 
-        buffer_trajectory_indices = trajectory_indices + self.position
+        buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
 
         # Get current step positions for each trajectory
         step_positions = self.current_step_positions[trajectory_indices]
@@ -449,8 +449,8 @@ class VectorizedReplayBuffer:
         self.current_step_positions.zero_()
 
     def num_steps(self) -> int:
-        """Total number of transitions (steps) stored across all trajectories."""
-        return self.trajectory_lengths.sum().item()
+        """Total number of transitions (steps) stored across all valid trajectories."""
+        return (self.trajectory_lengths * self.valid_trajectories).sum().item()
 
     def trim_to_steps(self, max_steps: int) -> None:
         """Trim oldest trajectories until total steps <= max_steps."""
@@ -464,42 +464,42 @@ class VectorizedReplayBuffer:
 
     def add_trajectory_legacy(self, trajectory) -> None:
         """Add a trajectory for backward compatibility with scalar environment."""
-        # Convert trajectory to batch format
-        observations = [t.observation for t in trajectory.transitions]
-        actions = [t.action for t in trajectory.transitions]
-        log_probs = [t.log_prob for t in trajectory.transitions]
-        rewards = [t.reward for t in trajectory.transitions]
-        dones = [t.done for t in trajectory.transitions]
-        legal_masks = [t.legal_mask for t in trajectory.transitions]
-        chips_placed = [t.chips_placed for t in trajectory.transitions]
-        delta2 = [t.delta2 for t in trajectory.transitions]
-        delta3 = [t.delta3 for t in trajectory.transitions]
-        values = [t.value for t in trajectory.transitions]
+        if trajectory.transitions:
+            self.start_adding_trajectories(1)
 
-        # Convert to tensors and add as batch
-        if observations:
-            # Create trajectory indices (all transitions belong to the same trajectory)
-            trajectory_indices = torch.zeros(
-                len(observations), dtype=torch.long, device=self.device
-            )
+            # Iterate over transitions directly
+            for t in trajectory.transitions:
+                self.add_batch(
+                    observations=t.observation.unsqueeze(0),
+                    actions=torch.tensor(
+                        [t.action], dtype=torch.long, device=self.device
+                    ),
+                    log_probs=torch.tensor(
+                        [t.log_prob], dtype=torch.float32, device=self.device
+                    ),
+                    rewards=torch.tensor(
+                        [t.reward], dtype=torch.float32, device=self.device
+                    ),
+                    dones=torch.tensor([t.done], dtype=torch.bool, device=self.device),
+                    legal_masks=t.legal_mask.unsqueeze(0),
+                    chips_placed=torch.tensor(
+                        [t.chips_placed], dtype=torch.float32, device=self.device
+                    ),
+                    delta2=torch.tensor(
+                        [t.delta2], dtype=torch.float32, device=self.device
+                    ),
+                    delta3=torch.tensor(
+                        [t.delta3], dtype=torch.float32, device=self.device
+                    ),
+                    values=torch.tensor(
+                        [t.value], dtype=torch.float32, device=self.device
+                    ),
+                    trajectory_indices=torch.zeros(
+                        1, dtype=torch.long, device=self.device
+                    ),
+                )
 
-            self.add_batch(
-                observations=torch.stack(observations),
-                actions=torch.tensor(actions, dtype=torch.long, device=self.device),
-                log_probs=torch.tensor(
-                    log_probs, dtype=torch.float32, device=self.device
-                ),
-                rewards=torch.tensor(rewards, dtype=torch.float32, device=self.device),
-                dones=torch.tensor(dones, dtype=torch.bool, device=self.device),
-                legal_masks=torch.stack(legal_masks),
-                chips_placed=torch.tensor(
-                    chips_placed, dtype=torch.float32, device=self.device
-                ),
-                delta2=torch.tensor(delta2, dtype=torch.float32, device=self.device),
-                delta3=torch.tensor(delta3, dtype=torch.float32, device=self.device),
-                values=torch.tensor(values, dtype=torch.float32, device=self.device),
-                trajectory_indices=trajectory_indices,
-            )
+            self.finish_adding_trajectories(1)
 
     def __len__(self) -> int:
         return self.size
