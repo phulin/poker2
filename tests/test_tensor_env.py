@@ -156,3 +156,49 @@ def test_n2_reset_done_partial():
             assert after_done[i].item() is False
         else:
             assert after_done[i].item() is False  # still running
+
+
+def test_step_bins_negative_one_no_action():
+    """Test that environments with -1 in step_bins are not stepped."""
+    env = _make_env(N=3, seed=123)
+
+    # Record initial state before stepping
+    initial_actions_this_round = env.actions_this_round.clone()
+    initial_to_act = env.to_act.clone()
+    initial_acted_since_reset = env.acted_since_reset.clone()
+
+    # Step with -1 for middle environment (index 1), valid actions for others
+    mask = env.legal_action_bins_mask()
+    actions = torch.tensor(
+        [1, -1, 1], device=env.device
+    )  # check/call for envs 0,2, no action for env 1
+    r, d, _, _ = env.step_bins(actions)
+
+    # Environment 1 (index 1) should not have been stepped
+    assert env.actions_this_round[1] == initial_actions_this_round[1]
+    assert env.to_act[1] == initial_to_act[1]
+    assert env.acted_since_reset[1] == initial_acted_since_reset[1]
+
+    # Environments 0 and 2 should have been stepped
+    assert env.actions_this_round[0] > initial_actions_this_round[0]
+    assert env.actions_this_round[2] > initial_actions_this_round[2]
+    assert env.acted_since_reset[0].item() is True
+    assert env.acted_since_reset[2].item() is True
+
+    # Rewards should be zero for environment 1 (no action taken)
+    assert r[1] == 0.0
+
+    # Test with all -1 (no environments should be stepped)
+    env2 = _make_env(N=2, seed=456)
+    initial_actions_2 = env2.actions_this_round.clone()
+    initial_to_act_2 = env2.to_act.clone()
+
+    actions_all_negative = torch.tensor([-1, -1], device=env2.device)
+    r2, d2, _, _ = env2.step_bins(actions_all_negative)
+
+    # No environments should have been stepped
+    assert torch.equal(env2.actions_this_round, initial_actions_2)
+    assert torch.equal(env2.to_act, initial_to_act_2)
+    assert torch.equal(
+        r2, torch.zeros(2, device=env2.device)
+    )  # All rewards should be zero

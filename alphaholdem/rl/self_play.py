@@ -361,7 +361,7 @@ class SelfPlayTrainer:
                 adding_trajectories = True
 
             loop_count += 1
-            print("loop", steps_collected, min_steps, f"(loop {loop_count})")
+            # print("loop", steps_collected, min_steps, f"(loop {loop_count})")
             # Only process non-done environments to avoid bias towards short episodes
             active_mask = ~self.tensor_env.done
             active_indices = torch.where(active_mask)[0]
@@ -386,6 +386,8 @@ class SelfPlayTrainer:
                 active_we_act = torch.where(active_who_acts == 0)[0]
                 active_opp_acts = torch.where(active_who_acts == 1)[0]
 
+                active_first_action = self.tensor_env.acted_since_reset[active_indices]
+
                 # Initialize logits and values tensors for active environments only
                 active_logits = torch.zeros(
                     active_indices.numel(), self.num_bet_bins, device=self.device
@@ -401,6 +403,13 @@ class SelfPlayTrainer:
 
                     active_logits[active_we_act] = our_logits
                     active_values[active_we_act] = our_values.squeeze(-1)
+
+                # SPECIAL CASE: If first action of round, opponent folding illegal
+                # (because it would leave an empty trajectory)
+                # This doesn't bias our sampling because we would never see the empty
+                # trajectory if it were sampled anyway, since there is no decision of the
+                # actor to train. We could in the future train only the value function.
+                legal_masks[(active_who_acts == 1) & active_first_action, 0] = False
 
                 # Get predictions from opponent models for opponent turns
                 opp_env_groups: Tuple[torch.Tensor, ...] | None = None
@@ -435,19 +444,19 @@ class SelfPlayTrainer:
                     active_values[active_opp_acts] = opp_values.squeeze(-1)
 
                 # Sample actions for active environments only
-                action_indices_active, log_probs_active = self.policy.action_batch(
+                action_values_active, log_probs_active = self.policy.action_batch(
                     active_logits, legal_masks
                 )
 
             # Create full-size tensors for stepping (needed by tensor_env.step_bins)
-            action_indices = torch.zeros(
-                self.num_envs, dtype=torch.long, device=self.device
+            action_values = torch.full(
+                (self.num_envs,), -1, dtype=torch.long, device=self.device
             )
-            action_indices[active_indices] = action_indices_active
+            action_values[active_indices] = action_values_active
 
             # Take steps in all environments (tensor_env expects full-size tensors)
             # NOTE: THIS CHANGES self.tensor_env.to_act!!
-            rewards, dones, _, placed_chips = self.tensor_env.step_bins(action_indices)
+            rewards, dones, _, placed_chips = self.tensor_env.step_bins(action_values)
             active_rewards = rewards[active_indices]
             active_dones = dones[active_indices]
             active_placed_chips = placed_chips[active_indices]
@@ -479,7 +488,7 @@ class SelfPlayTrainer:
                 )  # [N_our, total_obs_size]
 
                 # Extract tensor values efficiently (no .tolist() calls)
-                our_actions_tensor = action_indices_active[active_we_act]
+                our_actions_tensor = action_values_active[active_we_act]
                 our_log_probs_tensor = log_probs_active[active_we_act]
                 our_values_tensor = active_values[active_we_act]
                 our_rewards_tensor = active_rewards[active_we_act]

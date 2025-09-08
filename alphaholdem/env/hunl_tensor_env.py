@@ -97,6 +97,9 @@ class HUNLTensorEnv:
         self.actions_this_round = torch.zeros(
             self.N, dtype=torch.long, device=self.device
         )
+        self.acted_since_reset = torch.zeros(
+            self.N, dtype=torch.bool, device=self.device
+        )
 
         self.stacks = torch.zeros(self.N, 2, dtype=torch.long, device=self.device)
         self.committed = torch.zeros(self.N, 2, dtype=torch.long, device=self.device)
@@ -199,6 +202,7 @@ class HUNLTensorEnv:
         self.min_raise[ids] = self.bb
         self.last_aggr[ids] = self.bb
         self.actions_this_round[ids] = 0
+        self.acted_since_reset[ids] = False
         self.has_folded[ids, :] = False
         self.is_allin[ids, :] = False
         self.done[ids] = False
@@ -380,7 +384,7 @@ class HUNLTensorEnv:
     def step_bins(
         self, bin_indices: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Step all envs using discrete bin indices tensor [N].
+        """Step all envs using discrete bet bin indices tensor [N]. -1 means no action.
 
         Returns (rewards [N], dones [N], to_act [N], chips_placed [N])
         Rewards are scaled by 100bb consistent with HUNLEnv.
@@ -393,7 +397,6 @@ class HUNLTensorEnv:
         opp = 1 - me
 
         me_stack = self.stacks.gather(1, me.view(N, 1)).squeeze(1)
-        opp_stack = self.stacks.gather(1, opp.view(N, 1)).squeeze(1)
         me_comm = self.committed.gather(1, me.view(N, 1)).squeeze(1)
         opp_comm = self.committed.gather(1, opp.view(N, 1)).squeeze(1)
         to_call = opp_comm - me_comm
@@ -408,17 +411,27 @@ class HUNLTensorEnv:
         is_allin = bin_indices == (self.num_bet_bins - 1)
         is_bet_raise = ~(is_fold | is_check_call | is_allin)
 
+        # -1 bet bin index means no action
+        acting_mask = bin_indices >= 0
+        acting = torch.where(acting_mask)[0]
+
+        # We've now acted since reset
+        self.acted_since_reset[acting] = True
+
         # Record current action into history (actor rows and sum row)
-        n_idx = torch.arange(N, device=self.device)
-        round_idx = self.street.clamp(min=0, max=3)
-        slot_idx = torch.clamp(self.actions_this_round, max=self.history_slots - 1)
+        round_idx = self.street.clamp(min=0, max=3)[acting]
+        slot_idx = torch.clamp(self.actions_this_round, max=self.history_slots - 1)[
+            acting
+        ]
         # clear actor rows at this slot
-        self.action_history[n_idx, round_idx, slot_idx, 0, :] = 0
-        self.action_history[n_idx, round_idx, slot_idx, 1, :] = 0
+        self.action_history[acting, round_idx, slot_idx, 0, :] = 0
+        self.action_history[acting, round_idx, slot_idx, 1, :] = 0
         # set actor-specific one-hot
-        self.action_history[n_idx, round_idx, slot_idx, me, bin_indices] = 1
+        self.action_history[
+            acting, round_idx, slot_idx, me[acting], bin_indices[acting]
+        ] = 1
         # sum row
-        self.action_history[n_idx, round_idx, slot_idx, 2, bin_indices] = 1
+        self.action_history[acting, round_idx, slot_idx, 2, bin_indices[acting]] = 1
 
         # Fold: immediate terminal, award pot to opp
         idx = torch.where(is_fold)[0]
@@ -495,14 +508,19 @@ class HUNLTensorEnv:
                 )
 
         # Advance to next actor (simple alternation)
-        self.to_act = 1 - self.to_act
-        self.actions_this_round += ~self.done
+        self.to_act[acting] = 1 - self.to_act[acting]
+        self.actions_this_round[acting] += ~self.done[acting]
+        self.acted_since_reset[acting] = True
 
         # Write legal mask for next decision into history legal row
-        next_street = self.street.clamp(min=0, max=3)
-        next_slot = torch.clamp(self.actions_this_round, max=self.history_slots - 1)
+        next_street = self.street[acting].clamp(min=0, max=3)
+        next_slot = torch.clamp(
+            self.actions_this_round[acting], max=self.history_slots - 1
+        )
         legal_mask = self.legal_action_bins_mask()
-        self.action_history[n_idx, next_street, next_slot, 3, :] = legal_mask
+        self.action_history[acting, next_street[acting], next_slot[acting], 3, :] = (
+            legal_mask[acting]
+        )
 
         # Chips placed by the actor in this step (after updates)
         placed_chips = (
