@@ -12,6 +12,10 @@ import torch
 import hydra
 from ..core.structured_config import Config
 from ..rl.self_play import SelfPlayTrainer
+
+# Import encoders and models to register them
+from ..encoding import cards_encoder, actions_encoder
+from ..models import siamese_convnet, heads
 from ..utils.training_utils import (
     print_preflop_range_grid,
     print_training_stats,
@@ -180,18 +184,42 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
 
 
 @hydra.main(version_base=None, config_path="../../conf", config_name="config")
-def main(cfg: Config) -> None:
+def main(cfg) -> None:
     """
     Main training function with Hydra configuration.
 
     Args:
         cfg: Hydra configuration object
     """
-    # Set random seeds for reproducibility
-    torch.manual_seed(cfg.seed)
+    # Convert Hydra config to Config dataclass
+    from omegaconf import OmegaConf
+    from alphaholdem.core.structured_config import (
+        Config,
+        TrainingConfig,
+        ModelConfig,
+        EnvConfig,
+    )
 
-    # Train the agent - pass config directly for cleaner code
-    train_kbest(cfg)
+    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+
+    # Create nested config objects
+    train_config = TrainingConfig(**cfg_dict.get("train", {}))
+    model_config = ModelConfig(**cfg_dict.get("model", {}))
+    env_config = EnvConfig(**cfg_dict.get("env", {}))
+
+    # Create Config dataclass
+    config = Config(
+        train=train_config,
+        model=model_config,
+        env=env_config,
+        **{k: v for k, v in cfg_dict.items() if k not in ["train", "model", "env"]},
+    )
+
+    # Set random seeds for reproducibility
+    torch.manual_seed(config.seed)
+
+    # Train the agent - pass config dataclass
+    train_kbest(config)
 
     print("Training completed!")
 

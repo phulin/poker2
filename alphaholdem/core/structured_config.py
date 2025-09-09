@@ -35,6 +35,8 @@ class ModelConfig:
             self.kwargs = {
                 "cards_channels": 6,
                 "actions_channels": 24,
+                "cards_hidden": 256,
+                "actions_hidden": 256,
                 "fusion_hidden": [1024, 1024],
                 "num_actions": 8,
             }

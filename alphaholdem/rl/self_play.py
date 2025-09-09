@@ -55,6 +55,7 @@ class SelfPlayTrainer:
         self.learning_rate = cfg.train.learning_rate
         self.k_best_pool_size = cfg.k_best_pool_size
         self.min_elo_diff = cfg.min_elo_diff
+        self.min_step_diff = cfg.min_step_diff
         self.k_factor = cfg.k_factor
         self.use_mixed_precision = cfg.train.use_mixed_precision
         self.loss_scale = cfg.train.loss_scale

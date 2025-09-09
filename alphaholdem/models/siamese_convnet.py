@@ -3,9 +3,29 @@ from __future__ import annotations
 from typing import Tuple, Sequence
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..core.interfaces import Model
 from ..core.registry import register_model
+
+
+def _resize_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Pad x with zeros on right/bottom to match ref's spatial size. Error if x is larger.
+
+    This function never crops. It only pads when x's spatial dims are <= ref's.
+    """
+    if x.shape[2:] == ref.shape[2:]:
+        return x
+    x_h, x_w = x.shape[2], x.shape[3]
+    r_h, r_w = ref.shape[2], ref.shape[3]
+    if x_h > r_h or x_w > r_w:
+        raise ValueError(
+            f"Cannot align: source spatial {(x_h, x_w)} is larger than ref {(r_h, r_w)}"
+        )
+    pad_h = r_h - x_h
+    pad_w = r_w - x_w
+    # Pad order for F.pad with 4D tensors is (w_left, w_right, h_top, h_bottom)
+    return F.pad(x, (0, pad_w, 0, pad_h))
 
 
 class CardsConvTrunk(nn.Module):
@@ -48,13 +68,13 @@ class CardsConvTrunk(nn.Module):
         out2 = self.conv2(out)
         out2 = self.norm2(out2)
         out2 = self.relu2(out2)
-        out2 = self.conv3(out2)
-        out2 = self.norm3(out2)
-        # Residual connection
-        out = self.relu3(out2 + identity)
+        out3 = self.conv3(out2)
+        out3 = self.norm3(out3)
+        # Residual connection with spatial alignment (pad only, no crop)
+        out = self.relu3(out3 + _resize_to(identity, out3))
 
-        # Final residual connection from input
-        out = out + input_residual
+        # Final residual connection from input with spatial alignment (pad only)
+        out = out + _resize_to(input_residual, out)
 
         # Pool
         out = self.pool(out)
@@ -102,10 +122,11 @@ class ActionsConvTrunk(nn.Module):
 
         out = self.conv3(out)
         out = self.norm3(out)
-        out = self.relu3(out + identity)
+        # Identity is larger here; pad conv output up to identity size (no crop)
+        out = self.relu3(_resize_to(out, identity) + identity)
 
-        # Final residual connection from input
-        out = out + input_residual
+        # Final residual connection: pad to the larger (input_residual) to avoid cropping
+        out = _resize_to(out, input_residual) + input_residual
 
         out = self.pool(out)
         return out.flatten(1)
@@ -123,8 +144,8 @@ class SiameseConvNetV1(nn.Module, Model):
         num_actions: int,
     ):
         super().__init__()
-        self.cards_trunk = CardsConvTrunk(cards_channels, hidden=256)
-        self.actions_trunk = ActionsConvTrunk(actions_channels, hidden=256)
+        self.cards_trunk = CardsConvTrunk(cards_channels, hidden=cards_hidden)
+        self.actions_trunk = ActionsConvTrunk(actions_channels, hidden=actions_hidden)
         fusion_in = cards_hidden + actions_hidden
         # Build fusion MLP: accept single int or a sequence of hidden sizes
         hidden_sizes = (

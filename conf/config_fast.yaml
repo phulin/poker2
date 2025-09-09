@@ -60,8 +60,10 @@ train:
 model:
   name: "siamese_convnet_v1"
   kwargs:
-    cards_channels: 4
-    actions_channels: 16
+    cards_channels: 6
+    actions_channels: 24
+    cards_hidden: 128
+    actions_hidden: 128
     fusion_hidden: [512, 512]
     num_actions: 8
   
