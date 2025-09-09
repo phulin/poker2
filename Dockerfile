@@ -1,5 +1,5 @@
 # AlphaHoldem Training Dockerfile for vast.ai
-FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+FROM pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel
 
 # Set working directory
 WORKDIR /workspace
