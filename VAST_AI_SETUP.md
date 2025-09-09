@@ -31,7 +31,6 @@ git push origin main
 1. **Go to vast.ai Console** → "EDIT IMAGE & CONFIGURATION"
 2. **Docker Image Templates** → "Create New Template"
 3. **Configure the template**:
-   - **Image Path/Tag**: `pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel`
    - **Launch Mode**: "Run a jupyter python notebook (easiest)"
    - **Check**: "Use Jupyter Lab interface"
    - **Check**: "Expose SSH port"
@@ -151,7 +150,7 @@ python alphaholdem/cli/train_kbest.py --config-name=config_fast
 ```bash
 python alphaholdem/cli/train_kbest.py \
     --config-name=config_high_perf \
-    device=cuda \
+    device=cuda o
     num_steps=2000 \
     k_best_pool_size=10 \
     min_elo_diff=50.0 \
