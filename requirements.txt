@@ -10,3 +10,5 @@ pytest==8.4.1
 # Dependencies for training and debugging
 wandb>=0.15.0
 line-profiler>=4.0.0
+hydra-core>=1.3.0
+omegaconf>=2.3.0

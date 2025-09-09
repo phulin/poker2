@@ -1,0 +1,88 @@
+# AlphaHoldem Default Configuration
+# Balanced configuration for general training
+
+# === TRAINING CONFIGURATION ===
+num_steps: 2000
+k_best_pool_size: 10
+min_elo_diff: 50.0
+checkpoint_interval: 50
+eval_interval: 100
+checkpoint_dir: "checkpoints"
+
+# === DEVICE CONFIGURATION ===
+device: mps
+
+# === ENVIRONMENT CONFIGURATION ===
+use_tensor_env: true
+num_envs: 512
+
+# === WANDB CONFIGURATION ===
+use_wandb: true
+wandb_project: "poker-kbest"
+wandb_name: null  # Auto-generated if null
+wandb_tags: ["kbest", "poker", "ppo"]
+
+# === RESUME CONFIGURATION ===
+resume_from: null
+
+# === RANDOM SEED ===
+seed: 42
+
+# === ADDITIONAL CONFIGURATION ===
+config: null  # Path to YAML config for components/hparams
+wandb_run_id: null  # Wandb run ID to resume
+
+# === TRAINING HYPERPARAMETERS ===
+train:
+  learning_rate: 1e-4
+  batch_size: 1024
+  num_epochs: 4
+  replay_buffer_batches: 4
+  
+  # PPO hyperparameters
+  ppo_eps: 0.2
+  ppo_delta1: 3.0
+  gae_lambda: 0.95
+  gamma: 0.999
+  entropy_coef: 0.01
+  value_coef: 0.05
+  grad_clip: 1.0
+  
+  # Value loss configuration
+  value_loss_type: "huber"
+  huber_delta: 1.0
+
+# === MODEL CONFIGURATION ===
+model:
+  name: "siamese_convnet_v1"
+  kwargs:
+    cards_channels: 6
+    actions_channels: 24
+    fusion_hidden: [1024, 1024]
+    num_actions: 8
+  
+  # Policy configuration
+  policy:
+    name: "categorical_v1"
+    kwargs: {}
+
+# === ENVIRONMENT CONFIGURATION ===
+env:
+  # Game configuration
+  stack: 1000
+  sb: 5
+  bb: 10
+  
+  # Betting configuration
+  bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]
+  
+  # Card encoder configuration
+  card_encoder:
+    name: "cards_planes_v1"
+    kwargs: {}
+  
+  # Action encoder configuration
+  action_encoder:
+    name: "actions_hu_v1"
+    kwargs:
+      history_actions_per_round: 6

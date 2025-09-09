@@ -51,17 +51,19 @@ echo ""
 # Start training
 echo "=== Starting Training ==="
 python alphaholdem/cli/train_kbest.py \
-    --device cuda \
-    --steps $STEPS \
-    --k-best-pool-size $K_BEST_POOL_SIZE \
-    --min-elo-diff $MIN_ELO_DIFF \
-    --checkpoint-interval $CHECKPOINT_INTERVAL \
-    --eval-interval $EVAL_INTERVAL \
-    --checkpoint-dir /workspace/checkpoints \
-    --use-tensor-env \
-    --num-envs $NUM_ENVS \
-    --wandb-project $WANDB_PROJECT \
-    --wandb-name $WANDB_NAME \
-    --wandb-tags vast-ai poker kbest ppo
+    --config-name=config_high_perf \
+    device=cuda \
+    num_steps=$STEPS \
+    k_best_pool_size=$K_BEST_POOL_SIZE \
+    min_elo_diff=$MIN_ELO_DIFF \
+    checkpoint_interval=$CHECKPOINT_INTERVAL \
+    eval_interval=$EVAL_INTERVAL \
+    batch_size=$BATCH_SIZE \
+    checkpoint_dir=/workspace/checkpoints \
+    use_tensor_env=true \
+    num_envs=$NUM_ENVS \
+    wandb_project=$WANDB_PROJECT \
+    wandb_name=$WANDB_NAME \
+    wandb_tags="[vast-ai,poker,kbest,ppo]"
 
 echo "=== Training Completed ==="

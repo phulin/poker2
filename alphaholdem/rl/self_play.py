@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
 
 try:
     from line_profiler import profile
@@ -14,16 +12,9 @@ except Exception:  # pragma: no cover
         return f
 
 
-try:
-    import wandb
+import wandb
 
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-
-
-from alphaholdem.core.config_loader import get_config
-
+from ..core.structured_config import Config
 from ..env.hunl_env import HUNLEnv
 from ..env.hunl_tensor_env import HUNLTensorEnv
 from ..encoding.cards_encoder import CardsPlanesV1
@@ -38,82 +29,69 @@ from ..rl.replay import (
 from ..rl.vectorized_replay import VectorizedReplayBuffer
 from ..rl.losses import trinal_clip_ppo_loss
 from ..rl.k_best_pool import KBestOpponentPool, AgentSnapshot
-from ..core.config import RootConfig
 from ..core.builders import build_components_from_config
 
 
 class SelfPlayTrainer:
     def __init__(
         self,
-        learning_rate: float = None,
-        batch_size: int = None,
-        num_epochs: int = None,
-        gamma: float = None,
-        gae_lambda: float = None,
-        epsilon: float = None,
-        delta1: float = None,
-        value_coef: float = None,
-        entropy_coef: float = None,
-        grad_clip: float = None,
-        k_best_pool_size: int = 5,
-        min_elo_diff: float = 30.0,
-        device: torch.device = None,
-        config: Union[RootConfig, str, None] = None,
-        use_tensor_env: bool = False,
-        num_envs: int = 256,
-        use_wandb: bool = False,
-        wandb_project: str = "poker-ppo",
-        wandb_name: str = None,
-        wandb_tags: list = None,
-        wandb_run_id: str = None,
+        cfg: Config,
+        device: torch.device,
     ):
-        self.cfg = get_config(config) if config is not None else get_config(None)
+        self.cfg = cfg
 
-        # Use provided args if not None, else use config defaults
-        self.batch_size = batch_size if batch_size is not None else self.cfg.batch_size
-        self.num_epochs = num_epochs if num_epochs is not None else self.cfg.num_epochs
-        self.gamma = gamma if gamma is not None else self.cfg.gamma
-        self.gae_lambda = gae_lambda if gae_lambda is not None else self.cfg.gae_lambda
-        self.epsilon = epsilon if epsilon is not None else self.cfg.ppo_eps
-        self.delta1 = delta1 if delta1 is not None else self.cfg.ppo_delta1
-        self.value_coef = value_coef if value_coef is not None else self.cfg.value_coef
-        self.entropy_coef = (
-            entropy_coef if entropy_coef is not None else self.cfg.entropy_coef
-        )
-        self.grad_clip = grad_clip if grad_clip is not None else self.cfg.grad_clip
+        # Hydra config - extract parameters from nested structure
+        self.batch_size = cfg.train.batch_size
+        self.num_epochs = cfg.train.num_epochs
+        self.gamma = cfg.train.gamma
+        self.gae_lambda = cfg.train.gae_lambda
+        self.epsilon = cfg.train.ppo_eps
+        self.replay_buffer_batches = cfg.train.replay_buffer_batches
+        self.delta1 = cfg.train.ppo_delta1
+        self.value_coef = cfg.train.value_coef
+        self.entropy_coef = cfg.train.entropy_coef
+        self.grad_clip = cfg.train.grad_clip
+        self.learning_rate = cfg.train.learning_rate
+        self.k_best_pool_size = cfg.k_best_pool_size
+        self.min_elo_diff = cfg.min_elo_diff
+        self.use_tensor_env = cfg.use_tensor_env
+        self.num_envs = cfg.num_envs
+        self.use_wandb = cfg.use_wandb
+        self.wandb_project = cfg.wandb_project
+        self.wandb_name = cfg.wandb_name
+        self.wandb_tags = cfg.wandb_tags
+        self.wandb_run_id = cfg.wandb_run_id
 
         # Set device
         self.device = (
-            device
+            cfg.device
             if device is not None
             else torch.device(
                 "cuda"
                 if torch.cuda.is_available()
-                else "mps" if torch.backends.mps.is_available() else "cpu"
+                else "mps" if torch.mps.is_available() else "cpu"
             )
         )
 
         # Initialize RNG
         self.rng = torch.Generator(device=self.device)
 
-        # Store tensorized environment settings
-        self.use_tensor_env = use_tensor_env
-        self.num_envs = num_envs
-
         # Initialize components
-        if use_tensor_env:
+        if self.use_tensor_env:
             self.tensor_env = HUNLTensorEnv(
-                num_envs=num_envs,
-                starting_stack=self.cfg.stack,
-                sb=self.cfg.sb,
-                bb=self.cfg.bb,
-                bet_bins=self.cfg.bet_bins,
+                num_envs=self.num_envs,
+                starting_stack=self.cfg.env.stack,
+                sb=self.cfg.env.sb,
+                bb=self.cfg.env.bb,
+                bet_bins=self.cfg.env.bet_bins,
                 device=self.device,
                 rng=self.rng,
             )
         else:
             self.env = HUNLEnv(
-                starting_stack=self.cfg.stack, sb=self.cfg.sb, bb=self.cfg.bb
+                starting_stack=self.cfg.env.stack,
+                sb=self.cfg.env.sb,
+                bb=self.cfg.env.bb,
             )
 
         # Config-driven components
@@ -129,13 +107,13 @@ class SelfPlayTrainer:
         ):
             self.num_bet_bins = int(self.model.policy_head.out_features)
         else:
-            self.num_bet_bins = len(self.cfg.bet_bins) + 3
+            self.num_bet_bins = len(self.cfg.env.bet_bins) + 3
 
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights
         # Replay buffer capacity in steps is batch_size * replay_buffer_batches
         # Add an extra batch so we can reserve space for the next batch.
-        buffer_capacity = self.batch_size * max(1, 1 + self.cfg.replay_buffer_batches)
+        buffer_capacity = self.batch_size * max(1, 1 + self.replay_buffer_batches)
 
         # Calculate observation dimensions
         # Cards: 6 channels * 4 suits * 13 ranks = 312
@@ -156,12 +134,12 @@ class SelfPlayTrainer:
 
         # K-Best opponent pool
         self.opponent_pool = KBestOpponentPool(
-            k=k_best_pool_size, min_elo_diff=min_elo_diff
+            k=self.k_best_pool_size, min_elo_diff=self.min_elo_diff
         )
 
         # Optimizer with different learning rates for different components
         # CNN layers (cards_trunk) need lower learning rate to prevent gradient explosion
-        lr = learning_rate if learning_rate is not None else self.cfg.learning_rate
+        lr = self.learning_rate
 
         cards_params = []
         other_params = []
@@ -185,14 +163,14 @@ class SelfPlayTrainer:
         self.opponent_pool.current_elo = 1200.0  # Starting ELO rating
 
         # Weights & Biases setup
-        self.use_wandb = use_wandb and WANDB_AVAILABLE
+        self.use_wandb = self.use_wandb
         self.wandb_step = 0
         if self.use_wandb:
             # Determine if we're resuming an existing run
             wandb_init_kwargs = {
-                "project": wandb_project,
-                "name": wandb_name,
-                "tags": wandb_tags or [],
+                "project": self.wandb_project,
+                "name": self.wandb_name,
+                "tags": self.wandb_tags or [],
                 "config": {
                     "learning_rate": lr,
                     "batch_size": self.batch_size,
@@ -204,25 +182,23 @@ class SelfPlayTrainer:
                     "value_coef": self.value_coef,
                     "entropy_coef": self.entropy_coef,
                     "grad_clip": self.grad_clip,
-                    "k_best_pool_size": k_best_pool_size,
-                    "min_elo_diff": min_elo_diff,
-                    "use_tensor_env": use_tensor_env,
-                    "num_envs": num_envs,
+                    "k_best_pool_size": self.k_best_pool_size,
+                    "min_elo_diff": self.min_elo_diff,
+                    "use_tensor_env": self.use_tensor_env,
+                    "num_envs": self.num_envs,
                     "device": str(self.device),
                 },
             }
-            if wandb_run_id:
-                wandb_init_kwargs["id"] = wandb_run_id
+            if self.wandb_run_id:
+                wandb_init_kwargs["id"] = self.wandb_run_id
                 wandb_init_kwargs["resume"] = "must"
                 wandb.init(**wandb_init_kwargs)
-                print(f"Wandb resumed run {wandb_run_id} for project: {wandb_project}")
+                print(
+                    f"Wandb resumed run {self.wandb_run_id} for project: {self.wandb_project}"
+                )
             else:
                 wandb.init(**wandb_init_kwargs)
-                print(f"Wandb initialized new run for project: {wandb_project}")
-        elif use_wandb and not WANDB_AVAILABLE:
-            print(
-                "Warning: wandb requested but not available. Install with: pip install wandb"
-            )
+                print(f"Wandb initialized new run for project: {self.wandb_project}")
 
     def _initialize_weights(self):
         """Initialize model weights to prevent dead neurons."""
@@ -831,8 +807,8 @@ class SelfPlayTrainer:
                 delta3=delta3_vec,
                 value_coef=self.value_coef,
                 entropy_coef=self.entropy_coef,
-                value_loss_type=self.cfg.value_loss_type,
-                huber_delta=self.cfg.huber_delta,
+                value_loss_type=self.cfg.train.value_loss_type,
+                huber_delta=self.cfg.train.huber_delta,
             )
             loss_before_dict = {k: v for k, v in loss_dict.items()}
 
@@ -892,8 +868,8 @@ class SelfPlayTrainer:
                     delta3=delta3_vec,
                     value_coef=self.value_coef,
                     entropy_coef=self.entropy_coef,
-                    value_loss_type=self.cfg.value_loss_type,
-                    huber_delta=self.cfg.huber_delta,
+                    value_loss_type=self.cfg.train.value_loss_type,
+                    huber_delta=self.cfg.train.huber_delta,
                 )
 
             total_loss += loss_dict["total_loss"].item()
@@ -942,7 +918,7 @@ class SelfPlayTrainer:
         Returns:
             Dictionary with training statistics
         """
-        target_steps = self.batch_size * max(self.cfg.replay_buffer_batches, 1)
+        target_steps = self.batch_size * max(self.cfg.train.replay_buffer_batches, 1)
         if self.replay_buffer.num_steps() == 0:
             # Warmup: fill replay buffer with minimum required samples
             print(f"Warmup: filling replay buffer to {target_steps} steps...")
@@ -1269,8 +1245,8 @@ class SelfPlayTrainer:
         from ..env.types import GameState, PlayerState
 
         # Create players
-        p0 = PlayerState(stack=self.cfg.stack)
-        p1 = PlayerState(stack=self.cfg.stack)
+        p0 = PlayerState(stack=self.cfg.env.stack)
+        p1 = PlayerState(stack=self.cfg.env.stack)
 
         # In heads-up, the small blind is on the button and acts first preflop.
         # Make the analyzed seat both button and small blind, and set it to act.
@@ -1280,10 +1256,10 @@ class SelfPlayTrainer:
 
         # Post blinds
         p_states = [p0, p1]
-        p_states[p_sb].stack -= self.cfg.sb  # small blind
-        p_states[p_sb].committed += self.cfg.sb
-        p_states[p_bb].stack -= self.cfg.bb  # big blind
-        p_states[p_bb].committed += self.cfg.bb
+        p_states[p_sb].stack -= self.cfg.env.sb  # small blind
+        p_states[p_sb].committed += self.cfg.env.sb
+        p_states[p_bb].stack -= self.cfg.env.bb  # big blind
+        p_states[p_bb].committed += self.cfg.env.bb
 
         # Set hole cards for the seat we're analyzing
         p_states[seat].hole_cards = [

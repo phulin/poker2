@@ -8,6 +8,8 @@ setup(
         "torch>=1.9.0",
         "pyyaml>=5.4.0",
         "wandb>=0.15.0",
+        "hydra-core>=1.3.0",
+        "omegaconf>=2.3.0",
     ],
     extras_require={
         "dev": [
@@ -22,6 +24,8 @@ setup(
             "pytest>=7.0.0",
             "wandb>=0.15.0",
             "line-profiler>=4.0.0",
+            "hydra-core>=1.3.0",
+            "omegaconf>=2.3.0",
         ],
     },
     python_requires=">=3.8",

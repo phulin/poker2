@@ -85,6 +85,30 @@ pip install -e .[all]
 
 ## Step 6: Configure Training Parameters
 
+### Hydra Configuration System
+
+The project now uses Hydra for configuration management, making it easy to switch between different training setups:
+
+#### Available Configurations:
+- **`config`**: Default configuration (balanced)
+- **`config_high_perf`**: High-performance configuration for vast.ai GPUs
+- **`config_fast`**: Fast configuration for testing and development
+
+#### Configuration Structure:
+```
+conf/
+├── config.yaml              # Default configuration (balanced)
+├── config_high_perf.yaml    # High-performance preset for vast.ai
+└── config_fast.yaml         # Fast testing preset
+```
+
+Each configuration file contains all settings in a single, easy-to-read format:
+- **Training parameters**: Learning rate, batch size, epochs, etc.
+- **Model configuration**: Architecture, channels, hidden layers
+- **Environment settings**: Game rules, betting bins, encoders
+- **RL parameters**: K-Best pool, evaluation intervals
+- **Device and logging**: GPU settings, Wandb configuration
+
 ### Environment Variables (Optional):
 ```bash
 export STEPS=2000                    # Number of training steps
@@ -111,31 +135,44 @@ wandb login
 ./train_vast.sh
 ```
 
-### Method 2: Direct Command
+### Method 2: Using Hydra Configurations
 ```bash
-python alphaholdem/cli/train_kbest.py \
-    --device cuda \
-    --steps 2000 \
-    --k-best-pool-size 10 \
-    --min-elo-diff 50.0 \
-    --checkpoint-interval 50 \
-    --eval-interval 100 \
-    --checkpoint-dir /workspace/checkpoints \
-    --use-tensor-env \
-    --num-envs 512 \
-    --wandb-project "poker-kbest-vast" \
-    --wandb-name "vast-$(date +%Y%m%d-%H%M%S)" \
-    --wandb-tags vast-ai poker kbest ppo
+# Use high-performance configuration (recommended for vast.ai)
+python alphaholdem/cli/train_kbest.py --config-name=config_high_perf
+
+# Use default configuration
+python alphaholdem/cli/train_kbest.py --config-name=config
+
+# Use fast configuration for testing
+python alphaholdem/cli/train_kbest.py --config-name=config_fast
 ```
 
-### Method 3: Resume from Checkpoint
+### Method 3: Override Configuration Parameters
 ```bash
 python alphaholdem/cli/train_kbest.py \
-    --device cuda \
-    --steps 2000 \
-    --resume-from /workspace/checkpoints/checkpoint_step_1000.pt \
-    --use-tensor-env \
-    --num-envs 512
+    --config-name=config_high_perf \
+    device=cuda \
+    num_steps=2000 \
+    k_best_pool_size=10 \
+    min_elo_diff=50.0 \
+    checkpoint_interval=50 \
+    eval_interval=100 \
+    checkpoint_dir=/workspace/checkpoints \
+    use_tensor_env=true \
+    num_envs=512 \
+    wandb_project="poker-kbest-vast" \
+    wandb_name="vast-$(date +%Y%m%d-%H%M%S)" \
+    wandb_tags="[vast-ai,poker,kbest,ppo]"
+```
+
+### Method 4: Resume from Checkpoint
+```bash
+python alphaholdem/cli/train_kbest.py \
+    --config-name=config_high_perf \
+    device=cuda \
+    resume_from=/workspace/checkpoints/checkpoint_step_1000.pt \
+    use_tensor_env=true \
+    num_envs=512
 ```
 
 ## Step 8: Monitor Training
@@ -238,13 +275,49 @@ scp -P PORT root@IP_ADDRESS:/workspace/logs/* ./logs/
 - Instance reliability
 - Network usage
 
+## Hydra Configuration Benefits
+
+### Easy Configuration Management:
+- **Single File Configs**: Each configuration is in one easy-to-read file
+- **Preset Configurations**: Switch between different setups with `--config-name`
+- **Parameter Overrides**: Override any parameter from command line
+- **Automatic Logging**: Hydra automatically logs all configuration changes
+
+### Example Usage Patterns:
+```bash
+# Test with fast configuration
+python alphaholdem/cli/train_kbest.py --config-name=config_fast
+
+# Use high-performance config but override steps
+python alphaholdem/cli/train_kbest.py --config-name=config_high_perf num_steps=1000
+
+# Override multiple parameters
+python alphaholdem/cli/train_kbest.py \
+    --config-name=config_high_perf \
+    train.batch_size=2048 \
+    train.learning_rate=1e-5 \
+    num_envs=1024
+
+# Override model parameters
+python alphaholdem/cli/train_kbest.py \
+    --config-name=config \
+    model.kwargs.fusion_hidden="[2048, 2048]" \
+    train.batch_size=1536
+```
+
+### Configuration Validation:
+- Hydra validates all configuration parameters
+- Type checking ensures correct parameter types
+- Missing required parameters are caught early
+
 ## Next Steps
 
-1. **Start with a small run** (500 steps) to test setup
-2. **Monitor costs** and adjust parameters
-3. **Scale up** for longer training runs
-4. **Compare results** with local training
-5. **Optimize hyperparameters** based on GPU performance
+1. **Start with fast configuration** (`--config-name=config_fast`) to test setup
+2. **Monitor costs** and adjust parameters using Hydra overrides
+3. **Scale up** to high-performance configuration for longer runs
+4. **Compare results** with local training using different configs
+5. **Optimize hyperparameters** by creating custom configurations
+6. **Use Hydra's multirun** for hyperparameter sweeps (advanced)
 
 ## Support
 

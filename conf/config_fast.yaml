@@ -1,0 +1,85 @@
+# AlphaHoldem Fast Configuration
+# Fast configuration for testing and development
+
+# === TRAINING CONFIGURATION ===
+num_steps: 500
+k_best_pool_size: 5
+min_elo_diff: 30.0
+checkpoint_interval: 25
+eval_interval: 50
+checkpoint_dir: "checkpoints-fast"
+
+# === DEVICE CONFIGURATION ===
+device: "cpu"  # Use CPU for fast testing
+
+# === ENVIRONMENT CONFIGURATION ===
+use_tensor_env: false
+num_envs: 64
+
+# === WANDB CONFIGURATION ===
+use_wandb: false
+
+# === RESUME CONFIGURATION ===
+resume_from: null
+
+# === RANDOM SEED ===
+seed: 42
+
+# === ADDITIONAL CONFIGURATION ===
+config: null  # Path to YAML config for components/hparams
+wandb_run_id: null  # Wandb run ID to resume
+
+# === TRAINING HYPERPARAMETERS ===
+train:
+  learning_rate: 1e-3
+  batch_size: 256
+  num_epochs: 2
+  replay_buffer_batches: 2
+  
+  # PPO hyperparameters
+  ppo_eps: 0.2
+  ppo_delta1: 3.0
+  gae_lambda: 0.95
+  gamma: 0.999
+  entropy_coef: 0.01
+  value_coef: 0.05
+  grad_clip: 1.0
+  
+  # Value loss configuration
+  value_loss_type: "huber"
+  huber_delta: 1.0
+
+# === MODEL CONFIGURATION ===
+model:
+  name: "siamese_convnet_v1"
+  kwargs:
+    cards_channels: 4
+    actions_channels: 16
+    fusion_hidden: [512, 512]
+    num_actions: 8
+  
+  # Policy configuration
+  policy:
+    name: "categorical_v1"
+    kwargs: {}
+
+# === ENVIRONMENT CONFIGURATION ===
+env:
+  # Game configuration
+  stack: 1000
+  sb: 5
+  bb: 10
+  
+  # Betting configuration
+  bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]
+  
+  # Card encoder configuration
+  card_encoder:
+    name: "cards_planes_v1"
+    kwargs: {}
+  
+  # Action encoder configuration
+  action_encoder:
+    name: "actions_hu_v1"
+    kwargs:
+      history_actions_per_round: 6

@@ -31,4 +31,4 @@ ENV PYTHONPATH=/workspace
 ENV CUDA_VISIBLE_DEVICES=0
 
 # Default command (can be overridden)
-CMD ["python", "alphaholdem/cli/train_kbest.py", "--device", "cuda", "--steps", "1000", "--use-tensor-env"]
+CMD ["python", "alphaholdem/cli/train_kbest.py", "--config-name=config_high_perf", "device=cuda"]
