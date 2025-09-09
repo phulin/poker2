@@ -606,6 +606,48 @@ class TestVectorizedReplayBuffer:
         # Should remain empty
         assert buffer.size == 0
 
+    def test_compaction_behavior(self, buffer):
+        """Test that compaction correctly handles zero-length vs non-zero-length trajectories."""
+        # Add some valid trajectories first
+        buffer.start_adding_trajectory_batches(3)
+
+        # Add 2 valid trajectories
+        for i in range(2):
+            batch = self._create_test_batch(1, buffer.device)
+            trajectory_indices = torch.tensor([i], device=buffer.device)
+            batch["dones"][0] = True  # Complete trajectory
+            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+
+        # Add 1 zero-length trajectory (no transitions added)
+        # This simulates a trajectory that was started but never had any transitions added
+
+        # Finish adding - this should compact out zero-length trajectories
+        trajectories_added, steps_added = buffer.finish_adding_trajectory_batches()
+
+        # Should only count the 2 valid trajectories, not the zero-length one
+        assert trajectories_added == 2
+        assert buffer.size == 2
+
+        # Check that only valid trajectories are marked as valid
+        assert buffer.valid_trajectories[0] == True
+        assert buffer.valid_trajectories[1] == True
+        assert (
+            buffer.valid_trajectories[2] == False
+        )  # Zero-length trajectory should be compacted out
+
+        # Check trajectory lengths
+        assert buffer.trajectory_lengths[0] > 0
+        assert buffer.trajectory_lengths[1] > 0
+        assert (
+            buffer.trajectory_lengths[2] == 0
+        )  # Zero-length trajectory should have length 0
+
+        # The zero-length trajectory should be at the end of the buffer (compacted out)
+        # and its data should be zeroed out
+        assert buffer.current_step_positions[2] == 0
+        assert buffer.rewards[2].sum() == 0  # All rewards should be zero
+        assert buffer.action_indices[2].sum() == 0  # All action indices should be zero
+
     def test_buffer_filling_during_collection(self):
         """Test that the buffer properly fills and manages trajectories during collection."""
         from alphaholdem.rl.self_play import SelfPlayTrainer

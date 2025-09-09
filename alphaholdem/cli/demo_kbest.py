@@ -39,7 +39,7 @@ def demonstrate_kbest(cfg: Config):
         stats = trainer.train_step(num_trajectories=3)
 
         print(f"Step {step + 1}:")
-        print(f"  - Episodes: {stats['episode_count']}")
+        print(f"  - Trajectories: {stats['trajectories_collected']}")
         print(f"  - Avg Reward: {stats['avg_reward']:.2f}")
         print(f"  - Current ELO: {stats['current_elo']:.1f}")
         print(f"  - Pool Size: {stats['pool_stats']['pool_size']}")

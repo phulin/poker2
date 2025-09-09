@@ -651,6 +651,7 @@ class SelfPlayTrainer:
                 newly_done_rewards = per_env_rewards[
                     newly_done_indices
                 ]  # Keep as tensor
+                trajectory_count += newly_done_indices.numel()
                 collected_trajectory_rewards.append(newly_done_rewards)
 
             # Trajectories are now added immediately via vectorized operations
@@ -689,14 +690,12 @@ class SelfPlayTrainer:
             if dones.all():
                 self.tensor_env.reset()
                 if add_to_replay_buffer:
-                    trajectories_added, steps_added = (
+                    _, steps_added = (
                         self.replay_buffer.finish_adding_trajectory_batches()
                     )
-                    trajectory_count += trajectories_added
                     steps_collected += steps_added
                 else:
                     # For evaluation, just count episodes without adding to buffer
-                    trajectory_count += self.num_envs
                     steps_collected += per_traj_step_count.sum().item()
                 per_env_rewards[:] = 0.0
                 per_traj_step_count[:] = 0
@@ -792,8 +791,6 @@ class SelfPlayTrainer:
         total_mb_improved = 0
         total_loss_before = 0.0
         total_loss_after = 0.0
-        self.total_step_reward = 0.0
-        self.step_trajectories_collected = 0
 
         for _ in range(self.num_epochs):
             # Sample batch from vectorized buffer
@@ -963,7 +960,7 @@ class SelfPlayTrainer:
             ):
                 total_mb_improved += 1
 
-        # Calculate average reward for this update step
+        # Calculate average reward for this update step using captured values
         avg_reward = (
             self.total_step_reward / max(1, self.step_trajectories_collected)
             if self.step_trajectories_collected > 0
@@ -1005,6 +1002,10 @@ class SelfPlayTrainer:
             Dictionary with training statistics
         """
 
+        # These are updated while filling the replay buffer
+        self.total_step_reward = 0.0
+        self.step_trajectories_collected = 0
+
         target_steps = self.batch_size * max(self.cfg.train.replay_buffer_batches, 1)
         if self.replay_buffer.num_steps() == 0:
             # Warmup: fill replay buffer with minimum required samples
@@ -1029,8 +1030,8 @@ class SelfPlayTrainer:
         # Prepare training stats for return and logging
         training_stats = {
             "step": step,
-            "episode_count": self.step_trajectories_collected,
-            "total_episodes": self.total_trajectories_collected,
+            "trajectories_collected": self.step_trajectories_collected,
+            "total_trajectories_collected": self.total_trajectories_collected,
             "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
             **update_stats,
@@ -1045,7 +1046,7 @@ class SelfPlayTrainer:
             wandb.log(
                 {
                     "step": step,  # Match CLI display (1-indexed)
-                    "episode_count": training_stats["episode_count"],
+                    "trajectories_collected": training_stats["trajectories_collected"],
                     "avg_reward": training_stats["avg_reward"],
                     "current_elo": training_stats["current_elo"],
                     "policy_loss": training_stats["policy_loss"],
@@ -1259,8 +1260,8 @@ class SelfPlayTrainer:
         # Note: step counter is now managed externally
 
         # Restore wandb step for consistent logging
-        # If wandb_step not in checkpoint (old checkpoint), set it to match step
-        self.wandb_step = checkpoint.get("wandb_step", checkpoint["step"])
+        # If wandb_step not in checkpoint (old checkpoint), set it to 0 since we no longer store step
+        self.wandb_step = checkpoint.get("wandb_step", 0)
 
         # Restore replay buffer if present:
         if "replay_buffer" in checkpoint and checkpoint["replay_buffer"] is not None:
@@ -1315,7 +1316,8 @@ class SelfPlayTrainer:
         # Extract wandb run ID for resumption
         wandb_run_id = checkpoint.get("wandb_run_id")
 
-        return checkpoint["step"], wandb_run_id
+        # Return 0 for step since we no longer store it in checkpoints
+        return 0, wandb_run_id
 
     def evaluate_against_pool(self, num_games: int = 100) -> dict:
         """

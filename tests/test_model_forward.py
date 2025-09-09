@@ -34,7 +34,12 @@ def test_siamese_convnet_forward_and_policy_action():
     cards_enc = CardsPlanesV1()
     actions_enc = ActionsHUEncoderV1(history_actions_per_round=6)
     model = SiameseConvNetV1(
-        cards_channels=6, actions_channels=24, fusion_hidden=128, num_actions=nb
+        cards_channels=6,
+        actions_channels=24,
+        cards_hidden=128,
+        actions_hidden=128,
+        fusion_hidden=128,
+        num_actions=nb,
     )
     policy = CategoricalPolicyV1()
 

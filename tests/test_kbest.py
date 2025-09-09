@@ -34,13 +34,28 @@ def test_kbest_pool():
 
     # Create some dummy models
     model1 = SiameseConvNetV1(
-        cards_channels=6, actions_channels=24, fusion_hidden=[256, 256], num_actions=8
+        cards_channels=6,
+        actions_channels=24,
+        cards_hidden=128,
+        actions_hidden=128,
+        fusion_hidden=[256, 256],
+        num_actions=8,
     )
     model2 = SiameseConvNetV1(
-        cards_channels=6, actions_channels=24, fusion_hidden=[256, 256], num_actions=8
+        cards_channels=6,
+        actions_channels=24,
+        cards_hidden=128,
+        actions_hidden=128,
+        fusion_hidden=[256, 256],
+        num_actions=8,
     )
     model3 = SiameseConvNetV1(
-        cards_channels=6, actions_channels=24, fusion_hidden=[256, 256], num_actions=8
+        cards_channels=6,
+        actions_channels=24,
+        cards_hidden=128,
+        actions_hidden=128,
+        fusion_hidden=[256, 256],
+        num_actions=8,
     )
 
     # Create snapshots
@@ -157,6 +172,8 @@ def test_opponent_sampling():
         model = SiameseConvNetV1(
             cards_channels=6,
             actions_channels=24,
+            cards_hidden=128,
+            actions_hidden=128,
             fusion_hidden=[256, 256],
             num_actions=8,
         )

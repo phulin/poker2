@@ -204,8 +204,8 @@ def test_checkpoint_save_load():
         # Load checkpoint
         loaded_step, wandb_run_id = new_trainer.load_checkpoint(checkpoint_path)
 
-        # Verify loaded state
-        assert loaded_step == 3, f"Expected step 3, got {loaded_step}"
+        # Verify loaded state (step is no longer stored in checkpoints)
+        assert loaded_step == 0, f"Expected step 0, got {loaded_step}"
         assert (
             new_trainer.step_trajectories_collected
             == trainer.step_trajectories_collected
@@ -308,10 +308,15 @@ def test_basic_training_step():
 
         # Check that we have reasonable values
         assert "avg_reward" in stats, "Missing avg_reward in stats"
-        assert "episode_count" in stats, "Missing episode_count in stats"
+        assert (
+            "trajectories_collected" in stats
+        ), "Missing trajectories_collected in stats"
 
-        # Check that episodes are being counted
-        assert stats["episode_count"] > 0, "No episodes counted"
+        # Check that trajectories are being counted (skip first step which is warmup)
+        if step > 0:
+            assert (
+                stats["trajectories_collected"] > 0
+            ), f"No trajectories counted in step {step}"
 
         # Check that we have some reward signal
         assert not torch.isnan(torch.tensor(stats["avg_reward"])), "NaN in avg_reward"

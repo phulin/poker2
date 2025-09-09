@@ -45,7 +45,7 @@ def main():
     # 4. Test training step
     print(f"\n4. Training Step Test:")
     stats = trainer.train_step(num_trajectories=2)
-    print(f"   Episodes: {stats['episode_count']}")
+    print(f"   Trajectories: {stats['trajectories_collected']}")
     print(f"   Avg reward: {stats['avg_reward']:.2f}")
     if "avg_loss" in stats:
         print(f"   Avg loss: {stats['avg_loss']:.6f}")

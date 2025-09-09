@@ -37,7 +37,9 @@ def detailed_training_analysis():
         print(f"Step {step + 1:2d}: ", end="")
         if "avg_loss" in stats:
             print(f"Loss: {stats['avg_loss']:.6f}, ", end="")
-        print(f"Reward: {stats['avg_reward']:6.2f}, Episodes: {stats['episode_count']}")
+        print(
+            f"Reward: {stats['avg_reward']:6.2f}, Trajectories: {stats['trajectories_collected']}"
+        )
 
     print()
 

@@ -50,7 +50,7 @@ def train_model(trainer, num_steps=50):
         if step % 10 == 0:
             print(
                 f"Step {step:2d}: Reward: {stats['avg_reward']:6.2f}, "
-                f"Episodes: {stats['episode_count']}"
+                f"Trajectories: {stats['trajectories_collected']}"
             )
 
     print("Training completed!\n")
