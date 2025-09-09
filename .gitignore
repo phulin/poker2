@@ -156,3 +156,4 @@ profile_output*.txt
 /checkpoints/
 /checkpoints-*/
 /secret*
+/outputs/

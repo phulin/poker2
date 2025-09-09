@@ -14,7 +14,7 @@ device: cuda
 
 # === ENVIRONMENT CONFIGURATION ===
 use_tensor_env: true
-num_envs: 1024
+num_envs: 5000
 
 # === WANDB CONFIGURATION ===
 use_wandb: true

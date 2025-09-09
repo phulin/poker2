@@ -1069,23 +1069,55 @@ class SelfPlayTrainer:
 
         torch.save(checkpoint, path, _use_new_zipfile_serialization=True)
 
-        # Clean up old checkpoints if economize_checkpoints is enabled
-        if self.cfg.economize_checkpoints:
-            self._cleanup_old_checkpoints(path, step)
+        if "checkpoint_step_" in path:
+            # Create symlink for latest_model.pt pointing to current checkpoint
+            self._create_latest_symlink(path)
+
+            # Clean up old checkpoints if economize_checkpoints is enabled
+            if self.cfg.economize_checkpoints:
+                self._cleanup_old_checkpoints(path)
 
         compression_note = (
             " (compressed)"
-            if self.cfg.economize_checkpoints
+            if not self.cfg.economize_checkpoints
             else " (compressed, replay buffer excluded)"
         )
         print(f"Checkpoint saved to {path}{compression_note}")
 
-    def _cleanup_old_checkpoints(self, current_path: str, current_step: int) -> None:
+    def _create_latest_symlink(self, checkpoint_path: str) -> None:
+        """Create or update symlink from latest_model.pt to the current checkpoint."""
+        import os
+
+        # Resolve symlinks to get the actual checkpoint file
+        actual_checkpoint_path = os.path.realpath(checkpoint_path)
+        checkpoint_dir = os.path.dirname(actual_checkpoint_path)
+        latest_path = os.path.join(checkpoint_dir, "latest_model.pt")
+        checkpoint_filename = os.path.basename(actual_checkpoint_path)
+
+        # Remove existing symlink or file (force removal)
+        if os.path.exists(latest_path):
+            try:
+                os.remove(latest_path)
+            except OSError as e:
+                print(f"Warning: Could not remove existing latest_model.pt: {e}")
+                return
+
+        # Create symlink using relative path to avoid circular references
+        try:
+            os.symlink(checkpoint_filename, latest_path)
+            print(f"Created symlink: latest_model.pt -> {checkpoint_filename}")
+        except OSError as e:
+            print(f"Warning: Could not create symlink latest_model.pt: {e}")
+
+    def _cleanup_old_checkpoints(self, current_path: str) -> None:
         """Clean up old checkpoints, keeping only best_model.pt and latest checkpoint."""
         import os
         import glob
 
-        checkpoint_dir = os.path.dirname(current_path)
+        # Resolve symlinks to get the actual checkpoint file
+        actual_current_path = os.path.realpath(current_path)
+        checkpoint_dir = os.path.dirname(actual_current_path)
+
         if not os.path.exists(checkpoint_dir):
             return
 
@@ -1094,11 +1126,11 @@ class SelfPlayTrainer:
             os.path.join(checkpoint_dir, "checkpoint_step_*.pt")
         )
 
-        # Keep best_model.pt and latest_model.pt (these are special)
+        # Keep best_model.pt and the current checkpoint
+        # Note: latest_model.pt is a symlink, so we don't need to keep it in files_to_keep
         files_to_keep = {
             os.path.join(checkpoint_dir, "best_model.pt"),
-            os.path.join(checkpoint_dir, "latest_model.pt"),
-            current_path,  # Keep the current checkpoint
+            actual_current_path,  # Keep the current checkpoint (resolved path)
         }
 
         # Remove old checkpoint files
