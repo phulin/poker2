@@ -13,8 +13,7 @@ class TestVectorizedReplayBuffer:
         return VectorizedReplayBuffer(
             capacity=10,  # Number of trajectories
             max_trajectory_length=20,  # Max steps per trajectory
-            observation_dim=10,
-            legal_mask_dim=5,
+            num_bet_bins=5,  # Number of bet bins (replaces legal_mask_dim)
             device=device,
         )
 
@@ -26,8 +25,9 @@ class TestVectorizedReplayBuffer:
         assert buffer.position == 0
 
         # Check tensor shapes - now 2D: (capacity, max_trajectory_length, ...)
-        assert buffer.observations.shape == (10, 20, 10)
-        assert buffer.actions.shape == (10, 20)
+        assert buffer.cards_features.shape == (10, 20, 6, 4, 13)  # Cards features
+        assert buffer.actions_features.shape == (10, 20, 24, 4, 5)  # Actions features
+        assert buffer.action_indices.shape == (10, 20)  # Action indices
         assert buffer.log_probs.shape == (10, 20)
         assert buffer.rewards.shape == (10, 20)
         assert buffer.dones.shape == (10, 20)
@@ -155,8 +155,9 @@ class TestVectorizedReplayBuffer:
 
         # Check that all required keys are present
         expected_keys = {
-            "observations",
-            "actions",
+            "cards_features",
+            "actions_features",
+            "action_indices",
             "log_probs_old",
             "advantages",
             "returns",
@@ -168,9 +169,10 @@ class TestVectorizedReplayBuffer:
 
         # Check that we get data from 2 trajectories (4 total steps)
         # Each trajectory has 2 steps, so 2 trajectories = 4 total steps
-        total_steps = sampled["observations"].shape[0]
+        total_steps = sampled["cards_features"].shape[0]
         assert total_steps == 4
-        assert sampled["actions"].shape[0] == total_steps
+        assert sampled["actions_features"].shape[0] == total_steps
+        assert sampled["action_indices"].shape[0] == total_steps
         assert sampled["log_probs_old"].shape[0] == total_steps
         assert sampled["advantages"].shape[0] == total_steps
         assert sampled["returns"].shape[0] == total_steps
@@ -296,8 +298,9 @@ class TestVectorizedReplayBuffer:
 
         # Check that all buffer tensors are on the correct device
         for attr_name in [
-            "observations",
-            "actions",
+            "cards_features",
+            "actions_features",
+            "action_indices",
             "log_probs",
             "rewards",
             "dones",
@@ -452,8 +455,9 @@ class TestVectorizedReplayBuffer:
 
         # Check that all required keys are present
         expected_keys = {
-            "observations",
-            "actions",
+            "cards_features",
+            "actions_features",
+            "action_indices",
             "log_probs_old",
             "advantages",
             "returns",
@@ -464,8 +468,9 @@ class TestVectorizedReplayBuffer:
         assert set(sampled.keys()) == expected_keys
 
         # Check shapes
-        assert sampled["observations"].shape[0] == 5
-        assert sampled["actions"].shape[0] == 5
+        assert sampled["cards_features"].shape[0] == 5
+        assert sampled["actions_features"].shape[0] == 5
+        assert sampled["action_indices"].shape[0] == 5
         assert sampled["log_probs_old"].shape[0] == 5
         assert sampled["advantages"].shape[0] == 5
         assert sampled["returns"].shape[0] == 5
@@ -558,8 +563,13 @@ class TestVectorizedReplayBuffer:
 
         transitions = []
         for i in range(3):
+            # Create observation tensor with correct dimensions (cards + actions)
+            # Cards: 6*4*13 = 312, Actions: 24*4*5 = 480, Total: 792
+            observation = torch.zeros(792)
+            observation[i] = 1.0  # Set one element to 1 for testing
+
             transition = Transition(
-                observation=torch.randn(10),
+                observation=observation,
                 action=i,
                 log_prob=float(i),
                 reward=float(i),
@@ -892,25 +902,42 @@ class TestVectorizedReplayBuffer:
         print(f"Trajectory lengths: {trainer.replay_buffer.trajectory_lengths}")
         print(f"Current step positions: {trainer.replay_buffer.current_step_positions}")
 
-        # Check if there are any non-zero observations
-        non_zero_obs = (trainer.replay_buffer.observations != 0).any(dim=-1).any(dim=-1)
-        print(f"Non-zero observations: {non_zero_obs.sum().item()}")
+        # Check if there are any non-zero cards features
+        non_zero_cards = (
+            (trainer.replay_buffer.cards_features != 0)
+            .any(dim=-1)
+            .any(dim=-1)
+            .any(dim=-1)
+        )
+        print(f"Non-zero cards features: {non_zero_cards.sum().item()}")
 
-        # Check if there are any non-zero actions
-        non_zero_actions = (trainer.replay_buffer.actions != 0).any(dim=-1)
-        print(f"Non-zero actions: {non_zero_actions.sum().item()}")
+        # Check if there are any non-zero actions features
+        non_zero_actions_features = (
+            (trainer.replay_buffer.actions_features != 0)
+            .any(dim=-1)
+            .any(dim=-1)
+            .any(dim=-1)
+        )
+        print(f"Non-zero actions features: {non_zero_actions_features.sum().item()}")
+
+        # Check if there are any non-zero action indices
+        non_zero_action_indices = (trainer.replay_buffer.action_indices != 0).any(
+            dim=-1
+        )
+        print(f"Non-zero action indices: {non_zero_action_indices.sum().item()}")
 
         print("✅ Detailed buffer monitoring test completed!")
 
     def _create_test_batch(self, batch_size: int, device: torch.device) -> dict:
         """Create a test batch with random data."""
         return {
-            "observations": torch.randn(batch_size, 10, device=device),
-            "actions": torch.randint(0, 5, (batch_size,), device=device),
+            "cards_features": torch.randn(batch_size, 6, 4, 13, device=device).bool(),
+            "actions_features": torch.randn(batch_size, 24, 4, 5, device=device).bool(),
+            "action_indices": torch.randint(0, 5, (batch_size,), device=device),
             "log_probs": torch.randn(batch_size, device=device),
             "rewards": torch.randn(batch_size, device=device),
             "dones": torch.zeros(batch_size, dtype=torch.bool, device=device),
-            "legal_masks": torch.ones(batch_size, 5, device=device),
+            "legal_masks": torch.ones(batch_size, 5, device=device).bool(),
             "chips_placed": torch.randn(batch_size, device=device),
             "delta2": torch.randn(batch_size, device=device),
             "delta3": torch.randn(batch_size, device=device),

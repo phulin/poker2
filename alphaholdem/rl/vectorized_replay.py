@@ -15,8 +15,7 @@ class VectorizedReplayBuffer:
         self,
         capacity: int,  # Number of trajectories (not steps)
         max_trajectory_length: int,  # Maximum steps per trajectory
-        observation_dim: int,
-        legal_mask_dim: int,
+        num_bet_bins: int,  # Batch size for tensor operations
         device: torch.device,
     ):
         self.capacity = capacity  # Number of trajectories
@@ -30,14 +29,29 @@ class VectorizedReplayBuffer:
         )  # -1 if no batch is open, otherwise the nominal size of the open batch
 
         # Pre-allocate tensors for all transition fields: (capacity, max_trajectory_length, ...)
-        self.observations = torch.zeros(
+        # Cards features tensor: (capacity, max_trajectory_length, 6, 4, 13) - bool dtype
+        self.cards_features = torch.zeros(
             capacity,
             max_trajectory_length,
-            observation_dim,
-            dtype=torch.float32,
+            6,
+            4,
+            13,  # Fixed cards shape
+            dtype=torch.bool,
             device=device,
         )
-        self.actions = torch.zeros(
+
+        # Actions features tensor: (capacity, max_trajectory_length, 24, 4, num_bet_bins) - bool dtype
+        # 4 slots: p1, p2, sum, legal
+        self.actions_features = torch.zeros(
+            capacity,
+            max_trajectory_length,
+            24,
+            4,
+            num_bet_bins,
+            dtype=torch.bool,
+            device=device,
+        )
+        self.action_indices = torch.zeros(
             capacity, max_trajectory_length, dtype=torch.long, device=device
         )
         self.log_probs = torch.zeros(
@@ -52,8 +66,8 @@ class VectorizedReplayBuffer:
         self.legal_masks = torch.zeros(
             capacity,
             max_trajectory_length,
-            legal_mask_dim,
-            dtype=torch.float32,
+            num_bet_bins,
+            dtype=torch.bool,  # Changed to bool
             device=device,
         )
         self.chips_placed = torch.zeros(
@@ -118,12 +132,13 @@ class VectorizedReplayBuffer:
         self.current_step_positions[clear_indices] = 0
 
         # Clear the actual data tensors for these rows
-        self.observations[clear_indices] = 0
-        self.actions[clear_indices] = 0
+        self.cards_features[clear_indices] = False
+        self.actions_features[clear_indices] = False
+        self.action_indices[clear_indices] = 0
         self.log_probs[clear_indices] = 0
         self.rewards[clear_indices] = 0
         self.dones[clear_indices] = False
-        self.legal_masks[clear_indices] = 0
+        self.legal_masks[clear_indices] = False
         self.chips_placed[clear_indices] = 0
         self.delta2[clear_indices] = 0
         self.delta3[clear_indices] = 0
@@ -188,8 +203,9 @@ class VectorizedReplayBuffer:
             "trajectory_lengths",
             "valid_trajectories",
             "current_step_positions",
-            "observations",
-            "actions",
+            "cards_features",
+            "actions_features",
+            "action_indices",
             "log_probs",
             "rewards",
             "dones",
@@ -221,12 +237,13 @@ class VectorizedReplayBuffer:
 
     def add_batch(
         self,
-        observations: torch.Tensor,
-        actions: torch.Tensor,
+        cards_features: torch.Tensor,  # [batch_size, 6, 4, 13] - bool
+        actions_features: torch.Tensor,  # [batch_size, 24, 4, num_bet_bins] - bool
+        action_indices: torch.Tensor,  # [batch_size] - long
         log_probs: torch.Tensor,
         rewards: torch.Tensor,
         dones: torch.Tensor,
-        legal_masks: torch.Tensor,
+        legal_masks: torch.Tensor,  # [batch_size, legal_mask_dim] - bool
         chips_placed: torch.Tensor,
         delta2: torch.Tensor,
         delta3: torch.Tensor,
@@ -237,12 +254,13 @@ class VectorizedReplayBuffer:
         Add a batch of transitions to the buffer using vectorized operations.
 
         Args:
-            observations: [batch_size, observation_dim]
-            actions: [batch_size]
+            cards_features: [batch_size, 6, 4, 13] - bool dtype
+            actions_features: [batch_size, 24, 4, num_bet_bins] - bool dtype
+            action_indices: [batch_size] - long dtype
             log_probs: [batch_size]
             rewards: [batch_size]
             dones: [batch_size]
-            legal_masks: [batch_size, legal_mask_dim]
+            legal_masks: [batch_size, legal_mask_dim] - bool dtype
             chips_placed: [batch_size]
             delta2: [batch_size]
             delta3: [batch_size]
@@ -266,14 +284,15 @@ class VectorizedReplayBuffer:
 
         # Use vectorized indexing to add transitions
         # This is the key vectorized operation - no loops!
-        self.observations[buffer_trajectory_indices, step_positions] = observations
-        self.actions[buffer_trajectory_indices, step_positions] = actions
+        self.cards_features[buffer_trajectory_indices, step_positions] = cards_features
+        self.actions_features[buffer_trajectory_indices, step_positions] = (
+            actions_features
+        )
+        self.action_indices[buffer_trajectory_indices, step_positions] = action_indices
         self.log_probs[buffer_trajectory_indices, step_positions] = log_probs
         self.rewards[buffer_trajectory_indices, step_positions] = rewards
         self.dones[buffer_trajectory_indices, step_positions] = dones
-        self.legal_masks[buffer_trajectory_indices, step_positions] = (
-            legal_masks.float()
-        )
+        self.legal_masks[buffer_trajectory_indices, step_positions] = legal_masks
         self.chips_placed[buffer_trajectory_indices, step_positions] = (
             chips_placed.float()
         )
@@ -436,8 +455,13 @@ class VectorizedReplayBuffer:
         )  # [num_traj, max_len]
 
         # Gather all data for sampled trajectories up to their respective lengths
-        obs = self.observations[traj_indices, :max_len]  # [num_traj, max_len, ...]
-        acts = self.actions[traj_indices, :max_len]
+        cards_features = self.cards_features[
+            traj_indices, :max_len
+        ]  # [num_traj, max_len, 6, 4, 13]
+        actions_features = self.actions_features[
+            traj_indices, :max_len
+        ]  # [num_traj, max_len, 24, 4, num_bet_bins]
+        action_indices = self.action_indices[traj_indices, :max_len]
         logps = self.log_probs[traj_indices, :max_len]
         advs = self.advantages[traj_indices, :max_len]
         rets = self.returns[traj_indices, :max_len]
@@ -447,8 +471,15 @@ class VectorizedReplayBuffer:
 
         # Flatten only valid steps (mask out padding)
         mask_flat = mask.flatten()
-        all_observations = obs.reshape(-1, obs.shape[-1])[mask_flat]
-        all_actions = acts.reshape(-1)[mask_flat]
+        all_cards_features = cards_features.reshape(-1, *cards_features.shape[2:])[
+            mask_flat
+        ]  # [valid_steps, 6, 4, 13]
+        all_actions_features = actions_features.reshape(
+            -1, *actions_features.shape[2:]
+        )[
+            mask_flat
+        ]  # [valid_steps, 24, 4, num_bet_bins]
+        all_action_indices = action_indices.reshape(-1)[mask_flat]
         all_log_probs = logps.reshape(-1)[mask_flat]
         all_advantages = advs.reshape(-1)[mask_flat]
         all_returns = rets.reshape(-1)[mask_flat]
@@ -457,10 +488,11 @@ class VectorizedReplayBuffer:
         all_delta3 = d3.reshape(-1)[mask_flat]
 
         # Return the flattened data directly
-        if all_observations.numel() > 0:
+        if all_cards_features.numel() > 0:
             return {
-                "observations": all_observations,
-                "actions": all_actions,
+                "cards_features": all_cards_features,
+                "actions_features": all_actions_features,
+                "action_indices": all_action_indices,
                 "log_probs_old": all_log_probs,
                 "advantages": all_advantages,
                 "returns": all_returns,
@@ -505,8 +537,9 @@ class VectorizedReplayBuffer:
 
         # Vectorized extraction (inlined variables)
         return {
-            "observations": self.observations[traj_indices, step_indices],
-            "actions": self.actions[traj_indices, step_indices],
+            "cards_features": self.cards_features[traj_indices, step_indices],
+            "actions_features": self.actions_features[traj_indices, step_indices],
+            "action_indices": self.action_indices[traj_indices, step_indices],
             "log_probs_old": self.log_probs[traj_indices, step_indices],
             "advantages": self.advantages[traj_indices, step_indices],
             "returns": self.returns[traj_indices, step_indices],
@@ -544,9 +577,22 @@ class VectorizedReplayBuffer:
 
             # Iterate over transitions directly
             for t in trajectory.transitions:
+                # Extract cards and actions from the observation tensor
+                # Assuming observation is [cards_features, actions_features] flattened
+                cards_features = t.observation[:312]  # First 312 features are cards
+                actions_features = t.observation[312:]  # Next 768 features are actions
+
+                # Reshape cards: (312,) -> (6, 4, 13)
+                cards_features = cards_features.reshape(6, 4, 13).bool()
+
+                # Reshape actions: (768,) -> (24, 4, num_bet_bins)
+                num_bet_bins = actions_features.shape[0] // (24 * 4)
+                actions_features = actions_features.reshape(24, 4, num_bet_bins).bool()
+
                 self.add_batch(
-                    observations=t.observation.unsqueeze(0),
-                    actions=torch.tensor(
+                    cards_features=cards_features.unsqueeze(0),
+                    actions_features=actions_features.unsqueeze(0),
+                    action_indices=torch.tensor(
                         [t.action], dtype=torch.long, device=self.device
                     ),
                     log_probs=torch.tensor(
@@ -556,7 +602,7 @@ class VectorizedReplayBuffer:
                         [t.reward], dtype=torch.float32, device=self.device
                     ),
                     dones=torch.tensor([t.done], dtype=torch.bool, device=self.device),
-                    legal_masks=t.legal_mask.unsqueeze(0),
+                    legal_masks=t.legal_mask.unsqueeze(0).bool(),
                     chips_placed=torch.tensor(
                         [t.chips_placed], dtype=torch.float32, device=self.device
                     ),

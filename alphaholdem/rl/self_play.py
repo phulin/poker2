@@ -122,20 +122,11 @@ class SelfPlayTrainer:
         # Add an extra batch so we can reserve space for the next batch.
         buffer_capacity = self.batch_size * max(1, 1 + self.replay_buffer_batches)
 
-        # Calculate observation dimensions
-        # Cards: 6 channels * 4 suits * 13 ranks = 312
-        # Actions: 24 channels * 4 players * num_bet_bins = 24 * 4 * num_bet_bins
-        cards_dim = 6 * 4 * 13  # 312
-        actions_dim = 24 * 4 * self.num_bet_bins
-        observation_dim = cards_dim + actions_dim
-        legal_mask_dim = self.num_bet_bins
-
         # Use vectorized replay buffer for efficient tensor operations
         self.replay_buffer = VectorizedReplayBuffer(
             capacity=buffer_capacity,  # Number of trajectories
             max_trajectory_length=self.max_trajectory_length,  # Maximum steps per trajectory
-            observation_dim=observation_dim,
-            legal_mask_dim=legal_mask_dim,
+            num_bet_bins=self.num_bet_bins,  # Number of bet bins for actions tensor
             device=self.device,
         )
 
@@ -527,19 +518,20 @@ class SelfPlayTrainer:
                 )  # -opponent chips
                 our_delta3_tensor = chips[our_env_indices, 0] / scale  # our chips
 
-                # Pre-compute flattened observations for all our environments at once
-                our_cards_flat = active_cards[active_we_act].flatten(
-                    1
-                )  # [N_our, 6*4*13]
-                our_actions_flat = active_actions[active_we_act].flatten(
-                    1
-                )  # [N_our, 24*4*num_bet_bins]
-                our_observations = torch.cat(
-                    [our_cards_flat, our_actions_flat], dim=1
-                )  # [N_our, total_obs_size]
+                # Extract separate cards and actions features for our environments
+                our_cards_features = active_cards[
+                    active_we_act
+                ]  # [N_our, 6, 4, 13] - float32
+                our_actions_features = active_actions[
+                    active_we_act
+                ]  # [N_our, 24, 4, num_bet_bins] - float32
+
+                # Convert to bool dtype for storage in replay buffer
+                our_cards_features_bool = our_cards_features.bool()
+                our_actions_features_bool = our_actions_features.bool()
 
                 # Extract tensor values efficiently (no .tolist() calls)
-                our_actions_tensor = action_values_active[active_we_act]
+                our_action_indices = action_values_active[active_we_act]
                 our_log_probs_tensor = log_probs_active[active_we_act]
                 our_values_tensor = active_values[active_we_act]
                 our_rewards_tensor = active_rewards[active_we_act]
@@ -550,12 +542,13 @@ class SelfPlayTrainer:
                 # Add transitions immediately using vectorized operations
                 if add_to_replay_buffer:
                     self.replay_buffer.add_batch(
-                        observations=our_observations,
-                        actions=our_actions_tensor,
+                        cards_features=our_cards_features_bool,
+                        actions_features=our_actions_features_bool,
+                        action_indices=our_action_indices,
                         log_probs=our_log_probs_tensor,
                         rewards=our_rewards_tensor,
                         dones=our_dones_tensor,
-                        legal_masks=our_legal_masks_tensor,
+                        legal_masks=our_legal_masks_tensor.bool(),
                         chips_placed=our_placed_chips_tensor,
                         delta2=our_delta2_tensor,
                         delta3=our_delta3_tensor,
@@ -794,23 +787,27 @@ class SelfPlayTrainer:
                 first_clip_debug = {}
 
             # No minibatches: operate on the full batch at once
-            observations = batch["observations"]
-            cards = observations[:, : (6 * 4 * 13)].reshape(-1, 6, 4, 13)
-            actions_tensor = observations[:, (6 * 4 * 13) :].reshape(
-                -1, 24, 4, self.num_bet_bins
-            )
+            # Extract separate cards and actions features from batch
+            cards_features = batch["cards_features"]  # [batch_size, 6, 4, 13] - bool
+            actions_features = batch[
+                "actions_features"
+            ]  # [batch_size, 24, 4, num_bet_bins] - bool
+
+            # Convert bool tensors to float32 for model forward pass
+            cards_float = cards_features.float()
+            actions_float = actions_features.float()
 
             # Use mixed precision autocast for forward pass
             if self.use_mixed_precision and self.device.type == "cuda":
                 with torch.amp.autocast("cuda"):
-                    logits, values = self.model(cards, actions_tensor)
+                    logits, values = self.model(cards_float, actions_float)
             else:
-                logits, values = self.model(cards, actions_tensor)
+                logits, values = self.model(cards_float, actions_float)
 
             loss_dict = trinal_clip_ppo_loss(
                 logits=logits,
                 values=values,
-                actions=batch["actions"],
+                actions=batch["action_indices"],
                 log_probs_old=batch["log_probs_old"],
                 advantages=batch["advantages"],
                 returns=batch["returns"],
@@ -833,7 +830,7 @@ class SelfPlayTrainer:
                     legal_mb.bool(), logits, torch.full_like(logits, -1e9)
                 )
                 log_probs_new = torch.log_softmax(masked_logits, dim=-1)
-                a_mb = batch["actions"]
+                a_mb = batch["action_indices"]
                 logp_new = log_probs_new.gather(1, a_mb.unsqueeze(1)).squeeze(1)
                 logp_old = batch["log_probs_old"]
                 ratio = torch.exp(logp_new - logp_old)
@@ -886,11 +883,11 @@ class SelfPlayTrainer:
 
             # Recompute loss on the SAME batch AFTER the update to verify improvement
             with torch.no_grad():
-                logits_after, values_after = self.model(cards, actions_tensor)
+                logits_after, values_after = self.model(cards_float, actions_float)
                 loss_after_dict = trinal_clip_ppo_loss(
                     logits=logits_after,
                     values=values_after,
-                    actions=batch["actions"],
+                    actions=batch["action_indices"],
                     log_probs_old=batch["log_probs_old"],
                     advantages=batch["advantages"],
                     returns=batch["returns"],
@@ -925,7 +922,7 @@ class SelfPlayTrainer:
         denom = max(1, total_minibatches)
         return {
             "avg_loss": total_loss / self.num_epochs,
-            "num_samples": batch["actions"].shape[0],
+            "num_samples": batch["action_indices"].shape[0],
             "delta2_mean": float(delta2_vec.mean().item()),
             "delta3_mean": float(delta3_vec.mean().item()),
             "policy_loss": total_policy_loss / denom,
