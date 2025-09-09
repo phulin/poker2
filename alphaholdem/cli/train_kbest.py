@@ -232,7 +232,7 @@ def main():
         "--device",
         type=str,
         default="mps",
-        choices=["mps", "cpu"],
+        choices=["mps", "cpu", "cuda"],
         help="Device to use for training",
     )
     parser.add_argument(
@@ -281,16 +281,28 @@ def main():
 
     # Set up device (GPU if available)
     device = torch.device(
-        "mps" if args.device == "mps" and torch.backends.mps.is_available() else "cpu"
+        "cuda"
+        if args.device == "cuda" and torch.cuda.is_available()
+        else (
+            "mps"
+            if args.device == "mps" and torch.backends.mps.is_available()
+            else "cpu"
+        )
     )
     print(f"Using device: {device}")
 
-    if device.type == "mps":
+    if device.type == "cuda":
+        print("✅ Using NVIDIA GPU (CUDA)")
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(
+            f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
+        )
+    elif device.type == "mps":
         print("✅ Using Apple M3 GPU (MPS)")
     elif args.device == "cpu":
         print("✅ Using CPU (selected)")
     else:
-        print("⚠️ Using CPU (MPS not available)")
+        print("⚠️ Using CPU (GPU not available)")
 
     # Train the agent
     trainer = train_kbest(
