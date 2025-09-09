@@ -3,7 +3,15 @@ from __future__ import annotations
 import copy
 import random
 from typing import List, Optional, Tuple, Any
-from line_profiler import profile
+
+try:
+    from line_profiler import profile
+except ImportError:  # pragma: no cover
+
+    def profile(f):
+        return f
+
+
 import torch
 import torch.nn as nn
 

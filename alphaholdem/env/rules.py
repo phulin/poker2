@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Iterable, List, Tuple, Sequence
 import random
-from line_profiler import profile
+
+try:
+    from line_profiler import profile
+except ImportError:  # pragma: no cover
+
+    def profile(f):
+        return f
+
+
 import torch
 
 # Card encoding: 0..51, rank = c % 13 (2..A), suit = c // 13 (0..3)

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-from line_profiler import profile
+try:
+    from line_profiler import profile
+except ImportError:  # pragma: no cover
+
+    def profile(f):
+        return f
+
+
 import torch
 
 from . import rules

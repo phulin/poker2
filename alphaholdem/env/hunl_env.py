@@ -4,7 +4,13 @@ from dataclasses import replace
 from typing import Any, Dict, List, Tuple
 import random
 
-from line_profiler import profile
+try:
+    from line_profiler import profile
+except ImportError:  # pragma: no cover
+
+    def profile(f):
+        return f
+
 
 from .types import Action, GameState, PlayerState
 from ..core.config_loader import get_config
