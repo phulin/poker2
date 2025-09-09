@@ -438,8 +438,12 @@ class SelfPlayTrainer:
 
                 # Get predictions from our model for our turns
                 if active_we_act.numel() > 0:
-                    our_cards = active_cards[active_we_act]
-                    our_actions = active_actions[active_we_act]
+                    our_cards = active_cards[
+                        active_we_act
+                    ].float()  # Convert bool to float for model
+                    our_actions = active_actions[
+                        active_we_act
+                    ].float()  # Convert bool to float for model
 
                     our_logits, our_values = self.model(our_cards, our_actions)
 
@@ -470,16 +474,24 @@ class SelfPlayTrainer:
                         opponent = all_opponent_snapshots[opponent_idx]
 
                         # Use indices directly into active arrays
-                        opp_cards = active_cards[opp_active_indices]
-                        opp_actions = active_actions[opp_active_indices]
+                        opp_cards = active_cards[
+                            opp_active_indices
+                        ].float()  # Convert bool to float for model
+                        opp_actions = active_actions[
+                            opp_active_indices
+                        ].float()  # Convert bool to float for model
 
                         opp_logits, opp_values = opponent.model(opp_cards, opp_actions)
                         active_logits[opp_active_indices] = opp_logits
                         active_values[opp_active_indices] = opp_values.squeeze(-1)
                 elif active_opp_acts.numel() > 0:
                     # Self-play: use our model for opponent turns too
-                    opp_cards = active_cards[active_opp_acts]
-                    opp_actions = active_actions[active_opp_acts]
+                    opp_cards = active_cards[
+                        active_opp_acts
+                    ].float()  # Convert bool to float for model
+                    opp_actions = active_actions[
+                        active_opp_acts
+                    ].float()  # Convert bool to float for model
 
                     opp_logits, opp_values = self.model(opp_cards, opp_actions)
                     active_logits[active_opp_acts] = opp_logits
@@ -521,14 +533,10 @@ class SelfPlayTrainer:
                 # Extract separate cards and actions features for our environments
                 our_cards_features = active_cards[
                     active_we_act
-                ]  # [N_our, 6, 4, 13] - float32
+                ]  # [N_our, 6, 4, 13] - bool
                 our_actions_features = active_actions[
                     active_we_act
-                ]  # [N_our, 24, 4, num_bet_bins] - float32
-
-                # Convert to bool dtype for storage in replay buffer
-                our_cards_features_bool = our_cards_features.bool()
-                our_actions_features_bool = our_actions_features.bool()
+                ]  # [N_our, 24, 4, num_bet_bins] - bool
 
                 # Extract tensor values efficiently (no .tolist() calls)
                 our_action_indices = action_values_active[active_we_act]
@@ -542,8 +550,8 @@ class SelfPlayTrainer:
                 # Add transitions immediately using vectorized operations
                 if add_to_replay_buffer:
                     self.replay_buffer.add_batch(
-                        cards_features=our_cards_features_bool,
-                        actions_features=our_actions_features_bool,
+                        cards_features=our_cards_features,
+                        actions_features=our_actions_features,
                         action_indices=our_action_indices,
                         log_probs=our_log_probs_tensor,
                         rewards=our_rewards_tensor,
@@ -678,14 +686,14 @@ class SelfPlayTrainer:
         hole_cards = self.tensor_env.hole_onehot[:, 0]  # [N, 2, 4, 13]
         board_cards = self.tensor_env.board_onehot  # [N, 5, 4, 13]
 
-        # Initialize cards tensor
-        cards = torch.zeros(batch_size, 6, 4, 13, device=self.device)
+        # Initialize cards tensor as bool
+        cards = torch.zeros(batch_size, 6, 4, 13, dtype=torch.bool, device=self.device)
 
         # Channel 0: hole cards (sum over 2 hole cards)
-        cards[:, 0] = hole_cards.sum(dim=1)  # [N, 4, 13]
+        cards[:, 0] = hole_cards.any(dim=1)  # [N, 4, 13]
 
         # Channel 1: flop cards (first 3 board cards)
-        cards[:, 1] = board_cards[:, :3].sum(dim=1)  # [N, 4, 13]
+        cards[:, 1] = board_cards[:, :3].any(dim=1)  # [N, 4, 13]
 
         # Channel 2: turn card (4th board card)
         cards[:, 2] = board_cards[:, 3]  # [N, 4, 13]
@@ -694,10 +702,10 @@ class SelfPlayTrainer:
         cards[:, 3] = board_cards[:, 4]  # [N, 4, 13]
 
         # Channel 4: public cards (all board cards)
-        cards[:, 4] = board_cards.sum(dim=1)  # [N, 4, 13]
+        cards[:, 4] = board_cards.any(dim=1)  # [N, 4, 13]
 
         # Channel 5: all cards (hole + board)
-        cards[:, 5] = hole_cards.sum(dim=1) + board_cards.sum(dim=1)  # [N, 4, 13]
+        cards[:, 5] = hole_cards.any(dim=1) + board_cards.any(dim=1)  # [N, 4, 13]
 
         # Get action history directly from tensor environment
         # Shape: [N, 4_streets, 6_slots, 4_players, num_bet_bins]
@@ -705,7 +713,7 @@ class SelfPlayTrainer:
 
         # Reshape to match ActionsHUEncoderV1 format: [N, 24_channels, 4_players, num_bet_bins]
         # Flatten streets and slots: [N, 4*6, 4, num_bet_bins] = [N, 24, 4, num_bet_bins]
-        actions = action_history.view(batch_size, 24, 4, self.num_bet_bins).float()
+        actions = action_history.view(batch_size, 24, 4, self.num_bet_bins)
 
         return {
             "cards": cards,
