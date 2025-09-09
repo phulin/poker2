@@ -279,27 +279,14 @@ class SelfPlayTrainer:
 
             # Get model prediction
             with torch.no_grad():
-                autocast_enabled = (
-                    self.device.type == "cuda" or self.device.type == "mps"
-                )
-                dtype = torch.bfloat16 if autocast_enabled else torch.float16
-                cm = (
-                    torch.autocast(
-                        device_type=self.device.type,
-                        dtype=dtype,
+                if opponent_snapshot is not None and current_player != 0:
+                    logits, value = opponent_snapshot.model(
+                        cards.unsqueeze(0), actions_tensor.unsqueeze(0)
                     )
-                    if autocast_enabled
-                    else torch.amp.autocast("cpu", enabled=False)
-                )
-                with cm:
-                    if opponent_snapshot is not None and current_player != 0:
-                        logits, value = opponent_snapshot.model(
-                            cards.unsqueeze(0), actions_tensor.unsqueeze(0)
-                        )
-                    else:
-                        logits, value = self.model(
-                            cards.unsqueeze(0), actions_tensor.unsqueeze(0)
-                        )
+                else:
+                    logits, value = self.model(
+                        cards.unsqueeze(0), actions_tensor.unsqueeze(0)
+                    )
 
                 legal_mask = get_legal_mask(
                     state, self.num_bet_bins, device=self.device
@@ -814,8 +801,8 @@ class SelfPlayTrainer:
             )
 
             # Use mixed precision autocast for forward pass
-            if self.use_mixed_precision and str(self.device).startswith("cuda"):
-                with torch.cuda.amp.autocast():
+            if self.use_mixed_precision and self.device.type == "cuda":
+                with torch.cuda.autocast("cuda"):
                     logits, values = self.model(cards, actions_tensor)
             else:
                 logits, values = self.model(cards, actions_tensor)
