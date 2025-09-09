@@ -57,17 +57,25 @@ class KBestOpponentPool(OpponentPool):
     the agent from getting trapped in local minima.
     """
 
-    def __init__(self, k: int = 5, min_elo_diff: float = 50.0, k_factor: float = 32.0):
+    def __init__(
+        self,
+        k: int = 5,
+        min_elo_diff: float = 50.0,
+        min_step_diff: int = 300,
+        k_factor: float = 32.0,
+    ):
         """
         Initialize K-Best opponent pool.
 
         Args:
             k: Number of best opponents to maintain in pool
             min_elo_diff: Minimum ELO difference to consider for pool updates
+            min_step_diff: Minimum step difference before considering for pool updates
             k_factor: ELO K-factor for rating changes
         """
         self.k = k
         self.min_elo_diff = min_elo_diff
+        self.min_step_diff = min_step_diff
         self.k_factor = k_factor
         self.snapshots: List[AgentSnapshot] = []
         self.current_elo = 1200.0  # Starting ELO rating
@@ -109,7 +117,7 @@ class KBestOpponentPool(OpponentPool):
         return [self.snapshots[i] for i in sampled_indices]
 
     def add_snapshot(
-        self, model: Any, episode_count: int, rating: Optional[float] = None
+        self, model: Any, step: int, rating: Optional[float] = None
     ) -> None:
         """
         Add a new snapshot to the pool.
@@ -121,7 +129,7 @@ class KBestOpponentPool(OpponentPool):
         # Create new snapshot
         new_snapshot = AgentSnapshot(
             model=model,
-            step=episode_count,
+            step=step,
             elo=rating if rating is not None else self.current_elo,
         )
 
@@ -266,12 +274,12 @@ class KBestOpponentPool(OpponentPool):
             "best_snapshot_elo": self.snapshots[0].elo,
         }
 
-    def should_add_snapshot(self) -> bool:
+    def should_add_snapshot(self, current_step: int) -> bool:
         """
         Determine if a new snapshot should be added to the pool.
 
         Args:
-            new_elo: ELO rating of the new snapshot
+            current_step: Current training step
 
         Returns:
             True if the snapshot should be added
@@ -279,7 +287,11 @@ class KBestOpponentPool(OpponentPool):
         if len(self.snapshots) < self.k:
             return True
 
-        # Check if new ELO is significantly different from existing snapshots
+        latest_step = max(snapshot.step for snapshot in self.snapshots)
+        if abs(current_step - latest_step) < self.min_step_diff:
+            return False
+
+        # Check if new ELO is significantly different from existing snapshots and enough time has passed
         for snapshot in self.snapshots:
             if abs(self.current_elo - snapshot.elo) >= self.min_elo_diff:
                 return True
@@ -303,8 +315,6 @@ class KBestOpponentPool(OpponentPool):
     def save_pool(self, path: str):
         """Save the opponent pool to disk."""
         pool_data = {
-            "k": self.k,
-            "min_elo_diff": self.min_elo_diff,
             "current_elo": self.current_elo,
             "snapshots": [],
         }
@@ -327,8 +337,6 @@ class KBestOpponentPool(OpponentPool):
         """Load the opponent pool from disk."""
         pool_data = torch.load(path)
 
-        self.k = pool_data["k"]
-        self.min_elo_diff = pool_data["min_elo_diff"]
         self.current_elo = pool_data["current_elo"]
         self.snapshots = []
 

@@ -69,6 +69,9 @@ class Config:
     num_steps: int = 2000
     k_best_pool_size: int = 10
     min_elo_diff: float = 50.0
+    min_step_diff: int = (
+        300  # Minimum step difference before considering for pool updates
+    )
     k_factor: float = 32.0  # ELO K-factor for rating changes
     checkpoint_interval: int = 50
     eval_interval: int = 100

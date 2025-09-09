@@ -5,6 +5,7 @@
 num_steps: 500
 k_best_pool_size: 5
 min_elo_diff: 30.0
+min_step_diff: 100  # Lower step difference for faster testing
 k_factor: 16.0  # Lower K-factor for faster testing
 checkpoint_interval: 25
 eval_interval: 50

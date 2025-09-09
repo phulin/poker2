@@ -142,6 +142,7 @@ class SelfPlayTrainer:
         self.opponent_pool = KBestOpponentPool(
             k=self.k_best_pool_size,
             min_elo_diff=self.min_elo_diff,
+            min_step_diff=self.min_step_diff,
             k_factor=self.k_factor,
         )
 
@@ -179,6 +180,7 @@ class SelfPlayTrainer:
         )
 
         # Training stats
+        self.step = 1  # Training step counter
         self.step_trajectories_collected = 0
         self.total_step_reward = 0.0
         self.total_trajectories_collected = (
@@ -1002,6 +1004,9 @@ class SelfPlayTrainer:
         Returns:
             Dictionary with training statistics
         """
+        # Increment training step counter
+        self.step += 1
+
         target_steps = self.batch_size * max(self.cfg.train.replay_buffer_batches, 1)
         if self.replay_buffer.num_steps() == 0:
             # Warmup: fill replay buffer with minimum required samples
@@ -1018,13 +1023,14 @@ class SelfPlayTrainer:
         update_stats = self.update_model()
 
         # Check if we should add current model to opponent pool
-        if self.opponent_pool.should_add_snapshot():
+        if self.opponent_pool.should_add_snapshot(self.step):
             self.opponent_pool.add_snapshot(
                 self.model, self.total_trajectories_collected
             )
 
         # Prepare training stats for return and logging
         training_stats = {
+            "step": self.step,
             "episode_count": self.step_trajectories_collected,
             "total_episodes": self.total_trajectories_collected,
             "current_elo": self.opponent_pool.current_elo,
@@ -1126,7 +1132,7 @@ class SelfPlayTrainer:
             pool_data["snapshots"].append(snapshot_data)
 
         checkpoint = {
-            "step": step,
+            "step": self.step,
             "total_trajectories_collected": self.total_trajectories_collected,
             "current_elo": self.opponent_pool.current_elo,
             "model_state_dict": self.model.state_dict(),
@@ -1256,6 +1262,9 @@ class SelfPlayTrainer:
             self.total_step_reward = 0.0  # Reset step reward
 
         self.opponent_pool.current_elo = checkpoint.get("current_elo", 1200.0)
+
+        # Restore training step counter
+        self.step = checkpoint.get("step", 0)
 
         # Restore wandb step for consistent logging
         # If wandb_step not in checkpoint (old checkpoint), set it to match step

@@ -5,6 +5,7 @@
 num_steps: 25000
 k_best_pool_size: 10
 min_elo_diff: 75.0
+min_step_diff: 300  # Minimum step difference before considering for pool updates
 k_factor: 4.0  # Higher K-factor for more aggressive ELO updates
 checkpoint_interval: 100
 eval_interval: 500
