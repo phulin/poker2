@@ -15,7 +15,7 @@ device: cuda
 
 # === ENVIRONMENT CONFIGURATION ===
 use_tensor_env: true
-num_envs: 5000
+num_envs: 5000 # make this around 60% batch size
 
 # === WANDB CONFIGURATION ===
 use_wandb: true
@@ -38,8 +38,8 @@ economize_checkpoints: true  # Enable checkpoint economization for vast.ai stora
 train:
   learning_rate: 3e-4
   batch_size: 8192
-  num_epochs: 6
-  replay_buffer_batches: 12
+  num_epochs: 5
+  replay_buffer_batches: 10
   
   # PPO hyperparameters
   ppo_eps: 0.2
