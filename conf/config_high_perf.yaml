@@ -53,6 +53,10 @@ train:
   # Value loss configuration
   value_loss_type: "huber"
   huber_delta: 1.0
+  
+  # Mixed precision configuration
+  use_mixed_precision: true  # Enable automatic mixed precision for speed/memory
+  loss_scale: 128.0  # Initial loss scale for mixed precision
 
 # === MODEL CONFIGURATION ===
 model:

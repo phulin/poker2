@@ -55,6 +55,8 @@ class SelfPlayTrainer:
         self.k_best_pool_size = cfg.k_best_pool_size
         self.min_elo_diff = cfg.min_elo_diff
         self.k_factor = cfg.k_factor
+        self.use_mixed_precision = cfg.train.use_mixed_precision
+        self.loss_scale = cfg.train.loss_scale
         self.use_tensor_env = cfg.use_tensor_env
         self.num_envs = cfg.num_envs
         self.use_wandb = cfg.use_wandb
@@ -161,6 +163,19 @@ class SelfPlayTrainer:
                 {"params": cards_params, "lr": lr * 0.1},  # 10x lower for CNN
                 {"params": other_params, "lr": lr},
             ]
+        )
+
+        # Mixed precision scaler
+        self.scaler = (
+            torch.amp.GradScaler(
+                "cuda",
+                init_scale=self.loss_scale,
+                growth_factor=2.0,
+                backoff_factor=0.5,
+                growth_interval=2000,
+            )
+            if self.use_mixed_precision and self.device.type == "cuda"
+            else None
         )
 
         # Training stats
@@ -797,7 +812,12 @@ class SelfPlayTrainer:
                 -1, 24, 4, self.num_bet_bins
             )
 
-            logits, values = self.model(cards, actions_tensor)
+            # Use mixed precision autocast for forward pass
+            if self.use_mixed_precision and str(self.device).startswith("cuda"):
+                with torch.cuda.amp.autocast():
+                    logits, values = self.model(cards, actions_tensor)
+            else:
+                logits, values = self.model(cards, actions_tensor)
 
             loss_dict = trinal_clip_ppo_loss(
                 logits=logits,
@@ -844,18 +864,37 @@ class SelfPlayTrainer:
                 # explained_var = 1.0 - (var_err / (var_y + 1e-8))
 
             self.optimizer.zero_grad()
-            loss_dict["total_loss"].backward()
 
-            # Apply stricter gradient clipping to CNN layers to prevent explosion
-            for name, param in self.model.named_parameters():
-                if param.grad is not None and "cards_trunk" in name:
-                    torch.nn.utils.clip_grad_norm_(
-                        [param], 0.5
-                    )  # Stricter clipping for CNN
+            # Use scaler for mixed precision backward pass
+            if self.scaler is not None:
+                self.scaler.scale(loss_dict["total_loss"]).backward()
 
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                # Apply stricter gradient clipping to CNN layers to prevent explosion
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None and "cards_trunk" in name:
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            [param], 0.5
+                        )  # Stricter clipping for CNN
 
-            self.optimizer.step()
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss_dict["total_loss"].backward()
+
+                # Apply stricter gradient clipping to CNN layers to prevent explosion
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None and "cards_trunk" in name:
+                        torch.nn.utils.clip_grad_norm_(
+                            [param], 0.5
+                        )  # Stricter clipping for CNN
+
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+                self.optimizer.step()
 
             # Recompute loss on the SAME batch AFTER the update to verify improvement
             with torch.no_grad():
