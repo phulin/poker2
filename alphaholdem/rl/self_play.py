@@ -839,42 +839,42 @@ class SelfPlayTrainer:
             ]  # [batch_size, 24, 4, num_bet_bins] - bool
 
             # Convert bool tensors to appropriate dtype for model forward pass
-            cards_float = cards_features.to(self.float_dtype)
-            actions_float = actions_features.to(self.float_dtype)
+            cards_float = cards_features.to(torch.float32)
+            actions_float = actions_features.to(torch.float32)
 
             # Convert bool tensors to appropriate dtype for model forward pass
-            if self.use_mixed_precision and self.device.type in ["cuda", "mps"]:
-                # Use explicit bfloat16 autocast for consistency
-                with torch.amp.autocast(self.device.type, dtype=torch.bfloat16):
-                    logits, values = self.model(cards_float, actions_float)
-            else:
+            with torch.amp.autocast(
+                self.device.type,
+                dtype=torch.bfloat16,
+                enabled=self.use_mixed_precision
+                and self.device.type in ["cuda", "mps"],
+            ):
                 logits, values = self.model(cards_float, actions_float)
 
-            loss_dict = trinal_clip_ppo_loss(
-                logits=logits,
-                values=values,
-                actions=batch["action_indices"],
-                log_probs_old=batch["log_probs_old"],
-                advantages=batch["advantages"],
-                returns=batch["returns"],
-                legal_masks=batch["legal_masks"],
-                epsilon=self.epsilon,
-                delta1=self.delta1,
-                delta2=delta2_vec,
-                delta3=delta3_vec,
-                value_coef=self.value_coef,
-                entropy_coef=self.entropy_coef,
-                value_loss_type=self.cfg.train.value_loss_type,
-                huber_delta=self.cfg.train.huber_delta,
-            )
+                loss_dict = trinal_clip_ppo_loss(
+                    logits=logits,
+                    values=values,
+                    actions=batch["action_indices"],
+                    log_probs_old=batch["log_probs_old"].float(),
+                    advantages=batch["advantages"].float(),
+                    returns=batch["returns"].float(),
+                    legal_masks=batch["legal_masks"],
+                    epsilon=self.epsilon,
+                    delta1=self.delta1,
+                    delta2=delta2_vec.float(),
+                    delta3=delta3_vec.float(),
+                    value_coef=self.value_coef,
+                    entropy_coef=self.entropy_coef,
+                    value_loss_type=self.cfg.train.value_loss_type,
+                    huber_delta=self.cfg.train.huber_delta,
+                )
+
             loss_before_dict = {k: v for k, v in loss_dict.items()}
 
             # Debugging metrics: approx KL, clipfrac, explained variance
             with torch.no_grad():
                 legal_mb = batch["legal_masks"]
-                masked_logits = torch.where(
-                    legal_mb.bool(), logits, torch.full_like(logits, -1e9)
-                )
+                masked_logits = torch.where(legal_mb.bool(), logits, float("-inf"))
                 log_probs_new = torch.log_softmax(masked_logits, dim=-1)
                 a_mb = batch["action_indices"]
                 logp_new = log_probs_new.gather(1, a_mb.unsqueeze(1)).squeeze(1)
@@ -901,14 +901,13 @@ class SelfPlayTrainer:
                 self.scaler.scale(loss_dict["total_loss"]).backward()
 
                 # Apply stricter gradient clipping to CNN layers to prevent explosion
+                self.scaler.unscale_(self.optimizer)
                 for name, param in self.model.named_parameters():
                     if param.grad is not None and "cards_trunk" in name:
-                        self.scaler.unscale_(self.optimizer)
                         torch.nn.utils.clip_grad_norm_(
                             [param], 0.5
                         )  # Stricter clipping for CNN
 
-                self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
                 self.scaler.step(self.optimizer)
@@ -934,14 +933,14 @@ class SelfPlayTrainer:
                     logits=logits_after,
                     values=values_after,
                     actions=batch["action_indices"],
-                    log_probs_old=batch["log_probs_old"],
-                    advantages=batch["advantages"],
-                    returns=batch["returns"],
+                    log_probs_old=batch["log_probs_old"].float(),
+                    advantages=batch["advantages"].float(),
+                    returns=batch["returns"].float(),
                     legal_masks=batch["legal_masks"],
                     epsilon=self.epsilon,
                     delta1=self.delta1,
-                    delta2=delta2_vec,
-                    delta3=delta3_vec,
+                    delta2=delta2_vec.float(),
+                    delta3=delta3_vec.float(),
                     value_coef=self.value_coef,
                     entropy_coef=self.entropy_coef,
                     value_loss_type=self.cfg.train.value_loss_type,

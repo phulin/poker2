@@ -20,9 +20,9 @@ def _cards_to_planes(
 
 @register_card_encoder("cards_planes_v1")
 class CardsPlanesV1(Encoder):
-    def __init__(self, config: Config):
+    def __init__(self, config: Config | None = None):
         # Store config (not currently used but kept for consistency)
-        self.cfg: Config = config
+        self.cfg: Config | None = config
 
     def encode_cards(
         self, game_state: Any, seat: int, device: Optional[torch.device] = None

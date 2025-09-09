@@ -45,7 +45,7 @@ def trinal_clip_ppo_loss(
         log_probs_old: Old log probabilities (B,)
         advantages: GAE advantages (B,)
         returns: GAE returns (B,)
-        legal_masks: Legal action masks (B, num_actions)
+        legal_masks: Legal action masks (B, num_actions) bool
         epsilon: PPO clip parameter (typically 0.2)
         delta1: Policy upper bound when advantage < 0 (typically 3.0)
         delta2, delta3: Value clipping bounds (dynamic based on chips)
@@ -53,7 +53,7 @@ def trinal_clip_ppo_loss(
         entropy_coef: Entropy regularization coefficient
     """
     # Mask illegal actions
-    masked_logits = torch.where(legal_masks.bool(), logits, -1e9)
+    masked_logits = torch.where(legal_masks, logits, float("-inf"))
 
     # Compute new log probabilities
     log_probs = F.log_softmax(masked_logits, dim=-1)
