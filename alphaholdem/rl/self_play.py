@@ -874,7 +874,7 @@ class SelfPlayTrainer:
             # Debugging metrics: approx KL, clipfrac, explained variance
             with torch.no_grad():
                 legal_mb = batch["legal_masks"]
-                masked_logits = torch.where(legal_mb.bool(), logits, float("-inf"))
+                masked_logits = torch.where(legal_mb.bool(), logits, -1e9)
                 log_probs_new = torch.log_softmax(masked_logits, dim=-1)
                 a_mb = batch["action_indices"]
                 logp_new = log_probs_new.gather(1, a_mb.unsqueeze(1)).squeeze(1)

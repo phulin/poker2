@@ -53,7 +53,7 @@ def trinal_clip_ppo_loss(
         entropy_coef: Entropy regularization coefficient
     """
     # Mask illegal actions
-    masked_logits = torch.where(legal_masks, logits, float("-inf"))
+    masked_logits = torch.where(legal_masks, logits, -1e9)
 
     # Compute new log probabilities
     log_probs = F.log_softmax(masked_logits, dim=-1)

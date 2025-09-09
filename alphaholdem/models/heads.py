@@ -23,7 +23,7 @@ class CategoricalPolicyV1(Policy):
     ) -> Tuple[int, float]:
         if legal_mask is not None:
             # mask out illegal actions
-            logits = torch.where(legal_mask == 0, float("-inf"), logits)
+            logits = torch.where(legal_mask == 0, -1e9, logits)
         # Fast sampling: log_softmax -> exp -> multinomial
         log_probs_vec = F.log_softmax(logits.float(), dim=-1)
         probs_vec = log_probs_vec.exp()
@@ -47,7 +47,7 @@ class CategoricalPolicyV1(Policy):
         """
         if legal_masks is not None:
             # Mask out illegal actions
-            masked_logits = torch.where(legal_masks, logits, float("-inf"))
+            masked_logits = torch.where(legal_masks, logits, -1e9)
         else:
             masked_logits = logits
 
