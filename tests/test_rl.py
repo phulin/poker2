@@ -69,7 +69,7 @@ def test_trinal_clip_ppo_loss():
     log_probs_old = torch.randn(batch_size)
     advantages = torch.randn(batch_size)
     returns = torch.randn(batch_size)
-    legal_masks = torch.ones(batch_size, num_actions)
+    legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
     # Compute loss
     loss_dict = trinal_clip_ppo_loss(

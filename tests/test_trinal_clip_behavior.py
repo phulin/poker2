@@ -17,7 +17,7 @@ def test_trinal_policy_upper_clip_for_negative_advantages():
     # advantages: half negative, half positive
     advantages = torch.tensor([-1.0] * (batch // 2) + [1.0] * (batch - batch // 2))
     returns = torch.zeros(batch)
-    legal_masks = torch.ones(batch, num_actions)
+    legal_masks = torch.ones(batch, num_actions, dtype=torch.bool)
 
     out = trinal_clip_ppo_loss(
         logits=logits,
@@ -47,7 +47,7 @@ def test_value_clipping_symmetry():
     log_probs_old = torch.zeros(batch)
     advantages = torch.zeros(batch)
     returns = torch.tensor([-1000.0, -10.0, 10.0, 1000.0])
-    legal_masks = torch.ones(batch, 9)
+    legal_masks = torch.ones(batch, 9, dtype=torch.bool)
 
     out = trinal_clip_ppo_loss(
         logits,
