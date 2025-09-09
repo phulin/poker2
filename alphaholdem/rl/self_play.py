@@ -802,7 +802,7 @@ class SelfPlayTrainer:
 
             # Use mixed precision autocast for forward pass
             if self.use_mixed_precision and self.device.type == "cuda":
-                with torch.cuda.autocast("cuda"):
+                with torch.amp.autocast("cuda"):
                     logits, values = self.model(cards, actions_tensor)
             else:
                 logits, values = self.model(cards, actions_tensor)
