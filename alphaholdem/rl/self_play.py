@@ -63,15 +63,18 @@ class SelfPlayTrainer:
         self.wandb_run_id = cfg.wandb_run_id
 
         # Set device
-        self.device = (
-            cfg.device
-            if device is not None
-            else torch.device(
-                "cuda"
-                if torch.cuda.is_available()
-                else "mps" if torch.mps.is_available() else "cpu"
+        if device is not None:
+            self.device = device
+        else:
+            self.device = torch.device(
+                cfg.device
+                if cfg.device in ["cuda", "mps", "cpu"]
+                else (
+                    "cuda"
+                    if torch.cuda.is_available()
+                    else "mps" if torch.mps.is_available() else "cpu"
+                )
             )
-        )
 
         # Initialize RNG
         self.rng = torch.Generator(device=self.device)

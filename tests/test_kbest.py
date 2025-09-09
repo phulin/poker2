@@ -17,6 +17,12 @@ sys.path.insert(0, str(project_root))
 from alphaholdem.rl.k_best_pool import KBestOpponentPool, AgentSnapshot
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.models.siamese_convnet import SiameseConvNetV1
+from alphaholdem.core.structured_config import (
+    Config,
+    TrainingConfig,
+    ModelConfig,
+    EnvConfig,
+)
 
 
 def test_kbest_pool():
@@ -67,15 +73,28 @@ def test_selfplay_with_kbest():
     """Test self-play training with K-Best opponents."""
     print("Testing self-play with K-Best opponents...")
 
-    # Create trainer with very small parameters for fast testing
-    trainer = SelfPlayTrainer(
-        learning_rate=1e-3,
-        batch_size=4,  # Small batch for testing
-        num_epochs=1,  # Only 1 epoch instead of 4
+    # Create a Hydra config with small parameters for fast testing
+    cfg = Config(
+        train=TrainingConfig(
+            learning_rate=1e-3,
+            batch_size=4,  # Small batch for testing
+            num_epochs=1,  # Only 1 epoch instead of 4
+        ),
+        model=ModelConfig(),
+        env=EnvConfig(),
         k_best_pool_size=2,  # Smaller pool
         min_elo_diff=20.0,  # Lower threshold
         use_tensor_env=True,  # Use faster tensor environment
         num_envs=2,  # Much smaller than default 256
+        device="cpu",  # Set device to cpu for testing
+    )
+
+    # Set device for testing
+    device = torch.device("cpu")
+
+    trainer = SelfPlayTrainer(
+        cfg=cfg,
+        device=device,
     )
 
     print(f"Initial ELO: {trainer.opponent_pool.current_elo}")
@@ -113,12 +132,24 @@ def test_opponent_sampling():
     """Test that opponent sampling works correctly."""
     print("Testing opponent sampling...")
 
-    trainer = SelfPlayTrainer(
-        batch_size=4,  # Smaller batch
+    # Create a Hydra config with small parameters for testing
+    cfg = Config(
+        train=TrainingConfig(batch_size=4),  # Smaller batch
+        model=ModelConfig(),
+        env=EnvConfig(),
         k_best_pool_size=3,  # Smaller pool
         min_elo_diff=15.0,  # Lower threshold
         use_tensor_env=True,  # Use faster tensor environment
         num_envs=2,  # Very small for testing
+        device="cpu",  # Set device to cpu for testing
+    )
+
+    # Set device for testing
+    device = torch.device("cpu")
+
+    trainer = SelfPlayTrainer(
+        cfg=cfg,
+        device=device,
     )
 
     # Add some snapshots with different ELOs

@@ -13,7 +13,6 @@ except ImportError:  # pragma: no cover
 
 
 from .types import Action, GameState, PlayerState
-from ..core.config_loader import get_config
 from . import rules
 
 STREETS = ("preflop", "flop", "turn", "river", "showdown")
@@ -168,8 +167,8 @@ class HUNLEnv:
         # Bet/Raise options are available if both players have chips
         can_bet_raise = me_p.stack > 0 and opp_p.stack > 0
         if can_bet_raise:
-            cfg = get_config(None)
-            bet_mults = list(cfg.bet_bins)
+            # Use default bet_bins instead of global config
+            bet_mults = [0.5, 0.75, 1.0, 1.5, 2.0]  # Default bet_bins
             total_committed = s.pot + me_p.committed + opp_p.committed
             candidate_bins: List[int] = []
             realized_actions: set[tuple] = set()

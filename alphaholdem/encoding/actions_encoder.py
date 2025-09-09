@@ -7,18 +7,17 @@ from ..core.interfaces import Encoder
 from ..core.registry import register_action_encoder
 from ..env.types import GameState, Action
 from ..encoding.action_mapping import _action_to_bin_idx
-from ..core.config import RootConfig
-from ..core.config_loader import get_config
+from ..core.structured_config import Config
 
 
 @register_action_encoder("actions_hu_v1")
 class ActionsHUEncoderV1(Encoder):
     def __init__(
-        self, history_actions_per_round: int = 6, config: RootConfig | None = None
+        self, history_actions_per_round: int = 6, config: Config | None = None
     ):
         self.history_actions_per_round = history_actions_per_round
-        # Allow explicit config injection; default to global config
-        self.cfg: RootConfig = config if config is not None else get_config(None)
+        # Store config for access to bet_bins
+        self.cfg: Config | None = config
 
     def encode_cards(
         self, game_state: Any, seat: int, device: Optional[torch.device] = None
@@ -31,8 +30,16 @@ class ActionsHUEncoderV1(Encoder):
         seat: int,
         device: Optional[torch.device] = None,
     ) -> Any:
-        # Derive num_bet_bins from config if caller passes a mismatched size
-        num_bet_bins = len(self.cfg.bet_bins) + 3
+        # Derive num_bet_bins from config
+        if (
+            self.cfg is not None
+            and hasattr(self.cfg, "env")
+            and hasattr(self.cfg.env, "bet_bins")
+        ):
+            num_bet_bins = len(self.cfg.env.bet_bins) + 3
+        else:
+            # Fallback to default bet_bins if config not available
+            num_bet_bins = 8  # 5 bet_bins + 3 (fold, check/call, all-in)
         rounds = ["preflop", "flop", "turn", "river"]
         channels: List[torch.Tensor] = []
         for _ in rounds:

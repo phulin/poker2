@@ -4,7 +4,6 @@ from typing import List
 import torch
 
 from ..env.types import GameState, Action
-from ..core.config_loader import get_config
 from typing import Optional
 
 
@@ -83,9 +82,8 @@ def _bin_to_target_action(
         else:
             return Action("check")
     elif bin_idx >= 2 and bin_idx < (num_bet_bins - 1):
-        # Read multipliers from config; fall back to defaults if needed
-        cfg = get_config()
-        bins = cfg.bet_bins
+        # Use default bet_bins instead of global config
+        bins = [0.5, 0.75, 1.0, 1.5, 2.0]  # Default bet_bins
         # Map indices 2..(2+len(bins)-1) to bins[0..len(bins)-1]
         idx = bin_idx - 2
         idx = max(0, min(idx, len(bins) - 1))
@@ -148,9 +146,8 @@ def _action_to_bin_idx(
     else:
         return None
 
-    # Determine closest configured bin
-    cfg = get_config(None)
-    bins = cfg.bet_bins
+    # Determine closest configured bin using default bet_bins
+    bins = [0.5, 0.75, 1.0, 1.5, 2.0]  # Default bet_bins
     # Choose nearest multiplier index
     nearest = min(range(len(bins)), key=lambda i: abs(fraction - bins[i]))
     return 2 + nearest

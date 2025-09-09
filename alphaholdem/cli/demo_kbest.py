@@ -8,6 +8,7 @@ This script shows how to use the K-Best self-play mechanism as described in the 
 import os
 import sys
 import torch
+import hydra
 from pathlib import Path
 
 # Add the project root to the path
@@ -15,14 +16,15 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.core.structured_config import Config
 
 
-def demonstrate_kbest():
+def demonstrate_kbest(cfg: Config):
     """Demonstrate K-Best self-play functionality."""
     print("=== AlphaHoldem K-Best Self-Play Demonstration ===\n")
 
     # Initialize trainer with K-Best pool
-    trainer = SelfPlayTrainer()
+    trainer = SelfPlayTrainer(cfg=cfg, device=torch.device("cpu"))
 
     print("Initial setup:")
     print(f"  - K-Best pool size: {trainer.opponent_pool.k}")
@@ -115,16 +117,17 @@ def explain_kbest_concept():
     print("- Updates pool based on performance (adaptive)\n")
 
 
-def main():
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: Config) -> None:
     """Run the demonstration."""
     # Set random seed for reproducibility
-    torch.manual_seed(42)
+    torch.manual_seed(cfg.seed)
 
     # Explain the concept
     explain_kbest_concept()
 
     # Run demonstration
-    demonstrate_kbest()
+    demonstrate_kbest(cfg)
 
 
 if __name__ == "__main__":

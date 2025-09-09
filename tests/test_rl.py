@@ -12,6 +12,12 @@ from alphaholdem.rl.replay import (
 )
 from alphaholdem.rl.losses import trinal_clip_ppo_loss
 from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.core.structured_config import (
+    Config,
+    TrainingConfig,
+    ModelConfig,
+    EnvConfig,
+)
 
 
 def test_replay_buffer_and_gae():
@@ -92,8 +98,22 @@ def test_trinal_clip_ppo_loss():
 def test_self_play_trainer_basic():
     """Test basic trainer initialization and single trajectory collection."""
 
+    # Create a Hydra config with small parameters for testing
+    cfg = Config(
+        train=TrainingConfig(batch_size=8),
+        model=ModelConfig(),
+        env=EnvConfig(),
+        use_tensor_env=False,  # Use regular env for this test
+        num_envs=1,
+        device="cpu",  # Set device to cpu for testing
+    )
+
+    # Set device for testing
+    device = torch.device("cpu")
+
     trainer = SelfPlayTrainer(
-        batch_size=8,
+        cfg=cfg,
+        device=device,
     )
 
     # Test that trainer initializes correctly
@@ -138,10 +158,22 @@ def test_checkpoint_save_load():
 
     # Create a temporary directory for checkpoints
     with tempfile.TemporaryDirectory() as temp_dir:
-        trainer = SelfPlayTrainer(
-            batch_size=8,  # Small batch for testing
+        # Create a Hydra config with small parameters for testing
+        cfg = Config(
+            train=TrainingConfig(batch_size=8),  # Small batch for testing
+            model=ModelConfig(),
+            env=EnvConfig(),
             use_tensor_env=True,
             num_envs=4,
+            device="cpu",  # Set device to cpu for testing
+        )
+
+        # Set device for testing
+        device = torch.device("cpu")
+
+        trainer = SelfPlayTrainer(
+            cfg=cfg,
+            device=device,
         )
 
         # Run a few training steps
@@ -156,14 +188,21 @@ def test_checkpoint_save_load():
         assert os.path.exists(checkpoint_path), "Checkpoint file not created"
 
         # Create new trainer and load checkpoint
-        new_trainer = SelfPlayTrainer(
-            learning_rate=3e-4,
-            batch_size=8,
+        new_cfg = Config(
+            train=TrainingConfig(learning_rate=3e-4, batch_size=8),
+            model=ModelConfig(),
+            env=EnvConfig(),
             use_tensor_env=True,
+            device="cpu",  # Set device to cpu for testing
+        )
+
+        new_trainer = SelfPlayTrainer(
+            cfg=new_cfg,
+            device=device,
         )
 
         # Load checkpoint
-        loaded_step = new_trainer.load_checkpoint(checkpoint_path)
+        loaded_step, wandb_run_id = new_trainer.load_checkpoint(checkpoint_path)
 
         # Verify loaded state
         assert loaded_step == 3, f"Expected step 3, got {loaded_step}"
@@ -188,9 +227,22 @@ def test_checkpoint_save_load():
 def test_preflop_range_grid():
     """Test preflop range grid generation."""
 
+    # Create a Hydra config
+    cfg = Config(
+        train=TrainingConfig(
+            learning_rate=3e-4, batch_size=8
+        ),  # Small batch for testing
+        model=ModelConfig(),
+        env=EnvConfig(),
+        device="cpu",  # Set device to cpu for testing
+    )
+
+    # Set device for testing
+    device = torch.device("cpu")
+
     trainer = SelfPlayTrainer(
-        learning_rate=3e-4,
-        batch_size=8,  # Small batch for testing
+        cfg=cfg,
+        device=device,
     )
 
     # Generate range grid
@@ -226,11 +278,24 @@ def test_preflop_range_grid():
 def test_basic_training_step():
     """Test that a basic training step works and produces reasonable outputs."""
 
-    trainer = SelfPlayTrainer(
-        learning_rate=3e-4,
-        batch_size=4,  # Small batch for testing
+    # Create a Hydra config with small parameters for testing
+    cfg = Config(
+        train=TrainingConfig(
+            learning_rate=3e-4, batch_size=4
+        ),  # Small batch for testing
+        model=ModelConfig(),
+        env=EnvConfig(),
         use_tensor_env=True,
         num_envs=2,
+        device="cpu",  # Set device to cpu for testing
+    )
+
+    # Set device for testing
+    device = torch.device("cpu")
+
+    trainer = SelfPlayTrainer(
+        cfg=cfg,
+        device=device,
     )
 
     # Run a few training steps

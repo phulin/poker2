@@ -1,22 +1,34 @@
 from __future__ import annotations
 
-import os
+import torch
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.encoding.cards_encoder import CardsPlanesV1
 from alphaholdem.encoding.actions_encoder import ActionsHUEncoderV1
 from alphaholdem.models.siamese_convnet import SiameseConvNetV1
 from alphaholdem.models.heads import CategoricalPolicyV1
+from alphaholdem.core.structured_config import (
+    Config,
+    TrainingConfig,
+    ModelConfig,
+    EnvConfig,
+)
 
 
 def test_trainer_builds_components_from_config():
-    cfg_path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "configs", "default.yaml"
+    # Create a Hydra config instance with proper initialization
+    cfg = Config(
+        train=TrainingConfig(),
+        model=ModelConfig(),
+        env=EnvConfig(),
+        device="cpu",  # Set device to cpu for testing
     )
 
+    # Set device for testing
+    device = torch.device("cpu")
+
     trainer = SelfPlayTrainer(
-        batch_size=8,
-        learning_rate=3e-4,
-        config=cfg_path,
+        cfg=cfg,
+        device=device,
     )
 
     # Expect default config components

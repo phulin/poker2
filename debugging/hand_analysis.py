@@ -6,7 +6,6 @@ Trains the model for 50 steps, then runs through a complete poker hand
 showing value and policy calculations at each decision point.
 """
 
-import argparse
 import sys
 import os
 
@@ -14,12 +13,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn.functional as F
+import hydra
+from omegaconf import DictConfig
+
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.encoding.cards_encoder import CardsPlanesV1
 from alphaholdem.encoding.actions_encoder import ActionsHUEncoderV1
 from alphaholdem.env import rules
 from alphaholdem.encoding.action_mapping import get_legal_mask, bin_to_action
+from alphaholdem.core.structured_config import Config
 
 
 def card_number_to_name(card_num):
@@ -76,7 +79,10 @@ def analyze_hand(trainer):
 
     # Create a fresh environment for analysis
     env = HUNLEnv(
-        starting_stack=trainer.cfg.stack, sb=trainer.cfg.sb, bb=trainer.cfg.bb, seed=123
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        seed=123,
     )
     # Use trainer's encoders to respect config (e.g., bet_bins)
     cards_encoder = trainer.cards_encoder
@@ -198,18 +204,14 @@ def analyze_hand(trainer):
         print("Reached maximum steps, forcing termination")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Analyze a poker hand using a trained model checkpoint."
-    )
-    parser.add_argument(
-        "checkpoint",
-        nargs="?",
-        default=None,
-        help="Path to model checkpoint (optional, will use default if not provided)",
-    )
-    args = parser.parse_args()
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: Config) -> None:
+    """
+    Analyze a poker hand using a trained model checkpoint.
 
+    Args:
+        cfg: Hydra configuration object
+    """
     print("=== Hand Analysis Script ===")
     print("This script will:")
     print("1. Load a trained model from checkpoint")
@@ -217,11 +219,11 @@ def main():
     print("3. Show value and policy calculations at each decision point")
     print()
 
-    # Initialize trainer
-    trainer = SelfPlayTrainer()
+    # Initialize trainer with config
+    trainer = SelfPlayTrainer(cfg=cfg, device=torch.device("cpu"))
 
     # Load trained model from checkpoint
-    load_checkpoint(trainer, args.checkpoint)
+    load_checkpoint(trainer, cfg.resume_from)
 
     # Analyze a hand
     analyze_hand(trainer)

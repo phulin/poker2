@@ -6,8 +6,7 @@ import torch
 from ..core.interfaces import Encoder
 from ..core.registry import register_card_encoder
 from ..env import rules
-from ..core.config import RootConfig
-from ..core.config_loader import get_config
+from ..core.structured_config import Config
 
 
 def _cards_to_planes(
@@ -21,9 +20,9 @@ def _cards_to_planes(
 
 @register_card_encoder("cards_planes_v1")
 class CardsPlanesV1(Encoder):
-    def __init__(self, config: RootConfig | None = None):
-        # Allow explicit config injection; default to global config
-        self.cfg: RootConfig = config if config is not None else get_config(None)
+    def __init__(self, config: Config | None = None):
+        # Store config (not currently used but kept for consistency)
+        self.cfg: Config | None = config
 
     def encode_cards(
         self, game_state: Any, seat: int, device: Optional[torch.device] = None

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import argparse
+import hydra
+from omegaconf import DictConfig
 
-from alphaholdem.core.config_loader import get_config
 from alphaholdem.core.builders import build_components_from_config
+from alphaholdem.core.structured_config import Config
 
 # Ensure registries are populated via side-effect imports
 import alphaholdem.encoding.cards_encoder  # noqa: F401
@@ -14,19 +15,14 @@ import alphaholdem.models.siamese_convnet  # noqa: F401
 import alphaholdem.models.heads  # noqa: F401
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Print total and trainable parameter counts for the current model"
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Optional path to YAML config (defaults to configs/default.yaml)",
-    )
-    args = parser.parse_args()
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: Config) -> None:
+    """
+    Print total and trainable parameter counts for the current model.
 
-    cfg = get_config(args.config)
+    Args:
+        cfg: Hydra configuration object
+    """
     _, _, model, _, _ = build_components_from_config(cfg)
 
     # Totals

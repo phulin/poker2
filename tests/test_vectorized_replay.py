@@ -598,12 +598,30 @@ class TestVectorizedReplayBuffer:
     def test_buffer_filling_during_collection(self):
         """Test that the buffer properly fills and manages trajectories during collection."""
         from alphaholdem.rl.self_play import SelfPlayTrainer
+        from alphaholdem.core.structured_config import (
+            Config,
+            TrainingConfig,
+            ModelConfig,
+            EnvConfig,
+        )
+
+        # Create a Hydra config with small parameters for testing
+        cfg = Config(
+            train=TrainingConfig(batch_size=4),
+            model=ModelConfig(),
+            env=EnvConfig(),
+            use_tensor_env=True,
+            num_envs=8,  # Small number for easier testing
+            device="cpu",  # Set device to cpu for testing
+        )
+
+        # Set device for testing
+        device = torch.device("cpu")
 
         # Create a small trainer for testing
         trainer = SelfPlayTrainer(
-            batch_size=4,
-            use_tensor_env=True,
-            num_envs=8,  # Small number for easier testing
+            cfg=cfg,
+            device=device,
         )
 
         # Monitor buffer state before collection
@@ -617,7 +635,7 @@ class TestVectorizedReplayBuffer:
 
         # Collect some trajectories
         min_steps = 5  # Reduced expectation since poker games can be short
-        total_reward, episode_count = trainer.collect_tensor_trajectories(min_steps)
+        total_reward, episode_count, _ = trainer.collect_tensor_trajectories(min_steps)
 
         # Monitor buffer state after collection
         final_size = trainer.replay_buffer.size
@@ -655,11 +673,29 @@ class TestVectorizedReplayBuffer:
     def test_buffer_trajectory_lifecycle(self):
         """Test that trajectories are properly managed throughout their lifecycle."""
         from alphaholdem.rl.self_play import SelfPlayTrainer
+        from alphaholdem.core.structured_config import (
+            Config,
+            TrainingConfig,
+            ModelConfig,
+            EnvConfig,
+        )
 
-        trainer = SelfPlayTrainer(
-            batch_size=2,
+        # Create a Hydra config with small parameters for testing
+        cfg = Config(
+            train=TrainingConfig(batch_size=2),
+            model=ModelConfig(),
+            env=EnvConfig(),
             use_tensor_env=True,
             num_envs=4,
+            device="cpu",  # Set device to cpu for testing
+        )
+
+        # Set device for testing
+        device = torch.device("cpu")
+
+        trainer = SelfPlayTrainer(
+            cfg=cfg,
+            device=device,
         )
 
         # Collect trajectories in multiple rounds to test lifecycle
@@ -676,7 +712,7 @@ class TestVectorizedReplayBuffer:
             )
 
             # Collect trajectories
-            total_reward, episode_count = trainer.collect_tensor_trajectories(5)
+            total_reward, episode_count, _ = trainer.collect_tensor_trajectories(5)
 
             # Monitor after collection
             after_size = trainer.replay_buffer.size
@@ -714,12 +750,30 @@ class TestVectorizedReplayBuffer:
     def test_buffer_capacity_management(self):
         """Test that the buffer properly manages capacity and wraparound."""
         from alphaholdem.rl.self_play import SelfPlayTrainer
+        from alphaholdem.core.structured_config import (
+            Config,
+            TrainingConfig,
+            ModelConfig,
+            EnvConfig,
+        )
+
+        # Create a Hydra config with small parameters for testing
+        cfg = Config(
+            train=TrainingConfig(batch_size=2),
+            model=ModelConfig(),
+            env=EnvConfig(),
+            use_tensor_env=True,
+            num_envs=4,
+            device="cpu",  # Set device to cpu for testing
+        )
+
+        # Set device for testing
+        device = torch.device("cpu")
 
         # Create trainer with small buffer capacity
         trainer = SelfPlayTrainer(
-            batch_size=2,
-            use_tensor_env=True,
-            num_envs=4,
+            cfg=cfg,
+            device=device,
         )
 
         # Override buffer capacity for testing
@@ -737,7 +791,7 @@ class TestVectorizedReplayBuffer:
             before_position = trainer.replay_buffer.position
 
             # Collect trajectories
-            total_reward, episode_count = trainer.collect_tensor_trajectories(5)
+            total_reward, episode_count, _ = trainer.collect_tensor_trajectories(5)
 
             after_size = trainer.replay_buffer.size
             after_position = trainer.replay_buffer.position
@@ -774,11 +828,29 @@ class TestVectorizedReplayBuffer:
     def test_buffer_detailed_collection_monitoring(self):
         """Detailed test to monitor buffer state during collection process."""
         from alphaholdem.rl.self_play import SelfPlayTrainer
+        from alphaholdem.core.structured_config import (
+            Config,
+            TrainingConfig,
+            ModelConfig,
+            EnvConfig,
+        )
 
-        trainer = SelfPlayTrainer(
-            batch_size=2,
+        # Create a Hydra config with small parameters for testing
+        cfg = Config(
+            train=TrainingConfig(batch_size=2),
+            model=ModelConfig(),
+            env=EnvConfig(),
             use_tensor_env=True,
             num_envs=4,
+            device="cpu",  # Set device to cpu for testing
+        )
+
+        # Set device for testing
+        device = torch.device("cpu")
+
+        trainer = SelfPlayTrainer(
+            cfg=cfg,
+            device=device,
         )
 
         print("=== Detailed Buffer Monitoring ===")
@@ -807,7 +879,7 @@ class TestVectorizedReplayBuffer:
 
         # Collect trajectories with detailed monitoring
         print("\n--- Starting collection ---")
-        total_reward, episode_count = trainer.collect_tensor_trajectories(10)
+        total_reward, episode_count, _ = trainer.collect_tensor_trajectories(10)
 
         print_buffer_state("After collection")
         print(

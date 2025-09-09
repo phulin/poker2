@@ -1,32 +1,43 @@
 from __future__ import annotations
 
 import os
-from alphaholdem.core.config import load_config
+from alphaholdem.core.structured_config import (
+    Config,
+    TrainingConfig,
+    ModelConfig,
+    EnvConfig,
+)
 from alphaholdem.core import registry
 
 
 def test_load_default_config_values():
-    cfg_path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "configs", "default.yaml"
-    )
-    cfg = load_config(path=cfg_path)
+    # Create a default Hydra config instance with proper initialization
+    cfg = Config(train=TrainingConfig(), model=ModelConfig(), env=EnvConfig())
 
-    assert cfg.bet_bins == [0.5, 0.75, 1.0, 1.5, 2.0]
-    assert cfg.ppo_eps == 0.2
-    assert cfg.ppo_delta1 == 3.0
-    assert cfg.gae_lambda == 0.95
-    assert cfg.gamma == 0.999
-    assert cfg.entropy_coef == 0.01
-    assert cfg.value_coef == 0.05
-    assert cfg.grad_clip == 1.0
+    # Test training parameters
+    assert cfg.train.ppo_eps == 0.2
+    assert cfg.train.ppo_delta1 == 3.0
+    assert cfg.train.gae_lambda == 0.95
+    assert cfg.train.gamma == 0.999
+    assert cfg.train.entropy_coef == 0.01
+    assert cfg.train.value_coef == 0.05
+    assert cfg.train.grad_clip == 1.0
 
-    assert cfg.card_encoder.name == "cards_planes_v1"
-    assert cfg.action_encoder.name == "actions_hu_v1"
+    # Test environment parameters
+    assert cfg.env.bet_bins == [0.5, 0.75, 1.0, 1.5, 2.0]
+
+    # Test component configurations
+    assert cfg.env.card_encoder["name"] == "cards_planes_v1"
+    assert cfg.env.action_encoder["name"] == "actions_hu_v1"
     assert cfg.model.name == "siamese_convnet_v1"
-    assert cfg.policy.name == "categorical_v1"
+    assert cfg.model.policy["name"] == "categorical_v1"
 
 
 def test_registries_have_required_components():
+    # Import modules to trigger registration
+    from alphaholdem.encoding import cards_encoder, actions_encoder
+    from alphaholdem.models import siamese_convnet, heads
+
     # Names in default.yaml should be registered
     assert "cards_planes_v1" in registry.CARD_ENCODERS
     assert "actions_hu_v1" in registry.ACTION_ENCODERS
