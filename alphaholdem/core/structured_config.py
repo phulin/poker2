@@ -80,6 +80,7 @@ class Config:
     resume_from: Optional[str] = None
     seed: int = 42
     config: Optional[str] = None
+    economize_checkpoints: bool = False
 
     # Nested configs
     train: TrainingConfig = MISSING

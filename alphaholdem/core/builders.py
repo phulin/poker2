@@ -15,15 +15,19 @@ def build_components_from_config(cfg) -> Tuple[Any, Any, Any, Any]:
     if hasattr(cfg, "env"):
         # New dataclass structure
         card_encoder = registry.build_card_encoder(
-            cfg.env.card_encoder.name, config=cfg, **cfg.env.card_encoder.kwargs
+            cfg.env.card_encoder["name"], config=cfg, **cfg.env.card_encoder["kwargs"]
         )
         action_encoder = registry.build_action_encoder(
-            cfg.env.action_encoder.name, config=cfg, **cfg.env.action_encoder.kwargs
+            cfg.env.action_encoder["name"],
+            config=cfg,
+            **cfg.env.action_encoder["kwargs"],
         )
 
         model = registry.build_model(cfg.model.name, **cfg.model.kwargs)
 
-        policy = registry.build_policy(cfg.model.policy.name, **cfg.model.policy.kwargs)
+        policy = registry.build_policy(
+            cfg.model.policy["name"], **cfg.model.policy["kwargs"]
+        )
     else:
         # Legacy DictConfig structure
         card_encoder = registry.build_card_encoder(

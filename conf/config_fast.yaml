@@ -28,6 +28,7 @@ seed: 42
 # === ADDITIONAL CONFIGURATION ===
 config: null  # Path to YAML config for components/hparams
 wandb_run_id: null  # Wandb run ID to resume
+economize_checkpoints: true  # Enable checkpoint economization for fast testing
 
 # === TRAINING HYPERPARAMETERS ===
 train:

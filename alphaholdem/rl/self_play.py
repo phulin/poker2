@@ -1040,8 +1040,6 @@ class SelfPlayTrainer:
             "current_elo": self.opponent_pool.current_elo,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
-            # Store replay buffer to resume training seamlessly
-            "replay_buffer": self.replay_buffer,
             # Store opponent pool inline for single-file checkpoints
             "opponent_pool": pool_data,
             # Store wandb run ID for resumption
@@ -1061,8 +1059,58 @@ class SelfPlayTrainer:
                 "grad_clip": self.grad_clip,
             },
         }
-        torch.save(checkpoint, path)
-        print(f"Checkpoint saved to {path}")
+
+        # Conditionally include replay buffer based on economize_checkpoints flag
+        if not self.cfg.economize_checkpoints:
+            checkpoint["replay_buffer"] = self.replay_buffer
+
+        torch.save(checkpoint, path, _use_new_zipfile_serialization=True)
+
+        # Clean up old checkpoints if economize_checkpoints is enabled
+        if self.cfg.economize_checkpoints:
+            self._cleanup_old_checkpoints(path, step)
+
+        compression_note = (
+            " (compressed)"
+            if self.cfg.economize_checkpoints
+            else " (compressed, replay buffer excluded)"
+        )
+        print(f"Checkpoint saved to {path}{compression_note}")
+
+    def _cleanup_old_checkpoints(self, current_path: str, current_step: int) -> None:
+        """Clean up old checkpoints, keeping only best_model.pt and latest checkpoint."""
+        import os
+        import glob
+
+        checkpoint_dir = os.path.dirname(current_path)
+        if not os.path.exists(checkpoint_dir):
+            return
+
+        # Find all checkpoint files
+        checkpoint_files = glob.glob(
+            os.path.join(checkpoint_dir, "checkpoint_step_*.pt")
+        )
+
+        # Keep best_model.pt and latest_model.pt (these are special)
+        files_to_keep = {
+            os.path.join(checkpoint_dir, "best_model.pt"),
+            os.path.join(checkpoint_dir, "latest_model.pt"),
+            current_path,  # Keep the current checkpoint
+        }
+
+        # Remove old checkpoint files
+        deleted_count = 0
+        for file_path in checkpoint_files:
+            if file_path not in files_to_keep:
+                try:
+                    os.remove(file_path)
+                    deleted_count += 1
+                    print(f"Deleted old checkpoint: {os.path.basename(file_path)}")
+                except OSError as e:
+                    print(f"Warning: Could not delete {file_path}: {e}")
+
+        if deleted_count > 0:
+            print(f"Cleaned up {deleted_count} old checkpoint(s)")
 
     def load_checkpoint(self, path: str) -> tuple[int, str | None]:
         """Load model checkpoint and opponent pool. Returns (step_number, wandb_run_id)."""
@@ -1081,9 +1129,9 @@ class SelfPlayTrainer:
         # If wandb_step not in checkpoint (old checkpoint), set it to match step
         self.wandb_step = checkpoint.get("wandb_step", checkpoint["step"])
 
-        # Restore replay buffer if present (skip for now due to structure change)
-        # if "replay_buffer" in checkpoint and checkpoint["replay_buffer"] is not None:
-        #     self.replay_buffer = checkpoint["replay_buffer"]
+        # Restore replay buffer if present:
+        if "replay_buffer" in checkpoint and checkpoint["replay_buffer"] is not None:
+            self.replay_buffer = checkpoint["replay_buffer"]
 
         print(f"Checkpoint loaded from {path}")
 

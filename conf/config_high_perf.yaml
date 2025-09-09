@@ -31,6 +31,7 @@ seed: 42
 
 # === ADDITIONAL CONFIGURATION ===
 config: null  # Path to YAML config for components/hparams
+economize_checkpoints: true  # Enable checkpoint economization for vast.ai storage efficiency
 
 # === TRAINING HYPERPARAMETERS ===
 train:
