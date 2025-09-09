@@ -155,3 +155,4 @@ profile_output*.txt
 /venv/
 /checkpoints/
 /checkpoints-*/
+/secret*
