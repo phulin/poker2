@@ -28,7 +28,6 @@ seed: 42
 
 # === ADDITIONAL CONFIGURATION ===
 config: null  # Path to YAML config for components/hparams
-wandb_run_id: null  # Wandb run ID to resume
 economize_checkpoints: true  # Enable checkpoint economization for fast testing
 
 # === TRAINING HYPERPARAMETERS ===
@@ -37,6 +36,7 @@ train:
   batch_size: 256
   num_epochs: 2
   replay_buffer_batches: 2
+  max_trajectory_length: 20
   
   # PPO hyperparameters
   ppo_eps: 0.2
@@ -50,6 +50,10 @@ train:
   # Value loss configuration
   value_loss_type: "huber"
   huber_delta: 1.0
+  
+  # Mixed precision configuration
+  use_mixed_precision: false  # Disabled for fast testing
+  loss_scale: 128.0  # Initial loss scale for mixed precision
 
 # === MODEL CONFIGURATION ===
 model:

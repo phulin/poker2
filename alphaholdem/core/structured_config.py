@@ -10,6 +10,7 @@ class TrainingConfig:
     batch_size: int = 1024
     num_epochs: int = 4
     replay_buffer_batches: int = 4
+    max_trajectory_length: int = 50  # Maximum steps per trajectory in replay buffer
     gamma: float = 0.999
     gae_lambda: float = 0.95
     ppo_eps: float = 0.2
@@ -76,7 +77,7 @@ class Config:
     use_tensor_env: bool = True
     num_envs: int = 512
     use_wandb: bool = True
-    wandb_project: str = "poker-kbest"
+    wandb_project: Optional[str] = "poker-kbest"
     wandb_name: Optional[str] = None
     wandb_tags: Optional[List[str]] = None
     wandb_run_id: Optional[str] = None

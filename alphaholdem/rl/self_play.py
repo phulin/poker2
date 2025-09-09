@@ -47,6 +47,7 @@ class SelfPlayTrainer:
         self.gae_lambda = cfg.train.gae_lambda
         self.epsilon = cfg.train.ppo_eps
         self.replay_buffer_batches = cfg.train.replay_buffer_batches
+        self.max_trajectory_length = cfg.train.max_trajectory_length
         self.delta1 = cfg.train.ppo_delta1
         self.value_coef = cfg.train.value_coef
         self.entropy_coef = cfg.train.entropy_coef
@@ -132,7 +133,7 @@ class SelfPlayTrainer:
         # Use vectorized replay buffer for efficient tensor operations
         self.replay_buffer = VectorizedReplayBuffer(
             capacity=buffer_capacity,  # Number of trajectories
-            max_trajectory_length=50,  # Maximum steps per trajectory
+            max_trajectory_length=self.max_trajectory_length,  # Maximum steps per trajectory
             observation_dim=observation_dim,
             legal_mask_dim=legal_mask_dim,
             device=self.device,
