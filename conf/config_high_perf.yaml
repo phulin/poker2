@@ -5,8 +5,9 @@
 num_steps: 10000
 k_best_pool_size: 10
 min_elo_diff: 75.0
+k_factor: 40.0  # Higher K-factor for more aggressive ELO updates
 checkpoint_interval: 100
-eval_interval: 200
+eval_interval: 500
 checkpoint_dir: checkpoints-high-perf
 
 # === DEVICE CONFIGURATION ===

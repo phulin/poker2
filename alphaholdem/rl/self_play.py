@@ -54,6 +54,7 @@ class SelfPlayTrainer:
         self.learning_rate = cfg.train.learning_rate
         self.k_best_pool_size = cfg.k_best_pool_size
         self.min_elo_diff = cfg.min_elo_diff
+        self.k_factor = cfg.k_factor
         self.use_tensor_env = cfg.use_tensor_env
         self.num_envs = cfg.num_envs
         self.use_wandb = cfg.use_wandb
@@ -137,7 +138,9 @@ class SelfPlayTrainer:
 
         # K-Best opponent pool
         self.opponent_pool = KBestOpponentPool(
-            k=self.k_best_pool_size, min_elo_diff=self.min_elo_diff
+            k=self.k_best_pool_size,
+            min_elo_diff=self.min_elo_diff,
+            k_factor=self.k_factor,
         )
 
         # Optimizer with different learning rates for different components

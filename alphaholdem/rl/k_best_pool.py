@@ -57,16 +57,18 @@ class KBestOpponentPool(OpponentPool):
     the agent from getting trapped in local minima.
     """
 
-    def __init__(self, k: int = 5, min_elo_diff: float = 50.0):
+    def __init__(self, k: int = 5, min_elo_diff: float = 50.0, k_factor: float = 32.0):
         """
         Initialize K-Best opponent pool.
 
         Args:
             k: Number of best opponents to maintain in pool
             min_elo_diff: Minimum ELO difference to consider for pool updates
+            k_factor: ELO K-factor for rating changes
         """
         self.k = k
         self.min_elo_diff = min_elo_diff
+        self.k_factor = k_factor
         self.snapshots: List[AgentSnapshot] = []
         self.current_elo = 1200.0  # Starting ELO rating
 
@@ -140,7 +142,7 @@ class KBestOpponentPool(OpponentPool):
             self.snapshots = self.snapshots[: self.k]
 
     def update_elo_after_game(
-        self, opponent: AgentSnapshot, result: str, k_factor: float = 32.0
+        self, opponent: AgentSnapshot, result: str, k_factor: Optional[float] = None
     ):
         """
         Update ELO ratings after a game.
@@ -148,8 +150,11 @@ class KBestOpponentPool(OpponentPool):
         Args:
             opponent: The opponent that was played against
             result: 'win', 'loss', or 'draw'
-            k_factor: ELO K-factor for rating changes
+            k_factor: ELO K-factor for rating changes (uses instance default if None)
         """
+        if k_factor is None:
+            k_factor = self.k_factor
+
         # Calculate expected score
         expected_score = 1.0 / (1.0 + 10 ** ((opponent.elo - self.current_elo) / 400.0))
 
@@ -181,7 +186,7 @@ class KBestOpponentPool(OpponentPool):
         self,
         opponent: AgentSnapshot,
         rewards: torch.Tensor,
-        k_factor: float = 1.0,  # Increased from 1.0/64 to make changes more visible
+        k_factor: Optional[float] = None,
     ) -> None:
         """
         Vectorized ELO update for a single opponent over multiple games.
@@ -189,8 +194,10 @@ class KBestOpponentPool(OpponentPool):
         Args:
             opponent: The opponent that was fought
             rewards: Tensor of rewards [num_games] where >0 = win, <0 = loss, =0 = draw
-            k_factor: ELO K-factor for rating changes
+            k_factor: ELO K-factor for rating changes (uses instance default if None)
         """
+        if k_factor is None:
+            k_factor = self.k_factor
         if opponent is None or rewards.numel() == 0:
             return
 
