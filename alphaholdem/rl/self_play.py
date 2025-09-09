@@ -764,13 +764,6 @@ class SelfPlayTrainer:
             "actions": actions,
         }
 
-    # def update_model(self) -> dict:
-    #     with profile(record_shapes=True) as prof:
-    #         result = self.update_model_internal()
-    #     print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
-    #     prof.export_chrome_trace("update_model.json")
-    #     return result
-
     @profile
     def update_model(self) -> dict:
         """Perform PPO update on collected trajectories."""
@@ -797,6 +790,8 @@ class SelfPlayTrainer:
         total_mb_improved = 0
         total_loss_before = 0.0
         total_loss_after = 0.0
+        self.total_step_reward = 0.0
+        self.step_trajectories_collected = 0
 
         for _ in range(self.num_epochs):
             # Sample batch from vectorized buffer
@@ -966,9 +961,21 @@ class SelfPlayTrainer:
             ):
                 total_mb_improved += 1
 
+        # Calculate average reward for this update step
+        avg_reward = (
+            self.total_step_reward / max(1, self.step_trajectories_collected)
+            if self.step_trajectories_collected > 0
+            else 0.0
+        )
+        if abs(avg_reward) > 1:
+            print(f"Warning: Avg reward is {avg_reward}, which is outside [-1, 1].")
+            print(f"Total step reward: {self.total_step_reward}")
+            print(f"Step trajectories collected: {self.step_trajectories_collected}")
+
         denom = max(1, total_minibatches)
         return {
             "avg_loss": total_loss / self.num_epochs,
+            "avg_reward": avg_reward,
             "num_samples": batch["action_indices"].shape[0],
             "delta2_mean": float(delta2_vec.mean().item()),
             "delta3_mean": float(delta3_vec.mean().item()),
@@ -1016,18 +1023,10 @@ class SelfPlayTrainer:
                 self.model, self.total_trajectories_collected
             )
 
-        # Calculate average reward for this step and reset step counters
-        avg_reward = (
-            self.total_step_reward / max(1, self.step_trajectories_collected)
-            if self.step_trajectories_collected > 0
-            else 0.0
-        )
-
         # Prepare training stats for return and logging
         training_stats = {
             "episode_count": self.step_trajectories_collected,
             "total_episodes": self.total_trajectories_collected,
-            "avg_reward": avg_reward,
             "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
             **update_stats,
