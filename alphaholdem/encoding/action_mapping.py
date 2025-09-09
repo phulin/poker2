@@ -51,7 +51,11 @@ def bin_to_action(bin_idx: int, game_state: GameState, num_bet_bins: int) -> Act
             # Cannot raise; fallback to call
             return Action("call", amount=min(to_call, stack))
         # Ensure strictly greater than to_call and within stack
-        min_raise_total = to_call + 1
+        # Use proper min_raise logic: raise increment must be >= min_raise
+        min_raise_increment = (
+            max(1, game_state.min_raise) if game_state.min_raise > 0 else 1
+        )
+        min_raise_total = to_call + min_raise_increment
         amt = max(min_raise_total, min(target.amount, stack))
         return Action("raise", amount=int(amt))
     else:

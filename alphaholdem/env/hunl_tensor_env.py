@@ -299,9 +299,13 @@ class HUNLTensorEnv:
         raise_case = raise_case.unsqueeze(1).expand(-1, num_presets)  # [N, B-3]
         raise_amt = base + to_call.unsqueeze(1)  # [N, B-3]
         raise_inc = base  # [N, B-3]
-        meets_min = raise_inc >= self.min_raise.unsqueeze(1)  # [N, B-3]
+        # Handle min_raise = 0 case properly
+        min_raise_safe = torch.where(
+            self.min_raise > 0, self.min_raise, torch.ones_like(self.min_raise)
+        )
+        meets_min = raise_inc >= min_raise_safe.unsqueeze(1)  # [N, B-3]
         can_only_allin = me_stack.unsqueeze(1) <= (
-            to_call.unsqueeze(1) + self.min_raise.unsqueeze(1)
+            to_call.unsqueeze(1) + min_raise_safe.unsqueeze(1)
         )  # [N, B-3]
         # Legal if exceeds call and either meets min-raise or only all-in remains
         raise_legal = (
@@ -489,6 +493,7 @@ class HUNLTensorEnv:
                 amt = torch.minimum(amt, self.stacks[idx_bet, me[idx_bet]])
                 self.bet(idx_bet, amt)
                 self.last_aggr[idx_bet] = amt
+                # For bets, min_raise should be the bet amount
                 self.min_raise[idx_bet] = torch.maximum(self.min_raise[idx_bet], amt)
             idx_raise = idx[to_call[idx] > 0]
             if idx_raise.numel() > 0:
@@ -510,6 +515,7 @@ class HUNLTensorEnv:
                 raise_part = torch.where(need, min_req, raise_part)
                 self.bet(idx_raise, raise_part)
                 self.last_aggr[idx_raise] = raise_part
+                # For raises, min_raise should be the raise increment (raise_part is already the increment)
                 self.min_raise[idx_raise] = torch.maximum(
                     self.min_raise[idx_raise], raise_part
                 )
@@ -555,7 +561,7 @@ class HUNLTensorEnv:
 
             self.street[ids] = 1
             self.to_act[ids] = 1 - self.button[ids]
-            self.min_raise[ids] = self.bb
+            self.min_raise[ids] = self.bb  # Reset min_raise to big blind for new street
             self.last_aggr[ids] = 0
 
             # turn
@@ -568,7 +574,7 @@ class HUNLTensorEnv:
             self.board_onehot[ids, 3] = self.card_onehot_cache[c]
             self.street[ids] = 2
             self.to_act[ids] = 1 - self.button[ids]
-            self.min_raise[ids] = self.bb
+            self.min_raise[ids] = self.bb  # Reset min_raise to big blind for new street
             self.last_aggr[ids] = 0
 
             # river
@@ -581,7 +587,7 @@ class HUNLTensorEnv:
             self.board_onehot[ids, 4] = self.card_onehot_cache[c]
             self.street[ids] = 3
             self.to_act[ids] = 1 - self.button[ids]
-            self.min_raise[ids] = self.bb
+            self.min_raise[ids] = self.bb  # Reset min_raise to big blind for new street
             self.last_aggr[ids] = 0
 
             # showdown

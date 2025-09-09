@@ -191,7 +191,7 @@ class HUNLEnv:
                     if me_p.stack <= to_call:
                         continue
                     # Must exceed call and satisfy min-raise unless only all-in is possible
-                    min_raise_inc = max(1, s.min_raise)
+                    min_raise_inc = max(1, s.min_raise) if s.min_raise > 0 else 1
                     if amount <= to_call:
                         continue
                     raise_inc = amount - to_call
@@ -312,7 +312,13 @@ class HUNLEnv:
                 me_p.committed
             )  # This is the total amount committed by the current player
             last_aggr = max(last_aggr, total_bet)
-            min_raise = max(min_raise, last_aggr)
+
+            # For min_raise: if this was a raise, the min_raise should be the raise increment
+            if to_call > 0:  # This was a raise
+                raise_increment = total_bet - to_call
+                min_raise = max(min_raise, raise_increment)
+            else:  # This was a bet
+                min_raise = max(min_raise, total_bet)
             if me_p.stack == 0:
                 me_p.is_allin = True
             next_to_act = opp
@@ -341,21 +347,21 @@ class HUNLEnv:
                 street = "flop"
                 board.extend([deck.pop(), deck.pop(), deck.pop()])
                 next_to_act = 1 - s.button  # postflop, button acts last
-                min_raise = s.big_blind
+                min_raise = s.big_blind  # Reset min_raise to big blind for new street
                 last_aggr = 0
                 self.actions_this_round = 0  # Reset for new street
             elif street == "flop":
                 street = "turn"
                 board.append(deck.pop())
                 next_to_act = 1 - s.button
-                min_raise = s.big_blind
+                min_raise = s.big_blind  # Reset min_raise to big blind for new street
                 last_aggr = 0
                 self.actions_this_round = 0  # Reset for new street
             elif street == "turn":
                 street = "river"
                 board.append(deck.pop())
                 next_to_act = 1 - s.button
-                min_raise = s.big_blind
+                min_raise = s.big_blind  # Reset min_raise to big blind for new street
                 last_aggr = 0
                 self.actions_this_round = 0  # Reset for new street
             elif street == "river":
