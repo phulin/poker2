@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Tuple, Sequence
+from typing import Tuple, Sequence
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from ..core.interfaces import Model
 from ..core.registry import register_model
@@ -15,15 +14,15 @@ class CardsConvTrunk(nn.Module):
         # First conv projects to hidden if needed
         self.conv1 = nn.Conv2d(in_channels, hidden, kernel_size=(3, 1), padding=1)
         self.norm1 = nn.GroupNorm(16, hidden)
-        self.relu1 = nn.ReLU(inplace=True)
+        self.relu1 = nn.SiLU(inplace=True)
 
         self.conv2 = nn.Conv2d(hidden, hidden, kernel_size=(1, 3), padding=1)
         self.norm2 = nn.GroupNorm(16, hidden)
-        self.relu2 = nn.ReLU(inplace=True)
+        self.relu2 = nn.SiLU(inplace=True)
 
         self.conv3 = nn.Conv2d(hidden, hidden, kernel_size=2, padding=1)
         self.norm3 = nn.GroupNorm(16, hidden)
-        self.relu3 = nn.ReLU(inplace=True)
+        self.relu3 = nn.SiLU(inplace=True)
 
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
 
@@ -68,15 +67,15 @@ class ActionsConvTrunk(nn.Module):
         # Simpler approach for actions - focus on local patterns
         self.conv1 = nn.Conv2d(in_channels, hidden, kernel_size=2, padding=0)
         self.norm1 = nn.GroupNorm(16, hidden)
-        self.relu1 = nn.ReLU(inplace=True)
+        self.relu1 = nn.SiLU(inplace=True)
 
         self.conv2 = nn.Conv2d(hidden, hidden, kernel_size=2, padding=0)
         self.norm2 = nn.GroupNorm(16, hidden)
-        self.relu2 = nn.ReLU(inplace=True)
+        self.relu2 = nn.SiLU(inplace=True)
 
         self.conv3 = nn.Conv2d(hidden, hidden, kernel_size=2, padding=0)
         self.norm3 = nn.GroupNorm(16, hidden)
-        self.relu3 = nn.ReLU(inplace=True)
+        self.relu3 = nn.SiLU(inplace=True)
 
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
 
@@ -137,7 +136,7 @@ class SiameseConvNetV1(nn.Module, Model):
         for i, h in enumerate(hidden_sizes):
             layers.append(nn.Linear(in_dim, h))
             layers.append(nn.LayerNorm(h))
-            layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.SiLU(inplace=True))
             if i < len(hidden_sizes) - 1:
                 layers.append(nn.Dropout(0.1))
             in_dim = h
