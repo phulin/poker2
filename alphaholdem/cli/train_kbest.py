@@ -112,7 +112,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
         step_start_time = time.time()
 
         # Training step: collects until batch_size steps
-        stats = trainer.train_step(step)
+        stats = trainer.train_step(step + 1)  # Pass 1-indexed step for consistency
 
         # Calculate times
         step_elapsed_time = time.time() - step_start_time

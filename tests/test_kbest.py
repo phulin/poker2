@@ -102,7 +102,7 @@ def test_selfplay_with_kbest():
 
     # Run fewer training steps for faster testing
     for step in range(2):  # Reduced from 5 to 2
-        stats = trainer.train_step()
+        stats = trainer.train_step(step + 1)
         print(
             f"Step {step + 1}: ELO={stats['current_elo']:.1f}, "
             f"Pool size={stats['pool_stats']['pool_size']}, "

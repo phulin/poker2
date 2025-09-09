@@ -49,7 +49,7 @@ def main():
 
     # First training step
     print("🚀 Running first training step...")
-    stats1 = trainer.train_step()
+    stats1 = trainer.train_step(1)
     print(f"✅ Training step 1 completed")
     print(f"   Loss: {stats1.get('avg_loss', 'N/A'):.6f}")
     print(f"   Value loss: {stats1.get('value_loss', 'N/A'):.6f}")
@@ -72,7 +72,7 @@ def main():
 
     # Second training step (this is where the spike should occur)
     print("🚀 Running second training step (after evaluation)...")
-    stats2 = trainer.train_step()
+    stats2 = trainer.train_step(2)
     print(f"✅ Training step 2 completed")
     print(f"   Loss: {stats2.get('avg_loss', 'N/A'):.6f}")
     print(f"   Value loss: {stats2.get('value_loss', 'N/A'):.6f}")

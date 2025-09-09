@@ -177,8 +177,8 @@ def test_checkpoint_save_load():
         )
 
         # Run a few training steps
-        for _ in range(3):
-            trainer.train_step()
+        for step in range(3):
+            trainer.train_step(step + 1)
 
         # Save checkpoint
         checkpoint_path = os.path.join(temp_dir, "test_checkpoint.pt")
@@ -302,7 +302,7 @@ def test_basic_training_step():
     # Run a few training steps
     for step in range(3):
         print(f"\n=== Training Step {step} ===")
-        stats = trainer.train_step()
+        stats = trainer.train_step(step + 1)
 
         print(f"Step {step} stats: {stats}")
 

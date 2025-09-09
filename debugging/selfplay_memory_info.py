@@ -201,7 +201,7 @@ def main():
 
         trainer.update_model = wrapped_update_model
 
-        stats = trainer.train_step(0)
+        stats = trainer.train_step(1)
         step_time = time.time() - start_time
 
         print(f"✅ Training step completed in {step_time:.2f} seconds")

@@ -181,7 +181,6 @@ class SelfPlayTrainer:
         )
 
         # Training stats
-        self.step = 1  # Training step counter
         self.step_trajectories_collected = 0
         self.total_step_reward = 0.0
         self.total_trajectories_collected = (
@@ -995,18 +994,16 @@ class SelfPlayTrainer:
         }
 
     @profile
-    def train_step(self, step: int = None) -> dict:
+    def train_step(self, step: int) -> dict:
         """
         Single training step: collect trajectories against K-Best opponents and update model.
 
         Args:
-            step: Optional step number for wandb logging. If None, uses internal wandb_step counter.
+            step: Training step number for logging and opponent pool management.
 
         Returns:
             Dictionary with training statistics
         """
-        # Increment training step counter
-        self.step += 1
 
         target_steps = self.batch_size * max(self.cfg.train.replay_buffer_batches, 1)
         if self.replay_buffer.num_steps() == 0:
@@ -1024,14 +1021,14 @@ class SelfPlayTrainer:
         update_stats = self.update_model()
 
         # Check if we should add current model to opponent pool
-        if self.opponent_pool.should_add_snapshot(self.step):
+        if self.opponent_pool.should_add_snapshot(step):
             self.opponent_pool.add_snapshot(
                 self.model, self.total_trajectories_collected
             )
 
         # Prepare training stats for return and logging
         training_stats = {
-            "step": self.step,
+            "step": step,
             "episode_count": self.step_trajectories_collected,
             "total_episodes": self.total_trajectories_collected,
             "current_elo": self.opponent_pool.current_elo,
@@ -1045,11 +1042,9 @@ class SelfPlayTrainer:
 
         # Log to wandb if enabled
         if self.use_wandb:
-            # Use passed step if provided, otherwise use internal counter
-            wandb_step = (step + 1) if step is not None else (self.wandb_step + 1)
             wandb.log(
                 {
-                    "step": wandb_step,  # Match CLI display (1-indexed)
+                    "step": step,  # Match CLI display (1-indexed)
                     "episode_count": training_stats["episode_count"],
                     "avg_reward": training_stats["avg_reward"],
                     "current_elo": training_stats["current_elo"],
@@ -1061,11 +1056,9 @@ class SelfPlayTrainer:
                     "mb_improve_rate": training_stats["mb_improve_rate"],
                     "avg_loss": training_stats["avg_loss"],
                     "num_samples": training_stats["num_samples"],
-                }
+                },
+                step=step,
             )
-            # Only increment internal counter if no step was passed
-            if step is None:
-                self.wandb_step += 1
 
         return training_stats
 
@@ -1133,7 +1126,6 @@ class SelfPlayTrainer:
             pool_data["snapshots"].append(snapshot_data)
 
         checkpoint = {
-            "step": self.step,
             "total_trajectories_collected": self.total_trajectories_collected,
             "current_elo": self.opponent_pool.current_elo,
             "model_state_dict": self.model.state_dict(),
@@ -1264,8 +1256,7 @@ class SelfPlayTrainer:
 
         self.opponent_pool.current_elo = checkpoint.get("current_elo", 1200.0)
 
-        # Restore training step counter
-        self.step = checkpoint.get("step", 0)
+        # Note: step counter is now managed externally
 
         # Restore wandb step for consistent logging
         # If wandb_step not in checkpoint (old checkpoint), set it to match step
