@@ -68,11 +68,13 @@ class HUNLTensorEnv:
         bet_bins: list[float],
         device: Optional[torch.device] = None,
         rng: Optional[torch.Generator] = None,
+        float_dtype: torch.dtype = torch.float32,
     ) -> None:
         assert num_envs > 0
         self.device = device or torch.device(
             "mps" if torch.backends.mps.is_available() else "cpu"
         )
+        self.float_dtype = float_dtype
         self.N = num_envs
         self.arange_n = torch.arange(self.N, device=self.device)
         self.starting_stack = int(starting_stack)
@@ -81,7 +83,7 @@ class HUNLTensorEnv:
         self.bet_bins = bet_bins
         # Cache bet bins as tensor for fast indexing
         self.bet_bins_t = torch.tensor(
-            self.bet_bins, dtype=torch.float32, device=self.device
+            self.bet_bins, dtype=float_dtype, device=self.device
         )
         # Number of discrete bins: 0=fold, 1=check/call, 2..(B-2)=presets, (B-1)=all-in
         self.num_bet_bins = len(self.bet_bins) + 3
@@ -408,7 +410,7 @@ class HUNLTensorEnv:
 
         committed_before = me_comm.clone()
 
-        rewards = torch.zeros(N, dtype=torch.float32, device=device)
+        rewards = torch.zeros(N, dtype=self.float_dtype, device=device)
 
         # Group masks by action type
         is_fold = bin_indices == 0
@@ -446,7 +448,7 @@ class HUNLTensorEnv:
         # Reward equals current stack - starting_stack (committed lost to pot/opponent)
         scale = float(self.bb) * 100.0
         rewards[idx] = (
-            self.stacks[idx, me[idx]].to(torch.float32) - float(self.starting_stack)
+            self.stacks[idx, me[idx]].to(self.float_dtype) - float(self.starting_stack)
         ) / scale
 
         # Check/Call
@@ -626,8 +628,8 @@ class HUNLTensorEnv:
             scale = float(self.bb) * 100.0
             # Pot shares
             winner_ids = self.winner[ids]
-            pot = self.pot[ids].float()
-            stacks = self.stacks[ids, m].float()
+            pot = self.pot[ids].to(self.float_dtype)
+            stacks = self.stacks[ids, m].to(self.float_dtype)
             # pot_share: full pot if winner == m, half if tie, else 0
             pot_share = torch.where(
                 winner_ids == m,

@@ -80,6 +80,12 @@ class SelfPlayTrainer:
                 )
             )
 
+        self.float_dtype = (
+            torch.bfloat16
+            if self.use_mixed_precision and self.device.type in ["cuda", "mps"]
+            else torch.float32
+        )
+
         # Initialize RNG
         self.rng = torch.Generator(device=self.device)
 
@@ -93,6 +99,7 @@ class SelfPlayTrainer:
                 bet_bins=self.cfg.env.bet_bins,
                 device=self.device,
                 rng=self.rng,
+                float_dtype=self.float_dtype,
             )
         else:
             self.env = HUNLEnv(
@@ -128,6 +135,7 @@ class SelfPlayTrainer:
             max_trajectory_length=self.max_trajectory_length,  # Maximum steps per trajectory
             num_bet_bins=self.num_bet_bins,  # Number of bet bins for actions tensor
             device=self.device,
+            float_dtype=self.float_dtype,  # Use appropriate dtype for mixed precision
         )
 
         # K-Best opponent pool
@@ -160,13 +168,13 @@ class SelfPlayTrainer:
         # Mixed precision scaler
         self.scaler = (
             torch.amp.GradScaler(
-                "cuda",
+                self.device.type,
                 init_scale=self.loss_scale,
                 growth_factor=2.0,
                 backoff_factor=0.5,
                 growth_interval=2000,
             )
-            if self.use_mixed_precision and self.device.type == "cuda"
+            if self.use_mixed_precision and self.device.type in ["cuda", "mps"]
             else None
         )
 
@@ -280,7 +288,7 @@ class SelfPlayTrainer:
                     )
 
                 legal_mask = get_legal_mask(
-                    state, self.num_bet_bins, device=self.device
+                    state, self.num_bet_bins, dtype=self.float_dtype, device=self.device
                 )
 
                 # Sample action
@@ -432,20 +440,29 @@ class SelfPlayTrainer:
 
                 # Initialize logits and values tensors for active environments only
                 active_logits = torch.zeros(
-                    active_indices.numel(), self.num_bet_bins, device=self.device
+                    active_indices.numel(),
+                    self.num_bet_bins,
+                    dtype=self.float_dtype,
+                    device=self.device,
                 )
-                active_values = torch.zeros(active_indices.numel(), device=self.device)
+                active_values = torch.zeros(
+                    active_indices.numel(), dtype=self.float_dtype, device=self.device
+                )
 
                 # Get predictions from our model for our turns
                 if active_we_act.numel() > 0:
-                    our_cards = active_cards[
-                        active_we_act
-                    ].float()  # Convert bool to float for model
-                    our_actions = active_actions[
-                        active_we_act
-                    ].float()  # Convert bool to float for model
+                    # Convert bool to appropriate dtype for model
+                    if self.use_mixed_precision and self.device.type in ["cuda", "mps"]:
+                        our_cards = active_cards[active_we_act].to(torch.bfloat16)
+                        our_actions = active_actions[active_we_act].to(torch.bfloat16)
 
-                    our_logits, our_values = self.model(our_cards, our_actions)
+                        # Use autocast for mixed precision
+                        with torch.amp.autocast(self.device.type, dtype=torch.bfloat16):
+                            our_logits, our_values = self.model(our_cards, our_actions)
+                    else:
+                        our_cards = active_cards[active_we_act].float()
+                        our_actions = active_actions[active_we_act].float()
+                        our_logits, our_values = self.model(our_cards, our_actions)
 
                     active_logits[active_we_act] = our_logits
                     active_values[active_we_act] = our_values.squeeze(-1)
@@ -474,26 +491,47 @@ class SelfPlayTrainer:
                         opponent = all_opponent_snapshots[opponent_idx]
 
                         # Use indices directly into active arrays
-                        opp_cards = active_cards[
-                            opp_active_indices
-                        ].float()  # Convert bool to float for model
-                        opp_actions = active_actions[
-                            opp_active_indices
-                        ].float()  # Convert bool to float for model
+                        # Convert bool to appropriate dtype for model
+                        if self.use_mixed_precision and self.device.type in [
+                            "cuda",
+                            "mps",
+                        ]:
+                            opp_cards = active_cards[opp_active_indices].to(
+                                torch.bfloat16
+                            )
+                            opp_actions = active_actions[opp_active_indices].to(
+                                torch.bfloat16
+                            )
 
-                        opp_logits, opp_values = opponent.model(opp_cards, opp_actions)
+                            # Use autocast for mixed precision
+                            with torch.amp.autocast(
+                                self.device.type, dtype=torch.bfloat16
+                            ):
+                                opp_logits, opp_values = opponent.model(
+                                    opp_cards, opp_actions
+                                )
+                        else:
+                            opp_cards = active_cards[opp_active_indices].float()
+                            opp_actions = active_actions[opp_active_indices].float()
+                            opp_logits, opp_values = opponent.model(
+                                opp_cards, opp_actions
+                            )
                         active_logits[opp_active_indices] = opp_logits
                         active_values[opp_active_indices] = opp_values.squeeze(-1)
                 elif active_opp_acts.numel() > 0:
                     # Self-play: use our model for opponent turns too
-                    opp_cards = active_cards[
-                        active_opp_acts
-                    ].float()  # Convert bool to float for model
-                    opp_actions = active_actions[
-                        active_opp_acts
-                    ].float()  # Convert bool to float for model
+                    # Convert bool to appropriate dtype for model
+                    if self.use_mixed_precision and self.device.type in ["cuda", "mps"]:
+                        opp_cards = active_cards[active_opp_acts].to(torch.bfloat16)
+                        opp_actions = active_actions[active_opp_acts].to(torch.bfloat16)
 
-                    opp_logits, opp_values = self.model(opp_cards, opp_actions)
+                        # Use autocast for mixed precision
+                        with torch.amp.autocast(self.device.type, dtype=torch.bfloat16):
+                            opp_logits, opp_values = self.model(opp_cards, opp_actions)
+                    else:
+                        opp_cards = active_cards[active_opp_acts].float()
+                        opp_actions = active_actions[active_opp_acts].float()
+                        opp_logits, opp_values = self.model(opp_cards, opp_actions)
                     active_logits[active_opp_acts] = opp_logits
                     active_values[active_opp_acts] = opp_values.squeeze(-1)
 
@@ -522,7 +560,7 @@ class SelfPlayTrainer:
 
                 # Compute delta bounds from actor perspective AFTER step
                 # For our acting envs, actor is player 0
-                chips = self.tensor_env.chips_placed.to(torch.float32)
+                chips = self.tensor_env.chips_placed.to(self.float_dtype)
                 # Convert active_we_act to full environment indices
                 our_env_indices = active_indices[active_we_act]
                 our_delta2_tensor = (
@@ -801,13 +839,14 @@ class SelfPlayTrainer:
                 "actions_features"
             ]  # [batch_size, 24, 4, num_bet_bins] - bool
 
-            # Convert bool tensors to float32 for model forward pass
-            cards_float = cards_features.float()
-            actions_float = actions_features.float()
+            # Convert bool tensors to appropriate dtype for model forward pass
+            cards_float = cards_features.to(self.float_dtype)
+            actions_float = actions_features.to(self.float_dtype)
 
-            # Use mixed precision autocast for forward pass
-            if self.use_mixed_precision and self.device.type == "cuda":
-                with torch.amp.autocast("cuda"):
+            # Convert bool tensors to appropriate dtype for model forward pass
+            if self.use_mixed_precision and self.device.type in ["cuda", "mps"]:
+                # Use explicit bfloat16 autocast for consistency
+                with torch.amp.autocast(self.device.type, dtype=torch.bfloat16):
                     logits, values = self.model(cards_float, actions_float)
             else:
                 logits, values = self.model(cards_float, actions_float)

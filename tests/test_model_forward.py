@@ -57,7 +57,7 @@ def test_action_mapping_with_env():
     nb = 8
 
     # Test legal mask
-    legal_mask = get_legal_mask(state, nb)
+    legal_mask = get_legal_mask(state, nb, torch.float32)
     assert legal_mask.shape == (nb,)
     assert legal_mask.sum() > 0  # should have some legal actions
 

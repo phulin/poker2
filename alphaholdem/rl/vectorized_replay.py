@@ -17,6 +17,7 @@ class VectorizedReplayBuffer:
         max_trajectory_length: int,  # Maximum steps per trajectory
         num_bet_bins: int,  # Batch size for tensor operations
         device: torch.device,
+        float_dtype: torch.dtype = torch.float32,  # Dtype for float tensors
     ):
         self.capacity = capacity  # Number of trajectories
         self.max_trajectory_length = max_trajectory_length
@@ -55,10 +56,10 @@ class VectorizedReplayBuffer:
             capacity, max_trajectory_length, dtype=torch.long, device=device
         )
         self.log_probs = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.float32, device=device
+            capacity, max_trajectory_length, dtype=float_dtype, device=device
         )
         self.rewards = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.float32, device=device
+            capacity, max_trajectory_length, dtype=float_dtype, device=device
         )
         self.dones = torch.zeros(
             capacity, max_trajectory_length, dtype=torch.bool, device=device
@@ -71,22 +72,22 @@ class VectorizedReplayBuffer:
             device=device,
         )
         self.chips_placed = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.float32, device=device
+            capacity, max_trajectory_length, dtype=torch.long, device=device
         )
         self.delta2 = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.float32, device=device
+            capacity, max_trajectory_length, dtype=float_dtype, device=device
         )
         self.delta3 = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.float32, device=device
+            capacity, max_trajectory_length, dtype=float_dtype, device=device
         )
         self.values = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.float32, device=device
+            capacity, max_trajectory_length, dtype=float_dtype, device=device
         )
         self.advantages = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.float32, device=device
+            capacity, max_trajectory_length, dtype=float_dtype, device=device
         )
         self.returns = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.float32, device=device
+            capacity, max_trajectory_length, dtype=float_dtype, device=device
         )
 
         # Track trajectory metadata
@@ -293,9 +294,7 @@ class VectorizedReplayBuffer:
         self.rewards[buffer_trajectory_indices, step_positions] = rewards
         self.dones[buffer_trajectory_indices, step_positions] = dones
         self.legal_masks[buffer_trajectory_indices, step_positions] = legal_masks
-        self.chips_placed[buffer_trajectory_indices, step_positions] = (
-            chips_placed.float()
-        )
+        self.chips_placed[buffer_trajectory_indices, step_positions] = chips_placed
         self.delta2[buffer_trajectory_indices, step_positions] = delta2
         self.delta3[buffer_trajectory_indices, step_positions] = delta3
         self.values[buffer_trajectory_indices, step_positions] = values
@@ -596,24 +595,24 @@ class VectorizedReplayBuffer:
                         [t.action], dtype=torch.long, device=self.device
                     ),
                     log_probs=torch.tensor(
-                        [t.log_prob], dtype=torch.float32, device=self.device
+                        [t.log_prob], dtype=self.float_dtype, device=self.device
                     ),
                     rewards=torch.tensor(
-                        [t.reward], dtype=torch.float32, device=self.device
+                        [t.reward], dtype=self.float_dtype, device=self.device
                     ),
                     dones=torch.tensor([t.done], dtype=torch.bool, device=self.device),
                     legal_masks=t.legal_mask.unsqueeze(0).bool(),
                     chips_placed=torch.tensor(
-                        [t.chips_placed], dtype=torch.float32, device=self.device
+                        [t.chips_placed], dtype=self.float_dtype, device=self.device
                     ),
                     delta2=torch.tensor(
-                        [t.delta2], dtype=torch.float32, device=self.device
+                        [t.delta2], dtype=self.float_dtype, device=self.device
                     ),
                     delta3=torch.tensor(
-                        [t.delta3], dtype=torch.float32, device=self.device
+                        [t.delta3], dtype=self.float_dtype, device=self.device
                     ),
                     values=torch.tensor(
-                        [t.value], dtype=torch.float32, device=self.device
+                        [t.value], dtype=self.float_dtype, device=self.device
                     ),
                     trajectory_indices=torch.zeros(
                         1, dtype=torch.long, device=self.device

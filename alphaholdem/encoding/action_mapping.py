@@ -103,13 +103,16 @@ def _bin_to_target_action(
 
 
 def get_legal_mask(
-    game_state: GameState, num_bet_bins: int, device: Optional[torch.device] = None
+    game_state: GameState,
+    num_bet_bins: int,
+    dtype: torch.dtype,
+    device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     """Get legal action mask for current state.
 
     Uses env.legal_action_bins if available to avoid Action construction.
     """
-    mask = torch.zeros(num_bet_bins, dtype=torch.float32, device=device)
+    mask = torch.zeros(num_bet_bins, dtype=dtype, device=device)
     env = game_state.env
     bins = env.legal_action_bins(num_bet_bins)
     mask[bins] = 1.0

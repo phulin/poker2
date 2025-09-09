@@ -31,21 +31,20 @@ class ActionsHUEncoderV1(Encoder):
         device: Optional[torch.device] = None,
     ) -> Any:
         # Derive num_bet_bins from config
-        if (
-            self.cfg is not None
-            and hasattr(self.cfg, "env")
-            and hasattr(self.cfg.env, "bet_bins")
-        ):
-            num_bet_bins = len(self.cfg.env.bet_bins) + 3
-        else:
-            # Fallback to default bet_bins if config not available
-            num_bet_bins = 8  # 5 bet_bins + 3 (fold, check/call, all-in)
+        num_bet_bins = len(self.cfg.env.bet_bins) + 3
+        dtype = (
+            torch.bfloat16
+            if self.cfg.train.use_mixed_precision
+            and self.device.type in ["cuda", "mps"]
+            else torch.float32
+        )
+
         rounds = ["preflop", "flop", "turn", "river"]
         channels: List[torch.Tensor] = []
         for _ in rounds:
             for _ in range(self.history_actions_per_round):
                 channels.append(
-                    torch.zeros((4, num_bet_bins), dtype=torch.float32, device=device)
+                    torch.zeros((4, num_bet_bins), dtype=dtype, device=device)
                 )
 
         # Populate historical planes per round: player-specific and sum
@@ -68,7 +67,9 @@ class ActionsHUEncoderV1(Encoder):
                     channels[ch] = mat
 
         # Fill current legal actions for the next action slot in current round
-        legal = self._get_legal_mask(game_state, seat, num_bet_bins, device=device)
+        legal = self._get_legal_mask(
+            game_state, seat, num_bet_bins, dtype=dtype, device=device
+        )
         round_idx = (
             max(0, rounds.index(game_state.street))
             if game_state.street in rounds
@@ -90,10 +91,11 @@ class ActionsHUEncoderV1(Encoder):
         game_state: GameState,
         seat: int,
         num_bet_bins: int,
+        dtype: torch.dtype,
         device: Optional[torch.device] = None,
     ) -> torch.Tensor:
         """Generate legal action mask for current state."""
-        mask = torch.zeros(num_bet_bins, dtype=torch.float32, device=device)
+        mask = torch.zeros(num_bet_bins, dtype=dtype, device=device)
         if hasattr(game_state, "env") and game_state.env is not None:
             # Prefer env-provided legal bins for consistency and speed
             legal_bins = game_state.env.legal_action_bins(num_bet_bins)
