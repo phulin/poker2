@@ -179,9 +179,9 @@ class SelfPlayTrainer:
         )
 
         # Training stats
-        self.episode_count = 0
+        self.step_trajectories_collected = 0
         self.total_step_reward = 0.0
-        self.total_episodes_completed = (
+        self.total_trajectories_collected = (
             0  # Keep track of total episodes across all steps
         )
         self.opponent_pool.current_elo = 1200.0  # Starting ELO rating
@@ -387,10 +387,10 @@ class SelfPlayTrainer:
             raise ValueError("collect_tensor_trajectories requires use_tensor_env=True")
 
         total_reward = 0.0
-        episode_count = 0
+        trajectory_count = 0
         steps_collected = 0
         # Track individual episode rewards as list of tensors
-        individual_episode_rewards = []
+        collected_trajectory_rewards = []
 
         # Initialize all environments
         self.tensor_env.reset()
@@ -642,13 +642,14 @@ class SelfPlayTrainer:
                 self.tensor_env.done[env_indices] = True
 
             # Create trajectories for done environments
-            done_indices = torch.where(dones)[0]
-            total_reward += per_env_rewards[done_indices].sum().item()
+            newly_done_indices = torch.where(dones & active_mask)[0]
 
             # Collect individual episode rewards for accurate win counting
-            if done_indices.numel() > 0:
-                episode_rewards = per_env_rewards[done_indices]  # Keep as tensor
-                individual_episode_rewards.append(episode_rewards)
+            if newly_done_indices.numel() > 0:
+                newly_done_rewards = per_env_rewards[
+                    newly_done_indices
+                ]  # Keep as tensor
+                collected_trajectory_rewards.append(newly_done_rewards)
 
             # Trajectories are now added immediately via vectorized operations
             # No need for separate trajectory completion logic
@@ -683,17 +684,17 @@ class SelfPlayTrainer:
                 pass
 
             # If all environments are done, reset all of them
-            if active_indices.numel() == 0:
+            if dones.all():
                 self.tensor_env.reset()
                 if add_to_replay_buffer:
                     trajectories_added, steps_added = (
                         self.replay_buffer.finish_adding_trajectory_batches()
                     )
-                    episode_count += trajectories_added
+                    trajectory_count += trajectories_added
                     steps_collected += steps_added
                 else:
                     # For evaluation, just count episodes without adding to buffer
-                    episode_count += self.num_envs
+                    trajectory_count += self.num_envs
                     steps_collected += per_traj_step_count.sum().item()
                 per_env_rewards[:] = 0.0
                 per_traj_step_count[:] = 0
@@ -706,14 +707,15 @@ class SelfPlayTrainer:
             print(f"Collected {steps_collected} steps out of {min_steps} requested")
 
         # Concatenate all episode rewards into a single tensor
-        if individual_episode_rewards:
-            individual_episode_rewards_tensor = torch.cat(
-                individual_episode_rewards, dim=0
+        if collected_trajectory_rewards:
+            collected_trajectory_rewards_tensor = torch.cat(
+                collected_trajectory_rewards, dim=0
             )
         else:
-            individual_episode_rewards_tensor = torch.tensor([], device=self.device)
+            collected_trajectory_rewards_tensor = torch.tensor([], device=self.device)
+        total_reward = collected_trajectory_rewards_tensor.sum().item()
 
-        return total_reward, episode_count, individual_episode_rewards_tensor
+        return total_reward, trajectory_count, collected_trajectory_rewards_tensor
 
     def _encode_tensor_states(self) -> dict:
         """
@@ -1010,19 +1012,21 @@ class SelfPlayTrainer:
 
         # Check if we should add current model to opponent pool
         if self.opponent_pool.should_add_snapshot():
-            self.opponent_pool.add_snapshot(self.model, self.total_episodes_completed)
+            self.opponent_pool.add_snapshot(
+                self.model, self.total_trajectories_collected
+            )
 
         # Calculate average reward for this step and reset step counters
         avg_reward = (
-            self.total_step_reward / max(1, self.episode_count)
-            if self.episode_count > 0
+            self.total_step_reward / max(1, self.step_trajectories_collected)
+            if self.step_trajectories_collected > 0
             else 0.0
         )
 
         # Prepare training stats for return and logging
         training_stats = {
-            "episode_count": self.episode_count,
-            "total_episodes": self.total_episodes_completed,
+            "episode_count": self.step_trajectories_collected,
+            "total_episodes": self.total_trajectories_collected,
             "avg_reward": avg_reward,
             "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
@@ -1031,7 +1035,7 @@ class SelfPlayTrainer:
 
         # Reset step counters for next training step
         self.total_step_reward = 0.0
-        self.episode_count = 0
+        self.step_trajectories_collected = 0
 
         # Log to wandb if enabled
         if self.use_wandb:
@@ -1068,14 +1072,14 @@ class SelfPlayTrainer:
             min_steps: Minimum number of steps to add to replay buffer
         """
         if self.use_tensor_env:
-            total_reward, episode_count, _ = self.collect_tensor_trajectories(
+            total_reward, trajectory_count, _ = self.collect_tensor_trajectories(
                 min_steps,
                 all_opponent_snapshots=self.opponent_pool.snapshots,
             )
 
             self.total_step_reward += total_reward
-            self.episode_count += episode_count
-            self.total_episodes_completed += episode_count
+            self.step_trajectories_collected += trajectory_count
+            self.total_trajectories_collected += trajectory_count
         else:
             steps_added = 0
             while steps_added < min_steps:
@@ -1086,8 +1090,8 @@ class SelfPlayTrainer:
 
                 if len(trajectory.transitions) > 0:
                     self.replay_buffer.add_trajectory_legacy(trajectory)
-                    self.episode_count += 1
-                    self.total_episodes_completed += 1
+                    self.step_trajectories_collected += 1
+                    self.total_trajectories_collected += 1
                     steps_added += len(trajectory.transitions)
                     self.total_step_reward += reward
 
@@ -1124,8 +1128,7 @@ class SelfPlayTrainer:
 
         checkpoint = {
             "step": step,
-            "episode_count": self.total_episodes_completed,  # For backward compatibility
-            "total_episodes_completed": self.total_episodes_completed,
+            "total_trajectories_collected": self.total_trajectories_collected,
             "current_elo": self.opponent_pool.current_elo,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -1244,13 +1247,13 @@ class SelfPlayTrainer:
         # Handle both old and new checkpoint formats
         if "total_episodes_completed" in checkpoint:
             # New format
-            self.total_episodes_completed = checkpoint["total_episodes_completed"]
-            self.episode_count = 0  # Reset step counter
+            self.total_trajectories_collected = checkpoint["total_episodes_completed"]
+            self.step_trajectories_collected = 0  # Reset step counter
             self.total_step_reward = 0.0  # Reset step reward
         else:
             # Old format - migrate to new format
-            self.total_episodes_completed = checkpoint.get("episode_count", 0)
-            self.episode_count = 0  # Reset step counter
+            self.total_trajectories_collected = checkpoint.get("episode_count", 0)
+            self.step_trajectories_collected = 0  # Reset step counter
             self.total_step_reward = 0.0  # Reset step reward
 
         self.opponent_pool.current_elo = checkpoint.get("current_elo", 1200.0)

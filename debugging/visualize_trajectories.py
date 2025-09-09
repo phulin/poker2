@@ -30,13 +30,15 @@ def visualize_trajectories_per_step():
 
         # Clear replay buffer
         trainer.replay_buffer.clear()
-        initial_episodes = trainer.episode_count
+        initial_episodes = trainer.step_trajectories_collected
 
         # Run one training step
         stats = trainer.train_step(num_trajectories=num_trajectories)
 
         print(f"  Trajectories collected: {num_trajectories}")
-        print(f"  Episodes added: {trainer.episode_count - initial_episodes}")
+        print(
+            f"  Episodes added: {trainer.step_trajectories_collected - initial_episodes}"
+        )
         print(f"  Replay buffer size: {len(trainer.replay_buffer.trajectories)}")
         print(f"  Model updated: {'Yes' if 'avg_loss' in stats else 'No'}")
         if "avg_loss" in stats:
@@ -63,7 +65,7 @@ def show_training_cycle():
 
         # Before step
         buffer_before = len(trainer.replay_buffer.trajectories)
-        episodes_before = trainer.episode_count
+        episodes_before = trainer.step_trajectories_collected
 
         print(
             f"Before: Buffer has {buffer_before} trajectories, {episodes_before} episodes"
@@ -74,7 +76,7 @@ def show_training_cycle():
 
         # After step
         buffer_after = len(trainer.replay_buffer.trajectories)
-        episodes_after = trainer.episode_count
+        episodes_after = trainer.step_trajectories_collected
 
         print(f"Collected: {episodes_after - episodes_before} new episodes")
         print(f"After: Buffer has {buffer_after} trajectories")
