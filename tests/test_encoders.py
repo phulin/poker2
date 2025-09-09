@@ -27,7 +27,7 @@ def make_state(street: str, board: list[int]) -> GameState:
 
 
 def test_cards_planes_v1_values_and_shapes():
-    enc = CardsPlanesV1()
+    enc = CardsPlanesV1(config=None)
     # Board: ranks 4,5,6,7 suit 0
     s = make_state("turn", [4, 5, 6, 7])
     t = enc.encode_cards(s, seat=0)

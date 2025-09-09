@@ -210,7 +210,7 @@ def test_checkpoint_save_load():
             new_trainer.episode_count == trainer.episode_count
         ), "Episode count not restored"
         assert (
-            abs(new_trainer.total_reward - trainer.total_reward) < 1e-6
+            abs(new_trainer.total_step_reward - trainer.total_step_reward) < 1e-6
         ), "Total reward not restored"
 
         # Verify model parameters are the same

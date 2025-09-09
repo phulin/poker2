@@ -154,7 +154,8 @@ def main():
     # Override device to MPS and reduce replay buffer batches
     cfg.device = "mps"
     cfg.use_wandb = False  # Disable wandb for cleaner output
-    cfg.train.replay_buffer_batches = 1  # Reduce memory usage
+    cfg.train.use_mixed_precision = False
+    cfg.train.replay_buffer_batches = 2  # Reduce memory usage
 
     print(f"Config loaded:")
     print(f"  Batch size: {cfg.train.batch_size}")
@@ -175,6 +176,31 @@ def main():
     start_time = time.time()
 
     try:
+        # Hook into the update_model method to capture batch size
+        original_update_model = trainer.update_model
+
+        def wrapped_update_model():
+            # Call original method but capture the batch info
+            result = original_update_model()
+
+            # Get batch info from the replay buffer (it should have been sampled)
+            if trainer.replay_buffer.num_steps() > 0:
+                # Sample a small batch just to get the shapes (we'll discard it)
+                sample_batch = trainer.replay_buffer.sample_batch(
+                    torch.Generator(device=trainer.device),
+                    min(trainer.batch_size, trainer.replay_buffer.num_steps()),
+                )
+                batch_size = sample_batch["cards_features"].shape[0]
+                print(f"\n📦 Sample Batch Size: {batch_size}")
+                print(f"   Cards shape: {sample_batch['cards_features'].shape}")
+                print(f"   Actions shape: {sample_batch['actions_features'].shape}")
+                print(f"   Values shape: {sample_batch['values'].shape}")
+                print(f"   Logits shape: {sample_batch['log_probs'].shape}")
+
+            return result
+
+        trainer.update_model = wrapped_update_model
+
         stats = trainer.train_step(0)
         step_time = time.time() - start_time
 

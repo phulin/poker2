@@ -180,7 +180,10 @@ class SelfPlayTrainer:
 
         # Training stats
         self.episode_count = 0
-        self.total_reward = 0.0
+        self.total_step_reward = 0.0
+        self.total_episodes_completed = (
+            0  # Keep track of total episodes across all steps
+        )
         self.opponent_pool.current_elo = 1200.0  # Starting ELO rating
 
         # Weights & Biases setup
@@ -472,6 +475,7 @@ class SelfPlayTrainer:
                 # This doesn't bias our sampling because we would never see the empty
                 # trajectory if it were sampled anyway, since there is no decision of the
                 # actor to train. We could in the future train only the value function.
+                # NB that this will make our average reward look worse.
                 legal_masks[(active_who_acts == 1) & active_first_action, 0] = False
 
                 # Get predictions from opponent models for opponent turns
@@ -796,11 +800,6 @@ class SelfPlayTrainer:
             # Sample batch from vectorized buffer
             batch = self.replay_buffer.sample_batch(self.rng, self.batch_size)
 
-            # Move batch tensors to device FIRST for consistent indexing on device tensors
-            for key in batch:
-                if isinstance(batch[key], torch.Tensor):
-                    batch[key] = batch[key].to(self.device)
-
             # Normalize advantages across the batch for stability (mean=0, std=1)
             adv = batch["advantages"]
             adv_mean = adv.mean()
@@ -1012,16 +1011,28 @@ class SelfPlayTrainer:
 
         # Check if we should add current model to opponent pool
         if self.opponent_pool.should_add_snapshot():
-            self.opponent_pool.add_snapshot(self.model, self.episode_count)
+            self.opponent_pool.add_snapshot(self.model, self.total_episodes_completed)
+
+        # Calculate average reward for this step and reset step counters
+        avg_reward = (
+            self.total_step_reward / max(1, self.episode_count)
+            if self.episode_count > 0
+            else 0.0
+        )
 
         # Prepare training stats for return and logging
         training_stats = {
             "episode_count": self.episode_count,
-            "avg_reward": self.total_reward / max(1, self.episode_count),
+            "total_episodes": self.total_episodes_completed,
+            "avg_reward": avg_reward,
             "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
             **update_stats,
         }
+
+        # Reset step counters for next training step
+        self.total_step_reward = 0.0
+        self.episode_count = 0
 
         # Log to wandb if enabled
         if self.use_wandb:
@@ -1063,8 +1074,9 @@ class SelfPlayTrainer:
                 all_opponent_snapshots=self.opponent_pool.snapshots,
             )
 
-            self.total_reward += total_reward
+            self.total_step_reward += total_reward
             self.episode_count += episode_count
+            self.total_episodes_completed += episode_count
         else:
             steps_added = 0
             while steps_added < min_steps:
@@ -1076,8 +1088,9 @@ class SelfPlayTrainer:
                 if len(trajectory.transitions) > 0:
                     self.replay_buffer.add_trajectory_legacy(trajectory)
                     self.episode_count += 1
+                    self.total_episodes_completed += 1
                     steps_added += len(trajectory.transitions)
-                    self.total_reward += reward
+                    self.total_step_reward += reward
 
                     # Update opponent pool for scalar environment
                     if opponent is not None:
@@ -1112,8 +1125,8 @@ class SelfPlayTrainer:
 
         checkpoint = {
             "step": step,
-            "episode_count": self.episode_count,
-            "total_reward": self.total_reward,
+            "episode_count": self.total_episodes_completed,  # For backward compatibility
+            "total_episodes_completed": self.total_episodes_completed,
             "current_elo": self.opponent_pool.current_elo,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -1179,7 +1192,6 @@ class SelfPlayTrainer:
         # Create symlink using relative path to avoid circular references
         try:
             os.symlink(checkpoint_filename, latest_path)
-            print(f"Created symlink: latest_model.pt -> {checkpoint_filename}")
         except OSError as e:
             print(f"Warning: Could not create symlink latest_model.pt: {e}")
 
@@ -1214,7 +1226,6 @@ class SelfPlayTrainer:
                 try:
                     os.remove(file_path)
                     deleted_count += 1
-                    print(f"Deleted old checkpoint: {os.path.basename(file_path)}")
                 except OSError as e:
                     print(f"Warning: Could not delete {file_path}: {e}")
 
@@ -1230,8 +1241,19 @@ class SelfPlayTrainer:
 
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.episode_count = checkpoint["episode_count"]
-        self.total_reward = checkpoint["total_reward"]
+
+        # Handle both old and new checkpoint formats
+        if "total_episodes_completed" in checkpoint:
+            # New format
+            self.total_episodes_completed = checkpoint["total_episodes_completed"]
+            self.episode_count = 0  # Reset step counter
+            self.total_step_reward = 0.0  # Reset step reward
+        else:
+            # Old format - migrate to new format
+            self.total_episodes_completed = checkpoint.get("episode_count", 0)
+            self.episode_count = 0  # Reset step counter
+            self.total_step_reward = 0.0  # Reset step reward
+
         self.opponent_pool.current_elo = checkpoint.get("current_elo", 1200.0)
 
         # Restore wandb step for consistent logging

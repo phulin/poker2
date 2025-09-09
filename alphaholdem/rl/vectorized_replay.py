@@ -22,6 +22,7 @@ class VectorizedReplayBuffer:
         self.capacity = capacity  # Number of trajectories
         self.max_trajectory_length = max_trajectory_length
         self.device = device
+        self.float_dtype = float_dtype  # Store float dtype for use in methods
         self.position = 0  # Next trajectory write position
         self.size = 0  # Total number of valid trajectories
 
@@ -603,7 +604,7 @@ class VectorizedReplayBuffer:
                     dones=torch.tensor([t.done], dtype=torch.bool, device=self.device),
                     legal_masks=t.legal_mask.unsqueeze(0).bool(),
                     chips_placed=torch.tensor(
-                        [t.chips_placed], dtype=self.float_dtype, device=self.device
+                        [t.chips_placed], dtype=torch.long, device=self.device
                     ),
                     delta2=torch.tensor(
                         [t.delta2], dtype=self.float_dtype, device=self.device

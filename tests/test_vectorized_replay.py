@@ -15,6 +15,7 @@ class TestVectorizedReplayBuffer:
             max_trajectory_length=20,  # Max steps per trajectory
             num_bet_bins=5,  # Number of bet bins (replaces legal_mask_dim)
             device=device,
+            float_dtype=torch.float32,  # Add missing float_dtype parameter
         )
 
     def test_initialization(self, buffer):
@@ -938,7 +939,7 @@ class TestVectorizedReplayBuffer:
             "rewards": torch.randn(batch_size, device=device),
             "dones": torch.zeros(batch_size, dtype=torch.bool, device=device),
             "legal_masks": torch.ones(batch_size, 5, device=device).bool(),
-            "chips_placed": torch.randn(batch_size, device=device),
+            "chips_placed": torch.randint(0, 1000, (batch_size,), device=device),
             "delta2": torch.randn(batch_size, device=device),
             "delta3": torch.randn(batch_size, device=device),
             "values": torch.randn(batch_size, device=device),

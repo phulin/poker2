@@ -20,17 +20,19 @@ def _cards_to_planes(
 
 @register_card_encoder("cards_planes_v1")
 class CardsPlanesV1(Encoder):
-    def __init__(self, config: Config | None = None):
+    def __init__(self, config: Config):
         # Store config (not currently used but kept for consistency)
-        self.cfg: Config | None = config
+        self.cfg: Config = config
 
     def encode_cards(
         self, game_state: Any, seat: int, device: Optional[torch.device] = None
     ) -> Any:
         dtype = (
             torch.bfloat16
-            if self.cfg.train.use_mixed_precision
-            and self.device.type in ["cuda", "mps"]
+            if self.cfg
+            and self.cfg.train.use_mixed_precision
+            and device
+            and device.type in ["cuda", "mps"]
             else torch.float32
         )
         # Channels: hole, flop, turn, river, public, all

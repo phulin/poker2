@@ -31,11 +31,15 @@ class ActionsHUEncoderV1(Encoder):
         device: Optional[torch.device] = None,
     ) -> Any:
         # Derive num_bet_bins from config
-        num_bet_bins = len(self.cfg.env.bet_bins) + 3
+        num_bet_bins = (
+            len(self.cfg.env.bet_bins) + 3 if self.cfg else 8
+        )  # Default to 8 if no config
         dtype = (
             torch.bfloat16
-            if self.cfg.train.use_mixed_precision
-            and self.device.type in ["cuda", "mps"]
+            if self.cfg
+            and self.cfg.train.use_mixed_precision
+            and device
+            and device.type in ["cuda", "mps"]
             else torch.float32
         )
 
