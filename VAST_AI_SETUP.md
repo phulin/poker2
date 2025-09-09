@@ -78,10 +78,9 @@ ssh -p PORT root@IP_ADDRESS
 ```bash
 # Install Python dependencies
 pip install -r requirements.txt
-pip install wandb tensorboard matplotlib seaborn tqdm
 
-# Install the package
-pip install -e .
+# Install the package with all extras (includes wandb, tensorboard, etc.)
+pip install -e .[all]
 ```
 
 ## Step 6: Configure Training Parameters

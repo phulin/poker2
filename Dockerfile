@@ -17,19 +17,11 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install additional dependencies for training
-RUN pip install --no-cache-dir \
-    wandb \
-    tensorboard \
-    matplotlib \
-    seaborn \
-    tqdm
-
 # Copy the project
 COPY . .
 
-# Install the package in development mode
-RUN pip install -e .
+# Install the package in development mode with all extras
+RUN pip install -e .[all]
 
 # Create directories for checkpoints and logs
 RUN mkdir -p /workspace/checkpoints /workspace/logs

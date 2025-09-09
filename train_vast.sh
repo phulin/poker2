@@ -5,6 +5,13 @@
 export PYTHONPATH=/workspace
 export CUDA_VISIBLE_DEVICES=0
 
+# Install dependencies (if not already installed)
+if [ ! -d "venv" ]; then
+    echo "Installing dependencies..."
+    pip install -r requirements.txt
+    pip install -e .[all]
+fi
+
 # Create checkpoint directory
 mkdir -p /workspace/checkpoints
 

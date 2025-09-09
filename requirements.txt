@@ -1,6 +1,12 @@
+# Core dependencies
+torch==2.8.0
+pyyaml==6.0.2
+
+# Development and testing
 black==25.1.0
-numpy==2.3.2
 pre-commit==3.8.0
 pytest==8.4.1
-pyyaml==6.0.2
-torch==2.8.0
+
+# Dependencies for training and debugging
+wandb>=0.15.0
+line-profiler>=4.0.0
