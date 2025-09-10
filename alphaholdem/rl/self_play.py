@@ -789,9 +789,6 @@ class SelfPlayTrainer:
         total_clipfrac = 0.0
         total_explained_var = 0.0
         total_minibatches = 0
-        total_mb_improved = 0
-        total_loss_before = 0.0
-        total_loss_after = 0.0
 
         for _ in range(self.num_epochs):
             # Sample batch from vectorized buffer
@@ -807,26 +804,6 @@ class SelfPlayTrainer:
             # batch['delta2'] and batch['delta3'] are length-N tensors aligned with samples
             delta2_vec = batch["delta2"]
             delta3_vec = batch["delta3"]
-
-            # Debug: verify first sample clipping behavior on the exact batch
-            try:
-                ret0 = float(batch["returns"][0].item())
-                d2_0 = float(delta2_vec[0].item())
-                d3_0 = float(delta3_vec[0].item())
-                min_b0 = min(d2_0, d3_0)
-                max_b0 = max(d2_0, d3_0)
-                clipped0 = max(min(ret0, max_b0), min_b0)
-                first_clip_debug = {
-                    "first_ret": ret0,
-                    "first_d2": d2_0,
-                    "first_d3": d3_0,
-                    "first_min_b": min_b0,
-                    "first_max_b": max_b0,
-                    "first_ret_clipped": clipped0,
-                    "first_ret_out_of_bounds": not (min_b0 <= ret0 <= max_b0),
-                }
-            except Exception:
-                first_clip_debug = {}
 
             # No minibatches: operate on the full batch at once
             # Extract separate cards and actions features from batch
@@ -866,8 +843,6 @@ class SelfPlayTrainer:
                     huber_delta=self.cfg.train.huber_delta,
                 )
 
-            loss_before_dict = {k: v for k, v in loss_dict.items()}
-
             # Debugging metrics: approx KL, clipfrac, explained variance
             with torch.no_grad():
                 legal_mb = batch["legal_masks"]
@@ -881,15 +856,19 @@ class SelfPlayTrainer:
                 clip_low, clip_high = 1.0 - self.epsilon, 1.0 + self.epsilon
                 clipped = torch.clamp(ratio, clip_low, clip_high)
                 clipfrac = (torch.abs(clipped - ratio) > 1e-8).float().mean()
-                # Use the same target as the loss for EV: clipped returns
-                # # Ensure per-sample bounds are ordered to avoid clamp warnings
-                # min_b = torch.minimum(d2_mb, d3_mb)
-                # max_b = torch.maximum(d2_mb, d3_mb)
-                # ret_clipped_mb = torch.clamp(ret_mb, min=min_b, max=max_b)
-                # # Explained variance of value predictions against clipped targets
-                # var_y = torch.var(ret_clipped_mb)
-                # var_err = torch.var(ret_clipped_mb - values.detach())
-                # explained_var = 1.0 - (var_err / (var_y + 1e-8))
+
+                # Explained variance calculation using clipped returns (same as loss)
+                ret_mb = batch["returns"].float()
+                d2_mb = delta2_vec.float()
+                d3_mb = delta3_vec.float()
+                # Ensure per-sample bounds are ordered to avoid clamp warnings
+                min_b = torch.minimum(d2_mb, d3_mb)
+                max_b = torch.maximum(d2_mb, d3_mb)
+                ret_clipped_mb = torch.clamp(ret_mb, min=min_b, max=max_b)
+                # Explained variance of value predictions against clipped targets
+                var_y = torch.var(ret_clipped_mb)
+                var_err = torch.var(ret_clipped_mb - values.detach())
+                explained_var = 1.0 - (var_err / (var_y + 1e-8))
 
             self.optimizer.zero_grad()
 
@@ -923,43 +902,14 @@ class SelfPlayTrainer:
 
                 self.optimizer.step()
 
-            # Recompute loss on the SAME batch AFTER the update to verify improvement
-            with torch.no_grad():
-                logits_after, values_after = self.model(cards_float, actions_float)
-                loss_after_dict = trinal_clip_ppo_loss(
-                    logits=logits_after,
-                    values=values_after,
-                    actions=batch["action_indices"],
-                    log_probs_old=batch["log_probs_old"].float(),
-                    advantages=batch["advantages"].float(),
-                    returns=batch["returns"].float(),
-                    legal_masks=batch["legal_masks"],
-                    epsilon=self.epsilon,
-                    delta1=self.delta1,
-                    delta2=delta2_vec.float(),
-                    delta3=delta3_vec.float(),
-                    value_coef=self.value_coef,
-                    entropy_coef=self.entropy_coef,
-                    value_loss_type=self.cfg.train.value_loss_type,
-                    huber_delta=self.cfg.train.huber_delta,
-                )
-
             total_loss += loss_dict["total_loss"].item()
             total_policy_loss += float(loss_dict["policy_loss"].item())
             total_value_loss += float(loss_dict["value_loss"].item())
             total_entropy += float(loss_dict["entropy"].item())
             total_approx_kl += float(approx_kl.item())
             total_clipfrac += float(clipfrac.item())
-            # total_explained_var += float(explained_var.item())
+            total_explained_var += float(explained_var.item())
             total_minibatches += 1
-            # Track batch verification metrics
-            total_loss_before += float(loss_before_dict["total_loss"].item())
-            total_loss_after += float(loss_after_dict["total_loss"].item())
-            if (
-                loss_after_dict["total_loss"].item()
-                < loss_before_dict["total_loss"].item()
-            ):
-                total_mb_improved += 1
 
         # Calculate average reward for this update step using captured values
         avg_reward = (
@@ -984,11 +934,7 @@ class SelfPlayTrainer:
             "entropy": total_entropy / denom,
             "approx_kl": total_approx_kl / denom,
             "clipfrac": total_clipfrac / denom,
-            # "explained_var": total_explained_var / denom,
-            "mb_improve_rate": (total_mb_improved / denom) if denom > 0 else 0.0,
-            "mb_loss_before": (total_loss_before / denom) if denom > 0 else 0.0,
-            "mb_loss_after": (total_loss_after / denom) if denom > 0 else 0.0,
-            **first_clip_debug,
+            "explained_var": total_explained_var / denom,
         }
 
     @profile
@@ -1024,9 +970,7 @@ class SelfPlayTrainer:
 
         # Check if we should add current model to opponent pool
         if self.opponent_pool.should_add_snapshot(step):
-            self.opponent_pool.add_snapshot(
-                self.model, self.total_trajectories_collected
-            )
+            self.opponent_pool.add_snapshot(self.model, step)
 
         # Prepare training stats for return and logging
         training_stats = {
@@ -1055,7 +999,7 @@ class SelfPlayTrainer:
                     "entropy": training_stats["entropy"],
                     "approx_kl": training_stats["approx_kl"],
                     "clipfrac": training_stats["clipfrac"],
-                    "mb_improve_rate": training_stats["mb_improve_rate"],
+                    "explained_var": training_stats["explained_var"],
                     "avg_loss": training_stats["avg_loss"],
                     "num_samples": training_stats["num_samples"],
                 },
