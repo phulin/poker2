@@ -56,6 +56,7 @@ def analyze_forward_pass_memory(batch_size: int, device: torch.device):
         actions_hidden=512,
         fusion_hidden=[2048, 2048],
         num_actions=8,
+        use_gradient_checkpointing=True,
     ).to(device)
 
     # Clear memory and reset stats
