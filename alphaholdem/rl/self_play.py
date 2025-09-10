@@ -646,13 +646,8 @@ class SelfPlayTrainer:
             # Create trajectories for done environments
             newly_done_indices = torch.where(dones & active_mask)[0]
 
-            # Collect individual episode rewards for accurate win counting
             if newly_done_indices.numel() > 0:
-                newly_done_rewards = per_env_rewards[
-                    newly_done_indices
-                ]  # Keep as tensor
                 trajectory_count += newly_done_indices.numel()
-                collected_trajectory_rewards.append(newly_done_rewards)
 
             # Trajectories are now added immediately via vectorized operations
             # No need for separate trajectory completion logic
@@ -697,6 +692,9 @@ class SelfPlayTrainer:
                 else:
                     # For evaluation, just count episodes without adding to buffer
                     steps_collected += per_traj_step_count.sum().item()
+
+                # Collect individual episode rewards for accurate win counting
+                collected_trajectory_rewards.append(per_env_rewards.clone())
                 per_env_rewards[:] = 0.0
                 per_traj_step_count[:] = 0
                 adding_trajectories = False
@@ -706,6 +704,9 @@ class SelfPlayTrainer:
                 f"Warning: Reached maximum loop count ({max_loops}), stopping collection early"
             )
             print(f"Collected {steps_collected} steps out of {min_steps} requested")
+
+        if self.tensor_env.done.any().item():
+            collected_trajectory_rewards.append(per_env_rewards[self.tensor_env.done])
 
         # Concatenate all episode rewards into a single tensor
         if collected_trajectory_rewards:
