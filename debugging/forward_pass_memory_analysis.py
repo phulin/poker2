@@ -101,36 +101,35 @@ def analyze_forward_pass_memory(batch_size: int, device: torch.device):
         return current_memory
 
     # Forward pass with memory tracking
-    with torch.no_grad():
-        # Cards trunk
-        track_memory("Before Cards Trunk")
-        x_cards = model.cards_trunk(cards_tensor)
-        track_memory("After Cards Trunk")
+    # Cards trunk
+    track_memory("Before Cards Trunk")
+    x_cards = model.cards_trunk(cards_tensor)
+    track_memory("After Cards Trunk")
 
-        # Actions trunk
-        track_memory("Before Actions Trunk")
-        x_actions = model.actions_trunk(actions_tensor)
-        track_memory("After Actions Trunk")
+    # Actions trunk
+    track_memory("Before Actions Trunk")
+    x_actions = model.actions_trunk(actions_tensor)
+    track_memory("After Actions Trunk")
 
-        # Concatenation
-        track_memory("Before Concatenation")
-        x = torch.cat([x_cards, x_actions], dim=1)
-        track_memory("After Concatenation")
+    # Concatenation
+    track_memory("Before Concatenation")
+    x = torch.cat([x_cards, x_actions], dim=1)
+    track_memory("After Concatenation")
 
-        # Fusion layers
-        track_memory("Before Fusion")
-        h = model.fusion(x)
-        track_memory("After Fusion")
+    # Fusion layers
+    track_memory("Before Fusion")
+    h = model.fusion(x)
+    track_memory("After Fusion")
 
-        # Policy head
-        track_memory("Before Policy Head")
-        logits = model.policy_head(h)
-        track_memory("After Policy Head")
+    # Policy head
+    track_memory("Before Policy Head")
+    logits = model.policy_head(h)
+    track_memory("After Policy Head")
 
-        # Value head
-        track_memory("Before Value Head")
-        value = model.value_head(h).squeeze(-1)
-        track_memory("After Value Head")
+    # Value head
+    track_memory("Before Value Head")
+    value = model.value_head(h).squeeze(-1)
+    track_memory("After Value Head")
 
     # Print memory progression
     print(f"  Memory Progression:")
