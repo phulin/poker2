@@ -20,8 +20,8 @@ class HUNLTensorEnv:
 
     Maintains key game scalars/vectors as tensors of shape [N] or [N, 2]:
       - stacks, committed, has_folded, is_allin: [N, 2]
-      - pot, to_act, street, actions_this_round, min_raise, last_aggr: [N]
-      - board_onehot: [N, 5, 4, 13], hole_onehot: [N, 2, 2, 4, 13]
+      - pot, to_act, street, actions_this_round, min_raise: [N]
+      - board_onehot: [N, 5, 4, 13], hole_onehot: [N, 2 players, 2 cards, 4, 13]
       - done mask: [N] bool, winner: [N] in {0,1,-1}
 
     Decks are stored as a tensor [N, 52] with per-env draw positions [N].
@@ -44,7 +44,6 @@ class HUNLTensorEnv:
     to_act: torch.Tensor
     pot: torch.Tensor
     min_raise: torch.Tensor
-    last_aggr: torch.Tensor
     actions_this_round: torch.Tensor
     stacks: torch.Tensor
     committed: torch.Tensor
@@ -69,6 +68,7 @@ class HUNLTensorEnv:
         device: Optional[torch.device] = None,
         rng: Optional[torch.Generator] = None,
         float_dtype: torch.dtype = torch.float32,
+        debug_step_table: bool = False,
     ) -> None:
         assert num_envs > 0
         self.device = device or torch.device(
@@ -81,9 +81,10 @@ class HUNLTensorEnv:
         self.sb = int(sb)
         self.bb = int(bb)
         self.bet_bins = bet_bins
+        self.debug_step_table = debug_step_table and self.N <= 5
         # Cache bet bins as tensor for fast indexing
         self.bet_bins_t = torch.tensor(
-            self.bet_bins, dtype=float_dtype, device=self.device
+            [0] * 2 + self.bet_bins + [0], dtype=float_dtype, device=self.device
         )
         # Number of discrete bins: 0=fold, 1=check/call, 2..(B-2)=presets, (B-1)=all-in
         self.num_bet_bins = len(self.bet_bins) + 3
@@ -104,7 +105,6 @@ class HUNLTensorEnv:
         self.to_act = torch.zeros(self.N, dtype=torch.long, device=self.device)
         self.pot = torch.zeros(self.N, dtype=torch.long, device=self.device)
         self.min_raise = torch.zeros(self.N, dtype=torch.long, device=self.device)
-        self.last_aggr = torch.zeros(self.N, dtype=torch.long, device=self.device)
         self.actions_this_round = torch.zeros(
             self.N, dtype=torch.long, device=self.device
         )
@@ -156,7 +156,8 @@ class HUNLTensorEnv:
     # --- Reset -----------------------------------------------------------------
 
     def reset(self, mask: Optional[torch.Tensor] = None) -> None:
-
+        if self.debug_step_table:
+            print("========== RESET ==========")
         # Determine which environments to reset
         if mask is None:
             # Reset all environments
@@ -207,7 +208,6 @@ class HUNLTensorEnv:
         self.to_act[ids] = p_sb
         self.pot[ids] = self.sb + self.bb
         self.min_raise[ids] = self.bb
-        self.last_aggr[ids] = self.bb
         self.actions_this_round[ids] = 0
         self.acted_since_reset[ids] = False
         self.has_folded[ids, :] = False
@@ -236,8 +236,9 @@ class HUNLTensorEnv:
 
     # --- Legality ---------------------------------------------------------------
 
-    def _compute_bin_amounts_and_mask(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute (amounts, mask) for discrete bins, allowing non-integer bets, no deduplication.
+    def legal_bins_amounts_and_mask(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute (amounts, mask) for discrete bins, allowing integer bets, no deduplication.
+        Amounts is the concrete additional amount the player would commit to the pot.
 
         amounts: [N, B] with -1 for non-preset bins or illegal presets
         mask:    [N, B] bool mask of legal bins (fold/check-call/presets/all-in)
@@ -245,6 +246,7 @@ class HUNLTensorEnv:
         N = self.N
         device = self.device
         B = self.num_bet_bins
+        amounts = torch.full((N, B), -1, dtype=torch.long, device=device)
         mask = torch.zeros(N, B, dtype=torch.bool, device=device)
 
         me = self.to_act
@@ -255,76 +257,32 @@ class HUNLTensorEnv:
         opp_committed = self.committed[self.arange_n, opp]
         to_call = opp_committed - me_committed
 
-        total_committed = self.pot + me_committed + opp_committed
-
         # Fold if facing bet
         mask[:, 0] = to_call > 0
 
-        # Check/Call
-        can_check = to_call <= 0
-        can_call = (to_call > 0) & (me_stack > 0)
-        mask[:, 1] = can_check | can_call
+        # Check/Call: you can always check or call, even if it might put you all in.
+        mask[:, 1] = 1
 
         # Pre-compute candidate concrete amounts for preset bins 2..B-2
         can_bet_raise = (me_stack > 0) & (opp_stack > 0)
-        amounts = torch.full((N, B), -1, dtype=torch.long, device=device)
+        additional_amounts = (
+            self.bet_bins_t[2:-1].view(1, B - 3) * self.pot.view(N, 1)
+        ).long()
+        bet_raise_amounts = to_call.view(N, 1) + additional_amounts  # [N, B-3]
 
-        # Vectorized version using self.bet_bins_t
-        # bet_bins_t: [B-3] tensor of multipliers (float)
-        num_presets = self.bet_bins_t.shape[0]
-        # [N, B-3] for all preset bins
-        base = (total_committed.unsqueeze(1) * self.bet_bins_t.unsqueeze(0)).to(
-            torch.long
-        )  # [N, B-3]
-        amt = torch.full(
-            (N, num_presets), -1, dtype=torch.long, device=device
-        )  # [N, B-3]
-
-        # Bet case
-        bet_case = (to_call <= 0) & can_bet_raise & (total_committed > 0)  # [N]
-        bet_case = bet_case.unsqueeze(1).expand(-1, num_presets)  # [N, B-3]
-        bet_amt = base.clamp(min=self.bb)  # [N, B-3]
-        # Cap bet to opponent's effective stack to avoid unmatched excess in HU
-        bet_amt = torch.minimum(bet_amt, opp_stack.unsqueeze(1))
-        bet_amt = torch.minimum(
-            bet_amt, (me_stack - 1).unsqueeze(1)
-        )  # strictly below all-in
-        bet_legal = bet_case & (bet_amt > 0)
-        amt = torch.where(bet_legal, bet_amt, amt)
-
-        # Raise case
-        raise_case = (
-            (to_call > 0) & can_bet_raise & (me_stack > to_call) & (total_committed > 0)
-        )  # [N]
-        raise_case = raise_case.unsqueeze(1).expand(-1, num_presets)  # [N, B-3]
-        raise_amt = base + to_call.unsqueeze(1)  # [N, B-3]
-        raise_inc = base  # [N, B-3]
-        # Handle min_raise = 0 case properly
-        min_raise_safe = torch.where(
-            self.min_raise > 0, self.min_raise, torch.ones_like(self.min_raise)
+        # Either in raise or bet case, additional amount above call must be at least min_raise.
+        bet_raise_legal = (
+            can_bet_raise.view(N, 1)
+            & (bet_raise_amounts <= me_stack.view(N, 1))
+            & (additional_amounts >= self.min_raise.view(N, 1))
         )
-        meets_min = raise_inc >= min_raise_safe.unsqueeze(1)  # [N, B-3]
-        can_only_allin = me_stack.unsqueeze(1) <= (
-            to_call.unsqueeze(1) + min_raise_safe.unsqueeze(1)
-        )  # [N, B-3]
-        # Legal if exceeds call and either meets min-raise or only all-in remains
-        raise_legal = (
-            raise_case
-            & (raise_amt > to_call.unsqueeze(1))
-            & (meets_min | can_only_allin)
-        )
-        # Do not exceed stack (those map to all-in bin)
-        # Cap raise to both our stack and opponent's stack (HU, no side-pot)
-        raise_amt = torch.minimum(raise_amt, (me_stack - 1).unsqueeze(1))
-        raise_amt = torch.minimum(raise_amt, opp_stack.unsqueeze(1))
-        raise_legal = raise_legal & (raise_amt > to_call.unsqueeze(1))
-        amt = torch.where(raise_legal, raise_amt, amt)
 
         # Write to amounts and mask for bins 2..B-2
-        amounts[:, 2 : 2 + num_presets] = amt
-        mask[:, 2 : 2 + num_presets] = amt > 0
+        amounts[:, 2:-1] = bet_raise_amounts
+        mask[:, 2:-1] = bet_raise_legal
 
         # All-in always available if we have chips
+        amounts[:, B - 1] = me_stack
         mask[:, B - 1] = me_stack > 0
 
         # If any player is all-in in an env, restrict to check/call only
@@ -336,15 +294,10 @@ class HUNLTensorEnv:
 
         return amounts, mask
 
-    def legal_action_bins_mask(self) -> torch.Tensor:
+    def legal_bins_mask(self) -> torch.Tensor:
         """Return [N, B] mask of legal bins with deduplication."""
-        _, mask = self._compute_bin_amounts_and_mask()
+        _, mask = self.legal_bins_amounts_and_mask()
         return mask
-
-    def bin_amounts(self) -> torch.Tensor:
-        """Return [N, B] concrete amounts for bins; -1 where not applicable."""
-        amounts, _ = self._compute_bin_amounts_and_mask()
-        return amounts
 
     # --- Helper APIs -----------------------------------------------------------
 
@@ -393,9 +346,15 @@ class HUNLTensorEnv:
 
     @profile
     def step_bins(
-        self, bin_indices: torch.Tensor
+        self,
+        bin_indices: torch.Tensor,
+        bin_amounts: Optional[torch.Tensor] = None,
+        legal_masks: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Step all envs using discrete bet bin indices tensor [N]. -1 means no action.
+        bin_indices: [N] bet bin indices
+        bin_amounts: [N, B] concrete amounts for bins; -1 where not applicable
+        legal_masks: [N, B] bool mask of legal bins (fold/check-call/presets/all-in)
 
         Returns (rewards [N], dones [N], to_act [N], chips_placed [N])
         Rewards are scaled by 100bb consistent with HUNLEnv.
@@ -404,6 +363,9 @@ class HUNLTensorEnv:
         N = self.N
         device = self.device
 
+        if bin_amounts is None or legal_masks is None:
+            bin_amounts, legal_masks = self.legal_bins_amounts_and_mask()
+
         me = self.to_act
         opp = 1 - me
 
@@ -411,6 +373,10 @@ class HUNLTensorEnv:
         me_comm = self.committed.gather(1, me.view(N, 1)).squeeze(1)
         opp_comm = self.committed.gather(1, opp.view(N, 1)).squeeze(1)
         to_call = opp_comm - me_comm
+        if (to_call < 0).any():
+            print(
+                f"Warning: to_call < 0 in {torch.where(to_call < 0)[0].numel()} envs."
+            )
 
         committed_before = me_comm.clone()
 
@@ -429,6 +395,9 @@ class HUNLTensorEnv:
         # We've now acted since reset
         self.acted_since_reset[acting] = True
 
+        if self.debug_step_table:
+            starting_street = self.street.clone()
+
         # Record current action into history (actor rows and sum row)
         round_idx = self.street.clamp(min=0, max=3)[acting]
         slot_idx = torch.clamp(self.actions_this_round, max=self.history_slots - 1)[
@@ -443,208 +412,238 @@ class HUNLTensorEnv:
         ] = 1
         # sum row
         self.action_history[acting, round_idx, slot_idx, 2, bin_indices[acting]] = 1
+        # Write legal mask for this decision into history legal row
+        self.action_history[acting, round_idx, slot_idx, 3, :] = legal_masks[acting]
 
+        # Handle different actions.
         # Fold: immediate terminal, award pot to opp
-        idx = torch.where(is_fold)[0]
+        action_idx = torch.where(is_fold)[0]
         # Winner is opp
-        self.winner[idx] = opp[idx]
-        self.done[idx] = True
+        self.winner[action_idx] = opp[action_idx]
+        self.done[action_idx] = True
         # Reward equals current stack - starting_stack (committed lost to pot/opponent)
         scale = float(self.bb) * 100.0
-        rewards[idx] = (
-            self.stacks[idx, me[idx]].to(self.float_dtype) - float(self.starting_stack)
+        rewards[action_idx] = (
+            self.stacks[action_idx, me[action_idx]].to(self.float_dtype)
+            - float(self.starting_stack)
         ) / scale
 
         # Check/Call
-        idx = torch.where(is_check_call)[0]
-        call_amt = torch.minimum(to_call[idx], me_stack[idx])
-        self.bet(idx, call_amt)
+        action_idx = torch.where(is_check_call)[0]
+        call_amt = torch.minimum(to_call[action_idx], me_stack[action_idx])
+        self.bet(action_idx, call_amt)
 
         # All-in
-        idx = torch.where(is_allin)[0]
-        amt = me_stack[idx]
-        # Pay call first if needed
-        call_amt = torch.clamp(to_call[idx], min=0)
-        call_amt = torch.minimum(call_amt, amt)
-        if call_amt.any():
-            self.bet(idx, call_amt)
-        # Then shove remaining
-        remaining_amt = amt - call_amt
-        if remaining_amt.any():
-            self.bet(idx, remaining_amt)
-        self.is_allin[idx, me[idx]] = True
+        action_idx = torch.where(is_allin)[0]
+        amt = me_stack[action_idx]
+        self.bet(action_idx, amt)
+        self.is_allin[action_idx, me[action_idx]] = True
 
-        # Bet/Raise bins: approximate mapping using total_committed * mult
-        if is_bet_raise.any():
-            idx = torch.where(is_bet_raise)[0]
-            bin_local = bin_indices[idx]
-            mult_idx = (bin_local - 2).clamp(min=0, max=len(self.bet_bins) - 1)
-            mult = self.bet_bins_t[mult_idx]
-            total_committed = self.pot[idx] + me_comm[idx] + opp_comm[idx]
-            base = (total_committed * mult).to(torch.long)
-            # Separate bet vs raise by to_call
-            idx_bet = idx[to_call[idx] <= 0]
-            if idx_bet.numel() > 0:
-                amt = base[to_call[idx] <= 0]
-                amt = amt.clamp(min=self.bb)
-                # Cap to opponent's effective stack to avoid over-betting beyond coverage
-                amt = torch.minimum(amt, self.stacks[idx_bet, 1 - me[idx_bet]])
-                # Also cannot exceed our own stack (non-allin path)
-                amt = torch.minimum(amt, self.stacks[idx_bet, me[idx_bet]])
-                self.bet(idx_bet, amt)
-                self.last_aggr[idx_bet] = amt
-                # For bets, min_raise should be the bet amount
-                self.min_raise[idx_bet] = torch.maximum(self.min_raise[idx_bet], amt)
-            idx_raise = idx[to_call[idx] > 0]
-            if idx_raise.numel() > 0:
-                base_r = base[to_call[idx] > 0]
-                call_amt = torch.minimum(
-                    to_call[idx_raise], self.stacks[idx_raise, me[idx_raise]]
-                )
-                # Pay call
-                self.bet(idx_raise, call_amt)
-                # Raise part
-                avail = self.stacks[idx_raise, me[idx_raise]]
-                # Opponent coverage after call
-                opp_avail = self.stacks[idx_raise, 1 - me[idx_raise]]
-                min_req = self.min_raise[idx_raise]
-                raise_part = torch.minimum(base_r, avail)
-                # Cap to opponent coverage (HU, no side-pot)
-                raise_part = torch.minimum(raise_part, opp_avail)
-                need = (raise_part < min_req) & (avail > min_req)
-                raise_part = torch.where(need, min_req, raise_part)
-                self.bet(idx_raise, raise_part)
-                self.last_aggr[idx_raise] = raise_part
-                # For raises, min_raise should be the raise increment (raise_part is already the increment)
-                self.min_raise[idx_raise] = torch.maximum(
-                    self.min_raise[idx_raise], raise_part
-                )
+        # Bet/Raise bins: approximate mapping using pot * mult (pot includes committed)
+        # Semantics: e.g. 0.5x pot means raise ABOVE the current call amount by 0.5x pot
+        # So if you bet $10, opponent raises to $20 total, half pot means you put $10 to
+        # call the $20 and then half of the starting pot ($30 total => $15 raise).
+        action_idx = torch.where(is_bet_raise)[0]
+        bet_raise_amount = bin_amounts[action_idx, bin_indices[action_idx]]
+        self.bet(action_idx, bet_raise_amount)
+        self.min_raise[action_idx] = torch.maximum(
+            self.min_raise[action_idx], bet_raise_amount
+        )
 
         # Advance to next actor (simple alternation)
         self.to_act[acting] = 1 - self.to_act[acting]
-        self.actions_this_round[acting] += ~self.done[acting]
+        self.actions_this_round[acting] += 1
         self.acted_since_reset[acting] = True
-
-        # Write legal mask for next decision into history legal row
-        next_street = self.street[acting].clamp(min=0, max=3)
-        next_slot = torch.clamp(
-            self.actions_this_round[acting], max=self.history_slots - 1
-        )
-        legal_mask = self.legal_action_bins_mask()
-        self.action_history[acting, next_street, next_slot, 3, :] = legal_mask[acting]
 
         # Chips placed by the actor in this step (after updates)
         placed_chips = (
             self.committed.gather(1, me.view(N, 1)).squeeze(1) - committed_before
         )
 
-        # Round closure: equal committed and both acted
+        # Round closure: equal committed (or 1 player all-in) and both acted
         equal_committed = self.committed[:, 0] == self.committed[:, 1]
-        round_closed = equal_committed & (self.actions_this_round >= 2)
-        rc_idx = torch.where(round_closed)[0]
-        if rc_idx.numel() > 0:
+        all_in_committed = (
+            (self.is_allin[:, 0] & self.is_allin[:, 1])
+            | (self.is_allin[:, 0] & (self.committed[:, 0] <= self.committed[:, 1]))
+            | (self.is_allin[:, 1] & (self.committed[:, 1] <= self.committed[:, 0]))
+        )
+        # NB: Don't need to handle folds since then we're totally done with the hand
+        round_closed = (equal_committed | all_in_committed) & (
+            self.actions_this_round >= 2
+        )
+        round_closed_idx = torch.where(round_closed)[0]
+        if round_closed_idx.numel() > 0:
+            stack_difference = self.stacks[:, 0] != self.stacks[:, 1]
+            if stack_difference.any():
+                print(f"Warning: stacks not equal in {stack_difference.numel()} envs.")
+
             # Reset committed
-            self.pot[rc_idx] += 0  # already in pot
-            self.committed[rc_idx, :] = 0
-            self.actions_this_round[rc_idx] = 0
+            self.committed[round_closed_idx, :] = 0
+            self.actions_this_round[round_closed_idx] = 0
+            self.to_act[round_closed_idx] = 1 - self.button[round_closed_idx]
+            self.min_raise[round_closed_idx] = (
+                self.bb
+            )  # Reset min_raise to big blind for new street
             # Advance street and deal
-            s = self.street[rc_idx]
+            s = self.street[round_closed_idx]
 
             # flop (vectorized dealing of 3 cards)
             flop_mask = s == 0
-            ids = rc_idx[flop_mask]
-            pos = self.deck_pos[ids]
-            self.deck_pos[ids] = pos + 3
-            self.board_onehot[ids, 0] = self.card_onehot_cache[self.deck[ids, pos]]
-            self.board_onehot[ids, 1] = self.card_onehot_cache[self.deck[ids, pos + 1]]
-            self.board_onehot[ids, 2] = self.card_onehot_cache[self.deck[ids, pos + 2]]
-
-            self.street[ids] = 1
-            self.to_act[ids] = 1 - self.button[ids]
-            self.min_raise[ids] = self.bb  # Reset min_raise to big blind for new street
-            self.last_aggr[ids] = 0
+            flop_ids = round_closed_idx[flop_mask]
+            pos = self.deck_pos[flop_ids]
+            self.deck_pos[flop_ids] = pos + 3
+            self.board_onehot[flop_ids, 0] = self.card_onehot_cache[
+                self.deck[flop_ids, pos]
+            ]
+            self.board_onehot[flop_ids, 1] = self.card_onehot_cache[
+                self.deck[flop_ids, pos + 1]
+            ]
+            self.board_onehot[flop_ids, 2] = self.card_onehot_cache[
+                self.deck[flop_ids, pos + 2]
+            ]
 
             # turn
             turn_mask = s == 1
-            ids = rc_idx[turn_mask]
-            pos = self.deck_pos[ids]
-            c = self.deck[ids, pos]
-            self.deck_pos[ids] = pos + 1
-            # Use cached one-hot matrix for turn card
-            self.board_onehot[ids, 3] = self.card_onehot_cache[c]
-            self.street[ids] = 2
-            self.to_act[ids] = 1 - self.button[ids]
-            self.min_raise[ids] = self.bb  # Reset min_raise to big blind for new street
-            self.last_aggr[ids] = 0
+            turn_ids = round_closed_idx[turn_mask]
+            pos = self.deck_pos[turn_ids]
+            c = self.deck[turn_ids, pos]
+            self.deck_pos[turn_ids] = pos + 1
+            self.board_onehot[turn_ids, 3] = self.card_onehot_cache[c]
 
             # river
             river_mask = s == 2
-            ids = rc_idx[river_mask]
-            pos = self.deck_pos[ids]
-            c = self.deck[ids, pos]
-            self.deck_pos[ids] = pos + 1
+            river_ids = round_closed_idx[river_mask]
+            pos = self.deck_pos[river_ids]
+            c = self.deck[river_ids, pos]
+            self.deck_pos[river_ids] = pos + 1
             # Use cached one-hot matrix for river card
-            self.board_onehot[ids, 4] = self.card_onehot_cache[c]
-            self.street[ids] = 3
-            self.to_act[ids] = 1 - self.button[ids]
-            self.min_raise[ids] = self.bb  # Reset min_raise to big blind for new street
-            self.last_aggr[ids] = 0
+            self.board_onehot[river_ids, 4] = self.card_onehot_cache[c]
 
             # showdown
             sd_mask = s == 3
-            ids = rc_idx[sd_mask]
+            showdown_ids = round_closed_idx[sd_mask]
             # Evaluate winners or award folds
-            # Vectorized showdown resolution for all ids at once
+            # Vectorized showdown resolution for all showdown_ids at once
 
-            # Only consider ids where neither player has folded
-            not_folded_mask = (~self.has_folded[ids, 0]) & (~self.has_folded[ids, 1])
-            ids_showdown = ids[not_folded_mask]
+            # Only consider showdown_ids where neither player has folded
+            not_folded_mask = (~self.has_folded[showdown_ids, 0]) & (
+                ~self.has_folded[showdown_ids, 1]
+            )
+            not_folded_ids = showdown_ids[not_folded_mask]
 
             # Build one-hot 7-card planes for each player: 2 hole + 5 board
-            # Shape: [num_ids, 4, 13]
-            num_sd = ids_showdown.shape[0]
+            # Shape: [num_showdown_ids, 4, 13]
+            num_sd = not_folded_ids.shape[0]
             if num_sd > 0:
                 # Player 0
                 a_plane = (
-                    self.hole_onehot[ids_showdown, 0, 0]
-                    + self.hole_onehot[ids_showdown, 0, 1]
-                    + self.board_onehot[ids_showdown].sum(dim=1)
+                    self.hole_onehot[not_folded_ids, 0, 0]
+                    + self.hole_onehot[not_folded_ids, 0, 1]
+                    + self.board_onehot[not_folded_ids].sum(dim=1)
                 )
                 # Player 1
                 b_plane = (
-                    self.hole_onehot[ids_showdown, 1, 0]
-                    + self.hole_onehot[ids_showdown, 1, 1]
-                    + self.board_onehot[ids_showdown].sum(dim=1)
+                    self.hole_onehot[not_folded_ids, 1, 0]
+                    + self.hole_onehot[not_folded_ids, 1, 1]
+                    + self.board_onehot[not_folded_ids].sum(dim=1)
                 )
-                # Clamp planes to 0/1
-                a_plane = a_plane.clamp(0, 1)
-                b_plane = b_plane.clamp(0, 1)
                 # Compare hands in batch
                 cmp = rules.compare_7_batch(a_plane, b_plane)  # shape [num_sd]
                 # Set winners
-                self.winner[ids_showdown[cmp > 0]] = 0
-                self.winner[ids_showdown[cmp < 0]] = 1
-                self.winner[ids_showdown[cmp == 0]] = -1
+                self.winner[not_folded_ids[cmp > 0]] = 0
+                self.winner[not_folded_ids[cmp < 0]] = 1
+                self.winner[not_folded_ids[cmp == 0]] = -1
 
-            # Mark all as done
-            self.done[ids] = True
+            # Mark all showdowns as done
+            self.done[showdown_ids] = True
 
             # Compute scaled reward for actor of this step
-            m = me[ids].long()
+            m = me[showdown_ids].long()
             scale = float(self.bb) * 100.0
             # Pot shares
-            winner_ids = self.winner[ids]
-            pot = self.pot[ids].to(self.float_dtype)
-            stacks = self.stacks[ids, m].to(self.float_dtype)
+            winner_showdown_ids = self.winner[showdown_ids]
+            pot = self.pot[showdown_ids].to(self.float_dtype)
+            stacks = self.stacks[showdown_ids, m].to(self.float_dtype)
             # pot_share: full pot if winner == m, half if tie, else 0
             pot_share = torch.where(
-                winner_ids == m,
+                winner_showdown_ids == m,
                 pot,
-                torch.where(winner_ids == -1, pot / 2.0, torch.zeros_like(pot)),
+                torch.where(
+                    winner_showdown_ids == -1, pot / 2.0, torch.zeros_like(pot)
+                ),
             )
-            rewards[ids] = (stacks + pot_share - float(self.starting_stack)) / scale
+            rewards[showdown_ids] = (
+                stacks + pot_share - float(self.starting_stack)
+            ) / scale
+
+            # Advance street
+            self.street[round_closed_idx] += 1
+
+        # Debug table printing when enabled and batch size is small
+        if self.debug_step_table:
+            self._print_debug_table(bin_indices, rewards, acting, starting_street)
 
         return rewards, self.done, self.to_act, placed_chips
+
+    def _print_debug_table(
+        self,
+        bin_indices: torch.Tensor,
+        rewards: torch.Tensor,
+        active_indices: torch.Tensor,
+        starting_street: torch.Tensor,
+    ) -> None:
+        """Print a condensed debug row for all envs: [street] [actor] [action] [reward] [done]."""
+        # Convert tensors to CPU for printing
+        bin_indices_cpu = bin_indices.cpu()
+        rewards_cpu = rewards.cpu()
+        dones_cpu = self.done.cpu()
+        to_act_cpu = self.to_act.cpu()
+        street_cpu = starting_street.cpu()
+
+        # Street codes
+        # 0=preflop(p),1=flop(f),2=turn(t),3=river(r),4=showdown(s)
+        street_codes = "pftr"
+
+        # Build compact token per env with fixed-width columns
+        tokens = []
+        for i in range(self.N):
+            s = street_codes[int(street_cpu[i].item())]
+            actor = str(int(to_act_cpu[i].item()))
+
+            # Action
+            bi = int(bin_indices_cpu[i].item())
+            if bi < 0:
+                act = "-"
+            elif bi == 0:
+                act = "f"
+            elif bi == 1:
+                act = "c"
+            elif bi == (self.num_bet_bins - 1):
+                act = "ALL"
+            else:
+                mult_idx = bi - 2
+                if 0 <= mult_idx < len(self.bet_bins):
+                    mult = self.bet_bins[mult_idx]
+                    # Format like 0.5, 1.0, 1.5 etc
+                    act = f"{mult:.2f}".rstrip("0").rstrip(".")
+                else:
+                    act = f"bin{bi}"
+
+            # Fixed-width formatting: street(1) + space + actor(1) + space + action(4) + space + reward(5) + space + done(1)
+            # Total width per env: 1 + 1 + 1 + 1 + 4 + 1 + 5 + 1 + 1 = 16 characters
+            r = f"{float(rewards_cpu[i].item()):5.2f}"
+            done = "✓" if bool(dones_cpu[i].item()) else "✗"
+
+            # Format with fixed widths: street(1), actor(1), action(4), reward(5), done(1)
+            token = f"{s:1} {actor:1} {act:<4} {r:5} {done:1}"
+            tokens.append(token)
+
+        # Print header showing env indices once per row for readability
+        print(
+            " | ".join(tokens)
+            + " | "
+            + " ".join(str(i) for i in active_indices.tolist())
+        )
 
     def reset_done(self) -> None:
         """Reset only environments with done=True; keeps others unchanged."""

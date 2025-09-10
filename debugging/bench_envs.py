@@ -76,7 +76,7 @@ def bench_tensor_env(
             start = time.perf_counter()
             for i in range(iters):
                 with record_function(f"iteration_{i}"):
-                    mask = env.legal_action_bins_mask()
+                    mask = env.legal_bins_mask()
                     a = pick_bin_tensor(mask)
                     env.step_bins(a)
             elapsed = time.perf_counter() - start
@@ -114,7 +114,7 @@ def bench_tensor_env(
     else:
         start = time.perf_counter()
         for _ in range(iters):
-            mask = env.legal_action_bins_mask()
+            mask = env.legal_bins_mask()
             a = pick_bin_tensor(mask)
             env.step_bins(a)
         elapsed = time.perf_counter() - start

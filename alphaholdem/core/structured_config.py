@@ -55,6 +55,9 @@ class EnvConfig:
     bet_bins: Optional[List[float]] = None
     card_encoder: Optional[dict] = None
     action_encoder: Optional[dict] = None
+    debug_step_table: bool = (
+        False  # Print debug table during step_bins when batch_size <= 8
+    )
 
     def __post_init__(self):
         if self.bet_bins is None:

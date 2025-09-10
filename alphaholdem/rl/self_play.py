@@ -101,6 +101,7 @@ class SelfPlayTrainer:
                 device=self.device,
                 rng=self.rng,
                 float_dtype=self.float_dtype,
+                debug_step_table=self.cfg.env.debug_step_table,
             )
         else:
             self.env = HUNLEnv(
@@ -422,9 +423,11 @@ class SelfPlayTrainer:
             active_indices = torch.where(active_mask)[0]
 
             # Get legal action masks for active environments only
-            legal_masks = self.tensor_env.legal_action_bins_mask()[
-                active_indices
-            ]  # [N_active, B]
+            legal_bins_amounts, legal_bins_mask = (
+                self.tensor_env.legal_bins_amounts_and_mask()
+            )
+            active_legal_amounts = legal_bins_amounts[active_indices]
+            active_legal_masks = legal_bins_mask[active_indices]  # [N_active, B]
 
             # Encode states for active environments only
             states = self._encode_tensor_states()
@@ -478,7 +481,9 @@ class SelfPlayTrainer:
                 # trajectory if it were sampled anyway, since there is no decision of the
                 # actor to train. We could in the future train only the value function.
                 # NB that this will make our average reward look worse.
-                legal_masks[(active_who_acts == 1) & active_first_action, 0] = False
+                active_legal_masks[(active_who_acts == 1) & active_first_action, 0] = (
+                    False
+                )
 
                 # Get predictions from opponent models for opponent turns
                 opp_env_groups: Tuple[torch.Tensor, ...] | None = None
@@ -543,7 +548,7 @@ class SelfPlayTrainer:
 
                 # Sample actions for active environments only
                 action_values_active, log_probs_active = self.policy.action_batch(
-                    active_logits, legal_masks
+                    active_logits, active_legal_masks
                 )
 
             # Create full-size tensors for stepping (needed by tensor_env.step_bins)
@@ -554,7 +559,10 @@ class SelfPlayTrainer:
 
             # Take steps in all environments (tensor_env expects full-size tensors)
             # NOTE: THIS CHANGES self.tensor_env.to_act!!
-            rewards, dones, _, placed_chips = self.tensor_env.step_bins(action_values)
+            rewards, dones, _, placed_chips = self.tensor_env.step_bins(
+                action_values, legal_bins_amounts, legal_bins_mask
+            )
+
             active_rewards = rewards[active_indices]
             active_dones = dones[active_indices]
             active_placed_chips = placed_chips[active_indices]
@@ -588,7 +596,7 @@ class SelfPlayTrainer:
                 our_values_tensor = active_values[active_we_act]
                 our_rewards_tensor = active_rewards[active_we_act]
                 our_dones_tensor = active_dones[active_we_act]
-                our_legal_masks_tensor = legal_masks[active_we_act]
+                our_legal_masks_tensor = active_legal_masks[active_we_act]
                 our_placed_chips_tensor = active_placed_chips[active_we_act]
 
                 # Add transitions immediately using vectorized operations
@@ -683,7 +691,6 @@ class SelfPlayTrainer:
 
             # If all environments are done, reset all of them
             if dones.all():
-                self.tensor_env.reset()
                 if add_to_replay_buffer:
                     _, steps_added = (
                         self.replay_buffer.finish_adding_trajectory_batches()
@@ -698,6 +705,10 @@ class SelfPlayTrainer:
                 per_env_rewards[:] = 0.0
                 per_traj_step_count[:] = 0
                 adding_trajectories = False
+
+                # Reset environments if we're going through the loop again
+                if steps_collected < min_steps:
+                    self.tensor_env.reset()
 
         if loop_count >= max_loops:
             print(

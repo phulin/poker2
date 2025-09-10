@@ -6,7 +6,7 @@ num_steps: 25000
 k_best_pool_size: 10
 min_elo_diff: 75.0
 min_step_diff: 300  # Minimum step difference before considering for pool updates
-k_factor: 4.0  # Higher K-factor for more aggressive ELO updates
+k_factor: 1.0
 checkpoint_interval: 100
 eval_interval: 500
 checkpoint_dir: checkpoints-high-perf
@@ -97,3 +97,6 @@ env:
     name: "actions_hu_v1"
     kwargs:
       history_actions_per_round: 6
+  
+  # Debug configuration
+  debug_step_table: false  # Print debug table during step_bins when batch_size <= 8

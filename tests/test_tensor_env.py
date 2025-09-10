@@ -47,7 +47,7 @@ def test_n1_reset_and_shapes():
     assert env.board_onehot.shape == (1, 5, 4, 13)
     assert env.to_act.item() in (0, 1)
     # legal mask basics
-    mask = env.legal_action_bins_mask()
+    mask = env.legal_bins_mask()
     assert mask.shape == (1, 8)
     # Check/Call must be legal at start (SB posted, to_act is SB)
     assert mask[0, 1].item() is True
@@ -59,7 +59,7 @@ def test_n1_round_closure_and_deal():
     env = _make_env(N=1)
     # Force two checks to close preflop and deal flop
     for _ in range(2):
-        mask = env.legal_action_bins_mask()
+        mask = env.legal_bins_mask()
         assert mask[0, 1]
         r, d, _, _ = env.step_bins(torch.tensor([1]))
         assert not d.item()
@@ -73,9 +73,7 @@ def test_n1_round_closure_and_deal():
 def test_n1_min_raise_and_amounts():
     env = _make_env(N=1)
     # Make a small opening bet from SB on preflop when check allowed
-    amounts = env.bin_amounts()
-    # bins 2..6 are preset; ensure any legal bet is >= bb and < stack and <= opp stack
-    mask = env.legal_action_bins_mask()
+    amounts, mask = env.legal_bins_amounts_and_mask()
     for b in range(2, 7):
         if mask[0, b]:
             amt = amounts[0, b].item()
@@ -90,7 +88,7 @@ def test_n1_allin_and_auto_runout_rewards():
     # Drive an all-in quickly: choose all-in bin
     steps = 0
     while not env.done.item() and steps < 20:
-        mask = env.legal_action_bins_mask()
+        _, mask = env.legal_bins_amounts_and_mask()
         # prefer all-in when legal
         action = 7 if mask[0, 7] else 1
         r, d, _, _ = env.step_bins(torch.tensor([action]))
@@ -103,13 +101,13 @@ def test_n1_allin_and_auto_runout_rewards():
 def test_n1_action_history_logging():
     env = _make_env(N=1)
     # Ensure history tensor allocated after first step
-    mask = env.legal_action_bins_mask()
+    mask = env.legal_bins_mask()
     r, d, _, _ = env.step_bins(torch.tensor([1]))
     assert isinstance(env.get_action_history(), torch.Tensor)
     hist = env.get_action_history()
     assert hist.shape[-1] == 8
     # Next-legal mask should be written at row 3 for next slot
-    next_mask = env.legal_action_bins_mask().to(torch.float32)
+    next_mask = env.legal_bins_mask().to(torch.float32)
     round_idx = env.street.clamp(min=0, max=3).item()
     slot_idx = min(env.actions_this_round.item(), env.history_slots - 1)
     assert torch.equal(hist[0, round_idx, slot_idx, 3], next_mask[0])
@@ -117,8 +115,7 @@ def test_n1_action_history_logging():
 
 def test_n1_bin_deduplication_unique_amounts():
     env = _make_env(N=1)
-    amounts = env.bin_amounts()[0]
-    mask = env.legal_action_bins_mask()[0]
+    amounts, mask = env.legal_bins_amounts_and_mask()
     seen = set()
     for b in range(2, 7):
         if mask[b]:
@@ -130,7 +127,7 @@ def test_n1_bin_deduplication_unique_amounts():
 def test_n2_independence_and_mixed_actions():
     env = _make_env(N=2, seed=777)
     # Step env0 check/call, env1 all-in (if legal)
-    mask = env.legal_action_bins_mask()
+    mask = env.legal_bins_mask()
     a0 = 1
     a1 = 7 if mask[1, 7] else 1
     r, d, _, _ = env.step_bins(torch.tensor([a0, a1]))
@@ -145,12 +142,12 @@ def test_n2_independence_and_mixed_actions():
 def test_n2_reset_done_partial():
     env = _make_env(N=2, seed=42)
     # Force env0 to all-in, env1 to check once
-    mask = env.legal_action_bins_mask()
+    mask = env.legal_bins_mask()
     r, d, _, _ = env.step_bins(torch.tensor([7 if mask[0, 7] else 1, 1]))
     # Advance until any done
     steps = 0
     while (~env.done).any() and steps < 50:
-        mask = env.legal_action_bins_mask()
+        mask = env.legal_bins_mask()
         a = torch.where(mask[:, 7], torch.tensor(7), torch.tensor(1))
         r, d, _, _ = env.step_bins(a)
         steps += 1
@@ -176,7 +173,7 @@ def test_step_bins_negative_one_no_action():
     initial_acted_since_reset = env.acted_since_reset.clone()
 
     # Step with -1 for middle environment (index 1), valid actions for others
-    mask = env.legal_action_bins_mask()
+    mask = env.legal_bins_mask()
     actions = torch.tensor(
         [1, -1, 1], device=env.device
     )  # check/call for envs 0,2, no action for env 1

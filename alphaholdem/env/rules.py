@@ -294,7 +294,7 @@ def compare_7_batch(
     assert a_batch.dtype == torch.long
     assert b_batch.dtype == torch.long
 
-    ab_batch = torch.stack([a_batch, b_batch], dim=1)  # [N,2,4,13]
+    ab_batch = torch.stack([a_batch, b_batch], dim=1)  # [N, 2, 4, 13]
 
     # Create comparison vector
     compare = create_comparison_vector(ab_batch)  # [N, 2, 20]

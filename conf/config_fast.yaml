@@ -92,3 +92,6 @@ env:
     name: "actions_hu_v1"
     kwargs:
       history_actions_per_round: 6
+  
+  # Debug configuration
+  debug_step_table: false  # Print debug table during step_bins when batch_size <= 8
