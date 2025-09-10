@@ -161,7 +161,7 @@ class HUNLTensorEnv:
         # Determine which environments to reset
         if mask is None:
             # Reset all environments
-            ids = slice(None)
+            ids = torch.arange(self.N, device=self.device)
             num_reset = self.N
         else:
             # Reset only environments specified by mask
@@ -603,7 +603,7 @@ class HUNLTensorEnv:
         starting_to_act: torch.Tensor,
         after_betting_committed: torch.Tensor,
     ) -> None:
-        """Print a condensed debug row for all envs: [street] [actor] [action] [reward] [done] [pot] [committed]."""
+        """Print a condensed debug row for all envs: [street] [actor] [action] [reward] [done] [pot] [committed] [stacks]."""
         # Convert tensors to CPU for printing
         bin_indices_cpu = bin_indices.cpu()
         rewards_cpu = rewards.cpu()
@@ -612,6 +612,7 @@ class HUNLTensorEnv:
         street_cpu = starting_street.cpu()
         pot_cpu = self.pot.cpu()
         committed_cpu = after_betting_committed.cpu().clamp(0, 999)
+        stacks_cpu = self.stacks.cpu()
 
         # Street codes
         # 0=preflop(p),1=flop(f),2=turn(t),3=river(r)
@@ -648,14 +649,14 @@ class HUNLTensorEnv:
             pot = f"{int(pot_cpu[i].item()):4d}"
             comm0 = f"{int(committed_cpu[i, 0].item()):3d}"
             comm1 = f"{int(committed_cpu[i, 1].item()):3d}"
+            stack0 = f"{int(stacks_cpu[i, 0].item()):4d}"
+            stack1 = f"{int(stacks_cpu[i, 1].item()):4d}"
 
-            # Format with fixed widths: street(1), actor(1), action(4), reward(6), done(1), pot(4), committed(8)
+            # Format with fixed widths: street(1), actor(1), action(4), reward(6), done(1), pot(4), committed(8), stacks(12)
             if s == " ":
-                token = " " * 32
+                token = " " * 44
             else:
-                token = (
-                    f"{s:1} {actor:1} {act:<4} {r:6} {done:1} {pot:4} ({comm0},{comm1})"
-                )
+                token = f"{s:1} {actor:1} {act:<4} {r:6} {done:1} {pot:4} ({comm0},{comm1}) ({stack0},{stack1})"
             tokens.append(token)
 
         # Print header showing env indices once per row for readability
