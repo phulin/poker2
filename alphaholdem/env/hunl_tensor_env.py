@@ -366,14 +366,13 @@ class HUNLTensorEnv:
         if bin_amounts is None or legal_masks is None:
             bin_amounts, legal_masks = self.legal_bins_amounts_and_mask()
 
-        me = self.to_act
-        opp = 1 - me
-
-        me_stack = self.stacks.gather(1, me.view(N, 1)).squeeze(1)
-        me_comm = self.committed.gather(1, me.view(N, 1)).squeeze(1)
-        opp_comm = self.committed.gather(1, opp.view(N, 1)).squeeze(1)
-        to_call = opp_comm - me_comm
-        committed_before = me_comm.clone()
+        actor_stack = self.stacks.gather(1, self.to_act.view(N, 1)).squeeze(1)
+        actor_committed = self.committed.gather(1, self.to_act.view(N, 1)).squeeze(1)
+        other_committed = self.committed.gather(
+            1, (1 - self.to_act).view(N, 1)
+        ).squeeze(1)
+        to_call = other_committed - actor_committed
+        committed_before = actor_committed.clone()
 
         rewards = torch.zeros(N, dtype=self.float_dtype, device=device)
 
@@ -406,7 +405,7 @@ class HUNLTensorEnv:
         ]
         # set actor-specific one-hot
         self.action_history[
-            acting, round_idx, slot_idx, me[acting], bin_indices[acting]
+            acting, round_idx, slot_idx, self.to_act[acting], bin_indices[acting]
         ] = 1
         # sum row
         self.action_history[acting, round_idx, slot_idx, 2, bin_indices[acting]] = 1
@@ -417,25 +416,25 @@ class HUNLTensorEnv:
         # Fold: immediate terminal, award pot to opp
         action_idx = torch.where(is_fold)[0]
         # Winner is opp
-        self.winner[action_idx] = opp[action_idx]
+        self.winner[action_idx] = 1 - self.to_act[action_idx]
         self.done[action_idx] = True
         # Reward equals current stack - starting_stack (committed lost to pot/opponent)
         scale = float(self.bb) * 100.0
         rewards[action_idx] = (
-            self.stacks[action_idx, me[action_idx]].to(self.float_dtype)
+            self.stacks[action_idx, self.to_act[action_idx]].to(self.float_dtype)
             - float(self.starting_stack)
         ) / scale
 
         # Check/Call
         action_idx = torch.where(is_check_call)[0]
-        call_amt = torch.minimum(to_call[action_idx], me_stack[action_idx])
-        self.bet(action_idx, call_amt)
+        call_amount = torch.minimum(to_call[action_idx], actor_stack[action_idx])
+        self.bet(action_idx, call_amount)
 
         # All-in
         action_idx = torch.where(is_allin)[0]
-        amt = me_stack[action_idx]
-        self.bet(action_idx, amt)
-        self.is_allin[action_idx, me[action_idx]] = True
+        all_in_amount = actor_stack[action_idx]
+        self.bet(action_idx, all_in_amount)
+        self.is_allin[action_idx, self.to_act[action_idx]] = True
 
         # Bet/Raise bins: approximate mapping using pot * mult (pot includes committed)
         # Semantics: e.g. 0.5x pot means raise ABOVE the current call amount by 0.5x pot
@@ -458,7 +457,8 @@ class HUNLTensorEnv:
 
         # Chips placed by the actor in this step (after updates)
         placed_chips = (
-            self.committed.gather(1, me.view(N, 1)).squeeze(1) - committed_before
+            self.committed.gather(1, self.to_act.view(N, 1)).squeeze(1)
+            - committed_before
         )
 
         # Round closure: equal committed (or 1 player all-in) and both acted

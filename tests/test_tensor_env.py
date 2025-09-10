@@ -325,3 +325,193 @@ def test_blinds_correctly_entered_after_reset():
         assert (
             env2.stacks[i, bb_player] == expected_stack_bb2
         ), f"Env {i}: Expected BB player stack {expected_stack_bb2}, got {env2.stacks[i, bb_player]}"
+
+
+def test_reward_assignment_perspective():
+    """Test that rewards are assigned based on the acting player's perspective, not always player 0."""
+    # Test with different scenarios where player 0 and player 1 win
+
+    # Scenario 1: Player 0 wins at showdown
+    env1 = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=25,
+        bb=50,
+        bet_bins=[0.5, 1.0],
+        device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
+    )
+
+    # Set up a scenario where player 0 has a better hand
+    env1.reset()
+    # Force both players to check/call to showdown
+    for _ in range(8):  # Enough steps to reach showdown
+        mask = env1.legal_bins_mask()
+        if mask[0, 1]:  # Can check/call
+            r, d, _, _ = env1.step_bins(torch.tensor([1]))
+            if d.item():
+                break
+
+    # Check that reward is positive if player 0 won, negative if player 1 won
+    final_reward = r[0].item()
+    winner = env1.winner[0].item()
+
+    if winner == 0:  # Player 0 won
+        assert final_reward > 0, f"Player 0 won but reward is negative: {final_reward}"
+    elif winner == 1:  # Player 1 won
+        assert final_reward < 0, f"Player 1 won but reward is positive: {final_reward}"
+    elif winner == -1:  # Tie
+        assert (
+            abs(final_reward) < 0.01
+        ), f"Tie but reward is not near zero: {final_reward}"
+
+    # Scenario 2: Test with multiple environments to ensure consistency
+    env2 = HUNLTensorEnv(
+        num_envs=3,
+        starting_stack=2000,
+        sb=50,
+        bb=100,
+        bet_bins=[0.5, 1.0],
+        device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
+    )
+
+    env2.reset()
+
+    # Force all environments to showdown
+    for _ in range(10):
+        mask = env2.legal_bins_mask()
+        actions = []
+        for i in range(3):
+            if mask[i, 1]:  # Can check/call
+                actions.append(1)
+            else:
+                actions.append(-1)
+
+        r, d, _, _ = env2.step_bins(torch.tensor(actions))
+
+        if d.all():
+            break
+
+    # Verify reward signs match winner assignments
+    for i in range(3):
+        reward = r[i].item()
+        winner = env2.winner[i].item()
+
+        if winner == 0:  # Player 0 won
+            assert reward > 0, f"Env {i}: Player 0 won but reward is negative: {reward}"
+        elif winner == 1:  # Player 1 won
+            assert reward < 0, f"Env {i}: Player 1 won but reward is positive: {reward}"
+        elif winner == -1:  # Tie
+            assert (
+                abs(reward) < 0.01
+            ), f"Env {i}: Tie but reward is not near zero: {reward}"
+
+
+def test_reward_calculation_consistency():
+    """Test that reward calculation is consistent regardless of who was acting last."""
+    # Create multiple environments and force them to showdown
+    env = HUNLTensorEnv(
+        num_envs=4,
+        starting_stack=1500,
+        sb=30,
+        bb=60,
+        bet_bins=[0.5, 1.0, 1.5],
+        device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
+    )
+
+    env.reset()
+
+    # Track the last acting player for each environment
+    last_acting_players = []
+
+    # Force all environments to showdown
+    for step in range(12):
+        mask = env.legal_bins_mask()
+        actions = []
+        current_acting = []
+
+        for i in range(4):
+            if mask[i, 1]:  # Can check/call
+                actions.append(1)
+                current_acting.append(env.to_act[i].item())
+            else:
+                actions.append(-1)
+                current_acting.append(-1)
+
+        # Record who was acting before the step
+        if step == 0:
+            last_acting_players = [env.to_act[i].item() for i in range(4)]
+
+        r, d, _, _ = env.step_bins(torch.tensor(actions))
+
+        if d.all():
+            break
+
+    # Verify that rewards are calculated from player 0's perspective consistently
+    # regardless of who was acting last
+    for i in range(4):
+        reward = r[i].item()
+        winner = env.winner[i].item()
+        last_actor = last_acting_players[i]
+
+        # The reward should always be from player 0's perspective
+        if winner == 0:  # Player 0 won
+            assert (
+                reward > 0
+            ), f"Env {i}: Player 0 won but reward is negative: {reward} (last actor: {last_actor})"
+        elif winner == 1:  # Player 1 won
+            assert (
+                reward < 0
+            ), f"Env {i}: Player 1 won but reward is positive: {reward} (last actor: {last_actor})"
+        elif winner == -1:  # Tie
+            assert (
+                abs(reward) < 0.01
+            ), f"Env {i}: Tie but reward is not near zero: {reward} (last actor: {last_actor})"
+
+
+def test_fold_reward_assignment():
+    """Test that fold rewards are assigned correctly based on the folding player's perspective."""
+    env = HUNLTensorEnv(
+        num_envs=2,
+        starting_stack=1000,
+        sb=25,
+        bb=50,
+        bet_bins=[0.5, 1.0],
+        device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
+    )
+
+    env.reset()
+
+    # Test 1: Player 0 folds in env 0 (should get negative reward)
+    mask = env.legal_bins_mask()
+    if mask[0, 0]:  # Can fold
+        r, d, _, _ = env.step_bins(
+            torch.tensor([0, -1])
+        )  # Player 0 folds in env 0, no action in env 1
+        assert (
+            r[0].item() < 0
+        ), f"Player 0 folded but got positive reward: {r[0].item()}"
+        assert d[0].item(), "Environment 0 should be done after player 0 folds"
+        assert not d[1].item(), "Environment 1 should not be done"
+
+    # Reset and test player 1 folding in env 0
+    env.reset()
+
+    # Test 2: Player 1 folds in env 0 (should get negative reward)
+    # We need to wait until player 1 is to act in env 0
+    for _ in range(3):  # Try a few steps to get player 1 to act
+        mask = env.legal_bins_mask()
+        if env.to_act[0].item() == 1 and mask[0, 0]:  # Player 1 can fold in env 0
+            r, d, _, _ = env.step_bins(
+                torch.tensor([0, -1])
+            )  # Player 1 folds in env 0, no action in env 1
+            assert (
+                r[0].item() < 0
+            ), f"Player 1 folded but got positive reward: {r[0].item()}"
+            assert d[0].item(), "Environment 0 should be done after player 1 folds"
+            break
+        elif mask[0, 1]:  # Can check/call
+            env.step_bins(
+                torch.tensor([1, -1])
+            )  # Check/call in env 0, no action in env 1
+        else:
+            break
