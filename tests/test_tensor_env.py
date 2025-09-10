@@ -227,3 +227,101 @@ def test_step_bins_negative_one_no_action():
     assert torch.equal(
         r2, torch.zeros(2, device=env2.device)
     )  # All rewards should be zero
+
+
+def test_blinds_correctly_entered_after_reset():
+    """Test that blinds are correctly deducted from player stacks and added to pot after reset."""
+    # Test with different blind sizes
+    sb, bb = 25, 50
+    starting_stack = 1000
+
+    env = HUNLTensorEnv(
+        num_envs=3,
+        starting_stack=starting_stack,
+        sb=sb,
+        bb=bb,
+        bet_bins=[0.5, 1.0, 1.5],
+        device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
+    )
+
+    env.reset()
+
+    # Check that pot contains the blinds
+    expected_pot = sb + bb  # 25 + 50 = 75
+    assert torch.all(
+        env.pot == expected_pot
+    ), f"Expected pot {expected_pot}, got {env.pot}"
+
+    # Check that committed amounts are correct based on button position
+    for i in range(env.N):
+        sb_player = env.button[i].item()
+        bb_player = 1 - sb_player
+
+        assert (
+            env.committed[i, sb_player] == sb
+        ), f"Env {i}: Expected SB player {sb_player} committed {sb}, got {env.committed[i, sb_player]}"
+        assert (
+            env.committed[i, bb_player] == bb
+        ), f"Env {i}: Expected BB player {bb_player} committed {bb}, got {env.committed[i, bb_player]}"
+
+    # Check that stacks are reduced by the blinds
+    expected_stack_after_blinds = starting_stack - sb  # SB player
+    expected_stack_bb = starting_stack - bb  # BB player
+
+    # The button determines who is SB/BB, so we need to check based on button position
+    for i in range(env.N):
+        sb_player = env.button[i].item()
+        bb_player = 1 - sb_player
+
+        assert (
+            env.stacks[i, sb_player] == expected_stack_after_blinds
+        ), f"Env {i}: Expected SB player stack {expected_stack_after_blinds}, got {env.stacks[i, sb_player]}"
+        assert (
+            env.stacks[i, bb_player] == expected_stack_bb
+        ), f"Env {i}: Expected BB player stack {expected_stack_bb}, got {env.stacks[i, bb_player]}"
+
+    # Test with different blind sizes
+    sb2, bb2 = 10, 20
+    env2 = HUNLTensorEnv(
+        num_envs=2,
+        starting_stack=2000,
+        sb=sb2,
+        bb=bb2,
+        bet_bins=[0.5, 1.0],
+        device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
+    )
+
+    env2.reset()
+
+    # Check pot and committed amounts
+    expected_pot2 = sb2 + bb2  # 10 + 20 = 30
+    assert torch.all(
+        env2.pot == expected_pot2
+    ), f"Expected pot {expected_pot2}, got {env2.pot}"
+
+    # Check committed amounts based on button position
+    for i in range(env2.N):
+        sb_player = env2.button[i].item()
+        bb_player = 1 - sb_player
+
+        assert (
+            env2.committed[i, sb_player] == sb2
+        ), f"Env {i}: Expected SB player {sb_player} committed {sb2}, got {env2.committed[i, sb_player]}"
+        assert (
+            env2.committed[i, bb_player] == bb2
+        ), f"Env {i}: Expected BB player {bb_player} committed {bb2}, got {env2.committed[i, bb_player]}"
+
+    # Check stacks
+    expected_stack_sb2 = 2000 - sb2  # 1990
+    expected_stack_bb2 = 2000 - bb2  # 1980
+
+    for i in range(env2.N):
+        sb_player = env2.button[i].item()
+        bb_player = 1 - sb_player
+
+        assert (
+            env2.stacks[i, sb_player] == expected_stack_sb2
+        ), f"Env {i}: Expected SB player stack {expected_stack_sb2}, got {env2.stacks[i, sb_player]}"
+        assert (
+            env2.stacks[i, bb_player] == expected_stack_bb2
+        ), f"Env {i}: Expected BB player stack {expected_stack_bb2}, got {env2.stacks[i, bb_player]}"
