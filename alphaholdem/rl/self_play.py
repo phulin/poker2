@@ -1128,6 +1128,7 @@ class SelfPlayTrainer:
             pool_data["snapshots"].append(snapshot_data)
 
         checkpoint = {
+            "step": step,  # Store the training step
             "total_trajectories_collected": self.total_trajectories_collected,
             "current_elo": self.opponent_pool.current_elo,
             "model_state_dict": self.model.state_dict(),
@@ -1317,8 +1318,10 @@ class SelfPlayTrainer:
         # Extract wandb run ID for resumption
         wandb_run_id = checkpoint.get("wandb_run_id")
 
-        # Return 0 for step since we no longer store it in checkpoints
-        return 0, wandb_run_id
+        # Extract step number from checkpoint (default to 0 for old checkpoints)
+        step = checkpoint.get("step", 0)
+
+        return step, wandb_run_id
 
     def evaluate_against_pool(self, num_games: int = 100) -> dict:
         """

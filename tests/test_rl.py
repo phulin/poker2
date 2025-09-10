@@ -204,8 +204,8 @@ def test_checkpoint_save_load():
         # Load checkpoint
         loaded_step, wandb_run_id = new_trainer.load_checkpoint(checkpoint_path)
 
-        # Verify loaded state (step is no longer stored in checkpoints)
-        assert loaded_step == 0, f"Expected step 0, got {loaded_step}"
+        # Verify loaded state (step is now stored in checkpoints)
+        assert loaded_step == 3, f"Expected step 3, got {loaded_step}"
         assert (
             new_trainer.step_trajectories_collected
             == trainer.step_trajectories_collected
