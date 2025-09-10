@@ -8,7 +8,7 @@ min_elo_diff: 75.0
 min_step_diff: 300  # Minimum step difference before considering for pool updates
 k_factor: 1.0
 checkpoint_interval: 100
-eval_interval: 500
+eval_interval: 1000
 checkpoint_dir: checkpoints-high-perf
 
 # === DEVICE CONFIGURATION ===

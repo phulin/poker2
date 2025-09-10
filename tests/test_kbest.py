@@ -126,7 +126,7 @@ def test_selfplay_with_kbest():
 
     # Test evaluation with fewer games
     print("Testing evaluation against pool...")
-    eval_results = trainer.evaluate_against_pool(num_games=3)  # Reduced from 10 to 3
+    eval_results = trainer.evaluate_against_pool(min_games=3)  # Reduced from 10 to 3
     print(f"Evaluation results: {eval_results}")
 
     # Test checkpointing

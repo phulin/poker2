@@ -61,7 +61,7 @@ def main():
 
     # Evaluation
     print("🔍 Running evaluation...")
-    eval_results = trainer.evaluate_against_pool(num_games=5)
+    eval_results = trainer.evaluate_against_pool(min_games=5)
     print(f"✅ Evaluation completed")
     print(f"   Overall win rate: {eval_results.get('overall_win_rate', 'N/A'):.3f}")
     print(f"   Total games: {eval_results.get('total_games', 'N/A')}")

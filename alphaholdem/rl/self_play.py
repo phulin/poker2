@@ -1278,7 +1278,7 @@ class SelfPlayTrainer:
 
         return step, wandb_run_id
 
-    def evaluate_against_pool(self, num_games: int = 100) -> dict:
+    def evaluate_against_pool(self, min_games: int = 100) -> dict:
         """
         Evaluate current model against all opponents in the pool.
 
@@ -1305,31 +1305,33 @@ class SelfPlayTrainer:
                 if self.use_tensor_env:
                     # Use tensorized evaluation with individual episode reward tracking
                     _, _, individual_rewards = self.collect_tensor_trajectories(
-                        min_steps=num_games,
-                        all_opponent_snapshots=[opponent] * self.num_envs,
+                        min_steps=min_games,
+                        all_opponent_snapshots=[opponent],
                         add_to_replay_buffer=False,  # Don't pollute training data
                     )
 
                     # Count wins based on individual episode rewards (tensor operations)
                     wins = (individual_rewards > 0).sum().item()
+                    games = individual_rewards.numel()
                 else:
                     # Use scalar evaluation
-                    for _ in range(num_games):
+                    for _ in range(min_games):
                         _, final_reward = self.collect_trajectory(
                             opponent_snapshot=opponent
                         )
                         if final_reward > 0:
                             wins += 1
+                    games = min_games
 
-                win_rate = wins / num_games
+                win_rate = wins / games
                 results[f"opponent_{i}_step_{opponent.step}"] = {
                     "win_rate": win_rate,
                     "opponent_elo": opponent.elo,
                     "wins": wins,
-                    "total_games": num_games,
+                    "total_games": min_games,
                 }
                 total_wins += wins
-                total_games += num_games
+                total_games += games
 
         overall_win_rate = total_wins / total_games if total_games > 0 else 0.0
 

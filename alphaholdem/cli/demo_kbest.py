@@ -56,7 +56,7 @@ def demonstrate_kbest(cfg: Config):
 
     # Evaluate against the pool
     print("Evaluating against opponent pool...")
-    eval_results = trainer.evaluate_against_pool(num_games=20)
+    eval_results = trainer.evaluate_against_pool(min_games=20)
 
     print(f"Overall win rate: {eval_results['overall_win_rate']:.3f}")
     print("Individual opponent results:")

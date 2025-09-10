@@ -94,7 +94,7 @@ def debug_elo_system():
 
     # Test 6: Check evaluation logic
     print("\n📊 Test 6: Evaluation Logic Check")
-    eval_results = trainer.evaluate_against_pool(num_games=5)
+    eval_results = trainer.evaluate_against_pool(min_games=5)
     print(f"Evaluation results: {eval_results}")
 
     # Test 7: Check if evaluation updates ELO

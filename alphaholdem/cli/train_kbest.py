@@ -137,7 +137,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
 
         # Evaluation against pool
         if (step + 1) % cfg.eval_interval == 0:
-            eval_results = trainer.evaluate_against_pool(num_games=20)
+            eval_results = trainer.evaluate_against_pool(min_games=20)
             print_evaluation_results(eval_results)
 
         # Checkpointing
@@ -165,7 +165,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
     # Final evaluation
     final_total_time = time.time() - training_start_time
     print(f"\nFinal evaluation against opponent pool...")
-    final_eval = trainer.evaluate_against_pool(num_games=100)
+    final_eval = trainer.evaluate_against_pool(min_games=100)
     print_evaluation_results(final_eval)
     print(
         f"Total training time: {final_total_time:.1f}s ({final_total_time/3600:.2f} hours)"
