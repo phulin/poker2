@@ -403,9 +403,6 @@ class HUNLTensorEnv:
         slot_idx = torch.clamp(self.actions_this_round, max=self.history_slots - 1)[
             acting
         ]
-        # clear actor rows at this slot
-        self.action_history[acting, round_idx, slot_idx, 0, :] = 0
-        self.action_history[acting, round_idx, slot_idx, 1, :] = 0
         # set actor-specific one-hot
         self.action_history[
             acting, round_idx, slot_idx, me[acting], bin_indices[acting]

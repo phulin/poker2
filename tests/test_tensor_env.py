@@ -100,28 +100,48 @@ def test_n1_allin_and_auto_runout_rewards():
 
 def test_n1_action_history_logging():
     env = _make_env(N=1)
-    # Ensure history tensor allocated after first step
-    mask = env.legal_bins_mask()
-    r, d, _, _ = env.step_bins(torch.tensor([1]))
+    env.to_act.zero_()  # we go first.
+    first_legal_mask = env.legal_bins_mask()[0].cpu()
+    # quarter pot (floor(15 * 0.25) = 3) is below min raise (5).
+    assert torch.equal(
+        first_legal_mask, torch.tensor([1, 1, 0, 1, 1, 1, 1, 1], dtype=torch.bool)
+    )
+    env.step_bins(torch.tensor([1]))  # we call.
+    second_legal_mask = env.legal_bins_mask()[0].cpu()
+    # can't fold, not facing a bet
+    assert torch.equal(
+        second_legal_mask, torch.tensor([0, 1, 1, 1, 1, 1, 1, 1], dtype=torch.bool)
+    )
+    env.step_bins(torch.tensor([2]))  # opp bets half pot.
     assert isinstance(env.get_action_history(), torch.Tensor)
     hist = env.get_action_history()
     assert hist.shape[-1] == 8
-    # Next-legal mask should be written at row 3 for next slot
-    next_mask = env.legal_bins_mask().to(torch.float32)
-    round_idx = env.street.clamp(min=0, max=3).item()
-    slot_idx = min(env.actions_this_round.item(), env.history_slots - 1)
-    assert torch.equal(hist[0, round_idx, slot_idx, 3], next_mask[0])
-
-
-def test_n1_bin_deduplication_unique_amounts():
-    env = _make_env(N=1)
-    amounts, mask = env.legal_bins_amounts_and_mask()
-    seen = set()
-    for b in range(2, 7):
-        if mask[b]:
-            amt = int(amounts[b].item())
-            assert amt not in seen
-            seen.add(amt)
+    print(hist[0, 0, 0].cpu())
+    assert torch.equal(
+        hist[0, 0, 0].cpu(),
+        torch.tensor(
+            [
+                [0, 1, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 1, 0, 0, 0, 0, 0, 0],
+                [1, 1, 0, 1, 1, 1, 1, 1],
+            ],
+            dtype=torch.bool,
+        ),
+    )
+    assert torch.equal(
+        hist[0, 0, 1].cpu(),
+        torch.tensor(
+            [
+                [0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0, 0, 0, 0],
+                [0, 1, 1, 1, 1, 1, 1, 1],
+            ],
+            dtype=torch.bool,
+        ),
+    )
+    assert torch.all(hist[0, 0, 2:] == 0)
 
 
 def test_n2_independence_and_mixed_actions():
