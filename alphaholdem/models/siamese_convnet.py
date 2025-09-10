@@ -4,6 +4,7 @@ from typing import Tuple, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint
 
 from ..core.interfaces import Model
 from ..core.registry import register_model
@@ -142,8 +143,10 @@ class SiameseConvNetV1(nn.Module, Model):
         actions_hidden: int,
         fusion_hidden: int | Sequence[int],
         num_actions: int,
+        use_gradient_checkpointing: bool = True,
     ):
         super().__init__()
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         self.cards_trunk = CardsConvTrunk(cards_channels, hidden=cards_hidden)
         self.actions_trunk = ActionsConvTrunk(actions_channels, hidden=actions_hidden)
         fusion_in = cards_hidden + actions_hidden
@@ -189,8 +192,14 @@ class SiameseConvNetV1(nn.Module, Model):
         self, cards_tensor: torch.Tensor, actions_tensor: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Expect input shapes: (B, C, 4, 13) for both
-        x_cards = self.cards_trunk(cards_tensor)
-        x_actions = self.actions_trunk(actions_tensor)
+        # Use gradient checkpointing for memory-intensive conv trunks if enabled
+        if self.use_gradient_checkpointing:
+            x_cards = checkpoint.checkpoint(self.cards_trunk, cards_tensor)
+            x_actions = checkpoint.checkpoint(self.actions_trunk, actions_tensor)
+        else:
+            x_cards = self.cards_trunk(cards_tensor)
+            x_actions = self.actions_trunk(actions_tensor)
+
         x = torch.cat([x_cards, x_actions], dim=1)
         h = self.fusion(x)
         logits = self.policy_head(h)
