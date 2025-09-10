@@ -63,7 +63,7 @@ train:
 # === MODEL CONFIGURATION ===
 model:
   name: "siamese_convnet_v1"
-  use_gradient_checkpointing: true  # Enable gradient checkpointing for memory efficiency
+  use_gradient_checkpointing: false
   kwargs:
     cards_channels: 6
     actions_channels: 24
