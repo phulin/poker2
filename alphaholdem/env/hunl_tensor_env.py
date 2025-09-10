@@ -81,7 +81,7 @@ class HUNLTensorEnv:
         self.sb = int(sb)
         self.bb = int(bb)
         self.bet_bins = bet_bins
-        self.debug_step_table = debug_step_table and self.N <= 5
+        self.debug_step_table = debug_step_table and self.N <= 3
         # Cache bet bins as tensor for fast indexing
         self.bet_bins_t = torch.tensor(
             [0] * 2 + self.bet_bins + [0], dtype=float_dtype, device=self.device
@@ -157,7 +157,7 @@ class HUNLTensorEnv:
 
     def reset(self, mask: Optional[torch.Tensor] = None) -> None:
         if self.debug_step_table:
-            print("========== RESET ==========")
+            print("=" * 49 + " RESET " + "=" * 49)
         # Determine which environments to reset
         if mask is None:
             # Reset all environments
@@ -373,11 +373,6 @@ class HUNLTensorEnv:
         me_comm = self.committed.gather(1, me.view(N, 1)).squeeze(1)
         opp_comm = self.committed.gather(1, opp.view(N, 1)).squeeze(1)
         to_call = opp_comm - me_comm
-        if (to_call < 0).any():
-            print(
-                f"Warning: to_call < 0 in {torch.where(to_call < 0)[0].numel()} envs."
-            )
-
         committed_before = me_comm.clone()
 
         rewards = torch.zeros(N, dtype=self.float_dtype, device=device)
@@ -392,11 +387,17 @@ class HUNLTensorEnv:
         acting_mask = bin_indices >= 0
         acting = torch.where(acting_mask)[0]
 
+        if (to_call[acting] < 0).any():
+            print(
+                f"Warning: to_call < 0 in {torch.where(to_call[acting] < 0)[0].numel()} envs."
+            )
+
         # We've now acted since reset
         self.acted_since_reset[acting] = True
 
         if self.debug_step_table:
             starting_street = self.street.clone()
+            starting_to_act = self.to_act.clone()
 
         # Record current action into history (actor rows and sum row)
         round_idx = self.street.clamp(min=0, max=3)[acting]
@@ -447,6 +448,9 @@ class HUNLTensorEnv:
             self.min_raise[action_idx], bet_raise_amount
         )
 
+        if self.debug_step_table:
+            after_betting_committed = self.committed.clone()
+
         # Advance to next actor (simple alternation)
         self.to_act[acting] = 1 - self.to_act[acting]
         self.actions_this_round[acting] += 1
@@ -470,7 +474,9 @@ class HUNLTensorEnv:
         )
         round_closed_idx = torch.where(round_closed)[0]
         if round_closed_idx.numel() > 0:
-            stack_difference = self.stacks[:, 0] != self.stacks[:, 1]
+            stack_difference = (
+                self.stacks[round_closed_idx, 0] != self.stacks[round_closed_idx, 1]
+            )
             if stack_difference.any():
                 print(f"Warning: stacks not equal in {stack_difference.numel()} envs.")
 
@@ -576,9 +582,15 @@ class HUNLTensorEnv:
             # Advance street
             self.street[round_closed_idx] += 1
 
-        # Debug table printing when enabled and batch size is small
         if self.debug_step_table:
-            self._print_debug_table(bin_indices, rewards, acting, starting_street)
+            self._print_debug_table(
+                bin_indices,
+                rewards,
+                acting,
+                starting_street,
+                starting_to_act,
+                after_betting_committed,
+            )
 
         return rewards, self.done, self.to_act, placed_chips
 
@@ -588,18 +600,22 @@ class HUNLTensorEnv:
         rewards: torch.Tensor,
         active_indices: torch.Tensor,
         starting_street: torch.Tensor,
+        starting_to_act: torch.Tensor,
+        after_betting_committed: torch.Tensor,
     ) -> None:
-        """Print a condensed debug row for all envs: [street] [actor] [action] [reward] [done]."""
+        """Print a condensed debug row for all envs: [street] [actor] [action] [reward] [done] [pot] [committed]."""
         # Convert tensors to CPU for printing
         bin_indices_cpu = bin_indices.cpu()
         rewards_cpu = rewards.cpu()
         dones_cpu = self.done.cpu()
-        to_act_cpu = self.to_act.cpu()
+        to_act_cpu = starting_to_act.cpu()
         street_cpu = starting_street.cpu()
+        pot_cpu = self.pot.cpu()
+        committed_cpu = after_betting_committed.cpu().clamp(0, 999)
 
         # Street codes
-        # 0=preflop(p),1=flop(f),2=turn(t),3=river(r),4=showdown(s)
-        street_codes = "pftr"
+        # 0=preflop(p),1=flop(f),2=turn(t),3=river(r)
+        street_codes = "pftr "
 
         # Build compact token per env with fixed-width columns
         tokens = []
@@ -626,13 +642,20 @@ class HUNLTensorEnv:
                 else:
                     act = f"bin{bi}"
 
-            # Fixed-width formatting: street(1) + space + actor(1) + space + action(4) + space + reward(5) + space + done(1)
-            # Total width per env: 1 + 1 + 1 + 1 + 4 + 1 + 5 + 1 + 1 = 16 characters
-            r = f"{float(rewards_cpu[i].item()):5.2f}"
+            # Format values with proper padding
+            r = f"{float(rewards_cpu[i].item()):6.3f}"
             done = "✓" if bool(dones_cpu[i].item()) else "✗"
+            pot = f"{int(pot_cpu[i].item()):4d}"
+            comm0 = f"{int(committed_cpu[i, 0].item()):3d}"
+            comm1 = f"{int(committed_cpu[i, 1].item()):3d}"
 
-            # Format with fixed widths: street(1), actor(1), action(4), reward(5), done(1)
-            token = f"{s:1} {actor:1} {act:<4} {r:5} {done:1}"
+            # Format with fixed widths: street(1), actor(1), action(4), reward(6), done(1), pot(4), committed(8)
+            if s == " ":
+                token = " " * 32
+            else:
+                token = (
+                    f"{s:1} {actor:1} {act:<4} {r:6} {done:1} {pot:4} ({comm0},{comm1})"
+                )
             tokens.append(token)
 
         # Print header showing env indices once per row for readability
