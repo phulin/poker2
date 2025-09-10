@@ -194,8 +194,12 @@ class SiameseConvNetV1(nn.Module, Model):
         # Expect input shapes: (B, C, 4, 13) for both
         # Use gradient checkpointing for memory-intensive conv trunks if enabled
         if self.use_gradient_checkpointing:
-            x_cards = checkpoint.checkpoint(self.cards_trunk, cards_tensor)
-            x_actions = checkpoint.checkpoint(self.actions_trunk, actions_tensor)
+            x_cards = checkpoint.checkpoint(
+                self.cards_trunk, cards_tensor, use_reentrant=False
+            )
+            x_actions = checkpoint.checkpoint(
+                self.actions_trunk, actions_tensor, use_reentrant=False
+            )
         else:
             x_cards = self.cards_trunk(cards_tensor)
             x_actions = self.actions_trunk(actions_tensor)
