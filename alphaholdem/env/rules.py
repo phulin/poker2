@@ -283,9 +283,6 @@ def compare_7_batch(
     """Vectorized comparison for batches of 7-card hands using one-hot planes.
 
     Inputs must be one-hot planes [N,4,13]; returns [N] in {1, -1, 0}.
-    The score layout per hand is [category, t1, t2, t3, t4, t5] where
-    category is in {8:SF, 7:4K, 6:FH, 5:F, 4:S, 3:3K, 2:2P, 1:1P, 0:HC} and
-    t1..t5 are tiebreaker ranks in descending priority for that category.
     """
     assert isinstance(a_batch, torch.Tensor) and isinstance(b_batch, torch.Tensor)
     assert a_batch.shape == b_batch.shape

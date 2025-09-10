@@ -561,22 +561,19 @@ class HUNLTensorEnv:
             self.done[showdown_ids] = True
 
             # Compute scaled reward for actor of this step
-            m = me[showdown_ids].long()
             scale = float(self.bb) * 100.0
             # Pot shares
             winner_showdown_ids = self.winner[showdown_ids]
             pot = self.pot[showdown_ids].to(self.float_dtype)
-            stacks = self.stacks[showdown_ids, m].to(self.float_dtype)
+            my_stack = self.stacks[showdown_ids, 0].to(self.float_dtype)
             # pot_share: full pot if winner == m, half if tie, else 0
             pot_share = torch.where(
-                winner_showdown_ids == m,
+                winner_showdown_ids == 0,
                 pot,
-                torch.where(
-                    winner_showdown_ids == -1, pot / 2.0, torch.zeros_like(pot)
-                ),
+                torch.where(winner_showdown_ids == -1, pot / 2.0, 0),
             )
             rewards[showdown_ids] = (
-                stacks + pot_share - float(self.starting_stack)
+                my_stack + pot_share - float(self.starting_stack)
             ) / scale
 
             # Advance street
@@ -615,8 +612,8 @@ class HUNLTensorEnv:
         stacks_cpu = self.stacks.cpu()
 
         # Street codes
-        # 0=preflop(p),1=flop(f),2=turn(t),3=river(r)
-        street_codes = "pftr "
+        # 0=preflop(p),1=flop(f),2=turn(t),3=river(r),4=showdown(s)
+        street_codes = "pftrs"
 
         # Build compact token per env with fixed-width columns
         tokens = []
@@ -655,6 +652,11 @@ class HUNLTensorEnv:
             # Format with fixed widths: street(1), actor(1), action(4), reward(6), done(1), pot(4), committed(8), stacks(12)
             if s == " ":
                 token = " " * 44
+            elif (
+                self.street[i].item() == 4 and abs(rewards_cpu[i].item()) < 0.0001
+            ):  # showdown - show hands instead of normal row
+                hands_str = self._format_hands_for_debug(i)
+                token = f"s {hands_str}"
             else:
                 token = f"{s:1} {actor:1} {act:<4} {r:6} {done:1} {pot:4} ({comm0},{comm1}) ({stack0},{stack1})"
             tokens.append(token)
@@ -664,6 +666,44 @@ class HUNLTensorEnv:
             " | ".join(tokens)
             + " | "
             + " ".join(str(i) for i in active_indices.tolist())
+        )
+
+    def _format_hands_for_debug(self, env_idx: int) -> str:
+        """Format the two hands for debug output at showdown."""
+
+        # Convert hole cards to readable format
+        def card_to_str(card_onehot):
+            # card_onehot is [4, 13] - find the suit and rank
+            suit_idx = card_onehot.sum(dim=1).argmax().item()
+            rank_idx = card_onehot.sum(dim=0).argmax().item()
+
+            suits = ["♠", "♥", "♦", "♣"]
+            ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"]
+
+            return f"{ranks[rank_idx]}{suits[suit_idx]}"
+
+        # Get hole cards for both players
+        hole_cards = self.hole_onehot[env_idx]  # [2, 2, 4, 13]
+
+        # Player 0 hand
+        p0_card1 = card_to_str(hole_cards[0, 0])
+        p0_card2 = card_to_str(hole_cards[0, 1])
+
+        # Player 1 hand
+        p1_card1 = card_to_str(hole_cards[1, 0])
+        p1_card2 = card_to_str(hole_cards[1, 1])
+
+        # Get board cards
+        board_cards = []
+        board_onehot = self.board_onehot[env_idx]  # [5, 4, 13]
+        for i in range(5):
+            if board_onehot[i].sum() > 0:  # Card is present
+                board_cards.append(card_to_str(board_onehot[i]))
+
+        board_str = " ".join(board_cards) if board_cards else "No board"
+
+        return (
+            f"     {p0_card1} {p0_card2} = {board_str} = {p1_card1} {p1_card2}       "
         )
 
     def reset_done(self) -> None:
