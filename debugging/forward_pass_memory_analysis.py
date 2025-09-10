@@ -52,8 +52,8 @@ def analyze_forward_pass_memory(batch_size: int, device: torch.device):
     model = SiameseConvNetV1(
         cards_channels=6,
         actions_channels=24,
-        cards_hidden=512,
-        actions_hidden=512,
+        cards_hidden=256,
+        actions_hidden=256,
         fusion_hidden=[2048, 2048],
         num_actions=8,
         use_gradient_checkpointing=True,
