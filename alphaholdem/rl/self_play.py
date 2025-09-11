@@ -39,6 +39,7 @@ class SelfPlayTrainer:
         device: torch.device,
     ):
         self.cfg = cfg
+        self.device = device
 
         # Hydra config - extract parameters from nested structure
         self.batch_size = cfg.train.batch_size
@@ -57,7 +58,9 @@ class SelfPlayTrainer:
         self.min_elo_diff = cfg.min_elo_diff
         self.min_step_diff = cfg.min_step_diff
         self.k_factor = cfg.k_factor
-        self.use_mixed_precision = cfg.train.use_mixed_precision
+        self.use_mixed_precision = (
+            cfg.train.use_mixed_precision and self.device.type in ["cuda", "mps"]
+        )
         self.loss_scale = cfg.train.loss_scale
         self.use_tensor_env = cfg.use_tensor_env
         self.num_envs = cfg.num_envs
@@ -67,25 +70,7 @@ class SelfPlayTrainer:
         self.wandb_tags = cfg.wandb_tags
         self.wandb_run_id = cfg.wandb_run_id
 
-        # Set device
-        if device is not None:
-            self.device = device
-        else:
-            self.device = torch.device(
-                cfg.device
-                if cfg.device in ["cuda", "mps", "cpu"]
-                else (
-                    "cuda"
-                    if torch.cuda.is_available()
-                    else "mps" if torch.mps.is_available() else "cpu"
-                )
-            )
-
-        self.float_dtype = (
-            torch.bfloat16
-            if self.use_mixed_precision and self.device.type in ["cuda", "mps"]
-            else torch.float32
-        )
+        self.float_dtype = torch.bfloat16 if self.use_mixed_precision else torch.float32
 
         # Initialize RNG
         self.rng = torch.Generator(device=self.device)
@@ -177,7 +162,7 @@ class SelfPlayTrainer:
                 backoff_factor=0.5,
                 growth_interval=2000,
             )
-            if self.use_mixed_precision and self.device.type in ["cuda", "mps"]
+            if self.use_mixed_precision
             else None
         )
 
@@ -426,7 +411,6 @@ class SelfPlayTrainer:
             legal_bins_amounts, legal_bins_mask = (
                 self.tensor_env.legal_bins_amounts_and_mask()
             )
-            active_legal_amounts = legal_bins_amounts[active_indices]
             active_legal_masks = legal_bins_mask[active_indices]  # [N_active, B]
 
             # Encode states for active environments only
@@ -460,7 +444,7 @@ class SelfPlayTrainer:
                 # Get predictions from our model for our turns
                 if active_we_act.numel() > 0:
                     # Convert bool to appropriate dtype for model
-                    if self.use_mixed_precision and self.device.type in ["cuda", "mps"]:
+                    if self.use_mixed_precision:
                         our_cards = active_cards[active_we_act].to(torch.bfloat16)
                         our_actions = active_actions[active_we_act].to(torch.bfloat16)
 
@@ -503,27 +487,13 @@ class SelfPlayTrainer:
 
                         # Use indices directly into active arrays
                         # Convert bool to appropriate dtype for model
-                        if self.use_mixed_precision and self.device.type in [
-                            "cuda",
-                            "mps",
-                        ]:
-                            opp_cards = active_cards[opp_active_indices].to(
-                                torch.bfloat16
-                            )
-                            opp_actions = active_actions[opp_active_indices].to(
-                                torch.bfloat16
-                            )
-
-                            # Use autocast for mixed precision
-                            with torch.amp.autocast(
-                                self.device.type, dtype=torch.bfloat16
-                            ):
-                                opp_logits, opp_values = opponent.model(
-                                    opp_cards, opp_actions
-                                )
-                        else:
-                            opp_cards = active_cards[opp_active_indices].float()
-                            opp_actions = active_actions[opp_active_indices].float()
+                        opp_cards = active_cards[opp_active_indices].float()
+                        opp_actions = active_actions[opp_active_indices].float()
+                        with torch.amp.autocast(
+                            self.device.type,
+                            dtype=torch.bfloat16,
+                            enabled=self.use_mixed_precision,
+                        ):
                             opp_logits, opp_values = opponent.model(
                                 opp_cards, opp_actions
                             )
@@ -532,16 +502,13 @@ class SelfPlayTrainer:
                 elif active_opp_acts.numel() > 0:
                     # Self-play: use our model for opponent turns too
                     # Convert bool to appropriate dtype for model
-                    if self.use_mixed_precision and self.device.type in ["cuda", "mps"]:
-                        opp_cards = active_cards[active_opp_acts].to(torch.bfloat16)
-                        opp_actions = active_actions[active_opp_acts].to(torch.bfloat16)
-
-                        # Use autocast for mixed precision
-                        with torch.amp.autocast(self.device.type, dtype=torch.bfloat16):
-                            opp_logits, opp_values = self.model(opp_cards, opp_actions)
-                    else:
-                        opp_cards = active_cards[active_opp_acts].float()
-                        opp_actions = active_actions[active_opp_acts].float()
+                    opp_cards = active_cards[active_opp_acts].float()
+                    opp_actions = active_actions[active_opp_acts].float()
+                    with torch.amp.autocast(
+                        self.device.type,
+                        dtype=torch.bfloat16,
+                        enabled=self.use_mixed_precision,
+                    ):
                         opp_logits, opp_values = self.model(opp_cards, opp_actions)
                     active_logits[active_opp_acts] = opp_logits
                     active_values[active_opp_acts] = opp_values.squeeze(-1)
@@ -828,8 +795,7 @@ class SelfPlayTrainer:
             with torch.amp.autocast(
                 self.device.type,
                 dtype=torch.bfloat16,
-                enabled=self.use_mixed_precision
-                and self.device.type in ["cuda", "mps"],
+                enabled=self.use_mixed_precision,
             ):
                 logits, values = self.model(cards_float, actions_float)
 
