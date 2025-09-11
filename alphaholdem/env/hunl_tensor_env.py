@@ -80,6 +80,7 @@ class HUNLTensorEnv:
         self.starting_stack = int(starting_stack)
         self.sb = int(sb)
         self.bb = int(bb)
+        self.scale = float(self.bb) * 100.0
         self.bet_bins = bet_bins
         self.debug_step_table = debug_step_table and self.N <= 3
         # Cache bet bins as tensor for fast indexing
@@ -342,6 +343,24 @@ class HUNLTensorEnv:
         # Update chips_placed: track total chips placed by this player
         self.chips_placed[env_indices, player] += chips
 
+    def finish_and_assign_winners(
+        self, env_indices: torch.Tensor, winners: torch.Tensor
+    ) -> None:
+        """Assign winners to specified environments."""
+        self.winner[env_indices] = winners
+        self.done[env_indices] = True
+
+        pot = self.pot[env_indices].to(self.float_dtype)
+        my_stack = self.stacks[env_indices, 0].to(self.float_dtype)
+        # pot_share: full pot if winner == m, half if tie, else 0
+        pot_share = torch.where(
+            winners == 0,
+            pot,
+            torch.where(winners == -1, pot / 2.0, 0),
+        )
+
+        return (my_stack + pot_share - float(self.starting_stack)) / self.scale
+
     # --- Step ------------------------------------------------------------------
 
     @profile
@@ -416,14 +435,7 @@ class HUNLTensorEnv:
         # Fold: immediate terminal, award pot to opp
         action_idx = torch.where(is_fold)[0]
         # Winner is opp
-        self.winner[action_idx] = 1 - self.to_act[action_idx]
-        self.done[action_idx] = True
-        # Reward equals current stack - starting_stack (committed lost to pot/opponent)
-        scale = float(self.bb) * 100.0
-        rewards[action_idx] = (
-            self.stacks[action_idx, self.to_act[action_idx]].to(self.float_dtype)
-            - float(self.starting_stack)
-        ) / scale
+        self.finish_and_assign_winners(action_idx, 1 - self.to_act[action_idx])
 
         # Check/Call
         action_idx = torch.where(is_check_call)[0]
@@ -469,8 +481,10 @@ class HUNLTensorEnv:
             | (self.is_allin[:, 1] & (self.committed[:, 1] <= self.committed[:, 0]))
         )
         # NB: Don't need to handle folds since then we're totally done with the hand
-        round_closed = (equal_committed | all_in_committed) & (
-            self.actions_this_round >= 2
+        round_closed = (
+            acting_mask
+            & (equal_committed | all_in_committed)
+            & (self.actions_this_round >= 2)
         )
         round_closed_idx = torch.where(round_closed)[0]
         if round_closed_idx.numel() > 0:
@@ -557,24 +571,9 @@ class HUNLTensorEnv:
                 self.winner[not_folded_ids[cmp < 0]] = 1
                 self.winner[not_folded_ids[cmp == 0]] = -1
 
-            # Mark all showdowns as done
-            self.done[showdown_ids] = True
-
-            # Compute scaled reward for actor of this step
-            scale = float(self.bb) * 100.0
-            # Pot shares
-            winner_showdown_ids = self.winner[showdown_ids]
-            pot = self.pot[showdown_ids].to(self.float_dtype)
-            my_stack = self.stacks[showdown_ids, 0].to(self.float_dtype)
-            # pot_share: full pot if winner == m, half if tie, else 0
-            pot_share = torch.where(
-                winner_showdown_ids == 0,
-                pot,
-                torch.where(winner_showdown_ids == -1, pot / 2.0, 0),
+            rewards[showdown_ids] = self.finish_and_assign_winners(
+                showdown_ids, self.winner[showdown_ids]
             )
-            rewards[showdown_ids] = (
-                my_stack + pot_share - float(self.starting_stack)
-            ) / scale
 
             # Advance street
             self.street[round_closed_idx] += 1

@@ -338,7 +338,7 @@ def test_reward_assignment_perspective():
         sb=25,
         bb=50,
         bet_bins=[0.5, 1.0],
-        device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
+        device=torch.device("cpu"),  # Use CPU to avoid device issues
     )
 
     # Set up a scenario where player 0 has a better hand
@@ -347,7 +347,7 @@ def test_reward_assignment_perspective():
     for _ in range(8):  # Enough steps to reach showdown
         mask = env1.legal_bins_mask()
         if mask[0, 1]:  # Can check/call
-            r, d, _, _ = env1.step_bins(torch.tensor([1]))
+            r, d, _, _ = env1.step_bins(torch.tensor([1], device=env1.device))
             if d.item():
                 break
 
@@ -371,7 +371,7 @@ def test_reward_assignment_perspective():
         sb=50,
         bb=100,
         bet_bins=[0.5, 1.0],
-        device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
+        device=torch.device("cpu"),  # Use CPU to avoid device issues
     )
 
     env2.reset()
@@ -386,7 +386,7 @@ def test_reward_assignment_perspective():
             else:
                 actions.append(-1)
 
-        r, d, _, _ = env2.step_bins(torch.tensor(actions))
+        r, d, _, _ = env2.step_bins(torch.tensor(actions, device=env2.device))
 
         if d.all():
             break
@@ -404,6 +404,64 @@ def test_reward_assignment_perspective():
             assert (
                 abs(reward) < 0.01
             ), f"Env {i}: Tie but reward is not near zero: {reward}"
+
+    # Test fold reward perspective issues
+    print("\n=== TESTING FOLD REWARD PERSPECTIVE ISSUES ===")
+
+    # Test Player 0 fold (Player 0 loses)
+    env3 = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=25,
+        bb=50,
+        bet_bins=[0.5, 1.0],
+        device=torch.device("cpu"),  # Use CPU to avoid device issues
+    )
+    env3.reset()
+
+    # Make Player 0 face a bet so they can fold
+    mask = env3.legal_bins_mask()
+    if mask[0, 1]:  # Can call
+        env3.step_bins(torch.tensor([1], device=env3.device))  # Player 0 calls
+
+    mask = env3.legal_bins_mask()
+    if mask[0, 0]:  # Player 0 can fold
+        p0_fold_reward, _, _, _ = env3.step_bins(torch.tensor([0], device=env3.device))
+        print(f"Player 0 fold reward: {p0_fold_reward[0].item():.4f}")
+        # Player 0 folded, so Player 1 wins - reward should be negative from Player 0's perspective
+        assert (
+            p0_fold_reward[0].item() < 0
+        ), f"Player 0 fold should give negative reward, got {p0_fold_reward[0].item()}"
+
+    # Test Player 1 fold (Player 0 wins)
+    env4 = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=25,
+        bb=50,
+        bet_bins=[0.5, 1.0],
+        device=torch.device("cpu"),
+    )
+    env4.reset()
+
+    # Make Player 1 fold
+    for step in range(5):
+        mask = env4.legal_bins_mask()
+        if env4.to_act[0].item() == 1 and mask[0, 0]:  # Player 1 can fold
+            p1_fold_reward, _, _, _ = env4.step_bins(
+                torch.tensor([0], device=env4.device)
+            )
+            print(f"Player 1 fold reward: {p1_fold_reward[0].item():.4f}")
+            # Player 1 folded, so Player 0 wins - reward should be positive from Player 0's perspective
+            # ISSUE: Currently this gives 0.0 instead of positive reward
+            assert (
+                p1_fold_reward[0].item() > 0
+            ), f"Player 1 fold should give positive reward to Player 0, got {p1_fold_reward[0].item()}"
+            break
+        elif mask[0, 1]:
+            env4.step_bins(torch.tensor([1], device=env4.device))
+        else:
+            break
 
 
 def test_reward_calculation_consistency():
