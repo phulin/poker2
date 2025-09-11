@@ -100,7 +100,12 @@ class PokerTokenizer:
 
         # Create attention mask (1 = attend, 0 = ignore)
         attention_mask = torch.ones(len(tokens), dtype=torch.bool)
-        attention_mask[tokens == self.special_tokens["PAD"]] = False
+        # Mask out PAD tokens
+        pad_positions = [
+            i for i, token in enumerate(tokens) if token == self.special_tokens["PAD"]
+        ]
+        for pos in pad_positions:
+            attention_mask[pos] = False
 
         return torch.tensor(tokens, dtype=torch.long), attention_mask
 
@@ -112,6 +117,8 @@ class PokerTokenizer:
 
         # Get action history
         action_history = tensor_env.get_action_history()[env_idx]  # [4, 6, 4, num_bins]
+        # action_history structure: [street, slot, row, bin]
+        # row 0: player 0 actions, row 1: player 1 actions, row 2: sum, row 3: legal mask
 
         # Process each street
         for street_idx in range(4):
@@ -120,23 +127,25 @@ class PokerTokenizer:
             for slot_idx in range(6):
                 slot_actions = street_actions[slot_idx]  # [4, num_bins]
 
-                # Check if there are any actions in this slot
-                if slot_actions.sum() > 0:
-                    # Find the action
-                    action_bin = slot_actions.argmax(dim=-1)  # [4]
+                # Check if there are any actions in this slot (sum row)
+                if slot_actions[2].sum() > 0:  # row 2 is the sum
+                    # Find which player acted and what action
+                    for player_idx in range(2):  # Only check player rows (0, 1)
+                        player_actions = slot_actions[player_idx]  # [num_bins]
+                        if player_actions.sum() > 0:
+                            # Find the action bin
+                            action_bin = player_actions.argmax().item()
 
-                    # Get player action (first non-zero)
-                    for player_idx in range(2):
-                        if action_bin[player_idx] > 0:
-                            # Create action token
+                            # Create action token with proper encoding
+                            # Format: action_offset + player * num_action_types + action_bin
                             action_token = (
                                 self.action_offset
-                                + player_idx * 8  # 8 actions per player
-                                + street_idx * 2  # 2 streets per action type
-                                + action_bin[player_idx].item()
+                                + player_idx
+                                * len(self.action_type_map)  # 6 actions per player
+                                + action_bin
                             )
                             tokens.append(action_token)
-                            break
+                            break  # Only one player acts per slot
 
         return tokens
 

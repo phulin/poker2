@@ -12,6 +12,7 @@ import torch
 import pytest
 from alphaholdem.models.transformer import PokerTransformerV1
 from alphaholdem.models.factory import ModelFactory
+from alphaholdem.models.transformer.tokenizer import PokerTokenizer
 
 
 def test_transformer_model_creation():
@@ -147,5 +148,50 @@ if __name__ == "__main__":
 
     test_transformer_gradient_checkpointing()
     print("✅ Gradient checkpointing test passed")
+
+    print("\n🎉 All transformer tests passed!")
+
+
+def test_tokenizer():
+    """Test tokenizer functionality."""
+    tokenizer = PokerTokenizer(max_sequence_length=50)
+
+    # Test special tokens
+    assert tokenizer.special_tokens["CLS"] == 0
+    assert tokenizer.special_tokens["SEP"] == 1
+    assert tokenizer.special_tokens["MASK"] == 2
+    assert tokenizer.special_tokens["PAD"] == 3
+
+    # Test vocab size
+    assert tokenizer.get_vocab_size() == 80
+
+    # Test token decoding
+    tokens = torch.tensor([0, 1, 4, 5, 3, 3])  # CLS, SEP, card 0, card 1, PAD, PAD
+    decoded = tokenizer.decode_tokens(tokens)
+    expected = ["[CLS]", "[SEP]", "[CARD_0]", "[CARD_1]", "[PAD]", "[PAD]"]
+    assert decoded == expected
+
+    print("✅ Tokenizer test passed")
+
+
+if __name__ == "__main__":
+    # Run tests
+    test_transformer_model_creation()
+    print("✅ Model creation test passed")
+
+    test_transformer_forward_pass()
+    print("✅ Forward pass test passed")
+
+    test_transformer_via_factory()
+    print("✅ Factory test passed")
+
+    test_transformer_model_info()
+    print("✅ Model info test passed")
+
+    test_transformer_gradient_checkpointing()
+    print("✅ Gradient checkpointing test passed")
+
+    test_tokenizer()
+    print("✅ Tokenizer test passed")
 
     print("\n🎉 All transformer tests passed!")

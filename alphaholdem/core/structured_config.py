@@ -23,6 +23,13 @@ class TrainingConfig:
     use_mixed_precision: bool = False  # Enable automatic mixed precision
     loss_scale: float = 128.0  # Initial loss scale for mixed precision
 
+    # Transformer-specific training parameters
+    auxiliary_loss_coef: float = (
+        0.0  # Coefficient for auxiliary losses (e.g., hand range prediction)
+    )
+    warmup_steps: int = 0  # Learning rate warmup steps
+    weight_decay: float = 0.0  # Weight decay for regularization
+
 
 @dataclass
 class ModelConfig:
@@ -72,6 +79,16 @@ class EnvConfig:
 
 
 @dataclass
+class StateEncoderConfig:
+    name: str = "cnn"  # "cnn" or "transformer"
+    kwargs: Optional[dict] = None
+
+    def __post_init__(self):
+        if self.kwargs is None:
+            self.kwargs = {}
+
+
+@dataclass
 class Config:
     # Training parameters
     num_steps: int = 2000
@@ -101,6 +118,7 @@ class Config:
     train: TrainingConfig = MISSING
     model: ModelConfig = MISSING
     env: EnvConfig = MISSING
+    state_encoder: StateEncoderConfig = MISSING
 
     def __post_init__(self):
         if self.wandb_tags is None:
@@ -113,3 +131,4 @@ cs.store(name="config", node=Config)
 cs.store(group="train", name="default", node=TrainingConfig)
 cs.store(group="model", name="default", node=ModelConfig)
 cs.store(group="env", name="default", node=EnvConfig)
+cs.store(group="state_encoder", name="default", node=StateEncoderConfig)

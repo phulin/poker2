@@ -53,6 +53,22 @@ class VectorizedReplayBuffer:
             dtype=torch.bool,
             device=device,
         )
+
+        # Transformer token fields: (capacity, max_trajectory_length, seq_len)
+        self.token_ids = torch.zeros(
+            capacity,
+            max_trajectory_length,
+            50,  # Fixed sequence length
+            dtype=torch.long,
+            device=device,
+        )
+        self.attention_masks = torch.zeros(
+            capacity,
+            max_trajectory_length,
+            50,  # Fixed sequence length
+            dtype=torch.bool,
+            device=device,
+        )
         self.action_indices = torch.zeros(
             capacity, max_trajectory_length, dtype=torch.long, device=device
         )
@@ -234,17 +250,19 @@ class VectorizedReplayBuffer:
 
     def add_batch(
         self,
-        cards_features: torch.Tensor,  # [batch_size, 6, 4, 13] - bool
-        actions_features: torch.Tensor,  # [batch_size, 24, 4, num_bet_bins] - bool
-        action_indices: torch.Tensor,  # [batch_size] - long
-        log_probs: torch.Tensor,
-        rewards: torch.Tensor,
-        dones: torch.Tensor,
-        legal_masks: torch.Tensor,  # [batch_size, legal_mask_dim] - bool
-        delta2: torch.Tensor,
-        delta3: torch.Tensor,
-        values: torch.Tensor,
-        trajectory_indices: torch.Tensor,  # Which trajectory each transition belongs to
+        cards_features: torch.Tensor = None,  # [batch_size, 6, 4, 13] - bool
+        actions_features: torch.Tensor = None,  # [batch_size, 24, 4, num_bet_bins] - bool
+        token_ids: torch.Tensor = None,  # [batch_size, seq_len] - long
+        attention_masks: torch.Tensor = None,  # [batch_size, seq_len] - bool
+        action_indices: torch.Tensor = None,  # [batch_size] - long
+        log_probs: torch.Tensor = None,
+        rewards: torch.Tensor = None,
+        dones: torch.Tensor = None,
+        legal_masks: torch.Tensor = None,  # [batch_size, legal_mask_dim] - bool
+        delta2: torch.Tensor = None,
+        delta3: torch.Tensor = None,
+        values: torch.Tensor = None,
+        trajectory_indices: torch.Tensor = None,  # Which trajectory each transition belongs to
     ) -> None:
         """
         Add a batch of transitions to the buffer using vectorized operations.
@@ -279,10 +297,20 @@ class VectorizedReplayBuffer:
 
         # Use vectorized indexing to add transitions
         # This is the key vectorized operation - no loops!
-        self.cards_features[buffer_trajectory_indices, step_positions] = cards_features
-        self.actions_features[buffer_trajectory_indices, step_positions] = (
-            actions_features
-        )
+        if cards_features is not None:
+            self.cards_features[buffer_trajectory_indices, step_positions] = (
+                cards_features
+            )
+        if actions_features is not None:
+            self.actions_features[buffer_trajectory_indices, step_positions] = (
+                actions_features
+            )
+        if token_ids is not None:
+            self.token_ids[buffer_trajectory_indices, step_positions] = token_ids
+        if attention_masks is not None:
+            self.attention_masks[buffer_trajectory_indices, step_positions] = (
+                attention_masks
+            )
         self.action_indices[buffer_trajectory_indices, step_positions] = action_indices
         self.log_probs[buffer_trajectory_indices, step_positions] = log_probs
         self.rewards[buffer_trajectory_indices, step_positions] = rewards
@@ -528,9 +556,11 @@ class VectorizedReplayBuffer:
         ).long()
 
         # Vectorized extraction (inlined variables)
-        return {
+        batch = {
             "cards_features": self.cards_features[traj_indices, step_indices],
             "actions_features": self.actions_features[traj_indices, step_indices],
+            "token_ids": self.token_ids[traj_indices, step_indices],
+            "attention_masks": self.attention_masks[traj_indices, step_indices],
             "action_indices": self.action_indices[traj_indices, step_indices],
             "log_probs_old": self.log_probs[traj_indices, step_indices],
             "advantages": self.advantages[traj_indices, step_indices],
@@ -539,6 +569,8 @@ class VectorizedReplayBuffer:
             "delta2": self.delta2[traj_indices, step_indices],
             "delta3": self.delta3[traj_indices, step_indices],
         }
+
+        return batch
 
     def clear(self) -> None:
         """Clear all stored trajectories."""

@@ -37,7 +37,7 @@ economize_checkpoints: false
 
 # === TRAINING HYPERPARAMETERS ===
 train:
-  learning_rate: 3e-5  # Even lower LR for larger model
+  learning_rate: 0.00003  # Even lower LR for larger model
   batch_size: 256      # Smaller batch size for larger model
   num_epochs: 4
   replay_buffer_batches: 4
@@ -79,12 +79,10 @@ model:
     max_sequence_length: 50
     use_gradient_checkpointing: true
   
-  # Policy configuration
+  # Policy configuration (using existing categorical policy for now)
   policy:
-    name: "mixed_discrete_continuous_v1"
-    kwargs:
-      action_types: 4
-      size_distribution: "beta"
+    name: "categorical_v1"
+    kwargs: {}
 
 # === STATE ENCODER CONFIGURATION ===
 state_encoder:

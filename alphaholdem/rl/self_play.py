@@ -102,10 +102,19 @@ class SelfPlayTrainer:
         self.model = model
         self.policy = policy
 
-        # Create state encoder
-        self.state_encoder = StateEncoder(
-            self.cards_encoder, self.actions_encoder, self.device
-        )
+        # Create state encoder based on model type
+        is_transformer = cfg.model.name.startswith("poker_transformer")
+        if is_transformer:
+            # Use transformer state encoder
+            max_seq_len = cfg.state_encoder.kwargs.get("max_sequence_length", 50)
+            self.state_encoder = ModelFactory.create_state_encoder(
+                "transformer", self.device, max_sequence_length=max_seq_len
+            )
+        else:
+            # Use CNN state encoder
+            self.state_encoder = StateEncoder(
+                self.cards_encoder, self.actions_encoder, self.device
+            )
 
         # Ensure bins align with model output size to avoid mask/logit mismatch
         if hasattr(self.model, "policy_head") and hasattr(
@@ -151,12 +160,16 @@ class SelfPlayTrainer:
             else:
                 other_params.append(param)
 
-        self.optimizer = torch.optim.Adam(
-            [
-                {"params": cards_params, "lr": lr * 0.1},  # 10x lower for CNN
-                {"params": other_params, "lr": lr},
-            ]
-        )
+        # Handle different model types
+        if cards_params:  # CNN model
+            self.optimizer = torch.optim.Adam(
+                [
+                    {"params": cards_params, "lr": lr * 0.1},  # 10x lower for CNN
+                    {"params": other_params, "lr": lr},
+                ]
+            )
+        else:  # Transformer model (no cards_trunk)
+            self.optimizer = torch.optim.Adam([{"params": other_params, "lr": lr}])
 
         # Mixed precision scaler
         self.scaler = (
@@ -415,8 +428,14 @@ class SelfPlayTrainer:
 
             # Encode states for active environments only
             states = self._encode_tensor_states()
-            active_cards = states["cards"][active_indices]
-            active_actions = states["actions"][active_indices]
+            is_transformer = self.cfg.model.name.startswith("poker_transformer")
+
+            if is_transformer:
+                active_token_ids = states["token_ids"][active_indices]
+                active_attention_masks = states["attention_masks"][active_indices]
+            else:
+                active_cards = states["cards"][active_indices]
+                active_actions = states["actions"][active_indices]
 
             # Get model predictions for active environments only
             with torch.no_grad():
@@ -443,18 +462,40 @@ class SelfPlayTrainer:
 
                 # Get predictions from our model for our turns
                 if active_we_act.numel() > 0:
-                    # Convert bool to appropriate dtype for model
-                    if self.use_mixed_precision:
-                        our_cards = active_cards[active_we_act].to(torch.bfloat16)
-                        our_actions = active_actions[active_we_act].to(torch.bfloat16)
+                    if is_transformer:
+                        # Transformer model
+                        our_token_ids = active_token_ids[active_we_act]
+                        our_attention_masks = active_attention_masks[active_we_act]
 
-                        # Use autocast for mixed precision
-                        with torch.amp.autocast(self.device.type, dtype=torch.bfloat16):
-                            our_logits, our_values = self.model(our_cards, our_actions)
+                        if self.use_mixed_precision:
+                            with torch.amp.autocast(
+                                self.device.type, dtype=torch.bfloat16
+                            ):
+                                outputs = self.model(our_token_ids, our_attention_masks)
+                        else:
+                            outputs = self.model(our_token_ids, our_attention_masks)
+
+                        our_logits = outputs["policy_logits"]
+                        our_values = outputs["value"]
                     else:
-                        our_cards = active_cards[active_we_act].float()
-                        our_actions = active_actions[active_we_act].float()
-                        our_logits, our_values = self.model(our_cards, our_actions)
+                        # CNN model
+                        if self.use_mixed_precision:
+                            our_cards = active_cards[active_we_act].to(torch.bfloat16)
+                            our_actions = active_actions[active_we_act].to(
+                                torch.bfloat16
+                            )
+
+                            # Use autocast for mixed precision
+                            with torch.amp.autocast(
+                                self.device.type, dtype=torch.bfloat16
+                            ):
+                                our_logits, our_values = self.model(
+                                    our_cards, our_actions
+                                )
+                        else:
+                            our_cards = active_cards[active_we_act].float()
+                            our_actions = active_actions[active_we_act].float()
+                            our_logits, our_values = self.model(our_cards, our_actions)
 
                     active_logits[active_we_act] = our_logits
                     active_values[active_we_act] = our_values.squeeze(-1)
@@ -487,30 +528,60 @@ class SelfPlayTrainer:
                         opponent = all_opponent_snapshots[opponent_idx]
 
                         # Use indices directly into active arrays
-                        # Convert bool to appropriate dtype for model
-                        opp_cards = active_cards[opp_active_indices].float()
-                        opp_actions = active_actions[opp_active_indices].float()
+                        if is_transformer:
+                            # Transformer model
+                            opp_token_ids = active_token_ids[opp_active_indices]
+                            opp_attention_masks = active_attention_masks[
+                                opp_active_indices
+                            ]
+                            with torch.amp.autocast(
+                                self.device.type,
+                                dtype=torch.bfloat16,
+                                enabled=self.use_mixed_precision,
+                            ):
+                                outputs = opponent.model(
+                                    opp_token_ids, opp_attention_masks
+                                )
+                                opp_logits = outputs["policy_logits"]
+                                opp_values = outputs["value"]
+                        else:
+                            # CNN model
+                            opp_cards = active_cards[opp_active_indices].float()
+                            opp_actions = active_actions[opp_active_indices].float()
+                            with torch.amp.autocast(
+                                self.device.type,
+                                dtype=torch.bfloat16,
+                                enabled=self.use_mixed_precision,
+                            ):
+                                opp_logits, opp_values = opponent.model(
+                                    opp_cards, opp_actions
+                                )
+                        active_logits[opp_active_indices] = opp_logits
+                        active_values[opp_active_indices] = opp_values.squeeze(-1)
+                elif active_opp_acts.numel() > 0:
+                    # Self-play: use our model for opponent turns too
+                    if is_transformer:
+                        # Transformer model
+                        opp_token_ids = active_token_ids[active_opp_acts]
+                        opp_attention_masks = active_attention_masks[active_opp_acts]
                         with torch.amp.autocast(
                             self.device.type,
                             dtype=torch.bfloat16,
                             enabled=self.use_mixed_precision,
                         ):
-                            opp_logits, opp_values = opponent.model(
-                                opp_cards, opp_actions
-                            )
-                        active_logits[opp_active_indices] = opp_logits
-                        active_values[opp_active_indices] = opp_values.squeeze(-1)
-                elif active_opp_acts.numel() > 0:
-                    # Self-play: use our model for opponent turns too
-                    # Convert bool to appropriate dtype for model
-                    opp_cards = active_cards[active_opp_acts].float()
-                    opp_actions = active_actions[active_opp_acts].float()
-                    with torch.amp.autocast(
-                        self.device.type,
-                        dtype=torch.bfloat16,
-                        enabled=self.use_mixed_precision,
-                    ):
-                        opp_logits, opp_values = self.model(opp_cards, opp_actions)
+                            outputs = self.model(opp_token_ids, opp_attention_masks)
+                            opp_logits = outputs["policy_logits"]
+                            opp_values = outputs["value"]
+                    else:
+                        # CNN model
+                        opp_cards = active_cards[active_opp_acts].float()
+                        opp_actions = active_actions[active_opp_acts].float()
+                        with torch.amp.autocast(
+                            self.device.type,
+                            dtype=torch.bfloat16,
+                            enabled=self.use_mixed_precision,
+                        ):
+                            opp_logits, opp_values = self.model(opp_cards, opp_actions)
                     active_logits[active_opp_acts] = opp_logits
                     active_values[active_opp_acts] = opp_values.squeeze(-1)
 
@@ -549,13 +620,17 @@ class SelfPlayTrainer:
                 )  # -opponent chips
                 our_delta3_tensor = chips[our_env_indices, 0] / scale  # our chips
 
-                # Extract separate cards and actions features for our environments
-                our_cards_features = active_cards[
-                    active_we_act
-                ]  # [N_our, 6, 4, 13] - bool
-                our_actions_features = active_actions[
-                    active_we_act
-                ]  # [N_our, 24, 4, num_bet_bins] - bool
+                # Extract features for our environments
+                if is_transformer:
+                    our_token_ids = active_token_ids[active_we_act]
+                    our_attention_masks = active_attention_masks[active_we_act]
+                else:
+                    our_cards_features = active_cards[
+                        active_we_act
+                    ]  # [N_our, 6, 4, 13] - bool
+                    our_actions_features = active_actions[
+                        active_we_act
+                    ]  # [N_our, 24, 4, num_bet_bins] - bool
 
                 # Extract tensor values efficiently (no .tolist() calls)
                 our_action_indices = action_values_active[active_we_act]
@@ -567,19 +642,34 @@ class SelfPlayTrainer:
 
                 # Add transitions immediately using vectorized operations
                 if add_to_replay_buffer:
-                    self.replay_buffer.add_batch(
-                        cards_features=our_cards_features,
-                        actions_features=our_actions_features,
-                        action_indices=our_action_indices,
-                        log_probs=our_log_probs_tensor,
-                        rewards=our_rewards_tensor,
-                        dones=our_dones_tensor,
-                        legal_masks=our_legal_masks_tensor.bool(),
-                        delta2=our_delta2_tensor,
-                        delta3=our_delta3_tensor,
-                        values=our_values_tensor,
-                        trajectory_indices=our_env_indices,  # Use full environment indices
-                    )
+                    if is_transformer:
+                        self.replay_buffer.add_batch(
+                            token_ids=our_token_ids,
+                            attention_masks=our_attention_masks,
+                            action_indices=our_action_indices,
+                            log_probs=our_log_probs_tensor,
+                            rewards=our_rewards_tensor,
+                            dones=our_dones_tensor,
+                            legal_masks=our_legal_masks_tensor.bool(),
+                            delta2=our_delta2_tensor,
+                            delta3=our_delta3_tensor,
+                            values=our_values_tensor,
+                            trajectory_indices=our_env_indices,  # Use full environment indices
+                        )
+                    else:
+                        self.replay_buffer.add_batch(
+                            cards_features=our_cards_features,
+                            actions_features=our_actions_features,
+                            action_indices=our_action_indices,
+                            log_probs=our_log_probs_tensor,
+                            rewards=our_rewards_tensor,
+                            dones=our_dones_tensor,
+                            legal_masks=our_legal_masks_tensor.bool(),
+                            delta2=our_delta2_tensor,
+                            delta3=our_delta3_tensor,
+                            values=our_values_tensor,
+                            trajectory_indices=our_env_indices,  # Use full environment indices
+                        )
 
                 # Update per-environment reward tracking
                 per_env_rewards[our_env_indices] += our_rewards_tensor
@@ -700,11 +790,18 @@ class SelfPlayTrainer:
         Encode states for all tensor_environments in the tensorized environment.
 
         Returns:
-            Dictionary with 'cards' and 'actions' tensors
+            Dictionary with 'cards' and 'actions' tensors for CNN models,
+            or 'token_ids' and 'attention_masks' for transformer models
         """
-        return self.state_encoder.encode_tensor_states(
-            self.tensor_env, self.num_envs, self.num_bet_bins
-        )
+        is_transformer = self.cfg.model.name.startswith("poker_transformer")
+        if is_transformer:
+            return self.state_encoder.encode_tensor_states(
+                self.tensor_env, self.num_envs
+            )
+        else:
+            return self.state_encoder.encode_tensor_states(
+                self.tensor_env, self.num_envs, self.num_bet_bins
+            )
 
     @profile
     def update_model(self) -> dict:
@@ -746,41 +843,65 @@ class SelfPlayTrainer:
             delta3_vec = batch["delta3"]
 
             # No minibatches: operate on the full batch at once
-            # Extract separate cards and actions features from batch
-            cards_features = batch["cards_features"]  # [batch_size, 6, 4, 13] - bool
-            actions_features = batch[
-                "actions_features"
-            ]  # [batch_size, 24, 4, num_bet_bins] - bool
+            is_transformer = self.cfg.model.name.startswith("poker_transformer")
 
-            # Convert bool tensors to appropriate dtype for model forward pass
-            cards_float = cards_features.to(torch.float32)
-            actions_float = actions_features.to(torch.float32)
+            if is_transformer:
+                # Transformer model
+                token_ids = batch["token_ids"]  # [batch_size, seq_len]
+                attention_masks = batch["attention_masks"]  # [batch_size, seq_len]
 
-            # Convert bool tensors to appropriate dtype for model forward pass
-            with torch.amp.autocast(
-                self.device.type,
-                dtype=torch.bfloat16,
-                enabled=self.use_mixed_precision,
-            ):
-                logits, values = self.model(cards_float, actions_float)
+                with torch.amp.autocast(
+                    self.device.type,
+                    dtype=torch.bfloat16,
+                    enabled=self.use_mixed_precision,
+                ):
+                    outputs = self.model(token_ids, attention_masks)
+                    logits = outputs["policy_logits"]
+                    values = outputs["value"]
+            else:
+                # CNN model
+                cards_features = batch[
+                    "cards_features"
+                ]  # [batch_size, 6, 4, 13] - bool
+                actions_features = batch[
+                    "actions_features"
+                ]  # [batch_size, 24, 4, num_bet_bins] - bool
 
-                loss_dict = trinal_clip_ppo_loss(
-                    logits=logits,
-                    values=values,
-                    actions=batch["action_indices"],
-                    log_probs_old=batch["log_probs_old"].float(),
-                    advantages=batch["advantages"].float(),
-                    returns=batch["returns"].float(),
-                    legal_masks=batch["legal_masks"],
-                    epsilon=self.epsilon,
-                    delta1=self.delta1,
-                    delta2=delta2_vec.float(),
-                    delta3=delta3_vec.float(),
-                    value_coef=self.value_coef,
-                    entropy_coef=self.entropy_coef,
-                    value_loss_type=self.cfg.train.value_loss_type,
-                    huber_delta=self.cfg.train.huber_delta,
-                )
+                # Convert bool tensors to appropriate dtype for model forward pass
+                cards_float = cards_features.to(torch.float32)
+                actions_float = actions_features.to(torch.float32)
+
+                with torch.amp.autocast(
+                    self.device.type,
+                    dtype=torch.bfloat16,
+                    enabled=self.use_mixed_precision,
+                ):
+                    logits, values = self.model(cards_float, actions_float)
+
+                if is_transformer:
+                    # Transformer-specific loss with auxiliary hand range loss
+                    loss_dict = self._compute_transformer_loss(
+                        outputs, batch, delta2_vec, delta3_vec
+                    )
+                else:
+                    # CNN loss
+                    loss_dict = trinal_clip_ppo_loss(
+                        logits=logits,
+                        values=values,
+                        actions=batch["action_indices"],
+                        log_probs_old=batch["log_probs_old"].float(),
+                        advantages=batch["advantages"].float(),
+                        returns=batch["returns"].float(),
+                        legal_masks=batch["legal_masks"],
+                        epsilon=self.epsilon,
+                        delta1=self.delta1,
+                        delta2=delta2_vec.float(),
+                        delta3=delta3_vec.float(),
+                        value_coef=self.value_coef,
+                        entropy_coef=self.entropy_coef,
+                        value_loss_type=self.cfg.train.value_loss_type,
+                        huber_delta=self.cfg.train.huber_delta,
+                    )
 
             # Debugging metrics: approx KL, clipfrac, explained variance
             with torch.no_grad():
@@ -1157,8 +1278,6 @@ class SelfPlayTrainer:
         # Restore opponent pool from inline data if available; fallback to old separate file
         pool_data = checkpoint.get("opponent_pool")
         if pool_data is not None:
-            from ..models.cnn import SiameseConvNetV1
-
             self.opponent_pool.k = pool_data.get("k", self.opponent_pool.k)
             self.opponent_pool.min_elo_diff = pool_data.get(
                 "min_elo_diff", self.opponent_pool.min_elo_diff
@@ -1168,7 +1287,16 @@ class SelfPlayTrainer:
             )
             self.opponent_pool.snapshots = []
             for snapshot_data in pool_data.get("snapshots", []):
-                model = SiameseConvNetV1(**self.cfg.model.kwargs)
+                # Create model using ModelFactory to support both CNN and transformer
+                model_kwargs = (
+                    self.cfg.model.kwargs.copy() if self.cfg.model.kwargs else {}
+                )
+                model_kwargs["use_gradient_checkpointing"] = (
+                    self.cfg.model.use_gradient_checkpointing
+                )
+                model = ModelFactory.create_model(
+                    self.cfg.model.name, model_kwargs, self.device
+                )
                 model.load_state_dict(snapshot_data["model_state_dict"])
                 model.to(self.device)
                 snapshot = AgentSnapshot(
@@ -1186,6 +1314,7 @@ class SelfPlayTrainer:
             # Backward-compatibility path: load separate pool file if present
             pool_path = path.replace(".pt", "_pool.pt")
             try:
+                # For backward compatibility, assume CNN model if separate pool file exists
                 from ..models.cnn import SiameseConvNetV1
 
                 self.opponent_pool.load_pool(pool_path, SiameseConvNetV1)
@@ -1430,3 +1559,54 @@ class SelfPlayTrainer:
         suit = card_str[1]
 
         return rank_map[rank] * 4 + suit_map[suit]
+
+    def _compute_transformer_loss(
+        self,
+        outputs: dict,
+        batch: dict,
+        delta2_vec: torch.Tensor,
+        delta3_vec: torch.Tensor,
+    ) -> dict:
+        """Compute transformer-specific loss with auxiliary hand range loss."""
+        import torch.nn.functional as F
+
+        logits = outputs["policy_logits"]
+        values = outputs["value"]
+
+        # Standard PPO policy loss
+        policy_loss = trinal_clip_ppo_loss(
+            logits=logits,
+            values=values,
+            actions=batch["action_indices"],
+            log_probs_old=batch["log_probs_old"].float(),
+            advantages=batch["advantages"].float(),
+            returns=batch["returns"].float(),
+            legal_masks=batch["legal_masks"],
+            epsilon=self.epsilon,
+            delta1=self.delta1,
+            delta2=delta2_vec.float(),
+            delta3=delta3_vec.float(),
+            value_coef=self.value_coef,
+            entropy_coef=self.entropy_coef,
+            value_loss_type=self.cfg.train.value_loss_type,
+            huber_delta=self.cfg.train.huber_delta,
+        )
+
+        # Add auxiliary hand range loss if available
+        aux_loss = 0.0
+        if "hand_range_logits" in outputs and hasattr(
+            self.cfg.train, "auxiliary_loss_coef"
+        ):
+            # For now, we don't have hand range targets, so skip auxiliary loss
+            # In the future, this could be implemented with opponent hand range prediction
+            aux_loss = 0.0
+
+        total_loss = policy_loss["total_loss"] + aux_loss
+
+        return {
+            "policy_loss": policy_loss["policy_loss"],
+            "value_loss": policy_loss["value_loss"],
+            "entropy": policy_loss["entropy"],
+            "aux_loss": aux_loss,
+            "total_loss": total_loss,
+        }

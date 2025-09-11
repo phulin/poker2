@@ -197,6 +197,7 @@ def main(cfg) -> None:
         TrainingConfig,
         ModelConfig,
         EnvConfig,
+        StateEncoderConfig,
     )
 
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
@@ -205,13 +206,19 @@ def main(cfg) -> None:
     train_config = TrainingConfig(**cfg_dict.get("train", {}))
     model_config = ModelConfig(**cfg_dict.get("model", {}))
     env_config = EnvConfig(**cfg_dict.get("env", {}))
+    state_encoder_config = StateEncoderConfig(**cfg_dict.get("state_encoder", {}))
 
     # Create Config dataclass
     config = Config(
         train=train_config,
         model=model_config,
         env=env_config,
-        **{k: v for k, v in cfg_dict.items() if k not in ["train", "model", "env"]},
+        state_encoder=state_encoder_config,
+        **{
+            k: v
+            for k, v in cfg_dict.items()
+            if k not in ["train", "model", "env", "state_encoder"]
+        },
     )
 
     # Set random seeds for reproducibility
