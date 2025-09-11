@@ -93,17 +93,19 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     sf_ranks = sf_ranks_spread.max(dim=2).values.view(N, P, 1)  # [N, P, 1]
 
     # == 2. FOUR OF A KIND ==
+    has_quads_0 = (top_ranks_values[:, :, 0] >= 4).view(N, P, 1)
     four_with_kickers = torch.where(
-        (top_ranks_values[:, :, 0] >= 4).view(N, P, 1),
+        has_quads_0,
         top_ranks_indices[:, :, :2],
         -1,
     )
 
     # == 3. FULL HOUSE ==
+    has_triple_0 = (top_ranks_values[:, :, 0] >= 3).view(N, P, 1)
+    has_pair_0 = (top_ranks_values[:, :, 0] >= 2).view(N, P, 1)
+    has_pair_1 = (top_ranks_values[:, :, 1] >= 2).view(N, P, 1)
     full_house = torch.where(
-        ((top_ranks_values[:, :, 0] >= 3) & (top_ranks_values[:, :, 1] >= 2)).view(
-            N, P, 1
-        ),
+        has_triple_0 & has_pair_1,
         top_ranks_indices[:, :, :2],
         -1,
     )
@@ -126,7 +128,7 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
         :, :, :5
     ]  # [N, P, 5]
     flush = torch.where(
-        flush_mask.view(N, P, 1),
+        flush_mask,
         top_suit_ranks,
         -1,
     )
@@ -145,23 +147,21 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
 
     # == 6. THREE OF A KIND ==
     three_with_kickers = torch.where(
-        (top_ranks_values[:, :, 0] >= 3).view(N, P, 1),
+        has_triple_0,
         top_ranks_indices[:, :, :3],
         -1,
     )
 
     # == 7. TWO PAIR ==
     two_pair_with_kickers = torch.where(
-        ((top_ranks_values[:, :, 0] >= 2) & (top_ranks_values[:, :, 1] >= 2)).view(
-            N, P, 1
-        ),
+        has_pair_0 & has_pair_1,
         top_ranks_indices[:, :, :3],
         -1,
     )
 
     # == 8. ONE PAIR ==
     one_pair_with_kickers = torch.where(
-        (top_ranks_values[:, :, 0] >= 2).view(N, P, 1),
+        has_pair_0,
         top_ranks_indices[:, :, :4],
         -1,
     )
