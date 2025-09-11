@@ -50,6 +50,7 @@ class HUNLTensorEnv:
     has_folded: torch.Tensor
     is_allin: torch.Tensor
     board_onehot: torch.Tensor
+    hole_onehot: torch.Tensor
     done: torch.Tensor
     winner: torch.Tensor
     # action history
@@ -123,13 +124,13 @@ class HUNLTensorEnv:
         self.board_onehot = torch.zeros(
             (self.N, 5, 4, 13), dtype=torch.bool, device=self.device
         )
+        self.hole_onehot = torch.zeros(
+            (self.N, 2, 2, 4, 13), dtype=torch.bool, device=self.device
+        )
 
         # Chip tracking for delta calculations - single tensor for both players
         # chips_placed[env_idx, player] = total chips placed by that player in that environment
         self.chips_placed = torch.zeros(self.N, 2, dtype=torch.long, device=self.device)
-        self.hole_onehot = torch.zeros(
-            (self.N, 2, 2, 4, 13), dtype=torch.bool, device=self.device
-        )
         self.done = torch.zeros(self.N, dtype=torch.bool, device=self.device)
         self.winner = torch.full(
             (self.N,), -1, dtype=torch.long, device=self.device
@@ -551,23 +552,13 @@ class HUNLTensorEnv:
             not_folded_ids = showdown_ids[not_folded_mask]
 
             # Build one-hot 7-card planes for each player: 2 hole + 5 board
-            # Shape: [num_showdown_ids, 4, 13]
-            num_sd = not_folded_ids.shape[0]
-            if num_sd > 0:
-                # Player 0
-                a_plane = (
-                    self.hole_onehot[not_folded_ids, 0, 0]
-                    + self.hole_onehot[not_folded_ids, 0, 1]
-                    + self.board_onehot[not_folded_ids].sum(dim=1)
-                )
-                # Player 1
-                b_plane = (
-                    self.hole_onehot[not_folded_ids, 1, 0]
-                    + self.hole_onehot[not_folded_ids, 1, 1]
-                    + self.board_onehot[not_folded_ids].sum(dim=1)
-                )
-                # Compare hands in batch
-                cmp = rules.compare_7_batch(a_plane, b_plane)  # shape [num_sd]
+            # Shape: [num_sd, 4, 13]
+            N_sd = not_folded_ids.numel()
+            if N_sd > 0:
+                ab_plane = self.hole_onehot[not_folded_ids].any(
+                    dim=2
+                ) | self.board_onehot[not_folded_ids].any(dim=1).unsqueeze(1)
+                cmp = rules.compare_7_single_batch(ab_plane)  # shape [num_sd]
                 # Set winners
                 self.winner[not_folded_ids[cmp > 0]] = 0
                 self.winner[not_folded_ids[cmp < 0]] = 1

@@ -22,7 +22,7 @@ def assert_all_compares(a: list[int], b: list[int], expected: int) -> None:
     ao = onehot_plane(a).unsqueeze(0)
     bo = onehot_plane(b).unsqueeze(0)
     # Use batch comparison API
-    bat = rules.compare_7_batch(ao, bo)
+    bat = rules.compare_7_batches(ao, bo)
     assert int(bat[0].item()) == expected
 
 
@@ -325,7 +325,7 @@ def test_multiple_batches_paired_players():
             b_batch[i, suit, rank] = 1
 
     # Test batch comparison
-    results = rules.compare_7_batch(a_batch, b_batch)
+    results = rules.compare_7_batches(a_batch, b_batch)
 
     # Verify results
     assert results.shape == (batch_size,)
@@ -339,13 +339,13 @@ def test_multiple_batches_paired_players():
         ), f"Batch {i}: expected {expected}, got {int(results[i].item())}"
 
     # Test the reverse comparison (should be opposite results)
-    reverse_results = rules.compare_7_batch(b_batch, a_batch)
+    reverse_results = rules.compare_7_batches(b_batch, a_batch)
     assert torch.all(
         reverse_results == -results
     ), "Reverse comparison should give opposite results"
 
     # Test with identical hands (should all be ties)
-    tie_results = rules.compare_7_batch(a_batch, a_batch)
+    tie_results = rules.compare_7_batches(a_batch, a_batch)
     assert torch.all(tie_results == 0), "Identical hands should all be ties"
 
 

@@ -272,26 +272,22 @@ def compare_7(a_cards: List[int], b_cards: List[int]) -> int:
         b_onehot[suit_idx, rank_idx] = 1
 
     # Use batch comparison with single hand
-    result = compare_7_batch(a_onehot.unsqueeze(0), b_onehot.unsqueeze(0))
+    result = compare_7_batches(a_onehot.unsqueeze(0), b_onehot.unsqueeze(0))
     return int(result[0].item())
 
 
-def compare_7_batch(
-    a_batch: torch.Tensor,
-    b_batch: torch.Tensor,
-) -> torch.Tensor:
-    """Vectorized comparison for batches of 7-card hands using one-hot planes.
+def compare_7_single_batch(ab_batch: torch.Tensor) -> torch.Tensor:
+    """Compare two 7-card hands and return comparison result.
 
-    Inputs must be one-hot planes [N,4,13]; returns [N] in {1, -1, 0}.
+    Args:
+        ab_batch: [N, 2, 4, 13] - batch of hands for 2 players
+
+    Returns:
+        compare: [N] - comparison vector with winner for each hand
     """
-    assert isinstance(a_batch, torch.Tensor) and isinstance(b_batch, torch.Tensor)
-    assert a_batch.shape == b_batch.shape
-    assert a_batch.dim() == 3
-    assert a_batch.shape[1:] == (4, 13)
-    assert a_batch.dtype == torch.long
-    assert b_batch.dtype == torch.long
-
-    ab_batch = torch.stack([a_batch, b_batch], dim=1)  # [N, 2, 4, 13]
+    assert ab_batch.dim() == 4
+    assert ab_batch.shape[1:] == (2, 4, 13)
+    assert ab_batch.dtype == torch.bool
 
     # Create comparison vector
     compare = create_comparison_vector(ab_batch)  # [N, 2, 20]
@@ -306,3 +302,20 @@ def compare_7_batch(
     first_values = torch.gather(diff, 1, first_nonzero.unsqueeze(1)).squeeze(1)  # [N]
     # If no nonzero, set to 0
     return torch.where(has_nonzero, first_values.clamp(-1, 1), 0)
+
+
+def compare_7_batches(
+    a_batch: torch.Tensor,
+    b_batch: torch.Tensor,
+) -> torch.Tensor:
+    """Vectorized comparison for batches of 7-card hands using one-hot planes.
+
+    Inputs must be one-hot planes [N,4,13]; returns [N] in {1, -1, 0}.
+    """
+    assert a_batch.shape == b_batch.shape
+    assert a_batch.dim() == 3
+    assert a_batch.shape[1:] == (4, 13)
+
+    ab_batch = torch.stack([a_batch, b_batch], dim=1).bool()  # [N, 2, 4, 13]
+
+    return compare_7_single_batch(ab_batch)
