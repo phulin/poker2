@@ -78,7 +78,7 @@ class PokerTokenizer:
                         player_actions = slot_actions[player_idx]  # [num_bins]
                         if player_actions.sum() > 0:
                             # Find the action bin
-                            action_bin = player_actions.argmax().item()
+                            action_bin = player_actions.float().argmax().item()
 
                             # Create action token with proper encoding
                             # Format: action_offset + player * num_action_types + action_bin
@@ -128,6 +128,12 @@ class PokerTokenizer:
         pos = 0
 
         # Add CLS token (special token at position 0)
+        # For CLS token, we'll use a special card index that won't cause embedding issues
+        # We'll use card index 52 (out of range) to represent CLS, and handle it specially in embeddings
+        card_indices[pos] = 52  # Special CLS token index
+        card_stages[pos] = 0
+        card_visibility[pos] = 0
+        card_order[pos] = 0
         pos += 1
 
         # Add visible cards
@@ -246,15 +252,46 @@ class PokerTokenizer:
                         player_actions = slot_actions[player_idx]  # [num_bins]
                         if player_actions.sum() > 0:
                             # Find the action bin
-                            action_bin = player_actions.argmax().item()
+                            action_bin = player_actions.float().argmax().item()
+
+                            # Compute actual bet size features
+                            # Get the bet amount from the action bin
+                            # We need to get the legal bins amounts for this environment
+                            bin_amounts, _ = tensor_env.legal_bins_amounts_and_mask()
+                            bet_amount = bin_amounts[env_idx, action_bin].item()
+                            pot_size = tensor_env.pot[env_idx].item()
+                            stack_size = tensor_env.stacks[env_idx, player_idx].item()
+
+                            # Compute size features
+                            fraction_of_pot = (
+                                bet_amount / max(pot_size, 1.0) if pot_size > 0 else 0.0
+                            )
+                            fraction_of_stack = (
+                                bet_amount / max(stack_size, 1.0)
+                                if stack_size > 0
+                                else 0.0
+                            )
+                            log_chips = torch.log(
+                                torch.tensor(max(bet_amount, 1.0))
+                            ).item()
+
+                            # Map action_bin to a more meaningful size bin (0-19)
+                            # This is a simplified mapping - in practice you'd want more sophisticated binning
+                            size_bin = min(
+                                action_bin % 20, 19
+                            )  # Ensure it's in range [0, 19]
 
                             # Create structured action data
                             action_data = {
                                 "actor": player_idx,
                                 "action_type": action_bin,
                                 "street": street_idx,
-                                "size_bin": action_bin,  # Simplified for now
-                                "size_features": [0.0, 0.0, 0.0],  # Placeholder
+                                "size_bin": size_bin,
+                                "size_features": [
+                                    fraction_of_pot,
+                                    fraction_of_stack,
+                                    log_chips,
+                                ],
                             }
                             actions.append(action_data)
                             break  # Only one player acts per slot
@@ -279,7 +316,13 @@ class PokerTokenizer:
         street = tensor_env.street[env_idx].item()
         actions_round = tensor_env.actions_this_round[env_idx].item()
         min_raise = tensor_env.min_raise[env_idx].item() / 1000.0
-        bet_to_call = 0.0  # Placeholder
+
+        # Compute bet_to_call (amount needed to call)
+        # Get current player's committed amount and opponent's committed amount
+        current_player_committed = tensor_env.chips_placed[env_idx, player].item()
+        opponent_player = 1 - player
+        opponent_committed = tensor_env.chips_placed[env_idx, opponent_player].item()
+        bet_to_call = max(0.0, (opponent_committed - current_player_committed) / 1000.0)
 
         return {
             "pot_size": pot_size,

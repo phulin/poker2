@@ -23,14 +23,14 @@ class TransformerStateEncoder:
         self.tokenizer = PokerTokenizer(max_sequence_length)
 
     def encode_tensor_states(
-        self, tensor_env: HUNLTensorEnv, num_envs: int, player: int = 0
+        self, tensor_env: HUNLTensorEnv, num_envs: int, player: int = None
     ) -> Dict[str, torch.Tensor]:
         """Encode states for all environments in the tensorized environment.
 
         Args:
             tensor_env: HUNLTensorEnv instance
             num_envs: Number of environments
-            player: Player index (0 or 1)
+            player: Player index (0 or 1). If None, uses tensor_env.to_act for each env.
 
         Returns:
             Dictionary containing structured embedding components
@@ -89,8 +89,12 @@ class TransformerStateEncoder:
 
         # Encode each environment
         for env_idx in range(batch_size):
+            # Use per-environment player if player is None, otherwise use provided player
+            current_player = (
+                tensor_env.to_act[env_idx].item() if player is None else player
+            )
             structured_data = self.tokenizer.tokenize_state_structured(
-                tensor_env, env_idx, player
+                tensor_env, env_idx, current_player
             )
 
             # Copy structured data to batch tensors

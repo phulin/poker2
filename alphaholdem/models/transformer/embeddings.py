@@ -65,7 +65,7 @@ class CardEmbedding(nn.Module):
         """Forward pass for card embeddings.
 
         Args:
-            card_indices: Card indices [batch_size, seq_len] (0-51)
+            card_indices: Card indices [batch_size, seq_len] (0-51, with 52 for CLS)
             stages: Stage indices [batch_size, seq_len] (0-3)
             visibility: Visibility indices [batch_size, seq_len] (0-2)
             order: Order indices [batch_size, seq_len] (0-4)
@@ -73,18 +73,54 @@ class CardEmbedding(nn.Module):
         Returns:
             Card embeddings [batch_size, seq_len, d_model]
         """
-        # Convert card indices to rank and suit
-        ranks = card_indices % 13  # [batch_size, seq_len]
-        suits = card_indices // 13  # [batch_size, seq_len]
+        batch_size, seq_len = card_indices.shape
 
-        # Compose embeddings additively
-        embeddings = (
-            self.rank_emb(ranks)
-            + self.suit_emb(suits)
-            + self.stage_emb(stages)
-            + self.visibility_emb(visibility)
-            + self.order_emb(order)
+        # Handle CLS token (index 52) and padding (index -1)
+        # Create masks for valid card indices
+        valid_card_mask = (card_indices >= 0) & (card_indices < 52)
+        cls_mask = card_indices == 52
+
+        # Initialize embeddings
+        embeddings = torch.zeros(
+            batch_size, seq_len, self.d_model, device=card_indices.device
         )
+
+        # Process valid cards (0-51)
+        if valid_card_mask.any():
+            valid_indices = card_indices[valid_card_mask]
+            valid_stages = stages[valid_card_mask]
+            valid_visibility = visibility[valid_card_mask]
+            valid_order = order[valid_card_mask]
+
+            # Clamp embedding indices to valid ranges to avoid index errors
+            valid_stages = torch.clamp(valid_stages, 0, 3)  # 0-3: hole,flop,turn,river
+            valid_visibility = torch.clamp(
+                valid_visibility, 0, 2
+            )  # 0-2: self,opponent,public
+            valid_order = torch.clamp(valid_order, 0, 4)  # 0-4: position within stage
+
+            # Convert card indices to rank and suit
+            ranks = valid_indices % 13
+            suits = valid_indices // 13
+
+            # Compose embeddings additively for valid cards
+            valid_embeddings = (
+                self.rank_emb(ranks)
+                + self.suit_emb(suits)
+                + self.stage_emb(valid_stages)
+                + self.visibility_emb(valid_visibility)
+                + self.order_emb(valid_order)
+            )
+
+            # Place valid embeddings back
+            embeddings[valid_card_mask] = valid_embeddings
+
+        # Handle CLS tokens (index 52) - use zero embedding for now
+        # In the future, we could add a dedicated CLS embedding
+        if cls_mask.any():
+            embeddings[cls_mask] = 0.0
+
+        # Padding tokens (index -1) remain zero
 
         return embeddings
 
@@ -172,6 +208,16 @@ class ActionEmbedding(nn.Module):
         Returns:
             Action embeddings [batch_size, seq_len, d_model]
         """
+        batch_size, seq_len = actors.shape
+
+        # Clamp all embedding indices to valid ranges to avoid index errors
+        actors = torch.clamp(actors, 0, 1)  # 0-1: player indices
+        action_types = torch.clamp(
+            action_types, 0, self.num_action_types - 1
+        )  # 0-5: action types
+        streets = torch.clamp(streets, 0, 3)  # 0-3: hole,flop,turn,river
+        size_bins = torch.clamp(size_bins, 0, 19)  # 0-19: size bins
+
         # Get component embeddings
         actor_emb = self.actor_emb(actors)
         action_type_emb = self.action_type_emb(action_types)
@@ -245,6 +291,9 @@ class ContextEmbedding(nn.Module):
         Returns:
             Context embeddings [batch_size, seq_len, d_model]
         """
+        # Clamp embedding indices to valid ranges
+        positions = torch.clamp(positions, 0, 1)  # 0-1: player positions
+
         # Get component embeddings
         pot_emb = self.pot_emb(pot_sizes)
         stack_emb = self.stack_emb(stack_sizes)

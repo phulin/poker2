@@ -119,7 +119,12 @@ class PokerAttention(nn.Module):
 
         # Apply mask
         if mask is not None:
-            scores = scores.masked_fill(mask.unsqueeze(1) == 0, -1e9)
+            # mask is key_padding_mask: [batch_size, seq_len] with True for positions to mask
+            # We need to expand it to [batch_size, n_heads, seq_len, seq_len]
+            key_padding_mask = mask.unsqueeze(1).unsqueeze(
+                2
+            )  # [batch_size, 1, 1, seq_len]
+            scores = scores.masked_fill(key_padding_mask, -1e9)
 
         # Softmax and dropout
         attention_weights = F.softmax(scores, dim=-1)
@@ -162,8 +167,10 @@ class PokerAttention(nn.Module):
                 card_i = card_indices[:, i]  # [batch_size]
                 card_j = card_indices[:, j]  # [batch_size]
 
-                # Only apply bias for valid card indices (not padding)
-                valid_mask = (card_i >= 0) & (card_j >= 0)
+                # Only apply bias for valid card indices (not padding or CLS)
+                valid_mask = (
+                    (card_i >= 0) & (card_i < 52) & (card_j >= 0) & (card_j < 52)
+                )
                 if valid_mask.any():
                     rank_i = card_i[valid_mask] % 13
                     rank_j = card_j[valid_mask] % 13
@@ -225,11 +232,18 @@ class PokerTransformerEncoderLayer(nn.Module):
         src_mask: Optional[torch.Tensor] = None,
         card_indices: Optional[torch.Tensor] = None,
         position_indices: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with poker-specific attention."""
+        # Convert attention mask to key padding mask format
+        # attention_mask: [batch_size, seq_len] with 1.0 for valid positions, 0.0 for padding
+        key_padding_mask = None
+        if attention_mask is not None:
+            key_padding_mask = attention_mask == 0.0  # True for positions to mask out
+
         # Self-attention with poker biases
         attn_output, _ = self.self_attn(
-            src, src, src, src_mask, card_indices, position_indices
+            src, src, src, key_padding_mask, card_indices, position_indices
         )
         src = self.norm1(src + self.dropout(attn_output))
 

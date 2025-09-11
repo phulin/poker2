@@ -506,26 +506,11 @@ class SelfPlayTrainer:
                             active_we_act
                         ]
 
-                        if self.use_mixed_precision:
-                            with torch.amp.autocast(
-                                self.device.type, dtype=torch.bfloat16
-                            ):
-                                outputs = self.model(
-                                    card_indices=our_card_indices,
-                                    card_stages=our_card_stages,
-                                    card_visibility=our_card_visibility,
-                                    card_order=our_card_order,
-                                    action_actors=our_action_actors,
-                                    action_types=our_action_types,
-                                    action_streets=our_action_streets,
-                                    action_size_bins=our_action_size_bins,
-                                    action_size_features=our_action_size_features,
-                                    context_pot_sizes=our_context_pot_sizes,
-                                    context_stack_sizes=our_context_stack_sizes,
-                                    context_positions=our_context_positions,
-                                    context_street_context=our_context_street_context,
-                                )
-                        else:
+                        with torch.amp.autocast(
+                            self.device.type,
+                            dtype=torch.bfloat16,
+                            enabled=self.use_mixed_precision,
+                        ):
                             outputs = self.model(
                                 card_indices=our_card_indices,
                                 card_stages=our_card_stages,
@@ -546,22 +531,14 @@ class SelfPlayTrainer:
                         our_values = outputs["value"]
                     else:
                         # CNN model
-                        if self.use_mixed_precision:
-                            our_cards = active_cards[active_we_act].to(torch.bfloat16)
-                            our_actions = active_actions[active_we_act].to(
-                                torch.bfloat16
-                            )
+                        our_cards = active_cards[active_we_act].float()
+                        our_actions = active_actions[active_we_act].float()
 
-                            # Use autocast for mixed precision
-                            with torch.amp.autocast(
-                                self.device.type, dtype=torch.bfloat16
-                            ):
-                                our_logits, our_values = self.model(
-                                    our_cards, our_actions
-                                )
-                        else:
-                            our_cards = active_cards[active_we_act].float()
-                            our_actions = active_actions[active_we_act].float()
+                        with torch.amp.autocast(
+                            self.device.type,
+                            dtype=torch.bfloat16,
+                            enabled=self.use_mixed_precision,
+                        ):
                             our_logits, our_values = self.model(our_cards, our_actions)
 
                     active_logits[active_we_act] = our_logits
@@ -596,9 +573,34 @@ class SelfPlayTrainer:
 
                         # Use indices directly into active arrays
                         if is_transformer:
-                            # Transformer model
-                            opp_token_ids = active_token_ids[opp_active_indices]
-                            opp_attention_masks = active_attention_masks[
+                            # Transformer model with structured embeddings
+                            opp_card_indices = active_card_indices[opp_active_indices]
+                            opp_card_stages = active_card_stages[opp_active_indices]
+                            opp_card_visibility = active_card_visibility[
+                                opp_active_indices
+                            ]
+                            opp_card_order = active_card_order[opp_active_indices]
+                            opp_action_actors = active_action_actors[opp_active_indices]
+                            opp_action_types = active_action_types[opp_active_indices]
+                            opp_action_streets = active_action_streets[
+                                opp_active_indices
+                            ]
+                            opp_action_size_bins = active_action_size_bins[
+                                opp_active_indices
+                            ]
+                            opp_action_size_features = active_action_size_features[
+                                opp_active_indices
+                            ]
+                            opp_context_pot_sizes = active_context_pot_sizes[
+                                opp_active_indices
+                            ]
+                            opp_context_stack_sizes = active_context_stack_sizes[
+                                opp_active_indices
+                            ]
+                            opp_context_positions = active_context_positions[
+                                opp_active_indices
+                            ]
+                            opp_context_street_context = active_context_street_context[
                                 opp_active_indices
                             ]
                             with torch.amp.autocast(
@@ -607,7 +609,19 @@ class SelfPlayTrainer:
                                 enabled=self.use_mixed_precision,
                             ):
                                 outputs = opponent.model(
-                                    opp_token_ids, opp_attention_masks
+                                    card_indices=opp_card_indices,
+                                    card_stages=opp_card_stages,
+                                    card_visibility=opp_card_visibility,
+                                    card_order=opp_card_order,
+                                    action_actors=opp_action_actors,
+                                    action_types=opp_action_types,
+                                    action_streets=opp_action_streets,
+                                    action_size_bins=opp_action_size_bins,
+                                    action_size_features=opp_action_size_features,
+                                    context_pot_sizes=opp_context_pot_sizes,
+                                    context_stack_sizes=opp_context_stack_sizes,
+                                    context_positions=opp_context_positions,
+                                    context_street_context=opp_context_street_context,
                                 )
                                 opp_logits = outputs["policy_logits"]
                                 opp_values = outputs["value"]
@@ -628,15 +642,50 @@ class SelfPlayTrainer:
                 elif active_opp_acts.numel() > 0:
                     # Self-play: use our model for opponent turns too
                     if is_transformer:
-                        # Transformer model
-                        opp_token_ids = active_token_ids[active_opp_acts]
-                        opp_attention_masks = active_attention_masks[active_opp_acts]
+                        # Transformer model with structured embeddings
+                        opp_card_indices = active_card_indices[active_opp_acts]
+                        opp_card_stages = active_card_stages[active_opp_acts]
+                        opp_card_visibility = active_card_visibility[active_opp_acts]
+                        opp_card_order = active_card_order[active_opp_acts]
+                        opp_action_actors = active_action_actors[active_opp_acts]
+                        opp_action_types = active_action_types[active_opp_acts]
+                        opp_action_streets = active_action_streets[active_opp_acts]
+                        opp_action_size_bins = active_action_size_bins[active_opp_acts]
+                        opp_action_size_features = active_action_size_features[
+                            active_opp_acts
+                        ]
+                        opp_context_pot_sizes = active_context_pot_sizes[
+                            active_opp_acts
+                        ]
+                        opp_context_stack_sizes = active_context_stack_sizes[
+                            active_opp_acts
+                        ]
+                        opp_context_positions = active_context_positions[
+                            active_opp_acts
+                        ]
+                        opp_context_street_context = active_context_street_context[
+                            active_opp_acts
+                        ]
                         with torch.amp.autocast(
                             self.device.type,
                             dtype=torch.bfloat16,
                             enabled=self.use_mixed_precision,
                         ):
-                            outputs = self.model(opp_token_ids, opp_attention_masks)
+                            outputs = self.model(
+                                card_indices=opp_card_indices,
+                                card_stages=opp_card_stages,
+                                card_visibility=opp_card_visibility,
+                                card_order=opp_card_order,
+                                action_actors=opp_action_actors,
+                                action_types=opp_action_types,
+                                action_streets=opp_action_streets,
+                                action_size_bins=opp_action_size_bins,
+                                action_size_features=opp_action_size_features,
+                                context_pot_sizes=opp_context_pot_sizes,
+                                context_stack_sizes=opp_context_stack_sizes,
+                                context_positions=opp_context_positions,
+                                context_street_context=opp_context_street_context,
+                            )
                             opp_logits = outputs["policy_logits"]
                             opp_values = outputs["value"]
                     else:
@@ -689,8 +738,23 @@ class SelfPlayTrainer:
 
                 # Extract features for our environments
                 if is_transformer:
-                    our_token_ids = active_token_ids[active_we_act]
-                    our_attention_masks = active_attention_masks[active_we_act]
+                    our_card_indices = active_card_indices[active_we_act]
+                    our_card_stages = active_card_stages[active_we_act]
+                    our_card_visibility = active_card_visibility[active_we_act]
+                    our_card_order = active_card_order[active_we_act]
+                    our_action_actors = active_action_actors[active_we_act]
+                    our_action_types = active_action_types[active_we_act]
+                    our_action_streets = active_action_streets[active_we_act]
+                    our_action_size_bins = active_action_size_bins[active_we_act]
+                    our_action_size_features = active_action_size_features[
+                        active_we_act
+                    ]
+                    our_context_pot_sizes = active_context_pot_sizes[active_we_act]
+                    our_context_stack_sizes = active_context_stack_sizes[active_we_act]
+                    our_context_positions = active_context_positions[active_we_act]
+                    our_context_street_context = active_context_street_context[
+                        active_we_act
+                    ]
                 else:
                     our_cards_features = active_cards[
                         active_we_act
@@ -711,8 +775,19 @@ class SelfPlayTrainer:
                 if add_to_replay_buffer:
                     if is_transformer:
                         self.replay_buffer.add_batch(
-                            token_ids=our_token_ids,
-                            attention_masks=our_attention_masks,
+                            card_indices=our_card_indices,
+                            card_stages=our_card_stages,
+                            card_visibility=our_card_visibility,
+                            card_order=our_card_order,
+                            action_actors=our_action_actors,
+                            action_types=our_action_types,
+                            action_streets=our_action_streets,
+                            action_size_bins=our_action_size_bins,
+                            action_size_features=our_action_size_features,
+                            context_pot_sizes=our_context_pot_sizes,
+                            context_stack_sizes=our_context_stack_sizes,
+                            context_positions=our_context_positions,
+                            context_street_context=our_context_street_context,
                             action_indices=our_action_indices,
                             log_probs=our_log_probs_tensor,
                             rewards=our_rewards_tensor,
@@ -863,7 +938,7 @@ class SelfPlayTrainer:
         is_transformer = self.cfg.model.name.startswith("poker_transformer")
         if is_transformer:
             return self.state_encoder.encode_tensor_states(
-                self.tensor_env, self.num_envs
+                self.tensor_env, self.num_envs, player=None
             )
         else:
             return self.state_encoder.encode_tensor_states(
@@ -913,18 +988,34 @@ class SelfPlayTrainer:
             is_transformer = self.cfg.model.name.startswith("poker_transformer")
 
             if is_transformer:
-                # Transformer model
-                token_ids = batch["token_ids"]  # [batch_size, seq_len]
-                attention_masks = batch["attention_masks"]  # [batch_size, seq_len]
-
+                # Transformer model with structured embeddings
                 with torch.amp.autocast(
                     self.device.type,
                     dtype=torch.bfloat16,
                     enabled=self.use_mixed_precision,
                 ):
-                    outputs = self.model(token_ids, attention_masks)
+                    outputs = self.model(
+                        card_indices=batch["card_indices"],
+                        card_stages=batch["card_stages"],
+                        card_visibility=batch["card_visibility"],
+                        card_order=batch["card_order"],
+                        action_actors=batch["action_actors"],
+                        action_types=batch["action_types"],
+                        action_streets=batch["action_streets"],
+                        action_size_bins=batch["action_size_bins"],
+                        action_size_features=batch["action_size_features"],
+                        context_pot_sizes=batch["context_pot_sizes"],
+                        context_stack_sizes=batch["context_stack_sizes"],
+                        context_positions=batch["context_positions"],
+                        context_street_context=batch["context_street_context"],
+                    )
                     logits = outputs["policy_logits"]
                     values = outputs["value"]
+
+                # Transformer-specific loss with auxiliary hand range loss
+                loss_dict = self._compute_transformer_loss(
+                    outputs, batch, delta2_vec, delta3_vec
+                )
             else:
                 # CNN model
                 cards_features = batch[
@@ -945,30 +1036,24 @@ class SelfPlayTrainer:
                 ):
                     logits, values = self.model(cards_float, actions_float)
 
-                if is_transformer:
-                    # Transformer-specific loss with auxiliary hand range loss
-                    loss_dict = self._compute_transformer_loss(
-                        outputs, batch, delta2_vec, delta3_vec
-                    )
-                else:
-                    # CNN loss
-                    loss_dict = trinal_clip_ppo_loss(
-                        logits=logits,
-                        values=values,
-                        actions=batch["action_indices"],
-                        log_probs_old=batch["log_probs_old"].float(),
-                        advantages=batch["advantages"].float(),
-                        returns=batch["returns"].float(),
-                        legal_masks=batch["legal_masks"],
-                        epsilon=self.epsilon,
-                        delta1=self.delta1,
-                        delta2=delta2_vec.float(),
-                        delta3=delta3_vec.float(),
-                        value_coef=self.value_coef,
-                        entropy_coef=self.entropy_coef,
-                        value_loss_type=self.cfg.train.value_loss_type,
-                        huber_delta=self.cfg.train.huber_delta,
-                    )
+                # CNN loss
+                loss_dict = trinal_clip_ppo_loss(
+                    logits=logits,
+                    values=values,
+                    actions=batch["action_indices"],
+                    log_probs_old=batch["log_probs_old"].float(),
+                    advantages=batch["advantages"].float(),
+                    returns=batch["returns"].float(),
+                    legal_masks=batch["legal_masks"],
+                    epsilon=self.epsilon,
+                    delta1=self.delta1,
+                    delta2=delta2_vec.float(),
+                    delta3=delta3_vec.float(),
+                    value_coef=self.value_coef,
+                    entropy_coef=self.entropy_coef,
+                    value_loss_type=self.cfg.train.value_loss_type,
+                    huber_delta=self.cfg.train.huber_delta,
+                )
 
             # Debugging metrics: approx KL, clipfrac, explained variance
             with torch.no_grad():

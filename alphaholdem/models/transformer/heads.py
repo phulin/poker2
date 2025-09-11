@@ -16,10 +16,10 @@ class TransformerPolicyHead(nn.Module):
     - Bet size parameters (Beta distribution parameters for continuous sizing)
     """
 
-    def __init__(self, d_model: int, num_action_types: int = 4):
+    def __init__(self, d_model: int, num_actions: int = 4):
         super().__init__()
         self.d_model = d_model
-        self.num_action_types = num_action_types
+        self.num_actions = num_actions
 
         # Action type head (discrete)
         self.action_type_head = nn.Sequential(
@@ -27,7 +27,7 @@ class TransformerPolicyHead(nn.Module):
             nn.LayerNorm(d_model // 2),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(d_model // 2, num_action_types),
+            nn.Linear(d_model // 2, num_actions),
         )
 
         # Bet size head (continuous - Beta distribution parameters)
@@ -58,7 +58,7 @@ class TransformerPolicyHead(nn.Module):
 
         Returns:
             Dictionary containing:
-                - action_logits: Action type logits [batch_size, num_action_types]
+                - action_logits: Action type logits [batch_size, num_actions]
                 - size_params: Beta distribution parameters [batch_size, 2]
         """
         action_logits = self.action_type_head(x)

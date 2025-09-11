@@ -211,13 +211,21 @@ class PokerTransformerV1(nn.Module, Model):
         x = x + pos_embeddings.unsqueeze(0)
         x = self.dropout(x)
 
+        # Create attention mask for padded positions
+        # Mask out positions where card_indices == -1 (padding)
+        attention_mask = (card_indices != -1).float()  # [batch_size, seq_len]
+
         # Transformer encoding with poker-specific attention
         if self.use_gradient_checkpointing and self.training:
             # Use gradient checkpointing for memory efficiency
             def transformer_forward(x):
                 for layer in self.transformer:
                     x = layer(
-                        x, card_indices=card_indices, position_indices=position_indices
+                        x,
+                        src_mask=None,  # We'll use key padding mask instead
+                        card_indices=card_indices,
+                        position_indices=position_indices,
+                        attention_mask=attention_mask,
                     )
                 return x
 
@@ -227,7 +235,11 @@ class PokerTransformerV1(nn.Module, Model):
         else:
             for layer in self.transformer:
                 x = layer(
-                    x, card_indices=card_indices, position_indices=position_indices
+                    x,
+                    src_mask=None,  # We'll use key padding mask instead
+                    card_indices=card_indices,
+                    position_indices=position_indices,
+                    attention_mask=attention_mask,
                 )
 
         # Get CLS token representation (first token)

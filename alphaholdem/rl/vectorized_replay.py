@@ -54,20 +54,45 @@ class VectorizedReplayBuffer:
             device=device,
         )
 
-        # Transformer token fields: (capacity, max_trajectory_length, seq_len)
-        self.token_ids = torch.zeros(
-            capacity,
-            max_trajectory_length,
-            50,  # Fixed sequence length
-            dtype=torch.long,
-            device=device,
+        # Transformer structured embedding fields: (capacity, max_trajectory_length, ...)
+        self.card_indices = torch.full(
+            (capacity, max_trajectory_length, 50), -1, dtype=torch.long, device=device
         )
-        self.attention_masks = torch.zeros(
-            capacity,
-            max_trajectory_length,
-            50,  # Fixed sequence length
-            dtype=torch.bool,
-            device=device,
+        self.card_stages = torch.zeros(
+            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
+        )
+        self.card_visibility = torch.zeros(
+            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
+        )
+        self.card_order = torch.zeros(
+            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
+        )
+        self.action_actors = torch.zeros(
+            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
+        )
+        self.action_types = torch.zeros(
+            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
+        )
+        self.action_streets = torch.zeros(
+            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
+        )
+        self.action_size_bins = torch.zeros(
+            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
+        )
+        self.action_size_features = torch.zeros(
+            capacity, max_trajectory_length, 50, 3, dtype=torch.float, device=device
+        )
+        self.context_pot_sizes = torch.zeros(
+            capacity, max_trajectory_length, 50, 1, dtype=torch.float, device=device
+        )
+        self.context_stack_sizes = torch.zeros(
+            capacity, max_trajectory_length, 50, 2, dtype=torch.float, device=device
+        )
+        self.context_positions = torch.zeros(
+            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
+        )
+        self.context_street_context = torch.zeros(
+            capacity, max_trajectory_length, 50, 4, dtype=torch.float, device=device
         )
         self.action_indices = torch.zeros(
             capacity, max_trajectory_length, dtype=torch.long, device=device
@@ -149,6 +174,19 @@ class VectorizedReplayBuffer:
         # Clear the actual data tensors for these rows
         self.cards_features[clear_indices] = False
         self.actions_features[clear_indices] = False
+        self.card_indices[clear_indices] = -1
+        self.card_stages[clear_indices] = 0
+        self.card_visibility[clear_indices] = 0
+        self.card_order[clear_indices] = 0
+        self.action_actors[clear_indices] = 0
+        self.action_types[clear_indices] = 0
+        self.action_streets[clear_indices] = 0
+        self.action_size_bins[clear_indices] = 0
+        self.action_size_features[clear_indices] = 0
+        self.context_pot_sizes[clear_indices] = 0
+        self.context_stack_sizes[clear_indices] = 0
+        self.context_positions[clear_indices] = 0
+        self.context_street_context[clear_indices] = 0
         self.action_indices[clear_indices] = 0
         self.log_probs[clear_indices] = 0
         self.rewards[clear_indices] = 0
@@ -219,6 +257,19 @@ class VectorizedReplayBuffer:
             "current_step_positions",
             "cards_features",
             "actions_features",
+            "card_indices",
+            "card_stages",
+            "card_visibility",
+            "card_order",
+            "action_actors",
+            "action_types",
+            "action_streets",
+            "action_size_bins",
+            "action_size_features",
+            "context_pot_sizes",
+            "context_stack_sizes",
+            "context_positions",
+            "context_street_context",
             "action_indices",
             "log_probs",
             "rewards",
@@ -252,8 +303,20 @@ class VectorizedReplayBuffer:
         self,
         cards_features: torch.Tensor = None,  # [batch_size, 6, 4, 13] - bool
         actions_features: torch.Tensor = None,  # [batch_size, 24, 4, num_bet_bins] - bool
-        token_ids: torch.Tensor = None,  # [batch_size, seq_len] - long
-        attention_masks: torch.Tensor = None,  # [batch_size, seq_len] - bool
+        # Structured embedding fields
+        card_indices: torch.Tensor = None,  # [batch_size, seq_len] - long
+        card_stages: torch.Tensor = None,  # [batch_size, seq_len] - long
+        card_visibility: torch.Tensor = None,  # [batch_size, seq_len] - long
+        card_order: torch.Tensor = None,  # [batch_size, seq_len] - long
+        action_actors: torch.Tensor = None,  # [batch_size, seq_len] - long
+        action_types: torch.Tensor = None,  # [batch_size, seq_len] - long
+        action_streets: torch.Tensor = None,  # [batch_size, seq_len] - long
+        action_size_bins: torch.Tensor = None,  # [batch_size, seq_len] - long
+        action_size_features: torch.Tensor = None,  # [batch_size, seq_len, 3] - float
+        context_pot_sizes: torch.Tensor = None,  # [batch_size, seq_len, 1] - float
+        context_stack_sizes: torch.Tensor = None,  # [batch_size, seq_len, 2] - float
+        context_positions: torch.Tensor = None,  # [batch_size, seq_len] - long
+        context_street_context: torch.Tensor = None,  # [batch_size, seq_len, 4] - float
         action_indices: torch.Tensor = None,  # [batch_size] - long
         log_probs: torch.Tensor = None,
         rewards: torch.Tensor = None,
@@ -270,6 +333,19 @@ class VectorizedReplayBuffer:
         Args:
             cards_features: [batch_size, 6, 4, 13] - bool dtype
             actions_features: [batch_size, 24, 4, num_bet_bins] - bool dtype
+            card_indices: [batch_size, seq_len] - long dtype
+            card_stages: [batch_size, seq_len] - long dtype
+            card_visibility: [batch_size, seq_len] - long dtype
+            card_order: [batch_size, seq_len] - long dtype
+            action_actors: [batch_size, seq_len] - long dtype
+            action_types: [batch_size, seq_len] - long dtype
+            action_streets: [batch_size, seq_len] - long dtype
+            action_size_bins: [batch_size, seq_len] - long dtype
+            action_size_features: [batch_size, seq_len, 3] - float dtype
+            context_pot_sizes: [batch_size, seq_len, 1] - float dtype
+            context_stack_sizes: [batch_size, seq_len, 2] - float dtype
+            context_positions: [batch_size, seq_len] - long dtype
+            context_street_context: [batch_size, seq_len, 4] - float dtype
             action_indices: [batch_size] - long dtype
             log_probs: [batch_size]
             rewards: [batch_size]
@@ -305,11 +381,50 @@ class VectorizedReplayBuffer:
             self.actions_features[buffer_trajectory_indices, step_positions] = (
                 actions_features
             )
-        if token_ids is not None:
-            self.token_ids[buffer_trajectory_indices, step_positions] = token_ids
-        if attention_masks is not None:
-            self.attention_masks[buffer_trajectory_indices, step_positions] = (
-                attention_masks
+        # Structured embedding fields
+        if card_indices is not None:
+            self.card_indices[buffer_trajectory_indices, step_positions] = card_indices
+        if card_stages is not None:
+            self.card_stages[buffer_trajectory_indices, step_positions] = card_stages
+        if card_visibility is not None:
+            self.card_visibility[buffer_trajectory_indices, step_positions] = (
+                card_visibility
+            )
+        if card_order is not None:
+            self.card_order[buffer_trajectory_indices, step_positions] = card_order
+        if action_actors is not None:
+            self.action_actors[buffer_trajectory_indices, step_positions] = (
+                action_actors
+            )
+        if action_types is not None:
+            self.action_types[buffer_trajectory_indices, step_positions] = action_types
+        if action_streets is not None:
+            self.action_streets[buffer_trajectory_indices, step_positions] = (
+                action_streets
+            )
+        if action_size_bins is not None:
+            self.action_size_bins[buffer_trajectory_indices, step_positions] = (
+                action_size_bins
+            )
+        if action_size_features is not None:
+            self.action_size_features[buffer_trajectory_indices, step_positions] = (
+                action_size_features
+            )
+        if context_pot_sizes is not None:
+            self.context_pot_sizes[buffer_trajectory_indices, step_positions] = (
+                context_pot_sizes
+            )
+        if context_stack_sizes is not None:
+            self.context_stack_sizes[buffer_trajectory_indices, step_positions] = (
+                context_stack_sizes
+            )
+        if context_positions is not None:
+            self.context_positions[buffer_trajectory_indices, step_positions] = (
+                context_positions
+            )
+        if context_street_context is not None:
+            self.context_street_context[buffer_trajectory_indices, step_positions] = (
+                context_street_context
             )
         self.action_indices[buffer_trajectory_indices, step_positions] = action_indices
         self.log_probs[buffer_trajectory_indices, step_positions] = log_probs
@@ -481,6 +596,20 @@ class VectorizedReplayBuffer:
         actions_features = self.actions_features[
             traj_indices, :max_len
         ]  # [num_traj, max_len, 24, 4, num_bet_bins]
+        # Structured embedding fields
+        card_indices = self.card_indices[traj_indices, :max_len]
+        card_stages = self.card_stages[traj_indices, :max_len]
+        card_visibility = self.card_visibility[traj_indices, :max_len]
+        card_order = self.card_order[traj_indices, :max_len]
+        action_actors = self.action_actors[traj_indices, :max_len]
+        action_types = self.action_types[traj_indices, :max_len]
+        action_streets = self.action_streets[traj_indices, :max_len]
+        action_size_bins = self.action_size_bins[traj_indices, :max_len]
+        action_size_features = self.action_size_features[traj_indices, :max_len]
+        context_pot_sizes = self.context_pot_sizes[traj_indices, :max_len]
+        context_stack_sizes = self.context_stack_sizes[traj_indices, :max_len]
+        context_positions = self.context_positions[traj_indices, :max_len]
+        context_street_context = self.context_street_context[traj_indices, :max_len]
         action_indices = self.action_indices[traj_indices, :max_len]
         logps = self.log_probs[traj_indices, :max_len]
         advs = self.advantages[traj_indices, :max_len]
@@ -499,6 +628,38 @@ class VectorizedReplayBuffer:
         )[
             mask_flat
         ]  # [valid_steps, 24, 4, num_bet_bins]
+        # Structured embedding fields
+        all_card_indices = card_indices.reshape(-1, *card_indices.shape[2:])[mask_flat]
+        all_card_stages = card_stages.reshape(-1, *card_stages.shape[2:])[mask_flat]
+        all_card_visibility = card_visibility.reshape(-1, *card_visibility.shape[2:])[
+            mask_flat
+        ]
+        all_card_order = card_order.reshape(-1, *card_order.shape[2:])[mask_flat]
+        all_action_actors = action_actors.reshape(-1, *action_actors.shape[2:])[
+            mask_flat
+        ]
+        all_action_types = action_types.reshape(-1, *action_types.shape[2:])[mask_flat]
+        all_action_streets = action_streets.reshape(-1, *action_streets.shape[2:])[
+            mask_flat
+        ]
+        all_action_size_bins = action_size_bins.reshape(
+            -1, *action_size_bins.shape[2:]
+        )[mask_flat]
+        all_action_size_features = action_size_features.reshape(
+            -1, *action_size_features.shape[2:]
+        )[mask_flat]
+        all_context_pot_sizes = context_pot_sizes.reshape(
+            -1, *context_pot_sizes.shape[2:]
+        )[mask_flat]
+        all_context_stack_sizes = context_stack_sizes.reshape(
+            -1, *context_stack_sizes.shape[2:]
+        )[mask_flat]
+        all_context_positions = context_positions.reshape(
+            -1, *context_positions.shape[2:]
+        )[mask_flat]
+        all_context_street_context = context_street_context.reshape(
+            -1, *context_street_context.shape[2:]
+        )[mask_flat]
         all_action_indices = action_indices.reshape(-1)[mask_flat]
         all_log_probs = logps.reshape(-1)[mask_flat]
         all_advantages = advs.reshape(-1)[mask_flat]
@@ -512,6 +673,20 @@ class VectorizedReplayBuffer:
             return {
                 "cards_features": all_cards_features,
                 "actions_features": all_actions_features,
+                # Structured embedding fields
+                "card_indices": all_card_indices,
+                "card_stages": all_card_stages,
+                "card_visibility": all_card_visibility,
+                "card_order": all_card_order,
+                "action_actors": all_action_actors,
+                "action_types": all_action_types,
+                "action_streets": all_action_streets,
+                "action_size_bins": all_action_size_bins,
+                "action_size_features": all_action_size_features,
+                "context_pot_sizes": all_context_pot_sizes,
+                "context_stack_sizes": all_context_stack_sizes,
+                "context_positions": all_context_positions,
+                "context_street_context": all_context_street_context,
                 "action_indices": all_action_indices,
                 "log_probs_old": all_log_probs,
                 "advantages": all_advantages,
@@ -559,8 +734,24 @@ class VectorizedReplayBuffer:
         batch = {
             "cards_features": self.cards_features[traj_indices, step_indices],
             "actions_features": self.actions_features[traj_indices, step_indices],
-            "token_ids": self.token_ids[traj_indices, step_indices],
-            "attention_masks": self.attention_masks[traj_indices, step_indices],
+            # Structured embedding fields
+            "card_indices": self.card_indices[traj_indices, step_indices],
+            "card_stages": self.card_stages[traj_indices, step_indices],
+            "card_visibility": self.card_visibility[traj_indices, step_indices],
+            "card_order": self.card_order[traj_indices, step_indices],
+            "action_actors": self.action_actors[traj_indices, step_indices],
+            "action_types": self.action_types[traj_indices, step_indices],
+            "action_streets": self.action_streets[traj_indices, step_indices],
+            "action_size_bins": self.action_size_bins[traj_indices, step_indices],
+            "action_size_features": self.action_size_features[
+                traj_indices, step_indices
+            ],
+            "context_pot_sizes": self.context_pot_sizes[traj_indices, step_indices],
+            "context_stack_sizes": self.context_stack_sizes[traj_indices, step_indices],
+            "context_positions": self.context_positions[traj_indices, step_indices],
+            "context_street_context": self.context_street_context[
+                traj_indices, step_indices
+            ],
             "action_indices": self.action_indices[traj_indices, step_indices],
             "log_probs_old": self.log_probs[traj_indices, step_indices],
             "advantages": self.advantages[traj_indices, step_indices],
