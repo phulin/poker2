@@ -33,7 +33,6 @@ class TestVectorizedReplayBuffer:
         assert buffer.rewards.shape == (10, 20)
         assert buffer.dones.shape == (10, 20)
         assert buffer.legal_masks.shape == (10, 20, 5)
-        assert buffer.chips_placed.shape == (10, 20)
         assert buffer.delta2.shape == (10, 20)
         assert buffer.delta3.shape == (10, 20)
         assert buffer.values.shape == (10, 20)

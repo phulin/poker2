@@ -375,7 +375,7 @@ class HUNLTensorEnv:
         bin_indices: torch.Tensor,
         bin_amounts: Optional[torch.Tensor] = None,
         legal_masks: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Step all envs using discrete bet bin indices tensor [N]. -1 means no action.
         bin_indices: [N] bet bin indices
         bin_amounts: [N, B] concrete amounts for bins; -1 where not applicable
