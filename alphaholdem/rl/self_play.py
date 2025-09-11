@@ -475,7 +475,7 @@ class SelfPlayTrainer:
                     active_logits[active_we_act] = our_logits
                     active_values[active_we_act] = our_values.squeeze(-1)
 
-                # SPECIAL CASE: If first action of round, opponent folding illegal
+                # SPECIAL CASE: If first action of hand, opponent folding illegal
                 # (because it would leave an empty trajectory)
                 # This doesn't bias our sampling because we would never see the empty
                 # trajectory if it were sampled anyway, since there is no decision of the
@@ -759,7 +759,7 @@ class SelfPlayTrainer:
         cards[:, 4] = board_cards.any(dim=1)  # [N, 4, 13]
 
         # Channel 5: all cards (hole + board)
-        cards[:, 5] = hole_cards.any(dim=1) + board_cards.any(dim=1)  # [N, 4, 13]
+        cards[:, 5] = hole_cards.any(dim=1) | board_cards.any(dim=1)  # [N, 4, 13]
 
         # Get action history directly from tensor environment
         # Shape: [N, 4_streets, 6_slots, 4_players, num_bet_bins]

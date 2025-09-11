@@ -241,6 +241,12 @@ class HUNLTensorEnv:
         """Compute (amounts, mask) for discrete bins, allowing integer bets, no deduplication.
         Amounts is the concrete additional amount the player would commit to the pot.
 
+        Note: Bet bin deduplication is intentionally not implemented for performance reasons.
+        While multiple preset bins may map to the same concrete amount (especially near
+        all-in situations), deduplicating them would require expensive tensor operations
+        and has minimal benefit for training stability. The policy can learn to handle
+        multiple bins mapping to the same action effectively.
+
         amounts: [N, B] with -1 for non-preset bins or illegal presets
         mask:    [N, B] bool mask of legal bins (fold/check-call/presets/all-in)
         """
@@ -435,7 +441,9 @@ class HUNLTensorEnv:
         # Fold: immediate terminal, award pot to opp
         action_idx = torch.where(is_fold)[0]
         # Winner is opp
-        self.finish_and_assign_winners(action_idx, 1 - self.to_act[action_idx])
+        rewards[action_idx] = self.finish_and_assign_winners(
+            action_idx, 1 - self.to_act[action_idx]
+        )
 
         # Check/Call
         action_idx = torch.where(is_check_call)[0]
@@ -456,7 +464,7 @@ class HUNLTensorEnv:
         bet_raise_amount = bin_amounts[action_idx, bin_indices[action_idx]]
         self.bet(action_idx, bet_raise_amount)
         self.min_raise[action_idx] = torch.maximum(
-            self.min_raise[action_idx], bet_raise_amount
+            self.min_raise[action_idx], bet_raise_amount - to_call[action_idx]
         )
 
         if self.debug_step_table:
