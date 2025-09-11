@@ -128,7 +128,7 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
         :, :, :5
     ]  # [N, P, 5]
     flush = torch.where(
-        flush_mask,
+        flush_mask.view(N, P, 1),
         top_suit_ranks,
         -1,
     )
