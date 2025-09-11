@@ -9,6 +9,8 @@ import torch.nn as nn
 from ..core.interfaces import Model
 from ..core.registry import MODELS
 from .cnn import SiameseConvNetV1, CardsPlanesV1, ActionsHUEncoderV1
+from .transformer import PokerTransformerV1, TransformerStateEncoder
+from .state_encoder import StateEncoder
 
 
 class ModelFactory:
@@ -53,18 +55,37 @@ class ModelFactory:
     @staticmethod
     def _create_transformer_model(
         config: Dict[str, Any], device: torch.device
-    ) -> nn.Module:
-        """Create transformer-based model (placeholder for future implementation)."""
-        raise NotImplementedError("Transformer model not yet implemented")
+    ) -> PokerTransformerV1:
+        """Create transformer-based model."""
+        return PokerTransformerV1(**config)
 
     @staticmethod
-    def create_state_encoder(
-        cards_encoder: CardsPlanesV1,
-        actions_encoder: ActionsHUEncoderV1,
-        device: torch.device,
-    ) -> StateEncoder:
-        """Create state encoder."""
-        return StateEncoder(cards_encoder, actions_encoder, device)
+    def create_state_encoder(encoder_type: str, device: torch.device, **kwargs):
+        """Create state encoder based on type.
+
+        Args:
+            encoder_type: Type of encoder ('cnn' or 'transformer')
+            device: Device to create encoder on
+            **kwargs: Additional arguments for encoder creation
+
+        Returns:
+            State encoder instance
+        """
+        if encoder_type == "cnn":
+            # For CNN, we need the card and action encoders
+            cards_encoder = kwargs.get("cards_encoder")
+            actions_encoder = kwargs.get("actions_encoder")
+            if cards_encoder is None or actions_encoder is None:
+                raise ValueError(
+                    "CNN state encoder requires cards_encoder and actions_encoder"
+                )
+            return StateEncoder(cards_encoder, actions_encoder, device)
+        elif encoder_type == "transformer":
+            # For transformer, we only need device and optional max_seq_len
+            max_seq_len = kwargs.get("max_sequence_length", 50)
+            return TransformerStateEncoder(device, max_seq_len)
+        else:
+            raise ValueError(f"Unknown encoder type: {encoder_type}")
 
     @staticmethod
     def get_available_model_types() -> list[str]:

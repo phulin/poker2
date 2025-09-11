@@ -1,0 +1,106 @@
+# AlphaHoldem Transformer High-Performance Configuration
+# Configuration for transformer-based poker model with larger capacity
+
+# === TRAINING CONFIGURATION ===
+num_steps: 2000
+k_best_pool_size: 10
+min_elo_diff: 50.0
+min_step_diff: 300
+k_factor: 4.0
+checkpoint_interval: 50
+eval_interval: 100
+checkpoint_dir: "checkpoints-transformer-hp"
+
+# === DEVICE CONFIGURATION ===
+device: mps
+
+# === ENVIRONMENT CONFIGURATION ===
+use_tensor_env: true
+num_envs: 256  # Smaller batch for larger model
+
+# === WANDB CONFIGURATION ===
+use_wandb: true
+wandb_project: "poker-transformer-hp"
+wandb_name: null
+wandb_tags: ["transformer", "poker", "ppo", "high-performance"]
+
+# === RESUME CONFIGURATION ===
+resume_from: null
+
+# === RANDOM SEED ===
+seed: 42
+
+# === ADDITIONAL CONFIGURATION ===
+config: null
+wandb_run_id: null
+economize_checkpoints: false
+
+# === TRAINING HYPERPARAMETERS ===
+train:
+  learning_rate: 3e-5  # Even lower LR for larger model
+  batch_size: 256      # Smaller batch size for larger model
+  num_epochs: 4
+  replay_buffer_batches: 4
+  max_trajectory_length: 20
+  
+  # PPO hyperparameters
+  ppo_eps: 0.2
+  ppo_delta1: 3.0
+  gae_lambda: 0.95
+  gamma: 0.999
+  entropy_coef: 0.01
+  value_coef: 0.05
+  grad_clip: 1.0
+  
+  # Value loss configuration
+  value_loss_type: "huber"
+  huber_delta: 1.0
+  
+  # Mixed precision configuration
+  use_mixed_precision: true  # Enable for larger model
+  loss_scale: 128.0
+  
+  # Transformer-specific training parameters
+  auxiliary_loss_coef: 0.1
+  warmup_steps: 2000       # Longer warmup for larger model
+  weight_decay: 0.01
+
+# === MODEL CONFIGURATION ===
+model:
+  name: "poker_transformer_v1"
+  kwargs:
+    d_model: 512           # Larger model dimension
+    n_layers: 8            # More layers
+    n_heads: 8             # More attention heads
+    vocab_size: 80
+    num_actions: 8
+    dropout: 0.1
+    use_auxiliary_loss: true
+    max_sequence_length: 50
+    use_gradient_checkpointing: true
+  
+  # Policy configuration
+  policy:
+    name: "mixed_discrete_continuous_v1"
+    kwargs:
+      action_types: 4
+      size_distribution: "beta"
+
+# === STATE ENCODER CONFIGURATION ===
+state_encoder:
+  name: "transformer"
+  kwargs:
+    max_sequence_length: 50
+
+# === ENVIRONMENT CONFIGURATION ===
+env:
+  # Game configuration
+  stack: 1000
+  sb: 5
+  bb: 10
+  
+  # Betting configuration
+  bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]
+  
+  # Debug configuration
+  debug_step_table: false

@@ -1,0 +1,106 @@
+# AlphaHoldem Transformer Configuration
+# Configuration for transformer-based poker model
+
+# === TRAINING CONFIGURATION ===
+num_steps: 2000
+k_best_pool_size: 10
+min_elo_diff: 50.0
+min_step_diff: 300
+k_factor: 4.0
+checkpoint_interval: 50
+eval_interval: 100
+checkpoint_dir: "checkpoints-transformer"
+
+# === DEVICE CONFIGURATION ===
+device: mps
+
+# === ENVIRONMENT CONFIGURATION ===
+use_tensor_env: true
+num_envs: 512
+
+# === WANDB CONFIGURATION ===
+use_wandb: true
+wandb_project: "poker-transformer"
+wandb_name: null
+wandb_tags: ["transformer", "poker", "ppo"]
+
+# === RESUME CONFIGURATION ===
+resume_from: null
+
+# === RANDOM SEED ===
+seed: 42
+
+# === ADDITIONAL CONFIGURATION ===
+config: null
+wandb_run_id: null
+economize_checkpoints: false
+
+# === TRAINING HYPERPARAMETERS ===
+train:
+  learning_rate: 5e-5  # Lower LR for transformer
+  batch_size: 512      # Smaller batch size for transformer
+  num_epochs: 4
+  replay_buffer_batches: 4
+  max_trajectory_length: 20
+  
+  # PPO hyperparameters
+  ppo_eps: 0.2
+  ppo_delta1: 3.0
+  gae_lambda: 0.95
+  gamma: 0.999
+  entropy_coef: 0.01
+  value_coef: 0.05
+  grad_clip: 1.0
+  
+  # Value loss configuration
+  value_loss_type: "huber"
+  huber_delta: 1.0
+  
+  # Mixed precision configuration
+  use_mixed_precision: false
+  loss_scale: 128.0
+  
+  # Transformer-specific training parameters
+  auxiliary_loss_coef: 0.1  # Coefficient for hand range auxiliary loss
+  warmup_steps: 1000       # Learning rate warmup steps
+  weight_decay: 0.01       # Weight decay for regularization
+
+# === MODEL CONFIGURATION ===
+model:
+  name: "poker_transformer_v1"
+  kwargs:
+    d_model: 256
+    n_layers: 4
+    n_heads: 4
+    vocab_size: 80
+    num_actions: 8
+    dropout: 0.1
+    use_auxiliary_loss: true
+    max_sequence_length: 50
+    use_gradient_checkpointing: true
+  
+  # Policy configuration (transformer uses mixed discrete-continuous)
+  policy:
+    name: "mixed_discrete_continuous_v1"
+    kwargs:
+      action_types: 4  # fold, check/call, bet, raise
+      size_distribution: "beta"  # Beta distribution for bet sizing
+
+# === STATE ENCODER CONFIGURATION ===
+state_encoder:
+  name: "transformer"
+  kwargs:
+    max_sequence_length: 50
+
+# === ENVIRONMENT CONFIGURATION ===
+env:
+  # Game configuration
+  stack: 1000
+  sb: 5
+  bb: 10
+  
+  # Betting configuration
+  bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]
+  
+  # Debug configuration
+  debug_step_table: false
