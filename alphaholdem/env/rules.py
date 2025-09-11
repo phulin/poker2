@@ -66,15 +66,17 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     """
     N = ab_batch.size(0)
     P = ab_batch.size(1)
+    dtype = torch.long
     device = ab_batch.device
 
     # Sort ranks by count (descending), then by rank (descending)
-    rank_sum = ab_batch.sum(dim=2)  # [N, P, 13]
-    composite_key = rank_sum * 1000 + torch.arange(13, device=device)
-    top_ranks_indices = torch.argsort(
-        composite_key, dim=2, descending=True
-    )  # [N, P, 13]
-    top_ranks_values = torch.gather(rank_sum, 2, top_ranks_indices)  # [N, P, 13]
+    # Use topk instead of full argsort for better performance
+    rank_sum = ab_batch.sum(dim=2, dtype=dtype)  # [N, P, 13]
+    composite_key = (rank_sum << 8) | torch.arange(13, device=device, dtype=dtype)
+    top_ranks_values, top_ranks_indices = torch.topk(
+        composite_key, k=5, dim=2
+    )  # [N, P, 5] - only need top 5 for all hand types
+    top_ranks_values = top_ranks_values >> 8  # Convert back to actual counts
 
     # == 1. STRAIGHT FLUSH ==
     # Stack to [N, P, 4, 13] and check each for straight flush using a convolution with [1, 1, 1, 1]
@@ -84,13 +86,17 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
         [ab_batch[..., 12:13], ab_batch], dim=-1
     )  # [N, P, 4, 14]
     conv_sf = unfold_conv1d_ones(ab_ext_straight, 5)  # [N, P, 4, 10]
-    sf_mask = (conv_sf == 5).any(dim=2)  # [N, P, 10]
-    sf_ranks_spread = torch.where(
-        sf_mask,
-        torch.arange(10, device=device).view(1, 1, 10).expand_as(sf_mask),
-        -1,
-    )  # [N, P, 10]
-    sf_ranks = sf_ranks_spread.max(dim=2).values.view(N, P, 1)  # [N, P, 1]
+    sf_win_max = torch.amax(
+        conv_sf, dim=2
+    )  # [N, P, 10] - max convolution values per window
+    sf_win_mask = sf_win_max == 5  # [N, P, 10] - which windows have straight flush
+    windows = torch.arange(10, device=device, dtype=dtype)  # [10] - window indices
+    sf_last = (sf_win_mask.to(windows.dtype) * windows).amax(
+        dim=2, keepdim=True
+    )  # [N, P, 1]
+    sf_ranks = torch.where(
+        sf_win_mask.any(dim=2, keepdim=True), sf_last, -1
+    )  # [N, P, 1]
 
     # == 2. FOUR OF A KIND ==
     has_quads_0 = (top_ranks_values[:, :, 0] >= 4).view(N, P, 1)
@@ -112,8 +118,10 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
 
     # == 4. FLUSH ==
     # Flush: sum along suit dimension (rank axis=2), check for >= 5
-    suit_sum = ab_batch.sum(dim=3)  # [N, P, 4]
-    flush_mask = (suit_sum >= 5).any(dim=2)  # [N, P]
+    suit_sum = ab_batch.sum(dim=3, dtype=dtype)  # [N, P, 4]
+    flush_mask = (
+        torch.amax(suit_sum, dim=2) >= 5
+    )  # [N, P] - use numeric amax instead of boolean any
     flush_suit = suit_sum.argmax(dim=2)  # [N, P]
     # ab_batch shape: [N, P, 4, 13]
     # flush_suit shape: [N, P]
@@ -135,9 +143,11 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
 
     # == 5. STRAIGHT ==
     # Straight: take rank presence, convolve like with straight-flush
-    rank_presence_straight = ab_ext_straight.sum(dim=2).clamp(0, 1)  # [N, P, 14]
+    rank_presence_straight = ab_ext_straight.sum(dim=2, dtype=dtype).clamp(
+        0, 1
+    )  # [N, P, 14]
     conv_straight = unfold_conv1d_ones(rank_presence_straight, 5)
-    straight_mask = (conv_straight == 5).any(dim=2)  # [N, P]
+    straight_mask = torch.amax(conv_straight, dim=2) == 5  # [N, P]
     straight_high = conv_straight.argmax(dim=2)  # [N, P]
     straight = torch.where(
         straight_mask,
