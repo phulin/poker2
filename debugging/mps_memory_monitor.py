@@ -241,7 +241,6 @@ def simulate_replay_buffer_memory():
         "log_probs",
         "rewards",
         "dones",
-        "chips_placed",
         "delta2",
         "delta3",
         "values",

@@ -559,13 +559,12 @@ class SelfPlayTrainer:
 
             # Take steps in all environments (tensor_env expects full-size tensors)
             # NOTE: THIS CHANGES self.tensor_env.to_act!!
-            rewards, dones, _, placed_chips = self.tensor_env.step_bins(
+            rewards, dones, _ = self.tensor_env.step_bins(
                 action_values, legal_bins_amounts, legal_bins_mask
             )
 
             active_rewards = rewards[active_indices]
             active_dones = dones[active_indices]
-            active_placed_chips = placed_chips[active_indices]
 
             # Store transitions for our actions (don't add to replay buffer yet)
             if active_we_act.numel() > 0:
@@ -597,7 +596,6 @@ class SelfPlayTrainer:
                 our_rewards_tensor = active_rewards[active_we_act]
                 our_dones_tensor = active_dones[active_we_act]
                 our_legal_masks_tensor = active_legal_masks[active_we_act]
-                our_placed_chips_tensor = active_placed_chips[active_we_act]
 
                 # Add transitions immediately using vectorized operations
                 if add_to_replay_buffer:
@@ -609,7 +607,6 @@ class SelfPlayTrainer:
                         rewards=our_rewards_tensor,
                         dones=our_dones_tensor,
                         legal_masks=our_legal_masks_tensor.bool(),
-                        chips_placed=our_placed_chips_tensor,
                         delta2=our_delta2_tensor,
                         delta3=our_delta3_tensor,
                         values=our_values_tensor,

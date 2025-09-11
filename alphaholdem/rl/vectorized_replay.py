@@ -72,9 +72,6 @@ class VectorizedReplayBuffer:
             dtype=torch.bool,  # Changed to bool
             device=device,
         )
-        self.chips_placed = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.long, device=device
-        )
         self.delta2 = torch.zeros(
             capacity, max_trajectory_length, dtype=float_dtype, device=device
         )
@@ -141,7 +138,6 @@ class VectorizedReplayBuffer:
         self.rewards[clear_indices] = 0
         self.dones[clear_indices] = False
         self.legal_masks[clear_indices] = False
-        self.chips_placed[clear_indices] = 0
         self.delta2[clear_indices] = 0
         self.delta3[clear_indices] = 0
         self.values[clear_indices] = 0
@@ -212,7 +208,6 @@ class VectorizedReplayBuffer:
             "rewards",
             "dones",
             "legal_masks",
-            "chips_placed",
             "delta2",
             "delta3",
             "values",
@@ -246,7 +241,6 @@ class VectorizedReplayBuffer:
         rewards: torch.Tensor,
         dones: torch.Tensor,
         legal_masks: torch.Tensor,  # [batch_size, legal_mask_dim] - bool
-        chips_placed: torch.Tensor,
         delta2: torch.Tensor,
         delta3: torch.Tensor,
         values: torch.Tensor,
@@ -263,7 +257,6 @@ class VectorizedReplayBuffer:
             rewards: [batch_size]
             dones: [batch_size]
             legal_masks: [batch_size, legal_mask_dim] - bool dtype
-            chips_placed: [batch_size]
             delta2: [batch_size]
             delta3: [batch_size]
             values: [batch_size]
@@ -295,7 +288,6 @@ class VectorizedReplayBuffer:
         self.rewards[buffer_trajectory_indices, step_positions] = rewards
         self.dones[buffer_trajectory_indices, step_positions] = dones
         self.legal_masks[buffer_trajectory_indices, step_positions] = legal_masks
-        self.chips_placed[buffer_trajectory_indices, step_positions] = chips_placed
         self.delta2[buffer_trajectory_indices, step_positions] = delta2
         self.delta3[buffer_trajectory_indices, step_positions] = delta3
         self.values[buffer_trajectory_indices, step_positions] = values
@@ -608,9 +600,6 @@ class VectorizedReplayBuffer:
                     ),
                     dones=torch.tensor([t.done], dtype=torch.bool, device=self.device),
                     legal_masks=t.legal_mask.unsqueeze(0).bool(),
-                    chips_placed=torch.tensor(
-                        [t.chips_placed], dtype=torch.long, device=self.device
-                    ),
                     delta2=torch.tensor(
                         [t.delta2], dtype=self.float_dtype, device=self.device
                     ),

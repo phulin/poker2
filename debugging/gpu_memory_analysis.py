@@ -93,7 +93,6 @@ def analyze_replay_buffer_memory(buffer) -> Dict[str, Any]:
         "rewards",
         "dones",
         "legal_masks",
-        "chips_placed",
         "delta2",
         "delta3",
         "values",
@@ -128,7 +127,6 @@ def analyze_environment_memory(env) -> Dict[str, Any]:
     tensor_attrs = [
         "stacks",
         "pot",
-        "chips_placed",
         "actions_this_round",
         "street",
         "winner",

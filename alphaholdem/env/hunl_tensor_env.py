@@ -467,12 +467,6 @@ class HUNLTensorEnv:
         self.actions_this_round[acting] += 1
         self.acted_since_reset[acting] = True
 
-        # Chips placed by the actor in this step (after updates)
-        placed_chips = (
-            self.committed.gather(1, self.to_act.view(N, 1)).squeeze(1)
-            - committed_before
-        )
-
         # Round closure: equal committed (or 1 player all-in) and both acted
         equal_committed = self.committed[:, 0] == self.committed[:, 1]
         all_in_committed = (
@@ -588,7 +582,7 @@ class HUNLTensorEnv:
                 after_betting_committed,
             )
 
-        return rewards, self.done, self.to_act, placed_chips
+        return rewards, self.done, self.to_act
 
     def _print_debug_table(
         self,

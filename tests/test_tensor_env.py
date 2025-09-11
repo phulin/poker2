@@ -61,7 +61,7 @@ def test_n1_round_closure_and_deal():
     for _ in range(2):
         mask = env.legal_bins_mask()
         assert mask[0, 1]
-        r, d, _, _ = env.step_bins(torch.tensor([1]))
+        r, d, _ = env.step_bins(torch.tensor([1]))
         assert not d.item()
     # After two actions with equal committed, street should be flop
     assert env.street.item() in (1, 2, 3)  # progressed
@@ -91,7 +91,7 @@ def test_n1_allin_and_auto_runout_rewards():
         _, mask = env.legal_bins_amounts_and_mask()
         # prefer all-in when legal
         action = 7 if mask[0, 7] else 1
-        r, d, _, _ = env.step_bins(torch.tensor([action]))
+        r, d, _ = env.step_bins(torch.tensor([action]))
         steps += 1
     assert env.done.item() is True
     # Reward must be finite and scaled
@@ -150,7 +150,7 @@ def test_n2_independence_and_mixed_actions():
     mask = env.legal_bins_mask()
     a0 = 1
     a1 = 7 if mask[1, 7] else 1
-    r, d, _, _ = env.step_bins(torch.tensor([a0, a1]))
+    r, d, _ = env.step_bins(torch.tensor([a0, a1]))
     # Ensure states progressed independently
     assert env.actions_this_round[0] >= 1
     assert env.actions_this_round[1] >= 1
@@ -163,13 +163,13 @@ def test_n2_reset_done_partial():
     env = _make_env(N=2, seed=42)
     # Force env0 to all-in, env1 to check once
     mask = env.legal_bins_mask()
-    r, d, _, _ = env.step_bins(torch.tensor([7 if mask[0, 7] else 1, 1]))
+    r, d, _ = env.step_bins(torch.tensor([7 if mask[0, 7] else 1, 1]))
     # Advance until any done
     steps = 0
     while (~env.done).any() and steps < 50:
         mask = env.legal_bins_mask()
         a = torch.where(mask[:, 7], torch.tensor(7), torch.tensor(1))
-        r, d, _, _ = env.step_bins(a)
+        r, d, _ = env.step_bins(a)
         steps += 1
     # Reset only done envs
     before_done = env.done.clone()
@@ -197,7 +197,7 @@ def test_step_bins_negative_one_no_action():
     actions = torch.tensor(
         [1, -1, 1], device=env.device
     )  # check/call for envs 0,2, no action for env 1
-    r, d, _, _ = env.step_bins(actions)
+    r, d, _ = env.step_bins(actions)
 
     # Environment 1 (index 1) should not have been stepped
     assert env.actions_this_round[1] == initial_actions_this_round[1]
@@ -219,7 +219,7 @@ def test_step_bins_negative_one_no_action():
     initial_to_act_2 = env2.to_act.clone()
 
     actions_all_negative = torch.tensor([-1, -1], device=env2.device)
-    r2, d2, _, _ = env2.step_bins(actions_all_negative)
+    r2, d2, _ = env2.step_bins(actions_all_negative)
 
     # No environments should have been stepped
     assert torch.equal(env2.actions_this_round, initial_actions_2)
@@ -347,7 +347,7 @@ def test_reward_assignment_perspective():
     for _ in range(8):  # Enough steps to reach showdown
         mask = env1.legal_bins_mask()
         if mask[0, 1]:  # Can check/call
-            r, d, _, _ = env1.step_bins(torch.tensor([1], device=env1.device))
+            r, d, _ = env1.step_bins(torch.tensor([1], device=env1.device))
             if d.item():
                 break
 
@@ -386,7 +386,7 @@ def test_reward_assignment_perspective():
             else:
                 actions.append(-1)
 
-        r, d, _, _ = env2.step_bins(torch.tensor(actions, device=env2.device))
+        r, d, _ = env2.step_bins(torch.tensor(actions, device=env2.device))
 
         if d.all():
             break
@@ -426,7 +426,7 @@ def test_reward_assignment_perspective():
 
     mask = env3.legal_bins_mask()
     if mask[0, 0]:  # Player 0 can fold
-        p0_fold_reward, _, _, _ = env3.step_bins(torch.tensor([0], device=env3.device))
+        p0_fold_reward, _, _ = env3.step_bins(torch.tensor([0], device=env3.device))
         print(f"Player 0 fold reward: {p0_fold_reward[0].item():.4f}")
         # Player 0 folded, so Player 1 wins - reward should be negative from Player 0's perspective
         assert (
@@ -448,9 +448,7 @@ def test_reward_assignment_perspective():
     for step in range(5):
         mask = env4.legal_bins_mask()
         if env4.to_act[0].item() == 1 and mask[0, 0]:  # Player 1 can fold
-            p1_fold_reward, _, _, _ = env4.step_bins(
-                torch.tensor([0], device=env4.device)
-            )
+            p1_fold_reward, _, _ = env4.step_bins(torch.tensor([0], device=env4.device))
             print(f"Player 1 fold reward: {p1_fold_reward[0].item():.4f}")
             # Player 1 folded, so Player 0 wins - reward should be positive from Player 0's perspective
             # ISSUE: Currently this gives 0.0 instead of positive reward
@@ -499,7 +497,7 @@ def test_reward_calculation_consistency():
         if step == 0:
             last_acting_players = [env.to_act[i].item() for i in range(4)]
 
-        r, d, _, _ = env.step_bins(torch.tensor(actions))
+        r, d, _ = env.step_bins(torch.tensor(actions))
 
         if d.all():
             break
@@ -542,7 +540,7 @@ def test_fold_reward_assignment():
     # Test 1: Player 0 folds in env 0 (should get negative reward)
     mask = env.legal_bins_mask()
     if mask[0, 0]:  # Can fold
-        r, d, _, _ = env.step_bins(
+        r, d, _ = env.step_bins(
             torch.tensor([0, -1])
         )  # Player 0 folds in env 0, no action in env 1
         assert (
@@ -559,7 +557,7 @@ def test_fold_reward_assignment():
     for _ in range(3):  # Try a few steps to get player 1 to act
         mask = env.legal_bins_mask()
         if env.to_act[0].item() == 1 and mask[0, 0]:  # Player 1 can fold in env 0
-            r, d, _, _ = env.step_bins(
+            r, d, _ = env.step_bins(
                 torch.tensor([0, -1])
             )  # Player 1 folds in env 0, no action in env 1
             assert (

@@ -84,7 +84,6 @@ def analyze_trainer_memory(trainer):
         ("log_probs", trainer.replay_buffer.log_probs),
         ("rewards", trainer.replay_buffer.rewards),
         ("dones", trainer.replay_buffer.dones),
-        ("chips_placed", trainer.replay_buffer.chips_placed),
         ("delta2", trainer.replay_buffer.delta2),
         ("delta3", trainer.replay_buffer.delta3),
         ("values", trainer.replay_buffer.values),
