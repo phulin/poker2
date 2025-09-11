@@ -1,0 +1,240 @@
+"""Custom attention layers with poker-specific biases."""
+
+from __future__ import annotations
+
+from typing import Optional, Tuple
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class PokerAttention(nn.Module):
+    """Multi-head attention with poker-specific biases.
+
+    Incorporates card relationship biases (rank adjacency, suit matching)
+    and positional biases for poker-specific patterns.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        dropout: float = 0.1,
+        use_poker_biases: bool = True,
+    ):
+        super().__init__()
+        assert d_model % n_heads == 0
+
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+        self.use_poker_biases = use_poker_biases
+
+        # Linear projections
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+        self.w_o = nn.Linear(d_model, d_model)
+
+        self.dropout = nn.Dropout(dropout)
+
+        # Poker-specific biases
+        if use_poker_biases:
+            self.rank_bias = nn.Parameter(torch.zeros(13, 13))
+            self.suit_bias = nn.Parameter(torch.zeros(4, 4))
+            self.position_bias = nn.Parameter(torch.zeros(50, 50))  # Max seq len
+            self._init_poker_biases()
+
+    def _init_poker_biases(self):
+        """Initialize poker-specific attention biases."""
+        with torch.no_grad():
+            # Rank adjacency bias (for straights)
+            for i in range(13):
+                for j in range(13):
+                    if abs(i - j) == 1:  # Adjacent ranks
+                        self.rank_bias[i, j] = 0.1
+                    elif i == j:  # Same rank
+                        self.rank_bias[i, j] = 0.2
+
+            # Suit matching bias (for flushes)
+            for i in range(4):
+                for j in range(4):
+                    if i == j:  # Same suit
+                        self.suit_bias[i, j] = 0.3
+
+            # Position bias (temporal relationships)
+            for i in range(50):
+                for j in range(50):
+                    if abs(i - j) <= 2:  # Close positions
+                        self.position_bias[i, j] = 0.1
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        card_indices: Optional[torch.Tensor] = None,
+        position_indices: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass with poker-specific biases.
+
+        Args:
+            query: Query tensor [batch_size, seq_len, d_model]
+            key: Key tensor [batch_size, seq_len, d_model]
+            value: Value tensor [batch_size, seq_len, d_model]
+            mask: Attention mask [batch_size, seq_len, seq_len]
+            card_indices: Card indices for poker biases [batch_size, seq_len]
+            position_indices: Position indices for poker biases [batch_size, seq_len]
+
+        Returns:
+            Tuple of (output, attention_weights)
+        """
+        batch_size, seq_len, d_model = query.shape
+
+        # Linear projections
+        Q = (
+            self.w_q(query)
+            .view(batch_size, seq_len, self.n_heads, self.d_k)
+            .transpose(1, 2)
+        )
+        K = (
+            self.w_k(key)
+            .view(batch_size, seq_len, self.n_heads, self.d_k)
+            .transpose(1, 2)
+        )
+        V = (
+            self.w_v(value)
+            .view(batch_size, seq_len, self.n_heads, self.d_k)
+            .transpose(1, 2)
+        )
+
+        # Compute attention scores
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.d_k**0.5)
+
+        # Add poker-specific biases
+        if self.use_poker_biases and card_indices is not None:
+            poker_bias = self._compute_poker_bias(card_indices, position_indices)
+            scores = scores + poker_bias.unsqueeze(1)  # Add to all heads
+
+        # Apply mask
+        if mask is not None:
+            scores = scores.masked_fill(mask.unsqueeze(1) == 0, -1e9)
+
+        # Softmax and dropout
+        attention_weights = F.softmax(scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+
+        # Apply attention to values
+        context = torch.matmul(attention_weights, V)
+
+        # Reshape and project output
+        context = (
+            context.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        )
+        output = self.w_o(context)
+
+        return output, attention_weights
+
+    def _compute_poker_bias(
+        self,
+        card_indices: torch.Tensor,
+        position_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute poker-specific attention biases.
+
+        Args:
+            card_indices: Card indices [batch_size, seq_len]
+            position_indices: Position indices [batch_size, seq_len]
+
+        Returns:
+            Bias tensor [batch_size, seq_len, seq_len]
+        """
+        batch_size, seq_len = card_indices.shape
+        device = card_indices.device
+
+        # Initialize bias tensor
+        bias = torch.zeros(batch_size, seq_len, seq_len, device=device)
+
+        # Add rank-based biases
+        for i in range(seq_len):
+            for j in range(seq_len):
+                card_i = card_indices[:, i]  # [batch_size]
+                card_j = card_indices[:, j]  # [batch_size]
+
+                # Only apply bias for valid card indices (not padding)
+                valid_mask = (card_i >= 0) & (card_j >= 0)
+                if valid_mask.any():
+                    rank_i = card_i[valid_mask] % 13
+                    rank_j = card_j[valid_mask] % 13
+                    suit_i = card_i[valid_mask] // 13
+                    suit_j = card_j[valid_mask] // 13
+
+                    # Rank bias
+                    rank_bias = self.rank_bias[rank_i, rank_j]
+                    bias[valid_mask, i, j] += rank_bias
+
+                    # Suit bias
+                    suit_bias = self.suit_bias[suit_i, suit_j]
+                    bias[valid_mask, i, j] += suit_bias
+
+        # Add position-based biases
+        if position_indices is not None:
+            for i in range(seq_len):
+                for j in range(seq_len):
+                    pos_i = position_indices[:, i]
+                    pos_j = position_indices[:, j]
+
+                    # Only apply bias for valid positions
+                    valid_mask = (pos_i >= 0) & (pos_j >= 0)
+                    if valid_mask.any():
+                        pos_bias = self.position_bias[
+                            pos_i[valid_mask], pos_j[valid_mask]
+                        ]
+                        bias[valid_mask, i, j] += pos_bias
+
+        return bias
+
+
+class PokerTransformerEncoderLayer(nn.Module):
+    """Transformer encoder layer with poker-specific attention."""
+
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        dropout: float = 0.1,
+        use_poker_biases: bool = True,
+    ):
+        super().__init__()
+        self.self_attn = PokerAttention(d_model, n_heads, dropout, use_poker_biases)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model),
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        src: torch.Tensor,
+        src_mask: Optional[torch.Tensor] = None,
+        card_indices: Optional[torch.Tensor] = None,
+        position_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forward pass with poker-specific attention."""
+        # Self-attention with poker biases
+        attn_output, _ = self.self_attn(
+            src, src, src, src_mask, card_indices, position_indices
+        )
+        src = self.norm1(src + self.dropout(attn_output))
+
+        # Feed-forward
+        ff_output = self.feed_forward(src)
+        src = self.norm2(src + self.dropout(ff_output))
+
+        return src

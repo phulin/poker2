@@ -53,62 +53,6 @@ class PokerTokenizer:
             "bet_to_call": 7,
         }
 
-    def tokenize_state(
-        self, tensor_env: HUNLTensorEnv, env_idx: int, player: int
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Convert game state to token sequence.
-
-        Args:
-            tensor_env: HUNLTensorEnv instance
-            env_idx: Environment index
-            player: Player index (0 or 1)
-
-        Returns:
-            Tuple of (token_ids, attention_mask)
-        """
-        tokens = []
-
-        # Add CLS token
-        tokens.append(self.special_tokens["CLS"])
-
-        # Add visible cards
-        visible_cards = tensor_env.get_visible_card_indices(env_idx, player)
-        for card_idx in visible_cards:
-            token_id = self.card_offset + card_idx.item()
-            tokens.append(token_id)
-
-        # Add SEP token between cards and actions
-        tokens.append(self.special_tokens["SEP"])
-
-        # Add action history
-        action_tokens = self._tokenize_action_history(tensor_env, env_idx)
-        tokens.extend(action_tokens)
-
-        # Add SEP token between actions and context
-        tokens.append(self.special_tokens["SEP"])
-
-        # Add context tokens
-        context_tokens = self._tokenize_context(tensor_env, env_idx, player)
-        tokens.extend(context_tokens)
-
-        # Pad to max length
-        while len(tokens) < self.max_sequence_length:
-            tokens.append(self.special_tokens["PAD"])
-
-        # Truncate if too long
-        tokens = tokens[: self.max_sequence_length]
-
-        # Create attention mask (1 = attend, 0 = ignore)
-        attention_mask = torch.ones(len(tokens), dtype=torch.bool)
-        # Mask out PAD tokens
-        pad_positions = [
-            i for i, token in enumerate(tokens) if token == self.special_tokens["PAD"]
-        ]
-        for pos in pad_positions:
-            attention_mask[pos] = False
-
-        return torch.tensor(tokens, dtype=torch.long), attention_mask
-
     def _tokenize_action_history(
         self, tensor_env: HUNLTensorEnv, env_idx: int
     ) -> List[int]:
@@ -148,6 +92,201 @@ class PokerTokenizer:
                             break  # Only one player acts per slot
 
         return tokens
+
+    def tokenize_state_structured(
+        self, tensor_env: HUNLTensorEnv, env_idx: int, player: int
+    ) -> Dict[str, torch.Tensor]:
+        """Convert game state to structured embedding components.
+
+        Args:
+            tensor_env: HUNLTensorEnv instance
+            env_idx: Environment index
+            player: Player index (0 or 1)
+
+        Returns:
+            Dictionary containing structured embedding components
+        """
+        seq_len = self.max_sequence_length
+
+        # Initialize tensors for all components
+        card_indices = torch.full((seq_len,), -1, dtype=torch.long)  # -1 for padding
+        card_stages = torch.zeros(seq_len, dtype=torch.long)
+        card_visibility = torch.zeros(seq_len, dtype=torch.long)
+        card_order = torch.zeros(seq_len, dtype=torch.long)
+
+        action_actors = torch.zeros(seq_len, dtype=torch.long)
+        action_types = torch.zeros(seq_len, dtype=torch.long)
+        action_streets = torch.zeros(seq_len, dtype=torch.long)
+        action_size_bins = torch.zeros(seq_len, dtype=torch.long)
+        action_size_features = torch.zeros(seq_len, 3, dtype=torch.float)
+
+        context_pot_sizes = torch.zeros(seq_len, 1, dtype=torch.float)
+        context_stack_sizes = torch.zeros(seq_len, 2, dtype=torch.float)
+        context_positions = torch.zeros(seq_len, dtype=torch.long)
+        context_street_context = torch.zeros(seq_len, 4, dtype=torch.float)
+
+        pos = 0
+
+        # Add CLS token (special token at position 0)
+        pos += 1
+
+        # Add visible cards
+        visible_cards = tensor_env.get_visible_card_indices(env_idx, player)
+        for i, card_idx in enumerate(visible_cards):
+            if pos >= seq_len:
+                break
+            card_indices[pos] = card_idx.item()
+            card_stages[pos] = self._get_card_stage(
+                card_idx.item(), tensor_env, env_idx
+            )
+            card_visibility[pos] = self._get_card_visibility(
+                card_idx.item(), tensor_env, env_idx, player
+            )
+            card_order[pos] = i
+            pos += 1
+
+        # Add action history
+        action_pos = pos
+        action_tokens = self._tokenize_action_history_structured(tensor_env, env_idx)
+        for i, action_data in enumerate(action_tokens):
+            if pos >= seq_len:
+                break
+            action_actors[pos] = action_data["actor"]
+            action_types[pos] = action_data["action_type"]
+            action_streets[pos] = action_data["street"]
+            action_size_bins[pos] = action_data["size_bin"]
+            action_size_features[pos] = torch.tensor(
+                action_data["size_features"], dtype=torch.float
+            )
+            pos += 1
+
+        # Add context information
+        context_data = self._tokenize_context_structured(tensor_env, env_idx, player)
+        context_pot_sizes[0] = torch.tensor(
+            [context_data["pot_size"]], dtype=torch.float
+        )
+        context_stack_sizes[0] = torch.tensor(
+            context_data["stack_sizes"], dtype=torch.float
+        )
+        context_positions[0] = context_data["position"]
+        context_street_context[0] = torch.tensor(
+            context_data["street_context"], dtype=torch.float
+        )
+
+        return {
+            "card_indices": card_indices,
+            "card_stages": card_stages,
+            "card_visibility": card_visibility,
+            "card_order": card_order,
+            "action_actors": action_actors,
+            "action_types": action_types,
+            "action_streets": action_streets,
+            "action_size_bins": action_size_bins,
+            "action_size_features": action_size_features,
+            "context_pot_sizes": context_pot_sizes,
+            "context_stack_sizes": context_stack_sizes,
+            "context_positions": context_positions,
+            "context_street_context": context_street_context,
+        }
+
+    def _get_card_stage(
+        self, card_idx: int, tensor_env: HUNLTensorEnv, env_idx: int
+    ) -> int:
+        """Get the stage (hole/flop/turn/river) for a card."""
+        # Check if it's a hole card
+        hole_cards = tensor_env.hole_indices[env_idx].flatten()
+        if card_idx in hole_cards:
+            return 0  # hole
+
+        # Check board cards
+        board_cards = tensor_env.board_indices[env_idx]
+        for i, board_card in enumerate(board_cards):
+            if board_card == card_idx:
+                return i + 1  # flop=1, turn=2, river=3
+
+        return 0  # default to hole
+
+    def _get_card_visibility(
+        self, card_idx: int, tensor_env: HUNLTensorEnv, env_idx: int, player: int
+    ) -> int:
+        """Get visibility type (self/opponent/public) for a card."""
+        # Check if it's a hole card
+        hole_cards = tensor_env.hole_indices[env_idx, player]
+        if card_idx in hole_cards:
+            return 0  # self
+
+        # Check opponent hole cards
+        opp_hole_cards = tensor_env.hole_indices[env_idx, 1 - player]
+        if card_idx in opp_hole_cards:
+            return 1  # opponent
+
+        # Must be a board card
+        return 2  # public
+
+    def _tokenize_action_history_structured(
+        self, tensor_env: HUNLTensorEnv, env_idx: int
+    ) -> List[Dict[str, Any]]:
+        """Tokenize action history into structured components."""
+        actions = []
+
+        # Get action history
+        action_history = tensor_env.get_action_history()[env_idx]  # [4, 6, 4, num_bins]
+
+        # Process each street
+        for street_idx in range(4):
+            street_actions = action_history[street_idx]  # [6, 4, num_bins]
+
+            for slot_idx in range(6):
+                slot_actions = street_actions[slot_idx]  # [4, num_bins]
+
+                # Check if there are any actions in this slot (sum row)
+                if slot_actions[2].sum() > 0:  # row 2 is the sum
+                    # Find which player acted and what action
+                    for player_idx in range(2):  # Only check player rows (0, 1)
+                        player_actions = slot_actions[player_idx]  # [num_bins]
+                        if player_actions.sum() > 0:
+                            # Find the action bin
+                            action_bin = player_actions.argmax().item()
+
+                            # Create structured action data
+                            action_data = {
+                                "actor": player_idx,
+                                "action_type": action_bin,
+                                "street": street_idx,
+                                "size_bin": action_bin,  # Simplified for now
+                                "size_features": [0.0, 0.0, 0.0],  # Placeholder
+                            }
+                            actions.append(action_data)
+                            break  # Only one player acts per slot
+
+        return actions
+
+    def _tokenize_context_structured(
+        self, tensor_env: HUNLTensorEnv, env_idx: int, player: int
+    ) -> Dict[str, Any]:
+        """Tokenize context information into structured components."""
+        # Pot size (normalized)
+        pot_size = tensor_env.pot[env_idx].item() / 1000.0  # Normalize
+
+        # Stack sizes (normalized)
+        stack_p0 = tensor_env.stacks[env_idx, 0].item() / 1000.0
+        stack_p1 = tensor_env.stacks[env_idx, 1].item() / 1000.0
+
+        # Position
+        position = player
+
+        # Street context
+        street = tensor_env.street[env_idx].item()
+        actions_round = tensor_env.actions_this_round[env_idx].item()
+        min_raise = tensor_env.min_raise[env_idx].item() / 1000.0
+        bet_to_call = 0.0  # Placeholder
+
+        return {
+            "pot_size": pot_size,
+            "stack_sizes": [stack_p0, stack_p1],
+            "position": position,
+            "street_context": [street, actions_round, min_raise, bet_to_call],
+        }
 
     def _tokenize_context(
         self, tensor_env: HUNLTensorEnv, env_idx: int, player: int

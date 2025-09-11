@@ -40,18 +40,20 @@ class CardEmbedding(nn.Module):
     def _init_biases(self):
         """Initialize attention biases for poker relationships."""
         # Rank adjacency bias (for straights)
-        for i in range(13):
-            for j in range(13):
-                if abs(i - j) == 1:  # Adjacent ranks
-                    self.rank_bias[i, j] = 0.1
-                elif i == j:  # Same rank
-                    self.rank_bias[i, j] = 0.2
+        with torch.no_grad():
+            for i in range(13):
+                for j in range(13):
+                    if abs(i - j) == 1:  # Adjacent ranks
+                        self.rank_bias[i, j] = 0.1
+                    elif i == j:  # Same rank
+                        self.rank_bias[i, j] = 0.2
 
         # Suit matching bias (for flushes)
-        for i in range(4):
-            for j in range(4):
-                if i == j:  # Same suit
-                    self.suit_bias[i, j] = 0.3
+        with torch.no_grad():
+            for i in range(4):
+                for j in range(4):
+                    if i == j:  # Same suit
+                        self.suit_bias[i, j] = 0.3
 
     def forward(
         self,

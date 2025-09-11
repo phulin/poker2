@@ -12,6 +12,7 @@ from ...core.registry import register_model
 from .embeddings import CardEmbedding, ActionEmbedding, ContextEmbedding
 from .heads import TransformerPolicyHead, TransformerValueHead, HandRangeHead
 from .tokenizer import PokerTokenizer
+from .attention import PokerTransformerEncoderLayer
 
 
 @register_model("poker_transformer_v1")
@@ -46,23 +47,29 @@ class PokerTransformerV1(nn.Module, Model):
         self.max_sequence_length = max_sequence_length
         self.use_gradient_checkpointing = use_gradient_checkpointing
 
-        # Tokenizer for converting states to token sequences
+        # Tokenizer for converting states to structured embeddings
         self.tokenizer = PokerTokenizer(max_sequence_length)
 
-        # Token embeddings
-        self.token_emb = nn.Embedding(vocab_size, d_model)
+        # Positional embeddings
         self.pos_emb = nn.Embedding(max_sequence_length, d_model)
 
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            batch_first=True,
-            norm_first=True,  # Pre-norm for stability
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, n_layers)
+        # Structured embeddings
+        self.card_embedding = CardEmbedding(d_model)
+        self.action_embedding = ActionEmbedding(d_model)
+        self.context_embedding = ContextEmbedding(d_model)
+
+        # Transformer encoder with poker-specific attention
+        encoder_layers = [
+            PokerTransformerEncoderLayer(
+                d_model=d_model,
+                n_heads=n_heads,
+                d_ff=d_model * 4,
+                dropout=dropout,
+                use_poker_biases=True,
+            )
+            for _ in range(n_layers)
+        ]
+        self.transformer = nn.ModuleList(encoder_layers)
 
         # Output heads
         self.policy_head = TransformerPolicyHead(d_model, num_actions)
@@ -79,8 +86,7 @@ class PokerTransformerV1(nn.Module, Model):
 
     def _init_weights(self):
         """Initialize model weights."""
-        # Initialize token embeddings
-        nn.init.normal_(self.token_emb.weight, mean=0, std=0.02)
+        # Initialize positional embeddings
         nn.init.normal_(self.pos_emb.weight, mean=0, std=0.02)
 
         # Initialize transformer layers
@@ -94,94 +100,135 @@ class PokerTransformerV1(nn.Module, Model):
                 nn.init.zeros_(module.bias)
 
     def forward(
-        self, token_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+        self,
+        # Structured embedding components
+        card_indices: torch.Tensor,
+        card_stages: torch.Tensor,
+        card_visibility: torch.Tensor,
+        card_order: torch.Tensor,
+        action_actors: torch.Tensor,
+        action_types: torch.Tensor,
+        action_streets: torch.Tensor,
+        action_size_bins: torch.Tensor,
+        action_size_features: torch.Tensor,
+        context_pot_sizes: torch.Tensor,
+        context_stack_sizes: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_street_context: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """Forward pass with token-based input.
+        """Forward pass with structured embeddings.
 
         Args:
-            token_ids: Token IDs tensor [batch_size, seq_len]
-            attention_mask: Attention mask tensor [batch_size, seq_len] (1=attend, 0=ignore)
+            card_indices: Card indices [batch_size, seq_len] (0-51)
+            card_stages: Stage indices [batch_size, seq_len] (0-3)
+            card_visibility: Visibility indices [batch_size, seq_len] (0-2)
+            card_order: Order indices [batch_size, seq_len] (0-4)
+            action_actors: Actor indices [batch_size, seq_len] (0-1)
+            action_types: Action type indices [batch_size, seq_len] (0-5)
+            action_streets: Street indices [batch_size, seq_len] (0-3)
+            action_size_bins: Size bin indices [batch_size, seq_len] (0-19)
+            action_size_features: Size features [batch_size, seq_len, 3]
+            context_pot_sizes: Pot sizes [batch_size, seq_len, 1]
+            context_stack_sizes: Stack sizes [batch_size, seq_len, 2]
+            context_positions: Position indices [batch_size, seq_len] (0-1)
+            context_street_context: Street context [batch_size, seq_len, 4]
 
         Returns:
             Dictionary containing model outputs
         """
-        return self._forward_tokens(token_ids, attention_mask)
-
-    def forward_legacy(
-        self, cards_tensor: torch.Tensor, actions_tensor: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Legacy forward pass for compatibility with existing training loop.
-
-        Args:
-            cards_tensor: Cards tensor (not used in transformer, kept for compatibility)
-            actions_tensor: Actions tensor (not used in transformer, kept for compatibility)
-
-        Returns:
-            Tuple of (logits, value) for compatibility with training loop
-        """
-        # For now, we'll use dummy token sequences since the training loop
-        # doesn't yet support transformer state encoding
-        batch_size = cards_tensor.shape[0]
-        seq_len = 20  # Fixed sequence length for now
-        device = cards_tensor.device
-
-        # Create dummy token sequences
-        token_ids = torch.randint(
-            0, self.vocab_size, (batch_size, seq_len), device=device
-        )
-        attention_mask = torch.ones(
-            batch_size, seq_len, dtype=torch.bool, device=device
+        return self._forward_structured_embeddings(
+            card_indices,
+            card_stages,
+            card_visibility,
+            card_order,
+            action_actors,
+            action_types,
+            action_streets,
+            action_size_bins,
+            action_size_features,
+            context_pot_sizes,
+            context_stack_sizes,
+            context_positions,
+            context_street_context,
         )
 
-        # Get model outputs
-        outputs = self._forward_tokens(token_ids, attention_mask)
-
-        # Return in the format expected by training loop
-        return outputs["policy_logits"], outputs["value"]
-
-    def _forward_tokens(
-        self, token_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    def _forward_structured_embeddings(
+        self,
+        card_indices: torch.Tensor,
+        card_stages: torch.Tensor,
+        card_visibility: torch.Tensor,
+        card_order: torch.Tensor,
+        action_actors: torch.Tensor,
+        action_types: torch.Tensor,
+        action_streets: torch.Tensor,
+        action_size_bins: torch.Tensor,
+        action_size_features: torch.Tensor,
+        context_pot_sizes: torch.Tensor,
+        context_stack_sizes: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_street_context: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """Internal forward pass with token inputs.
+        """Internal forward pass with structured embeddings.
 
         Args:
-            token_ids: Token IDs tensor [batch_size, seq_len]
-            attention_mask: Attention mask tensor [batch_size, seq_len]
+            All structured embedding components as described in forward()
 
         Returns:
             Dictionary containing model outputs
         """
-        batch_size, seq_len = token_ids.shape
+        batch_size, seq_len = card_indices.shape
 
         # Create positional IDs
-        pos_ids = torch.arange(seq_len, device=token_ids.device)
+        pos_ids = torch.arange(seq_len, device=card_indices.device)
+        position_indices = pos_ids.unsqueeze(0).expand(
+            batch_size, -1
+        )  # [batch_size, seq_len]
 
-        # Token embeddings + positional embeddings
-        token_embeddings = self.token_emb(token_ids)  # [batch, seq_len, d_model]
+        # Get structured embeddings
+        card_embeddings = self.card_embedding(
+            card_indices, card_stages, card_visibility, card_order
+        )
+        action_embeddings = self.action_embedding(
+            action_actors,
+            action_types,
+            action_streets,
+            action_size_bins,
+            action_size_features,
+        )
+        context_embeddings = self.context_embedding(
+            context_pot_sizes,
+            context_stack_sizes,
+            context_positions,
+            context_street_context,
+        )
+
+        # Combine embeddings (simple addition for now)
+        # In practice, you might want to use learned combination weights
+        x = card_embeddings + action_embeddings + context_embeddings
+
+        # Add positional embeddings
         pos_embeddings = self.pos_emb(pos_ids)  # [seq_len, d_model]
-
-        # Add positional embeddings to token embeddings
-        x = token_embeddings + pos_embeddings.unsqueeze(0)
+        x = x + pos_embeddings.unsqueeze(0)
         x = self.dropout(x)
 
-        # Create attention mask (True = ignore, False = attend)
-        if attention_mask is not None:
-            # Convert to transformer format: True = ignore
-            src_key_padding_mask = attention_mask == 0
-        else:
-            src_key_padding_mask = None
-
-        # Transformer encoding
+        # Transformer encoding with poker-specific attention
         if self.use_gradient_checkpointing and self.training:
             # Use gradient checkpointing for memory efficiency
-            def transformer_forward(x, mask):
-                return self.transformer(x, src_key_padding_mask=mask)
+            def transformer_forward(x):
+                for layer in self.transformer:
+                    x = layer(
+                        x, card_indices=card_indices, position_indices=position_indices
+                    )
+                return x
 
             x = torch.utils.checkpoint.checkpoint(
-                transformer_forward, x, src_key_padding_mask, use_reentrant=False
+                transformer_forward, x, use_reentrant=False
             )
         else:
-            x = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
+            for layer in self.transformer:
+                x = layer(
+                    x, card_indices=card_indices, position_indices=position_indices
+                )
 
         # Get CLS token representation (first token)
         cls_repr = x[:, 0]  # [batch_size, d_model]

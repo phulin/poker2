@@ -110,11 +110,14 @@ class SelfPlayTrainer:
             self.state_encoder = ModelFactory.create_state_encoder(
                 "transformer", self.device, max_sequence_length=max_seq_len
             )
+            # Always use structured embeddings for transformer models
+            self.use_structured_embeddings = True
         else:
             # Use CNN state encoder
             self.state_encoder = StateEncoder(
                 self.cards_encoder, self.actions_encoder, self.device
             )
+            self.use_structured_embeddings = False
 
         # Ensure bins align with model output size to avoid mask/logit mismatch
         if hasattr(self.model, "policy_head") and hasattr(
@@ -431,9 +434,28 @@ class SelfPlayTrainer:
             is_transformer = self.cfg.model.name.startswith("poker_transformer")
 
             if is_transformer:
-                active_token_ids = states["token_ids"][active_indices]
-                active_attention_masks = states["attention_masks"][active_indices]
+                # Structured embeddings
+                active_card_indices = states["card_indices"][active_indices]
+                active_card_stages = states["card_stages"][active_indices]
+                active_card_visibility = states["card_visibility"][active_indices]
+                active_card_order = states["card_order"][active_indices]
+                active_action_actors = states["action_actors"][active_indices]
+                active_action_types = states["action_types"][active_indices]
+                active_action_streets = states["action_streets"][active_indices]
+                active_action_size_bins = states["action_size_bins"][active_indices]
+                active_action_size_features = states["action_size_features"][
+                    active_indices
+                ]
+                active_context_pot_sizes = states["context_pot_sizes"][active_indices]
+                active_context_stack_sizes = states["context_stack_sizes"][
+                    active_indices
+                ]
+                active_context_positions = states["context_positions"][active_indices]
+                active_context_street_context = states["context_street_context"][
+                    active_indices
+                ]
             else:
+                # CNN mode
                 active_cards = states["cards"][active_indices]
                 active_actions = states["actions"][active_indices]
 
@@ -463,17 +485,62 @@ class SelfPlayTrainer:
                 # Get predictions from our model for our turns
                 if active_we_act.numel() > 0:
                     if is_transformer:
-                        # Transformer model
-                        our_token_ids = active_token_ids[active_we_act]
-                        our_attention_masks = active_attention_masks[active_we_act]
+                        # Structured transformer model
+                        our_card_indices = active_card_indices[active_we_act]
+                        our_card_stages = active_card_stages[active_we_act]
+                        our_card_visibility = active_card_visibility[active_we_act]
+                        our_card_order = active_card_order[active_we_act]
+                        our_action_actors = active_action_actors[active_we_act]
+                        our_action_types = active_action_types[active_we_act]
+                        our_action_streets = active_action_streets[active_we_act]
+                        our_action_size_bins = active_action_size_bins[active_we_act]
+                        our_action_size_features = active_action_size_features[
+                            active_we_act
+                        ]
+                        our_context_pot_sizes = active_context_pot_sizes[active_we_act]
+                        our_context_stack_sizes = active_context_stack_sizes[
+                            active_we_act
+                        ]
+                        our_context_positions = active_context_positions[active_we_act]
+                        our_context_street_context = active_context_street_context[
+                            active_we_act
+                        ]
 
                         if self.use_mixed_precision:
                             with torch.amp.autocast(
                                 self.device.type, dtype=torch.bfloat16
                             ):
-                                outputs = self.model(our_token_ids, our_attention_masks)
+                                outputs = self.model(
+                                    card_indices=our_card_indices,
+                                    card_stages=our_card_stages,
+                                    card_visibility=our_card_visibility,
+                                    card_order=our_card_order,
+                                    action_actors=our_action_actors,
+                                    action_types=our_action_types,
+                                    action_streets=our_action_streets,
+                                    action_size_bins=our_action_size_bins,
+                                    action_size_features=our_action_size_features,
+                                    context_pot_sizes=our_context_pot_sizes,
+                                    context_stack_sizes=our_context_stack_sizes,
+                                    context_positions=our_context_positions,
+                                    context_street_context=our_context_street_context,
+                                )
                         else:
-                            outputs = self.model(our_token_ids, our_attention_masks)
+                            outputs = self.model(
+                                card_indices=our_card_indices,
+                                card_stages=our_card_stages,
+                                card_visibility=our_card_visibility,
+                                card_order=our_card_order,
+                                action_actors=our_action_actors,
+                                action_types=our_action_types,
+                                action_streets=our_action_streets,
+                                action_size_bins=our_action_size_bins,
+                                action_size_features=our_action_size_features,
+                                context_pot_sizes=our_context_pot_sizes,
+                                context_stack_sizes=our_context_stack_sizes,
+                                context_positions=our_context_positions,
+                                context_street_context=our_context_street_context,
+                            )
 
                         our_logits = outputs["policy_logits"]
                         our_values = outputs["value"]
@@ -791,7 +858,7 @@ class SelfPlayTrainer:
 
         Returns:
             Dictionary with 'cards' and 'actions' tensors for CNN models,
-            or 'token_ids' and 'attention_masks' for transformer models
+            or structured embedding components for transformer models
         """
         is_transformer = self.cfg.model.name.startswith("poker_transformer")
         if is_transformer:

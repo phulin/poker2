@@ -33,32 +33,111 @@ class TransformerStateEncoder:
             player: Player index (0 or 1)
 
         Returns:
-            Dictionary containing:
-                - token_ids: Token sequences [num_envs, max_seq_len]
-                - attention_masks: Attention masks [num_envs, max_seq_len]
+            Dictionary containing structured embedding components
         """
         batch_size = num_envs
+        return self._encode_structured_states(tensor_env, batch_size, player)
 
-        # Initialize output tensors
-        token_ids = torch.zeros(
-            batch_size, self.max_sequence_length, dtype=torch.long, device=self.device
+    def _encode_structured_states(
+        self, tensor_env: HUNLTensorEnv, batch_size: int, player: int
+    ) -> Dict[str, torch.Tensor]:
+        """Encode states using structured embeddings."""
+        seq_len = self.max_sequence_length
+
+        # Initialize all structured embedding tensors
+        card_indices = torch.full(
+            (batch_size, seq_len), -1, dtype=torch.long, device=self.device
         )
-        attention_masks = torch.zeros(
-            batch_size, self.max_sequence_length, dtype=torch.bool, device=self.device
+        card_stages = torch.zeros(
+            batch_size, seq_len, dtype=torch.long, device=self.device
+        )
+        card_visibility = torch.zeros(
+            batch_size, seq_len, dtype=torch.long, device=self.device
+        )
+        card_order = torch.zeros(
+            batch_size, seq_len, dtype=torch.long, device=self.device
+        )
+
+        action_actors = torch.zeros(
+            batch_size, seq_len, dtype=torch.long, device=self.device
+        )
+        action_types = torch.zeros(
+            batch_size, seq_len, dtype=torch.long, device=self.device
+        )
+        action_streets = torch.zeros(
+            batch_size, seq_len, dtype=torch.long, device=self.device
+        )
+        action_size_bins = torch.zeros(
+            batch_size, seq_len, dtype=torch.long, device=self.device
+        )
+        action_size_features = torch.zeros(
+            batch_size, seq_len, 3, dtype=torch.float, device=self.device
+        )
+
+        context_pot_sizes = torch.zeros(
+            batch_size, seq_len, 1, dtype=torch.float, device=self.device
+        )
+        context_stack_sizes = torch.zeros(
+            batch_size, seq_len, 2, dtype=torch.float, device=self.device
+        )
+        context_positions = torch.zeros(
+            batch_size, seq_len, dtype=torch.long, device=self.device
+        )
+        context_street_context = torch.zeros(
+            batch_size, seq_len, 4, dtype=torch.float, device=self.device
         )
 
         # Encode each environment
         for env_idx in range(batch_size):
-            tokens, mask = self.tokenizer.tokenize_state(tensor_env, env_idx, player)
+            structured_data = self.tokenizer.tokenize_state_structured(
+                tensor_env, env_idx, player
+            )
 
-            # Truncate if necessary
-            seq_len = min(len(tokens), self.max_sequence_length)
-            token_ids[env_idx, :seq_len] = tokens[:seq_len].to(self.device)
-            attention_masks[env_idx, :seq_len] = mask[:seq_len].to(self.device)
+            # Copy structured data to batch tensors
+            card_indices[env_idx] = structured_data["card_indices"].to(self.device)
+            card_stages[env_idx] = structured_data["card_stages"].to(self.device)
+            card_visibility[env_idx] = structured_data["card_visibility"].to(
+                self.device
+            )
+            card_order[env_idx] = structured_data["card_order"].to(self.device)
+
+            action_actors[env_idx] = structured_data["action_actors"].to(self.device)
+            action_types[env_idx] = structured_data["action_types"].to(self.device)
+            action_streets[env_idx] = structured_data["action_streets"].to(self.device)
+            action_size_bins[env_idx] = structured_data["action_size_bins"].to(
+                self.device
+            )
+            action_size_features[env_idx] = structured_data["action_size_features"].to(
+                self.device
+            )
+
+            context_pot_sizes[env_idx] = structured_data["context_pot_sizes"].to(
+                self.device
+            )
+            context_stack_sizes[env_idx] = structured_data["context_stack_sizes"].to(
+                self.device
+            )
+            context_positions[env_idx] = structured_data["context_positions"].to(
+                self.device
+            )
+            context_street_context[env_idx] = structured_data[
+                "context_street_context"
+            ].to(self.device)
 
         return {
-            "token_ids": token_ids,
-            "attention_masks": attention_masks,
+            "card_indices": card_indices,
+            "card_stages": card_stages,
+            "card_visibility": card_visibility,
+            "card_order": card_order,
+            "action_actors": action_actors,
+            "action_types": action_types,
+            "action_streets": action_streets,
+            "action_size_bins": action_size_bins,
+            "action_size_features": action_size_features,
+            "context_pot_sizes": context_pot_sizes,
+            "context_stack_sizes": context_stack_sizes,
+            "context_positions": context_positions,
+            "context_street_context": context_street_context,
         }
 
     def encode_single_state(
