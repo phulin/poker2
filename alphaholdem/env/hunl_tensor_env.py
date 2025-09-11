@@ -51,6 +51,8 @@ class HUNLTensorEnv:
     is_allin: torch.Tensor
     board_onehot: torch.Tensor
     hole_onehot: torch.Tensor
+    board_indices: torch.Tensor
+    hole_indices: torch.Tensor
     done: torch.Tensor
     winner: torch.Tensor
     # action history
@@ -119,14 +121,21 @@ class HUNLTensorEnv:
         self.has_folded = torch.zeros(self.N, 2, dtype=torch.bool, device=self.device)
         self.is_allin = torch.zeros(self.N, 2, dtype=torch.bool, device=self.device)
 
-        # Board and hole cards stored as one-hot [4,13]
+        # Board and hole cards stored as one-hot [4,13] and as indices [0-51]
         # board_onehot: [N, 5, 4, 13], hole_onehot: [N, 2 players, 2 cards, 4, 13]
+        # board_indices: [N, 5], hole_indices: [N, 2 players, 2 cards]
         self.board_onehot = torch.zeros(
             (self.N, 5, 4, 13), dtype=torch.bool, device=self.device
         )
         self.hole_onehot = torch.zeros(
             (self.N, 2, 2, 4, 13), dtype=torch.bool, device=self.device
         )
+        self.board_indices = torch.full(
+            (self.N, 5), -1, dtype=torch.long, device=self.device
+        )  # -1 means no card
+        self.hole_indices = torch.full(
+            (self.N, 2, 2), -1, dtype=torch.long, device=self.device
+        )  # -1 means no card
 
         # Chip tracking for delta calculations - single tensor for both players
         # chips_placed[env_idx, player] = total chips placed by that player in that environment
@@ -217,9 +226,11 @@ class HUNLTensorEnv:
         self.done[ids] = False
         self.winner[ids] = -1
 
-        # Zero out board_onehot and hole_onehot
+        # Zero out board_onehot, hole_onehot, and card indices
         self.board_onehot[ids, :, :, :] = False
         self.hole_onehot[ids, :, :, :, :] = False
+        self.board_indices[ids, :] = -1
+        self.hole_indices[ids, :, :] = -1
 
         # Set hole_onehot for specified environments using cached one-hot matrices
         # Direct assignment from cache: [num_reset, 4, 13] -> [num_reset, 2, 2, 4, 13]
@@ -227,6 +238,12 @@ class HUNLTensorEnv:
         self.hole_onehot[ids, 0, 1] = self.card_onehot_cache[_c0_2]
         self.hole_onehot[ids, 1, 0] = self.card_onehot_cache[_c1_1]
         self.hole_onehot[ids, 1, 1] = self.card_onehot_cache[_c1_2]
+
+        # Set hole card indices
+        self.hole_indices[ids, 0, 0] = _c0_1
+        self.hole_indices[ids, 0, 1] = _c0_2
+        self.hole_indices[ids, 1, 0] = _c1_1
+        self.hole_indices[ids, 1, 1] = _c1_2
 
         # Reset history planes for specified environments
         self.action_history[ids].zero_()
@@ -521,6 +538,10 @@ class HUNLTensorEnv:
             self.board_onehot[flop_ids, 2] = self.card_onehot_cache[
                 self.deck[flop_ids, pos + 2]
             ]
+            # Set flop card indices
+            self.board_indices[flop_ids, 0] = self.deck[flop_ids, pos]
+            self.board_indices[flop_ids, 1] = self.deck[flop_ids, pos + 1]
+            self.board_indices[flop_ids, 2] = self.deck[flop_ids, pos + 2]
 
             # turn
             turn_mask = s == 1
@@ -529,6 +550,8 @@ class HUNLTensorEnv:
             c = self.deck[turn_ids, pos]
             self.deck_pos[turn_ids] = pos + 1
             self.board_onehot[turn_ids, 3] = self.card_onehot_cache[c]
+            # Set turn card index
+            self.board_indices[turn_ids, 3] = c
 
             # river
             river_mask = s == 2
@@ -538,6 +561,8 @@ class HUNLTensorEnv:
             self.deck_pos[river_ids] = pos + 1
             # Use cached one-hot matrix for river card
             self.board_onehot[river_ids, 4] = self.card_onehot_cache[c]
+            # Set river card index
+            self.board_indices[river_ids, 4] = c
 
             # showdown
             sd_mask = s == 3
@@ -697,6 +722,67 @@ class HUNLTensorEnv:
         return (
             f"     {p0_card1} {p0_card2} = {board_str} = {p1_card1} {p1_card2}       "
         )
+
+    def get_hole_card_indices(self, env_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Get hole card indices for both players in a specific environment.
+
+        Args:
+            env_idx: Environment index
+
+        Returns:
+            Tuple of (player_0_cards, player_1_cards) where each is [2] tensor of card indices
+        """
+        p0_cards = self.hole_indices[env_idx, 0]  # [2]
+        p1_cards = self.hole_indices[env_idx, 1]  # [2]
+        return p0_cards, p1_cards
+
+    def get_board_card_indices(self, env_idx: int) -> torch.Tensor:
+        """Get board card indices for a specific environment.
+
+        Args:
+            env_idx: Environment index
+
+        Returns:
+            Tensor of board card indices [5], with -1 for empty slots
+        """
+        return self.board_indices[env_idx]  # [5]
+
+    def get_visible_card_indices(self, env_idx: int, player: int) -> torch.Tensor:
+        """Get all visible card indices for a specific player in a specific environment.
+
+        Args:
+            env_idx: Environment index
+            player: Player index (0 or 1)
+
+        Returns:
+            Tensor of visible card indices, including hole cards and board cards
+        """
+        hole_cards = self.hole_indices[env_idx, player]  # [2]
+        board_cards = self.board_indices[env_idx]  # [5]
+
+        # Filter out -1 values (empty slots)
+        hole_visible = hole_cards[hole_cards >= 0]
+        board_visible = board_cards[board_cards >= 0]
+
+        return torch.cat([hole_visible, board_visible])
+
+    def get_all_card_indices(self, env_idx: int) -> torch.Tensor:
+        """Get all card indices (hole + board) for a specific environment.
+
+        Args:
+            env_idx: Environment index
+
+        Returns:
+            Tensor of all card indices, including hole cards and board cards
+        """
+        hole_cards = self.hole_indices[env_idx].flatten()  # [4]
+        board_cards = self.board_indices[env_idx]  # [5]
+
+        # Filter out -1 values (empty slots)
+        hole_visible = hole_cards[hole_cards >= 0]
+        board_visible = board_cards[board_cards >= 0]
+
+        return torch.cat([hole_visible, board_visible])
 
     def reset_done(self) -> None:
         """Reset only environments with done=True; keeps others unchanged."""
