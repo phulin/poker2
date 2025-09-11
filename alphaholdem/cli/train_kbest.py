@@ -14,8 +14,7 @@ from ..core.structured_config import Config
 from ..rl.self_play import SelfPlayTrainer
 
 # Import encoders and models to register them
-from ..encoding import cards_encoder, actions_encoder
-from ..models import siamese_convnet, heads
+from ..models import cnn, heads
 from ..utils.training_utils import (
     print_preflop_range_grid,
     print_training_stats,

@@ -18,8 +18,7 @@ from omegaconf import DictConfig
 
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.env.hunl_env import HUNLEnv
-from alphaholdem.encoding.cards_encoder import CardsPlanesV1
-from alphaholdem.encoding.actions_encoder import ActionsHUEncoderV1
+from alphaholdem.models.cnn import CardsPlanesV1, ActionsHUEncoderV1
 from alphaholdem.env import rules
 from alphaholdem.encoding.action_mapping import get_legal_mask, bin_to_action
 from alphaholdem.core.structured_config import Config

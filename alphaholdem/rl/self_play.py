@@ -17,11 +17,11 @@ import wandb
 from ..core.structured_config import Config
 from ..env.hunl_env import HUNLEnv
 from ..env.hunl_tensor_env import HUNLTensorEnv
-from ..encoding.cards_encoder import CardsPlanesV1
-from ..encoding.actions_encoder import ActionsHUEncoderV1
+from ..models.cnn import CardsPlanesV1, ActionsHUEncoderV1
 from ..encoding.action_mapping import bin_to_action, get_legal_mask
-from ..models.siamese_convnet import SiameseConvNetV1
-from ..models.heads import CategoricalPolicyV1
+from ..models.factory import ModelFactory
+from ..models.state_encoder import StateEncoder
+from ..models.cnn import SiameseConvNetV1
 from ..rl.replay import (
     Transition,
     Trajectory,
@@ -101,6 +101,11 @@ class SelfPlayTrainer:
         self.actions_encoder = ae
         self.model = model
         self.policy = policy
+
+        # Create state encoder
+        self.state_encoder = StateEncoder(
+            self.cards_encoder, self.actions_encoder, self.device
+        )
 
         # Ensure bins align with model output size to avoid mask/logit mismatch
         if hasattr(self.model, "policy_head") and hasattr(
@@ -258,13 +263,8 @@ class SelfPlayTrainer:
             current_player = state.to_act
 
             # Encode state for current player
-            cards = self.cards_encoder.encode_cards(
-                state, seat=current_player, device=self.device
-            )
-            actions_tensor = self.actions_encoder.encode_actions(
-                state,
-                seat=current_player,
-                device=self.device,
+            cards, actions_tensor = self.state_encoder.encode_single_state(
+                state, seat=current_player
             )
 
             # Get model prediction
@@ -465,9 +465,10 @@ class SelfPlayTrainer:
                 # trajectory if it were sampled anyway, since there is no decision of the
                 # actor to train. We could in the future train only the value function.
                 # NB that this will make our average reward look worse.
-                active_legal_masks[(active_who_acts == 1) & active_first_action, 0] = (
-                    False
-                )
+                if add_to_replay_buffer:
+                    active_legal_masks[
+                        (active_who_acts == 1) & active_first_action, 0
+                    ] = False
 
                 # Get predictions from opponent models for opponent turns
                 opp_env_groups: Tuple[torch.Tensor, ...] | None = None
@@ -701,45 +702,9 @@ class SelfPlayTrainer:
         Returns:
             Dictionary with 'cards' and 'actions' tensors
         """
-        batch_size = self.num_envs
-
-        # Vectorized card encoding - much faster than Python loops
-        hole_cards = self.tensor_env.hole_onehot[:, 0]  # [N, 2, 4, 13]
-        board_cards = self.tensor_env.board_onehot  # [N, 5, 4, 13]
-
-        # Initialize cards tensor as bool
-        cards = torch.zeros(batch_size, 6, 4, 13, dtype=torch.bool, device=self.device)
-
-        # Channel 0: hole cards (sum over 2 hole cards)
-        cards[:, 0] = hole_cards.any(dim=1)  # [N, 4, 13]
-
-        # Channel 1: flop cards (first 3 board cards)
-        cards[:, 1] = board_cards[:, :3].any(dim=1)  # [N, 4, 13]
-
-        # Channel 2: turn card (4th board card)
-        cards[:, 2] = board_cards[:, 3]  # [N, 4, 13]
-
-        # Channel 3: river card (5th board card)
-        cards[:, 3] = board_cards[:, 4]  # [N, 4, 13]
-
-        # Channel 4: public cards (all board cards)
-        cards[:, 4] = board_cards.any(dim=1)  # [N, 4, 13]
-
-        # Channel 5: all cards (hole + board)
-        cards[:, 5] = hole_cards.any(dim=1) | board_cards.any(dim=1)  # [N, 4, 13]
-
-        # Get action history directly from tensor environment
-        # Shape: [N, 4_streets, 6_slots, 4_players, num_bet_bins]
-        action_history = self.tensor_env.get_action_history()
-
-        # Reshape to match ActionsHUEncoderV1 format: [N, 24_channels, 4_players, num_bet_bins]
-        # Flatten streets and slots: [N, 4*6, 4, num_bet_bins] = [N, 24, 4, num_bet_bins]
-        actions = action_history.view(batch_size, 24, 4, self.num_bet_bins)
-
-        return {
-            "cards": cards,
-            "actions": actions,
-        }
+        return self.state_encoder.encode_tensor_states(
+            self.tensor_env, self.num_envs, self.num_bet_bins
+        )
 
     @profile
     def update_model(self) -> dict:
@@ -1192,7 +1157,7 @@ class SelfPlayTrainer:
         # Restore opponent pool from inline data if available; fallback to old separate file
         pool_data = checkpoint.get("opponent_pool")
         if pool_data is not None:
-            from ..models.siamese_convnet import SiameseConvNetV1
+            from ..models.cnn import SiameseConvNetV1
 
             self.opponent_pool.k = pool_data.get("k", self.opponent_pool.k)
             self.opponent_pool.min_elo_diff = pool_data.get(
@@ -1221,7 +1186,7 @@ class SelfPlayTrainer:
             # Backward-compatibility path: load separate pool file if present
             pool_path = path.replace(".pt", "_pool.pt")
             try:
-                from ..models.siamese_convnet import SiameseConvNetV1
+                from ..models.cnn import SiameseConvNetV1
 
                 self.opponent_pool.load_pool(pool_path, SiameseConvNetV1)
                 # Ensure snapshot models are on the correct device
@@ -1391,8 +1356,7 @@ class SelfPlayTrainer:
         )
 
         # Encode state
-        cards = self.cards_encoder.encode_cards(state, seat=seat)
-        actions_tensor = self.actions_encoder.encode_actions(state, seat=seat)
+        cards, actions_tensor = self.state_encoder.encode_single_state(state, seat=seat)
 
         # Move tensors to device
         cards = cards.to(self.device)

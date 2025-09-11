@@ -15,7 +15,7 @@ import torch.nn as nn
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from alphaholdem.models.siamese_convnet import SiameseConvNetV1
+from alphaholdem.models.cnn import SiameseConvNetV1
 
 
 def format_bytes(bytes_value: int) -> str:

@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Any, List, Optional
 import torch
 
-from ..core.interfaces import Encoder
-from ..core.registry import register_card_encoder
-from ..env import rules
-from ..core.structured_config import Config
+from ...core.interfaces import Encoder
+from ...core.registry import register_card_encoder
+from ...env import rules
+from ...core.structured_config import Config
 
 
 def _cards_to_planes(

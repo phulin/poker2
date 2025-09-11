@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import Any, List, Optional
 import torch
 
-from ..core.interfaces import Encoder
-from ..core.registry import register_action_encoder
-from ..env.types import GameState, Action
-from ..encoding.action_mapping import _action_to_bin_idx
-from ..core.structured_config import Config
+from ...core.interfaces import Encoder
+from ...core.registry import register_action_encoder
+from ...env.types import GameState, Action
+from ...encoding.action_mapping import _action_to_bin_idx
+from ...core.structured_config import Config
 
 
 @register_action_encoder("actions_hu_v1")

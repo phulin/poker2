@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import torch
 from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.encoding.cards_encoder import CardsPlanesV1
-from alphaholdem.encoding.actions_encoder import ActionsHUEncoderV1
-from alphaholdem.models.siamese_convnet import SiameseConvNetV1
+from alphaholdem.models.cnn import CardsPlanesV1, ActionsHUEncoderV1
+from alphaholdem.models.cnn import SiameseConvNetV1
 from alphaholdem.models.heads import CategoricalPolicyV1
 from alphaholdem.core.structured_config import (
     Config,

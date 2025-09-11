@@ -6,8 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
-from ..core.interfaces import Model
-from ..core.registry import register_model
+from ...core.interfaces import Model
+from ...core.registry import register_model
 
 
 def _resize_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:

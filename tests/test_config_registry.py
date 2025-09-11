@@ -35,8 +35,7 @@ def test_load_default_config_values():
 
 def test_registries_have_required_components():
     # Import modules to trigger registration
-    from alphaholdem.encoding import cards_encoder, actions_encoder
-    from alphaholdem.models import siamese_convnet, heads
+    from alphaholdem.models import cnn, heads
 
     # Names in default.yaml should be registered
     assert "cards_planes_v1" in registry.CARD_ENCODERS

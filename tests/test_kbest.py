@@ -16,7 +16,7 @@ sys.path.insert(0, str(project_root))
 
 from alphaholdem.rl.k_best_pool import KBestOpponentPool, AgentSnapshot
 from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.models.siamese_convnet import SiameseConvNetV1
+from alphaholdem.models.cnn import SiameseConvNetV1
 from alphaholdem.core.structured_config import (
     Config,
     TrainingConfig,

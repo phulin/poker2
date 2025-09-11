@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 from alphaholdem.rl.k_best_pool import KBestOpponentPool, AgentSnapshot
-from alphaholdem.models.siamese_convnet import SiameseConvNetV1
+from alphaholdem.models.cnn import SiameseConvNetV1
 
 
 def test_kbest_add_and_sample():

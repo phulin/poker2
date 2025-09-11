@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.encoding.cards_encoder import CardsPlanesV1
-from alphaholdem.encoding.actions_encoder import ActionsHUEncoderV1
+from alphaholdem.models.cnn import CardsPlanesV1, ActionsHUEncoderV1
 from alphaholdem.env.types import Action
 from alphaholdem.env.types import GameState, PlayerState
 

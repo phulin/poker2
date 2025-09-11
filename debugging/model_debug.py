@@ -14,8 +14,7 @@ import torch
 import torch.nn.functional as F
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.env.hunl_env import HUNLEnv
-from alphaholdem.encoding.cards_encoder import CardsPlanesV1
-from alphaholdem.encoding.actions_encoder import ActionsHUEncoderV1
+from alphaholdem.models.cnn import CardsPlanesV1, ActionsHUEncoderV1
 
 
 def debug_model_internals(trainer):
