@@ -16,7 +16,7 @@ device: cuda
 
 # === ENVIRONMENT CONFIGURATION ===
 use_tensor_env: true
-num_envs: 256  # Smaller batch for larger model
+num_envs: 1700
 
 # === WANDB CONFIGURATION ===
 use_wandb: true
@@ -37,8 +37,8 @@ economize_checkpoints: true
 
 # === TRAINING HYPERPARAMETERS ===
 train:
-  learning_rate: 0.00003  # Even lower LR for larger model
-  batch_size: 256      # Smaller batch size for larger model
+  learning_rate: 3e-4
+  batch_size: 3000
   num_epochs: 4
   replay_buffer_batches: 4
   max_trajectory_length: 20
@@ -100,3 +100,5 @@ env:
   
   # Debug configuration
   debug_step_table: false
+
+  flop_showdown: false
