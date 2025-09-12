@@ -60,12 +60,15 @@ class ModelFactory:
         return PokerTransformerV1(**config)
 
     @staticmethod
-    def create_state_encoder(encoder_type: str, device: torch.device, **kwargs):
+    def create_state_encoder(
+        encoder_type: str, device: torch.device, tensor_env=None, **kwargs
+    ):
         """Create state encoder based on type.
 
         Args:
             encoder_type: Type of encoder ('cnn' or 'transformer')
             device: Device to create encoder on
+            tensor_env: Tensor environment (required for transformer)
             **kwargs: Additional arguments for encoder creation
 
         Returns:
@@ -81,9 +84,10 @@ class ModelFactory:
                 )
             return StateEncoder(cards_encoder, actions_encoder, device)
         elif encoder_type == "transformer":
-            # For transformer, we only need device and optional max_seq_len
-            max_seq_len = kwargs.get("max_sequence_length", 50)
-            return TransformerStateEncoder(device, max_seq_len)
+            # For transformer, we need tensor_env and device
+            if tensor_env is None:
+                raise ValueError("Transformer state encoder requires tensor_env")
+            return TransformerStateEncoder(tensor_env, device)
         else:
             raise ValueError(f"Unknown encoder type: {encoder_type}")
 

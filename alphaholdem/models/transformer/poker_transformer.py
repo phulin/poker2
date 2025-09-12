@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Union
+from line_profiler import profile
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,7 +12,7 @@ from ...core.interfaces import Model
 from ...core.registry import register_model
 from .embeddings import CardEmbedding, ActionEmbedding, ContextEmbedding
 from .heads import TransformerPolicyHead, TransformerValueHead, HandRangeHead
-from .tokenizer import PokerTokenizer
+from .embedding_data import StructuredEmbeddingData
 from .attention import PokerTransformerEncoderLayer
 
 
@@ -33,8 +34,7 @@ class PokerTransformerV1(nn.Module, Model):
         num_actions: int = 8,
         dropout: float = 0.1,
         use_auxiliary_loss: bool = True,
-        max_sequence_length: int = 50,
-        use_gradient_checkpointing: bool = True,
+        use_gradient_checkpointing: bool = False,  # Disabled for performance
     ):
         super().__init__()
 
@@ -44,14 +44,10 @@ class PokerTransformerV1(nn.Module, Model):
         self.vocab_size = vocab_size
         self.num_actions = num_actions
         self.use_auxiliary_loss = use_auxiliary_loss
-        self.max_sequence_length = max_sequence_length
         self.use_gradient_checkpointing = use_gradient_checkpointing
 
-        # Tokenizer for converting states to structured embeddings
-        self.tokenizer = PokerTokenizer(max_sequence_length)
-
-        # Positional embeddings
-        self.pos_emb = nn.Embedding(max_sequence_length, d_model)
+        # Positional embeddings (use large fixed size)
+        self.pos_emb = nn.Embedding(42, d_model)
 
         # Structured embeddings
         self.card_embedding = CardEmbedding(d_model)
@@ -99,107 +95,42 @@ class PokerTransformerV1(nn.Module, Model):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
+    @profile
     def forward(
-        self,
-        # Structured embedding components
-        card_indices: torch.Tensor,
-        card_stages: torch.Tensor,
-        card_visibility: torch.Tensor,
-        card_order: torch.Tensor,
-        action_actors: torch.Tensor,
-        action_types: torch.Tensor,
-        action_streets: torch.Tensor,
-        action_size_bins: torch.Tensor,
-        action_size_features: torch.Tensor,
-        context_pot_sizes: torch.Tensor,
-        context_stack_sizes: torch.Tensor,
-        context_positions: torch.Tensor,
-        context_street_context: torch.Tensor,
+        self, structured_data: StructuredEmbeddingData
     ) -> Dict[str, torch.Tensor]:
         """Forward pass with structured embeddings.
 
         Args:
-            card_indices: Card indices [batch_size, seq_len] (0-51)
-            card_stages: Stage indices [batch_size, seq_len] (0-3)
-            card_visibility: Visibility indices [batch_size, seq_len] (0-2)
-            card_order: Order indices [batch_size, seq_len] (0-4)
-            action_actors: Actor indices [batch_size, seq_len] (0-1)
-            action_types: Action type indices [batch_size, seq_len] (0-5)
-            action_streets: Street indices [batch_size, seq_len] (0-3)
-            action_size_bins: Size bin indices [batch_size, seq_len] (0-19)
-            action_size_features: Size features [batch_size, seq_len, 3]
-            context_pot_sizes: Pot sizes [batch_size, seq_len, 1]
-            context_stack_sizes: Stack sizes [batch_size, seq_len, 2]
-            context_positions: Position indices [batch_size, seq_len] (0-1)
-            context_street_context: Street context [batch_size, seq_len, 4]
+            structured_data: StructuredEmbeddingData containing all embedding components
 
         Returns:
             Dictionary containing model outputs
         """
-        return self._forward_structured_embeddings(
-            card_indices,
-            card_stages,
-            card_visibility,
-            card_order,
-            action_actors,
-            action_types,
-            action_streets,
-            action_size_bins,
-            action_size_features,
-            context_pot_sizes,
-            context_stack_sizes,
-            context_positions,
-            context_street_context,
-        )
-
-    def _forward_structured_embeddings(
-        self,
-        card_indices: torch.Tensor,
-        card_stages: torch.Tensor,
-        card_visibility: torch.Tensor,
-        card_order: torch.Tensor,
-        action_actors: torch.Tensor,
-        action_types: torch.Tensor,
-        action_streets: torch.Tensor,
-        action_size_bins: torch.Tensor,
-        action_size_features: torch.Tensor,
-        context_pot_sizes: torch.Tensor,
-        context_stack_sizes: torch.Tensor,
-        context_positions: torch.Tensor,
-        context_street_context: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        """Internal forward pass with structured embeddings.
-
-        Args:
-            All structured embedding components as described in forward()
-
-        Returns:
-            Dictionary containing model outputs
-        """
-        batch_size, seq_len = card_indices.shape
+        batch_size, seq_len = structured_data.batch_size, structured_data.seq_len
+        device = structured_data.device
 
         # Create positional IDs
-        pos_ids = torch.arange(seq_len, device=card_indices.device)
+        pos_ids = torch.arange(seq_len, device=device)
         position_indices = pos_ids.unsqueeze(0).expand(
             batch_size, -1
         )  # [batch_size, seq_len]
 
         # Get structured embeddings
         card_embeddings = self.card_embedding(
-            card_indices, card_stages, card_visibility, card_order
+            structured_data.card_indices, structured_data.card_stages
         )
         action_embeddings = self.action_embedding(
-            action_actors,
-            action_types,
-            action_streets,
-            action_size_bins,
-            action_size_features,
+            structured_data.action_actors,
+            structured_data.action_streets,
+            structured_data.action_legal_masks,
         )
         context_embeddings = self.context_embedding(
-            context_pot_sizes,
-            context_stack_sizes,
-            context_positions,
-            context_street_context,
+            structured_data.context_pot_sizes,
+            structured_data.context_stack_sizes,
+            structured_data.context_committed_sizes,
+            structured_data.context_positions,
+            structured_data.context_street,
         )
 
         # Combine embeddings (simple addition for now)
@@ -213,7 +144,9 @@ class PokerTransformerV1(nn.Module, Model):
 
         # Create attention mask for padded positions
         # Mask out positions where card_indices == -1 (padding)
-        attention_mask = (card_indices != -1).float()  # [batch_size, seq_len]
+        attention_mask = (
+            structured_data.card_indices != -1
+        ).float()  # [batch_size, seq_len]
 
         # Transformer encoding with poker-specific attention
         if self.use_gradient_checkpointing and self.training:
@@ -223,7 +156,7 @@ class PokerTransformerV1(nn.Module, Model):
                     x = layer(
                         x,
                         src_mask=None,  # We'll use key padding mask instead
-                        card_indices=card_indices,
+                        card_indices=structured_data.card_indices,
                         position_indices=position_indices,
                         attention_mask=attention_mask,
                     )
@@ -237,7 +170,7 @@ class PokerTransformerV1(nn.Module, Model):
                 x = layer(
                     x,
                     src_mask=None,  # We'll use key padding mask instead
-                    card_indices=card_indices,
+                    card_indices=structured_data.card_indices,
                     position_indices=position_indices,
                     attention_mask=attention_mask,
                 )
@@ -289,7 +222,6 @@ class PokerTransformerV1(nn.Module, Model):
             "n_heads": self.n_heads,
             "vocab_size": self.vocab_size,
             "num_actions": self.num_actions,
-            "max_sequence_length": self.max_sequence_length,
             "use_auxiliary_loss": self.use_auxiliary_loss,
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,

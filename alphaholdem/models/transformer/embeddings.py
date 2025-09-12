@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from line_profiler import profile
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,8 +16,6 @@ class CardEmbedding(nn.Module):
     - Rank embedding (A, 2, 3, ..., K)
     - Suit embedding (s, h, d, c)
     - Stage embedding (hole, flop, turn, river)
-    - Visibility embedding (self, opponent, public)
-    - Order embedding (position within stage)
     """
 
     def __init__(self, d_model: int = 256):
@@ -27,8 +26,6 @@ class CardEmbedding(nn.Module):
         self.rank_emb = nn.Embedding(13, d_model)  # A,2,3,...,K
         self.suit_emb = nn.Embedding(4, d_model)  # s,h,d,c
         self.stage_emb = nn.Embedding(4, d_model)  # hole,flop,turn,river
-        self.visibility_emb = nn.Embedding(3, d_model)  # self,opponent,public
-        self.order_emb = nn.Embedding(5, d_model)  # position within stage
 
         # Relational attention biases for poker-specific patterns
         self.rank_bias = nn.Parameter(torch.zeros(13, 13))
@@ -55,20 +52,17 @@ class CardEmbedding(nn.Module):
                     if i == j:  # Same suit
                         self.suit_bias[i, j] = 0.3
 
+    @profile
     def forward(
         self,
         card_indices: torch.Tensor,
         stages: torch.Tensor,
-        visibility: torch.Tensor,
-        order: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass for card embeddings.
 
         Args:
             card_indices: Card indices [batch_size, seq_len] (0-51, with 52 for CLS)
             stages: Stage indices [batch_size, seq_len] (0-3)
-            visibility: Visibility indices [batch_size, seq_len] (0-2)
-            order: Order indices [batch_size, seq_len] (0-4)
 
         Returns:
             Card embeddings [batch_size, seq_len, d_model]
@@ -89,15 +83,9 @@ class CardEmbedding(nn.Module):
         if valid_card_mask.any():
             valid_indices = card_indices[valid_card_mask]
             valid_stages = stages[valid_card_mask]
-            valid_visibility = visibility[valid_card_mask]
-            valid_order = order[valid_card_mask]
 
             # Clamp embedding indices to valid ranges to avoid index errors
             valid_stages = torch.clamp(valid_stages, 0, 3)  # 0-3: hole,flop,turn,river
-            valid_visibility = torch.clamp(
-                valid_visibility, 0, 2
-            )  # 0-2: self,opponent,public
-            valid_order = torch.clamp(valid_order, 0, 4)  # 0-4: position within stage
 
             # Convert card indices to rank and suit
             ranks = valid_indices % 13
@@ -108,8 +96,6 @@ class CardEmbedding(nn.Module):
                 self.rank_emb(ranks)
                 + self.suit_emb(suits)
                 + self.stage_emb(valid_stages)
-                + self.visibility_emb(valid_visibility)
-                + self.order_emb(valid_order)
             )
 
             # Place valid embeddings back
@@ -155,26 +141,21 @@ class ActionEmbedding(nn.Module):
 
     Composes action embeddings from:
     - Actor embedding (P1, P2)
-    - Action type embedding (fold, check, call, bet, raise, allin)
     - Street embedding (preflop, flop, turn, river)
-    - Size bin embedding (coarse bet size categories)
-    - Size MLP (fine bet size features)
+    - Legal action masks (8 action types)
     """
 
-    def __init__(self, d_model: int = 256, num_action_types: int = 6):
+    def __init__(self, d_model: int = 256):
         super().__init__()
         self.d_model = d_model
-        self.num_action_types = num_action_types
 
         # Component embeddings
         self.actor_emb = nn.Embedding(2, d_model)  # P1, P2
-        self.action_type_emb = nn.Embedding(num_action_types, d_model)
         self.street_emb = nn.Embedding(4, d_model)  # pre,flop,turn,river
-        self.size_bin_emb = nn.Embedding(20, d_model)  # coarse size bins
 
-        # Fine size features MLP
-        self.size_mlp = nn.Sequential(
-            nn.Linear(3, d_model),  # fraction_of_pot, fraction_of_stack, log_chips
+        # Legal action mask processing
+        self.legal_mask_mlp = nn.Sequential(
+            nn.Linear(8, d_model),  # 8 action types
             nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -182,7 +163,7 @@ class ActionEmbedding(nn.Module):
 
         # Combine embeddings
         self.combine_mlp = nn.Sequential(
-            nn.Linear(d_model * 4, d_model),  # 4 component embeddings
+            nn.Linear(d_model * 3, d_model),  # 3 component embeddings
             nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -191,19 +172,15 @@ class ActionEmbedding(nn.Module):
     def forward(
         self,
         actors: torch.Tensor,
-        action_types: torch.Tensor,
         streets: torch.Tensor,
-        size_bins: torch.Tensor,
-        size_features: torch.Tensor,
+        legal_masks: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass for action embeddings.
 
         Args:
             actors: Actor indices [batch_size, seq_len] (0-1)
-            action_types: Action type indices [batch_size, seq_len] (0-5)
             streets: Street indices [batch_size, seq_len] (0-3)
-            size_bins: Size bin indices [batch_size, seq_len] (0-19)
-            size_features: Size features [batch_size, seq_len, 3]
+            legal_masks: Legal action masks [batch_size, seq_len, 8]
 
         Returns:
             Action embeddings [batch_size, seq_len, d_model]
@@ -212,26 +189,21 @@ class ActionEmbedding(nn.Module):
 
         # Clamp all embedding indices to valid ranges to avoid index errors
         actors = torch.clamp(actors, 0, 1)  # 0-1: player indices
-        action_types = torch.clamp(
-            action_types, 0, self.num_action_types - 1
-        )  # 0-5: action types
         streets = torch.clamp(streets, 0, 3)  # 0-3: hole,flop,turn,river
-        size_bins = torch.clamp(size_bins, 0, 19)  # 0-19: size bins
 
         # Get component embeddings
         actor_emb = self.actor_emb(actors)
-        action_type_emb = self.action_type_emb(action_types)
         street_emb = self.street_emb(streets)
-        size_bin_emb = self.size_bin_emb(size_bins)
 
-        # Process fine size features
-        size_mlp_emb = self.size_mlp(size_features)
+        # Process legal action masks
+        legal_mask_emb = self.legal_mask_mlp(legal_masks.float())
 
         # Combine embeddings
         combined = torch.cat(
-            [actor_emb, action_type_emb, street_emb, size_bin_emb], dim=-1
-        )  # [batch, seq, d_model * 4]
+            [actor_emb, street_emb, legal_mask_emb], dim=-1
+        )  # [batch, seq, d_model * 3]
 
+        # Final combination
         embeddings = self.combine_mlp(combined)
 
         return embeddings
@@ -243,6 +215,7 @@ class ContextEmbedding(nn.Module):
     Handles:
     - Pot size embedding
     - Stack size embedding (both players)
+    - Committed size embedding (both players)
     - Position embedding (SB, BB)
     - Street-specific context
     """
@@ -263,6 +236,13 @@ class ContextEmbedding(nn.Module):
             nn.Dropout(0.1),
         )
 
+        self.committed_emb = nn.Sequential(
+            nn.Linear(2, d_model),  # committed chips for both players
+            nn.LayerNorm(d_model),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+        )
+
         self.position_emb = nn.Embedding(2, d_model)  # SB, BB
 
         # Street-specific context
@@ -277,6 +257,7 @@ class ContextEmbedding(nn.Module):
         self,
         pot_sizes: torch.Tensor,
         stack_sizes: torch.Tensor,
+        committed_sizes: torch.Tensor,
         positions: torch.Tensor,
         street_context: torch.Tensor,
     ) -> torch.Tensor:
@@ -285,6 +266,7 @@ class ContextEmbedding(nn.Module):
         Args:
             pot_sizes: Pot sizes [batch_size, seq_len, 1]
             stack_sizes: Stack sizes [batch_size, seq_len, 2]
+            committed_sizes: Committed sizes [batch_size, seq_len, 2]
             positions: Position indices [batch_size, seq_len] (0-1)
             street_context: Street context [batch_size, seq_len, 4]
 
@@ -297,10 +279,13 @@ class ContextEmbedding(nn.Module):
         # Get component embeddings
         pot_emb = self.pot_emb(pot_sizes)
         stack_emb = self.stack_emb(stack_sizes)
+        committed_emb = self.committed_emb(committed_sizes)
         position_emb = self.position_emb(positions)
         street_context_emb = self.street_context_emb(street_context)
 
         # Combine embeddings additively
-        embeddings = pot_emb + stack_emb + position_emb + street_context_emb
+        embeddings = (
+            pot_emb + stack_emb + committed_emb + position_emb + street_context_emb
+        )
 
         return embeddings

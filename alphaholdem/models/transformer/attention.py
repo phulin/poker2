@@ -146,7 +146,7 @@ class PokerAttention(nn.Module):
         card_indices: torch.Tensor,
         position_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Compute poker-specific attention biases.
+        """Compute poker-specific attention biases (vectorized version).
 
         Args:
             card_indices: Card indices [batch_size, seq_len]
@@ -161,44 +161,65 @@ class PokerAttention(nn.Module):
         # Initialize bias tensor
         bias = torch.zeros(batch_size, seq_len, seq_len, device=device)
 
-        # Add rank-based biases
-        for i in range(seq_len):
-            for j in range(seq_len):
-                card_i = card_indices[:, i]  # [batch_size]
-                card_j = card_indices[:, j]  # [batch_size]
+        # Create valid card mask (exclude CLS token and padding)
+        valid_mask = (card_indices >= 0) & (card_indices < 52)
 
-                # Only apply bias for valid card indices (not padding or CLS)
-                valid_mask = (
-                    (card_i >= 0) & (card_i < 52) & (card_j >= 0) & (card_j < 52)
-                )
-                if valid_mask.any():
-                    rank_i = card_i[valid_mask] % 13
-                    rank_j = card_j[valid_mask] % 13
-                    suit_i = card_i[valid_mask] // 13
-                    suit_j = card_j[valid_mask] // 13
+        if not valid_mask.any():
+            return bias
 
-                    # Rank bias
-                    rank_bias = self.rank_bias[rank_i, rank_j]
-                    bias[valid_mask, i, j] += rank_bias
+        # Vectorized computation for valid cards only
+        valid_cards = card_indices[valid_mask]
 
-                    # Suit bias
-                    suit_bias = self.suit_bias[suit_i, suit_j]
-                    bias[valid_mask, i, j] += suit_bias
+        # Convert to ranks and suits for valid cards
+        ranks = valid_cards % 13
+        suits = valid_cards // 13
 
-        # Add position-based biases
+        # Create expanded tensors for pairwise computation
+        # ranks_i: [num_valid, 1], ranks_j: [1, num_valid]
+        ranks_i = ranks.unsqueeze(1)  # [num_valid, 1]
+        ranks_j = ranks.unsqueeze(0)  # [1, num_valid]
+        suits_i = suits.unsqueeze(1)  # [num_valid, 1]
+        suits_j = suits.unsqueeze(0)  # [1, num_valid]
+
+        # Compute rank biases vectorized
+        rank_diff = torch.abs(ranks_i - ranks_j)
+        rank_bias = torch.zeros_like(rank_diff, dtype=torch.float)
+        rank_bias[rank_diff == 1] = 0.1  # Adjacent ranks
+        rank_bias[rank_diff == 0] = 0.2  # Same rank
+
+        # Compute suit biases vectorized
+        suit_match = suits_i == suits_j
+        suit_bias = torch.zeros_like(suit_match, dtype=torch.float)
+        suit_bias[suit_match] = 0.3  # Same suit
+
+        # Combine biases
+        combined_bias = rank_bias + suit_bias
+
+        # Add position bias if available
         if position_indices is not None:
-            for i in range(seq_len):
-                for j in range(seq_len):
-                    pos_i = position_indices[:, i]
-                    pos_j = position_indices[:, j]
+            valid_positions = position_indices[valid_mask]
+            pos_i = valid_positions.unsqueeze(1)  # [num_valid, 1]
+            pos_j = valid_positions.unsqueeze(0)  # [1, num_valid]
+            pos_diff = torch.abs(pos_i - pos_j)
+            pos_bias = torch.zeros_like(pos_diff, dtype=torch.float)
+            pos_bias[pos_diff <= 2] = 0.1  # Close positions
+            combined_bias += pos_bias
 
-                    # Only apply bias for valid positions
-                    valid_mask = (pos_i >= 0) & (pos_j >= 0)
-                    if valid_mask.any():
-                        pos_bias = self.position_bias[
-                            pos_i[valid_mask], pos_j[valid_mask]
-                        ]
-                        bias[valid_mask, i, j] += pos_bias
+        # Map back to full bias tensor
+        # Create indices for valid positions
+        valid_indices = torch.where(valid_mask)
+        batch_indices = valid_indices[0]  # [num_valid]
+        seq_indices = valid_indices[1]  # [num_valid]
+
+        # Create meshgrid for pairwise indices
+        i_indices = seq_indices.unsqueeze(1)  # [num_valid, 1]
+        j_indices = seq_indices.unsqueeze(0)  # [1, num_valid]
+
+        # Map biases back to full tensor
+        batch_i = batch_indices.unsqueeze(1).expand(-1, len(seq_indices))
+        batch_j = batch_indices.unsqueeze(0).expand(len(seq_indices), -1)
+
+        bias[batch_i, i_indices, j_indices] = combined_bias
 
         return bias
 

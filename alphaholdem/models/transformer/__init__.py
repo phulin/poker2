@@ -3,7 +3,6 @@
 from .poker_transformer import PokerTransformerV1
 from .embeddings import CardEmbedding, ActionEmbedding, ContextEmbedding
 from .heads import TransformerPolicyHead, TransformerValueHead, HandRangeHead
-from .tokenizer import PokerTokenizer
 from .state_encoder import TransformerStateEncoder
 
 __all__ = [
@@ -14,6 +13,5 @@ __all__ = [
     "TransformerPolicyHead",
     "TransformerValueHead",
     "HandRangeHead",
-    "PokerTokenizer",
     "TransformerStateEncoder",
 ]

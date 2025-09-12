@@ -18,11 +18,17 @@ class VectorizedReplayBuffer:
         num_bet_bins: int,  # Batch size for tensor operations
         device: torch.device,
         float_dtype: torch.dtype = torch.float32,  # Dtype for float tensors
+        is_transformer: bool = False,  # Whether this buffer is for transformer models
+        sequence_length: int = 50,  # Sequence length for transformer models
     ):
         self.capacity = capacity  # Number of trajectories
         self.max_trajectory_length = max_trajectory_length
         self.device = device
         self.float_dtype = float_dtype  # Store float dtype for use in methods
+        self.is_transformer = is_transformer  # Store transformer flag
+        self.sequence_length = (
+            sequence_length  # Store sequence length for transformer models
+        )
         self.position = 0  # Next trajectory write position
         self.size = 0  # Total number of valid trajectories
 
@@ -31,69 +37,127 @@ class VectorizedReplayBuffer:
         )  # -1 if no batch is open, otherwise the nominal size of the open batch
 
         # Pre-allocate tensors for all transition fields: (capacity, max_trajectory_length, ...)
-        # Cards features tensor: (capacity, max_trajectory_length, 6, 4, 13) - bool dtype
-        self.cards_features = torch.zeros(
-            capacity,
-            max_trajectory_length,
-            6,
-            4,
-            13,  # Fixed cards shape
-            dtype=torch.bool,
-            device=device,
-        )
+        if not is_transformer:
+            # CNN model tensors
+            # Cards features tensor: (capacity, max_trajectory_length, 6, 4, 13) - bool dtype
+            self.cards_features = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                6,
+                4,
+                13,  # Fixed cards shape
+                dtype=torch.bool,
+                device=device,
+            )
 
-        # Actions features tensor: (capacity, max_trajectory_length, 24, 4, num_bet_bins) - bool dtype
-        # 4 slots: p1, p2, sum, legal
-        self.actions_features = torch.zeros(
-            capacity,
-            max_trajectory_length,
-            24,
-            4,
-            num_bet_bins,
-            dtype=torch.bool,
-            device=device,
-        )
-
-        # Transformer structured embedding fields: (capacity, max_trajectory_length, ...)
-        self.card_indices = torch.full(
-            (capacity, max_trajectory_length, 50), -1, dtype=torch.long, device=device
-        )
-        self.card_stages = torch.zeros(
-            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
-        )
-        self.card_visibility = torch.zeros(
-            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
-        )
-        self.card_order = torch.zeros(
-            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
-        )
-        self.action_actors = torch.zeros(
-            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
-        )
-        self.action_types = torch.zeros(
-            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
-        )
-        self.action_streets = torch.zeros(
-            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
-        )
-        self.action_size_bins = torch.zeros(
-            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
-        )
-        self.action_size_features = torch.zeros(
-            capacity, max_trajectory_length, 50, 3, dtype=torch.float, device=device
-        )
-        self.context_pot_sizes = torch.zeros(
-            capacity, max_trajectory_length, 50, 1, dtype=torch.float, device=device
-        )
-        self.context_stack_sizes = torch.zeros(
-            capacity, max_trajectory_length, 50, 2, dtype=torch.float, device=device
-        )
-        self.context_positions = torch.zeros(
-            capacity, max_trajectory_length, 50, dtype=torch.long, device=device
-        )
-        self.context_street_context = torch.zeros(
-            capacity, max_trajectory_length, 50, 4, dtype=torch.float, device=device
-        )
+            # Actions features tensor: (capacity, max_trajectory_length, 24, 4, num_bet_bins) - bool dtype
+            # 4 slots: p1, p2, sum, legal
+            self.actions_features = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                24,
+                4,
+                num_bet_bins,
+                dtype=torch.bool,
+                device=device,
+            )
+        else:
+            # Transformer structured embedding fields: (capacity, max_trajectory_length, ...)
+            self.card_indices = torch.full(
+                (capacity, max_trajectory_length, self.sequence_length),
+                -1,
+                dtype=torch.long,
+                device=device,
+            )
+            self.card_stages = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                dtype=torch.long,
+                device=device,
+            )
+            self.action_actors = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                dtype=torch.long,
+                device=device,
+            )
+            self.action_streets = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                dtype=torch.long,
+                device=device,
+            )
+            self.action_legal_masks = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                8,
+                dtype=torch.bool,
+                device=device,
+            )
+            self.context_pot_sizes = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                1,
+                dtype=torch.float,
+                device=device,
+            )
+            self.context_stack_sizes = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                2,
+                dtype=torch.float,
+                device=device,
+            )
+            self.context_committed_sizes = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                2,
+                dtype=torch.float,
+                device=device,
+            )
+            self.context_positions = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                dtype=torch.long,
+                device=device,
+            )
+            self.context_street = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                4,
+                dtype=torch.float,
+                device=device,
+            )
+            self.context_actions_this_round = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                dtype=torch.long,
+                device=device,
+            )
+            self.context_min_raise = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                dtype=torch.float,
+                device=device,
+            )
+            self.context_bet_to_call = torch.zeros(
+                capacity,
+                max_trajectory_length,
+                self.sequence_length,
+                dtype=torch.float,
+                device=device,
+            )
         self.action_indices = torch.zeros(
             capacity, max_trajectory_length, dtype=torch.long, device=device
         )
@@ -172,21 +236,27 @@ class VectorizedReplayBuffer:
         self.current_step_positions[clear_indices] = 0
 
         # Clear the actual data tensors for these rows
-        self.cards_features[clear_indices] = False
-        self.actions_features[clear_indices] = False
-        self.card_indices[clear_indices] = -1
-        self.card_stages[clear_indices] = 0
-        self.card_visibility[clear_indices] = 0
-        self.card_order[clear_indices] = 0
-        self.action_actors[clear_indices] = 0
-        self.action_types[clear_indices] = 0
-        self.action_streets[clear_indices] = 0
-        self.action_size_bins[clear_indices] = 0
-        self.action_size_features[clear_indices] = 0
-        self.context_pot_sizes[clear_indices] = 0
-        self.context_stack_sizes[clear_indices] = 0
-        self.context_positions[clear_indices] = 0
-        self.context_street_context[clear_indices] = 0
+        if not self.is_transformer:
+            # CNN model tensors
+            self.cards_features[clear_indices] = False
+            self.actions_features[clear_indices] = False
+        else:
+            # Transformer structured embedding tensors
+            self.card_indices[clear_indices] = -1
+            self.card_stages[clear_indices] = 0
+            self.action_actors[clear_indices] = 0
+            self.action_streets[clear_indices] = 0
+            self.action_legal_masks[clear_indices] = False
+            self.context_pot_sizes[clear_indices] = 0
+            self.context_stack_sizes[clear_indices] = 0
+            self.context_committed_sizes[clear_indices] = 0
+            self.context_positions[clear_indices] = 0
+            self.context_street[clear_indices] = 0
+            self.context_actions_this_round[clear_indices] = 0
+            self.context_min_raise[clear_indices] = 0
+            self.context_bet_to_call[clear_indices] = 0
+
+        # Common tensors for both model types
         self.action_indices[clear_indices] = 0
         self.log_probs[clear_indices] = 0
         self.rewards[clear_indices] = 0
@@ -251,25 +321,10 @@ class VectorizedReplayBuffer:
 
         # Compact nonzero-length trajectories to the front of the window
         # For each field, move data from nonzero_indices to the front of indices
-        for attr in [
+        common_fields = [
             "trajectory_lengths",
             "valid_trajectories",
             "current_step_positions",
-            "cards_features",
-            "actions_features",
-            "card_indices",
-            "card_stages",
-            "card_visibility",
-            "card_order",
-            "action_actors",
-            "action_types",
-            "action_streets",
-            "action_size_bins",
-            "action_size_features",
-            "context_pot_sizes",
-            "context_stack_sizes",
-            "context_positions",
-            "context_street_context",
             "action_indices",
             "log_probs",
             "rewards",
@@ -280,7 +335,32 @@ class VectorizedReplayBuffer:
             "values",
             "advantages",
             "returns",
-        ]:
+        ]
+
+        if not self.is_transformer:
+            # CNN model fields
+            cnn_fields = ["cards_features", "actions_features"]
+            all_fields = common_fields + cnn_fields
+        else:
+            # Transformer model fields
+            transformer_fields = [
+                "card_indices",
+                "card_stages",
+                "action_actors",
+                "action_streets",
+                "action_legal_masks",
+                "context_pot_sizes",
+                "context_stack_sizes",
+                "context_committed_sizes",
+                "context_positions",
+                "context_street",
+                "context_actions_this_round",
+                "context_min_raise",
+                "context_bet_to_call",
+            ]
+            all_fields = common_fields + transformer_fields
+
+        for attr in all_fields:
             buf = getattr(self, attr)
             buf[compacted_indices] = buf[nonzero_indices]
             # Zero out the now-unused slots at the end of the window
@@ -447,6 +527,129 @@ class VectorizedReplayBuffer:
                 self.current_step_positions[completed_trajectories]
             )
 
+            # Reset step positions for completed trajectories
+            self.current_step_positions[completed_trajectories] = 0
+
+    def add_batch_transformer(
+        self,
+        structured_data: "StructuredEmbeddingData",
+        action_indices: torch.Tensor = None,  # [batch_size] - long
+        log_probs: torch.Tensor = None,
+        rewards: torch.Tensor = None,
+        dones: torch.Tensor = None,
+        legal_masks: torch.Tensor = None,  # [batch_size, legal_mask_dim] - bool
+        delta2: torch.Tensor = None,
+        delta3: torch.Tensor = None,
+        values: torch.Tensor = None,
+        trajectory_indices: torch.Tensor = None,  # Which trajectory each transition belongs to
+    ) -> None:
+        """
+        Add a batch of transitions to the buffer using StructuredEmbeddingData.
+
+        Args:
+            structured_data: StructuredEmbeddingData containing all embedding components
+            action_indices: [batch_size] - long dtype
+            log_probs: [batch_size] - float dtype
+            rewards: [batch_size] - float dtype
+            dones: [batch_size] - bool dtype
+            legal_masks: [batch_size, legal_mask_dim] - bool dtype
+            delta2: [batch_size] - float dtype
+            delta3: [batch_size] - float dtype
+            values: [batch_size] - float dtype
+            trajectory_indices: [batch_size] - long dtype
+        """
+        if not self.is_transformer:
+            raise ValueError(
+                "add_batch_transformer can only be used with transformer buffers"
+            )
+
+        batch_size = structured_data.batch_size
+
+        # Get trajectory indices for this batch
+        if trajectory_indices is None:
+            trajectory_indices = torch.arange(
+                self.position, self.position + batch_size, device=self.device
+            )
+
+        # Get step positions within trajectories
+        step_positions = self.current_step_positions[trajectory_indices]
+
+        # Clamp step positions to be within bounds
+        step_positions = torch.clamp(step_positions, 0, self.max_trajectory_length - 1)
+
+        # Store structured embedding data
+        self.card_indices[trajectory_indices, step_positions, :] = (
+            structured_data.card_indices
+        )
+        self.card_stages[trajectory_indices, step_positions, :] = (
+            structured_data.card_stages
+        )
+        self.action_actors[trajectory_indices, step_positions, :] = (
+            structured_data.action_actors
+        )
+        self.action_streets[trajectory_indices, step_positions, :] = (
+            structured_data.action_streets
+        )
+        self.action_legal_masks[trajectory_indices, step_positions, :] = (
+            structured_data.action_legal_masks
+        )
+        self.context_pot_sizes[trajectory_indices, step_positions, :] = (
+            structured_data.context_pot_sizes
+        )
+        self.context_stack_sizes[trajectory_indices, step_positions, :] = (
+            structured_data.context_stack_sizes
+        )
+        self.context_committed_sizes[trajectory_indices, step_positions, :] = (
+            structured_data.context_committed_sizes
+        )
+        self.context_positions[trajectory_indices, step_positions, :] = (
+            structured_data.context_positions
+        )
+        self.context_street[trajectory_indices, step_positions, :] = (
+            structured_data.context_street
+        )
+        self.context_actions_this_round[trajectory_indices, step_positions, :] = (
+            structured_data.context_actions_this_round
+        )
+        self.context_min_raise[trajectory_indices, step_positions, :] = (
+            structured_data.context_min_raise
+        )
+        self.context_bet_to_call[trajectory_indices, step_positions, :] = (
+            structured_data.context_bet_to_call
+        )
+
+        # Store other transition data
+        if action_indices is not None:
+            self.action_indices[trajectory_indices, step_positions] = action_indices
+        if log_probs is not None:
+            self.log_probs[trajectory_indices, step_positions] = log_probs
+        if rewards is not None:
+            self.rewards[trajectory_indices, step_positions] = rewards
+        if dones is not None:
+            self.dones[trajectory_indices, step_positions] = dones
+        if legal_masks is not None:
+            self.legal_masks[trajectory_indices, step_positions] = legal_masks
+        if delta2 is not None:
+            self.delta2[trajectory_indices, step_positions] = delta2
+        if delta3 is not None:
+            self.delta3[trajectory_indices, step_positions] = delta3
+        if values is not None:
+            self.values[trajectory_indices, step_positions] = values
+
+        # Advance step positions
+        self.current_step_positions[trajectory_indices] += 1
+
+        # Check for completed trajectories
+        completed_mask = (
+            dones.bool()
+            if dones is not None
+            else torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        )
+        if completed_mask.any():
+            completed_trajectories = trajectory_indices[completed_mask]
+            self.trajectory_lengths[completed_trajectories] = (
+                self.current_step_positions[completed_trajectories]
+            )
             # Reset step positions for completed trajectories
             self.current_step_positions[completed_trajectories] = 0
 

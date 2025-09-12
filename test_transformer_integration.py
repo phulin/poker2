@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from alphaholdem.models.transformer import PokerTransformerV1
 from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
+from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
 from alphaholdem.models.factory import ModelFactory
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
@@ -46,7 +47,6 @@ def test_transformer_pipeline():
         "vocab_size": 80,
         "num_actions": 8,
         "use_auxiliary_loss": True,
-        "max_sequence_length": max_seq_len,
         "use_gradient_checkpointing": False,  # Disable for testing
     }
 
@@ -83,10 +83,10 @@ def test_transformer_pipeline():
 
     # Encode states
     states = state_encoder.encode_tensor_states(tensor_env, num_envs, player=None)
-    print(f"✅ Encoded states: {list(states.keys())}")
+    print(f"✅ Encoded states: {list(states.to_dict().keys())}")
 
     # Verify state shapes
-    for key, tensor in states.items():
+    for key, tensor in states.to_dict().items():
         print(f"   {key}: {tensor.shape}")
 
     # Test 2: State Encoder → Model
@@ -98,11 +98,16 @@ def test_transformer_pipeline():
 
     if len(active_indices) > 0:
         # Extract structured embeddings for active environments
-        active_states = {key: tensor[active_indices] for key, tensor in states.items()}
+        active_states_dict = {
+            key: tensor[active_indices] for key, tensor in states.to_dict().items()
+        }
+
+        # Create structured data for active environments
+        active_states = StructuredEmbeddingData.from_dict(active_states_dict)
 
         # Forward pass through model
         with torch.no_grad():
-            outputs = model(**active_states)
+            outputs = model(structured_data=active_states)
 
         print(f"✅ Model forward pass successful")
         print(f"   policy_logits: {outputs['policy_logits'].shape}")
@@ -119,8 +124,11 @@ def test_transformer_pipeline():
 
     # Add a batch of transitions
     if len(active_indices) > 0:
+        active_states_dict = {
+            key: tensor[active_indices] for key, tensor in states.to_dict().items()
+        }
         replay_buffer.add_batch(
-            **{key: tensor[active_indices] for key, tensor in states.items()},
+            **active_states_dict,
             action_indices=torch.randint(0, 8, (len(active_indices),), device=device),
             log_probs=torch.randn(len(active_indices), device=device),
             rewards=torch.randn(len(active_indices), device=device),
@@ -154,22 +162,9 @@ def test_transformer_pipeline():
         print(f"   Batch size: {batch['action_indices'].shape[0]}")
 
         # Test model forward pass on sampled batch
+        batch_structured = StructuredEmbeddingData.from_dict(batch)
         with torch.no_grad():
-            outputs = model(
-                card_indices=batch["card_indices"],
-                card_stages=batch["card_stages"],
-                card_visibility=batch["card_visibility"],
-                card_order=batch["card_order"],
-                action_actors=batch["action_actors"],
-                action_types=batch["action_types"],
-                action_streets=batch["action_streets"],
-                action_size_bins=batch["action_size_bins"],
-                action_size_features=batch["action_size_features"],
-                context_pot_sizes=batch["context_pot_sizes"],
-                context_stack_sizes=batch["context_stack_sizes"],
-                context_positions=batch["context_positions"],
-                context_street_context=batch["context_street_context"],
-            )
+            outputs = model(structured_data=batch_structured)
 
         print(f"✅ Model forward pass on sampled batch successful")
         print(f"   policy_logits: {outputs['policy_logits'].shape}")
@@ -191,7 +186,6 @@ def test_cls_pad_handling():
         vocab_size=80,
         num_actions=8,
         use_auxiliary_loss=False,
-        max_sequence_length=10,
     )
 
     # Create test input with CLS token (52) and padding (-1)
@@ -231,22 +225,24 @@ def test_cls_pad_handling():
     )
 
     # Forward pass should not crash
+    test_data = StructuredEmbeddingData(
+        card_indices=card_indices,
+        card_stages=card_stages,
+        card_visibility=card_visibility,
+        card_order=card_order,
+        action_actors=action_actors,
+        action_types=action_types,
+        action_streets=action_streets,
+        action_size_bins=action_size_bins,
+        action_size_features=action_size_features,
+        context_pot_sizes=context_pot_sizes,
+        context_stack_sizes=context_stack_sizes,
+        context_positions=context_positions,
+        context_street=context_street_context,
+    )
+
     with torch.no_grad():
-        outputs = model(
-            card_indices=card_indices,
-            card_stages=card_stages,
-            card_visibility=card_visibility,
-            card_order=card_order,
-            action_actors=action_actors,
-            action_types=action_types,
-            action_streets=action_streets,
-            action_size_bins=action_size_bins,
-            action_size_features=action_size_features,
-            context_pot_sizes=context_pot_sizes,
-            context_stack_sizes=context_stack_sizes,
-            context_positions=context_positions,
-            context_street_context=context_street_context,
-        )
+        outputs = model(structured_data=test_data)
 
     print(f"✅ CLS/PAD handling test passed")
     print(
