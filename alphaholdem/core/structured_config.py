@@ -65,6 +65,7 @@ class EnvConfig:
     debug_step_table: bool = (
         False  # Print debug table during step_bins when batch_size <= 8
     )
+    flop_showdown: bool = False  # Skip turn/river, go directly to showdown after flop
 
     def __post_init__(self):
         if self.bet_bins is None:

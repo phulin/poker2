@@ -86,17 +86,17 @@ def print_training_stats(
     d3 = stats.get("delta3_mean")
     parts = []
     if pol is not None:
-        parts.append(f"policy {pol:.4f}")
+        parts.append(f"policy {pol:7.4f}")
     if val is not None:
         parts.append(f"value {val:.4f}")
     if ent is not None:
         parts.append(f"entropy {ent:.4f}")
     if kl is not None:
-        parts.append(f"kl {kl:.4f}")
+        parts.append(f"kl {kl:7.4f}")
     if clip is not None:
         parts.append(f"clip {clip:.3f}")
     if ev is not None:
-        parts.append(f"ev {ev:.3f}")
+        parts.append(f"ev {ev:6.3f}")
     if d2 is not None and d3 is not None:
         parts.append(f"d2 {d2:.1f} d3 {d3:.1f}")
     if parts:

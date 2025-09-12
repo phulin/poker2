@@ -89,6 +89,7 @@ class SelfPlayTrainer:
             rng=self.rng,
             float_dtype=self.float_dtype,
             debug_step_table=self.cfg.env.debug_step_table,
+            flop_showdown=getattr(self.cfg.env, "flop_showdown", False),
         )
 
         if not self.use_tensor_env:
@@ -1370,88 +1371,74 @@ class SelfPlayTrainer:
     def _get_preflop_action_probability(
         self, card1: str, card2: str, seat: int, metric: str
     ) -> str:
-        """Get action probability for a specific hole card combination.
+        """Get action probability for a specific hole card combination using tensor environment.
 
         metric: "allin" or "fold"
         """
-        # Create a minimal game state for preflop small blind (first to act) play
-        from ..env.types import GameState, PlayerState
-
-        # Create players
-        p0 = PlayerState(stack=self.cfg.env.stack)
-        p1 = PlayerState(stack=self.cfg.env.stack)
-
-        # In heads-up, the small blind is on the button and acts first preflop.
-        # Make the analyzed seat both button and small blind, and set it to act.
-        button = seat
-        p_sb = button
-        p_bb = 1 - p_sb
-
-        # Post blinds
-        p_states = [p0, p1]
-        p_states[p_sb].stack -= self.cfg.env.sb  # small blind
-        p_states[p_sb].committed += self.cfg.env.sb
-        p_states[p_bb].stack -= self.cfg.env.bb  # big blind
-        p_states[p_bb].committed += self.cfg.env.bb
-
-        # Set hole cards for the seat we're analyzing
-        p_states[seat].hole_cards = [
-            self._card_str_to_int(card1),
-            self._card_str_to_int(card2),
-        ]
-
-        # Create game state with the small blind (our seat) first to act
-        state = GameState(
-            button=button,
-            street="preflop",
-            deck=[],  # Not needed for this analysis
-            board=[],
-            pot=150,
-            to_act=seat,
-            small_blind=50,
-            big_blind=100,
-            min_raise=100,
-            last_aggressive_amount=100,
-            players=(p_states[0], p_states[1]),
-            terminal=False,
+        # Create a temporary tensor environment for this analysis
+        temp_env = HUNLTensorEnv(
+            num_envs=1,
+            starting_stack=self.cfg.env.stack,
+            sb=self.cfg.env.sb,
+            bb=self.cfg.env.bb,
+            bet_bins=self.cfg.env.bet_bins,
+            device=self.device,
+            rng=self.rng,
+            flop_showdown=getattr(self.cfg.env, "flop_showdown", False),
         )
 
-        # Encode state
-        cards, actions_tensor = self.state_encoder.encode_single_state(state, seat=seat)
+        # Reset and set up the specific hand
+        temp_env.reset()
 
-        # Move tensors to device
-        cards = cards.to(self.device)
-        actions_tensor = actions_tensor.to(self.device)
+        # Set the button to the seat we're analyzing
+        temp_env.button[0] = seat
+        temp_env.to_act[0] = seat
 
-        # Get model prediction
+        # Set hole cards for the seat we're analyzing
+        card1_int = self._card_str_to_int(card1)
+        card2_int = self._card_str_to_int(card2)
+
+        # Convert cards to one-hot representation
+        suit1, rank1 = card1_int // 13, card1_int % 13
+        suit2, rank2 = card2_int // 13, card2_int % 13
+
+        # Set hole cards in the tensor environment
+        temp_env.hole_onehot[0, 0, 0, suit1, rank1] = True
+        temp_env.hole_onehot[0, 0, 1, suit2, rank2] = True
+
+        # Set hole card indices
+        temp_env.hole_indices[0, 0, 0] = card1_int
+        temp_env.hole_indices[0, 0, 1] = card2_int
+
+        # Get model prediction using tensor environment
         with torch.no_grad():
-            # Create CNNEmbeddingData
-            embedding_data = CNNEmbeddingData(
-                cards=cards.unsqueeze(0), actions=actions_tensor.unsqueeze(0)
-            )
-            outputs = self.model(embedding_data)
+            if self.use_structured_embeddings:
+                # For transformer models, use the transformer state encoder
+                # Create a temporary transformer state encoder for this analysis
+                from ..models.transformer.state_encoder import TransformerStateEncoder
+
+                temp_state_encoder = TransformerStateEncoder(temp_env, self.device)
+
+                # Encode the state using the transformer state encoder
+                structured_data = temp_state_encoder.encode_tensor_states(
+                    seat, torch.tensor([0], device=self.device)
+                )
+                outputs = self.model(structured_data)
+            else:
+                # For CNN models, use the existing state encoder
+                embedding_data = self.state_encoder.encode_tensor_states(
+                    seat, torch.tensor([0], device=self.device)
+                )
+                outputs = self.model(embedding_data)
+
             logits = outputs["policy_logits"]
 
-            # Preflop small blind (first to act) legal actions based on to_call
-            legal_mask = torch.zeros(self.num_bet_bins)
-            me = seat
-            opp = 1 - me
-            to_call = state.players[opp].committed - state.players[me].committed
-            if to_call > 0:
-                # Facing a bet (the big blind): fold, call, raises, all-in
-                legal_mask[0] = 1.0  # fold
-                legal_mask[1] = 1.0  # call
-            else:
-                # No bet to call: check, bets, all-in
-                legal_mask[1] = 1.0  # check
-            # Enable all configured bet/raise bins (2..6) and all-in (7)
-            for idx in range(2, self.num_bet_bins):
-                legal_mask[idx] = 1.0
-            legal_mask = legal_mask.to(self.device)  # Move legal mask to device
+            # Get legal actions from tensor environment
+            legal_mask = temp_env.legal_bins_mask()[0]  # [num_bet_bins]
 
             # Apply legal mask
             masked_logits = torch.where(
-                legal_mask.unsqueeze(0) == 0, torch.full_like(logits, -1e9), logits
+                legal_mask == 0, torch.full_like(logits, -1e9), logits
             )
 
             # Get probabilities
@@ -1459,11 +1446,11 @@ class SelfPlayTrainer:
 
             # Select metric index
             if metric == "allin":
-                idx = 7
+                idx = self.num_bet_bins - 1  # Last bin is all-in
             elif metric == "fold":
-                idx = 0
+                idx = 0  # First bin is fold
             else:
-                idx = 7
+                idx = self.num_bet_bins - 1
 
             selected_prob = probs[idx].item()
 

@@ -72,6 +72,7 @@ class HUNLTensorEnv:
         rng: Optional[torch.Generator] = None,
         float_dtype: torch.dtype = torch.float32,
         debug_step_table: bool = False,
+        flop_showdown: bool = False,
     ) -> None:
         assert num_envs > 0
         self.device = device or torch.device(
@@ -86,6 +87,7 @@ class HUNLTensorEnv:
         self.scale = float(self.bb) * 100.0
         self.bet_bins = bet_bins
         self.debug_step_table = debug_step_table and self.N <= 3
+        self.flop_showdown = flop_showdown
         # Cache bet bins as tensor for fast indexing
         self.bet_bins_t = torch.tensor(
             [0] * 2 + self.bet_bins + [0], dtype=float_dtype, device=self.device
@@ -565,7 +567,7 @@ class HUNLTensorEnv:
             self.board_indices[river_ids, 4] = c
 
             # showdown
-            sd_mask = s == 3
+            sd_mask = s == (0 if self.flop_showdown else 3)
             showdown_ids = round_closed_idx[sd_mask]
             # Evaluate winners or award folds
             # Vectorized showdown resolution for all showdown_ids at once

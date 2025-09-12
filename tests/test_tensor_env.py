@@ -564,3 +564,310 @@ def test_fold_reward_assignment():
             )  # Check/call in env 0, no action in env 1
         else:
             break
+
+
+def _make_flop_showdown_env(
+    N=1,
+    starting_stack=1000,
+    sb=5,
+    bb=10,
+    bet_bins=None,
+    device=None,
+    seed=123,
+    flop_showdown=True,
+):
+    """Helper function to create environment with flop_showdown mode."""
+    if bet_bins is None:
+        bet_bins = [0.5, 0.75, 1.0, 1.5, 2.0]
+
+    # Create RNG
+    if device is None:
+        device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    rng = torch.Generator(device=device)
+    if seed is not None:
+        rng.manual_seed(seed)
+
+    env = HUNLTensorEnv(
+        num_envs=N,
+        starting_stack=starting_stack,
+        sb=sb,
+        bb=bb,
+        bet_bins=bet_bins,
+        device=device,
+        rng=rng,
+        flop_showdown=flop_showdown,
+    )
+    env.reset()
+    return env
+
+
+def test_flop_showdown_mode_enabled():
+    """Test that flop_showdown mode is properly enabled and configured."""
+    env = _make_flop_showdown_env(N=1, flop_showdown=True)
+    assert env.flop_showdown is True
+
+    env_normal = _make_flop_showdown_env(N=1, flop_showdown=False)
+    assert env_normal.flop_showdown is False
+
+
+def test_flop_showdown_skips_turn_river():
+    """Test that flop_showdown mode skips turn and river streets."""
+    env = _make_flop_showdown_env(N=2, seed=42)
+
+    # Play through preflop betting
+    for _ in range(2):  # SB and BB actions
+        mask = env.legal_bins_mask()
+        actions = torch.tensor([1, 1], device=env.device)  # Check/call
+        r, d, _ = env.step_bins(actions)
+        if d.all():
+            break
+
+    # Should be on flop now (street 1)
+    assert torch.all(env.street == 1), f"Expected street 1 (flop), got {env.street}"
+
+    # Play through flop betting
+    for _ in range(2):  # Button and BB actions
+        mask = env.legal_bins_mask()
+        actions = torch.tensor([1, 1], device=env.device)  # Check/call
+        r, d, _ = env.step_bins(actions)
+        if d.all():
+            break
+
+    # Should go directly to showdown (street 4), skipping turn (2) and river (3)
+    assert torch.all(env.done), f"Expected all games to be done, got {env.done}"
+    assert torch.all(env.street >= 2), f"Expected street >= 2, got {env.street}"
+
+
+def test_flop_showdown_vs_normal_mode():
+    """Test that flop_showdown mode behaves differently from normal mode."""
+    # Test flop_showdown mode
+    env_flop = _make_flop_showdown_env(N=1, seed=123, flop_showdown=True)
+
+    # Play through to completion
+    steps = 0
+    while not env_flop.done.item() and steps < 20:
+        mask = env_flop.legal_bins_mask()
+        action = 1 if mask[0, 1] else 0  # Check/call or fold
+        r, d, _ = env_flop.step_bins(torch.tensor([action], device=env_flop.device))
+        steps += 1
+
+    flop_final_street = env_flop.street.item()
+    flop_done = env_flop.done.item()
+
+    # Test normal mode
+    env_normal = _make_flop_showdown_env(N=1, seed=123, flop_showdown=False)
+
+    # Play through to completion
+    steps = 0
+    while not env_normal.done.item() and steps < 20:
+        mask = env_normal.legal_bins_mask()
+        action = 1 if mask[0, 1] else 0  # Check/call or fold
+        r, d, _ = env_normal.step_bins(torch.tensor([action], device=env_normal.device))
+        steps += 1
+
+    normal_final_street = env_normal.street.item()
+    normal_done = env_normal.done.item()
+
+    # Both should be done
+    assert flop_done and normal_done, "Both modes should complete games"
+
+    # Flop showdown should reach showdown earlier (lower street number)
+    # In flop showdown: preflop(0) -> flop(1) -> showdown(4+)
+    # In normal: preflop(0) -> flop(1) -> turn(2) -> river(3) -> showdown(4+)
+    assert (
+        flop_final_street < normal_final_street
+    ), f"Flop showdown should reach showdown earlier: flop={flop_final_street}, normal={normal_final_street}"
+
+
+def test_flop_showdown_board_cards():
+    """Test that board cards are properly set in flop_showdown mode."""
+    env = _make_flop_showdown_env(N=1, seed=456)
+
+    # Play through preflop
+    for _ in range(2):
+        mask = env.legal_bins_mask()
+        if mask[0, 1]:
+            r, d, _ = env.step_bins(torch.tensor([1], device=env.device))
+            if d.item():
+                break
+
+    # Should be on flop with 3 board cards
+    if env.street.item() >= 1:
+        board_cards = env.board_onehot[0].sum(dim=(1, 2))  # Sum over suits and ranks
+        flop_cards = board_cards[:3]  # First 3 positions (flop)
+        turn_card = board_cards[3]  # Turn position
+        river_card = board_cards[4]  # River position
+
+        # Flop cards should be set
+        assert torch.all(flop_cards > 0), f"Flop cards should be set, got {flop_cards}"
+
+        # In flop showdown mode, turn and river cards should not be set initially
+        # (they might be set later when we reach showdown, but not during flop betting)
+        if env.street.item() == 1:  # Still on flop
+            assert (
+                turn_card.item() == 0
+            ), f"Turn card should not be set during flop betting, got {turn_card}"
+            assert (
+                river_card.item() == 0
+            ), f"River card should not be set during flop betting, got {river_card}"
+
+
+def test_flop_showdown_multiple_environments():
+    """Test flop_showdown mode with multiple environments."""
+    env = _make_flop_showdown_env(N=4, seed=789)
+
+    # Play through all environments
+    steps = 0
+    while not env.done.all() and steps < 30:
+        mask = env.legal_bins_mask()
+        actions = []
+
+        for i in range(4):
+            if mask[i, 1]:  # Can check/call
+                actions.append(1)
+            else:
+                actions.append(0)  # Fold if can't check/call
+
+        r, d, _ = env.step_bins(torch.tensor(actions, device=env.device))
+        steps += 1
+
+    # All environments should be done
+    assert torch.all(env.done), f"Expected all environments to be done, got {env.done}"
+
+    # All should have reached showdown (street >= 2)
+    assert torch.all(env.street >= 2), f"Expected all streets >= 2, got {env.street}"
+
+    # Winners should be assigned
+    assert torch.all(env.winner != 0) or torch.any(
+        env.winner != 0
+    ), f"Expected winners to be assigned, got {env.winner}"
+
+
+def test_flop_showdown_rewards():
+    """Test that rewards are properly calculated in flop_showdown mode."""
+    env = _make_flop_showdown_env(N=3, seed=999)
+
+    # Play through to completion
+    steps = 0
+    while not env.done.all() and steps < 25:
+        mask = env.legal_bins_mask()
+        actions = []
+
+        for i in range(3):
+            if mask[i, 1]:  # Can check/call
+                actions.append(1)
+            else:
+                actions.append(0)  # Fold
+
+        r, d, _ = env.step_bins(torch.tensor(actions, device=env.device))
+        steps += 1
+
+    # Check that rewards are finite and reasonable
+    assert torch.all(torch.isfinite(r)), f"Expected finite rewards, got {r}"
+
+    # Check reward signs match winners
+    for i in range(3):
+        if env.done[i].item():
+            reward = r[i].item()
+            winner = env.winner[i].item()
+
+            if winner == 0:  # Player 0 won
+                assert (
+                    reward > 0
+                ), f"Env {i}: Player 0 won but reward is negative: {reward}"
+            elif winner == 1:  # Player 1 won
+                assert (
+                    reward < 0
+                ), f"Env {i}: Player 1 won but reward is positive: {reward}"
+            elif winner == -1:  # Tie
+                assert (
+                    abs(reward) < 0.01
+                ), f"Env {i}: Tie but reward is not near zero: {reward}"
+
+
+def test_flop_showdown_with_betting():
+    """Test flop_showdown mode with actual betting (not just checks)."""
+    env = _make_flop_showdown_env(N=2, seed=111)
+
+    # Play through with betting until completion
+    steps = 0
+    while not env.done.all() and steps < 20:
+        mask = env.legal_bins_mask()
+        actions = []
+
+        for i in range(2):
+            if mask[i, 2]:  # Can bet half pot
+                actions.append(2)
+            elif mask[i, 1]:  # Can check/call
+                actions.append(1)
+            else:
+                actions.append(0)  # Fold
+
+        r, d, _ = env.step_bins(torch.tensor(actions, device=env.device))
+        steps += 1
+
+        if d.all():
+            break
+
+    # Should reach showdown
+    assert torch.all(env.done), f"Expected all games to be done, got {env.done}"
+
+    # Check that pot amounts are reasonable
+    assert torch.all(env.pot > 0), f"Expected positive pot amounts, got {env.pot}"
+
+    # Check that rewards are proportional to pot size
+    for i in range(2):
+        if env.done[i].item():
+            reward = r[i].item()
+            pot = env.pot[i].item()
+
+            # Reward should be scaled relative to pot size
+            assert (
+                abs(reward) <= pot
+            ), f"Env {i}: Reward {reward} should not exceed pot {pot}"
+
+
+def test_flop_showdown_edge_cases():
+    """Test edge cases in flop_showdown mode."""
+    # Test with very small stacks
+    env = _make_flop_showdown_env(N=1, starting_stack=100, sb=25, bb=50, seed=222)
+
+    # Play through
+    steps = 0
+    while not env.done.item() and steps < 10:
+        mask = env.legal_bins_mask()
+        if mask[0, 7]:  # All-in available
+            action = 7
+        elif mask[0, 1]:  # Check/call
+            action = 1
+        else:
+            action = 0  # Fold
+
+        r, d, _ = env.step_bins(torch.tensor([action], device=env.device))
+        steps += 1
+
+    # Should complete
+    assert env.done.item(), f"Expected game to complete, got done={env.done.item()}"
+
+    # Test with all-in scenarios
+    env2 = _make_flop_showdown_env(N=2, starting_stack=200, sb=50, bb=100, seed=333)
+
+    # Force all-in scenarios
+    steps = 0
+    while not env2.done.all() and steps < 15:
+        mask = env2.legal_bins_mask()
+        actions = []
+
+        for i in range(2):
+            if mask[i, 7]:  # All-in
+                actions.append(7)
+            elif mask[i, 1]:  # Check/call
+                actions.append(1)
+            else:
+                actions.append(0)  # Fold
+
+        r, d, _ = env2.step_bins(torch.tensor(actions, device=env2.device))
+        steps += 1
+
+    # Should complete with all-in scenarios
+    assert torch.all(env2.done), f"Expected all games to complete, got {env2.done}"
