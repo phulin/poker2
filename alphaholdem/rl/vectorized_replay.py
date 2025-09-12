@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import torch
-from typing import Dict
+from typing import Dict, Union
+
+# Import embedding data classes
+from ..models.cnn_embedding_data import CNNEmbeddingData
+from ..models.transformer.embedding_data import StructuredEmbeddingData
 
 
 class VectorizedReplayBuffer:
@@ -36,13 +40,15 @@ class VectorizedReplayBuffer:
             -1
         )  # -1 if no batch is open, otherwise the nominal size of the open batch
 
+        C, T, L = capacity, max_trajectory_length, sequence_length
+
         # Pre-allocate tensors for all transition fields: (capacity, max_trajectory_length, ...)
         if not is_transformer:
             # CNN model tensors
             # Cards features tensor: (capacity, max_trajectory_length, 6, 4, 13) - bool dtype
             self.cards_features = torch.zeros(
-                capacity,
-                max_trajectory_length,
+                C,
+                T,
                 6,
                 4,
                 13,  # Fixed cards shape
@@ -53,8 +59,8 @@ class VectorizedReplayBuffer:
             # Actions features tensor: (capacity, max_trajectory_length, 24, 4, num_bet_bins) - bool dtype
             # 4 slots: p1, p2, sum, legal
             self.actions_features = torch.zeros(
-                capacity,
-                max_trajectory_length,
+                C,
+                T,
                 24,
                 4,
                 num_bet_bins,
@@ -63,84 +69,81 @@ class VectorizedReplayBuffer:
             )
         else:
             # Transformer structured embedding fields: (capacity, max_trajectory_length, ...)
-            self.card_indices = torch.full(
-                (capacity, max_trajectory_length, self.sequence_length),
+            self.token_ids = torch.full(
+                (C, T, self.sequence_length),
                 -1,
                 dtype=torch.long,
                 device=device,
             )
+            self.card_ranks = torch.zeros(
+                C,
+                T,
+                L,
+                dtype=torch.long,
+                device=device,
+            )
+            self.card_suits = torch.zeros(
+                C,
+                T,
+                L,
+                dtype=torch.long,
+                device=device,
+            )
             self.card_stages = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
+                C,
+                T,
+                L,
                 dtype=torch.long,
                 device=device,
             )
             self.action_actors = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
+                C,
+                T,
+                L,
                 dtype=torch.long,
                 device=device,
             )
             self.action_streets = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
+                C,
+                T,
+                L,
                 dtype=torch.long,
                 device=device,
             )
             self.action_legal_masks = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
+                C,
+                T,
+                L,
                 8,
                 dtype=torch.bool,
                 device=device,
             )
             # Consolidated context tensor [capacity, max_trajectory_length, sequence_length, 10]
             self.context_features = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
+                C,
+                T,
+                L,
                 10,
                 dtype=torch.long,
                 device=device,
             )
-        self.action_indices = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.long, device=device
-        )
-        self.log_probs = torch.zeros(
-            capacity, max_trajectory_length, dtype=float_dtype, device=device
-        )
-        self.rewards = torch.zeros(
-            capacity, max_trajectory_length, dtype=float_dtype, device=device
-        )
-        self.dones = torch.zeros(
-            capacity, max_trajectory_length, dtype=torch.bool, device=device
-        )
+
+        self.action_indices = torch.zeros(C, T, dtype=torch.long, device=device)
+        self.log_probs = torch.zeros(C, T, dtype=float_dtype, device=device)
+        self.rewards = torch.zeros(C, T, dtype=float_dtype, device=device)
+        self.dones = torch.zeros(C, T, dtype=torch.bool, device=device)
         self.legal_masks = torch.zeros(
-            capacity,
-            max_trajectory_length,
+            C,
+            T,
             num_bet_bins,
             dtype=torch.bool,  # Changed to bool
             device=device,
         )
-        self.delta2 = torch.zeros(
-            capacity, max_trajectory_length, dtype=float_dtype, device=device
-        )
-        self.delta3 = torch.zeros(
-            capacity, max_trajectory_length, dtype=float_dtype, device=device
-        )
-        self.values = torch.zeros(
-            capacity, max_trajectory_length, dtype=float_dtype, device=device
-        )
-        self.advantages = torch.zeros(
-            capacity, max_trajectory_length, dtype=float_dtype, device=device
-        )
-        self.returns = torch.zeros(
-            capacity, max_trajectory_length, dtype=float_dtype, device=device
-        )
+        self.delta2 = torch.zeros(C, T, dtype=float_dtype, device=device)
+        self.delta3 = torch.zeros(C, T, dtype=float_dtype, device=device)
+        self.values = torch.zeros(C, T, dtype=float_dtype, device=device)
+        self.advantages = torch.zeros(C, T, dtype=float_dtype, device=device)
+        self.returns = torch.zeros(C, T, dtype=float_dtype, device=device)
 
         # Track trajectory metadata
         self.trajectory_lengths = torch.zeros(capacity, dtype=torch.long, device=device)
@@ -191,7 +194,9 @@ class VectorizedReplayBuffer:
             self.actions_features[clear_indices] = False
         else:
             # Transformer structured embedding tensors
-            self.card_indices[clear_indices] = -1
+            self.token_ids[clear_indices] = -1
+            self.card_ranks[clear_indices] = 0
+            self.card_suits[clear_indices] = 0
             self.card_stages[clear_indices] = 0
             self.action_actors[clear_indices] = 0
             self.action_streets[clear_indices] = 0
@@ -316,22 +321,7 @@ class VectorizedReplayBuffer:
 
     def add_batch(
         self,
-        cards_features: torch.Tensor = None,  # [batch_size, 6, 4, 13] - bool
-        actions_features: torch.Tensor = None,  # [batch_size, 24, 4, num_bet_bins] - bool
-        # Structured embedding fields
-        card_indices: torch.Tensor = None,  # [batch_size, seq_len] - long
-        card_stages: torch.Tensor = None,  # [batch_size, seq_len] - long
-        card_visibility: torch.Tensor = None,  # [batch_size, seq_len] - long
-        card_order: torch.Tensor = None,  # [batch_size, seq_len] - long
-        action_actors: torch.Tensor = None,  # [batch_size, seq_len] - long
-        action_types: torch.Tensor = None,  # [batch_size, seq_len] - long
-        action_streets: torch.Tensor = None,  # [batch_size, seq_len] - long
-        action_size_bins: torch.Tensor = None,  # [batch_size, seq_len] - long
-        action_size_features: torch.Tensor = None,  # [batch_size, seq_len, 3] - float
-        context_pot_sizes: torch.Tensor = None,  # [batch_size, seq_len, 1] - float
-        context_stack_sizes: torch.Tensor = None,  # [batch_size, seq_len, 2] - float
-        context_positions: torch.Tensor = None,  # [batch_size, seq_len] - long
-        context_street_context: torch.Tensor = None,  # [batch_size, seq_len, 4] - float
+        embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData],
         action_indices: torch.Tensor = None,  # [batch_size] - long
         log_probs: torch.Tensor = None,
         rewards: torch.Tensor = None,
@@ -343,146 +333,10 @@ class VectorizedReplayBuffer:
         trajectory_indices: torch.Tensor = None,  # Which trajectory each transition belongs to
     ) -> None:
         """
-        Add a batch of transitions to the buffer using vectorized operations.
+        Add a batch of transitions to the buffer using embedding data.
 
         Args:
-            cards_features: [batch_size, 6, 4, 13] - bool dtype
-            actions_features: [batch_size, 24, 4, num_bet_bins] - bool dtype
-            card_indices: [batch_size, seq_len] - long dtype
-            card_stages: [batch_size, seq_len] - long dtype
-            card_visibility: [batch_size, seq_len] - long dtype
-            card_order: [batch_size, seq_len] - long dtype
-            action_actors: [batch_size, seq_len] - long dtype
-            action_types: [batch_size, seq_len] - long dtype
-            action_streets: [batch_size, seq_len] - long dtype
-            action_size_bins: [batch_size, seq_len] - long dtype
-            action_size_features: [batch_size, seq_len, 3] - float dtype
-            context_pot_sizes: [batch_size, seq_len, 1] - float dtype
-            context_stack_sizes: [batch_size, seq_len, 2] - float dtype
-            context_positions: [batch_size, seq_len] - long dtype
-            context_street_context: [batch_size, seq_len, 4] - float dtype
-            action_indices: [batch_size] - long dtype
-            log_probs: [batch_size]
-            rewards: [batch_size]
-            dones: [batch_size]
-            legal_masks: [batch_size, legal_mask_dim] - bool dtype
-            delta2: [batch_size]
-            delta3: [batch_size]
-            values: [batch_size]
-            trajectory_indices: [batch_size] - which trajectory each transition belongs to (in source space)
-        """
-
-        assert (
-            self.open_batch > 0
-        ), "Must call start_adding_trajectories before adding a batch"
-
-        # Convert user's source trajectory indices to ring buffer indices
-        buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
-
-        # Get current step positions for each trajectory using buffer indices
-        step_positions = self.current_step_positions[buffer_trajectory_indices]
-
-        # Check if any trajectories would exceed max length
-        if (step_positions >= self.max_trajectory_length).any():
-            raise ValueError("Some trajectories would exceed max_trajectory_length")
-
-        # Use vectorized indexing to add transitions
-        # This is the key vectorized operation - no loops!
-        if cards_features is not None:
-            self.cards_features[buffer_trajectory_indices, step_positions] = (
-                cards_features
-            )
-        if actions_features is not None:
-            self.actions_features[buffer_trajectory_indices, step_positions] = (
-                actions_features
-            )
-        # Structured embedding fields
-        if card_indices is not None:
-            self.card_indices[buffer_trajectory_indices, step_positions] = card_indices
-        if card_stages is not None:
-            self.card_stages[buffer_trajectory_indices, step_positions] = card_stages
-        if card_visibility is not None:
-            self.card_visibility[buffer_trajectory_indices, step_positions] = (
-                card_visibility
-            )
-        if card_order is not None:
-            self.card_order[buffer_trajectory_indices, step_positions] = card_order
-        if action_actors is not None:
-            self.action_actors[buffer_trajectory_indices, step_positions] = (
-                action_actors
-            )
-        if action_types is not None:
-            self.action_types[buffer_trajectory_indices, step_positions] = action_types
-        if action_streets is not None:
-            self.action_streets[buffer_trajectory_indices, step_positions] = (
-                action_streets
-            )
-        if action_size_bins is not None:
-            self.action_size_bins[buffer_trajectory_indices, step_positions] = (
-                action_size_bins
-            )
-        if action_size_features is not None:
-            self.action_size_features[buffer_trajectory_indices, step_positions] = (
-                action_size_features
-            )
-        if context_pot_sizes is not None:
-            self.context_pot_sizes[buffer_trajectory_indices, step_positions] = (
-                context_pot_sizes
-            )
-        if context_stack_sizes is not None:
-            self.context_stack_sizes[buffer_trajectory_indices, step_positions] = (
-                context_stack_sizes
-            )
-        if context_positions is not None:
-            self.context_positions[buffer_trajectory_indices, step_positions] = (
-                context_positions
-            )
-        if context_street_context is not None:
-            self.context_street_context[buffer_trajectory_indices, step_positions] = (
-                context_street_context
-            )
-        self.action_indices[buffer_trajectory_indices, step_positions] = action_indices
-        self.log_probs[buffer_trajectory_indices, step_positions] = log_probs
-        self.rewards[buffer_trajectory_indices, step_positions] = rewards
-        self.dones[buffer_trajectory_indices, step_positions] = dones
-        self.legal_masks[buffer_trajectory_indices, step_positions] = legal_masks
-        self.delta2[buffer_trajectory_indices, step_positions] = delta2
-        self.delta3[buffer_trajectory_indices, step_positions] = delta3
-        self.values[buffer_trajectory_indices, step_positions] = values
-
-        # Update trajectory step positions
-        self.current_step_positions[buffer_trajectory_indices] += 1
-
-        # Handle trajectory completion
-        completed_trajectories = buffer_trajectory_indices[dones]
-        if len(completed_trajectories) > 0:
-            # Mark completed trajectories as valid
-            self.valid_trajectories[completed_trajectories] = True
-            self.trajectory_lengths[completed_trajectories] = (
-                self.current_step_positions[completed_trajectories]
-            )
-
-            # Reset step positions for completed trajectories
-            self.current_step_positions[completed_trajectories] = 0
-
-    def add_batch_transformer(
-        self,
-        structured_data: "StructuredEmbeddingData",
-        action_indices: torch.Tensor = None,  # [batch_size] - long
-        log_probs: torch.Tensor = None,
-        rewards: torch.Tensor = None,
-        dones: torch.Tensor = None,
-        legal_masks: torch.Tensor = None,  # [batch_size, legal_mask_dim] - bool
-        delta2: torch.Tensor = None,
-        delta3: torch.Tensor = None,
-        values: torch.Tensor = None,
-        trajectory_indices: torch.Tensor = None,  # Which trajectory each transition belongs to
-    ) -> None:
-        """
-        Add a batch of transitions to the buffer using StructuredEmbeddingData.
-
-        Args:
-            structured_data: StructuredEmbeddingData containing all embedding components
+            embedding_data: Either CNNEmbeddingData or StructuredEmbeddingData containing embedding components
             action_indices: [batch_size] - long dtype
             log_probs: [batch_size] - float dtype
             rewards: [batch_size] - float dtype
@@ -493,12 +347,13 @@ class VectorizedReplayBuffer:
             values: [batch_size] - float dtype
             trajectory_indices: [batch_size] - long dtype
         """
-        if not self.is_transformer:
-            raise ValueError(
-                "add_batch_transformer can only be used with transformer buffers"
+
+        if self.open_batch <= 0:
+            raise RuntimeError(
+                "Must call start_adding_trajectory_batches before adding data"
             )
 
-        batch_size = structured_data.batch_size
+        batch_size = embedding_data.batch_size
 
         # Get trajectory indices for this batch
         if trajectory_indices is None:
@@ -512,27 +367,45 @@ class VectorizedReplayBuffer:
         # Clamp step positions to be within bounds
         step_positions = torch.clamp(step_positions, 0, self.max_trajectory_length - 1)
 
-        # Store structured embedding data
-        self.card_indices[trajectory_indices, step_positions, :] = (
-            structured_data.token_ids
-        )
-        self.card_stages[trajectory_indices, step_positions, :] = (
-            structured_data.card_stages
-        )
-        self.action_actors[trajectory_indices, step_positions, :] = (
-            structured_data.action_actors
-        )
-        self.action_streets[trajectory_indices, step_positions, :] = (
-            structured_data.action_streets
-        )
-        self.action_legal_masks[trajectory_indices, step_positions, :] = (
-            structured_data.action_legal_masks
-        )
-        self.context_features[trajectory_indices, step_positions, :] = (
-            structured_data.context_features
-        )
+        # Handle different embedding data types
+        if isinstance(embedding_data, CNNEmbeddingData):
+            # Store CNN features
+            self.cards_features[trajectory_indices, step_positions, :] = (
+                embedding_data.cards
+            )
+            self.actions_features[trajectory_indices, step_positions, :] = (
+                embedding_data.actions
+            )
+        elif isinstance(embedding_data, StructuredEmbeddingData):
+            # Store structured embedding data
+            self.card_indices[trajectory_indices, step_positions, :] = (
+                embedding_data.token_ids
+            )
+            self.card_ranks[trajectory_indices, step_positions, :] = (
+                embedding_data.card_ranks
+            )
+            self.card_suits[trajectory_indices, step_positions, :] = (
+                embedding_data.card_suits
+            )
+            self.card_stages[trajectory_indices, step_positions, :] = (
+                embedding_data.card_stages
+            )
+            self.action_actors[trajectory_indices, step_positions, :] = (
+                embedding_data.action_actors
+            )
+            self.action_streets[trajectory_indices, step_positions, :] = (
+                embedding_data.action_streets
+            )
+            self.action_legal_masks[trajectory_indices, step_positions, :] = (
+                embedding_data.action_legal_masks
+            )
+            self.context_features[trajectory_indices, step_positions, :] = (
+                embedding_data.context_features
+            )
+        else:
+            raise ValueError(f"Unsupported embedding data type: {type(embedding_data)}")
 
-        # Store other transition data
+        # Store common transition data
         if action_indices is not None:
             self.action_indices[trajectory_indices, step_positions] = action_indices
         if log_probs is not None:
@@ -542,9 +415,28 @@ class VectorizedReplayBuffer:
         if dones is not None:
             self.dones[trajectory_indices, step_positions] = dones
         if legal_masks is not None:
-            self.legal_masks[trajectory_indices, step_positions] = legal_masks
+            self.legal_masks[trajectory_indices, step_positions, :] = legal_masks
         if delta2 is not None:
             self.delta2[trajectory_indices, step_positions] = delta2
+        if delta3 is not None:
+            self.delta3[trajectory_indices, step_positions] = delta3
+        if values is not None:
+            self.values[trajectory_indices, step_positions] = values
+
+        # Advance step positions
+        self.current_step_positions[trajectory_indices] += 1
+
+        # Handle trajectory completion
+        completed_trajectories = trajectory_indices[dones]
+        if len(completed_trajectories) > 0:
+            # Mark completed trajectories as valid
+            self.valid_trajectories[completed_trajectories] = True
+            self.trajectory_lengths[completed_trajectories] = (
+                self.current_step_positions[completed_trajectories]
+            )
+
+            # Reset step positions for completed trajectories
+            self.current_step_positions[completed_trajectories] = 0
         if delta3 is not None:
             self.delta3[trajectory_indices, step_positions] = delta3
         if values is not None:

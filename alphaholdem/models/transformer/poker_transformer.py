@@ -71,8 +71,8 @@ class PokerTransformerV1(nn.Module, Model):
         self.policy_head = TransformerPolicyHead(d_model, num_actions)
         self.value_head = TransformerValueHead(d_model)
 
-        if use_auxiliary_loss:
-            self.hand_range_head = HandRangeHead(d_model)
+        # if use_auxiliary_loss:
+        #     self.hand_range_head = HandRangeHead(d_model)
 
         # Dropout for regularization
         self.dropout = nn.Dropout(dropout)
@@ -190,21 +190,6 @@ class PokerTransformerV1(nn.Module, Model):
             outputs["hand_range_logits"] = hand_range_logits
 
         return outputs
-
-    def encode_state(
-        self, tensor_env, env_idx: int, player: int
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Encode a game state into token sequence.
-
-        Args:
-            tensor_env: HUNLTensorEnv instance
-            env_idx: Environment index
-            player: Player index (0 or 1)
-
-        Returns:
-            Tuple of (card_indices, attention_mask)
-        """
-        return self.tokenizer.tokenize_state(tensor_env, env_idx, player)
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information for logging/debugging."""

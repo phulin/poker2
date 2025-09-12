@@ -208,4 +208,7 @@ class SiameseConvNetV1(nn.Module, Model):
         h = self.fusion(x)
         logits = self.policy_head(h)
         value = self.value_head(h).squeeze(-1)
-        return logits, value
+        return {
+            "policy_logits": logits,
+            "value": value,
+        }

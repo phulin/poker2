@@ -17,6 +17,8 @@ class StructuredEmbeddingData:
 
     # Card components [batch_size, seq_len]
     token_ids: torch.Tensor  # Token IDs (0-51 for cards, 52 for CLS, -1 for padding)
+    card_ranks: torch.Tensor  # Card ranks (0-12)
+    card_suits: torch.Tensor  # Card suits (0-3)
     card_stages: torch.Tensor  # Stage indices (0-3: hole, flop, turn, river)
 
     # Action components [batch_size, seq_len]

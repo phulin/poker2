@@ -8,6 +8,7 @@ import torch
 from ..env.hunl_tensor_env import HUNLTensorEnv
 from ..env.hunl_env import HUNLEnv
 from .cnn import CardsPlanesV1, ActionsHUEncoderV1
+from .cnn_embedding_data import CNNEmbeddingData
 
 
 class CNNStateEncoder:
@@ -15,30 +16,29 @@ class CNNStateEncoder:
 
     def __init__(
         self,
+        tensor_env: HUNLTensorEnv,
         device: torch.device,
     ):
+        self.tensor_env = tensor_env
         self.device = device
+        self.num_bet_bins = tensor_env.num_bet_bins
 
-    def encode_tensor_states(
-        self, tensor_env: HUNLTensorEnv, num_bet_bins: int, idxs: torch.Tensor
-    ) -> Dict[str, torch.Tensor]:
+    def encode_tensor_states(self, player: int, idxs: torch.Tensor) -> CNNEmbeddingData:
         """
         Encode states for all tensor_environments in the tensorized environment.
 
         Args:
-            tensor_env: The tensorized environment
-            num_envs: Number of environments
-            num_bet_bins: Number of betting bins
-            idxs: Optional tensor of indices to filter environments
+            player: Player index (0 or 1)
+            idxs: Tensor of indices to filter environments
 
         Returns:
-            Dictionary with 'cards' and 'actions' tensors
+            CNNEmbeddingData containing cards and actions tensors
         """
         M = idxs.numel()
         env_indices = idxs
 
-        hole_cards = tensor_env.hole_onehot[env_indices, 0]  # [M, 2, 4, 13]
-        board_cards = tensor_env.board_onehot[env_indices]  # [M, 5, 4, 13]
+        hole_cards = self.tensor_env.hole_onehot[env_indices, 0]  # [M, 2, 4, 13]
+        board_cards = self.tensor_env.board_onehot[env_indices]  # [M, 5, 4, 13]
 
         # Initialize cards tensor as bool with correct batch size
         cards = torch.zeros(M, 6, 4, 13, dtype=torch.bool, device=self.device)
@@ -63,13 +63,13 @@ class CNNStateEncoder:
 
         # Get action history directly from tensor environment
         # Shape: [M, 4_streets, 6_slots, 4_players, num_bet_bins]
-        action_history = tensor_env.get_action_history()[env_indices]
+        action_history = self.tensor_env.get_action_history()[env_indices]
 
         # Reshape to match ActionsHUEncoderV1 format: [M, 24_channels, 4_players, num_bet_bins]
         # Flatten streets and slots: [M, 4*6, 4, num_bet_bins] = [M, 24, 4, num_bet_bins]
-        actions = action_history.view(M, 24, 4, num_bet_bins)
+        actions = action_history.view(M, 24, 4, self.num_bet_bins)
 
-        return {
-            "cards": cards,
-            "actions": actions,
-        }
+        return CNNEmbeddingData(
+            cards=cards,
+            actions=actions,
+        )

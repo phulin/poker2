@@ -10,29 +10,7 @@ from enum import Enum
 from ...env.hunl_tensor_env import HUNLTensorEnv
 from ...env.hunl_env import HUNLEnv
 from .embedding_data import StructuredEmbeddingData
-
-
-# not using most of these for now
-class Special(Enum):
-    CLS = 0
-    SEP = 1
-    MASK = 2
-    PAD = 3
-    NUM_SPECIAL = 4
-
-
-class Context(Enum):
-    POT = 0
-    STACK_P0 = 1
-    STACK_P1 = 2
-    COMMITTED_P0 = 3
-    COMMITTED_P1 = 4
-    POSITION = 5
-    STREET = 6
-    ACTIONS_ROUND = 7
-    MIN_RAISE = 8
-    BET_TO_CALL = 9
-    NUM_CONTEXT = 10
+from .tokens import Special, Context
 
 
 class TransformerStateEncoder:
