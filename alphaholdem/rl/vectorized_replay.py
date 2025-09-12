@@ -70,7 +70,7 @@ class VectorizedReplayBuffer:
         else:
             # Transformer structured embedding fields: (capacity, max_trajectory_length, ...)
             self.token_ids = torch.full(
-                (C, T, self.sequence_length),
+                (C, T, L),
                 -1,
                 dtype=torch.long,
                 device=device,
@@ -86,28 +86,28 @@ class VectorizedReplayBuffer:
                 C,
                 T,
                 L,
-                dtype=torch.long,
+                dtype=torch.uint8,
                 device=device,
             )
             self.card_stages = torch.zeros(
                 C,
                 T,
                 L,
-                dtype=torch.long,
+                dtype=torch.uint8,
                 device=device,
             )
             self.action_actors = torch.zeros(
                 C,
                 T,
                 L,
-                dtype=torch.long,
+                dtype=torch.uint8,
                 device=device,
             )
             self.action_streets = torch.zeros(
                 C,
                 T,
                 L,
-                dtype=torch.long,
+                dtype=torch.uint8,
                 device=device,
             )
             self.action_legal_masks = torch.zeros(
@@ -357,72 +357,84 @@ class VectorizedReplayBuffer:
 
         batch_size = embedding_data.batch_size
 
+        # Convert source trajectory indices to buffer indices by adding current position
+        buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
+
         # Get step positions within trajectories
-        step_positions = self.current_step_positions[trajectory_indices]
+        step_positions = self.current_step_positions[buffer_trajectory_indices]
+
+        # Check if any trajectory would exceed max length
+        if (step_positions >= self.max_trajectory_length).any():
+            raise ValueError("Some trajectories would exceed max_trajectory_length")
 
         # Clamp step positions to be within bounds
         step_positions = torch.clamp(step_positions, 0, self.max_trajectory_length - 1)
 
         # Handle different embedding data types
         if isinstance(embedding_data, CNNEmbeddingData):
-            # Store CNN features
-            self.cards_features[trajectory_indices, step_positions, :] = (
+            # Store CNN features - vectorized assignment
+            self.cards_features[buffer_trajectory_indices, step_positions] = (
                 embedding_data.cards
             )
-            self.actions_features[trajectory_indices, step_positions, :] = (
+            self.actions_features[buffer_trajectory_indices, step_positions] = (
                 embedding_data.actions
             )
         elif isinstance(embedding_data, StructuredEmbeddingData):
-            # Store structured embedding data
-            self.token_ids[trajectory_indices, step_positions, :] = (
+            # Store structured embedding data - vectorized assignment
+            self.token_ids[buffer_trajectory_indices, step_positions] = (
                 embedding_data.token_ids
             )
-            self.card_ranks[trajectory_indices, step_positions, :] = (
+            self.card_ranks[buffer_trajectory_indices, step_positions] = (
                 embedding_data.card_ranks
             )
-            self.card_suits[trajectory_indices, step_positions, :] = (
+            self.card_suits[buffer_trajectory_indices, step_positions] = (
                 embedding_data.card_suits
             )
-            self.card_stages[trajectory_indices, step_positions, :] = (
+            self.card_stages[buffer_trajectory_indices, step_positions] = (
                 embedding_data.card_stages
             )
-            self.action_actors[trajectory_indices, step_positions, :] = (
+            self.action_actors[buffer_trajectory_indices, step_positions] = (
                 embedding_data.action_actors
             )
-            self.action_streets[trajectory_indices, step_positions, :] = (
+            self.action_streets[buffer_trajectory_indices, step_positions] = (
                 embedding_data.action_streets
             )
-            self.action_legal_masks[trajectory_indices, step_positions, :] = (
+            self.action_legal_masks[buffer_trajectory_indices, step_positions] = (
                 embedding_data.action_legal_masks
             )
-            self.context_features[trajectory_indices, step_positions, :] = (
+            self.context_features[buffer_trajectory_indices, step_positions] = (
                 embedding_data.context_features
             )
 
         # Store common transition data
-        self.action_indices[trajectory_indices, step_positions] = action_indices
-        self.log_probs[trajectory_indices, step_positions] = log_probs
-        self.rewards[trajectory_indices, step_positions] = rewards
-        self.dones[trajectory_indices, step_positions] = dones
-        self.legal_masks[trajectory_indices, step_positions, :] = legal_masks
-        self.delta2[trajectory_indices, step_positions] = delta2
-        self.delta3[trajectory_indices, step_positions] = delta3
-        self.values[trajectory_indices, step_positions] = values
+        self.action_indices[buffer_trajectory_indices, step_positions] = action_indices
+        self.log_probs[buffer_trajectory_indices, step_positions] = log_probs
+        self.rewards[buffer_trajectory_indices, step_positions] = rewards
+        self.dones[buffer_trajectory_indices, step_positions] = dones
+        self.legal_masks[buffer_trajectory_indices, step_positions, :] = legal_masks
+        self.delta2[buffer_trajectory_indices, step_positions] = delta2
+        self.delta3[buffer_trajectory_indices, step_positions] = delta3
+        self.values[buffer_trajectory_indices, step_positions] = values
 
         # Advance step positions
-        self.current_step_positions[trajectory_indices] += 1
+        self.current_step_positions[buffer_trajectory_indices] += 1
 
         # Handle trajectory completion
         completed_trajectories = trajectory_indices[dones]
         if len(completed_trajectories) > 0:
+            # Convert completed trajectory indices to buffer indices
+            completed_buffer_indices = (
+                completed_trajectories + self.position
+            ) % self.capacity
+
             # Mark completed trajectories as valid
-            self.valid_trajectories[completed_trajectories] = True
-            self.trajectory_lengths[completed_trajectories] = (
-                self.current_step_positions[completed_trajectories]
+            self.valid_trajectories[completed_buffer_indices] = True
+            self.trajectory_lengths[completed_buffer_indices] = (
+                self.current_step_positions[completed_buffer_indices]
             )
 
             # Reset step positions for completed trajectories
-            self.current_step_positions[completed_trajectories] = 0
+            self.current_step_positions[completed_buffer_indices] = 0
 
     def compute_gae_returns(self, gamma: float = 0.999, lambda_: float = 0.95) -> None:
         """Compute GAE advantages and returns for all stored trajectories using vectorized operations."""
