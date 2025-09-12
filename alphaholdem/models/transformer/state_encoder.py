@@ -83,20 +83,8 @@ class TransformerStateEncoder:
         self.action_streets = torch.zeros(N, L, dtype=torch.long, device=device)
         self.action_legal_masks = torch.zeros(N, L, 8, dtype=torch.bool, device=device)
 
-        self.context_pot_sizes = torch.zeros(N, L, 1, dtype=torch.float, device=device)
-        self.context_stack_sizes = torch.zeros(
-            N, L, 2, dtype=torch.float, device=device
-        )
-        self.context_committed_sizes = torch.zeros(
-            N, L, 2, dtype=torch.float, device=device
-        )
-        self.context_positions = torch.zeros(N, L, dtype=torch.long, device=device)
-        self.context_street = torch.zeros(N, L, 4, dtype=torch.float, device=device)
-        self.context_actions_this_round = torch.zeros(
-            N, L, dtype=torch.long, device=device
-        )
-        self.context_min_raise = torch.zeros(N, L, dtype=torch.float, device=device)
-        self.context_bet_to_call = torch.zeros(N, L, dtype=torch.float, device=device)
+        # Consolidated context tensor [N, L, 10]
+        self.context_features = torch.zeros(N, L, 10, dtype=torch.long, device=device)
 
     def encode_tensor_states(
         self, player: int, idxs: torch.Tensor
@@ -124,19 +112,12 @@ class TransformerStateEncoder:
         )
 
         return StructuredEmbeddingData(
-            card_indices=self.token_ids[:M],
+            token_ids=self.token_ids[:M],
             card_stages=self.card_stages[:M],
             action_actors=self.action_actors[:M],
             action_streets=self.action_streets[:M],
             action_legal_masks=self.action_legal_masks[:M],
-            context_pot_sizes=self.context_pot_sizes[:M],
-            context_stack_sizes=self.context_stack_sizes[:M],
-            context_committed_sizes=self.context_committed_sizes[:M],
-            context_positions=self.context_positions[:M],
-            context_street=self.context_street[:M],
-            context_actions_this_round=self.context_actions_this_round[:M],
-            context_min_raise=self.context_min_raise[:M],
-            context_bet_to_call=self.context_bet_to_call[:M],
+            context_features=self.context_features[:M],
         )
 
     def _process_cards_vectorized(
@@ -205,26 +186,32 @@ class TransformerStateEncoder:
         self.token_ids[:M, k : k + Context.NUM_CONTEXT.value] = (
             self.context_token_offset + self.arange_context
         )
-        self.context_pot_sizes[:M, k, 0] = self.tensor_env.pot[idxs].float()
-        self.context_stack_sizes[:M, k, :] = self.tensor_env.stacks[idxs].float()
-        self.context_committed_sizes[:M, k, :] = self.tensor_env.committed[idxs].float()
-        self.context_positions[:M, k] = torch.where(
-            self.tensor_env.button[idxs] == player, 0, 1
-        )
-        # Create street context tensor with 4 dimensions
-        street_context = torch.stack(
+
+        # Consolidate all context features into a single tensor [M, 10]
+        context_features = torch.stack(
             [
-                self.tensor_env.street[idxs].float(),
-                self.tensor_env.actions_this_round[idxs].float(),
-                self.tensor_env.min_raise[idxs].float(),
+                self.tensor_env.pot[idxs].long(),  # 0: pot size
+                self.tensor_env.stacks[idxs, 0].long(),  # 1: our stack
+                self.tensor_env.stacks[idxs, 1].long(),  # 2: opponent stack
+                self.tensor_env.committed[idxs, 0].long(),  # 3: our committed
+                self.tensor_env.committed[idxs, 1].long(),  # 4: opponent committed
+                torch.where(
+                    self.tensor_env.button[idxs] == player, 0, 1
+                ),  # 5: position
+                self.tensor_env.street[idxs].long(),  # 6: street
+                self.tensor_env.actions_this_round[
+                    idxs
+                ].long(),  # 7: actions this round
+                self.tensor_env.min_raise[idxs].long(),  # 8: min raise
                 (
                     self.tensor_env.committed[idxs, 1 - player]
                     - self.tensor_env.committed[idxs, player]
-                ).float(),
+                ).long(),  # 9: bet to call
             ],
             dim=1,
-        )  # [M, 4]
-        self.context_street[:M, k, :] = street_context
+        )  # [M, 10]
+
+        self.context_features[:M, k, :] = context_features
 
     def encode_single_state(
         self, game_state: HUNLEnv, player: int

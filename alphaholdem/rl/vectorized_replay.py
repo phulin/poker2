@@ -98,64 +98,13 @@ class VectorizedReplayBuffer:
                 dtype=torch.bool,
                 device=device,
             )
-            self.context_pot_sizes = torch.zeros(
+            # Consolidated context tensor [capacity, max_trajectory_length, sequence_length, 10]
+            self.context_features = torch.zeros(
                 capacity,
                 max_trajectory_length,
                 self.sequence_length,
-                1,
-                dtype=torch.float,
-                device=device,
-            )
-            self.context_stack_sizes = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
-                2,
-                dtype=torch.float,
-                device=device,
-            )
-            self.context_committed_sizes = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
-                2,
-                dtype=torch.float,
-                device=device,
-            )
-            self.context_positions = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
+                10,
                 dtype=torch.long,
-                device=device,
-            )
-            self.context_street = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
-                4,
-                dtype=torch.float,
-                device=device,
-            )
-            self.context_actions_this_round = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
-                dtype=torch.long,
-                device=device,
-            )
-            self.context_min_raise = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
-                dtype=torch.float,
-                device=device,
-            )
-            self.context_bet_to_call = torch.zeros(
-                capacity,
-                max_trajectory_length,
-                self.sequence_length,
-                dtype=torch.float,
                 device=device,
             )
         self.action_indices = torch.zeros(
@@ -247,14 +196,7 @@ class VectorizedReplayBuffer:
             self.action_actors[clear_indices] = 0
             self.action_streets[clear_indices] = 0
             self.action_legal_masks[clear_indices] = False
-            self.context_pot_sizes[clear_indices] = 0
-            self.context_stack_sizes[clear_indices] = 0
-            self.context_committed_sizes[clear_indices] = 0
-            self.context_positions[clear_indices] = 0
-            self.context_street[clear_indices] = 0
-            self.context_actions_this_round[clear_indices] = 0
-            self.context_min_raise[clear_indices] = 0
-            self.context_bet_to_call[clear_indices] = 0
+            self.context_features[clear_indices] = 0
 
         # Common tensors for both model types
         self.action_indices[clear_indices] = 0
@@ -349,14 +291,7 @@ class VectorizedReplayBuffer:
                 "action_actors",
                 "action_streets",
                 "action_legal_masks",
-                "context_pot_sizes",
-                "context_stack_sizes",
-                "context_committed_sizes",
-                "context_positions",
-                "context_street",
-                "context_actions_this_round",
-                "context_min_raise",
-                "context_bet_to_call",
+                "context_features",
             ]
             all_fields = common_fields + transformer_fields
 
@@ -579,7 +514,7 @@ class VectorizedReplayBuffer:
 
         # Store structured embedding data
         self.card_indices[trajectory_indices, step_positions, :] = (
-            structured_data.card_indices
+            structured_data.token_ids
         )
         self.card_stages[trajectory_indices, step_positions, :] = (
             structured_data.card_stages
@@ -593,29 +528,8 @@ class VectorizedReplayBuffer:
         self.action_legal_masks[trajectory_indices, step_positions, :] = (
             structured_data.action_legal_masks
         )
-        self.context_pot_sizes[trajectory_indices, step_positions, :] = (
-            structured_data.context_pot_sizes
-        )
-        self.context_stack_sizes[trajectory_indices, step_positions, :] = (
-            structured_data.context_stack_sizes
-        )
-        self.context_committed_sizes[trajectory_indices, step_positions, :] = (
-            structured_data.context_committed_sizes
-        )
-        self.context_positions[trajectory_indices, step_positions, :] = (
-            structured_data.context_positions
-        )
-        self.context_street[trajectory_indices, step_positions, :] = (
-            structured_data.context_street
-        )
-        self.context_actions_this_round[trajectory_indices, step_positions, :] = (
-            structured_data.context_actions_this_round
-        )
-        self.context_min_raise[trajectory_indices, step_positions, :] = (
-            structured_data.context_min_raise
-        )
-        self.context_bet_to_call[trajectory_indices, step_positions, :] = (
-            structured_data.context_bet_to_call
+        self.context_features[trajectory_indices, step_positions, :] = (
+            structured_data.context_features
         )
 
         # Store other transition data
@@ -809,10 +723,7 @@ class VectorizedReplayBuffer:
         action_streets = self.action_streets[traj_indices, :max_len]
         action_size_bins = self.action_size_bins[traj_indices, :max_len]
         action_size_features = self.action_size_features[traj_indices, :max_len]
-        context_pot_sizes = self.context_pot_sizes[traj_indices, :max_len]
-        context_stack_sizes = self.context_stack_sizes[traj_indices, :max_len]
-        context_positions = self.context_positions[traj_indices, :max_len]
-        context_street_context = self.context_street_context[traj_indices, :max_len]
+        context_features = self.context_features[traj_indices, :max_len]
         action_indices = self.action_indices[traj_indices, :max_len]
         logps = self.log_probs[traj_indices, :max_len]
         advs = self.advantages[traj_indices, :max_len]
@@ -851,17 +762,8 @@ class VectorizedReplayBuffer:
         all_action_size_features = action_size_features.reshape(
             -1, *action_size_features.shape[2:]
         )[mask_flat]
-        all_context_pot_sizes = context_pot_sizes.reshape(
-            -1, *context_pot_sizes.shape[2:]
-        )[mask_flat]
-        all_context_stack_sizes = context_stack_sizes.reshape(
-            -1, *context_stack_sizes.shape[2:]
-        )[mask_flat]
-        all_context_positions = context_positions.reshape(
-            -1, *context_positions.shape[2:]
-        )[mask_flat]
-        all_context_street_context = context_street_context.reshape(
-            -1, *context_street_context.shape[2:]
+        all_context_features = context_features.reshape(
+            -1, *context_features.shape[2:]
         )[mask_flat]
         all_action_indices = action_indices.reshape(-1)[mask_flat]
         all_log_probs = logps.reshape(-1)[mask_flat]
@@ -886,10 +788,7 @@ class VectorizedReplayBuffer:
                 "action_streets": all_action_streets,
                 "action_size_bins": all_action_size_bins,
                 "action_size_features": all_action_size_features,
-                "context_pot_sizes": all_context_pot_sizes,
-                "context_stack_sizes": all_context_stack_sizes,
-                "context_positions": all_context_positions,
-                "context_street_context": all_context_street_context,
+                "context_features": all_context_features,
                 "action_indices": all_action_indices,
                 "log_probs_old": all_log_probs,
                 "advantages": all_advantages,
@@ -949,12 +848,7 @@ class VectorizedReplayBuffer:
             "action_size_features": self.action_size_features[
                 traj_indices, step_indices
             ],
-            "context_pot_sizes": self.context_pot_sizes[traj_indices, step_indices],
-            "context_stack_sizes": self.context_stack_sizes[traj_indices, step_indices],
-            "context_positions": self.context_positions[traj_indices, step_indices],
-            "context_street_context": self.context_street_context[
-                traj_indices, step_indices
-            ],
+            "context_features": self.context_features[traj_indices, step_indices],
             "action_indices": self.action_indices[traj_indices, step_indices],
             "log_probs_old": self.log_probs[traj_indices, step_indices],
             "advantages": self.advantages[traj_indices, step_indices],

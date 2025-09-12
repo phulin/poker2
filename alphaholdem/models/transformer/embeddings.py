@@ -255,26 +255,39 @@ class ContextEmbedding(nn.Module):
 
     def forward(
         self,
-        pot_sizes: torch.Tensor,
-        stack_sizes: torch.Tensor,
-        committed_sizes: torch.Tensor,
-        positions: torch.Tensor,
-        street_context: torch.Tensor,
+        context_features: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass for context embeddings.
 
         Args:
-            pot_sizes: Pot sizes [batch_size, seq_len, 1]
-            stack_sizes: Stack sizes [batch_size, seq_len, 2]
-            committed_sizes: Committed sizes [batch_size, seq_len, 2]
-            positions: Position indices [batch_size, seq_len] (0-1)
-            street_context: Street context [batch_size, seq_len, 4]
+            context_features: Consolidated context features [batch_size, seq_len, 10] (long)
+                - 0: pot size
+                - 1: our stack
+                - 2: opponent stack
+                - 3: our committed
+                - 4: opponent committed
+                - 5: position (0-1)
+                - 6: street
+                - 7: actions this round
+                - 8: min raise
+                - 9: bet to call
 
         Returns:
             Context embeddings [batch_size, seq_len, d_model]
         """
+        # Extract individual components from consolidated tensor
+        pot_sizes = context_features[:, :, 0:1].float()  # [batch_size, seq_len, 1]
+        stack_sizes = context_features[:, :, 1:3].float()  # [batch_size, seq_len, 2]
+        committed_sizes = context_features[
+            :, :, 3:5
+        ].float()  # [batch_size, seq_len, 2]
+        positions = context_features[:, :, 5]  # [batch_size, seq_len] - already long
+        street_context = context_features[
+            :, :, 6:10
+        ].float()  # [batch_size, seq_len, 4]
+
         # Clamp embedding indices to valid ranges
-        positions = torch.clamp(positions, 0, 1)  # 0-1: player positions
+        positions = torch.clamp(positions, 0, 1).long()  # Convert to long for embedding
 
         # Get component embeddings
         pot_emb = self.pot_emb(pot_sizes)

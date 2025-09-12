@@ -21,7 +21,7 @@ from ..models.cnn import CardsPlanesV1, ActionsHUEncoderV1
 from ..models.transformer.embedding_data import StructuredEmbeddingData
 from ..encoding.action_mapping import bin_to_action, get_legal_mask
 from ..models.factory import ModelFactory
-from ..models.state_encoder import StateEncoder
+from ..models.state_encoder import CNNStateEncoder
 from ..models.cnn import SiameseConvNetV1
 from ..rl.replay import (
     Transition,
@@ -114,7 +114,7 @@ class SelfPlayTrainer:
             self.use_structured_embeddings = True
         else:
             # Use CNN state encoder
-            self.state_encoder = StateEncoder(
+            self.state_encoder = CNNStateEncoder(
                 self.cards_encoder, self.actions_encoder, self.device
             )
             self.use_structured_embeddings = False
@@ -434,17 +434,14 @@ class SelfPlayTrainer:
             )
             active_legal_masks = legal_bins_mask[active_indices]  # [N_active, B]
 
-            # Encode states for active environments only
-            states = self._encode_tensor_states(player=0, idxs=active_indices)
+            # Encode states separately for our perspective and opponent perspective
             is_transformer = self.cfg.model.name.startswith("poker_transformer")
 
-            if is_transformer:
-                # Structured embeddings
-                active_data = states
-            else:
-                # CNN mode
-                active_cards = states["cards"][active_indices]
-                active_actions = states["actions"][active_indices]
+            # Encode states from our perspective (player=0)
+            our_states = self._encode_tensor_states(player=0, idxs=active_indices)
+
+            # Encode states from opponent perspective (player=1)
+            opp_states = self._encode_tensor_states(player=1, idxs=active_indices)
 
             # Get model predictions for active environments only
             with torch.no_grad():
@@ -472,34 +469,15 @@ class SelfPlayTrainer:
                 # Get predictions from our model for our turns
                 if active_we_act.numel() > 0:
                     if is_transformer:
-                        # Structured transformer model
-                        our_card_indices = active_data.card_indices[active_we_act]
-                        our_card_stages = active_data.card_stages[active_we_act]
-                        our_action_actors = active_data.action_actors[active_we_act]
-                        our_action_streets = active_data.action_streets[active_we_act]
-                        our_action_legal_masks = active_data.action_legal_masks[
+                        # Structured transformer model - use our perspective
+                        our_card_indices = our_states.token_ids[active_we_act]
+                        our_card_stages = our_states.card_stages[active_we_act]
+                        our_action_actors = our_states.action_actors[active_we_act]
+                        our_action_streets = our_states.action_streets[active_we_act]
+                        our_action_legal_masks = our_states.action_legal_masks[
                             active_we_act
                         ]
-                        our_context_pot_sizes = active_data.context_pot_sizes[
-                            active_we_act
-                        ]
-                        our_context_stack_sizes = active_data.context_stack_sizes[
-                            active_we_act
-                        ]
-                        our_context_positions = active_data.context_positions[
-                            active_we_act
-                        ]
-                        our_context_street = active_data.context_street[active_we_act]
-                        our_context_committed_sizes = (
-                            active_data.context_committed_sizes[active_we_act]
-                        )
-                        our_context_actions_this_round = (
-                            active_data.context_actions_this_round[active_we_act]
-                        )
-                        our_context_min_raise = active_data.context_min_raise[
-                            active_we_act
-                        ]
-                        our_context_bet_to_call = active_data.context_bet_to_call[
+                        our_context_features = our_states.context_features[
                             active_we_act
                         ]
 
@@ -510,28 +488,21 @@ class SelfPlayTrainer:
                         ):
                             # Create structured data for our model
                             our_structured_data = StructuredEmbeddingData(
-                                card_indices=our_card_indices,
+                                token_ids=our_card_indices,
                                 card_stages=our_card_stages,
                                 action_actors=our_action_actors,
                                 action_streets=our_action_streets,
                                 action_legal_masks=our_action_legal_masks,
-                                context_pot_sizes=our_context_pot_sizes,
-                                context_stack_sizes=our_context_stack_sizes,
-                                context_positions=our_context_positions,
-                                context_street=our_context_street,
-                                context_committed_sizes=our_context_committed_sizes,
-                                context_actions_this_round=our_context_actions_this_round,
-                                context_min_raise=our_context_min_raise,
-                                context_bet_to_call=our_context_bet_to_call,
+                                context_features=our_context_features,
                             )
                             outputs = self.model(our_structured_data)
 
                         our_logits = outputs["policy_logits"]
                         our_values = outputs["value"]
                     else:
-                        # CNN model
-                        our_cards = active_cards[active_we_act].float()
-                        our_actions = active_actions[active_we_act].float()
+                        # CNN model - use our perspective
+                        our_cards = our_states["cards"][active_we_act].float()
+                        our_actions = our_states["actions"][active_we_act].float()
 
                         with torch.amp.autocast(
                             self.device.type,
@@ -601,7 +572,7 @@ class SelfPlayTrainer:
                             ):
                                 # Create structured data for opponent model
                                 opp_structured_data = StructuredEmbeddingData(
-                                    card_indices=opp_card_indices,
+                                    token_ids=opp_card_indices,
                                     card_stages=opp_card_stages,
                                     action_actors=opp_action_actors,
                                     action_streets=opp_action_streets,
@@ -631,34 +602,15 @@ class SelfPlayTrainer:
                 elif active_opp_acts.numel() > 0:
                     # Self-play: use our model for opponent turns too
                     if is_transformer:
-                        # Transformer model with structured embeddings
-                        opp_card_indices = active_data.card_indices[active_opp_acts]
-                        opp_card_stages = active_data.card_stages[active_opp_acts]
-                        opp_action_actors = active_data.action_actors[active_opp_acts]
-                        opp_action_streets = active_data.action_streets[active_opp_acts]
-                        opp_action_legal_masks = active_data.action_legal_masks[
+                        # Transformer model with structured embeddings - use opponent perspective
+                        opp_card_indices = opp_states.token_ids[active_opp_acts]
+                        opp_card_stages = opp_states.card_stages[active_opp_acts]
+                        opp_action_actors = opp_states.action_actors[active_opp_acts]
+                        opp_action_streets = opp_states.action_streets[active_opp_acts]
+                        opp_action_legal_masks = opp_states.action_legal_masks[
                             active_opp_acts
                         ]
-                        opp_context_pot_sizes = active_data.context_pot_sizes[
-                            active_opp_acts
-                        ]
-                        opp_context_stack_sizes = active_data.context_stack_sizes[
-                            active_opp_acts
-                        ]
-                        opp_context_positions = active_data.context_positions[
-                            active_opp_acts
-                        ]
-                        opp_context_street = active_data.context_street[active_opp_acts]
-                        opp_context_committed_sizes = (
-                            active_data.context_committed_sizes[active_opp_acts]
-                        )
-                        opp_context_actions_this_round = (
-                            active_data.context_actions_this_round[active_opp_acts]
-                        )
-                        opp_context_min_raise = active_data.context_min_raise[
-                            active_opp_acts
-                        ]
-                        opp_context_bet_to_call = active_data.context_bet_to_call[
+                        opp_context_features = opp_states.context_features[
                             active_opp_acts
                         ]
                         with torch.amp.autocast(
@@ -668,27 +620,20 @@ class SelfPlayTrainer:
                         ):
                             # Create structured data for self-play opponent
                             opp_structured_data = StructuredEmbeddingData(
-                                card_indices=opp_card_indices,
+                                token_ids=opp_card_indices,
                                 card_stages=opp_card_stages,
                                 action_actors=opp_action_actors,
                                 action_streets=opp_action_streets,
                                 action_legal_masks=opp_action_legal_masks,
-                                context_pot_sizes=opp_context_pot_sizes,
-                                context_stack_sizes=opp_context_stack_sizes,
-                                context_committed_sizes=opp_context_committed_sizes,
-                                context_positions=opp_context_positions,
-                                context_street=opp_context_street,
-                                context_actions_this_round=opp_context_actions_this_round,
-                                context_min_raise=opp_context_min_raise,
-                                context_bet_to_call=opp_context_bet_to_call,
+                                context_features=opp_context_features,
                             )
                             outputs = self.model(opp_structured_data)
                             opp_logits = outputs["policy_logits"]
                             opp_values = outputs["value"]
                     else:
-                        # CNN model
-                        opp_cards = active_cards[active_opp_acts].float()
-                        opp_actions = active_actions[active_opp_acts].float()
+                        # CNN model - use opponent perspective
+                        opp_cards = opp_states["cards"][active_opp_acts].float()
+                        opp_actions = opp_states["actions"][active_opp_acts].float()
                         with torch.amp.autocast(
                             self.device.type,
                             dtype=torch.bfloat16,
@@ -735,29 +680,14 @@ class SelfPlayTrainer:
 
                 # Extract features for our environments
                 if is_transformer:
-                    our_card_indices = active_data.card_indices[active_we_act]
-                    our_card_stages = active_data.card_stages[active_we_act]
-                    our_action_actors = active_data.action_actors[active_we_act]
-                    our_action_streets = active_data.action_streets[active_we_act]
-                    our_action_legal_masks = active_data.action_legal_masks[
+                    our_card_indices = our_states.token_ids[active_we_act]
+                    our_card_stages = our_states.card_stages[active_we_act]
+                    our_action_actors = our_states.action_actors[active_we_act]
+                    our_action_streets = our_states.action_streets[active_we_act]
+                    our_action_legal_masks = our_states.action_legal_masks[
                         active_we_act
                     ]
-                    our_context_pot_sizes = active_data.context_pot_sizes[active_we_act]
-                    our_context_stack_sizes = active_data.context_stack_sizes[
-                        active_we_act
-                    ]
-                    our_context_positions = active_data.context_positions[active_we_act]
-                    our_context_street = active_data.context_street[active_we_act]
-                    our_context_committed_sizes = active_data.context_committed_sizes[
-                        active_we_act
-                    ]
-                    our_context_actions_this_round = (
-                        active_data.context_actions_this_round[active_we_act]
-                    )
-                    our_context_min_raise = active_data.context_min_raise[active_we_act]
-                    our_context_bet_to_call = active_data.context_bet_to_call[
-                        active_we_act
-                    ]
+                    our_context_features = our_states.context_features[active_we_act]
                 else:
                     our_cards_features = active_cards[
                         active_we_act
@@ -779,19 +709,12 @@ class SelfPlayTrainer:
                     if is_transformer:
                         # Create structured data for transformer
                         our_structured_data = StructuredEmbeddingData(
-                            card_indices=our_card_indices,
+                            token_ids=our_card_indices,
                             card_stages=our_card_stages,
                             action_actors=our_action_actors,
                             action_streets=our_action_streets,
                             action_legal_masks=our_action_legal_masks,
-                            context_pot_sizes=our_context_pot_sizes,
-                            context_stack_sizes=our_context_stack_sizes,
-                            context_committed_sizes=our_context_committed_sizes,
-                            context_positions=our_context_positions,
-                            context_street=our_context_street,
-                            context_actions_this_round=our_context_actions_this_round,
-                            context_min_raise=our_context_min_raise,
-                            context_bet_to_call=our_context_bet_to_call,
+                            context_features=our_context_features,
                         )
                         self.replay_buffer.add_batch_transformer(
                             structured_data=our_structured_data,
@@ -947,7 +870,7 @@ class SelfPlayTrainer:
             return self.state_encoder.encode_tensor_states(player=player, idxs=idxs)
         else:
             return self.state_encoder.encode_tensor_states(
-                self.tensor_env, self.num_envs, self.num_bet_bins
+                self.tensor_env, self.num_envs, self.num_bet_bins, idxs=idxs
             )
 
     @profile

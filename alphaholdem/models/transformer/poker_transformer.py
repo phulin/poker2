@@ -118,7 +118,7 @@ class PokerTransformerV1(nn.Module, Model):
 
         # Get structured embeddings
         card_embeddings = self.card_embedding(
-            structured_data.card_indices, structured_data.card_stages
+            structured_data.token_ids, structured_data.card_stages
         )
         action_embeddings = self.action_embedding(
             structured_data.action_actors,
@@ -126,11 +126,7 @@ class PokerTransformerV1(nn.Module, Model):
             structured_data.action_legal_masks,
         )
         context_embeddings = self.context_embedding(
-            structured_data.context_pot_sizes,
-            structured_data.context_stack_sizes,
-            structured_data.context_committed_sizes,
-            structured_data.context_positions,
-            structured_data.context_street,
+            structured_data.context_features,
         )
 
         # Combine embeddings (simple addition for now)
@@ -145,7 +141,7 @@ class PokerTransformerV1(nn.Module, Model):
         # Create attention mask for padded positions
         # Mask out positions where card_indices == -1 (padding)
         attention_mask = (
-            structured_data.card_indices != -1
+            structured_data.token_ids != -1
         ).float()  # [batch_size, seq_len]
 
         # Transformer encoding with poker-specific attention
@@ -156,7 +152,7 @@ class PokerTransformerV1(nn.Module, Model):
                     x = layer(
                         x,
                         src_mask=None,  # We'll use key padding mask instead
-                        card_indices=structured_data.card_indices,
+                        card_indices=structured_data.token_ids,
                         position_indices=position_indices,
                         attention_mask=attention_mask,
                     )
@@ -170,7 +166,7 @@ class PokerTransformerV1(nn.Module, Model):
                 x = layer(
                     x,
                     src_mask=None,  # We'll use key padding mask instead
-                    card_indices=structured_data.card_indices,
+                    card_indices=structured_data.token_ids,
                     position_indices=position_indices,
                     attention_mask=attention_mask,
                 )
@@ -206,7 +202,7 @@ class PokerTransformerV1(nn.Module, Model):
             player: Player index (0 or 1)
 
         Returns:
-            Tuple of (token_ids, attention_mask)
+            Tuple of (card_indices, attention_mask)
         """
         return self.tokenizer.tokenize_state(tensor_env, env_idx, player)
 

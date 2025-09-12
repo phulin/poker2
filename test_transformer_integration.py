@@ -226,7 +226,7 @@ def test_cls_pad_handling():
 
     # Forward pass should not crash
     test_data = StructuredEmbeddingData(
-        card_indices=card_indices,
+        token_ids=card_indices,
         card_stages=card_stages,
         card_visibility=card_visibility,
         card_order=card_order,

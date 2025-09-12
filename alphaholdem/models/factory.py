@@ -10,7 +10,7 @@ from ..core.interfaces import Model
 from ..core.registry import MODELS
 from .cnn import SiameseConvNetV1, CardsPlanesV1, ActionsHUEncoderV1
 from .transformer import PokerTransformerV1, TransformerStateEncoder
-from .state_encoder import StateEncoder
+from .state_encoder import CNNStateEncoder
 
 
 class ModelFactory:
@@ -82,7 +82,7 @@ class ModelFactory:
                 raise ValueError(
                     "CNN state encoder requires cards_encoder and actions_encoder"
                 )
-            return StateEncoder(cards_encoder, actions_encoder, device)
+            return CNNStateEncoder(cards_encoder, actions_encoder, device)
         elif encoder_type == "transformer":
             # For transformer, we need tensor_env and device
             if tensor_env is None:
