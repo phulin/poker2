@@ -46,8 +46,13 @@ class PokerTransformerV1(nn.Module, Model):
         self.use_auxiliary_loss = use_auxiliary_loss
         self.use_gradient_checkpointing = use_gradient_checkpointing
 
-        # Positional embeddings (use large fixed size)
-        self.pos_emb = nn.Embedding(42, d_model)
+        # Separate positional embeddings for different token types
+        self.action_pos_emb = nn.Embedding(
+            24, d_model
+        )  # For action tokens (positions 8-31)
+        self.context_pos_emb = nn.Embedding(
+            10, d_model
+        )  # For context tokens (positions 32-41)
 
         # Structured embeddings
         self.card_embedding = CardEmbedding(d_model)
@@ -83,7 +88,8 @@ class PokerTransformerV1(nn.Module, Model):
     def _init_weights(self):
         """Initialize model weights."""
         # Initialize positional embeddings
-        nn.init.normal_(self.pos_emb.weight, mean=0, std=0.02)
+        nn.init.normal_(self.action_pos_emb.weight, mean=0, std=0.02)
+        nn.init.normal_(self.context_pos_emb.weight, mean=0, std=0.02)
 
         # Initialize transformer layers
         for module in self.transformer.modules():
@@ -134,8 +140,31 @@ class PokerTransformerV1(nn.Module, Model):
         # In practice, you might want to use learned combination weights
         x = card_embeddings + action_embeddings + context_embeddings
 
-        # Add positional embeddings
-        pos_embeddings = self.pos_emb(pos_ids)  # [seq_len, d_model]
+        # Add targeted positional embeddings
+        # Action tokens (positions 8-31): use action positional embeddings
+        action_pos_indices = torch.arange(
+            24, device=device
+        )  # 0-23 for action positions
+        action_pos_embeddings = self.action_pos_emb(action_pos_indices)  # [24, d_model]
+
+        # Context tokens (positions 32-41): use context positional embeddings
+        context_pos_indices = torch.arange(
+            10, device=device
+        )  # 0-9 for context positions
+        context_pos_embeddings = self.context_pos_emb(
+            context_pos_indices
+        )  # [10, d_model]
+
+        # Apply positional embeddings to appropriate positions
+        # Positions 0-7: CLS + cards (no positional embedding)
+        # Positions 8-31: actions (action positional embeddings)
+        # Positions 32-41: context (context positional embeddings)
+
+        # Create full positional embedding tensor
+        pos_embeddings = torch.zeros(seq_len, self.d_model, device=device)
+        pos_embeddings[8:32] = action_pos_embeddings  # Action positions
+        pos_embeddings[32:42] = context_pos_embeddings  # Context positions
+
         x = x + pos_embeddings.unsqueeze(0)
         x = self.dropout(x)
 
