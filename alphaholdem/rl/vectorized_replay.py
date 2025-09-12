@@ -72,14 +72,14 @@ class VectorizedReplayBuffer:
             self.token_ids = torch.full(
                 (C, T, L),
                 -1,
-                dtype=torch.long,
+                dtype=torch.int8,
                 device=device,
             )
             self.card_ranks = torch.zeros(
                 C,
                 T,
                 L,
-                dtype=torch.long,
+                dtype=torch.uint8,
                 device=device,
             )
             self.card_suits = torch.zeros(
@@ -89,7 +89,7 @@ class VectorizedReplayBuffer:
                 dtype=torch.uint8,
                 device=device,
             )
-            self.card_stages = torch.zeros(
+            self.card_streets = torch.zeros(
                 C,
                 T,
                 L,
@@ -197,7 +197,7 @@ class VectorizedReplayBuffer:
             self.token_ids[clear_indices] = -1
             self.card_ranks[clear_indices] = 0
             self.card_suits[clear_indices] = 0
-            self.card_stages[clear_indices] = 0
+            self.card_streets[clear_indices] = 0
             self.action_actors[clear_indices] = 0
             self.action_streets[clear_indices] = 0
             self.action_legal_masks[clear_indices] = False
@@ -294,7 +294,7 @@ class VectorizedReplayBuffer:
                 "token_ids",
                 "card_ranks",
                 "card_suits",
-                "card_stages",
+                "card_streets",
                 "action_actors",
                 "action_streets",
                 "action_legal_masks",
@@ -372,7 +372,7 @@ class VectorizedReplayBuffer:
 
         # Handle different embedding data types
         if isinstance(embedding_data, CNNEmbeddingData):
-            # Store CNN features - vectorized assignment
+            # Store CNN features - vectorized assignment using advanced indexing
             self.cards_features[buffer_trajectory_indices, step_positions] = (
                 embedding_data.cards
             )
@@ -380,7 +380,7 @@ class VectorizedReplayBuffer:
                 embedding_data.actions
             )
         elif isinstance(embedding_data, StructuredEmbeddingData):
-            # Store structured embedding data - vectorized assignment
+            # Store structured embedding data - vectorized assignment using advanced indexing
             self.token_ids[buffer_trajectory_indices, step_positions] = (
                 embedding_data.token_ids
             )
@@ -390,8 +390,8 @@ class VectorizedReplayBuffer:
             self.card_suits[buffer_trajectory_indices, step_positions] = (
                 embedding_data.card_suits
             )
-            self.card_stages[buffer_trajectory_indices, step_positions] = (
-                embedding_data.card_stages
+            self.card_streets[buffer_trajectory_indices, step_positions] = (
+                embedding_data.card_streets
             )
             self.action_actors[buffer_trajectory_indices, step_positions] = (
                 embedding_data.action_actors
@@ -585,7 +585,7 @@ class VectorizedReplayBuffer:
             all_token_ids = self.token_ids[traj_indices, :max_len]
             all_card_ranks = self.card_ranks[traj_indices, :max_len]
             all_card_suits = self.card_suits[traj_indices, :max_len]
-            all_card_stages = self.card_stages[traj_indices, :max_len]
+            all_card_streets = self.card_streets[traj_indices, :max_len]
             all_action_actors = self.action_actors[traj_indices, :max_len]
             all_action_streets = self.action_streets[traj_indices, :max_len]
             all_action_legal_masks = self.action_legal_masks[traj_indices, :max_len]
@@ -642,8 +642,8 @@ class VectorizedReplayBuffer:
                 card_suits_flat = all_card_suits.reshape(-1, *all_card_suits.shape[2:])[
                     mask_flat
                 ]
-                card_stages_flat = all_card_stages.reshape(
-                    -1, *all_card_stages.shape[2:]
+                card_streets_flat = all_card_streets.reshape(
+                    -1, *all_card_streets.shape[2:]
                 )[mask_flat]
                 action_actors_flat = all_action_actors.reshape(
                     -1, *all_action_actors.shape[2:]
@@ -661,7 +661,7 @@ class VectorizedReplayBuffer:
                     "token_ids": token_ids_flat,
                     "card_ranks": card_ranks_flat,
                     "card_suits": card_suits_flat,
-                    "card_stages": card_stages_flat,
+                    "card_streets": card_streets_flat,
                     "action_actors": action_actors_flat,
                     "action_streets": action_streets_flat,
                     "action_legal_masks": action_legal_masks_flat,
@@ -727,7 +727,7 @@ class VectorizedReplayBuffer:
                 "token_ids": self.token_ids[traj_indices, step_indices],
                 "card_ranks": self.card_ranks[traj_indices, step_indices],
                 "card_suits": self.card_suits[traj_indices, step_indices],
-                "card_stages": self.card_stages[traj_indices, step_indices],
+                "card_streets": self.card_streets[traj_indices, step_indices],
                 "action_actors": self.action_actors[traj_indices, step_indices],
                 "action_streets": self.action_streets[traj_indices, step_indices],
                 "action_legal_masks": self.action_legal_masks[

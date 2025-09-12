@@ -51,14 +51,14 @@ class TransformerStateEncoder:
         N, L = self.N, self.L
 
         # Preallocate tensors
-        self.token_ids = torch.full((N, L), -1, dtype=torch.long, device=device)
+        self.token_ids = torch.full((N, L), -1, dtype=torch.int8, device=device)
 
-        self.card_ranks = torch.full((N, L), -1, dtype=torch.long, device=device)
-        self.card_suits = torch.full((N, L), -1, dtype=torch.long, device=device)
-        self.card_stages = torch.full((N, L), -1, dtype=torch.long, device=device)
+        self.card_ranks = torch.full((N, L), -1, dtype=torch.uint8, device=device)
+        self.card_suits = torch.full((N, L), -1, dtype=torch.uint8, device=device)
+        self.card_streets = torch.full((N, L), -1, dtype=torch.uint8, device=device)
 
-        self.action_actors = torch.zeros(N, L, dtype=torch.long, device=device)
-        self.action_streets = torch.zeros(N, L, dtype=torch.long, device=device)
+        self.action_actors = torch.zeros(N, L, dtype=torch.uint8, device=device)
+        self.action_streets = torch.zeros(N, L, dtype=torch.uint8, device=device)
         self.action_legal_masks = torch.zeros(N, L, 8, dtype=torch.bool, device=device)
 
         # Consolidated context tensor [N, L, 10]
@@ -91,7 +91,9 @@ class TransformerStateEncoder:
 
         return StructuredEmbeddingData(
             token_ids=self.token_ids[:M],
-            card_stages=self.card_stages[:M],
+            card_ranks=self.card_ranks[:M],
+            card_suits=self.card_suits[:M],
+            card_streets=self.card_streets[:M],
             action_actors=self.action_actors[:M],
             action_streets=self.action_streets[:M],
             action_legal_masks=self.action_legal_masks[:M],
@@ -122,7 +124,7 @@ class TransformerStateEncoder:
         self.card_suits[:M, k : k + 7] = torch.where(
             visible_cards >= 0, visible_cards // 13, -1
         )
-        self.card_stages[:M, k : k + 7] = torch.where(
+        self.card_streets[:M, k : k + 7] = torch.where(
             visible_cards >= 0, self.stages.view(1, 7), -1
         )
 

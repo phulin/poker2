@@ -5,6 +5,7 @@ import torch
 from alphaholdem.models.cnn import CardsPlanesV1, ActionsHUEncoderV1
 from alphaholdem.encoding.action_mapping import bin_to_action, get_legal_mask
 from alphaholdem.models.cnn import SiameseConvNetV1
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.heads import CategoricalPolicyV1
 from alphaholdem.env.types import GameState, PlayerState
 from alphaholdem.env.hunl_env import HUNLEnv
@@ -46,7 +47,13 @@ def test_siamese_convnet_forward_and_policy_action():
     cards = cards_enc.encode_cards(s, seat=0).unsqueeze(0)  # (1, 6, 4, 13)
     actions = actions_enc.encode_actions(s, seat=0).unsqueeze(0)  # (1, 24, 4, 8)
 
-    logits, value = model(cards, actions)
+    # Create CNNEmbeddingData
+    embedding_data = CNNEmbeddingData(cards=cards, actions=actions)
+
+    # Get model outputs
+    outputs = model(embedding_data)
+    logits = outputs["policy_logits"]
+    value = outputs["value"]
     assert logits.shape == (1, nb)
     assert value.shape == (1,)
 

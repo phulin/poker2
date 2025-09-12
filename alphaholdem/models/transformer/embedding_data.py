@@ -19,7 +19,7 @@ class StructuredEmbeddingData:
     token_ids: torch.Tensor  # Token IDs (0-51 for cards, 52 for CLS, -1 for padding)
     card_ranks: torch.Tensor  # Card ranks (0-12)
     card_suits: torch.Tensor  # Card suits (0-3)
-    card_stages: torch.Tensor  # Stage indices (0-3: hole, flop, turn, river)
+    card_streets: torch.Tensor  # Stage indices (0-3: hole, flop, turn, river)
 
     # Action components [batch_size, seq_len]
     action_actors: torch.Tensor  # Actor indices (0-1: player indices)
@@ -34,8 +34,10 @@ class StructuredEmbeddingData:
     def to_dict(self) -> Dict[str, torch.Tensor]:
         """Convert to dictionary format for model forward pass."""
         return {
-            "card_indices": self.token_ids,
-            "card_stages": self.card_stages,
+            "token_ids": self.token_ids,
+            "card_ranks": self.card_ranks,
+            "card_suits": self.card_suits,
+            "card_streets": self.card_streets,
             "action_actors": self.action_actors,
             "action_streets": self.action_streets,
             "action_legal_masks": self.action_legal_masks,
@@ -46,8 +48,10 @@ class StructuredEmbeddingData:
     def from_dict(cls, data: Dict[str, torch.Tensor]) -> StructuredEmbeddingData:
         """Create from dictionary format."""
         return cls(
-            token_ids=data["card_indices"],
-            card_stages=data["card_stages"],
+            token_ids=data["token_ids"],
+            card_ranks=data["card_ranks"],
+            card_suits=data["card_suits"],
+            card_streets=data["card_streets"],
             action_actors=data["action_actors"],
             action_streets=data["action_streets"],
             action_legal_masks=data["action_legal_masks"],
@@ -58,7 +62,9 @@ class StructuredEmbeddingData:
         """Move all tensors to specified device."""
         return StructuredEmbeddingData(
             token_ids=self.token_ids.to(device),
-            card_stages=self.card_stages.to(device),
+            card_ranks=self.card_ranks.to(device),
+            card_suits=self.card_suits.to(device),
+            card_streets=self.card_streets.to(device),
             action_actors=self.action_actors.to(device),
             action_streets=self.action_streets.to(device),
             action_legal_masks=self.action_legal_masks.to(device),

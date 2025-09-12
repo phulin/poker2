@@ -19,6 +19,7 @@ from ..env.hunl_env import HUNLEnv
 from ..env.hunl_tensor_env import HUNLTensorEnv
 from ..models.cnn import CardsPlanesV1, ActionsHUEncoderV1
 from ..models.transformer.embedding_data import StructuredEmbeddingData
+from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..encoding.action_mapping import bin_to_action, get_legal_mask
 from ..models.factory import ModelFactory
 from ..models.state_encoder import CNNStateEncoder
@@ -77,19 +78,21 @@ class SelfPlayTrainer:
         self.rng = torch.Generator(device=self.device)
 
         # Initialize components
-        if self.use_tensor_env:
-            self.tensor_env = HUNLTensorEnv(
-                num_envs=self.num_envs,
-                starting_stack=self.cfg.env.stack,
-                sb=self.cfg.env.sb,
-                bb=self.cfg.env.bb,
-                bet_bins=self.cfg.env.bet_bins,
-                device=self.device,
-                rng=self.rng,
-                float_dtype=self.float_dtype,
-                debug_step_table=self.cfg.env.debug_step_table,
-            )
-        else:
+        # Always create tensor_env for state encoder, even if we don't use it for training
+        self.tensor_env = HUNLTensorEnv(
+            num_envs=self.num_envs,
+            starting_stack=self.cfg.env.stack,
+            sb=self.cfg.env.sb,
+            bb=self.cfg.env.bb,
+            bet_bins=self.cfg.env.bet_bins,
+            device=self.device,
+            rng=self.rng,
+            float_dtype=self.float_dtype,
+            debug_step_table=self.cfg.env.debug_step_table,
+        )
+
+        if not self.use_tensor_env:
+            # Also create regular env for non-tensorized training
             self.env = HUNLEnv(
                 starting_stack=self.cfg.env.stack,
                 sb=self.cfg.env.sb,
@@ -288,14 +291,17 @@ class SelfPlayTrainer:
 
             # Get model prediction
             with torch.no_grad():
+                # Create CNNEmbeddingData
+                embedding_data = CNNEmbeddingData(
+                    cards=cards.unsqueeze(0), actions=actions_tensor.unsqueeze(0)
+                )
+
                 if opponent_snapshot is not None and current_player != 0:
-                    logits, value = opponent_snapshot.model(
-                        cards.unsqueeze(0), actions_tensor.unsqueeze(0)
-                    )
+                    outputs = opponent_snapshot.model(embedding_data)
                 else:
-                    logits, value = self.model(
-                        cards.unsqueeze(0), actions_tensor.unsqueeze(0)
-                    )
+                    outputs = self.model(embedding_data)
+                logits = outputs["policy_logits"]
+                value = outputs["value"]
 
                 legal_mask = get_legal_mask(
                     state, self.num_bet_bins, dtype=self.float_dtype, device=self.device
@@ -392,9 +398,6 @@ class SelfPlayTrainer:
         """
         if not self.use_tensor_env:
             raise ValueError("collect_tensor_trajectories requires use_tensor_env=True")
-
-        # Encode states separately for our perspective and opponent perspective
-        is_transformer = self.cfg.model.name.startswith("poker_transformer")
 
         total_reward = 0.0
         trajectory_count = 0
@@ -654,15 +657,13 @@ class SelfPlayTrainer:
             # Use premade chunking to efficiently group done environments by opponent
             if opp_env_groups is not None:
                 # Vectorized ELO update per opponent using existing chunking
-                for opponent_idx, opp_active_indices in enumerate(opp_env_groups):
-                    if opp_active_indices.numel() == 0:
+                for opponent_idx, opp_env_indices in enumerate(opp_env_groups):
+                    if opp_env_indices.numel() == 0:
                         continue
 
                     opponent = all_opponent_snapshots[opponent_idx]
 
-                    # Convert active indices to full environment indices
-                    opp_env_indices = active_indices[opp_active_indices]
-
+                    # opp_env_indices are already full environment indices from env_active_opp_acts
                     # Find which environments in this opponent's group are done
                     done_mask = dones[opp_env_indices]
                     done_env_idxs_for_opponent = opp_env_indices[done_mask]
@@ -782,8 +783,6 @@ class SelfPlayTrainer:
                     # Create structured data from batch
                     batch_structured_data = StructuredEmbeddingData.from_dict(batch)
                     outputs = self.model(batch_structured_data)
-                    logits = outputs["policy_logits"]
-                    values = outputs["value"]
 
                 # Transformer-specific loss with auxiliary hand range loss
                 loss_dict = self._compute_transformer_loss(
@@ -807,7 +806,13 @@ class SelfPlayTrainer:
                     dtype=torch.bfloat16,
                     enabled=self.use_mixed_precision,
                 ):
-                    logits, values = self.model(cards_float, actions_float)
+                    # Create CNNEmbeddingData
+                    embedding_data = CNNEmbeddingData(
+                        cards=cards_float, actions=actions_float
+                    )
+                    outputs = self.model(embedding_data)
+                    logits = outputs["policy_logits"]
+                    values = outputs["value"]
 
                 # CNN loss
                 loss_dict = trinal_clip_ppo_loss(
@@ -1418,7 +1423,12 @@ class SelfPlayTrainer:
 
         # Get model prediction
         with torch.no_grad():
-            logits, _ = self.model(cards.unsqueeze(0), actions_tensor.unsqueeze(0))
+            # Create CNNEmbeddingData
+            embedding_data = CNNEmbeddingData(
+                cards=cards.unsqueeze(0), actions=actions_tensor.unsqueeze(0)
+            )
+            outputs = self.model(embedding_data)
+            logits = outputs["policy_logits"]
 
             # Preflop small blind (first to act) legal actions based on to_call
             legal_mask = torch.zeros(self.num_bet_bins)

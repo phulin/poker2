@@ -13,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath("."))
 
 from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.core.structured_config import (
     Config,
     TrainingConfig,
@@ -74,8 +75,13 @@ def test_mps_autocast_forward_pass(mps_config):
     cards_float = cards_features.to(torch.bfloat16)
     actions_float = actions_features.to(torch.bfloat16)
 
+    # Create CNNEmbeddingData
+    embedding_data = CNNEmbeddingData(cards=cards_float, actions=actions_float)
+
     with torch.amp.autocast("mps", dtype=torch.bfloat16):
-        logits, values = trainer.model(cards_float, actions_float)
+        outputs = trainer.model(embedding_data)
+        logits = outputs["policy_logits"]
+        values = outputs["value"]
 
     # Verify outputs
     assert (
@@ -105,8 +111,13 @@ def test_mps_autocast_backward_pass(mps_config):
     cards_float = cards_features.to(torch.bfloat16)
     actions_float = actions_features.to(torch.bfloat16)
 
+    # Create CNNEmbeddingData
+    embedding_data = CNNEmbeddingData(cards=cards_float, actions=actions_float)
+
     with torch.amp.autocast("mps", dtype=torch.bfloat16):
-        logits, values = trainer.model(cards_float, actions_float)
+        outputs = trainer.model(embedding_data)
+        logits = outputs["policy_logits"]
+        values = outputs["value"]
 
     # Create a dummy loss
     loss = torch.mean(logits) + torch.mean(values)
@@ -149,8 +160,13 @@ def test_mps_autocast_device_consistency(mps_config):
     cards_float = cards_features.to(torch.bfloat16)
     actions_float = actions_features.to(torch.bfloat16)
 
+    # Create CNNEmbeddingData
+    embedding_data = CNNEmbeddingData(cards=cards_float, actions=actions_float)
+
     with torch.amp.autocast("mps", dtype=torch.bfloat16):
-        logits, values = trainer.model(cards_float, actions_float)
+        outputs = trainer.model(embedding_data)
+        logits = outputs["policy_logits"]
+        values = outputs["value"]
 
     # Verify device consistency (account for device index)
     assert logits.device.type == device.type, "Logits should be on MPS device"
@@ -247,11 +263,17 @@ def test_mps_autocast_integration_with_selfplay_trainer(mps_config):
         actions_float = actions_features.to(torch.bfloat16)
 
         with torch.amp.autocast(trainer.device.type, dtype=torch.bfloat16):
-            logits, values = trainer.model(cards_float, actions_float)
+            embedding_data = CNNEmbeddingData(cards=cards_float, actions=actions_float)
+            outputs = trainer.model(embedding_data)
+            logits = outputs["policy_logits"]
+            values = outputs["value"]
     else:
         cards_float = cards_features.float()
         actions_float = actions_features.float()
-        logits, values = trainer.model(cards_float, actions_float)
+        embedding_data = CNNEmbeddingData(cards=cards_float, actions=actions_float)
+        outputs = trainer.model(embedding_data)
+        logits = outputs["policy_logits"]
+        values = outputs["value"]
 
     # Verify autocast is working
     assert (

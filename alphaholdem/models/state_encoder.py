@@ -73,3 +73,65 @@ class CNNStateEncoder:
             cards=cards,
             actions=actions,
         )
+
+    def encode_single_state(
+        self, game_state: HUNLEnv, seat: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encode a single game state for CNN model.
+
+        Args:
+            game_state: Single HUNLEnv game state
+            seat: Player index (0 or 1)
+
+        Returns:
+            Tuple of (cards_tensor, actions_tensor)
+        """
+        # Create a temporary tensor environment with this state
+        # We'll need to manually construct the tensors from the game state
+
+        # Convert hole cards to one-hot
+        hole_cards = torch.zeros(2, 4, 13, dtype=torch.bool, device=self.device)
+        for i, card in enumerate(game_state.players[seat].hole_cards):
+            if card is not None:
+                suit = card // 13
+                rank = card % 13
+                hole_cards[i, suit, rank] = True
+
+        # Convert board cards to one-hot
+        board_cards = torch.zeros(5, 4, 13, dtype=torch.bool, device=self.device)
+        for i, card in enumerate(game_state.board):
+            if card is not None:
+                suit = card // 13
+                rank = card % 13
+                board_cards[i, suit, rank] = True
+
+        # Create cards tensor [6, 4, 13]
+        cards = torch.zeros(6, 4, 13, dtype=torch.bool, device=self.device)
+
+        # Channel 0: hole cards (sum over 2 hole cards)
+        cards[0] = hole_cards.any(dim=0)
+
+        # Channel 1: flop cards (first 3 board cards)
+        cards[1] = board_cards[:3].any(dim=0)
+
+        # Channel 2: turn card (4th board card)
+        cards[2] = board_cards[3]
+
+        # Channel 3: river card (5th board card)
+        cards[4] = board_cards[4]
+
+        # Channel 4: public cards (all board cards)
+        cards[4] = board_cards.any(dim=0)
+
+        # Channel 5: all cards (hole + board)
+        cards[5] = hole_cards.any(dim=0) | board_cards.any(dim=0)
+
+        # Create actions tensor [24, 4, num_bet_bins]
+        # For now, create empty actions tensor - this would need to be populated
+        # with actual action history from the game state
+        actions = torch.zeros(
+            24, 4, self.num_bet_bins, dtype=torch.bool, device=self.device
+        )
+
+        return cards, actions

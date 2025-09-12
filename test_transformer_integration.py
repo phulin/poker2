@@ -55,8 +55,18 @@ def test_transformer_pipeline():
         f"✅ Created transformer model with {sum(p.numel() for p in model.parameters())} parameters"
     )
 
+    # Create tensor environment
+    tensor_env = HUNLTensorEnv(
+        num_envs=4,
+        starting_stack=1000,
+        sb=10,
+        bb=20,
+        bet_bins=[0.0, 0.5, 1.0, 2.0, 3.0],
+        device=device,
+    )
+
     # Create state encoder
-    state_encoder = TransformerStateEncoder(device, max_seq_len)
+    state_encoder = TransformerStateEncoder(tensor_env, device)
     print("✅ Created transformer state encoder")
 
     # Create replay buffer
@@ -64,6 +74,8 @@ def test_transformer_pipeline():
         capacity=10,
         max_trajectory_length=20,
         num_bet_bins=8,
+        is_transformer=True,
+        sequence_length=42,  # Match state encoder sequence length
         device=device,
         float_dtype=torch.float32,
     )
@@ -81,8 +93,9 @@ def test_transformer_pipeline():
             action_values, legal_bins_amounts, legal_bins_mask
         )
 
-    # Encode states
-    states = state_encoder.encode_tensor_states(tensor_env, num_envs, player=None)
+        # Encode states
+        idxs = torch.arange(num_envs, device=device)
+        states = state_encoder.encode_tensor_states(player=0, idxs=idxs)
     print(f"✅ Encoded states: {list(states.to_dict().keys())}")
 
     # Verify state shapes
@@ -127,8 +140,10 @@ def test_transformer_pipeline():
         active_states_dict = {
             key: tensor[active_indices] for key, tensor in states.to_dict().items()
         }
+        active_states = StructuredEmbeddingData.from_dict(active_states_dict)
+
         replay_buffer.add_batch(
-            **active_states_dict,
+            embedding_data=active_states,
             action_indices=torch.randint(0, 8, (len(active_indices),), device=device),
             log_probs=torch.randn(len(active_indices), device=device),
             rewards=torch.randn(len(active_indices), device=device),
@@ -201,7 +216,7 @@ def test_cls_pad_handling():
     )
 
     # Create dummy structured embeddings
-    card_stages = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
+    card_streets = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
     card_visibility = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
     card_order = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
     action_actors = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
@@ -227,18 +242,13 @@ def test_cls_pad_handling():
     # Forward pass should not crash
     test_data = StructuredEmbeddingData(
         token_ids=card_indices,
-        card_stages=card_stages,
-        card_visibility=card_visibility,
-        card_order=card_order,
+        card_ranks=torch.randint(0, 13, (batch_size, seq_len), device=device),
+        card_suits=torch.randint(0, 4, (batch_size, seq_len), device=device),
+        card_streets=card_streets,
         action_actors=action_actors,
-        action_types=action_types,
         action_streets=action_streets,
-        action_size_bins=action_size_bins,
-        action_size_features=action_size_features,
-        context_pot_sizes=context_pot_sizes,
-        context_stack_sizes=context_stack_sizes,
-        context_positions=context_positions,
-        context_street=context_street_context,
+        action_legal_masks=torch.ones(batch_size, seq_len, 8, device=device).bool(),
+        context_features=torch.randint(0, 10, (batch_size, seq_len, 10), device=device),
     )
 
     with torch.no_grad():
