@@ -783,6 +783,8 @@ class SelfPlayTrainer:
                     # Create structured data from batch
                     batch_structured_data = StructuredEmbeddingData.from_dict(batch)
                     outputs = self.model(batch_structured_data)
+                    logits = outputs["policy_logits"]
+                    values = outputs["value"]
 
                 # Transformer-specific loss with auxiliary hand range loss
                 loss_dict = self._compute_transformer_loss(
