@@ -37,7 +37,7 @@ economize_checkpoints: false
 
 # === TRAINING HYPERPARAMETERS ===
 train:
-  learning_rate: 0.00005  # Lower LR for transformer
+  learning_rate: 5e-5  # Lower LR for transformer
   batch_size: 512      # Smaller batch size for transformer
   num_epochs: 4
   replay_buffer_batches: 4

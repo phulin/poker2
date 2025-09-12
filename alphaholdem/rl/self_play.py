@@ -1368,12 +1368,63 @@ class SelfPlayTrainer:
 
         return "\n".join(grid)
 
+    def get_preflop_value_grid(self, seat: int = 0) -> str:
+        """Get preflop value estimates as a grid showing value estimates for button play."""
+        # Create a 13x13 grid representing all possible hole card combinations
+        # Rows/cols: A, K, Q, J, T, 9, 8, 7, 6, 5, 4, 3, 2
+        ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+
+        # Initialize grid with value estimates
+        grid = []
+        header = "    " + " ".join(f"{rank:>2}" for rank in ranks)
+        grid.append(header)
+        grid.append("   " + "-" * 39)  # Separator line
+
+        for i, rank1 in enumerate(ranks):
+            row = [f"{rank1:>2} |"]
+            for j, rank2 in enumerate(ranks):
+                if i == j:
+                    # Same rank (pairs) - always suited
+                    card1, card2 = f"{rank1}s", f"{rank1}h"  # Suited pair
+                elif i < j:
+                    # Top-right triangle: suited hands (e.g., AKs, AQs)
+                    card1, card2 = f"{rank1}s", f"{rank2}h"  # Suited
+                else:
+                    # Bottom-left triangle: off-suit hands (e.g., KAs, QAs)
+                    card1, card2 = f"{rank2}s", f"{rank1}d"  # Off-suit
+
+                # Get value estimate for this hand
+                _, value = self._get_preflop_action_probability_and_value(
+                    card1, card2, seat, "call"
+                )
+
+                # Format value estimate (multiply by 100 for readability, round to 1 decimal)
+                formatted_value = f"{value:5.2f}"
+                row.append(formatted_value)
+
+            grid.append(" ".join(row))
+
+        return "\n".join(grid)
+
     def _get_preflop_action_probability(
         self, card1: str, card2: str, seat: int, metric: str
     ) -> str:
         """Get action probability for a specific hole card combination using tensor environment.
 
         metric: "allin" or "fold"
+        """
+        prob, _ = self._get_preflop_action_probability_and_value(
+            card1, card2, seat, metric
+        )
+        return prob
+
+    def _get_preflop_action_probability_and_value(
+        self, card1: str, card2: str, seat: int, metric: str
+    ) -> tuple[str, float]:
+        """Get action probability and value estimate for a specific hole card combination using tensor environment.
+
+        Returns:
+            tuple: (formatted_probability_string, value_estimate)
         """
         # Create a temporary tensor environment for this analysis
         temp_env = HUNLTensorEnv(
@@ -1432,6 +1483,7 @@ class SelfPlayTrainer:
                 outputs = self.model(embedding_data)
 
             logits = outputs["policy_logits"]
+            value = outputs["value"].item()  # Get value estimate
 
             # Get legal actions from tensor environment
             legal_mask = temp_env.legal_bins_mask()[0]  # [num_bet_bins]
@@ -1447,6 +1499,8 @@ class SelfPlayTrainer:
             # Select metric index
             if metric == "allin":
                 idx = self.num_bet_bins - 1  # Last bin is all-in
+            elif metric == "call":
+                idx = 1  # Second bin is call
             elif metric == "fold":
                 idx = 0  # First bin is fold
             else:
@@ -1457,8 +1511,11 @@ class SelfPlayTrainer:
             # Convert to percentage and format
             percentage = round(selected_prob * 100)
             if percentage >= 100:
-                return "██"  # Two filled boxes to keep 2-char width
-            return f"{percentage:2d}"
+                prob_str = "██"  # Two filled boxes to keep 2-char width
+            else:
+                prob_str = f"{percentage:2d}"
+
+            return prob_str, value
 
     def _card_str_to_int(self, card_str: str) -> int:
         """Convert card string (e.g., 'As', 'Kh') to integer representation."""

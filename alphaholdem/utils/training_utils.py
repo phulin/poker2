@@ -49,6 +49,12 @@ def print_preflop_range_grid(
         print(left[i].ljust(left_width) + "   |   " + right[i])
     print()
 
+    # Print value estimates grid
+    print("--- Preflop Value Estimates (Step {}) ---".format(step))
+    print("Small blind (first) - value estimates (×100)")
+    print(trainer.get_preflop_value_grid(seat=seat))
+    print()
+
 
 def print_training_stats(
     stats: dict, step: int, total_steps: int, step_time: str, total_time: str
@@ -68,8 +74,8 @@ def print_training_stats(
 
     print(
         f"Step {step + 1}/{total_steps} | "
-        f"Avg Reward: {stats['avg_reward']:.2f} | "
-        f"ELO: {stats['current_elo']:.1f} | "
+        f"Avg Reward: {stats['avg_reward']:5.2f} | "
+        f"ELO: {stats['current_elo']:.0f} | "
         f"Loss: {loss:.4f} | "
         f"Step Time: {step_time} | "
         f"Total Time: {total_time}"
@@ -90,9 +96,9 @@ def print_training_stats(
     if val is not None:
         parts.append(f"value {val:.4f}")
     if ent is not None:
-        parts.append(f"entropy {ent:.4f}")
+        parts.append(f"entropy {ent:.2f}")
     if kl is not None:
-        parts.append(f"kl {kl:7.4f}")
+        parts.append(f"kl {kl:6.3f}")
     if clip is not None:
         parts.append(f"clip {clip:.3f}")
     if ev is not None:
