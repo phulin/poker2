@@ -8,6 +8,7 @@ import torch.utils.checkpoint as checkpoint
 
 from ...core.interfaces import Model
 from ...core.registry import register_model
+from ...models.cnn_embedding_data import CNNEmbeddingData
 
 
 def _resize_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
@@ -188,9 +189,11 @@ class SiameseConvNetV1(nn.Module, Model):
             nn.Linear(256, 1),
         )
 
-    def forward(
-        self, cards_tensor: torch.Tensor, actions_tensor: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, embedding_data: CNNEmbeddingData) -> dict:
+        # Extract cards and actions from embedding data and convert to float
+        cards_tensor = embedding_data.cards.float()
+        actions_tensor = embedding_data.actions.float()
+
         # Expect input shapes: (B, C, 4, 13) for both
         # Use gradient checkpointing for memory-intensive conv trunks if enabled
         if self.use_gradient_checkpointing:

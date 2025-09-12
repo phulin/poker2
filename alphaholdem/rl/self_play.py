@@ -428,8 +428,12 @@ class SelfPlayTrainer:
             # Only process non-done environments to avoid bias towards short episodes
             active_mask = ~self.tensor_env.done
             active_indices = torch.where(active_mask)[0]
-            env_active_we_act = torch.where(active_mask & (self.to_act == 0))[0]
-            env_active_opp_acts = torch.where(active_mask & (self.to_act == 1))[0]
+            env_active_we_act = torch.where(
+                active_mask & (self.tensor_env.to_act == 0)
+            )[0]
+            env_active_opp_acts = torch.where(
+                active_mask & (self.tensor_env.to_act == 1)
+            )[0]
 
             # Get legal action masks for active environments only
             legal_bins_amounts, legal_bins_mask = (
@@ -467,30 +471,15 @@ class SelfPlayTrainer:
 
                 # Get predictions from our model for our turns
                 if active_we_act.numel() > 0:
-                    if is_transformer:
-                        with torch.amp.autocast(
-                            self.device.type,
-                            dtype=torch.bfloat16,
-                            enabled=self.use_mixed_precision,
-                        ):
-                            outputs = self.model(our_states)
+                    with torch.amp.autocast(
+                        self.device.type,
+                        dtype=torch.bfloat16,
+                        enabled=self.use_mixed_precision,
+                    ):
+                        outputs = self.model(our_states)
 
-                        our_logits = outputs["policy_logits"]
-                        our_values = outputs["value"]
-                    else:
-                        # CNN model - use our perspective
-                        our_cards = our_states.cards.float()
-                        our_actions = our_states.actions.float()
-
-                        with torch.amp.autocast(
-                            self.device.type,
-                            dtype=torch.bfloat16,
-                            enabled=self.use_mixed_precision,
-                        ):
-                            our_logits, our_values = self.model(our_cards, our_actions)
-
-                    active_logits[active_we_act] = our_logits
-                    active_values[active_we_act] = our_values.squeeze(-1)
+                    active_logits[active_we_act] = outputs["policy_logits"]
+                    active_values[active_we_act] = outputs["value"].squeeze(-1)
 
                 # SPECIAL CASE: If first action of hand, opponent folding illegal
                 # (because it would leave an empty trajectory)

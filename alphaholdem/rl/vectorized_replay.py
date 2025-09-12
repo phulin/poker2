@@ -291,7 +291,9 @@ class VectorizedReplayBuffer:
         else:
             # Transformer model fields
             transformer_fields = [
-                "card_indices",
+                "token_ids",
+                "card_ranks",
+                "card_suits",
                 "card_stages",
                 "action_actors",
                 "action_streets",
@@ -322,15 +324,15 @@ class VectorizedReplayBuffer:
     def add_batch(
         self,
         embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData],
-        action_indices: torch.Tensor = None,  # [batch_size] - long
-        log_probs: torch.Tensor = None,
-        rewards: torch.Tensor = None,
-        dones: torch.Tensor = None,
-        legal_masks: torch.Tensor = None,  # [batch_size, legal_mask_dim] - bool
-        delta2: torch.Tensor = None,
-        delta3: torch.Tensor = None,
-        values: torch.Tensor = None,
-        trajectory_indices: torch.Tensor = None,  # Which trajectory each transition belongs to
+        action_indices: torch.Tensor,  # [batch_size] - long
+        log_probs: torch.Tensor,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        legal_masks: torch.Tensor,  # [batch_size, legal_mask_dim] - bool
+        delta2: torch.Tensor,
+        delta3: torch.Tensor,
+        values: torch.Tensor,
+        trajectory_indices: torch.Tensor,  # Which trajectory each transition belongs to
     ) -> None:
         """
         Add a batch of transitions to the buffer using embedding data.
@@ -355,12 +357,6 @@ class VectorizedReplayBuffer:
 
         batch_size = embedding_data.batch_size
 
-        # Get trajectory indices for this batch
-        if trajectory_indices is None:
-            trajectory_indices = torch.arange(
-                self.position, self.position + batch_size, device=self.device
-            )
-
         # Get step positions within trajectories
         step_positions = self.current_step_positions[trajectory_indices]
 
@@ -378,7 +374,7 @@ class VectorizedReplayBuffer:
             )
         elif isinstance(embedding_data, StructuredEmbeddingData):
             # Store structured embedding data
-            self.card_indices[trajectory_indices, step_positions, :] = (
+            self.token_ids[trajectory_indices, step_positions, :] = (
                 embedding_data.token_ids
             )
             self.card_ranks[trajectory_indices, step_positions, :] = (
@@ -402,26 +398,16 @@ class VectorizedReplayBuffer:
             self.context_features[trajectory_indices, step_positions, :] = (
                 embedding_data.context_features
             )
-        else:
-            raise ValueError(f"Unsupported embedding data type: {type(embedding_data)}")
 
         # Store common transition data
-        if action_indices is not None:
-            self.action_indices[trajectory_indices, step_positions] = action_indices
-        if log_probs is not None:
-            self.log_probs[trajectory_indices, step_positions] = log_probs
-        if rewards is not None:
-            self.rewards[trajectory_indices, step_positions] = rewards
-        if dones is not None:
-            self.dones[trajectory_indices, step_positions] = dones
-        if legal_masks is not None:
-            self.legal_masks[trajectory_indices, step_positions, :] = legal_masks
-        if delta2 is not None:
-            self.delta2[trajectory_indices, step_positions] = delta2
-        if delta3 is not None:
-            self.delta3[trajectory_indices, step_positions] = delta3
-        if values is not None:
-            self.values[trajectory_indices, step_positions] = values
+        self.action_indices[trajectory_indices, step_positions] = action_indices
+        self.log_probs[trajectory_indices, step_positions] = log_probs
+        self.rewards[trajectory_indices, step_positions] = rewards
+        self.dones[trajectory_indices, step_positions] = dones
+        self.legal_masks[trajectory_indices, step_positions, :] = legal_masks
+        self.delta2[trajectory_indices, step_positions] = delta2
+        self.delta3[trajectory_indices, step_positions] = delta3
+        self.values[trajectory_indices, step_positions] = values
 
         # Advance step positions
         self.current_step_positions[trajectory_indices] += 1
@@ -435,27 +421,6 @@ class VectorizedReplayBuffer:
                 self.current_step_positions[completed_trajectories]
             )
 
-            # Reset step positions for completed trajectories
-            self.current_step_positions[completed_trajectories] = 0
-        if delta3 is not None:
-            self.delta3[trajectory_indices, step_positions] = delta3
-        if values is not None:
-            self.values[trajectory_indices, step_positions] = values
-
-        # Advance step positions
-        self.current_step_positions[trajectory_indices] += 1
-
-        # Check for completed trajectories
-        completed_mask = (
-            dones.bool()
-            if dones is not None
-            else torch.zeros(batch_size, dtype=torch.bool, device=self.device)
-        )
-        if completed_mask.any():
-            completed_trajectories = trajectory_indices[completed_mask]
-            self.trajectory_lengths[completed_trajectories] = (
-                self.current_step_positions[completed_trajectories]
-            )
             # Reset step positions for completed trajectories
             self.current_step_positions[completed_trajectories] = 0
 
@@ -572,7 +537,7 @@ class VectorizedReplayBuffer:
         return adv, returns
 
     def sample_trajectories(self, num_trajectories: int) -> Dict[str, torch.Tensor]:
-        """Sample complete trajectories for PPO updates."""
+        """Sample complete trajectories for PPO updates. Not currently used."""
         if self.size == 0:
             raise ValueError("No trajectories available")
 
@@ -599,23 +564,20 @@ class VectorizedReplayBuffer:
         )  # [num_traj, max_len]
 
         # Gather all data for sampled trajectories up to their respective lengths
-        cards_features = self.cards_features[
-            traj_indices, :max_len
-        ]  # [num_traj, max_len, 6, 4, 13]
-        actions_features = self.actions_features[
-            traj_indices, :max_len
-        ]  # [num_traj, max_len, 24, 4, num_bet_bins]
-        # Structured embedding fields
-        card_indices = self.card_indices[traj_indices, :max_len]
-        card_stages = self.card_stages[traj_indices, :max_len]
-        card_visibility = self.card_visibility[traj_indices, :max_len]
-        card_order = self.card_order[traj_indices, :max_len]
-        action_actors = self.action_actors[traj_indices, :max_len]
-        action_types = self.action_types[traj_indices, :max_len]
-        action_streets = self.action_streets[traj_indices, :max_len]
-        action_size_bins = self.action_size_bins[traj_indices, :max_len]
-        action_size_features = self.action_size_features[traj_indices, :max_len]
-        context_features = self.context_features[traj_indices, :max_len]
+        if not self.is_transformer:
+            # CNN model fields
+            all_cards_features = self.cards_features[traj_indices, :max_len]
+            all_actions_features = self.actions_features[traj_indices, :max_len]
+        else:
+            # Transformer model fields
+            all_token_ids = self.token_ids[traj_indices, :max_len]
+            all_card_ranks = self.card_ranks[traj_indices, :max_len]
+            all_card_suits = self.card_suits[traj_indices, :max_len]
+            all_card_stages = self.card_stages[traj_indices, :max_len]
+            all_action_actors = self.action_actors[traj_indices, :max_len]
+            all_action_streets = self.action_streets[traj_indices, :max_len]
+            all_action_legal_masks = self.action_legal_masks[traj_indices, :max_len]
+            all_context_features = self.context_features[traj_indices, :max_len]
         action_indices = self.action_indices[traj_indices, :max_len]
         logps = self.log_probs[traj_indices, :max_len]
         advs = self.advantages[traj_indices, :max_len]
@@ -626,71 +588,80 @@ class VectorizedReplayBuffer:
 
         # Flatten only valid steps (mask out padding)
         mask_flat = mask.flatten()
-        all_cards_features = cards_features.reshape(-1, *cards_features.shape[2:])[
-            mask_flat
-        ]  # [valid_steps, 6, 4, 13]
-        all_actions_features = actions_features.reshape(
-            -1, *actions_features.shape[2:]
-        )[
-            mask_flat
-        ]  # [valid_steps, 24, 4, num_bet_bins]
-        # Structured embedding fields
-        all_card_indices = card_indices.reshape(-1, *card_indices.shape[2:])[mask_flat]
-        all_card_stages = card_stages.reshape(-1, *card_stages.shape[2:])[mask_flat]
-        all_card_visibility = card_visibility.reshape(-1, *card_visibility.shape[2:])[
-            mask_flat
-        ]
-        all_card_order = card_order.reshape(-1, *card_order.shape[2:])[mask_flat]
-        all_action_actors = action_actors.reshape(-1, *action_actors.shape[2:])[
-            mask_flat
-        ]
-        all_action_types = action_types.reshape(-1, *action_types.shape[2:])[mask_flat]
-        all_action_streets = action_streets.reshape(-1, *action_streets.shape[2:])[
-            mask_flat
-        ]
-        all_action_size_bins = action_size_bins.reshape(
-            -1, *action_size_bins.shape[2:]
-        )[mask_flat]
-        all_action_size_features = action_size_features.reshape(
-            -1, *action_size_features.shape[2:]
-        )[mask_flat]
-        all_context_features = context_features.reshape(
-            -1, *context_features.shape[2:]
-        )[mask_flat]
-        all_action_indices = action_indices.reshape(-1)[mask_flat]
-        all_log_probs = logps.reshape(-1)[mask_flat]
-        all_advantages = advs.reshape(-1)[mask_flat]
-        all_returns = rets.reshape(-1)[mask_flat]
-        all_legal_masks = legal.reshape(-1, legal.shape[-1])[mask_flat]
-        all_delta2 = d2.reshape(-1)[mask_flat]
-        all_delta3 = d3.reshape(-1)[mask_flat]
+        # Flatten the data for return
+        action_indices_flat = action_indices.reshape(-1)[mask_flat]
+        logps_flat = logps.reshape(-1)[mask_flat]
+        advs_flat = advs.reshape(-1)[mask_flat]
+        rets_flat = rets.reshape(-1)[mask_flat]
+        legal_flat = legal.reshape(-1, legal.shape[-1])[mask_flat]
 
         # Return the flattened data directly
-        if all_cards_features.numel() > 0:
-            return {
-                "cards_features": all_cards_features,
-                "actions_features": all_actions_features,
-                # Structured embedding fields
-                "card_indices": all_card_indices,
-                "card_stages": all_card_stages,
-                "card_visibility": all_card_visibility,
-                "card_order": all_card_order,
-                "action_actors": all_action_actors,
-                "action_types": all_action_types,
-                "action_streets": all_action_streets,
-                "action_size_bins": all_action_size_bins,
-                "action_size_features": all_action_size_features,
-                "context_features": all_context_features,
-                "action_indices": all_action_indices,
-                "log_probs_old": all_log_probs,
-                "advantages": all_advantages,
-                "returns": all_returns,
-                "legal_masks": all_legal_masks,
-                "delta2": all_delta2,
-                "delta3": all_delta3,
-            }
+        if not self.is_transformer:
+            # CNN model return
+            if all_cards_features.numel() > 0:
+                # Flatten CNN features
+                cards_flat = all_cards_features.reshape(
+                    -1, *all_cards_features.shape[2:]
+                )[mask_flat]
+                actions_flat = all_actions_features.reshape(
+                    -1, *all_actions_features.shape[2:]
+                )[mask_flat]
+                return {
+                    "cards_features": cards_flat,
+                    "actions_features": actions_flat,
+                    "action_indices": action_indices_flat,
+                    "log_probs": logps_flat,
+                    "advantages": advs_flat,
+                    "returns": rets_flat,
+                    "legal_masks": legal_flat,
+                }
+            else:
+                raise ValueError("No valid trajectories found")
         else:
-            raise ValueError("No valid trajectories found")
+            # Transformer model return
+            if all_token_ids.numel() > 0:
+                # Flatten transformer features
+                token_ids_flat = all_token_ids.reshape(-1, *all_token_ids.shape[2:])[
+                    mask_flat
+                ]
+                card_ranks_flat = all_card_ranks.reshape(-1, *all_card_ranks.shape[2:])[
+                    mask_flat
+                ]
+                card_suits_flat = all_card_suits.reshape(-1, *all_card_suits.shape[2:])[
+                    mask_flat
+                ]
+                card_stages_flat = all_card_stages.reshape(
+                    -1, *all_card_stages.shape[2:]
+                )[mask_flat]
+                action_actors_flat = all_action_actors.reshape(
+                    -1, *all_action_actors.shape[2:]
+                )[mask_flat]
+                action_streets_flat = all_action_streets.reshape(
+                    -1, *all_action_streets.shape[2:]
+                )[mask_flat]
+                action_legal_masks_flat = all_action_legal_masks.reshape(
+                    -1, *all_action_legal_masks.shape[2:]
+                )[mask_flat]
+                context_features_flat = all_context_features.reshape(
+                    -1, *all_context_features.shape[2:]
+                )[mask_flat]
+                return {
+                    "token_ids": token_ids_flat,
+                    "card_ranks": card_ranks_flat,
+                    "card_suits": card_suits_flat,
+                    "card_stages": card_stages_flat,
+                    "action_actors": action_actors_flat,
+                    "action_streets": action_streets_flat,
+                    "action_legal_masks": action_legal_masks_flat,
+                    "context_features": context_features_flat,
+                    "action_indices": action_indices_flat,
+                    "log_probs": logps_flat,
+                    "advantages": advs_flat,
+                    "returns": rets_flat,
+                    "legal_masks": legal_flat,
+                }
+            else:
+                raise ValueError("No valid trajectories found")
 
     def sample_batch(
         self, rng: torch.Generator, batch_size: int
@@ -725,30 +696,40 @@ class VectorizedReplayBuffer:
         ).long()
 
         # Vectorized extraction (inlined variables)
-        batch = {
-            "cards_features": self.cards_features[traj_indices, step_indices],
-            "actions_features": self.actions_features[traj_indices, step_indices],
-            # Structured embedding fields
-            "card_indices": self.card_indices[traj_indices, step_indices],
-            "card_stages": self.card_stages[traj_indices, step_indices],
-            "card_visibility": self.card_visibility[traj_indices, step_indices],
-            "card_order": self.card_order[traj_indices, step_indices],
-            "action_actors": self.action_actors[traj_indices, step_indices],
-            "action_types": self.action_types[traj_indices, step_indices],
-            "action_streets": self.action_streets[traj_indices, step_indices],
-            "action_size_bins": self.action_size_bins[traj_indices, step_indices],
-            "action_size_features": self.action_size_features[
-                traj_indices, step_indices
-            ],
-            "context_features": self.context_features[traj_indices, step_indices],
-            "action_indices": self.action_indices[traj_indices, step_indices],
-            "log_probs_old": self.log_probs[traj_indices, step_indices],
-            "advantages": self.advantages[traj_indices, step_indices],
-            "returns": self.returns[traj_indices, step_indices],
-            "legal_masks": self.legal_masks[traj_indices, step_indices],
-            "delta2": self.delta2[traj_indices, step_indices],
-            "delta3": self.delta3[traj_indices, step_indices],
-        }
+        if not self.is_transformer:
+            # CNN model fields
+            batch = {
+                "cards_features": self.cards_features[traj_indices, step_indices],
+                "actions_features": self.actions_features[traj_indices, step_indices],
+                "action_indices": self.action_indices[traj_indices, step_indices],
+                "log_probs_old": self.log_probs[traj_indices, step_indices],
+                "advantages": self.advantages[traj_indices, step_indices],
+                "returns": self.returns[traj_indices, step_indices],
+                "legal_masks": self.legal_masks[traj_indices, step_indices],
+                "delta2": self.delta2[traj_indices, step_indices],
+                "delta3": self.delta3[traj_indices, step_indices],
+            }
+        else:
+            # Transformer model fields
+            batch = {
+                "token_ids": self.token_ids[traj_indices, step_indices],
+                "card_ranks": self.card_ranks[traj_indices, step_indices],
+                "card_suits": self.card_suits[traj_indices, step_indices],
+                "card_stages": self.card_stages[traj_indices, step_indices],
+                "action_actors": self.action_actors[traj_indices, step_indices],
+                "action_streets": self.action_streets[traj_indices, step_indices],
+                "action_legal_masks": self.action_legal_masks[
+                    traj_indices, step_indices
+                ],
+                "context_features": self.context_features[traj_indices, step_indices],
+                "action_indices": self.action_indices[traj_indices, step_indices],
+                "log_probs_old": self.log_probs[traj_indices, step_indices],
+                "advantages": self.advantages[traj_indices, step_indices],
+                "returns": self.returns[traj_indices, step_indices],
+                "legal_masks": self.legal_masks[traj_indices, step_indices],
+                "delta2": self.delta2[traj_indices, step_indices],
+                "delta3": self.delta3[traj_indices, step_indices],
+            }
 
         return batch
 
@@ -780,53 +761,10 @@ class VectorizedReplayBuffer:
             self.size -= 1
 
     def add_trajectory_legacy(self, trajectory) -> None:
-        """Add a trajectory for backward compatibility with scalar environment."""
-        if trajectory.transitions:
-            self.start_adding_trajectory_batches(1)
-
-            # Iterate over transitions directly
-            for t in trajectory.transitions:
-                # Extract cards and actions from the observation tensor
-                # Assuming observation is [cards_features, actions_features] flattened
-                cards_features = t.observation[:312]  # First 312 features are cards
-                actions_features = t.observation[312:]  # Next 768 features are actions
-
-                # Reshape cards: (312,) -> (6, 4, 13)
-                cards_features = cards_features.reshape(6, 4, 13).bool()
-
-                # Reshape actions: (768,) -> (24, 4, num_bet_bins)
-                num_bet_bins = actions_features.shape[0] // (24 * 4)
-                actions_features = actions_features.reshape(24, 4, num_bet_bins).bool()
-
-                self.add_batch(
-                    cards_features=cards_features.unsqueeze(0),
-                    actions_features=actions_features.unsqueeze(0),
-                    action_indices=torch.tensor(
-                        [t.action], dtype=torch.long, device=self.device
-                    ),
-                    log_probs=torch.tensor(
-                        [t.log_prob], dtype=self.float_dtype, device=self.device
-                    ),
-                    rewards=torch.tensor(
-                        [t.reward], dtype=self.float_dtype, device=self.device
-                    ),
-                    dones=torch.tensor([t.done], dtype=torch.bool, device=self.device),
-                    legal_masks=t.legal_mask.unsqueeze(0).bool(),
-                    delta2=torch.tensor(
-                        [t.delta2], dtype=self.float_dtype, device=self.device
-                    ),
-                    delta3=torch.tensor(
-                        [t.delta3], dtype=self.float_dtype, device=self.device
-                    ),
-                    values=torch.tensor(
-                        [t.value], dtype=self.float_dtype, device=self.device
-                    ),
-                    trajectory_indices=torch.zeros(
-                        1, dtype=torch.long, device=self.device
-                    ),
-                )
-
-            self.finish_adding_trajectory_batches()
+        """Legacy method no longer supported - use add_batch with embedding data instead."""
+        raise NotImplementedError(
+            "add_trajectory_legacy is no longer supported. Use add_batch with CNNEmbeddingData or StructuredEmbeddingData instead."
+        )
 
     def __len__(self) -> int:
         return self.size

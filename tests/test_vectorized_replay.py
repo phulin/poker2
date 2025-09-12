@@ -1,6 +1,8 @@
 import pytest
 import torch
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
 
 
 class TestVectorizedReplayBuffer:
@@ -16,6 +18,8 @@ class TestVectorizedReplayBuffer:
             num_bet_bins=5,  # Number of bet bins (replaces legal_mask_dim)
             device=device,
             float_dtype=torch.float32,  # Add missing float_dtype parameter
+            is_transformer=True,  # Use transformer mode for tests
+            sequence_length=50,  # Sequence length for transformer
         )
 
     def test_initialization(self, buffer):
@@ -26,8 +30,15 @@ class TestVectorizedReplayBuffer:
         assert buffer.position == 0
 
         # Check tensor shapes - now 2D: (capacity, max_trajectory_length, ...)
-        assert buffer.cards_features.shape == (10, 20, 6, 4, 13)  # Cards features
-        assert buffer.actions_features.shape == (10, 20, 24, 4, 5)  # Actions features
+        # Transformer mode fields
+        assert buffer.token_ids.shape == (10, 20, 50)  # Token IDs
+        assert buffer.card_ranks.shape == (10, 20, 50)  # Card ranks
+        assert buffer.card_suits.shape == (10, 20, 50)  # Card suits
+        assert buffer.card_stages.shape == (10, 20, 50)  # Card stages
+        assert buffer.action_actors.shape == (10, 20, 50)  # Action actors
+        assert buffer.action_streets.shape == (10, 20, 50)  # Action streets
+        assert buffer.action_legal_masks.shape == (10, 20, 50, 8)  # Action legal masks
+        assert buffer.context_features.shape == (10, 20, 50, 10)  # Context features
         assert buffer.action_indices.shape == (10, 20)  # Action indices
         assert buffer.log_probs.shape == (10, 20)
         assert buffer.rewards.shape == (10, 20)
@@ -153,32 +164,34 @@ class TestVectorizedReplayBuffer:
         # Sample trajectories
         sampled = buffer.sample_trajectories(2)
 
-        # Check that all required keys are present
+        # Check that all required keys are present (transformer mode)
         expected_keys = {
-            "cards_features",
-            "actions_features",
+            "token_ids",
+            "card_ranks",
+            "card_suits",
+            "card_stages",
+            "action_actors",
+            "action_streets",
+            "action_legal_masks",
+            "context_features",
             "action_indices",
-            "log_probs_old",
+            "log_probs",
             "advantages",
             "returns",
             "legal_masks",
-            "delta2",
-            "delta3",
         }
         assert set(sampled.keys()) == expected_keys
 
         # Check that we get data from 2 trajectories (4 total steps)
         # Each trajectory has 2 steps, so 2 trajectories = 4 total steps
-        total_steps = sampled["cards_features"].shape[0]
+        total_steps = sampled["token_ids"].shape[0]
         assert total_steps == 4
-        assert sampled["actions_features"].shape[0] == total_steps
+        assert sampled["card_ranks"].shape[0] == total_steps
         assert sampled["action_indices"].shape[0] == total_steps
-        assert sampled["log_probs_old"].shape[0] == total_steps
+        assert sampled["log_probs"].shape[0] == total_steps
         assert sampled["advantages"].shape[0] == total_steps
         assert sampled["returns"].shape[0] == total_steps
         assert sampled["legal_masks"].shape[0] == total_steps
-        assert sampled["delta2"].shape[0] == total_steps
-        assert sampled["delta3"].shape[0] == total_steps
 
     def test_sample_empty_buffer(self, buffer):
         """Test sampling from empty buffer raises error."""
@@ -298,8 +311,14 @@ class TestVectorizedReplayBuffer:
 
         # Check that all buffer tensors are on the correct device
         for attr_name in [
-            "cards_features",
-            "actions_features",
+            "token_ids",
+            "card_ranks",
+            "card_suits",
+            "card_stages",
+            "action_actors",
+            "action_streets",
+            "action_legal_masks",
+            "context_features",
             "action_indices",
             "log_probs",
             "rewards",
@@ -452,10 +471,16 @@ class TestVectorizedReplayBuffer:
         rng = torch.Generator(device=buffer.device)
         sampled = buffer.sample_batch(rng, 5)
 
-        # Check that all required keys are present
+        # Check that all required keys are present (transformer mode)
         expected_keys = {
-            "cards_features",
-            "actions_features",
+            "token_ids",
+            "card_ranks",
+            "card_suits",
+            "card_stages",
+            "action_actors",
+            "action_streets",
+            "action_legal_masks",
+            "context_features",
             "action_indices",
             "log_probs_old",
             "advantages",
@@ -467,8 +492,8 @@ class TestVectorizedReplayBuffer:
         assert set(sampled.keys()) == expected_keys
 
         # Check shapes
-        assert sampled["cards_features"].shape[0] == 5
-        assert sampled["actions_features"].shape[0] == 5
+        assert sampled["token_ids"].shape[0] == 5
+        assert sampled["card_ranks"].shape[0] == 5
         assert sampled["action_indices"].shape[0] == 5
         assert sampled["log_probs_old"].shape[0] == 5
         assert sampled["advantages"].shape[0] == 5
@@ -554,55 +579,6 @@ class TestVectorizedReplayBuffer:
         assert buffer.num_steps() <= 4
         # Buffer size should be reduced
         assert buffer.size < 10
-
-    def test_add_trajectory_legacy(self, buffer):
-        """Test add_trajectory_legacy method."""
-        # Create a mock trajectory object
-        from alphaholdem.rl.replay import Trajectory, Transition
-
-        transitions = []
-        for i in range(3):
-            # Create observation tensor with correct dimensions (cards + actions)
-            # Cards: 6*4*13 = 312, Actions: 24*4*5 = 480, Total: 792
-            observation = torch.zeros(792)
-            observation[i] = 1.0  # Set one element to 1 for testing
-
-            transition = Transition(
-                observation=observation,
-                action=i,
-                log_prob=float(i),
-                reward=float(i),
-                done=(i == 2),  # Only last transition is done
-                legal_mask=torch.ones(5),
-                chips_placed=i,
-                delta2=float(i),
-                delta3=float(i),
-                value=float(i),
-            )
-            transitions.append(transition)
-
-        trajectory = Trajectory(transitions=transitions)
-
-        # Add using legacy method
-        buffer.add_trajectory_legacy(trajectory)
-
-        # Should be valid; size increments only on finish now
-        assert buffer.size == 1
-        assert buffer.valid_trajectories[0] == True
-        # Full trajectory length should be recorded at completion
-        assert buffer.trajectory_lengths[0] == 3
-
-    def test_add_trajectory_legacy_empty(self, buffer):
-        """Test add_trajectory_legacy with empty trajectory."""
-        from alphaholdem.rl.replay import Trajectory
-
-        trajectory = Trajectory(transitions=[])
-
-        # Should not raise error
-        buffer.add_trajectory_legacy(trajectory)
-
-        # Should remain empty
-        assert buffer.size == 0
 
     def test_compaction_behavior(self, buffer):
         """Test that compaction correctly handles zero-length vs non-zero-length trajectories."""
@@ -971,9 +947,18 @@ class TestVectorizedReplayBuffer:
 
     def _create_test_batch(self, batch_size: int, device: torch.device) -> dict:
         """Create a test batch with random data."""
+        embedding_data = StructuredEmbeddingData(
+            token_ids=torch.randint(0, 100, (batch_size, 50), device=device),
+            card_ranks=torch.randint(0, 13, (batch_size, 50), device=device),
+            card_suits=torch.randint(0, 4, (batch_size, 50), device=device),
+            card_stages=torch.randint(0, 4, (batch_size, 50), device=device),
+            action_actors=torch.randint(0, 2, (batch_size, 50), device=device),
+            action_streets=torch.randint(0, 4, (batch_size, 50), device=device),
+            action_legal_masks=torch.ones(batch_size, 50, 8, device=device).bool(),
+            context_features=torch.randint(0, 10, (batch_size, 50, 10), device=device),
+        )
         return {
-            "cards_features": torch.randn(batch_size, 6, 4, 13, device=device).bool(),
-            "actions_features": torch.randn(batch_size, 24, 4, 5, device=device).bool(),
+            "embedding_data": embedding_data,
             "action_indices": torch.randint(0, 5, (batch_size,), device=device),
             "log_probs": torch.randn(batch_size, device=device),
             "rewards": torch.randn(batch_size, device=device),
