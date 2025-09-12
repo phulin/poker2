@@ -47,7 +47,7 @@ def test_transformer_forward_pass():
 
     # Test forward pass with structured embeddings
     batch_size = 2
-    seq_len = 20
+    seq_len = 42
 
     # Create structured embedding inputs using the new StructuredEmbeddingData structure
     structured_data = StructuredEmbeddingData(
@@ -129,7 +129,7 @@ def test_transformer_gradient_checkpointing():
 
     # Test forward pass with gradient checkpointing
     batch_size = 2
-    seq_len = 20
+    seq_len = 42
 
     # Create structured embedding inputs using the new StructuredEmbeddingData structure
     structured_data = StructuredEmbeddingData(
@@ -185,7 +185,7 @@ def test_structured_embeddings():
 
     # Test structured embeddings forward pass
     batch_size = 2
-    seq_len = 20
+    seq_len = 42
 
     # Create structured embedding inputs using the new StructuredEmbeddingData structure
     structured_data = StructuredEmbeddingData(
