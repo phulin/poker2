@@ -16,7 +16,8 @@ from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.factory import ModelFactory
 from ..models.state_encoder import CNNStateEncoder
 from ..models.transformer.embedding_data import StructuredEmbeddingData
-from ..rl.k_best_pool import AgentSnapshot, KBestOpponentPool
+from ..rl.agent_snapshot import AgentSnapshot
+from ..rl.k_best_pool import KBestOpponentPool
 from ..rl.losses import trinal_clip_ppo_loss
 from ..rl.replay import Trajectory, Transition
 from ..rl.vectorized_replay import VectorizedReplayBuffer

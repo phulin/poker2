@@ -11,7 +11,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 
 from alphaholdem.core.config_loader import get_config
-from alphaholdem.rl.k_best_pool import AgentSnapshot, KBestOpponentPool
+from alphaholdem.rl.agent_snapshot import AgentSnapshot
+from alphaholdem.rl.k_best_pool import KBestOpponentPool
 from alphaholdem.rl.self_play import SelfPlayTrainer
 
 

@@ -22,7 +22,8 @@ from alphaholdem.core.structured_config import (
     TrainingConfig,
 )
 from alphaholdem.models.cnn import SiameseConvNetV1
-from alphaholdem.rl.k_best_pool import AgentSnapshot, KBestOpponentPool
+from alphaholdem.rl.agent_snapshot import AgentSnapshot
+from alphaholdem.rl.k_best_pool import KBestOpponentPool
 from alphaholdem.rl.self_play import SelfPlayTrainer
 
 

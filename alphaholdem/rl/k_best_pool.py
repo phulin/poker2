@@ -9,41 +9,8 @@ import torch.nn as nn
 
 from ..core.interfaces import OpponentPool
 from ..utils.profiling import profile
-
-
-class AgentSnapshot:
-    """Represents a snapshot of an agent at a specific training step."""
-
-    def __init__(self, model: nn.Module, step: int, elo: float = 1200.0):
-        self.model = copy.deepcopy(model)
-        self.step = step
-        self.elo = elo
-        self.total_rewards = 0
-        self.games_played = 0
-        self.wins = 0
-        self.losses = 0
-        self.draws = 0
-
-    def get_win_rate(self) -> float:
-        """Get win rate of this snapshot."""
-        total_games = self.games_played
-        if total_games == 0:
-            return 0.5
-        return self.wins / total_games
-
-    def get_expected_reward(self) -> float:
-        """Get expected reward of this snapshot."""
-        return self.total_rewards / self.games_played
-
-    def update_stats(self, result: str):
-        """Update game statistics."""
-        self.games_played += 1
-        if result == "win":
-            self.wins += 1
-        elif result == "loss":
-            self.losses += 1
-        else:  # draw
-            self.draws += 1
+from .agent_snapshot import AgentSnapshot
+from .elo_calculator import ELOCalculator
 
 
 class KBestOpponentPool(OpponentPool):
@@ -77,6 +44,7 @@ class KBestOpponentPool(OpponentPool):
         self.k_factor = k_factor
         self.snapshots: List[AgentSnapshot] = []
         self.current_elo = 1200.0  # Starting ELO rating
+        self.elo_calculator = ELOCalculator(k_factor)
 
     def sample(self, k: int = 1) -> List[AgentSnapshot]:
         """
@@ -158,28 +126,18 @@ class KBestOpponentPool(OpponentPool):
             result: 'win', 'loss', or 'draw'
             k_factor: ELO K-factor for rating changes (uses instance default if None)
         """
-        if k_factor is None:
-            k_factor = self.k_factor
-
-        # Calculate expected score
-        expected_score = 1.0 / (1.0 + 10 ** ((opponent.elo - self.current_elo) / 400.0))
-
-        # Calculate actual score
-        if result == "win":
-            actual_score = 1.0
-        elif result == "loss":
-            actual_score = 0.0
-        else:  # draw
-            actual_score = 0.5
-
-        # Calculate ELO change
-        elo_change = k_factor * (actual_score - expected_score)
-
         # Update current ELO
-        self.current_elo += elo_change
+        self.current_elo = self.elo_calculator.update_elo_after_game(
+            self.current_elo, opponent, result, k_factor
+        )
 
         # Update opponent ELO (opposite change)
-        opponent.elo -= elo_change
+        opponent.elo = self.elo_calculator.update_elo_after_game(
+            opponent.elo,
+            AgentSnapshot(opponent.model, opponent.step, self.current_elo),
+            "loss" if result == "win" else "win" if result == "loss" else "draw",
+            k_factor,
+        )
 
         # Update opponent stats
         opponent.update_stats(result)
@@ -203,41 +161,17 @@ class KBestOpponentPool(OpponentPool):
         if opponent is None or rewards.numel() == 0:
             return
 
-        # Check for rewards outside [-1, 1] range and warn
-        extreme_rewards = torch.abs(rewards) > 1.0
-        if extreme_rewards.any():
-            extreme_values = rewards[extreme_rewards]
-            print(
-                f"Warning: {extreme_rewards.numel()} rewards outside [-1, 1] range: {extreme_values.tolist()}"
-            )
-
-        # Scale rewards to [0, 1] range based on magnitude
-        # Convert to actual scores: negative rewards -> 0, positive rewards -> 1, scaled by magnitude
-        actual_scores = 0.5 + 0.5 * rewards
-
-        # Calculate expected scores for each game
-        expected_scores = 1.0 / (
-            1.0 + 10 ** ((opponent.elo - self.current_elo) / 400.0)
+        # Update current ELO using the calculator
+        self.current_elo = self.elo_calculator.update_elo_batch_vectorized(
+            self.current_elo, opponent, rewards
         )
 
-        # Calculate ELO changes
-        elo_changes = self.k_factor * (actual_scores - expected_scores)
-
-        # Update current ELO (sum of all changes)
-        total_elo_change = elo_changes.sum().item()
-        self.current_elo += total_elo_change
-
         # Update opponent ELO (opposite change)
-        opponent.elo -= total_elo_change
-
-        # Update opponent stats for each game
-        # Calculate wins/losses for stats (regardless of magnitude-based scoring)
-        num_wins = (rewards > 0).sum().item()
-        num_losses = (rewards < 0).sum().item()
-        opponent.games_played += rewards.numel()
-        opponent.wins += num_wins
-        opponent.losses += num_losses
-        opponent.draws += rewards.numel() - num_wins - num_losses
+        # Create a temporary snapshot with current ELO for opponent calculation
+        temp_snapshot = AgentSnapshot(opponent.model, opponent.step, self.current_elo)
+        opponent.elo = self.elo_calculator.update_elo_batch_vectorized(
+            opponent.elo, temp_snapshot, -rewards
+        )
 
         # Re-sort snapshots by ELO
         self.snapshots.sort(key=lambda x: x.elo, reverse=True)
