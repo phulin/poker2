@@ -88,8 +88,7 @@ def print_preflop_range_grid(
     # Generate all grids using the efficient 169-environment approach
     fold_grid = get_preflop_range_grid(
         trainer.model,
-        seat,
-        "fold",
+        0,
         trainer.device,
         starting_stack=trainer.cfg.env.stack,
         sb=trainer.cfg.env.sb,
@@ -101,8 +100,7 @@ def print_preflop_range_grid(
 
     call_grid = get_preflop_range_grid(
         trainer.model,
-        seat,
-        "call",
+        1,
         trainer.device,
         starting_stack=trainer.cfg.env.stack,
         sb=trainer.cfg.env.sb,
@@ -114,8 +112,7 @@ def print_preflop_range_grid(
 
     allin_grid = get_preflop_range_grid(
         trainer.model,
-        seat,
-        "allin",
+        trainer.num_bet_bins - 1,
         trainer.device,
         starting_stack=trainer.cfg.env.stack,
         sb=trainer.cfg.env.sb,
@@ -127,7 +124,6 @@ def print_preflop_range_grid(
 
     betting_grid = get_preflop_betting_grid(
         trainer.model,
-        seat,
         trainer.device,
         starting_stack=trainer.cfg.env.stack,
         sb=trainer.cfg.env.sb,
@@ -161,7 +157,6 @@ def print_preflop_range_grid(
 
     value_grid = get_preflop_value_grid(
         trainer.model,
-        seat,
         trainer.device,
         starting_stack=trainer.cfg.env.stack,
         sb=trainer.cfg.env.sb,

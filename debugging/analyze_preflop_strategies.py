@@ -164,8 +164,7 @@ def print_bb_response_tables(trainer: SelfPlayTrainer, step: int):
     # Note: The grid functions now create their own 169-hand environments internally
     fold_grid_lines = get_preflop_range_grid_bb_response(
         trainer.model,
-        seat=1,
-        metric="fold",
+        0,
         device=trainer.device,
         starting_stack=trainer.cfg.env.stack,
         sb=trainer.cfg.env.sb,
@@ -177,8 +176,7 @@ def print_bb_response_tables(trainer: SelfPlayTrainer, step: int):
 
     call_grid_lines = get_preflop_range_grid_bb_response(
         trainer.model,
-        seat=1,
-        metric="call",
+        1,
         device=trainer.device,
         starting_stack=trainer.cfg.env.stack,
         sb=trainer.cfg.env.sb,
@@ -204,7 +202,6 @@ def print_bb_response_tables(trainer: SelfPlayTrainer, step: int):
     print("BB value estimates when facing SB all-in (×100)")
     value_grid = get_preflop_value_grid_bb_response(
         trainer.model,
-        seat=1,
         device=trainer.device,
         starting_stack=trainer.cfg.env.stack,
         sb=trainer.cfg.env.sb,

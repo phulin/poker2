@@ -5,7 +5,7 @@ Contains functions for creating test environments and analyzing specific scenari
 """
 
 import torch
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Any
 from .hunl_tensor_env import HUNLTensorEnv
 from ..models.transformer.state_encoder import TransformerStateEncoder
 from ..models.state_encoder import CNNStateEncoder
@@ -105,6 +105,7 @@ def get_probabilities(
 
 def create_169_hand_analysis_setup(
     model,
+    button: int,
     starting_stack: int = 20000,
     sb: int = 50,
     bb: int = 100,
@@ -113,10 +114,11 @@ def create_169_hand_analysis_setup(
     rng: torch.Generator = None,
     flop_showdown: bool = False,
 ) -> Tuple[HUNLTensorEnv, Any]:
-    """Create a tensor environment with all 169 preflop hands set up and appropriate state encoder.
+    """Create a tensor environment with all 169 preflop hands set up for player 0 and appropriate state encoder.
 
     Args:
         model: The trained model instance
+        button: Which player is the button
         starting_stack: Starting stack size
         sb: Small blind amount
         bb: Big blind amount
@@ -150,7 +152,9 @@ def create_169_hand_analysis_setup(
     )
 
     # Reset the environment
-    temp_env.reset(force_button=torch.zeros(169, dtype=torch.long, device=device))
+    temp_env.reset(
+        force_button=torch.full((169,), button, dtype=torch.long, device=device)
+    )
 
     # Get all 169 hand combinations
     hands = create_169_hand_combinations()
@@ -315,7 +319,6 @@ def _create_169_grid(
 
 def get_preflop_betting_grid(
     model,
-    seat: int = 0,
     device: torch.device = None,
     starting_stack: int = 20000,
     sb: int = 50,
@@ -346,6 +349,7 @@ def get_preflop_betting_grid(
     # Create 169-hand environment and state encoder
     env, state_encoder = create_169_hand_analysis_setup(
         model,
+        button=0,
         starting_stack=starting_stack,
         sb=sb,
         bb=bb,
@@ -356,7 +360,7 @@ def get_preflop_betting_grid(
     )
 
     # Get probabilities and values
-    probs, _, _ = get_probabilities(model, state_encoder, env, seat, device)
+    probs, _, _ = get_probabilities(model, state_encoder, env, 0, device)
 
     # Sum all betting probabilities (exclude fold=0, call=1, and all-in=num_bet_bins-1)
     # Betting actions are typically indices 2 through num_bet_bins-2 (excluding all-in)
@@ -397,8 +401,7 @@ def step_sb_action(
 
 def get_preflop_range_grid(
     model,
-    seat: int = 0,
-    metric: str = "allin",
+    bin_index: int,
     device: torch.device = None,
     starting_stack: int = 20000,
     sb: int = 50,
@@ -411,8 +414,7 @@ def get_preflop_range_grid(
 
     Args:
         model: Trained model for prediction
-        seat: Seat position (0 for SB, 1 for BB)
-        metric: "allin", "call", or "fold"
+        bin_index: Index of the betting bin to check
         device: Device for tensor operations
         starting_stack: Starting stack size
         sb: Small blind amount
@@ -430,6 +432,7 @@ def get_preflop_range_grid(
     # Create 169-hand environment and state encoder
     env, state_encoder = create_169_hand_analysis_setup(
         model,
+        button=0,
         starting_stack=starting_stack,
         sb=sb,
         bb=bb,
@@ -440,29 +443,17 @@ def get_preflop_range_grid(
     )
 
     # Get probabilities and values
-    probs, _, _ = get_probabilities(model, state_encoder, env, seat, device)
-
-    # Select metric index
-    num_bet_bins = probs.shape[1]
-    if metric == "allin":
-        idx = num_bet_bins - 1  # Last bin is all-in
-    elif metric == "call":
-        idx = 1  # Second bin is call
-    elif metric == "fold":
-        idx = 0  # First bin is fold
-    else:
-        idx = num_bet_bins - 1
+    probs, _, _ = get_probabilities(model, state_encoder, env, 0, device)
 
     # Get probabilities for the selected metric
-    selected_probs = probs[:, idx]  # [169]
+    selected_probs = probs[:, bin_index]  # [169]
 
     return _create_169_grid(selected_probs, "probability", " 0")
 
 
 def get_preflop_range_grid_bb_response(
     model,
-    seat: int = 1,
-    metric: str = "allin",
+    bin_index: int,
     device: torch.device = None,
     starting_stack: int = 20000,
     sb: int = 50,
@@ -475,8 +466,7 @@ def get_preflop_range_grid_bb_response(
 
     Args:
         model: Trained model for prediction
-        seat: Seat position (1 for BB)
-        metric: "allin", "call", or "fold"
+        bin_index: Index of the betting bin to check
         device: Device for tensor operations
         starting_stack: Starting stack size
         sb: Small blind amount
@@ -492,8 +482,10 @@ def get_preflop_range_grid_bb_response(
         device = torch.device("cpu")
 
     # Create 169-hand environment and state encoder
+    # Seat 0 (model perspective) is BB, button/SB is p1.
     env, state_encoder = create_169_hand_analysis_setup(
         model,
+        button=1,
         starting_stack=starting_stack,
         sb=sb,
         bb=bb,
@@ -506,29 +498,19 @@ def get_preflop_range_grid_bb_response(
     # Simulate SB all-in action
     step_sb_action(env, "allin", device)
 
-    # Get probabilities and values
-    probs, _, _ = get_probabilities(model, state_encoder, env, seat, device)
+    # Now next-to-act is p0 (BB)
 
-    # Select metric index
-    num_bet_bins = probs.shape[1]
-    if metric == "allin":
-        idx = num_bet_bins - 1  # Last bin is all-in
-    elif metric == "call":
-        idx = 1  # Second bin is call
-    elif metric == "fold":
-        idx = 0  # First bin is fold
-    else:
-        idx = num_bet_bins - 1
+    # Get probabilities and values
+    probs, _, _ = get_probabilities(model, state_encoder, env, 0, device)
 
     # Get probabilities for the selected metric
-    selected_probs = probs[:, idx]  # [169]
+    selected_probs = probs[:, bin_index]  # [169]
 
     return _create_169_grid(selected_probs, "probability", " 0")
 
 
 def get_preflop_value_grid_bb_response(
     model,
-    seat: int = 1,
     device: torch.device = None,
     starting_stack: int = 20000,
     sb: int = 50,
@@ -541,7 +523,6 @@ def get_preflop_value_grid_bb_response(
 
     Args:
         model: Trained model for prediction
-        seat: Seat position (1 for BB)
         device: Device for tensor operations
         starting_stack: Starting stack size
         sb: Small blind amount
@@ -559,6 +540,7 @@ def get_preflop_value_grid_bb_response(
     # Create 169-hand environment and state encoder
     env, state_encoder = create_169_hand_analysis_setup(
         model,
+        button=1,
         starting_stack=starting_stack,
         sb=sb,
         bb=bb,
@@ -572,14 +554,13 @@ def get_preflop_value_grid_bb_response(
     step_sb_action(env, "allin", device)
 
     # Get probabilities and values
-    _, values, _ = get_probabilities(model, state_encoder, env, seat, device)
+    _, values, _ = get_probabilities(model, state_encoder, env, 0, device)
 
     return _create_169_grid(values, "value", " 0.00")
 
 
 def get_preflop_value_grid(
     model,
-    seat: int = 0,
     device: torch.device = None,
     starting_stack: int = 20000,
     sb: int = 50,
@@ -610,6 +591,7 @@ def get_preflop_value_grid(
     # Create 169-hand environment and state encoder
     env, state_encoder = create_169_hand_analysis_setup(
         model,
+        button=0,
         starting_stack=starting_stack,
         sb=sb,
         bb=bb,
@@ -620,6 +602,6 @@ def get_preflop_value_grid(
     )
 
     # Get probabilities and values
-    _, values, _ = get_probabilities(model, state_encoder, env, seat, device)
+    _, values, _ = get_probabilities(model, state_encoder, env, 0, device)
 
     return _create_169_grid(values, "value", " 0.00")
