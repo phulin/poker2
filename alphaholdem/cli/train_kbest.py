@@ -88,12 +88,12 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
     training_start_time = time.time()
 
     print(f"Starting K-Best training from step {start_step}")
-    print(f"K-Best pool size: {cfg.k_best_pool_size}")
-    print(f"Min ELO difference: {cfg.min_elo_diff}")
     if cfg.use_tensor_env:
         print(f"Using tensorized environment with {cfg.num_envs} parallel environments")
     else:
         print("Using scalar environment")
+    if cfg.env.flop_showdown:
+        print("Using FLOP SHOWDOWN environment")
     if cfg.use_wandb:
         print(f"📊 Wandb logging enabled - check https://wandb.ai for real-time plots!")
         print(f"   Project: {cfg.wandb_project}")
