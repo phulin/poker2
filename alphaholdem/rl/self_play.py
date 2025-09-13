@@ -777,67 +777,39 @@ class SelfPlayTrainer:
             # No minibatches: operate on the full batch at once
             is_transformer = self.cfg.model.name.startswith("poker_transformer")
 
-            if is_transformer:
-                # Transformer model with structured embeddings
-                with torch.amp.autocast(
-                    self.device.type,
-                    dtype=torch.bfloat16,
-                    enabled=self.use_mixed_precision,
-                ):
-                    # Create structured data from batch
-                    batch_structured_data = StructuredEmbeddingData.from_dict(batch)
-                    outputs = self.model(batch_structured_data)
-                    logits = outputs["policy_logits"].float()
-                    values = outputs["value"].float()
+            with torch.amp.autocast(
+                self.device.type,
+                dtype=torch.bfloat16,
+                enabled=self.use_mixed_precision,
+            ):
+                outputs = self.model(batch["embedding_data"])
+                logits = outputs["policy_logits"].float()
+                values = outputs["value"].float()
 
-                # Transformer-specific loss with auxiliary hand range loss
-                loss_dict = self._compute_transformer_loss(
-                    outputs, batch, delta2_vec, delta3_vec
-                )
-            else:
-                # CNN model
-                cards_features = batch[
-                    "cards_features"
-                ]  # [batch_size, 6, 4, 13] - bool
-                actions_features = batch[
-                    "actions_features"
-                ]  # [batch_size, 24, 4, num_bet_bins] - bool
-
-                # Convert bool tensors to appropriate dtype for model forward pass
-                cards_float = cards_features.to(torch.float32)
-                actions_float = actions_features.to(torch.float32)
-
-                with torch.amp.autocast(
-                    self.device.type,
-                    dtype=torch.bfloat16,
-                    enabled=self.use_mixed_precision,
-                ):
-                    # Create CNNEmbeddingData
-                    embedding_data = CNNEmbeddingData(
-                        cards=cards_float, actions=actions_float
+                if is_transformer:
+                    # Transformer-specific loss with auxiliary hand range loss
+                    loss_dict = self._compute_transformer_loss(
+                        outputs, batch, delta2_vec, delta3_vec
                     )
-                    outputs = self.model(embedding_data)
-                    logits = outputs["policy_logits"].float()
-                    values = outputs["value"].float()
-
-                # CNN loss
-                loss_dict = trinal_clip_ppo_loss(
-                    logits=logits,
-                    values=values,
-                    actions=batch["action_indices"],
-                    log_probs_old=batch["log_probs_old"].float(),
-                    advantages=batch["advantages"].float(),
-                    returns=batch["returns"].float(),
-                    legal_masks=batch["legal_masks"],
-                    epsilon=self.epsilon,
-                    delta1=self.delta1,
-                    delta2=delta2_vec.float(),
-                    delta3=delta3_vec.float(),
-                    value_coef=self.value_coef,
-                    entropy_coef=self.entropy_coef,
-                    value_loss_type=self.cfg.train.value_loss_type,
-                    huber_delta=self.cfg.train.huber_delta,
-                )
+                else:
+                    # CNN loss
+                    loss_dict = trinal_clip_ppo_loss(
+                        logits=logits,
+                        values=values,
+                        actions=batch["action_indices"],
+                        log_probs_old=batch["log_probs_old"].float(),
+                        advantages=batch["advantages"].float(),
+                        returns=batch["returns"].float(),
+                        legal_masks=batch["legal_masks"],
+                        epsilon=self.epsilon,
+                        delta1=self.delta1,
+                        delta2=delta2_vec.float(),
+                        delta3=delta3_vec.float(),
+                        value_coef=self.value_coef,
+                        entropy_coef=self.entropy_coef,
+                        value_loss_type=self.cfg.train.value_loss_type,
+                        huber_delta=self.cfg.train.huber_delta,
+                    )
 
             # Debugging metrics: approx KL, clipfrac, explained variance
             with torch.no_grad():
@@ -913,15 +885,15 @@ class SelfPlayTrainer:
             last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
 
             if last_admitted_opponent is not None:
-                # Take a 64-element sample from the current batch
+                # Take a 64-element sample from the current batch without replacement
                 batch_size = batch["returns"].shape[0]
                 sample_size = min(64, batch_size)
-                sample_indices = torch.randperm(batch_size, device=self.device)[
-                    :sample_size
-                ]
+                sample_indices = torch.randperm(
+                    batch_size, device=batch["returns"].device
+                )[:sample_size]
 
                 # Get states for KL computation
-                kl_states = self._encode_tensor_states(player=0, idxs=sample_indices)
+                kl_states = batch["embedding_data"][sample_indices]
 
                 # Get current model logits
                 with torch.no_grad():

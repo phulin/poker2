@@ -90,3 +90,16 @@ class StructuredEmbeddingData:
     def device(self) -> torch.device:
         """Get device of tensors."""
         return self.token_ids.device
+
+    def __getitem__(self, indices) -> StructuredEmbeddingData:
+        """Slice the embedding data by indices."""
+        return StructuredEmbeddingData(
+            token_ids=self.token_ids[indices],
+            card_ranks=self.card_ranks[indices],
+            card_suits=self.card_suits[indices],
+            card_streets=self.card_streets[indices],
+            action_actors=self.action_actors[indices],
+            action_streets=self.action_streets[indices],
+            action_legal_masks=self.action_legal_masks[indices],
+            context_features=self.context_features[indices],
+        )

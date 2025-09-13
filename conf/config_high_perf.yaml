@@ -3,7 +3,7 @@
 
 # === TRAINING CONFIGURATION ===
 num_steps: 25000
-opponent_pool_type: "k_best"  # "k_best" or "dred"
+opponent_pool_type: "dred"  # "k_best" or "dred"
 k_best_pool_size: 10
 min_elo_diff: 75.0
 min_step_diff: 300  # Minimum step difference before considering for pool updates

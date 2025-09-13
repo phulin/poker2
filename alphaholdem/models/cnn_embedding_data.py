@@ -59,3 +59,10 @@ class CNNEmbeddingData:
     def device(self) -> torch.device:
         """Get device of tensors."""
         return self.cards.device
+
+    def __getitem__(self, indices) -> CNNEmbeddingData:
+        """Slice the embedding data by indices."""
+        return CNNEmbeddingData(
+            cards=self.cards[indices],
+            actions=self.actions[indices],
+        )

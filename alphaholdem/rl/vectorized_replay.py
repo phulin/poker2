@@ -709,40 +709,34 @@ class VectorizedReplayBuffer:
         ).long()
 
         # Vectorized extraction (inlined variables)
-        if not self.is_transformer:
-            # CNN model fields
-            batch = {
-                "cards_features": self.cards_features[traj_indices, step_indices],
-                "actions_features": self.actions_features[traj_indices, step_indices],
-                "action_indices": self.action_indices[traj_indices, step_indices],
-                "log_probs_old": self.log_probs[traj_indices, step_indices],
-                "advantages": self.advantages[traj_indices, step_indices],
-                "returns": self.returns[traj_indices, step_indices],
-                "legal_masks": self.legal_masks[traj_indices, step_indices],
-                "delta2": self.delta2[traj_indices, step_indices],
-                "delta3": self.delta3[traj_indices, step_indices],
-            }
+        if self.is_transformer:
+            data = StructuredEmbeddingData(
+                token_ids=self.token_ids[traj_indices, step_indices],
+                card_ranks=self.card_ranks[traj_indices, step_indices],
+                card_suits=self.card_suits[traj_indices, step_indices],
+                card_streets=self.card_streets[traj_indices, step_indices],
+                action_actors=self.action_actors[traj_indices, step_indices],
+                action_streets=self.action_streets[traj_indices, step_indices],
+                action_legal_masks=self.action_legal_masks[traj_indices, step_indices],
+                context_features=self.context_features[traj_indices, step_indices],
+            )
         else:
-            # Transformer model fields
-            batch = {
-                "token_ids": self.token_ids[traj_indices, step_indices],
-                "card_ranks": self.card_ranks[traj_indices, step_indices],
-                "card_suits": self.card_suits[traj_indices, step_indices],
-                "card_streets": self.card_streets[traj_indices, step_indices],
-                "action_actors": self.action_actors[traj_indices, step_indices],
-                "action_streets": self.action_streets[traj_indices, step_indices],
-                "action_legal_masks": self.action_legal_masks[
-                    traj_indices, step_indices
-                ],
-                "context_features": self.context_features[traj_indices, step_indices],
-                "action_indices": self.action_indices[traj_indices, step_indices],
-                "log_probs_old": self.log_probs[traj_indices, step_indices],
-                "advantages": self.advantages[traj_indices, step_indices],
-                "returns": self.returns[traj_indices, step_indices],
-                "legal_masks": self.legal_masks[traj_indices, step_indices],
-                "delta2": self.delta2[traj_indices, step_indices],
-                "delta3": self.delta3[traj_indices, step_indices],
-            }
+            data = CNNEmbeddingData(
+                cards=self.cards_features[traj_indices, step_indices],
+                actions=self.actions_features[traj_indices, step_indices],
+            )
+
+        # CNN model fields
+        batch = {
+            "embedding_data": data,
+            "action_indices": self.action_indices[traj_indices, step_indices],
+            "log_probs_old": self.log_probs[traj_indices, step_indices],
+            "advantages": self.advantages[traj_indices, step_indices],
+            "returns": self.returns[traj_indices, step_indices],
+            "legal_masks": self.legal_masks[traj_indices, step_indices],
+            "delta2": self.delta2[traj_indices, step_indices],
+            "delta3": self.delta3[traj_indices, step_indices],
+        }
 
         return batch
 

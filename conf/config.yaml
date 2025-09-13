@@ -20,7 +20,7 @@ use_tensor_env: true
 num_envs: 512
 
 # === WANDB CONFIGURATION ===
-use_wandb: true
+use_wandb: false
 wandb_project: "poker-kbest"
 wandb_name: null  # Auto-generated if null
 wandb_tags: ["kbest", "poker", "ppo"]
