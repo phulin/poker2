@@ -7,6 +7,8 @@ import torch
 from ..utils.profiling import profile
 from . import rules
 
+DEBUG_STEP_TABLE_ENVS = 3
+
 
 class HUNLTensorEnv:
     """Tensorized, batched HUNL environment.
@@ -79,7 +81,7 @@ class HUNLTensorEnv:
         self.bb = int(bb)
         self.scale = float(self.bb) * 100.0
         self.bet_bins = bet_bins
-        self.debug_step_table = debug_step_table and self.N <= 3
+        self.debug_step_table = debug_step_table
         self.flop_showdown = flop_showdown
         # Cache bet bins as tensor for fast indexing
         self.bet_bins_t = torch.tensor(
@@ -441,8 +443,8 @@ class HUNLTensorEnv:
         self.acted_since_reset[acting] = True
 
         if self.debug_step_table:
-            starting_street = self.street.clone()
-            starting_to_act = self.to_act.clone()
+            starting_street = self.street[:DEBUG_STEP_TABLE_ENVS].clone()
+            starting_to_act = self.to_act[:DEBUG_STEP_TABLE_ENVS].clone()
 
         # Record current action into history (actor rows and sum row)
         round_idx = self.street.clamp(min=0, max=3)[acting]
@@ -489,7 +491,7 @@ class HUNLTensorEnv:
         )
 
         if self.debug_step_table:
-            after_betting_committed = self.committed.clone()
+            after_betting_committed = self.committed[:DEBUG_STEP_TABLE_ENVS].clone()
 
         # Advance to next actor (simple alternation)
         self.to_act[acting] = 1 - self.to_act[acting]
@@ -596,12 +598,12 @@ class HUNLTensorEnv:
 
         if self.debug_step_table:
             self._print_debug_table(
-                bin_indices,
-                rewards,
-                acting,
-                starting_street,
-                starting_to_act,
-                after_betting_committed,
+                bin_indices[:3],
+                rewards[:3],
+                acting[:3],
+                starting_street[:3],
+                starting_to_act[:3],
+                after_betting_committed[:3],
             )
 
         return rewards, self.done, self.to_act
