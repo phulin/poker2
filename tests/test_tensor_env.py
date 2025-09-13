@@ -871,3 +871,289 @@ def test_flop_showdown_edge_cases():
 
     # Should complete with all-in scenarios
     assert torch.all(env2.done), f"Expected all games to complete, got {env2.done}"
+
+
+def test_allin_legal_mask_logic():
+    """Test the all-in legal mask logic for different scenarios."""
+
+    # Test 1: When opponent is all-in, we can fold or call
+    env = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env.reset()
+
+    # Manually set up scenario where player 1 is all-in
+    env.is_allin[0, 1] = True
+    env.stacks[0, 1] = 0
+    env.committed[0, 1] = (
+        env.stacks[0, 0].item() + env.committed[0, 0].item()
+    )  # All-in amount
+    env.to_act[0] = 0  # Player 0 to act
+
+    # Check legal mask for player 0 (opponent of all-in player)
+    mask = env.legal_bins_mask()
+    legal_mask = mask[0]
+
+    # Should be able to fold (bin 0) or call (bin 1)
+    assert legal_mask[0].item() is True, "Should be able to fold when opponent all-in"
+    assert legal_mask[1].item() is True, "Should be able to call when opponent all-in"
+
+    # Should not be able to bet/raise/all-in (bins 2-7)
+    for bin_idx in range(2, 8):
+        assert (
+            legal_mask[bin_idx].item() is False
+        ), f"Should not be able to bet/raise/all-in (bin {bin_idx}) when opponent all-in"
+
+    # Test 2: When we are all-in, we can only call
+    env2 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env2.reset()
+
+    # Manually set up scenario where player 0 is all-in
+    env2.is_allin[0, 0] = True
+    env2.stacks[0, 0] = 0
+    env2.to_act[0] = 0  # Player 0 to act
+
+    # Check legal mask for player 0 (who is all-in)
+    mask = env2.legal_bins_mask()
+    legal_mask = mask[0]
+
+    # Should only be able to call (bin 1)
+    assert legal_mask[1].item() is True, "Should be able to call when we are all-in"
+
+    # Should not be able to fold (bin 0) or bet/raise/all-in (bins 2-7)
+    assert (
+        legal_mask[0].item() is False
+    ), "Should not be able to fold when we are all-in"
+    for bin_idx in range(2, 8):
+        assert (
+            legal_mask[bin_idx].item() is False
+        ), f"Should not be able to bet/raise/all-in (bin {bin_idx}) when we are all-in"
+
+    # Test 3: When both players are all-in, we can only call
+    env3 = _make_env(
+        N=1, starting_stack=200, sb=50, bb=100
+    )  # Small stacks to force all-in
+    env3.reset()
+
+    # Manually set up scenario where both players are all-in
+    env3.is_allin[0, 0] = True
+    env3.is_allin[0, 1] = True
+    env3.stacks[0, 0] = 0
+    env3.stacks[0, 1] = 0
+    env3.to_act[0] = 0  # Player 0 to act
+
+    # Check legal mask
+    mask = env3.legal_bins_mask()
+    legal_mask = mask[0]
+
+    # Should only be able to call (bin 1)
+    assert (
+        legal_mask[1].item() is True
+    ), "Should be able to call when both players all-in"
+
+    # Should not be able to fold (bin 0) or bet/raise/all-in (bins 2-7)
+    assert (
+        legal_mask[0].item() is False
+    ), "Should not be able to fold when both players all-in"
+    for bin_idx in range(2, 8):
+        assert (
+            legal_mask[bin_idx].item() is False
+        ), f"Should not be able to bet/raise/all-in (bin {bin_idx}) when both players all-in"
+
+
+def test_allin_legal_mask_edge_cases():
+    """Test edge cases for all-in legal mask logic."""
+
+    # Test with multiple environments having different all-in states
+    env = _make_env(N=4, starting_stack=1000, sb=25, bb=50)
+    env.reset()
+
+    # Manually set up different all-in scenarios
+    # Env 0: Player 0 all-in
+    env.is_allin[0, 0] = True
+    env.stacks[0, 0] = 0
+
+    # Env 1: Player 1 all-in
+    env.is_allin[1, 1] = True
+    env.stacks[1, 1] = 0
+
+    # Env 2: Both all-in
+    env.is_allin[2, 0] = True
+    env.is_allin[2, 1] = True
+    env.stacks[2, 0] = 0
+    env.stacks[2, 1] = 0
+
+    # Env 3: Neither all-in (normal case)
+    env.is_allin[3, 0] = False
+    env.is_allin[3, 1] = False
+
+    # Set to_act to test different scenarios
+    env.to_act[0] = 0  # Player 0 to act in env 0 (player 0 is all-in)
+    env.to_act[1] = 0  # Player 0 to act in env 1 (player 1 is all-in)
+    env.to_act[2] = 0  # Player 0 to act in env 2 (both all-in)
+    env.to_act[3] = 0  # Player 0 to act in env 3 (normal)
+
+    # Get legal masks
+    mask = env.legal_bins_mask()
+
+    # Env 0: Player 0 is all-in, should only be able to call
+    assert mask[0, 1].item() is True, "Env 0: Should be able to call when we are all-in"
+    assert (
+        mask[0, 0].item() is False
+    ), "Env 0: Should not be able to fold when we are all-in"
+    for bin_idx in range(2, 8):
+        assert (
+            mask[0, bin_idx].item() is False
+        ), f"Env 0: Should not be able to bet/raise/all-in (bin {bin_idx}) when we are all-in"
+
+    # Env 1: Player 1 is all-in, player 0 can fold or call
+    assert (
+        mask[1, 0].item() is True
+    ), "Env 1: Should be able to fold when opponent all-in"
+    assert (
+        mask[1, 1].item() is True
+    ), "Env 1: Should be able to call when opponent all-in"
+    for bin_idx in range(2, 8):
+        assert (
+            mask[1, bin_idx].item() is False
+        ), f"Env 1: Should not be able to bet/raise/all-in (bin {bin_idx}) when opponent all-in"
+
+    # Env 2: Both all-in, should only be able to call
+    assert (
+        mask[2, 1].item() is True
+    ), "Env 2: Should be able to call when both players all-in"
+    assert (
+        mask[2, 0].item() is False
+    ), "Env 2: Should not be able to fold when both players all-in"
+    for bin_idx in range(2, 8):
+        assert (
+            mask[2, bin_idx].item() is False
+        ), f"Env 2: Should not be able to bet/raise/all-in (bin {bin_idx}) when both players all-in"
+
+    # Env 3: Normal case, should have normal legal actions
+    assert (
+        mask[3, 1].item() is True
+    ), "Env 3: Should be able to check/call in normal case"
+    assert mask[3, 7].item() is True, "Env 3: Should be able to all-in in normal case"
+    # Fold might not be legal if not facing a bet
+    if env.committed[3, 0].item() == env.committed[3, 1].item():
+        assert (
+            mask[3, 0].item() is False
+        ), "Env 3: Should not be able to fold when not facing a bet"
+
+
+def test_allin_legal_mask_with_betting():
+    """Test all-in legal mask logic with actual betting scenarios."""
+
+    # Test scenario: SB goes all-in, BB can fold or call
+    env = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env.reset()
+
+    # Make SB (player 0) go all-in
+    # First, let's get to a state where SB can all-in
+    mask = env.legal_bins_mask()
+    if mask[0, 7]:  # SB can all-in
+        r, d, _ = env.step_bins(torch.tensor([7], device=env.device))  # SB all-in
+
+        # Now BB (player 1) should be able to fold or call
+        mask = env.legal_bins_mask()
+        assert mask[0, 0].item() is True, "BB should be able to fold vs SB all-in"
+        assert mask[0, 1].item() is True, "BB should be able to call vs SB all-in"
+
+        # BB should not be able to bet/raise/all-in
+        for bin_idx in range(2, 8):
+            assert (
+                mask[0, bin_idx].item() is False
+            ), f"BB should not be able to bet/raise/all-in (bin {bin_idx}) vs SB all-in"
+
+    # Test scenario: BB goes all-in, SB can fold or call
+    env2 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env2.reset()
+
+    # Make BB (player 1) go all-in
+    # First SB acts
+    mask = env2.legal_bins_mask()
+    if mask[0, 1]:  # SB can call
+        env2.step_bins(torch.tensor([1], device=env2.device))  # SB calls
+
+        # Now BB can all-in
+        mask = env2.legal_bins_mask()
+        if mask[0, 7]:  # BB can all-in
+            env2.step_bins(torch.tensor([7], device=env2.device))  # BB all-in
+
+            # Now SB should be able to fold or call
+            mask = env2.legal_bins_mask()
+            assert mask[0, 0].item() is True, "SB should be able to fold vs BB all-in"
+            assert mask[0, 1].item() is True, "SB should be able to call vs BB all-in"
+
+            # SB should not be able to bet/raise/all-in
+            for bin_idx in range(2, 8):
+                assert (
+                    mask[0, bin_idx].item() is False
+                ), f"SB should not be able to bet/raise/all-in (bin {bin_idx}) vs BB all-in"
+
+
+def test_allin_legal_mask_consistency():
+    """Test that all-in legal mask logic is consistent across different scenarios."""
+
+    # Test scenario 1: SB goes all-in first
+    env1 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env1.reset()
+
+    # Make SB (player 0) go all-in
+    mask = env1.legal_bins_mask()
+    if mask[0, 7]:  # SB can all-in
+        env1.step_bins(torch.tensor([7], device=env1.device))  # SB all-in
+
+        # Check that BB (player 1) can fold or call
+        mask = env1.legal_bins_mask()
+        assert mask[0, 0].item() is True, "BB should be able to fold vs SB all-in"
+        assert mask[0, 1].item() is True, "BB should be able to call vs SB all-in"
+
+        # BB should not be able to bet/raise/all-in
+        for bin_idx in range(2, 8):
+            assert (
+                mask[0, bin_idx].item() is False
+            ), f"BB should not be able to bet/raise/all-in (bin {bin_idx}) vs SB all-in"
+
+    # Test scenario 2: BB goes all-in first
+    env2 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env2.reset()
+
+    # Make BB (player 1) go all-in
+    # First SB acts
+    mask = env2.legal_bins_mask()
+    if mask[0, 1]:  # SB can call
+        env2.step_bins(torch.tensor([1], device=env2.device))  # SB calls
+
+        # Now BB can all-in
+        mask = env2.legal_bins_mask()
+        if mask[0, 7]:  # BB can all-in
+            env2.step_bins(torch.tensor([7], device=env2.device))  # BB all-in
+
+            # Check that SB (player 0) can fold or call
+            mask = env2.legal_bins_mask()
+            assert mask[0, 0].item() is True, "SB should be able to fold vs BB all-in"
+            assert mask[0, 1].item() is True, "SB should be able to call vs BB all-in"
+
+            # SB should not be able to bet/raise/all-in
+            for bin_idx in range(2, 8):
+                assert (
+                    mask[0, bin_idx].item() is False
+                ), f"SB should not be able to bet/raise/all-in (bin {bin_idx}) vs BB all-in"
+
+    # Test scenario 3: Manual setup to test all-in player restrictions
+    env3 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env3.reset()
+
+    # Manually set player 0 as all-in
+    env3.is_allin[0, 0] = True
+    env3.stacks[0, 0] = 0
+    env3.to_act[0] = 0  # Player 0 to act
+
+    # Check that all-in player can only call
+    mask = env3.legal_bins_mask()
+    assert mask[0, 1].item() is True, "All-in player should be able to call"
+    assert mask[0, 0].item() is False, "All-in player should not be able to fold"
+    for bin_idx in range(2, 8):
+        assert (
+            mask[0, bin_idx].item() is False
+        ), f"All-in player should not be able to bet/raise/all-in (bin {bin_idx})"

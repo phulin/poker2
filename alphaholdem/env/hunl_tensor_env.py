@@ -312,12 +312,13 @@ class HUNLTensorEnv:
         amounts[:, B - 1] = me_stack
         mask[:, B - 1] = me_stack > 0
 
-        # If any player is all-in in an env, restrict to check/call only
-        any_allin = self.is_allin[:, 0] | self.is_allin[:, 1]
-        if any_allin.any():
-            rows = any_allin
-            mask[rows, :] = False
-            mask[rows, 1] = True
+        me_allin = torch.where(self.is_allin[:, me])[0]
+        opp_allin = torch.where(self.is_allin[:, opp])[0]
+        mask[opp_allin, 0:2] = True  # fold is not legal when we are all-in
+        mask[opp_allin, 2:] = False
+        # if both allin, this will override the opp_allin path.
+        mask[me_allin, :] = False
+        mask[me_allin, 1] = True  # only call is legal when we are all-in
 
         return amounts, mask
 
