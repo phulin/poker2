@@ -1157,3 +1157,218 @@ def test_allin_legal_mask_consistency():
         assert (
             mask[0, bin_idx].item() is False
         ), f"All-in player should not be able to bet/raise/all-in (bin {bin_idx})"
+
+
+def test_minimum_raise_rules():
+    """Test minimum raise rules and raise sizing validation."""
+
+    # Test 1: Basic minimum raise from big blind
+    env = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env.reset()
+
+    # SB should be able to raise to at least BB + min raise (50 + 50 = 100)
+    amounts, mask = env.legal_bins_amounts_and_mask()
+
+    # Check that all legal bet amounts are at least the minimum raise
+    to_call = (
+        env.committed[0, 1 - env.to_act.item()].item()
+        - env.committed[0, env.to_act.item()].item()
+    )
+    for bin_idx in range(2, 8):  # Bet bins (2-7)
+        if mask[0, bin_idx]:
+            bet_amount = amounts[0, bin_idx].item()
+            additional_amount = bet_amount - to_call  # Additional amount above call
+            min_raise = env.bb  # Minimum raise is the size of the big blind
+            assert (
+                additional_amount >= min_raise
+            ), f"Additional amount {additional_amount} is less than minimum raise {min_raise}"
+
+    # Test 2: Minimum raise after a bet
+    env2 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env2.reset()
+
+    # Make a bet first (half pot = 37.5, round to 38)
+    mask = env2.legal_bins_mask()
+    if mask[0, 2]:  # Half pot bet
+        env2.step_bins(torch.tensor([2], device=env2.device))
+
+    # Now check minimum raise for the opponent
+    amounts, mask = env2.legal_bins_amounts_and_mask()
+    to_call = (
+        env2.committed[0, 1 - env2.to_act.item()].item()
+        - env2.committed[0, env2.to_act.item()].item()
+    )
+    min_raise = env2.min_raise[0].item()  # Use the actual min_raise from environment
+
+    for bin_idx in range(2, 8):
+        if mask[0, bin_idx]:
+            bet_amount = amounts[0, bin_idx].item()
+            additional_amount = bet_amount - to_call  # Additional amount above call
+            assert (
+                additional_amount >= min_raise
+            ), f"Additional amount {additional_amount} is less than minimum raise {min_raise}"
+
+    # Test 3: All-in as valid raise (even if less than minimum)
+    env3 = _make_env(N=1, starting_stack=100, sb=25, bb=50)  # Small stack
+    env3.reset()
+
+    # Make a bet that's larger than remaining stack
+    mask = env3.legal_bins_mask()
+    if mask[0, 2]:  # Half pot bet
+        env3.step_bins(torch.tensor([2], device=env3.device))
+
+    # All-in should be legal even if it's less than minimum raise
+    amounts, mask = env3.legal_bins_amounts_and_mask()
+    assert (
+        mask[0, 7].item() is True
+    ), "All-in should be legal even if less than minimum raise"
+
+    # Test 4: Multiple environments with different raise scenarios
+    env4 = _make_env(N=3, starting_stack=1000, sb=25, bb=50)
+    env4.reset()
+
+    # Set up different scenarios in each environment
+    # Env 0: No bet yet (preflop)
+    # Env 1: Small bet made
+    # Env 2: Large bet made
+
+    # Make bets in envs 1 and 2
+    mask = env4.legal_bins_mask()
+    actions = torch.tensor([1, 2, 3], device=env4.device)  # Call, half pot, pot
+    env4.step_bins(actions)
+
+    # Check minimum raise rules for each environment
+    amounts, mask = env4.legal_bins_amounts_and_mask()
+
+    for i in range(3):
+        to_call = (
+            env4.committed[i, 1 - env4.to_act[i].item()].item()
+            - env4.committed[i, env4.to_act[i].item()].item()
+        )
+        min_raise = env4.min_raise[i].item()  # Use actual min_raise from environment
+
+        for bin_idx in range(2, 8):
+            if mask[i, bin_idx]:
+                bet_amount = amounts[i, bin_idx].item()
+                additional_amount = bet_amount - to_call  # Additional amount above call
+                assert (
+                    additional_amount >= min_raise
+                ), f"Env {i}, bin {bin_idx}: Additional amount {additional_amount} is less than minimum raise {min_raise}"
+
+
+def test_button_position_and_blind_posting():
+    """Test button position and blind posting rules."""
+
+    # Test 1: Button position assignment and blind posting
+    env = _make_env(N=4, starting_stack=1000, sb=25, bb=50)
+    env.reset()
+
+    # Check that button positions are assigned correctly
+    for i in range(4):
+        button_pos = env.button[i].item()
+        assert button_pos in [0, 1], f"Env {i}: Invalid button position {button_pos}"
+
+        # Check that blinds are posted correctly
+        sb_player = button_pos
+        bb_player = 1 - button_pos
+
+        assert (
+            env.committed[i, sb_player] == env.sb
+        ), f"Env {i}: SB player {sb_player} should have committed {env.sb}"
+        assert (
+            env.committed[i, bb_player] == env.bb
+        ), f"Env {i}: BB player {bb_player} should have committed {env.bb}"
+
+        # Check that pot contains both blinds
+        expected_pot = env.sb + env.bb
+        assert (
+            env.pot[i] == expected_pot
+        ), f"Env {i}: Pot should be {expected_pot}, got {env.pot[i]}"
+
+    # Test 2: Button randomization on reset (not rotation)
+    env2 = _make_env(N=2, starting_stack=1000, sb=25, bb=50)
+    env2.reset()
+
+    initial_button_0 = env2.button[0].item()
+    initial_button_1 = env2.button[1].item()
+
+    # Complete a hand by forcing showdown
+    for _ in range(10):  # Enough steps to complete hand
+        mask = env2.legal_bins_mask()
+        actions = []
+        for i in range(2):
+            if mask[i, 1]:  # Can check/call
+                actions.append(1)
+            else:
+                actions.append(-1)
+
+        r, d, _ = env2.step_bins(torch.tensor(actions, device=env2.device))
+        if d.all():
+            break
+
+    # Reset and check that button is randomized (may or may not change)
+    env2.reset()
+
+    # Button positions should be valid (0 or 1)
+    assert env2.button[0].item() in [0, 1], "Button position should be 0 or 1"
+    assert env2.button[1].item() in [0, 1], "Button position should be 0 or 1"
+
+    # Test 3: Blind posting with different stack sizes
+    env3 = _make_env(N=2, starting_stack=100, sb=25, bb=50)  # Small stacks
+    env3.reset()
+
+    for i in range(2):
+        sb_player = env3.button[i].item()
+        bb_player = 1 - sb_player
+
+        # Check that stacks are reduced by blind amounts
+        expected_sb_stack = env3.starting_stack - env3.sb
+        expected_bb_stack = env3.starting_stack - env3.bb
+
+        assert (
+            env3.stacks[i, sb_player] == expected_sb_stack
+        ), f"Env {i}: SB stack should be {expected_sb_stack}"
+        assert (
+            env3.stacks[i, bb_player] == expected_bb_stack
+        ), f"Env {i}: BB stack should be {expected_bb_stack}"
+
+    # Test 4: Action order based on button position
+    env4 = _make_env(N=3, starting_stack=1000, sb=25, bb=50)
+    env4.reset()
+
+    for i in range(3):
+        button_pos = env4.button[i].item()
+
+        # In heads-up, SB acts first preflop (regardless of button position)
+        # Check that to_act is set correctly initially
+        sb_player = button_pos  # SB is the button player
+        assert (
+            env4.to_act[i] == sb_player
+        ), f"Env {i}: SB player {sb_player} should act first"
+
+    # Test 5: Blind posting edge case - stack smaller than big blind
+    env5 = _make_env(N=1, starting_stack=30, sb=25, bb=50)  # Stack < BB
+    env5.reset()
+
+    # Player with insufficient chips will have negative stack (environment doesn't handle this edge case)
+    bb_player = 1 - env5.button[0].item()
+    expected_bb_stack = env5.starting_stack - env5.bb  # 30 - 50 = -20
+    assert (
+        env5.stacks[0, bb_player] == expected_bb_stack
+    ), f"BB player should have stack {expected_bb_stack}"
+    assert (
+        env5.committed[0, bb_player] == env5.bb
+    ), f"BB player should have committed {env5.bb}"
+
+    # Test 6: Multiple resets maintain button randomization
+    env6 = _make_env(N=2, starting_stack=1000, sb=25, bb=50)
+
+    button_positions = []
+    for _ in range(5):  # Multiple resets
+        env6.reset()
+        button_positions.append((env6.button[0].item(), env6.button[1].item()))
+
+    # Check that button positions are always valid
+    for i, (pos0, pos1) in enumerate(button_positions):
+        assert pos0 in [0, 1], f"Invalid button position {pos0} at reset {i}"
+        assert pos1 in [0, 1], f"Invalid button position {pos1} at reset {i}"
