@@ -4,7 +4,6 @@ import random
 from dataclasses import replace
 from typing import Any, Dict, List, Tuple
 
-from ..utils.profiling import profile
 from . import rules
 from .types import Action, GameState, PlayerState
 

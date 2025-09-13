@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Tuple
 
 import torch
 
 from ...env.hunl_env import HUNLEnv
 from ...env.hunl_tensor_env import HUNLTensorEnv
-from ...utils.profiling import profile
 from .embedding_data import StructuredEmbeddingData
 from .tokens import Context, Special
 

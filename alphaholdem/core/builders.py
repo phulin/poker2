@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Tuple
 
 # Import modules to trigger registration
-from ..models import cnn, heads, transformer
 from . import registry
 
 

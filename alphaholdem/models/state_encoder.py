@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Tuple
 
 import torch
 
 from ..env.hunl_env import HUNLEnv
 from ..env.hunl_tensor_env import HUNLTensorEnv
-from .cnn import ActionsHUEncoderV1, CardsPlanesV1
 from .cnn_embedding_data import CNNEmbeddingData
 
 

@@ -15,7 +15,6 @@ import torch
 from ..core.structured_config import Config
 
 # Import encoders and models to register them
-from ..models import cnn, heads
 from ..rl.self_play import SelfPlayTrainer
 from ..utils.config_loader import load_config_from_checkpoint
 from ..utils.training_utils import (

@@ -12,7 +12,6 @@ from ..core.structured_config import Config
 from ..encoding.action_mapping import bin_to_action, get_legal_mask
 from ..env.hunl_env import HUNLEnv
 from ..env.hunl_tensor_env import HUNLTensorEnv
-from ..models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.factory import ModelFactory
 from ..models.state_encoder import CNNStateEncoder
@@ -21,7 +20,6 @@ from ..rl.k_best_pool import AgentSnapshot, KBestOpponentPool
 from ..rl.losses import trinal_clip_ppo_loss
 from ..rl.replay import Trajectory, Transition
 from ..rl.vectorized_replay import VectorizedReplayBuffer
-from ..utils.config_loader import load_config_from_checkpoint
 from ..utils.profiling import profile
 
 
@@ -1335,7 +1333,6 @@ class SelfPlayTrainer:
         delta3_vec: torch.Tensor,
     ) -> dict:
         """Compute transformer-specific loss with auxiliary hand range loss."""
-        import torch.nn.functional as F
 
         logits = outputs["policy_logits"]
         values = outputs["value"]

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from ...core.interfaces import Model
 from ...core.registry import register_model
@@ -14,7 +13,7 @@ from ...utils.profiling import profile
 from .attention import PokerTransformerEncoderLayer
 from .embedding_data import StructuredEmbeddingData
 from .embeddings import ActionEmbedding, CardEmbedding, ContextEmbedding
-from .heads import HandRangeHead, TransformerPolicyHead, TransformerValueHead
+from .heads import TransformerPolicyHead, TransformerValueHead
 
 
 @register_model("poker_transformer_v1")

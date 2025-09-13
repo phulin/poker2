@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Type
+from typing import Any, Callable, Dict
 
 # Global registries for pluggable components
 CARD_ENCODERS: Dict[str, Any] = {}
