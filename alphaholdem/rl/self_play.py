@@ -19,6 +19,7 @@ from ..models.transformer.embedding_data import StructuredEmbeddingData
 from ..rl.agent_snapshot import AgentSnapshot
 from ..rl.k_best_pool import KBestOpponentPool
 from ..rl.dred_pool import DREDPool
+from ..utils.kl_divergence import compute_kl_divergence_batch
 from ..rl.losses import trinal_clip_ppo_loss
 from ..rl.replay import Trajectory, Transition
 from ..rl.vectorized_replay import VectorizedReplayBuffer
@@ -63,7 +64,7 @@ class SelfPlayTrainer:
         self.wandb_tags = cfg.wandb_tags
         self.wandb_run_id = cfg.wandb_run_id
 
-        self.float_dtype = torch.bfloat16 if self.use_mixed_precision else torch.float32
+        self.float_dtype = torch.float32
 
         # Initialize RNG
         self.rng = torch.Generator(device=self.device)
@@ -141,6 +142,7 @@ class SelfPlayTrainer:
         )
 
         # Initialize opponent pool based on configuration
+        self.opponent_pool_type = self.cfg.opponent_pool_type
         if self.opponent_pool_type == "k_best":
             self.opponent_pool = KBestOpponentPool(
                 k=self.k_best_pool_size,
@@ -301,8 +303,8 @@ class SelfPlayTrainer:
                     outputs = opponent_snapshot.model(embedding_data)
                 else:
                     outputs = self.model(embedding_data)
-                logits = outputs["policy_logits"]
-                value = outputs["value"]
+                logits = outputs["policy_logits"].float()
+                value = outputs["value"].float()
 
                 legal_mask = get_legal_mask(
                     state, self.num_bet_bins, dtype=self.float_dtype, device=self.device
@@ -482,8 +484,8 @@ class SelfPlayTrainer:
                     ):
                         outputs = self.model(our_states)
 
-                    active_logits[active_we_act] = outputs["policy_logits"]
-                    active_values[active_we_act] = outputs["value"].squeeze(-1)
+                    active_logits[active_we_act] = outputs["policy_logits"].float()
+                    active_values[active_we_act] = outputs["value"].float().squeeze(-1)
 
                 # SPECIAL CASE: If first action of hand, opponent folding illegal
                 # (because it would leave an empty trajectory)
@@ -524,8 +526,8 @@ class SelfPlayTrainer:
                             enabled=self.use_mixed_precision,
                         ):
                             outputs = opponent.model(opp_states)
-                            opp_logits = outputs["policy_logits"]
-                            opp_values = outputs["value"]
+                            opp_logits = outputs["policy_logits"].float()
+                            opp_values = outputs["value"].float()
 
                         just_processed = opp_env_indices.numel()
                         active_logits[
@@ -546,8 +548,8 @@ class SelfPlayTrainer:
                         enabled=self.use_mixed_precision,
                     ):
                         outputs = self.model(opp_states)
-                        opp_logits = outputs["policy_logits"]
-                        opp_values = outputs["value"]
+                        opp_logits = outputs["policy_logits"].float()
+                        opp_values = outputs["value"].float()
 
                     active_logits[active_opp_acts] = opp_logits
                     active_values[active_opp_acts] = opp_values.squeeze(-1)
@@ -673,45 +675,6 @@ class SelfPlayTrainer:
                         # Slice rewards tensor directly - no .item() calls needed
                         opponent_rewards = per_env_rewards[done_env_idxs_for_opponent]
 
-                        # Compute KL divergence between current model and opponent model
-                        kl_divergence = 0.0
-                        if hasattr(self, "_compute_kl_with_opponent"):
-                            try:
-                                # Use a subset of the batch for KL computation
-                                subset_size = min(
-                                    64, done_env_idxs_for_opponent.numel()
-                                )
-                                subset_indices = done_env_idxs_for_opponent[
-                                    :subset_size
-                                ]
-
-                                # Get states for KL computation
-                                kl_states = self._encode_tensor_states(
-                                    player=0, idxs=subset_indices
-                                )
-
-                                # Get current model logits
-                                with torch.no_grad():
-                                    current_outputs = self.model(kl_states)
-                                    current_logits = current_outputs["policy_logits"]
-
-                                # Get opponent model logits
-                                with torch.no_grad():
-                                    opponent_outputs = opponent.model(kl_states)
-                                    opponent_logits = opponent_outputs["policy_logits"]
-
-                                # Compute KL divergence
-                                from ..utils.kl_divergence import (
-                                    compute_kl_divergence_batch,
-                                )
-
-                                kl_divergence = compute_kl_divergence_batch(
-                                    current_logits, opponent_logits, subset_size
-                                )
-                            except Exception as e:
-                                print(f"Warning: Could not compute KL divergence: {e}")
-                                kl_divergence = 0.0
-
                         # Update ELO for this opponent with all their games
                         self.opponent_pool.update_elo_batch_vectorized(
                             opponent,
@@ -773,7 +736,7 @@ class SelfPlayTrainer:
         return self.state_encoder.encode_tensor_states(player=player, idxs=idxs)
 
     @profile
-    def update_model(self) -> dict:
+    def update_model(self, step: int) -> dict:
         """Perform PPO update on collected trajectories."""
         # Require enough samples (transitions) in buffer
         if self.replay_buffer.num_steps() < self.batch_size:
@@ -824,8 +787,8 @@ class SelfPlayTrainer:
                     # Create structured data from batch
                     batch_structured_data = StructuredEmbeddingData.from_dict(batch)
                     outputs = self.model(batch_structured_data)
-                    logits = outputs["policy_logits"]
-                    values = outputs["value"]
+                    logits = outputs["policy_logits"].float()
+                    values = outputs["value"].float()
 
                 # Transformer-specific loss with auxiliary hand range loss
                 loss_dict = self._compute_transformer_loss(
@@ -854,8 +817,8 @@ class SelfPlayTrainer:
                         cards=cards_float, actions=actions_float
                     )
                     outputs = self.model(embedding_data)
-                    logits = outputs["policy_logits"]
-                    values = outputs["value"]
+                    logits = outputs["policy_logits"].float()
+                    values = outputs["value"].float()
 
                 # CNN loss
                 loss_dict = trinal_clip_ppo_loss(
@@ -944,6 +907,39 @@ class SelfPlayTrainer:
             total_explained_var += float(explained_var.item())
             total_minibatches += 1
 
+            # Check if we should add current model to opponent pool
+            # Compute KL divergence between current model and last admitted opponent
+            kl_divergence = 0.0
+            last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
+
+            if last_admitted_opponent is not None:
+                # Take a 64-element sample from the current batch
+                batch_size = batch["returns"].shape[0]
+                sample_size = min(64, batch_size)
+                sample_indices = torch.randperm(batch_size, device=self.device)[
+                    :sample_size
+                ]
+
+                # Get states for KL computation
+                kl_states = self._encode_tensor_states(player=0, idxs=sample_indices)
+
+                # Get current model logits
+                with torch.no_grad():
+                    current_outputs = self.model(kl_states)
+                    current_logits = current_outputs["policy_logits"].float()
+
+                    # Get last admitted opponent model logits
+                    opponent_outputs = last_admitted_opponent.model(kl_states)
+                    opponent_logits = opponent_outputs["policy_logits"].float()
+
+                # Compute KL divergence
+                kl_divergence = compute_kl_divergence_batch(
+                    current_logits, opponent_logits
+                )
+
+            if self.opponent_pool.should_add_snapshot(step, kl_divergence):
+                self.opponent_pool.add_snapshot(self.model, step)
+
         # Calculate average reward for this update step using captured values
         avg_reward = (
             self.total_step_reward / max(1, self.step_trajectories_collected)
@@ -999,12 +995,7 @@ class SelfPlayTrainer:
         self.replay_buffer.trim_to_steps(target_steps)
 
         # Update model
-        update_stats = self.update_model()
-
-        # Check if we should add current model to opponent pool
-        approx_kl = update_stats.get("approx_kl", 0.0)
-        if self.opponent_pool.should_add_snapshot(step, approx_kl):
-            self.opponent_pool.add_snapshot(self.model, step)
+        update_stats = self.update_model(step)
 
         # Prepare training stats for return and logging
         training_stats = {
@@ -1090,16 +1081,26 @@ class SelfPlayTrainer:
         """Save model checkpoint and opponent pool."""
         # Serialize opponent pool inline
         pool_data = {
-            "k": self.opponent_pool.k,
-            "min_elo_diff": self.opponent_pool.min_elo_diff,
+            "pool_type": self.opponent_pool_type,
             "current_elo": self.opponent_pool.current_elo,
             "snapshots": [],
         }
+
+        # Add pool-specific attributes
+        if hasattr(self.opponent_pool, "k"):
+            pool_data["k"] = self.opponent_pool.k
+        if hasattr(self.opponent_pool, "min_elo_diff"):
+            pool_data["min_elo_diff"] = self.opponent_pool.min_elo_diff
+        if hasattr(self.opponent_pool, "max_size"):
+            pool_data["max_size"] = self.opponent_pool.max_size
+        if hasattr(self.opponent_pool, "embedding_dim"):
+            pool_data["embedding_dim"] = self.opponent_pool.embedding_dim
         for snapshot in self.opponent_pool.snapshots:
             snapshot_data = {
                 "step": snapshot.step,
                 "elo": snapshot.elo,
                 "games_played": snapshot.games_played,
+                "total_rewards": snapshot.total_rewards,
                 "wins": snapshot.wins,
                 "losses": snapshot.losses,
                 "draws": snapshot.draws,
@@ -1257,10 +1258,28 @@ class SelfPlayTrainer:
         # Restore opponent pool from inline data if available; fallback to old separate file
         pool_data = checkpoint.get("opponent_pool")
         if pool_data is not None:
-            self.opponent_pool.k = pool_data.get("k", self.opponent_pool.k)
-            self.opponent_pool.min_elo_diff = pool_data.get(
-                "min_elo_diff", self.opponent_pool.min_elo_diff
-            )
+            # Restore pool-specific attributes
+            if hasattr(self.opponent_pool, "k") and "k" in pool_data:
+                self.opponent_pool.k = pool_data.get("k", self.opponent_pool.k)
+            if (
+                hasattr(self.opponent_pool, "min_elo_diff")
+                and "min_elo_diff" in pool_data
+            ):
+                self.opponent_pool.min_elo_diff = pool_data.get(
+                    "min_elo_diff", self.opponent_pool.min_elo_diff
+                )
+            if hasattr(self.opponent_pool, "max_size") and "max_size" in pool_data:
+                self.opponent_pool.max_size = pool_data.get(
+                    "max_size", self.opponent_pool.max_size
+                )
+            if (
+                hasattr(self.opponent_pool, "embedding_dim")
+                and "embedding_dim" in pool_data
+            ):
+                self.opponent_pool.embedding_dim = pool_data.get(
+                    "embedding_dim", self.opponent_pool.embedding_dim
+                )
+
             self.opponent_pool.current_elo = pool_data.get(
                 "current_elo", self.opponent_pool.current_elo
             )
@@ -1387,8 +1406,8 @@ class SelfPlayTrainer:
     ) -> dict:
         """Compute transformer-specific loss with auxiliary hand range loss."""
 
-        logits = outputs["policy_logits"]
-        values = outputs["value"]
+        logits = outputs["policy_logits"].float()
+        values = outputs["value"].float()
 
         # Standard PPO policy loss
         policy_loss = trinal_clip_ppo_loss(

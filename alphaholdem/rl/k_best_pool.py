@@ -182,6 +182,12 @@ class KBestOpponentPool(OpponentPool):
             return None
         return self.snapshots[0]
 
+    def get_last_admitted_snapshot(self) -> Optional[AgentSnapshot]:
+        """Get the most recently admitted snapshot."""
+        if not self.snapshots:
+            return None
+        return max(self.snapshots, key=lambda s: s.step)
+
     def get_pool_stats(self) -> dict:
         """Get statistics about the opponent pool."""
         if not self.snapshots:

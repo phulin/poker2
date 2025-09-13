@@ -4,6 +4,15 @@ from typing import Any, Tuple
 
 # Import modules to trigger registration
 from . import registry
+from ..models import heads  # Import to trigger policy registration
+from ..models.cnn import siamese_convnet  # Import to trigger model registration
+from ..models.transformer import (
+    poker_transformer,
+)  # Import to trigger transformer model registration
+from ..models.cnn import cards_encoder  # Import to trigger card encoder registration
+from ..models.cnn import (
+    actions_encoder,
+)  # Import to trigger action encoder registration
 
 
 def build_components_from_config(cfg) -> Tuple[Any, Any, Any, Any]:
@@ -31,6 +40,7 @@ def build_components_from_config(cfg) -> Tuple[Any, Any, Any, Any]:
 
     # Pass gradient checkpointing configuration to model
     model_kwargs = cfg.model.kwargs.copy() if cfg.model.kwargs else {}
+    # Ensure gradient checkpointing is set in kwargs
     model_kwargs["use_gradient_checkpointing"] = cfg.model.use_gradient_checkpointing
     model = registry.build_model(cfg.model.name, **model_kwargs)
 

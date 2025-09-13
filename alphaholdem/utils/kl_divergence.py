@@ -33,35 +33,25 @@ def compute_kl_divergence(policy1: torch.Tensor, policy2: torch.Tensor) -> float
     return kl_div.item()
 
 
-def compute_kl_divergence_batch(
-    logits1: torch.Tensor, logits2: torch.Tensor, subset_size: int = 64
-) -> float:
+def compute_kl_divergence_batch(logits1: torch.Tensor, logits2: torch.Tensor) -> float:
     """
     Compute KL divergence between two batches of policy logits.
 
     Args:
         logits1: First batch of policy logits
         logits2: Second batch of policy logits
-        subset_size: Number of samples to use for KL computation
 
     Returns:
-        Average KL divergence across the subset
+        Average KL divergence across the batch
     """
     batch_size = min(logits1.shape[0], logits2.shape[0])
 
     if batch_size == 0:
         return 0.0
 
-    # Use subset of samples for efficiency
-    subset_size = min(subset_size, batch_size)
-    indices = torch.randperm(batch_size)[:subset_size]
-
-    subset_logits1 = logits1[indices]
-    subset_logits2 = logits2[indices]
-
     # Convert to probabilities
-    probs1 = torch.softmax(subset_logits1, dim=-1)
-    probs2 = torch.softmax(subset_logits2, dim=-1)
+    probs1 = torch.softmax(logits1, dim=-1)
+    probs2 = torch.softmax(logits2, dim=-1)
 
     # Add small epsilon to avoid log(0)
     eps = 1e-8

@@ -3,6 +3,7 @@
 
 # === TRAINING CONFIGURATION ===
 num_steps: 2000
+opponent_pool_type: "k_best"  # "k_best" or "dred"
 k_best_pool_size: 10
 min_elo_diff: 50.0
 min_step_diff: 300  # Minimum step difference before considering for pool updates
@@ -63,6 +64,7 @@ train:
 # === MODEL CONFIGURATION ===
 model:
   name: "siamese_convnet_v1"
+  use_gradient_checkpointing: false
   kwargs:
     cards_channels: 6
     actions_channels: 24

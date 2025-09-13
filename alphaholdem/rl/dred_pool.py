@@ -382,6 +382,12 @@ class DREDPool(OpponentPool):
             return None
         return max(self.snapshots, key=lambda s: s.elo)
 
+    def get_last_admitted_snapshot(self) -> Optional[AgentSnapshot]:
+        """Get the most recently admitted snapshot."""
+        if not self.snapshots:
+            return None
+        return max(self.snapshots, key=lambda s: s.step)
+
     def should_add_snapshot(
         self, current_step: int, kl_divergence: float = 0.0
     ) -> bool:

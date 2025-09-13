@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, Optional
 
 import torch.nn as nn
 
@@ -11,17 +11,27 @@ import torch.nn as nn
 class AgentSnapshot:
     """Represents a snapshot of an agent at a specific training step."""
 
+    model: nn.Module
+    step: int
+    elo: float
+    total_rewards: float
+    games_played: int
+    wins: int
+    losses: int
+    draws: int
+    data: Optional[Any]
+
     def __init__(
         self,
         model: nn.Module,
         step: int,
         elo: float = 1200.0,
-        data: Any = None,
+        data: Optional[Any] = None,
     ):
         self.model = copy.deepcopy(model)
         self.step = step
         self.elo = elo
-        self.total_rewards = 0
+        self.total_rewards = 0.0
         self.games_played = 0
         self.wins = 0
         self.losses = 0
@@ -41,7 +51,7 @@ class AgentSnapshot:
             return 0.0
         return self.total_rewards / self.games_played
 
-    def update_stats(self, result: str):
+    def update_stats(self, result: str) -> None:
         """Update game statistics."""
         self.games_played += 1
         if result == "win":
