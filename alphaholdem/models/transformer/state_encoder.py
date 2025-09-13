@@ -184,10 +184,12 @@ class TransformerStateEncoder:
         context_features = torch.stack(
             [
                 self.tensor_env.pot[idxs].long(),  # 0: pot size
-                self.tensor_env.stacks[idxs, 0].long(),  # 1: our stack
-                self.tensor_env.stacks[idxs, 1].long(),  # 2: opponent stack
-                self.tensor_env.committed[idxs, 0].long(),  # 3: our committed
-                self.tensor_env.committed[idxs, 1].long(),  # 4: opponent committed
+                self.tensor_env.stacks[idxs, player].long(),  # 1: our stack
+                self.tensor_env.stacks[idxs, 1 - player].long(),  # 2: opponent stack
+                self.tensor_env.committed[idxs, player].long(),  # 3: our committed
+                self.tensor_env.committed[
+                    idxs, 1 - player
+                ].long(),  # 4: opponent committed
                 torch.where(
                     self.tensor_env.button[idxs] == player, 0, 1
                 ),  # 5: position
