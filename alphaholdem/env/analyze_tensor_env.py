@@ -7,6 +7,32 @@ Contains functions for creating test environments and analyzing specific scenari
 import torch
 from typing import List, Tuple, Dict, Any
 from .hunl_tensor_env import HUNLTensorEnv
+from ..models.transformer.state_encoder import TransformerStateEncoder
+from ..models.state_encoder import CNNStateEncoder
+
+
+def create_state_encoder_for_model(model, env: HUNLTensorEnv, device: torch.device):
+    """Create the appropriate state encoder based on the model type.
+
+    Args:
+        model: The trained model instance
+        env: The 169-hand tensor environment
+        device: Device for tensor operations
+
+    Returns:
+        Appropriate state encoder for the model
+    """
+    # Detect model type from the model's class name
+    model_class_name = model.__class__.__name__.lower()
+
+    if "transformer" in model_class_name:
+        # For transformer models, create TransformerStateEncoder
+        return TransformerStateEncoder(env, device)
+    elif "siamese" in model_class_name or "cnn" in model_class_name:
+        # For CNN models, create CNNStateEncoder with tensor_env and device
+        return CNNStateEncoder(env, device)
+    else:
+        raise ValueError(f"Unknown model type: {model_class_name}")
 
 
 def create_169_hand_combinations() -> List[Tuple[str, str]]:
@@ -36,7 +62,49 @@ def create_169_hand_combinations() -> List[Tuple[str, str]]:
     return hands
 
 
-def create_169_hand_env(
+def get_probabilities(
+    model,
+    state_encoder,
+    env: HUNLTensorEnv,
+    seat: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Get model probabilities and values for all 169 preflop hands.
+
+    Args:
+        model: The trained model instance
+        state_encoder: The state encoder for the model
+        env: The 169-hand tensor environment
+        seat: Seat position (0 for SB, 1 for BB)
+        device: Device for tensor operations
+
+    Returns:
+        Tuple of (probabilities [169, num_bet_bins], values [169], legal_masks [169, num_bet_bins])
+    """
+    # Get model prediction using tensor environment
+    with torch.no_grad():
+        embedding_data = state_encoder.encode_tensor_states(
+            seat, torch.arange(169, device=device)  # All environments
+        )
+        outputs = model(embedding_data)
+
+        logits = outputs["policy_logits"]  # [169, num_bet_bins]
+        values = outputs["value"]  # [169]
+
+        # Get legal actions from tensor environment
+        legal_masks = env.legal_bins_mask()  # [169, num_bet_bins]
+
+        # Apply legal mask
+        masked_logits = torch.where(legal_masks == 0, -1e9, logits)
+
+        # Get probabilities
+        probs = torch.softmax(masked_logits, dim=-1)  # [169, num_bet_bins]
+
+    return probs, values, legal_masks
+
+
+def create_169_hand_analysis_setup(
+    model,
     starting_stack: int = 20000,
     sb: int = 50,
     bb: int = 100,
@@ -44,10 +112,11 @@ def create_169_hand_env(
     device: torch.device = None,
     rng: torch.Generator = None,
     flop_showdown: bool = False,
-) -> HUNLTensorEnv:
-    """Create a tensor environment with all 169 preflop hands set up.
+) -> Tuple[HUNLTensorEnv, Any]:
+    """Create a tensor environment with all 169 preflop hands set up and appropriate state encoder.
 
     Args:
+        model: The trained model instance
         starting_stack: Starting stack size
         sb: Small blind amount
         bb: Big blind amount
@@ -57,7 +126,7 @@ def create_169_hand_env(
         flop_showdown: Whether to showdown after flop
 
     Returns:
-        HUNLTensorEnv with 169 environments, each with a different preflop hand
+        Tuple of (HUNLTensorEnv with 169 environments, state encoder for the model)
     """
     if bet_bins is None:
         bet_bins = [0.5, 0.75, 1.0, 1.5, 2.0]
@@ -81,11 +150,7 @@ def create_169_hand_env(
     )
 
     # Reset the environment
-    temp_env.reset()
-
-    # Set all environments to p0 = SB to act.
-    temp_env.button[:] = 0  # p0 is button/SB
-    temp_env.to_act[:] = 0  # p0 to act
+    temp_env.reset(force_button=torch.zeros(169, dtype=torch.long, device=device))
 
     # Get all 169 hand combinations
     hands = create_169_hand_combinations()
@@ -142,7 +207,10 @@ def create_169_hand_env(
         # Set deck_pos to 4 (after hole cards)
         temp_env.deck_pos[i] = 4
 
-    return temp_env
+    # Create appropriate state encoder for the model
+    state_encoder = create_state_encoder_for_model(model, temp_env, device)
+
+    return temp_env, state_encoder
 
 
 def _card_str_to_int(card_str: str) -> int:
@@ -177,82 +245,43 @@ def _card_str_to_int(card_str: str) -> int:
     return rank_map[rank] * 4 + suit_map[suit]
 
 
-def get_preflop_betting_grid(
-    env: HUNLTensorEnv,
-    model,
-    state_encoder,
-    seat: int = 0,
-    use_structured_embeddings: bool = False,
-    device: torch.device = None,
+def _create_169_grid(
+    values: torch.Tensor, value_type: str = "probability", default_value: str = " 0"
 ) -> str:
-    """Get preflop betting probabilities as a grid showing all bet options combined.
+    """Create a standardized 13x13 grid for 169 preflop hands.
 
     Args:
-        env: HUNLTensorEnv with 169 environments (one for each preflop hand)
-        model: Trained model for prediction
-        state_encoder: State encoder for the model
-        seat: Seat position (0 for SB, 1 for BB)
-        use_structured_embeddings: Whether to use structured embeddings (transformer)
-        device: Device for tensor operations
+        values: Tensor of 169 values for each hand
+        value_type: Type of values - "probability", "value", or "raw"
+        default_value: Default value to use if hand not found
 
     Returns:
-        String representation of the preflop betting grid (all bet options combined)
+        String representation of the 13x13 grid
     """
-    if device is None:
-        device = env.device
-
     # Create a 13x13 grid representing all possible hole card combinations
     # Rows/cols: A, K, Q, J, T, 9, 8, 7, 6, 5, 4, 3, 2
     ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
 
-    # Get model prediction using tensor environment
-    with torch.no_grad():
-        if use_structured_embeddings:
-            # For transformer models, use the transformer state encoder
-            from ..models.transformer.state_encoder import TransformerStateEncoder
-
-            temp_state_encoder = TransformerStateEncoder(env, device)
-            structured_data = temp_state_encoder.encode_tensor_states(
-                seat, torch.arange(169, device=device)  # All environments
-            )
-            outputs = model(structured_data)
-        else:
-            # For CNN models, use the existing state encoder
-            embedding_data = state_encoder.encode_tensor_states(
-                seat, torch.arange(169, device=device)  # All environments
-            )
-            outputs = model(embedding_data)
-
-        logits = outputs["policy_logits"]  # [169, num_bet_bins]
-
-        # Get legal actions from tensor environment
-        legal_masks = env.legal_bins_mask()  # [169, num_bet_bins]
-
-        # Apply legal mask
-        masked_logits = torch.where(
-            legal_masks == 0, torch.full_like(logits, -1e9), logits
-        )
-
-        # Get probabilities
-        probs = torch.softmax(masked_logits, dim=-1)  # [169, num_bet_bins]
-
-        # Sum all betting probabilities (exclude fold=0, call=1, and all-in=num_bet_bins-1)
-        # Betting actions are typically indices 2 through num_bet_bins-2 (excluding all-in)
-        num_bet_bins = logits.shape[1]
-        betting_probs = probs[:, 2 : num_bet_bins - 1].sum(
-            dim=1
-        )  # Sum bet actions excluding all-in [169]
-
+    # Format values based on type
+    if value_type == "probability":
         # Convert to percentages and format
-        percentages = (betting_probs * 100).round().int()
-        prob_strings = []
+        percentages = (values * 100).round().int()
+        formatted_values = []
         for pct in percentages:
             if pct >= 100:
-                prob_strings.append("99")  # Cap at 99%
+                formatted_values.append("99")  # Cap at 99%
             else:
-                prob_strings.append(f"{pct.item():2d}")
+                formatted_values.append(f"{pct.item():2d}")
+    elif value_type == "value":
+        # Format value estimates (multiply by 100 for readability, round to 2 decimal places)
+        formatted_values = []
+        for value in values:
+            formatted_values.append(f"{value.item() * 100:5.2f}")
+    else:  # raw
+        # Use values as-is (assumes they're already formatted strings)
+        formatted_values = values
 
-    # Initialize grid with betting probabilities
+    # Initialize grid
     grid = []
     header = "    " + " ".join(f"{rank:>2}" for rank in ranks)
     grid.append(header)
@@ -274,14 +303,69 @@ def get_preflop_betting_grid(
         for j, rank2 in enumerate(ranks):
             if (i, j) in hand_to_index:
                 hand_idx = hand_to_index[(i, j)]
-                prob_str = prob_strings[hand_idx]
+                value_str = formatted_values[hand_idx]
             else:
-                prob_str = " 0"  # Default if not found
-            row.append(prob_str)
+                value_str = default_value
+            row.append(value_str)
 
         grid.append(" ".join(row))
 
     return "\n".join(grid)
+
+
+def get_preflop_betting_grid(
+    model,
+    seat: int = 0,
+    device: torch.device = None,
+    starting_stack: int = 20000,
+    sb: int = 50,
+    bb: int = 100,
+    bet_bins: List[int] = None,
+    rng: torch.Generator = None,
+    flop_showdown: bool = False,
+) -> str:
+    """Get preflop betting probabilities as a grid showing all bet options combined.
+
+    Args:
+        model: Trained model for prediction
+        seat: Seat position (0 for SB, 1 for BB)
+        device: Device for tensor operations
+        starting_stack: Starting stack size
+        sb: Small blind amount
+        bb: Big blind amount
+        bet_bins: List of bet bin values
+        rng: Random number generator
+        flop_showdown: Whether to showdown after flop
+
+    Returns:
+        String representation of the preflop betting grid (all bet options combined)
+    """
+    if device is None:
+        device = torch.device("cpu")
+
+    # Create 169-hand environment and state encoder
+    env, state_encoder = create_169_hand_analysis_setup(
+        model,
+        starting_stack=starting_stack,
+        sb=sb,
+        bb=bb,
+        bet_bins=bet_bins,
+        device=device,
+        rng=rng,
+        flop_showdown=flop_showdown,
+    )
+
+    # Get probabilities and values
+    probs, _, _ = get_probabilities(model, state_encoder, env, seat, device)
+
+    # Sum all betting probabilities (exclude fold=0, call=1, and all-in=num_bet_bins-1)
+    # Betting actions are typically indices 2 through num_bet_bins-2 (excluding all-in)
+    num_bet_bins = probs.shape[1]
+    betting_probs = probs[:, 2 : num_bet_bins - 1].sum(
+        dim=1
+    )  # Sum bet actions excluding all-in [169]
+
+    return _create_169_grid(betting_probs, "probability", " 0")
 
 
 def step_sb_action(
@@ -312,202 +396,230 @@ def step_sb_action(
 
 
 def get_preflop_range_grid(
-    env: HUNLTensorEnv,
     model,
-    state_encoder,
     seat: int = 0,
     metric: str = "allin",
-    use_transformer_model: bool = False,
     device: torch.device = None,
+    starting_stack: int = 20000,
+    sb: int = 50,
+    bb: int = 100,
+    bet_bins: List[int] = None,
+    rng: torch.Generator = None,
+    flop_showdown: bool = False,
 ) -> str:
     """Get preflop range as a grid showing selected action probabilities.
 
     Args:
-        env: HUNLTensorEnv with 169 environments (one for each preflop hand)
         model: Trained model for prediction
-        state_encoder: State encoder for the model
         seat: Seat position (0 for SB, 1 for BB)
         metric: "allin", "call", or "fold"
-        use_transformer_model: Whether to use structured embeddings (transformer)
         device: Device for tensor operations
+        starting_stack: Starting stack size
+        sb: Small blind amount
+        bb: Big blind amount
+        bet_bins: List of bet bin values
+        rng: Random number generator
+        flop_showdown: Whether to showdown after flop
 
     Returns:
         String representation of the preflop range grid
     """
     if device is None:
-        device = env.device
+        device = torch.device("cpu")
 
-    # Create a 13x13 grid representing all possible hole card combinations
-    # Rows/cols: A, K, Q, J, T, 9, 8, 7, 6, 5, 4, 3, 2
-    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+    # Create 169-hand environment and state encoder
+    env, state_encoder = create_169_hand_analysis_setup(
+        model,
+        starting_stack=starting_stack,
+        sb=sb,
+        bb=bb,
+        bet_bins=bet_bins,
+        device=device,
+        rng=rng,
+        flop_showdown=flop_showdown,
+    )
 
-    # Get model prediction using tensor environment
-    with torch.no_grad():
-        if use_transformer_model:
-            # For transformer models, use the transformer state encoder
-            from ..models.transformer.state_encoder import TransformerStateEncoder
+    # Get probabilities and values
+    probs, _, _ = get_probabilities(model, state_encoder, env, seat, device)
 
-            temp_state_encoder = TransformerStateEncoder(env, device)
-            structured_data = temp_state_encoder.encode_tensor_states(
-                seat, torch.arange(169, device=device)  # All environments
-            )
-            outputs = model(structured_data)
-        else:
-            # For CNN models, use the existing state encoder
-            embedding_data = state_encoder.encode_tensor_states(
-                seat, torch.arange(169, device=device)  # All environments
-            )
-            outputs = model(embedding_data)
+    # Select metric index
+    num_bet_bins = probs.shape[1]
+    if metric == "allin":
+        idx = num_bet_bins - 1  # Last bin is all-in
+    elif metric == "call":
+        idx = 1  # Second bin is call
+    elif metric == "fold":
+        idx = 0  # First bin is fold
+    else:
+        idx = num_bet_bins - 1
 
-        logits = outputs["policy_logits"]  # [169, num_bet_bins]
-        values = outputs["value"]  # [169]
+    # Get probabilities for the selected metric
+    selected_probs = probs[:, idx]  # [169]
 
-        # Get legal actions from tensor environment
-        legal_masks = env.legal_bins_mask()  # [169, num_bet_bins]
-
-        # Apply legal mask
-        masked_logits = torch.where(
-            legal_masks == 0, torch.full_like(logits, -1e9), logits
-        )
-
-        # Get probabilities
-        probs = torch.softmax(masked_logits, dim=-1)  # [169, num_bet_bins]
-
-        # Select metric index
-        num_bet_bins = logits.shape[1]
-        if metric == "allin":
-            idx = num_bet_bins - 1  # Last bin is all-in
-        elif metric == "call":
-            idx = 1  # Second bin is call
-        elif metric == "fold":
-            idx = 0  # First bin is fold
-        else:
-            idx = num_bet_bins - 1
-
-        # Get probabilities for the selected metric
-        selected_probs = probs[:, idx]  # [169]
-
-        # Convert to percentages and format
-        percentages = (selected_probs * 100).round().int()
-        prob_strings = []
-        for pct in percentages:
-            if pct >= 100:
-                prob_strings.append("99")  # Cap at 99%
-            else:
-                prob_strings.append(f"{pct.item():2d}")
-
-    # Initialize grid with action probabilities
-    grid = []
-    header = "    " + " ".join(f"{rank:>2}" for rank in ranks)
-    grid.append(header)
-    grid.append("   " + "-" * 39)  # Separator line
-
-    # Create mapping from hand index to grid position
-    hand_to_index = {}
-    hands = create_169_hand_combinations()
-    for i, (card1, card2) in enumerate(hands):
-        # Convert to grid coordinates
-        rank1 = card1[:-1]
-        rank2 = card2[:-1]
-        grid_row = ranks.index(rank1)
-        grid_col = ranks.index(rank2)
-        hand_to_index[(grid_row, grid_col)] = i
-
-    for i, rank1 in enumerate(ranks):
-        row = [f"{rank1:>2} |"]
-        for j, rank2 in enumerate(ranks):
-            if (i, j) in hand_to_index:
-                hand_idx = hand_to_index[(i, j)]
-                prob_str = prob_strings[hand_idx]
-            else:
-                prob_str = " 0"  # Default if not found
-            row.append(prob_str)
-
-        grid.append(" ".join(row))
-
-    return "\n".join(grid)
+    return _create_169_grid(selected_probs, "probability", " 0")
 
 
-def get_preflop_value_grid(
-    env: HUNLTensorEnv,
+def get_preflop_range_grid_bb_response(
     model,
-    state_encoder,
-    seat: int = 0,
-    use_transformer_model: bool = False,
+    seat: int = 1,
+    metric: str = "allin",
     device: torch.device = None,
+    starting_stack: int = 20000,
+    sb: int = 50,
+    bb: int = 100,
+    bet_bins: List[int] = None,
+    rng: torch.Generator = None,
+    flop_showdown: bool = False,
 ) -> str:
-    """Get preflop value estimates as a grid showing value estimates.
+    """Get preflop range as a grid for BB response after SB all-in.
 
     Args:
-        env: HUNLTensorEnv with 169 environments (one for each preflop hand)
         model: Trained model for prediction
-        state_encoder: State encoder for the model
-        seat: Seat position (0 for SB, 1 for BB)
-        use_transformer_model: Whether to use structured embeddings (transformer)
+        seat: Seat position (1 for BB)
+        metric: "allin", "call", or "fold"
         device: Device for tensor operations
+        starting_stack: Starting stack size
+        sb: Small blind amount
+        bb: Big blind amount
+        bet_bins: List of bet bin values
+        rng: Random number generator
+        flop_showdown: Whether to showdown after flop
+
+    Returns:
+        String representation of the preflop range grid
+    """
+    if device is None:
+        device = torch.device("cpu")
+
+    # Create 169-hand environment and state encoder
+    env, state_encoder = create_169_hand_analysis_setup(
+        model,
+        starting_stack=starting_stack,
+        sb=sb,
+        bb=bb,
+        bet_bins=bet_bins,
+        device=device,
+        rng=rng,
+        flop_showdown=flop_showdown,
+    )
+
+    # Simulate SB all-in action
+    step_sb_action(env, "allin", device)
+
+    # Get probabilities and values
+    probs, _, _ = get_probabilities(model, state_encoder, env, seat, device)
+
+    # Select metric index
+    num_bet_bins = probs.shape[1]
+    if metric == "allin":
+        idx = num_bet_bins - 1  # Last bin is all-in
+    elif metric == "call":
+        idx = 1  # Second bin is call
+    elif metric == "fold":
+        idx = 0  # First bin is fold
+    else:
+        idx = num_bet_bins - 1
+
+    # Get probabilities for the selected metric
+    selected_probs = probs[:, idx]  # [169]
+
+    return _create_169_grid(selected_probs, "probability", " 0")
+
+
+def get_preflop_value_grid_bb_response(
+    model,
+    seat: int = 1,
+    device: torch.device = None,
+    starting_stack: int = 20000,
+    sb: int = 50,
+    bb: int = 100,
+    bet_bins: List[int] = None,
+    rng: torch.Generator = None,
+    flop_showdown: bool = False,
+) -> str:
+    """Get preflop value estimates as a grid for BB response after SB all-in.
+
+    Args:
+        model: Trained model for prediction
+        seat: Seat position (1 for BB)
+        device: Device for tensor operations
+        starting_stack: Starting stack size
+        sb: Small blind amount
+        bb: Big blind amount
+        bet_bins: List of bet bin values
+        rng: Random number generator
+        flop_showdown: Whether to showdown after flop
 
     Returns:
         String representation of the preflop value grid
     """
     if device is None:
-        device = env.device
+        device = torch.device("cpu")
 
-    # Create a 13x13 grid representing all possible hole card combinations
-    # Rows/cols: A, K, Q, J, T, 9, 8, 7, 6, 5, 4, 3, 2
-    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+    # Create 169-hand environment and state encoder
+    env, state_encoder = create_169_hand_analysis_setup(
+        model,
+        starting_stack=starting_stack,
+        sb=sb,
+        bb=bb,
+        bet_bins=bet_bins,
+        device=device,
+        rng=rng,
+        flop_showdown=flop_showdown,
+    )
 
-    # Get model prediction using tensor environment
-    with torch.no_grad():
-        if use_transformer_model:
-            # For transformer models, use the transformer state encoder
-            from ..models.transformer.state_encoder import TransformerStateEncoder
+    # Simulate SB all-in action
+    step_sb_action(env, "allin", device)
 
-            temp_state_encoder = TransformerStateEncoder(env, device)
-            structured_data = temp_state_encoder.encode_tensor_states(
-                seat, torch.arange(169, device=device)  # All environments
-            )
-            outputs = model(structured_data)
-        else:
-            # For CNN models, use the existing state encoder
-            embedding_data = state_encoder.encode_tensor_states(
-                seat, torch.arange(169, device=device)  # All environments
-            )
-            outputs = model(embedding_data)
+    # Get probabilities and values
+    _, values, _ = get_probabilities(model, state_encoder, env, seat, device)
 
-        values = outputs["value"]  # [169]
+    return _create_169_grid(values, "value", " 0.00")
 
-        # Format value estimates (multiply by 100 for readability, round to 2 decimal places)
-        formatted_values = []
-        for value in values:
-            formatted_values.append(f"{value.item() * 100:5.2f}")
 
-    # Initialize grid with value estimates
-    grid = []
-    header = "    " + " ".join(f"{rank:>2}" for rank in ranks)
-    grid.append(header)
-    grid.append("   " + "-" * 39)  # Separator line
+def get_preflop_value_grid(
+    model,
+    seat: int = 0,
+    device: torch.device = None,
+    starting_stack: int = 20000,
+    sb: int = 50,
+    bb: int = 100,
+    bet_bins: List[int] = None,
+    rng: torch.Generator = None,
+    flop_showdown: bool = False,
+) -> str:
+    """Get preflop value estimates as a grid showing value estimates.
 
-    # Create mapping from hand index to grid position
-    hand_to_index = {}
-    hands = create_169_hand_combinations()
-    for i, (card1, card2) in enumerate(hands):
-        # Convert to grid coordinates
-        rank1 = card1[:-1]
-        rank2 = card2[:-1]
-        grid_row = ranks.index(rank1)
-        grid_col = ranks.index(rank2)
-        hand_to_index[(grid_row, grid_col)] = i
+    Args:
+        model: Trained model for prediction
+        seat: Seat position (0 for SB, 1 for BB)
+        device: Device for tensor operations
+        starting_stack: Starting stack size
+        sb: Small blind amount
+        bb: Big blind amount
+        bet_bins: List of bet bin values
+        rng: Random number generator
+        flop_showdown: Whether to showdown after flop
 
-    for i, rank1 in enumerate(ranks):
-        row = [f"{rank1:>2} |"]
-        for j, rank2 in enumerate(ranks):
-            if (i, j) in hand_to_index:
-                hand_idx = hand_to_index[(i, j)]
-                value_str = formatted_values[hand_idx]
-            else:
-                value_str = " 0.00"  # Default if not found
-            row.append(value_str)
+    Returns:
+        String representation of the preflop value grid
+    """
+    if device is None:
+        device = torch.device("cpu")
 
-        grid.append(" ".join(row))
+    # Create 169-hand environment and state encoder
+    env, state_encoder = create_169_hand_analysis_setup(
+        model,
+        starting_stack=starting_stack,
+        sb=sb,
+        bb=bb,
+        bet_bins=bet_bins,
+        device=device,
+        rng=rng,
+        flop_showdown=flop_showdown,
+    )
 
-    return "\n".join(grid)
+    # Get probabilities and values
+    _, values, _ = get_probabilities(model, state_encoder, env, seat, device)
+
+    return _create_169_grid(values, "value", " 0.00")

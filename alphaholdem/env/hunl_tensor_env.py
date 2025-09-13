@@ -163,17 +163,21 @@ class HUNLTensorEnv:
 
     # --- Reset -----------------------------------------------------------------
 
-    def reset(self, mask: Optional[torch.Tensor] = None) -> None:
+    def reset(
+        self,
+        env_indices: Optional[torch.Tensor] = None,
+        force_button: Optional[torch.Tensor] = None,
+    ) -> None:
         if self.debug_step_table:
             print("=" * 49 + " RESET " + "=" * 49)
         # Determine which environments to reset
-        if mask is None:
+        if env_indices is None:
             # Reset all environments
             ids = torch.arange(self.N, device=self.device)
             num_reset = self.N
         else:
             # Reset only environments specified by mask
-            ids = mask
+            ids = env_indices
             if ids.numel() == 0:
                 return  # Nothing to reset
             num_reset = ids.numel()
@@ -190,9 +194,12 @@ class HUNLTensorEnv:
         self.deck_pos[ids] = 4
 
         # Randomize button for specified environments
-        button = torch.randint(
-            0, 2, (num_reset,), generator=self.rng, device=self.device
-        )
+        if force_button is not None:
+            button = force_button.clone()
+        else:
+            button = torch.randint(
+                0, 2, (num_reset,), generator=self.rng, device=self.device
+            )
         p_sb = button
         p_bb = 1 - button
 
@@ -246,7 +253,6 @@ class HUNLTensorEnv:
         self.action_history[ids].zero_()
 
         # Reset chip tracking for specified environments and account for posted blinds
-        self.chips_placed[ids] = 0
         self.chips_placed[ids, p_sb] = self.sb
         self.chips_placed[ids, p_bb] = self.bb
 
@@ -407,13 +413,12 @@ class HUNLTensorEnv:
         if bin_amounts is None or legal_masks is None:
             bin_amounts, legal_masks = self.legal_bins_amounts_and_mask()
 
-        actor_stack = self.stacks.gather(1, self.to_act.view(N, 1)).squeeze(1)
-        actor_committed = self.committed.gather(1, self.to_act.view(N, 1)).squeeze(1)
-        other_committed = self.committed.gather(
-            1, (1 - self.to_act).view(N, 1)
-        ).squeeze(1)
+        actor_idx = self.to_act
+        other_idx = 1 - self.to_act
+        actor_stack = self.stacks.gather(1, actor_idx.view(N, 1)).squeeze(1)
+        actor_committed = self.committed.gather(1, actor_idx.view(N, 1)).squeeze(1)
+        other_committed = self.committed.gather(1, other_idx.view(N, 1)).squeeze(1)
         to_call = other_committed - actor_committed
-        committed_before = actor_committed.clone()
 
         rewards = torch.zeros(N, dtype=self.float_dtype, device=device)
 
@@ -458,7 +463,7 @@ class HUNLTensorEnv:
         action_idx = torch.where(is_fold)[0]
         # Winner is opp
         rewards[action_idx] = self.finish_and_assign_winners(
-            action_idx, 1 - self.to_act[action_idx]
+            action_idx, other_idx[action_idx]
         )
 
         # Check/Call
@@ -470,7 +475,7 @@ class HUNLTensorEnv:
         action_idx = torch.where(is_allin)[0]
         all_in_amount = actor_stack[action_idx]
         self.bet(action_idx, all_in_amount)
-        self.is_allin[action_idx, self.to_act[action_idx]] = True
+        self.is_allin[action_idx, actor_idx[action_idx]] = True
 
         # Bet/Raise bins: approximate mapping using pot * mult (pot includes committed)
         # Semantics: e.g. 0.5x pot means raise ABOVE the current call amount by 0.5x pot
@@ -787,4 +792,4 @@ class HUNLTensorEnv:
         ids = torch.where(self.done)[0]
         if ids.numel() == 0:
             return  # Nothing to reset
-        self.reset(mask=ids)
+        self.reset(env_indices=ids)

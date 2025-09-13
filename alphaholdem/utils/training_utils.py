@@ -6,7 +6,7 @@ Utility functions for AlphaHoldem training and analysis.
 from typing import Optional, List, Tuple
 
 from ..env.analyze_tensor_env import (
-    create_169_hand_env,
+    create_169_hand_analysis_setup,
     get_preflop_range_grid,
     get_preflop_value_grid,
     get_preflop_betting_grid,
@@ -85,59 +85,56 @@ def print_preflop_range_grid(
 
     print(f"\n--- {title} ---")
 
-    # Create environment with all 169 hands
-    temp_env = create_169_hand_env(
+    # Generate all grids using the efficient 169-environment approach
+    fold_grid = get_preflop_range_grid(
+        trainer.model,
+        seat,
+        "fold",
+        trainer.device,
         starting_stack=trainer.cfg.env.stack,
         sb=trainer.cfg.env.sb,
         bb=trainer.cfg.env.bb,
         bet_bins=trainer.cfg.env.bet_bins,
-        device=trainer.device,
         rng=trainer.rng,
         flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
-    )
-
-    # Set the button to the seat we're analyzing
-    temp_env.button[:] = seat
-    temp_env.to_act[:] = seat
-
-    # Generate all grids using the efficient 169-environment approach
-    fold_grid = get_preflop_range_grid(
-        temp_env,
-        trainer.model,
-        trainer.state_encoder,
-        seat,
-        "fold",
-        trainer.use_structured_embeddings,
-        trainer.device,
     ).splitlines()
 
     call_grid = get_preflop_range_grid(
-        temp_env,
         trainer.model,
-        trainer.state_encoder,
         seat,
         "call",
-        trainer.use_structured_embeddings,
         trainer.device,
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        bet_bins=trainer.cfg.env.bet_bins,
+        rng=trainer.rng,
+        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
     ).splitlines()
 
     allin_grid = get_preflop_range_grid(
-        temp_env,
         trainer.model,
-        trainer.state_encoder,
         seat,
         "allin",
-        trainer.use_structured_embeddings,
         trainer.device,
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        bet_bins=trainer.cfg.env.bet_bins,
+        rng=trainer.rng,
+        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
     ).splitlines()
 
     betting_grid = get_preflop_betting_grid(
-        temp_env,
         trainer.model,
-        trainer.state_encoder,
         seat,
-        trainer.use_structured_embeddings,
         trainer.device,
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        bet_bins=trainer.cfg.env.bet_bins,
+        rng=trainer.rng,
+        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
     ).splitlines()
 
     # First row: Fold | Call
@@ -163,12 +160,15 @@ def print_preflop_range_grid(
     print("Small blind (first) - value estimates (×100)")
 
     value_grid = get_preflop_value_grid(
-        temp_env,
         trainer.model,
-        trainer.state_encoder,
         seat,
-        trainer.use_structured_embeddings,
         trainer.device,
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        bet_bins=trainer.cfg.env.bet_bins,
+        rng=trainer.rng,
+        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
     )
     print(value_grid)
     print()
