@@ -282,7 +282,7 @@ class DREDPool(OpponentPool):
 
         keep_indices = set(top_indices.tolist())
 
-        if remaining_indices and remaining_indices.numel() > 1:
+        if remaining_indices.numel() > 1:
             # Generate embeddings for remaining snapshots
             embeddings = torch.stack(
                 [self._generate_embedding(self.snapshots[i]) for i in remaining_indices]
