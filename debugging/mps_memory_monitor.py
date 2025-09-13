@@ -3,10 +3,11 @@
 MPS Memory Monitor - Track actual memory usage on Apple Silicon GPUs
 """
 
-import torch
-import psutil
 import time
-from typing import Dict, Any
+from typing import Any, Dict
+
+import psutil
+import torch
 
 
 def get_mps_memory_info() -> Dict[str, Any]:

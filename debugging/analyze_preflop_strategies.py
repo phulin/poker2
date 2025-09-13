@@ -10,29 +10,30 @@ This script loads a trained model checkpoint and prints:
 import argparse
 import os
 import sys
-import torch
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any, Dict, List
+
+import torch
 
 # Add the project root to the Python path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from alphaholdem.core.structured_config import Config
-from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.utils.training_utils import (
-    print_preflop_range_grid,
-    print_combined_tables,
-)
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.analyze_tensor_env import (
     create_169_hand_analysis_setup,
     create_169_hand_combinations,
-    step_sb_action,
+    create_state_encoder_for_model,
     get_preflop_range_grid_bb_response,
     get_preflop_value_grid_bb_response,
     get_probabilities,
-    create_state_encoder_for_model,
+    step_sb_action,
+)
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.utils.training_utils import (
+    print_combined_tables,
+    print_preflop_range_grid,
 )
 
 
@@ -55,10 +56,10 @@ def load_checkpoint_and_trainer(
 
     # Create a basic config with reasonable defaults
     from alphaholdem.core.structured_config import (
-        TrainingConfig,
-        ModelConfig,
         EnvConfig,
+        ModelConfig,
         StateEncoderConfig,
+        TrainingConfig,
     )
 
     # Detect model type from checkpoint

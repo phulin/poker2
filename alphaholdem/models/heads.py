@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from typing import Optional, Tuple
+
 import torch
 import torch.nn.functional as F
 
-from ..utils.profiling import profile
-
-
 from ..core.interfaces import Policy
 from ..core.registry import register_policy
+from ..utils.profiling import profile
 
 
 @register_policy("categorical_v1")

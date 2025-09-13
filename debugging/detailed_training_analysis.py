@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Detailed training analysis with comprehensive loss function breakdown."""
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn.functional as F
-from alphaholdem.rl.self_play import SelfPlayTrainer
+
 from alphaholdem.rl.losses import trinal_clip_ppo_loss
 from alphaholdem.rl.replay import compute_gae_returns, prepare_ppo_batch
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def detailed_training_analysis():

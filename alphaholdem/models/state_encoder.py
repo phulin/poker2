@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import Dict, Tuple
+
 import torch
 
-from ..env.hunl_tensor_env import HUNLTensorEnv
 from ..env.hunl_env import HUNLEnv
-from .cnn import CardsPlanesV1, ActionsHUEncoderV1
+from ..env.hunl_tensor_env import HUNLTensorEnv
+from .cnn import ActionsHUEncoderV1, CardsPlanesV1
 from .cnn_embedding_data import CNNEmbeddingData
 
 

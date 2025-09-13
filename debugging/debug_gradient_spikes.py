@@ -4,8 +4,10 @@ Debug script to test gradient computation during evaluation.
 Runs: training step -> evaluation -> training step to detect gradient spikes.
 """
 
-import torch
 import os
+
+import torch
+
 from alphaholdem.rl.self_play import SelfPlayTrainer
 
 

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Compare Trinal-Clip PPO vs Standard PPO."""
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
+
+from alphaholdem.rl.losses import standard_ppo_loss, trinal_clip_ppo_loss
 from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.rl.losses import trinal_clip_ppo_loss, standard_ppo_loss
 
 
 def compare_ppo_losses():

@@ -5,8 +5,10 @@ This module provides utilities for loading and merging configurations from check
 with CLI overrides, enabling complete config restoration while allowing parameter overrides.
 """
 
-import torch
 from typing import Optional
+
+import torch
+
 from ..core.structured_config import Config
 
 

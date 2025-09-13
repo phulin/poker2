@@ -4,11 +4,13 @@ Debug utilities for HUNLTensorEnv.
 Contains functions for creating test environments and analyzing specific scenarios.
 """
 
+from typing import Any, List, Tuple
+
 import torch
-from typing import List, Tuple, Any
-from .hunl_tensor_env import HUNLTensorEnv
-from ..models.transformer.state_encoder import TransformerStateEncoder
+
 from ..models.state_encoder import CNNStateEncoder
+from ..models.transformer.state_encoder import TransformerStateEncoder
+from .hunl_tensor_env import HUNLTensorEnv
 
 
 def create_state_encoder_for_model(model, env: HUNLTensorEnv, device: torch.device):

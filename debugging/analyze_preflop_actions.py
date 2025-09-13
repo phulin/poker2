@@ -4,14 +4,14 @@ Simplified script to analyze preflop action probabilities for a given checkpoint
 Shows what the model would do when acting first (SB) and as BB when called to act.
 """
 
-import torch
 import argparse
 from pathlib import Path
 
-from alphaholdem.env.hunl_env import HUNLEnv
-from alphaholdem.models.cnn import SiameseConvNetV1
-from alphaholdem.models.cnn import CardsPlanesV1, ActionsHUEncoderV1
+import torch
+
 from alphaholdem.encoding.action_mapping import get_legal_mask
+from alphaholdem.env.hunl_env import HUNLEnv
+from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 
 
 def load_model(checkpoint_path: str, device: str = "cpu"):

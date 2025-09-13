@@ -3,10 +3,11 @@
 SelfPlayTrainer Memory Test - Monitor MPS memory usage during training
 """
 
-import torch
-import psutil
 import time
-from hydra import initialize, compose
+
+import psutil
+import torch
+from hydra import compose, initialize
 from hydra.core.global_hydra import GlobalHydra
 
 from alphaholdem.rl.self_play import SelfPlayTrainer

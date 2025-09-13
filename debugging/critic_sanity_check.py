@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from typing import Optional, Dict
 import time
+from typing import Dict, Optional
+
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
 # Internal imports
-from alphaholdem.rl.replay import prepare_ppo_batch, compute_gae_returns
+from alphaholdem.rl.replay import compute_gae_returns, prepare_ppo_batch
 from alphaholdem.rl.self_play import SelfPlayTrainer
 
 

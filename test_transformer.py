@@ -8,11 +8,12 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-import torch
 import pytest
+import torch
+
+from alphaholdem.models.factory import ModelFactory
 from alphaholdem.models.transformer import PokerTransformerV1
 from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
-from alphaholdem.models.factory import ModelFactory
 
 
 def test_transformer_model_creation():

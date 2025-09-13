@@ -3,13 +3,13 @@
 Utility functions for AlphaHoldem training and analysis.
 """
 
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
 
 from ..env.analyze_tensor_env import (
     create_169_hand_analysis_setup,
+    get_preflop_betting_grid,
     get_preflop_range_grid,
     get_preflop_value_grid,
-    get_preflop_betting_grid,
 )
 
 

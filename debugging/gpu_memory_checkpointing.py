@@ -6,10 +6,11 @@ This script compares memory usage with and without gradient checkpointing on MPS
 """
 
 import sys
+import time
 from pathlib import Path
+
 import torch
 import torch.nn as nn
-import time
 
 # Add project root to path
 project_root = Path(__file__).parent.parent

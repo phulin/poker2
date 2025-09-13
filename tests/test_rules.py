@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from alphaholdem.env import rules
 import torch
+
+from alphaholdem.env import rules
 
 # Helper to make card by rank/suit (r: 0..12 for 2..A, s: 0..3)
 

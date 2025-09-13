@@ -8,6 +8,7 @@ it's working correctly and measure memory usage.
 
 import sys
 from pathlib import Path
+
 import torch
 import torch.nn as nn
 

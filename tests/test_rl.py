@@ -1,23 +1,24 @@
 from __future__ import annotations
 
-import tempfile
 import os
+import tempfile
+
 import torch
 
-from alphaholdem.rl.replay import (
-    ReplayBuffer,
-    Transition,
-    Trajectory,
-    compute_gae_returns,
-)
-from alphaholdem.rl.losses import trinal_clip_ppo_loss
-from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.core.structured_config import (
     Config,
-    TrainingConfig,
-    ModelConfig,
     EnvConfig,
+    ModelConfig,
+    TrainingConfig,
 )
+from alphaholdem.rl.losses import trinal_clip_ppo_loss
+from alphaholdem.rl.replay import (
+    ReplayBuffer,
+    Trajectory,
+    Transition,
+    compute_gae_returns,
+)
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def test_replay_buffer_and_gae():

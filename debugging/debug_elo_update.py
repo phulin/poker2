@@ -3,15 +3,16 @@
 Debug script to test ELO update logic specifically.
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-from alphaholdem.rl.k_best_pool import KBestOpponentPool, AgentSnapshot
-from alphaholdem.rl.self_play import SelfPlayTrainer
+
 from alphaholdem.core.config_loader import get_config
+from alphaholdem.rl.k_best_pool import AgentSnapshot, KBestOpponentPool
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def debug_elo_update():

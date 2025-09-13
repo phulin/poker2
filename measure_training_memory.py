@@ -3,17 +3,18 @@
 Script to measure MPS memory usage during actual training steps.
 """
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import psutil
 import time
 from typing import Dict, List, Tuple
 
-from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
-from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
+import psutil
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
 from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
 from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
+from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 
 
 def get_mps_memory_usage() -> float:

@@ -1,33 +1,28 @@
 from __future__ import annotations
 
 from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 
-from ..utils.profiling import profile
-from ..utils.config_loader import load_config_from_checkpoint
-
-
 import wandb
 
+from ..core.builders import build_components_from_config
 from ..core.structured_config import Config
+from ..encoding.action_mapping import bin_to_action, get_legal_mask
 from ..env.hunl_env import HUNLEnv
 from ..env.hunl_tensor_env import HUNLTensorEnv
-from ..models.cnn import CardsPlanesV1, ActionsHUEncoderV1
-from ..models.transformer.embedding_data import StructuredEmbeddingData
+from ..models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 from ..models.cnn_embedding_data import CNNEmbeddingData
-from ..encoding.action_mapping import bin_to_action, get_legal_mask
 from ..models.factory import ModelFactory
 from ..models.state_encoder import CNNStateEncoder
-from ..models.cnn import SiameseConvNetV1
-from ..rl.replay import (
-    Transition,
-    Trajectory,
-)
-from ..rl.vectorized_replay import VectorizedReplayBuffer
+from ..models.transformer.embedding_data import StructuredEmbeddingData
+from ..rl.k_best_pool import AgentSnapshot, KBestOpponentPool
 from ..rl.losses import trinal_clip_ppo_loss
-from ..rl.k_best_pool import KBestOpponentPool, AgentSnapshot
-from ..core.builders import build_components_from_config
+from ..rl.replay import Trajectory, Transition
+from ..rl.vectorized_replay import VectorizedReplayBuffer
+from ..utils.config_loader import load_config_from_checkpoint
+from ..utils.profiling import profile
 
 
 class SelfPlayTrainer:
@@ -1136,8 +1131,8 @@ class SelfPlayTrainer:
 
     def _cleanup_old_checkpoints(self, current_path: str) -> None:
         """Clean up old checkpoints, keeping only best_model.pt and latest checkpoint."""
-        import os
         import glob
+        import os
 
         # Resolve symlinks to get the actual checkpoint file
         actual_current_path = os.path.realpath(current_path)

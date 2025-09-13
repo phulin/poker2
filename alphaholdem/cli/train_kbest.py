@@ -8,19 +8,21 @@ where the agent maintains a pool of K best historical versions and trains agains
 
 import os
 import time
-import torch
+
 import hydra
+import torch
+
 from ..core.structured_config import Config
-from ..rl.self_play import SelfPlayTrainer
-from ..utils.config_loader import load_config_from_checkpoint
 
 # Import encoders and models to register them
 from ..models import cnn, heads
+from ..rl.self_play import SelfPlayTrainer
+from ..utils.config_loader import load_config_from_checkpoint
 from ..utils.training_utils import (
+    print_checkpoint_info,
+    print_evaluation_results,
     print_preflop_range_grid,
     print_training_stats,
-    print_evaluation_results,
-    print_checkpoint_info,
 )
 
 
@@ -200,12 +202,13 @@ def main(cfg) -> None:
     """
     # Convert Hydra config to Config dataclass
     from omegaconf import OmegaConf
+
     from alphaholdem.core.structured_config import (
         Config,
-        TrainingConfig,
-        ModelConfig,
         EnvConfig,
+        ModelConfig,
         StateEncoderConfig,
+        TrainingConfig,
     )
 
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)

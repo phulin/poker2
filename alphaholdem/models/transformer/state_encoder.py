@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Dict, Tuple, Optional, List, Any
-from ...utils.profiling import profile
-import torch
 from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
 
-from ...env.hunl_tensor_env import HUNLTensorEnv
+import torch
+
 from ...env.hunl_env import HUNLEnv
+from ...env.hunl_tensor_env import HUNLTensorEnv
+from ...utils.profiling import profile
 from .embedding_data import StructuredEmbeddingData
-from .tokens import Special, Context
+from .tokens import Context, Special
 
 
 class TransformerStateEncoder:

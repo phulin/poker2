@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any, Type
+from typing import Any, Dict, Type
+
 import torch
 import torch.nn as nn
 
 from ..core.interfaces import Model
 from ..core.registry import MODELS
-from .cnn import SiameseConvNetV1, CardsPlanesV1, ActionsHUEncoderV1
-from .transformer import PokerTransformerV1, TransformerStateEncoder
+from .cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 from .state_encoder import CNNStateEncoder
+from .transformer import PokerTransformerV1, TransformerStateEncoder
 
 
 class ModelFactory:

@@ -5,16 +5,17 @@ Model Debugging Script
 Investigates why the model shows no policy diversity.
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn.functional as F
-from alphaholdem.rl.self_play import SelfPlayTrainer
+
 from alphaholdem.env.hunl_env import HUNLEnv
-from alphaholdem.models.cnn import CardsPlanesV1, ActionsHUEncoderV1
+from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def debug_model_internals(trainer):

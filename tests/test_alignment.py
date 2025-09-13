@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from alphaholdem.env.hunl_env import HUNLEnv
-from alphaholdem.env.types import Action
 from alphaholdem.encoding.action_mapping import (
     _action_to_bin_idx,
     _bin_to_target_action,
 )
+from alphaholdem.env.hunl_env import HUNLEnv
+from alphaholdem.env.types import Action
 
 
 def test_env_action_bins_align_total_committed_reference():

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
+
+from alphaholdem.core import registry
 from alphaholdem.core.structured_config import (
     Config,
-    TrainingConfig,
-    ModelConfig,
     EnvConfig,
+    ModelConfig,
+    TrainingConfig,
 )
-from alphaholdem.core import registry
 
 
 def test_load_default_config_values():

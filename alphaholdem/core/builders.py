@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Tuple
 
-from . import registry
-
 # Import modules to trigger registration
 from ..models import cnn, heads, transformer
+from . import registry
 
 
 def build_components_from_config(cfg) -> Tuple[Any, Any, Any, Any]:

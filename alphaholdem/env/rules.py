@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from typing import List
 import random
-
-from ..utils.profiling import profile
-
+from typing import List
 
 import torch
+
+from ..utils.profiling import profile
 
 # Card encoding: 0..51, rank = c % 13 (2..A), suit = c // 13 (0..3)
 

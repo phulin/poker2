@@ -6,22 +6,22 @@ Trains the model for 50 steps, then runs through a complete poker hand
 showing value and policy calculations at each decision point.
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import hydra
 import torch
 import torch.nn.functional as F
-import hydra
 from omegaconf import DictConfig
 
-from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.env.hunl_env import HUNLEnv
-from alphaholdem.models.cnn import CardsPlanesV1, ActionsHUEncoderV1
-from alphaholdem.env import rules
-from alphaholdem.encoding.action_mapping import get_legal_mask, bin_to_action
 from alphaholdem.core.structured_config import Config
+from alphaholdem.encoding.action_mapping import bin_to_action, get_legal_mask
+from alphaholdem.env import rules
+from alphaholdem.env.hunl_env import HUNLEnv
+from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def card_number_to_name(card_num):

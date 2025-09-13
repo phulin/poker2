@@ -7,16 +7,17 @@ This script shows how to use the K-Best self-play mechanism as described in the 
 
 import os
 import sys
-import torch
-import hydra
 from pathlib import Path
+
+import hydra
+import torch
 
 # Add the project root to the path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.core.structured_config import Config
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def demonstrate_kbest(cfg: Config):

@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import torch
-from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.models.cnn import CardsPlanesV1, ActionsHUEncoderV1
-from alphaholdem.models.cnn import SiameseConvNetV1
-from alphaholdem.models.heads import CategoricalPolicyV1
+
 from alphaholdem.core.structured_config import (
     Config,
-    TrainingConfig,
-    ModelConfig,
     EnvConfig,
+    ModelConfig,
+    TrainingConfig,
 )
+from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
+from alphaholdem.models.heads import CategoricalPolicyV1
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def test_trainer_builds_components_from_config():

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
+
 import torch
 
-from ..env.types import GameState, Action
-from typing import Optional
+from ..env.types import Action, GameState
 
 
 def bin_to_action(bin_idx: int, game_state: GameState, num_bet_bins: int) -> Action:

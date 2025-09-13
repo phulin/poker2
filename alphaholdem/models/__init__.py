@@ -7,7 +7,7 @@ __all__ = [
 ]
 
 # Import main classes for easy access
-from .cnn import SiameseConvNetV1, CardsPlanesV1, ActionsHUEncoderV1
-from .transformer import PokerTransformerV1
-from .state_encoder import CNNStateEncoder
+from .cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 from .factory import ModelFactory
+from .state_encoder import CNNStateEncoder
+from .transformer import PokerTransformerV1

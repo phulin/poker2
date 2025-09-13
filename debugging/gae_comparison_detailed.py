@@ -4,9 +4,10 @@ Detailed comparison of vectorized vs non-vectorized GAE implementations.
 Shows step-by-step computation for both approaches.
 """
 
-import torch
-import sys
 import os
+import sys
+
+import torch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

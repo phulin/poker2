@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 setup(
     name="alphaholdem",
@@ -13,13 +13,17 @@ setup(
     ],
     extras_require={
         "dev": [
+            "autoflake>=2.0.0",
             "black>=22.0.0",
+            "isort>=5.0.0",
             "pre-commit>=3.0.0",
             "pytest>=7.0.0",
             "line-profiler>=4.0.0",
         ],
         "all": [
+            "autoflake>=2.0.0",
             "black>=22.0.0",
+            "isort>=5.0.0",
             "pre-commit>=3.0.0",
             "pytest>=7.0.0",
             "wandb>=0.15.0",

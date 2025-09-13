@@ -7,22 +7,23 @@ This script tests the basic functionality of the K-Best opponent pool and self-p
 
 import os
 import sys
-import torch
 from pathlib import Path
+
+import torch
 
 # Add the project root to the path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from alphaholdem.rl.k_best_pool import KBestOpponentPool, AgentSnapshot
-from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.models.cnn import SiameseConvNetV1
 from alphaholdem.core.structured_config import (
     Config,
-    TrainingConfig,
-    ModelConfig,
     EnvConfig,
+    ModelConfig,
+    TrainingConfig,
 )
+from alphaholdem.models.cnn import SiameseConvNetV1
+from alphaholdem.rl.k_best_pool import AgentSnapshot, KBestOpponentPool
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def test_kbest_pool():

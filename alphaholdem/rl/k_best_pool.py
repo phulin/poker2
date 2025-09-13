@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import copy
 import random
-from typing import List, Optional, Tuple, Any
-
-from ..utils.profiling import profile
-
+from typing import Any, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from ..core.interfaces import OpponentPool
+from ..utils.profiling import profile
 
 
 class AgentSnapshot:

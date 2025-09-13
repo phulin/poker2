@@ -10,11 +10,12 @@ sys.path.insert(0, str(project_root))
 
 import torch
 import torch.nn as nn
-from alphaholdem.models.transformer import PokerTransformerV1
-from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
-from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
-from alphaholdem.models.factory import ModelFactory
+
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.factory import ModelFactory
+from alphaholdem.models.transformer import PokerTransformerV1
+from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
+from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
 
 

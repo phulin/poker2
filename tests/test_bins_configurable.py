@@ -3,12 +3,12 @@ from __future__ import annotations
 from alphaholdem.core.structured_config import (
     Config,
     EnvConfig,
-    TrainingConfig,
     ModelConfig,
+    TrainingConfig,
 )
 from alphaholdem.encoding.action_mapping import (
-    _bin_to_target_action,
     _action_to_bin_idx,
+    _bin_to_target_action,
 )
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.types import Action

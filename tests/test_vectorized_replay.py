@@ -1,8 +1,9 @@
 import pytest
 import torch
-from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
+
 from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
+from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
 
 
 class TestVectorizedReplayBuffer:
@@ -643,13 +644,13 @@ class TestVectorizedReplayBuffer:
 
     def test_buffer_filling_during_collection(self):
         """Test that the buffer properly fills and manages trajectories during collection."""
-        from alphaholdem.rl.self_play import SelfPlayTrainer
         from alphaholdem.core.structured_config import (
             Config,
-            TrainingConfig,
-            ModelConfig,
             EnvConfig,
+            ModelConfig,
+            TrainingConfig,
         )
+        from alphaholdem.rl.self_play import SelfPlayTrainer
 
         # Create a Hydra config with small parameters for testing
         cfg = Config(
@@ -718,13 +719,13 @@ class TestVectorizedReplayBuffer:
 
     def test_buffer_trajectory_lifecycle(self):
         """Test that trajectories are properly managed throughout their lifecycle."""
-        from alphaholdem.rl.self_play import SelfPlayTrainer
         from alphaholdem.core.structured_config import (
             Config,
-            TrainingConfig,
-            ModelConfig,
             EnvConfig,
+            ModelConfig,
+            TrainingConfig,
         )
+        from alphaholdem.rl.self_play import SelfPlayTrainer
 
         # Create a Hydra config with small parameters for testing
         cfg = Config(
@@ -795,13 +796,13 @@ class TestVectorizedReplayBuffer:
 
     def test_buffer_capacity_management(self):
         """Test that the buffer properly manages capacity and wraparound."""
-        from alphaholdem.rl.self_play import SelfPlayTrainer
         from alphaholdem.core.structured_config import (
             Config,
-            TrainingConfig,
-            ModelConfig,
             EnvConfig,
+            ModelConfig,
+            TrainingConfig,
         )
+        from alphaholdem.rl.self_play import SelfPlayTrainer
 
         # Create a Hydra config with small parameters for testing
         cfg = Config(
@@ -873,13 +874,13 @@ class TestVectorizedReplayBuffer:
 
     def test_buffer_detailed_collection_monitoring(self):
         """Detailed test to monitor buffer state during collection process."""
-        from alphaholdem.rl.self_play import SelfPlayTrainer
         from alphaholdem.core.structured_config import (
             Config,
-            TrainingConfig,
-            ModelConfig,
             EnvConfig,
+            ModelConfig,
+            TrainingConfig,
         )
+        from alphaholdem.rl.self_play import SelfPlayTrainer
 
         # Create a Hydra config with small parameters for testing
         cfg = Config(

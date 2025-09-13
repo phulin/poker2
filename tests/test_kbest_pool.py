@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import torch
-from alphaholdem.rl.k_best_pool import KBestOpponentPool, AgentSnapshot
+
 from alphaholdem.models.cnn import SiameseConvNetV1
+from alphaholdem.rl.k_best_pool import AgentSnapshot, KBestOpponentPool
 
 
 def test_kbest_add_and_sample():

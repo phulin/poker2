@@ -6,11 +6,12 @@ This script provides detailed memory breakdown during forward pass,
 showing memory usage for model, gradients, activations, etc.
 """
 
+import gc
 import sys
 from pathlib import Path
+
 import torch
 import torch.nn as nn
-import gc
 
 # Add project root to path
 project_root = Path(__file__).parent.parent

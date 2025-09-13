@@ -3,23 +3,24 @@
 Tests for MPS autocast support in SelfPlayTrainer.
 """
 
+import os
+import sys
+from unittest.mock import patch
+
 import pytest
 import torch
-import sys
-import os
-from unittest.mock import patch
 
 # Add the project root to the path for imports
 sys.path.insert(0, os.path.abspath("."))
 
-from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.core.structured_config import (
     Config,
-    TrainingConfig,
-    ModelConfig,
     EnvConfig,
+    ModelConfig,
+    TrainingConfig,
 )
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 @pytest.fixture

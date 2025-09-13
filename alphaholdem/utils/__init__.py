@@ -6,7 +6,7 @@ profiling, and other common functionality.
 """
 
 from .config_loader import load_config_from_checkpoint
-from .profiling import profile, PROFILE_AVAILABLE
+from .profiling import PROFILE_AVAILABLE, profile
 
 __all__ = [
     "load_config_from_checkpoint",

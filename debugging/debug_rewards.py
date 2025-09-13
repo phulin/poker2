@@ -3,14 +3,15 @@
 Debug script to investigate reward issues in the replay buffer and training.
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-from alphaholdem.rl.self_play import SelfPlayTrainer
+
 from alphaholdem.core.config_loader import get_config
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def debug_rewards():

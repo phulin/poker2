@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-from ..utils.profiling import profile
-
-
 import torch
 
+from ..utils.profiling import profile
 from . import rules
 
 

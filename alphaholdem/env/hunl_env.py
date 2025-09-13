@@ -1,14 +1,12 @@
 from __future__ import annotations
 
+import random
 from dataclasses import replace
 from typing import Any, Dict, List, Tuple
-import random
 
 from ..utils.profiling import profile
-
-
-from .types import Action, GameState, PlayerState
 from . import rules
+from .types import Action, GameState, PlayerState
 
 STREETS = ("preflop", "flop", "turn", "river", "showdown")
 

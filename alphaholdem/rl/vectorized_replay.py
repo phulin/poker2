@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import torch
 from typing import Dict, Union
+
+import torch
 
 # Import embedding data classes
 from ..models.cnn_embedding_data import CNNEmbeddingData
