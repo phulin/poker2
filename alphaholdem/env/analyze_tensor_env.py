@@ -122,11 +122,11 @@ def create_169_hand_env(
         temp_env.deck[i, 1] = card2_int
         temp_env.deck[i, 2] = opp_card1_int
         temp_env.deck[i, 3] = opp_card2_int
-        temp_env.deck[i, 4:] = torch.tensor(deck_minus_hole, device=temp_env.device)[
-            torch.randperm(48)
+        temp_env.deck[i, 4:9] = torch.tensor(deck_minus_hole, device=temp_env.device)[
+            torch.randperm(48)[:5]
         ]
 
-        # Set deck_pos to 2 (start of deck)
+        # Set deck_pos to 4 (after hole cards)
         temp_env.deck_pos[i] = 4
 
     return temp_env
