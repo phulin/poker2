@@ -18,6 +18,7 @@ class AgentSnapshot:
         self.model = copy.deepcopy(model)
         self.step = step
         self.elo = elo
+        self.total_rewards = 0
         self.games_played = 0
         self.wins = 0
         self.losses = 0
@@ -29,6 +30,10 @@ class AgentSnapshot:
         if total_games == 0:
             return 0.5
         return self.wins / total_games
+
+    def get_expected_reward(self) -> float:
+        """Get expected reward of this snapshot."""
+        return self.total_rewards / self.games_played
 
     def update_stats(self, result: str):
         """Update game statistics."""
@@ -187,7 +192,6 @@ class KBestOpponentPool(OpponentPool):
         self,
         opponent: AgentSnapshot,
         rewards: torch.Tensor,
-        k_factor: Optional[float] = None,
     ) -> None:
         """
         Vectorized ELO update for a single opponent over multiple games.
@@ -195,30 +199,29 @@ class KBestOpponentPool(OpponentPool):
         Args:
             opponent: The opponent that was fought
             rewards: Tensor of rewards [num_games] where >0 = win, <0 = loss, =0 = draw
-            k_factor: ELO K-factor for rating changes (uses instance default if None)
         """
-        if k_factor is None:
-            k_factor = self.k_factor
         if opponent is None or rewards.numel() == 0:
             return
 
-        # Convert rewards to actual scores (0.0, 0.5, 1.0)
-        wins = rewards > 0
-        losses = rewards < 0
-        actual_scores = torch.where(wins, 1.0, torch.where(losses, 0.0, 0.5))
+        # Check for rewards outside [-1, 1] range and warn
+        extreme_rewards = torch.abs(rewards) > 1.0
+        if extreme_rewards.any():
+            extreme_values = rewards[extreme_rewards]
+            print(
+                f"Warning: {extreme_rewards.numel()} rewards outside [-1, 1] range: {extreme_values.tolist()}"
+            )
 
-        # Get opponent ELO (scalar)
-        opponent_elo = torch.tensor(
-            opponent.elo, device=rewards.device, dtype=rewards.dtype
-        )
+        # Scale rewards to [0, 1] range based on magnitude
+        # Convert to actual scores: negative rewards -> 0, positive rewards -> 1, scaled by magnitude
+        actual_scores = 0.5 + 0.5 * rewards
 
         # Calculate expected scores for each game
         expected_scores = 1.0 / (
-            1.0 + 10 ** ((opponent_elo - self.current_elo) / 400.0)
+            1.0 + 10 ** ((opponent.elo - self.current_elo) / 400.0)
         )
 
         # Calculate ELO changes
-        elo_changes = k_factor * (actual_scores - expected_scores)
+        elo_changes = self.k_factor * (actual_scores - expected_scores)
 
         # Update current ELO (sum of all changes)
         total_elo_change = elo_changes.sum().item()
@@ -228,9 +231,9 @@ class KBestOpponentPool(OpponentPool):
         opponent.elo -= total_elo_change
 
         # Update opponent stats for each game
-        # Vectorized update of opponent stats using wins/losses tensors
-        num_wins = wins.sum().item()
-        num_losses = losses.sum().item()
+        # Calculate wins/losses for stats (regardless of magnitude-based scoring)
+        num_wins = (rewards > 0).sum().item()
+        num_losses = (rewards < 0).sum().item()
         opponent.games_played += rewards.numel()
         opponent.wins += num_wins
         opponent.losses += num_losses

@@ -666,7 +666,8 @@ class SelfPlayTrainer:
 
                         # Update ELO for this opponent with all their games
                         self.opponent_pool.update_elo_batch_vectorized(
-                            opponent, opponent_rewards
+                            opponent,
+                            opponent_rewards,
                         )
             else:
                 # Fallback for self-play case (no opponents, so no ELO tracking)
