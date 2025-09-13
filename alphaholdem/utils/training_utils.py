@@ -3,7 +3,69 @@
 Utility functions for AlphaHoldem training and analysis.
 """
 
-from typing import Optional
+from typing import Optional, List, Tuple
+
+from ..env.analyze_tensor_env import (
+    create_169_hand_env,
+    get_preflop_range_grid,
+    get_preflop_value_grid,
+    get_preflop_betting_grid,
+)
+
+
+def print_combined_tables(
+    tables: List[Tuple[List[str], str]], title: Optional[str] = None
+) -> None:
+    """
+    Print multiple tables combined horizontally.
+
+    Args:
+        tables: List of tuples containing (grid_lines, header) for each table
+        title: Optional title for the combined display
+    """
+    if not tables:
+        return
+
+    if title:
+        print(f"--- {title} ---")
+
+    # Align all tables to the same length
+    max_lines = max(len(table_lines) for table_lines, _ in tables)
+    aligned_tables = []
+
+    for table_lines, header in tables:
+        # Pad table to max_lines
+        padded_lines = table_lines[:]
+        while len(padded_lines) < max_lines:
+            padded_lines.append("")
+        aligned_tables.append((padded_lines, header))
+
+    # Calculate column widths for proper alignment
+    widths = []
+    for table_lines, header in aligned_tables:
+        width = max((len(line) for line in table_lines), default=len(header))
+        widths.append(width)
+
+    # Print headers
+    header_parts = []
+    for i, (_, header) in enumerate(aligned_tables):
+        header_parts.append(header.ljust(widths[i]))
+    print("   |   ".join(header_parts))
+
+    # Print separator line
+    separator_parts = []
+    for i, (_, header) in enumerate(aligned_tables):
+        separator_parts.append(("-" * len(header)).ljust(widths[i]))
+    print("   |   ".join(separator_parts))
+
+    # Print table rows
+    for line_idx in range(max_lines):
+        row_parts = []
+        for i, (table_lines, _) in enumerate(aligned_tables):
+            row_parts.append(table_lines[line_idx].ljust(widths[i]))
+        print("   |   ".join(row_parts))
+
+    print()
 
 
 def print_preflop_range_grid(
@@ -22,37 +84,93 @@ def print_preflop_range_grid(
         title = f"Preflop Range Grid (Step {step})"
 
     print(f"\n--- {title} ---")
-    # Generate both grids
-    left = trainer.get_preflop_range_grid(seat=seat, metric="allin").splitlines()
-    right = trainer.get_preflop_range_grid(seat=seat, metric="fold").splitlines()
 
-    # Align lengths
-    max_lines = max(len(left), len(right))
-    while len(left) < max_lines:
-        left.append("")
-    while len(right) < max_lines:
-        right.append("")
+    # Create environment with all 169 hands
+    temp_env = create_169_hand_env(
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        bet_bins=trainer.cfg.env.bet_bins,
+        device=trainer.device,
+        rng=trainer.rng,
+        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
+    )
 
-    # Compute left column width for padding
-    left_width = max((len(line) for line in left), default=0)
+    # Set the button to the seat we're analyzing
+    temp_env.button[:] = seat
+    temp_env.to_act[:] = seat
 
-    # Headers
-    left_hdr = "Small blind (first) - all-in (%)"
-    right_hdr = "Small blind (first) - fold (%)"
-    print(left_hdr.ljust(left_width) + "   |   " + right_hdr)
+    # Generate all grids using the efficient 169-environment approach
+    fold_grid = get_preflop_range_grid(
+        temp_env,
+        trainer.model,
+        trainer.state_encoder,
+        seat,
+        "fold",
+        trainer.use_structured_embeddings,
+        trainer.device,
+    ).splitlines()
 
-    # Separator under headers
-    print(("-" * len(left_hdr)).ljust(left_width) + "   |   " + ("-" * len(right_hdr)))
+    call_grid = get_preflop_range_grid(
+        temp_env,
+        trainer.model,
+        trainer.state_encoder,
+        seat,
+        "call",
+        trainer.use_structured_embeddings,
+        trainer.device,
+    ).splitlines()
 
-    # Rows side-by-side
-    for i in range(max_lines):
-        print(left[i].ljust(left_width) + "   |   " + right[i])
-    print()
+    allin_grid = get_preflop_range_grid(
+        temp_env,
+        trainer.model,
+        trainer.state_encoder,
+        seat,
+        "allin",
+        trainer.use_structured_embeddings,
+        trainer.device,
+    ).splitlines()
+
+    betting_grid = get_preflop_betting_grid(
+        temp_env,
+        trainer.model,
+        trainer.state_encoder,
+        seat,
+        trainer.use_structured_embeddings,
+        trainer.device,
+    ).splitlines()
+
+    # First row: Fold | Call
+    print_combined_tables(
+        [
+            (fold_grid, "Small blind (first) - fold (%)"),
+            (call_grid, "Small blind (first) - call (%)"),
+        ],
+        "First Row: Fold | Call",
+    )
+
+    # Second row: Betting | All-in
+    print_combined_tables(
+        [
+            (betting_grid, "Small blind (first) - betting (%)"),
+            (allin_grid, "Small blind (first) - all-in (%)"),
+        ],
+        "Second Row: Betting | All-in",
+    )
 
     # Print value estimates grid
     print("--- Preflop Value Estimates (Step {}) ---".format(step))
     print("Small blind (first) - value estimates (×100)")
-    print(trainer.get_preflop_value_grid(seat=seat))
+
+    value_grid = get_preflop_value_grid(
+        temp_env,
+        trainer.model,
+        trainer.state_encoder,
+        seat,
+        trainer.use_structured_embeddings,
+        trainer.device,
+    )
+    print(value_grid)
     print()
 
 

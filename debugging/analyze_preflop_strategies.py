@@ -20,9 +20,18 @@ sys.path.insert(0, str(project_root))
 
 from alphaholdem.core.structured_config import Config
 from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.utils.training_utils import print_preflop_range_grid
+from alphaholdem.utils.training_utils import (
+    print_preflop_range_grid,
+    print_combined_tables,
+)
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.env.analyze_tensor_env import create_169_hand_env, simulate_sb_action
+from alphaholdem.env.analyze_tensor_env import (
+    create_169_hand_env,
+    step_sb_action,
+    get_preflop_range_grid,
+    get_preflop_value_grid,
+    get_preflop_betting_grid,
+)
 
 
 def load_checkpoint_and_trainer(
@@ -47,7 +56,38 @@ def load_checkpoint_and_trainer(
         TrainingConfig,
         ModelConfig,
         EnvConfig,
+        StateEncoderConfig,
     )
+
+    # Detect model type from checkpoint
+    model_keys = list(checkpoint["model_state_dict"].keys())
+    if any("transformer" in key for key in model_keys):
+        model_name = "poker_transformer_v1"
+        state_encoder_name = "transformer"
+        model_kwargs = {
+            "d_model": 256,
+            "n_layers": 2,
+            "n_heads": 2,
+            "vocab_size": 80,
+            "num_actions": 8,
+            "dropout": 0.1,
+            "use_auxiliary_loss": False,
+        }
+    else:
+        # Default to CNN model
+        model_name = "siamese_convnet_v1"
+        state_encoder_name = "cnn"
+        model_kwargs = {
+            "cards_channels": 6,
+            "actions_channels": 24,
+            "cards_hidden": 192,
+            "actions_hidden": 192,
+            "fusion_hidden": [2048, 2048],
+            "num_actions": 8,
+        }
+
+    print(f"Detected model type: {model_name}")
+    print(f"Using state encoder: {state_encoder_name}")
 
     cfg = Config(
         train=TrainingConfig(
@@ -67,18 +107,11 @@ def load_checkpoint_and_trainer(
             loss_scale=1.0,
         ),
         model=ModelConfig(
-            name="poker_transformer_v1",
-            kwargs={
-                "d_model": 256,
-                "n_layers": 2,
-                "n_heads": 2,
-                "vocab_size": 80,
-                "num_actions": 8,
-                "dropout": 0.1,
-                "use_auxiliary_loss": False,
-            },
+            name=model_name,
+            kwargs=model_kwargs,
             use_gradient_checkpointing=False,
         ),
+        state_encoder=StateEncoderConfig(name=state_encoder_name),
         env=EnvConfig(
             stack=1000,
             sb=5,
@@ -125,93 +158,70 @@ def print_bb_response_tables(trainer: SelfPlayTrainer, step: int):
     print("BIG BLIND RESPONSE TO SB ALL-IN")
     print("=" * 80)
 
-    # Create grids for BB responses
-    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+    # Create environment with all 169 hands
+    temp_env = create_169_hand_env(
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        bet_bins=trainer.cfg.env.bet_bins,
+        device=trainer.device,
+        rng=trainer.rng,
+        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
+    )
 
-    # Call probabilities (when facing all-in, BB can call or fold)
-    print("\n--- BB Call Probabilities vs SB All-in ---")
-    print("(When facing all-in, BB can call or fold)")
-    call_grid = []
-    header = "    " + " ".join(f"{rank:>2}" for rank in ranks)
-    call_grid.append(header)
-    call_grid.append("   " + "-" * 39)
+    # Set the button to BB (seat 1) and simulate SB all-in
+    temp_env.button[:] = 1  # p1 is button/SB
+    temp_env.to_act[:] = 1  # SB to act
 
-    for i, rank1 in enumerate(ranks):
-        row = [f"{rank1:>2} |"]
-        for j, rank2 in enumerate(ranks):
-            if i == j:
-                card1, card2 = f"{rank1}s", f"{rank1}h"  # Suited pair
-            elif i < j:
-                card1, card2 = f"{rank1}s", f"{rank2}h"  # Suited
-            else:
-                card1, card2 = f"{rank2}s", f"{rank1}d"  # Off-suit
+    # Simulate SB all-in action
+    step_sb_action(temp_env, "allin", trainer.device)
 
-            # Get call probability for BB (seat=1) when facing all-in
-            call_prob, _ = trainer._get_preflop_action_probability_and_value(
-                card1, card2, seat=1, metric="call"
-            )
-            row.append(f"{call_prob:>2}")
+    assert (temp_env.to_act == 0).all()
 
-        call_grid.append(" ".join(row))
+    # Get all the grids for BB response analysis
+    fold_grid_lines = get_preflop_range_grid(
+        temp_env,
+        trainer.model,
+        trainer.state_encoder,
+        seat=1,
+        metric="fold",
+        use_transformer_model=trainer.use_structured_embeddings,
+        device=trainer.device,
+    ).split("\n")
 
-    for line in call_grid:
-        print(line)
+    call_grid_lines = get_preflop_range_grid(
+        temp_env,
+        trainer.model,
+        trainer.state_encoder,
+        seat=1,
+        metric="call",
+        use_transformer_model=trainer.use_structured_embeddings,
+        device=trainer.device,
+    ).split("\n")
 
-    # Fold probabilities
-    print("\n--- BB Fold Probabilities vs SB All-in ---")
-    fold_grid = []
-    fold_grid.append(header)
-    fold_grid.append("   " + "-" * 39)
+    # Display BB response strategy in the same format as SB strategy
+    print("\n--- BB Response Strategy vs SB All-in ---")
 
-    for i, rank1 in enumerate(ranks):
-        row = [f"{rank1:>2} |"]
-        for j, rank2 in enumerate(ranks):
-            if i == j:
-                card1, card2 = f"{rank1}s", f"{rank1}h"  # Suited pair
-            elif i < j:
-                card1, card2 = f"{rank1}s", f"{rank2}h"  # Suited
-            else:
-                card1, card2 = f"{rank2}s", f"{rank1}d"  # Off-suit
-
-            # Get fold probability for BB (seat=1) when facing all-in
-            fold_prob, _ = trainer._get_preflop_action_probability_and_value(
-                card1, card2, seat=1, metric="fold"
-            )
-            row.append(f"{fold_prob:>2}")
-
-        fold_grid.append(" ".join(row))
-
-    for line in fold_grid:
-        print(line)
+    # First row: Fold | Call
+    print_combined_tables(
+        [
+            (fold_grid_lines, "Big blind (facing all-in) - fold (%)"),
+            (call_grid_lines, "Big blind (facing all-in) - call (%)"),
+        ]
+    )
 
     # Value estimates for BB when facing all-in
     print("\n--- BB Value Estimates vs SB All-in ---")
     print("BB value estimates when facing SB all-in (×100)")
-    value_grid = []
-    value_grid.append(header)
-    value_grid.append("   " + "-" * 39)
-
-    for i, rank1 in enumerate(ranks):
-        row = [f"{rank1:>2} |"]
-        for j, rank2 in enumerate(ranks):
-            if i == j:
-                card1, card2 = f"{rank1}s", f"{rank1}h"  # Suited pair
-            elif i < j:
-                card1, card2 = f"{rank1}s", f"{rank2}h"  # Suited
-            else:
-                card1, card2 = f"{rank2}s", f"{rank1}d"  # Off-suit
-
-            # Get value estimate for BB (seat=1) when facing all-in
-            _, value = trainer._get_preflop_action_probability_and_value(
-                card1, card2, seat=1, metric="call"
-            )
-            formatted_value = f"{value:5.2f}"
-            row.append(formatted_value)
-
-        value_grid.append(" ".join(row))
-
-    for line in value_grid:
-        print(line)
+    value_grid = get_preflop_value_grid(
+        temp_env,
+        trainer.model,
+        trainer.state_encoder,
+        seat=1,
+        use_transformer_model=trainer.use_structured_embeddings,
+        device=trainer.device,
+    )
+    print(value_grid)
 
 
 def create_169_hand_combinations():
@@ -258,7 +268,7 @@ def analyze_169_hands_vectorized(trainer: SelfPlayTrainer, sb_action: str = "all
     print(f"Total hands to analyze: 169")
 
     # Simulate SB action using debug utilities
-    simulate_sb_action(temp_env, sb_action, trainer.device)
+    step_sb_action(temp_env, sb_action, trainer.device)
 
     # Analyze BB responses using debug utilities
     analysis_results = analyze_bb_responses(

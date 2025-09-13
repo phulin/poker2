@@ -21,11 +21,16 @@ def create_169_hand_combinations() -> List[Tuple[str, str]]:
     ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
     hands = []
 
-    for rank1 in ranks:
-        for rank2 in ranks:
-            if rank1 < rank2:
+    for i, rank1 in enumerate(ranks):
+        for j, rank2 in enumerate(ranks):
+            if i == j:
+                # Same rank (pairs) - always suited
+                hands.append((f"{rank1}s", f"{rank1}h"))
+            elif i < j:
+                # Top-right triangle: suited hands (e.g., AKs, AQs)
                 hands.append((f"{rank1}s", f"{rank2}s"))
-            elif rank1 >= rank2:
+            else:
+                # Bottom-left triangle: off-suit hands (e.g., KAs, QAs)
                 hands.append((f"{rank1}s", f"{rank2}h"))
 
     return hands
@@ -78,9 +83,9 @@ def create_169_hand_env(
     # Reset the environment
     temp_env.reset()
 
-    # Set all environments to BB to act (seat 1)
-    temp_env.button[:] = 1  # BB is button
-    temp_env.to_act[:] = 1  # BB to act
+    # Set all environments to p0 = SB to act.
+    temp_env.button[:] = 0  # p0 is button/SB
+    temp_env.to_act[:] = 0  # p0 to act
 
     # Get all 169 hand combinations
     hands = create_169_hand_combinations()
@@ -90,8 +95,6 @@ def create_169_hand_env(
         # Convert card strings to integers (assuming standard mapping)
         card1_int = _card_str_to_int(card1)
         card2_int = _card_str_to_int(card2)
-        opp_card1_int = temp_env.hole_indices[i, 1, 0]
-        opp_card2_int = temp_env.hole_indices[i, 1, 1]
 
         # Convert cards to one-hot representation
         suit1, rank1 = card1_int // 13, card1_int % 13
@@ -111,20 +114,30 @@ def create_169_hand_env(
         # Get the full deck (0..51)
         full_deck = list(range(52))
         # Remove the two hole cards
-        deck_minus_hole = [
-            c
-            for c in full_deck
-            if c not in (card1_int, card2_int, opp_card1_int, opp_card2_int)
-        ]
+        deck_minus_hole = [c for c in full_deck if c not in (card1_int, card2_int)]
         # Shuffle the deck
         # Place the shuffled deck into temp_env.deck for this env
         temp_env.deck[i, 0] = card1_int
         temp_env.deck[i, 1] = card2_int
-        temp_env.deck[i, 2] = opp_card1_int
-        temp_env.deck[i, 3] = opp_card2_int
-        temp_env.deck[i, 4:9] = torch.tensor(deck_minus_hole, device=temp_env.device)[
-            torch.randperm(48)[:5]
+        temp_env.deck[i, 2:9] = torch.tensor(deck_minus_hole, device=temp_env.device)[
+            torch.randperm(50)[:7]
         ]
+
+        # Deal opponent hole cards
+        opp_card1_int = temp_env.deck[i, 2]
+        opp_card2_int = temp_env.deck[i, 3]
+
+        opp_suit1, opp_rank1 = opp_card1_int // 13, opp_card1_int % 13
+        opp_suit2, opp_rank2 = opp_card2_int // 13, opp_card2_int % 13
+
+        # Set hole cards in the tensor environment
+        temp_env.hole_onehot[i, 1, :, :, :] = False
+        temp_env.hole_onehot[i, 1, 0, opp_suit1, opp_rank1] = True
+        temp_env.hole_onehot[i, 1, 1, opp_suit2, opp_rank2] = True
+
+        # Set hole card indices
+        temp_env.hole_indices[i, 1, 0] = opp_card1_int
+        temp_env.hole_indices[i, 1, 1] = opp_card2_int
 
         # Set deck_pos to 4 (after hole cards)
         temp_env.deck_pos[i] = 4
@@ -164,7 +177,114 @@ def _card_str_to_int(card_str: str) -> int:
     return rank_map[rank] * 4 + suit_map[suit]
 
 
-def simulate_sb_action(
+def get_preflop_betting_grid(
+    env: HUNLTensorEnv,
+    model,
+    state_encoder,
+    seat: int = 0,
+    use_structured_embeddings: bool = False,
+    device: torch.device = None,
+) -> str:
+    """Get preflop betting probabilities as a grid showing all bet options combined.
+
+    Args:
+        env: HUNLTensorEnv with 169 environments (one for each preflop hand)
+        model: Trained model for prediction
+        state_encoder: State encoder for the model
+        seat: Seat position (0 for SB, 1 for BB)
+        use_structured_embeddings: Whether to use structured embeddings (transformer)
+        device: Device for tensor operations
+
+    Returns:
+        String representation of the preflop betting grid (all bet options combined)
+    """
+    if device is None:
+        device = env.device
+
+    # Create a 13x13 grid representing all possible hole card combinations
+    # Rows/cols: A, K, Q, J, T, 9, 8, 7, 6, 5, 4, 3, 2
+    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+
+    # Get model prediction using tensor environment
+    with torch.no_grad():
+        if use_structured_embeddings:
+            # For transformer models, use the transformer state encoder
+            from ..models.transformer.state_encoder import TransformerStateEncoder
+
+            temp_state_encoder = TransformerStateEncoder(env, device)
+            structured_data = temp_state_encoder.encode_tensor_states(
+                seat, torch.arange(169, device=device)  # All environments
+            )
+            outputs = model(structured_data)
+        else:
+            # For CNN models, use the existing state encoder
+            embedding_data = state_encoder.encode_tensor_states(
+                seat, torch.arange(169, device=device)  # All environments
+            )
+            outputs = model(embedding_data)
+
+        logits = outputs["policy_logits"]  # [169, num_bet_bins]
+
+        # Get legal actions from tensor environment
+        legal_masks = env.legal_bins_mask()  # [169, num_bet_bins]
+
+        # Apply legal mask
+        masked_logits = torch.where(
+            legal_masks == 0, torch.full_like(logits, -1e9), logits
+        )
+
+        # Get probabilities
+        probs = torch.softmax(masked_logits, dim=-1)  # [169, num_bet_bins]
+
+        # Sum all betting probabilities (exclude fold=0, call=1, and all-in=num_bet_bins-1)
+        # Betting actions are typically indices 2 through num_bet_bins-2 (excluding all-in)
+        num_bet_bins = logits.shape[1]
+        betting_probs = probs[:, 2 : num_bet_bins - 1].sum(
+            dim=1
+        )  # Sum bet actions excluding all-in [169]
+
+        # Convert to percentages and format
+        percentages = (betting_probs * 100).round().int()
+        prob_strings = []
+        for pct in percentages:
+            if pct >= 100:
+                prob_strings.append("99")  # Cap at 99%
+            else:
+                prob_strings.append(f"{pct.item():2d}")
+
+    # Initialize grid with betting probabilities
+    grid = []
+    header = "    " + " ".join(f"{rank:>2}" for rank in ranks)
+    grid.append(header)
+    grid.append("   " + "-" * 39)  # Separator line
+
+    # Create mapping from hand index to grid position
+    hand_to_index = {}
+    hands = create_169_hand_combinations()
+    for i, (card1, card2) in enumerate(hands):
+        # Convert to grid coordinates
+        rank1 = card1[:-1]
+        rank2 = card2[:-1]
+        grid_row = ranks.index(rank1)
+        grid_col = ranks.index(rank2)
+        hand_to_index[(grid_row, grid_col)] = i
+
+    for i, rank1 in enumerate(ranks):
+        row = [f"{rank1:>2} |"]
+        for j, rank2 in enumerate(ranks):
+            if (i, j) in hand_to_index:
+                hand_idx = hand_to_index[(i, j)]
+                prob_str = prob_strings[hand_idx]
+            else:
+                prob_str = " 0"  # Default if not found
+            row.append(prob_str)
+
+        grid.append(" ".join(row))
+
+    return "\n".join(grid)
+
+
+def step_sb_action(
     env: HUNLTensorEnv, sb_action: str = "allin", device: torch.device = None
 ) -> None:
     """Simulate a specific SB action across all environments.
@@ -189,3 +309,205 @@ def simulate_sb_action(
     elif sb_action == "bet":
         # SB bets (half pot) for all environments
         env.step_bins(torch.full((169,), 2, device=device))
+
+
+def get_preflop_range_grid(
+    env: HUNLTensorEnv,
+    model,
+    state_encoder,
+    seat: int = 0,
+    metric: str = "allin",
+    use_transformer_model: bool = False,
+    device: torch.device = None,
+) -> str:
+    """Get preflop range as a grid showing selected action probabilities.
+
+    Args:
+        env: HUNLTensorEnv with 169 environments (one for each preflop hand)
+        model: Trained model for prediction
+        state_encoder: State encoder for the model
+        seat: Seat position (0 for SB, 1 for BB)
+        metric: "allin", "call", or "fold"
+        use_transformer_model: Whether to use structured embeddings (transformer)
+        device: Device for tensor operations
+
+    Returns:
+        String representation of the preflop range grid
+    """
+    if device is None:
+        device = env.device
+
+    # Create a 13x13 grid representing all possible hole card combinations
+    # Rows/cols: A, K, Q, J, T, 9, 8, 7, 6, 5, 4, 3, 2
+    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+
+    # Get model prediction using tensor environment
+    with torch.no_grad():
+        if use_transformer_model:
+            # For transformer models, use the transformer state encoder
+            from ..models.transformer.state_encoder import TransformerStateEncoder
+
+            temp_state_encoder = TransformerStateEncoder(env, device)
+            structured_data = temp_state_encoder.encode_tensor_states(
+                seat, torch.arange(169, device=device)  # All environments
+            )
+            outputs = model(structured_data)
+        else:
+            # For CNN models, use the existing state encoder
+            embedding_data = state_encoder.encode_tensor_states(
+                seat, torch.arange(169, device=device)  # All environments
+            )
+            outputs = model(embedding_data)
+
+        logits = outputs["policy_logits"]  # [169, num_bet_bins]
+        values = outputs["value"]  # [169]
+
+        # Get legal actions from tensor environment
+        legal_masks = env.legal_bins_mask()  # [169, num_bet_bins]
+
+        # Apply legal mask
+        masked_logits = torch.where(
+            legal_masks == 0, torch.full_like(logits, -1e9), logits
+        )
+
+        # Get probabilities
+        probs = torch.softmax(masked_logits, dim=-1)  # [169, num_bet_bins]
+
+        # Select metric index
+        num_bet_bins = logits.shape[1]
+        if metric == "allin":
+            idx = num_bet_bins - 1  # Last bin is all-in
+        elif metric == "call":
+            idx = 1  # Second bin is call
+        elif metric == "fold":
+            idx = 0  # First bin is fold
+        else:
+            idx = num_bet_bins - 1
+
+        # Get probabilities for the selected metric
+        selected_probs = probs[:, idx]  # [169]
+
+        # Convert to percentages and format
+        percentages = (selected_probs * 100).round().int()
+        prob_strings = []
+        for pct in percentages:
+            if pct >= 100:
+                prob_strings.append("99")  # Cap at 99%
+            else:
+                prob_strings.append(f"{pct.item():2d}")
+
+    # Initialize grid with action probabilities
+    grid = []
+    header = "    " + " ".join(f"{rank:>2}" for rank in ranks)
+    grid.append(header)
+    grid.append("   " + "-" * 39)  # Separator line
+
+    # Create mapping from hand index to grid position
+    hand_to_index = {}
+    hands = create_169_hand_combinations()
+    for i, (card1, card2) in enumerate(hands):
+        # Convert to grid coordinates
+        rank1 = card1[:-1]
+        rank2 = card2[:-1]
+        grid_row = ranks.index(rank1)
+        grid_col = ranks.index(rank2)
+        hand_to_index[(grid_row, grid_col)] = i
+
+    for i, rank1 in enumerate(ranks):
+        row = [f"{rank1:>2} |"]
+        for j, rank2 in enumerate(ranks):
+            if (i, j) in hand_to_index:
+                hand_idx = hand_to_index[(i, j)]
+                prob_str = prob_strings[hand_idx]
+            else:
+                prob_str = " 0"  # Default if not found
+            row.append(prob_str)
+
+        grid.append(" ".join(row))
+
+    return "\n".join(grid)
+
+
+def get_preflop_value_grid(
+    env: HUNLTensorEnv,
+    model,
+    state_encoder,
+    seat: int = 0,
+    use_transformer_model: bool = False,
+    device: torch.device = None,
+) -> str:
+    """Get preflop value estimates as a grid showing value estimates.
+
+    Args:
+        env: HUNLTensorEnv with 169 environments (one for each preflop hand)
+        model: Trained model for prediction
+        state_encoder: State encoder for the model
+        seat: Seat position (0 for SB, 1 for BB)
+        use_transformer_model: Whether to use structured embeddings (transformer)
+        device: Device for tensor operations
+
+    Returns:
+        String representation of the preflop value grid
+    """
+    if device is None:
+        device = env.device
+
+    # Create a 13x13 grid representing all possible hole card combinations
+    # Rows/cols: A, K, Q, J, T, 9, 8, 7, 6, 5, 4, 3, 2
+    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+
+    # Get model prediction using tensor environment
+    with torch.no_grad():
+        if use_transformer_model:
+            # For transformer models, use the transformer state encoder
+            from ..models.transformer.state_encoder import TransformerStateEncoder
+
+            temp_state_encoder = TransformerStateEncoder(env, device)
+            structured_data = temp_state_encoder.encode_tensor_states(
+                seat, torch.arange(169, device=device)  # All environments
+            )
+            outputs = model(structured_data)
+        else:
+            # For CNN models, use the existing state encoder
+            embedding_data = state_encoder.encode_tensor_states(
+                seat, torch.arange(169, device=device)  # All environments
+            )
+            outputs = model(embedding_data)
+
+        values = outputs["value"]  # [169]
+
+        # Format value estimates (multiply by 100 for readability, round to 2 decimal places)
+        formatted_values = []
+        for value in values:
+            formatted_values.append(f"{value.item() * 100:5.2f}")
+
+    # Initialize grid with value estimates
+    grid = []
+    header = "    " + " ".join(f"{rank:>2}" for rank in ranks)
+    grid.append(header)
+    grid.append("   " + "-" * 39)  # Separator line
+
+    # Create mapping from hand index to grid position
+    hand_to_index = {}
+    hands = create_169_hand_combinations()
+    for i, (card1, card2) in enumerate(hands):
+        # Convert to grid coordinates
+        rank1 = card1[:-1]
+        rank2 = card2[:-1]
+        grid_row = ranks.index(rank1)
+        grid_col = ranks.index(rank2)
+        hand_to_index[(grid_row, grid_col)] = i
+
+    for i, rank1 in enumerate(ranks):
+        row = [f"{rank1:>2} |"]
+        for j, rank2 in enumerate(ranks):
+            if (i, j) in hand_to_index:
+                hand_idx = hand_to_index[(i, j)]
+                value_str = formatted_values[hand_idx]
+            else:
+                value_str = " 0.00"  # Default if not found
+            row.append(value_str)
+
+        grid.append(" ".join(row))
+
+    return "\n".join(grid)
