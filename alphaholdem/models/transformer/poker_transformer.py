@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Dict, Any, Optional, Tuple, Union
-from line_profiler import profile
+from ...utils.profiling import profile
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

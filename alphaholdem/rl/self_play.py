@@ -4,12 +4,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-try:
-    from line_profiler import profile
-except Exception:  # pragma: no cover
-
-    def profile(f):
-        return f
+from ..utils.profiling import profile
 
 
 import wandb

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Dict, Tuple, Optional, List, Any
-from line_profiler import profile
+from ...utils.profiling import profile
 import torch
 from enum import Enum
 

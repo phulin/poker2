@@ -4,12 +4,7 @@ import copy
 import random
 from typing import List, Optional, Tuple, Any
 
-try:
-    from line_profiler import profile
-except ImportError:  # pragma: no cover
-
-    def profile(f):
-        return f
+from ..utils.profiling import profile
 
 
 import torch

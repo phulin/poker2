@@ -4,12 +4,7 @@ import torch
 import torch.nn.functional as F
 from typing import Dict
 
-try:
-    from line_profiler import profile
-except ImportError:  # pragma: no cover
-
-    def profile(f):
-        return f
+from ..utils.profiling import profile
 
 
 @profile

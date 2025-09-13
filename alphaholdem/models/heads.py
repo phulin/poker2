@@ -4,12 +4,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 
-try:
-    from line_profiler import profile
-except ImportError:  # pragma: no cover
-
-    def profile(f):
-        return f
+from ..utils.profiling import profile
 
 
 from ..core.interfaces import Policy

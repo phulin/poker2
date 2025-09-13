@@ -4,12 +4,7 @@ from dataclasses import replace
 from typing import Any, Dict, List, Tuple
 import random
 
-try:
-    from line_profiler import profile
-except ImportError:  # pragma: no cover
-
-    def profile(f):
-        return f
+from ..utils.profiling import profile
 
 
 from .types import Action, GameState, PlayerState
