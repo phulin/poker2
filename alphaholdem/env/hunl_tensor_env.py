@@ -15,7 +15,7 @@ class HUNLTensorEnv:
       - stacks, committed, has_folded, is_allin: [N, 2]
       - pot, to_act, street, actions_this_round, min_raise: [N]
       - board_onehot: [N, 5, 4, 13], hole_onehot: [N, 2 players, 2 cards, 4, 13]
-      - done mask: [N] bool, winner: [N] in {0,1,-1}
+      - done mask: [N] bool, winner: [N] in {0,1,2}
 
     Decks are stored as a tensor [N, 52] with per-env draw positions [N].
     Discrete bin stepping is compatible with bet_bins.
@@ -382,7 +382,7 @@ class HUNLTensorEnv:
         pot_share = torch.where(
             winners == 0,
             pot,
-            torch.where(winners == -1, pot / 2.0, 0),
+            torch.where(winners == 2, pot / 2.0, 0),
         )
 
         return (my_stack + pot_share - float(self.starting_stack)) / self.scale
@@ -429,11 +429,13 @@ class HUNLTensorEnv:
         # -1 bet bin index means no action
         acting_mask = bin_indices >= 0
         acting = torch.where(acting_mask)[0]
+        if self.done[acting].any():
+            print(
+                f"Warning: trying to act while done in {self.done[acting].sum()} envs."
+            )
 
         if (to_call[acting] < 0).any():
-            print(
-                f"Warning: to_call < 0 in {torch.where(to_call[acting] < 0)[0].numel()} envs."
-            )
+            print(f"Warning: to_call < 0 in {(to_call[acting] < 0).sum()} envs.")
 
         # We've now acted since reset
         self.acted_since_reset[acting] = True
@@ -503,7 +505,8 @@ class HUNLTensorEnv:
         )
         # NB: Don't need to handle folds since then we're totally done with the hand
         round_closed = (
-            acting_mask
+            acting_mask  # must have acted
+            & ~self.done  # this will be newly true if we've folded.
             & (equal_committed | all_in_committed)
             & (self.actions_this_round >= 2)
         )
@@ -524,6 +527,29 @@ class HUNLTensorEnv:
             )  # Reset min_raise to big blind for new street
             # Advance street and deal
             s = self.street[round_closed_idx]
+
+            # showdown right after river (or flop in flop showdown mode)
+            sd_mask = s == (0 if self.flop_showdown else 2)
+            showdown_ids = round_closed_idx[sd_mask]
+            # Evaluate winners or award folds
+            # Vectorized showdown resolution for all showdown_ids at once
+
+            # Build one-hot 7-card planes for each player: 2 hole + 5 board
+            # Shape: [num_sd, 4, 13]
+            N_sd = showdown_ids.numel()
+            if N_sd > 0:
+                ab_plane = self.hole_onehot[showdown_ids].any(
+                    dim=2
+                ) | self.board_onehot[showdown_ids].any(dim=1).unsqueeze(1)
+                cmp = rules.compare_7_single_batch(ab_plane)  # shape [num_sd]
+                # Set winners
+                self.winner[showdown_ids[cmp > 0]] = 0
+                self.winner[showdown_ids[cmp < 0]] = 1
+                self.winner[showdown_ids[cmp == 0]] = 2
+
+                rewards[showdown_ids] = self.finish_and_assign_winners(
+                    showdown_ids, self.winner[showdown_ids]
+                )
 
             # flop (vectorized dealing of 3 cards)
             flop_mask = s == 0
@@ -564,35 +590,6 @@ class HUNLTensorEnv:
             self.board_onehot[river_ids, 4] = self.card_onehot_cache[c]
             # Set river card index
             self.board_indices[river_ids, 4] = c
-
-            # showdown
-            sd_mask = s == (0 if self.flop_showdown else 3)
-            showdown_ids = round_closed_idx[sd_mask]
-            # Evaluate winners or award folds
-            # Vectorized showdown resolution for all showdown_ids at once
-
-            # Only consider showdown_ids where neither player has folded
-            not_folded_mask = (~self.has_folded[showdown_ids, 0]) & (
-                ~self.has_folded[showdown_ids, 1]
-            )
-            not_folded_ids = showdown_ids[not_folded_mask]
-
-            # Build one-hot 7-card planes for each player: 2 hole + 5 board
-            # Shape: [num_sd, 4, 13]
-            N_sd = not_folded_ids.numel()
-            if N_sd > 0:
-                ab_plane = self.hole_onehot[not_folded_ids].any(
-                    dim=2
-                ) | self.board_onehot[not_folded_ids].any(dim=1).unsqueeze(1)
-                cmp = rules.compare_7_single_batch(ab_plane)  # shape [num_sd]
-                # Set winners
-                self.winner[not_folded_ids[cmp > 0]] = 0
-                self.winner[not_folded_ids[cmp < 0]] = 1
-                self.winner[not_folded_ids[cmp == 0]] = -1
-
-            rewards[showdown_ids] = self.finish_and_assign_winners(
-                showdown_ids, self.winner[showdown_ids]
-            )
 
             # Advance street
             self.street[round_closed_idx] += 1

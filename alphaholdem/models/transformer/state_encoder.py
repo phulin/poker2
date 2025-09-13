@@ -60,7 +60,9 @@ class TransformerStateEncoder:
 
         self.action_actors = torch.zeros(N, L, dtype=torch.uint8, device=device)
         self.action_streets = torch.zeros(N, L, dtype=torch.uint8, device=device)
-        self.action_legal_masks = torch.zeros(N, L, 8, dtype=torch.bool, device=device)
+        self.action_legal_masks = torch.zeros(
+            N, L, self.num_bet_bins, dtype=torch.bool, device=device
+        )
 
         # Consolidated context tensor [N, L, 10]
         self.context_features = torch.zeros(N, L, 10, dtype=torch.long, device=device)
@@ -91,14 +93,14 @@ class TransformerStateEncoder:
         )
 
         return StructuredEmbeddingData(
-            token_ids=self.token_ids[:M],
-            card_ranks=self.card_ranks[:M],
-            card_suits=self.card_suits[:M],
-            card_streets=self.card_streets[:M],
-            action_actors=self.action_actors[:M],
-            action_streets=self.action_streets[:M],
-            action_legal_masks=self.action_legal_masks[:M],
-            context_features=self.context_features[:M],
+            token_ids=self.token_ids[:M].clone(),
+            card_ranks=self.card_ranks[:M].clone(),
+            card_suits=self.card_suits[:M].clone(),
+            card_streets=self.card_streets[:M].clone(),
+            action_actors=self.action_actors[:M].clone(),
+            action_streets=self.action_streets[:M].clone(),
+            action_legal_masks=self.action_legal_masks[:M].clone(),
+            context_features=self.context_features[:M].clone(),
         )
 
     def _process_cards_vectorized(
@@ -143,11 +145,18 @@ class TransformerStateEncoder:
         action_history = self.tensor_env.get_action_history().view(
             N, 24, 4, self.num_bet_bins
         )[idxs]
-        action_count = action_history[:, :, :2, :].any(dim=3).float()  # [N, 24, 2]
-        action_actor = action_count.argmax(dim=2)  # [N, 24]
+
+        # Determine which player acted in each slot using argmax
+        # action_history[:, :, :2, :] gives us [M, 24, 2, num_bet_bins]
+        # .any(dim=3) gives us [M, 24, 2] - whether each player acted
+        action_count = action_history[:, :, :2, :].any(dim=3).float()  # [M, 24, 2]
+        # .argmax(dim=2) gives us [M, 24] - which player acted (0 or 1)
+        action_actor = action_count.argmax(dim=2)  # [M, 24]
+
         if player == 1:
-            # ALways present the state to the model as if we are player 0.
+            # Always present the state to the model as if we are player 0.
             action_actor = 1 - action_actor
+
         action_id = action_history[:, :, 3, :].float().argmax(dim=2)  # [N, 24]
 
         # Fill all 24 action slots (NO available_slots logic. DO NOT CHANGE THIS.)

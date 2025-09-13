@@ -19,6 +19,7 @@ from alphaholdem.rl.replay import (
     compute_gae_returns,
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.env.analyze_tensor_env import get_preflop_range_grid
 
 
 def test_replay_buffer_and_gae():
@@ -247,8 +248,16 @@ def test_preflop_range_grid():
         device=device,
     )
 
-    # Generate range grid
-    grid = trainer.get_preflop_range_grid(seat=0)
+    # Generate range grid using the new analyze_tensor_env functions
+    grid = get_preflop_range_grid(
+        model=trainer.model,
+        bin_index=0,  # Fold action
+        starting_stack=cfg.env.stack,
+        sb=cfg.env.sb,
+        bb=cfg.env.bb,
+        bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
 
     # Basic checks
     assert isinstance(grid, str), "Grid should be a string"

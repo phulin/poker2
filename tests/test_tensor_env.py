@@ -361,7 +361,7 @@ def test_reward_assignment_perspective():
         assert final_reward > 0, f"Player 0 won but reward is negative: {final_reward}"
     elif winner == 1:  # Player 1 won
         assert final_reward < 0, f"Player 1 won but reward is positive: {final_reward}"
-    elif winner == -1:  # Tie
+    elif winner == 2:  # Tie
         assert (
             abs(final_reward) < 0.01
         ), f"Tie but reward is not near zero: {final_reward}"
@@ -402,7 +402,7 @@ def test_reward_assignment_perspective():
             assert reward > 0, f"Env {i}: Player 0 won but reward is negative: {reward}"
         elif winner == 1:  # Player 1 won
             assert reward < 0, f"Env {i}: Player 1 won but reward is positive: {reward}"
-        elif winner == -1:  # Tie
+        elif winner == 2:  # Tie
             assert (
                 abs(reward) < 0.01
             ), f"Env {i}: Tie but reward is not near zero: {reward}"
@@ -520,7 +520,7 @@ def test_reward_calculation_consistency():
             assert (
                 reward < 0
             ), f"Env {i}: Player 1 won but reward is positive: {reward} (last actor: {last_actor})"
-        elif winner == -1:  # Tie
+        elif winner == 2:  # Tie
             assert (
                 abs(reward) < 0.01
             ), f"Env {i}: Tie but reward is not near zero: {reward} (last actor: {last_actor})"
@@ -616,67 +616,16 @@ def test_flop_showdown_skips_turn_river():
 
     # Play through preflop betting
     for _ in range(2):  # SB and BB actions
-        mask = env.legal_bins_mask()
         actions = torch.tensor([1, 1], device=env.device)  # Check/call
-        r, d, _ = env.step_bins(actions)
+        _, d, _ = env.step_bins(actions)
         if d.all():
             break
 
     # Should be on flop now (street 1)
-    assert torch.all(env.street == 1), f"Expected street 1 (flop), got {env.street}"
-
-    # Play through flop betting
-    for _ in range(2):  # Button and BB actions
-        mask = env.legal_bins_mask()
-        actions = torch.tensor([1, 1], device=env.device)  # Check/call
-        r, d, _ = env.step_bins(actions)
-        if d.all():
-            break
-
-    # Should go directly to showdown (street 4), skipping turn (2) and river (3)
+    assert torch.all(
+        env.street == 1
+    ), f"Expected street 1 (flop/showdown), got {env.street}"
     assert torch.all(env.done), f"Expected all games to be done, got {env.done}"
-    assert torch.all(env.street >= 2), f"Expected street >= 2, got {env.street}"
-
-
-def test_flop_showdown_vs_normal_mode():
-    """Test that flop_showdown mode behaves differently from normal mode."""
-    # Test flop_showdown mode
-    env_flop = _make_flop_showdown_env(N=1, seed=123, flop_showdown=True)
-
-    # Play through to completion
-    steps = 0
-    while not env_flop.done.item() and steps < 20:
-        mask = env_flop.legal_bins_mask()
-        action = 1 if mask[0, 1] else 0  # Check/call or fold
-        r, d, _ = env_flop.step_bins(torch.tensor([action], device=env_flop.device))
-        steps += 1
-
-    flop_final_street = env_flop.street.item()
-    flop_done = env_flop.done.item()
-
-    # Test normal mode
-    env_normal = _make_flop_showdown_env(N=1, seed=123, flop_showdown=False)
-
-    # Play through to completion
-    steps = 0
-    while not env_normal.done.item() and steps < 20:
-        mask = env_normal.legal_bins_mask()
-        action = 1 if mask[0, 1] else 0  # Check/call or fold
-        r, d, _ = env_normal.step_bins(torch.tensor([action], device=env_normal.device))
-        steps += 1
-
-    normal_final_street = env_normal.street.item()
-    normal_done = env_normal.done.item()
-
-    # Both should be done
-    assert flop_done and normal_done, "Both modes should complete games"
-
-    # Flop showdown should reach showdown earlier (lower street number)
-    # In flop showdown: preflop(0) -> flop(1) -> showdown(4+)
-    # In normal: preflop(0) -> flop(1) -> turn(2) -> river(3) -> showdown(4+)
-    assert (
-        flop_final_street < normal_final_street
-    ), f"Flop showdown should reach showdown earlier: flop={flop_final_street}, normal={normal_final_street}"
 
 
 def test_flop_showdown_board_cards():
@@ -685,31 +634,27 @@ def test_flop_showdown_board_cards():
 
     # Play through preflop
     for _ in range(2):
-        mask = env.legal_bins_mask()
-        if mask[0, 1]:
-            r, d, _ = env.step_bins(torch.tensor([1], device=env.device))
-            if d.item():
-                break
+        r, d, _ = env.step_bins(torch.tensor([1], device=env.device))
 
     # Should be on flop with 3 board cards
-    if env.street.item() >= 1:
-        board_cards = env.board_onehot[0].sum(dim=(1, 2))  # Sum over suits and ranks
-        flop_cards = board_cards[:3]  # First 3 positions (flop)
-        turn_card = board_cards[3]  # Turn position
-        river_card = board_cards[4]  # River position
+    board_cards = env.board_onehot[0].sum(dim=(1, 2))  # Sum over suits and ranks
+    flop_cards = board_cards[:3]  # First 3 positions (flop)
+    turn_card = board_cards[3]  # Turn position
+    river_card = board_cards[4]  # River position
 
-        # Flop cards should be set
-        assert torch.all(flop_cards > 0), f"Flop cards should be set, got {flop_cards}"
+    # Flop cards should be exactly [1, 1, 1]
+    assert torch.equal(
+        flop_cards, torch.tensor([1, 1, 1], device=flop_cards.device)
+    ), f"Flop cards should be [1, 1, 1], got {flop_cards}"
 
-        # In flop showdown mode, turn and river cards should not be set initially
-        # (they might be set later when we reach showdown, but not during flop betting)
-        if env.street.item() == 1:  # Still on flop
-            assert (
-                turn_card.item() == 0
-            ), f"Turn card should not be set during flop betting, got {turn_card}"
-            assert (
-                river_card.item() == 0
-            ), f"River card should not be set during flop betting, got {river_card}"
+    # In flop showdown mode, turn and river cards should not be set initially
+    # (they might be set later when we reach showdown, but not during flop betting)
+    assert (
+        turn_card.item() == 0
+    ), f"Turn card should not be set during flop betting, got {turn_card}"
+    assert (
+        river_card.item() == 0
+    ), f"River card should not be set during flop betting, got {river_card}"
 
 
 def test_flop_showdown_multiple_environments():
@@ -735,11 +680,11 @@ def test_flop_showdown_multiple_environments():
     assert torch.all(env.done), f"Expected all environments to be done, got {env.done}"
 
     # All should have reached showdown (street >= 2)
-    assert torch.all(env.street >= 2), f"Expected all streets >= 2, got {env.street}"
+    assert torch.all(env.street == 1), f"Expected all streets == 1, got {env.street}"
 
     # Winners should be assigned
-    assert torch.all(env.winner != 0) or torch.any(
-        env.winner != 0
+    assert torch.all(
+        (env.winner >= 0) & (env.winner <= 2)
     ), f"Expected winners to be assigned, got {env.winner}"
 
 
@@ -779,7 +724,7 @@ def test_flop_showdown_rewards():
                 assert (
                     reward < 0
                 ), f"Env {i}: Player 1 won but reward is positive: {reward}"
-            elif winner == -1:  # Tie
+            elif winner == 2:  # Tie
                 assert (
                     abs(reward) < 0.01
                 ), f"Env {i}: Tie but reward is not near zero: {reward}"
