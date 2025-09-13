@@ -10,8 +10,7 @@ This implements a more sophisticated opponent pool that considers:
 
 from __future__ import annotations
 
-import copy
-import random
+from dataclasses import dataclass
 from typing import Any, List, Optional
 
 import torch
@@ -19,9 +18,19 @@ import torch.nn as nn
 
 from ..core.interfaces import OpponentPool
 from ..utils.profiling import profile
+from ..utils.kl_divergence import compute_kl_divergence
 from .agent_snapshot import AgentSnapshot
 from .elo_calculator import ELOCalculator
 from .kmedoids import SimpleKMedoids
+
+
+@dataclass
+class DREDSnapshotData:
+    """Data associated with a DRED snapshot."""
+
+    age: int = 0
+    alpha: float = 1.0
+    beta: float = 1.0
 
 
 class DREDPool(OpponentPool):
@@ -38,7 +47,7 @@ class DREDPool(OpponentPool):
 
     def __init__(
         self,
-        max_size: int = 500,
+        max_size: int = 100,
         beta: float = 0.02,
         lam: float = 0.003,
         tau: float = 1.0,
@@ -84,6 +93,9 @@ class DREDPool(OpponentPool):
         self.recent_opponents: List[torch.Tensor] = (
             []
         )  # Store embeddings of last K opponents
+
+        # Track last admitted snapshot for step-based admission
+        self.last_admitted_step: int = -1
 
         # Initialize embedding generator (simple MLP)
         self._init_embedding_generator()
@@ -136,8 +148,6 @@ class DREDPool(OpponentPool):
 
         # Sample with DRED weighting
         weights = self._calculate_weights()
-        if weights is None:
-            return random.sample(self.snapshots, min(k, len(self.snapshots)))
 
         # Sample with replacement using DRED weights
         sampled_indices = torch.multinomial(weights, num_samples=k, replacement=True)
@@ -157,7 +167,7 @@ class DREDPool(OpponentPool):
     def _calculate_weights(self) -> Optional[torch.Tensor]:
         """Calculate DRED sampling weights for all snapshots."""
         if not self.snapshots:
-            return None
+            raise ValueError("No snapshots available")
 
         n = len(self.snapshots)
 
@@ -166,9 +176,7 @@ class DREDPool(OpponentPool):
         skill_weights = torch.exp(self.beta * elos)
 
         # Age-based decay
-        ages = torch.tensor(
-            [s.data.get("age", 0) for s in self.snapshots], dtype=torch.float32
-        )
+        ages = torch.tensor([s.data.age for s in self.snapshots], dtype=torch.float32)
         age_weights = torch.exp(-self.lam * ages)
 
         # Difficulty estimation via Beta distribution
@@ -176,7 +184,6 @@ class DREDPool(OpponentPool):
         difficulties = []
         for s in self.snapshots:
             if s.games_played > 0:
-                win_rate = s.wins / s.games_played
                 # Convert to Beta parameters (simplified)
                 alpha = s.wins + 1
                 beta_param = s.losses + 1
@@ -239,7 +246,7 @@ class DREDPool(OpponentPool):
             model=model,
             step=step,
             elo=rating if rating is not None else self.current_elo,
-            data={"age": 0, "alpha": 1.0, "beta": 1.0},  # DRED-specific data
+            data=DREDSnapshotData(),  # DRED-specific data
         )
 
         # Reduce memory footprint of snapshot models
@@ -250,10 +257,13 @@ class DREDPool(OpponentPool):
         # Add to snapshots list
         self.snapshots.append(new_snapshot)
 
+        # Update tracking for admission criteria (only when actually adding)
+        self.last_admitted_step = step
+
         # Age all other snapshots
         for snapshot in self.snapshots:
             if snapshot is not new_snapshot:
-                snapshot.data["age"] = snapshot.data.get("age", 0) + 1
+                snapshot.data.age += 1
 
         # Prune if over capacity
         if len(self.snapshots) > self.max_size:
@@ -262,25 +272,24 @@ class DREDPool(OpponentPool):
     def _prune(self):
         """Prune snapshots using DRED strategy."""
         n = len(self.snapshots)
-        keep_indices = set()
 
         # Keep top ELO 10%
         top_count = max(1, n // 10)
         elos = torch.tensor([s.elo for s in self.snapshots])
-        top_indices = torch.argsort(-elos)[:top_count]
-        keep_indices.update(top_indices.tolist())
+        sorted_indices = torch.argsort(-elos)
+        top_indices = sorted_indices[:top_count]
+        remaining_indices = sorted_indices[top_count:]
 
-        # K-medoids clustering on embeddings for remainder
-        remaining_indices = [i for i in range(n) if i not in keep_indices]
+        keep_indices = set(top_indices.tolist())
 
-        if remaining_indices and len(remaining_indices) > 1:
+        if remaining_indices and remaining_indices.numel() > 1:
             # Generate embeddings for remaining snapshots
             embeddings = torch.stack(
                 [self._generate_embedding(self.snapshots[i]) for i in remaining_indices]
             )
 
-            # Cluster count (up to 60 clusters)
-            k_clusters = min(60, len(remaining_indices))
+            # Cluster count (up to 20 clusters)
+            k_clusters = min(20, len(remaining_indices))
 
             if k_clusters > 1:
                 # Use our custom k-medoids implementation
@@ -331,11 +340,10 @@ class DREDPool(OpponentPool):
 
         # Update DRED-specific stats
         if result == "win":
-            opponent.data["alpha"] = opponent.data.get("alpha", 1.0) + 1
+            opponent.data.alpha += 1
         elif result == "loss":
-            opponent.data["beta"] = opponent.data.get("beta", 1.0) + 1
+            opponent.data.beta += 1
 
-    @profile
     def update_elo_batch_vectorized(
         self,
         opponent: AgentSnapshot,
@@ -357,7 +365,7 @@ class DREDPool(OpponentPool):
         )
 
         # Update opponent ELO (opposite change)
-        temp_snapshot = AgentSnapshot(opponent.model, opponent.step, self.current_elo)
+        temp_snapshot = AgentSnapshot(None, -1, self.current_elo)
         opponent.elo = self.elo_calculator.update_elo_batch_vectorized(
             opponent.elo, temp_snapshot, -rewards
         )
@@ -365,14 +373,45 @@ class DREDPool(OpponentPool):
         # Update DRED-specific stats
         wins = (rewards > 0).sum().item()
         losses = (rewards < 0).sum().item()
-        opponent.data["alpha"] = opponent.data.get("alpha", 1.0) + wins
-        opponent.data["beta"] = opponent.data.get("beta", 1.0) + losses
+        opponent.data.alpha += wins
+        opponent.data.beta += losses
 
     def get_best_snapshot(self) -> Optional[AgentSnapshot]:
         """Get the snapshot with the highest ELO rating."""
         if not self.snapshots:
             return None
         return max(self.snapshots, key=lambda s: s.elo)
+
+    def should_add_snapshot(
+        self, current_step: int, kl_divergence: float = 0.0
+    ) -> bool:
+        """
+        Determine if a new snapshot should be added to the pool.
+
+        Args:
+            current_step: Current training step
+            kl_divergence: KL divergence from the last training step
+
+        Returns:
+            True if the snapshot should be added
+        """
+
+        # Always add if current ELO is significantly higher than best snapshot
+        best_snapshot = self.get_best_snapshot()
+        if best_snapshot is None or self.current_elo > best_snapshot.elo + 10:
+            return True
+
+        # Check if enough steps have passed since last admission
+        steps_since_last = current_step - self.last_admitted_step
+        if steps_since_last >= 10:
+            return True
+
+        # Check if KL divergence is significant enough
+        kl_threshold = 0.1  # Threshold for significant policy change
+        if kl_divergence > kl_threshold:
+            return True
+
+        return False
 
     def get_pool_stats(self) -> dict:
         """Get statistics about the opponent pool."""
@@ -388,14 +427,14 @@ class DREDPool(OpponentPool):
             }
 
         elos = [snapshot.elo for snapshot in self.snapshots]
-        ages = [snapshot.data.get("age", 0) for snapshot in self.snapshots]
+        ages = [snapshot.data.age for snapshot in self.snapshots]
 
         # Calculate average difficulty
         difficulties = []
         for snapshot in self.snapshots:
             if snapshot.games_played > 0:
-                alpha = snapshot.data.get("alpha", snapshot.wins + 1)
-                beta_param = snapshot.data.get("beta", snapshot.losses + 1)
+                alpha = snapshot.data.alpha
+                beta_param = snapshot.data.beta
                 p = alpha / (alpha + beta_param)
                 difficulties.append(p)
             else:

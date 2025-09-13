@@ -204,12 +204,17 @@ class KBestOpponentPool(OpponentPool):
             "best_snapshot_elo": self.snapshots[0].elo,
         }
 
-    def should_add_snapshot(self, current_step: int) -> bool:
+    def should_add_snapshot(
+        self,
+        current_step: int,
+        kl_divergence: float = 0.0,
+    ) -> bool:
         """
         Determine if a new snapshot should be added to the pool.
 
         Args:
             current_step: Current training step
+            kl_divergence: KL divergence from the last training step (unused for K-Best)
 
         Returns:
             True if the snapshot should be added

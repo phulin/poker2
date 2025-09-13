@@ -18,6 +18,7 @@ from ..models.state_encoder import CNNStateEncoder
 from ..models.transformer.embedding_data import StructuredEmbeddingData
 from ..rl.agent_snapshot import AgentSnapshot
 from ..rl.k_best_pool import KBestOpponentPool
+from ..rl.dred_pool import DREDPool
 from ..rl.losses import trinal_clip_ppo_loss
 from ..rl.replay import Trajectory, Transition
 from ..rl.vectorized_replay import VectorizedReplayBuffer
@@ -139,13 +140,22 @@ class SelfPlayTrainer:
             sequence_length=sequence_length,  # Sequence length for transformer models
         )
 
-        # K-Best opponent pool
-        self.opponent_pool = KBestOpponentPool(
-            k=self.k_best_pool_size,
-            min_elo_diff=self.min_elo_diff,
-            min_step_diff=self.min_step_diff,
-            k_factor=self.k_factor,
-        )
+        # Initialize opponent pool based on configuration
+        if self.opponent_pool_type == "k_best":
+            self.opponent_pool = KBestOpponentPool(
+                k=self.k_best_pool_size,
+                min_elo_diff=self.min_elo_diff,
+                min_step_diff=self.min_step_diff,
+                k_factor=self.k_factor,
+            )
+        elif self.opponent_pool_type == "dred":
+            self.opponent_pool = DREDPool(
+                max_size=self.k_best_pool_size * 10,  # DRED can handle larger pools
+                embedding_dim=128,
+                k_factor=self.k_factor,
+            )
+        else:
+            raise ValueError(f"Unknown opponent pool type: {self.opponent_pool_type}")
 
         # Optimizer with different learning rates for different components
         # CNN layers (cards_trunk) need lower learning rate to prevent gradient explosion
@@ -663,6 +673,45 @@ class SelfPlayTrainer:
                         # Slice rewards tensor directly - no .item() calls needed
                         opponent_rewards = per_env_rewards[done_env_idxs_for_opponent]
 
+                        # Compute KL divergence between current model and opponent model
+                        kl_divergence = 0.0
+                        if hasattr(self, "_compute_kl_with_opponent"):
+                            try:
+                                # Use a subset of the batch for KL computation
+                                subset_size = min(
+                                    64, done_env_idxs_for_opponent.numel()
+                                )
+                                subset_indices = done_env_idxs_for_opponent[
+                                    :subset_size
+                                ]
+
+                                # Get states for KL computation
+                                kl_states = self._encode_tensor_states(
+                                    player=0, idxs=subset_indices
+                                )
+
+                                # Get current model logits
+                                with torch.no_grad():
+                                    current_outputs = self.model(kl_states)
+                                    current_logits = current_outputs["policy_logits"]
+
+                                # Get opponent model logits
+                                with torch.no_grad():
+                                    opponent_outputs = opponent.model(kl_states)
+                                    opponent_logits = opponent_outputs["policy_logits"]
+
+                                # Compute KL divergence
+                                from ..utils.kl_divergence import (
+                                    compute_kl_divergence_batch,
+                                )
+
+                                kl_divergence = compute_kl_divergence_batch(
+                                    current_logits, opponent_logits, subset_size
+                                )
+                            except Exception as e:
+                                print(f"Warning: Could not compute KL divergence: {e}")
+                                kl_divergence = 0.0
+
                         # Update ELO for this opponent with all their games
                         self.opponent_pool.update_elo_batch_vectorized(
                             opponent,
@@ -953,7 +1002,8 @@ class SelfPlayTrainer:
         update_stats = self.update_model()
 
         # Check if we should add current model to opponent pool
-        if self.opponent_pool.should_add_snapshot(step):
+        approx_kl = update_stats.get("approx_kl", 0.0)
+        if self.opponent_pool.should_add_snapshot(step, approx_kl):
             self.opponent_pool.add_snapshot(self.model, step)
 
         # Prepare training stats for return and logging
@@ -1001,9 +1051,11 @@ class SelfPlayTrainer:
             min_steps: Minimum number of steps to add to replay buffer
         """
         if self.use_tensor_env:
+            # Sample 10 opponents for replay buffer filling
+            sampled_opponents = self.opponent_pool.sample(k=10)
             total_reward, trajectory_count, _ = self.collect_tensor_trajectories(
                 min_steps,
-                all_opponent_snapshots=self.opponent_pool.snapshots,
+                all_opponent_snapshots=sampled_opponents,
             )
 
             self.total_step_reward += total_reward

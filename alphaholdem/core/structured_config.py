@@ -94,6 +94,7 @@ class StateEncoderConfig:
 class Config:
     # Training parameters
     num_steps: int = 2000
+    opponent_pool_type: str = "k_best"  # "k_best" or "dred"
     k_best_pool_size: int = 10
     min_elo_diff: float = 50.0
     min_step_diff: int = (
