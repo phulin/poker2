@@ -200,7 +200,7 @@ def print_bb_response_tables(trainer: SelfPlayTrainer, step: int):
 
     # Value estimates for BB when facing all-in
     print("\n--- BB Value Estimates vs SB All-in ---")
-    print("BB value estimates when facing SB all-in (×100)")
+    print("BB value estimates when facing SB all-in (×1000)")
     value_grid = get_preflop_value_grid_bb_response(
         trainer.model,
         device=trainer.device,

@@ -153,7 +153,7 @@ def print_preflop_range_grid(
 
     # Print value estimates grid
     print("--- Preflop Value Estimates (Step {}) ---".format(step))
-    print("Small blind (first) - value estimates (×100)")
+    print("Small blind (first) - value estimates (×1000)")
 
     value_grid = get_preflop_value_grid(
         trainer.model,

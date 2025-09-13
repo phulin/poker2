@@ -252,7 +252,7 @@ def _card_str_to_int(card_str: str) -> int:
 
 
 def _create_169_grid(
-    values: torch.Tensor, value_type: str = "probability", default_value: str = " 0"
+    values: torch.Tensor, value_type: str = "probability", default_value: str = " 0.0"
 ) -> str:
     """Create a standardized 13x13 grid for 169 preflop hands.
 
@@ -279,10 +279,11 @@ def _create_169_grid(
             else:
                 formatted_values.append(f"{pct.item():2d}")
     elif value_type == "value":
-        # Format value estimates (multiply by 100 for readability, round to 2 decimal places)
+        # Format value estimates (multiply by 1000 for readability, show 3 sig figs, max 4 chars)
         formatted_values = []
         for value in values:
-            formatted_values.append(f"{value.item() * 100:5.2f}")
+            val_scaled = value.item() * 1000
+            formatted_values.append(f"{val_scaled:4.0f}")
     else:  # raw
         # Use values as-is (assumes they're already formatted strings)
         formatted_values = values
@@ -558,7 +559,7 @@ def get_preflop_value_grid_bb_response(
     # Get probabilities and values
     _, values, _ = get_probabilities(model, state_encoder, env, 0, device)
 
-    return _create_169_grid(values, "value", " 0.00")
+    return _create_169_grid(values, "value", " 0.0")
 
 
 def get_preflop_value_grid(
@@ -606,4 +607,4 @@ def get_preflop_value_grid(
     # Get probabilities and values
     _, values, _ = get_probabilities(model, state_encoder, env, 0, device)
 
-    return _create_169_grid(values, "value", " 0.00")
+    return _create_169_grid(values, "value", " 0.0")
