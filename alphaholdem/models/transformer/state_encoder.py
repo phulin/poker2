@@ -145,6 +145,9 @@ class TransformerStateEncoder:
         )[idxs]
         action_count = action_history[:, :, :2, :].any(dim=3).float()  # [N, 24, 2]
         action_actor = action_count.argmax(dim=2)  # [N, 24]
+        if player == 1:
+            # ALways present the state to the model as if we are player 0.
+            action_actor = 1 - action_actor
         action_id = action_history[:, :, 3, :].float().argmax(dim=2)  # [N, 24]
 
         # Fill all 24 action slots (NO available_slots logic. DO NOT CHANGE THIS.)

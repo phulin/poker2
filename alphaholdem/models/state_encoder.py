@@ -38,7 +38,7 @@ class CNNStateEncoder:
         M = idxs.numel()
         env_indices = idxs
 
-        hole_cards = self.tensor_env.hole_onehot[env_indices, 0]  # [M, 2, 4, 13]
+        hole_cards = self.tensor_env.hole_onehot[env_indices, player]  # [M, 2, 4, 13]
         board_cards = self.tensor_env.board_onehot[env_indices]  # [M, 5, 4, 13]
 
         # Initialize cards tensor as bool with correct batch size
@@ -69,6 +69,10 @@ class CNNStateEncoder:
         # Reshape to match ActionsHUEncoderV1 format: [M, 24_channels, 4_players, num_bet_bins]
         # Flatten streets and slots: [M, 4*6, 4, num_bet_bins] = [M, 24, 4, num_bet_bins]
         actions = action_history.view(M, 24, 4, self.num_bet_bins)
+        if player == 1:
+            # Always present the state to the model as if the model is player 0.
+            actions = actions.clone()
+            actions[:, :, [0, 1], :] = actions[:, :, [1, 0], :]
 
         return CNNEmbeddingData(
             cards=cards,

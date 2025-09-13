@@ -128,7 +128,7 @@ class SelfPlayTrainer:
 
         # Use vectorized replay buffer for efficient tensor operations
         sequence_length = (
-            self.state_encoder.get_sequence_length() if is_transformer else 50
+            self.state_encoder.get_sequence_length() if is_transformer else -1
         )
         self.replay_buffer = VectorizedReplayBuffer(
             capacity=buffer_capacity,  # Number of trajectories
