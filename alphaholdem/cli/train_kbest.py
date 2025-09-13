@@ -12,6 +12,7 @@ import torch
 import hydra
 from ..core.structured_config import Config
 from ..rl.self_play import SelfPlayTrainer
+from ..utils.config_loader import load_config_from_checkpoint
 
 # Import encoders and models to register them
 from ..models import cnn, heads
@@ -59,25 +60,32 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
     else:
         print("⚠️ Using CPU (GPU not available)")
 
-    # Load checkpoint if specified to get wandb run ID
+    # Load checkpoint if specified to get wandb run ID and merge config
     start_step = 0
     wandb_run_id_from_checkpoint = None
+    merged_config = cfg  # Default to CLI config
+
     if cfg.resume_from and os.path.exists(cfg.resume_from):
-        print(f"Loading checkpoint to extract wandb run ID: {cfg.resume_from}")
+        print(
+            f"Loading checkpoint to extract config and wandb run ID: {cfg.resume_from}"
+        )
+
+        # Load config from checkpoint and merge with CLI overrides
+        merged_config = load_config_from_checkpoint(cfg.resume_from, cfg)
+
+        # Extract wandb run ID from checkpoint
         checkpoint = torch.load(
             cfg.resume_from, weights_only=False, map_location=device
         )
         wandb_run_id_from_checkpoint = checkpoint.get("wandb_run_id")
         if wandb_run_id_from_checkpoint:
             print(f"Found wandb run ID in checkpoint: {wandb_run_id_from_checkpoint}")
+            merged_config.wandb_run_id = wandb_run_id_from_checkpoint
         else:
             print("No wandb run ID found in checkpoint")
 
-    # Initialize trainer with K-Best pool - pass Hydra config directly
-    # Override wandb_run_id if we found one in checkpoint
-    if wandb_run_id_from_checkpoint:
-        cfg.wandb_run_id = wandb_run_id_from_checkpoint
-    trainer = SelfPlayTrainer(cfg=cfg, device=device)
+    # Initialize trainer with merged config
+    trainer = SelfPlayTrainer(cfg=merged_config, device=device)
 
     # Load checkpoint if specified (after trainer initialization for wandb resumption)
     if cfg.resume_from and os.path.exists(cfg.resume_from):

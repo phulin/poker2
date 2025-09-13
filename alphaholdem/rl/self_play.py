@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from ..utils.profiling import profile
+from ..utils.config_loader import load_config_from_checkpoint
 
 
 import wandb
@@ -1071,6 +1072,9 @@ class SelfPlayTrainer:
             "wandb_run_id": wandb.run.id if self.use_wandb and wandb.run else None,
             # Store wandb step for consistent logging
             "wandb_step": self.wandb_step,
+            # Store full config for complete restoration
+            "full_config": self.cfg,
+            # Legacy config for backward compatibility
             "config": {
                 "num_bet_bins": self.num_bet_bins,
                 "batch_size": self.batch_size,
