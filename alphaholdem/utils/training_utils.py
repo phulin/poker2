@@ -235,6 +235,36 @@ def print_training_stats(
         if segs:
             print("  " + " | ".join(segs))
 
+    # Print pool stats
+    pool_stats = stats.get("pool_stats")
+    if pool_stats:
+        # Build pool stats line
+        pool_parts = []
+        pool_parts.append(f"Pool Size: {pool_stats.get('pool_size', 0)}")
+        pool_parts.append(f"Current ELO: {pool_stats.get('current_elo', 0):.1f}")
+        pool_parts.append(f"Avg ELO: {pool_stats.get('avg_elo', 0):.1f}")
+        pool_parts.append(
+            f"ELO Range: {pool_stats.get('min_elo', 0):.1f}-{pool_stats.get('max_elo', 0):.1f}"
+        )
+
+        # DREDPool specific stats
+        if "avg_age" in pool_stats:
+            pool_parts.append(f"Avg Age: {pool_stats.get('avg_age', 0):.1f}")
+            pool_parts.append(
+                f"Avg Difficulty: {pool_stats.get('avg_difficulty', 0):.3f}"
+            )
+            pool_parts.append(
+                f"Recent Opponents: {pool_stats.get('recent_opponents_count', 0)}"
+            )
+
+        # KBestPool specific stats
+        if "best_snapshot_step" in pool_stats:
+            pool_parts.append(
+                f"Best Snapshot: Step {pool_stats.get('best_snapshot_step', 0)}, ELO {pool_stats.get('best_snapshot_elo', 0):.1f}"
+            )
+
+        print(f"📊 Pool Stats: {' | '.join(pool_parts)}")
+
 
 def print_evaluation_results(eval_results: dict):
     """
