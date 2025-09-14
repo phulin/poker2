@@ -230,46 +230,38 @@ class TransformerStateEncoder:
 
         # Assign each context feature individually
         self.context_features[:M, k + Context.POT.value, Context.POT.value] = (
-            self.tensor_env.pot[idxs].float().unsqueeze(1)
+            self.tensor_env.pot[idxs].float()
         )
         self.context_features[
             :M, k + Context.STACK_P0.value, Context.STACK_P0.value
-        ] = (self.tensor_env.stacks[idxs, player].float().unsqueeze(1))
+        ] = self.tensor_env.stacks[idxs, player].float()
         self.context_features[
             :M, k + Context.STACK_P1.value, Context.STACK_P1.value
-        ] = (self.tensor_env.stacks[idxs, 1 - player].float().unsqueeze(1))
+        ] = self.tensor_env.stacks[idxs, 1 - player].float()
         self.context_features[
             :M, k + Context.COMMITTED_P0.value, Context.COMMITTED_P0.value
-        ] = (self.tensor_env.committed[idxs, player].float().unsqueeze(1))
+        ] = self.tensor_env.committed[idxs, player].float()
         self.context_features[
             :M, k + Context.COMMITTED_P1.value, Context.COMMITTED_P1.value
-        ] = (self.tensor_env.committed[idxs, 1 - player].float().unsqueeze(1))
+        ] = self.tensor_env.committed[idxs, 1 - player].float()
         self.context_features[
             :M, k + Context.POSITION.value, Context.POSITION.value
-        ] = (
-            torch.where(self.tensor_env.button[idxs] == player, 0, 1)
-            .float()
-            .unsqueeze(1)
-        )
+        ] = torch.where(self.tensor_env.button[idxs] == player, 0, 1).float()
         self.context_features[:M, k + Context.STREET.value, Context.STREET.value] = (
-            self.tensor_env.street[idxs].float().unsqueeze(1)
+            self.tensor_env.street[idxs].float()
         )
         self.context_features[
             :M, k + Context.ACTIONS_ROUND.value, Context.ACTIONS_ROUND.value
-        ] = (self.tensor_env.actions_this_round[idxs].float().unsqueeze(1))
+        ] = self.tensor_env.actions_this_round[idxs].float()
         self.context_features[
             :M, k + Context.MIN_RAISE.value, Context.MIN_RAISE.value
-        ] = (self.tensor_env.min_raise[idxs].float().unsqueeze(1))
+        ] = self.tensor_env.min_raise[idxs].float()
         self.context_features[
             :M, k + Context.BET_TO_CALL.value, Context.BET_TO_CALL.value
         ] = (
-            (
-                self.tensor_env.committed[idxs, 1 - player]
-                - self.tensor_env.committed[idxs, player]
-            )
-            .float()
-            .unsqueeze(1)
-        )
+            self.tensor_env.committed[idxs, 1 - player]
+            - self.tensor_env.committed[idxs, player]
+        ).float()
 
     def encode_single_state(
         self, game_state: HUNLEnv, player: int
