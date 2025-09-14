@@ -200,8 +200,8 @@ class TransformerStateEncoder:
             # Always present the state to the model as if we are player 0.
             action_actor = 1 - action_actor
 
-        action_any = action_history[:, :, 3, :].any(dim=2)
-        action_id = action_history[:, :, 3, :].float().argmax(dim=2)  # [N, 24]
+        action_any = action_history[:, :, 2, :].any(dim=2)
+        action_id = action_history[:, :, 2, :].float().argmax(dim=2)  # [N, 24]
 
         # Fill all 24 action slots (NO available_slots logic. DO NOT CHANGE THIS.)
         self.token_ids[:M, k : k + 24] = (
@@ -253,7 +253,9 @@ class TransformerStateEncoder:
             dim=1,
         )  # [M, 10]
 
-        self.context_features[:M, k, :] = context_features
+        self.context_features[:M, k : k + Context.NUM_CONTEXT.value, :] = (
+            context_features
+        )
 
     def encode_single_state(
         self, game_state: HUNLEnv, player: int

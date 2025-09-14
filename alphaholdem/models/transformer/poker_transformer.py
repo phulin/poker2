@@ -42,6 +42,7 @@ class PokerTransformerV1(nn.Module, Model):
         self.n_heads = n_heads
         self.use_auxiliary_loss = use_auxiliary_loss
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.num_bet_bins = num_bet_bins
 
         # Structured embeddings
         self.card_embedding = CardEmbedding(num_bet_bins=num_bet_bins, d_model=d_model)

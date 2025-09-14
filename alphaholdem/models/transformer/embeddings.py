@@ -284,7 +284,7 @@ class ContextEmbedding(nn.Module):
         # Actions this round embedding (discrete count)
         self.actions_round_emb = nn.Embedding(
             6, d_model
-        )  # Assuming max 10 actions per round
+        )  # Assuming max 6 actions per round
 
         # Min raise and bet to call MLP
         self.betting_context_emb = nn.Sequential(
