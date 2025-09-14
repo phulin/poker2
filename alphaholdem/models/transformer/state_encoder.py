@@ -222,39 +222,53 @@ class TransformerStateEncoder:
         """Process context for all environments in a vectorized manner."""
         M = idxs.numel()
         k = self.get_context_index_offset()
+        v = self.get_context_token_offset(self.num_bet_bins)
 
         self.token_ids[:M, k : k + Context.NUM_CONTEXT.value] = (
             self.get_context_token_offset(self.num_bet_bins) + self.arange_context
         )
 
-        # Consolidate all context features into a single tensor [M, 10]
-        context_features = torch.stack(
-            [
-                self.tensor_env.pot[idxs].float(),  # 0: pot size
-                self.tensor_env.stacks[idxs, player].float(),  # 1: our stack
-                self.tensor_env.stacks[idxs, 1 - player].float(),  # 2: opponent stack
-                self.tensor_env.committed[idxs, player].float(),  # 3: our committed
-                self.tensor_env.committed[
-                    idxs, 1 - player
-                ].float(),  # 4: opponent committed
-                torch.where(
-                    self.tensor_env.button[idxs] == player, 0, 1
-                ).float(),  # 5: position
-                self.tensor_env.street[idxs].float(),  # 6: street
-                self.tensor_env.actions_this_round[
-                    idxs
-                ].float(),  # 7: actions this round
-                self.tensor_env.min_raise[idxs].float(),  # 8: min raise
-                (
-                    self.tensor_env.committed[idxs, 1 - player]
-                    - self.tensor_env.committed[idxs, player]
-                ).float(),  # 9: bet to call
-            ],
-            dim=1,
-        )  # [M, 10]
-
-        self.context_features[:M, k : k + Context.NUM_CONTEXT.value, :] = (
-            context_features
+        # Assign each context feature individually
+        self.context_features[:M, k + Context.POT.value, Context.POT.value] = (
+            self.tensor_env.pot[idxs].float().unsqueeze(1)
+        )
+        self.context_features[
+            :M, k + Context.STACK_P0.value, Context.STACK_P0.value
+        ] = (self.tensor_env.stacks[idxs, player].float().unsqueeze(1))
+        self.context_features[
+            :M, k + Context.STACK_P1.value, Context.STACK_P1.value
+        ] = (self.tensor_env.stacks[idxs, 1 - player].float().unsqueeze(1))
+        self.context_features[
+            :M, k + Context.COMMITTED_P0.value, Context.COMMITTED_P0.value
+        ] = (self.tensor_env.committed[idxs, player].float().unsqueeze(1))
+        self.context_features[
+            :M, k + Context.COMMITTED_P1.value, Context.COMMITTED_P1.value
+        ] = (self.tensor_env.committed[idxs, 1 - player].float().unsqueeze(1))
+        self.context_features[
+            :M, k + Context.POSITION.value, Context.POSITION.value
+        ] = (
+            torch.where(self.tensor_env.button[idxs] == player, 0, 1)
+            .float()
+            .unsqueeze(1)
+        )
+        self.context_features[:M, k + Context.STREET.value, Context.STREET.value] = (
+            self.tensor_env.street[idxs].float().unsqueeze(1)
+        )
+        self.context_features[
+            :M, k + Context.ACTIONS_ROUND.value, Context.ACTIONS_ROUND.value
+        ] = (self.tensor_env.actions_this_round[idxs].float().unsqueeze(1))
+        self.context_features[
+            :M, k + Context.MIN_RAISE.value, Context.MIN_RAISE.value
+        ] = (self.tensor_env.min_raise[idxs].float().unsqueeze(1))
+        self.context_features[
+            :M, k + Context.BET_TO_CALL.value, Context.BET_TO_CALL.value
+        ] = (
+            (
+                self.tensor_env.committed[idxs, 1 - player]
+                - self.tensor_env.committed[idxs, player]
+            )
+            .float()
+            .unsqueeze(1)
         )
 
     def encode_single_state(
