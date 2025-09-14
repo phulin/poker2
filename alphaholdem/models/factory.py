@@ -50,14 +50,14 @@ class ModelFactory:
         config: Dict[str, Any], device: torch.device
     ) -> SiameseConvNetV1:
         """Create CNN-based model."""
-        return SiameseConvNetV1(**config)
+        return torch.compile(SiameseConvNetV1(**config).to(device))
 
     @staticmethod
     def _create_transformer_model(
         config: Dict[str, Any], device: torch.device
     ) -> PokerTransformerV1:
         """Create transformer-based model."""
-        return PokerTransformerV1(**config)
+        return torch.compile(PokerTransformerV1(**config).to(device))
 
     @staticmethod
     def create_state_encoder(

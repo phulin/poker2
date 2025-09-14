@@ -73,8 +73,6 @@ model:
     d_model: 128  # Reduced for better performance
     n_layers: 2   # Reduced for better performance
     n_heads: 2    # Reduced for better performance
-    vocab_size: 80
-    num_actions: 8
     dropout: 0.1
     use_auxiliary_loss: false  # Disabled for performance
     use_gradient_checkpointing: false  # Disabled for performance

@@ -34,18 +34,8 @@ class TransformerStateEncoder:
             Context.NUM_CONTEXT.value, device=self.device
         )
 
-        # Token ID offsets
-        self.special_offset = 0
-        self.card_token_offset = self.special_offset + Special.NUM_SPECIAL.value
-        self.action_token_offset = self.card_token_offset + 52
-        self.context_token_offset = self.action_token_offset + self.num_bet_bins
-
-        # Index offsets
-        self.cls_index_offset = 0
-        self.card_index_offset = self.cls_index_offset + 1
-        self.action_index_offset = self.card_index_offset + 7
-        self.context_index_offset = self.action_index_offset + 24
-        self.L = self.context_index_offset + Context.NUM_CONTEXT.value
+        # Calculate sequence length
+        self.L = self.get_context_index_offset() + Context.NUM_CONTEXT.value
 
         N, L = self.N, self.L
 
@@ -64,6 +54,59 @@ class TransformerStateEncoder:
 
         # Consolidated context tensor [N, L, 10]
         self.context_features = torch.zeros(N, L, 10, dtype=torch.long, device=device)
+
+    @classmethod
+    def get_special_token_offset(cls, num_bet_bins: int) -> int:
+        """Get the special token offset."""
+        return 0
+
+    @classmethod
+    def get_card_token_offset(cls, num_bet_bins: int) -> int:
+        """Get the card token offset."""
+        return cls.get_special_token_offset(num_bet_bins) + Special.NUM_SPECIAL.value
+
+    @classmethod
+    def get_action_token_offset(cls, num_bet_bins: int) -> int:
+        """Get the action token offset.
+
+        Args:
+            num_bet_bins: Number of bet bins in the environment
+        """
+        return cls.get_card_token_offset(num_bet_bins) + 52
+
+    @classmethod
+    def get_context_token_offset(cls, num_bet_bins: int) -> int:
+        """Get the context token offset.
+
+        Args:
+            num_bet_bins: Number of bet bins in the environment
+        """
+        return cls.get_action_token_offset(num_bet_bins) + num_bet_bins
+
+    @classmethod
+    def get_cls_index_offset(cls) -> int:
+        """Get the CLS index offset."""
+        return 0
+
+    @classmethod
+    def get_card_index_offset(cls) -> int:
+        """Get the card index offset."""
+        return cls.get_cls_index_offset() + 1
+
+    @classmethod
+    def get_action_index_offset(cls) -> int:
+        """Get the action index offset."""
+        return cls.get_card_index_offset() + 7
+
+    @classmethod
+    def get_context_index_offset(cls) -> int:
+        """Get the context index offset."""
+        return cls.get_action_index_offset() + 24
+
+    @classmethod
+    def get_max_sequence_length(cls) -> int:
+        """Get the max sequence length."""
+        return cls.get_context_index_offset() + Context.NUM_CONTEXT.value
 
     def encode_tensor_states(
         self, player: int, idxs: torch.Tensor
@@ -108,7 +151,7 @@ class TransformerStateEncoder:
     ) -> None:
         """Process cards for all environments in a vectorized manner."""
         M = idxs.numel()
-        k = self.card_index_offset
+        k = self.get_card_index_offset()
 
         # Get visible cards for this player across all environments
         player_hole = self.tensor_env.hole_indices[
@@ -137,7 +180,7 @@ class TransformerStateEncoder:
         """Process actions for all environments in a vectorized manner."""
         N = self.N
         M = idxs.numel()
-        k = self.action_index_offset
+        k = self.get_action_index_offset()
 
         # Encode the whole action history.
         action_history = self.tensor_env.get_action_history().view(
@@ -155,10 +198,14 @@ class TransformerStateEncoder:
             # Always present the state to the model as if we are player 0.
             action_actor = 1 - action_actor
 
+        action_any = action_history[:, :, 3, :].any(dim=2)
         action_id = action_history[:, :, 3, :].float().argmax(dim=2)  # [N, 24]
 
         # Fill all 24 action slots (NO available_slots logic. DO NOT CHANGE THIS.)
-        self.token_ids[:M, k : k + 24] = self.action_token_offset + action_id
+        self.token_ids[:M, k : k + 24] = (
+            self.get_action_token_offset(self.num_bet_bins) + action_id
+        )
+        self.token_ids[:M, k : k + 24][~action_any] = -1
         self.action_actors[:M, k : k + 24] = action_actor
         self.action_streets[:M, k : k + 24] = torch.arange(24, device=self.device) // 6
         self.action_legal_masks[:M, k : k + 24] = action_history[
@@ -172,10 +219,10 @@ class TransformerStateEncoder:
     ) -> None:
         """Process context for all environments in a vectorized manner."""
         M = idxs.numel()
-        k = self.context_index_offset
+        k = self.get_context_index_offset()
 
         self.token_ids[:M, k : k + Context.NUM_CONTEXT.value] = (
-            self.context_token_offset + self.arange_context
+            self.get_context_token_offset(self.num_bet_bins) + self.arange_context
         )
 
         # Consolidate all context features into a single tensor [M, 10]
@@ -217,4 +264,6 @@ class TransformerStateEncoder:
 
     def get_vocab_size(self) -> int:
         """Get vocabulary size."""
-        return self.context_token_offset + Context.NUM_CONTEXT.value
+        return (
+            self.get_context_token_offset(self.num_bet_bins) + Context.NUM_CONTEXT.value
+        )

@@ -10,34 +10,24 @@ import torch.nn.functional as F
 
 
 class TransformerPolicyHead(nn.Module):
-    """Policy head for transformer model with mixed discrete-continuous outputs.
+    """Policy head for transformer model with bet bin outputs.
 
     Outputs:
-    - Action type logits (fold, check/call, bet, raise, allin)
-    - Bet size parameters (Beta distribution parameters for continuous sizing)
+    - Bet bin logits (fold, call, bet_0.5x, bet_1x, bet_1.5x, bet_2x, allin)
     """
 
-    def __init__(self, d_model: int, num_actions: int = 4):
+    def __init__(self, d_model: int, num_bet_bins: int, dropout: float = 0.1):
         super().__init__()
         self.d_model = d_model
-        self.num_actions = num_actions
+        self.num_bet_bins = num_bet_bins
 
-        # Action type head (discrete)
-        self.action_type_head = nn.Sequential(
+        # Bet bin head (discrete)
+        self.bet_bin_head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.LayerNorm(d_model // 2),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(d_model // 2, num_actions),
-        )
-
-        # Bet size head (continuous - Beta distribution parameters)
-        self.size_head = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
-            nn.LayerNorm(d_model // 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(d_model // 2, 2),  # Alpha and Beta parameters
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 2, num_bet_bins),
         )
 
         # Initialize weights
@@ -59,22 +49,17 @@ class TransformerPolicyHead(nn.Module):
 
         Returns:
             Dictionary containing:
-                - action_logits: Action type logits [batch_size, num_actions]
-                - size_params: Beta distribution parameters [batch_size, 2]
+                - bet_bin_logits: Bet bin logits [batch_size, num_bet_bins]
         """
-        action_logits = self.action_type_head(x)
+        policy_logits = self.bet_bin_head(x)
 
-        # Size parameters for Beta distribution
-        size_raw = self.size_head(x)
-        size_params = F.softplus(size_raw) + 1.0  # Ensure positive parameters
-
-        return {"action_logits": action_logits, "size_params": size_params}
+        return {"policy_logits": policy_logits}
 
 
 class TransformerValueHead(nn.Module):
     """Value head for transformer model."""
 
-    def __init__(self, d_model: int):
+    def __init__(self, d_model: int, dropout: float = 0.1):
         super().__init__()
         self.d_model = d_model
 
@@ -83,11 +68,11 @@ class TransformerValueHead(nn.Module):
             nn.Linear(d_model, d_model // 2),
             nn.LayerNorm(d_model // 2),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(d_model // 2, d_model // 4),
             nn.LayerNorm(d_model // 4),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(d_model // 4, 1),
         )
 

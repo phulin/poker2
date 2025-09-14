@@ -73,8 +73,6 @@ model:
     d_model: 256           # Larger model dimension
     n_layers: 2            # More layers
     n_heads: 2             # More attention heads
-    vocab_size: 80
-    num_actions: 8
     dropout: 0.1
     use_auxiliary_loss: false
     use_gradient_checkpointing: true

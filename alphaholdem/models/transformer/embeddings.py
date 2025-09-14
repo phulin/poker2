@@ -6,6 +6,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
+
 from ...utils.profiling import profile
 
 
@@ -18,14 +20,15 @@ class CardEmbedding(nn.Module):
     - Stage embedding (hole, flop, turn, river)
     """
 
-    def __init__(self, d_model: int = 256):
+    def __init__(self, num_bet_bins: int, d_model: int = 256):
         super().__init__()
+        self.num_bet_bins = num_bet_bins
         self.d_model = d_model
 
         # Component embeddings
         self.rank_emb = nn.Embedding(13, d_model)  # A,2,3,...,K
         self.suit_emb = nn.Embedding(4, d_model)  # s,h,d,c
-        self.stage_emb = nn.Embedding(4, d_model)  # hole,flop,turn,river
+        self.street_emb = nn.Embedding(4, d_model)  # hole,flop,turn,river
 
         # Relational attention biases for poker-specific patterns
         self.rank_bias = nn.Parameter(torch.zeros(13, 13))
@@ -36,8 +39,8 @@ class CardEmbedding(nn.Module):
 
     def _init_biases(self):
         """Initialize attention biases for poker relationships."""
-        # Rank adjacency bias (for straights)
         with torch.no_grad():
+            # Rank adjacency bias (for straights)
             for i in range(13):
                 for j in range(13):
                     if abs(i - j) == 1:  # Adjacent ranks
@@ -45,8 +48,7 @@ class CardEmbedding(nn.Module):
                     elif i == j:  # Same rank
                         self.rank_bias[i, j] = 0.2
 
-        # Suit matching bias (for flushes)
-        with torch.no_grad():
+            # Suit matching bias (for flushes)
             for i in range(4):
                 for j in range(4):
                     if i == j:  # Same suit
@@ -55,60 +57,57 @@ class CardEmbedding(nn.Module):
     @profile
     def forward(
         self,
-        card_indices: torch.Tensor,
-        stages: torch.Tensor,
+        token_ids: torch.Tensor,
+        card_streets: torch.Tensor,
+        card_ranks: torch.Tensor,
+        card_suits: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass for card embeddings.
 
         Args:
-            card_indices: Card indices [batch_size, seq_len] (0-51, with 52 for CLS)
-            stages: Stage indices [batch_size, seq_len] (0-3)
+            token_ids: Token IDs [batch_size, seq_len] (0-51, with 52 for CLS)
+            card_streets: Street indices [batch_size, seq_len] (0-3)
+            card_ranks: Card ranks [batch_size, seq_len] (0-12, with -1 for invalid)
+            card_suits: Card suits [batch_size, seq_len] (0-3, with -1 for invalid)
 
         Returns:
             Card embeddings [batch_size, seq_len, d_model]
         """
-        batch_size, seq_len = card_indices.shape
+        batch_size, _ = token_ids.shape
 
-        # Handle CLS token (index 52) and padding (index -1)
-        # Create masks for valid card indices
-        valid_card_mask = (card_indices >= 0) & (card_indices < 52)
-        cls_mask = card_indices == 52
+        start = TransformerStateEncoder.get_card_index_offset()
+        end = TransformerStateEncoder.get_action_index_offset()
 
-        # Initialize embeddings
-        embeddings = torch.zeros(
-            batch_size, seq_len, self.d_model, device=card_indices.device
+        # Get card data for the card range
+        card_ranks_slice = card_ranks[:, start:end]
+        card_suits_slice = card_suits[:, start:end]
+        card_streets_slice = card_streets[:, start:end]
+
+        # Create mask for valid cards (not -1)
+        valid = torch.where(token_ids[:, start:end] >= 0)[0]
+
+        # Create full-sized tensor for this slice
+        slice_embeddings = torch.zeros(
+            batch_size,
+            end - start,
+            self.d_model,
+            device=token_ids.device,
+            dtype=self.rank_emb.weight.dtype,
         )
 
-        # Process valid cards (0-51)
-        if valid_card_mask.any():
-            valid_indices = card_indices[valid_card_mask]
-            valid_stages = stages[valid_card_mask]
+        # Get embeddings for valid positions only
+        rank_emb = self.rank_emb(card_ranks_slice[valid])
+        suit_emb = self.suit_emb(card_suits_slice[valid])
+        stage_emb = self.street_emb(card_streets_slice[valid])
 
-            # Clamp embedding indices to valid ranges to avoid index errors
-            valid_stages = torch.clamp(valid_stages, 0, 3)  # 0-3: hole,flop,turn,river
+        # Combine embeddings additively
+        combined_emb = rank_emb + suit_emb + stage_emb
 
-            # Convert card indices to rank and suit
-            ranks = valid_indices % 13
-            suits = valid_indices // 13
+        # Place valid embeddings back
+        slice_embeddings[valid] = combined_emb
 
-            # Compose embeddings additively for valid cards
-            valid_embeddings = (
-                self.rank_emb(ranks)
-                + self.suit_emb(suits)
-                + self.stage_emb(valid_stages)
-            )
-
-            # Place valid embeddings back
-            embeddings[valid_card_mask] = valid_embeddings
-
-        # Handle CLS tokens (index 52) - use zero embedding for now
-        # In the future, we could add a dedicated CLS embedding
-        if cls_mask.any():
-            embeddings[cls_mask] = 0.0
-
-        # Padding tokens (index -1) remain zero
-
-        return embeddings
+        # Return only the card range embeddings
+        return slice_embeddings
 
     def get_attention_biases(
         self, ranks: torch.Tensor, suits: torch.Tensor
@@ -122,7 +121,6 @@ class CardEmbedding(nn.Module):
         Returns:
             Attention biases [batch_size, seq_len, seq_len]
         """
-        batch_size, seq_len = ranks.shape
 
         # Get rank biases
         rank_biases = self.rank_bias[ranks, ranks.unsqueeze(-1)]  # [batch, seq, seq]
@@ -145,25 +143,25 @@ class ActionEmbedding(nn.Module):
     - Legal action masks (8 action types)
     """
 
-    def __init__(self, d_model: int = 256):
+    def __init__(self, num_bet_bins: int, d_model: int = 256):
         super().__init__()
+        self.num_bet_bins = num_bet_bins
         self.d_model = d_model
 
         # Component embeddings
         self.actor_emb = nn.Embedding(2, d_model)  # P1, P2
         self.street_emb = nn.Embedding(4, d_model)  # pre,flop,turn,river
 
+        start = TransformerStateEncoder.get_action_index_offset()
+        end = TransformerStateEncoder.get_context_index_offset()
+
+        self.pos_emb = nn.Embedding(
+            end - start, d_model
+        )  # Positional embedding for 24 action slots
+
         # Legal action mask processing
         self.legal_mask_mlp = nn.Sequential(
-            nn.Linear(8, d_model),  # 8 action types
-            nn.LayerNorm(d_model),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-        )
-
-        # Combine embeddings
-        self.combine_mlp = nn.Sequential(
-            nn.Linear(d_model * 3, d_model),  # 3 component embeddings
+            nn.Linear(num_bet_bins, d_model),  # num_bet_bins action types
             nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -171,42 +169,65 @@ class ActionEmbedding(nn.Module):
 
     def forward(
         self,
-        actors: torch.Tensor,
-        streets: torch.Tensor,
-        legal_masks: torch.Tensor,
+        token_ids: torch.Tensor,
+        action_actors: torch.Tensor,
+        action_streets: torch.Tensor,
+        action_legal_masks: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass for action embeddings.
 
         Args:
-            actors: Actor indices [batch_size, seq_len] (0-1)
-            streets: Street indices [batch_size, seq_len] (0-3)
-            legal_masks: Legal action masks [batch_size, seq_len, 8]
+            action_actors: Actor indices [batch_size, seq_len] (0-1)
+            action_streets: Street indices [batch_size, seq_len] (0-3)
+            action_legal_masks: Legal action masks [batch_size, seq_len, num_bet_bins]
 
         Returns:
             Action embeddings [batch_size, seq_len, d_model]
         """
-        batch_size, seq_len = actors.shape
+        batch_size, seq_len = action_actors.shape
 
-        # Clamp all embedding indices to valid ranges to avoid index errors
-        actors = torch.clamp(actors, 0, 1)  # 0-1: player indices
-        streets = torch.clamp(streets, 0, 3)  # 0-3: hole,flop,turn,river
+        start = TransformerStateEncoder.get_action_index_offset()
+        end = TransformerStateEncoder.get_context_index_offset()
 
-        # Get component embeddings
-        actor_emb = self.actor_emb(actors)
-        street_emb = self.street_emb(streets)
+        # Get action data for the action range
+        action_actors_slice = action_actors[:, start:end]
+        action_streets_slice = action_streets[:, start:end]
+        action_legal_masks_slice = action_legal_masks[:, start:end, :]
 
-        # Process legal action masks
-        legal_mask_emb = self.legal_mask_mlp(legal_masks.float())
+        # Create mask for valid tokens (non-negative token_ids)
+        valid_mask = token_ids[:, start:end] >= 0
+        valid_indices = torch.where(valid_mask)
 
-        # Combine embeddings
-        combined = torch.cat(
-            [actor_emb, street_emb, legal_mask_emb], dim=-1
-        )  # [batch, seq, d_model * 3]
+        # Create full-sized tensor for this slice
+        slice_embeddings = torch.zeros(
+            batch_size,
+            end - start,
+            self.d_model,
+            device=action_actors.device,
+            dtype=self.actor_emb.weight.dtype,
+        )
 
-        # Final combination
-        embeddings = self.combine_mlp(combined)
+        # Get embeddings for valid positions only
+        actor_emb = self.actor_emb(action_actors_slice[valid_indices])
+        street_emb = self.street_emb(action_streets_slice[valid_indices])
 
-        return embeddings
+        # Create positional embeddings for valid action slots
+        valid_positions = valid_indices[1]  # Position indices within the action range
+        pos_emb = self.pos_emb(valid_positions)
+
+        # Process legal action masks for valid positions
+        legal_mask_emb = self.legal_mask_mlp(
+            action_legal_masks_slice[valid_indices].float()
+        )
+
+        # Combine embeddings additively
+        combined_emb = actor_emb + street_emb + pos_emb + legal_mask_emb
+
+        # Place valid embeddings back
+        slice_embeddings[valid_indices] = combined_emb
+
+        # Return only the action range embeddings
+        return slice_embeddings
 
 
 class ContextEmbedding(nn.Module):
@@ -220,8 +241,9 @@ class ContextEmbedding(nn.Module):
     - Street-specific context
     """
 
-    def __init__(self, d_model: int = 256):
+    def __init__(self, num_bet_bins: int, d_model: int = 256):
         super().__init__()
+        self.num_bet_bins = num_bet_bins
         self.d_model = d_model
 
         # Context embeddings
@@ -255,11 +277,13 @@ class ContextEmbedding(nn.Module):
 
     def forward(
         self,
+        token_ids: torch.Tensor,
         context_features: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass for context embeddings.
 
         Args:
+            token_ids: Token IDs [batch_size, seq_len] (0-51, with 52 for CLS)
             context_features: Consolidated context features [batch_size, seq_len, 10] (long)
                 - 0: pot size
                 - 1: our stack
@@ -275,15 +299,36 @@ class ContextEmbedding(nn.Module):
         Returns:
             Context embeddings [batch_size, seq_len, d_model]
         """
-        # Extract individual components from consolidated tensor
-        pot_sizes = context_features[:, :, 0:1].float()  # [batch_size, seq_len, 1]
-        stack_sizes = context_features[:, :, 1:3].float()  # [batch_size, seq_len, 2]
-        committed_sizes = context_features[
-            :, :, 3:5
+
+        start = TransformerStateEncoder.get_context_index_offset()
+        end = start + 10  # Context has 10 features
+
+        value_start = TransformerStateEncoder.get_context_token_offset(
+            self.num_bet_bins
+        )
+        value_end = value_start + 10
+
+        if (
+            (token_ids[:, start:end] < value_start)
+            | (token_ids[:, start:end] > value_end)
+        ).any():
+            print("WARNING: Invalid tokens found in context embeddings.")
+
+        # Extract individual components from consolidated tensor for context range
+        pot_sizes = context_features[
+            :, start:end, 0:1
+        ].float()  # [batch_size, seq_len, 1]
+        stack_sizes = context_features[
+            :, start:end, 1:3
         ].float()  # [batch_size, seq_len, 2]
-        positions = context_features[:, :, 5]  # [batch_size, seq_len] - already long
+        committed_sizes = context_features[
+            :, start:end, 3:5
+        ].float()  # [batch_size, seq_len, 2]
+        positions = context_features[
+            :, start:end, 5
+        ]  # [batch_size, seq_len] - already long
         street_context = context_features[
-            :, :, 6:10
+            :, start:end, 6:10
         ].float()  # [batch_size, seq_len, 4]
 
         # Clamp embedding indices to valid ranges
@@ -301,4 +346,5 @@ class ContextEmbedding(nn.Module):
             pot_emb + stack_emb + committed_emb + position_emb + street_context_emb
         )
 
+        # Return only the context range embeddings
         return embeddings
