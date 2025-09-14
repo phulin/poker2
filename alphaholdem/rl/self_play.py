@@ -497,10 +497,11 @@ class SelfPlayTrainer:
                 # trajectory if it were sampled anyway, since there is no decision of the
                 # actor to train.
                 # NB that this will make our average reward look worse.
-                if add_to_replay_buffer:
-                    active_legal_masks[
-                        (active_who_acts == 1) & active_first_action, 0
-                    ] = False
+                # === WE ARE TURNING THIS OFF FOR NOW. ===
+                # if add_to_replay_buffer:
+                #     active_legal_masks[
+                #         (active_who_acts == 1) & active_first_action, 0
+                #     ] = False
 
                 # Get predictions from opponent models for opponent turns
                 opp_env_groups: Tuple[torch.Tensor, ...] | None = None
