@@ -634,7 +634,7 @@ class HUNLTensorEnv:
 
         # Build compact token per env with fixed-width columns
         tokens = []
-        for i in range(self.N):
+        for i in range(bin_indices_cpu.shape[0]):
             s = street_codes[int(street_cpu[i].item())]
             actor = str(int(to_act_cpu[i].item()))
 

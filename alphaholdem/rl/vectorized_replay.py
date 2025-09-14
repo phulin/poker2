@@ -34,7 +34,7 @@ class VectorizedReplayBuffer:
         self.sequence_length = (
             sequence_length  # Store sequence length for transformer models
         )
-        self.position = 0  # Next trajectory write position
+        self.position = 0  # Next trajectory write position (end of ring buffer)
         self.size = 0  # Total number of valid trajectories
 
         self.open_batch = (
@@ -148,7 +148,6 @@ class VectorizedReplayBuffer:
 
         # Track trajectory metadata
         self.trajectory_lengths = torch.zeros(capacity, dtype=torch.long, device=device)
-        self.valid_trajectories = torch.zeros(capacity, dtype=torch.bool, device=device)
 
         # Track current step position within each trajectory (relative to ring buffer start)
         self.current_step_positions = torch.zeros(
@@ -185,7 +184,6 @@ class VectorizedReplayBuffer:
 
         # Clear trajectory metadata for these rows
         self.trajectory_lengths[clear_indices] = 0
-        self.valid_trajectories[clear_indices] = False
         self.current_step_positions[clear_indices] = 0
 
         # Clear the actual data tensors for these rows
@@ -266,12 +264,13 @@ class VectorizedReplayBuffer:
 
         compacted_indices = indices[:num_valid]
         unused_indices = indices[num_valid:]
+        print(f"=> compacted {num_valid} indices out of {num_trajectories}")
+        # print("trajectory lengths: ", self.trajectory_lengths[indices].tolist())
 
         # Compact nonzero-length trajectories to the front of the window
         # For each field, move data from nonzero_indices to the front of indices
         common_fields = [
             "trajectory_lengths",
-            "valid_trajectories",
             "current_step_positions",
             "action_indices",
             "log_probs",
@@ -428,7 +427,6 @@ class VectorizedReplayBuffer:
             ) % self.capacity
 
             # Mark completed trajectories as valid
-            self.valid_trajectories[completed_buffer_indices] = True
             self.trajectory_lengths[completed_buffer_indices] = (
                 self.current_step_positions[completed_buffer_indices]
             )
@@ -436,13 +434,46 @@ class VectorizedReplayBuffer:
             # Reset step positions for completed trajectories
             self.current_step_positions[completed_buffer_indices] = 0
 
+    def update_opponent_rewards(
+        self, trajectory_indices: torch.Tensor, opponent_rewards: torch.Tensor
+    ) -> None:
+        """
+        Update the last transition's reward for trajectories where opponent ended the hand.
+
+        Args:
+            trajectory_indices: [K] - trajectory indices to update
+            opponent_rewards: [K] - rewards from opponent's perspective (will be negated)
+        """
+        if trajectory_indices.numel() == 0:
+            return
+
+        # Convert source trajectory indices to buffer indices by adding current position
+        buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
+
+        # Get current step positions for each trajectory
+        step_positions = self.current_step_positions[buffer_trajectory_indices]
+
+        # Only update trajectories that have at least one step
+        valid_mask = step_positions > 0
+        if not valid_mask.any():
+            return
+
+        valid_trajectories = buffer_trajectory_indices[valid_mask]
+        valid_step_positions = step_positions[valid_mask] - 1  # Last step index
+        valid_rewards = -opponent_rewards[valid_mask]  # Negate for our perspective
+
+        # Vectorized update of rewards and done flags
+        self.trajectory_lengths[valid_trajectories] = valid_step_positions + 1
+        self.rewards[valid_trajectories, valid_step_positions] = valid_rewards
+        self.dones[valid_trajectories, valid_step_positions] = True
+
     def compute_gae_returns(self, gamma: float = 0.999, lambda_: float = 0.95) -> None:
         """Compute GAE advantages and returns for all stored trajectories using vectorized operations."""
         if self.size == 0:
             return
 
         # Get valid trajectory indices
-        valid_indices = torch.where(self.valid_trajectories)[0]
+        valid_indices = torch.where(self.trajectory_lengths > 0)[0]
 
         if len(valid_indices) == 0:
             return
@@ -473,35 +504,6 @@ class VectorizedReplayBuffer:
         # Store computed values back to the buffer (vectorized)
         self.advantages[valid_indices, :max_length] = advantages
         self.returns[valid_indices, :max_length] = returns
-
-    def update_opponent_rewards(
-        self, trajectory_indices: torch.Tensor, opponent_rewards: torch.Tensor
-    ) -> None:
-        """
-        Update the last transition's reward for trajectories where opponent ended the hand.
-
-        Args:
-            trajectory_indices: [K] - trajectory indices to update
-            opponent_rewards: [K] - rewards from opponent's perspective (will be negated)
-        """
-        if trajectory_indices.numel() == 0:
-            return
-
-        # Get current step positions for each trajectory
-        step_positions = self.current_step_positions[trajectory_indices]
-
-        # Only update trajectories that have at least one step
-        valid_mask = step_positions > 0
-        if not valid_mask.any():
-            return
-
-        valid_trajectories = trajectory_indices[valid_mask]
-        valid_step_positions = step_positions[valid_mask] - 1  # Last step index
-        valid_rewards = -opponent_rewards[valid_mask]  # Negate for our perspective
-
-        # Vectorized update of rewards and done flags
-        self.rewards[valid_trajectories, valid_step_positions] = valid_rewards
-        self.dones[valid_trajectories, valid_step_positions] = True
 
     def _compute_gae_vectorized(self, rewards, values, dones, gamma=0.99, lam=0.95):
         """
@@ -554,7 +556,7 @@ class VectorizedReplayBuffer:
             raise ValueError("No trajectories available")
 
         # Get valid trajectory indices
-        valid_indices = torch.where(self.valid_trajectories)[0]
+        valid_indices = torch.where(self.trajectory_lengths > 0)[0]
 
         if len(valid_indices) == 0:
             raise ValueError("No valid trajectories available")
@@ -682,8 +684,8 @@ class VectorizedReplayBuffer:
         if self.size == 0:
             raise ValueError("No trajectories available")
 
-        # Get valid trajectory indices
-        valid_indices = torch.where(self.valid_trajectories)[0]
+        # Get valid trajectory indices (this will only be nonzero in valid positions inside the buffer)
+        valid_indices = torch.where(self.trajectory_lengths > 0)[0]
 
         if len(valid_indices) == 0:
             raise ValueError("No valid trajectories available")
@@ -748,12 +750,11 @@ class VectorizedReplayBuffer:
         self.position = 0
         self.size = 0
         self.trajectory_lengths.zero_()
-        self.valid_trajectories.zero_()
         self.current_step_positions.zero_()
 
     def num_steps(self) -> int:
         """Total number of transitions (steps) stored across all valid trajectories."""
-        return (self.trajectory_lengths * self.valid_trajectories).sum().item()
+        return (self.trajectory_lengths).sum().item()
 
     def trim_to_steps(self, max_steps: int) -> None:
         """Trim oldest trajectories until removing the next traj would make total steps <= max_steps."""
@@ -765,7 +766,6 @@ class VectorizedReplayBuffer:
             and self.size > 0
         ):
             oldest_idx = (self.position - self.size) % self.capacity
-            self.valid_trajectories[oldest_idx] = False
             self.trajectory_lengths[oldest_idx] = 0
             self.current_step_positions[oldest_idx] = 0
             self.size -= 1

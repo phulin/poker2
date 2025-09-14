@@ -466,7 +466,7 @@ class SelfPlayTrainer:
                     player=0, idxs=env_active_we_act
                 )
 
-                active_first_action = self.tensor_env.acted_since_reset[active_indices]
+                active_first_action = ~self.tensor_env.acted_since_reset[active_indices]
 
                 # Initialize logits and values tensors for active environments only
                 active_logits = torch.zeros(
@@ -495,7 +495,7 @@ class SelfPlayTrainer:
                 # (because it would leave an empty trajectory)
                 # This doesn't bias our sampling because we would never see the empty
                 # trajectory if it were sampled anyway, since there is no decision of the
-                # actor to train. We could in the future train only the value function.
+                # actor to train.
                 # NB that this will make our average reward look worse.
                 if add_to_replay_buffer:
                     active_legal_masks[
