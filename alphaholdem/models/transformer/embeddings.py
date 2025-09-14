@@ -84,7 +84,7 @@ class CardEmbedding(nn.Module):
         card_streets_slice = card_streets[:, start:end]
 
         # Create mask for valid cards (not -1)
-        valid = torch.where(token_ids[:, start:end] >= 0)[0]
+        valid_mask = token_ids[:, start:end] >= 0
 
         # Create full-sized tensor for this slice
         slice_embeddings = torch.zeros(
@@ -96,15 +96,16 @@ class CardEmbedding(nn.Module):
         )
 
         # Get embeddings for valid positions only
-        rank_emb = self.rank_emb(card_ranks_slice[valid])
-        suit_emb = self.suit_emb(card_suits_slice[valid])
-        stage_emb = self.street_emb(card_streets_slice[valid])
+        valid_indices = torch.where(valid_mask)
+        rank_emb = self.rank_emb(card_ranks_slice[valid_indices])
+        suit_emb = self.suit_emb(card_suits_slice[valid_indices])
+        stage_emb = self.street_emb(card_streets_slice[valid_indices])
 
         # Combine embeddings additively
         combined_emb = rank_emb + suit_emb + stage_emb
 
         # Place valid embeddings back
-        slice_embeddings[valid] = combined_emb
+        slice_embeddings[valid_indices] = combined_emb
 
         # Return only the card range embeddings
         return slice_embeddings
@@ -208,23 +209,26 @@ class ActionEmbedding(nn.Module):
         )
 
         # Get embeddings for valid positions only
-        actor_emb = self.actor_emb(action_actors_slice[valid_indices])
-        street_emb = self.street_emb(action_streets_slice[valid_indices])
+        if valid_indices[0].numel() > 0:  # Only compute if there are valid tokens
+            actor_emb = self.actor_emb(action_actors_slice[valid_indices])
+            street_emb = self.street_emb(action_streets_slice[valid_indices])
 
-        # Create positional embeddings for valid action slots
-        valid_positions = valid_indices[1]  # Position indices within the action range
-        pos_emb = self.pos_emb(valid_positions)
+            # Create positional embeddings for valid action slots
+            valid_positions = valid_indices[
+                1
+            ]  # Position indices within the action range
+            pos_emb = self.pos_emb(valid_positions)
 
-        # Process legal action masks for valid positions
-        legal_mask_emb = self.legal_mask_mlp(
-            action_legal_masks_slice[valid_indices].float()
-        )
+            # Process legal action masks for valid positions
+            legal_mask_emb = self.legal_mask_mlp(
+                action_legal_masks_slice[valid_indices].float()
+            )
 
-        # Combine embeddings additively
-        combined_emb = actor_emb + street_emb + pos_emb + legal_mask_emb
+            # Combine embeddings additively
+            combined_emb = actor_emb + street_emb + pos_emb + legal_mask_emb
 
-        # Place valid embeddings back
-        slice_embeddings[valid_indices] = combined_emb
+            # Place valid embeddings back
+            slice_embeddings[valid_indices] = combined_emb
 
         # Return only the action range embeddings
         return slice_embeddings
