@@ -166,17 +166,30 @@ class KBestOpponentPool(OpponentPool):
         if opponent is None or rewards.numel() == 0:
             return
 
+        # Store original current ELO for opponent calculation (needed for ELO conservation)
+        original_current_elo = self.current_elo
+
         # Update current ELO using the calculator
         self.current_elo = self.elo_calculator.update_elo_batch_vectorized(
             self.current_elo, opponent, rewards
         )
 
         # Update opponent ELO (opposite change)
-        # Create a temporary snapshot with current ELO for opponent calculation
-        temp_snapshot = AgentSnapshot(opponent.model, opponent.step, self.current_elo)
+        # Use ORIGINAL current ELO for opponent calculation to maintain ELO conservation
+        temp_snapshot = AgentSnapshot(
+            opponent.model, opponent.step, original_current_elo
+        )
         opponent.elo = self.elo_calculator.update_elo_batch_vectorized(
             opponent.elo, temp_snapshot, -rewards
         )
+
+        # Update opponent stats with negated rewards (from opponent's perspective)
+        num_wins = (-rewards > 0).sum().item()  # Opponent wins when we lose
+        num_losses = (-rewards < 0).sum().item()  # Opponent loses when we win
+        opponent.games_played += rewards.numel()
+        opponent.wins += num_wins
+        opponent.losses += num_losses
+        opponent.draws += rewards.numel() - num_wins - num_losses
 
         # Re-sort snapshots by ELO
         self.snapshots.sort(key=lambda x: x.elo, reverse=True)

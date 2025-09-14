@@ -250,11 +250,9 @@ def print_training_stats(
         # DREDPool specific stats
         if "avg_age" in pool_stats:
             pool_parts.append(f"Avg Age: {pool_stats.get('avg_age', 0):.1f}")
+        if "avg_difficulty" in pool_stats:
             pool_parts.append(
                 f"Avg Difficulty: {pool_stats.get('avg_difficulty', 0):.3f}"
-            )
-            pool_parts.append(
-                f"Recent Opponents: {pool_stats.get('recent_opponents_count', 0)}"
             )
 
         # KBestPool specific stats

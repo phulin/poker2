@@ -293,8 +293,8 @@ class DREDPool(OpponentPool):
                 [self._generate_embedding(self.snapshots[i]) for i in remaining_indices]
             )
 
-            # Cluster count (up to 20 clusters)
-            k_clusters = min(20, len(remaining_indices))
+            # Cluster count (up to 30 clusters)
+            k_clusters = min(30, remaining_indices.numel())
 
             if k_clusters > 1:
                 # Use our custom k-medoids implementation
@@ -364,22 +364,32 @@ class DREDPool(OpponentPool):
         if opponent is None or rewards.numel() == 0:
             return
 
+        # Store original current ELO for opponent calculation (needed for ELO conservation)
+        original_current_elo = self.current_elo
+
         # Update current ELO using the calculator
         self.current_elo = self.elo_calculator.update_elo_batch_vectorized(
             self.current_elo, opponent, rewards
         )
 
         # Update opponent ELO (opposite change)
-        temp_snapshot = AgentSnapshot(None, -1, self.current_elo)
+        # Use ORIGINAL current ELO for opponent calculation to maintain ELO conservation
+        temp_snapshot = AgentSnapshot(None, -1, original_current_elo)
         opponent.elo = self.elo_calculator.update_elo_batch_vectorized(
             opponent.elo, temp_snapshot, -rewards
         )
 
-        # Update DRED-specific stats
-        wins = (rewards > 0).sum().item()
-        losses = (rewards < 0).sum().item()
-        opponent.data.alpha += wins
-        opponent.data.beta += losses
+        # Update opponent stats with negated rewards (from opponent's perspective)
+        num_wins = (-rewards > 0).sum().item()  # Opponent wins when we lose
+        num_losses = (-rewards < 0).sum().item()  # Opponent loses when we win
+        opponent.games_played += rewards.numel()
+        opponent.wins += num_wins
+        opponent.losses += num_losses
+        opponent.draws += rewards.numel() - num_wins - num_losses
+
+        # Update DRED-specific stats (from opponent's perspective)
+        opponent.data.alpha += num_wins
+        opponent.data.beta += num_losses
 
     def get_best_snapshot(self) -> Optional[AgentSnapshot]:
         """Get the snapshot with the highest ELO rating."""

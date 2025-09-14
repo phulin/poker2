@@ -100,13 +100,7 @@ class ELOCalculator:
         # Update current ELO (sum of all changes)
         total_elo_change = elo_changes.sum().item()
 
-        # Update opponent stats for each game
-        # Calculate wins/losses for stats (regardless of magnitude-based scoring)
-        num_wins = (rewards > 0).sum().item()
-        num_losses = (rewards < 0).sum().item()
-        opponent.games_played += rewards.numel()
-        opponent.wins += num_wins
-        opponent.losses += num_losses
-        opponent.draws += rewards.numel() - num_wins - num_losses
+        # Note: Opponent stats are updated by the calling pool, not here
+        # This prevents double-counting when both players' ELOs are updated
 
         return current_elo + total_elo_change
