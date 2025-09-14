@@ -86,15 +86,6 @@ class CardEmbedding(nn.Module):
         # Create mask for valid cards (not -1)
         valid_mask = token_ids[:, start:end] >= 0
 
-        # Create full-sized tensor for this slice
-        slice_embeddings = torch.zeros(
-            batch_size,
-            end - start,
-            self.d_model,
-            device=token_ids.device,
-            dtype=self.rank_emb.weight.dtype,
-        )
-
         # Get embeddings for valid positions only
         valid_indices = torch.where(valid_mask)
         rank_emb = self.rank_emb(card_ranks_slice[valid_indices])
@@ -103,6 +94,15 @@ class CardEmbedding(nn.Module):
 
         # Combine embeddings additively
         combined_emb = rank_emb + suit_emb + stage_emb
+
+        # Create full-sized tensor for this slice
+        slice_embeddings = torch.zeros(
+            batch_size,
+            end - start,
+            self.d_model,
+            device=token_ids.device,
+            dtype=combined_emb.dtype,
+        )
 
         # Place valid embeddings back
         slice_embeddings[valid_indices] = combined_emb
@@ -199,36 +199,31 @@ class ActionEmbedding(nn.Module):
         valid_mask = token_ids[:, start:end] >= 0
         valid_indices = torch.where(valid_mask)
 
+        # Get embeddings for valid positions only
+        actor_emb = self.actor_emb(action_actors_slice[valid_indices])
+        street_emb = self.street_emb(action_streets_slice[valid_indices])
+
+        # Create positional embeddings for valid action slots
+        valid_positions = valid_indices[1]  # Position indices within the action range
+        pos_emb = self.pos_emb(valid_positions)
+
+        # Process legal action masks for valid positions
+        legal_mask_emb = self.legal_mask_mlp(action_legal_masks_slice[valid_indices])
+
+        # Combine embeddings additively
+        combined_emb = actor_emb + street_emb + pos_emb + legal_mask_emb
+
         # Create full-sized tensor for this slice
         slice_embeddings = torch.zeros(
             batch_size,
             end - start,
             self.d_model,
             device=action_actors.device,
-            dtype=self.actor_emb.weight.dtype,
+            dtype=combined_emb.dtype,
         )
 
-        # Get embeddings for valid positions only
-        if valid_indices[0].numel() > 0:  # Only compute if there are valid tokens
-            actor_emb = self.actor_emb(action_actors_slice[valid_indices])
-            street_emb = self.street_emb(action_streets_slice[valid_indices])
-
-            # Create positional embeddings for valid action slots
-            valid_positions = valid_indices[
-                1
-            ]  # Position indices within the action range
-            pos_emb = self.pos_emb(valid_positions)
-
-            # Process legal action masks for valid positions
-            legal_mask_emb = self.legal_mask_mlp(
-                action_legal_masks_slice[valid_indices].float()
-            )
-
-            # Combine embeddings additively
-            combined_emb = actor_emb + street_emb + pos_emb + legal_mask_emb
-
-            # Place valid embeddings back
-            slice_embeddings[valid_indices] = combined_emb
+        # Place valid embeddings back
+        slice_embeddings[valid_indices] = combined_emb
 
         # Return only the action range embeddings
         return slice_embeddings
@@ -271,9 +266,17 @@ class ContextEmbedding(nn.Module):
 
         self.position_emb = nn.Embedding(2, d_model)  # SB, BB
 
-        # Street-specific context
-        self.street_context_emb = nn.Sequential(
-            nn.Linear(4, d_model),  # street, actions_this_round, min_raise, bet_to_call
+        # Street embedding (0-3: hole, flop, turn, river)
+        self.street_emb = nn.Embedding(4, d_model)
+
+        # Actions this round embedding (discrete count)
+        self.actions_round_emb = nn.Embedding(
+            6, d_model
+        )  # Assuming max 10 actions per round
+
+        # Min raise and bet to call MLP
+        self.betting_context_emb = nn.Sequential(
+            nn.Linear(2, d_model),  # min_raise, bet_to_call
             nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -288,15 +291,15 @@ class ContextEmbedding(nn.Module):
 
         Args:
             token_ids: Token IDs [batch_size, seq_len] (0-51, with 52 for CLS)
-            context_features: Consolidated context features [batch_size, seq_len, 10] (long)
+            context_features: Consolidated context features [batch_size, seq_len, 10] (float32)
                 - 0: pot size
                 - 1: our stack
                 - 2: opponent stack
                 - 3: our committed
                 - 4: opponent committed
                 - 5: position (0-1)
-                - 6: street
-                - 7: actions this round
+                - 6: street (0-3: hole, flop, turn, river)
+                - 7: actions this round (0-9: count of actions)
                 - 8: min raise
                 - 9: bet to call
 
@@ -319,35 +322,49 @@ class ContextEmbedding(nn.Module):
             print("WARNING: Invalid tokens found in context embeddings.")
 
         # Extract individual components from consolidated tensor for context range
-        pot_sizes = context_features[
-            :, start:end, 0:1
-        ].float()  # [batch_size, seq_len, 1]
-        stack_sizes = context_features[
-            :, start:end, 1:3
-        ].float()  # [batch_size, seq_len, 2]
+        pot_sizes = context_features[:, start:end, 0:1]  # [batch_size, seq_len, 1]
+        stack_sizes = context_features[:, start:end, 1:3]  # [batch_size, seq_len, 2]
         committed_sizes = context_features[
             :, start:end, 3:5
-        ].float()  # [batch_size, seq_len, 2]
+        ]  # [batch_size, seq_len, 2]
         positions = context_features[
             :, start:end, 5
-        ]  # [batch_size, seq_len] - already long
-        street_context = context_features[
-            :, start:end, 6:10
-        ].float()  # [batch_size, seq_len, 4]
+        ].long()  # [batch_size, seq_len] - convert to long for embedding lookup
+        street = context_features[
+            :, start:end, 6
+        ].long()  # [batch_size, seq_len] - convert to long for embedding lookup
+        actions_this_round = context_features[
+            :, start:end, 7
+        ].long()  # [batch_size, seq_len] - convert to long for embedding lookup
+        betting_context = context_features[
+            :, start:end, 8:10
+        ]  # [batch_size, seq_len, 2] - min_raise, bet_to_call
 
         # Clamp embedding indices to valid ranges
-        positions = torch.clamp(positions, 0, 1).long()  # Convert to long for embedding
+        positions = torch.clamp(positions, 0, 1)
+        street = torch.clamp(street, 0, 3)  # 0-3: hole, flop, turn, river
+        actions_this_round = torch.clamp(
+            actions_this_round, 0, 5
+        )  # 0-5: max actions per round
 
         # Get component embeddings
         pot_emb = self.pot_emb(pot_sizes)
         stack_emb = self.stack_emb(stack_sizes)
         committed_emb = self.committed_emb(committed_sizes)
         position_emb = self.position_emb(positions)
-        street_context_emb = self.street_context_emb(street_context)
+        street_emb = self.street_emb(street)
+        actions_round_emb = self.actions_round_emb(actions_this_round)
+        betting_context_emb = self.betting_context_emb(betting_context)
 
         # Combine embeddings additively
         embeddings = (
-            pot_emb + stack_emb + committed_emb + position_emb + street_context_emb
+            pot_emb
+            + stack_emb
+            + committed_emb
+            + position_emb
+            + street_emb
+            + actions_round_emb
+            + betting_context_emb
         )
 
         # Return only the context range embeddings

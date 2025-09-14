@@ -149,12 +149,14 @@ class SelfPlayTrainer:
                 min_elo_diff=self.min_elo_diff,
                 min_step_diff=self.min_step_diff,
                 k_factor=self.k_factor,
+                use_mixed_precision=self.use_mixed_precision,
             )
         elif self.opponent_pool_type == "dred":
             self.opponent_pool = DREDPool(
                 max_size=self.k_best_pool_size * 10,  # DRED can handle larger pools
                 embedding_dim=128,
                 k_factor=self.k_factor,
+                use_mixed_precision=self.use_mixed_precision,
             )
         else:
             raise ValueError(f"Unknown opponent pool type: {self.opponent_pool_type}")
@@ -300,7 +302,9 @@ class SelfPlayTrainer:
                 )
 
                 if opponent_snapshot is not None and current_player != 0:
-                    outputs = opponent_snapshot.model(embedding_data)
+                    outputs = opponent_snapshot.model(
+                        embedding_data.to(opponent_snapshot.model_dtype)
+                    )
                 else:
                     outputs = self.model(embedding_data)
                 logits = outputs["policy_logits"].float()
@@ -525,7 +529,9 @@ class SelfPlayTrainer:
                             dtype=torch.bfloat16,
                             enabled=self.use_mixed_precision,
                         ):
-                            outputs = opponent.model(opp_states)
+                            outputs = opponent.model(
+                                opp_states.to(opponent.model_dtype)
+                            )
                             opp_logits = outputs["policy_logits"].float()
                             opp_values = outputs["value"].float()
 
@@ -896,12 +902,21 @@ class SelfPlayTrainer:
                 kl_states = batch["embedding_data"][sample_indices]
 
                 # Get current model logits
-                with torch.no_grad():
+                with (
+                    torch.no_grad(),
+                    torch.amp.autocast(
+                        self.device.type,
+                        dtype=torch.bfloat16,
+                        enabled=self.use_mixed_precision,
+                    ),
+                ):
                     current_outputs = self.model(kl_states)
                     current_logits = current_outputs["policy_logits"].float()
 
                     # Get last admitted opponent model logits
-                    opponent_outputs = last_admitted_opponent.model(kl_states)
+                    opponent_outputs = last_admitted_opponent.model(
+                        kl_states.to(last_admitted_opponent.model_dtype)
+                    )
                     opponent_logits = opponent_outputs["policy_logits"].float()
 
                 # Compute KL divergence
@@ -1269,10 +1284,24 @@ class SelfPlayTrainer:
                 )
                 model.load_state_dict(snapshot_data["model_state_dict"])
                 model.to(self.device)
+                # Handle backward compatibility for older snapshots
+                model_dtype = snapshot_data.get("model_dtype", torch.float32)
+                # Handle legacy use_mixed_precision field
+                if (
+                    "use_mixed_precision" in snapshot_data
+                    and "model_dtype" not in snapshot_data
+                ):
+                    model_dtype = (
+                        torch.bfloat16
+                        if snapshot_data["use_mixed_precision"]
+                        else torch.float32
+                    )
+
                 snapshot = AgentSnapshot(
                     model=model,
                     step=snapshot_data.get("step", 0),
                     elo=snapshot_data.get("elo", 1200.0),
+                    model_dtype=model_dtype,
                 )
                 snapshot.games_played = snapshot_data.get("games_played", 0)
                 snapshot.wins = snapshot_data.get("wins", 0)

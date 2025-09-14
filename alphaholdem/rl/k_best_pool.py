@@ -28,6 +28,7 @@ class KBestOpponentPool(OpponentPool):
         min_elo_diff: float = 50.0,
         min_step_diff: int = 300,
         k_factor: float = 32.0,
+        use_mixed_precision: bool = False,
     ):
         """
         Initialize K-Best opponent pool.
@@ -37,11 +38,13 @@ class KBestOpponentPool(OpponentPool):
             min_elo_diff: Minimum ELO difference to consider for pool updates
             min_step_diff: Minimum step difference before considering for pool updates
             k_factor: ELO K-factor for rating changes
+            use_mixed_precision: Whether to store models in bfloat16 for memory efficiency
         """
         self.k = k
         self.min_elo_diff = min_elo_diff
         self.min_step_diff = min_step_diff
         self.k_factor = k_factor
+        self.use_mixed_precision = use_mixed_precision
         self.snapshots: List[AgentSnapshot] = []
         self.current_elo = 1200.0  # Starting ELO rating
         self.elo_calculator = ELOCalculator(k_factor)
@@ -93,10 +96,12 @@ class KBestOpponentPool(OpponentPool):
             rating: ELO rating of the agent
         """
         # Create new snapshot
+        model_dtype = torch.bfloat16 if self.use_mixed_precision else torch.float32
         new_snapshot = AgentSnapshot(
             model=model,
             step=step,
             elo=rating if rating is not None else self.current_elo,
+            model_dtype=model_dtype,
         )
 
         # Reduce memory footprint of snapshot models on accelerators
@@ -257,6 +262,7 @@ class KBestOpponentPool(OpponentPool):
         """Save the opponent pool to disk."""
         pool_data = {
             "current_elo": self.current_elo,
+            "use_mixed_precision": self.use_mixed_precision,
             "snapshots": [],
         }
 
@@ -269,6 +275,7 @@ class KBestOpponentPool(OpponentPool):
                 "losses": snapshot.losses,
                 "draws": snapshot.draws,
                 "model_state_dict": snapshot.model.state_dict(),
+                "model_dtype": snapshot.model_dtype,
             }
             pool_data["snapshots"].append(snapshot_data)
 
@@ -279,6 +286,8 @@ class KBestOpponentPool(OpponentPool):
         pool_data = torch.load(path)
 
         self.current_elo = pool_data["current_elo"]
+        # Handle backward compatibility for older pool files
+        self.use_mixed_precision = pool_data.get("use_mixed_precision", False)
         self.snapshots = []
 
         for snapshot_data in pool_data["snapshots"]:
@@ -286,8 +295,24 @@ class KBestOpponentPool(OpponentPool):
             model = model_class()  # You'll need to pass the model class
             model.load_state_dict(snapshot_data["model_state_dict"])
 
+            # Handle backward compatibility for older snapshots
+            model_dtype = snapshot_data.get("model_dtype", torch.float32)
+            # Handle legacy use_mixed_precision field
+            if (
+                "use_mixed_precision" in snapshot_data
+                and "model_dtype" not in snapshot_data
+            ):
+                model_dtype = (
+                    torch.bfloat16
+                    if snapshot_data["use_mixed_precision"]
+                    else torch.float32
+                )
+
             snapshot = AgentSnapshot(
-                model=model, step=snapshot_data["step"], elo=snapshot_data["elo"]
+                model=model,
+                step=snapshot_data["step"],
+                elo=snapshot_data["elo"],
+                model_dtype=model_dtype,
             )
             snapshot.games_played = snapshot_data["games_played"]
             snapshot.wins = snapshot_data["wins"]

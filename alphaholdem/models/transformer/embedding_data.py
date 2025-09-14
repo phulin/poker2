@@ -14,23 +14,46 @@ class StructuredEmbeddingData:
 
     This class encapsulates all the structured embedding components used by the
     transformer poker model, providing a clean interface and type safety.
+
+    Dtype conventions:
+    - All integer fields (token_ids, card_ranks, card_suits, card_streets, action_actors, action_streets) are long
+    - Context fields (action_legal_masks, context_features) should match self.dtype (default: float32)
     """
 
-    # Card components [batch_size, seq_len]
+    # Card components [batch_size, seq_len] - all should be long
     token_ids: torch.Tensor  # Token IDs (0-51 for cards, 52 for CLS, -1 for padding)
     card_ranks: torch.Tensor  # Card ranks (0-12)
     card_suits: torch.Tensor  # Card suits (0-3)
     card_streets: torch.Tensor  # Stage indices (0-3: hole, flop, turn, river)
 
-    # Action components [batch_size, seq_len]
+    # Action components [batch_size, seq_len] - all should be long
     action_actors: torch.Tensor  # Actor indices (0-1: player indices)
     action_streets: torch.Tensor  # Street indices (0-3: hole, flop, turn, river)
-    action_legal_masks: torch.Tensor  # Legal action masks [batch_size, seq_len, 8]
 
-    # Context components [batch_size, seq_len, 10]
+    # Context components - should match self.dtype (default: float32)
+    action_legal_masks: (
+        torch.Tensor
+    )  # Legal action masks [batch_size, seq_len, 8] - dtype should match self.dtype
     context_features: (
         torch.Tensor
-    )  # All context info in one tensor [batch_size, seq_len, 10]
+    )  # All context info in one tensor [batch_size, seq_len, 10] - dtype should match self.dtype
+
+    # Dtype control
+    dtype: torch.dtype = torch.float32  # Target dtype for context fields
+
+    def __post_init__(self):
+        """Ensure proper dtypes on creation."""
+        # Convert integer fields to long
+        self.token_ids = self.token_ids.long()
+        self.card_ranks = self.card_ranks.long()
+        self.card_suits = self.card_suits.long()
+        self.card_streets = self.card_streets.long()
+        self.action_actors = self.action_actors.long()
+        self.action_streets = self.action_streets.long()
+
+        # Convert context fields to specified dtype (self.dtype)
+        self.action_legal_masks = self.action_legal_masks.to(self.dtype)  # Float mask
+        self.context_features = self.context_features.to(self.dtype)
 
     def to_dict(self) -> Dict[str, torch.Tensor]:
         """Convert to dictionary format for model forward pass."""
@@ -70,7 +93,27 @@ class StructuredEmbeddingData:
             action_streets=self.action_streets.to(device),
             action_legal_masks=self.action_legal_masks.to(device),
             context_features=self.context_features.to(device),
+            dtype=self.dtype,  # Preserve the dtype
         )
+
+    def to(self, dtype: torch.dtype) -> StructuredEmbeddingData:
+        """Convert context fields to specified dtype and update self.dtype. Integer fields remain long."""
+        # Create new instance without calling __post_init__
+        result = StructuredEmbeddingData.__new__(StructuredEmbeddingData)
+        result.token_ids = self.token_ids  # Keep as long
+        result.card_ranks = self.card_ranks  # Keep as long
+        result.card_suits = self.card_suits  # Keep as long
+        result.card_streets = self.card_streets  # Keep as long
+        result.action_actors = self.action_actors  # Keep as long
+        result.action_streets = self.action_streets  # Keep as long
+        result.action_legal_masks = self.action_legal_masks.to(
+            dtype
+        )  # Convert to new dtype
+        result.context_features = self.context_features.to(
+            dtype
+        )  # Convert to new dtype
+        result.dtype = dtype  # Update self.dtype to match
+        return result
 
     def __len__(self) -> int:
         """Return batch size."""

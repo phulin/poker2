@@ -58,6 +58,7 @@ class DREDPool(OpponentPool):
         k_recent: int = 20,
         k_factor: float = 32.0,
         embedding_dim: int = 128,
+        use_mixed_precision: bool = False,
     ):
         """
         Initialize DRED opponent pool.
@@ -74,6 +75,7 @@ class DREDPool(OpponentPool):
             k_recent: Number of recent opponents to consider for diversity
             k_factor: ELO K-factor for rating changes
             embedding_dim: Dimension of opponent embeddings
+            use_mixed_precision: Whether to store models in bfloat16 for memory efficiency
         """
         self.max_size = max_size
         self.beta = beta
@@ -86,6 +88,7 @@ class DREDPool(OpponentPool):
         self.k_recent = k_recent
         self.k_factor = k_factor
         self.embedding_dim = embedding_dim
+        self.use_mixed_precision = use_mixed_precision
 
         self.snapshots: List[AgentSnapshot] = []
         self.current_elo = 1200.0
@@ -242,11 +245,13 @@ class DREDPool(OpponentPool):
             rating: ELO rating of the agent
         """
         # Create new snapshot
+        model_dtype = torch.bfloat16 if self.use_mixed_precision else torch.float32
         new_snapshot = AgentSnapshot(
             model=model,
             step=step,
             elo=rating if rating is not None else self.current_elo,
             data=DREDSnapshotData(),  # DRED-specific data
+            model_dtype=model_dtype,
         )
 
         # Reduce memory footprint of snapshot models

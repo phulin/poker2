@@ -53,7 +53,9 @@ class TransformerStateEncoder:
         )
 
         # Consolidated context tensor [N, L, 10]
-        self.context_features = torch.zeros(N, L, 10, dtype=torch.long, device=device)
+        self.context_features = torch.zeros(
+            N, L, 10, dtype=torch.float32, device=device
+        )
 
     @classmethod
     def get_special_token_offset(cls, num_bet_bins: int) -> int:
@@ -228,25 +230,25 @@ class TransformerStateEncoder:
         # Consolidate all context features into a single tensor [M, 10]
         context_features = torch.stack(
             [
-                self.tensor_env.pot[idxs].long(),  # 0: pot size
-                self.tensor_env.stacks[idxs, player].long(),  # 1: our stack
-                self.tensor_env.stacks[idxs, 1 - player].long(),  # 2: opponent stack
-                self.tensor_env.committed[idxs, player].long(),  # 3: our committed
+                self.tensor_env.pot[idxs].float(),  # 0: pot size
+                self.tensor_env.stacks[idxs, player].float(),  # 1: our stack
+                self.tensor_env.stacks[idxs, 1 - player].float(),  # 2: opponent stack
+                self.tensor_env.committed[idxs, player].float(),  # 3: our committed
                 self.tensor_env.committed[
                     idxs, 1 - player
-                ].long(),  # 4: opponent committed
+                ].float(),  # 4: opponent committed
                 torch.where(
                     self.tensor_env.button[idxs] == player, 0, 1
-                ),  # 5: position
-                self.tensor_env.street[idxs].long(),  # 6: street
+                ).float(),  # 5: position
+                self.tensor_env.street[idxs].float(),  # 6: street
                 self.tensor_env.actions_this_round[
                     idxs
-                ].long(),  # 7: actions this round
-                self.tensor_env.min_raise[idxs].long(),  # 8: min raise
+                ].float(),  # 7: actions this round
+                self.tensor_env.min_raise[idxs].float(),  # 8: min raise
                 (
                     self.tensor_env.committed[idxs, 1 - player]
                     - self.tensor_env.committed[idxs, player]
-                ).long(),  # 9: bet to call
+                ).float(),  # 9: bet to call
             ],
             dim=1,
         )  # [M, 10]

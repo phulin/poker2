@@ -125,7 +125,7 @@ class VectorizedReplayBuffer:
                 T,
                 L,
                 10,
-                dtype=torch.long,
+                dtype=float_dtype,  # Use float_dtype for context features
                 device=device,
             )
 
@@ -356,8 +356,6 @@ class VectorizedReplayBuffer:
                 "Must call start_adding_trajectory_batches before adding data"
             )
 
-        batch_size = embedding_data.batch_size
-
         # Convert source trajectory indices to buffer indices by adding current position
         buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
 
@@ -382,29 +380,30 @@ class VectorizedReplayBuffer:
             )
         elif isinstance(embedding_data, StructuredEmbeddingData):
             # Store structured embedding data - vectorized assignment using advanced indexing
+            # Convert to buffer dtypes for memory efficiency
             self.token_ids[buffer_trajectory_indices, step_positions] = (
-                embedding_data.token_ids
+                embedding_data.token_ids.to(torch.int8)
             )
             self.card_ranks[buffer_trajectory_indices, step_positions] = (
-                embedding_data.card_ranks
+                embedding_data.card_ranks.to(torch.uint8)
             )
             self.card_suits[buffer_trajectory_indices, step_positions] = (
-                embedding_data.card_suits
+                embedding_data.card_suits.to(torch.uint8)
             )
             self.card_streets[buffer_trajectory_indices, step_positions] = (
-                embedding_data.card_streets
+                embedding_data.card_streets.to(torch.uint8)
             )
             self.action_actors[buffer_trajectory_indices, step_positions] = (
-                embedding_data.action_actors
+                embedding_data.action_actors.to(torch.uint8)
             )
             self.action_streets[buffer_trajectory_indices, step_positions] = (
-                embedding_data.action_streets
+                embedding_data.action_streets.to(torch.uint8)
             )
             self.action_legal_masks[buffer_trajectory_indices, step_positions] = (
-                embedding_data.action_legal_masks
+                embedding_data.action_legal_masks.to(torch.bool)
             )
             self.context_features[buffer_trajectory_indices, step_positions] = (
-                embedding_data.context_features
+                embedding_data.context_features.to(self.float_dtype)
             )
 
         # Store common transition data
