@@ -471,3 +471,97 @@ class DREDPool(OpponentPool):
             "avg_difficulty": sum(difficulties) / len(difficulties),
             "recent_opponents_count": len(self.recent_opponents),
         }
+
+    def save_pool(self, path: str):
+        """Save the DRED opponent pool to disk."""
+        pool_data = {
+            "current_elo": self.current_elo,
+            "use_mixed_precision": self.use_mixed_precision,
+            "max_size": self.max_size,
+            "beta": self.beta,
+            "lam": self.lam,
+            "tau": self.tau,
+            "eta": self.eta,
+            "gamma": self.gamma,
+            "p_curr": self.p_curr,
+            "weak_floor": self.weak_floor,
+            "k_recent": self.k_recent,
+            "k_factor": self.k_factor,
+            "embedding_dim": self.embedding_dim,
+            "last_admitted_step": self.last_admitted_step,
+            "snapshots": [],
+        }
+
+        for snapshot in self.snapshots:
+            snapshot_data = {
+                "step": snapshot.step,
+                "elo": snapshot.elo,
+                "games_played": snapshot.games_played,
+                "wins": snapshot.wins,
+                "losses": snapshot.losses,
+                "draws": snapshot.draws,
+                "model_state_dict": snapshot.model.state_dict(),
+                "model_dtype": snapshot.model_dtype,
+            }
+
+            # Add DRED-specific data
+            if hasattr(snapshot, "data") and snapshot.data is not None:
+                snapshot_data["dred_age"] = snapshot.data.age
+                snapshot_data["dred_alpha"] = snapshot.data.alpha
+                snapshot_data["dred_beta"] = snapshot.data.beta
+
+            pool_data["snapshots"].append(snapshot_data)
+
+        torch.save(pool_data, path)
+
+    def load_pool(self, path: str, model_class):
+        """Load the DRED opponent pool from disk."""
+        pool_data = torch.load(path)
+
+        self.current_elo = pool_data["current_elo"]
+        self.use_mixed_precision = pool_data.get("use_mixed_precision", False)
+        self.max_size = pool_data.get("max_size", 100)
+        self.beta = pool_data.get("beta", 0.02)
+        self.lam = pool_data.get("lam", 0.003)
+        self.tau = pool_data.get("tau", 1.0)
+        self.eta = pool_data.get("eta", 40.0)
+        self.gamma = pool_data.get("gamma", 0.5)
+        self.p_curr = pool_data.get("p_curr", 0.5)
+        self.weak_floor = pool_data.get("weak_floor", 0.1)
+        self.k_recent = pool_data.get("k_recent", 20)
+        self.k_factor = pool_data.get("k_factor", 32.0)
+        self.embedding_dim = pool_data.get("embedding_dim", 128)
+        self.last_admitted_step = pool_data.get("last_admitted_step", 0)
+
+        self.snapshots = []
+        for snapshot_data in pool_data["snapshots"]:
+            # Create model instance
+            model = model_class()
+            model.load_state_dict(snapshot_data["model_state_dict"])
+
+            # Get model dtype with backward compatibility
+            model_dtype = snapshot_data.get("model_dtype", torch.float32)
+
+            # Create snapshot
+            snapshot = AgentSnapshot(
+                model=model,
+                step=snapshot_data["step"],
+                elo=snapshot_data["elo"],
+                model_dtype=model_dtype,
+            )
+
+            # Restore game statistics
+            snapshot.games_played = snapshot_data["games_played"]
+            snapshot.wins = snapshot_data["wins"]
+            snapshot.losses = snapshot_data["losses"]
+            snapshot.draws = snapshot_data["draws"]
+
+            # Restore DRED-specific data
+            if "dred_age" in snapshot_data:
+                snapshot.data = DREDSnapshotData(
+                    age=snapshot_data["dred_age"],
+                    alpha=snapshot_data.get("dred_alpha", 1.0),
+                    beta=snapshot_data.get("dred_beta", 1.0),
+                )
+
+            self.snapshots.append(snapshot)

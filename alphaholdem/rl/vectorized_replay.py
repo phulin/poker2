@@ -46,7 +46,7 @@ class VectorizedReplayBuffer:
         # Pre-allocate tensors for all transition fields: (capacity, max_trajectory_length, ...)
         if not is_transformer:
             # CNN model tensors
-            # Cards features tensor: (capacity, max_trajectory_length, 6, 4, 13) - bool dtype
+            # Cards features tensor: (capacity, max_trajectory_length, 6, 4, 13) - bool dtype for memory efficiency
             self.cards_features = torch.zeros(
                 C,
                 T,
@@ -57,7 +57,7 @@ class VectorizedReplayBuffer:
                 device=device,
             )
 
-            # Actions features tensor: (capacity, max_trajectory_length, 24, 4, num_bet_bins) - bool dtype
+            # Actions features tensor: (capacity, max_trajectory_length, 24, 4, num_bet_bins) - bool dtype for memory efficiency
             # 4 slots: p1, p2, sum, legal
             self.actions_features = torch.zeros(
                 C,
@@ -371,12 +371,12 @@ class VectorizedReplayBuffer:
 
         # Handle different embedding data types
         if isinstance(embedding_data, CNNEmbeddingData):
-            # Store CNN features - vectorized assignment using advanced indexing
+            # Store CNN features - convert from float to bool for memory efficiency
             self.cards_features[buffer_trajectory_indices, step_positions] = (
-                embedding_data.cards
+                embedding_data.cards.to(torch.bool)
             )
             self.actions_features[buffer_trajectory_indices, step_positions] = (
-                embedding_data.actions
+                embedding_data.actions.to(torch.bool)
             )
         elif isinstance(embedding_data, StructuredEmbeddingData):
             # Store structured embedding data - vectorized assignment using advanced indexing
@@ -721,8 +721,12 @@ class VectorizedReplayBuffer:
             )
         else:
             data = CNNEmbeddingData(
-                cards=self.cards_features[traj_indices, step_indices],
-                actions=self.actions_features[traj_indices, step_indices],
+                cards=self.cards_features[traj_indices, step_indices].to(
+                    self.float_dtype
+                ),
+                actions=self.actions_features[traj_indices, step_indices].to(
+                    self.float_dtype
+                ),
             )
 
         # CNN model fields

@@ -492,14 +492,7 @@ class TestVectorizedReplayBuffer:
 
         # Check that all required keys are present (transformer mode)
         expected_keys = {
-            "token_ids",
-            "card_ranks",
-            "card_suits",
-            "card_streets",
-            "action_actors",
-            "action_streets",
-            "action_legal_masks",
-            "context_features",
+            "embedding_data",
             "action_indices",
             "log_probs_old",
             "advantages",
@@ -511,8 +504,8 @@ class TestVectorizedReplayBuffer:
         assert set(sampled.keys()) == expected_keys
 
         # Check shapes
-        assert sampled["token_ids"].shape[0] == 5
-        assert sampled["card_ranks"].shape[0] == 5
+        assert sampled["embedding_data"].token_ids.shape[0] == 5
+        assert sampled["embedding_data"].card_ranks.shape[0] == 5
         assert sampled["action_indices"].shape[0] == 5
         assert sampled["log_probs_old"].shape[0] == 5
         assert sampled["advantages"].shape[0] == 5

@@ -58,17 +58,17 @@ class CardEmbedding(nn.Module):
     def forward(
         self,
         token_ids: torch.Tensor,
-        card_streets: torch.Tensor,
         card_ranks: torch.Tensor,
         card_suits: torch.Tensor,
+        card_streets: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass for card embeddings.
 
         Args:
             token_ids: Token IDs [batch_size, seq_len] (0-51, with 52 for CLS)
-            card_streets: Street indices [batch_size, seq_len] (0-3)
             card_ranks: Card ranks [batch_size, seq_len] (0-12, with -1 for invalid)
             card_suits: Card suits [batch_size, seq_len] (0-3, with -1 for invalid)
+            card_streets: Street indices [batch_size, seq_len] (0-3)
 
         Returns:
             Card embeddings [batch_size, seq_len, d_model]
@@ -198,6 +198,18 @@ class ActionEmbedding(nn.Module):
         # Create mask for valid tokens (non-negative token_ids)
         valid_mask = token_ids[:, start:end] >= 0
         valid_indices = torch.where(valid_mask)
+
+        # Handle case when there are no valid action
+        if valid_indices[0].numel() == 0:
+            # Return zero embeddings for this slice
+            slice_embeddings = torch.zeros(
+                batch_size,
+                end - start,
+                self.d_model,
+                device=action_actors.device,
+                dtype=torch.float32,
+            )
+            return slice_embeddings
 
         # Get embeddings for valid positions only
         actor_emb = self.actor_emb(action_actors_slice[valid_indices])

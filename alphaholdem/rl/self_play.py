@@ -1092,7 +1092,18 @@ class SelfPlayTrainer:
                 "losses": snapshot.losses,
                 "draws": snapshot.draws,
                 "model_state_dict": snapshot.model.state_dict(),
+                "model_dtype": snapshot.model_dtype,
             }
+
+            # Add DRED-specific data if present
+            if hasattr(snapshot, "data") and snapshot.data is not None:
+                if hasattr(snapshot.data, "age"):
+                    snapshot_data["dred_age"] = snapshot.data.age
+                if hasattr(snapshot.data, "alpha"):
+                    snapshot_data["dred_alpha"] = snapshot.data.alpha
+                if hasattr(snapshot.data, "beta"):
+                    snapshot_data["dred_beta"] = snapshot.data.beta
+
             pool_data["snapshots"].append(snapshot_data)
 
         checkpoint = {
@@ -1307,6 +1318,17 @@ class SelfPlayTrainer:
                 snapshot.wins = snapshot_data.get("wins", 0)
                 snapshot.losses = snapshot_data.get("losses", 0)
                 snapshot.draws = snapshot_data.get("draws", 0)
+
+                # Restore DRED-specific data if present
+                if "dred_age" in snapshot_data:
+                    from .dred_pool import DREDSnapshotData
+
+                    snapshot.data = DREDSnapshotData(
+                        age=snapshot_data["dred_age"],
+                        alpha=snapshot_data.get("dred_alpha", 1.0),
+                        beta=snapshot_data.get("dred_beta", 1.0),
+                    )
+
                 self.opponent_pool.snapshots.append(snapshot)
             print("Opponent pool restored from checkpoint file")
         else:

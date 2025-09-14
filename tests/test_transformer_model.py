@@ -149,7 +149,7 @@ class TestContextEmbedding:
 
         # Create dummy input data with full sequence length
         token_ids = torch.randint(0, 60, (batch_size, max_seq_len))
-        context_features = torch.randint(0, 1000, (batch_size, max_seq_len, 10))
+        context_features = torch.randint(0, 1000, (batch_size, max_seq_len, 10)).float()
 
         # Test forward pass
         output = embedding(token_ids, context_features)
@@ -203,7 +203,9 @@ class TestPokerTransformerV1:
             action_legal_masks=torch.randint(
                 0, 2, (batch_size, max_seq_len, num_bet_bins)
             ).float(),
-            context_features=torch.randint(0, 1000, (batch_size, max_seq_len, 10)),
+            context_features=torch.randint(
+                0, 1000, (batch_size, max_seq_len, 10)
+            ).float(),
         )
 
         # Test forward pass
@@ -212,10 +214,12 @@ class TestPokerTransformerV1:
             assert "policy_logits" in outputs
             assert "value" in outputs
             assert outputs["policy_logits"].shape == (batch_size, num_bet_bins)
-            assert outputs["value"].shape == (batch_size, 1)
+            assert outputs["value"].shape == (batch_size,)
 
     def test_transformer_with_real_environment(self):
         """Test PokerTransformerV1 with real environment data."""
+        device = torch.device("cpu")
+
         # Create environment
         env = HUNLTensorEnv(
             num_envs=2,
@@ -223,8 +227,8 @@ class TestPokerTransformerV1:
             sb=50,
             bb=100,
             bet_bins=[0.5, 1.0, 1.5, 2.0],
+            device=device,  # Pass device to environment
         )
-        device = torch.device("cpu")
 
         # Create state encoder
         state_encoder = ModelFactory.create_state_encoder(
@@ -255,7 +259,7 @@ class TestPokerTransformerV1:
             assert "policy_logits" in outputs
             assert "value" in outputs
             assert outputs["policy_logits"].shape == (2, 8)
-            assert outputs["value"].shape == (2, 1)
+            assert outputs["value"].shape == (2,)
 
     def test_transformer_gradient_checkpointing(self):
         """Test PokerTransformerV1 with gradient checkpointing enabled."""
@@ -284,7 +288,9 @@ class TestPokerTransformerV1:
             action_legal_masks=torch.randint(
                 0, 2, (batch_size, max_seq_len, num_bet_bins)
             ).float(),
-            context_features=torch.randint(0, 1000, (batch_size, max_seq_len, 10)),
+            context_features=torch.randint(
+                0, 1000, (batch_size, max_seq_len, 10)
+            ).float(),
         )
 
         # Test forward pass
@@ -292,7 +298,7 @@ class TestPokerTransformerV1:
         assert "policy_logits" in outputs
         assert "value" in outputs
         assert outputs["policy_logits"].shape == (batch_size, num_bet_bins)
-        assert outputs["value"].shape == (batch_size, 1)
+        assert outputs["value"].shape == (batch_size,)
 
     def test_transformer_different_batch_sizes(self):
         """Test PokerTransformerV1 with different batch sizes."""
@@ -320,13 +326,15 @@ class TestPokerTransformerV1:
                 action_legal_masks=torch.randint(
                     0, 2, (batch_size, max_seq_len, num_bet_bins)
                 ).float(),
-                context_features=torch.randint(0, 1000, (batch_size, max_seq_len, 10)),
+                context_features=torch.randint(
+                    0, 1000, (batch_size, max_seq_len, 10)
+                ).float(),
             )
 
             with torch.no_grad():
                 outputs = model(structured_data)
                 assert outputs["policy_logits"].shape == (batch_size, num_bet_bins)
-                assert outputs["value"].shape == (batch_size, 1)
+                assert outputs["value"].shape == (batch_size,)
 
 
 class TestEmbeddingIntegration:
@@ -375,7 +383,7 @@ class TestEmbeddingIntegration:
         )  # ActionEmbedding returns 24 positions
 
         # Test context embedding
-        context_features = torch.randint(0, 1000, (batch_size, max_seq_len, 10))
+        context_features = torch.randint(0, 1000, (batch_size, max_seq_len, 10)).float()
         context_output = context_embedding(token_ids, context_features)
         assert context_output.shape == (
             batch_size,

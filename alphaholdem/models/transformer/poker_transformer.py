@@ -131,19 +131,19 @@ class PokerTransformerV1(nn.Module, Model):
         # Get structured embeddings first
         # Convert tensors to long for embedding layers
         card_embeddings = self.card_embedding(
-            structured_data.token_ids.long(),
-            structured_data.card_streets.long(),
-            structured_data.card_ranks.long(),
-            structured_data.card_suits.long(),
+            structured_data.token_ids,
+            structured_data.card_ranks,
+            structured_data.card_suits,
+            structured_data.card_streets,
         )
         action_embeddings = self.action_embedding(
-            structured_data.token_ids.long(),
-            structured_data.action_actors.long(),
-            structured_data.action_streets.long(),
+            structured_data.token_ids,
+            structured_data.action_actors,
+            structured_data.action_streets,
             structured_data.action_legal_masks,
         )
         context_embeddings = self.context_embedding(
-            structured_data.token_ids.long(),
+            structured_data.token_ids,
             structured_data.context_features,
         )
 
