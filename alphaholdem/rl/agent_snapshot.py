@@ -25,7 +25,7 @@ class AgentSnapshot:
 
     def __init__(
         self,
-        model: nn.Module,
+        model: Optional[nn.Module],
         step: int,
         elo: float = 1200.0,
         data: Optional[Any] = None,
@@ -34,6 +34,8 @@ class AgentSnapshot:
         self.model_dtype = model_dtype
         if model is not None:
             self.model = copy.deepcopy(model).to(model_dtype)
+            for p in self.model.parameters():
+                p.requires_grad = False
         else:
             self.model = None
 
@@ -68,25 +70,3 @@ class AgentSnapshot:
             self.losses += 1
         else:  # draw
             self.draws += 1
-
-    def get_model_for_inference(self, device: torch.device) -> nn.Module:
-        """Get the model for inference. Convert bfloat16 models back to float32 for inference."""
-        if self.model is None:
-            raise ValueError("Cannot get model for inference: model is None")
-
-        if (
-            self.model_dtype == torch.bfloat16
-            and next(self.model.parameters()).dtype == torch.bfloat16
-        ):
-            # Convert bfloat16 model back to float32 for inference to maintain precision
-            # This is the standard approach for mixed precision inference
-            model = self.model.to(torch.float32)
-        else:
-            model = self.model
-
-        return model.to(device)
-
-    def convert_input_to_model_dtype(self, structured_data):
-        """Convert input data to match the model's dtype for inference."""
-        # No conversion needed since we convert the model to float32 for inference
-        return structured_data
