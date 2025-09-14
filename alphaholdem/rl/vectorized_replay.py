@@ -264,8 +264,6 @@ class VectorizedReplayBuffer:
 
         compacted_indices = indices[:num_valid]
         unused_indices = indices[num_valid:]
-        print(f"=> compacted {num_valid} indices out of {num_trajectories}")
-        # print("trajectory lengths: ", self.trajectory_lengths[indices].tolist())
 
         # Compact nonzero-length trajectories to the front of the window
         # For each field, move data from nonzero_indices to the front of indices
@@ -453,7 +451,7 @@ class VectorizedReplayBuffer:
         # Get current step positions for each trajectory
         step_positions = self.current_step_positions[buffer_trajectory_indices]
 
-        # Only update trajectories that have at least one step
+        # Only update trajectories that have at least one step (not e.g. opponent folded immediately)
         valid_mask = step_positions > 0
         if not valid_mask.any():
             return
