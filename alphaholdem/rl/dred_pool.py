@@ -230,6 +230,9 @@ class DREDPool(OpponentPool):
         floor_weight = self.weak_floor * weights.sum() / len(weak_idx)
         weights[weak_idx] = torch.maximum(weights[weak_idx], floor_weight)
 
+        # Ensure weights are non-negative
+        weights = torch.clamp(weights, min=0.0)
+
         # Normalize
         return weights / weights.sum()
 
