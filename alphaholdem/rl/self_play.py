@@ -541,13 +541,15 @@ class SelfPlayTrainer:
 
                 if opp_env_groups is not None and env_active_opp_acts.numel() > 0:
                     for opponent_idx, opp_env_indices in enumerate(opp_env_groups):
-                        if opp_env_indices.numel() == 0:
-                            continue
                         opponent = all_opponent_snapshots[opponent_idx]
 
                         opp_working_env_indices = opp_env_indices[
                             env_active_opp_acts_mask[opp_env_indices]
                         ]
+
+                        if opp_working_env_indices.numel() == 0:
+                            continue
+
                         opp_states = self._encode_tensor_states(
                             player=1, idxs=opp_working_env_indices
                         )
@@ -676,6 +678,10 @@ class SelfPlayTrainer:
                 if add_to_replay_buffer:
                     self.replay_buffer.finish_adding_trajectory_batches()
                     adding_trajectories = False
+
+                if self.cfg.env.debug_step_table:
+                    print(f"=> Batch steps collected: {batch_steps_collected}")
+                    print(f"=> Updating ELO from rewards", per_env_rewards)
 
                 self._update_elo_from_rewards(
                     per_env_rewards, dones, opp_env_groups, all_opponent_snapshots
