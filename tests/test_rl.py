@@ -224,7 +224,134 @@ def test_checkpoint_save_load():
                 param1, param2
             ), "Model parameters not restored correctly"
 
+        # Test dtype preservation for main model
+        print("Testing main model dtype preservation...")
+        main_model_dtype = next(trainer.model.parameters()).dtype
+        loaded_main_model_dtype = next(new_trainer.model.parameters()).dtype
+        assert (
+            main_model_dtype == loaded_main_model_dtype
+        ), f"Main model dtype mismatch: {main_model_dtype} vs {loaded_main_model_dtype}"
+
+        # Test dtype preservation for opponent pool snapshots
+        print("Testing opponent pool snapshot dtype preservation...")
+        if hasattr(trainer, "opponent_pool") and trainer.opponent_pool.snapshots:
+            original_snapshot = trainer.opponent_pool.snapshots[0]
+            loaded_snapshot = new_trainer.opponent_pool.snapshots[0]
+
+            # Check snapshot model dtype
+            assert (
+                original_snapshot.model_dtype == loaded_snapshot.model_dtype
+            ), f"Snapshot model_dtype mismatch: {original_snapshot.model_dtype} vs {loaded_snapshot.model_dtype}"
+
+            # Check actual model parameter dtypes
+            original_param_dtype = next(original_snapshot.model.parameters()).dtype
+            loaded_param_dtype = next(loaded_snapshot.model.parameters()).dtype
+            assert (
+                original_param_dtype == loaded_param_dtype
+            ), f"Snapshot parameter dtype mismatch: {original_param_dtype} vs {loaded_param_dtype}"
+
+            # Verify snapshot model parameters are the same
+            for param1, param2 in zip(
+                original_snapshot.model.parameters(), loaded_snapshot.model.parameters()
+            ):
+                assert torch.allclose(
+                    param1, param2
+                ), "Snapshot model parameters not restored correctly"
+
         print("✅ Checkpoint save/load test passed!")
+
+
+def test_checkpoint_dtype_preservation():
+    """Test that checkpoint save/load preserves dtypes correctly, especially for mixed precision."""
+
+    # Create a temporary directory for checkpoints
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Test with mixed precision enabled (use MPS if available, otherwise CPU)
+        device_name = "mps" if torch.backends.mps.is_available() else "cpu"
+        cfg = Config(
+            train=TrainingConfig(batch_size=4, use_mixed_precision=True),
+            model=ModelConfig(),
+            env=EnvConfig(),
+            use_tensor_env=True,
+            num_envs=2,
+            device=device_name,
+        )
+
+        device = torch.device(device_name)
+        trainer = SelfPlayTrainer(cfg=cfg, device=device)
+
+        # Run a few training steps to populate opponent pool
+        for step in range(2):
+            trainer.train_step(step + 1)
+
+        # Manually add a snapshot to ensure we have one to test with
+        trainer.opponent_pool.add_snapshot(trainer.model, step=1, rating=1200.0)
+
+        # Verify opponent snapshots are in bfloat16 when mixed precision is enabled
+        assert trainer.opponent_pool.snapshots, "No snapshots in opponent pool"
+        snapshot = trainer.opponent_pool.snapshots[0]
+        assert (
+            snapshot.model_dtype == torch.bfloat16
+        ), f"Expected bfloat16, got {snapshot.model_dtype}"
+        param_dtype = next(snapshot.model.parameters()).dtype
+        assert (
+            param_dtype == torch.bfloat16
+        ), f"Expected bfloat16 parameters, got {param_dtype}"
+
+        # Save checkpoint
+        checkpoint_path = os.path.join(temp_dir, "test_dtype_checkpoint.pt")
+        trainer.save_checkpoint(checkpoint_path, step=2)
+
+        # Load checkpoint
+        new_trainer = SelfPlayTrainer(cfg=cfg, device=device)
+        loaded_step, _ = new_trainer.load_checkpoint(checkpoint_path)
+
+        # Verify opponent snapshots maintain bfloat16 dtype after loading
+        assert (
+            new_trainer.opponent_pool.snapshots
+        ), "No snapshots in loaded opponent pool"
+        loaded_snapshot = new_trainer.opponent_pool.snapshots[0]
+        assert (
+            loaded_snapshot.model_dtype == torch.bfloat16
+        ), f"Expected bfloat16 after load, got {loaded_snapshot.model_dtype}"
+        loaded_param_dtype = next(loaded_snapshot.model.parameters()).dtype
+        assert (
+            loaded_param_dtype == torch.bfloat16
+        ), f"Expected bfloat16 parameters after load, got {loaded_param_dtype}"
+
+        # Test with mixed precision disabled
+        cfg_no_mixed = Config(
+            train=TrainingConfig(batch_size=4, use_mixed_precision=False),
+            model=ModelConfig(),
+            env=EnvConfig(),
+            use_tensor_env=True,
+            num_envs=2,
+            device=device_name,
+        )
+
+        trainer_no_mixed = SelfPlayTrainer(cfg=cfg_no_mixed, device=device)
+        for step in range(2):
+            trainer_no_mixed.train_step(step + 1)
+
+        # Manually add a snapshot to ensure we have one to test with
+        trainer_no_mixed.opponent_pool.add_snapshot(
+            trainer_no_mixed.model, step=1, rating=1200.0
+        )
+
+        # Verify opponent snapshots are in float32 when mixed precision is disabled
+        assert (
+            trainer_no_mixed.opponent_pool.snapshots
+        ), "No snapshots in opponent pool (no mixed precision)"
+        snapshot = trainer_no_mixed.opponent_pool.snapshots[0]
+        assert (
+            snapshot.model_dtype == torch.float32
+        ), f"Expected float32, got {snapshot.model_dtype}"
+        param_dtype = next(snapshot.model.parameters()).dtype
+        assert (
+            param_dtype == torch.float32
+        ), f"Expected float32 parameters, got {param_dtype}"
+
+        print("✅ Checkpoint dtype preservation test passed!")
 
 
 def test_preflop_range_grid():
@@ -328,7 +455,9 @@ def test_basic_training_step():
                 stats["trajectories_collected"] > 0
             ), f"No trajectories counted in step {step}"
 
-        # Check that we have some reward signal
-        assert not torch.isnan(stats["avg_reward"]), "NaN in avg_reward"
+            # Check that we have some reward signal
+            assert not torch.isnan(
+                torch.tensor(stats["avg_reward"])
+            ), "NaN in avg_reward"
 
     print("✅ Basic training step test passed!")

@@ -152,6 +152,15 @@ class DREDPool(OpponentPool):
         # Sample with DRED weighting
         weights = self._calculate_weights()
 
+        # Defensive: ensure weights form a valid multinomial distribution
+        if (
+            not torch.isfinite(weights).all()
+            or (weights < 0).any()
+            or weights.sum() <= 0
+        ):
+            print("Warning: Invalid weights in DRED pool")
+            print(weights)
+
         # Sample with replacement using DRED weights
         sampled_indices = torch.multinomial(weights, num_samples=k, replacement=True)
 

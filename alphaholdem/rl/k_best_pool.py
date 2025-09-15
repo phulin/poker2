@@ -280,6 +280,15 @@ class KBestOpponentPool(OpponentPool):
         }
 
         for snapshot in self.snapshots:
+            # Ensure model is in the correct dtype before saving state dict
+            model_state_dict = snapshot.model.state_dict()
+            # Convert all tensors to the stored dtype to ensure consistency
+            if snapshot.model_dtype != torch.float32:
+                model_state_dict = {
+                    k: v.to(snapshot.model_dtype) if isinstance(v, torch.Tensor) else v
+                    for k, v in model_state_dict.items()
+                }
+
             snapshot_data = {
                 "step": snapshot.step,
                 "elo": snapshot.elo,
@@ -287,7 +296,7 @@ class KBestOpponentPool(OpponentPool):
                 "wins": snapshot.wins,
                 "losses": snapshot.losses,
                 "draws": snapshot.draws,
-                "model_state_dict": snapshot.model.state_dict(),
+                "model_state_dict": model_state_dict,
                 "model_dtype": snapshot.model_dtype,
             }
             pool_data["snapshots"].append(snapshot_data)
@@ -304,10 +313,6 @@ class KBestOpponentPool(OpponentPool):
         self.snapshots = []
 
         for snapshot_data in pool_data["snapshots"]:
-            # Recreate model
-            model = model_class()  # You'll need to pass the model class
-            model.load_state_dict(snapshot_data["model_state_dict"])
-
             # Handle backward compatibility for older snapshots
             model_dtype = snapshot_data.get("model_dtype", torch.float32)
             # Handle legacy use_mixed_precision field
@@ -320,6 +325,12 @@ class KBestOpponentPool(OpponentPool):
                     if snapshot_data["use_mixed_precision"]
                     else torch.float32
                 )
+
+            # Recreate model
+            model = model_class()  # You'll need to pass the model class
+            model.load_state_dict(snapshot_data["model_state_dict"])
+            # Convert model to the stored dtype
+            model = model.to(model_dtype)
 
             snapshot = AgentSnapshot(
                 model=model,
