@@ -661,7 +661,9 @@ class TestVectorizedReplayBuffer:
 
         # Collect some trajectories
         min_steps = 5  # Reduced expectation since poker games can be short
-        total_reward, episode_count, _ = trainer.collect_tensor_trajectories(min_steps)
+        trajectory_rewards = trainer.collect_tensor_trajectories(min_steps=min_steps)
+        total_reward = trajectory_rewards.sum().item()
+        episode_count = trajectory_rewards.numel()
 
         # Monitor buffer state after collection
         final_size = trainer.replay_buffer.size
@@ -738,7 +740,9 @@ class TestVectorizedReplayBuffer:
             )
 
             # Collect trajectories
-            total_reward, episode_count, _ = trainer.collect_tensor_trajectories(5)
+            trajectory_rewards = trainer.collect_tensor_trajectories(min_steps=5)
+            total_reward = trajectory_rewards.sum().item()
+            episode_count = trajectory_rewards.numel()
 
             # Monitor after collection
             after_size = trainer.replay_buffer.size
@@ -817,7 +821,9 @@ class TestVectorizedReplayBuffer:
             before_position = trainer.replay_buffer.position
 
             # Collect trajectories
-            total_reward, episode_count, _ = trainer.collect_tensor_trajectories(5)
+            trajectory_rewards = trainer.collect_tensor_trajectories(min_steps=5)
+            total_reward = trajectory_rewards.sum().item()
+            episode_count = trajectory_rewards.numel()
 
             after_size = trainer.replay_buffer.size
             after_position = trainer.replay_buffer.position
@@ -905,7 +911,9 @@ class TestVectorizedReplayBuffer:
 
         # Collect trajectories with detailed monitoring
         print("\n--- Starting collection ---")
-        total_reward, episode_count, _ = trainer.collect_tensor_trajectories(10)
+        trajectory_rewards = trainer.collect_tensor_trajectories(min_steps=10)
+        total_reward = trajectory_rewards.sum().item()
+        episode_count = trajectory_rewards.numel()
 
         print_buffer_state("After collection")
         print(
