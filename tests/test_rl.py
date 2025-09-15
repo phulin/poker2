@@ -329,6 +329,6 @@ def test_basic_training_step():
             ), f"No trajectories counted in step {step}"
 
         # Check that we have some reward signal
-        assert not torch.isnan(torch.tensor(stats["avg_reward"])), "NaN in avg_reward"
+        assert not torch.isnan(stats["avg_reward"]), "NaN in avg_reward"
 
     print("✅ Basic training step test passed!")

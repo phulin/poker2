@@ -242,7 +242,7 @@ class SelfPlayTrainer:
                 )
             else:
                 wandb.init(**wandb_init_kwargs)
-                print(f"Wandb initialized new run for project: {self.wandb_project}")
+            print(f"Wandb initialized new run for project: {self.wandb_project}")
 
     def _initialize_weights(self):
         """Initialize model weights to prevent dead neurons."""
@@ -379,6 +379,37 @@ class SelfPlayTrainer:
             final_reward_from_our_perspective,
         )
 
+    def _update_elo_from_rewards(
+        self,
+        per_env_rewards: torch.Tensor,
+        mask: torch.Tensor,
+        opp_env_groups: Optional[list[torch.Tensor]],
+        all_opponent_snapshots: list[AgentSnapshot],
+    ) -> None:
+        # Update ELO ratings for done environments (vectorized by opponent)
+        # Use premade chunking to efficiently group done environments by opponent
+        if opp_env_groups is None:
+            return
+
+        # Vectorized ELO update per opponent using existing chunking
+        for opponent_idx, opp_env_indices in enumerate(opp_env_groups):
+            if opp_env_indices.numel() == 0:
+                continue
+
+            opponent = all_opponent_snapshots[opponent_idx]
+
+            masked_opp_env_indices_mask = mask[opp_env_indices]
+            masked_opp_env_indices = opp_env_indices[masked_opp_env_indices_mask]
+
+            if masked_opp_env_indices.numel() > 0:
+                opponent_rewards = per_env_rewards[masked_opp_env_indices]
+
+                # Update ELO for this opponent with all their games
+                self.opponent_pool.update_elo_batch_vectorized(
+                    opponent,
+                    opponent_rewards,
+                )
+
     @profile
     def collect_tensor_trajectories(
         self,
@@ -409,6 +440,7 @@ class SelfPlayTrainer:
         total_reward = 0.0
         trajectory_count = 0
         steps_collected = 0
+        batch_steps_collected = 0
         # Track individual episode rewards as list of tensors
         collected_trajectory_rewards = []
 
@@ -422,9 +454,30 @@ class SelfPlayTrainer:
         )
         max_steps = 50  # Safety limit per trajectory
 
+        # Chunk opponents by tensor env index
+        opp_env_groups = None
+        env_indices = torch.arange(self.num_envs, device=self.device)
+        if all_opponent_snapshots is not None and len(all_opponent_snapshots) > 0:
+            # Use opponent models - assign opponents to environments
+            num_opps = len(all_opponent_snapshots)
+            # Split active_opp_acts into num_opps approximately equal groups
+            opp_env_groups = torch.chunk(env_indices, num_opps)
+
+        # Initialize logits and values tensors for active environments only
+        env_logits = torch.zeros(
+            self.num_envs,
+            self.num_bet_bins,
+            dtype=self.float_dtype,
+            device=self.device,
+        )
+        env_values = torch.zeros(
+            self.num_envs, dtype=self.float_dtype, device=self.device
+        )
+
         # Outer loop: collect complete trajectories until we have enough steps
         loop_count = 0
         max_loops = 1000  # Safety limit to prevent infinite loops
+
         adding_trajectories = False
 
         while steps_collected < min_steps and loop_count < max_loops:
@@ -438,49 +491,32 @@ class SelfPlayTrainer:
             # Only process non-done environments to avoid bias towards short episodes
             active_mask = ~self.tensor_env.done
             active_indices = torch.where(active_mask)[0]
-            env_active_we_act = torch.where(
-                active_mask & (self.tensor_env.to_act == 0)
-            )[0]
-            env_active_opp_acts = torch.where(
-                active_mask & (self.tensor_env.to_act == 1)
-            )[0]
+            we_act_mask = self.tensor_env.to_act == 0
+            opp_acts_mask = self.tensor_env.to_act == 1
+            env_active_we_act_mask = active_mask & we_act_mask
+            env_active_we_act = torch.where(env_active_we_act_mask)[0]
+            env_active_opp_acts_mask = active_mask & opp_acts_mask
+            env_active_opp_acts = torch.where(env_active_opp_acts_mask)[0]
 
             # Get legal action masks for active environments only
             legal_bins_amounts, legal_bins_mask = (
                 self.tensor_env.legal_bins_amounts_and_mask()
             )
-            active_legal_masks = legal_bins_mask[active_indices]  # [N_active, B]
 
             # Get model predictions for active environments only
             with torch.no_grad():
-                # Determine which active environments need our model vs opponent models
-                # Save actor mask BEFORE stepping; these are the envs where we act now
-                original_to_act = self.tensor_env.to_act.clone()
-                active_who_acts = original_to_act[active_indices]
-                # these two are indices INTO THE ACTIVE ENV ARRAY only
-                active_we_act = torch.where(active_who_acts == 0)[0]
-                active_opp_acts = torch.where(active_who_acts == 1)[0]
-
                 # Encode states from our perspective (player=0)
                 our_states = self._encode_tensor_states(
                     player=0, idxs=env_active_we_act
                 )
 
-                active_first_action = ~self.tensor_env.acted_since_reset[active_indices]
+                env_logits.zero_()
+                env_values.zero_()
 
-                # Initialize logits and values tensors for active environments only
-                active_logits = torch.zeros(
-                    active_indices.numel(),
-                    self.num_bet_bins,
-                    dtype=self.float_dtype,
-                    device=self.device,
-                )
-                active_values = torch.zeros(
-                    active_indices.numel(), dtype=self.float_dtype, device=self.device
-                )
+                # active_first_action = ~self.tensor_env.acted_since_reset[active_indices]
 
                 # Get predictions from our model for our turns
-                if active_we_act.numel() > 0:
+                if env_active_we_act.numel() > 0:
                     with torch.amp.autocast(
                         self.device.type,
                         dtype=torch.bfloat16,
@@ -488,8 +524,8 @@ class SelfPlayTrainer:
                     ):
                         outputs = self.model(our_states)
 
-                    active_logits[active_we_act] = outputs["policy_logits"].float()
-                    active_values[active_we_act] = outputs["value"].float().squeeze(-1)
+                    env_logits[env_active_we_act] = outputs["policy_logits"].float()
+                    env_values[env_active_we_act] = outputs["value"].float().squeeze(-1)
 
                 # SPECIAL CASE: If first action of hand, opponent folding illegal
                 # (because it would leave an empty trajectory)
@@ -497,31 +533,23 @@ class SelfPlayTrainer:
                 # trajectory if it were sampled anyway, since there is no decision of the
                 # actor to train.
                 # NB that this will make our average reward look worse.
-                # === WE ARE TURNING THIS OFF FOR NOW. ===
+                # === WE ARE TURNING THIS OFF FOR NOW TO AVOID BIASING REWARDS. ===
                 # if add_to_replay_buffer:
                 #     active_legal_masks[
                 #         (active_who_acts == 1) & active_first_action, 0
                 #     ] = False
 
-                # Get predictions from opponent models for opponent turns
-                opp_env_groups: Tuple[torch.Tensor, ...] | None = None
-                if (
-                    all_opponent_snapshots is not None
-                    and len(all_opponent_snapshots) > 0
-                    and env_active_opp_acts.numel() > 0
-                ):
-                    # Use opponent models - assign opponents to environments
-                    num_opps = len(all_opponent_snapshots)
-                    # Split active_opp_acts into num_opps approximately equal groups
-                    opp_env_groups = torch.chunk(env_active_opp_acts, num_opps)
-                    processed = 0
+                if opp_env_groups is not None and env_active_opp_acts.numel() > 0:
                     for opponent_idx, opp_env_indices in enumerate(opp_env_groups):
                         if opp_env_indices.numel() == 0:
                             continue
                         opponent = all_opponent_snapshots[opponent_idx]
 
+                        opp_working_env_indices = opp_env_indices[
+                            env_active_opp_acts_mask[opp_env_indices]
+                        ]
                         opp_states = self._encode_tensor_states(
-                            player=1, idxs=opp_env_indices
+                            player=1, idxs=opp_working_env_indices
                         )
 
                         # Use indices directly into active arrays
@@ -533,18 +561,14 @@ class SelfPlayTrainer:
                             outputs = opponent.model(
                                 opp_states.to(opponent.model_dtype)
                             )
-                            opp_logits = outputs["policy_logits"].float()
-                            opp_values = outputs["value"].float()
+                            env_logits[opp_working_env_indices] = outputs[
+                                "policy_logits"
+                            ].float()
+                            env_values[opp_working_env_indices] = outputs[
+                                "value"
+                            ].float()
 
-                        just_processed = opp_env_indices.numel()
-                        active_logits[
-                            active_opp_acts[processed : processed + just_processed]
-                        ] = opp_logits
-                        active_values[
-                            active_opp_acts[processed : processed + just_processed]
-                        ] = opp_values.squeeze(-1)
-                        processed += just_processed
-                elif active_opp_acts.numel() > 0:
+                elif env_active_opp_acts.numel() > 0:
                     opp_states = self._encode_tensor_states(
                         player=1, idxs=env_active_opp_acts
                     )
@@ -555,54 +579,51 @@ class SelfPlayTrainer:
                         enabled=self.use_mixed_precision,
                     ):
                         outputs = self.model(opp_states)
-                        opp_logits = outputs["policy_logits"].float()
-                        opp_values = outputs["value"].float()
+                        env_logits[env_active_opp_acts] = outputs[
+                            "policy_logits"
+                        ].float()
+                        env_values[env_active_opp_acts] = outputs["value"].float()
 
-                    active_logits[active_opp_acts] = opp_logits
-                    active_values[active_opp_acts] = opp_values.squeeze(-1)
-
-                # Sample actions for active environments only
-                action_values_active, log_probs_active = self.policy.action_batch(
-                    active_logits, active_legal_masks
+                # Sample actions for active environments only.
+                action_bins_active, log_probs_active = self.policy.action_batch(
+                    env_logits[active_indices], legal_bins_mask[active_indices]
                 )
 
             # Create full-size tensors for stepping (needed by tensor_env.step_bins)
-            action_values = torch.full(
+            action_bins = torch.full(
                 (self.num_envs,), -1, dtype=torch.long, device=self.device
             )
-            action_values[active_indices] = action_values_active
+            action_bins[active_indices] = action_bins_active
 
             # Take steps in all environments (tensor_env expects full-size tensors)
             # NOTE: THIS CHANGES self.tensor_env.to_act!!
             rewards, dones, _ = self.tensor_env.step_bins(
-                action_values, legal_bins_amounts, legal_bins_mask
+                action_bins, legal_bins_amounts, legal_bins_mask
             )
-
-            active_rewards = rewards[active_indices]
-            active_dones = dones[active_indices]
+            newly_done_mask = dones & active_mask
 
             # Store transitions for our actions (don't add to replay buffer yet)
-            if active_we_act.numel() > 0:
+            if env_active_we_act.numel() > 0:
                 # Scale factor for reward/targets: 100 big blinds
                 scale = float(self.tensor_env.bb) * 100.0
 
-                # Compute delta bounds from actor perspective AFTER step
+                # Compute delta bounds from our (p0/actor) perspective AFTER step
                 # For our acting envs, actor is player 0
                 chips = self.tensor_env.chips_placed.to(self.float_dtype)
                 # Convert active_we_act to full environment indices
-                our_env_indices = active_indices[active_we_act]
                 our_delta2_tensor = (
-                    -chips[our_env_indices, 1] / scale
+                    -chips[env_active_we_act, 1] / scale
                 )  # -opponent chips
-                our_delta3_tensor = chips[our_env_indices, 0] / scale  # our chips
+                our_delta3_tensor = chips[env_active_we_act, 0] / scale  # our chips
 
                 # Extract tensor values efficiently (no .tolist() calls)
-                our_action_indices = action_values_active[active_we_act]
+                active_we_act = torch.where(we_act_mask[active_indices])[0]
+                our_action_indices = action_bins_active[active_we_act]
                 our_log_probs_tensor = log_probs_active[active_we_act]
-                our_values_tensor = active_values[active_we_act]
-                our_rewards_tensor = active_rewards[active_we_act]
-                our_dones_tensor = active_dones[active_we_act]
-                our_legal_masks_tensor = active_legal_masks[active_we_act]
+                our_values_tensor = env_values[env_active_we_act]
+                our_rewards_tensor = rewards[env_active_we_act]
+                our_dones_tensor = dones[env_active_we_act]
+                our_legal_masks_tensor = legal_bins_mask[env_active_we_act]
 
                 # Add transitions immediately using vectorized operations
                 if add_to_replay_buffer:
@@ -616,33 +637,26 @@ class SelfPlayTrainer:
                         delta2=our_delta2_tensor,
                         delta3=our_delta3_tensor,
                         values=our_values_tensor,
-                        trajectory_indices=our_env_indices,  # Use full environment indices
+                        trajectory_indices=env_active_we_act,  # Use full environment indices
                     )
 
-                # Update per-environment reward tracking
-                per_env_rewards[our_env_indices] += our_rewards_tensor
+                batch_steps_collected += env_active_we_act.numel()
 
-            if active_opp_acts.numel() > 0:
+            if env_active_opp_acts.numel() > 0:
                 # Check if any opponent actions ended the hand
-                opp_ended_hands_mask = active_mask & dones & (original_to_act == 1)
+                opp_ended_hands_mask = newly_done_mask & opp_acts_mask
                 opp_ended_hands = torch.where(opp_ended_hands_mask)[0]
                 opp_rewards = rewards[opp_ended_hands]
 
                 # For environments where opponent's action ended the hand,
-                # update the last transition's reward using vectorized method
+                # update the last transition's reward
                 if opp_ended_hands.numel() > 0 and add_to_replay_buffer:
-                    # Use vectorized method to update rewards
                     self.replay_buffer.update_opponent_rewards(
                         opp_ended_hands, opp_rewards
                     )
 
-                # Update per-environment reward tracking
-                per_env_rewards[active_indices[active_opp_acts]] += active_rewards[
-                    active_opp_acts
-                ]
-
-            # Update step counts for active environments
-            per_traj_step_count[active_indices] += 1
+            # Update per-environment reward tracking
+            per_env_rewards += rewards
 
             # Handle environments that exceed max steps
             over_limit = (per_traj_step_count >= max_steps) & (~self.tensor_env.done)
@@ -655,58 +669,24 @@ class SelfPlayTrainer:
                 self.tensor_env.done[env_indices] = True
 
             # Create trajectories for done environments
-            newly_done_indices = torch.where(dones & active_mask)[0]
+            trajectory_count += newly_done_mask.sum()
 
-            if newly_done_indices.numel() > 0:
-                trajectory_count += newly_done_indices.numel()
-
-            # Trajectories are now added immediately via vectorized operations
-            # No need for separate trajectory completion logic
-
-            # Update ELO ratings for done environments (vectorized by opponent)
-            # Use premade chunking to efficiently group done environments by opponent
-            if opp_env_groups is not None:
-                # Vectorized ELO update per opponent using existing chunking
-                for opponent_idx, opp_env_indices in enumerate(opp_env_groups):
-                    if opp_env_indices.numel() == 0:
-                        continue
-
-                    opponent = all_opponent_snapshots[opponent_idx]
-
-                    # opp_env_indices are already full environment indices from env_active_opp_acts
-                    # Find which environments in this opponent's group are done
-                    done_mask = dones[opp_env_indices]
-                    done_env_idxs_for_opponent = opp_env_indices[done_mask]
-
-                    if done_env_idxs_for_opponent.numel() > 0:
-                        # Slice rewards tensor directly - no .item() calls needed
-                        opponent_rewards = per_env_rewards[done_env_idxs_for_opponent]
-
-                        # Update ELO for this opponent with all their games
-                        self.opponent_pool.update_elo_batch_vectorized(
-                            opponent,
-                            opponent_rewards,
-                        )
-            else:
-                # Fallback for self-play case (no opponents, so no ELO tracking)
-                pass
-
-            # If all environments are done, reset all of them
+            # If all environments are done, reset all of them and take credit for steps collected
             if dones.all():
                 if add_to_replay_buffer:
-                    _, steps_added = (
-                        self.replay_buffer.finish_adding_trajectory_batches()
-                    )
-                    steps_collected += steps_added
-                else:
-                    # For evaluation, just count episodes without adding to buffer
-                    steps_collected += per_traj_step_count.sum().item()
+                    self.replay_buffer.finish_adding_trajectory_batches()
+                    adding_trajectories = False
+
+                self._update_elo_from_rewards(
+                    per_env_rewards, dones, opp_env_groups, all_opponent_snapshots
+                )
+
+                steps_collected += batch_steps_collected
+                batch_steps_collected = 0
 
                 # Collect individual episode rewards for accurate win counting
                 collected_trajectory_rewards.append(per_env_rewards.clone())
                 per_env_rewards[:] = 0.0
-                per_traj_step_count[:] = 0
-                adding_trajectories = False
 
                 # Reset environments if we're going through the loop again
                 if steps_collected < min_steps:
@@ -717,9 +697,6 @@ class SelfPlayTrainer:
                 f"Warning: Reached maximum loop count ({max_loops}), stopping collection early"
             )
             print(f"Collected {steps_collected} steps out of {min_steps} requested")
-
-        if self.tensor_env.done.any().item():
-            collected_trajectory_rewards.append(per_env_rewards[self.tensor_env.done])
 
         # Concatenate all episode rewards into a single tensor
         if collected_trajectory_rewards:

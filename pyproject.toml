@@ -2,4 +2,8 @@
 line-length = 88
 target-version = ["py311", "py312", "py313"]
 
-
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning:wandb.*",
+    "ignore::DeprecationWarning:wandb.analytics.sentry.*",
+]

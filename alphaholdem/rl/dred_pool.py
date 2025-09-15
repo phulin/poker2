@@ -167,7 +167,7 @@ class DREDPool(OpponentPool):
 
         return [self.snapshots[i.item()] for i in sampled_indices]
 
-    def _calculate_weights(self) -> Optional[torch.Tensor]:
+    def _calculate_weights(self) -> torch.Tensor:
         """Calculate DRED sampling weights for all snapshots."""
         if not self.snapshots:
             raise ValueError("No snapshots available")
