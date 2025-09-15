@@ -160,6 +160,8 @@ class DREDPool(OpponentPool):
         ):
             print("Warning: Invalid weights in DRED pool")
             print(weights)
+            # Fallback to uniform sampling
+            weights = torch.ones(len(self.snapshots)) / len(self.snapshots)
 
         # Sample with replacement using DRED weights
         sampled_indices = torch.multinomial(weights, num_samples=k, replacement=True)
@@ -185,11 +187,15 @@ class DREDPool(OpponentPool):
 
         # ELO-based skill weighting
         elos = torch.tensor([s.elo for s in self.snapshots], dtype=torch.float32)
-        skill_weights = torch.exp(self.beta * elos)
+        # Clamp ELO values to prevent extreme exponentials
+        elos_clamped = torch.clamp(elos, min=-1000, max=1000)
+        skill_weights = torch.exp(self.beta * elos_clamped)
 
         # Age-based decay
         ages = torch.tensor([s.data.age for s in self.snapshots], dtype=torch.float32)
-        age_weights = torch.exp(-self.lam * ages)
+        # Clamp ages to prevent extreme exponentials
+        ages_clamped = torch.clamp(ages, min=0, max=1000)
+        age_weights = torch.exp(-self.lam * ages_clamped)
 
         # Difficulty estimation via Beta distribution
         # Use win/loss ratios to estimate difficulty
@@ -199,12 +205,22 @@ class DREDPool(OpponentPool):
                 # Convert to Beta parameters (simplified)
                 alpha = s.wins + 1
                 beta_param = s.losses + 1
-                p = alpha / (alpha + beta_param)
+                # Ensure denominator is never zero
+                total = alpha + beta_param
+                if total > 0:
+                    p = alpha / total
+                else:
+                    p = 0.5  # Fallback
             else:
                 p = 0.5  # Default difficulty
 
-            # Peak difficulty near 0.5 (balanced opponents)
-            diff_weight = torch.exp(torch.tensor(-self.eta * (p - 0.5) ** 2))
+            # Clamp p to valid range and prevent extreme exponentials
+            p_tensor = torch.tensor(p, dtype=torch.float32)
+            p_clamped = torch.clamp(p_tensor, min=0.001, max=0.999)
+            diff_exp = torch.clamp(
+                -self.eta * (p_clamped - 0.5) ** 2, min=-100, max=100
+            )
+            diff_weight = torch.exp(diff_exp)
             difficulties.append(diff_weight)
 
         difficulty_weights = torch.stack(difficulties)
@@ -236,14 +252,32 @@ class DREDPool(OpponentPool):
         # Apply weak opponent floor
         elo_ranks = torch.argsort(elos)
         weak_idx = elo_ranks[: max(1, n // 10)]  # Bottom decile
-        floor_weight = self.weak_floor * weights.sum() / len(weak_idx)
-        weights[weak_idx] = torch.maximum(weights[weak_idx], floor_weight)
+        weights_sum = weights.sum()
+        if weights_sum > 0:
+            floor_weight = self.weak_floor * weights_sum / len(weak_idx)
+            weights[weak_idx] = torch.maximum(weights[weak_idx], floor_weight)
 
-        # Ensure weights are non-negative
+        # Ensure weights are non-negative and finite
         weights = torch.clamp(weights, min=0.0)
 
+        # Check for NaN or infinite values
+        if torch.isnan(weights).any() or torch.isinf(weights).any():
+            print(f"Warning: Invalid weights detected in DRED pool")
+            print(f"Skill weights: {skill_weights}")
+            print(f"Age weights: {age_weights}")
+            print(f"Difficulty weights: {difficulty_weights}")
+            print(f"Diversity weights: {diversity_weights}")
+            print(f"Combined weights: {weights}")
+            # Fallback to uniform weights
+            weights = torch.ones(n) / n
+
         # Normalize
-        return weights / weights.sum()
+        weights_sum = weights.sum()
+        if weights_sum > 0:
+            return weights / weights_sum
+        else:
+            # Fallback to uniform weights if sum is zero
+            return torch.ones(n) / n
 
     def add_snapshot(
         self, model: Any, step: int, rating: Optional[float] = None
