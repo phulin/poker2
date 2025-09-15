@@ -756,7 +756,6 @@ class VectorizedReplayBuffer:
 
     def trim_to_steps(self, max_steps: int) -> None:
         """Trim oldest trajectories until removing the next traj would make total steps <= max_steps."""
-        # Remove oldest trajectories until removing the next would make total steps <= max_steps
         while (
             self.num_steps()
             - self.trajectory_lengths[(self.position - self.size) % self.capacity]

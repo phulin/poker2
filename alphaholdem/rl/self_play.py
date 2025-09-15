@@ -962,9 +962,6 @@ class SelfPlayTrainer:
             # Before update, add one batch worth of fresh steps
             self._fill_replay_buffer(self.batch_size)
 
-        # Trim buffer back to target_steps
-        self.replay_buffer.trim_to_steps(target_steps)
-
         # Update model
         update_stats = self.update_model(step)
 
