@@ -126,17 +126,22 @@ def test_transformer_state_encoder_perspective_behavior():
     )
     action_actors_p1 = states_p1.action_actors[0]  # [L] - actor for each action
 
-    # Find action slots that have activity (non-zero actor values)
-    # The action actors are stored starting at index 8 (action_index_offset)
-    # Based on the debug output, we have actions in slots 0 and 1 of the action history
-    # which correspond to indices 8 and 9 in the action_actors tensor
-    action_start_idx = 8  # action_index_offset
-    active_actors_p0 = action_actors_p0[
-        action_start_idx : action_start_idx + 2
-    ]  # Slots 8-9
-    active_actors_p1 = action_actors_p1[
-        action_start_idx : action_start_idx + 2
-    ]  # Slots 8-9
+    # Identify action tokens dynamically now that the sequence is variable-length.
+    action_offset = TransformerStateEncoder.get_action_token_offset(env.num_bet_bins)
+    action_mask_p0 = (states_p0.token_ids[0] >= action_offset) & (
+        states_p0.token_ids[0] < action_offset + env.num_bet_bins
+    )
+    action_mask_p1 = (states_p1.token_ids[0] >= action_offset) & (
+        states_p1.token_ids[0] < action_offset + env.num_bet_bins
+    )
+
+    active_actors_p0 = action_actors_p0[action_mask_p0]
+    active_actors_p1 = action_actors_p1[action_mask_p1]
+
+    # Ensure both perspectives observed the same number of actions.
+    assert (
+        active_actors_p0.numel() == active_actors_p1.numel()
+    ), "Perspectives must observe identical action counts"
 
     # For player 0 encoding, actors should be [0, 1, 0, 1, ...] (alternating)
     # For player 1 encoding, actors should be [1, 0, 1, 0, ...] (swapped)
@@ -144,16 +149,16 @@ def test_transformer_state_encoder_perspective_behavior():
     # Check that the actors are properly swapped
     # If we have actions from both players, they should be swapped
     if len(active_actors_p0) >= 2:
-        # First action should be from different players
+        # First action must swap perspective between encodings.
         assert (
             active_actors_p0[0] != active_actors_p1[0]
-        ), f"First action actors should be different: p0={active_actors_p0[0]}, p1={active_actors_p1[0]}"
+        ), f"First action actors should differ across perspectives: p0={active_actors_p0[0]}, p1={active_actors_p1[0]}"
 
-        # The actors should be flipped
+        # All actors should be flipped (0 <-> 1) between viewpoints.
         expected_p1_actors = 1 - active_actors_p0
         assert torch.allclose(
             active_actors_p1.float(), expected_p1_actors.float()
-        ), f"Actors should be flipped: p0={active_actors_p0}, p1={active_actors_p1}, expected_p1={expected_p1_actors}"
+        ), f"Actors should flip for all actions: p0={active_actors_p0}, p1={active_actors_p1}, expected={expected_p1_actors}"
 
 
 def test_both_encoders_consistency():

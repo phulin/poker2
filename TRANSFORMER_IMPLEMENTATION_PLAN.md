@@ -4,6 +4,17 @@
 
 This document outlines the detailed plan for implementing a transformer-based poker model to replace or complement the existing CNN-based approach in AlphaHoldem. The transformer will leverage the newly added 0-51 card index tracking in `HUNLTensorEnv` and follow the embedding patterns discussed.
 
+## 2025 Update: Variable-Length Sequence Pipeline
+
+- **Sequence Layout**: Observations are encoded as `[CLS(game constants), CONTEXT(dynamic hand state), STREET token, cards..., actions...]` for each street. Street markers are emitted for preflop, flop, turn, and river, with action history expressed as an ordered list of tokens instead of fixed slots.
+- **CLS Token**: Contains invariant data (sb, bb, hero button flag) so caches can be scoped per table configuration.
+- **Context Token**: Aggregates hand-level scalars (pot, stacks, committed, min-raise, bet-to-call, etc.) for the acting hero (always presented as seat P0 to allow dedicated KV caches per private information).
+- **Card Tokens**: Cards are written immediately after their street token and tagged with street IDs to keep timeline semantics explicit. Unknown cards remain absent, shrinking the effective prefix length.
+- **Action Tokens**: Only realized actions are serialized, each storing actor, street, action id, and legal mask snapshot, enabling variable depth sequences per trajectory.
+- **RoPE Integration**: The transformer encoder now applies rotary positional embeddings to query/key projections, enabling caching-friendly relative attention without learned positional indices.
+- **Attention Masking**: `StructuredEmbeddingData` exposes boolean masks plus per-sample lengths, ensuring both KV caching and the replay buffer operate on minimal prefixes.
+- **Testing**: Added targeted coverage for the encoder, embeddings, and RoPE model path; extended replay buffer tests to validate variable-length storage. Run via `./venv/bin/python -m pytest tests/test_transformer_model.py tests/test_vectorized_replay.py`.
+
 ## Architecture Design
 
 ### Core Components

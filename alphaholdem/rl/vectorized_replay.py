@@ -128,6 +128,12 @@ class VectorizedReplayBuffer:
                 dtype=float_dtype,  # Use float_dtype for context features
                 device=device,
             )
+            self.token_lengths = torch.zeros(
+                C,
+                T,
+                dtype=torch.long,
+                device=device,
+            )
 
         self.action_indices = torch.zeros(C, T, dtype=torch.long, device=device)
         # Store full log-prob distributions per step for exact KL and stable ratio
@@ -205,6 +211,7 @@ class VectorizedReplayBuffer:
             self.action_streets[clear_indices] = 0
             self.action_legal_masks[clear_indices] = False
             self.context_features[clear_indices] = 0
+            self.token_lengths[clear_indices] = 0
 
         # Common tensors for both model types
         self.action_indices[clear_indices] = 0
@@ -406,6 +413,9 @@ class VectorizedReplayBuffer:
             self.context_features[buffer_trajectory_indices, step_positions] = (
                 embedding_data.context_features.to(self.float_dtype)
             )
+            self.token_lengths[buffer_trajectory_indices, step_positions] = (
+                embedding_data.lengths.to(torch.long)
+            )
 
         # Store common transition data
         self.action_indices[buffer_trajectory_indices, step_positions] = action_indices
@@ -595,6 +605,7 @@ class VectorizedReplayBuffer:
             all_action_streets = self.action_streets[traj_indices, :max_len]
             all_action_legal_masks = self.action_legal_masks[traj_indices, :max_len]
             all_context_features = self.context_features[traj_indices, :max_len]
+            all_token_lengths = self.token_lengths[traj_indices, :max_len]
         else:
             # CNN model fields
             all_cards_features = self.cards_features[traj_indices, :max_len]
@@ -661,6 +672,7 @@ class VectorizedReplayBuffer:
             context_features_flat = all_context_features.reshape(
                 -1, *all_context_features.shape[2:]
             )[mask_flat]
+            token_lengths_flat = all_token_lengths.reshape(-1)[mask_flat]
 
             return {
                 "embedding_data": StructuredEmbeddingData(
@@ -672,6 +684,7 @@ class VectorizedReplayBuffer:
                     action_streets=action_streets_flat,
                     action_legal_masks=action_legal_masks_flat,
                     context_features=context_features_flat,
+                    lengths=token_lengths_flat,
                 ),
                 "action_indices": action_indices_flat,
                 "log_probs_old": logps_flat,
@@ -745,6 +758,7 @@ class VectorizedReplayBuffer:
                 action_streets=self.action_streets[traj_indices, step_indices],
                 action_legal_masks=self.action_legal_masks[traj_indices, step_indices],
                 context_features=self.context_features[traj_indices, step_indices],
+                lengths=self.token_lengths[traj_indices, step_indices],
             )
         else:
             data = CNNEmbeddingData(

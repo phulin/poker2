@@ -242,16 +242,22 @@ class SelfPlayTrainer:
                     "device": str(self.device),
                 },
             }
-            if self.wandb_run_id:
-                wandb_init_kwargs["id"] = self.wandb_run_id
-                wandb_init_kwargs["resume"] = "must"
-                wandb.init(**wandb_init_kwargs)
+            try:
+                if self.wandb_run_id:
+                    wandb_init_kwargs["id"] = self.wandb_run_id
+                    wandb_init_kwargs["resume"] = "must"
+                    wandb.init(**wandb_init_kwargs)
+                    print(
+                        f"Wandb resumed run {self.wandb_run_id} for project: {self.wandb_project}"
+                    )
+                else:
+                    wandb.init(**wandb_init_kwargs)
+                print(f"Wandb initialized new run for project: {self.wandb_project}")
+            except Exception as exc:  # pragma: no cover - offline fallback path
                 print(
-                    f"Wandb resumed run {self.wandb_run_id} for project: {self.wandb_project}"
+                    f"Wandb initialization failed ({exc}); continuing without wandb logging."
                 )
-            else:
-                wandb.init(**wandb_init_kwargs)
-            print(f"Wandb initialized new run for project: {self.wandb_project}")
+                self.use_wandb = False
 
     def _initialize_weights(self):
         """Initialize model weights to prevent dead neurons."""

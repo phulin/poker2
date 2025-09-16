@@ -115,6 +115,7 @@ class DummyStateEncoder:
         zeros = torch.zeros(M, L, dtype=torch.long, device=self.device)
         legal = torch.ones(M, L, 8, dtype=torch.float32, device=self.device)
         ctx = torch.zeros(M, L, 10, dtype=torch.float32, device=self.device)
+        lengths = torch.full((M,), L, dtype=torch.long, device=self.device)
         return StructuredEmbeddingData(
             token_ids=token_ids,
             card_ranks=zeros,
@@ -124,6 +125,7 @@ class DummyStateEncoder:
             action_streets=zeros,
             action_legal_masks=legal,
             context_features=ctx,
+            lengths=lengths,
         )
 
 

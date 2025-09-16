@@ -976,6 +976,7 @@ class TestVectorizedReplayBuffer:
             context_features=torch.randint(
                 0, 10, (batch_size, 50, 10), device=device, dtype=torch.long
             ),
+            lengths=torch.full((batch_size,), 50, device=device, dtype=torch.long),
         )
         return {
             "embedding_data": embedding_data,
@@ -1335,6 +1336,7 @@ class TestVectorizedReplayBuffer:
                 device=device,
                 dtype=torch.long,
             ),
+            lengths=torch.full((batch_size,), 50, device=device, dtype=torch.long),
         )
         return {
             "embedding_data": embedding_data,
@@ -1402,6 +1404,12 @@ class TestVectorizedReplayBuffer:
                 0,
                 10,
                 (batch_size, trajectory_length, 50, 10),
+                device=device,
+                dtype=torch.long,
+            ),
+            lengths=torch.full(
+                (batch_size, trajectory_length),
+                50,
                 device=device,
                 dtype=torch.long,
             ),

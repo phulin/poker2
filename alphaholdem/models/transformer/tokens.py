@@ -4,13 +4,15 @@ from enum import Enum
 
 
 class Special(Enum):
-    """Special tokens for the transformer model."""
+    """Special tokens used in the variable-length transformer sequence."""
 
     CLS = 0
-    SEP = 1
-    MASK = 2
-    PAD = 3
-    NUM_SPECIAL = 4
+    CONTEXT = 1
+    STREET_PREFLOP = 2
+    STREET_FLOP = 3
+    STREET_TURN = 4
+    STREET_RIVER = 5
+    NUM_SPECIAL = 6
 
 
 class Context(Enum):

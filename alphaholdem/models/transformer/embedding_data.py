@@ -24,7 +24,7 @@ class StructuredEmbeddingData:
     token_ids: torch.Tensor  # Token IDs (0-51 for cards, 52 for CLS, -1 for padding)
     card_ranks: torch.Tensor  # Card ranks (0-12)
     card_suits: torch.Tensor  # Card suits (0-3)
-    card_streets: torch.Tensor  # Stage indices (0-3: hole, flop, turn, river)
+    card_streets: torch.Tensor  # Street indices for cards (0-3)
 
     # Action components [batch_size, seq_len] - all should be long
     action_actors: torch.Tensor  # Actor indices (0-1: player indices)
@@ -36,7 +36,10 @@ class StructuredEmbeddingData:
     )  # Legal action masks [batch_size, seq_len, 8] - dtype should match self.dtype
     context_features: (
         torch.Tensor
-    )  # All context info in one tensor [batch_size, seq_len, 10] - dtype should match self.dtype
+    )  # Numeric features per token [batch_size, seq_len, 10]
+
+    # Sequence metadata
+    lengths: torch.Tensor  # Actual sequence lengths [batch_size]
 
     # Dtype control
     dtype: torch.dtype = torch.float32  # Target dtype for context fields
@@ -50,6 +53,7 @@ class StructuredEmbeddingData:
         self.card_streets = self.card_streets.long()
         self.action_actors = self.action_actors.long()
         self.action_streets = self.action_streets.long()
+        self.lengths = self.lengths.long()
 
         # Convert context fields to specified dtype (self.dtype)
         self.action_legal_masks = self.action_legal_masks.to(self.dtype)  # Float mask
@@ -66,11 +70,15 @@ class StructuredEmbeddingData:
             "action_streets": self.action_streets,
             "action_legal_masks": self.action_legal_masks,
             "context_features": self.context_features,
+            "lengths": self.lengths,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, torch.Tensor]) -> StructuredEmbeddingData:
         """Create from dictionary format."""
+        lengths = data.get("lengths")
+        if lengths is None:
+            lengths = (data["token_ids"] >= 0).long().sum(dim=1)
         return cls(
             token_ids=data["token_ids"],
             card_ranks=data["card_ranks"],
@@ -80,6 +88,7 @@ class StructuredEmbeddingData:
             action_streets=data["action_streets"],
             action_legal_masks=data["action_legal_masks"],
             context_features=data["context_features"],
+            lengths=lengths,
         )
 
     def to_device(self, device: torch.device) -> StructuredEmbeddingData:
@@ -93,6 +102,7 @@ class StructuredEmbeddingData:
             action_streets=self.action_streets.to(device),
             action_legal_masks=self.action_legal_masks.to(device),
             context_features=self.context_features.to(device),
+            lengths=self.lengths.to(device),
             dtype=self.dtype,  # Preserve the dtype
         )
 
@@ -112,6 +122,7 @@ class StructuredEmbeddingData:
         result.context_features = self.context_features.to(
             dtype
         )  # Convert to new dtype
+        result.lengths = self.lengths  # Keep as long
         result.dtype = dtype  # Update self.dtype to match
         return result
 
@@ -145,4 +156,10 @@ class StructuredEmbeddingData:
             action_streets=self.action_streets[indices],
             action_legal_masks=self.action_legal_masks[indices],
             context_features=self.context_features[indices],
+            lengths=self.lengths[indices],
         )
+
+    @property
+    def attention_mask(self) -> torch.Tensor:
+        """Return boolean mask indicating valid tokens."""
+        return self.token_ids >= 0
