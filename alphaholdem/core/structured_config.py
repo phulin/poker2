@@ -8,6 +8,8 @@ from omegaconf import MISSING
 @dataclass
 class TrainingConfig:
     learning_rate: float = 1e-4
+    learning_rate_final: float = 1e-5
+    lr_schedule: str = "cosine"  # Learning rate schedule type
     batch_size: int = 1024
     num_epochs: int = 4
     replay_buffer_batches: int = 4
@@ -18,6 +20,8 @@ class TrainingConfig:
     ppo_delta1: float = 3.0
     value_coef: float = 0.05
     entropy_coef: float = 0.01
+    entropy_coef_final: float = 0.002
+    entropy_decay_portion: float = 0.6  # Portion of training for linear entropy decay
     grad_clip: float = 1.0
     value_loss_type: str = "huber"
     huber_delta: float = 1.0
