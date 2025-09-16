@@ -173,29 +173,25 @@ class TestVectorizedReplayBuffer:
 
         # Check that all required keys are present (transformer mode)
         expected_keys = {
-            "token_ids",
-            "card_ranks",
-            "card_suits",
-            "card_streets",
-            "action_actors",
-            "action_streets",
-            "action_legal_masks",
-            "context_features",
+            "embedding_data",
             "action_indices",
-            "log_probs",
+            "log_probs_old",
+            "log_probs_old_full",
             "advantages",
             "returns",
             "legal_masks",
+            "delta2",
+            "delta3",
         }
         assert set(sampled.keys()) == expected_keys
 
         # Check that we get data from 2 trajectories (4 total steps)
         # Each trajectory has 2 steps, so 2 trajectories = 4 total steps
-        total_steps = sampled["token_ids"].shape[0]
+        total_steps = sampled["embedding_data"].token_ids.shape[0]
         assert total_steps == 4
-        assert sampled["card_ranks"].shape[0] == total_steps
+        assert sampled["embedding_data"].card_ranks.shape[0] == total_steps
         assert sampled["action_indices"].shape[0] == total_steps
-        assert sampled["log_probs"].shape[0] == total_steps
+        assert sampled["log_probs_old"].shape[0] == total_steps
         assert sampled["advantages"].shape[0] == total_steps
         assert sampled["returns"].shape[0] == total_steps
         assert sampled["legal_masks"].shape[0] == total_steps
@@ -488,6 +484,7 @@ class TestVectorizedReplayBuffer:
             "embedding_data",
             "action_indices",
             "log_probs_old",
+            "log_probs_old_full",
             "advantages",
             "returns",
             "legal_masks",
