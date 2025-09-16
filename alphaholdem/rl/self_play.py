@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional, Tuple
+import math
 
 import torch
 import torch.nn as nn
@@ -48,6 +49,12 @@ class SelfPlayTrainer:
         self.entropy_coef = cfg.train.entropy_coef
         self.grad_clip = cfg.train.grad_clip
         self.learning_rate = cfg.train.learning_rate
+        # LR and entropy schedules (assumed present in config)
+        self.learning_rate_final = cfg.train.learning_rate_final
+        self.lr_schedule = cfg.train.lr_schedule
+        self.entropy_coef_start = cfg.train.entropy_coef
+        self.entropy_coef_final = cfg.train.entropy_coef_final
+        self.entropy_decay_portion = cfg.train.entropy_decay_portion
         self.k_best_pool_size = cfg.k_best_pool_size
         self.min_elo_diff = cfg.min_elo_diff
         self.min_step_diff = cfg.min_step_diff
@@ -182,8 +189,10 @@ class SelfPlayTrainer:
                     {"params": other_params, "lr": lr},
                 ]
             )
+            self._optimizer_group_scales = [0.1, 1.0]
         else:  # Transformer model (no cards_trunk)
             self.optimizer = torch.optim.Adam([{"params": other_params, "lr": lr}])
+            self._optimizer_group_scales = [1.0]
 
         # Mixed precision scaler
         self.scaler = (
@@ -965,6 +974,9 @@ class SelfPlayTrainer:
             Dictionary with training statistics
         """
 
+        # Apply LR/entropy schedules for this step
+        self._apply_schedules(step)
+
         # These are updated while filling the replay buffer
         self.total_step_reward = 0.0
         self.step_trajectories_collected = 0
@@ -1011,11 +1023,47 @@ class SelfPlayTrainer:
                     "explained_var": training_stats["explained_var"],
                     "avg_loss": training_stats["avg_loss"],
                     "num_samples": training_stats["num_samples"],
+                    "lr": self.optimizer.param_groups[-1]["lr"],
+                    "entropy_coef_current": self.entropy_coef,
                 },
                 step=step,
             )
 
         return training_stats
+
+    def _apply_schedules(self, step: int) -> None:
+        """Apply cosine LR decay and linear entropy decay with floor."""
+        total_steps = max(1, self.cfg.num_steps)
+        t = min(1.0, max(0.0, step / float(total_steps)))
+
+        # Learning rate schedule
+        lr_start = float(self.learning_rate)
+        lr_final = float(self.learning_rate_final)
+        if self.lr_schedule == "cosine" and lr_final != lr_start:
+            lr_now = lr_final + 0.5 * (lr_start - lr_final) * (
+                1.0 + math.cos(math.pi * t)
+            )
+        else:
+            lr_now = lr_start
+
+        # Update optimizer groups preserving relative scales
+        for scale, group in zip(
+            self._optimizer_group_scales, self.optimizer.param_groups
+        ):
+            group["lr"] = lr_now * scale
+
+        # Entropy coef linear decay with floor over first portion, then hold
+        ent_start = float(self.entropy_coef_start)
+        ent_final = float(self.entropy_coef_final)
+        portion = float(self.entropy_decay_portion)
+        if portion > 0:
+            if t <= portion:
+                frac = t / portion
+                self.entropy_coef = ent_start + (ent_final - ent_start) * frac
+            else:
+                self.entropy_coef = ent_final
+        else:
+            self.entropy_coef = ent_start
 
     @profile
     def _fill_replay_buffer(self, min_steps: int) -> None:

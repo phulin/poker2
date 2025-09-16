@@ -39,9 +39,11 @@ economize_checkpoints: true  # Enable checkpoint economization for vast.ai stora
 # === TRAINING HYPERPARAMETERS ===
 train:
   learning_rate: 3e-4
+  learning_rate_final: 1e-5
+  lr_schedule: cosine
   batch_size: 12000
-  num_epochs: 5
-  replay_buffer_batches: 10
+  num_epochs: 4
+  replay_buffer_batches: 4
   max_trajectory_length: 15
   
   # PPO hyperparameters
@@ -50,6 +52,8 @@ train:
   gae_lambda: 0.95
   gamma: 0.999
   entropy_coef: 0.01
+  entropy_coef_final: 0.002
+  entropy_decay_portion: 0.6
   value_coef: 0.05
   grad_clip: 1.0
   

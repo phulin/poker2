@@ -39,6 +39,8 @@ economize_checkpoints: false
 # === TRAINING HYPERPARAMETERS ===
 train:
   learning_rate: 3e-4  # Lower LR for transformer
+  learning_rate_final: 1e-5
+  lr_schedule: cosine
   batch_size: 512      # Smaller batch size for transformer
   num_epochs: 4
   replay_buffer_batches: 4
@@ -50,6 +52,8 @@ train:
   gae_lambda: 0.95
   gamma: 0.999
   entropy_coef: 0.01
+  entropy_coef_final: 0.002
+  entropy_decay_portion: 0.6
   value_coef: 0.05
   grad_clip: 1.0
   

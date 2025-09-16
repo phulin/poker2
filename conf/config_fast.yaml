@@ -35,6 +35,8 @@ economize_checkpoints: true  # Enable checkpoint economization for fast testing
 # === TRAINING HYPERPARAMETERS ===
 train:
   learning_rate: 1e-3
+  learning_rate_final: 1e-4
+  lr_schedule: cosine
   batch_size: 256
   num_epochs: 2
   replay_buffer_batches: 2
@@ -46,6 +48,8 @@ train:
   gae_lambda: 0.95
   gamma: 0.999
   entropy_coef: 0.01
+  entropy_coef_final: 0.002
+  entropy_decay_portion: 0.6
   value_coef: 0.05
   grad_clip: 1.0
   

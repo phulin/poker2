@@ -24,6 +24,7 @@ use_wandb: true
 wandb_project: "poker-transformer-hp"
 wandb_name: null
 wandb_tags: ["transformer", "poker", "ppo", "high-performance"]
+wandb_run_id: null
 
 # === RESUME CONFIGURATION ===
 resume_from: null
@@ -33,16 +34,17 @@ seed: 42
 
 # === ADDITIONAL CONFIGURATION ===
 config: null
-wandb_run_id: null
 economize_checkpoints: true
 
 # === TRAINING HYPERPARAMETERS ===
 train:
   learning_rate: 3e-4
+  learning_rate_final: 1e-5
+  lr_schedule: cosine
   batch_size: 6000
   num_epochs: 4
   replay_buffer_batches: 4
-  max_trajectory_length: 20
+  max_trajectory_length: 15
   
   # PPO hyperparameters
   ppo_eps: 0.2
@@ -50,6 +52,8 @@ train:
   gae_lambda: 0.95
   gamma: 0.999
   entropy_coef: 0.01
+  entropy_coef_final: 0.002
+  entropy_decay_portion: 0.6
   value_coef: 0.05
   grad_clip: 1.0
   
