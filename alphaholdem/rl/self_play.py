@@ -1369,38 +1369,45 @@ class SelfPlayTrainer:
 
         # Use no_grad to prevent gradient computation during evaluation
         with torch.no_grad():
-            for i, opponent in enumerate(self.opponent_pool.snapshots):
-                wins = 0
+            opponents = list(self.opponent_pool.snapshots)
 
-                if self.use_tensor_env:
-                    # Use tensorized evaluation with individual episode reward tracking
-                    individual_rewards = self.collect_tensor_trajectories(
-                        min_trajectories=min_games,
-                        all_opponent_snapshots=[opponent],
-                        add_to_replay_buffer=False,  # Don't pollute training data
-                    )
+            # Snapshot opponent stats BEFORE evaluation
+            before_stats = [
+                (opp.wins, opp.losses, opp.games_played) for opp in opponents
+            ]
 
-                    # Count wins based on individual episode rewards (tensor operations)
-                    wins = (individual_rewards > 0).sum().item()
-                    games = individual_rewards.numel()
-                else:
-                    # Use scalar evaluation
+            if self.use_tensor_env:
+                # Collect trajectories ONCE against all opponents; size to roughly hit min_games/opponent
+                total_target_trajectories = max(1, min_games * len(opponents))
+                _ = self.collect_tensor_trajectories(
+                    min_trajectories=total_target_trajectories,
+                    all_opponent_snapshots=opponents,
+                    add_to_replay_buffer=False,
+                )
+            else:
+                # Scalar fallback: play min_games per opponent without adding to replay buffer
+                for opp in opponents:
                     for _ in range(min_games):
-                        _, final_reward = self.collect_trajectory(
-                            opponent_snapshot=opponent
-                        )
-                        if final_reward > 0:
-                            wins += 1
-                    games = min_games
+                        self.collect_trajectory(opponent_snapshot=opp)
 
-                win_rate = wins / games
-                results[f"opponent_{i}_step_{opponent.step}"] = {
+            # Compute per-opponent deltas AFTER evaluation
+            for i, opp in enumerate(opponents):
+                _, before_losses, before_games_played = before_stats[i]
+                after_losses = opp.losses
+                after_games = opp.games_played
+
+                # From opponent's perspective, their losses are our wins
+                our_wins = max(0, after_losses - before_losses)
+                games = max(0, after_games - before_games_played)
+                win_rate = (our_wins / games) if games > 0 else 0.0
+
+                results[f"opponent_{i}_step_{opp.step}"] = {
                     "win_rate": win_rate,
-                    "opponent_elo": opponent.elo,
-                    "wins": wins,
+                    "opponent_elo": opp.elo,
+                    "wins": our_wins,
                     "total_games": games,
                 }
-                total_wins += wins
+                total_wins += our_wins
                 total_games += games
 
         overall_win_rate = total_wins / total_games if total_games > 0 else 0.0
