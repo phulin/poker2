@@ -595,7 +595,7 @@ class SelfPlayTrainer:
                         env_values[env_active_opp_acts] = outputs["value"].float()
 
                 # Sample actions for active environments only.
-                action_bins_active, log_probs_active = self.policy.action_batch(
+                action_bins_active, log_probs_active_full = self.policy.action_batch(
                     env_logits[active_indices], legal_bins_mask[active_indices]
                 )
 
@@ -632,7 +632,7 @@ class SelfPlayTrainer:
                 # Extract tensor values efficiently (no .tolist() calls)
                 active_we_act = torch.where(we_act_mask[active_indices])[0]
                 our_action_indices = action_bins_active[active_we_act]
-                our_log_probs_tensor = log_probs_active[active_we_act]
+                our_log_probs_full = log_probs_active_full[active_we_act]
                 our_values_tensor = env_values[env_active_we_act]
                 our_rewards_tensor = rewards[env_active_we_act]
                 our_dones_tensor = dones[env_active_we_act]
@@ -643,7 +643,7 @@ class SelfPlayTrainer:
                     self.replay_buffer.add_batch(
                         embedding_data=our_states,
                         action_indices=our_action_indices,
-                        log_probs=our_log_probs_tensor,
+                        log_probs=our_log_probs_full,
                         rewards=our_rewards_tensor,
                         dones=our_dones_tensor,
                         legal_masks=our_legal_masks_tensor.bool(),
@@ -812,16 +812,23 @@ class SelfPlayTrainer:
                         huber_delta=self.cfg.train.huber_delta,
                     )
 
-            # Debugging metrics: approx KL, clipfrac, explained variance
+            # Debugging metrics: exact KL (from old full dist), clipfrac, explained variance
             with torch.no_grad():
-                legal_mb = batch["legal_masks"]
-                masked_logits = torch.where(legal_mb.bool(), logits, -1e9)
-                log_probs_new = torch.log_softmax(masked_logits, dim=-1)
+                legal_mb = batch["legal_masks"].bool()
+                masked_logits_new = torch.where(legal_mb, logits, -1e9)
+                log_probs_new_full = torch.log_softmax(masked_logits_new, dim=-1)
+                log_probs_old_full = batch.get("log_probs_old_full")
+                # Compute exact KL: E_{a~p_old}[log p_old - log p_new]
+                p_old = torch.exp(log_probs_old_full)
+                exact_kl_vec = (p_old * (log_probs_old_full - log_probs_new_full)).sum(
+                    dim=-1
+                )
+                approx_kl = exact_kl_vec.mean()
+                # Compute ratio/clipfrac for monitoring
                 a_mb = batch["action_indices"]
-                logp_new = log_probs_new.gather(1, a_mb.unsqueeze(1)).squeeze(1)
+                logp_new = log_probs_new_full.gather(1, a_mb.unsqueeze(1)).squeeze(1)
                 logp_old = batch["log_probs_old"]
                 ratio = torch.exp(logp_new - logp_old)
-                approx_kl = (logp_old - logp_new).mean()
                 clip_low, clip_high = 1.0 - self.epsilon, 1.0 + self.epsilon
                 clipped = torch.clamp(ratio, clip_low, clip_high)
                 clipfrac = (torch.abs(clipped - ratio) > 1e-8).float().mean()
@@ -831,9 +838,7 @@ class SelfPlayTrainer:
                 d2_mb = delta2_vec.float()
                 d3_mb = delta3_vec.float()
                 # Ensure per-sample bounds are ordered to avoid clamp warnings
-                min_b = torch.minimum(d2_mb, d3_mb)
-                max_b = torch.maximum(d2_mb, d3_mb)
-                ret_clipped_mb = torch.clamp(ret_mb, min=min_b, max=max_b)
+                ret_clipped_mb = torch.clamp(ret_mb, min=d2_mb, max=d3_mb)
                 # Explained variance of value predictions against clipped targets
                 var_y = torch.var(ret_clipped_mb)
                 var_err = torch.var(ret_clipped_mb - values.detach())

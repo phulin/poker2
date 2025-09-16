@@ -41,7 +41,7 @@ class TestVectorizedReplayBuffer:
         assert buffer.action_legal_masks.shape == (10, 20, 50, 8)  # Action legal masks
         assert buffer.context_features.shape == (10, 20, 50, 10)  # Context features
         assert buffer.action_indices.shape == (10, 20)  # Action indices
-        assert buffer.log_probs.shape == (10, 20)
+        assert buffer.log_probs.shape == (10, 20, 5)
         assert buffer.rewards.shape == (10, 20)
         assert buffer.dones.shape == (10, 20)
         assert buffer.legal_masks.shape == (10, 20, 5)
@@ -983,7 +983,8 @@ class TestVectorizedReplayBuffer:
         return {
             "embedding_data": embedding_data,
             "action_indices": torch.randint(0, 5, (batch_size,), device=device),
-            "log_probs": torch.randn(batch_size, device=device),
+            # Provide full log-prob distributions per step
+            "log_probs": torch.randn(batch_size, 5, device=device),
             "rewards": torch.randn(batch_size, device=device),
             "dones": torch.zeros(batch_size, dtype=torch.bool, device=device),
             "legal_masks": torch.ones(batch_size, 5, device=device).bool(),
@@ -1341,7 +1342,7 @@ class TestVectorizedReplayBuffer:
         return {
             "embedding_data": embedding_data,
             "action_indices": torch.randint(0, 5, (batch_size,), device=device),
-            "log_probs": torch.randn(batch_size, device=device),
+            "log_probs": torch.randn(batch_size, 5, device=device),
             "rewards": torch.randn(batch_size, device=device),
             "dones": torch.zeros(batch_size, dtype=torch.bool, device=device),
             "legal_masks": torch.ones(batch_size, 5, device=device).bool(),

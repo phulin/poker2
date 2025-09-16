@@ -27,7 +27,7 @@ class CategoricalPolicyV1(Policy):
 
     def action_batch(
         self, logits: torch.Tensor, legal_masks: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Sample actions for a batch of environments.
 
@@ -36,7 +36,7 @@ class CategoricalPolicyV1(Policy):
             legal_masks: [N, B] tensor of legal action masks
 
         Returns:
-            Tuple of (action_indices, log_probs) both of shape [N]
+            Tuple of (action_indices [N], log_probs [N, B])
         """
         if legal_masks is not None:
             # Mask out illegal actions
@@ -52,7 +52,4 @@ class CategoricalPolicyV1(Policy):
 
         action_indices = torch.multinomial(probs, num_samples=1).squeeze(1)
 
-        # Get log probabilities for selected actions
-        selected_log_probs = log_probs.gather(1, action_indices.unsqueeze(1)).squeeze(1)
-
-        return action_indices, selected_log_probs
+        return action_indices, log_probs

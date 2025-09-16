@@ -130,7 +130,10 @@ class VectorizedReplayBuffer:
             )
 
         self.action_indices = torch.zeros(C, T, dtype=torch.long, device=device)
-        self.log_probs = torch.zeros(C, T, dtype=float_dtype, device=device)
+        # Store full log-prob distributions per step for exact KL and stable ratio
+        self.log_probs = torch.zeros(
+            C, T, num_bet_bins, dtype=float_dtype, device=device
+        )
         self.rewards = torch.zeros(C, T, dtype=float_dtype, device=device)
         self.dones = torch.zeros(C, T, dtype=torch.bool, device=device)
         self.legal_masks = torch.zeros(
@@ -145,6 +148,7 @@ class VectorizedReplayBuffer:
         self.values = torch.zeros(C, T, dtype=float_dtype, device=device)
         self.advantages = torch.zeros(C, T, dtype=float_dtype, device=device)
         self.returns = torch.zeros(C, T, dtype=float_dtype, device=device)
+        # No separate logits tensor; full distributions are stored in log_probs
 
         # Track trajectory metadata
         self.trajectory_lengths = torch.zeros(capacity, dtype=torch.long, device=device)
@@ -405,7 +409,8 @@ class VectorizedReplayBuffer:
 
         # Store common transition data
         self.action_indices[buffer_trajectory_indices, step_positions] = action_indices
-        self.log_probs[buffer_trajectory_indices, step_positions] = log_probs
+        # Expect log_probs shape [batch_size, num_bet_bins]
+        self.log_probs[buffer_trajectory_indices, step_positions, :] = log_probs
         self.rewards[buffer_trajectory_indices, step_positions] = rewards
         self.dones[buffer_trajectory_indices, step_positions] = dones
         self.legal_masks[buffer_trajectory_indices, step_positions, :] = legal_masks
@@ -730,10 +735,19 @@ class VectorizedReplayBuffer:
             )
 
         # CNN model fields
+        action_indices_sel = self.action_indices[traj_indices, step_indices]
+        full_log_probs = self.log_probs[traj_indices, step_indices]
+        action_log_probs = full_log_probs.gather(
+            1, action_indices_sel.unsqueeze(1)
+        ).squeeze(1)
+
         batch = {
             "embedding_data": data,
-            "action_indices": self.action_indices[traj_indices, step_indices],
-            "log_probs_old": self.log_probs[traj_indices, step_indices],
+            "action_indices": action_indices_sel,
+            # Keep scalar old log-probs for losses/ratios
+            "log_probs_old": action_log_probs,
+            # Provide full old distribution for exact KL
+            "log_probs_old_full": full_log_probs,
             "advantages": self.advantages[traj_indices, step_indices],
             "returns": self.returns[traj_indices, step_indices],
             "legal_masks": self.legal_masks[traj_indices, step_indices],
