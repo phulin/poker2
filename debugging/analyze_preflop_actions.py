@@ -64,7 +64,8 @@ def card_to_index(card: str) -> int:
     if rank not in ranks or suit not in suits:
         raise ValueError(f"Invalid card: {card}")
 
-    return ranks[rank] * 4 + suits[suit]
+    # Use suit-major indexing consistent with HUNLTensorEnv (card // 13 = suit, card % 13 = rank)
+    return suits[suit] * 13 + ranks[rank]
 
 
 def create_preflop_state_with_hand(hand_cards: list, device: str = "cpu"):

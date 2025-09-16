@@ -248,7 +248,8 @@ def _card_str_to_int(card_str: str) -> int:
     rank = card_str[:-1]
     suit = card_str[-1]
 
-    return rank_map[rank] * 4 + suit_map[suit]
+    # Use suit-major indexing consistent with HUNLTensorEnv (card // 13 = suit, card % 13 = rank)
+    return suit_map[suit] * 13 + rank_map[rank]
 
 
 def _create_169_grid(
