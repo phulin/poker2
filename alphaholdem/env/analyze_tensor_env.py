@@ -64,6 +64,41 @@ def create_169_hand_combinations() -> List[Tuple[str, str]]:
     return hands
 
 
+def create_1326_hand_combinations() -> List[Tuple[str, str]]:
+    """Create all 1326 distinct preflop combinations (ordered hole cards, no overlap).
+
+    Returns pairs like ("As", "Kh"). Offsuit/suited and pairs fully enumerated.
+    """
+    suits = ["s", "h", "d", "c"]
+    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+    # Build full deck strings
+    deck = [r + s for r in ranks for s in suits]
+    hands: List[Tuple[str, str]] = []
+    for i in range(len(deck)):
+        for j in range(i + 1, len(deck)):
+            c1, c2 = deck[i], deck[j]
+            # Exclude same card obviously, and allow any suit/rank
+            hands.append((c1, c2))
+    return hands
+
+
+def _grid_coords_for_hand(card1: str, card2: str) -> Tuple[int, int]:
+    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+    r1 = card1[:-1]
+    r2 = card2[:-1]
+    i = ranks.index(r1)
+    j = ranks.index(r2)
+    # Suited if same suit and not pair → top-right triangle; else bottom-left
+    if r1 == r2:
+        return i, j
+    if card1[-1] == card2[-1]:
+        # suited → place at (min(i,j), max(i,j)) where higher rank is column
+        return (min(i, j), max(i, j))
+    else:
+        # offsuit → place at (max(i,j), min(i,j))
+        return (max(i, j), min(i, j))
+
+
 def get_probabilities(
     model,
     state_encoder,
@@ -71,7 +106,7 @@ def get_probabilities(
     seat: int,
     device: torch.device,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Get model probabilities and values for all 169 preflop hands.
+    """Get model probabilities and values for all environments in `env`.
 
     Args:
         model: The trained model instance
@@ -81,26 +116,26 @@ def get_probabilities(
         device: Device for tensor operations
 
     Returns:
-        Tuple of (probabilities [169, num_bet_bins], values [169], legal_masks [169, num_bet_bins])
+        Tuple of (probabilities [N, num_bet_bins], values [N], legal_masks [N, num_bet_bins])
     """
     # Get model prediction using tensor environment
     with torch.no_grad():
         embedding_data = state_encoder.encode_tensor_states(
-            seat, torch.arange(169, device=device)  # All environments
+            seat, torch.arange(env.N, device=device)  # All environments
         )
         outputs = model(embedding_data)
 
-        logits = outputs["policy_logits"]  # [169, num_bet_bins]
-        values = outputs["value"]  # [169]
+        logits = outputs["policy_logits"]  # [N, num_bet_bins]
+        values = outputs["value"]  # [N]
 
         # Get legal actions from tensor environment
-        legal_masks = env.legal_bins_mask()  # [169, num_bet_bins]
+        legal_masks = env.legal_bins_mask()  # [N, num_bet_bins]
 
         # Apply legal mask
         masked_logits = torch.where(legal_masks == 0, -1e9, logits)
 
         # Get probabilities
-        probs = torch.softmax(masked_logits, dim=-1)  # [169, num_bet_bins]
+        probs = torch.softmax(masked_logits, dim=-1)  # [N, num_bet_bins]
 
     return probs, values, legal_masks
 
@@ -141,9 +176,9 @@ def create_169_hand_analysis_setup(
     if rng is None:
         rng = torch.Generator(device=device)
 
-    # Create environment with 169 states
+    # Create environment with 1326 states
     temp_env = HUNLTensorEnv(
-        num_envs=169,
+        num_envs=1326,
         starting_stack=starting_stack,
         sb=sb,
         bb=bb,
@@ -155,11 +190,11 @@ def create_169_hand_analysis_setup(
 
     # Reset the environment
     temp_env.reset(
-        force_button=torch.full((169,), button, dtype=torch.long, device=device)
+        force_button=torch.full((temp_env.N,), button, dtype=torch.long, device=device)
     )
 
-    # Get all 169 hand combinations
-    hands = create_169_hand_combinations()
+    # Get all 1326 hand combinations
+    hands = create_1326_hand_combinations()
 
     # Set hole cards for each environment
     for i, (card1, card2) in enumerate(hands):
@@ -350,7 +385,7 @@ def get_preflop_betting_grid(
     if device is None:
         device = torch.device("cpu")
 
-    # Create 169-hand environment and state encoder
+    # Create 1326-hand environment and state encoder
     env, state_encoder = create_169_hand_analysis_setup(
         model,
         button=0,
@@ -363,17 +398,37 @@ def get_preflop_betting_grid(
         flop_showdown=flop_showdown,
     )
 
-    # Get probabilities and values
+    # Get probabilities and values for all 1326 combos
     probs, _, _ = get_probabilities(model, state_encoder, env, 0, device)
 
     # Sum all betting probabilities (exclude fold=0, call=1, and all-in=num_bet_bins-1)
     # Betting actions are typically indices 2 through num_bet_bins-2 (excluding all-in)
     num_bet_bins = probs.shape[1]
-    betting_probs = probs[:, 2 : num_bet_bins - 1].sum(
-        dim=1
-    )  # Sum bet actions excluding all-in [169]
+    betting_probs = probs[:, 2 : num_bet_bins - 1].sum(dim=1)  # [1326]
 
-    return _create_169_grid(betting_probs, "probability", " 0")
+    # Aggregate to 169 grid by averaging combos per cell
+    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+    grid_sums = torch.zeros(13, 13, dtype=probs.dtype, device=device)
+    grid_counts = torch.zeros(13, 13, dtype=torch.long, device=device)
+
+    hands = create_1326_hand_combinations()
+    for idx, (c1, c2) in enumerate(hands):
+        i, j = _grid_coords_for_hand(c1, c2)
+        grid_sums[i, j] += betting_probs[idx]
+        grid_counts[i, j] += 1
+
+    averaged = torch.where(
+        grid_counts > 0,
+        grid_sums / grid_counts.clamp(min=1),
+        torch.zeros_like(grid_sums),
+    )
+    values_169 = []
+    for i, r1 in enumerate(ranks):
+        for j, r2 in enumerate(ranks):
+            values_169.append(averaged[i, j])
+    values_169 = torch.stack(values_169)
+
+    return _create_169_grid(values_169, "probability", " 0")
 
 
 def step_sb_action(
@@ -382,25 +437,22 @@ def step_sb_action(
     """Simulate a specific SB action across all environments.
 
     Args:
-        env: HUNLTensorEnv with 169 environments
+        env: HUNLTensorEnv with N environments
         sb_action: SB action to simulate ("allin", "call", "fold", "bet")
         device: Device for tensor operations
     """
     if device is None:
         device = env.device
 
+    N = env.N
     if sb_action == "allin":
-        # Set SB (seat 0) to all-in for all environments
-        env.step_bins(torch.full((169,), 7, device=device))
+        env.step_bins(torch.full((N,), 7, device=device))
     elif sb_action == "call":
-        # SB calls (checks) for all environments
-        env.step_bins(torch.full((169,), 1, device=device))
+        env.step_bins(torch.full((N,), 1, device=device))
     elif sb_action == "fold":
-        # SB folds for all environments
-        env.step_bins(torch.full((169,), 0, device=device))
+        env.step_bins(torch.full((N,), 0, device=device))
     elif sb_action == "bet":
-        # SB bets (half pot) for all environments
-        env.step_bins(torch.full((169,), 2, device=device))
+        env.step_bins(torch.full((N,), 2, device=device))
 
 
 def get_preflop_range_grid(
@@ -449,10 +501,32 @@ def get_preflop_range_grid(
     # Get probabilities and values
     probs, _, _ = get_probabilities(model, state_encoder, env, 0, device)
 
-    # Get probabilities for the selected metric
-    selected_probs = probs[:, bin_index]  # [169]
+    # Aggregate 1326 → 169 by averaging combos that map to same grid cell
+    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+    grid_sums = torch.zeros(13, 13, dtype=probs.dtype, device=device)
+    grid_counts = torch.zeros(13, 13, dtype=torch.long, device=device)
 
-    return _create_169_grid(selected_probs, "probability", " 0")
+    hands = create_1326_hand_combinations()
+    selected = probs[:, bin_index]  # [1326]
+    for idx, (c1, c2) in enumerate(hands):
+        i, j = _grid_coords_for_hand(c1, c2)
+        grid_sums[i, j] += selected[idx]
+        grid_counts[i, j] += 1
+
+    # Avoid div by zero; cells with zero combos should not happen
+    averaged = torch.where(
+        grid_counts > 0,
+        grid_sums / grid_counts.clamp(min=1),
+        torch.zeros_like(grid_sums),
+    )
+    # Flatten in 169 order matching _create_169_grid traversal
+    values_169 = []
+    for i, r1 in enumerate(ranks):
+        for j, r2 in enumerate(ranks):
+            values_169.append(averaged[i, j])
+    values_169 = torch.stack(values_169)
+
+    return _create_169_grid(values_169, "probability", " 0")
 
 
 def get_preflop_range_grid_bb_response(
@@ -504,13 +578,35 @@ def get_preflop_range_grid_bb_response(
 
     # Now next-to-act is p0 (BB)
 
-    # Get probabilities and values
+    # Get probabilities and values for all 1326 combos
     probs, _, _ = get_probabilities(model, state_encoder, env, 0, device)
 
-    # Get probabilities for the selected metric
-    selected_probs = probs[:, bin_index]  # [169]
+    # Aggregate 1326 → 169 by averaging combos that map to same grid cell
+    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+    grid_sums = torch.zeros(13, 13, dtype=probs.dtype, device=device)
+    grid_counts = torch.zeros(13, 13, dtype=torch.long, device=device)
 
-    return _create_169_grid(selected_probs, "probability", " 0")
+    hands = create_1326_hand_combinations()
+    selected = probs[:, bin_index]  # [1326]
+    for idx, (c1, c2) in enumerate(hands):
+        i, j = _grid_coords_for_hand(c1, c2)
+        grid_sums[i, j] += selected[idx]
+        grid_counts[i, j] += 1
+
+    # Avoid div by zero
+    averaged = torch.where(
+        grid_counts > 0,
+        grid_sums / grid_counts.clamp(min=1),
+        torch.zeros_like(grid_sums),
+    )
+    # Flatten in 169 order matching _create_169_grid traversal
+    values_169 = []
+    for i, r1 in enumerate(ranks):
+        for j, r2 in enumerate(ranks):
+            values_169.append(averaged[i, j])
+    values_169 = torch.stack(values_169)
+
+    return _create_169_grid(values_169, "probability", " 0")
 
 
 def get_preflop_value_grid_bb_response(
@@ -557,10 +653,32 @@ def get_preflop_value_grid_bb_response(
     # Simulate SB all-in action
     step_sb_action(env, "allin", device)
 
-    # Get probabilities and values
+    # Get values for all 1326 combos
     _, values, _ = get_probabilities(model, state_encoder, env, 0, device)
 
-    return _create_169_grid(values, "value", " 0.0")
+    # Aggregate to 169 grid by averaging
+    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+    grid_sums = torch.zeros(13, 13, dtype=values.dtype, device=device)
+    grid_counts = torch.zeros(13, 13, dtype=torch.long, device=device)
+
+    hands = create_1326_hand_combinations()
+    for idx, (c1, c2) in enumerate(hands):
+        i, j = _grid_coords_for_hand(c1, c2)
+        grid_sums[i, j] += values[idx]
+        grid_counts[i, j] += 1
+
+    averaged = torch.where(
+        grid_counts > 0,
+        grid_sums / grid_counts.clamp(min=1),
+        torch.zeros_like(grid_sums),
+    )
+    values_169 = []
+    for i, r1 in enumerate(ranks):
+        for j, r2 in enumerate(ranks):
+            values_169.append(averaged[i, j])
+    values_169 = torch.stack(values_169)
+
+    return _create_169_grid(values_169, "value", " 0.0")
 
 
 def get_preflop_value_grid(
@@ -592,7 +710,7 @@ def get_preflop_value_grid(
     if device is None:
         device = torch.device("cpu")
 
-    # Create 169-hand environment and state encoder
+    # Create 1326-hand environment and state encoder
     env, state_encoder = create_169_hand_analysis_setup(
         model,
         button=0,
@@ -605,7 +723,29 @@ def get_preflop_value_grid(
         flop_showdown=flop_showdown,
     )
 
-    # Get probabilities and values
+    # Get values for all 1326 combos
     _, values, _ = get_probabilities(model, state_encoder, env, 0, device)
 
-    return _create_169_grid(values, "value", " 0.0")
+    # Aggregate to 169 grid by averaging
+    ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+    grid_sums = torch.zeros(13, 13, dtype=values.dtype, device=device)
+    grid_counts = torch.zeros(13, 13, dtype=torch.long, device=device)
+
+    hands = create_1326_hand_combinations()
+    for idx, (c1, c2) in enumerate(hands):
+        i, j = _grid_coords_for_hand(c1, c2)
+        grid_sums[i, j] += values[idx]
+        grid_counts[i, j] += 1
+
+    averaged = torch.where(
+        grid_counts > 0,
+        grid_sums / grid_counts.clamp(min=1),
+        torch.zeros_like(grid_sums),
+    )
+    values_169 = []
+    for i, r1 in enumerate(ranks):
+        for j, r2 in enumerate(ranks):
+            values_169.append(averaged[i, j])
+    values_169 = torch.stack(values_169)
+
+    return _create_169_grid(values_169, "value", " 0.0")

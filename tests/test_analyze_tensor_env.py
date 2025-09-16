@@ -9,6 +9,7 @@ from alphaholdem.env.analyze_tensor_env import (
     get_preflop_range_grid,
     create_state_encoder_for_model,
     get_preflop_value_grid,
+    create_1326_hand_combinations,
 )
 from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
 
@@ -55,7 +56,7 @@ def _parse_grid_values(grid: str) -> list[list[str]]:
 
 def test_preflop_range_grid_allin_high():
     # num_bet_bins = 8 by default (5 presets + fold/check + all-in)
-    N = 169
+    N = len(create_1326_hand_combinations())
     B = 8
     logits = torch.full((N, B), -10.0)
     # Make all-in (bin 7) extremely likely
@@ -74,7 +75,7 @@ def test_preflop_range_grid_allin_high():
 
 
 def test_preflop_betting_grid_prefers_bets():
-    N = 169
+    N = len(create_1326_hand_combinations())
     B = 8
     logits = torch.full((N, B), -10.0)
     # Prefer betting bins 2..6 equally
@@ -138,7 +139,10 @@ class DummyValueModel(torch.nn.Module):
     def forward(self, embedding_data: StructuredEmbeddingData):
         token_ids = embedding_data.token_ids  # [N, 2]
         ranks = token_ids % 13
-        values = (ranks[:, 0] + ranks[:, 1]).to(torch.float32) / 24.0  # [N]
+        suits = token_ids // 13
+        values = (ranks[:, 0] + ranks[:, 1] + suits[:, 0] * suits[:, 1]).to(
+            torch.float32
+        ) / 30.0  # [N]
         logits = torch.zeros(
             values.shape[0], 8, dtype=torch.float32, device=values.device
         )
@@ -167,7 +171,13 @@ def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
     aa = value_rows[0][0]
     kk = value_rows[1][1]
     qq = value_rows[2][2]
+    aks = value_rows[0][1]
+    ako = value_rows[1][0]
     twotwo = value_rows[12][12]
 
-    assert aa > kk > qq
-    assert twotwo == 0
+    assert aa == 861  # [12 + 12 + (1 * 2 + 1 * 3 + 2 * 3) / 6] / 30.0
+    assert kk == 794
+    assert qq == 728
+    assert aks == 883  # [12 + 11 + (1 * 1 + 2 * 2 + 3 * 3) / 4] / 30.0
+    assert ako == 828  # [12 + 11 + (1 * 2 + 1 * 3 + 2 * 3) / 6] / 30.0
+    assert twotwo == 61
