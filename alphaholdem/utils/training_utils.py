@@ -9,6 +9,8 @@ from ..env.analyze_tensor_env import (
     get_preflop_betting_grid,
     get_preflop_range_grid,
     get_preflop_value_grid,
+    get_preflop_range_grid_bb_response,
+    get_preflop_value_grid_bb_response,
 )
 
 
@@ -165,6 +167,55 @@ def print_preflop_range_grid(
         flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
     )
     print(value_grid)
+    print()
+
+    # Also print BB response (facing SB all-in), matching debug_tensor_env
+    print("--- BB Response vs SB All-in (Step {}) ---".format(step))
+
+    bb_fold_grid = get_preflop_range_grid_bb_response(
+        trainer.model,
+        0,  # fold bin
+        device=trainer.device,
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        bet_bins=trainer.cfg.env.bet_bins,
+        rng=trainer.rng,
+        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
+    ).splitlines()
+
+    bb_call_grid = get_preflop_range_grid_bb_response(
+        trainer.model,
+        1,  # call bin
+        device=trainer.device,
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        bet_bins=trainer.cfg.env.bet_bins,
+        rng=trainer.rng,
+        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
+    ).splitlines()
+
+    print_combined_tables(
+        [
+            (bb_fold_grid, "Big blind (facing all-in) - fold (%)"),
+            (bb_call_grid, "Big blind (facing all-in) - call (%)"),
+        ],
+        "BB Response: Fold | Call",
+    )
+
+    print("BB value estimates when facing SB all-in (×1000)")
+    bb_value_grid = get_preflop_value_grid_bb_response(
+        trainer.model,
+        device=trainer.device,
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        bet_bins=trainer.cfg.env.bet_bins,
+        rng=trainer.rng,
+        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
+    )
+    print(bb_value_grid)
     print()
 
 
