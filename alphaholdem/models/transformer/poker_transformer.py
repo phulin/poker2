@@ -7,7 +7,6 @@ from typing import Any, Dict, Tuple
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
-import torch.nn.functional as F
 
 from ...core.interfaces import Model
 from ...core.registry import register_model
@@ -20,172 +19,7 @@ from .embeddings import (
     combine_embeddings,
 )
 from .heads import TransformerPolicyHead, TransformerValueHead
-
-
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotate last dimension by half for RoPE application."""
-
-    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
-    return torch.cat([-x2, x1], dim=-1)
-
-
-def apply_rotary_pos_emb(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Apply rotary position embedding to query/key pair."""
-
-    cos = cos.to(dtype=q.dtype)
-    sin = sin.to(dtype=q.dtype)
-    return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
-
-
-def build_rope_cos_sin(
-    inv_freq: torch.Tensor,
-    positions: torch.Tensor,
-    dtype: torch.dtype,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Construct cos/sin rotary caches for the provided absolute positions."""
-
-    # positions: [batch, seq]; inv_freq: [head_dim/2]
-    freqs = torch.einsum("bs,d->bsd", positions.to(inv_freq.dtype), inv_freq)
-    emb = torch.cat((freqs, freqs), dim=-1)
-    cos = emb.cos().to(dtype)
-    sin = emb.sin().to(dtype)
-    return cos.unsqueeze(1), sin.unsqueeze(1)
-
-
-class RotarySelfAttention(nn.Module):
-    """Multi-head self-attention with RoPE positional encoding."""
-
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1) -> None:
-        super().__init__()
-        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.d_head = d_model // n_heads
-        assert (
-            self.d_head % 2 == 0
-        ), "Rotary embeddings require an even projected head dimension"
-
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
-        self.attn_dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        x_new: torch.Tensor,
-        key_padding_mask: torch.Tensor,
-        inv_freq: torch.Tensor,
-        cache: dict[str, torch.Tensor] | None,
-        capture_cache: bool,
-        past_lengths: torch.Tensor,
-        valid_new_mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, dict[str, torch.Tensor] | None, torch.Tensor]:
-        """Compute self-attention on the new tokens only.
-
-        Args:
-            x_new: Newly appended hidden states [B, T_new_max, d_model]
-            key_padding_mask: Padding mask over the full sequence [B, T_total_max]
-            inv_freq: Rotary base frequencies [head_dim/2]
-            cache: Optional previous KV cache
-            capture_cache: Whether to return an updated cache
-            past_lengths: Length of cached prefix per batch item [B]
-            valid_new_mask: Mask for valid new tokens [B, T_new_max]
-
-        Returns:
-            Tuple of (new_token_context, updated_cache or None, total_lengths)
-        """
-
-        batch_size, max_t_new, _ = x_new.shape
-        device = x_new.device
-
-        past_k = cache.get("k") if cache is not None else None
-        past_v = cache.get("v") if cache is not None else None
-
-        # Project queries/keys/values only for the new tokens.
-        q = self.q_proj(x_new).view(batch_size, max_t_new, self.n_heads, self.d_head)
-        k_new = self.k_proj(x_new).view(
-            batch_size, max_t_new, self.n_heads, self.d_head
-        )
-        v_new = self.v_proj(x_new).view(
-            batch_size, max_t_new, self.n_heads, self.d_head
-        )
-
-        q = q.permute(0, 2, 1, 3)
-        k_new = k_new.permute(0, 2, 1, 3)
-        v_new = v_new.permute(0, 2, 1, 3)
-
-        # Build rotary embeddings for the absolute positions of the new tokens.
-        steps = torch.arange(max_t_new, device=device)
-        positions = past_lengths.unsqueeze(1) + steps.unsqueeze(0)
-        positions = positions.masked_fill(~valid_new_mask, 0)
-        cos, sin = build_rope_cos_sin(inv_freq, positions, q.dtype)
-        q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)
-
-        valid_new = valid_new_mask.unsqueeze(1).unsqueeze(-1).to(dtype=q.dtype)
-        q = q * valid_new
-        k_new = k_new * valid_new
-        v_new = v_new * valid_new
-
-        new_counts = valid_new_mask.sum(dim=1)
-        total_lengths = past_lengths + new_counts
-        max_total_len = int(total_lengths.max().item())
-
-        # Build concatenated keys/values with the cached prefix.
-        k_total = x_new.new_zeros(batch_size, self.n_heads, max_total_len, self.d_head)
-        v_total = torch.zeros_like(k_total)
-
-        if past_k is not None and past_v is not None:
-            cached_max = past_k.shape[2]
-            for b in range(batch_size):
-                cached_len = int(past_lengths[b].item())
-                if cached_len <= 0:
-                    continue
-                copy_len = min(cached_len, cached_max)
-                k_total[b, :, :copy_len] = past_k[b, :, :copy_len]
-                v_total[b, :, :copy_len] = past_v[b, :, :copy_len]
-
-        for b in range(batch_size):
-            count = int(new_counts[b].item())
-            if count <= 0:
-                continue
-            start = int(past_lengths[b].item())
-            end = start + count
-            k_total[b, :, start:end] = k_new[b, :, :count]
-            v_total[b, :, start:end] = v_new[b, :, :count]
-
-        attn_mask = key_padding_mask[:, :max_total_len]
-        attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)
-
-        attn_dropout = self.attn_dropout.p if self.training else 0.0
-        attn_output = F.scaled_dot_product_attention(
-            q,
-            k_total,
-            v_total,
-            attn_mask=attn_mask,
-            dropout_p=attn_dropout,
-            is_causal=False,
-        )
-
-        attn_output = attn_output.permute(0, 2, 1, 3).contiguous()
-        attn_output = attn_output.view(batch_size, max_t_new, self.d_model)
-        attn_output = self.out_proj(attn_output)
-        attn_output = attn_output * valid_new_mask.unsqueeze(-1).to(attn_output.dtype)
-
-        new_cache: dict[str, torch.Tensor] | None = None
-        if capture_cache:
-            new_cache = {
-                "k": k_total.detach(),
-                "v": v_total.detach(),
-                "lengths": total_lengths.detach(),
-            }
-
-        return attn_output, new_cache, total_lengths
+from .rotary_attention import RotarySelfAttention
 
 
 class TransformerLayer(nn.Module):
@@ -207,7 +41,6 @@ class TransformerLayer(nn.Module):
     def forward(
         self,
         x_new: torch.Tensor,
-        key_padding_mask: torch.Tensor,
         inv_freq: torch.Tensor,
         cache: dict[str, torch.Tensor] | None,
         capture_cache: bool,
@@ -216,7 +49,6 @@ class TransformerLayer(nn.Module):
     ) -> Tuple[torch.Tensor, dict[str, torch.Tensor] | None, torch.Tensor]:
         attn_out, attn_cache, total_lengths = self.attn(
             x_new,
-            key_padding_mask,
             inv_freq,
             cache,
             capture_cache,
@@ -327,8 +159,6 @@ class PokerTransformerV1(nn.Module, Model):
         batch_size, seq_len, _ = hidden_full.shape
         device = hidden_full.device
 
-        attention_mask = structured_data.attention_mask.bool()
-        key_padding_mask = ~attention_mask
         current_lengths = structured_data.lengths.to(device).long()
 
         cache_inputs = kv_cache
@@ -360,7 +190,6 @@ class PokerTransformerV1(nn.Module, Model):
                 def inner(inputs: torch.Tensor) -> torch.Tensor:
                     output, _, _ = layer_module(
                         inputs,
-                        key_padding_mask,
                         inv_freq,
                         None,
                         False,
@@ -433,7 +262,6 @@ class PokerTransformerV1(nn.Module, Model):
 
                 layer_output, updated_cache, total_lengths = layer(
                     layer_input,
-                    key_padding_mask,
                     inv_freq,
                     layer_cache,
                     capture_new_cache,
