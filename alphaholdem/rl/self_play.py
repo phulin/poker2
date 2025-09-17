@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Any, List, Optional, Tuple
 import math
 
 import torch
@@ -115,18 +115,23 @@ class SelfPlayTrainer:
             )
             # Always use structured embeddings for transformer models
             self.use_structured_embeddings = True
+            self._init_kv_cache_storage()
         else:
             # Use CNN state encoder
             self.state_encoder = CNNStateEncoder(self.tensor_env, self.device)
             self.use_structured_embeddings = False
-
-        # Ensure bins align with model output size to avoid mask/logit mismatch
-        if hasattr(self.model, "policy_head") and hasattr(
-            self.model.policy_head, "out_features"
+        self.is_transformer_model = is_transformer
+        self._transformer_checkpointing_enabled = bool(
+            getattr(cfg.model, "use_gradient_checkpointing", False)
+        )
+        if self.is_transformer_model and hasattr(
+            self.model, "use_gradient_checkpointing"
         ):
-            self.num_bet_bins = int(self.model.policy_head.out_features)
-        else:
-            self.num_bet_bins = len(self.cfg.env.bet_bins) + 3
+            self.model.use_gradient_checkpointing = (
+                self._transformer_checkpointing_enabled
+            )
+
+        self.num_bet_bins = len(self.cfg.env.bet_bins) + 3
 
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights
@@ -468,7 +473,7 @@ class SelfPlayTrainer:
         collected_trajectory_rewards = []
 
         # Initialize all environments
-        self.tensor_env.reset()
+        self._reset_envs()
 
         # Per-environment reward tracking and step counts
         per_env_rewards = torch.zeros(self.num_envs, device=self.device)
@@ -504,6 +509,12 @@ class SelfPlayTrainer:
         while (
             steps_collected < min_steps or trajectory_count < min_trajectories
         ) and loop_count < max_loops:
+            orig_checkpoint = None
+            if self.is_transformer_model and hasattr(
+                self.model, "use_gradient_checkpointing"
+            ):
+                orig_checkpoint = self.model.use_gradient_checkpointing
+                self.model.use_gradient_checkpointing = False
             if not adding_trajectories and add_to_replay_buffer:
                 # Initialize trajectory collection; reserve space in buffer.
                 self.replay_buffer.start_adding_trajectory_batches(self.num_envs)
@@ -540,15 +551,40 @@ class SelfPlayTrainer:
 
                 # Get predictions from our model for our turns
                 if env_active_we_act.numel() > 0:
+                    kv_cache_input = None
+                    use_kv_cache = (
+                        self.is_transformer_model
+                        and self.use_structured_embeddings
+                        and hasattr(self, "_kv_caches")
+                    )
+                    if use_kv_cache:
+                        kv_cache_input = self._prepare_kv_cache_batch(
+                            player=0,
+                            idxs=env_active_we_act,
+                            structured_data=our_states,
+                        )
                     with torch.amp.autocast(
                         self.device.type,
                         dtype=torch.bfloat16,
                         enabled=self.use_mixed_precision,
                     ):
-                        outputs = self.model(our_states)
+                        if self.is_transformer_model:
+                            outputs = self.model(
+                                our_states,
+                                kv_cache=kv_cache_input,
+                            )
+                        else:
+                            outputs = self.model(our_states)
 
                     env_logits[env_active_we_act] = outputs["policy_logits"].float()
                     env_values[env_active_we_act] = outputs["value"].float().squeeze(-1)
+                    if use_kv_cache:
+                        self._update_kv_cache_batch(
+                            player=0,
+                            idxs=env_active_we_act,
+                            structured_data=our_states,
+                            kv_cache_output=outputs.get("kv_cache"),
+                        )
 
                 # SPECIAL CASE: If first action of hand, opponent folding illegal
                 # (because it would leave an empty trajectory)
@@ -598,16 +634,41 @@ class SelfPlayTrainer:
                         player=1, idxs=env_active_opp_acts
                     )
                     # Self-play: use our model for opponent turns too
+                    kv_cache_input = None
+                    use_kv_cache = (
+                        self.is_transformer_model
+                        and self.use_structured_embeddings
+                        and hasattr(self, "_kv_caches")
+                    )
+                    if use_kv_cache:
+                        kv_cache_input = self._prepare_kv_cache_batch(
+                            player=1,
+                            idxs=env_active_opp_acts,
+                            structured_data=opp_states,
+                        )
                     with torch.amp.autocast(
                         self.device.type,
                         dtype=torch.bfloat16,
                         enabled=self.use_mixed_precision,
                     ):
-                        outputs = self.model(opp_states)
+                        if self.is_transformer_model:
+                            outputs = self.model(
+                                opp_states,
+                                kv_cache=kv_cache_input,
+                            )
+                        else:
+                            outputs = self.model(opp_states)
                         env_logits[env_active_opp_acts] = outputs[
                             "policy_logits"
                         ].float()
                         env_values[env_active_opp_acts] = outputs["value"].float()
+                    if use_kv_cache:
+                        self._update_kv_cache_batch(
+                            player=1,
+                            idxs=env_active_opp_acts,
+                            structured_data=opp_states,
+                            kv_cache_output=outputs.get("kv_cache"),
+                        )
 
                 # Sample actions for active environments only.
                 action_bins_active, log_probs_active_full = self.policy.action_batch(
@@ -626,6 +687,9 @@ class SelfPlayTrainer:
                 action_bins, legal_bins_amounts, legal_bins_mask
             )
             newly_done_mask = dones & active_mask
+
+            if orig_checkpoint is not None:
+                self.model.use_gradient_checkpointing = orig_checkpoint
 
             # Update per-environment reward tracking
             per_env_rewards += rewards
@@ -723,7 +787,7 @@ class SelfPlayTrainer:
 
                 # Reset environments if we're going through the loop again
                 if steps_collected < min_steps or trajectory_count < min_trajectories:
-                    self.tensor_env.reset()
+                    self._reset_envs()
 
         if loop_count >= max_loops:
             print(
@@ -740,6 +804,222 @@ class SelfPlayTrainer:
             collected_trajectory_rewards_tensor = torch.tensor([], device=self.device)
 
         return collected_trajectory_rewards_tensor
+
+    def _init_kv_cache_storage(self) -> None:
+        self._kv_caches: dict[int, List[Optional[dict[str, Any]]]] = {
+            0: [None for _ in range(self.num_envs)],
+            1: [None for _ in range(self.num_envs)],
+        }
+
+    def _reset_kv_cache(self, env_indices: Optional[torch.Tensor] = None) -> None:
+        if not hasattr(self, "_kv_caches"):
+            return
+        if env_indices is None:
+            indices = range(self.num_envs)
+        else:
+            indices = [int(i) for i in env_indices.tolist()]
+        for player in (0, 1):
+            for env_idx in indices:
+                self._kv_caches[player][env_idx] = None
+
+    def _reset_envs(self, env_indices: Optional[torch.Tensor] = None) -> None:
+        self.tensor_env.reset(env_indices=env_indices)
+        self._reset_kv_cache(env_indices)
+
+    def _prepare_kv_cache_batch(
+        self,
+        player: int,
+        idxs: torch.Tensor,
+        structured_data: StructuredEmbeddingData,
+    ) -> Optional[List[dict[str, torch.Tensor]]]:
+        if idxs.numel() == 0 or not hasattr(self, "_kv_caches"):
+            return None
+
+        cache_entries: List[Optional[List[dict[str, Any]]]] = []
+        for batch_idx, env_idx in enumerate(idxs.tolist()):
+            entry = self._kv_caches[player][env_idx]
+            if entry is None:
+                cache_entries.append(None)
+                continue
+
+            prev_tokens: torch.Tensor = entry["token_ids"]
+            prev_len = prev_tokens.shape[0]
+            new_len = int(structured_data.lengths[batch_idx].item())
+
+            if prev_len == 0:
+                cache_entries.append(entry["layers"])
+                continue
+
+            if prev_len > new_len:
+                self._kv_caches[player][env_idx] = None
+                cache_entries.append(None)
+                continue
+
+            new_prefix = (
+                structured_data.token_ids[batch_idx, :prev_len].detach().to("cpu")
+            )
+            new_context = (
+                structured_data.context_features[batch_idx, :prev_len]
+                .detach()
+                .to("cpu")
+            )
+            prev_context: Optional[torch.Tensor] = entry.get("context_features")
+
+            valid_len = prev_len
+            for pos in range(prev_len):
+                if prev_tokens[pos] != new_prefix[pos]:
+                    valid_len = pos
+                    break
+                if prev_context is not None and not torch.allclose(
+                    prev_context[pos],
+                    new_context[pos],
+                    atol=1e-6,
+                    rtol=1e-6,
+                ):
+                    valid_len = pos
+                    break
+
+            if valid_len == 0:
+                self._kv_caches[player][env_idx] = None
+                cache_entries.append(None)
+                continue
+
+            if valid_len < prev_len:
+                trimmed_layers: List[dict[str, Any]] = []
+                for layer_cache in entry["layers"]:
+                    trimmed_layers.append(
+                        {
+                            "k": layer_cache["k"][:, :valid_len, :],
+                            "v": layer_cache["v"][:, :valid_len, :],
+                            "length": valid_len,
+                        }
+                    )
+                entry["layers"] = trimmed_layers
+                entry["token_ids"] = entry["token_ids"][:valid_len].clone()
+                if entry.get("context_features") is not None:
+                    entry["context_features"] = entry["context_features"][
+                        :valid_len
+                    ].clone()
+                prev_len = valid_len
+
+            prefix_len = prev_len
+            struct_device = structured_data.token_ids.device
+            structured_data.token_ids[batch_idx, :prefix_len] = entry["token_ids"][
+                :prefix_len
+            ].to(struct_device)
+            if entry.get("context_features") is not None:
+                structured_data.context_features[batch_idx, :prefix_len] = entry[
+                    "context_features"
+                ][:prefix_len].to(struct_device)
+
+            cache_entries.append(entry["layers"])
+
+        if not any(cache_entries):
+            return None
+
+        return self._pack_layer_caches(cache_entries)
+
+    def _pack_layer_caches(
+        self, cache_entries: List[Optional[List[dict[str, Any]]]]
+    ) -> List[dict[str, torch.Tensor]]:
+        batch_size = len(cache_entries)
+        packed: List[dict[str, torch.Tensor]] = []
+        head_dim = self.model.d_model // self.model.n_heads
+        model_device = self.device
+        sample_dtype = next(self.model.parameters()).dtype
+
+        for layer_idx in range(self.model.n_layers):
+            lengths = torch.zeros(batch_size, dtype=torch.long, device=model_device)
+            max_len = 0
+            layer_dtype = sample_dtype
+            layer_device = model_device
+            for batch_idx, env_cache in enumerate(cache_entries):
+                if env_cache is None:
+                    continue
+                layer_cache = env_cache[layer_idx]
+                length = int(layer_cache["length"])
+                lengths[batch_idx] = length
+                max_len = max(max_len, length)
+                layer_dtype = layer_cache["k"].dtype
+                layer_device = layer_cache["k"].device
+
+            if max_len == 0:
+                k_tensor = torch.zeros(
+                    batch_size,
+                    self.model.n_heads,
+                    0,
+                    head_dim,
+                    device=layer_device,
+                    dtype=layer_dtype,
+                )
+                v_tensor = torch.zeros_like(k_tensor)
+            else:
+                k_tensor = torch.zeros(
+                    batch_size,
+                    self.model.n_heads,
+                    max_len,
+                    head_dim,
+                    device=layer_device,
+                    dtype=layer_dtype,
+                )
+                v_tensor = torch.zeros_like(k_tensor)
+                for batch_idx, env_cache in enumerate(cache_entries):
+                    if env_cache is None:
+                        continue
+                    layer_cache = env_cache[layer_idx]
+                    length = int(layer_cache["length"])
+                    if length == 0:
+                        continue
+                    k_tensor[batch_idx, :, :length, :] = layer_cache["k"]
+                    v_tensor[batch_idx, :, :length, :] = layer_cache["v"]
+
+            packed.append({"k": k_tensor, "v": v_tensor, "lengths": lengths})
+
+        return packed
+
+    def _update_kv_cache_batch(
+        self,
+        player: int,
+        idxs: torch.Tensor,
+        structured_data: StructuredEmbeddingData,
+        kv_cache_output: Optional[List[dict[str, torch.Tensor]]],
+    ) -> None:
+        if idxs.numel() == 0 or kv_cache_output is None:
+            return
+
+        for batch_idx, env_idx in enumerate(idxs.tolist()):
+            layer_caches: List[dict[str, Any]] = []
+            max_length = int(structured_data.lengths[batch_idx].item())
+
+            if max_length == 0:
+                self._kv_caches[player][env_idx] = None
+                continue
+
+            for layer_cache in kv_cache_output:
+                k_slice = (
+                    layer_cache["k"][batch_idx, :, :max_length, :].detach().clone()
+                )
+                v_slice = (
+                    layer_cache["v"][batch_idx, :, :max_length, :].detach().clone()
+                )
+                layer_caches.append({"k": k_slice, "v": v_slice, "length": max_length})
+
+            tokens_snapshot = (
+                structured_data.token_ids[batch_idx, :max_length]
+                .detach()
+                .to("cpu")
+                .clone()
+            )
+            self._kv_caches[player][env_idx] = {
+                "layers": layer_caches,
+                "token_ids": tokens_snapshot,
+                "context_features": (
+                    structured_data.context_features[batch_idx, :max_length]
+                    .detach()
+                    .to("cpu")
+                    .clone()
+                ),
+            }
 
     def _encode_tensor_states(self, player: int, idxs: torch.Tensor) -> dict:
         """
@@ -758,6 +1038,15 @@ class SelfPlayTrainer:
         if self.replay_buffer.num_steps() < self.batch_size:
             raise ValueError(
                 f"Not enough samples in replay buffer: {self.replay_buffer.num_steps()} < {self.batch_size}"
+            )
+
+        orig_checkpoint = None
+        if self.is_transformer_model and hasattr(
+            self.model, "use_gradient_checkpointing"
+        ):
+            orig_checkpoint = self.model.use_gradient_checkpointing
+            self.model.use_gradient_checkpointing = (
+                self._transformer_checkpointing_enabled
             )
 
         # Compute GAE for all stored trajectories
@@ -954,6 +1243,11 @@ class SelfPlayTrainer:
             print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
         denom = max(1, total_minibatches)
+        if orig_checkpoint is not None and hasattr(
+            self.model, "use_gradient_checkpointing"
+        ):
+            self.model.use_gradient_checkpointing = orig_checkpoint
+
         return {
             "avg_reward": avg_reward,
             "num_samples": self.batch_size * self.num_epochs,

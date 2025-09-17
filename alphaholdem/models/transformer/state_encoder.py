@@ -95,7 +95,8 @@ class TransformerStateEncoder:
         # Street markers plus cards
         base_tokens += sum(1 + layout.num_cards for layout in cls.STREETS)
         # Maximum number of actions (history slots per street)
-        base_tokens += len(cls.STREETS) * history_slots
+        base_tokens += len(cls.STREETS) * history_slots  # action tokens
+        base_tokens += len(cls.STREETS) * history_slots  # per-action context tokens
         return base_tokens
 
     # ------------------------------------------------------------------ Encoding
@@ -105,26 +106,179 @@ class TransformerStateEncoder:
         """Encode a batch of tensorized environments for the requested player."""
 
         batch = idxs.numel()
-        self._reset_buffers(batch)
-
-        action_history = self.tensor_env.get_action_history()[idxs]
-        lengths = self.length_buffer[:batch]
-
-        for row, env_index in enumerate(idxs.tolist()):
-            lengths[row] = self._encode_single(
-                row, env_index, action_history[row], player
+        if batch == 0:
+            return StructuredEmbeddingData(
+                token_ids=torch.empty(0, 0, device=self.device),
+                card_ranks=torch.empty(0, 0, device=self.device),
+                card_suits=torch.empty(0, 0, device=self.device),
+                card_streets=torch.empty(0, 0, device=self.device),
+                action_actors=torch.empty(0, 0, device=self.device),
+                action_streets=torch.empty(0, 0, device=self.device),
+                action_legal_masks=torch.empty(
+                    0, 0, self.num_bet_bins, device=self.device
+                ),
+                context_features=torch.empty(
+                    0, 0, Context.NUM_CONTEXT.value, device=self.device
+                ),
+                lengths=torch.empty(0, dtype=torch.long, device=self.device),
             )
 
+        self._reset_buffers(batch)
+
+        rows = torch.arange(batch, device=self.device)
+        positions = torch.zeros(batch, dtype=torch.long, device=self.device)
+
+        token_ids = self.token_ids[:batch]
+        card_ranks = self.card_ranks[:batch]
+        card_suits = self.card_suits[:batch]
+        card_streets = self.card_streets[:batch]
+        action_actors = self.action_actors[:batch]
+        action_streets = self.action_streets[:batch]
+        action_legal_masks = self.action_legal_masks[:batch]
+        context_features = self.context_features[:batch]
+
+        special_offset = self.special_offset
+        context_offset = self.special_offset + Special.CONTEXT.value
+
+        base_context_world = self._gather_env_context(idxs)
+        base_context_hero = self._to_hero_context(base_context_world, player)
+
+        # CLS token (stores blinds and hero button flag)
+        token_ids[rows, positions] = special_offset + Special.CLS.value
+        cf_dtype = context_features.dtype
+        context_features[rows, positions, 0] = torch.full(
+            (batch,), float(self.tensor_env.sb), device=self.device, dtype=cf_dtype
+        )
+        context_features[rows, positions, 1] = torch.full(
+            (batch,), float(self.tensor_env.bb), device=self.device, dtype=cf_dtype
+        )
+        hero_on_button = (self.tensor_env.button[idxs] == player).to(cf_dtype)
+        context_features[rows, positions, 2] = hero_on_button
+        positions = positions + 1
+
+        # Initial context token for current state
+        token_ids[rows, positions] = context_offset
+        context_features[rows, positions] = base_context_hero
+        positions = positions + 1
+
+        hole_cards = self.tensor_env.hole_indices[idxs, player]
+        board_cards = self.tensor_env.board_indices[idxs]
+        action_history = self.tensor_env.get_action_history()[idxs]
+        action_context_world = self.tensor_env.action_context[idxs]
+
+        for street_layout in self.STREETS:
+            street_idx = street_layout.index
+
+            if street_idx == 0:
+                street_cards = hole_cards
+            elif street_idx == 1:
+                street_cards = board_cards[:, :3]
+            elif street_idx == 2:
+                street_cards = board_cards[:, 3:4]
+            else:
+                street_cards = board_cards[:, 4:5]
+
+            has_cards = street_cards >= 0
+            card_presence = (
+                has_cards.any(dim=1)
+                if street_cards.shape[1] > 0
+                else torch.zeros(batch, dtype=torch.bool, device=self.device)
+            )
+
+            street_actions = action_history[:, street_idx]
+            action_taken_mask = street_actions[:, :, 2, :].any(dim=2)
+            actions_present = action_taken_mask.any(dim=1)
+
+            street_mask = card_presence | actions_present
+            if not street_mask.any():
+                continue
+
+            active_rows = torch.where(street_mask)[0]
+            active_positions = positions[active_rows]
+            token_ids[active_rows, active_positions] = (
+                special_offset + street_layout.special.value
+            )
+            card_streets[active_rows, active_positions] = torch.full(
+                active_positions.shape,
+                street_idx,
+                device=self.device,
+                dtype=card_streets.dtype,
+            )
+            positions[active_rows] = active_positions + 1
+
+            # Street cards
+            for card_slot in range(street_cards.shape[1]):
+                slot_cards = street_cards[:, card_slot]
+                mask = street_mask & (slot_cards >= 0)
+                if not mask.any():
+                    continue
+                idx = torch.where(mask)[0]
+                pos = positions[idx]
+                vals = slot_cards[idx]
+                token_ids[idx, pos] = (self.card_offset + vals).to(token_ids.dtype)
+                card_ranks[idx, pos] = (vals % 13).to(card_ranks.dtype)
+                card_suits[idx, pos] = (vals // 13).to(card_suits.dtype)
+                card_streets[idx, pos] = torch.full(
+                    pos.shape,
+                    street_idx,
+                    device=self.device,
+                    dtype=card_streets.dtype,
+                )
+                positions[idx] = pos + 1
+
+            # Actions with per-step context
+            street_context = action_context_world[:, street_idx]
+            for slot in range(self.history_slots):
+                slot_mask = street_mask & action_taken_mask[:, slot]
+                if not slot_mask.any():
+                    continue
+
+                idx = torch.where(slot_mask)[0]
+                pos = positions[idx]
+
+                ctx_world = street_context[idx, slot]
+                ctx_hero = self._to_hero_context(ctx_world, player)
+                token_ids[idx, pos] = context_offset
+                context_features[idx, pos] = ctx_hero
+                positions[idx] = pos + 1
+
+                action_sum = street_actions[:, slot, 2, :]
+                action_ids_all = action_sum.float().argmax(dim=1)
+                action_ids = action_ids_all[idx]
+
+                actor_flags = street_actions[:, slot, :2, :].any(dim=2).float()
+                actors = actor_flags.argmax(dim=1)[idx]
+                if player == 1:
+                    actors = 1 - actors
+
+                legal_masks = street_actions[:, slot, 3, :][idx]
+
+                pos = positions[idx]
+                token_ids[idx, pos] = (self.action_offset + action_ids).to(
+                    token_ids.dtype
+                )
+                action_actors[idx, pos] = actors.to(action_actors.dtype)
+                action_streets[idx, pos] = torch.full(
+                    pos.shape,
+                    street_idx,
+                    device=self.device,
+                    dtype=action_streets.dtype,
+                )
+                action_legal_masks[idx, pos] = legal_masks
+                positions[idx] = pos + 1
+
+        self.length_buffer[:batch] = positions
+
         return StructuredEmbeddingData(
-            token_ids=self.token_ids[:batch].clone(),
-            card_ranks=self.card_ranks[:batch].clone(),
-            card_suits=self.card_suits[:batch].clone(),
-            card_streets=self.card_streets[:batch].clone(),
-            action_actors=self.action_actors[:batch].clone(),
-            action_streets=self.action_streets[:batch].clone(),
-            action_legal_masks=self.action_legal_masks[:batch].clone(),
-            context_features=self.context_features[:batch].clone(),
-            lengths=lengths.clone(),
+            token_ids=token_ids.clone(),
+            card_ranks=card_ranks.clone(),
+            card_suits=card_suits.clone(),
+            card_streets=card_streets.clone(),
+            action_actors=action_actors.clone(),
+            action_streets=action_streets.clone(),
+            action_legal_masks=action_legal_masks.clone(),
+            context_features=context_features.clone(),
+            lengths=positions.clone(),
         )
 
     # ---------------------------------------------------------------- Private
@@ -141,169 +295,56 @@ class TransformerStateEncoder:
         self.context_features[:batch].zero_()
         self.length_buffer[:batch].zero_()
 
-    def _encode_single(
-        self,
-        row: int,
-        env_index: int,
-        action_history: torch.Tensor,
-        player: int,
-    ) -> int:
-        """Encode one environment row and return the produced sequence length."""
+    def _gather_env_context(self, idxs: torch.Tensor) -> torch.Tensor:
+        env = self.tensor_env
+        result = torch.zeros(
+            idxs.numel(), Context.NUM_CONTEXT.value, device=self.device
+        )
+        target_dtype = result.dtype
+        result[:, Context.POT.value].copy_(env.pot[idxs].to(target_dtype))
+        result[:, Context.STACK_P0.value].copy_(env.stacks[idxs, 0].to(target_dtype))
+        result[:, Context.STACK_P1.value].copy_(env.stacks[idxs, 1].to(target_dtype))
+        result[:, Context.COMMITTED_P0.value].copy_(
+            env.committed[idxs, 0].to(target_dtype)
+        )
+        result[:, Context.COMMITTED_P1.value].copy_(
+            env.committed[idxs, 1].to(target_dtype)
+        )
+        result[:, Context.POSITION.value].copy_(env.button[idxs].to(target_dtype))
+        result[:, Context.STREET.value].copy_(env.street[idxs].to(target_dtype))
+        result[:, Context.ACTIONS_ROUND.value].copy_(
+            env.actions_this_round[idxs].to(target_dtype)
+        )
+        result[:, Context.MIN_RAISE.value].copy_(env.min_raise[idxs].to(target_dtype))
+        diff = env.committed[idxs, 1] - env.committed[idxs, 0]
+        result[:, Context.BET_TO_CALL.value].copy_(diff.to(target_dtype))
+        return result
 
-        pos = 0
-
-        # Game-level invariants (blinds, seating) live on CLS token.
-        self.token_ids[row, pos] = self.special_offset + Special.CLS.value
-        self._write_game_invariants(row, pos, env_index, player)
-        pos += 1
-
-        # Dynamic observation context lives on a dedicated token.
-        self.token_ids[row, pos] = self.special_offset + Special.CONTEXT.value
-        self._write_dynamic_context(row, pos, env_index, player)
-        pos += 1
-
-        # Cards and actions grouped by street.
-        for street_layout in self.STREETS:
-            pos = self._encode_street(
-                row=row,
-                env_index=env_index,
-                street_layout=street_layout,
-                action_history=action_history[street_layout.index],
-                pos=pos,
-                player=player,
+    def _to_hero_context(
+        self, context_world: torch.Tensor, player: int
+    ) -> torch.Tensor:
+        result = context_world.clone()
+        if player == 1:
+            result[:, Context.STACK_P0.value], result[:, Context.STACK_P1.value] = (
+                context_world[:, Context.STACK_P1.value],
+                context_world[:, Context.STACK_P0.value],
+            )
+            (
+                result[:, Context.COMMITTED_P0.value],
+                result[:, Context.COMMITTED_P1.value],
+            ) = (
+                context_world[:, Context.COMMITTED_P1.value],
+                context_world[:, Context.COMMITTED_P0.value],
             )
 
-        return pos
-
-    def _write_game_invariants(
-        self, row: int, pos: int, env_index: int, player: int
-    ) -> None:
-        """Populate CLS token features with blinds and hero position."""
-
-        env = self.tensor_env
-        features = self.context_features
-        features[row, pos, 0] = float(env.sb)
-        features[row, pos, 1] = float(env.bb)
-        hero_on_button = 1.0 if int(env.button[env_index]) == player else 0.0
-        features[row, pos, 2] = hero_on_button
-
-    def _write_dynamic_context(
-        self, row: int, pos: int, env_index: int, player: int
-    ) -> None:
-        """Populate hand-level context token with numeric scalars."""
-
-        env = self.tensor_env
-        opp = 1 - player
-        features = self.context_features
-
-        features[row, pos, Context.POT.value] = env.pot[env_index].float()
-        features[row, pos, Context.STACK_P0.value] = env.stacks[
-            env_index, player
-        ].float()
-        features[row, pos, Context.STACK_P1.value] = env.stacks[env_index, opp].float()
-        features[row, pos, Context.COMMITTED_P0.value] = env.committed[
-            env_index, player
-        ].float()
-        features[row, pos, Context.COMMITTED_P1.value] = env.committed[
-            env_index, opp
-        ].float()
-        hero_button_flag = 0.0 if int(env.button[env_index]) == player else 1.0
-        features[row, pos, Context.POSITION.value] = hero_button_flag
-        features[row, pos, Context.STREET.value] = env.street[env_index].float()
-        features[row, pos, Context.ACTIONS_ROUND.value] = env.actions_this_round[
-            env_index
-        ].float()
-        features[row, pos, Context.MIN_RAISE.value] = env.min_raise[env_index].float()
-        bet_to_call = env.committed[env_index, opp] - env.committed[env_index, player]
-        features[row, pos, Context.BET_TO_CALL.value] = bet_to_call.float()
-
-    def _encode_street(
-        self,
-        row: int,
-        env_index: int,
-        street_layout: StreetLayout,
-        action_history: torch.Tensor,
-        pos: int,
-        player: int,
-    ) -> int:
-        """Emit street marker, visible cards, and historical actions."""
-
-        cards = list(self._iter_street_cards(env_index, street_layout, player))
-        actions = list(self._iter_actions(action_history))
-
-        if not cards and not actions:
-            return pos
-
-        # Street marker token
-        self.token_ids[row, pos] = self.special_offset + street_layout.special.value
-        self.card_streets[row, pos] = street_layout.index
-        pos += 1
-
-        # Visible cards from hero perspective
-        for card in cards:
-            self.token_ids[row, pos] = self.card_offset + card
-            self.card_ranks[row, pos] = card % 13
-            self.card_suits[row, pos] = card // 13
-            self.card_streets[row, pos] = street_layout.index
-            pos += 1
-
-        # Historical actions in chronological order
-        for action_id, actor, legal_mask in actions:
-            hero_actor = actor if player == 0 else 1 - actor
-            self.token_ids[row, pos] = self.action_offset + action_id
-            self.action_actors[row, pos] = hero_actor
-            self.action_streets[row, pos] = street_layout.index
-            self.action_legal_masks[row, pos] = legal_mask
-            pos += 1
-
-        return pos
-
-    def _iter_street_cards(
-        self, env_index: int, street_layout: StreetLayout, player: int
-    ) -> Iterable[int]:
-        """Yield visible card indices for the given street."""
-
-        env = self.tensor_env
-        if street_layout.index == 0:
-            hole_cards = env.hole_indices[env_index, player]
-            for card in hole_cards.tolist():
-                if card >= 0:
-                    yield int(card)
-            return
-
-        # Board cards: indices 0-2 flop, 3 turn, 4 river
-        board = env.board_indices[env_index]
-        offset, count = self._board_slice_for_street(street_layout)
-        for idx in range(offset, offset + count):
-            card = int(board[idx])
-            if card >= 0:
-                yield card
-
-    def _board_slice_for_street(self, street_layout: StreetLayout) -> Tuple[int, int]:
-        """Return slice (offset, length) for board cards of a street."""
-
-        if street_layout.index == 1:
-            return 0, 3
-        if street_layout.index == 2:
-            return 3, 1
-        return 4, 1
-
-    def _iter_actions(
-        self, street_history: torch.Tensor
-    ) -> Iterable[Tuple[int, int, torch.Tensor]]:
-        """Yield (action_id, actor, legal_mask) tuples for populated slots."""
-
-        for slot in range(self.history_slots):
-            slot_view = street_history[slot]
-            action_taken = slot_view[2]
-            if not action_taken.any():
-                break
-
-            # Determine the actor by checking which player's row fired.
-            actor = 0 if slot_view[0].any() else 1
-            action_id = slot_view[2].float().argmax().item()
-            legal_mask = slot_view[3].clone()
-            yield int(action_id), actor, legal_mask
+        button = context_world[:, Context.POSITION.value]
+        hero_not_button = (button != player).to(context_world.dtype)
+        result[:, Context.POSITION.value] = hero_not_button
+        result[:, Context.BET_TO_CALL.value] = (
+            result[:, Context.COMMITTED_P1.value]
+            - result[:, Context.COMMITTED_P0.value]
+        )
+        return result
 
     # ---------------------------------------------------------------- Interface
     def encode_single_state(

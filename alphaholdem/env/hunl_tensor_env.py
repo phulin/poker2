@@ -148,6 +148,14 @@ class HUNLTensorEnv:
             dtype=torch.bool,
             device=self.device,
         )
+        self.action_context = torch.zeros(
+            self.N,
+            4,
+            self.history_slots,
+            10,
+            dtype=float_dtype,
+            device=self.device,
+        )
 
         # Cache one-hot card encodings for all 52 cards
         # Precompute full 4x13 one-hot matrices for all cards 0-51
@@ -251,6 +259,7 @@ class HUNLTensorEnv:
 
         # Reset history planes for specified environments
         self.action_history[ids].zero_()
+        self.action_context[ids].zero_()
 
         # Reset chip tracking for specified environments and account for posted blinds
         self.chips_placed[ids, p_sb] = self.sb
@@ -459,6 +468,23 @@ class HUNLTensorEnv:
         self.action_history[acting, round_idx, slot_idx, 2, bin_indices[acting]] = 1
         # Write legal mask for this decision into history legal row
         self.action_history[acting, round_idx, slot_idx, 3, :] = legal_masks[acting]
+
+        context_snapshot = torch.stack(
+            [
+                self.pot,
+                self.stacks[:, 0],
+                self.stacks[:, 1],
+                self.committed[:, 0],
+                self.committed[:, 1],
+                self.button,
+                self.street,
+                self.actions_this_round,
+                self.min_raise,
+                self.committed[:, 1] - self.committed[:, 0],
+            ],
+            dim=1,
+        ).to(self.float_dtype)
+        self.action_context[acting, round_idx, slot_idx] = context_snapshot[acting]
 
         # Handle different actions.
         # Fold: immediate terminal, award pot to opp

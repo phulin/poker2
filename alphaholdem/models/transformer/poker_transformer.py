@@ -64,7 +64,10 @@ class RotarySelfAttention(nn.Module):
         attention_mask: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> torch.Tensor:
+        cache: dict[str, torch.Tensor] | None,
+        use_cache: bool,
+        current_lengths: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         batch_size, seq_len, _ = x.shape
 
         q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
@@ -76,6 +79,25 @@ class RotarySelfAttention(nn.Module):
         v = v.permute(0, 2, 1, 3)
 
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        if use_cache and cache is not None:
+            past_k = cache.get("k")
+            past_v = cache.get("v")
+            past_lengths = cache.get("lengths")
+            if past_k is not None and past_v is not None and past_lengths is not None:
+                max_prefix = min(past_k.shape[2], k.shape[2])
+                if max_prefix > 0:
+                    for batch_idx in range(batch_size):
+                        cached_len = int(past_lengths[batch_idx].item())
+                        if cached_len <= 0:
+                            continue
+                        cached_len = min(cached_len, max_prefix)
+                        k[batch_idx, :, :cached_len, :] = past_k[
+                            batch_idx, :, :cached_len, :
+                        ]
+                        v[batch_idx, :, :cached_len, :] = past_v[
+                            batch_idx, :, :cached_len, :
+                        ]
 
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_head)
 
@@ -89,8 +111,14 @@ class RotarySelfAttention(nn.Module):
         context = torch.matmul(attn, v)
         context = context.permute(0, 2, 1, 3).contiguous()
         context = context.view(batch_size, seq_len, self.d_model)
-
-        return self.out_proj(context)
+        cache_lengths = current_lengths.to(k.device)
+        cache_lengths = torch.clamp(cache_lengths, max=k.shape[2])
+        new_cache = {
+            "k": k.detach(),
+            "v": v.detach(),
+            "lengths": cache_lengths.detach(),
+        }
+        return self.out_proj(context), new_cache
 
 
 class TransformerLayer(nn.Module):
@@ -115,12 +143,17 @@ class TransformerLayer(nn.Module):
         attention_mask: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> torch.Tensor:
-        attn_out = self.attn(x, attention_mask, cos, sin)
+        cache: dict[str, torch.Tensor] | None,
+        use_cache: bool,
+        current_lengths: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        attn_out, attn_cache = self.attn(
+            x, attention_mask, cos, sin, cache, use_cache, current_lengths
+        )
         x = self.norm1(x + self.dropout(attn_out))
         ffn_out = self.ffn(x)
         x = self.norm2(x + self.dropout(ffn_out))
-        return x
+        return x, attn_cache
 
 
 @register_model("poker_transformer_v1")
@@ -212,7 +245,9 @@ class PokerTransformerV1(nn.Module, Model):
 
     @profile
     def forward(
-        self, structured_data: StructuredEmbeddingData
+        self,
+        structured_data: StructuredEmbeddingData,
+        kv_cache: list[dict[str, torch.Tensor]] | None = None,
     ) -> Dict[str, torch.Tensor]:
         """Run forward pass on structured observation batch."""
 
@@ -232,14 +267,29 @@ class PokerTransformerV1(nn.Module, Model):
             dtype=x.dtype,
         )
 
+        cache_inputs = kv_cache
+        next_caches: list[dict[str, torch.Tensor]] = []
+        current_lengths = structured_data.lengths.to(x.device)
+
         if self.use_gradient_checkpointing and self.training:
-            for layer in self.layers:
-                x = torch.utils.checkpoint.checkpoint(
-                    layer, x, attention_mask, cos, sin, use_reentrant=False
-                )
-        else:
-            for layer in self.layers:
-                x = layer(x, attention_mask, cos, sin)
+            raise RuntimeError(
+                "KV caching is not compatible with gradient checkpointing."
+            )
+
+        for layer_idx, layer in enumerate(self.layers):
+            layer_cache = None
+            if cache_inputs is not None:
+                layer_cache = cache_inputs[layer_idx]
+            x, updated_cache = layer(
+                x,
+                attention_mask,
+                cos,
+                sin,
+                layer_cache,
+                cache_inputs is not None,
+                current_lengths,
+            )
+            next_caches.append(updated_cache)
 
         cls_state = x[:, 0]
         cls_state = self.cls_mlp(cls_state)
@@ -250,6 +300,7 @@ class PokerTransformerV1(nn.Module, Model):
         return {
             "policy_logits": policy_output["policy_logits"],
             "value": value,
+            "kv_cache": next_caches,
         }
 
     def get_model_info(self) -> Dict[str, Any]:
