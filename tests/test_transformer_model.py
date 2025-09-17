@@ -375,3 +375,69 @@ class TestPokerTransformerV1:
             atol=1e-5,
             rtol=1e-5,
         )
+
+    def test_invariance_to_hidden_cards_and_undealt_deck(self):
+        device = torch.device("cpu")
+        env = _build_env(device)
+        env.reset()
+        encoder = TransformerStateEncoder(env, device)
+        idxs = torch.tensor([0], device=device)
+
+        model = PokerTransformerV1(
+            d_model=64,
+            n_layers=2,
+            n_heads=4,
+            num_bet_bins=env.num_bet_bins,
+            dropout=0.1,
+        )
+        model.eval()
+
+        def run_model() -> torch.Tensor:
+            structured = encoder.encode_tensor_states(player=0, idxs=idxs)
+            structured = structured.to_device(device)
+            with torch.no_grad():
+                outputs = model(structured)
+            return torch.cat(
+                [
+                    outputs["policy_logits"].float().view(-1),
+                    outputs["value"].float().view(-1),
+                ]
+            )
+
+        base_output = run_model()
+
+        base_holes = env.hole_indices.clone()
+        base_deck = env.deck.clone()
+
+        hero_cards = env.hole_indices[0, 0].tolist()
+        board_cards = env.board_indices[0].tolist()
+        seen = set(card for card in hero_cards + board_cards if card >= 0)
+
+        unused = [card for card in range(52) if card not in seen]
+        new_opponent_cards = torch.tensor(unused[:2], device=device, dtype=torch.long)
+
+        env.hole_indices[0, 1] = new_opponent_cards
+
+        # Rebuild deck: hero cards first, then opponent cards, then remaining
+        remaining_cards = unused[2 : 2 + (env.deck.shape[1] - 4)]
+        new_deck = hero_cards + new_opponent_cards.tolist() + remaining_cards
+        env.deck[0] = torch.tensor(new_deck, device=device, dtype=torch.long)
+
+        output_opponent_swapped = run_model()
+        torch.testing.assert_close(
+            base_output, output_opponent_swapped, atol=1e-6, rtol=1e-6
+        )
+
+        # Restore base state before next modification
+        env.hole_indices.copy_(base_holes)
+        env.deck.copy_(base_deck)
+
+        # Shuffle undealt portion of deck (indices >= 4)
+        perm = torch.arange(env.deck.shape[1], device=device)
+        perm[4:] = perm[4:].flip(0)
+        env.deck[0] = env.deck[0, perm]
+
+        output_deck_shuffled = run_model()
+        torch.testing.assert_close(
+            base_output, output_deck_shuffled, atol=1e-6, rtol=1e-6
+        )
