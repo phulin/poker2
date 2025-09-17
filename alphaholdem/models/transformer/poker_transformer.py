@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import math
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
+import torch.nn.functional as F
 
 from ...core.interfaces import Model
 from ...core.registry import register_model
@@ -30,13 +30,31 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rotary_pos_emb(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Apply rotary position embedding to query/key pair."""
 
     cos = cos.to(dtype=q.dtype)
     sin = sin.to(dtype=q.dtype)
     return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
+
+
+def build_rope_cos_sin(
+    inv_freq: torch.Tensor,
+    positions: torch.Tensor,
+    dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Construct cos/sin rotary caches for the provided absolute positions."""
+
+    # positions: [batch, seq]; inv_freq: [head_dim/2]
+    freqs = torch.einsum("bs,d->bsd", positions.to(inv_freq.dtype), inv_freq)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    cos = emb.cos().to(dtype)
+    sin = emb.sin().to(dtype)
+    return cos.unsqueeze(1), sin.unsqueeze(1)
 
 
 class RotarySelfAttention(nn.Module):
@@ -60,65 +78,114 @@ class RotarySelfAttention(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        attention_mask: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        x_new: torch.Tensor,
+        key_padding_mask: torch.Tensor,
+        inv_freq: torch.Tensor,
         cache: dict[str, torch.Tensor] | None,
-        use_cache: bool,
-        current_lengths: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        batch_size, seq_len, _ = x.shape
+        capture_cache: bool,
+        past_lengths: torch.Tensor,
+        valid_new_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, dict[str, torch.Tensor] | None, torch.Tensor]:
+        """Compute self-attention on the new tokens only.
 
-        q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
-        k = self.k_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
-        v = self.v_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
+        Args:
+            x_new: Newly appended hidden states [B, T_new_max, d_model]
+            key_padding_mask: Padding mask over the full sequence [B, T_total_max]
+            inv_freq: Rotary base frequencies [head_dim/2]
+            cache: Optional previous KV cache
+            capture_cache: Whether to return an updated cache
+            past_lengths: Length of cached prefix per batch item [B]
+            valid_new_mask: Mask for valid new tokens [B, T_new_max]
+
+        Returns:
+            Tuple of (new_token_context, updated_cache or None, total_lengths)
+        """
+
+        batch_size, max_t_new, _ = x_new.shape
+        device = x_new.device
+
+        past_k = cache.get("k") if cache is not None else None
+        past_v = cache.get("v") if cache is not None else None
+
+        # Project queries/keys/values only for the new tokens.
+        q = self.q_proj(x_new).view(batch_size, max_t_new, self.n_heads, self.d_head)
+        k_new = self.k_proj(x_new).view(
+            batch_size, max_t_new, self.n_heads, self.d_head
+        )
+        v_new = self.v_proj(x_new).view(
+            batch_size, max_t_new, self.n_heads, self.d_head
+        )
 
         q = q.permute(0, 2, 1, 3)
-        k = k.permute(0, 2, 1, 3)
-        v = v.permute(0, 2, 1, 3)
+        k_new = k_new.permute(0, 2, 1, 3)
+        v_new = v_new.permute(0, 2, 1, 3)
 
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        # Build rotary embeddings for the absolute positions of the new tokens.
+        steps = torch.arange(max_t_new, device=device)
+        positions = past_lengths.unsqueeze(1) + steps.unsqueeze(0)
+        positions = positions.masked_fill(~valid_new_mask, 0)
+        cos, sin = build_rope_cos_sin(inv_freq, positions, q.dtype)
+        q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)
 
-        if use_cache and cache is not None:
-            past_k = cache.get("k")
-            past_v = cache.get("v")
-            past_lengths = cache.get("lengths")
-            if past_k is not None and past_v is not None and past_lengths is not None:
-                max_prefix = min(past_k.shape[2], k.shape[2])
-                if max_prefix > 0:
-                    for batch_idx in range(batch_size):
-                        cached_len = int(past_lengths[batch_idx].item())
-                        if cached_len <= 0:
-                            continue
-                        cached_len = min(cached_len, max_prefix)
-                        k[batch_idx, :, :cached_len, :] = past_k[
-                            batch_idx, :, :cached_len, :
-                        ]
-                        v[batch_idx, :, :cached_len, :] = past_v[
-                            batch_idx, :, :cached_len, :
-                        ]
+        valid_new = valid_new_mask.unsqueeze(1).unsqueeze(-1).to(dtype=q.dtype)
+        q = q * valid_new
+        k_new = k_new * valid_new
+        v_new = v_new * valid_new
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_head)
+        new_counts = valid_new_mask.sum(dim=1)
+        total_lengths = past_lengths + new_counts
+        max_total_len = int(total_lengths.max().item())
 
-        if attention_mask is not None:
-            key_padding = (~attention_mask).unsqueeze(1).unsqueeze(2)
-            scores = scores.masked_fill(key_padding, torch.finfo(scores.dtype).min)
+        # Build concatenated keys/values with the cached prefix.
+        k_total = x_new.new_zeros(batch_size, self.n_heads, max_total_len, self.d_head)
+        v_total = torch.zeros_like(k_total)
 
-        attn = torch.softmax(scores, dim=-1)
-        attn = self.attn_dropout(attn)
+        if past_k is not None and past_v is not None:
+            cached_max = past_k.shape[2]
+            for b in range(batch_size):
+                cached_len = int(past_lengths[b].item())
+                if cached_len <= 0:
+                    continue
+                copy_len = min(cached_len, cached_max)
+                k_total[b, :, :copy_len] = past_k[b, :, :copy_len]
+                v_total[b, :, :copy_len] = past_v[b, :, :copy_len]
 
-        context = torch.matmul(attn, v)
-        context = context.permute(0, 2, 1, 3).contiguous()
-        context = context.view(batch_size, seq_len, self.d_model)
-        cache_lengths = current_lengths.to(k.device)
-        cache_lengths = torch.clamp(cache_lengths, max=k.shape[2])
-        new_cache = {
-            "k": k.detach(),
-            "v": v.detach(),
-            "lengths": cache_lengths.detach(),
-        }
-        return self.out_proj(context), new_cache
+        for b in range(batch_size):
+            count = int(new_counts[b].item())
+            if count <= 0:
+                continue
+            start = int(past_lengths[b].item())
+            end = start + count
+            k_total[b, :, start:end] = k_new[b, :, :count]
+            v_total[b, :, start:end] = v_new[b, :, :count]
+
+        attn_mask = key_padding_mask[:, :max_total_len]
+        attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)
+
+        attn_dropout = self.attn_dropout.p if self.training else 0.0
+        attn_output = F.scaled_dot_product_attention(
+            q,
+            k_total,
+            v_total,
+            attn_mask=attn_mask,
+            dropout_p=attn_dropout,
+            is_causal=False,
+        )
+
+        attn_output = attn_output.permute(0, 2, 1, 3).contiguous()
+        attn_output = attn_output.view(batch_size, max_t_new, self.d_model)
+        attn_output = self.out_proj(attn_output)
+        attn_output = attn_output * valid_new_mask.unsqueeze(-1).to(attn_output.dtype)
+
+        new_cache: dict[str, torch.Tensor] | None = None
+        if capture_cache:
+            new_cache = {
+                "k": k_total.detach(),
+                "v": v_total.detach(),
+                "lengths": total_lengths.detach(),
+            }
+
+        return attn_output, new_cache, total_lengths
 
 
 class TransformerLayer(nn.Module):
@@ -139,21 +206,30 @@ class TransformerLayer(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        attention_mask: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        x_new: torch.Tensor,
+        key_padding_mask: torch.Tensor,
+        inv_freq: torch.Tensor,
         cache: dict[str, torch.Tensor] | None,
-        use_cache: bool,
-        current_lengths: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        attn_out, attn_cache = self.attn(
-            x, attention_mask, cos, sin, cache, use_cache, current_lengths
+        capture_cache: bool,
+        past_lengths: torch.Tensor,
+        valid_new_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, dict[str, torch.Tensor] | None, torch.Tensor]:
+        attn_out, attn_cache, total_lengths = self.attn(
+            x_new,
+            key_padding_mask,
+            inv_freq,
+            cache,
+            capture_cache,
+            past_lengths,
+            valid_new_mask,
         )
-        x = self.norm1(x + self.dropout(attn_out))
+        residual = x_new
+        x = self.norm1(residual + self.dropout(attn_out))
         ffn_out = self.ffn(x)
         x = self.norm2(x + self.dropout(ffn_out))
-        return x, attn_cache
+        mask = valid_new_mask.unsqueeze(-1).to(dtype=x.dtype)
+        x = x * mask
+        return x, attn_cache, total_lengths
 
 
 @register_model("poker_transformer_v1")
@@ -232,17 +308,6 @@ class PokerTransformerV1(nn.Module, Model):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
-    def _build_rope_cache(
-        self, seq_len: int, device: torch.device, dtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        inv_freq = self.rotary_inv_freq.to(device=device, dtype=dtype)
-        positions = torch.arange(seq_len, device=device, dtype=dtype)
-        freqs = torch.einsum("i,j->ij", positions, inv_freq)
-        emb = torch.cat((freqs, freqs), dim=-1)
-        cos = emb.cos()[None, None, :, :]
-        sin = emb.sin()[None, None, :, :]
-        return cos, sin
-
     @profile
     def forward(
         self,
@@ -258,71 +323,144 @@ class PokerTransformerV1(nn.Module, Model):
             structured_data,
         )
 
-        x = self.input_ffn(embeddings)
-        attention_mask = structured_data.attention_mask
+        hidden_full = self.input_ffn(embeddings)
+        batch_size, seq_len, _ = hidden_full.shape
+        device = hidden_full.device
 
-        cos, sin = self._build_rope_cache(
-            seq_len=x.size(1),
-            device=x.device,
-            dtype=x.dtype,
-        )
+        attention_mask = structured_data.attention_mask.bool()
+        key_padding_mask = ~attention_mask
+        current_lengths = structured_data.lengths.to(device).long()
 
         cache_inputs = kv_cache
-        capture_cache = cache_inputs is not None
-        current_lengths = structured_data.lengths.to(x.device)
-
+        has_cached_prefix = cache_inputs is not None
         use_checkpoint = self.use_gradient_checkpointing and torch.is_grad_enabled()
 
-        if use_checkpoint and capture_cache:
+        if use_checkpoint and has_cached_prefix:
             raise RuntimeError(
                 "KV caching with gradient checkpointing is not supported."
             )
 
-        produce_cache = not use_checkpoint
+        capture_new_cache = not use_checkpoint
         next_caches: list[dict[str, torch.Tensor]] | None = (
-            [] if produce_cache else None
+            [] if capture_new_cache else None
         )
 
-        if use_checkpoint:
-            for layer in self.layers:
+        inv_freq = self.rotary_inv_freq.to(device=device, dtype=hidden_full.dtype)
 
-                def layer_forward(tensor: torch.Tensor) -> torch.Tensor:
-                    output, _ = layer(
-                        tensor,
-                        attention_mask,
-                        cos,
-                        sin,
+        if use_checkpoint:
+            valid_new_mask = torch.arange(seq_len, device=device).unsqueeze(0).expand(
+                batch_size, -1
+            ) < current_lengths.unsqueeze(1)
+            zero_prefix = torch.zeros_like(current_lengths)
+
+            def run_layer_with_checkpoint(
+                layer_module: TransformerLayer,
+                tensor: torch.Tensor,
+            ) -> torch.Tensor:
+                def inner(inputs: torch.Tensor) -> torch.Tensor:
+                    output, _, _ = layer_module(
+                        inputs,
+                        key_padding_mask,
+                        inv_freq,
                         None,
                         False,
-                        current_lengths,
+                        zero_prefix,
+                        valid_new_mask,
                     )
                     return output
 
-                x = torch.utils.checkpoint.checkpoint(
-                    layer_forward, x, use_reentrant=False
+                return torch.utils.checkpoint.checkpoint(
+                    inner, tensor, use_reentrant=False
                 )
+
+            layer_output = hidden_full
+            for layer in self.layers:
+                layer_output = run_layer_with_checkpoint(layer, layer_output)
+
+            final_hidden = layer_output
+            new_token_counts = current_lengths
+            max_new_tokens = seq_len
+            valid_new_mask_out = valid_new_mask
         else:
+            start_positions = torch.zeros_like(current_lengths)
+            if has_cached_prefix and cache_inputs:
+                first_cache = cache_inputs[0]
+                if first_cache is not None:
+                    cached_lengths = first_cache.get("lengths")
+                    if cached_lengths is not None:
+                        start_positions = cached_lengths.to(device=device).long()
+                        start_positions = torch.clamp(
+                            start_positions, min=0, max=seq_len
+                        )
+
+            reset_mask = current_lengths <= start_positions
+            if reset_mask.any():
+                start_positions = start_positions.masked_fill(reset_mask, 0)
+
+            new_token_counts = current_lengths - start_positions
+            no_new_mask = new_token_counts <= 0
+            if no_new_mask.any():
+                start_positions = start_positions.masked_fill(no_new_mask, 0)
+                new_token_counts = current_lengths - start_positions
+
+            max_new_tokens = int(new_token_counts.max().item())
+            token_offsets = torch.arange(max_new_tokens, device=device)
+            valid_new_mask_out = token_offsets.unsqueeze(
+                0
+            ) < new_token_counts.unsqueeze(1)
+
+            gather_indices = start_positions.unsqueeze(1) + token_offsets.unsqueeze(0)
+            gather_indices = gather_indices.clamp(max=seq_len - 1, min=0)
+
+            x_new = torch.gather(
+                hidden_full,
+                dim=1,
+                index=gather_indices.unsqueeze(-1).expand(-1, -1, hidden_full.size(-1)),
+            )
+            x_new = x_new * valid_new_mask_out.unsqueeze(-1).to(hidden_full.dtype)
+
+            layer_input = x_new
+            layer_start_positions = start_positions
             for layer_idx, layer in enumerate(self.layers):
-                layer_cache = None
-                if cache_inputs is not None:
-                    layer_cache = cache_inputs[layer_idx]
-                x, updated_cache = layer(
-                    x,
-                    attention_mask,
-                    cos,
-                    sin,
+                layer_cache = cache_inputs[layer_idx] if has_cached_prefix else None
+                if layer_cache is not None and "lengths" in layer_cache:
+                    cached_lengths = layer_cache["lengths"].to(device=device).long()
+                    diverged = cached_lengths != layer_start_positions
+                    if diverged.any():
+                        layer_start_positions = layer_start_positions.masked_fill(
+                            diverged, 0
+                        )
+
+                layer_output, updated_cache, total_lengths = layer(
+                    layer_input,
+                    key_padding_mask,
+                    inv_freq,
                     layer_cache,
-                    capture_cache,
-                    current_lengths,
+                    capture_new_cache,
+                    layer_start_positions,
+                    valid_new_mask_out,
                 )
-                if produce_cache and next_caches is not None:
+
+                if (
+                    capture_new_cache
+                    and next_caches is not None
+                    and updated_cache is not None
+                ):
                     next_caches.append(updated_cache)
 
-        cls_state = x[:, 0]
-        cls_state = self.cls_mlp(cls_state)
+                layer_input = layer_output
+                layer_start_positions = total_lengths - new_token_counts
 
-        policy_output = self.policy_head(cls_state)
-        value = self.value_head(cls_state)
+            final_hidden = layer_input
+
+        batch_indices = torch.arange(batch_size, device=device)
+        summary_positions = new_token_counts - 1
+        summary_positions = summary_positions.clamp(min=0)
+        summary_states = final_hidden[batch_indices, summary_positions]
+        summary_states = self.cls_mlp(summary_states)
+
+        policy_output = self.policy_head(summary_states)
+        value = self.value_head(summary_states)
 
         outputs = {
             "policy_logits": policy_output["policy_logits"],
