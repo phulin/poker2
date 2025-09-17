@@ -121,15 +121,6 @@ class SelfPlayTrainer:
             self.state_encoder = CNNStateEncoder(self.tensor_env, self.device)
             self.use_structured_embeddings = False
         self.is_transformer_model = is_transformer
-        self._transformer_checkpointing_enabled = bool(
-            getattr(cfg.model, "use_gradient_checkpointing", False)
-        )
-        if self.is_transformer_model and hasattr(
-            self.model, "use_gradient_checkpointing"
-        ):
-            self.model.use_gradient_checkpointing = (
-                self._transformer_checkpointing_enabled
-            )
 
         self.num_bet_bins = len(self.cfg.env.bet_bins) + 3
 
@@ -509,12 +500,6 @@ class SelfPlayTrainer:
         while (
             steps_collected < min_steps or trajectory_count < min_trajectories
         ) and loop_count < max_loops:
-            orig_checkpoint = None
-            if self.is_transformer_model and hasattr(
-                self.model, "use_gradient_checkpointing"
-            ):
-                orig_checkpoint = self.model.use_gradient_checkpointing
-                self.model.use_gradient_checkpointing = False
             if not adding_trajectories and add_to_replay_buffer:
                 # Initialize trajectory collection; reserve space in buffer.
                 self.replay_buffer.start_adding_trajectory_batches(self.num_envs)
@@ -687,9 +672,6 @@ class SelfPlayTrainer:
                 action_bins, legal_bins_amounts, legal_bins_mask
             )
             newly_done_mask = dones & active_mask
-
-            if orig_checkpoint is not None:
-                self.model.use_gradient_checkpointing = orig_checkpoint
 
             # Update per-environment reward tracking
             per_env_rewards += rewards
@@ -1040,15 +1022,6 @@ class SelfPlayTrainer:
                 f"Not enough samples in replay buffer: {self.replay_buffer.num_steps()} < {self.batch_size}"
             )
 
-        orig_checkpoint = None
-        if self.is_transformer_model and hasattr(
-            self.model, "use_gradient_checkpointing"
-        ):
-            orig_checkpoint = self.model.use_gradient_checkpointing
-            self.model.use_gradient_checkpointing = (
-                self._transformer_checkpointing_enabled
-            )
-
         # Compute GAE for all stored trajectories
         self.replay_buffer.compute_gae_returns(
             gamma=self.gamma, lambda_=self.gae_lambda
@@ -1243,11 +1216,6 @@ class SelfPlayTrainer:
             print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
         denom = max(1, total_minibatches)
-        if orig_checkpoint is not None and hasattr(
-            self.model, "use_gradient_checkpointing"
-        ):
-            self.model.use_gradient_checkpointing = orig_checkpoint
-
         return {
             "avg_reward": avg_reward,
             "num_samples": self.batch_size * self.num_epochs,

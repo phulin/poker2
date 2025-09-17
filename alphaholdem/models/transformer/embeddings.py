@@ -36,7 +36,10 @@ class CardEmbedding(nn.Module):
         batch_size, seq_len = token_ids.shape
         device = token_ids.device
 
-        embeddings = torch.zeros(batch_size, seq_len, self.d_model, device=device)
+        base_dtype = self.rank_emb.weight.dtype
+        embeddings = torch.zeros(
+            batch_size, seq_len, self.d_model, device=device, dtype=base_dtype
+        )
         card_offset = TransformerStateEncoder.get_card_token_offset(self.num_bet_bins)
         card_mask = (token_ids >= card_offset) & (token_ids < card_offset + 52)
 
@@ -50,7 +53,7 @@ class CardEmbedding(nn.Module):
 
         card_embed = (
             self.rank_emb(ranks) + self.suit_emb(suits) + self.street_emb(streets)
-        )
+        ).to(base_dtype)
         embeddings[rows, cols] = card_embed
         return embeddings
 
@@ -85,7 +88,10 @@ class ActionEmbedding(nn.Module):
 
         batch_size, seq_len = token_ids.shape
         device = token_ids.device
-        embeddings = torch.zeros(batch_size, seq_len, self.d_model, device=device)
+        base_dtype = self.actor_emb.weight.dtype
+        embeddings = torch.zeros(
+            batch_size, seq_len, self.d_model, device=device, dtype=base_dtype
+        )
 
         action_offset = TransformerStateEncoder.get_action_token_offset(
             self.num_bet_bins
@@ -108,7 +114,7 @@ class ActionEmbedding(nn.Module):
             + self.street_emb(streets)
             + self.action_type_emb(action_ids)
             + self.legal_mask_mlp(legal_masks)
-        )
+        ).to(base_dtype)
         embeddings[rows, cols] = action_embed
         return embeddings
 
@@ -143,7 +149,10 @@ class ContextEmbedding(nn.Module):
 
         batch_size, seq_len = token_ids.shape
         device = token_ids.device
-        embeddings = torch.zeros(batch_size, seq_len, self.d_model, device=device)
+        base_dtype = self.special_embedding.weight.dtype
+        embeddings = torch.zeros(
+            batch_size, seq_len, self.d_model, device=device, dtype=base_dtype
+        )
 
         special_offset = TransformerStateEncoder.get_special_token_offset(
             self.num_bet_bins
@@ -154,21 +163,23 @@ class ContextEmbedding(nn.Module):
         )
 
         if special_mask.any():
-            embeddings[special_mask] = self.special_embedding(special_ids[special_mask])
+            embeddings[special_mask] = self.special_embedding(
+                special_ids[special_mask]
+            ).to(base_dtype)
 
         # CLS token augments: blinds and hero seat flag live in the first 3 dims.
         cls_id = special_offset + Special.CLS.value
         cls_mask = token_ids == cls_id
         if cls_mask.any():
             cls_features = context_features[cls_mask][:, :3]
-            embeddings[cls_mask] += self.cls_mlp(cls_features)
+            embeddings[cls_mask] += self.cls_mlp(cls_features).to(base_dtype)
 
         # Dynamic context token uses the standard 10-feature MLP.
         context_id = special_offset + Special.CONTEXT.value
         context_mask = token_ids == context_id
         if context_mask.any():
             ctx_features = context_features[context_mask]
-            embeddings[context_mask] += self.context_mlp(ctx_features)
+            embeddings[context_mask] += self.context_mlp(ctx_features).to(base_dtype)
 
         return embeddings
 

@@ -268,28 +268,55 @@ class PokerTransformerV1(nn.Module, Model):
         )
 
         cache_inputs = kv_cache
-        next_caches: list[dict[str, torch.Tensor]] = []
+        capture_cache = cache_inputs is not None
         current_lengths = structured_data.lengths.to(x.device)
 
-        if self.use_gradient_checkpointing and self.training:
+        use_checkpoint = self.use_gradient_checkpointing and torch.is_grad_enabled()
+
+        if use_checkpoint and capture_cache:
             raise RuntimeError(
-                "KV caching is not compatible with gradient checkpointing."
+                "KV caching with gradient checkpointing is not supported."
             )
 
-        for layer_idx, layer in enumerate(self.layers):
-            layer_cache = None
-            if cache_inputs is not None:
-                layer_cache = cache_inputs[layer_idx]
-            x, updated_cache = layer(
-                x,
-                attention_mask,
-                cos,
-                sin,
-                layer_cache,
-                cache_inputs is not None,
-                current_lengths,
-            )
-            next_caches.append(updated_cache)
+        produce_cache = not use_checkpoint
+        next_caches: list[dict[str, torch.Tensor]] | None = (
+            [] if produce_cache else None
+        )
+
+        if use_checkpoint:
+            for layer in self.layers:
+
+                def layer_forward(tensor: torch.Tensor) -> torch.Tensor:
+                    output, _ = layer(
+                        tensor,
+                        attention_mask,
+                        cos,
+                        sin,
+                        None,
+                        False,
+                        current_lengths,
+                    )
+                    return output
+
+                x = torch.utils.checkpoint.checkpoint(
+                    layer_forward, x, use_reentrant=False
+                )
+        else:
+            for layer_idx, layer in enumerate(self.layers):
+                layer_cache = None
+                if cache_inputs is not None:
+                    layer_cache = cache_inputs[layer_idx]
+                x, updated_cache = layer(
+                    x,
+                    attention_mask,
+                    cos,
+                    sin,
+                    layer_cache,
+                    capture_cache,
+                    current_lengths,
+                )
+                if produce_cache and next_caches is not None:
+                    next_caches.append(updated_cache)
 
         cls_state = x[:, 0]
         cls_state = self.cls_mlp(cls_state)
@@ -297,11 +324,13 @@ class PokerTransformerV1(nn.Module, Model):
         policy_output = self.policy_head(cls_state)
         value = self.value_head(cls_state)
 
-        return {
+        outputs = {
             "policy_logits": policy_output["policy_logits"],
             "value": value,
-            "kv_cache": next_caches,
         }
+        outputs["kv_cache"] = next_caches
+
+        return outputs
 
     def get_model_info(self) -> Dict[str, Any]:
         total_params = sum(p.numel() for p in self.parameters())
