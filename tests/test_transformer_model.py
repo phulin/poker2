@@ -49,6 +49,13 @@ class TestTransformerStateEncoder:
         preflop_token = special_offset + Special.STREET_PREFLOP.value
         assert torch.any(data.token_ids == preflop_token)
 
+        for row in range(data.token_ids.shape[0]):
+            length = int(data.lengths[row].item())
+            last_token = int(data.token_ids[row, length - 1].item())
+            assert (
+                last_token == special_offset + Special.CONTEXT.value
+            ), "Final token should be context snapshot"
+
         action_offset = TransformerStateEncoder.get_action_token_offset(
             env.num_bet_bins
         )
@@ -345,3 +352,26 @@ class TestPokerTransformerV1:
 
         for obs, exp in zip(observed_p1, expected_p1):
             torch.testing.assert_close(obs, exp, atol=1e-5, rtol=1e-5)
+
+        # Final context token should reflect current state
+        final_token = int(data_p0.token_ids[0, data_p0.lengths[0] - 1].item())
+        special_offset = TransformerStateEncoder.get_special_token_offset(
+            env.num_bet_bins
+        )
+        assert final_token == special_offset + Special.CONTEXT.value
+
+        final_context_world = encoder._gather_env_context(idxs)
+        expected_final_p0 = encoder._to_hero_context(final_context_world, player=0)
+        torch.testing.assert_close(
+            data_p0.context_features[0, data_p0.lengths[0] - 1],
+            expected_final_p0[0],
+            atol=1e-5,
+            rtol=1e-5,
+        )
+        expected_final_p1 = encoder._to_hero_context(final_context_world, player=1)
+        torch.testing.assert_close(
+            data_p1.context_features[0, data_p1.lengths[0] - 1],
+            expected_final_p1[0],
+            atol=1e-5,
+            rtol=1e-5,
+        )

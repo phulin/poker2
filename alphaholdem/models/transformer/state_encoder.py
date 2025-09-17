@@ -267,6 +267,13 @@ class TransformerStateEncoder:
                 action_legal_masks[idx, pos] = legal_masks
                 positions[idx] = pos + 1
 
+        # Final context snapshot (current observation)
+        final_context_world = self._gather_env_context(idxs)
+        final_context_hero = self._to_hero_context(final_context_world, player)
+        token_ids[rows, positions] = context_offset
+        context_features[rows, positions] = final_context_hero
+        positions = positions + 1
+
         self.length_buffer[:batch] = positions
 
         return StructuredEmbeddingData(
