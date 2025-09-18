@@ -110,20 +110,12 @@ class RotarySelfAttention(nn.Module):
         else:
             trimmed_past = torch.zeros_like(past_lengths)
 
-        available_new = valid_new_mask.sum(dim=1)
-        trimmed_new = torch.clamp(new_token_counts, max=available_new)
-        trimmed_new = torch.clamp(trimmed_new, min=0)
-
         if max_t_new > 0:
-            new_idx = torch.arange(max_t_new, device=device)
-            new_mask = (
-                new_idx.unsqueeze(0) < trimmed_new.unsqueeze(1)
-            ) & valid_new_mask
-            new_mask = new_mask.unsqueeze(1).unsqueeze(-1).to(k_new.dtype)
+            new_mask = valid_new_mask.unsqueeze(1).unsqueeze(-1).to(k_new.dtype)
             k_new = k_new * new_mask
             v_new = v_new * new_mask
 
-        total_lengths = trimmed_past + trimmed_new
+        total_lengths = trimmed_past + new_token_counts
         max_total_len = (
             int(total_lengths.max().item()) if total_lengths.numel() > 0 else 0
         )

@@ -231,16 +231,9 @@ class PokerTransformerV1(nn.Module, Model):
     ) -> Dict[str, torch.Tensor]:
         """Run forward pass on structured observation batch."""
 
-        embeddings = combine_embeddings(
-            self.card_embedding,
-            self.action_embedding,
-            self.context_embedding,
-            structured_data,
-        )
-
-        hidden_full = self.input_ffn(embeddings)
-        batch_size, seq_len, _ = hidden_full.shape
-        device = hidden_full.device
+        token_ids = structured_data.token_ids
+        batch_size, seq_len = token_ids.shape
+        device = token_ids.device
 
         current_lengths = structured_data.lengths.to(device).long()
 
@@ -259,6 +252,14 @@ class PokerTransformerV1(nn.Module, Model):
         )
 
         if use_checkpoint:
+            embeddings_full = combine_embeddings(
+                self.card_embedding,
+                self.action_embedding,
+                self.context_embedding,
+                structured_data,
+            )
+            hidden_full = self.input_ffn(embeddings_full)
+
             valid_new_mask = torch.arange(seq_len, device=device).unsqueeze(0).expand(
                 batch_size, -1
             ) < current_lengths.unsqueeze(1)
@@ -314,7 +315,7 @@ class PokerTransformerV1(nn.Module, Model):
                 layer_output = run_layer_with_checkpoint(layer, layer_output)
 
             final_hidden = layer_output
-            new_token_counts = current_lengths
+            new_token_counts = valid_new_mask.sum(dim=1).to(torch.long)
             max_new_tokens = seq_len
             valid_new_mask_out = valid_new_mask
         else:
@@ -348,12 +349,18 @@ class PokerTransformerV1(nn.Module, Model):
             gather_indices = start_positions.unsqueeze(1) + token_offsets.unsqueeze(0)
             gather_indices = gather_indices.clamp(max=seq_len - 1, min=0)
 
-            x_new = torch.gather(
-                hidden_full,
-                dim=1,
-                index=gather_indices.unsqueeze(-1).expand(-1, -1, hidden_full.size(-1)),
+            embeddings_new = combine_embeddings(
+                self.card_embedding,
+                self.action_embedding,
+                self.context_embedding,
+                structured_data,
+                gather_indices=gather_indices,
             )
-            x_new = x_new * valid_new_mask_out.unsqueeze(-1).to(hidden_full.dtype)
+            embeddings_new = embeddings_new * valid_new_mask_out.unsqueeze(-1).to(
+                embeddings_new.dtype
+            )
+            x_new = self.input_ffn(embeddings_new)
+            x_new = x_new * valid_new_mask_out.unsqueeze(-1).to(x_new.dtype)
 
             head_dim = self.d_model // self.n_heads
             if max_new_tokens > 0:
@@ -362,12 +369,10 @@ class PokerTransformerV1(nn.Module, Model):
                 )
                 max_position = int(base_positions.max().item()) + 1
                 cos_table, sin_table = self._get_rope_cache(
-                    max_position, device, hidden_full.dtype
+                    max_position, device, x_new.dtype
                 )
             else:
-                cos_table, sin_table = self._get_rope_cache(
-                    1, device, hidden_full.dtype
-                )
+                cos_table, sin_table = self._get_rope_cache(1, device, x_new.dtype)
 
             layer_input = x_new
             layer_start_positions = start_positions

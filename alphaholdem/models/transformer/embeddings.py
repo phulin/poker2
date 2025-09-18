@@ -189,17 +189,43 @@ def combine_embeddings(
     action_embedding: ActionEmbedding,
     context_embedding: ContextEmbedding,
     data,
+    gather_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Utility to gather and sum embedding components."""
 
-    cards = card_embedding(
-        data.token_ids,
-        data.card_ranks,
-        data.card_suits,
-        data.card_streets,
-    )
+    if gather_indices is None:
+        token_ids = data.token_ids
+        card_ranks = data.card_ranks
+        card_suits = data.card_suits
+        card_streets = data.card_streets
+        action_actors = data.action_actors
+        action_streets = data.action_streets
+        action_legal_masks = data.action_legal_masks
+        context_features = data.context_features
+    else:
+        gather_indices = gather_indices.long()
+        token_ids = torch.gather(data.token_ids, 1, gather_indices)
+        card_ranks = torch.gather(data.card_ranks, 1, gather_indices)
+        card_suits = torch.gather(data.card_suits, 1, gather_indices)
+        card_streets = torch.gather(data.card_streets, 1, gather_indices)
+        action_actors = torch.gather(data.action_actors, 1, gather_indices)
+        action_streets = torch.gather(data.action_streets, 1, gather_indices)
+        action_legal_masks = torch.gather(
+            data.action_legal_masks,
+            1,
+            gather_indices.unsqueeze(-1).expand(
+                -1, -1, data.action_legal_masks.size(-1)
+            ),
+        )
+        context_features = torch.gather(
+            data.context_features,
+            1,
+            gather_indices.unsqueeze(-1).expand(-1, -1, data.context_features.size(-1)),
+        )
+
+    cards = card_embedding(token_ids, card_ranks, card_suits, card_streets)
     actions = action_embedding(
-        data.token_ids, data.action_actors, data.action_streets, data.action_legal_masks
+        token_ids, action_actors, action_streets, action_legal_masks
     )
-    context = context_embedding(data.token_ids, data.context_features)
+    context = context_embedding(token_ids, context_features)
     return cards + actions + context
