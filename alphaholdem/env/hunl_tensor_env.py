@@ -556,29 +556,6 @@ class HUNLTensorEnv:
             # Advance street and deal
             s = self.street[round_closed_idx]
 
-            # showdown right after river (or flop in flop showdown mode)
-            sd_mask = s == (0 if self.flop_showdown else 2)
-            showdown_ids = round_closed_idx[sd_mask]
-            # Evaluate winners or award folds
-            # Vectorized showdown resolution for all showdown_ids at once
-
-            # Build one-hot 7-card planes for each player: 2 hole + 5 board
-            # Shape: [num_sd, 4, 13]
-            N_sd = showdown_ids.numel()
-            if N_sd > 0:
-                ab_plane = self.hole_onehot[showdown_ids].any(
-                    dim=2
-                ) | self.board_onehot[showdown_ids].any(dim=1).unsqueeze(1)
-                cmp = rules.compare_7_single_batch(ab_plane)  # shape [num_sd]
-                # Set winners
-                self.winner[showdown_ids[cmp > 0]] = 0
-                self.winner[showdown_ids[cmp < 0]] = 1
-                self.winner[showdown_ids[cmp == 0]] = 2
-
-                rewards[showdown_ids] = self.finish_and_assign_winners(
-                    showdown_ids, self.winner[showdown_ids]
-                )
-
             # flop (vectorized dealing of 3 cards)
             flop_mask = s == 0
             flop_ids = round_closed_idx[flop_mask]
@@ -618,6 +595,29 @@ class HUNLTensorEnv:
             self.board_onehot[river_ids, 4] = self.card_onehot_cache[c]
             # Set river card index
             self.board_indices[river_ids, 4] = c
+
+            # showdown after river betting closes (or right after flop in flop showdown mode)
+            sd_mask = s == (0 if self.flop_showdown else 3)
+            showdown_ids = round_closed_idx[sd_mask]
+            # Evaluate winners or award folds
+            # Vectorized showdown resolution for all showdown_ids at once
+
+            # Build one-hot 7-card planes for each player: 2 hole + 5 board
+            # Shape: [num_sd, 4, 13]
+            N_sd = showdown_ids.numel()
+            if N_sd > 0:
+                ab_plane = self.hole_onehot[showdown_ids].any(
+                    dim=2
+                ) | self.board_onehot[showdown_ids].any(dim=1).unsqueeze(1)
+                cmp = rules.compare_7_single_batch(ab_plane)  # shape [num_sd]
+                # Set winners
+                self.winner[showdown_ids[cmp > 0]] = 0
+                self.winner[showdown_ids[cmp < 0]] = 1
+                self.winner[showdown_ids[cmp == 0]] = 2
+
+                rewards[showdown_ids] = self.finish_and_assign_winners(
+                    showdown_ids, self.winner[showdown_ids]
+                )
 
             # Advance street
             self.street[round_closed_idx] += 1
