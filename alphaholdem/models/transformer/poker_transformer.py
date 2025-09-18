@@ -20,6 +20,7 @@ from .embeddings import (
     combine_embeddings,
 )
 from .heads import TransformerPolicyHead, TransformerValueHead
+from .kv_cache import CacheManager, LayerKVCache
 from .rotary_attention import RotarySelfAttention
 
 
@@ -45,12 +46,12 @@ class TransformerLayer(nn.Module):
         x_new: torch.Tensor,
         rotary_cos: torch.Tensor,
         rotary_sin: torch.Tensor,
-        cache: dict[str, torch.Tensor] | None,
+        cache: LayerKVCache | None,
         capture_cache: bool,
-        past_lengths: torch.Tensor,
+        past_lengths: torch.Tensor | None,
         valid_new_mask: torch.Tensor,
         new_token_counts: torch.Tensor,
-    ) -> Tuple[torch.Tensor, dict[str, torch.Tensor] | None, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, LayerKVCache | None, torch.Tensor]:
         attn_out, attn_cache, total_lengths = self.attn(
             x_new,
             rotary_cos,
@@ -237,8 +238,10 @@ class PokerTransformerV1(nn.Module, Model):
 
         current_lengths = structured_data.lengths.to(device).long()
 
-        cache_inputs = kv_cache
-        has_cached_prefix = cache_inputs is not None
+        cache_manager = CacheManager.from_input(kv_cache, self.n_layers)
+        has_cached_prefix = any(
+            cache_manager.get(idx) is not None for idx in range(self.n_layers)
+        )
         use_checkpoint = self.use_gradient_checkpointing and torch.is_grad_enabled()
 
         if use_checkpoint and has_cached_prefix:
@@ -247,9 +250,6 @@ class PokerTransformerV1(nn.Module, Model):
             )
 
         capture_new_cache = not use_checkpoint
-        next_caches: list[dict[str, torch.Tensor]] | None = (
-            [] if capture_new_cache else None
-        )
 
         if use_checkpoint:
             embeddings_full = combine_embeddings(
@@ -264,7 +264,6 @@ class PokerTransformerV1(nn.Module, Model):
                 batch_size, -1
             ) < current_lengths.unsqueeze(1)
             zero_prefix = torch.zeros_like(current_lengths)
-
             if seq_len > 0:
                 cos_table, sin_table = self._get_rope_cache(
                     seq_len, device, hidden_full.dtype
@@ -320,15 +319,11 @@ class PokerTransformerV1(nn.Module, Model):
             valid_new_mask_out = valid_new_mask
         else:
             start_positions = torch.zeros_like(current_lengths)
-            if has_cached_prefix and cache_inputs:
-                first_cache = cache_inputs[0]
+            if has_cached_prefix:
+                first_cache = cache_manager.get(0)
                 if first_cache is not None:
-                    cached_lengths = first_cache.get("lengths")
-                    if cached_lengths is not None:
-                        start_positions = cached_lengths.to(device=device).long()
-                        start_positions = torch.clamp(
-                            start_positions, min=0, max=seq_len
-                        )
+                    start_positions = first_cache.lengths.to(device=device).long()
+                    start_positions = torch.clamp(start_positions, min=0, max=seq_len)
 
             reset_mask = current_lengths <= start_positions
             if reset_mask.any():
@@ -377,9 +372,11 @@ class PokerTransformerV1(nn.Module, Model):
             layer_input = x_new
             layer_start_positions = start_positions
             for layer_idx, layer in enumerate(self.layers):
-                layer_cache = cache_inputs[layer_idx] if has_cached_prefix else None
-                if layer_cache is not None and "lengths" in layer_cache:
-                    cached_lengths = layer_cache["lengths"].to(device=device).long()
+                layer_cache = (
+                    cache_manager.get(layer_idx) if has_cached_prefix else None
+                )
+                if layer_cache is not None:
+                    cached_lengths = layer_cache.lengths.to(device=device).long()
                     diverged = cached_lengths != layer_start_positions
                     if diverged.any():
                         layer_start_positions = layer_start_positions.masked_fill(
@@ -423,12 +420,8 @@ class PokerTransformerV1(nn.Module, Model):
                     new_token_counts,
                 )
 
-                if (
-                    capture_new_cache
-                    and next_caches is not None
-                    and updated_cache is not None
-                ):
-                    next_caches.append(updated_cache)
+                if capture_new_cache and updated_cache is not None:
+                    cache_manager.set(layer_idx, updated_cache)
 
                 layer_input = layer_output
                 layer_start_positions = total_lengths - new_token_counts
@@ -448,7 +441,10 @@ class PokerTransformerV1(nn.Module, Model):
             "policy_logits": policy_output["policy_logits"],
             "value": value,
         }
-        outputs["kv_cache"] = next_caches
+        if capture_new_cache:
+            outputs["kv_cache"] = cache_manager.as_output()
+        else:
+            outputs["kv_cache"] = None
 
         return outputs
 
