@@ -155,6 +155,7 @@ class RotarySelfAttention(nn.Module):
                     v_total,
                     new_token_counts,
                     total_lengths,
+                    max_total_len,
                     attn_dropout,
                 )
             except RuntimeError:
@@ -196,6 +197,7 @@ class RotarySelfAttention(nn.Module):
         v_total: torch.Tensor,
         new_token_counts: torch.Tensor,
         total_lengths: torch.Tensor,
+        max_total_len: int,
         dropout_p: float,
     ) -> torch.Tensor:
         """Compute attention using FlashAttention v2 when available."""
