@@ -89,48 +89,55 @@ class RotarySelfAttention(nn.Module):
         k_new = k_new * valid_new
         v_new = v_new * valid_new
 
-        total_lengths_requested = past_lengths + new_token_counts
-        total_lengths = total_lengths_requested.clone()
+        trimmed_past = past_lengths
+        if past_k is not None and past_v is not None:
+            past_k = past_k.to(device=device, dtype=q.dtype)
+            past_v = past_v.to(device=device, dtype=q.dtype)
+            max_cached = past_k.shape[2]
+            trimmed_past = torch.clamp(trimmed_past, max=max_cached)
+            max_past = int(trimmed_past.max().item()) if trimmed_past.numel() > 0 else 0
+            if max_past > 0:
+                past_k = past_k[:, :, :max_past]
+                past_v = past_v[:, :, :max_past]
+                past_idx = torch.arange(max_past, device=device)
+                past_mask = past_idx.unsqueeze(0) < trimmed_past.unsqueeze(1)
+                past_mask = past_mask.unsqueeze(1).unsqueeze(-1).to(past_k.dtype)
+                past_k = past_k * past_mask
+                past_v = past_v * past_mask
+            else:
+                past_k = None
+                past_v = None
+        else:
+            trimmed_past = torch.zeros_like(past_lengths)
+
+        available_new = valid_new_mask.sum(dim=1)
+        trimmed_new = torch.clamp(new_token_counts, max=available_new)
+        trimmed_new = torch.clamp(trimmed_new, min=0)
+
+        if max_t_new > 0:
+            new_idx = torch.arange(max_t_new, device=device)
+            new_mask = (
+                new_idx.unsqueeze(0) < trimmed_new.unsqueeze(1)
+            ) & valid_new_mask
+            new_mask = new_mask.unsqueeze(1).unsqueeze(-1).to(k_new.dtype)
+            k_new = k_new * new_mask
+            v_new = v_new * new_mask
+
+        total_lengths = trimmed_past + trimmed_new
         max_total_len = (
             int(total_lengths.max().item()) if total_lengths.numel() > 0 else 0
         )
 
-        if max_total_len == 0:
+        if past_k is not None:
+            k_total = torch.cat([past_k, k_new], dim=2)
+            v_total = torch.cat([past_v, v_new], dim=2)
+        else:
             k_total = k_new
             v_total = v_new
-        else:
-            k_total = x_new.new_zeros(
-                batch_size, self.n_heads, max_total_len, self.d_head
-            )
-            v_total = torch.zeros_like(k_total)
 
-            if past_k is not None and past_v is not None:
-                past_k = past_k.to(device=device, dtype=q.dtype)
-                past_v = past_v.to(device=device, dtype=q.dtype)
-
-            for b in range(batch_size):
-                total_len = int(total_lengths_requested[b].item())
-                if total_len == 0:
-                    continue
-                past_len = int(past_lengths[b].item())
-                past_len = min(past_len, total_len)
-                new_len = int(new_token_counts[b].item())
-                max_new_available = int(valid_new_mask[b].sum().item())
-                new_len = min(new_len, max_new_available)
-                new_len = max(new_len, 0)
-                if past_len > 0 and past_k is not None and past_v is not None:
-                    available = past_k.shape[2]
-                    copy_len = min(past_len, available)
-                    if copy_len > 0:
-                        k_total[b, :, :copy_len] = past_k[b, :, :copy_len]
-                        v_total[b, :, :copy_len] = past_v[b, :, :copy_len]
-                    past_len = copy_len
-                if new_len > 0:
-                    start = past_len
-                    end = past_len + new_len
-                    k_total[b, :, start:end] = k_new[b, :, :new_len]
-                    v_total[b, :, start:end] = v_new[b, :, :new_len]
-                total_lengths[b] = past_len + new_len
+        if k_total.shape[2] > max_total_len:
+            k_total = k_total[:, :, :max_total_len]
+            v_total = v_total[:, :, :max_total_len]
 
         total_positions = torch.arange(max_total_len, device=device).unsqueeze(0)
         valid_keys = total_positions < total_lengths.unsqueeze(1)
