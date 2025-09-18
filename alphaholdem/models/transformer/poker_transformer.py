@@ -13,12 +13,7 @@ from ...core.interfaces import Model
 from ...core.registry import register_model
 from ...utils.profiling import profile
 from .embedding_data import StructuredEmbeddingData
-from .embeddings import (
-    ActionEmbedding,
-    CardEmbedding,
-    ContextEmbedding,
-    combine_embeddings,
-)
+from .embeddings import PokerFusedEmbedding
 from .heads import TransformerPolicyHead, TransformerValueHead
 
 
@@ -146,14 +141,8 @@ class PokerTransformerV1(nn.Module, Model):
         self.use_auxiliary_loss = use_auxiliary_loss
         self.use_gradient_checkpointing = use_gradient_checkpointing
 
-        # Embedding modules for different token families
-        self.card_embedding = CardEmbedding(num_bet_bins=num_bet_bins, d_model=d_model)
-        self.action_embedding = ActionEmbedding(
-            num_bet_bins=num_bet_bins, d_model=d_model
-        )
-        self.context_embedding = ContextEmbedding(
-            num_bet_bins=num_bet_bins, d_model=d_model
-        )
+        # Single fused embedding module for all token types
+        self.embedding = PokerFusedEmbedding(num_bet_bins=num_bet_bins, d_model=d_model)
 
         self.input_ffn = nn.Sequential(
             nn.Linear(d_model, d_model * 2),
@@ -216,12 +205,7 @@ class PokerTransformerV1(nn.Module, Model):
     ) -> Dict[str, torch.Tensor]:
         """Run forward pass on structured observation batch."""
 
-        embeddings = combine_embeddings(
-            self.card_embedding,
-            self.action_embedding,
-            self.context_embedding,
-            structured_data,
-        )
+        embeddings = self.embedding(structured_data)
 
         x = self.input_ffn(embeddings)
         attention_mask = structured_data.attention_mask

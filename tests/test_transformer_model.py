@@ -6,9 +6,7 @@ from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.factory import ModelFactory
 from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
 from alphaholdem.models.transformer.embeddings import (
-    ActionEmbedding,
-    CardEmbedding,
-    ContextEmbedding,
+    PokerFusedEmbedding,
     combine_embeddings,
 )
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
@@ -60,78 +58,53 @@ class TestEmbeddings:
         self.data = self.encoder.encode_tensor_states(player=0, idxs=idxs)
         self.num_bet_bins = self.env.num_bet_bins
         self.d_model = 64
+        self.embedding = PokerFusedEmbedding(self.num_bet_bins, d_model=self.d_model)
+        self.embedding.eval()  # disable dropout for deterministic assertions
 
-    def test_card_embedding_masks_cards(self):
-        embedding = CardEmbedding(self.num_bet_bins, d_model=self.d_model)
-        result = embedding(
-            self.data.token_ids,
-            self.data.card_ranks,
-            self.data.card_suits,
-            self.data.card_streets,
+    def _clone_data(self) -> StructuredEmbeddingData:
+        return StructuredEmbeddingData(
+            token_ids=self.data.token_ids.clone(),
+            card_ranks=self.data.card_ranks.clone(),
+            card_suits=self.data.card_suits.clone(),
+            card_streets=self.data.card_streets.clone(),
+            action_actors=self.data.action_actors.clone(),
+            action_streets=self.data.action_streets.clone(),
+            action_legal_masks=self.data.action_legal_masks.clone(),
+            context_features=self.data.context_features.clone(),
+            lengths=self.data.lengths.clone(),
         )
+
+    def test_fused_embedding_respects_padding(self):
+        result = self.embedding(self.data)
         assert result.shape == (
             self.data.batch_size,
             self.data.seq_len,
             self.d_model,
         )
-        card_offset = TransformerStateEncoder.get_card_token_offset(self.num_bet_bins)
-        card_mask = (self.data.token_ids >= card_offset) & (
-            self.data.token_ids < card_offset + 52
-        )
-        assert torch.count_nonzero(result[card_mask]) > 0
-        assert torch.count_nonzero(result[~card_mask]) == 0
+        padding_mask = self.data.token_ids < 0
+        assert torch.count_nonzero(result[padding_mask]) == 0
+        assert torch.count_nonzero(result[~padding_mask]) > 0
 
-    def test_action_embedding_nonzero_only_for_actions(self):
-        embedding = ActionEmbedding(self.num_bet_bins, d_model=self.d_model)
-        result = embedding(
-            self.data.token_ids,
-            self.data.action_actors,
-            self.data.action_streets,
-            self.data.action_legal_masks,
-        )
-        assert result.shape == (
-            self.data.batch_size,
-            self.data.seq_len,
-            self.d_model,
-        )
-        action_offset = TransformerStateEncoder.get_action_token_offset(
-            self.num_bet_bins
-        )
-        action_mask = (self.data.token_ids >= action_offset) & (
-            self.data.token_ids < action_offset + self.num_bet_bins
-        )
-        if torch.any(action_mask):
-            assert torch.count_nonzero(result[action_mask]) > 0
-        assert torch.count_nonzero(result[~action_mask]) == 0
-
-    def test_context_embedding_handles_special_tokens(self):
-        embedding = ContextEmbedding(self.num_bet_bins, d_model=self.d_model)
-        result = embedding(self.data.token_ids, self.data.context_features)
-        assert result.shape == (
-            self.data.batch_size,
-            self.data.seq_len,
-            self.d_model,
-        )
+    def test_context_features_affect_embeddings(self):
         special_offset = TransformerStateEncoder.get_special_token_offset(
             self.num_bet_bins
         )
-        special_mask = (self.data.token_ids >= special_offset) & (
-            self.data.token_ids < special_offset + Special.NUM_SPECIAL.value
-        )
-        assert torch.count_nonzero(result[special_mask]) > 0
+        context_id = special_offset + Special.CONTEXT.value
+        context_mask = self.data.token_ids == context_id
+        assert torch.any(context_mask)
 
-    def test_combine_embeddings_matches_sequence_shape(self):
-        combined = combine_embeddings(
-            CardEmbedding(self.num_bet_bins, d_model=self.d_model),
-            ActionEmbedding(self.num_bet_bins, d_model=self.d_model),
-            ContextEmbedding(self.num_bet_bins, d_model=self.d_model),
-            self.data,
-        )
-        assert combined.shape == (
-            self.data.batch_size,
-            self.data.seq_len,
-            self.d_model,
-        )
+        base = self.embedding(self.data).detach()
+
+        modified = self._clone_data()
+        modified.context_features[context_mask] += 1.0
+
+        updated = self.embedding(modified)
+        assert not torch.allclose(base[context_mask], updated[context_mask])
+
+    def test_combine_embeddings_wrapper_calls_fused_module(self):
+        combined = combine_embeddings(self.embedding, data=self.data)
+        direct = self.embedding(self.data)
+        assert torch.allclose(combined, direct)
 
 
 class TestPokerTransformerV1:
