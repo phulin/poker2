@@ -383,7 +383,7 @@ class HUNLTensorEnv:
     def finish_and_assign_winners(
         self, env_indices: torch.Tensor, winners: torch.Tensor
     ) -> None:
-        """Assign winners to specified environments."""
+        """Assign winners to specified environments and return rewards from p0 perspective."""
         self.winner[env_indices] = winners
         self.done[env_indices] = True
 

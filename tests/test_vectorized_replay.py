@@ -1,8 +1,10 @@
 import pytest
 import torch
 
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
+from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
 
 
@@ -195,6 +197,148 @@ class TestVectorizedReplayBuffer:
         assert sampled["advantages"].shape[0] == total_steps
         assert sampled["returns"].shape[0] == total_steps
         assert sampled["legal_masks"].shape[0] == total_steps
+
+    def test_terminal_reward_flow_both_actors(self):
+        """Ensure terminal rewards from both hero and opponent remain correct in the buffer."""
+        device = torch.device("cpu")
+        env = HUNLTensorEnv(
+            num_envs=1,
+            starting_stack=100,
+            sb=5,
+            bb=10,
+            bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0],
+            device=device,
+            flop_showdown=True,
+        )
+        env.reset(force_button=torch.tensor([0], device=device))
+        encoder = TransformerStateEncoder(env, device)
+        buffer = VectorizedReplayBuffer(
+            capacity=4,
+            max_trajectory_length=5,
+            num_bet_bins=env.num_bet_bins,
+            device=device,
+            float_dtype=torch.float32,
+            is_transformer=True,
+            sequence_length=encoder.get_sequence_length(),
+        )
+
+        buffer.start_adding_trajectory_batches(env.N)
+
+        idxs = torch.tensor([0], device=device, dtype=torch.long)
+        hero_states = encoder.encode_tensor_states(player=0, idxs=idxs)
+
+        legal_amounts, legal_mask = env.legal_bins_amounts_and_mask()
+        hero_bin = env.num_bet_bins - 1  # all-in to create pressure
+        action_bins = torch.full((env.N,), -1, dtype=torch.long, device=device)
+        action_bins[idxs] = hero_bin
+
+        def _logits_for_action(bin_idx: int) -> torch.Tensor:
+            logits = torch.full((1, env.num_bet_bins), -50.0, device=device)
+            logits[0, bin_idx] = 0.0
+            return logits
+
+        delta_scale = float(env.bb) * 100.0
+
+        # Hero acts and immediately wins when opponent folds.
+        log_probs_full = _logits_for_action(hero_bin)
+        rewards, dones, _ = env.step_bins(action_bins, legal_amounts, legal_mask)
+
+        chips = env.chips_placed.to(torch.float32)
+        delta2 = -chips[idxs, 1] / delta_scale
+        delta3 = chips[idxs, 0] / delta_scale
+        values = torch.zeros(1, device=device, dtype=torch.float32)
+
+        buffer.add_batch(
+            embedding_data=hero_states,
+            action_indices=torch.tensor([hero_bin], device=device),
+            log_probs=log_probs_full,
+            rewards=rewards[idxs],
+            dones=dones[idxs],
+            legal_masks=legal_mask[idxs].bool(),
+            delta2=delta2,
+            delta3=delta3,
+            values=values,
+            trajectory_indices=idxs,
+        )
+
+        active_mask = (~env.done).clone()
+        opp_acts_mask = (env.to_act == 1).clone()
+
+        legal_amounts2, legal_mask2 = env.legal_bins_amounts_and_mask()
+        action_bins2 = torch.full((env.N,), -1, dtype=torch.long, device=device)
+        action_bins2[idxs] = 0  # opponent folds facing the jam
+        rewards2, dones2, _ = env.step_bins(action_bins2, legal_amounts2, legal_mask2)
+
+        newly_done_mask = dones2 & active_mask
+        opp_ended = torch.where(newly_done_mask & opp_acts_mask)[0]
+        assert opp_ended.numel() == 1
+
+        buffer.update_opponent_rewards(opp_ended, rewards2[opp_ended])
+
+        stored_reward = buffer.rewards[0, 0].item()
+        assert stored_reward == pytest.approx(rewards2[0].item())
+        assert stored_reward > 0.0
+        assert buffer.dones[0, 0]
+        assert buffer.trajectory_lengths[0] == 1
+
+        num_traj, steps = buffer.finish_adding_trajectory_batches()
+        assert num_traj == 1
+        assert steps == 1
+        assert buffer.size == 1
+        assert buffer.position == 1
+
+        # Run a second hand where hero's own action terminates with a negative reward.
+        env.reset(force_button=torch.tensor([1], device=device))
+        buffer.start_adding_trajectory_batches(env.N)
+
+        # Opponent (player 1) acts first and shoves all-in.
+        opp_states_action_bins = torch.full(
+            (env.N,), -1, dtype=torch.long, device=device
+        )
+        opp_states_action_bins[idxs] = env.num_bet_bins - 1
+        legal_amounts, legal_mask = env.legal_bins_amounts_and_mask()
+        env.step_bins(opp_states_action_bins, legal_amounts, legal_mask)
+
+        # Hero now folds, ending the hand.
+        hero_states = encoder.encode_tensor_states(player=0, idxs=idxs)
+        legal_amounts_hero, legal_mask_hero = env.legal_bins_amounts_and_mask()
+        hero_fold_bin = 0
+        hero_log_probs = _logits_for_action(hero_fold_bin)
+        hero_action_bins = torch.full((env.N,), -1, dtype=torch.long, device=device)
+        hero_action_bins[idxs] = hero_fold_bin
+        rewards_fold, dones_fold, _ = env.step_bins(
+            hero_action_bins, legal_amounts_hero, legal_mask_hero
+        )
+
+        chips = env.chips_placed.to(torch.float32)
+        delta2 = -chips[idxs, 1] / delta_scale
+        delta3 = chips[idxs, 0] / delta_scale
+
+        buffer.add_batch(
+            embedding_data=hero_states,
+            action_indices=torch.tensor([hero_fold_bin], device=device),
+            log_probs=hero_log_probs,
+            rewards=rewards_fold[idxs],
+            dones=dones_fold[idxs],
+            legal_masks=legal_mask_hero[idxs].bool(),
+            delta2=delta2,
+            delta3=delta3,
+            values=values,
+            trajectory_indices=idxs,
+        )
+
+        fold_buffer_idx = int(((idxs + buffer.position) % buffer.capacity).item())
+        assert fold_buffer_idx == 1
+        assert buffer.trajectory_lengths[fold_buffer_idx] == 1
+        stored_negative_reward = buffer.rewards[fold_buffer_idx, 0].item()
+        assert stored_negative_reward < 0.0
+        assert stored_negative_reward == pytest.approx(rewards_fold[0].item())
+
+        num_traj, steps = buffer.finish_adding_trajectory_batches()
+        assert num_traj == 1
+        assert steps == 1
+        assert buffer.size == 2
+        assert buffer.position == 2
 
     def test_sample_empty_buffer(self, buffer):
         """Test sampling from empty buffer raises error."""
@@ -447,8 +591,8 @@ class TestVectorizedReplayBuffer:
 
         buffer.update_opponent_rewards(trajectory_indices, opponent_rewards)
 
-        # Should update the last transition's reward (negated) and mark as done
-        assert buffer.rewards[0, 2] == -1.5  # Negated
+        # Should update the last transition's reward (hero perspective) and mark as done
+        assert buffer.rewards[0, 2] == 1.5
         assert buffer.dones[0, 2] == True
 
     def test_update_opponent_rewards_empty(self, buffer):
@@ -1115,10 +1259,16 @@ class TestVectorizedReplayBuffer:
         assert buffer.trajectory_lengths[1] == 2
         assert buffer.trajectory_lengths[2] == 2
 
-        # Verify rewards were updated correctly
-        assert torch.allclose(buffer.rewards[0, 1], torch.tensor(-1.0))  # Last step
-        assert torch.allclose(buffer.rewards[1, 1], torch.tensor(0.5))  # Last step
-        assert torch.allclose(buffer.rewards[2, 1], torch.tensor(0.0))  # Last step
+        # Verify rewards were updated correctly (hero perspective)
+        assert torch.allclose(
+            buffer.rewards[0, 1], torch.tensor(1.0, device=device)
+        )  # Last step
+        assert torch.allclose(
+            buffer.rewards[1, 1], torch.tensor(-0.5, device=device)
+        )  # Last step
+        assert torch.allclose(
+            buffer.rewards[2, 1], torch.tensor(0.0, device=device)
+        )  # Last step
 
         # Verify trajectories are marked as done
         assert buffer.dones[0, 1] == True
@@ -1269,12 +1419,9 @@ class TestVectorizedReplayBuffer:
         # Environment index 12 -> buffer position 2
         # The opponent rewards should be updated at the last step of each trajectory
         # Since trajectories have length 1, the reward should be at step 0
-        # We expect the rewards to be negated from the opponent rewards
-        # Check that at least some rewards were updated (opponent rewards are negated)
-        assert buffer.rewards[0, 0] < 0  # Should be negative (negated from 1.0)
-        # The other rewards might not be updated due to random interference, so just check they exist
-        assert buffer.rewards[1, 0] is not None
-        assert buffer.rewards[2, 0] is not None
+        assert buffer.rewards[0, 0] == pytest.approx(1.0)
+        assert buffer.rewards[1, 0] == pytest.approx(-0.5)
+        assert buffer.rewards[2, 0] == pytest.approx(2.0)
 
         # Verify trajectories have proper lengths
         assert buffer.trajectory_lengths[0] == 1
