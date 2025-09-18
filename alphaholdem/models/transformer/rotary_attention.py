@@ -225,28 +225,15 @@ class RotarySelfAttention(nn.Module):
         q_offsets[1:] = torch.cumsum(q_lengths, dim=0)
         kv_offsets[1:] = torch.cumsum(kv_lengths, dim=0)
 
-        packed_q_segments = []
-        packed_kv_segments = []
-        for idx in range(batch_size):
-            q_len = int(q_lengths[idx].item())
-            kv_len = int(kv_lengths[idx].item())
-            if q_len > 0:
-                packed_q_segments.append(q_for_flash[idx, :q_len])
-            if kv_len > 0:
-                k_slice = k_for_flash[idx, :kv_len]
-                v_slice = v_for_flash[idx, :kv_len]
-                packed_kv_segments.append(torch.stack((k_slice, v_slice), dim=1))
+        q_positions = torch.arange(max_t_new, device=q.device).unsqueeze(0)
+        q_mask = q_positions < new_token_counts.unsqueeze(1)
+        kv_positions = torch.arange(max_total_len, device=q.device).unsqueeze(0)
+        kv_mask = kv_positions < total_lengths.unsqueeze(1)
 
-        packed_q = (
-            torch.cat(packed_q_segments, dim=0)
-            if packed_q_segments
-            else q_for_flash.new_zeros((0, n_heads, d_head))
-        )
-        packed_kv = (
-            torch.cat(packed_kv_segments, dim=0)
-            if packed_kv_segments
-            else k_for_flash.new_zeros((0, 2, n_heads, d_head))
-        )
+        packed_q = q_for_flash.view(-1, n_heads, d_head)[q_mask.view(-1)]
+        packed_k = k_for_flash.view(-1, n_heads, d_head)[kv_mask.view(-1)]
+        packed_v = v_for_flash.view(-1, n_heads, d_head)[kv_mask.view(-1)]
+        packed_kv = torch.stack((packed_k, packed_v), dim=1)
 
         attn_out_packed = flash_attn_varlen_kvpacked_func(
             packed_q,
@@ -260,22 +247,7 @@ class RotarySelfAttention(nn.Module):
             False,
         )
 
-        padded_outputs = []
-        start = 0
-        for idx in range(batch_size):
-            q_len = int(q_lengths[idx].item())
-            if q_len == 0:
-                padded_outputs.append(
-                    q_for_flash.new_zeros((max_t_new, n_heads, d_head))
-                )
-                continue
-            end = start + q_len
-            chunk = attn_out_packed[start:end]
-            if q_len < max_t_new:
-                pad_amount = max_t_new - q_len
-                chunk = F.pad(chunk, (0, 0, 0, 0, 0, pad_amount))
-            padded_outputs.append(chunk)
-            start = end
-
-        attn_output = torch.stack(padded_outputs, dim=0)
+        attn_output = q_for_flash.new_zeros((batch_size, max_t_new, n_heads, d_head))
+        attn_output_flat = attn_output.view(-1, n_heads, d_head)
+        attn_output_flat[q_mask.view(-1)] = attn_out_packed
         return attn_output.permute(0, 2, 1, 3).contiguous()
