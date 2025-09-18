@@ -274,12 +274,12 @@ class PokerTransformerV1(nn.Module, Model):
                     .expand(batch_size, -1)
                     .to(torch.long)
                 )
-                cos_slice = cos_table.index_select(0, position_indices.view(-1)).view(
-                    batch_size, seq_len, -1
-                )
-                sin_slice = sin_table.index_select(0, position_indices.view(-1)).view(
-                    batch_size, seq_len, -1
-                )
+                cos_slice = cos_table.index_select(
+                    0, position_indices.reshape(-1)
+                ).reshape(batch_size, seq_len, -1)
+                sin_slice = sin_table.index_select(
+                    0, position_indices.reshape(-1)
+                ).reshape(batch_size, seq_len, -1)
             else:
                 head_dim = self.d_model // self.n_heads
                 cos_slice = hidden_full.new_zeros(batch_size, 0, head_dim)
@@ -395,11 +395,11 @@ class PokerTransformerV1(nn.Module, Model):
                     ).to(torch.long)
 
                     cos_slice = cos_table.index_select(
-                        0, position_indices.view(-1)
-                    ).view(batch_size, max_new_tokens, head_dim)
+                        0, position_indices.reshape(-1)
+                    ).reshape(batch_size, max_new_tokens, head_dim)
                     sin_slice = sin_table.index_select(
-                        0, position_indices.view(-1)
-                    ).view(batch_size, max_new_tokens, head_dim)
+                        0, position_indices.reshape(-1)
+                    ).reshape(batch_size, max_new_tokens, head_dim)
 
                     rotary_cos = cos_slice.unsqueeze(1)
                     rotary_sin = sin_slice.unsqueeze(1)

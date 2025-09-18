@@ -243,10 +243,10 @@ class TestPokerTransformerV1:
                 return zero, zero
             positions = torch.arange(start, start + length, device=device).unsqueeze(0)
             positions = positions.to(torch.long)
-            cos_slice = cos_table.index_select(0, positions.view(-1)).view(
+            cos_slice = cos_table.index_select(0, positions.reshape(-1)).reshape(
                 1, length, head_dim
             )
-            sin_slice = sin_table.index_select(0, positions.view(-1)).view(
+            sin_slice = sin_table.index_select(0, positions.reshape(-1)).reshape(
                 1, length, head_dim
             )
             return cos_slice.unsqueeze(1), sin_slice.unsqueeze(1)
