@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Optional
 
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 
+import warnings
 from ...core.interfaces import Model
 from ...core.registry import register_model
 from ...utils.profiling import profile
@@ -38,22 +39,27 @@ class TransformerLayer(nn.Module):
         )
         self.norm2 = nn.LayerNorm(d_model)
 
+    @profile
     def forward(
         self,
         x_new: torch.Tensor,
-        inv_freq: torch.Tensor,
+        rotary_cos: torch.Tensor,
+        rotary_sin: torch.Tensor,
         cache: dict[str, torch.Tensor] | None,
         capture_cache: bool,
         past_lengths: torch.Tensor,
         valid_new_mask: torch.Tensor,
+        new_token_counts: torch.Tensor,
     ) -> Tuple[torch.Tensor, dict[str, torch.Tensor] | None, torch.Tensor]:
         attn_out, attn_cache, total_lengths = self.attn(
             x_new,
-            inv_freq,
+            rotary_cos,
+            rotary_sin,
             cache,
             capture_cache,
             past_lengths,
             valid_new_mask,
+            new_token_counts,
         )
         residual = x_new
         x = self.norm1(residual + self.dropout(attn_out))
@@ -77,6 +83,8 @@ class PokerTransformerV1(nn.Module, Model):
         dropout: float = 0.1,
         use_auxiliary_loss: bool = True,
         use_gradient_checkpointing: bool = False,
+        use_torch_compile: bool = False,
+        compile_mode: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -86,6 +94,9 @@ class PokerTransformerV1(nn.Module, Model):
         self.num_bet_bins = num_bet_bins
         self.use_auxiliary_loss = use_auxiliary_loss
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self._compiled_forward = None
+        self._compile_mode = compile_mode or "reduce-overhead"
+        self._use_torch_compile = use_torch_compile
 
         # Embedding modules for different token families
         self.card_embedding = CardEmbedding(num_bet_bins=num_bet_bins, d_model=d_model)
@@ -126,7 +137,14 @@ class PokerTransformerV1(nn.Module, Model):
         )
         self.register_buffer("rotary_inv_freq", inv_freq, persistent=False)
 
+        self._rope_cache: dict[
+            tuple[str, int | None, torch.dtype], dict[str, torch.Tensor]
+        ] = {}
+
         self._init_weights()
+
+        if self._use_torch_compile:
+            self._maybe_compile_forward()
 
     def _init_weights(self) -> None:
         """Initialize parameters with Xavier uniform where appropriate."""
@@ -140,8 +158,73 @@ class PokerTransformerV1(nn.Module, Model):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
+    def _get_rope_cache(
+        self,
+        max_seq_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return cached RoPE cos/sin tables sized for max_seq_len."""
+
+        if max_seq_len <= 0:
+            max_seq_len = 1
+
+        key = (device.type, device.index, dtype)
+        cache = self._rope_cache.get(key)
+        need_refresh = True
+        if cache is not None:
+            cached_len = cache["cos"].size(0)
+            if cached_len >= max_seq_len:
+                need_refresh = False
+
+        if need_refresh:
+            inv_freq = self.rotary_inv_freq.to(device=device, dtype=dtype)
+            positions = torch.arange(max_seq_len, device=device, dtype=inv_freq.dtype)
+            freqs = torch.einsum("i,j->ij", positions, inv_freq)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos().to(dtype)
+            sin = emb.sin().to(dtype)
+            cache = {"cos": cos, "sin": sin}
+            self._rope_cache[key] = cache
+
+        cos_cached = cache["cos"][:max_seq_len]
+        sin_cached = cache["sin"][:max_seq_len]
+        return cos_cached, sin_cached
+
+    def _maybe_compile_forward(self) -> None:
+        """Compile the forward graph with torch.compile when available."""
+
+        if not hasattr(torch, "compile"):
+            warnings.warn(
+                "torch.compile unavailable; skipping compilation", RuntimeWarning
+            )
+            return
+
+        try:
+            self._compiled_forward = torch.compile(
+                self._forward_impl,
+                mode=self._compile_mode,
+            )
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - compile failures depend on backend
+            warnings.warn(
+                f"torch.compile failed, falling back to eager mode: {exc}",
+                RuntimeWarning,
+            )
+            self._compiled_forward = None
+
     @profile
     def forward(
+        self,
+        structured_data: StructuredEmbeddingData,
+        kv_cache: list[dict[str, torch.Tensor]] | None = None,
+    ) -> Dict[str, torch.Tensor]:
+        if self._compiled_forward is not None:
+            return self._compiled_forward(structured_data, kv_cache)
+        return self._forward_impl(structured_data, kv_cache)
+
+    def _forward_impl(
         self,
         structured_data: StructuredEmbeddingData,
         kv_cache: list[dict[str, torch.Tensor]] | None = None,
@@ -175,13 +258,35 @@ class PokerTransformerV1(nn.Module, Model):
             [] if capture_new_cache else None
         )
 
-        inv_freq = self.rotary_inv_freq.to(device=device, dtype=hidden_full.dtype)
-
         if use_checkpoint:
             valid_new_mask = torch.arange(seq_len, device=device).unsqueeze(0).expand(
                 batch_size, -1
             ) < current_lengths.unsqueeze(1)
             zero_prefix = torch.zeros_like(current_lengths)
+
+            if seq_len > 0:
+                cos_table, sin_table = self._get_rope_cache(
+                    seq_len, device, hidden_full.dtype
+                )
+                position_indices = (
+                    torch.arange(seq_len, device=device)
+                    .unsqueeze(0)
+                    .expand(batch_size, -1)
+                    .to(torch.long)
+                )
+                cos_slice = cos_table.index_select(0, position_indices.view(-1)).view(
+                    batch_size, seq_len, -1
+                )
+                sin_slice = sin_table.index_select(0, position_indices.view(-1)).view(
+                    batch_size, seq_len, -1
+                )
+            else:
+                head_dim = self.d_model // self.n_heads
+                cos_slice = hidden_full.new_zeros(batch_size, 0, head_dim)
+                sin_slice = hidden_full.new_zeros(batch_size, 0, head_dim)
+
+            rotary_cos_full = cos_slice.unsqueeze(1)
+            rotary_sin_full = sin_slice.unsqueeze(1)
 
             def run_layer_with_checkpoint(
                 layer_module: TransformerLayer,
@@ -190,11 +295,13 @@ class PokerTransformerV1(nn.Module, Model):
                 def inner(inputs: torch.Tensor) -> torch.Tensor:
                     output, _, _ = layer_module(
                         inputs,
-                        inv_freq,
+                        rotary_cos_full,
+                        rotary_sin_full,
                         None,
                         False,
                         zero_prefix,
                         valid_new_mask,
+                        current_lengths,
                     )
                     return output
 
@@ -248,6 +355,20 @@ class PokerTransformerV1(nn.Module, Model):
             )
             x_new = x_new * valid_new_mask_out.unsqueeze(-1).to(hidden_full.dtype)
 
+            head_dim = self.d_model // self.n_heads
+            if max_new_tokens > 0:
+                base_positions = start_positions.unsqueeze(1) + token_offsets.unsqueeze(
+                    0
+                )
+                max_position = int(base_positions.max().item()) + 1
+                cos_table, sin_table = self._get_rope_cache(
+                    max_position, device, hidden_full.dtype
+                )
+            else:
+                cos_table, sin_table = self._get_rope_cache(
+                    1, device, hidden_full.dtype
+                )
+
             layer_input = x_new
             layer_start_positions = start_positions
             for layer_idx, layer in enumerate(self.layers):
@@ -260,13 +381,41 @@ class PokerTransformerV1(nn.Module, Model):
                             diverged, 0
                         )
 
+                if max_new_tokens > 0:
+                    position_indices = layer_start_positions.unsqueeze(
+                        1
+                    ) + token_offsets.unsqueeze(0)
+                    position_indices = torch.where(
+                        valid_new_mask_out,
+                        position_indices,
+                        position_indices.new_zeros(1, 1),
+                    )
+                    position_indices = position_indices.clamp(
+                        min=0, max=cos_table.size(0) - 1
+                    ).to(torch.long)
+
+                    cos_slice = cos_table.index_select(
+                        0, position_indices.view(-1)
+                    ).view(batch_size, max_new_tokens, head_dim)
+                    sin_slice = sin_table.index_select(
+                        0, position_indices.view(-1)
+                    ).view(batch_size, max_new_tokens, head_dim)
+
+                    rotary_cos = cos_slice.unsqueeze(1)
+                    rotary_sin = sin_slice.unsqueeze(1)
+                else:
+                    rotary_cos = x_new.new_zeros(batch_size, 1, 0, head_dim)
+                    rotary_sin = rotary_cos
+
                 layer_output, updated_cache, total_lengths = layer(
                     layer_input,
-                    inv_freq,
+                    rotary_cos,
+                    rotary_sin,
                     layer_cache,
                     capture_new_cache,
                     layer_start_positions,
                     valid_new_mask_out,
+                    new_token_counts,
                 )
 
                 if (

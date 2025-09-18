@@ -1,6 +1,7 @@
 """Tests for variable-length transformer model and embeddings."""
 
 import torch
+import pytest
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.factory import ModelFactory
@@ -12,6 +13,7 @@ from alphaholdem.models.transformer.embeddings import (
     combine_embeddings,
 )
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
+from alphaholdem.models.transformer.rotary_attention import RotarySelfAttention
 from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
 from alphaholdem.models.transformer.tokens import Special
 
@@ -182,6 +184,162 @@ class TestPokerTransformerV1:
             env.num_bet_bins,
         )
         assert outputs["value"].shape == (structured.batch_size,)
+
+    def test_rope_cache_reuse_and_expand(self):
+        device = torch.device("cpu")
+        model = PokerTransformerV1(
+            d_model=64,
+            n_layers=1,
+            n_heads=4,
+            num_bet_bins=8,
+            dropout=0.0,
+        ).to(device)
+
+        dtype = torch.float32
+        cos8, sin8 = model._get_rope_cache(8, device, dtype)
+        key = (device.type, device.index, dtype)
+        cache_entry = model._rope_cache[key]
+        assert cache_entry["cos"].shape[0] >= 8
+
+        base_ptr = cache_entry["cos"].untyped_storage().data_ptr()
+
+        cos4, sin4 = model._get_rope_cache(4, device, dtype)
+        cache_entry_after_shrink = model._rope_cache[key]
+        assert cache_entry_after_shrink["cos"].untyped_storage().data_ptr() == base_ptr
+        assert torch.equal(cos4, cache_entry_after_shrink["cos"][:4])
+        assert torch.equal(sin4, cache_entry_after_shrink["sin"][:4])
+
+        cos16, sin16 = model._get_rope_cache(16, device, dtype)
+        cache_entry_extended = model._rope_cache[key]
+        assert cache_entry_extended["cos"].shape[0] >= 16
+        assert torch.equal(cos16[:8], cos8)
+        assert torch.equal(sin16[:8], sin8)
+
+    def test_rotary_attention_incremental_matches_full(self):
+        device = torch.device("cpu")
+        d_model = 32
+        n_heads = 4
+        attn_full = RotarySelfAttention(d_model, n_heads, dropout=0.0).to(device)
+        attn_full.eval()
+
+        torch.manual_seed(0)
+        x_full = torch.randn(1, 7, d_model, device=device)
+        valid_mask_full = torch.ones(1, 7, dtype=torch.bool, device=device)
+
+        model = PokerTransformerV1(
+            d_model=d_model,
+            n_layers=1,
+            n_heads=n_heads,
+            num_bet_bins=8,
+            dropout=0.0,
+        ).to(device)
+
+        cos_table, sin_table = model._get_rope_cache(7, device, x_full.dtype)
+        head_dim = d_model // n_heads
+
+        def gather_rotary(start: int, length: int) -> tuple[torch.Tensor, torch.Tensor]:
+            if length == 0:
+                zero = x_full.new_zeros(1, 1, 0, head_dim)
+                return zero, zero
+            positions = torch.arange(start, start + length, device=device).unsqueeze(0)
+            positions = positions.to(torch.long)
+            cos_slice = cos_table.index_select(0, positions.view(-1)).view(
+                1, length, head_dim
+            )
+            sin_slice = sin_table.index_select(0, positions.view(-1)).view(
+                1, length, head_dim
+            )
+            return cos_slice.unsqueeze(1), sin_slice.unsqueeze(1)
+
+        rotary_cos_full, rotary_sin_full = gather_rotary(0, 7)
+        new_counts_full = torch.tensor([7], device=device)
+
+        with torch.no_grad():
+            full_outputs, cache_full, total_lengths_full = attn_full(
+                x_full,
+                rotary_cos_full,
+                rotary_sin_full,
+                cache=None,
+                capture_cache=True,
+                past_lengths=torch.zeros(1, dtype=torch.long, device=device),
+                valid_new_mask=valid_mask_full,
+                new_token_counts=new_counts_full,
+            )
+
+        attn_incremental = RotarySelfAttention(d_model, n_heads, dropout=0.0).to(device)
+        attn_incremental.load_state_dict(attn_full.state_dict())
+        attn_incremental.eval()
+
+        x_past = x_full[:, :5]
+        x_new = x_full[:, 5:]
+        valid_past = valid_mask_full[:, :5]
+        valid_new = valid_mask_full[:, 5:]
+
+        rotary_cos_past, rotary_sin_past = gather_rotary(0, 5)
+
+        with torch.no_grad():
+            past_outputs, cache_past, total_lengths_past = attn_incremental(
+                x_past,
+                rotary_cos_past,
+                rotary_sin_past,
+                cache=None,
+                capture_cache=True,
+                past_lengths=torch.zeros(1, dtype=torch.long, device=device),
+                valid_new_mask=valid_past,
+                new_token_counts=torch.tensor([5], device=device),
+            )
+
+        rotary_cos_new, rotary_sin_new = gather_rotary(
+            int(total_lengths_past.item()), x_new.size(1)
+        )
+
+        with torch.no_grad():
+            new_outputs, cache_new, total_lengths_new = attn_incremental(
+                x_new,
+                rotary_cos_new,
+                rotary_sin_new,
+                cache_past,
+                capture_cache=True,
+                past_lengths=total_lengths_past,
+                valid_new_mask=valid_new,
+                new_token_counts=torch.tensor([2], device=device),
+            )
+
+        combined_outputs = torch.cat([past_outputs, new_outputs], dim=1)
+
+        torch.testing.assert_close(full_outputs, combined_outputs, atol=1e-5, rtol=1e-5)
+        assert cache_new is not None
+        assert total_lengths_new.tolist() == [7]
+
+    def test_torch_compile_optional(self):
+        if not hasattr(torch, "compile"):
+            pytest.skip("torch.compile unavailable")
+
+        device = torch.device("cpu")
+        env = _build_env(device)
+        env.reset()
+        encoder = TransformerStateEncoder(env, device)
+        idxs = torch.arange(env.N, device=device)
+        structured = encoder.encode_tensor_states(player=0, idxs=idxs)
+
+        model = PokerTransformerV1(
+            d_model=64,
+            n_layers=1,
+            n_heads=4,
+            num_bet_bins=env.num_bet_bins,
+            dropout=0.0,
+            use_torch_compile=True,
+        ).to(device)
+
+        model.eval()
+        with torch.no_grad():
+            outputs = model(structured)
+
+        assert outputs["policy_logits"].shape[0] == structured.batch_size
+        assert outputs["value"].shape[0] == structured.batch_size
+
+        if hasattr(torch, "_dynamo"):
+            torch._dynamo.reset()
 
     def test_factory_creates_state_encoder_and_model(self):
         device = torch.device("cpu")

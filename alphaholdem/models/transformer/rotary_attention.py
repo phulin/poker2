@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...utils.profiling import profile
+
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     """Rotate last dimension by half for RoPE application."""
@@ -29,20 +31,6 @@ def apply_rotary_pos_emb(
     return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
 
 
-def build_rope_cos_sin(
-    inv_freq: torch.Tensor,
-    positions: torch.Tensor,
-    dtype: torch.dtype,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Construct cos/sin rotary caches for the provided absolute positions."""
-
-    freqs = torch.einsum("bs,d->bsd", positions.to(inv_freq.dtype), inv_freq)
-    emb = torch.cat((freqs, freqs), dim=-1)
-    cos = emb.cos().to(dtype)
-    sin = emb.sin().to(dtype)
-    return cos.unsqueeze(1), sin.unsqueeze(1)
-
-
 class RotarySelfAttention(nn.Module):
     """Multi-head self-attention with RoPE positional encoding."""
 
@@ -62,14 +50,17 @@ class RotarySelfAttention(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         self.attn_dropout = nn.Dropout(dropout)
 
+    @profile
     def forward(
         self,
         x_new: torch.Tensor,
-        inv_freq: torch.Tensor,
+        rotary_cos: torch.Tensor,
+        rotary_sin: torch.Tensor,
         cache: dict[str, torch.Tensor] | None,
         capture_cache: bool,
         past_lengths: torch.Tensor,
         valid_new_mask: torch.Tensor,
+        new_token_counts: torch.Tensor,
     ) -> Tuple[torch.Tensor, dict[str, torch.Tensor] | None, torch.Tensor]:
         """Compute self-attention on the new tokens only."""
 
@@ -91,39 +82,56 @@ class RotarySelfAttention(nn.Module):
         k_new = k_new.permute(0, 2, 1, 3)
         v_new = v_new.permute(0, 2, 1, 3)
 
-        steps = torch.arange(max_t_new, device=device)
-        positions = past_lengths.unsqueeze(1) + steps.unsqueeze(0)
-        positions = positions.masked_fill(~valid_new_mask, 0)
-        cos, sin = build_rope_cos_sin(inv_freq, positions, q.dtype)
-        q, k_new = apply_rotary_pos_emb(q, k_new, cos, sin)
+        q, k_new = apply_rotary_pos_emb(q, k_new, rotary_cos, rotary_sin)
 
         valid_new = valid_new_mask.unsqueeze(1).unsqueeze(-1).to(dtype=q.dtype)
         q = q * valid_new
         k_new = k_new * valid_new
         v_new = v_new * valid_new
 
-        new_counts = valid_new_mask.sum(dim=1)
-        total_lengths = past_lengths + new_counts
+        total_lengths_requested = past_lengths + new_token_counts
+        total_lengths = total_lengths_requested.clone()
+        max_total_len = (
+            int(total_lengths.max().item()) if total_lengths.numel() > 0 else 0
+        )
 
-        if past_k is not None and past_v is not None:
-            past_k = past_k.to(device=device, dtype=q.dtype)
-            past_v = past_v.to(device=device, dtype=q.dtype)
-            if past_k.shape[2] > 0:
-                past_indices = torch.arange(past_k.shape[2], device=device).unsqueeze(0)
-                valid_past = past_indices < past_lengths.unsqueeze(1)
-                valid_past = valid_past.unsqueeze(1).unsqueeze(-1).to(dtype=q.dtype)
-                masked_past_k = past_k * valid_past
-                masked_past_v = past_v * valid_past
-            else:
-                masked_past_k = past_k
-                masked_past_v = past_v
-            k_total = torch.cat([masked_past_k, k_new], dim=2)
-            v_total = torch.cat([masked_past_v, v_new], dim=2)
-        else:
+        if max_total_len == 0:
             k_total = k_new
             v_total = v_new
+        else:
+            k_total = x_new.new_zeros(
+                batch_size, self.n_heads, max_total_len, self.d_head
+            )
+            v_total = torch.zeros_like(k_total)
 
-        max_total_len = k_total.shape[2]
+            if past_k is not None and past_v is not None:
+                past_k = past_k.to(device=device, dtype=q.dtype)
+                past_v = past_v.to(device=device, dtype=q.dtype)
+
+            for b in range(batch_size):
+                total_len = int(total_lengths_requested[b].item())
+                if total_len == 0:
+                    continue
+                past_len = int(past_lengths[b].item())
+                past_len = min(past_len, total_len)
+                new_len = int(new_token_counts[b].item())
+                max_new_available = int(valid_new_mask[b].sum().item())
+                new_len = min(new_len, max_new_available)
+                new_len = max(new_len, 0)
+                if past_len > 0 and past_k is not None and past_v is not None:
+                    available = past_k.shape[2]
+                    copy_len = min(past_len, available)
+                    if copy_len > 0:
+                        k_total[b, :, :copy_len] = past_k[b, :, :copy_len]
+                        v_total[b, :, :copy_len] = past_v[b, :, :copy_len]
+                    past_len = copy_len
+                if new_len > 0:
+                    start = past_len
+                    end = past_len + new_len
+                    k_total[b, :, start:end] = k_new[b, :, :new_len]
+                    v_total[b, :, start:end] = v_new[b, :, :new_len]
+                total_lengths[b] = past_len + new_len
+
         total_positions = torch.arange(max_total_len, device=device).unsqueeze(0)
         valid_keys = total_positions < total_lengths.unsqueeze(1)
         attn_mask = (~valid_keys).unsqueeze(1).unsqueeze(1)
