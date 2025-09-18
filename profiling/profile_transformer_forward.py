@@ -61,7 +61,6 @@ def build_profiling_config(device: torch.device) -> Config:
         kwargs=model_kwargs,
         policy={"name": "categorical_v1", "kwargs": {}},
         use_gradient_checkpointing=False,
-        use_torch_compile=True,
     )
 
     env_cfg = EnvConfig(

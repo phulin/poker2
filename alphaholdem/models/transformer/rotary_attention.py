@@ -10,6 +10,14 @@ import torch.nn.functional as F
 
 from ...utils.profiling import profile
 
+try:
+    from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func
+
+    _FLASH_ATTN_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency
+    flash_attn_varlen_kvpacked_func = None
+    _FLASH_ATTN_AVAILABLE = False
+
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     """Rotate last dimension by half for RoPE application."""
@@ -131,19 +139,40 @@ class RotarySelfAttention(nn.Module):
             k_total = k_total[:, :, :max_total_len]
             v_total = v_total[:, :, :max_total_len]
 
-        total_positions = torch.arange(max_total_len, device=device).unsqueeze(0)
-        valid_keys = total_positions < total_lengths.unsqueeze(1)
-        attn_mask = (~valid_keys).unsqueeze(1).unsqueeze(1)
-
+        attn_output = None
         attn_dropout = self.attn_dropout.p if self.training else 0.0
-        attn_output = F.scaled_dot_product_attention(
-            q,
-            k_total,
-            v_total,
-            attn_mask=attn_mask,
-            dropout_p=attn_dropout,
-            is_causal=False,
-        )
+        if (
+            _FLASH_ATTN_AVAILABLE
+            and q.is_cuda
+            and q.dtype in (torch.float16, torch.bfloat16)
+            and max_total_len > 0
+            and new_token_counts.sum() > 0
+        ):
+            try:
+                attn_output = self._flash_attention(
+                    q,
+                    k_total,
+                    v_total,
+                    new_token_counts,
+                    total_lengths,
+                    attn_dropout,
+                )
+            except RuntimeError:
+                attn_output = None
+
+        if attn_output is None:
+            total_positions = torch.arange(max_total_len, device=device).unsqueeze(0)
+            valid_keys = total_positions < total_lengths.unsqueeze(1)
+            attn_mask = (~valid_keys).unsqueeze(1).unsqueeze(1)
+
+            attn_output = F.scaled_dot_product_attention(
+                q,
+                k_total,
+                v_total,
+                attn_mask=attn_mask,
+                dropout_p=attn_dropout,
+                is_causal=False,
+            )
 
         attn_output = attn_output.permute(0, 2, 1, 3).contiguous()
         attn_output = attn_output.view(batch_size, max_t_new, self.d_model)
@@ -159,3 +188,94 @@ class RotarySelfAttention(nn.Module):
             }
 
         return attn_output, new_cache, total_lengths
+
+    def _flash_attention(
+        self,
+        q: torch.Tensor,
+        k_total: torch.Tensor,
+        v_total: torch.Tensor,
+        new_token_counts: torch.Tensor,
+        total_lengths: torch.Tensor,
+        dropout_p: float,
+    ) -> torch.Tensor:
+        """Compute attention using FlashAttention v2 when available."""
+
+        if not _FLASH_ATTN_AVAILABLE or flash_attn_varlen_kvpacked_func is None:
+            raise RuntimeError("FlashAttention is not available")
+
+        batch_size, n_heads, max_t_new, d_head = q.shape
+
+        q_lengths = new_token_counts.to(dtype=torch.int32)
+        kv_lengths = total_lengths.to(dtype=torch.int32)
+
+        total_q = int(q_lengths.sum().item())
+        if total_q == 0:
+            return torch.zeros_like(q)
+
+        max_kv_len = int(kv_lengths.max().item()) if kv_lengths.numel() > 0 else 0
+        if max_kv_len == 0:
+            return torch.zeros_like(q)
+
+        q_for_flash = q.permute(0, 2, 1, 3).contiguous()  # [B, Tq, H, Dh]
+        k_for_flash = k_total.permute(0, 2, 1, 3).contiguous()  # [B, Tk, H, Dh]
+        v_for_flash = v_total.permute(0, 2, 1, 3).contiguous()
+
+        q_offsets = torch.zeros(batch_size + 1, device=q.device, dtype=torch.int32)
+        kv_offsets = torch.zeros(batch_size + 1, device=q.device, dtype=torch.int32)
+        q_offsets[1:] = torch.cumsum(q_lengths, dim=0)
+        kv_offsets[1:] = torch.cumsum(kv_lengths, dim=0)
+
+        packed_q_segments = []
+        packed_kv_segments = []
+        for idx in range(batch_size):
+            q_len = int(q_lengths[idx].item())
+            kv_len = int(kv_lengths[idx].item())
+            if q_len > 0:
+                packed_q_segments.append(q_for_flash[idx, :q_len])
+            if kv_len > 0:
+                k_slice = k_for_flash[idx, :kv_len]
+                v_slice = v_for_flash[idx, :kv_len]
+                packed_kv_segments.append(torch.stack((k_slice, v_slice), dim=1))
+
+        packed_q = (
+            torch.cat(packed_q_segments, dim=0)
+            if packed_q_segments
+            else q_for_flash.new_zeros((0, n_heads, d_head))
+        )
+        packed_kv = (
+            torch.cat(packed_kv_segments, dim=0)
+            if packed_kv_segments
+            else k_for_flash.new_zeros((0, 2, n_heads, d_head))
+        )
+
+        attn_out_packed = flash_attn_varlen_kvpacked_func(
+            packed_q,
+            packed_kv,
+            q_offsets,
+            kv_offsets,
+            int(max_t_new),
+            max_kv_len,
+            dropout_p,
+            None,
+            False,
+        )
+
+        padded_outputs = []
+        start = 0
+        for idx in range(batch_size):
+            q_len = int(q_lengths[idx].item())
+            if q_len == 0:
+                padded_outputs.append(
+                    q_for_flash.new_zeros((max_t_new, n_heads, d_head))
+                )
+                continue
+            end = start + q_len
+            chunk = attn_out_packed[start:end]
+            if q_len < max_t_new:
+                pad_amount = max_t_new - q_len
+                chunk = F.pad(chunk, (0, 0, 0, 0, 0, pad_amount))
+            padded_outputs.append(chunk)
+            start = end
+
+        attn_output = torch.stack(padded_outputs, dim=0)
+        return attn_output.permute(0, 2, 1, 3).contiguous()
