@@ -455,7 +455,7 @@ class VectorizedReplayBuffer:
 
         Args:
             trajectory_indices: [K] - trajectory indices to update
-            opponent_rewards: [K] - rewards from opponent's perspective (will be negated)
+            opponent_rewards: [K] - rewards from our perspective returned by the environment
         """
         if trajectory_indices.numel() == 0:
             return
@@ -473,7 +473,7 @@ class VectorizedReplayBuffer:
 
         valid_trajectories = buffer_trajectory_indices[valid_mask]
         valid_step_positions = step_positions[valid_mask] - 1  # Last step index
-        valid_rewards = -opponent_rewards[valid_mask]  # Negate for our perspective
+        valid_rewards = opponent_rewards[valid_mask]
 
         # Vectorized update of rewards and done flags
         self.trajectory_lengths[valid_trajectories] = valid_step_positions + 1
