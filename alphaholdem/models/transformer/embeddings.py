@@ -140,6 +140,10 @@ class ContextEmbedding(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.1),
         )
+        self._cls_cache: dict[
+            tuple[str, torch.dtype, torch.dtype],
+            dict[tuple[float, float, float], torch.Tensor],
+        ] = {}
 
     @profile
     def forward(
@@ -172,7 +176,22 @@ class ContextEmbedding(nn.Module):
         cls_mask = token_ids == cls_id
         if cls_mask.any():
             cls_features = context_features[cls_mask][:, :3]
-            embeddings[cls_mask] += self.cls_mlp(cls_features).to(base_dtype)
+            cache_key = (
+                cls_features.device.type,
+                cls_features.dtype,
+                base_dtype,
+            )
+            device_cache = self._cls_cache.setdefault(cache_key, {})
+            cached_outputs = []
+            for feat in cls_features:
+                key = tuple(float(x) for x in feat.tolist())
+                cached = device_cache.get(key)
+                if cached is None:
+                    cached = self.cls_mlp(feat.unsqueeze(0)).to(base_dtype).squeeze(0)
+                    device_cache[key] = cached
+                cached_outputs.append(cached)
+            cls_embeddings = torch.stack(cached_outputs, dim=0)
+            embeddings[cls_mask] += cls_embeddings
 
         # Dynamic context token uses the standard 10-feature MLP.
         context_id = special_offset + Special.CONTEXT.value
