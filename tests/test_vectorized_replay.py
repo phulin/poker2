@@ -3,7 +3,9 @@ import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
 
 

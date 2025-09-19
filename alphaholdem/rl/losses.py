@@ -8,7 +8,6 @@ import torch.nn.functional as F
 from ..utils.profiling import profile
 
 
-@profile
 def trinal_clip_ppo_loss(
     logits: torch.Tensor,
     values: torch.Tensor,

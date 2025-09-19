@@ -6,7 +6,8 @@ import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.state_encoder import CNNStateEncoder
-from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
+from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
+from alphaholdem.models.transformer.tokens import get_action_token_id_offset
 
 
 def test_cnn_state_encoder_perspective_behavior():
@@ -112,7 +113,7 @@ def test_transformer_state_encoder_perspective_behavior():
     env.step_bins(torch.tensor([1, 1], device=device))  # Call for both envs
 
     # Create state encoder
-    encoder = TransformerStateEncoder(env, device)
+    encoder = TokenSequenceBuilder(env, device)
 
     # Encode for player 0 (should be unchanged)
     states_p0 = encoder.encode_tensor_states(
@@ -127,7 +128,7 @@ def test_transformer_state_encoder_perspective_behavior():
     action_actors_p1 = states_p1.action_actors[0]  # [L] - actor for each action
 
     # Identify action tokens dynamically now that the sequence is variable-length.
-    action_offset = TransformerStateEncoder.get_action_token_offset(env.num_bet_bins)
+    action_offset = get_action_token_id_offset()
     action_mask_p0 = (states_p0.token_ids[0] >= action_offset) & (
         states_p0.token_ids[0] < action_offset + env.num_bet_bins
     )
@@ -184,7 +185,7 @@ def test_both_encoders_consistency():
 
     # Create both encoders
     cnn_encoder = CNNStateEncoder(env, device)
-    transformer_encoder = TransformerStateEncoder(env, device)
+    transformer_encoder = TokenSequenceBuilder(env, device)
 
     # Encode for both players with both encoders
     cnn_p0 = cnn_encoder.encode_tensor_states(

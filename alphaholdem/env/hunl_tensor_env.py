@@ -30,6 +30,7 @@ class HUNLTensorEnv:
     bb: int
     device: torch.device
     bet_bins: list[float]
+    store_action_history: bool
     rng: torch.Generator
     # deck tensor and per-env draw position
     deck: torch.Tensor
@@ -63,6 +64,7 @@ class HUNLTensorEnv:
         sb: int,
         bb: int,
         bet_bins: list[float],
+        store_action_history: bool = False,
         device: Optional[torch.device] = None,
         rng: Optional[torch.Generator] = None,
         float_dtype: torch.dtype = torch.float32,
@@ -81,6 +83,7 @@ class HUNLTensorEnv:
         self.bb = int(bb)
         self.scale = float(self.bb) * 100.0
         self.bet_bins = bet_bins
+        self.store_action_history = store_action_history
         self.debug_step_table = debug_step_table
         self.flop_showdown = flop_showdown
         # Cache bet bins as tensor for fast indexing
@@ -454,19 +457,20 @@ class HUNLTensorEnv:
             starting_street = self.street[:DEBUG_STEP_TABLE_ENVS].clone()
             starting_to_act = self.to_act[:DEBUG_STEP_TABLE_ENVS].clone()
 
-        # Record current action into history (actor rows and sum row)
-        round_idx = self.street.clamp(min=0, max=3)[acting]
-        slot_idx = torch.clamp(self.actions_this_round, max=self.history_slots - 1)[
-            acting
-        ]
-        # set actor-specific one-hot
-        self.action_history[
-            acting, round_idx, slot_idx, self.to_act[acting], bin_indices[acting]
-        ] = 1
-        # sum row
-        self.action_history[acting, round_idx, slot_idx, 2, bin_indices[acting]] = 1
-        # Write legal mask for this decision into history legal row
-        self.action_history[acting, round_idx, slot_idx, 3, :] = legal_masks[acting]
+        if self.store_action_history:
+            # Record current action into history (actor rows and sum row)
+            round_idx = self.street.clamp(min=0, max=3)[acting]
+            slot_idx = torch.clamp(self.actions_this_round, max=self.history_slots - 1)[
+                acting
+            ]
+            # set actor-specific one-hot
+            self.action_history[
+                acting, round_idx, slot_idx, self.to_act[acting], bin_indices[acting]
+            ] = 1
+            # sum row
+            self.action_history[acting, round_idx, slot_idx, 2, bin_indices[acting]] = 1
+            # Write legal mask for this decision into history legal row
+            self.action_history[acting, round_idx, slot_idx, 3, :] = legal_masks[acting]
 
         # Handle different actions.
         # Fold: immediate terminal, award pot to opp

@@ -76,6 +76,9 @@ class SelfPlayTrainer:
         # Initialize RNG
         self.rng = torch.Generator(device=self.device)
 
+        # Determine model type
+        self.is_transformer = cfg.model.name.startswith("poker_transformer")
+
         # Initialize components
         # Always create tensor_env for state encoder, even if we don't use it for training
         self.tensor_env = HUNLTensorEnv(
@@ -84,6 +87,7 @@ class SelfPlayTrainer:
             sb=self.cfg.env.sb,
             bb=self.cfg.env.bb,
             bet_bins=self.cfg.env.bet_bins,
+            store_action_history=not self.is_transformer,
             device=self.device,
             rng=self.rng,
             float_dtype=self.float_dtype,
@@ -103,9 +107,6 @@ class SelfPlayTrainer:
         _, _, model, policy = build_components_from_config(self.cfg)
         self.model = model
         self.policy = policy
-
-        # Determine model type
-        self.is_transformer = cfg.model.name.startswith("poker_transformer")
 
         # Ensure bins align with model output size to avoid mask/logit mismatch
         if hasattr(self.model, "policy_head") and hasattr(

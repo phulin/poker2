@@ -7,11 +7,12 @@ import torch
 from alphaholdem.env.analyze_tensor_env import (
     get_preflop_betting_grid,
     get_preflop_range_grid,
-    create_state_encoder_for_model,
     get_preflop_value_grid,
     create_1326_hand_combinations,
 )
-from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
 
 
 class DummyTransformerModel(torch.nn.Module):

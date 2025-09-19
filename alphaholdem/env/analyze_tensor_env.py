@@ -249,7 +249,7 @@ def create_169_hand_analysis_setup(
         # Set deck_pos to 4 (after hole cards)
         temp_env.deck_pos[i] = 4
 
-    return temp_env, create_state_encoder_for_model(model, temp_env, device)
+    return temp_env
 
 
 def _card_str_to_int(card_str: str) -> int:
@@ -356,6 +356,7 @@ def _create_169_grid(
 
 def get_preflop_betting_grid(
     model,
+    state_encoder,
     device: torch.device = None,
     starting_stack: int = 20000,
     sb: int = 50,
@@ -384,7 +385,7 @@ def get_preflop_betting_grid(
         device = torch.device("cpu")
 
     # Create 1326-hand environment and state encoder
-    env, state_encoder = create_169_hand_analysis_setup(
+    env = create_169_hand_analysis_setup(
         model,
         button=0,
         starting_stack=starting_stack,
@@ -455,6 +456,7 @@ def step_sb_action(
 
 def get_preflop_range_grid(
     model,
+    state_encoder,
     bin_index: int,
     device: torch.device = None,
     starting_stack: int = 20000,
@@ -484,7 +486,7 @@ def get_preflop_range_grid(
         device = torch.device("cpu")
 
     # Create 169-hand environment and state encoder
-    env, state_encoder = create_169_hand_analysis_setup(
+    env = create_169_hand_analysis_setup(
         model,
         button=0,
         starting_stack=starting_stack,
@@ -529,6 +531,7 @@ def get_preflop_range_grid(
 
 def get_preflop_range_grid_bb_response(
     model,
+    state_encoder,
     bin_index: int,
     device: torch.device = None,
     starting_stack: int = 20000,
@@ -559,7 +562,7 @@ def get_preflop_range_grid_bb_response(
 
     # Create 169-hand environment and state encoder
     # Seat 0 (model perspective) is BB, button/SB is p1.
-    env, state_encoder = create_169_hand_analysis_setup(
+    env = create_169_hand_analysis_setup(
         model,
         button=1,
         starting_stack=starting_stack,
@@ -609,6 +612,7 @@ def get_preflop_range_grid_bb_response(
 
 def get_preflop_value_grid_bb_response(
     model,
+    state_encoder,
     device: torch.device = None,
     starting_stack: int = 20000,
     sb: int = 50,
@@ -636,7 +640,7 @@ def get_preflop_value_grid_bb_response(
         device = torch.device("cpu")
 
     # Create 169-hand environment and state encoder
-    env, state_encoder = create_169_hand_analysis_setup(
+    env = create_169_hand_analysis_setup(
         model,
         button=1,
         starting_stack=starting_stack,
@@ -681,6 +685,7 @@ def get_preflop_value_grid_bb_response(
 
 def get_preflop_value_grid(
     model,
+    state_encoder,
     device: torch.device = None,
     starting_stack: int = 20000,
     sb: int = 50,
@@ -709,7 +714,7 @@ def get_preflop_value_grid(
         device = torch.device("cpu")
 
     # Create 1326-hand environment and state encoder
-    env, state_encoder = create_169_hand_analysis_setup(
+    env = create_169_hand_analysis_setup(
         model,
         button=0,
         starting_stack=starting_stack,

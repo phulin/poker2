@@ -17,7 +17,7 @@ device: cuda
 
 # === ENVIRONMENT CONFIGURATION ===
 use_tensor_env: true
-num_envs: 3800
+num_envs: 5500
 
 # === WANDB CONFIGURATION ===
 use_wandb: true
@@ -41,7 +41,7 @@ train:
   learning_rate: 3e-4
   learning_rate_final: 1e-5
   lr_schedule: cosine
-  batch_size: 6000
+  batch_size: 10000
   num_epochs: 4
   replay_buffer_batches: 4
   max_trajectory_length: 15
