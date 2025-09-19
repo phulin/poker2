@@ -160,7 +160,7 @@ class TestVectorizedReplayBuffer:
         assert buffer.action_actors[0, pos - 1].item() == 1
         assert buffer.action_streets[0, pos - 1].item() == 0
 
-    def test_transformer_add_batch_appends_context_and_action(self, buffer):
+    def test_transformer_add_transitions_appends_context_and_action(self, buffer):
         device = buffer.device
         buffer.start_adding_trajectory_batches(1)
         from alphaholdem.models.transformer.tokens import Special, Context as Ctx
@@ -187,7 +187,7 @@ class TestVectorizedReplayBuffer:
             context_features=ctx,
             lengths=torch.tensor([2], device=device),
         )
-        # Seed CLS once so add_batch doesn't add it
+        # Seed CLS once so add_transitions doesn't add it
         buffer.add_tokens(
             embedding_data=StructuredEmbeddingData(
                 token_ids=token_ids,
@@ -207,7 +207,7 @@ class TestVectorizedReplayBuffer:
 
         # Add our action
         pos_before = buffer.token_positions[0].item()
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=emb,
             action_indices=torch.tensor([2], device=device),
             log_probs=torch.randn(1, buffer.num_bet_bins, device=device),
@@ -232,7 +232,7 @@ class TestVectorizedReplayBuffer:
         trajectory_indices = torch.tensor([0], device=buffer.device)
 
         buffer.start_adding_trajectory_batches(1)
-        buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+        buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Should not be valid yet (no done flag)
         assert buffer.size == 0
@@ -247,7 +247,7 @@ class TestVectorizedReplayBuffer:
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([0], device=buffer.device)
             batch["dones"][0] = i == 2  # Only last transition is done
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit completed trajectories (size updates happen here)
         buffer.finish_adding_trajectory_batches()
@@ -266,14 +266,14 @@ class TestVectorizedReplayBuffer:
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([0], device=buffer.device)
             batch["dones"][0] = i == 1  # Only last transition is done
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Second trajectory - add transitions one by one
         for i in range(3):
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([1], device=buffer.device)
             batch["dones"][0] = i == 2  # Only last transition is done
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit both completed trajectories
         buffer.finish_adding_trajectory_batches()
@@ -300,7 +300,7 @@ class TestVectorizedReplayBuffer:
                 batch = self._create_test_batch(1, buffer.device)
                 # Mark the last step as done
                 batch["dones"][0] = step == trajectory_length - 1
-                buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+                buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit all completed trajectories
         buffer.finish_adding_trajectory_batches()
@@ -317,13 +317,13 @@ class TestVectorizedReplayBuffer:
         # Fill trajectory to max length
         buffer.start_adding_trajectory_batches(1)
         for _ in range(buffer.max_trajectory_length):
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Next addition should fail
         with pytest.raises(
             ValueError, match="Some trajectories would exceed max_trajectory_length"
         ):
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
     def test_sample_trajectories(self, buffer):
         """Test sampling complete trajectories."""
@@ -334,7 +334,7 @@ class TestVectorizedReplayBuffer:
                 batch = self._create_test_batch(1, buffer.device)
                 trajectory_indices = torch.tensor([i], device=buffer.device)
                 batch["dones"][0] = j == 1  # Only last transition is done
-                buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+                buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit completed trajectories
         buffer.finish_adding_trajectory_batches()
@@ -379,7 +379,7 @@ class TestVectorizedReplayBuffer:
         trajectory_indices = torch.tensor([0], device=buffer.device)
         # No done flags - trajectory not completed
         buffer.start_adding_trajectory_batches(1)
-        buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+        buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         with pytest.raises(ValueError, match="No trajectories available"):
             buffer.sample_trajectories(1)
@@ -395,7 +395,7 @@ class TestVectorizedReplayBuffer:
             batch = self._create_test_batch(1, buffer.device)
             batch["dones"][0] = i == 2  # Only last transition is done
             batch["rewards"][0] = rewards[i]
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit the completed trajectory
         buffer.finish_adding_trajectory_batches()
@@ -423,7 +423,7 @@ class TestVectorizedReplayBuffer:
                 batch = self._create_test_batch(1, buffer.device)
                 batch["dones"][0] = j == 1  # Only last transition is done
                 batch["rewards"][0] = rewards[i][j]
-                buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+                buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit both completed trajectories
         buffer.finish_adding_trajectory_batches()
@@ -444,7 +444,7 @@ class TestVectorizedReplayBuffer:
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([i], device=buffer.device)
             batch["dones"][0] = True
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit completed trajectories
         buffer.finish_adding_trajectory_batches()
@@ -468,7 +468,7 @@ class TestVectorizedReplayBuffer:
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([i], device=buffer.device)
             batch["dones"][0] = True
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         initial_size = buffer.size
         initial_position = buffer.position
@@ -486,7 +486,7 @@ class TestVectorizedReplayBuffer:
         trajectory_indices = torch.tensor([0], device=buffer.device)
         batch["dones"][0] = True
         buffer.start_adding_trajectory_batches(1)
-        buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+        buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Check that all buffer tensors are on the correct device
         for attr_name in [
@@ -525,18 +525,18 @@ class TestVectorizedReplayBuffer:
         # Add first transition
         batch1 = self._create_test_batch(1, buffer.device)
         batch1["dones"][0] = False
-        buffer.add_batch(trajectory_indices=trajectory_indices1, **batch1)
+        buffer.add_transitions(trajectory_indices=trajectory_indices1, **batch1)
 
         # Add second transition (completes trajectory)
         batch2 = self._create_test_batch(1, buffer.device)
         batch2["dones"][0] = True
-        buffer.add_batch(trajectory_indices=trajectory_indices1, **batch2)
+        buffer.add_transitions(trajectory_indices=trajectory_indices1, **batch2)
 
         # Second trajectory: 1 transition
         trajectory_indices2 = torch.tensor([1], device=buffer.device)
         batch3 = self._create_test_batch(1, buffer.device)
         batch3["dones"][0] = True
-        buffer.add_batch(trajectory_indices=trajectory_indices2, **batch3)
+        buffer.add_transitions(trajectory_indices=trajectory_indices2, **batch3)
 
         # Commit both completed trajectories
         buffer.finish_adding_trajectory_batches()
@@ -556,7 +556,7 @@ class TestVectorizedReplayBuffer:
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([i], device=buffer.device)
             batch["dones"][0] = True
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Size updates now occur only on finish_adding_trajectory_batches
         assert buffer.size == 0
@@ -586,7 +586,7 @@ class TestVectorizedReplayBuffer:
             # Use source trajectory index (0, 1, 2, ...)
             trajectory_indices = torch.tensor([i], device=buffer.device)
             batch["dones"][0] = True
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         buffer.finish_adding_trajectory_batches()
         assert buffer.position == 8
@@ -607,7 +607,7 @@ class TestVectorizedReplayBuffer:
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([0], device=buffer.device)
             batch["dones"][0] = False  # Not done yet
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit completed trajectories
         buffer.finish_adding_trajectory_batches()
@@ -653,14 +653,14 @@ class TestVectorizedReplayBuffer:
 
         # Step 1: player 0 acts in env0, player 1 acts in env1 (both take call/check action)
         actions_step1 = torch.tensor([1, 1], device=device)
-        rewards_step1, dones_step1, _ = env.step_bins(actions_step1)
+        rewards_step1, dones_step1, *_ = env.step_bins(actions_step1)
 
         # Record our action for env0 (player 0 acted)
         batch_env0 = self._create_test_batch_single_step(1, device)
         batch_env0["action_indices"][0] = actions_step1[0]
         batch_env0["rewards"][0] = rewards_step1[0]
         batch_env0["dones"][0] = dones_step1[0]
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=batch_env0["embedding_data"],
             action_indices=batch_env0["action_indices"],
             log_probs=batch_env0["log_probs"],
@@ -675,7 +675,7 @@ class TestVectorizedReplayBuffer:
 
         # Step 2: opponents fold in env0, player 0 folds in env1
         actions_step2 = torch.tensor([0, 0], device=device)
-        rewards_step2, dones_step2, _ = env.step_bins(actions_step2)
+        rewards_step2, dones_step2, *_ = env.step_bins(actions_step2)
 
         assert dones_step2.tolist() == [True, True]
         assert rewards_step2[0] > 0  # Player 0 wins when opponent folds
@@ -686,7 +686,7 @@ class TestVectorizedReplayBuffer:
         batch_env1["action_indices"][0] = actions_step2[1]
         batch_env1["rewards"][0] = rewards_step2[1]
         batch_env1["dones"][0] = dones_step2[1]
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=batch_env1["embedding_data"],
             action_indices=batch_env1["action_indices"],
             log_probs=batch_env1["log_probs"],
@@ -725,7 +725,7 @@ class TestVectorizedReplayBuffer:
                 batch = self._create_test_batch(1, buffer.device)
                 trajectory_indices = torch.tensor([i], device=buffer.device)
                 batch["dones"][0] = j == 1  # Only last transition is done
-                buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+                buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit completed trajectories
         buffer.finish_adding_trajectory_batches()
@@ -781,7 +781,7 @@ class TestVectorizedReplayBuffer:
                 batch = self._create_test_batch(1, buffer.device)
                 trajectory_indices = torch.tensor([i], device=buffer.device)
                 batch["dones"][0] = j == length - 1  # Only last transition is done
-                buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+                buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit completed trajectories
         buffer.finish_adding_trajectory_batches()
@@ -798,7 +798,7 @@ class TestVectorizedReplayBuffer:
                 batch = self._create_test_batch(1, buffer.device)
                 trajectory_indices = torch.tensor([i], device=buffer.device)
                 batch["dones"][0] = j == 1  # Only last transition is done
-                buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+                buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Commit completed trajectories
         buffer.finish_adding_trajectory_batches()
@@ -823,7 +823,7 @@ class TestVectorizedReplayBuffer:
             # Use source trajectory index (0, 1, 2, ...)
             trajectory_indices = torch.tensor([i], device=buffer.device)
             batch["dones"][0] = True
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         buffer.finish_adding_trajectory_batches()
         assert buffer.size == 10
@@ -851,7 +851,7 @@ class TestVectorizedReplayBuffer:
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([i], device=buffer.device)
             batch["dones"][0] = True  # Complete trajectory
-            buffer.add_batch(trajectory_indices=trajectory_indices, **batch)
+            buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Add 1 zero-length trajectory (no transitions added)
         # This simulates a trajectory that was started but never had any transitions added
@@ -1263,7 +1263,7 @@ class TestVectorizedReplayBuffer:
         batch_data = self._create_test_batch_single_step(1, device)
         batch_data["dones"][:] = False  # Not done yet
 
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=batch_data["embedding_data"],
             action_indices=batch_data["action_indices"],
             log_probs=batch_data["log_probs"],
@@ -1280,7 +1280,7 @@ class TestVectorizedReplayBuffer:
         batch_data2 = self._create_test_batch_single_step(1, device)
         batch_data2["dones"][:] = True  # Mark as done
 
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=batch_data2["embedding_data"],
             action_indices=batch_data2["action_indices"],
             log_probs=batch_data2["log_probs"],
@@ -1326,7 +1326,7 @@ class TestVectorizedReplayBuffer:
 
         env_indices = torch.tensor([0, 1, 2], device=device)
 
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=batch_data["embedding_data"],
             action_indices=batch_data["action_indices"],
             log_probs=batch_data["log_probs"],
@@ -1343,7 +1343,7 @@ class TestVectorizedReplayBuffer:
         batch_data2 = self._create_test_batch_single_step(3, device)
         batch_data2["dones"][:] = False  # Still not done
 
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=batch_data2["embedding_data"],
             action_indices=batch_data2["action_indices"],
             log_probs=batch_data2["log_probs"],
@@ -1396,7 +1396,7 @@ class TestVectorizedReplayBuffer:
 
         env_indices = torch.tensor([0, 1, 2, 3, 4], device=device)
 
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=batch_data["embedding_data"],
             action_indices=batch_data["action_indices"],
             log_probs=batch_data["log_probs"],
@@ -1418,7 +1418,7 @@ class TestVectorizedReplayBuffer:
         batch_data2["dones"][3] = False  # Trajectory 3: incomplete
         batch_data2["dones"][4] = True  # Trajectory 4: complete
 
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=batch_data2["embedding_data"],
             action_indices=batch_data2["action_indices"],
             log_probs=batch_data2["log_probs"],
@@ -1468,7 +1468,7 @@ class TestVectorizedReplayBuffer:
 
         env_indices = torch.arange(10, device=device)
 
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=batch_data["embedding_data"],
             action_indices=batch_data["action_indices"],
             log_probs=batch_data["log_probs"],
@@ -1495,7 +1495,7 @@ class TestVectorizedReplayBuffer:
 
         new_env_indices = torch.tensor([10, 11, 12], device=device)
 
-        buffer.add_batch(
+        buffer.add_transitions(
             embedding_data=new_batch_data["embedding_data"],
             action_indices=new_batch_data["action_indices"],
             log_probs=new_batch_data["log_probs"],
@@ -1548,42 +1548,42 @@ class TestVectorizedReplayBuffer:
                 100,
                 (batch_size, 50),
                 device=device,
-                dtype=torch.int8,
+                dtype=torch.long,
             ),
             card_ranks=torch.randint(
                 0,
                 13,
                 (batch_size, 50),
                 device=device,
-                dtype=torch.uint8,
+                dtype=torch.long,
             ),
             card_suits=torch.randint(
                 0,
                 4,
                 (batch_size, 50),
                 device=device,
-                dtype=torch.uint8,
+                dtype=torch.long,
             ),
             card_streets=torch.randint(
                 0,
                 4,
                 (batch_size, 50),
                 device=device,
-                dtype=torch.uint8,
+                dtype=torch.long,
             ),
             action_actors=torch.randint(
                 0,
                 2,
                 (batch_size, 50),
                 device=device,
-                dtype=torch.uint8,
+                dtype=torch.long,
             ),
             action_streets=torch.randint(
                 0,
                 4,
                 (batch_size, 50),
                 device=device,
-                dtype=torch.uint8,
+                dtype=torch.long,
             ),
             action_legal_masks=torch.ones(batch_size, 50, 8, device=device).bool(),
             context_features=torch.randint(

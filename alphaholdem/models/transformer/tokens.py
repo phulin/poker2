@@ -3,6 +3,11 @@
 from enum import Enum
 
 
+CLS_INDEX = 0
+HOLE0_INDEX = 2
+HOLE1_INDEX = 3
+
+
 class Special(Enum):
     """Special tokens used in the variable-length transformer sequence."""
 
@@ -29,3 +34,30 @@ class Context(Enum):
     MIN_RAISE = 8
     BET_TO_CALL = 9
     NUM_CONTEXT = 10
+
+
+class Cls(Enum):
+    """CLS token indices for the transformer model."""
+
+    SB = 0
+    BB = 1
+    HERO_ON_BUTTON = 2
+    NUM_CLS = 3
+
+
+def get_special_token_id_offset() -> int:
+    """value_offset where special tokens start."""
+
+    return 0
+
+
+def get_card_token_id_offset() -> int:
+    """value_offset where card tokens start."""
+
+    return get_special_token_id_offset() + Special.NUM_SPECIAL.value
+
+
+def get_action_token_id_offset() -> int:
+    """value_offset where action tokens start."""
+
+    return get_card_token_id_offset() + 52

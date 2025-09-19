@@ -108,7 +108,7 @@ def scripted_hand(
         amount_val = (
             int(amounts[0, action_idx].item()) if action_idx not in (0, 1) else None
         )
-        reward, done, _ = env.step_bins(torch.tensor([action_idx], device=device))
+        reward, done, *_ = env.step_bins(torch.tensor([action_idx], device=device))
 
         if buffer is not None and encoder is not None:
             if actor == 0:
@@ -116,7 +116,7 @@ def scripted_hand(
                 our_states = encoder.encode_tensor_states(
                     player=0, idxs=torch.tensor([0], device=device)
                 )
-                buffer.add_batch(
+                buffer.add_transitions(
                     embedding_data=our_states,
                     action_indices=torch.tensor([action_idx], device=device),
                     log_probs=torch.zeros(1, env.num_bet_bins, device=device),

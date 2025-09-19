@@ -4,10 +4,12 @@ from typing import Dict, Union
 
 import torch
 
+from ..env.hunl_tensor_env import HUNLTensorEnv
+
 # Import embedding data classes
 from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.transformer.embedding_data import StructuredEmbeddingData
-from ..models.transformer.tokens import Special, Context
+from ..models.transformer.tokens import Cls, Special, Context
 
 
 class VectorizedReplayBuffer:
@@ -103,13 +105,13 @@ class VectorizedReplayBuffer:
             self.action_actors = torch.full(
                 (C, L),
                 -1,
-                dtype=torch.int16,
+                dtype=torch.uint8,
                 device=device,
             )
             self.action_streets = torch.full(
                 (C, L),
                 -1,
-                dtype=torch.int16,
+                dtype=torch.uint8,
                 device=device,
             )
             self.action_legal_masks = torch.zeros(
@@ -173,6 +175,14 @@ class VectorizedReplayBuffer:
             capacity, dtype=torch.long, device=device
         )
 
+        # Track positions of the first two hole cards (preflop) per trajectory row
+        # These are buffer-row-local positions, used to temporarily swap to opponent
+        # hole cards for self-play opponent action tokens.
+        self.hole_pos0 = torch.full((capacity,), -1, dtype=torch.long, device=device)
+        self.hole_pos1 = torch.full((capacity,), -1, dtype=torch.long, device=device)
+        self.hero_hole0 = torch.full((capacity,), -1, dtype=torch.long, device=device)
+        self.hero_hole1 = torch.full((capacity,), -1, dtype=torch.long, device=device)
+
     def start_adding_trajectory_batches(self, num_trajectories: int) -> None:
         """
         Mark the start of new trajectories being added to the buffer.
@@ -223,6 +233,11 @@ class VectorizedReplayBuffer:
             self.token_positions[clear_indices] = 0
             self.decision_token_ends[clear_indices] = 0
             self.transition_token_ends[clear_indices] = 0
+            # Reset hole tracking for these rows
+            self.hole_pos0[clear_indices] = -1
+            self.hole_pos1[clear_indices] = -1
+            self.hero_hole0[clear_indices] = -1
+            self.hero_hole1[clear_indices] = -1
 
         # Common tensors for both model types
         self.action_indices[clear_indices] = 0
@@ -344,7 +359,7 @@ class VectorizedReplayBuffer:
 
         return trajectories_added, steps_added
 
-    def add_batch(
+    def add_transitions(
         self,
         embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData],
         action_indices: torch.Tensor,  # [batch_size] - long
@@ -405,65 +420,12 @@ class VectorizedReplayBuffer:
                 raise TypeError(
                     "StructuredEmbeddingData provided but buffer is not in transformer mode"
                 )
-            # In transformer mode, append only two tokens per transition:
-            # 1) CONTEXT (dynamic scalars)
-            # 2) ACTION (taken action)
-            bidx = buffer_trajectory_indices
-            if bidx.numel() == 0:
-                return
-
-            # Write CLS once at the beginning of each trajectory that has no tokens yet
-            needs_cls = self.token_positions[bidx] == 0
-            if needs_cls.any():
-                cls_rows = bidx[needs_cls]
-                self.token_ids[cls_rows, 0] = self.special_offset + Special.CLS.value
-                # Copy invariant CLS features from encoder slot 0
-                self.context_features[cls_rows, 0, :] = embedding_data.context_features[
-                    needs_cls, 0, :
-                ].to(self.float_dtype)
-                # Advance position for those rows
-                self.token_positions[cls_rows] = 1
-
-            # Positions before writing CONTEXT
-            pos_ctx = self.token_positions[bidx]
-
-            # Bounds check: require room for two tokens
-            if (pos_ctx + 2 > self.sequence_length).any():
-                raise ValueError("Token sequence exceeds configured sequence length")
-
-            # 1) Write CONTEXT token at current position
-            self.token_ids[bidx, pos_ctx] = self.special_offset + Special.CONTEXT.value
-            # Fill dynamic context scalars from encoder slot 1
-            self.context_features[bidx, pos_ctx, :] = embedding_data.context_features[
-                :, 1, :
-            ].to(self.float_dtype)
-            # Explicitly mark as non-action
-            self.action_actors[bidx, pos_ctx] = -1
-            self.action_streets[bidx, pos_ctx] = -1
-
-            # Record decision-end (exclusive) right after context for this step
-            self.decision_token_ends[bidx, step_positions] = pos_ctx + 1
-
-            # 2) Write ACTION token at next position
-            pos_act = pos_ctx + 1
-            self.token_ids[bidx, pos_act] = (
-                self.action_offset + action_indices.to(torch.int16)
-            ).to(torch.int8)
-            # Actor is always hero (P0) for add_batch transitions
-            self.action_actors[bidx, pos_act] = 0
-            # Street pulled from dynamic context scalar
-            street_vals = embedding_data.context_features[
-                :, 1, Context.STREET.value
-            ].to(torch.int16)
-            self.action_streets[bidx, pos_act] = street_vals
-            # Snapshot legal mask at action time
-            self.action_legal_masks[bidx, pos_act, :] = legal_masks
-
-            # Record end-of-sequence (exclusive length) for this transition
-            ends = pos_act + 1
-            self.transition_token_ends[bidx, step_positions] = ends
-            # Advance token positions to new end
-            self.token_positions[bidx] = ends
+            # Append any newly provided tokens to the sequence (vectorized)
+            self._append_from_embedding(buffer_trajectory_indices, embedding_data)
+            # Record transition end pointer for this step
+            self.transition_token_ends[buffer_trajectory_indices, step_positions] = (
+                self.token_positions[buffer_trajectory_indices]
+            )
         else:
             raise TypeError("Unsupported embedding_data type")
 
@@ -803,6 +765,58 @@ class VectorizedReplayBuffer:
 
         return batch
 
+    def record_step_metadata(
+        self,
+        trajectory_indices: torch.Tensor,
+        decision_ends: torch.Tensor,
+        transition_ends: torch.Tensor,
+        action_indices: torch.Tensor,
+        log_probs: torch.Tensor,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        legal_masks: torch.Tensor,
+        delta2: torch.Tensor,
+        delta3: torch.Tensor,
+        values: torch.Tensor,
+    ) -> None:
+        """Store per-step scalars and end indices for transformer steps.
+
+        Assumes tokens have already been appended via add_tokens and token_positions updated.
+        """
+        if not self.is_transformer:
+            raise TypeError("record_step_metadata is only valid in transformer mode")
+        if trajectory_indices.numel() == 0:
+            return
+
+        bidx = (trajectory_indices + self.position) % self.capacity
+        step_positions = self.current_step_positions[bidx]
+
+        # Record ends
+        self.decision_token_ends[bidx, step_positions] = decision_ends
+        self.transition_token_ends[bidx, step_positions] = transition_ends
+
+        # Store step scalars
+        self.action_indices[bidx, step_positions] = action_indices
+        self.log_probs[bidx, step_positions, :] = log_probs
+        self.rewards[bidx, step_positions] = rewards
+        self.dones[bidx, step_positions] = dones
+        self.legal_masks[bidx, step_positions, :] = legal_masks
+        self.delta2[bidx, step_positions] = delta2
+        self.delta3[bidx, step_positions] = delta3
+        self.values[bidx, step_positions] = values
+
+        # Advance step positions
+        self.current_step_positions[bidx] += 1
+
+        # Handle completed
+        completed = trajectory_indices[dones]
+        if len(completed) > 0:
+            completed_b = (completed + self.position) % self.capacity
+            self.trajectory_lengths[completed_b] = self.current_step_positions[
+                completed_b
+            ]
+            self.current_step_positions[completed_b] = 0
+
     def clear(self) -> None:
         """Clear all stored trajectories."""
         self.position = 0
@@ -848,47 +862,113 @@ class VectorizedReplayBuffer:
         if buffer_indices.numel() == 0:
             return
 
-        lengths = embedding_data.lengths.long()
+        bidx = buffer_indices
+        batch = bidx.shape[0]
+        seq_len = self.sequence_length
 
-        for batch_idx, buf_idx in enumerate(buffer_indices.tolist()):
-            new_len = int(lengths[batch_idx].item())
-            prev_len = int(self.token_positions[buf_idx].item())
+        new_lens = embedding_data.lengths[:batch].long()
+        prev_lens = self.token_positions[bidx]
 
-            if new_len < prev_len:
-                raise ValueError("Embedding length cannot decrease when appending")
+        if (new_lens < prev_lens).any():
+            raise ValueError("Embedding length cannot decrease when appending")
 
-            append_len = new_len - prev_len
-            if append_len == 0:
-                continue
+        if (new_lens > seq_len).any():
+            raise ValueError("Token sequence exceeds configured sequence length")
 
-            if new_len > self.sequence_length:
-                raise ValueError("Token sequence exceeds configured sequence length")
+        # Build mask for positions to append: prev_len <= pos < new_len per row
+        pos = torch.arange(seq_len, device=self.device).unsqueeze(0).expand(batch, -1)
+        mask = (pos >= prev_lens.unsqueeze(1)) & (pos < new_lens.unsqueeze(1))
 
-            dest = slice(prev_len, new_len)
-            src = slice(prev_len, new_len)
+        if not mask.any():
+            return
 
-            self.token_ids[buf_idx, dest] = embedding_data.token_ids[batch_idx, src].to(
-                torch.int8
-            )
-            self.card_ranks[buf_idx, dest] = embedding_data.card_ranks[batch_idx, src]
-            self.card_suits[buf_idx, dest] = embedding_data.card_suits[batch_idx, src]
-            self.card_streets[buf_idx, dest] = embedding_data.card_streets[
-                batch_idx, src
-            ]
-            self.action_actors[buf_idx, dest] = embedding_data.action_actors[
-                batch_idx, src
-            ]
-            self.action_streets[buf_idx, dest] = embedding_data.action_streets[
-                batch_idx, src
-            ]
-            self.action_legal_masks[buf_idx, dest] = embedding_data.action_legal_masks[
-                batch_idx, src, :
-            ]
-            self.context_features[buf_idx, dest] = embedding_data.context_features[
-                batch_idx, src, :
-            ].to(self.float_dtype)
+        # Row-wise views
+        token_ids_src = embedding_data.token_ids[:batch]
+        card_ranks_src = embedding_data.card_ranks[:batch]
+        card_suits_src = embedding_data.card_suits[:batch]
+        card_streets_src = embedding_data.card_streets[:batch]
+        action_actors_src = embedding_data.action_actors[:batch]
+        action_streets_src = embedding_data.action_streets[:batch]
+        action_legal_src = embedding_data.action_legal_masks[:batch]
+        context_src = embedding_data.context_features[:batch]
 
-            self.token_positions[buf_idx] = new_len
+        self.token_ids[bidx][mask] = token_ids_src[mask].to(torch.int8)
+        self.card_ranks[bidx][mask] = card_ranks_src[mask].to(torch.uint8)
+        self.card_suits[bidx][mask] = card_suits_src[mask].to(torch.uint8)
+        self.card_streets[bidx][mask] = card_streets_src[mask].to(torch.uint8)
+        self.action_actors[bidx][mask] = action_actors_src[mask].to(torch.uint8)
+        self.action_streets[bidx][mask] = action_streets_src[mask].to(torch.uint8)
+        # For 3D, expand mask to match action_legal_masks shape
+        mask3 = mask.unsqueeze(-1).expand(-1, -1, self.num_bet_bins)
+        self.action_legal_masks[bidx][mask3] = action_legal_src[mask3].to(torch.bool)
+        # For context features, use a different mask expansion
+        mask3_context = mask.unsqueeze(-1).expand(
+            -1, -1, self.context_features.shape[-1]
+        )
+        self.context_features[bidx][mask3_context] = context_src[mask3_context].to(
+            self.float_dtype
+        )
+
+        # Update positions to new_lens
+        self.token_positions[bidx] = new_lens
+
+    def set_hole_cards(
+        self, traj_indices: torch.Tensor, card0: torch.Tensor, card1: torch.Tensor
+    ) -> None:
+        """Temporarily overwrite preflop hole card tokens to given cards for trajectories.
+
+        This enables opponent-perspective appends during self-play without permanently
+        altering stored hero-perspective tokens (call restore_hero_holes afterward).
+        """
+        if not self.is_transformer or traj_indices.numel() == 0:
+            return
+        bidx = (traj_indices + self.position) % self.capacity
+        p0 = self.hole_pos0[bidx]
+        p1 = self.hole_pos1[bidx]
+        m0 = p0 >= 0
+        m1 = p1 >= 0
+        if m0.any():
+            ii0 = bidx[m0]
+            pp0 = p0[m0]
+            c0 = card0[m0]
+            self.token_ids[ii0, pp0] = (Special.NUM_SPECIAL.value + c0).to(torch.int8)
+            self.card_ranks[ii0, pp0] = (c0 % 13).to(torch.uint8)
+            self.card_suits[ii0, pp0] = (c0 // 13).to(torch.uint8)
+            self.card_streets[ii0, pp0] = 0
+        if m1.any():
+            ii1 = bidx[m1]
+            pp1 = p1[m1]
+            c1 = card1[m1]
+            self.token_ids[ii1, pp1] = (Special.NUM_SPECIAL.value + c1).to(torch.int8)
+            self.card_ranks[ii1, pp1] = (c1 % 13).to(torch.uint8)
+            self.card_suits[ii1, pp1] = (c1 // 13).to(torch.uint8)
+            self.card_streets[ii1, pp1] = 0
+
+    def restore_hero_holes(self, traj_indices: torch.Tensor) -> None:
+        """Restore originally recorded hero hole cards for given trajectories."""
+        if not self.is_transformer or traj_indices.numel() == 0:
+            return
+        bidx = (traj_indices + self.position) % self.capacity
+        p0 = self.hole_pos0[bidx]
+        p1 = self.hole_pos1[bidx]
+        m0 = p0 >= 0
+        m1 = p1 >= 0
+        if m0.any():
+            ii0 = bidx[m0]
+            pp0 = p0[m0]
+            c0 = self.hero_hole0[ii0]
+            self.token_ids[ii0, pp0] = (Special.NUM_SPECIAL.value + c0).to(torch.int8)
+            self.card_ranks[ii0, pp0] = (c0 % 13).to(torch.uint8)
+            self.card_suits[ii0, pp0] = (c0 // 13).to(torch.uint8)
+            self.card_streets[ii0, pp0] = 0
+        if m1.any():
+            ii1 = bidx[m1]
+            pp1 = p1[m1]
+            c1 = self.hero_hole1[ii1]
+            self.token_ids[ii1, pp1] = (Special.NUM_SPECIAL.value + c1).to(torch.int8)
+            self.card_ranks[ii1, pp1] = (c1 % 13).to(torch.uint8)
+            self.card_suits[ii1, pp1] = (c1 // 13).to(torch.uint8)
+            self.card_streets[ii1, pp1] = 0
 
     def add_tokens(
         self,
@@ -910,9 +990,8 @@ class VectorizedReplayBuffer:
         buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
         if not self.is_transformer:
             raise TypeError("add_tokens is only valid in transformer mode")
-        self._append_non_action_tokens_from_embedding(
-            buffer_trajectory_indices, embedding_data
-        )
+        # Append full new suffix from embedding_data to token streams
+        self._append_from_embedding(buffer_trajectory_indices, embedding_data)
 
     def add_token(
         self,
@@ -921,192 +1000,6 @@ class VectorizedReplayBuffer:
     ) -> None:
         """Alias for add_tokens for API parity with single-token events."""
         self.add_tokens(embedding_data, trajectory_indices)
-
-    def add_opponent_actions(
-        self,
-        trajectory_indices: torch.Tensor,
-        action_indices: torch.Tensor,
-        legal_masks: torch.Tensor,
-        streets: torch.Tensor,
-    ) -> None:
-        """Append opponent action tokens to token streams (no context).
-
-        Args:
-            trajectory_indices: [K] environment indices whose opponent acted this step
-            action_indices: [K] discrete action bins taken by opponent
-            legal_masks: [K, num_bet_bins] legal mask snapshot at opponent action time
-            streets: [K] street ids at the time of the opponent action (pre-advance)
-        """
-
-        if self.open_batch <= 0:
-            raise RuntimeError(
-                "Must call start_adding_trajectory_batches before adding data"
-            )
-
-        if not self.is_transformer:
-            raise TypeError("add_opponent_actions is only valid in transformer mode")
-
-        if trajectory_indices.numel() == 0:
-            return
-
-        bidx = (trajectory_indices + self.position) % self.capacity
-        pos = self.token_positions[bidx]
-
-        # Ensure CLS exists if needed
-        needs_cls = pos == 0
-        if needs_cls.any():
-            cls_rows = bidx[needs_cls]
-            self.token_ids[cls_rows, 0] = self.special_offset + Special.CLS.value
-            # No need to write CLS context invariants here
-            pos = self.token_positions[bidx]  # refresh
-
-        # Bounds check
-        if (pos + 1 > self.sequence_length).any():
-            raise ValueError("Token sequence exceeds configured sequence length")
-
-        # Write action token
-        token_vals = (self.action_offset + action_indices.to(torch.int16)).to(
-            torch.int8
-        )
-        self.token_ids[bidx, pos] = token_vals
-        self.action_actors[bidx, pos] = 1  # opponent
-        self.action_streets[bidx, pos] = streets.to(torch.int16)
-        self.action_legal_masks[bidx, pos, :] = legal_masks
-
-        # Advance positions
-        self.token_positions[bidx] = pos + 1
-
-    def _append_non_action_tokens_from_embedding(
-        self,
-        buffer_indices: torch.Tensor,
-        embedding_data: StructuredEmbeddingData,
-    ) -> None:
-        """Append only street markers and card tokens from embedding_data.
-
-        Action tokens (>= action_offset) are ignored to avoid duplication with add_batch.
-        """
-
-        if buffer_indices.numel() == 0:
-            return
-
-        lengths = embedding_data.lengths.long()
-        action_cutoff = torch.as_tensor(
-            self.action_offset, device=self.device, dtype=torch.int32
-        )
-
-        for batch_idx, buf_idx in enumerate(buffer_indices.tolist()):
-            new_len = int(lengths[batch_idx].item())
-            prev_len = int(self.token_positions[buf_idx].item())
-
-            if new_len < prev_len:
-                raise ValueError("Embedding length cannot decrease when appending")
-
-            if new_len == prev_len:
-                continue
-
-            if new_len > self.sequence_length:
-                raise ValueError("Token sequence exceeds configured sequence length")
-
-            # Identify newly available tokens and filter to non-action ids
-            src_ids = embedding_data.token_ids[batch_idx, prev_len:new_len].to(
-                torch.int32
-            )
-            non_action_mask = src_ids < action_cutoff
-
-            if non_action_mask.any():
-                sel = non_action_mask
-                num_sel = int(sel.sum().item())
-                dest_start = prev_len
-                dest_end = prev_len + num_sel
-
-                # Gather indices in source window
-                src_indices = torch.nonzero(sel, as_tuple=False).squeeze(1)
-                # Map to absolute positions in embedding_data
-                abs_src = prev_len + src_indices
-
-                self.token_ids[buf_idx, dest_start:dest_end] = embedding_data.token_ids[
-                    batch_idx, abs_src
-                ].to(torch.int8)
-                self.card_ranks[buf_idx, dest_start:dest_end] = (
-                    embedding_data.card_ranks[batch_idx, abs_src]
-                )
-                self.card_suits[buf_idx, dest_start:dest_end] = (
-                    embedding_data.card_suits[batch_idx, abs_src]
-                )
-                self.card_streets[buf_idx, dest_start:dest_end] = (
-                    embedding_data.card_streets[batch_idx, abs_src]
-                )
-                # Clear action meta for non-action tokens
-                self.action_actors[buf_idx, dest_start:dest_end] = -1
-                self.action_streets[buf_idx, dest_start:dest_end] = -1
-                # No legal mask/context copy for non-action tokens except CLS/context features if present
-                # If any selected token equals CONTEXT, copy its context features
-                sel_token_ids = embedding_data.token_ids[batch_idx, abs_src]
-                is_context = sel_token_ids == (
-                    self.special_offset + Special.CONTEXT.value
-                )
-                if is_context.any():
-                    ctx_src_idx = abs_src[is_context]
-                    ctx_dst_idx = dest_start + torch.nonzero(
-                        is_context, as_tuple=False
-                    ).squeeze(1)
-                    self.context_features[buf_idx, ctx_dst_idx, :] = (
-                        embedding_data.context_features[batch_idx, ctx_src_idx, :].to(
-                            self.float_dtype
-                        )
-                    )
-
-                # Advance position by number of appended tokens
-                self.token_positions[buf_idx] = dest_end
-
-    def add_context(
-        self,
-        embedding_data: StructuredEmbeddingData,
-        trajectory_indices: torch.Tensor,
-    ) -> None:
-        """Append a CONTEXT token for current decision and record decision end.
-
-        Uses context_features[:, 1, :] from embedding_data as the numeric payload.
-        """
-        if self.open_batch <= 0:
-            raise RuntimeError(
-                "Must call start_adding_trajectory_batches before adding data"
-            )
-        if not self.is_transformer:
-            raise TypeError("add_context is only valid in transformer mode")
-
-        bidx = (trajectory_indices + self.position) % self.capacity
-        if bidx.numel() == 0:
-            return
-
-        # Ensure CLS at start rows
-        needs_cls = self.token_positions[bidx] == 0
-        if needs_cls.any():
-            cls_rows = bidx[needs_cls]
-            self.token_ids[cls_rows, 0] = self.special_offset + Special.CLS.value
-            self.context_features[cls_rows, 0, :] = embedding_data.context_features[
-                needs_cls, 0, :
-            ].to(self.float_dtype)
-            self.token_positions[cls_rows] = 1
-
-        pos = self.token_positions[bidx]
-        if (pos + 1 > self.sequence_length).any():
-            raise ValueError("Token sequence exceeds configured sequence length")
-
-        # Write CONTEXT at current position
-        self.token_ids[bidx, pos] = self.special_offset + Special.CONTEXT.value
-        self.context_features[bidx, pos, :] = embedding_data.context_features[
-            :, 1, :
-        ].to(self.float_dtype)
-        # Mark as non-action
-        self.action_actors[bidx, pos] = -1
-        self.action_streets[bidx, pos] = -1
-
-        # Record decision end for current step (exclusive of context)
-        step_positions = self.current_step_positions[bidx]
-        self.decision_token_ends[bidx, step_positions] = pos + 1
-        # Advance token position to include context
-        self.token_positions[bidx] = pos + 1
 
     def _sample_transformer_steps(
         self,
@@ -1276,74 +1169,7 @@ class VectorizedReplayBuffer:
             lengths=ends,
         )
 
-    def add_hero_action_step(
-        self,
-        trajectory_indices: torch.Tensor,
-        action_indices: torch.Tensor,
-        log_probs: torch.Tensor,
-        rewards: torch.Tensor,
-        dones: torch.Tensor,
-        legal_masks: torch.Tensor,
-        delta2: torch.Tensor,
-        delta3: torch.Tensor,
-        values: torch.Tensor,
-        street_values: torch.Tensor,
-    ) -> None:
-        """Append the hero's ACTION token and record transition data for current step.
-
-        Assumes the CONTEXT token for the decision was already appended via add_tokens.
-        """
-        if not self.is_transformer:
-            raise TypeError("add_hero_action_step is only valid in transformer mode")
-
-        bidx = (trajectory_indices + self.position) % self.capacity
-        if bidx.numel() == 0:
-            return
-
-        step_positions = self.current_step_positions[bidx]
-        # Bounds check
-        if (step_positions >= self.max_trajectory_length).any():
-            raise ValueError("Some trajectories would exceed max_trajectory_length")
-
-        # Write ACTION at current token_positions and advance
-        pos = self.token_positions[bidx]
-        if (pos + 1 > self.sequence_length).any():
-            raise ValueError("Token sequence exceeds configured sequence length")
-
-        self.token_ids[bidx, pos] = (
-            self.action_offset + action_indices.to(torch.int16)
-        ).to(torch.int8)
-        self.action_actors[bidx, pos] = 0  # hero
-        self.action_streets[bidx, pos] = street_values.to(torch.int16)
-        self.action_legal_masks[bidx, pos, :] = legal_masks
-        # Transition ends after writing action
-        new_pos = pos + 1
-        self.token_positions[bidx] = new_pos
-        self.transition_token_ends[bidx, step_positions] = new_pos
-        # decision_end was the position before action
-        self.decision_token_ends[bidx, step_positions] = pos
-
-        # Store scalar step data
-        self.action_indices[bidx, step_positions] = action_indices
-        self.log_probs[bidx, step_positions, :] = log_probs
-        self.rewards[bidx, step_positions] = rewards
-        self.dones[bidx, step_positions] = dones
-        self.legal_masks[bidx, step_positions, :] = legal_masks
-        self.delta2[bidx, step_positions] = delta2
-        self.delta3[bidx, step_positions] = delta3
-        self.values[bidx, step_positions] = values
-
-        # Advance step positions
-        self.current_step_positions[bidx] += 1
-
-        # Handle done trajectories
-        completed = trajectory_indices[dones]
-        if len(completed) > 0:
-            completed_b = (completed + self.position) % self.capacity
-            self.trajectory_lengths[completed_b] = self.current_step_positions[
-                completed_b
-            ]
-            self.current_step_positions[completed_b] = 0
+    # add_hero_action_step removed in favor of TokenSequenceBuilder + record_step_metadata
 
     def snapshot_decision_prefixes(
         self, traj_indices: torch.Tensor

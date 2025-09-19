@@ -1,12 +1,11 @@
-"""Inspect transformer tokenization for a simple hand history.
+"""Inspect transformer tokenization by hooking into SelfPlayTrainer.
 
 Run with:
 
     python debugging/inspect_transformer_sequence.py --actions 2,1,0
 
-This will step a single environment through the provided discrete bet bins,
-print the tensor environment state after every action, and then pretty-print
-the resulting transformer token sequences for both players.
+This will run a single iteration of SelfPlayTrainer and hook into the model
+to see what exactly gets passed in as input data.
 """
 
 from __future__ import annotations
@@ -17,8 +16,14 @@ from typing import Iterable, List
 import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
-from alphaholdem.models.transformer.tokens import Context, Special
+from alphaholdem.models.transformer.tokens import Context, Special, Cls
+from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.core.structured_config import (
+    Config,
+    TrainingConfig,
+    ModelConfig,
+    EnvConfig,
+)
 
 
 RANK_STR = "AKQJT98765432"[::-1]  # -> "23456789TJQKA"
@@ -68,16 +73,15 @@ def print_environment_state(env: HUNLTensorEnv, step_idx: int) -> None:
 
 
 def make_pretty_tokens(data, bet_bins: List[float], title: str) -> None:
-    encoder = TransformerStateEncoder
+    """Pretty print token sequence data."""
+    encoder = type(data)  # Get the class for static methods
     card_offset = encoder.get_card_token_offset(len(bet_bins) + 3)
     action_offset = encoder.get_action_token_offset(len(bet_bins) + 3)
     special_offset = encoder.get_special_token_offset(len(bet_bins) + 3)
 
     print(f"\n--- Token sequence for {title} (length={int(data.lengths[0])}) ---")
-    for pos, token in enumerate(data.token_ids[0]):
-        if token < 0:
-            break
-        token = int(token.item())
+    for pos in range(int(data.lengths[0])):
+        token = int(data.token_ids[0, pos].item())
         parts: List[str] = [f"[{pos:02d}]"]
         if special_offset <= token < special_offset + Special.NUM_SPECIAL.value:
             special_name = Special(token - special_offset).name
@@ -110,6 +114,43 @@ def make_pretty_tokens(data, bet_bins: List[float], title: str) -> None:
         print(" ".join(parts))
 
 
+def hook_model_forward(model, original_forward):
+    """Hook into model forward to inspect input data."""
+
+    def hooked_forward(embedding_data):
+        print("\n=== MODEL INPUT INSPECTION ===")
+        print(f"Input type: {type(embedding_data)}")
+        print(
+            f"Input shape: {embedding_data.token_ids.shape if hasattr(embedding_data, 'token_ids') else 'N/A'}"
+        )
+
+        if hasattr(embedding_data, "token_ids"):
+            print(f"Token IDs shape: {embedding_data.token_ids.shape}")
+            print(f"Token IDs sample: {embedding_data.token_ids[0, :10].tolist()}")
+            print(f"Lengths: {embedding_data.lengths.tolist()}")
+
+            if hasattr(embedding_data, "context_features"):
+                print(
+                    f"Context features shape: {embedding_data.context_features.shape}"
+                )
+                print(
+                    f"Context features sample: {embedding_data.context_features[0, 0, :5].tolist()}"
+                )
+
+        # Call original forward
+        result = original_forward(embedding_data)
+
+        print(f"Output keys: {list(result.keys())}")
+        if "policy_logits" in result:
+            print(f"Policy logits shape: {result['policy_logits'].shape}")
+        if "value" in result:
+            print(f"Value shape: {result['value'].shape}")
+
+        return result
+
+    return hooked_forward
+
+
 def parse_actions(arg: str) -> List[int]:
     if not arg:
         return []
@@ -118,34 +159,58 @@ def parse_actions(arg: str) -> List[int]:
 
 def main(actions: Iterable[int]) -> None:
     device = torch.device("cpu")
-    bet_bins = [0.5, 1.0, 1.5, 2.0]
-    env = HUNLTensorEnv(
-        num_envs=1,
-        starting_stack=20000,
-        sb=50,
-        bb=100,
-        bet_bins=bet_bins,
-        device=device,
+
+    # Create config manually
+    config = Config(
+        use_wandb=False,
+        num_envs=8,
+        train=TrainingConfig(
+            batch_size=64,
+            num_epochs=4,
+            max_trajectory_length=10,
+            learning_rate=1e-4,
+        ),
+        model=ModelConfig(
+            name="poker_transformer_v1",
+            kwargs={
+                "d_model": 128,
+                "n_layers": 2,
+                "n_heads": 4,
+                "num_bet_bins": 7,  # len(bet_bins) + 3
+            },
+        ),
+        env=EnvConfig(
+            stack=20000,
+            bet_bins=[0.5, 1.0, 1.5, 2.0],
+            sb=50,
+            bb=100,
+        ),
+        device="cpu",
     )
-    env.reset()
 
-    print("Initial environment ready. Starting sequence...")
-    print_environment_state(env, step_idx=0)
+    # Add missing field that SelfPlayTrainer expects
+    config.train.max_sequence_length = 50
 
-    for idx, action in enumerate(actions, start=1):
-        current_player = int(env.to_act[0].item())
-        print(f"\n--> Step {idx}: player {current_player} takes bin {action}")
-        env.step_bins(torch.tensor([action], device=device))
-        print_environment_state(env, step_idx=idx)
+    # Create trainer
+    trainer = SelfPlayTrainer(config, device)
 
-    encoder = TransformerStateEncoder(env, device)
-    idx_tensor = torch.tensor([0], device=device)
+    # Hook into the model to see what gets passed in
+    original_forward = trainer.model.forward
+    trainer.model.forward = hook_model_forward(trainer.model, original_forward)
 
-    player0 = encoder.encode_tensor_states(player=0, idxs=idx_tensor)
-    player1 = encoder.encode_tensor_states(player=1, idxs=idx_tensor)
+    print("Starting SelfPlayTrainer iteration...")
+    print(f"Actions to take: {list(actions)}")
 
-    make_pretty_tokens(player0, bet_bins, title="player 0 perspective")
-    make_pretty_tokens(player1, bet_bins, title="player 1 perspective")
+    # Run one iteration of trajectory collection
+    try:
+        # This will collect trajectories and we'll see what gets passed to the model
+        trainer.collect_tensor_trajectories(min_trajectories=1)
+        print("\n=== TRAJECTORY COLLECTION COMPLETED ===")
+    except Exception as e:
+        print(f"Error during collection: {e}")
+        import traceback
+
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

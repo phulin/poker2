@@ -45,6 +45,7 @@ train:
   num_epochs: 4
   replay_buffer_batches: 4
   max_trajectory_length: 20
+  max_sequence_length: 50
   
   # PPO hyperparameters
   ppo_eps: 0.2

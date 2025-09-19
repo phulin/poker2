@@ -397,13 +397,18 @@ class HUNLTensorEnv:
         bin_indices: torch.Tensor,
         bin_amounts: Optional[torch.Tensor] = None,
         legal_masks: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Step all envs using discrete bet bin indices tensor [N]. -1 means no action.
         bin_indices: [N] bet bin indices
         bin_amounts: [N, B] concrete amounts for bins; -1 where not applicable
         legal_masks: [N, B] bool mask of legal bins (fold/check-call/presets/all-in)
 
-        Returns (rewards [N], dones [N], to_act [N], chips_placed [N])
+        Returns:
+          - rewards [N]
+          - dones [N]
+          - to_act [N]
+          - new_streets [N]: -1 if street did not advance, otherwise 1=flop, 2=turn, 3=river
+          - dealt_cards [N, 3]: indices of newly dealt cards this step; -1 where not applicable
         Rewards are scaled by 100bb consistent with HUNLEnv.
         """
         assert bin_indices.shape[0] == self.N
@@ -421,6 +426,9 @@ class HUNLTensorEnv:
         to_call = other_committed - actor_committed
 
         rewards = torch.zeros(N, dtype=self.float_dtype, device=device)
+        # Track street advancement and cards dealt this step
+        new_streets = torch.full((N,), -1, dtype=torch.long, device=device)
+        dealt_cards = torch.full((N, 3), -1, dtype=torch.long, device=device)
 
         # Group masks by action type
         is_fold = bin_indices == 0
@@ -571,6 +579,12 @@ class HUNLTensorEnv:
             self.board_indices[flop_ids, 0] = self.deck[flop_ids, pos]
             self.board_indices[flop_ids, 1] = self.deck[flop_ids, pos + 1]
             self.board_indices[flop_ids, 2] = self.deck[flop_ids, pos + 2]
+            # Record returned advancement/card indices
+            if flop_ids.numel() > 0:
+                new_streets[flop_ids] = 1
+                dealt_cards[flop_ids, 0] = self.board_indices[flop_ids, 0]
+                dealt_cards[flop_ids, 1] = self.board_indices[flop_ids, 1]
+                dealt_cards[flop_ids, 2] = self.board_indices[flop_ids, 2]
 
             # turn
             turn_mask = s == 1
@@ -581,6 +595,10 @@ class HUNLTensorEnv:
             self.board_onehot[turn_ids, 3] = self.card_onehot_cache[c]
             # Set turn card index
             self.board_indices[turn_ids, 3] = c
+            # Record returned advancement/card indices
+            if turn_ids.numel() > 0:
+                new_streets[turn_ids] = 2
+                dealt_cards[turn_ids, 0] = c
 
             # river
             river_mask = s == 2
@@ -592,6 +610,10 @@ class HUNLTensorEnv:
             self.board_onehot[river_ids, 4] = self.card_onehot_cache[c]
             # Set river card index
             self.board_indices[river_ids, 4] = c
+            # Record returned advancement/card indices
+            if river_ids.numel() > 0:
+                new_streets[river_ids] = 3
+                dealt_cards[river_ids, 0] = c
 
             # Advance street
             self.street[round_closed_idx] += 1
@@ -606,7 +628,7 @@ class HUNLTensorEnv:
                 after_betting_committed[:3],
             )
 
-        return rewards, self.done, self.to_act
+        return rewards, self.done, self.to_act, new_streets, dealt_cards
 
     def _print_debug_table(
         self,

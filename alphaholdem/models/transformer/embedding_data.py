@@ -163,3 +163,17 @@ class StructuredEmbeddingData:
     def attention_mask(self) -> torch.Tensor:
         """Return boolean mask indicating valid tokens."""
         return self.token_ids >= 0
+
+    def clone(self) -> StructuredEmbeddingData:
+        """Return a copy of the embedding data."""
+        return StructuredEmbeddingData(
+            token_ids=self.token_ids.clone(),
+            card_ranks=self.card_ranks.clone(),
+            card_suits=self.card_suits.clone(),
+            card_streets=self.card_streets.clone(),
+            action_actors=self.action_actors.clone(),
+            action_streets=self.action_streets.clone(),
+            action_legal_masks=self.action_legal_masks.clone(),
+            context_features=self.context_features.clone(),
+            lengths=self.lengths.clone(),
+        )

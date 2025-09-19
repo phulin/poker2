@@ -71,7 +71,6 @@ class TransformerStateEncoder:
     def get_special_token_offset(cls, num_bet_bins: int) -> int:
         """Offset where special tokens start."""
 
-        del num_bet_bins  # unused but kept for API compatibility
         return 0
 
     @classmethod

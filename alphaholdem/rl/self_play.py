@@ -16,7 +16,7 @@ from ..env.hunl_tensor_env import HUNLTensorEnv
 from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.factory import ModelFactory
 from ..models.state_encoder import CNNStateEncoder
-from ..models.transformer.embedding_data import StructuredEmbeddingData
+from ..models.transformer.token_sequence_builder import TokenSequenceBuilder
 from ..rl.agent_snapshot import AgentSnapshot
 from ..rl.k_best_pool import KBestOpponentPool
 from ..rl.dred_pool import DREDPool
@@ -100,25 +100,12 @@ class SelfPlayTrainer:
             )
 
         # Config-driven components
-        ce, ae, model, policy = build_components_from_config(self.cfg)
-        self.cards_encoder = ce
-        self.actions_encoder = ae
+        _, _, model, policy = build_components_from_config(self.cfg)
         self.model = model
         self.policy = policy
 
-        # Create state encoder based on model type
+        # Determine model type
         self.is_transformer = cfg.model.name.startswith("poker_transformer")
-        if self.is_transformer:
-            # Use transformer state encoder
-            self.state_encoder = ModelFactory.create_state_encoder(
-                "transformer", self.device, tensor_env=self.tensor_env
-            )
-            # Always use structured embeddings for transformer models
-            self.use_structured_embeddings = True
-        else:
-            # Use CNN state encoder
-            self.state_encoder = CNNStateEncoder(self.tensor_env, self.device)
-            self.use_structured_embeddings = False
 
         # Ensure bins align with model output size to avoid mask/logit mismatch
         if hasattr(self.model, "policy_head") and hasattr(
@@ -128,6 +115,21 @@ class SelfPlayTrainer:
         else:
             self.num_bet_bins = len(self.cfg.env.bet_bins) + 3
 
+        # Create state encoder based on model type (TSB becomes the encoder for transformer)
+        if self.is_transformer:
+            # Use TSB directly as the state encoder
+            # Choose a safe sequence length (matches tests/typical config)
+            self.state_encoder = TokenSequenceBuilder(
+                tensor_env=self.tensor_env,
+                sequence_length=self.cfg.train.max_sequence_length,
+                num_bet_bins=self.num_bet_bins,
+                device=self.device,
+                float_dtype=self.float_dtype,
+            )
+        else:
+            # Use CNN state encoder
+            self.state_encoder = CNNStateEncoder(self.tensor_env, self.device)
+
         self.model.to(self.device)  # Move model to device
         self._initialize_weights()  # Initialize with better weights
         # Replay buffer capacity in steps is batch_size * replay_buffer_batches
@@ -136,7 +138,7 @@ class SelfPlayTrainer:
 
         # Use vectorized replay buffer for efficient tensor operations
         sequence_length = (
-            self.state_encoder.get_sequence_length() if self.is_transformer else -1
+            self.state_encoder.sequence_length if self.is_transformer else -1
         )
         self.replay_buffer = VectorizedReplayBuffer(
             capacity=buffer_capacity,  # Number of trajectories
@@ -425,6 +427,32 @@ class SelfPlayTrainer:
                     opponent_rewards,
                 )
 
+    def _reset_tensor_env_and_encoder(self) -> None:
+        """Reset the tensorized environment and token sequence builder."""
+        self.tensor_env.reset()
+
+        all_env_indices = torch.arange(self.num_envs, device=self.device)
+        if self.is_transformer and isinstance(self.state_encoder, TokenSequenceBuilder):
+            self.state_encoder.reset_envs(
+                torch.arange(self.num_envs, device=self.device)
+            )
+
+            # CLS
+            self.state_encoder.add_cls(all_env_indices)
+            # Preflop street marker
+            self.state_encoder.add_street(
+                all_env_indices, torch.zeros_like(all_env_indices)
+            )
+            # Hole cards for P0
+            self.state_encoder.add_card(
+                all_env_indices,
+                self.tensor_env.hole_indices[all_env_indices, 0, 0],
+            )
+            self.state_encoder.add_card(
+                all_env_indices,
+                self.tensor_env.hole_indices[all_env_indices, 0, 1],
+            )
+
     @profile
     def collect_tensor_trajectories(
         self,
@@ -468,13 +496,13 @@ class SelfPlayTrainer:
         collected_trajectory_rewards = []
 
         # Initialize all environments
-        self.tensor_env.reset()
+        self._reset_tensor_env_and_encoder()
 
         # Per-environment reward tracking and step counts
         per_env_rewards = torch.zeros(self.num_envs, device=self.device)
         max_steps = self.cfg.train.max_trajectory_length
         steps_since_reset = 0
-        prev_street = self.tensor_env.street.clone()
+        # Use the trainer's state_encoder as the TSB for transformer path
 
         # Chunk opponents by tensor env index
         opp_env_groups = None
@@ -510,17 +538,6 @@ class SelfPlayTrainer:
                 self.replay_buffer.start_adding_trajectory_batches(self.num_envs)
                 adding_trajectories = True
 
-                # Append initial non-action tokens (CLS, preflop marker, hole cards) for transformer only
-                if self.is_transformer:
-                    all_env_indices = torch.arange(self.num_envs, device=self.device)
-                    init_states = self._encode_tensor_states(
-                        player=0, idxs=all_env_indices
-                    )
-                    self.replay_buffer.add_tokens(
-                        embedding_data=init_states,
-                        trajectory_indices=all_env_indices,
-                    )
-
             loop_count += 1
 
             # Only process non-done environments to avoid bias towards short episodes
@@ -540,8 +557,14 @@ class SelfPlayTrainer:
 
             # Get model predictions for active environments only
             with torch.no_grad():
+                # Add pre-action context token
+                if self.is_transformer and isinstance(
+                    self.state_encoder, TokenSequenceBuilder
+                ):
+                    self.state_encoder.add_context(active_indices)
+
                 # Encode states from our perspective (player=0)
-                our_states = self._encode_tensor_states(
+                our_states = self.state_encoder.encode_tensor_states(
                     player=0, idxs=env_active_we_act
                 )
 
@@ -557,24 +580,10 @@ class SelfPlayTrainer:
                         dtype=torch.bfloat16,
                         enabled=self.use_mixed_precision,
                     ):
-                        if self.is_transformer:
-                            # Append decision CONTEXT into live token streams
-                            self.replay_buffer.add_context(
-                                embedding_data=our_states,
-                                trajectory_indices=env_active_we_act,
-                            )
-                            # Snapshot decision-time prefixes and run inference
-                            decision_prefixes = (
-                                self.replay_buffer.snapshot_current_prefixes(
-                                    env_active_we_act
-                                )
-                            )
-                            outputs = self.model(decision_prefixes)
-                        else:
-                            outputs = self.model(our_states)
+                        outputs = self.model(our_states)
 
                     env_logits[env_active_we_act] = outputs["policy_logits"].float()
-                    env_values[env_active_we_act] = outputs["value"].float().squeeze(-1)
+                    env_values[env_active_we_act] = outputs["value"].float()
 
                 # SPECIAL CASE: If first action of hand, opponent folding illegal
                 # (because it would leave an empty trajectory)
@@ -599,7 +608,7 @@ class SelfPlayTrainer:
                         if opp_working_env_indices.numel() == 0:
                             continue
 
-                        opp_states = self._encode_tensor_states(
+                        opp_states = self.state_encoder.encode_tensor_states(
                             player=1, idxs=opp_working_env_indices
                         )
 
@@ -620,7 +629,7 @@ class SelfPlayTrainer:
                             ].float()
 
                 elif env_active_opp_acts.numel() > 0:
-                    opp_states = self._encode_tensor_states(
+                    opp_states = self.state_encoder.encode_tensor_states(
                         player=1, idxs=env_active_opp_acts
                     )
                     # Self-play: use our model for opponent turns too
@@ -648,32 +657,40 @@ class SelfPlayTrainer:
 
             # Take steps in all environments (tensor_env expects full-size tensors)
             # NOTE: THIS CHANGES self.tensor_env.to_act!!
-            rewards, dones, _ = self.tensor_env.step_bins(
+            original_to_act = self.tensor_env.to_act.clone()
+            rewards, dones, _, new_streets, dealt_cards = self.tensor_env.step_bins(
                 action_bins, legal_bins_amounts, legal_bins_mask
             )
             newly_done_mask = dones & active_mask
 
-            # After environment step, append any newly revealed non-action tokens (transformer only)
-            if add_to_replay_buffer and getattr(
-                self.replay_buffer, "is_transformer", False
+            # After environment step, append action and any newly revealed non-action tokens
+            if self.is_transformer and isinstance(
+                self.state_encoder, TokenSequenceBuilder
             ):
-                advanced_mask = self.tensor_env.street > prev_street
-                if advanced_mask.any():
-                    advanced_envs = torch.where(advanced_mask)[0]
-                    adv_states = self._encode_tensor_states(
-                        player=0, idxs=advanced_envs
+                self.state_encoder.add_action(
+                    active_indices,
+                    original_to_act[active_indices],
+                    action_bins_active,
+                    legal_bins_mask[active_indices],
+                )
+
+                # Use environment return to detect street progress and dealt cards
+                advanced_envs = torch.where(new_streets >= 0)[0]
+                if advanced_envs.numel() > 0:
+                    # Add street markers for environments that advanced
+                    self.state_encoder.add_street(
+                        advanced_envs, new_streets[advanced_envs] - 1
                     )
-                    self.replay_buffer.add_tokens(
-                        embedding_data=adv_states,
-                        trajectory_indices=advanced_envs,
-                    )
-                # Update prev_street for next iteration
-                prev_street = self.tensor_env.street.clone()
+                    for i in range(3):
+                        valid_cards = torch.where(dealt_cards[:, i] >= 0)[0]
+                        self.state_encoder.add_card(
+                            valid_cards, dealt_cards[valid_cards, i]
+                        )
 
             # Update per-environment reward tracking
             per_env_rewards += rewards
 
-            # Store transitions for our actions (don't add to replay buffer yet)
+            # Store transitions for our actions
             if env_active_we_act.numel() > 0:
                 # Scale factor for reward/targets: 100 big blinds
                 scale = float(self.tensor_env.bb) * 100.0
@@ -698,49 +715,22 @@ class SelfPlayTrainer:
 
                 # Add transitions immediately using vectorized operations
                 if add_to_replay_buffer:
-                    if self.is_transformer:
-                        # Append ACTION and store transition metadata (decision_end already recorded)
-                        streets_now = self.tensor_env.street[env_active_we_act]
-                        self.replay_buffer.add_hero_action_step(
-                            trajectory_indices=env_active_we_act,
-                            action_indices=our_action_indices,
-                            log_probs=our_log_probs_full,
-                            rewards=our_rewards_tensor,
-                            dones=our_dones_tensor,
-                            legal_masks=our_legal_masks_tensor.bool(),
-                            delta2=our_delta2_tensor,
-                            delta3=our_delta3_tensor,
-                            values=our_values_tensor,
-                            street_values=streets_now,
-                        )
-                    else:
-                        self.replay_buffer.add_batch(
-                            embedding_data=our_states,
-                            action_indices=our_action_indices,
-                            log_probs=our_log_probs_full,
-                            rewards=our_rewards_tensor,
-                            dones=our_dones_tensor,
-                            legal_masks=our_legal_masks_tensor.bool(),
-                            delta2=our_delta2_tensor,
-                            delta3=our_delta3_tensor,
-                            values=our_values_tensor,
-                            trajectory_indices=env_active_we_act,
-                        )
+                    self.replay_buffer.add_transitions(
+                        embedding_data=our_states,
+                        action_indices=our_action_indices,
+                        log_probs=our_log_probs_full,
+                        rewards=our_rewards_tensor,
+                        dones=our_dones_tensor,
+                        legal_masks=our_legal_masks_tensor.bool(),
+                        delta2=our_delta2_tensor,
+                        delta3=our_delta3_tensor,
+                        values=our_values_tensor,
+                        trajectory_indices=env_active_we_act,
+                    )
 
                 batch_steps_collected += env_active_we_act.numel()
 
             if env_active_opp_acts.numel() > 0:
-                # Append opponent actions to token streams in transformer mode
-                if add_to_replay_buffer and self.is_transformer:
-                    opp_legal = legal_bins_mask[env_active_opp_acts]
-                    opp_actions = action_bins[env_active_opp_acts]
-                    opp_streets = prev_street[env_active_opp_acts]
-                    self.replay_buffer.add_opponent_actions(
-                        trajectory_indices=env_active_opp_acts,
-                        action_indices=opp_actions,
-                        legal_masks=opp_legal.bool(),
-                        streets=opp_streets,
-                    )
                 # Check if any opponent actions ended the hand
                 opp_ended_hands_mask = newly_done_mask & opp_acts_mask
                 opp_ended_hands = torch.where(opp_ended_hands_mask)[0]
@@ -793,7 +783,7 @@ class SelfPlayTrainer:
 
                 # Reset environments if we're going through the loop again
                 if steps_collected < min_steps or trajectory_count < min_trajectories:
-                    self.tensor_env.reset()
+                    self._reset_tensor_env_and_encoder()
 
         if loop_count >= max_loops:
             print(
@@ -810,16 +800,6 @@ class SelfPlayTrainer:
             collected_trajectory_rewards_tensor = torch.tensor([], device=self.device)
 
         return collected_trajectory_rewards_tensor
-
-    def _encode_tensor_states(self, player: int, idxs: torch.Tensor) -> dict:
-        """
-        Encode states for all tensor_environments in the tensorized environment.
-
-        Returns:
-            Dictionary with 'cards' and 'actions' tensors for CNN models,
-            or structured embedding components for transformer models
-        """
-        return self.state_encoder.encode_tensor_states(player=player, idxs=idxs)
 
     @profile
     def update_model(self, step: int) -> dict:
