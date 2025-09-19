@@ -1033,9 +1033,6 @@ class SelfPlayTrainer:
                         enabled=self.use_mixed_precision,
                     ),
                 ):
-                    current_outputs = self.model(kl_states)
-                    current_logits = current_outputs.policy_logits.float()
-
                     # Get last admitted opponent model logits
                     opponent_outputs = last_admitted_opponent.model(
                         kl_states.to(last_admitted_opponent.model_dtype)
@@ -1043,6 +1040,7 @@ class SelfPlayTrainer:
                     opponent_logits = opponent_outputs.policy_logits.float()
 
                 # Compute KL divergence
+                current_logits = outputs.policy_logits[sample_indices].float()
                 kl_divergence = compute_kl_divergence_batch(
                     current_logits, opponent_logits
                 )
