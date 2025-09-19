@@ -214,6 +214,7 @@ def print_preflop_range_grid(
     print("BB value estimates when facing SB all-in (×1000)")
     bb_value_grid = get_preflop_value_grid_bb_response(
         trainer.model,
+        trainer.state_encoder,
         device=trainer.device,
         starting_stack=trainer.cfg.env.stack,
         sb=trainer.cfg.env.sb,
