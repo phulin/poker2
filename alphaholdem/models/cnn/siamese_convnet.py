@@ -10,6 +10,7 @@ import torch.utils.checkpoint as checkpoint
 from ...core.interfaces import Model
 from ...core.registry import register_model
 from ...models.cnn_embedding_data import CNNEmbeddingData
+from ...models.model_outputs import ModelOutput
 
 
 def _resize_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
@@ -190,7 +191,7 @@ class SiameseConvNetV1(nn.Module, Model):
             nn.Linear(256, 1),
         )
 
-    def forward(self, embedding_data: CNNEmbeddingData) -> dict:
+    def forward(self, embedding_data: CNNEmbeddingData) -> ModelOutput:
         # Extract cards and actions from embedding data and convert to float
         cards_tensor = embedding_data.cards.float()
         actions_tensor = embedding_data.actions.float()
@@ -212,7 +213,7 @@ class SiameseConvNetV1(nn.Module, Model):
         h = self.fusion(x)
         logits = self.policy_head(h)
         value = self.value_head(h).squeeze(-1)
-        return {
-            "policy_logits": logits,
-            "value": value,
-        }
+        return ModelOutput(
+            policy_logits=logits,
+            value=value,
+        )

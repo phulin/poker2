@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import math
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,6 +11,7 @@ import torch.utils.checkpoint
 from ...core.interfaces import Model
 from ...core.registry import register_model
 from ...utils.profiling import profile
+from ..model_outputs import ModelOutput
 from .structured_embedding_data import StructuredEmbeddingData
 from .embeddings import PokerFusedEmbedding
 from .heads import TransformerPolicyHead, TransformerValueHead
@@ -40,12 +40,13 @@ class TransformerLayer(nn.Module):
         attention_mask: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> torch.Tensor:
-        attn_out = self.attn(x, attention_mask, cos, sin)
+        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        attn_out, new_kv_cache = self.attn(x, attention_mask, cos, sin, kv_cache)
         x = self.norm1(x + self.dropout(attn_out))
         ffn_out = self.ffn(x)
         x = self.norm2(x + self.dropout(ffn_out))
-        return x
+        return x, new_kv_cache
 
 
 @register_model("poker_transformer_v1")
@@ -106,6 +107,16 @@ class PokerTransformerV1(nn.Module, Model):
 
         self._init_weights()
 
+    def create_empty_cache(
+        self, batch_size: int, device: torch.device
+    ) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
+        """Create empty KV cache for all layers and players."""
+        cache = {}
+        for layer in self.layers:
+            layer_cache = layer.attn.create_empty_cache(batch_size, device)
+            cache[id(layer)] = layer_cache
+        return cache
+
     def _init_weights(self) -> None:
         """Initialize parameters with Xavier uniform where appropriate."""
 
@@ -131,10 +142,20 @@ class PokerTransformerV1(nn.Module, Model):
 
     @profile
     def forward(
-        self, structured_data: StructuredEmbeddingData
-    ) -> Dict[str, torch.Tensor]:
-        """Run forward pass on structured observation batch."""
+        self,
+        structured_data: StructuredEmbeddingData,
+        kv_cache: Optional[Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = None,
+    ) -> ModelOutput:
+        """
+        Run forward pass on structured observation batch.
 
+        Args:
+            structured_data: Input structured data
+            kv_cache: Optional KV cache dictionary keyed by layer ID
+
+        Returns:
+            ModelOutput with policy_logits, value, and updated cache
+        """
         embeddings = self.embedding(structured_data)
 
         x = self.input_ffn(embeddings)
@@ -146,14 +167,22 @@ class PokerTransformerV1(nn.Module, Model):
             dtype=x.dtype,
         )
 
+        # Handle KV caching through layers
+        new_kv_cache = {}
+
         if self.use_gradient_checkpointing and self.training:
+            # Note: Gradient checkpointing doesn't support KV caching well
+            # In training mode, we typically don't use caching anyway
             for layer in self.layers:
-                x = torch.utils.checkpoint.checkpoint(
-                    layer, x, attention_mask, cos, sin, use_reentrant=False
+                x, _ = torch.utils.checkpoint.checkpoint(
+                    layer, x, attention_mask, cos, sin, None, use_reentrant=False
                 )
         else:
             for layer in self.layers:
-                x = layer(x, attention_mask, cos, sin)
+                layer_cache = kv_cache.get(id(layer)) if kv_cache else None
+                x, layer_new_cache = layer(x, attention_mask, cos, sin, layer_cache)
+                if layer_new_cache is not None:
+                    new_kv_cache[id(layer)] = layer_new_cache
 
         cls_state = x[:, 0]
         cls_state = self.cls_mlp(cls_state)
@@ -161,10 +190,11 @@ class PokerTransformerV1(nn.Module, Model):
         policy_output = self.policy_head(cls_state)
         value = self.value_head(cls_state)
 
-        return {
-            "policy_logits": policy_output["policy_logits"],
-            "value": value,
-        }
+        return ModelOutput(
+            policy_logits=policy_output["policy_logits"],
+            value=value,
+            kv_cache=new_kv_cache,
+        )
 
     def get_model_info(self) -> Dict[str, Any]:
         total_params = sum(p.numel() for p in self.parameters())

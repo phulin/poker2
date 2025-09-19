@@ -1,6 +1,6 @@
 """Rotary Position Embedding (RoPE) attention implementation."""
 
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -42,13 +42,37 @@ class RotarySelfAttention(nn.Module):
 
         self.dropout = dropout
 
+    def create_empty_cache(
+        self, batch_size: int, device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Create empty KV cache for the given batch size and device."""
+        empty_k = torch.zeros(batch_size, self.n_heads, 0, self.d_head, device=device)
+        empty_v = torch.zeros(batch_size, self.n_heads, 0, self.d_head, device=device)
+        return empty_k, empty_v
+
     def forward(
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> torch.Tensor:
+        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        """
+        Forward pass with KV caching support.
+
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, d_model)
+            attention_mask: Boolean mask of shape (batch_size, seq_len) where True means attend
+            cos: Cosine values for RoPE of shape (seq_len, d_head)
+            sin: Sine values for RoPE of shape (seq_len, d_head)
+            kv_cache: Optional cached key-value pairs from previous forward passes
+
+        Returns:
+            Tuple of (output_tensor, new_kv_cache)
+            - output_tensor: Attention output of shape (batch_size, seq_len, d_model)
+            - new_kv_cache: Updated cache for next forward pass
+        """
         batch_size, seq_len, _ = x.shape
 
         q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
@@ -59,32 +83,59 @@ class RotarySelfAttention(nn.Module):
         k = k.permute(0, 2, 1, 3)
         v = v.permute(0, 2, 1, 3)
 
+        # Apply rotary position embedding
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        # Handle KV caching
+        if kv_cache is not None:
+            # Concatenate with cached keys and values
+            cached_k, cached_v = kv_cache
+            k = torch.cat([cached_k, k], dim=2)  # dim=2 is the sequence dimension
+            v = torch.cat([cached_v, v], dim=2)
+
+        # Always return updated cache
+        new_kv_cache = (k, v)
+
+        # Get the actual sequence length after caching
+        actual_seq_len = k.shape[2]
 
         # collapse batch and heads for SDPA
         q = q.reshape(batch_size * self.n_heads, seq_len, self.d_head)
-        k = k.reshape(batch_size * self.n_heads, seq_len, self.d_head)
-        v = v.reshape(batch_size * self.n_heads, seq_len, self.d_head)
+        k = k.reshape(batch_size * self.n_heads, actual_seq_len, self.d_head)
+        v = v.reshape(batch_size * self.n_heads, actual_seq_len, self.d_head)
 
         # Prepare attention mask for SDPA
-        # SDPA expects attn_mask to be broadcastable with (batch*heads, seq_len, seq_len)
-        # We need to create a 3D mask from the 2D input mask
-        # Create a 3D mask: (batch*heads, seq_len, seq_len)
-        # True means "attend to this position", False means "mask this position"
-        attn_mask = attention_mask.unsqueeze(1).expand(
-            batch_size, self.n_heads, seq_len
-        )
-        attn_mask = attn_mask.reshape(batch_size * self.n_heads, seq_len)
-        # Convert to 3D by expanding to (batch*heads, seq_len, seq_len)
+        # For KV caching, we need to handle the mask differently
+        if kv_cache is not None:
+            # When using cache, we need to create a mask that accounts for the full sequence
+            # The mask should be True for all cached positions and for current positions
+            cached_len = cached_k.shape[2]
+            # Create mask for cached positions (all True)
+            cached_mask = torch.ones(
+                batch_size, cached_len, device=x.device, dtype=torch.bool
+            )
+            # Concatenate with current mask
+            attn_mask = torch.cat([cached_mask, attention_mask], dim=1)
+        else:
+            attn_mask = attention_mask
+
+        # Expand mask for all heads
         attn_mask = attn_mask.unsqueeze(1).expand(
-            batch_size * self.n_heads, seq_len, seq_len
+            batch_size, self.n_heads, actual_seq_len
+        )
+        attn_mask = attn_mask.reshape(batch_size * self.n_heads, actual_seq_len)
+
+        # For SDPA, we need to create a 3D mask
+        # Only attend to positions where mask is True
+        attn_mask_3d = attn_mask.unsqueeze(1).expand(
+            batch_size * self.n_heads, seq_len, actual_seq_len
         )
 
         context = F.scaled_dot_product_attention(
             q,
             k,
             v,
-            attn_mask=attn_mask,
+            attn_mask=attn_mask_3d,
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=False,
         )
@@ -92,4 +143,4 @@ class RotarySelfAttention(nn.Module):
         context = context.permute(0, 2, 1, 3).contiguous()
         context = context.view(batch_size, seq_len, self.d_model)
 
-        return self.out_proj(context)
+        return self.out_proj(context), new_kv_cache

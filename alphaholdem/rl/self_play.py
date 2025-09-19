@@ -17,6 +17,8 @@ from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.factory import ModelFactory
 from ..models.state_encoder import CNNStateEncoder
 from ..models.transformer.token_sequence_builder import TokenSequenceBuilder
+from ..models.transformer.kv_cache_manager import SelfPlayKVCacheManager
+from ..models.model_outputs import ModelOutput
 from ..rl.agent_snapshot import AgentSnapshot
 from ..rl.k_best_pool import KBestOpponentPool
 from ..rl.dred_pool import DREDPool
@@ -170,6 +172,12 @@ class SelfPlayTrainer:
             )
         else:
             raise ValueError(f"Unknown opponent pool type: {self.opponent_pool_type}")
+
+        # Initialize KV cache manager for transformer models
+        if self.is_transformer:
+            self.kv_cache_manager = SelfPlayKVCacheManager(self.model, self.device)
+        else:
+            self.kv_cache_manager = None
 
         # Optimizer with different learning rates for different components
         # CNN layers (cards_trunk) need lower learning rate to prevent gradient explosion
@@ -325,8 +333,8 @@ class SelfPlayTrainer:
                     )
                 else:
                     outputs = self.model(embedding_data)
-                logits = outputs["policy_logits"].float()
-                value = outputs["value"].float()
+                logits = outputs.policy_logits.float()
+                value = outputs.value.float()
 
                 legal_mask = get_legal_mask(
                     state, self.num_bet_bins, dtype=self.float_dtype, device=self.device
@@ -428,9 +436,18 @@ class SelfPlayTrainer:
                     opponent_rewards,
                 )
 
-    def _reset_tensor_env_and_encoder(self) -> None:
+    def _reset_tensor_env_and_encoder_kv(
+        self, opponent_snapshots: Optional[list[AgentSnapshot]]
+    ) -> None:
         """Reset the tensorized environment and token sequence builder."""
         self.tensor_env.reset()
+
+        if self.kv_cache_manager is not None:
+            self.kv_cache_manager.reset_for_new_game()
+            # Initialize caches for self and opponent
+            self.kv_cache_manager.initialize_self_cache(self.num_envs)
+            for i in range(len(opponent_snapshots)):
+                self.kv_cache_manager.initialize_opponent_cache(i, self.num_envs)
 
         all_env_indices = torch.arange(self.num_envs, device=self.device)
         if self.is_transformer and isinstance(self.state_encoder, TokenSequenceBuilder):
@@ -497,7 +514,7 @@ class SelfPlayTrainer:
         collected_trajectory_rewards = []
 
         # Initialize all environments
-        self._reset_tensor_env_and_encoder()
+        self._reset_tensor_env_and_encoder_kv(all_opponent_snapshots)
 
         # Per-environment reward tracking and step counts
         per_env_rewards = torch.zeros(self.num_envs, device=self.device)
@@ -581,10 +598,21 @@ class SelfPlayTrainer:
                         dtype=torch.bfloat16,
                         enabled=self.use_mixed_precision,
                     ):
-                        outputs = self.model(our_states)
+                        # Use KV caching for transformer models
+                        if self.is_transformer and self.kv_cache_manager is not None:
+                            # Get our cache
+                            our_cache = self.kv_cache_manager.get_self_cache()
+                            outputs = self.model(our_states, kv_cache=our_cache)
+                            # Update our cache
+                            if outputs.kv_cache is not None:
+                                self.kv_cache_manager.update_self_cache(
+                                    outputs.kv_cache
+                                )
+                        else:
+                            outputs = self.model(our_states)
 
-                    env_logits[env_active_we_act] = outputs["policy_logits"].float()
-                    env_values[env_active_we_act] = outputs["value"].float()
+                    env_logits[env_active_we_act] = outputs.policy_logits.float()
+                    env_values[env_active_we_act] = outputs.value.float()
 
                 # SPECIAL CASE: If first action of hand, opponent folding illegal
                 # (because it would leave an empty trajectory)
@@ -619,15 +647,32 @@ class SelfPlayTrainer:
                             dtype=torch.bfloat16,
                             enabled=self.use_mixed_precision,
                         ):
-                            outputs = opponent.model(
-                                opp_states.to(opponent.model_dtype)
+                            # Use KV caching for transformer models
+                            if (
+                                self.is_transformer
+                                and self.kv_cache_manager is not None
+                            ):
+                                # Get opponent cache
+                                opp_cache = self.kv_cache_manager.get_opponent_cache(
+                                    opponent_idx
+                                )
+                                outputs = opponent.model(
+                                    opp_states.to(opponent.model_dtype),
+                                    kv_cache=opp_cache,
+                                )
+                                # Update opponent cache
+                                if outputs.kv_cache is not None:
+                                    self.kv_cache_manager.update_opponent_cache(
+                                        opponent_idx, outputs.kv_cache
+                                    )
+                            else:
+                                outputs = opponent.model(
+                                    opp_states.to(opponent.model_dtype)
+                                )
+                            env_logits[opp_working_env_indices] = (
+                                outputs.policy_logits.float()
                             )
-                            env_logits[opp_working_env_indices] = outputs[
-                                "policy_logits"
-                            ].float()
-                            env_values[opp_working_env_indices] = outputs[
-                                "value"
-                            ].float()
+                            env_values[opp_working_env_indices] = outputs.value.float()
 
                 elif env_active_opp_acts.numel() > 0:
                     opp_states = self.state_encoder.encode_tensor_states(
@@ -639,11 +684,23 @@ class SelfPlayTrainer:
                         dtype=torch.bfloat16,
                         enabled=self.use_mixed_precision,
                     ):
-                        outputs = self.model(opp_states)
-                        env_logits[env_active_opp_acts] = outputs[
-                            "policy_logits"
-                        ].float()
-                        env_values[env_active_opp_acts] = outputs["value"].float()
+                        # Use KV caching for transformer models
+                        if self.is_transformer and self.kv_cache_manager is not None:
+                            # For self-play, we can reuse our own cache for opponent turns
+                            # or create a separate cache for the opponent player
+                            opp_cache = self.kv_cache_manager.get_opponent_cache(
+                                1
+                            )  # Player 1
+                            outputs = self.model(opp_states, kv_cache=opp_cache)
+                            # Update opponent cache
+                            if outputs.kv_cache is not None:
+                                self.kv_cache_manager.update_opponent_cache(
+                                    1, outputs.kv_cache
+                                )
+                        else:
+                            outputs = self.model(opp_states)
+                        env_logits[env_active_opp_acts] = outputs.policy_logits.float()
+                        env_values[env_active_opp_acts] = outputs.value.float()
 
                 # Sample actions for active environments only.
                 action_bins_active, log_probs_active_full = self.policy.action_batch(
@@ -784,7 +841,7 @@ class SelfPlayTrainer:
 
                 # Reset environments if we're going through the loop again
                 if steps_collected < min_steps or trajectory_count < min_trajectories:
-                    self._reset_tensor_env_and_encoder()
+                    self._reset_tensor_env_and_encoder_kv(all_opponent_snapshots)
 
         if loop_count >= max_loops:
             print(
@@ -850,8 +907,8 @@ class SelfPlayTrainer:
                 enabled=self.use_mixed_precision,
             ):
                 outputs = self.model(batch["embedding_data"])
-                logits = outputs["policy_logits"].float()
-                values = outputs["value"].float()
+                logits = outputs.policy_logits.float()
+                values = outputs.value.float()
 
                 if is_transformer:
                     # Transformer-specific loss with auxiliary hand range loss
@@ -977,13 +1034,13 @@ class SelfPlayTrainer:
                     ),
                 ):
                     current_outputs = self.model(kl_states)
-                    current_logits = current_outputs["policy_logits"].float()
+                    current_logits = current_outputs.policy_logits.float()
 
                     # Get last admitted opponent model logits
                     opponent_outputs = last_admitted_opponent.model(
                         kl_states.to(last_admitted_opponent.model_dtype)
                     )
-                    opponent_logits = opponent_outputs["policy_logits"].float()
+                    opponent_logits = opponent_outputs.policy_logits.float()
 
                 # Compute KL divergence
                 kl_divergence = compute_kl_divergence_batch(
@@ -1531,18 +1588,18 @@ class SelfPlayTrainer:
 
     def _compute_transformer_loss(
         self,
-        outputs: dict,
+        outputs: ModelOutput,
         batch: dict,
         delta2_vec: torch.Tensor,
         delta3_vec: torch.Tensor,
     ) -> dict:
         """Compute transformer-specific loss with auxiliary hand range loss."""
 
-        logits = outputs["policy_logits"].float()
-        values = outputs["value"].float()
+        logits = outputs.policy_logits.float()
+        values = outputs.value.float()
 
         # Standard PPO policy loss
-        policy_loss = trinal_clip_ppo_loss(
+        return trinal_clip_ppo_loss(
             logits=logits,
             values=values,
             actions=batch["action_indices"],
@@ -1559,22 +1616,3 @@ class SelfPlayTrainer:
             value_loss_type=self.cfg.train.value_loss_type,
             huber_delta=self.cfg.train.huber_delta,
         )
-
-        # Add auxiliary hand range loss if available
-        aux_loss = 0.0
-        if "hand_range_logits" in outputs and hasattr(
-            self.cfg.train, "auxiliary_loss_coef"
-        ):
-            # For now, we don't have hand range targets, so skip auxiliary loss
-            # In the future, this could be implemented with opponent hand range prediction
-            aux_loss = 0.0
-
-        total_loss = policy_loss["total_loss"] + aux_loss
-
-        return {
-            "policy_loss": policy_loss["policy_loss"],
-            "value_loss": policy_loss["value_loss"],
-            "entropy": policy_loss["entropy"],
-            "aux_loss": aux_loss,
-            "total_loss": total_loss,
-        }
