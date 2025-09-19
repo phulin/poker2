@@ -66,14 +66,27 @@ class RotarySelfAttention(nn.Module):
         k = k.reshape(batch_size * self.n_heads, seq_len, self.d_head)
         v = v.reshape(batch_size * self.n_heads, seq_len, self.d_head)
 
+        # Prepare attention mask for SDPA
+        # SDPA expects attn_mask to be broadcastable with (batch*heads, seq_len, seq_len)
+        # We need to create a 3D mask from the 2D input mask
+        # Create a 3D mask: (batch*heads, seq_len, seq_len)
+        # True means "attend to this position", False means "mask this position"
+        attn_mask = attention_mask.unsqueeze(1).expand(
+            batch_size, self.n_heads, seq_len
+        )
+        attn_mask = attn_mask.reshape(batch_size * self.n_heads, seq_len)
+        # Convert to 3D by expanding to (batch*heads, seq_len, seq_len)
+        attn_mask = attn_mask.unsqueeze(1).expand(
+            batch_size * self.n_heads, seq_len, seq_len
+        )
+
         context = F.scaled_dot_product_attention(
             q,
             k,
             v,
-            attn_mask=attention_mask,
+            attn_mask=attn_mask,
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=False,
-            enable_gqa=True,
         )
         context = context.view(batch_size, self.n_heads, seq_len, self.d_head)
         context = context.permute(0, 2, 1, 3).contiguous()
