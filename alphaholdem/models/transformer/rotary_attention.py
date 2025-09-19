@@ -40,6 +40,8 @@ class RotarySelfAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
 
+        self.dropout = dropout
+
     def forward(
         self,
         x: torch.Tensor,
@@ -69,7 +71,7 @@ class RotarySelfAttention(nn.Module):
             k,
             v,
             attn_mask=attention_mask,
-            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            dropout_p=self.dropout if self.training else 0.0,
             is_causal=False,
             enable_gqa=True,
         )
