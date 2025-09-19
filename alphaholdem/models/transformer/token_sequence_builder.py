@@ -5,6 +5,7 @@ from .tokens import (
     Special,
     Context,
     Cls,
+    get_action_token_id_offset,
     get_card_token_id_offset,
     HOLE0_INDEX,
     HOLE1_INDEX,
@@ -219,6 +220,13 @@ class TokenSequenceBuilder:
         # Reverse all CONTEXT bet_to_call values. Will be 0 for non-context tokens, so this is fine.
         result.context_features[:, :, Context.BET_TO_CALL.value] = (
             -result.context_features[:, :, Context.BET_TO_CALL.value]
+        )
+
+        # Reverse all actor indices, but only where the token is an action.
+        action_token_offset = get_action_token_id_offset()
+        action_token_mask = result.token_ids >= action_token_offset
+        result.action_actors[action_token_mask] = (
+            1 - result.action_actors[action_token_mask]
         )
 
         return result

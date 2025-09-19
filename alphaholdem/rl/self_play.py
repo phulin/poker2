@@ -147,7 +147,7 @@ class SelfPlayTrainer:
             device=self.device,
             float_dtype=self.float_dtype,  # Use appropriate dtype for mixed precision
             is_transformer=self.is_transformer,  # Whether this buffer is for transformer models
-            sequence_length=sequence_length,  # Sequence length for transformer models
+            max_sequence_length=sequence_length,  # Sequence length for transformer models
         )
 
         # Initialize opponent pool based on configuration
@@ -679,7 +679,7 @@ class SelfPlayTrainer:
                 if advanced_envs.numel() > 0:
                     # Add street markers for environments that advanced
                     self.state_encoder.add_street(
-                        advanced_envs, new_streets[advanced_envs] - 1
+                        advanced_envs, new_streets[advanced_envs]
                     )
                     for i in range(3):
                         valid_cards = torch.where(dealt_cards[:, i] >= 0)[0]

@@ -126,21 +126,99 @@ def hook_model_forward(model, original_forward):
 
         if hasattr(embedding_data, "token_ids"):
             print(f"Token IDs shape: {embedding_data.token_ids.shape}")
-            print(f"Token IDs sample: {embedding_data.token_ids[0, :10].tolist()}")
             print(f"Lengths: {embedding_data.lengths.tolist()}")
+
+            # Parse and display token sequences for each sample
+            for batch_idx in range(
+                min(3, embedding_data.token_ids.shape[0])
+            ):  # Show first 3 samples
+                seq_len = int(embedding_data.lengths[batch_idx])
+                print(f"\n--- Sample {batch_idx} (length={seq_len}) ---")
+
+                tokens = embedding_data.token_ids[batch_idx, :seq_len]
+                for pos, token in enumerate(tokens):
+                    token = int(token.item())
+                    parts = [f"[{pos:02d}]"]
+
+                    # Decode token based on type
+                    if token == Special.CLS.value:
+                        parts.append("CLS")
+                        if hasattr(embedding_data, "context_features"):
+                            ctx = embedding_data.context_features[batch_idx, pos]
+                            parts.append(f"sb={ctx[Cls.SB.value]:.0f}")
+                            parts.append(f"bb={ctx[Cls.BB.value]:.0f}")
+                            parts.append(
+                                f"hero_button={ctx[Cls.HERO_ON_BUTTON.value]:.0f}"
+                            )
+
+                    elif token == Special.CONTEXT.value:
+                        parts.append("CONTEXT")
+                        if hasattr(embedding_data, "context_features"):
+                            ctx = embedding_data.context_features[batch_idx, pos]
+                            parts.append(f"pot={ctx[Context.POT.value]:.0f}")
+                            parts.append(f"stack_p0={ctx[Context.STACK_P0.value]:.0f}")
+                            parts.append(f"stack_p1={ctx[Context.STACK_P1.value]:.0f}")
+                            parts.append(f"street={ctx[Context.STREET.value]:.0f}")
+
+                    elif token in [
+                        Special.STREET_PREFLOP.value,
+                        Special.STREET_FLOP.value,
+                        Special.STREET_TURN.value,
+                        Special.STREET_RIVER.value,
+                    ]:
+                        street_names = ["PREFLOP", "FLOP", "TURN", "RIVER"]
+                        street_idx = token - Special.STREET_PREFLOP.value
+                        parts.append(f"STREET_{street_names[street_idx]}")
+
+                    elif (
+                        Special.NUM_SPECIAL.value
+                        <= token
+                        < Special.NUM_SPECIAL.value + 52
+                    ):
+                        # Card token
+                        card_idx = token - Special.NUM_SPECIAL.value
+                        parts.append(f"CARD_{format_card(card_idx)}")
+                        if hasattr(embedding_data, "card_streets"):
+                            street = int(
+                                embedding_data.card_streets[batch_idx, pos].item()
+                            )
+                            parts.append(f"street={street}")
+
+                    elif (
+                        Special.NUM_SPECIAL.value + 52
+                        <= token
+                        < Special.NUM_SPECIAL.value + 52 + 7
+                    ):
+                        # Action token
+                        action_id = token - Special.NUM_SPECIAL.value - 52
+                        parts.append(
+                            f"ACTION_{describe_action(action_id, [0.5, 1.0, 1.5, 2.0])}"
+                        )
+                        if hasattr(embedding_data, "action_actors"):
+                            actor = int(
+                                embedding_data.action_actors[batch_idx, pos].item()
+                            )
+                            parts.append(f"actor={actor}")
+                        if hasattr(embedding_data, "action_streets"):
+                            street = int(
+                                embedding_data.action_streets[batch_idx, pos].item()
+                            )
+                            parts.append(f"street={street}")
+
+                    else:
+                        parts.append(f"UNKNOWN_TOKEN_{token}")
+
+                    print(" ".join(parts))
 
             if hasattr(embedding_data, "context_features"):
                 print(
-                    f"Context features shape: {embedding_data.context_features.shape}"
-                )
-                print(
-                    f"Context features sample: {embedding_data.context_features[0, 0, :5].tolist()}"
+                    f"\nContext features shape: {embedding_data.context_features.shape}"
                 )
 
         # Call original forward
         result = original_forward(embedding_data)
 
-        print(f"Output keys: {list(result.keys())}")
+        print(f"\nOutput keys: {list(result.keys())}")
         if "policy_logits" in result:
             print(f"Policy logits shape: {result['policy_logits'].shape}")
         if "value" in result:

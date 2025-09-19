@@ -304,7 +304,7 @@ def main() -> None:
         num_bet_bins=len(bet_bins) + 3,
         device=device,
         is_transformer=True,
-        sequence_length=seq_len,
+        max_sequence_length=seq_len,
     )
 
     action_log = scripted_hand(env, buffer=buffer, encoder=encoder)

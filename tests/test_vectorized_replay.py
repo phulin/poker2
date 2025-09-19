@@ -21,7 +21,7 @@ class TestVectorizedReplayBuffer:
             device=device,
             float_dtype=torch.float32,  # Add missing float_dtype parameter
             is_transformer=True,  # Use transformer mode for tests
-            sequence_length=50,  # Sequence length for transformer
+            max_sequence_length=50,  # Sequence length for transformer
         )
 
     def test_initialization(self, buffer):
@@ -65,10 +65,10 @@ class TestVectorizedReplayBuffer:
         from alphaholdem.models.transformer.tokens import Special
 
         token_ids = torch.full(
-            (2, buffer.sequence_length), -1, dtype=torch.int8, device=device
+            (2, buffer.max_sequence_length), -1, dtype=torch.long, device=device
         )
         ctx = torch.zeros(
-            2, buffer.sequence_length, 10, dtype=torch.float32, device=device
+            2, buffer.max_sequence_length, 10, dtype=torch.float32, device=device
         )
         lengths = torch.full((2,), 5, dtype=torch.long, device=device)
         token_ids[:, 0] = Special.CLS.value
@@ -79,23 +79,23 @@ class TestVectorizedReplayBuffer:
         emb = StructuredEmbeddingData(
             token_ids=token_ids,
             card_ranks=torch.zeros(
-                2, buffer.sequence_length, dtype=torch.uint8, device=device
+                2, buffer.max_sequence_length, dtype=torch.long, device=device
             ),
             card_suits=torch.zeros(
-                2, buffer.sequence_length, dtype=torch.uint8, device=device
+                2, buffer.max_sequence_length, dtype=torch.long, device=device
             ),
             card_streets=torch.zeros(
-                2, buffer.sequence_length, dtype=torch.uint8, device=device
+                2, buffer.max_sequence_length, dtype=torch.long, device=device
             ),
             action_actors=torch.full(
-                (2, buffer.sequence_length), -1, dtype=torch.int16, device=device
+                (2, buffer.max_sequence_length), -1, dtype=torch.long, device=device
             ),
             action_streets=torch.full(
-                (2, buffer.sequence_length), -1, dtype=torch.int16, device=device
+                (2, buffer.max_sequence_length), -1, dtype=torch.long, device=device
             ),
             action_legal_masks=torch.zeros(
                 2,
-                buffer.sequence_length,
+                buffer.max_sequence_length,
                 buffer.num_bet_bins,
                 dtype=torch.bool,
                 device=device,
@@ -115,32 +115,32 @@ class TestVectorizedReplayBuffer:
         # Seed initial CLS
         init = StructuredEmbeddingData(
             token_ids=torch.full(
-                (1, buffer.sequence_length), -1, dtype=torch.int8, device=device
+                (1, buffer.max_sequence_length), -1, dtype=torch.long, device=device
             ),
             card_ranks=torch.zeros(
-                1, buffer.sequence_length, dtype=torch.uint8, device=device
+                1, buffer.max_sequence_length, dtype=torch.long, device=device
             ),
             card_suits=torch.zeros(
-                1, buffer.sequence_length, dtype=torch.uint8, device=device
+                1, buffer.max_sequence_length, dtype=torch.long, device=device
             ),
             card_streets=torch.zeros(
-                1, buffer.sequence_length, dtype=torch.uint8, device=device
+                1, buffer.max_sequence_length, dtype=torch.long, device=device
             ),
             action_actors=torch.full(
-                (1, buffer.sequence_length), -1, dtype=torch.int16, device=device
+                (1, buffer.max_sequence_length), -1, dtype=torch.long, device=device
             ),
             action_streets=torch.full(
-                (1, buffer.sequence_length), -1, dtype=torch.int16, device=device
+                (1, buffer.max_sequence_length), -1, dtype=torch.long, device=device
             ),
             action_legal_masks=torch.zeros(
                 1,
-                buffer.sequence_length,
+                buffer.max_sequence_length,
                 buffer.num_bet_bins,
                 dtype=torch.bool,
                 device=device,
             ),
             context_features=torch.zeros(
-                1, buffer.sequence_length, 10, dtype=torch.float32, device=device
+                1, buffer.max_sequence_length, 10, dtype=torch.float32, device=device
             ),
             lengths=torch.tensor([1], device=device),
         )
@@ -166,8 +166,8 @@ class TestVectorizedReplayBuffer:
         from alphaholdem.models.transformer.tokens import Special, Context as Ctx
 
         # Prepare embedding with context features in slot 0/1
-        L = buffer.sequence_length
-        token_ids = torch.full((1, L), -1, dtype=torch.int8, device=device)
+        L = buffer.max_sequence_length
+        token_ids = torch.full((1, L), -1, dtype=torch.long, device=device)
         ctx = torch.zeros(1, L, 10, dtype=torch.float32, device=device)
         token_ids[:, 0] = Special.CLS.value
         token_ids[:, 1] = Special.CONTEXT.value
@@ -176,26 +176,26 @@ class TestVectorizedReplayBuffer:
         ctx[:, 1, Ctx.STREET.value] = 0.0
         emb = StructuredEmbeddingData(
             token_ids=token_ids,
-            card_ranks=torch.zeros(1, L, dtype=torch.uint8, device=device),
-            card_suits=torch.zeros(1, L, dtype=torch.uint8, device=device),
-            card_streets=torch.zeros(1, L, dtype=torch.uint8, device=device),
-            action_actors=torch.full((1, L), -1, dtype=torch.int16, device=device),
-            action_streets=torch.full((1, L), -1, dtype=torch.int16, device=device),
+            card_ranks=torch.zeros(1, L, dtype=torch.long, device=device),
+            card_suits=torch.zeros(1, L, dtype=torch.long, device=device),
+            card_streets=torch.zeros(1, L, dtype=torch.long, device=device),
+            action_actors=torch.full((1, L), -1, dtype=torch.long, device=device),
+            action_streets=torch.full((1, L), -1, dtype=torch.long, device=device),
             action_legal_masks=torch.zeros(
                 1, L, buffer.num_bet_bins, dtype=torch.bool, device=device
             ),
             context_features=ctx,
-            lengths=torch.tensor([2], device=device),
+            lengths=torch.tensor([3], device=device),
         )
         # Seed CLS once so add_transitions doesn't add it
         buffer.add_tokens(
             embedding_data=StructuredEmbeddingData(
                 token_ids=token_ids,
-                card_ranks=torch.zeros(1, L, dtype=torch.uint8, device=device),
-                card_suits=torch.zeros(1, L, dtype=torch.uint8, device=device),
-                card_streets=torch.zeros(1, L, dtype=torch.uint8, device=device),
-                action_actors=torch.full((1, L), -1, dtype=torch.int16, device=device),
-                action_streets=torch.full((1, L), -1, dtype=torch.int16, device=device),
+                card_ranks=torch.zeros(1, L, dtype=torch.long, device=device),
+                card_suits=torch.zeros(1, L, dtype=torch.long, device=device),
+                card_streets=torch.zeros(1, L, dtype=torch.long, device=device),
+                action_actors=torch.full((1, L), -1, dtype=torch.long, device=device),
+                action_streets=torch.full((1, L), -1, dtype=torch.long, device=device),
                 action_legal_masks=torch.zeros(
                     1, L, buffer.num_bet_bins, dtype=torch.bool, device=device
                 ),
@@ -1213,26 +1213,26 @@ class TestVectorizedReplayBuffer:
         """Create a test batch with random data."""
         embedding_data = StructuredEmbeddingData(
             token_ids=torch.randint(
-                0, 100, (batch_size, 50), device=device, dtype=torch.int8
+                0, 100, (batch_size, 50), device=device, dtype=torch.long
             ),
             card_ranks=torch.randint(
-                0, 13, (batch_size, 50), device=device, dtype=torch.uint8
+                0, 13, (batch_size, 50), device=device, dtype=torch.long
             ),
             card_suits=torch.randint(
-                0, 4, (batch_size, 50), device=device, dtype=torch.uint8
+                0, 4, (batch_size, 50), device=device, dtype=torch.long
             ),
             card_streets=torch.randint(
-                0, 4, (batch_size, 50), device=device, dtype=torch.uint8
+                0, 4, (batch_size, 50), device=device, dtype=torch.long
             ),
             action_actors=torch.randint(
-                0, 2, (batch_size, 50), device=device, dtype=torch.uint8
+                0, 2, (batch_size, 50), device=device, dtype=torch.long
             ),
             action_streets=torch.randint(
-                0, 4, (batch_size, 50), device=device, dtype=torch.uint8
+                0, 4, (batch_size, 50), device=device, dtype=torch.long
             ),
-            action_legal_masks=torch.ones(batch_size, 50, 8, device=device).bool(),
+            action_legal_masks=torch.ones(batch_size, 50, 5, device=device).bool(),
             context_features=torch.randint(
-                0, 10, (batch_size, 50, 10), device=device, dtype=torch.long
+                0, 10, (batch_size, 50, 10), device=device, dtype=torch.float32
             ),
             lengths=torch.full((batch_size,), 50, device=device, dtype=torch.long),
         )
@@ -1585,13 +1585,13 @@ class TestVectorizedReplayBuffer:
                 device=device,
                 dtype=torch.long,
             ),
-            action_legal_masks=torch.ones(batch_size, 50, 8, device=device).bool(),
+            action_legal_masks=torch.ones(batch_size, 50, 5, device=device).bool(),
             context_features=torch.randint(
                 0,
                 10,
                 (batch_size, 50, 10),
                 device=device,
-                dtype=torch.long,
+                dtype=torch.float32,
             ),
             lengths=torch.full((batch_size,), 50, device=device, dtype=torch.long),
         )
@@ -1655,14 +1655,14 @@ class TestVectorizedReplayBuffer:
                 dtype=torch.uint8,
             ),
             action_legal_masks=torch.ones(
-                batch_size, trajectory_length, 50, 8, device=device
+                batch_size, trajectory_length, 50, 5, device=device
             ).bool(),
             context_features=torch.randint(
                 0,
                 10,
                 (batch_size, trajectory_length, 50, 10),
                 device=device,
-                dtype=torch.long,
+                dtype=torch.float32,
             ),
             lengths=torch.full(
                 (batch_size, trajectory_length),
