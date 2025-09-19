@@ -31,16 +31,17 @@ class TestVectorizedReplayBuffer:
         assert buffer.size == 0
         assert buffer.position == 0
 
-        # Check tensor shapes - now 2D: (capacity, max_trajectory_length, ...)
-        # Transformer mode fields
-        assert buffer.token_ids.shape == (10, 20, 50)  # Token IDs
-        assert buffer.card_ranks.shape == (10, 20, 50)  # Card ranks
-        assert buffer.card_suits.shape == (10, 20, 50)  # Card suits
-        assert buffer.card_streets.shape == (10, 20, 50)  # Card stages
-        assert buffer.action_actors.shape == (10, 20, 50)  # Action actors
-        assert buffer.action_streets.shape == (10, 20, 50)  # Action streets
-        assert buffer.action_legal_masks.shape == (10, 20, 50, 8)  # Action legal masks
-        assert buffer.context_features.shape == (10, 20, 50, 10)  # Context features
+        # Transformer mode fields use a single token stream per trajectory
+        assert buffer.token_ids.shape == (10, 50)  # Token IDs
+        assert buffer.card_ranks.shape == (10, 50)  # Card ranks
+        assert buffer.card_suits.shape == (10, 50)  # Card suits
+        assert buffer.card_streets.shape == (10, 50)  # Card stages
+        assert buffer.action_actors.shape == (10, 50)  # Action actors
+        assert buffer.action_streets.shape == (10, 50)  # Action streets
+        assert buffer.action_legal_masks.shape == (10, 50, 5)  # Action legal masks
+        assert buffer.context_features.shape == (10, 50, 10)  # Context features
+        assert buffer.transition_token_ends.shape == (10, 20)
+        assert buffer.token_positions.shape == (10,)
         assert buffer.action_indices.shape == (10, 20)  # Action indices
         assert buffer.log_probs.shape == (10, 20, 5)
         assert buffer.rewards.shape == (10, 20)
@@ -55,6 +56,175 @@ class TestVectorizedReplayBuffer:
         # Check trajectory tracking tensors
         assert buffer.trajectory_lengths.shape == (10,)
         assert buffer.current_step_positions.shape == (10,)
+
+    def test_transformer_add_tokens_initial_and_street_progress(self, buffer):
+        device = buffer.device
+        # Start adding trajectories for 2 envs
+        buffer.start_adding_trajectory_batches(2)
+        # Build minimal initial embedding with CLS+CONTEXT+PREFLOP+2 cards
+        from alphaholdem.models.transformer.tokens import Special
+
+        token_ids = torch.full(
+            (2, buffer.sequence_length), -1, dtype=torch.int8, device=device
+        )
+        ctx = torch.zeros(
+            2, buffer.sequence_length, 10, dtype=torch.float32, device=device
+        )
+        lengths = torch.full((2,), 5, dtype=torch.long, device=device)
+        token_ids[:, 0] = Special.CLS.value
+        token_ids[:, 1] = Special.CONTEXT.value
+        token_ids[:, 2] = Special.STREET_PREFLOP.value
+        token_ids[:, 3] = Special.NUM_SPECIAL.value  # first card id offset
+        token_ids[:, 4] = Special.NUM_SPECIAL.value + 1
+        emb = StructuredEmbeddingData(
+            token_ids=token_ids,
+            card_ranks=torch.zeros(
+                2, buffer.sequence_length, dtype=torch.uint8, device=device
+            ),
+            card_suits=torch.zeros(
+                2, buffer.sequence_length, dtype=torch.uint8, device=device
+            ),
+            card_streets=torch.zeros(
+                2, buffer.sequence_length, dtype=torch.uint8, device=device
+            ),
+            action_actors=torch.full(
+                (2, buffer.sequence_length), -1, dtype=torch.int16, device=device
+            ),
+            action_streets=torch.full(
+                (2, buffer.sequence_length), -1, dtype=torch.int16, device=device
+            ),
+            action_legal_masks=torch.zeros(
+                2,
+                buffer.sequence_length,
+                buffer.num_bet_bins,
+                dtype=torch.bool,
+                device=device,
+            ),
+            context_features=ctx,
+            lengths=lengths,
+        )
+        env_idxs = torch.tensor([0, 1], device=device)
+        buffer.add_tokens(emb, env_idxs)
+        assert buffer.token_positions[0] == 5
+        assert buffer.token_ids[0, 0] == Special.CLS.value
+        assert buffer.token_ids[0, 2] == Special.STREET_PREFLOP.value
+
+    def test_transformer_add_opponent_actions(self, buffer):
+        device = buffer.device
+        buffer.start_adding_trajectory_batches(1)
+        # Seed initial CLS
+        init = StructuredEmbeddingData(
+            token_ids=torch.full(
+                (1, buffer.sequence_length), -1, dtype=torch.int8, device=device
+            ),
+            card_ranks=torch.zeros(
+                1, buffer.sequence_length, dtype=torch.uint8, device=device
+            ),
+            card_suits=torch.zeros(
+                1, buffer.sequence_length, dtype=torch.uint8, device=device
+            ),
+            card_streets=torch.zeros(
+                1, buffer.sequence_length, dtype=torch.uint8, device=device
+            ),
+            action_actors=torch.full(
+                (1, buffer.sequence_length), -1, dtype=torch.int16, device=device
+            ),
+            action_streets=torch.full(
+                (1, buffer.sequence_length), -1, dtype=torch.int16, device=device
+            ),
+            action_legal_masks=torch.zeros(
+                1,
+                buffer.sequence_length,
+                buffer.num_bet_bins,
+                dtype=torch.bool,
+                device=device,
+            ),
+            context_features=torch.zeros(
+                1, buffer.sequence_length, 10, dtype=torch.float32, device=device
+            ),
+            lengths=torch.tensor([1], device=device),
+        )
+        buffer.add_tokens(init, torch.tensor([0], device=device))
+        # Append opponent action
+        buffer.add_opponent_actions(
+            trajectory_indices=torch.tensor([0], device=device),
+            action_indices=torch.tensor([3], device=device),
+            legal_masks=torch.ones(
+                1, buffer.num_bet_bins, dtype=torch.bool, device=device
+            ),
+            streets=torch.tensor([0], device=device),
+        )
+        pos = buffer.token_positions[0].item()
+        assert pos == 2
+        # Last written should be action token for opponent (actor=1)
+        assert buffer.action_actors[0, pos - 1].item() == 1
+        assert buffer.action_streets[0, pos - 1].item() == 0
+
+    def test_transformer_add_batch_appends_context_and_action(self, buffer):
+        device = buffer.device
+        buffer.start_adding_trajectory_batches(1)
+        from alphaholdem.models.transformer.tokens import Special, Context as Ctx
+
+        # Prepare embedding with context features in slot 0/1
+        L = buffer.sequence_length
+        token_ids = torch.full((1, L), -1, dtype=torch.int8, device=device)
+        ctx = torch.zeros(1, L, 10, dtype=torch.float32, device=device)
+        token_ids[:, 0] = Special.CLS.value
+        token_ids[:, 1] = Special.CONTEXT.value
+        ctx[:, 0, 0] = 5.0  # sb
+        ctx[:, 0, 1] = 10.0  # bb
+        ctx[:, 1, Ctx.STREET.value] = 0.0
+        emb = StructuredEmbeddingData(
+            token_ids=token_ids,
+            card_ranks=torch.zeros(1, L, dtype=torch.uint8, device=device),
+            card_suits=torch.zeros(1, L, dtype=torch.uint8, device=device),
+            card_streets=torch.zeros(1, L, dtype=torch.uint8, device=device),
+            action_actors=torch.full((1, L), -1, dtype=torch.int16, device=device),
+            action_streets=torch.full((1, L), -1, dtype=torch.int16, device=device),
+            action_legal_masks=torch.zeros(
+                1, L, buffer.num_bet_bins, dtype=torch.bool, device=device
+            ),
+            context_features=ctx,
+            lengths=torch.tensor([2], device=device),
+        )
+        # Seed CLS once so add_batch doesn't add it
+        buffer.add_tokens(
+            embedding_data=StructuredEmbeddingData(
+                token_ids=token_ids,
+                card_ranks=torch.zeros(1, L, dtype=torch.uint8, device=device),
+                card_suits=torch.zeros(1, L, dtype=torch.uint8, device=device),
+                card_streets=torch.zeros(1, L, dtype=torch.uint8, device=device),
+                action_actors=torch.full((1, L), -1, dtype=torch.int16, device=device),
+                action_streets=torch.full((1, L), -1, dtype=torch.int16, device=device),
+                action_legal_masks=torch.zeros(
+                    1, L, buffer.num_bet_bins, dtype=torch.bool, device=device
+                ),
+                context_features=ctx,
+                lengths=torch.tensor([1], device=device),
+            ),
+            trajectory_indices=torch.tensor([0], device=device),
+        )
+
+        # Add our action
+        pos_before = buffer.token_positions[0].item()
+        buffer.add_batch(
+            embedding_data=emb,
+            action_indices=torch.tensor([2], device=device),
+            log_probs=torch.randn(1, buffer.num_bet_bins, device=device),
+            rewards=torch.tensor([0.0], device=device),
+            dones=torch.tensor([False], dtype=torch.bool, device=device),
+            legal_masks=torch.ones(
+                1, buffer.num_bet_bins, dtype=torch.bool, device=device
+            ),
+            delta2=torch.tensor([0.0], device=device),
+            delta3=torch.tensor([0.0], device=device),
+            values=torch.tensor([0.0], device=device),
+            trajectory_indices=torch.tensor([0], device=device),
+        )
+        # Expect two tokens appended: CONTEXT then ACTION
+        assert buffer.token_positions[0] == pos_before + 2
+        # transition end for step 0 should equal new position
+        assert buffer.transition_token_ends[0, 0] == buffer.token_positions[0]
 
     def test_add_single_transition(self, buffer):
         """Test adding a single transition to a trajectory."""

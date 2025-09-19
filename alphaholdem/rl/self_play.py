@@ -474,6 +474,7 @@ class SelfPlayTrainer:
         per_env_rewards = torch.zeros(self.num_envs, device=self.device)
         max_steps = self.cfg.train.max_trajectory_length
         steps_since_reset = 0
+        prev_street = self.tensor_env.street.clone()
 
         # Chunk opponents by tensor env index
         opp_env_groups = None
@@ -508,6 +509,17 @@ class SelfPlayTrainer:
                 # Initialize trajectory collection; reserve space in buffer.
                 self.replay_buffer.start_adding_trajectory_batches(self.num_envs)
                 adding_trajectories = True
+
+                # Append initial non-action tokens (CLS, preflop marker, hole cards) for transformer only
+                if self.replay_buffer.is_transformer:
+                    all_env_indices = torch.arange(self.num_envs, device=self.device)
+                    init_states = self._encode_tensor_states(
+                        player=0, idxs=all_env_indices
+                    )
+                    self.replay_buffer.add_tokens(
+                        embedding_data=init_states,
+                        trajectory_indices=all_env_indices,
+                    )
 
             loop_count += 1
 
@@ -627,6 +639,23 @@ class SelfPlayTrainer:
             )
             newly_done_mask = dones & active_mask
 
+            # After environment step, append any newly revealed non-action tokens (transformer only)
+            if add_to_replay_buffer and getattr(
+                self.replay_buffer, "is_transformer", False
+            ):
+                advanced_mask = self.tensor_env.street > prev_street
+                if advanced_mask.any():
+                    advanced_envs = torch.where(advanced_mask)[0]
+                    adv_states = self._encode_tensor_states(
+                        player=0, idxs=advanced_envs
+                    )
+                    self.replay_buffer.add_tokens(
+                        embedding_data=adv_states,
+                        trajectory_indices=advanced_envs,
+                    )
+                # Update prev_street for next iteration
+                prev_street = self.tensor_env.street.clone()
+
             # Update per-environment reward tracking
             per_env_rewards += rewards
 
@@ -671,6 +700,19 @@ class SelfPlayTrainer:
                 batch_steps_collected += env_active_we_act.numel()
 
             if env_active_opp_acts.numel() > 0:
+                # Append opponent actions to token streams in transformer mode
+                if add_to_replay_buffer and self.cfg.model.name.startswith(
+                    "poker_transformer"
+                ):
+                    opp_legal = legal_bins_mask[env_active_opp_acts]
+                    opp_actions = action_bins[env_active_opp_acts]
+                    opp_streets = prev_street[env_active_opp_acts]
+                    self.replay_buffer.add_opponent_actions(
+                        trajectory_indices=env_active_opp_acts,
+                        action_indices=opp_actions,
+                        legal_masks=opp_legal.bool(),
+                        streets=opp_streets,
+                    )
                 # Check if any opponent actions ended the hand
                 opp_ended_hands_mask = newly_done_mask & opp_acts_mask
                 opp_ended_hands = torch.where(opp_ended_hands_mask)[0]
