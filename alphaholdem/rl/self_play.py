@@ -107,8 +107,8 @@ class SelfPlayTrainer:
         self.policy = policy
 
         # Create state encoder based on model type
-        is_transformer = cfg.model.name.startswith("poker_transformer")
-        if is_transformer:
+        self.is_transformer = cfg.model.name.startswith("poker_transformer")
+        if self.is_transformer:
             # Use transformer state encoder
             self.state_encoder = ModelFactory.create_state_encoder(
                 "transformer", self.device, tensor_env=self.tensor_env
@@ -136,7 +136,7 @@ class SelfPlayTrainer:
 
         # Use vectorized replay buffer for efficient tensor operations
         sequence_length = (
-            self.state_encoder.get_sequence_length() if is_transformer else -1
+            self.state_encoder.get_sequence_length() if self.is_transformer else -1
         )
         self.replay_buffer = VectorizedReplayBuffer(
             capacity=buffer_capacity,  # Number of trajectories
@@ -144,7 +144,7 @@ class SelfPlayTrainer:
             num_bet_bins=self.num_bet_bins,  # Number of bet bins for actions tensor
             device=self.device,
             float_dtype=self.float_dtype,  # Use appropriate dtype for mixed precision
-            is_transformer=is_transformer,  # Whether this buffer is for transformer models
+            is_transformer=self.is_transformer,  # Whether this buffer is for transformer models
             sequence_length=sequence_length,  # Sequence length for transformer models
         )
 
@@ -511,7 +511,7 @@ class SelfPlayTrainer:
                 adding_trajectories = True
 
                 # Append initial non-action tokens (CLS, preflop marker, hole cards) for transformer only
-                if self.replay_buffer.is_transformer:
+                if self.is_transformer:
                     all_env_indices = torch.arange(self.num_envs, device=self.device)
                     init_states = self._encode_tensor_states(
                         player=0, idxs=all_env_indices
@@ -557,7 +557,21 @@ class SelfPlayTrainer:
                         dtype=torch.bfloat16,
                         enabled=self.use_mixed_precision,
                     ):
-                        outputs = self.model(our_states)
+                        if self.is_transformer:
+                            # Append decision CONTEXT into live token streams
+                            self.replay_buffer.add_context(
+                                embedding_data=our_states,
+                                trajectory_indices=env_active_we_act,
+                            )
+                            # Snapshot decision-time prefixes and run inference
+                            decision_prefixes = (
+                                self.replay_buffer.snapshot_current_prefixes(
+                                    env_active_we_act
+                                )
+                            )
+                            outputs = self.model(decision_prefixes)
+                        else:
+                            outputs = self.model(our_states)
 
                     env_logits[env_active_we_act] = outputs["policy_logits"].float()
                     env_values[env_active_we_act] = outputs["value"].float().squeeze(-1)
@@ -684,26 +698,40 @@ class SelfPlayTrainer:
 
                 # Add transitions immediately using vectorized operations
                 if add_to_replay_buffer:
-                    self.replay_buffer.add_batch(
-                        embedding_data=our_states,
-                        action_indices=our_action_indices,
-                        log_probs=our_log_probs_full,
-                        rewards=our_rewards_tensor,
-                        dones=our_dones_tensor,
-                        legal_masks=our_legal_masks_tensor.bool(),
-                        delta2=our_delta2_tensor,
-                        delta3=our_delta3_tensor,
-                        values=our_values_tensor,
-                        trajectory_indices=env_active_we_act,  # Use full environment indices
-                    )
+                    if self.is_transformer:
+                        # Append ACTION and store transition metadata (decision_end already recorded)
+                        streets_now = self.tensor_env.street[env_active_we_act]
+                        self.replay_buffer.add_hero_action_step(
+                            trajectory_indices=env_active_we_act,
+                            action_indices=our_action_indices,
+                            log_probs=our_log_probs_full,
+                            rewards=our_rewards_tensor,
+                            dones=our_dones_tensor,
+                            legal_masks=our_legal_masks_tensor.bool(),
+                            delta2=our_delta2_tensor,
+                            delta3=our_delta3_tensor,
+                            values=our_values_tensor,
+                            street_values=streets_now,
+                        )
+                    else:
+                        self.replay_buffer.add_batch(
+                            embedding_data=our_states,
+                            action_indices=our_action_indices,
+                            log_probs=our_log_probs_full,
+                            rewards=our_rewards_tensor,
+                            dones=our_dones_tensor,
+                            legal_masks=our_legal_masks_tensor.bool(),
+                            delta2=our_delta2_tensor,
+                            delta3=our_delta3_tensor,
+                            values=our_values_tensor,
+                            trajectory_indices=env_active_we_act,
+                        )
 
                 batch_steps_collected += env_active_we_act.numel()
 
             if env_active_opp_acts.numel() > 0:
                 # Append opponent actions to token streams in transformer mode
-                if add_to_replay_buffer and self.cfg.model.name.startswith(
-                    "poker_transformer"
-                ):
+                if add_to_replay_buffer and self.is_transformer:
                     opp_legal = legal_bins_mask[env_active_opp_acts]
                     opp_actions = action_bins[env_active_opp_acts]
                     opp_streets = prev_street[env_active_opp_acts]
