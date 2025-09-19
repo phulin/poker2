@@ -53,7 +53,7 @@ class TransformerPolicyHead(nn.Module):
         """
         policy_logits = self.bet_bin_head(x)
 
-        return {"policy_logits": policy_logits}
+        return policy_logits
 
 
 class TransformerValueHead(nn.Module):

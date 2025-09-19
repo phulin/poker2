@@ -126,19 +126,16 @@ def get_probabilities(
         )
         outputs = model(embedding_data)
 
-        logits = outputs["policy_logits"]  # [N, num_bet_bins]
-        values = outputs["value"]  # [N]
-
         # Get legal actions from tensor environment
         legal_masks = env.legal_bins_mask()  # [N, num_bet_bins]
 
         # Apply legal mask
-        masked_logits = torch.where(legal_masks == 0, -1e9, logits)
+        masked_logits = torch.where(legal_masks == 0, -1e9, outputs.policy_logits)
 
         # Get probabilities
         probs = torch.softmax(masked_logits, dim=-1)  # [N, num_bet_bins]
 
-    return probs, values, legal_masks
+    return probs, outputs.value, legal_masks
 
 
 def create_169_hand_analysis_setup(

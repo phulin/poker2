@@ -187,12 +187,9 @@ class PokerTransformerV1(nn.Module, Model):
         cls_state = x[:, 0]
         cls_state = self.cls_mlp(cls_state)
 
-        policy_output = self.policy_head(cls_state)
-        value = self.value_head(cls_state)
-
         return ModelOutput(
-            policy_logits=policy_output["policy_logits"],
-            value=value,
+            policy_logits=self.policy_head(cls_state),
+            value=self.value_head(cls_state),
             kv_cache=new_kv_cache,
         )
 
