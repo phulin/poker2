@@ -86,14 +86,20 @@ class KBestOpponentPool(OpponentPool):
         return [self.snapshots[i] for i in sampled_indices]
 
     def add_snapshot(
-        self, model: Any, step: int, rating: Optional[float] = None
+        self,
+        model: Any,
+        step: int,
+        rating: Optional[float] = None,
+        is_exploiter: bool = False,
     ) -> None:
         """
         Add a new snapshot to the pool.
 
         Args:
-            agent: The agent to snapshot (should have a model attribute)
+            model: The model to snapshot
+            step: Training step
             rating: ELO rating of the agent
+            is_exploiter: Whether this snapshot is an exploiter
         """
         # Create new snapshot
         model_dtype = torch.bfloat16 if self.use_mixed_precision else torch.float32
@@ -102,6 +108,7 @@ class KBestOpponentPool(OpponentPool):
             step=step,
             elo=rating if rating is not None else self.current_elo,
             model_dtype=model_dtype,
+            is_exploiter=is_exploiter,
         )
 
         # Reduce memory footprint of snapshot models on accelerators

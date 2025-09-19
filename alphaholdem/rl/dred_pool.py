@@ -280,7 +280,11 @@ class DREDPool(OpponentPool):
             return torch.ones(n) / n
 
     def add_snapshot(
-        self, model: Any, step: int, rating: Optional[float] = None
+        self,
+        model: Any,
+        step: int,
+        rating: Optional[float] = None,
+        is_exploiter: bool = False,
     ) -> None:
         """
         Add a new snapshot to the pool.
@@ -289,6 +293,7 @@ class DREDPool(OpponentPool):
             model: The model to snapshot
             step: Training step
             rating: ELO rating of the agent
+            is_exploiter: Whether this snapshot is an exploiter
         """
         # Create new snapshot
         model_dtype = torch.bfloat16 if self.use_mixed_precision else torch.float32
@@ -298,6 +303,7 @@ class DREDPool(OpponentPool):
             elo=rating if rating is not None else self.current_elo,
             data=DREDSnapshotData(),  # DRED-specific data
             model_dtype=model_dtype,
+            is_exploiter=is_exploiter,
         )
 
         # Reduce memory footprint of snapshot models
@@ -321,8 +327,22 @@ class DREDPool(OpponentPool):
             self._prune()
 
     def _prune(self):
-        """Prune snapshots using DRED strategy."""
+        """Prune snapshots using DRED strategy while preserving last 5 exploiters."""
         n = len(self.snapshots)
+
+        # First, identify and preserve the last 5 exploiters
+        exploiter_indices = []
+        for i, snapshot in enumerate(self.snapshots):
+            if snapshot.is_exploiter:
+                exploiter_indices.append(i)
+
+        # Sort exploiters by step (most recent first) and keep last 5
+        if exploiter_indices:
+            exploiter_steps = [(i, self.snapshots[i].step) for i in exploiter_indices]
+            exploiter_steps.sort(key=lambda x: x[1], reverse=True)  # Most recent first
+            keep_exploiters = set(i for i, _ in exploiter_steps[:5])  # Keep last 5
+        else:
+            keep_exploiters = set()
 
         # Keep top ELO 10%
         top_count = max(1, n // 10)
@@ -333,27 +353,38 @@ class DREDPool(OpponentPool):
 
         keep_indices = set(top_indices.tolist())
 
+        # Always keep the preserved exploiters
+        keep_indices.update(keep_exploiters)
+
         if remaining_indices.numel() > 1:
-            # Generate embeddings for remaining snapshots
-            embeddings = torch.stack(
-                [self._generate_embedding(self.snapshots[i]) for i in remaining_indices]
-            )
+            # Generate embeddings for remaining snapshots (excluding preserved exploiters)
+            non_exploiter_remaining = [
+                i for i in remaining_indices if i not in keep_exploiters
+            ]
 
-            # Cluster count (up to 30 clusters)
-            k_clusters = min(30, remaining_indices.numel())
-
-            if k_clusters > 1:
-                # Use our custom k-medoids implementation
-                kmedoids = SimpleKMedoids(n_clusters=k_clusters, random_state=0).fit(
-                    embeddings
+            if non_exploiter_remaining:
+                embeddings = torch.stack(
+                    [
+                        self._generate_embedding(self.snapshots[i])
+                        for i in non_exploiter_remaining
+                    ]
                 )
 
-                # Add medoid indices to keep set
-                for medoid_idx in kmedoids.medoid_indices_:
-                    keep_indices.add(remaining_indices[medoid_idx])
-            else:
-                # If only one cluster, keep all remaining indices
-                keep_indices.update(remaining_indices)
+                # Cluster count (up to 30 clusters)
+                k_clusters = min(30, len(non_exploiter_remaining))
+
+                if k_clusters > 1:
+                    # Use our custom k-medoids implementation
+                    kmedoids = SimpleKMedoids(
+                        n_clusters=k_clusters, random_state=0
+                    ).fit(embeddings)
+
+                    # Add medoid indices to keep set
+                    for medoid_idx in kmedoids.medoid_indices_:
+                        keep_indices.add(non_exploiter_remaining[medoid_idx])
+                else:
+                    # If only one cluster, keep all remaining non-exploiter indices
+                    keep_indices.update(non_exploiter_remaining)
 
         # Final reservoir sampling if still over budget
         if len(keep_indices) > self.max_size:

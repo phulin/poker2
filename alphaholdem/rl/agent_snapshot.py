@@ -22,6 +22,7 @@ class AgentSnapshot:
     draws: int
     data: Optional[Any]
     model_dtype: torch.dtype
+    is_exploiter: bool
 
     def __init__(
         self,
@@ -30,6 +31,7 @@ class AgentSnapshot:
         elo: float = 1200.0,
         data: Optional[Any] = None,
         model_dtype: torch.dtype = torch.float32,
+        is_exploiter: bool = False,
     ):
         self.model_dtype = model_dtype
         if model is not None:
@@ -47,6 +49,7 @@ class AgentSnapshot:
         self.losses = 0
         self.draws = 0
         self.data = data  # Additional data that can be filled by the pool
+        self.is_exploiter = is_exploiter
 
     def get_win_rate(self) -> float:
         """Get win rate of this snapshot."""

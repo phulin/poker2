@@ -16,6 +16,7 @@ from ..core.structured_config import Config
 
 # Import encoders and models to register them
 from ..rl.self_play import SelfPlayTrainer
+from ..rl.fixed_opponent_pool import FixedOpponentPool
 from ..utils.config_loader import load_config_from_checkpoint
 from ..utils.training_utils import (
     print_checkpoint_info,
@@ -25,12 +26,78 @@ from ..utils.training_utils import (
 )
 
 
+def train_exploiter(trainer, exploiter_trainer, step, cfg):
+    """
+    Train an exploiter against the current model and add it to the opponent pool.
+
+    Args:
+        trainer: Main SelfPlayTrainer instance
+        exploiter_trainer: Exploiter SelfPlayTrainer instance with FixedOpponentPool
+        step: Current training step
+        cfg: Configuration object
+
+    Returns:
+        Dictionary with exploiter training statistics
+    """
+    print(f"\n🤖 Training exploiter at step {step + 1}...")
+    exploiter_start_time = time.time()
+
+    # Copy current model to exploiter
+    exploiter_trainer.model.load_state_dict(trainer.model.state_dict())
+
+    # Set the current model as the fixed opponent for the exploiter
+    exploiter_trainer.opponent_pool.set_fixed_opponent(
+        trainer.model, step + 1, trainer.opponent_pool.current_elo
+    )
+
+    # Train exploiter for specified number of steps
+    exploiter_stats = []
+    for exploiter_step in range(cfg.exploiter.training_steps):
+        step_stats = exploiter_trainer.train_step(exploiter_step + 1)
+        exploiter_stats.append(step_stats)
+
+    # Calculate average exploiter performance
+    avg_exploiter_reward = sum(s.get("avg_reward", 0) for s in exploiter_stats) / len(
+        exploiter_stats
+    )
+    avg_exploiter_loss = sum(s.get("avg_loss", 0) for s in exploiter_stats) / len(
+        exploiter_stats
+    )
+
+    # Add trained exploiter to main pool
+    trainer.opponent_pool.add_snapshot(
+        exploiter_trainer.model, step + 1, is_exploiter=True
+    )
+
+    exploiter_time = time.time() - exploiter_start_time
+    print(f"✅ Exploiter training completed in {exploiter_time:.2f}s")
+    print(f"   Average reward: {avg_exploiter_reward:.4f}")
+    print(f"   Average loss: {avg_exploiter_loss:.4f}")
+    print(f"   Pool size: {len(trainer.opponent_pool.snapshots)}")
+
+    return {
+        "exploiter_training_time": exploiter_time,
+        "avg_exploiter_reward": avg_exploiter_reward,
+        "avg_exploiter_loss": avg_exploiter_loss,
+        "pool_size_after": len(trainer.opponent_pool.snapshots),
+    }
+
+
 def train_kbest(cfg: Config) -> SelfPlayTrainer:
     """
-    Train AlphaHoldem agent using K-Best self-play.
+    Train AlphaHoldem agent using K-Best self-play with optional exploiter training.
+
+    This function implements the main training loop with the following features:
+    - K-Best opponent pool management
+    - Optional exploiter training every N steps
+    - Exploiters train against the current model using FixedOpponentPool
+    - Comprehensive logging and checkpointing
 
     Args:
         cfg: Hydra configuration object containing all training parameters
+
+    Returns:
+        SelfPlayTrainer: The trained trainer instance
     """
 
     # Create checkpoint directory
@@ -87,6 +154,30 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
 
     # Initialize trainer with merged config
     trainer = SelfPlayTrainer(cfg=merged_config, device=device)
+
+    # Initialize exploiter trainer if enabled
+    exploiter_trainer = None
+    if merged_config.exploiter.enabled:
+        print("🤖 Exploiter training enabled")
+
+        # Create exploiter trainer with same config but different hyperparameters
+        exploiter_cfg = merged_config
+        exploiter_cfg.train.learning_rate = merged_config.exploiter.learning_rate
+        exploiter_cfg.train.batch_size = merged_config.exploiter.batch_size
+        exploiter_cfg.train.num_epochs = merged_config.exploiter.num_epochs
+        exploiter_cfg.train.entropy_coef = merged_config.exploiter.entropy_coef
+
+        exploiter_trainer = SelfPlayTrainer(cfg=exploiter_cfg, device=device)
+
+        # Replace exploiter's opponent pool with a fixed opponent pool
+        exploiter_trainer.opponent_pool = FixedOpponentPool(
+            k_factor=merged_config.k_factor,
+            use_mixed_precision=merged_config.train.use_mixed_precision,
+        )
+
+        print("✅ Exploiter trainer initialized")
+    else:
+        print("❌ Exploiter training disabled")
 
     # Load checkpoint if specified (after trainer initialization for wandb resumption)
     if cfg.resume_from and os.path.exists(cfg.resume_from):
@@ -148,6 +239,16 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
             eval_results = trainer.evaluate_against_pool(min_games=20)
             print_evaluation_results(eval_results)
 
+        # Exploiter training
+        if (
+            merged_config.exploiter.enabled
+            and exploiter_trainer is not None
+            and (step + 1) % merged_config.exploiter.training_interval == 0
+        ):
+            exploiter_stats = train_exploiter(
+                trainer, exploiter_trainer, step, merged_config
+            )
+
         # Checkpointing
         if (step + 1) % cfg.checkpoint_interval == 0:
             checkpoint_path = os.path.join(
@@ -205,6 +306,7 @@ def main(cfg) -> None:
     from alphaholdem.core.structured_config import (
         Config,
         EnvConfig,
+        ExploiterConfig,
         ModelConfig,
         StateEncoderConfig,
         TrainingConfig,
@@ -217,6 +319,7 @@ def main(cfg) -> None:
     model_config = ModelConfig(**cfg_dict.get("model", {}))
     env_config = EnvConfig(**cfg_dict.get("env", {}))
     state_encoder_config = StateEncoderConfig(**cfg_dict.get("state_encoder", {}))
+    exploiter_config = ExploiterConfig(**cfg_dict.get("exploiter", {}))
 
     # Create Config dataclass
     config = Config(
@@ -224,10 +327,11 @@ def main(cfg) -> None:
         model=model_config,
         env=env_config,
         state_encoder=state_encoder_config,
+        exploiter=exploiter_config,
         **{
             k: v
             for k, v in cfg_dict.items()
-            if k not in ["train", "model", "env", "state_encoder"]
+            if k not in ["train", "model", "env", "state_encoder", "exploiter"]
         },
     )
 

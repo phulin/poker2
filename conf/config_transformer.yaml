@@ -36,6 +36,16 @@ config: null
 wandb_run_id: null
 economize_checkpoints: false
 
+# === EXPLOITER CONFIGURATION ===
+exploiter:
+  enabled: true
+  training_interval: 1000  # Train every 1000 steps
+  training_steps: 50       # Number of steps to train exploiter
+  learning_rate: 3e-4      # Higher LR for faster adaptation
+  batch_size: 256          # Smaller batch for transformer exploiter
+  num_epochs: 2            # Fewer epochs per update
+  entropy_coef: 0.005      # Lower entropy for more focused exploitation
+
 # === TRAINING HYPERPARAMETERS ===
 train:
   learning_rate: 3e-4  # Lower LR for transformer

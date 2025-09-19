@@ -96,6 +96,19 @@ class StateEncoderConfig:
 
 
 @dataclass
+class ExploiterConfig:
+    """Configuration for exploiter training."""
+
+    enabled: bool = True
+    training_interval: int = 1000  # Train every 1000 steps
+    training_steps: int = 50  # Number of steps to train exploiter
+    learning_rate: float = 3e-4  # Higher LR for faster adaptation
+    batch_size: int = 512  # Smaller batch for faster training
+    num_epochs: int = 2  # Fewer epochs per update
+    entropy_coef: float = 0.005  # Lower entropy for more focused exploitation
+
+
+@dataclass
 class Config:
     # Training parameters
     num_steps: int = 2000
@@ -127,6 +140,7 @@ class Config:
     model: ModelConfig = MISSING
     env: EnvConfig = MISSING
     state_encoder: StateEncoderConfig = MISSING
+    exploiter: ExploiterConfig = MISSING
 
     def __post_init__(self):
         if self.wandb_tags is None:
@@ -140,3 +154,4 @@ cs.store(group="train", name="default", node=TrainingConfig)
 cs.store(group="model", name="default", node=ModelConfig)
 cs.store(group="env", name="default", node=EnvConfig)
 cs.store(group="state_encoder", name="default", node=StateEncoderConfig)
+cs.store(group="exploiter", name="default", node=ExploiterConfig)

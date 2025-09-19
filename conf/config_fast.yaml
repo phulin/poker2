@@ -32,6 +32,16 @@ seed: 42
 config: null  # Path to YAML config for components/hparams
 economize_checkpoints: true  # Enable checkpoint economization for fast testing
 
+# === EXPLOITER CONFIGURATION ===
+exploiter:
+  enabled: true
+  training_interval: 200  # Train every 200 steps for fast testing
+  training_steps: 20      # Fewer steps for fast testing
+  learning_rate: 3e-4     # Higher LR for faster adaptation
+  batch_size: 256         # Smaller batch for fast testing
+  num_epochs: 2           # Fewer epochs per update
+  entropy_coef: 0.005     # Lower entropy for more focused exploitation
+
 # === TRAINING HYPERPARAMETERS ===
 train:
   learning_rate: 1e-3

@@ -36,6 +36,16 @@ config: null  # Path to YAML config for components/hparams
 wandb_run_id: null  # Wandb run ID to resume
 economize_checkpoints: false  # Keep only best_model.pt and latest checkpoint, skip replay buffer
 
+# === EXPLOITER CONFIGURATION ===
+exploiter:
+  enabled: true
+  training_interval: 1000  # Train every 1000 steps
+  training_steps: 50       # Number of steps to train exploiter
+  learning_rate: 3e-4      # Higher LR for faster adaptation
+  batch_size: 512          # Smaller batch for faster training
+  num_epochs: 2            # Fewer epochs per update
+  entropy_coef: 0.005      # Lower entropy for more focused exploitation
+
 # === TRAINING HYPERPARAMETERS ===
 train:
   learning_rate: 3e-4

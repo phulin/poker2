@@ -1207,7 +1207,7 @@ class SelfPlayTrainer:
                 trajectory, reward = self.collect_trajectory(opponent)
 
                 if len(trajectory.transitions) > 0:
-                    self.replay_buffer.add_trajectory_legacy(trajectory)
+                    self.replay_buffer.add_trajectory(trajectory)
                     self.step_trajectories_collected += 1
                     self.total_trajectories_collected += 1
                     steps_added += len(trajectory.transitions)
