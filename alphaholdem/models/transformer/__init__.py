@@ -3,7 +3,6 @@
 from .embeddings import PokerFusedEmbedding, combine_embeddings
 from .heads import HandRangeHead, TransformerPolicyHead, TransformerValueHead
 from .poker_transformer import PokerTransformerV1
-from .state_encoder import TransformerStateEncoder
 
 __all__ = [
     "PokerTransformerV1",
@@ -12,5 +11,4 @@ __all__ = [
     "TransformerPolicyHead",
     "TransformerValueHead",
     "HandRangeHead",
-    "TransformerStateEncoder",
 ]

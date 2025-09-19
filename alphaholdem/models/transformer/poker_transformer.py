@@ -12,7 +12,7 @@ import torch.utils.checkpoint
 from ...core.interfaces import Model
 from ...core.registry import register_model
 from ...utils.profiling import profile
-from .embedding_data import StructuredEmbeddingData
+from .structured_embedding_data import StructuredEmbeddingData
 from .embeddings import PokerFusedEmbedding
 from .heads import TransformerPolicyHead, TransformerValueHead
 

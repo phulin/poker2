@@ -1689,6 +1689,98 @@ class TestVectorizedReplayBuffer:
             "values": torch.randn(batch_size, trajectory_length, device=device),
         }
 
+    def _create_test_embedding_data(
+        self, batch_size: int, device: torch.device, length: int
+    ) -> StructuredEmbeddingData:
+        """Create test embedding data for testing."""
+        return StructuredEmbeddingData(
+            token_ids=torch.randint(
+                0, 100, (batch_size, length), device=device, dtype=torch.int8
+            ),
+            card_ranks=torch.randint(
+                0, 13, (batch_size, length), device=device, dtype=torch.uint8
+            ),
+            card_suits=torch.randint(
+                0, 4, (batch_size, length), device=device, dtype=torch.uint8
+            ),
+            card_streets=torch.randint(
+                0, 4, (batch_size, length), device=device, dtype=torch.uint8
+            ),
+            action_actors=torch.randint(
+                0, 2, (batch_size, length), device=device, dtype=torch.uint8
+            ),
+            action_streets=torch.randint(
+                0, 4, (batch_size, length), device=device, dtype=torch.uint8
+            ),
+            action_legal_masks=torch.ones(batch_size, length, 5, device=device).bool(),
+            context_features=torch.randn(batch_size, length, 10, device=device),
+            lengths=torch.full((batch_size,), length, dtype=torch.long, device=device),
+        )
+
+    def test_sample_transformer_steps(self, buffer):
+        """Test _sample_transformer_steps method."""
+        # Start adding trajectory batches
+        buffer.start_adding_trajectory_batches(2)
+
+        # Add some tokens to create trajectories
+        embedding_data = self._create_test_embedding_data(2, buffer.device, 10)
+        trajectory_indices = torch.tensor([0, 1], device=buffer.device)
+        buffer.add_tokens(embedding_data, trajectory_indices)
+
+        # Set up transition token ends for the steps
+        buffer.transition_token_ends[0, 0] = 3
+        buffer.transition_token_ends[1, 0] = 7
+
+        # Test sampling with different step indices
+        bidx = torch.tensor([0, 1], device=buffer.device)
+        step_indices = torch.tensor([0, 0], device=buffer.device)  # Use step 0
+
+        result = buffer._sample_transformer_steps(bidx, step_indices)
+
+        # Check that the result has the correct shape
+        assert result.token_ids.shape[0] == 2
+        assert result.lengths[0] == 3
+        assert result.lengths[1] == 7
+
+    def test_append_from_embedding(self, buffer):
+        """Test _append_from_embedding method."""
+        # Set initial token positions
+        buffer.token_positions[0] = 3
+        buffer.token_positions[1] = 2
+
+        # Create embedding data with total lengths (not just new data)
+        embedding_data = self._create_test_embedding_data(
+            2, buffer.device, 8
+        )  # Total length 8
+        embedding_data.lengths[0] = 8  # Total length for first trajectory
+        embedding_data.lengths[1] = 7  # Total length for second trajectory
+
+        # Test appending
+        buffer_indices = torch.tensor([0, 1], device=buffer.device)
+        buffer._append_from_embedding(buffer_indices, embedding_data)
+
+        # Check that token positions were updated to the total lengths
+        assert buffer.token_positions[0] == 8
+        assert buffer.token_positions[1] == 7
+
+        # Test error when embedding length decreases
+        embedding_data_decreased = self._create_test_embedding_data(2, buffer.device, 5)
+        embedding_data_decreased.lengths[0] = 2  # Less than current position 8
+        embedding_data_decreased.lengths[1] = 1  # Less than current position 7
+        with pytest.raises(
+            ValueError, match="Embedding length cannot decrease when appending"
+        ):
+            buffer._append_from_embedding(buffer_indices, embedding_data_decreased)
+
+        # Test error when sequence length exceeded
+        embedding_data_too_long = self._create_test_embedding_data(2, buffer.device, 60)
+        embedding_data_too_long.lengths[0] = 60  # Exceeds max sequence length
+        embedding_data_too_long.lengths[1] = 60
+        with pytest.raises(
+            ValueError, match="Token sequence exceeds configured sequence length"
+        ):
+            buffer._append_from_embedding(buffer_indices, embedding_data_too_long)
+
 
 if __name__ == "__main__":
     # Run tests if script is executed directly

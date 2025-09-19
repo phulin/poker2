@@ -13,7 +13,8 @@ class TrainingConfig:
     batch_size: int = 1024
     num_epochs: int = 4
     replay_buffer_batches: int = 4
-    max_trajectory_length: int = 50  # Maximum steps per trajectory in replay buffer
+    max_trajectory_length: int = 12  # Maximum steps per trajectory in replay buffer
+    max_sequence_length: int = 50  # Maximum sequence length for transformer models
     gamma: float = 0.999
     gae_lambda: float = 0.95
     ppo_eps: float = 0.2

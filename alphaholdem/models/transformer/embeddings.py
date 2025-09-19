@@ -7,13 +7,18 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
-from alphaholdem.models.transformer.tokens import Context, Special
+from .tokens import (
+    Context,
+    Special,
+    get_action_token_id_offset,
+    get_card_token_id_offset,
+    get_special_token_id_offset,
+)
 
 from ...utils.profiling import profile
 
 if TYPE_CHECKING:  # pragma: no cover - import guarded for type checkers only
-    from .embedding_data import StructuredEmbeddingData
+    from .structured_embedding_data import StructuredEmbeddingData
 
 
 class PokerFusedEmbedding(nn.Module):
@@ -24,9 +29,7 @@ class PokerFusedEmbedding(nn.Module):
         self.num_bet_bins = num_bet_bins
         self.d_model = d_model
 
-        self.vocab_size = (
-            TransformerStateEncoder.get_action_token_offset(num_bet_bins) + num_bet_bins
-        )
+        self.vocab_size = get_action_token_id_offset() + num_bet_bins
         self.padding_idx = self.vocab_size  # sentinel row for padded tokens
 
         self.base_embedding = nn.Embedding(
@@ -36,15 +39,11 @@ class PokerFusedEmbedding(nn.Module):
         # Card components
         self.card_rank_emb = nn.Embedding(13, d_model)
         self.card_suit_emb = nn.Embedding(4, d_model)
-        self.card_street_emb = nn.Embedding(
-            len(TransformerStateEncoder.STREETS), d_model
-        )
+        self.card_street_emb = nn.Embedding(4, d_model)
 
         # Action components
         self.action_actor_emb = nn.Embedding(2, d_model)
-        self.action_street_emb = nn.Embedding(
-            len(TransformerStateEncoder.STREETS), d_model
-        )
+        self.action_street_emb = nn.Embedding(4, d_model)
         self.action_type_emb = nn.Embedding(num_bet_bins, d_model)
         self.legal_mask_mlp = nn.Sequential(
             nn.Linear(num_bet_bins, d_model),
@@ -90,13 +89,9 @@ class PokerFusedEmbedding(nn.Module):
         embeddings = self.base_embedding(padded_ids)
         dtype = embeddings.dtype
 
-        special_offset = TransformerStateEncoder.get_special_token_offset(
-            self.num_bet_bins
-        )
-        card_offset = TransformerStateEncoder.get_card_token_offset(self.num_bet_bins)
-        action_offset = TransformerStateEncoder.get_action_token_offset(
-            self.num_bet_bins
-        )
+        special_offset = get_special_token_id_offset()
+        card_offset = get_card_token_id_offset()
+        action_offset = get_action_token_id_offset()
 
         # Card token contributions (rank + suit + street)
         card_mask = (padded_ids >= card_offset) & (padded_ids < card_offset + 52)
@@ -104,9 +99,7 @@ class PokerFusedEmbedding(nn.Module):
             rows, cols = torch.where(card_mask)
             ranks = data.card_ranks[rows, cols].clamp(min=0, max=12)
             suits = data.card_suits[rows, cols].clamp(min=0, max=3)
-            streets = data.card_streets[rows, cols].clamp(
-                min=0, max=len(TransformerStateEncoder.STREETS) - 1
-            )
+            streets = data.card_streets[rows, cols].clamp(min=0, max=4)
             card_embed = (
                 self.card_rank_emb(ranks)
                 + self.card_suit_emb(suits)
@@ -121,9 +114,7 @@ class PokerFusedEmbedding(nn.Module):
         if action_mask.any():
             rows, cols = torch.where(action_mask)
             actors = data.action_actors[rows, cols].clamp(min=0, max=1)
-            streets = data.action_streets[rows, cols].clamp(
-                min=0, max=len(TransformerStateEncoder.STREETS) - 1
-            )
+            streets = data.action_streets[rows, cols].clamp(min=0, max=4)
             action_ids = padded_ids[rows, cols] - action_offset
             legal_masks = data.action_legal_masks[rows, cols].to(embeddings.dtype)
             action_embed = (

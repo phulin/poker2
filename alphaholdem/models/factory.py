@@ -9,8 +9,7 @@ import torch.nn as nn
 
 from ..core.registry import MODELS
 from .cnn import SiameseConvNetV1
-from .state_encoder import CNNStateEncoder
-from .transformer import PokerTransformerV1, TransformerStateEncoder
+from .transformer import PokerTransformerV1
 
 
 class ModelFactory:
@@ -58,38 +57,6 @@ class ModelFactory:
     ) -> PokerTransformerV1:
         """Create transformer-based model."""
         return torch.compile(PokerTransformerV1(**config).to(device))
-
-    @staticmethod
-    def create_state_encoder(
-        encoder_type: str, device: torch.device, tensor_env=None, **kwargs
-    ):
-        """Create state encoder based on type.
-
-        Args:
-            encoder_type: Type of encoder ('cnn' or 'transformer')
-            device: Device to create encoder on
-            tensor_env: Tensor environment (required for transformer)
-            **kwargs: Additional arguments for encoder creation
-
-        Returns:
-            State encoder instance
-        """
-        if encoder_type == "cnn":
-            # For CNN, we need the card and action encoders
-            cards_encoder = kwargs.get("cards_encoder")
-            actions_encoder = kwargs.get("actions_encoder")
-            if cards_encoder is None or actions_encoder is None:
-                raise ValueError(
-                    "CNN state encoder requires cards_encoder and actions_encoder"
-                )
-            return CNNStateEncoder(cards_encoder, actions_encoder, device)
-        elif encoder_type == "transformer":
-            # For transformer, we need tensor_env and device
-            if tensor_env is None:
-                raise ValueError("Transformer state encoder requires tensor_env")
-            return TransformerStateEncoder(tensor_env, device)
-        else:
-            raise ValueError(f"Unknown encoder type: {encoder_type}")
 
     @staticmethod
     def get_available_model_types() -> list[str]:

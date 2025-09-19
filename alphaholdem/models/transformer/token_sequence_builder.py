@@ -2,6 +2,7 @@ import torch
 
 from ...env.hunl_tensor_env import HUNLTensorEnv
 from .tokens import (
+    CLS_INDEX,
     Special,
     Context,
     Cls,
@@ -10,7 +11,7 @@ from .tokens import (
     HOLE0_INDEX,
     HOLE1_INDEX,
 )
-from .embedding_data import StructuredEmbeddingData
+from .structured_embedding_data import StructuredEmbeddingData
 
 
 class TokenSequenceBuilder:
@@ -58,8 +59,8 @@ class TokenSequenceBuilder:
         self.card_ranks = torch.zeros(N, L, dtype=torch.long, device=device)
         self.card_suits = torch.zeros(N, L, dtype=torch.long, device=device)
         self.card_streets = torch.zeros(N, L, dtype=torch.long, device=device)
-        self.action_actors = torch.full((N, L), -1, dtype=torch.long, device=device)
-        self.action_streets = torch.full((N, L), -1, dtype=torch.long, device=device)
+        self.action_actors = torch.zeros(N, L, dtype=torch.long, device=device)
+        self.action_streets = torch.zeros(N, L, dtype=torch.long, device=device)
         self.action_legal_masks = torch.zeros(
             N, L, num_bet_bins, dtype=torch.bool, device=device
         )
@@ -177,57 +178,58 @@ class TokenSequenceBuilder:
         This mirrors the transformer state encoder's context computation so the
         TSB can act as the state-encoder during rollout.
         """
-        M = idxs.numel()
 
         result = StructuredEmbeddingData(
-            token_ids=self.token_ids[:M].clone(),
-            card_ranks=self.card_ranks[:M].clone(),
-            card_suits=self.card_suits[:M].clone(),
-            card_streets=self.card_streets[:M].clone(),
-            action_actors=self.action_actors[:M].clone(),
-            action_streets=self.action_streets[:M].clone(),
-            action_legal_masks=self.action_legal_masks[:M].clone(),
-            context_features=self.context_features[:M].clone(),
-            lengths=self.lengths[:M].clone(),
+            token_ids=self.token_ids[idxs],
+            card_ranks=self.card_ranks[idxs],
+            card_suits=self.card_suits[idxs],
+            card_streets=self.card_streets[idxs],
+            action_actors=self.action_actors[idxs],
+            action_streets=self.action_streets[idxs],
+            action_legal_masks=self.action_legal_masks[idxs],
+            context_features=self.context_features[idxs],
+            lengths=self.lengths[idxs],
         )
 
-        # hero_on_button flag in CLS (binary)
-        button = self.tensor_env.button[idxs]
-        result.context_features[:, 0, Cls.HERO_ON_BUTTON.value] = (
-            button == int(player)
-        ).to(self.float_dtype)
+        if player == 1:
+            # hero_on_button flag in CLS (binary)
+            button = self.tensor_env.button[idxs]
+            result.context_features[:, CLS_INDEX, Cls.HERO_ON_BUTTON.value] = (
+                button == int(player)
+            ).to(self.float_dtype)
 
-        # Set hole cards
-        result.token_ids[:, HOLE0_INDEX] = (
-            get_card_token_id_offset() + self.tensor_env.hole_indices[idxs, player, 0]
-        )
-        result.card_ranks[:, HOLE0_INDEX] = (
-            self.tensor_env.hole_indices[idxs, player, 0] % 13
-        )
-        result.card_suits[:, HOLE0_INDEX] = (
-            self.tensor_env.hole_indices[idxs, player, 0] // 13
-        )
-        result.token_ids[:, HOLE1_INDEX] = (
-            get_card_token_id_offset() + self.tensor_env.hole_indices[idxs, player, 1]
-        )
-        result.card_ranks[:, HOLE1_INDEX] = (
-            self.tensor_env.hole_indices[idxs, player, 1] % 13
-        )
-        result.card_suits[:, HOLE1_INDEX] = (
-            self.tensor_env.hole_indices[idxs, player, 1] // 13
-        )
+            # Set hole cards
+            result.token_ids[:, HOLE0_INDEX] = (
+                get_card_token_id_offset()
+                + self.tensor_env.hole_indices[idxs, player, 0]
+            )
+            result.card_ranks[:, HOLE0_INDEX] = (
+                self.tensor_env.hole_indices[idxs, player, 0] % 13
+            )
+            result.card_suits[:, HOLE0_INDEX] = (
+                self.tensor_env.hole_indices[idxs, player, 0] // 13
+            )
+            result.token_ids[:, HOLE1_INDEX] = (
+                get_card_token_id_offset()
+                + self.tensor_env.hole_indices[idxs, player, 1]
+            )
+            result.card_ranks[:, HOLE1_INDEX] = (
+                self.tensor_env.hole_indices[idxs, player, 1] % 13
+            )
+            result.card_suits[:, HOLE1_INDEX] = (
+                self.tensor_env.hole_indices[idxs, player, 1] // 13
+            )
 
-        # Reverse all CONTEXT bet_to_call values. Will be 0 for non-context tokens, so this is fine.
-        result.context_features[:, :, Context.BET_TO_CALL.value] = (
-            -result.context_features[:, :, Context.BET_TO_CALL.value]
-        )
+            # Reverse all CONTEXT bet_to_call values. Will be 0 for non-context tokens, so this is fine.
+            result.context_features[:, :, Context.BET_TO_CALL.value] = (
+                -result.context_features[:, :, Context.BET_TO_CALL.value]
+            )
 
-        # Reverse all actor indices, but only where the token is an action.
-        action_token_offset = get_action_token_id_offset()
-        action_token_mask = result.token_ids >= action_token_offset
-        result.action_actors[action_token_mask] = (
-            1 - result.action_actors[action_token_mask]
-        )
+            # Reverse all actor indices, but only where the token is an action.
+            action_token_mask = result.token_ids >= get_action_token_id_offset()
+            result.action_actors[action_token_mask] = (
+                1 - result.action_actors[action_token_mask]
+            )
 
         return result
 

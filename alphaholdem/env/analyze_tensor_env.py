@@ -8,8 +8,9 @@ from typing import Any, List, Tuple
 
 import torch
 
-from ..models.state_encoder import CNNStateEncoder
-from ..models.transformer.state_encoder import TransformerStateEncoder
+from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
+from alphaholdem.models.state_encoder import CNNStateEncoder
+
 from .hunl_tensor_env import HUNLTensorEnv
 
 
@@ -29,7 +30,7 @@ def create_state_encoder_for_model(model, env: HUNLTensorEnv, device: torch.devi
 
     if "transformer" in model_class_name:
         # For transformer models, create TransformerStateEncoder
-        return TransformerStateEncoder(env, device)
+        return TokenSequenceBuilder(env, device)
     elif "siamese" in model_class_name or "cnn" in model_class_name:
         # For CNN models, create CNNStateEncoder with tensor_env and device
         return CNNStateEncoder(env, device)
@@ -248,10 +249,7 @@ def create_169_hand_analysis_setup(
         # Set deck_pos to 4 (after hole cards)
         temp_env.deck_pos[i] = 4
 
-    # Create appropriate state encoder for the model
-    state_encoder = create_state_encoder_for_model(model, temp_env, device)
-
-    return temp_env, state_encoder
+    return temp_env, create_state_encoder_for_model(model, temp_env, device)
 
 
 def _card_str_to_int(card_str: str) -> int:

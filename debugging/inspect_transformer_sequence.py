@@ -241,7 +241,7 @@ def main(actions: Iterable[int]) -> None:
     # Create config manually
     config = Config(
         use_wandb=False,
-        num_envs=8,
+        num_envs=1,
         train=TrainingConfig(
             batch_size=64,
             num_epochs=4,

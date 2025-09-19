@@ -6,7 +6,7 @@ import torch
 from typing import Dict, List
 
 from ...env.hunl_tensor_env import HUNLTensorEnv
-from .embedding_data import StructuredEmbeddingData
+from .structured_embedding_data import StructuredEmbeddingData
 from .state_encoder import TransformerStateEncoder
 
 
