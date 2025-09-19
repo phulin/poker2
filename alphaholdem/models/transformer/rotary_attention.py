@@ -1,10 +1,10 @@
 """Rotary Position Embedding (RoPE) attention implementation."""
 
-import math
 from typing import Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -39,7 +39,6 @@ class RotarySelfAttention(nn.Module):
         self.k_proj = nn.Linear(d_model, d_model)
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
-        self.attn_dropout = nn.Dropout(dropout)
 
     def forward(
         self,
@@ -60,16 +59,21 @@ class RotarySelfAttention(nn.Module):
 
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_head)
+        # collapse batch and heads for SDPA
+        q = q.reshape(batch_size * self.n_heads, seq_len, self.d_head)
+        k = k.reshape(batch_size * self.n_heads, seq_len, self.d_head)
+        v = v.reshape(batch_size * self.n_heads, seq_len, self.d_head)
 
-        if attention_mask is not None:
-            key_padding = (~attention_mask).unsqueeze(1).unsqueeze(2)
-            scores = scores.masked_fill(key_padding, torch.finfo(scores.dtype).min)
-
-        attn = torch.softmax(scores, dim=-1)
-        attn = self.attn_dropout(attn)
-
-        context = torch.matmul(attn, v)
+        context = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attention_mask,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=False,
+            enable_gqa=True,
+        )
+        context = context.view(batch_size, self.n_heads, seq_len, self.d_head)
         context = context.permute(0, 2, 1, 3).contiguous()
         context = context.view(batch_size, seq_len, self.d_model)
 

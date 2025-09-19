@@ -126,12 +126,8 @@ class PokerFusedEmbedding(nn.Module):
             embeddings[rows, cols] += action_embed
 
         # Special tokens: CLS + dynamic context augmentations
-        cls_id = special_offset + Special.CLS.value
-        cls_mask = padded_ids == cls_id
-        if cls_mask.any():
-            cls_features = data.context_features[cls_mask][:, :3]
-            cls_embed = self.cls_mlp(cls_features).to(dtype)
-            embeddings[cls_mask] += cls_embed
+        # CLS token always at index 0
+        embeddings[:, 0] += self.cls_mlp(data.context_features[:, 0, :3])
 
         context_id = special_offset + Special.CONTEXT.value
         context_mask = padded_ids == context_id
