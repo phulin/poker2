@@ -192,6 +192,7 @@ def print_preflop_range_grid(
 
     bb_call_grid = get_preflop_range_grid_bb_response(
         trainer.model,
+        trainer.state_encoder,
         1,  # call bin
         device=trainer.device,
         starting_stack=trainer.cfg.env.stack,
