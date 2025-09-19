@@ -15,77 +15,7 @@ from ...utils.profiling import profile
 from .structured_embedding_data import StructuredEmbeddingData
 from .embeddings import PokerFusedEmbedding
 from .heads import TransformerPolicyHead, TransformerValueHead
-
-
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotate last dimension by half for RoPE application."""
-
-    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
-    return torch.cat([-x2, x1], dim=-1)
-
-
-def apply_rotary_pos_emb(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply rotary position embedding to query/key pair."""
-
-    cos = cos.to(dtype=q.dtype)
-    sin = sin.to(dtype=q.dtype)
-    return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
-
-
-class RotarySelfAttention(nn.Module):
-    """Multi-head self-attention with RoPE positional encoding."""
-
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1) -> None:
-        super().__init__()
-        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.d_head = d_model // n_heads
-        assert (
-            self.d_head % 2 == 0
-        ), "Rotary embeddings require an even projected head dimension"
-
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
-        self.attn_dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        attention_mask: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size, seq_len, _ = x.shape
-
-        q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
-        k = self.k_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
-        v = self.v_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
-
-        q = q.permute(0, 2, 1, 3)
-        k = k.permute(0, 2, 1, 3)
-        v = v.permute(0, 2, 1, 3)
-
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
-
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_head)
-
-        if attention_mask is not None:
-            key_padding = (~attention_mask).unsqueeze(1).unsqueeze(2)
-            scores = scores.masked_fill(key_padding, torch.finfo(scores.dtype).min)
-
-        attn = torch.softmax(scores, dim=-1)
-        attn = self.attn_dropout(attn)
-
-        context = torch.matmul(attn, v)
-        context = context.permute(0, 2, 1, 3).contiguous()
-        context = context.view(batch_size, seq_len, self.d_model)
-
-        return self.out_proj(context)
+from .rotary_attention import RotarySelfAttention
 
 
 class TransformerLayer(nn.Module):
