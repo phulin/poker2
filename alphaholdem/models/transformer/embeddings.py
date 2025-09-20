@@ -20,6 +20,8 @@ from ...utils.profiling import profile
 if TYPE_CHECKING:  # pragma: no cover - import guarded for type checkers only
     from .structured_embedding_data import StructuredEmbeddingData
 
+FOURIER_FEATURES = 5 * 2
+
 
 class PokerFusedEmbedding(nn.Module):
     """Single fused embedding module covering all transformer token types."""
@@ -58,8 +60,13 @@ class PokerFusedEmbedding(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.1),
         )
+        self.register_buffer(
+            "context_fourier",
+            torch.pi * (2 ** torch.arange(0, FOURIER_FEATURES / 2)),
+            persistent=False,
+        )
         self.context_mlp = nn.Sequential(
-            nn.Linear(Context.NUM_CONTEXT.value, d_model),
+            nn.Linear(Context.NUM_CONTEXT.value * (1 + FOURIER_FEATURES), d_model),
             nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -75,6 +82,7 @@ class PokerFusedEmbedding(nn.Module):
     def forward(self, data: "StructuredEmbeddingData") -> torch.Tensor:
         """Return fused embeddings for all tokens in the batch."""
 
+        N = data.token_ids.shape[0]
         token_ids = data.token_ids
 
         # Map padded positions to the dedicated padding row in the embedding table.
@@ -85,10 +93,9 @@ class PokerFusedEmbedding(nn.Module):
             token_ids,
         )
 
-        embeddings = self.base_embedding(padded_ids) + self.street_emb(
-            data.token_streets
+        embeddings = self.base_embedding(padded_ids.int()) + self.street_emb(
+            data.token_streets.int()
         )
-        dtype = embeddings.dtype
 
         special_offset = get_special_token_id_offset()
         card_offset = get_card_token_id_offset()
@@ -100,10 +107,9 @@ class PokerFusedEmbedding(nn.Module):
             rows, cols = torch.where(card_mask)
             ranks = data.card_ranks[rows, cols].clamp(min=0, max=12)
             suits = data.card_suits[rows, cols].clamp(min=0, max=3)
-            card_embed = (self.card_rank_emb(ranks) + self.card_suit_emb(suits)).to(
-                dtype
-            )
-            embeddings[rows, cols] += card_embed
+            embeddings[rows, cols] += self.card_rank_emb(
+                ranks.int()
+            ) + self.card_suit_emb(suits.int())
 
         # Action token contributions (actor + street + action id + legal mask projection)
         action_mask = (padded_ids >= action_offset) & (
@@ -113,12 +119,12 @@ class PokerFusedEmbedding(nn.Module):
             rows, cols = torch.where(action_mask)
             actors = data.action_actors[rows, cols].clamp(min=0, max=1)
             action_ids = padded_ids[rows, cols] - action_offset
-            legal_masks = data.action_legal_masks[rows, cols].to(embeddings.dtype)
+            legal_masks = data.action_legal_masks[rows, cols]
             action_embed = (
-                self.action_actor_emb(actors)
-                + self.action_type_emb(action_ids)
+                self.action_actor_emb(actors.int())
+                + self.action_type_emb(action_ids.int())
                 + self.legal_mask_mlp(legal_masks)
-            ).to(dtype)
+            )
             embeddings[rows, cols] += action_embed
 
         # Special tokens: CLS + dynamic context augmentations
@@ -128,8 +134,28 @@ class PokerFusedEmbedding(nn.Module):
         context_id = special_offset + Special.CONTEXT.value
         context_mask = padded_ids == context_id
         if context_mask.any():
-            ctx_features = data.context_features[context_mask]
-            context_embed = self.context_mlp(ctx_features).to(dtype)
+            # Expand context features to broadcast to FOURIER_FEATURES features
+            ctx_features = data.context_features[context_mask].view(
+                -1, Context.NUM_CONTEXT.value, 1
+            )
+            # 2^k * pi * x
+            ctx_features_fourier = ctx_features * self.context_fourier.view(
+                1, 1, FOURIER_FEATURES // 2
+            )
+            # sin/cos(2^k * pi * x)
+            ctx_features_fourier_sin = torch.sin(ctx_features_fourier)
+            ctx_features_fourier_cos = torch.cos(ctx_features_fourier)
+
+            # Concatenate original features with Fourier features
+            ctx_features_all = torch.cat(
+                [ctx_features, ctx_features_fourier_sin, ctx_features_fourier_cos],
+                dim=-1,
+            )
+            context_embed = self.context_mlp(
+                ctx_features_all.view(
+                    -1, Context.NUM_CONTEXT.value * (1 + FOURIER_FEATURES)
+                )
+            )
             embeddings[context_mask] += context_embed
 
         # Ensure explicit zeros for padded tokens after augmentations.

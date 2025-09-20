@@ -33,11 +33,10 @@ class Context(Enum):
     COMMITTED_P0 = 7
     COMMITTED_P1 = 8
     POSITION = 9
-    STREET = 10
-    ACTIONS_ROUND = 11
-    MIN_RAISE = 12
-    BET_TO_CALL = 13
-    NUM_CONTEXT = 14
+    ACTIONS_ROUND = 10
+    MIN_RAISE = 11
+    BET_TO_CALL = 12
+    NUM_CONTEXT = 13
 
 
 class Cls(Enum):
@@ -45,7 +44,7 @@ class Cls(Enum):
 
     SB = 0
     BB = 1
-    HERO_ON_BUTTON = 2
+    HERO_POSITION = 2
     NUM_CLS = 3
 
 

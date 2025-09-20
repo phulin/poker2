@@ -7,6 +7,8 @@ from typing import Dict
 
 import torch
 
+from .tokens import Context
+
 
 @dataclass
 class StructuredEmbeddingData:
@@ -199,7 +201,9 @@ class StructuredEmbeddingData:
                 (batch_size, seq_len, num_bet_bins), dtype=torch.bool, device=device
             ),
             context_features=torch.zeros(
-                (batch_size, seq_len, 10), dtype=dtype, device=device
+                (batch_size, seq_len, Context.NUM_CONTEXT.value),
+                dtype=dtype,
+                device=device,
             ),
             lengths=torch.zeros((batch_size), dtype=torch.long, device=device),
         )

@@ -76,13 +76,13 @@ class VectorizedReplayBuffer:
             )
             self.current_token_positions = torch.zeros(
                 C,
-                dtype=torch.long,
+                dtype=torch.uint8,
                 device=device,
             )
             self.transition_token_ends = torch.zeros(
                 C,
                 T,
-                dtype=torch.long,
+                dtype=torch.uint8,
                 device=device,
             )
 

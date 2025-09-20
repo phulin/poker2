@@ -62,7 +62,9 @@ class TokenSequenceBuilder:
         self.action_legal_masks = torch.zeros(
             N, L, num_bet_bins, dtype=torch.bool, device=device
         )
-        self.context_features = torch.zeros(N, L, 10, dtype=float_dtype, device=device)
+        self.context_features = torch.zeros(
+            N, L, Context.NUM_CONTEXT.value, dtype=float_dtype, device=device
+        )
         self.lengths = torch.zeros(N, dtype=torch.long, device=device)
 
     def _reserve(self, idxs: torch.Tensor, k: int) -> torch.Tensor:
@@ -113,11 +115,10 @@ class TokenSequenceBuilder:
             self.tensor_env.committed[idxs, opp].to(self.float_dtype)
         ) / scale
         self.context_features[idxs, start, Context.POSITION.value] = (
-            self.tensor_env.button[idxs] != player
+            # position 0 is the button, 1 is BB
+            self.tensor_env.button[idxs]
+            != self.tensor_env.to_act
         ).to(self.float_dtype)
-        self.context_features[idxs, start, Context.STREET.value] = (
-            self.tensor_env.street[idxs].to(self.float_dtype)
-        )
         self.context_features[idxs, start, Context.ACTIONS_ROUND.value] = (
             self.tensor_env.actions_this_round[idxs].to(self.float_dtype)
         )
@@ -140,8 +141,8 @@ class TokenSequenceBuilder:
         # CLS slot (index 0)
         self.context_features[idxs, start, Cls.SB.value] = float(self.tensor_env.sb)
         self.context_features[idxs, start, Cls.BB.value] = float(self.tensor_env.bb)
-        self.context_features[idxs, start, Cls.HERO_ON_BUTTON.value] = (
-            self.tensor_env.button[idxs] == 0
+        self.context_features[idxs, start, Cls.HERO_POSITION.value] = (
+            self.tensor_env.button[idxs] == 1
         ).to(self.float_dtype)
 
     def add_action(
@@ -209,7 +210,7 @@ class TokenSequenceBuilder:
         if player == 1:
             # hero_on_button flag in CLS (binary)
             button = self.tensor_env.button[idxs]
-            result.context_features[:, CLS_INDEX, Cls.HERO_ON_BUTTON.value] = (
+            result.context_features[:, CLS_INDEX, Cls.HERO_POSITION.value] = (
                 button == int(player)
             ).to(self.float_dtype)
 
@@ -268,10 +269,10 @@ class TokenSequenceBuilder:
                 -result.context_features[:, :, Context.BET_TO_CALL.value]
             )
 
-            context_token_mask = result.token_ids == Special.CONTEXT.value
-            result.context_features[context_token_mask, :, Context.POSITION.value] = (
-                1
-                - result.context_features[context_token_mask, :, Context.POSITION.value]
+            # Reverse all CONTEXT position values.
+            rows, cols = torch.where(result.token_ids == Special.CONTEXT.value)
+            result.context_features[rows, cols, Context.POSITION.value] = (
+                1 - result.context_features[rows, cols, Context.POSITION.value]
             )
 
             # Reverse all actor indices, but only where the token is an action.

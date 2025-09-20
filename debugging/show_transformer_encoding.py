@@ -234,7 +234,7 @@ def inspect_embedding(data, perspective: int, env: HUNLTensorEnv) -> None:
             if special == "CLS":
                 cls_vec = data.context_features[0, pos]
                 parts.append(
-                    "cls={sb:.0f} bb={bb:.0f} hero_on_button={btn:.0f}".format(
+                    "cls={sb:.0f} bb={bb:.0f} hero_position={btn:.0f}".format(
                         sb=float(cls_vec[0].item()),
                         bb=float(cls_vec[1].item()),
                         btn=float(cls_vec[2].item()),

@@ -150,7 +150,7 @@ def hook_model_forward(model, original_forward):
                             parts.append(f"sb={ctx[Cls.SB.value]:.0f}")
                             parts.append(f"bb={ctx[Cls.BB.value]:.0f}")
                             parts.append(
-                                f"hero_button={ctx[Cls.HERO_ON_BUTTON.value]:.0f}"
+                                f"hero_position={ctx[Cls.HERO_POSITION.value]:.0f}"
                             )
 
                     elif token == Special.CONTEXT.value:
@@ -160,7 +160,6 @@ def hook_model_forward(model, original_forward):
                             parts.append(f"pot={ctx[Context.POT.value]:.0f}")
                             parts.append(f"stack_p0={ctx[Context.STACK_P0.value]:.0f}")
                             parts.append(f"stack_p1={ctx[Context.STACK_P1.value]:.0f}")
-                            parts.append(f"street={ctx[Context.STREET.value]:.0f}")
                             parts.append(
                                 f"bet_to_call={ctx[Context.BET_TO_CALL.value]:.0f}"
                             )
@@ -551,16 +550,25 @@ def print_replay_buffer_summary(replay_buffer):
                             # Create table header
                             print(f"  Context features table:")
                             print(
-                                f"    {'Pos':<4} {'POT':<8} {'STACK_P0':<8} {'STACK_P1':<8} {'COMM_P0':<8} {'COMM_P1':<8} {'POS':<4} {'STREET':<6} {'ACT_ROUND':<9} {'MIN_RAISE':<9} {'BET_CALL':<8}"
+                                f"    {'Pos':<4} {'POT':<8} {'STACK_P0':<8} {'STACK_P1':<8} {'COMM_P0':<8} {'COMM_P1':<8} {'POS':<4} {'ACT_ROUND':<9} {'MIN_RAISE':<9} {'BET_CALL':<8}"
                             )
                             print(
-                                f"    {'-'*4} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*4} {'-'*6} {'-'*9} {'-'*9} {'-'*8}"
+                                f"    {'-'*4} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*4} {'-'*9} {'-'*9} {'-'*8}"
                             )
 
                             for j in context_token_indices:
                                 ctx = context_features[j].tolist()
                                 print(
-                                    f"    {j:<4} {ctx[0]:<8.1f} {ctx[1]:<8.1f} {ctx[2]:<8.1f} {ctx[3]:<8.1f} {ctx[4]:<8.1f} {ctx[5]:<4.0f} {ctx[6]:<6.0f} {ctx[7]:<9.0f} {ctx[8]:<9.1f} {ctx[9]:<8.1f}"
+                                    f"    {j:<4} "
+                                    f"{ctx[Context.POT.value]:<8.3f} "
+                                    f"{ctx[Context.STACK_P0.value]:<8.3f} "
+                                    f"{ctx[Context.STACK_P1.value]:<8.3f} "
+                                    f"{ctx[Context.COMMITTED_P0.value]:<8.3f} "
+                                    f"{ctx[Context.COMMITTED_P1.value]:<8.3f} "
+                                    f"{ctx[Context.POSITION.value]:<4.0f} "
+                                    f"{ctx[Context.ACTIONS_ROUND.value]:<9.0f} "
+                                    f"{ctx[Context.MIN_RAISE.value]:<9.3f} "
+                                    f"{ctx[Context.BET_TO_CALL.value]:<8.3f}"
                                 )
                         else:
                             print(f"  No context tokens found in this trajectory")
@@ -746,7 +754,6 @@ def main(actions: Iterable[int]) -> None:
                     embedding_data = batch["embedding_data"]
                     print(f"\nEmbedding data type: {type(embedding_data)}")
                     if hasattr(embedding_data, "token_ids"):
-                        print(f"Token IDs shape: {embedding_data.token_ids.shape}")
                         print(f"Lengths: {embedding_data.lengths.tolist()}")
 
                         # Show token sequences for sampled transitions
@@ -765,10 +772,10 @@ def main(actions: Iterable[int]) -> None:
                                     parts.append("CLS")
                                     if hasattr(embedding_data, "context_features"):
                                         ctx = embedding_data.context_features[i, pos]
-                                        parts.append(f"sb={ctx[Cls.SB.value]:.0f}")
-                                        parts.append(f"bb={ctx[Cls.BB.value]:.0f}")
+                                        parts.append(f"sb={ctx[Cls.SB.value]:.3f}")
+                                        parts.append(f"bb={ctx[Cls.BB.value]:.3f}")
                                         parts.append(
-                                            f"hero_button={ctx[Cls.HERO_ON_BUTTON.value]:.0f}"
+                                            f"hero_position={ctx[Cls.HERO_POSITION.value]:.0f}"
                                         )
 
                                 elif token == Special.CONTEXT.value:
@@ -776,19 +783,16 @@ def main(actions: Iterable[int]) -> None:
                                     if hasattr(embedding_data, "context_features"):
                                         ctx = embedding_data.context_features[i, pos]
                                         parts.append(
-                                            f"pot={ctx[Context.POT.value]:.0f}"
+                                            f"pot={ctx[Context.POT.value]:.3f}"
                                         )
                                         parts.append(
-                                            f"stack_p0={ctx[Context.STACK_P0.value]:.0f}"
+                                            f"stack_p0={ctx[Context.STACK_P0.value]:.3f}"
                                         )
                                         parts.append(
-                                            f"stack_p1={ctx[Context.STACK_P1.value]:.0f}"
+                                            f"stack_p1={ctx[Context.STACK_P1.value]:.3f}"
                                         )
                                         parts.append(
-                                            f"street={ctx[Context.STREET.value]:.0f}"
-                                        )
-                                        parts.append(
-                                            f"bet_to_call={ctx[Context.BET_TO_CALL.value]:.0f}"
+                                            f"bet_to_call={ctx[Context.BET_TO_CALL.value]:.3f}"
                                         )
 
                                 elif token in [
