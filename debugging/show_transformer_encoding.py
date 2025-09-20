@@ -312,7 +312,7 @@ def main() -> None:
 
     # Finish and display the token stream and ends
     buffer.finish_adding_trajectory_batches()
-    pos = int(buffer.token_positions[0].item())
+    pos = int(buffer.current_token_positions[0].item())
     print(f"\nReplay token stream length={pos}")
     print("Token IDs:", buffer.token_ids[0, :pos].tolist())
     print(

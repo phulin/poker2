@@ -1183,7 +1183,9 @@ class TestVectorizedReplayBuffer:
             f"Valid trajectories mask: {trainer.replay_buffer.trajectory_lengths > 0}"
         )
         print(f"Trajectory lengths: {trainer.replay_buffer.trajectory_lengths}")
-        print(f"Current step positions: {trainer.replay_buffer.current_step_positions}")
+        print(
+            f"Current step positions: {trainer.replay_buffer.current_transition_counts}"
+        )
 
         # Check if there are any non-zero cards features
         non_zero_cards = (

@@ -135,13 +135,14 @@ class TokenSequenceBuilder:
         actors: torch.Tensor,
         action_ids: torch.Tensor,
         legal_masks: torch.Tensor,
+        action_streets: torch.Tensor,
     ) -> None:
         if idxs.numel() == 0:
             return
         start = self._reserve(idxs, 1)
         self.token_ids[idxs, start] = Special.NUM_SPECIAL.value + 52 + action_ids
         self.action_actors[idxs, start] = actors
-        self.action_streets[idxs, start] = self.tensor_env.street[idxs]
+        self.action_streets[idxs, start] = action_streets
         self.action_legal_masks[idxs, start, :] = legal_masks
 
     def add_card(
@@ -220,6 +221,26 @@ class TokenSequenceBuilder:
                 self.tensor_env.hole_indices[idxs, player, 1] // 13
             )
 
+            result.context_features[
+                :,
+                :,
+                [
+                    Context.STACK_P0.value,
+                    Context.STACK_P1.value,
+                    Context.COMMITTED_P0.value,
+                    Context.COMMITTED_P1.value,
+                ],
+            ] = result.context_features[
+                :,
+                :,
+                [
+                    Context.STACK_P1.value,
+                    Context.STACK_P0.value,
+                    Context.COMMITTED_P1.value,
+                    Context.COMMITTED_P0.value,
+                ],
+            ]
+
             # Reverse all CONTEXT bet_to_call values. Will be 0 for non-context tokens, so this is fine.
             result.context_features[:, :, Context.BET_TO_CALL.value] = (
                 -result.context_features[:, :, Context.BET_TO_CALL.value]
@@ -240,8 +261,8 @@ class TokenSequenceBuilder:
         self.card_ranks[idxs] = 0
         self.card_suits[idxs] = 0
         self.card_streets[idxs] = 0
-        self.action_actors[idxs] = -1
-        self.action_streets[idxs] = -1
+        self.action_actors[idxs] = 0
+        self.action_streets[idxs] = 0
         self.action_legal_masks[idxs] = False
         self.context_features[idxs] = 0
         self.lengths[idxs] = 0

@@ -39,6 +39,8 @@ class VectorizedReplayBuffer:
             -1
         )  # -1 if no batch is open, otherwise the nominal size of the open batch
 
+        # T is the maximum number of transitions per trajectory
+        # L is the maximum number of tokens per trajectory (should be > T)
         C, T, L = capacity, max_trajectory_length, max_sequence_length
 
         # Pre-allocate tensors for all transition fields: (capacity, max_trajectory_length, ...)
@@ -68,57 +70,10 @@ class VectorizedReplayBuffer:
             )
         else:
             # Transformer structured embedding fields: maintain a single growing token stream per trajectory
-            self.token_ids = torch.full(
-                (C, L),
-                -1,
-                dtype=torch.int8,
-                device=device,
+            self.data = StructuredEmbeddingData.empty(
+                C, L, num_bet_bins, float_dtype, device
             )
-            self.card_ranks = torch.zeros(
-                C,
-                L,
-                dtype=torch.uint8,
-                device=device,
-            )
-            self.card_suits = torch.zeros(
-                C,
-                L,
-                dtype=torch.uint8,
-                device=device,
-            )
-            self.card_streets = torch.zeros(
-                C,
-                L,
-                dtype=torch.uint8,
-                device=device,
-            )
-            self.action_actors = torch.zeros(
-                C,
-                L,
-                dtype=torch.uint8,
-                device=device,
-            )
-            self.action_streets = torch.zeros(
-                C,
-                L,
-                dtype=torch.uint8,
-                device=device,
-            )
-            self.action_legal_masks = torch.zeros(
-                C,
-                L,
-                num_bet_bins,
-                dtype=torch.bool,
-                device=device,
-            )
-            self.context_features = torch.zeros(
-                C,
-                L,
-                10,
-                dtype=float_dtype,
-                device=device,
-            )
-            self.token_positions = torch.zeros(
+            self.current_token_positions = torch.zeros(
                 C,
                 dtype=torch.long,
                 device=device,
@@ -155,7 +110,7 @@ class VectorizedReplayBuffer:
         self.trajectory_lengths = torch.zeros(capacity, dtype=torch.long, device=device)
 
         # Track current step position within each trajectory
-        self.current_step_positions = torch.zeros(
+        self.current_transition_counts = torch.zeros(
             capacity, dtype=torch.long, device=device
         )
 
@@ -189,7 +144,7 @@ class VectorizedReplayBuffer:
 
         # Clear trajectory metadata for these rows
         self.trajectory_lengths[clear_indices] = 0
-        self.current_step_positions[clear_indices] = 0
+        self.current_transition_counts[clear_indices] = 0
 
         # Clear the actual data tensors for these rows
         if not self.is_transformer:
@@ -198,15 +153,15 @@ class VectorizedReplayBuffer:
             self.actions_features[clear_indices] = False
         else:
             # Transformer structured embedding tensors
-            self.token_ids[clear_indices] = -1
-            self.card_ranks[clear_indices] = 0
-            self.card_suits[clear_indices] = 0
-            self.card_streets[clear_indices] = 0
-            self.action_actors[clear_indices] = -1
-            self.action_streets[clear_indices] = -1
-            self.action_legal_masks[clear_indices] = False
-            self.context_features[clear_indices] = 0
-            self.token_positions[clear_indices] = 0
+            self.data.token_ids[clear_indices] = -1
+            self.data.card_ranks[clear_indices] = 0
+            self.data.card_suits[clear_indices] = 0
+            self.data.card_streets[clear_indices] = 0
+            self.data.action_actors[clear_indices] = -1
+            self.data.action_streets[clear_indices] = -1
+            self.data.action_legal_masks[clear_indices] = False
+            self.data.context_features[clear_indices] = 0
+            self.current_token_positions[clear_indices] = 0
             self.transition_token_ends[clear_indices] = 0
 
         # Common tensors for both model types
@@ -276,7 +231,7 @@ class VectorizedReplayBuffer:
         # For each field, move data from nonzero_indices to the front of indices
         common_fields = [
             "trajectory_lengths",
-            "current_step_positions",
+            "current_transition_counts",
             "action_indices",
             "log_probs",
             "rewards",
@@ -289,6 +244,7 @@ class VectorizedReplayBuffer:
             "returns",
         ]
 
+        data_fields = []
         if not self.is_transformer:
             # CNN model fields
             cnn_fields = ["cards_features", "actions_features"]
@@ -297,7 +253,10 @@ class VectorizedReplayBuffer:
             # Transformer model fields
             transformer_fields = [
                 "transition_token_ends",
-                "token_positions",
+                "current_token_positions",
+            ]
+            all_fields = common_fields + transformer_fields
+            data_fields = [
                 "token_ids",
                 "card_ranks",
                 "card_suits",
@@ -306,11 +265,17 @@ class VectorizedReplayBuffer:
                 "action_streets",
                 "action_legal_masks",
                 "context_features",
+                "lengths",
             ]
-            all_fields = common_fields + transformer_fields
 
         for attr in all_fields:
             buf = getattr(self, attr)
+            buf[compacted_indices] = buf[nonzero_indices]
+            # Zero out the now-unused slots at the end of the window
+            buf[unused_indices] = 0
+
+        for attr in data_fields:
+            buf = getattr(self.data, attr)
             buf[compacted_indices] = buf[nonzero_indices]
             # Zero out the now-unused slots at the end of the window
             buf[unused_indices] = 0
@@ -366,22 +331,19 @@ class VectorizedReplayBuffer:
         buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
 
         # Get step positions within trajectories
-        step_positions = self.current_step_positions[buffer_trajectory_indices]
+        transition_counts = self.current_transition_counts[buffer_trajectory_indices]
 
         # Check if any trajectory would exceed max length
-        if (step_positions >= self.max_trajectory_length).any():
+        if (transition_counts >= self.max_trajectory_length).any():
             raise ValueError("Some trajectories would exceed max_trajectory_length")
-
-        # Clamp step positions to be within bounds
-        step_positions = torch.clamp(step_positions, 0, self.max_trajectory_length - 1)
 
         # Handle different embedding data types
         if isinstance(embedding_data, CNNEmbeddingData):
             # Store CNN features - convert from float to bool for memory efficiency
-            self.cards_features[buffer_trajectory_indices, step_positions] = (
+            self.cards_features[buffer_trajectory_indices, transition_counts] = (
                 embedding_data.cards.to(torch.bool)
             )
-            self.actions_features[buffer_trajectory_indices, step_positions] = (
+            self.actions_features[buffer_trajectory_indices, transition_counts] = (
                 embedding_data.actions.to(torch.bool)
             )
         elif isinstance(embedding_data, StructuredEmbeddingData):
@@ -392,43 +354,37 @@ class VectorizedReplayBuffer:
             # Append any newly provided tokens to the sequence (vectorized)
             self._append_from_embedding(buffer_trajectory_indices, embedding_data)
             # Record transition end pointer for this step
-            self.transition_token_ends[buffer_trajectory_indices, step_positions] = (
-                self.token_positions[buffer_trajectory_indices]
+            self.transition_token_ends[buffer_trajectory_indices, transition_counts] = (
+                self.current_token_positions[buffer_trajectory_indices]
             )
         else:
             raise TypeError("Unsupported embedding_data type")
 
         # Store common transition data
-        self.action_indices[buffer_trajectory_indices, step_positions] = action_indices
+        self.action_indices[buffer_trajectory_indices, transition_counts] = (
+            action_indices
+        )
         # Expect log_probs shape [batch_size, num_bet_bins]
-        self.log_probs[buffer_trajectory_indices, step_positions, :] = log_probs
-        self.rewards[buffer_trajectory_indices, step_positions] = rewards
-        self.dones[buffer_trajectory_indices, step_positions] = dones
-        self.legal_masks[buffer_trajectory_indices, step_positions, :] = legal_masks
-        self.delta2[buffer_trajectory_indices, step_positions] = delta2
-        self.delta3[buffer_trajectory_indices, step_positions] = delta3
-        self.values[buffer_trajectory_indices, step_positions] = values
+        self.log_probs[buffer_trajectory_indices, transition_counts, :] = log_probs
+        self.rewards[buffer_trajectory_indices, transition_counts] = rewards
+        self.dones[buffer_trajectory_indices, transition_counts] = dones
+        self.legal_masks[buffer_trajectory_indices, transition_counts, :] = legal_masks
+        self.delta2[buffer_trajectory_indices, transition_counts] = delta2
+        self.delta3[buffer_trajectory_indices, transition_counts] = delta3
+        self.values[buffer_trajectory_indices, transition_counts] = values
 
         # Advance step positions
-        self.current_step_positions[buffer_trajectory_indices] += 1
+        self.current_transition_counts[buffer_trajectory_indices] += 1
 
         # Handle trajectory completion
-        completed_trajectories = trajectory_indices[dones]
+        completed_trajectories = buffer_trajectory_indices[dones]
         if len(completed_trajectories) > 0:
-            # Convert completed trajectory indices to buffer indices
-            completed_buffer_indices = (
-                completed_trajectories + self.position
-            ) % self.capacity
-
             # Mark completed trajectories as valid
-            self.trajectory_lengths[completed_buffer_indices] = (
-                self.current_step_positions[completed_buffer_indices]
+            self.trajectory_lengths[completed_trajectories] = (
+                self.current_transition_counts[completed_trajectories]
             )
 
-            # Reset step positions for completed trajectories
-            self.current_step_positions[completed_buffer_indices] = 0
-
-    def update_opponent_rewards(
+    def update_last_transition_rewards(
         self, trajectory_indices: torch.Tensor, opponent_rewards: torch.Tensor
     ) -> None:
         """
@@ -445,21 +401,22 @@ class VectorizedReplayBuffer:
         buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
 
         # Get current step positions for each trajectory
-        step_positions = self.current_step_positions[buffer_trajectory_indices]
+        transition_counts = self.current_transition_counts[buffer_trajectory_indices]
 
-        # Only update trajectories that have at least one step (not e.g. opponent folded immediately)
-        valid_mask = step_positions > 0
+        # Only update trajectories that have at least one transition (not e.g. opponent folded immediately)
+        valid_mask = transition_counts > 0
         if not valid_mask.any():
             return
 
         valid_trajectories = buffer_trajectory_indices[valid_mask]
-        valid_step_positions = step_positions[valid_mask] - 1  # Last step index
+        valid_transition_counts = transition_counts[valid_mask]
+        valid_transition_positions = valid_transition_counts - 1
         valid_rewards = opponent_rewards[valid_mask]
 
         # Vectorized update of rewards and done flags
-        self.trajectory_lengths[valid_trajectories] = valid_step_positions + 1
-        self.rewards[valid_trajectories, valid_step_positions] = valid_rewards
-        self.dones[valid_trajectories, valid_step_positions] = True
+        self.trajectory_lengths[valid_trajectories] = valid_transition_counts
+        self.rewards[valid_trajectories, valid_transition_positions] = valid_rewards
+        self.dones[valid_trajectories, valid_transition_positions] = True
 
     def compute_gae_returns(self, gamma: float = 0.999, lambda_: float = 0.95) -> None:
         """Compute GAE advantages and returns for all stored trajectories using vectorized operations."""
@@ -549,8 +506,6 @@ class VectorizedReplayBuffer:
         if self.size == 0:
             raise ValueError("No trajectories available")
 
-        C, T, L = self.capacity, self.max_trajectory_length, self.max_sequence_length
-
         # Get valid trajectory indices
         valid_indices = torch.where(self.trajectory_lengths > 0)[0]
 
@@ -563,105 +518,17 @@ class VectorizedReplayBuffer:
         )
         traj_indices = valid_indices[traj_sample_indices]
 
-        # Get lengths of sampled trajectories
-        traj_lengths = self.trajectory_lengths[traj_indices]
-        max_len = traj_lengths.max().item()
-
-        # Build mask for valid steps in each trajectory
-        mask = torch.arange(max_len, device=self.device).unsqueeze(
-            0
-        ) < traj_lengths.unsqueeze(
-            1
-        )  # [num_traj, max_len]
-        mask_flat = mask.flatten()
-
-        # Gather all data for sampled trajectories up to their respective lengths
-        if not self.is_transformer:
-            # CNN model fields
-            all_cards_features = self.cards_features[traj_indices, :max_len]
-            all_actions_features = self.actions_features[traj_indices, :max_len]
-
-        action_indices = self.action_indices[
-            traj_indices, :max_len
-        ]  # [num_traj, max_len]
-        logps_full = self.log_probs[
-            traj_indices, :max_len
-        ]  # [num_traj, max_len, num_bet_bins]
-        num_traj = traj_indices.shape[0]
-        flat_logps_full = logps_full.reshape(
-            -1, logps_full.shape[-1]
-        )  # [num_traj*max_len, num_bet_bins]
-        flat_action_indices = action_indices.reshape(-1)  # [num_traj*max_len]
-        logps = flat_logps_full[
-            torch.arange(
-                flat_action_indices.shape[0], device=flat_action_indices.device
-            ),
-            flat_action_indices,
-        ]
-        logps = logps.reshape(num_traj, max_len)  # [num_traj, max_len]
-        advs = self.advantages[traj_indices, :max_len]
-        rets = self.returns[traj_indices, :max_len]
-        legal = self.legal_masks[traj_indices, :max_len]
-        d2 = self.delta2[traj_indices, :max_len]
-        d3 = self.delta3[traj_indices, :max_len]
-
-        # Flatten only valid steps (mask out padding)
-        action_indices_flat = action_indices.reshape(-1)[mask_flat]
-        logps_full_flat = logps_full.reshape(num_traj * max_len, -1)[mask_flat]
-        logps_flat = logps.reshape(-1)[mask_flat]
-        advs_flat = advs.reshape(-1)[mask_flat]
-        rets_flat = rets.reshape(-1)[mask_flat]
-        legal_flat = legal.reshape(-1, legal.shape[-1])[mask_flat]
-        d2_flat = d2.reshape(-1)[mask_flat]
-        d3_flat = d3.reshape(-1)[mask_flat]
-
-        if not self.is_transformer:
-            if all_cards_features.numel() == 0:
-                raise ValueError("No valid trajectories found")
-            cards_flat = all_cards_features.reshape(-1, *all_cards_features.shape[2:])[
-                mask_flat
-            ]
-            actions_flat = all_actions_features.reshape(
-                -1, *all_actions_features.shape[2:]
-            )[mask_flat]
-            return {
-                "cards_features": cards_flat,
-                "actions_features": actions_flat,
-                "action_indices": action_indices_flat,
-                "log_probs_old": logps_flat,
-                "log_probs_old_full": logps_full_flat,
-                "advantages": advs_flat,
-                "returns": rets_flat,
-                "legal_masks": legal_flat,
-            }
-        else:
-            # Transformer: materialize per-step prefixes using transition_token_ends
-            # Build per-sample (traj, step) lists
-            traj_list = []
-            step_list = []
-            for i in range(traj_indices.shape[0]):
-                length_i = int(traj_lengths[i].item())
-                if length_i > 0:
-                    traj_list.append(traj_indices[i].repeat(length_i))
-                    step_list.append(torch.arange(length_i, device=self.device))
-            if len(traj_list) == 0:
-                raise ValueError("No valid trajectories found")
-            traj_idx_flat = torch.cat(traj_list, dim=0)
-            step_idx_flat = torch.cat(step_list, dim=0)
-
-            data = self._sample_transformer_steps(traj_idx_flat, step_idx_flat)
-
-            return {
-                "embedding_data": data,
-                "action_indices": action_indices_flat,
-                "log_probs_old": logps_flat,
-                "log_probs_old_full": logps_full_flat,
-                "advantages": advs_flat,
-                "returns": rets_flat,
-                "legal_masks": legal_flat,
-                "delta2": d2_flat,
-                "delta3": d3_flat,
-            }
+        return {
+            "embedding_data": self.data[traj_indices],
+            "action_indices": self.action_indices[traj_indices],
+            "log_probs_old": self.log_probs[traj_indices],
+            "log_probs_old_full": self.log_probs[traj_indices],
+            "advantages": self.advantages[traj_indices],
+            "returns": self.returns[traj_indices],
+            "legal_masks": self.legal_masks[traj_indices],
+            "delta2": self.delta2[traj_indices],
+            "delta3": self.delta3[traj_indices],
+        }
 
     def sample_batch(
         self, rng: torch.Generator, batch_size: int
@@ -690,7 +557,7 @@ class VectorizedReplayBuffer:
         traj_lengths_sampled = traj_lengths[traj_sample_indices]  # [batch_size]
 
         # For each sampled trajectory, sample a random step within its length (vectorized)
-        step_indices = torch.floor(
+        transition_indices = torch.floor(
             torch.rand(batch_size, device=self.device, generator=rng)
             * traj_lengths_sampled.float()
         ).long()
@@ -698,20 +565,19 @@ class VectorizedReplayBuffer:
         # Vectorized extraction (inlined variables)
         if self.is_transformer:
             # Use decision-end prefixes for training/inference consistency
-            data = self._sample_transformer_steps(traj_indices, step_indices)
+            data = self._sample_transformer_steps(traj_indices, transition_indices)
         else:
             data = CNNEmbeddingData(
-                cards=self.cards_features[traj_indices, step_indices].to(
+                cards=self.cards_features[traj_indices, transition_indices].to(
                     self.float_dtype
                 ),
-                actions=self.actions_features[traj_indices, step_indices].to(
+                actions=self.actions_features[traj_indices, transition_indices].to(
                     self.float_dtype
                 ),
             )
 
-        # CNN model fields
-        action_indices_sel = self.action_indices[traj_indices, step_indices]
-        full_log_probs = self.log_probs[traj_indices, step_indices]
+        action_indices_sel = self.action_indices[traj_indices, transition_indices]
+        full_log_probs = self.log_probs[traj_indices, transition_indices]
         action_log_probs = full_log_probs.gather(
             1, action_indices_sel.unsqueeze(1)
         ).squeeze(1)
@@ -723,11 +589,11 @@ class VectorizedReplayBuffer:
             "log_probs_old": action_log_probs,
             # Provide full old distribution for exact KL
             "log_probs_old_full": full_log_probs,
-            "advantages": self.advantages[traj_indices, step_indices],
-            "returns": self.returns[traj_indices, step_indices],
-            "legal_masks": self.legal_masks[traj_indices, step_indices],
-            "delta2": self.delta2[traj_indices, step_indices],
-            "delta3": self.delta3[traj_indices, step_indices],
+            "advantages": self.advantages[traj_indices, transition_indices],
+            "returns": self.returns[traj_indices, transition_indices],
+            "legal_masks": self.legal_masks[traj_indices, transition_indices],
+            "delta2": self.delta2[traj_indices, transition_indices],
+            "delta3": self.delta3[traj_indices, transition_indices],
         }
 
         return batch
@@ -737,7 +603,7 @@ class VectorizedReplayBuffer:
         self.position = 0
         self.size = 0
         self.trajectory_lengths.zero_()
-        self.current_step_positions.zero_()
+        self.current_transition_counts.zero_()
 
     def num_steps(self) -> int:
         """Total number of transitions (steps) stored across all valid trajectories."""
@@ -753,7 +619,7 @@ class VectorizedReplayBuffer:
         ):
             oldest_idx = (self.position - self.size) % self.capacity
             self.trajectory_lengths[oldest_idx] = 0
-            self.current_step_positions[oldest_idx] = 0
+            self.current_transition_counts[oldest_idx] = 0
             self.size -= 1
 
     def add_trajectory_legacy(self, trajectory) -> None:
@@ -777,12 +643,11 @@ class VectorizedReplayBuffer:
         if buffer_indices.numel() == 0:
             return
 
-        bidx = buffer_indices
-        M = bidx.shape[0]
+        M = buffer_indices.shape[0]
         L = self.max_sequence_length
 
-        new_lens = embedding_data.lengths[:M].long()
-        prev_lens = self.token_positions[bidx]
+        new_lens = embedding_data.lengths
+        prev_lens = self.current_token_positions[buffer_indices]
 
         if (new_lens < prev_lens).any():
             raise ValueError("Embedding length cannot decrease when appending")
@@ -794,42 +659,32 @@ class VectorizedReplayBuffer:
         pos = torch.arange(L, device=self.device).unsqueeze(0).expand(M, L)
         mask = (pos >= prev_lens.unsqueeze(1)) & (pos < new_lens.unsqueeze(1))
         rows, cols = torch.where(mask)
-        buffer_rows = bidx[rows]
+        buffer_rows = buffer_indices[rows]
 
         if not mask.any():
             return
 
-        # Row-wise views
-        token_ids_src = embedding_data.token_ids[:M]
-        card_ranks_src = embedding_data.card_ranks[:M]
-        card_suits_src = embedding_data.card_suits[:M]
-        card_streets_src = embedding_data.card_streets[:M]
-        action_actors_src = embedding_data.action_actors[:M]
-        action_streets_src = embedding_data.action_streets[:M]
-        action_legal_src = embedding_data.action_legal_masks[:M]
-        context_src = embedding_data.context_features[:M]
-
-        self.token_ids[buffer_rows, cols] = token_ids_src[rows, cols].to(torch.int8)
-        self.card_ranks[buffer_rows, cols] = card_ranks_src[rows, cols].to(torch.uint8)
-        self.card_suits[buffer_rows, cols] = card_suits_src[rows, cols].to(torch.uint8)
-        self.card_streets[buffer_rows, cols] = card_streets_src[rows, cols].to(
-            torch.uint8
+        self.data.token_ids[buffer_rows, cols] = embedding_data.token_ids[rows, cols]
+        self.data.card_ranks[buffer_rows, cols] = embedding_data.card_ranks[rows, cols]
+        self.data.card_suits[buffer_rows, cols] = embedding_data.card_suits[rows, cols]
+        self.data.card_streets[buffer_rows, cols] = embedding_data.card_streets[
+            rows, cols
+        ]
+        self.data.action_actors[buffer_rows, cols] = embedding_data.action_actors[
+            rows, cols
+        ]
+        self.data.action_streets[buffer_rows, cols] = embedding_data.action_streets[
+            rows, cols
+        ]
+        self.data.action_legal_masks[buffer_rows, cols] = (
+            embedding_data.action_legal_masks[rows, cols]
         )
-        self.action_actors[buffer_rows, cols] = action_actors_src[rows, cols].to(
-            torch.uint8
-        )
-        self.action_streets[buffer_rows, cols] = action_streets_src[rows, cols].to(
-            torch.uint8
-        )
-        self.action_legal_masks[buffer_rows, cols] = action_legal_src[rows, cols].to(
-            torch.bool
-        )
-        self.context_features[buffer_rows, cols] = context_src[rows, cols].to(
-            self.float_dtype
-        )
+        self.data.context_features[buffer_rows, cols] = embedding_data.context_features[
+            rows, cols
+        ].to(self.float_dtype)
 
         # Update positions to new_lens
-        self.token_positions[buffer_rows] = new_lens[rows]
+        self.current_token_positions[buffer_rows] = new_lens[rows]
 
     def add_tokens(
         self,
@@ -911,7 +766,7 @@ class VectorizedReplayBuffer:
 
         # Add action tokens (opponent = actor 1)
         for i in range(batch_size):
-            pos = self.token_positions[buffer_trajectory_indices[i]].item()
+            pos = self.current_token_positions[buffer_trajectory_indices[i]].item()
             if pos < seq_len:
                 token_ids[i, pos] = (
                     Special.NUM_SPECIAL.value + 52 + action_indices[i].item()
@@ -920,7 +775,7 @@ class VectorizedReplayBuffer:
                 action_streets[i, pos] = streets[i].item()
                 action_legal_masks_tensor[i, pos] = legal_masks[i]
 
-        lengths = self.token_positions[buffer_trajectory_indices] + 1
+        lengths = self.current_token_positions[buffer_trajectory_indices] + 1
 
         embedding_data = StructuredEmbeddingData(
             token_ids=token_ids,
@@ -949,17 +804,8 @@ class VectorizedReplayBuffer:
 
         ends = self.transition_token_ends[traj_indices, step_indices]
 
-        result = StructuredEmbeddingData(
-            token_ids=self.token_ids[traj_indices],
-            card_ranks=self.card_ranks[traj_indices],
-            card_suits=self.card_suits[traj_indices],
-            card_streets=self.card_streets[traj_indices],
-            action_actors=self.action_actors[traj_indices],
-            action_streets=self.action_streets[traj_indices],
-            action_legal_masks=self.action_legal_masks[traj_indices],
-            context_features=self.context_features[traj_indices],
-            lengths=ends,
-        )
+        result = self.data[traj_indices]
+        result.lengths = ends
 
         range_tensor = torch.arange(self.max_sequence_length, device=self.device)
         mask = range_tensor.unsqueeze(0) >= ends.unsqueeze(1)

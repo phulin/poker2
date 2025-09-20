@@ -374,10 +374,10 @@ class HUNLTensorEnv:
         # Update chips_placed: track total chips placed by this player
         self.chips_placed[env_indices, player] += chips
 
-    def finish_and_assign_winners(
+    def finish_and_assign_rewards(
         self, env_indices: torch.Tensor, winners: torch.Tensor
     ) -> None:
-        """Assign winners to specified environments."""
+        """Assign winners to specified environments. Rewards are from p0's perspective."""
         self.winner[env_indices] = winners
         self.done[env_indices] = True
 
@@ -412,7 +412,7 @@ class HUNLTensorEnv:
           - to_act [N]
           - new_streets [N]: -1 if street did not advance, otherwise 1=flop, 2=turn, 3=river
           - dealt_cards [N, 3]: indices of newly dealt cards this step; -1 where not applicable
-        Rewards are scaled by 100bb consistent with HUNLEnv.
+        Rewards are from p0's perspective, scaled by 100bb.
         """
         assert bin_indices.shape[0] == self.N
         N = self.N
@@ -476,7 +476,7 @@ class HUNLTensorEnv:
         # Fold: immediate terminal, award pot to opp
         action_idx = torch.where(is_fold)[0]
         # Winner is opp
-        rewards[action_idx] = self.finish_and_assign_winners(
+        rewards[action_idx] = self.finish_and_assign_rewards(
             action_idx, other_idx[action_idx]
         )
 
@@ -542,8 +542,8 @@ class HUNLTensorEnv:
             # Advance street and deal
             s = self.street[round_closed_idx]
 
-            # showdown right after river (or flop in flop showdown mode)
-            sd_mask = s == (0 if self.flop_showdown else 2)
+            # showdown after river (or right after flop in flop showdown mode)
+            sd_mask = s == (0 if self.flop_showdown else 3)
             showdown_ids = round_closed_idx[sd_mask]
             # Evaluate winners or award folds
             # Vectorized showdown resolution for all showdown_ids at once
@@ -561,7 +561,7 @@ class HUNLTensorEnv:
                 self.winner[showdown_ids[cmp < 0]] = 1
                 self.winner[showdown_ids[cmp == 0]] = 2
 
-                rewards[showdown_ids] = self.finish_and_assign_winners(
+                rewards[showdown_ids] = self.finish_and_assign_rewards(
                     showdown_ids, self.winner[showdown_ids]
                 )
 

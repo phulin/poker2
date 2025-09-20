@@ -177,3 +177,40 @@ class StructuredEmbeddingData:
             context_features=self.context_features.clone(),
             lengths=self.lengths.clone(),
         )
+
+    @classmethod
+    def empty(
+        cls,
+        batch_size: int,
+        seq_len: int,
+        num_bet_bins: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> StructuredEmbeddingData:
+        return cls(
+            token_ids=torch.full(
+                (batch_size, seq_len), -1, dtype=torch.int8, device=device
+            ),
+            card_ranks=torch.zeros(
+                (batch_size, seq_len), dtype=torch.uint8, device=device
+            ),
+            card_suits=torch.zeros(
+                (batch_size, seq_len), dtype=torch.uint8, device=device
+            ),
+            card_streets=torch.zeros(
+                (batch_size, seq_len), dtype=torch.uint8, device=device
+            ),
+            action_actors=torch.zeros(
+                (batch_size, seq_len), dtype=torch.uint8, device=device
+            ),
+            action_streets=torch.zeros(
+                (batch_size, seq_len), dtype=torch.uint8, device=device
+            ),
+            action_legal_masks=torch.zeros(
+                (batch_size, seq_len, num_bet_bins), dtype=torch.bool, device=device
+            ),
+            context_features=torch.zeros(
+                (batch_size, seq_len, 10), dtype=dtype, device=device
+            ),
+            lengths=torch.zeros((batch_size), dtype=torch.long, device=device),
+        )

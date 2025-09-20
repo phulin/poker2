@@ -446,8 +446,11 @@ class SelfPlayTrainer:
             self.kv_cache_manager.reset_for_new_game()
             # Initialize caches for self and opponent
             self.kv_cache_manager.initialize_self_cache(self.num_envs)
-            for i in range(len(opponent_snapshots)):
-                self.kv_cache_manager.initialize_opponent_cache(i, self.num_envs)
+            if opponent_snapshots is not None:
+                for i in range(len(opponent_snapshots)):
+                    self.kv_cache_manager.initialize_opponent_cache(i, self.num_envs)
+            else:
+                self.kv_cache_manager.initialize_opponent_cache(0, self.num_envs)
 
         all_env_indices = torch.arange(self.num_envs, device=self.device)
         if self.is_transformer and isinstance(self.state_encoder, TokenSequenceBuilder):
@@ -614,18 +617,7 @@ class SelfPlayTrainer:
                     env_logits[env_active_we_act] = outputs.policy_logits.float()
                     env_values[env_active_we_act] = outputs.value.float()
 
-                # SPECIAL CASE: If first action of hand, opponent folding illegal
-                # (because it would leave an empty trajectory)
-                # This doesn't bias our sampling because we would never see the empty
-                # trajectory if it were sampled anyway, since there is no decision of the
-                # actor to train.
-                # NB that this will make our average reward look worse.
-                # === WE ARE TURNING THIS OFF FOR NOW TO AVOID BIASING REWARDS. ===
-                # if add_to_replay_buffer:
-                #     active_legal_masks[
-                #         (active_who_acts == 1) & active_first_action, 0
-                #     ] = False
-
+                # Get predictions from opponent models for opponent turns
                 if opp_env_groups is not None and env_active_opp_acts.numel() > 0:
                     for opponent_idx, opp_env_indices in enumerate(opp_env_groups):
                         opponent = all_opponent_snapshots[opponent_idx]
@@ -689,13 +681,13 @@ class SelfPlayTrainer:
                             # For self-play, we can reuse our own cache for opponent turns
                             # or create a separate cache for the opponent player
                             opp_cache = self.kv_cache_manager.get_opponent_cache(
-                                1
+                                0
                             )  # Player 1
                             outputs = self.model(opp_states, kv_cache=opp_cache)
                             # Update opponent cache
                             if outputs.kv_cache is not None:
                                 self.kv_cache_manager.update_opponent_cache(
-                                    1, outputs.kv_cache
+                                    0, outputs.kv_cache
                                 )
                         else:
                             outputs = self.model(opp_states)
@@ -713,25 +705,29 @@ class SelfPlayTrainer:
             )
             action_bins[active_indices] = action_bins_active
 
-            # Take steps in all environments (tensor_env expects full-size tensors)
-            # NOTE: THIS CHANGES self.tensor_env.to_act!!
-            original_to_act = self.tensor_env.to_act.clone()
-            rewards, dones, _, new_streets, dealt_cards = self.tensor_env.step_bins(
-                action_bins, legal_bins_amounts, legal_bins_mask
-            )
-            newly_done_mask = dones & active_mask
-
-            # After environment step, append action and any newly revealed non-action tokens
+            # Add street before step, as stepping changes values
             if self.is_transformer and isinstance(
                 self.state_encoder, TokenSequenceBuilder
             ):
                 self.state_encoder.add_action(
                     active_indices,
-                    original_to_act[active_indices],
+                    self.tensor_env.to_act[active_indices],
                     action_bins_active,
                     legal_bins_mask[active_indices],
+                    self.tensor_env.street[active_indices],
                 )
 
+            # Take steps in all environments (tensor_env expects full-size tensors)
+            # NOTE: THIS CHANGES self.tensor_env.to_act!!
+            rewards, dones, _, new_streets, dealt_cards = self.tensor_env.step_bins(
+                action_bins, legal_bins_amounts, legal_bins_mask
+            )
+            newly_done_mask = dones & active_mask
+
+            # After environment step, append any newly revealed non-action tokens
+            if self.is_transformer and isinstance(
+                self.state_encoder, TokenSequenceBuilder
+            ):
                 # Use environment return to detect street progress and dealt cards
                 advanced_envs = torch.where(new_streets >= 0)[0]
                 if advanced_envs.numel() > 0:
@@ -742,7 +738,8 @@ class SelfPlayTrainer:
                     for i in range(3):
                         valid_cards = torch.where(dealt_cards[:, i] >= 0)[0]
                         self.state_encoder.add_card(
-                            valid_cards, dealt_cards[valid_cards, i]
+                            valid_cards,
+                            dealt_cards[valid_cards, i],
                         )
 
             # Update per-environment reward tracking
@@ -792,13 +789,14 @@ class SelfPlayTrainer:
                 # Check if any opponent actions ended the hand
                 opp_ended_hands_mask = newly_done_mask & opp_acts_mask
                 opp_ended_hands = torch.where(opp_ended_hands_mask)[0]
-                opp_rewards = rewards[opp_ended_hands]
+                # rewards are from p0's perspective
+                opp_ended_hands_rewards = rewards[opp_ended_hands]
 
                 # For environments where opponent's action ended the hand,
-                # update the last transition's reward
+                # update p0's reward for the last transition
                 if opp_ended_hands.numel() > 0 and add_to_replay_buffer:
-                    self.replay_buffer.update_opponent_rewards(
-                        opp_ended_hands, opp_rewards
+                    self.replay_buffer.update_last_transition_rewards(
+                        opp_ended_hands, opp_ended_hands_rewards
                     )
 
             # Handle environments that exceed max steps
