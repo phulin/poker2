@@ -65,6 +65,7 @@ class SelfPlayTrainer:
             cfg.train.use_mixed_precision and self.device.type in ["cuda", "mps"]
         )
         self.loss_scale = cfg.train.loss_scale
+        self.use_kv_cache = cfg.train.use_kv_cache
         self.use_tensor_env = cfg.use_tensor_env
         self.num_envs = cfg.num_envs
         self.use_wandb = cfg.use_wandb
@@ -174,7 +175,7 @@ class SelfPlayTrainer:
             raise ValueError(f"Unknown opponent pool type: {self.opponent_pool_type}")
 
         # Initialize KV cache manager for transformer models
-        if self.is_transformer:
+        if self.is_transformer and self.use_kv_cache:
             self.kv_cache_manager = SelfPlayKVCacheManager(self.model, self.device)
         else:
             self.kv_cache_manager = None

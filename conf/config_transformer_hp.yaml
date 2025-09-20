@@ -56,6 +56,7 @@ train:
   replay_buffer_batches: 4
   max_trajectory_length: 12
   max_sequence_length: 50
+  use_kv_cache: true
   
   # PPO hyperparameters
   ppo_eps: 0.2
