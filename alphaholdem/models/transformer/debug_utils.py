@@ -25,7 +25,7 @@ class TransformerStateDebugger:
             self.card_to_rank_suit[card_idx] = (rank, suit)
 
     def reconstruct_cards_from_tokens(
-        self, token_ids: torch.Tensor, card_streets: torch.Tensor
+        self, token_ids: torch.Tensor, token_streets: torch.Tensor
     ) -> Dict[str, List]:
         """Reconstruct card information from token IDs and street information."""
         batch_size, seq_len = token_ids.shape
@@ -44,7 +44,7 @@ class TransformerStateDebugger:
 
             for seq_idx in range(seq_len):
                 token_id = token_ids[batch_idx, seq_idx].item()
-                street = card_streets[batch_idx, seq_idx].item()
+                street = token_streets[batch_idx, seq_idx].item()
 
                 # Skip padding tokens
                 if token_id == -1:
@@ -73,7 +73,7 @@ class TransformerStateDebugger:
         return reconstructed
 
     def reconstruct_actions_from_tokens(
-        self, action_actors: torch.Tensor, action_streets: torch.Tensor
+        self, action_actors: torch.Tensor, token_streets: torch.Tensor
     ) -> Dict[str, List]:
         """Reconstruct action information from actor and street data."""
         batch_size, seq_len = action_actors.shape
@@ -92,7 +92,7 @@ class TransformerStateDebugger:
 
             for seq_idx in range(seq_len):
                 actor = action_actors[batch_idx, seq_idx].item()
-                street = action_streets[batch_idx, seq_idx].item()
+                street = token_streets[batch_idx, seq_idx].item()
 
                 # Skip padding
                 if actor == -1:
@@ -243,10 +243,10 @@ class TransformerStateDebugger:
         """Compare reconstructed data with actual environment state."""
         # Reconstruct data from embeddings
         reconstructed_cards = self.reconstruct_cards_from_tokens(
-            embedding_data.token_ids, embedding_data.card_streets
+            embedding_data.token_ids, embedding_data.token_streets
         )
         reconstructed_actions = self.reconstruct_actions_from_tokens(
-            embedding_data.action_actors, embedding_data.action_streets
+            embedding_data.action_actors, embedding_data.token_streets
         )
         reconstructed_context = self.reconstruct_context_from_features(
             embedding_data.context_features
@@ -440,10 +440,10 @@ class TransformerStateDebugger:
 
         # Reconstruct data
         reconstructed_cards = self.reconstruct_cards_from_tokens(
-            embedding_data.token_ids, embedding_data.card_streets
+            embedding_data.token_ids, embedding_data.token_streets
         )
         reconstructed_actions = self.reconstruct_actions_from_tokens(
-            embedding_data.action_actors, embedding_data.action_streets
+            embedding_data.action_actors, embedding_data.token_streets
         )
         reconstructed_context = self.reconstruct_context_from_features(
             embedding_data.context_features

@@ -35,15 +35,14 @@ class PokerFusedEmbedding(nn.Module):
         self.base_embedding = nn.Embedding(
             self.vocab_size + 1, d_model, padding_idx=self.padding_idx
         )
+        self.street_emb = nn.Embedding(4, d_model)
 
         # Card components
         self.card_rank_emb = nn.Embedding(13, d_model)
         self.card_suit_emb = nn.Embedding(4, d_model)
-        self.card_street_emb = nn.Embedding(4, d_model)
 
         # Action components
         self.action_actor_emb = nn.Embedding(2, d_model)
-        self.action_street_emb = nn.Embedding(4, d_model)
         self.action_type_emb = nn.Embedding(num_bet_bins, d_model)
         self.legal_mask_mlp = nn.Sequential(
             nn.Linear(num_bet_bins, d_model),
@@ -86,7 +85,9 @@ class PokerFusedEmbedding(nn.Module):
             token_ids,
         )
 
-        embeddings = self.base_embedding(padded_ids)
+        embeddings = self.base_embedding(padded_ids) + self.street_emb(
+            data.token_streets
+        )
         dtype = embeddings.dtype
 
         special_offset = get_special_token_id_offset()
@@ -99,12 +100,9 @@ class PokerFusedEmbedding(nn.Module):
             rows, cols = torch.where(card_mask)
             ranks = data.card_ranks[rows, cols].clamp(min=0, max=12)
             suits = data.card_suits[rows, cols].clamp(min=0, max=3)
-            streets = data.card_streets[rows, cols].clamp(min=0, max=4)
-            card_embed = (
-                self.card_rank_emb(ranks)
-                + self.card_suit_emb(suits)
-                + self.card_street_emb(streets)
-            ).to(dtype)
+            card_embed = (self.card_rank_emb(ranks) + self.card_suit_emb(suits)).to(
+                dtype
+            )
             embeddings[rows, cols] += card_embed
 
         # Action token contributions (actor + street + action id + legal mask projection)
@@ -114,12 +112,10 @@ class PokerFusedEmbedding(nn.Module):
         if action_mask.any():
             rows, cols = torch.where(action_mask)
             actors = data.action_actors[rows, cols].clamp(min=0, max=1)
-            streets = data.action_streets[rows, cols].clamp(min=0, max=4)
             action_ids = padded_ids[rows, cols] - action_offset
             legal_masks = data.action_legal_masks[rows, cols].to(embeddings.dtype)
             action_embed = (
                 self.action_actor_emb(actors)
-                + self.action_street_emb(streets)
                 + self.action_type_emb(action_ids)
                 + self.legal_mask_mlp(legal_masks)
             ).to(dtype)

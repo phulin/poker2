@@ -104,13 +104,13 @@ def make_pretty_tokens(data, bet_bins: List[float], title: str) -> None:
         elif card_offset <= token < card_offset + 52:
             parts.append("type=card")
             parts.append(f"card={format_card(token - card_offset)}")
-            parts.append(f"street={int(data.card_streets[0, pos].item())}")
+            parts.append(f"street={int(data.token_streets[0, pos].item())}")
         elif action_offset <= token < action_offset + len(bet_bins) + 3:
             parts.append("type=action")
             action_id = token - action_offset
             parts.append(f"action={describe_action(action_id, bet_bins)}")
             parts.append(f"actor={int(data.action_actors[0, pos].item())}")
-            parts.append(f"street={int(data.action_streets[0, pos].item())}")
+            parts.append(f"street={int(data.token_streets[0, pos].item())}")
             legal_mask = data.action_legal_masks[0, pos]
             legal_bins = [i for i, flag in enumerate(legal_mask.tolist()) if flag]
             parts.append(f"legal={legal_bins}")
@@ -183,9 +183,9 @@ def hook_model_forward(model, original_forward):
                         # Card token
                         card_idx = token - Special.NUM_SPECIAL.value
                         parts.append(f"CARD_{format_card(card_idx)}")
-                        if hasattr(embedding_data, "card_streets"):
+                        if hasattr(embedding_data, "token_streets"):
                             street = int(
-                                embedding_data.card_streets[batch_idx, pos].item()
+                                embedding_data.token_streets[batch_idx, pos].item()
                             )
                             parts.append(f"street={street}")
 
@@ -204,9 +204,9 @@ def hook_model_forward(model, original_forward):
                                 embedding_data.action_actors[batch_idx, pos].item()
                             )
                             parts.append(f"actor={actor}")
-                        if hasattr(embedding_data, "action_streets"):
+                        if hasattr(embedding_data, "token_streets"):
                             street = int(
-                                embedding_data.action_streets[batch_idx, pos].item()
+                                embedding_data.token_streets[batch_idx, pos].item()
                             )
                             parts.append(f"street={street}")
 
@@ -519,22 +519,18 @@ def print_replay_buffer_summary(replay_buffer):
                         card_suits = replay_buffer.data.card_suits[
                             traj_idx, valid_token_indices
                         ].tolist()
-                        card_streets = replay_buffer.data.card_streets[
+                        token_streets = replay_buffer.data.token_streets[
                             traj_idx, valid_token_indices
                         ].tolist()
                         print(f"  Card ranks: {card_ranks}")
                         print(f"  Card suits: {card_suits}")
-                        print(f"  Card streets: {card_streets}")
+                        print(f"  Token streets: {token_streets}")
 
                         # Action information
                         action_actors = replay_buffer.data.action_actors[
                             traj_idx, valid_token_indices
                         ].tolist()
-                        action_streets = replay_buffer.data.action_streets[
-                            traj_idx, valid_token_indices
-                        ].tolist()
                         print(f"  Action actors: {action_actors}")
-                        print(f"  Action streets: {action_streets}")
 
                         # Context features (show for context tokens only)
                         context_features = replay_buffer.data.context_features[

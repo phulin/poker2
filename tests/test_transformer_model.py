@@ -45,7 +45,11 @@ class TestTransformerStateEncoder:
         encoder.add_card(idxs, torch.zeros_like(idxs))
         encoder.add_card(idxs, torch.zeros_like(idxs))
         encoder.add_action(
-            idxs, torch.zeros_like(idxs), torch.zeros_like(idxs), torch.zeros_like(idxs)
+            idxs,
+            torch.zeros_like(idxs),
+            torch.zeros_like(idxs),
+            torch.zeros_like(idxs),
+            torch.zeros_like(idxs),
         )
 
         data = encoder.encode_tensor_states(player=0, idxs=idxs)
@@ -79,11 +83,10 @@ class TestEmbeddings:
     def _clone_data(self) -> StructuredEmbeddingData:
         return StructuredEmbeddingData(
             token_ids=self.data.token_ids.clone(),
+            token_streets=self.data.token_streets.clone(),
             card_ranks=self.data.card_ranks.clone(),
             card_suits=self.data.card_suits.clone(),
-            card_streets=self.data.card_streets.clone(),
             action_actors=self.data.action_actors.clone(),
-            action_streets=self.data.action_streets.clone(),
             action_legal_masks=self.data.action_legal_masks.clone(),
             context_features=self.data.context_features.clone(),
             lengths=self.data.lengths.clone(),
@@ -197,11 +200,10 @@ class TestPokerTransformerV1:
         lengths = (token_ids >= 0).sum(dim=1)
         data = StructuredEmbeddingData(
             token_ids=token_ids,
+            token_streets=zeros,
             card_ranks=zeros,
             card_suits=zeros,
-            card_streets=zeros,
             action_actors=zeros,
-            action_streets=zeros,
             action_legal_masks=legal,
             context_features=ctx,
             lengths=lengths,

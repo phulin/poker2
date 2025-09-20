@@ -30,11 +30,10 @@ class TokenSequenceBuilder:
     float_dtype: torch.dtype
 
     token_ids: torch.Tensor
+    token_streets: torch.Tensor
     card_ranks: torch.Tensor
     card_suits: torch.Tensor
-    card_streets: torch.Tensor
     action_actors: torch.Tensor
-    action_streets: torch.Tensor
     action_legal_masks: torch.Tensor
     context_features: torch.Tensor
     lengths: torch.Tensor
@@ -56,11 +55,10 @@ class TokenSequenceBuilder:
         L = sequence_length
         N = tensor_env.N
         self.token_ids = torch.full((N, L), -1, dtype=torch.long, device=device)
+        self.token_streets = torch.zeros(N, L, dtype=torch.long, device=device)
         self.card_ranks = torch.zeros(N, L, dtype=torch.long, device=device)
         self.card_suits = torch.zeros(N, L, dtype=torch.long, device=device)
-        self.card_streets = torch.zeros(N, L, dtype=torch.long, device=device)
         self.action_actors = torch.zeros(N, L, dtype=torch.long, device=device)
-        self.action_streets = torch.zeros(N, L, dtype=torch.long, device=device)
         self.action_legal_masks = torch.zeros(
             N, L, num_bet_bins, dtype=torch.bool, device=device
         )
@@ -80,23 +78,40 @@ class TokenSequenceBuilder:
             return
         player = 0
         opp = 1 - player
+        scale = 100 * self.tensor_env.bb
         start = self._reserve(idxs, 1)
         self.token_ids[idxs, start] = Special.CONTEXT.value
-        self.context_features[idxs, start, Context.POT.value] = self.tensor_env.pot[
-            idxs
-        ].to(self.float_dtype)
+        self.token_streets[idxs, start] = self.tensor_env.street[idxs]
+        self.context_features[idxs, start, Context.POT.value] = (
+            self.tensor_env.pot[idxs].to(self.float_dtype) / scale
+        )
         self.context_features[idxs, start, Context.STACK_P0.value] = (
             self.tensor_env.stacks[idxs, player].to(self.float_dtype)
-        )
+        ) / scale
         self.context_features[idxs, start, Context.STACK_P1.value] = (
             self.tensor_env.stacks[idxs, opp].to(self.float_dtype)
+        ) / scale
+        self.context_features[idxs, start, Context.EFFECTIVE_STACK_P0.value] = (
+            self.tensor_env.stacks[idxs, player].to(self.float_dtype)
+            / self.tensor_env.bb
+        )
+        self.context_features[idxs, start, Context.EFFECTIVE_STACK_P1.value] = (
+            self.tensor_env.stacks[idxs, opp].to(self.float_dtype) / self.tensor_env.bb
+        )
+        self.context_features[idxs, start, Context.SPR_P0.value] = (
+            self.tensor_env.stacks[idxs, player].to(self.float_dtype)
+            / self.tensor_env.pot[idxs]
+        )
+        self.context_features[idxs, start, Context.SPR_P1.value] = (
+            self.tensor_env.stacks[idxs, opp].to(self.float_dtype)
+            / self.tensor_env.pot[idxs]
         )
         self.context_features[idxs, start, Context.COMMITTED_P0.value] = (
             self.tensor_env.committed[idxs, player].to(self.float_dtype)
-        )
+        ) / scale
         self.context_features[idxs, start, Context.COMMITTED_P1.value] = (
             self.tensor_env.committed[idxs, opp].to(self.float_dtype)
-        )
+        ) / scale
         self.context_features[idxs, start, Context.POSITION.value] = (
             self.tensor_env.button[idxs] != player
         ).to(self.float_dtype)
@@ -108,13 +123,13 @@ class TokenSequenceBuilder:
         )
         self.context_features[idxs, start, Context.MIN_RAISE.value] = (
             self.tensor_env.min_raise[idxs].to(self.float_dtype)
-        )
+        ) / scale
         bet_to_call = (
             self.tensor_env.committed[idxs, opp]
             - self.tensor_env.committed[idxs, player]
         )
-        self.context_features[idxs, start, Context.BET_TO_CALL.value] = bet_to_call.to(
-            self.float_dtype
+        self.context_features[idxs, start, Context.BET_TO_CALL.value] = (
+            bet_to_call.to(self.float_dtype) / scale
         )
 
     def add_cls(self, idxs: torch.Tensor) -> None:
@@ -135,14 +150,14 @@ class TokenSequenceBuilder:
         actors: torch.Tensor,
         action_ids: torch.Tensor,
         legal_masks: torch.Tensor,
-        action_streets: torch.Tensor,
+        token_streets: torch.Tensor,
     ) -> None:
         if idxs.numel() == 0:
             return
         start = self._reserve(idxs, 1)
         self.token_ids[idxs, start] = Special.NUM_SPECIAL.value + 52 + action_ids
+        self.token_streets[idxs, start] = token_streets
         self.action_actors[idxs, start] = actors
-        self.action_streets[idxs, start] = action_streets
         self.action_legal_masks[idxs, start, :] = legal_masks
 
     def add_card(
@@ -155,9 +170,9 @@ class TokenSequenceBuilder:
         start = self._reserve(idxs, 1)
         token_vals = (Special.NUM_SPECIAL.value + card_indices).to(torch.long)
         self.token_ids[idxs, start] = token_vals
+        self.token_streets[idxs, start] = self.tensor_env.street[idxs]
         self.card_ranks[idxs, start] = card_indices % 13
         self.card_suits[idxs, start] = card_indices // 13
-        self.card_streets[idxs, start] = self.tensor_env.street[idxs]
 
     def add_street(self, idxs: torch.Tensor, street_ids: torch.Tensor) -> None:
         if idxs.numel() == 0:
@@ -167,7 +182,7 @@ class TokenSequenceBuilder:
             torch.int64
         )  # assumes 0=preflop,1=flop,2=turn,3=river
         self.token_ids[idxs, start] = special_tokens.to(torch.long)
-        self.card_streets[idxs, start] = street_ids.to(torch.long)
+        self.token_streets[idxs, start] = street_ids.to(torch.long)
 
     def encode_tensor_states(
         self,
@@ -182,11 +197,10 @@ class TokenSequenceBuilder:
 
         result = StructuredEmbeddingData(
             token_ids=self.token_ids[idxs],
+            token_streets=self.token_streets[idxs],
             card_ranks=self.card_ranks[idxs],
             card_suits=self.card_suits[idxs],
-            card_streets=self.card_streets[idxs],
             action_actors=self.action_actors[idxs],
-            action_streets=self.action_streets[idxs],
             action_legal_masks=self.action_legal_masks[idxs],
             context_features=self.context_features[idxs],
             lengths=self.lengths[idxs],
@@ -227,6 +241,10 @@ class TokenSequenceBuilder:
                 [
                     Context.STACK_P0.value,
                     Context.STACK_P1.value,
+                    Context.EFFECTIVE_STACK_P0.value,
+                    Context.EFFECTIVE_STACK_P1.value,
+                    Context.SPR_P0.value,
+                    Context.SPR_P1.value,
                     Context.COMMITTED_P0.value,
                     Context.COMMITTED_P1.value,
                 ],
@@ -236,6 +254,10 @@ class TokenSequenceBuilder:
                 [
                     Context.STACK_P1.value,
                     Context.STACK_P0.value,
+                    Context.EFFECTIVE_STACK_P1.value,
+                    Context.EFFECTIVE_STACK_P0.value,
+                    Context.SPR_P1.value,
+                    Context.SPR_P0.value,
                     Context.COMMITTED_P1.value,
                     Context.COMMITTED_P0.value,
                 ],
@@ -244,6 +266,12 @@ class TokenSequenceBuilder:
             # Reverse all CONTEXT bet_to_call values. Will be 0 for non-context tokens, so this is fine.
             result.context_features[:, :, Context.BET_TO_CALL.value] = (
                 -result.context_features[:, :, Context.BET_TO_CALL.value]
+            )
+
+            context_token_mask = result.token_ids == Special.CONTEXT.value
+            result.context_features[context_token_mask, :, Context.POSITION.value] = (
+                1
+                - result.context_features[context_token_mask, :, Context.POSITION.value]
             )
 
             # Reverse all actor indices, but only where the token is an action.
@@ -258,11 +286,10 @@ class TokenSequenceBuilder:
         if idxs.numel() == 0:
             return
         self.token_ids[idxs] = -1
+        self.token_streets[idxs] = 0
         self.card_ranks[idxs] = 0
         self.card_suits[idxs] = 0
-        self.card_streets[idxs] = 0
         self.action_actors[idxs] = 0
-        self.action_streets[idxs] = 0
         self.action_legal_masks[idxs] = False
         self.context_features[idxs] = 0
         self.lengths[idxs] = 0

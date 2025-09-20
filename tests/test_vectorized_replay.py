@@ -35,11 +35,10 @@ class TestVectorizedReplayBuffer:
 
         # Transformer mode fields use a single token stream per trajectory
         assert buffer.token_ids.shape == (10, 50)  # Token IDs
+        assert buffer.token_streets.shape == (10, 50)  # Token streets
         assert buffer.card_ranks.shape == (10, 50)  # Card ranks
         assert buffer.card_suits.shape == (10, 50)  # Card suits
-        assert buffer.card_streets.shape == (10, 50)  # Card stages
         assert buffer.action_actors.shape == (10, 50)  # Action actors
-        assert buffer.action_streets.shape == (10, 50)  # Action streets
         assert buffer.action_legal_masks.shape == (10, 50, 5)  # Action legal masks
         assert buffer.context_features.shape == (10, 50, 10)  # Context features
         assert buffer.transition_token_ends.shape == (10, 20)
@@ -80,19 +79,16 @@ class TestVectorizedReplayBuffer:
         token_ids[:, 4] = Special.NUM_SPECIAL.value + 1
         emb = StructuredEmbeddingData(
             token_ids=token_ids,
+            token_streets=torch.zeros(
+                2, buffer.max_sequence_length, dtype=torch.long, device=device
+            ),
             card_ranks=torch.zeros(
                 2, buffer.max_sequence_length, dtype=torch.long, device=device
             ),
             card_suits=torch.zeros(
                 2, buffer.max_sequence_length, dtype=torch.long, device=device
             ),
-            card_streets=torch.zeros(
-                2, buffer.max_sequence_length, dtype=torch.long, device=device
-            ),
             action_actors=torch.full(
-                (2, buffer.max_sequence_length), -1, dtype=torch.long, device=device
-            ),
-            action_streets=torch.full(
                 (2, buffer.max_sequence_length), -1, dtype=torch.long, device=device
             ),
             action_legal_masks=torch.zeros(
@@ -125,13 +121,10 @@ class TestVectorizedReplayBuffer:
             card_suits=torch.zeros(
                 1, buffer.max_sequence_length, dtype=torch.long, device=device
             ),
-            card_streets=torch.zeros(
+            token_streets=torch.zeros(
                 1, buffer.max_sequence_length, dtype=torch.long, device=device
             ),
             action_actors=torch.full(
-                (1, buffer.max_sequence_length), -1, dtype=torch.long, device=device
-            ),
-            action_streets=torch.full(
                 (1, buffer.max_sequence_length), -1, dtype=torch.long, device=device
             ),
             action_legal_masks=torch.zeros(
@@ -160,7 +153,7 @@ class TestVectorizedReplayBuffer:
         assert pos == 2
         # Last written should be action token for opponent (actor=1)
         assert buffer.action_actors[0, pos - 1].item() == 1
-        assert buffer.action_streets[0, pos - 1].item() == 0
+        assert buffer.token_streets[0, pos - 1].item() == 0
 
     def test_transformer_add_transitions_appends_context_and_action(self, buffer):
         device = buffer.device
@@ -180,9 +173,8 @@ class TestVectorizedReplayBuffer:
             token_ids=token_ids,
             card_ranks=torch.zeros(1, L, dtype=torch.long, device=device),
             card_suits=torch.zeros(1, L, dtype=torch.long, device=device),
-            card_streets=torch.zeros(1, L, dtype=torch.long, device=device),
+            token_streets=torch.zeros(1, L, dtype=torch.long, device=device),
             action_actors=torch.full((1, L), -1, dtype=torch.long, device=device),
-            action_streets=torch.full((1, L), -1, dtype=torch.long, device=device),
             action_legal_masks=torch.zeros(
                 1, L, buffer.num_bet_bins, dtype=torch.bool, device=device
             ),
@@ -195,9 +187,8 @@ class TestVectorizedReplayBuffer:
                 token_ids=token_ids,
                 card_ranks=torch.zeros(1, L, dtype=torch.long, device=device),
                 card_suits=torch.zeros(1, L, dtype=torch.long, device=device),
-                card_streets=torch.zeros(1, L, dtype=torch.long, device=device),
+                token_streets=torch.zeros(1, L, dtype=torch.long, device=device),
                 action_actors=torch.full((1, L), -1, dtype=torch.long, device=device),
-                action_streets=torch.full((1, L), -1, dtype=torch.long, device=device),
                 action_legal_masks=torch.zeros(
                     1, L, buffer.num_bet_bins, dtype=torch.bool, device=device
                 ),
@@ -493,11 +484,10 @@ class TestVectorizedReplayBuffer:
         # Check that all buffer tensors are on the correct device
         for attr_name in [
             "token_ids",
+            "token_streets",
             "card_ranks",
             "card_suits",
-            "card_streets",
             "action_actors",
-            "action_streets",
             "action_legal_masks",
             "context_features",
             "action_indices",
@@ -1225,14 +1215,11 @@ class TestVectorizedReplayBuffer:
             card_suits=torch.randint(
                 0, 4, (batch_size, 50), device=device, dtype=torch.long
             ),
-            card_streets=torch.randint(
+            token_streets=torch.randint(
                 0, 4, (batch_size, 50), device=device, dtype=torch.long
             ),
             action_actors=torch.randint(
                 0, 2, (batch_size, 50), device=device, dtype=torch.long
-            ),
-            action_streets=torch.randint(
-                0, 4, (batch_size, 50), device=device, dtype=torch.long
             ),
             action_legal_masks=torch.ones(batch_size, 50, 5, device=device).bool(),
             context_features=torch.randint(
@@ -1568,7 +1555,7 @@ class TestVectorizedReplayBuffer:
                 device=device,
                 dtype=torch.long,
             ),
-            card_streets=torch.randint(
+            token_streets=torch.randint(
                 0,
                 4,
                 (batch_size, 50),
@@ -1578,13 +1565,6 @@ class TestVectorizedReplayBuffer:
             action_actors=torch.randint(
                 0,
                 2,
-                (batch_size, 50),
-                device=device,
-                dtype=torch.long,
-            ),
-            action_streets=torch.randint(
-                0,
-                4,
                 (batch_size, 50),
                 device=device,
                 dtype=torch.long,
@@ -1637,7 +1617,7 @@ class TestVectorizedReplayBuffer:
                 device=device,
                 dtype=torch.uint8,
             ),
-            card_streets=torch.randint(
+            token_streets=torch.randint(
                 0,
                 4,
                 (batch_size, trajectory_length, 50),
@@ -1647,13 +1627,6 @@ class TestVectorizedReplayBuffer:
             action_actors=torch.randint(
                 0,
                 2,
-                (batch_size, trajectory_length, 50),
-                device=device,
-                dtype=torch.uint8,
-            ),
-            action_streets=torch.randint(
-                0,
-                4,
                 (batch_size, trajectory_length, 50),
                 device=device,
                 dtype=torch.uint8,
@@ -1707,14 +1680,11 @@ class TestVectorizedReplayBuffer:
             card_suits=torch.randint(
                 0, 4, (batch_size, length), device=device, dtype=torch.uint8
             ),
-            card_streets=torch.randint(
+            token_streets=torch.randint(
                 0, 4, (batch_size, length), device=device, dtype=torch.uint8
             ),
             action_actors=torch.randint(
                 0, 2, (batch_size, length), device=device, dtype=torch.uint8
-            ),
-            action_streets=torch.randint(
-                0, 4, (batch_size, length), device=device, dtype=torch.uint8
             ),
             action_legal_masks=torch.ones(batch_size, length, 5, device=device).bool(),
             context_features=torch.randn(batch_size, length, 10, device=device),

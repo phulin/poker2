@@ -6,6 +6,7 @@ import torch
 
 from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
+from ..models.transformer.tokens import Special
 
 
 class VectorizedReplayBuffer:
@@ -154,11 +155,10 @@ class VectorizedReplayBuffer:
         else:
             # Transformer structured embedding tensors
             self.data.token_ids[clear_indices] = -1
+            self.data.token_streets[clear_indices] = 0
             self.data.card_ranks[clear_indices] = 0
             self.data.card_suits[clear_indices] = 0
-            self.data.card_streets[clear_indices] = 0
-            self.data.action_actors[clear_indices] = -1
-            self.data.action_streets[clear_indices] = -1
+            self.data.action_actors[clear_indices] = 0
             self.data.action_legal_masks[clear_indices] = False
             self.data.context_features[clear_indices] = 0
             self.current_token_positions[clear_indices] = 0
@@ -258,11 +258,10 @@ class VectorizedReplayBuffer:
             all_fields = common_fields + transformer_fields
             data_fields = [
                 "token_ids",
+                "token_streets",
                 "card_ranks",
                 "card_suits",
-                "card_streets",
                 "action_actors",
-                "action_streets",
                 "action_legal_masks",
                 "context_features",
                 "lengths",
@@ -665,15 +664,12 @@ class VectorizedReplayBuffer:
             return
 
         self.data.token_ids[buffer_rows, cols] = embedding_data.token_ids[rows, cols]
+        self.data.token_streets[buffer_rows, cols] = embedding_data.token_streets[
+            rows, cols
+        ]
         self.data.card_ranks[buffer_rows, cols] = embedding_data.card_ranks[rows, cols]
         self.data.card_suits[buffer_rows, cols] = embedding_data.card_suits[rows, cols]
-        self.data.card_streets[buffer_rows, cols] = embedding_data.card_streets[
-            rows, cols
-        ]
         self.data.action_actors[buffer_rows, cols] = embedding_data.action_actors[
-            rows, cols
-        ]
-        self.data.action_streets[buffer_rows, cols] = embedding_data.action_streets[
             rows, cols
         ]
         self.data.action_legal_masks[buffer_rows, cols] = (
@@ -736,11 +732,11 @@ class VectorizedReplayBuffer:
         batch_size = trajectory_indices.shape[0]
         seq_len = self.max_sequence_length
 
-        # Create embedding data for opponent actions
-        from alphaholdem.models.transformer.tokens import Special
-
         token_ids = torch.full(
             (batch_size, seq_len), -1, dtype=torch.long, device=self.device
+        )
+        token_streets = torch.zeros(
+            (batch_size, seq_len), dtype=torch.long, device=self.device
         )
         card_ranks = torch.zeros(
             (batch_size, seq_len), dtype=torch.long, device=self.device
@@ -748,13 +744,7 @@ class VectorizedReplayBuffer:
         card_suits = torch.zeros(
             (batch_size, seq_len), dtype=torch.long, device=self.device
         )
-        card_streets = torch.zeros(
-            (batch_size, seq_len), dtype=torch.long, device=self.device
-        )
         action_actors = torch.zeros(
-            (batch_size, seq_len), dtype=torch.long, device=self.device
-        )
-        action_streets = torch.zeros(
             (batch_size, seq_len), dtype=torch.long, device=self.device
         )
         action_legal_masks_tensor = torch.zeros(
@@ -772,18 +762,17 @@ class VectorizedReplayBuffer:
                     Special.NUM_SPECIAL.value + 52 + action_indices[i].item()
                 )
                 action_actors[i, pos] = 1  # Opponent
-                action_streets[i, pos] = streets[i].item()
+                token_streets[i, pos] = streets[i].item()
                 action_legal_masks_tensor[i, pos] = legal_masks[i]
 
         lengths = self.current_token_positions[buffer_trajectory_indices] + 1
 
         embedding_data = StructuredEmbeddingData(
             token_ids=token_ids,
+            token_streets=token_streets,
             card_ranks=card_ranks,
             card_suits=card_suits,
-            card_streets=card_streets,
             action_actors=action_actors,
-            action_streets=action_streets,
             action_legal_masks=action_legal_masks_tensor,
             context_features=context_features,
             lengths=lengths,
@@ -811,11 +800,10 @@ class VectorizedReplayBuffer:
         mask = range_tensor.unsqueeze(0) >= ends.unsqueeze(1)
 
         result.token_ids[mask] = -1
+        result.token_streets[mask] = 0
         result.card_ranks[mask] = 0
         result.card_suits[mask] = 0
-        result.card_streets[mask] = 0
         result.action_actors[mask] = 0
-        result.action_streets[mask] = 0
         result.action_legal_masks[mask] = False
         result.context_features[mask] = 0
 

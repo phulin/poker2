@@ -119,11 +119,10 @@ class DummyStateEncoder:
         lengths = torch.full((M,), L, dtype=torch.long, device=self.device)
         return StructuredEmbeddingData(
             token_ids=token_ids,
+            token_streets=zeros,
             card_ranks=zeros,
             card_suits=zeros,
-            card_streets=zeros,
             action_actors=zeros,
-            action_streets=zeros,
             action_legal_masks=legal,
             context_features=ctx,
             lengths=lengths,

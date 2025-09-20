@@ -26,14 +26,18 @@ class Context(Enum):
     POT = 0
     STACK_P0 = 1
     STACK_P1 = 2
-    COMMITTED_P0 = 3
-    COMMITTED_P1 = 4
-    POSITION = 5
-    STREET = 6
-    ACTIONS_ROUND = 7
-    MIN_RAISE = 8
-    BET_TO_CALL = 9
-    NUM_CONTEXT = 10
+    EFFECTIVE_STACK_P0 = 3
+    EFFECTIVE_STACK_P1 = 4
+    SPR_P0 = 5
+    SPR_P1 = 6
+    COMMITTED_P0 = 7
+    COMMITTED_P1 = 8
+    POSITION = 9
+    STREET = 10
+    ACTIONS_ROUND = 11
+    MIN_RAISE = 12
+    BET_TO_CALL = 13
+    NUM_CONTEXT = 14
 
 
 class Cls(Enum):

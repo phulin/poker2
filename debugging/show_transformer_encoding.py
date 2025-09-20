@@ -251,7 +251,7 @@ def inspect_embedding(data, perspective: int, env: HUNLTensorEnv) -> None:
 
         elif token < action_offset:
             card_idx = token - card_offset
-            street_idx = int(data.card_streets[0, pos].item())
+            street_idx = int(data.token_streets[0, pos].item())
             street = STREET_NAMES.get(street_idx, str(street_idx))
             parts.extend(
                 [
@@ -263,7 +263,7 @@ def inspect_embedding(data, perspective: int, env: HUNLTensorEnv) -> None:
 
         elif token < action_offset + num_bet_bins:
             action_id = token - action_offset
-            street_idx = int(data.action_streets[0, pos].item())
+            street_idx = int(data.token_streets[0, pos].item())
             street = STREET_NAMES.get(street_idx, str(street_idx))
             actor = int(data.action_actors[0, pos].item())
             legal_mask = data.action_legal_masks[0, pos]
@@ -330,8 +330,7 @@ def main() -> None:
         # Reuse existing printer for a single row by wrapping
         tmp = type("obj", (), {})()
         tmp.token_ids = data.token_ids[i : i + 1]
-        tmp.card_streets = data.card_streets[i : i + 1]
-        tmp.action_streets = data.action_streets[i : i + 1]
+        tmp.token_streets = data.token_streets[i : i + 1]
         tmp.action_actors = data.action_actors[i : i + 1]
         tmp.action_legal_masks = data.action_legal_masks[i : i + 1]
         tmp.context_features = data.context_features[i : i + 1]
