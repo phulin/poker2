@@ -817,9 +817,10 @@ class SelfPlayTrainer:
                         self.state_encoder.lengths[active_indices]
                         >= self.cfg.train.max_sequence_length
                     )
-                    print(
-                        f"Warning: Environments {torch.where(sequence_length_mask)[0].tolist()} reached max sequence length ({self.cfg.train.max_sequence_length}), forcing termination"
-                    )
+                    if sequence_length_mask.any():
+                        print(
+                            f"Warning: Environments {torch.where(sequence_length_mask)[0].tolist()} reached max sequence length ({self.cfg.train.max_sequence_length}), forcing termination"
+                        )
                     bad_mask |= sequence_length_mask
                 bad_indices = active_indices[bad_mask]
                 # Mark them as done
