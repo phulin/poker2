@@ -809,8 +809,8 @@ class SelfPlayTrainer:
                 if self.is_transformer and isinstance(
                     self.state_encoder, TokenSequenceBuilder
                 ):
-                    mask &= self.state_encoder.lengths[active_indices] >= max_steps
-                bad_indices = torch.where(mask)[0]
+                    mask |= self.state_encoder.lengths[active_indices] >= max_steps
+                bad_indices = active_indices[mask]
                 print(
                     f"Warning: Environments {bad_indices} reached max steps ({max_steps}), forcing termination"
                 )
