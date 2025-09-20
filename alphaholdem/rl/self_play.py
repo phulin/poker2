@@ -802,17 +802,20 @@ class SelfPlayTrainer:
             # Handle environments that exceed max steps
             steps_since_reset += 1
             if steps_since_reset >= max_steps:
-                mask = (
+                bad_mask = (
                     self.replay_buffer.get_current_transition_counts(active_indices)
                     >= max_steps
                 )
                 if self.is_transformer and isinstance(
                     self.state_encoder, TokenSequenceBuilder
                 ):
-                    mask |= self.state_encoder.lengths[active_indices] >= max_steps
-                bad_indices = active_indices[mask]
+                    bad_mask |= (
+                        self.state_encoder.lengths[active_indices]
+                        >= self.cfg.train.max_sequence_length
+                    )
+                bad_indices = active_indices[bad_mask]
                 print(
-                    f"Warning: Environments {bad_indices} reached max steps ({max_steps}), forcing termination"
+                    f"Warning: Environments {bad_indices.tolist()} reached max steps ({max_steps}), forcing termination"
                 )
                 # Mark them as done
                 self.tensor_env.done[bad_indices] = True
