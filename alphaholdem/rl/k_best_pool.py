@@ -7,10 +7,9 @@ from typing import Any, List, Optional
 import torch
 import torch.nn as nn
 
-from ..core.interfaces import OpponentPool
+from .opponent_pool import OpponentPool
 from ..utils.profiling import profile
 from .agent_snapshot import AgentSnapshot
-from .elo_calculator import ELOCalculator
 
 
 class KBestOpponentPool(OpponentPool):
@@ -40,14 +39,14 @@ class KBestOpponentPool(OpponentPool):
             k_factor: ELO K-factor for rating changes
             use_mixed_precision: Whether to store models in bfloat16 for memory efficiency
         """
+        # Initialize parent class with ELO calculation
+        super().__init__(k_factor=k_factor)
+
         self.k = k
         self.min_elo_diff = min_elo_diff
         self.min_step_diff = min_step_diff
-        self.k_factor = k_factor
         self.use_mixed_precision = use_mixed_precision
         self.snapshots: List[AgentSnapshot] = []
-        self.current_elo = 1200.0  # Starting ELO rating
-        self.elo_calculator = ELOCalculator(k_factor)
 
     def sample(self, k: int = 1) -> List[AgentSnapshot]:
         """
@@ -131,25 +130,15 @@ class KBestOpponentPool(OpponentPool):
         self, opponent: AgentSnapshot, result: str, k_factor: Optional[float] = None
     ):
         """
-        Update ELO ratings after a game.
+        Update ELO ratings after a game with K-Best specific sorting.
 
         Args:
             opponent: The opponent that was played against
             result: 'win', 'loss', or 'draw'
             k_factor: ELO K-factor for rating changes (uses instance default if None)
         """
-        # Update current ELO
-        self.current_elo = self.elo_calculator.update_elo_after_game(
-            self.current_elo, opponent, result, k_factor
-        )
-
-        # Update opponent ELO (opposite change)
-        opponent.elo = self.elo_calculator.update_elo_after_game(
-            opponent.elo,
-            AgentSnapshot(opponent.model, opponent.step, self.current_elo),
-            "loss" if result == "win" else "win" if result == "loss" else "draw",
-            k_factor,
-        )
+        # Use parent class ELO calculation
+        super().update_elo_after_game(opponent, result, k_factor)
 
         # Update opponent stats
         opponent.update_stats(result)
@@ -164,7 +153,7 @@ class KBestOpponentPool(OpponentPool):
         rewards: torch.Tensor,
     ) -> None:
         """
-        Vectorized ELO update for a single opponent over multiple games.
+        Vectorized ELO update for a single opponent over multiple games with K-Best sorting.
 
         Args:
             opponent: The opponent that was fought
@@ -173,30 +162,8 @@ class KBestOpponentPool(OpponentPool):
         if opponent is None or rewards.numel() == 0:
             return
 
-        # Store original current ELO for opponent calculation (needed for ELO conservation)
-        original_current_elo = self.current_elo
-
-        # Update current ELO using the calculator
-        self.current_elo = self.elo_calculator.update_elo_batch_vectorized(
-            self.current_elo, opponent, rewards
-        )
-
-        # Update opponent ELO (opposite change)
-        # Use ORIGINAL current ELO for opponent calculation to maintain ELO conservation
-        temp_snapshot = AgentSnapshot(
-            opponent.model, opponent.step, original_current_elo
-        )
-        opponent.elo = self.elo_calculator.update_elo_batch_vectorized(
-            opponent.elo, temp_snapshot, -rewards
-        )
-
-        # Update opponent stats with negated rewards (from opponent's perspective)
-        num_wins = (-rewards > 0).sum().item()  # Opponent wins when we lose
-        num_losses = (-rewards < 0).sum().item()  # Opponent loses when we win
-        opponent.games_played += rewards.numel()
-        opponent.wins += num_wins
-        opponent.losses += num_losses
-        opponent.draws += rewards.numel() - num_wins - num_losses
+        # Use parent class batch update
+        super().update_elo_batch_vectorized(opponent, rewards)
 
         # Re-sort snapshots by ELO
         self.snapshots.sort(key=lambda x: x.elo, reverse=True)

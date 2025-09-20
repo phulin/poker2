@@ -5,7 +5,7 @@ from typing import Any, List, Optional
 import torch
 import torch.nn as nn
 
-from ..core.interfaces import OpponentPool
+from .opponent_pool import OpponentPool
 from ..utils.profiling import profile
 from .agent_snapshot import AgentSnapshot
 
@@ -31,10 +31,11 @@ class FixedOpponentPool(OpponentPool):
             k_factor: ELO K-factor for rating changes (unused but kept for interface compatibility)
             use_mixed_precision: Whether to store models in bfloat16 for memory efficiency
         """
-        self.k_factor = k_factor
+        # Initialize parent class with ELO calculation
+        super().__init__(k_factor=k_factor)
+
         self.use_mixed_precision = use_mixed_precision
         self.snapshots: List[AgentSnapshot] = []
-        self.current_elo = 1200.0  # Starting ELO rating
 
     def sample(self, k: int = 1) -> List[AgentSnapshot]:
         """
@@ -109,24 +110,6 @@ class FixedOpponentPool(OpponentPool):
         """
         return True
 
-    def update_elo_after_game(
-        self, opponent: AgentSnapshot, result: str, k_factor: Optional[float] = None
-    ):
-        """
-        Update ELO rating after a game result.
-
-        For a fixed pool, we don't typically update ELO since the opponent
-        is fixed, but we keep this for interface compatibility.
-
-        Args:
-            opponent: The opponent that was played against
-            result: Game result ("win", "loss", or "draw")
-            k_factor: ELO K-factor (uses instance default if None)
-        """
-        # For fixed pool, we don't update ELO ratings
-        # The opponent is meant to be static
-        pass
-
     def get_best_snapshot(self) -> Optional[AgentSnapshot]:
         """Get the snapshot with the highest ELO rating (the only snapshot)."""
         if not self.snapshots:
@@ -178,6 +161,24 @@ class FixedOpponentPool(OpponentPool):
             rating: ELO rating of the agent
         """
         self.add_snapshot(model, step, rating)
+
+    def update_elo_batch_vectorized(
+        self,
+        opponent: AgentSnapshot,
+        rewards: torch.Tensor,
+    ) -> None:
+        """
+        Vectorized ELO update for a single opponent over multiple games.
+
+        Args:
+            opponent: The opponent that was fought
+            rewards: Tensor of rewards [num_games] where >0 = win, <0 = loss, =0 = draw
+        """
+        if opponent is None or rewards.numel() == 0:
+            return
+
+        # Use parent class batch update (no additional logic needed for fixed pool)
+        super().update_elo_batch_vectorized(opponent, rewards)
 
     def clear(self) -> None:
         """Clear all snapshots from the pool."""

@@ -41,14 +41,6 @@ class Policy(ABC):
         ...
 
 
-class OpponentPool(ABC):
-    @abstractmethod
-    def sample(self, k: int = 1) -> Iterable[Any]: ...
-
-    @abstractmethod
-    def add_snapshot(self, agent: Any, rating: float) -> None: ...
-
-
 class League(ABC):
     @abstractmethod
     def sample_lineup(self, num_seats: int) -> Tuple[Any, ...]: ...
