@@ -234,7 +234,7 @@ def debug_comparison_vector(compare: torch.Tensor, hand_index: int = 0) -> str:
 
             # Check if this hand type is present (not all -1)
             if not torch.all(hand_values == -1):
-                result += f"{hand_type} [{" ".join([str(n) for n in hand_values.tolist()])}]: "
+                result += f"{hand_type} [{' '.join([str(n) for n in hand_values.tolist()])}]: "
                 rank_strs = []
                 for val in hand_values:
                     if val != -1:
