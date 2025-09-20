@@ -236,7 +236,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
 
         # Evaluation against pool
         if (step + 1) % cfg.eval_interval == 0:
-            eval_results = trainer.evaluate_against_pool(min_games=20)
+            eval_results = trainer.evaluate_against_pool(min_games=50)
             print_evaluation_results(eval_results)
 
         # Exploiter training

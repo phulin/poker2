@@ -802,14 +802,18 @@ class SelfPlayTrainer:
             # Handle environments that exceed max steps
             steps_since_reset += 1
             if steps_since_reset >= max_steps:
-                bad_mask = (
-                    self.replay_buffer.get_current_transition_counts(active_indices)
-                    >= max_steps
+                bad_mask = torch.zeros(
+                    active_indices.shape[0], dtype=torch.bool, device=self.device
                 )
-                if bad_mask.any():
-                    print(
-                        f"Warning: Environments {torch.where(bad_mask)[0].tolist()} reached max steps ({max_steps}), forcing termination"
+                if add_to_replay_buffer:
+                    bad_mask |= (
+                        self.replay_buffer.get_current_transition_counts(active_indices)
+                        >= max_steps
                     )
+                    if bad_mask.any():
+                        print(
+                            f"Warning: Environments {torch.where(bad_mask)[0].tolist()} reached max steps ({max_steps}), forcing termination"
+                        )
                 if self.is_transformer and isinstance(
                     self.state_encoder, TokenSequenceBuilder
                 ):
