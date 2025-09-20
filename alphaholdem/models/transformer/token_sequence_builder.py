@@ -117,7 +117,7 @@ class TokenSequenceBuilder:
         self.context_features[idxs, start, Context.POSITION.value] = (
             # position 0 is the button, 1 is BB
             self.tensor_env.button[idxs]
-            != self.tensor_env.to_act
+            != self.tensor_env.to_act[idxs]
         ).to(self.float_dtype)
         self.context_features[idxs, start, Context.ACTIONS_ROUND.value] = (
             self.tensor_env.actions_this_round[idxs].to(self.float_dtype)
