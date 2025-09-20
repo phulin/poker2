@@ -36,6 +36,8 @@ class TrainingConfig:
     warmup_steps: int = 0  # Learning rate warmup steps
     weight_decay: float = 0.0  # Weight decay for regularization
 
+    use_kv_cache: bool = True
+
 
 @dataclass
 class ModelConfig:
