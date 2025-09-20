@@ -223,7 +223,7 @@ class TokenSequenceBuilder:
 
             result.context_features[
                 :,
-                :,
+                1:,  # skip CLS token
                 [
                     Context.STACK_P0.value,
                     Context.STACK_P1.value,
@@ -232,7 +232,7 @@ class TokenSequenceBuilder:
                 ],
             ] = result.context_features[
                 :,
-                :,
+                1:,  # skip CLS token
                 [
                     Context.STACK_P1.value,
                     Context.STACK_P0.value,
