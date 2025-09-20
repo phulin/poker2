@@ -806,17 +806,22 @@ class SelfPlayTrainer:
                     self.replay_buffer.get_current_transition_counts(active_indices)
                     >= max_steps
                 )
+                if bad_mask.any():
+                    print(
+                        f"Warning: Environments {torch.where(bad_mask)[0].tolist()} reached max steps ({max_steps}), forcing termination"
+                    )
                 if self.is_transformer and isinstance(
                     self.state_encoder, TokenSequenceBuilder
                 ):
-                    bad_mask |= (
+                    sequence_length_mask = (
                         self.state_encoder.lengths[active_indices]
                         >= self.cfg.train.max_sequence_length
                     )
+                    print(
+                        f"Warning: Environments {torch.where(sequence_length_mask)[0].tolist()} reached max sequence length ({self.cfg.train.max_sequence_length}), forcing termination"
+                    )
+                    bad_mask |= sequence_length_mask
                 bad_indices = active_indices[bad_mask]
-                print(
-                    f"Warning: Environments {bad_indices.tolist()} reached max steps ({max_steps}), forcing termination"
-                )
                 # Mark them as done
                 self.tensor_env.done[bad_indices] = True
 
