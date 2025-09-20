@@ -54,8 +54,8 @@ train:
   batch_size: 10000
   num_epochs: 4
   replay_buffer_batches: 4
-  max_trajectory_length: 12
-  max_sequence_length: 50
+  max_trajectory_length: 7
+  max_sequence_length: 26   # Can't be higher than 2 * max_trajectory_length + 12
   use_kv_cache: true
   
   # PPO hyperparameters

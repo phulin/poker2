@@ -780,6 +780,16 @@ class VectorizedReplayBuffer:
 
         self._append_from_embedding(buffer_trajectory_indices, embedding_data)
 
+    def get_current_transition_counts(
+        self, trajectory_indices: torch.Tensor
+    ) -> torch.Tensor:
+        """Get the current transition counts for the given trajectory indices."""
+        if self.open_batch <= 0:
+            raise RuntimeError("No open batch, cannot get current transition counts")
+
+        buffer_trajectory_indices = (trajectory_indices + self.position) % self.capacity
+        return self.current_transition_counts[buffer_trajectory_indices]
+
     def _sample_transformer_steps(
         self,
         traj_indices: torch.Tensor,

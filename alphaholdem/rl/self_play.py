@@ -802,12 +802,20 @@ class SelfPlayTrainer:
             # Handle environments that exceed max steps
             steps_since_reset += 1
             if steps_since_reset >= max_steps:
-                env_indices = torch.where(~self.tensor_env.done)[0]
+                mask = (
+                    self.replay_buffer.get_current_transition_counts(active_indices)
+                    >= max_steps
+                )
+                if self.is_transformer and isinstance(
+                    self.state_encoder, TokenSequenceBuilder
+                ):
+                    mask &= self.state_encoder.lengths >= max_steps
+                bad_indices = torch.where(mask)[0]
                 print(
-                    f"Warning: Environments {env_indices} reached max steps ({max_steps}), forcing termination"
+                    f"Warning: Environments {bad_indices} reached max steps ({max_steps}), forcing termination"
                 )
                 # Mark them as done
-                self.tensor_env.done[env_indices] = True
+                self.tensor_env.done[bad_indices] = True
 
             # If all environments are done, reset all of them and take credit for steps and trajectories collected
             if dones.all():
