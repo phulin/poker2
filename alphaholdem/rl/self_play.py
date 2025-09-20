@@ -167,7 +167,6 @@ class SelfPlayTrainer:
         elif self.opponent_pool_type == "dred":
             self.opponent_pool = DREDPool(
                 max_size=self.k_best_pool_size * 10,  # DRED can handle larger pools
-                embedding_dim=128,
                 k_factor=self.k_factor,
                 use_mixed_precision=self.use_mixed_precision,
             )
@@ -1045,7 +1044,9 @@ class SelfPlayTrainer:
                 )
 
             if self.opponent_pool.should_add_snapshot(step, kl_divergence):
-                self.opponent_pool.add_snapshot(self.model, step)
+                sample_batch_size = min(1024, len(batch["embedding_data"]))
+                sample_batch = batch["embedding_data"][:sample_batch_size]
+                self.opponent_pool.add_snapshot(self.model, step, sample_batch)
 
         # Calculate average reward for this update step using captured values
         avg_reward = (

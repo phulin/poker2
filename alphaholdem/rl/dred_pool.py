@@ -11,16 +11,17 @@ This implements a more sophisticated opponent pool that considers:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 import torch
-import torch.nn as nn
+
+from ..models.cnn_embedding_data import CNNEmbeddingData
+from ..models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
 
 from .opponent_pool import OpponentPool
-from ..utils.profiling import profile
-from ..utils.kl_divergence import compute_kl_divergence
 from .agent_snapshot import AgentSnapshot
-from .elo_calculator import ELOCalculator
 from .kmedoids import SimpleKMedoids
 
 
@@ -57,7 +58,6 @@ class DREDPool(OpponentPool):
         weak_floor: float = 0.1,
         k_recent: int = 20,
         k_factor: float = 32.0,
-        embedding_dim: int = 128,
         use_mixed_precision: bool = False,
     ):
         """
@@ -74,7 +74,6 @@ class DREDPool(OpponentPool):
             weak_floor: Minimum weight for weak opponents (bottom decile)
             k_recent: Number of recent opponents to consider for diversity
             k_factor: ELO K-factor for rating changes
-            embedding_dim: Dimension of opponent embeddings
             use_mixed_precision: Whether to store models in bfloat16 for memory efficiency
         """
         # Initialize parent class with ELO calculation
@@ -89,48 +88,24 @@ class DREDPool(OpponentPool):
         self.p_curr = p_curr
         self.weak_floor = weak_floor
         self.k_recent = k_recent
-        self.embedding_dim = embedding_dim
         self.use_mixed_precision = use_mixed_precision
 
         self.snapshots: List[AgentSnapshot] = []
-        self.recent_opponents: List[torch.Tensor] = (
-            []
-        )  # Store embeddings of last K opponents
 
         # Track last admitted snapshot for step-based admission
         self.last_admitted_step: int = -1
 
-        # Initialize embedding generator (simple MLP)
-        self._init_embedding_generator()
-
-    def _init_embedding_generator(self):
-        """Initialize a simple MLP to generate opponent embeddings."""
-        self.embedding_generator = nn.Sequential(
-            nn.Linear(1, 64),  # Input: ELO rating
-            nn.ReLU(),
-            nn.Linear(64, 128),
-            nn.ReLU(),
-            nn.Linear(128, self.embedding_dim),
-        )
-
-        # Disable gradients for embedding generator
-        for p in self.embedding_generator.parameters():
-            p.requires_grad = False
-
-    def _generate_embedding(self, snapshot: AgentSnapshot) -> torch.Tensor:
+    def _generate_embedding(
+        self,
+        snapshot: AgentSnapshot,
+        sample_batch: Union[CNNEmbeddingData, StructuredEmbeddingData],
+    ) -> torch.Tensor:
         """Generate embedding for a snapshot based on its characteristics."""
-        # Simple embedding based on ELO rating
-        elo_tensor = torch.tensor([[snapshot.elo]], dtype=torch.float32)
         with torch.no_grad():
-            embedding = self.embedding_generator(elo_tensor).squeeze()
-
-        # Add some noise based on step and stats for diversity
-        noise = torch.randn(self.embedding_dim) * 0.1
-        embedding = embedding + noise * (
-            snapshot.step / 10000.0
-        )  # More noise for older snapshots
-
-        return embedding
+            model_outputs = snapshot.model(sample_batch.to(snapshot.model_dtype))
+            probs = torch.softmax(model_outputs.policy_logits, dim=-1)
+            all_info = torch.cat([probs, model_outputs.value.unsqueeze(-1)], dim=-1)
+            return all_info.flatten().detach()
 
     def sample(self, k: int = 1) -> List[AgentSnapshot]:
         """
@@ -165,16 +140,6 @@ class DREDPool(OpponentPool):
 
         # Sample with replacement using DRED weights
         sampled_indices = torch.multinomial(weights, num_samples=k, replacement=True)
-
-        # Update recent opponents for diversity calculation
-        for idx in sampled_indices:
-            snapshot = self.snapshots[idx]
-            embedding = self._generate_embedding(snapshot)
-            self.recent_opponents.append(embedding)
-
-            # Keep only last k_recent
-            if len(self.recent_opponents) > self.k_recent:
-                self.recent_opponents.pop(0)
 
         return [self.snapshots[i.item()] for i in sampled_indices]
 
@@ -225,29 +190,8 @@ class DREDPool(OpponentPool):
 
         difficulty_weights = torch.stack(difficulties)
 
-        # Diversity vs recent opponents
-        if self.recent_opponents:
-            recent_embeddings = torch.stack(self.recent_opponents[-self.k_recent :])
-            snapshot_embeddings = torch.stack(
-                [self._generate_embedding(s) for s in self.snapshots]
-            )
-
-            # Calculate average distance to recent opponents
-            distances = torch.norm(
-                snapshot_embeddings[:, None, :] - recent_embeddings[None, :, :], dim=-1
-            ).mean(dim=1)
-
-            diversity_weights = 1.0 + self.gamma * distances
-        else:
-            diversity_weights = torch.ones(n)
-
         # Combine all weights
-        weights = (
-            skill_weights
-            * age_weights
-            * (0.5 + self.tau * difficulty_weights)
-            * diversity_weights
-        )
+        weights = skill_weights * age_weights * (0.5 + self.tau * difficulty_weights)
 
         # Apply weak opponent floor
         elo_ranks = torch.argsort(elos)
@@ -266,7 +210,6 @@ class DREDPool(OpponentPool):
             print(f"Skill weights: {skill_weights}")
             print(f"Age weights: {age_weights}")
             print(f"Difficulty weights: {difficulty_weights}")
-            print(f"Diversity weights: {diversity_weights}")
             print(f"Combined weights: {weights}")
             # Fallback to uniform weights
             weights = torch.ones(n) / n
@@ -283,6 +226,7 @@ class DREDPool(OpponentPool):
         self,
         model: Any,
         step: int,
+        sample_batch: Union[CNNEmbeddingData, StructuredEmbeddingData],
         rating: Optional[float] = None,
         is_exploiter: bool = False,
     ) -> None:
@@ -324,11 +268,13 @@ class DREDPool(OpponentPool):
 
         # Prune if over capacity
         if len(self.snapshots) > self.max_size:
-            self._prune()
+            self._prune(sample_batch)
 
-    def _prune(self):
+    def _prune(self, sample_batch: Union[CNNEmbeddingData, StructuredEmbeddingData]):
         """Prune snapshots using DRED strategy while preserving last 5 exploiters."""
         n = len(self.snapshots)
+
+        print("=> Pool size exceeded. Pruning...")
 
         # First, identify and preserve the last 5 exploiters
         exploiter_indices = []
@@ -365,13 +311,17 @@ class DREDPool(OpponentPool):
             if non_exploiter_remaining:
                 embeddings = torch.stack(
                     [
-                        self._generate_embedding(self.snapshots[i])
+                        self._generate_embedding(self.snapshots[i], sample_batch)
                         for i in non_exploiter_remaining
                     ]
                 )
 
                 # Cluster count (up to 30 clusters)
-                k_clusters = min(30, len(non_exploiter_remaining))
+                k_clusters = min(
+                    30,
+                    len(non_exploiter_remaining),
+                    max(0, self.max_size - len(keep_indices)),
+                )
 
                 if k_clusters > 1:
                     # Use our custom k-medoids implementation
@@ -518,7 +468,6 @@ class DREDPool(OpponentPool):
             "current_elo": self.current_elo,
             "avg_age": sum(ages) / len(ages),
             "avg_difficulty": sum(difficulties) / len(difficulties),
-            "recent_opponents_count": len(self.recent_opponents),
         }
 
     def save_pool(self, path: str):
@@ -536,7 +485,6 @@ class DREDPool(OpponentPool):
             "weak_floor": self.weak_floor,
             "k_recent": self.k_recent,
             "k_factor": self.k_factor,
-            "embedding_dim": self.embedding_dim,
             "last_admitted_step": self.last_admitted_step,
             "snapshots": [],
         }
@@ -579,7 +527,6 @@ class DREDPool(OpponentPool):
         self.weak_floor = pool_data.get("weak_floor", 0.1)
         self.k_recent = pool_data.get("k_recent", 20)
         self.k_factor = pool_data.get("k_factor", 32.0)
-        self.embedding_dim = pool_data.get("embedding_dim", 128)
         self.last_admitted_step = pool_data.get("last_admitted_step", 0)
 
         self.snapshots = []
