@@ -115,6 +115,14 @@ class OpponentPool(ABC):
             opponent.elo, temp_snapshot, -rewards
         )
 
+        wins = (rewards > 0).sum().item()
+        losses = (rewards < 0).sum().item()
+
+        opponent.wins += wins
+        opponent.losses += losses
+        opponent.draws += rewards.numel() - wins - losses
+        opponent.games_played += rewards.numel()
+
     def _reverse_result(self, result: str) -> str:
         """Reverse the result for the opponent's perspective."""
         if result == "win":
