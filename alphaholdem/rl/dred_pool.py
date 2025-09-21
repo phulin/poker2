@@ -539,6 +539,9 @@ class DREDPool(OpponentPool):
             # Get model dtype with backward compatibility
             model_dtype = snapshot_data.get("model_dtype", torch.float32)
 
+            # Convert model to the stored dtype
+            model = model.to(model_dtype)
+
             # Create snapshot
             snapshot = AgentSnapshot(
                 model=model,

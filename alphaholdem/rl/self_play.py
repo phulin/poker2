@@ -1477,7 +1477,6 @@ class SelfPlayTrainer:
                     self.cfg.model.name, model_kwargs, self.device
                 )
                 model.load_state_dict(snapshot_data["model_state_dict"])
-                model.to(self.device)
                 # Handle backward compatibility for older snapshots
                 model_dtype = snapshot_data.get("model_dtype", torch.float32)
                 # Handle legacy use_mixed_precision field
@@ -1490,6 +1489,9 @@ class SelfPlayTrainer:
                         if snapshot_data["use_mixed_precision"]
                         else torch.float32
                     )
+
+                # Convert model to the stored dtype and device
+                model = model.to(dtype=model_dtype, device=self.device)
 
                 snapshot = AgentSnapshot(
                     model=model,
@@ -1522,9 +1524,9 @@ class SelfPlayTrainer:
                 from ..models.cnn import SiameseConvNetV1
 
                 self.opponent_pool.load_pool(pool_path, SiameseConvNetV1)
-                # Ensure snapshot models are on the correct device
+                # Ensure snapshot models are on the correct device and dtype
                 for snap in self.opponent_pool.snapshots:
-                    snap.model.to(self.device)
+                    snap.model.to(dtype=snap.model_dtype, device=self.device)
                 print(f"Opponent pool loaded from {pool_path}")
             except FileNotFoundError:
                 print(
