@@ -226,8 +226,8 @@ class DREDPool(OpponentPool):
         self,
         model: Any,
         step: int,
-        sample_batch: Union[CNNEmbeddingData, StructuredEmbeddingData],
         rating: Optional[float] = None,
+        sample_batch: Optional[Union[CNNEmbeddingData, StructuredEmbeddingData]] = None,
         is_exploiter: bool = False,
     ) -> None:
         """
@@ -237,6 +237,7 @@ class DREDPool(OpponentPool):
             model: The model to snapshot
             step: Training step
             rating: ELO rating of the agent
+            sample_batch: Sample batch for embedding generation
             is_exploiter: Whether this snapshot is an exploiter
         """
         # Create new snapshot

@@ -1067,7 +1067,12 @@ class SelfPlayTrainer:
             if self.opponent_pool.should_add_snapshot(step, kl_divergence):
                 sample_batch_size = min(1024, len(batch["embedding_data"]))
                 sample_batch = batch["embedding_data"][:sample_batch_size]
-                self.opponent_pool.add_snapshot(self.model, step, sample_batch)
+                if isinstance(self.opponent_pool, DREDPool):
+                    self.opponent_pool.add_snapshot(
+                        self.model, step, sample_batch=sample_batch
+                    )
+                else:
+                    self.opponent_pool.add_snapshot(self.model, step)
 
         # Calculate average reward for this update step using captured values
         avg_reward = (
