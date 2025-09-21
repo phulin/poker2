@@ -54,6 +54,10 @@ def train_exploiter(trainer, exploiter_trainer, step, cfg):
     exploiter_stats = []
     for exploiter_step in range(cfg.exploiter.training_steps):
         step_stats = exploiter_trainer.train_step(exploiter_step + 1)
+        if (exploiter_step + 1) % 10 == 0:
+            print(
+                f"Exploiter Step {exploiter_step + 1}/{cfg.exploiter.training_steps}."
+            )
         exploiter_stats.append(step_stats)
 
     # Calculate average exploiter performance
