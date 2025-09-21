@@ -12,7 +12,8 @@ from typing import Any, Iterable, Optional
 
 import torch
 
-from ..rl.elo_calculator import ELOCalculator
+from .agent_snapshot import AgentSnapshot
+from .elo_calculator import ELOCalculator
 
 
 class OpponentPool(ABC):
@@ -99,19 +100,20 @@ class OpponentPool(ABC):
             opponent: The opponent that was played against
             rewards: Tensor of rewards from multiple games against this opponent
         """
-        # Convert rewards to results
-        results = []
-        for reward in rewards:
-            if reward > 0:
-                results.append("win")
-            elif reward < 0:
-                results.append("loss")
-            else:
-                results.append("draw")
+        # Store original current ELO for opponent calculation (needed for ELO conservation)
+        original_current_elo = self.current_elo
 
-        # Update ELO for each game
-        for result in results:
-            self.update_elo_after_game(opponent, result)
+        # Update current ELO using the calculator
+        self.current_elo = self.elo_calculator.update_elo_batch_vectorized(
+            self.current_elo, opponent, rewards
+        )
+
+        # Update opponent ELO (opposite change)
+        # Use ORIGINAL current ELO for opponent calculation to maintain ELO conservation
+        temp_snapshot = AgentSnapshot(None, -1, original_current_elo)
+        opponent.elo = self.elo_calculator.update_elo_batch_vectorized(
+            opponent.elo, temp_snapshot, -rewards
+        )
 
     def _reverse_result(self, result: str) -> str:
         """Reverse the result for the opponent's perspective."""
