@@ -1002,6 +1002,7 @@ class SelfPlayTrainer:
 
                 if last_admitted_opponent is not None:
                     # Get last admitted opponent model logits
+                    last_admitted_opponent.model.to(kl_states.device)
                     opponent_outputs = last_admitted_opponent.model(
                         kl_states.to(last_admitted_opponent.model_dtype)
                     )
