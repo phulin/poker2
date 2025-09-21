@@ -327,7 +327,7 @@ class DREDPool(OpponentPool):
                     # Use our custom k-medoids implementation
                     kmedoids = SimpleKMedoids(
                         n_clusters=k_clusters, random_state=0
-                    ).fit(embeddings)
+                    ).fit(embeddings.float())
 
                     # Add medoid indices to keep set
                     for medoid_idx in kmedoids.medoid_indices_:
