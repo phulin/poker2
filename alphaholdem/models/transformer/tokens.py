@@ -2,7 +2,6 @@
 
 from enum import Enum
 
-
 CLS_INDEX = 0
 HOLE0_INDEX = 2
 HOLE1_INDEX = 3

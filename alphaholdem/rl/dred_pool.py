@@ -16,13 +16,10 @@ from typing import Any, List, Optional, Union
 import torch
 
 from ..models.cnn_embedding_data import CNNEmbeddingData
-from ..models.transformer.structured_embedding_data import (
-    StructuredEmbeddingData,
-)
-
-from .opponent_pool import OpponentPool
+from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
 from .agent_snapshot import AgentSnapshot
 from .kmedoids import SimpleKMedoids
+from .opponent_pool import OpponentPool
 
 
 @dataclass

@@ -158,7 +158,8 @@ class TestVectorizedReplayBuffer:
     def test_transformer_add_transitions_appends_context_and_action(self, buffer):
         device = buffer.device
         buffer.start_adding_trajectory_batches(1)
-        from alphaholdem.models.transformer.tokens import Special, Context as Ctx
+        from alphaholdem.models.transformer.tokens import Context as Ctx
+        from alphaholdem.models.transformer.tokens import Special
 
         # Prepare embedding with context features in slot 0/1
         L = buffer.max_sequence_length

@@ -4,19 +4,19 @@ import pytest
 import torch
 import torch.nn as nn
 
+from alphaholdem.models.model_outputs import ModelOutput
+from alphaholdem.models.transformer.kv_cache_manager import (
+    KVCacheManager,
+    SelfPlayKVCacheManager,
+)
 from alphaholdem.models.transformer.poker_transformer import (
     PokerTransformerV1,
     TransformerLayer,
 )
 from alphaholdem.models.transformer.rotary_attention import RotarySelfAttention
-from alphaholdem.models.transformer.kv_cache_manager import (
-    KVCacheManager,
-    SelfPlayKVCacheManager,
-)
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.models.model_outputs import ModelOutput
 
 
 class TestRotaryAttentionKVCaching:

@@ -11,6 +11,7 @@ from alphaholdem.core.structured_config import (
     ModelConfig,
     TrainingConfig,
 )
+from alphaholdem.env.analyze_tensor_env import get_preflop_range_grid
 from alphaholdem.rl.losses import trinal_clip_ppo_loss
 from alphaholdem.rl.replay import (
     ReplayBuffer,
@@ -19,7 +20,6 @@ from alphaholdem.rl.replay import (
     compute_gae_returns,
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.env.analyze_tensor_env import get_preflop_range_grid
 
 
 def test_replay_buffer_and_gae():

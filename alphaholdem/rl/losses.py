@@ -8,12 +8,9 @@ import torch
 import torch.nn.functional as F
 
 from ..models.cnn_embedding_data import CNNEmbeddingData
-from ..models.transformer.structured_embedding_data import (
-    StructuredEmbeddingData,
-)
-from .vectorized_replay import BatchSample
-
+from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
 from ..utils.profiling import profile
+from .vectorized_replay import BatchSample
 
 
 @dataclass

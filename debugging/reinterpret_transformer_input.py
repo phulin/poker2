@@ -2,13 +2,14 @@
 """Comprehensive example of transformer state debugging utilities."""
 
 import torch
+
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
 from alphaholdem.models.transformer.debug_utils import (
-    debug_transformer_state,
     TransformerStateDebugger,
     create_debugger_with_encoder,
+    debug_transformer_state,
 )
+from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
 
 
 def test_basic_debugging():

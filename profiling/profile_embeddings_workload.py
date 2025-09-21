@@ -5,8 +5,8 @@ import argparse
 import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
 from alphaholdem.models.transformer.embeddings import PokerFusedEmbedding
+from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
 
 
 def build_batch(batch_size: int, device: torch.device, dtype: torch.dtype):

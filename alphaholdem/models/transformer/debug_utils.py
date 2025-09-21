@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import torch
 from typing import Dict, List
 
+import torch
+
 from ...env.hunl_tensor_env import HUNLTensorEnv
-from .structured_embedding_data import StructuredEmbeddingData
 from .state_encoder import TransformerStateEncoder
+from .structured_embedding_data import StructuredEmbeddingData
 
 
 class TransformerStateDebugger:

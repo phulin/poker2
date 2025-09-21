@@ -13,10 +13,10 @@ import hydra
 import torch
 
 from ..core.structured_config import Config
+from ..rl.fixed_opponent_pool import FixedOpponentPool
 
 # Import encoders and models to register them
 from ..rl.self_play import SelfPlayTrainer
-from ..rl.fixed_opponent_pool import FixedOpponentPool
 from ..utils.config_loader import load_config_from_checkpoint
 from ..utils.training_utils import (
     print_checkpoint_info,

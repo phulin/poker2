@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from ...utils.profiling import profile
 from .tokens import (
     Context,
     Special,
@@ -14,8 +15,6 @@ from .tokens import (
     get_card_token_id_offset,
     get_special_token_id_offset,
 )
-
-from ...utils.profiling import profile
 
 if TYPE_CHECKING:  # pragma: no cover - import guarded for type checkers only
     from .structured_embedding_data import StructuredEmbeddingData

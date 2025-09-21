@@ -7,9 +7,9 @@ from typing import Any, List, Optional
 import torch
 import torch.nn as nn
 
-from .opponent_pool import OpponentPool
 from ..utils.profiling import profile
 from .agent_snapshot import AgentSnapshot
+from .opponent_pool import OpponentPool
 
 
 class KBestOpponentPool(OpponentPool):

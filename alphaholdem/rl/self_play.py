@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Optional
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -15,17 +15,17 @@ from ..env.hunl_env import HUNLEnv
 from ..env.hunl_tensor_env import HUNLTensorEnv
 from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.factory import ModelFactory
-from ..models.state_encoder import CNNStateEncoder
-from ..models.transformer.token_sequence_builder import TokenSequenceBuilder
-from ..models.transformer.kv_cache_manager import SelfPlayKVCacheManager
 from ..models.model_outputs import ModelOutput
+from ..models.state_encoder import CNNStateEncoder
+from ..models.transformer.kv_cache_manager import SelfPlayKVCacheManager
+from ..models.transformer.token_sequence_builder import TokenSequenceBuilder
 from ..rl.agent_snapshot import AgentSnapshot
-from ..rl.k_best_pool import KBestOpponentPool
 from ..rl.dred_pool import DREDPool
-from ..utils.kl_divergence import compute_kl_divergence_batch
+from ..rl.k_best_pool import KBestOpponentPool
 from ..rl.losses import TrinalClipPPOLoss
 from ..rl.replay import Trajectory, Transition
 from ..rl.vectorized_replay import VectorizedReplayBuffer
+from ..utils.kl_divergence import compute_kl_divergence_batch
 from ..utils.profiling import profile
 
 

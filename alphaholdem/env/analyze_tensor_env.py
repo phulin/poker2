@@ -8,8 +8,8 @@ from typing import Any, List, Tuple
 
 import torch
 
-from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.models.state_encoder import CNNStateEncoder
+from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 
 from .hunl_tensor_env import HUNLTensorEnv
 

@@ -1,17 +1,17 @@
 import torch
 
 from ...env.hunl_tensor_env import HUNLTensorEnv
+from .structured_embedding_data import StructuredEmbeddingData
 from .tokens import (
     CLS_INDEX,
-    Special,
-    Context,
-    Cls,
-    get_action_token_id_offset,
-    get_card_token_id_offset,
     HOLE0_INDEX,
     HOLE1_INDEX,
+    Cls,
+    Context,
+    Special,
+    get_action_token_id_offset,
+    get_card_token_id_offset,
 )
-from .structured_embedding_data import StructuredEmbeddingData
 
 
 class TokenSequenceBuilder:

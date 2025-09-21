@@ -22,7 +22,6 @@ from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
 from alphaholdem.models.transformer.tokens import Context, Special
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
 
-
 RANKS = "23456789TJQKA"
 SUITS = "shdc"
 STREET_NAMES = {

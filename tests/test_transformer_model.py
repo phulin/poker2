@@ -4,21 +4,22 @@ import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.factory import ModelFactory
-from alphaholdem.models.transformer.structured_embedding_data import (
-    StructuredEmbeddingData,
-)
 from alphaholdem.models.transformer.embeddings import (
     PokerFusedEmbedding,
     combine_embeddings,
 )
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
-from alphaholdem.models.transformer.tokens import Special
-
-from alphaholdem.models.transformer.tokens import get_special_token_id_offset
-from alphaholdem.models.transformer.tokens import get_card_token_id_offset
-from alphaholdem.models.transformer.tokens import get_street_token_id_offset
-from alphaholdem.models.transformer.tokens import get_action_token_id_offset
+from alphaholdem.models.transformer.tokens import (
+    Special,
+    get_action_token_id_offset,
+    get_card_token_id_offset,
+    get_special_token_id_offset,
+    get_street_token_id_offset,
+)
 
 
 def _build_env(device: torch.device) -> HUNLTensorEnv:

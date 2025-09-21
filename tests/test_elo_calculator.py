@@ -5,9 +5,10 @@ Tests for ELO calculator functionality.
 
 import pytest
 import torch
-from alphaholdem.rl.elo_calculator import ELOCalculator
-from alphaholdem.rl.agent_snapshot import AgentSnapshot
+
 from alphaholdem.models.cnn import SiameseConvNetV1
+from alphaholdem.rl.agent_snapshot import AgentSnapshot
+from alphaholdem.rl.elo_calculator import ELOCalculator
 
 
 class TestELOCalculator:

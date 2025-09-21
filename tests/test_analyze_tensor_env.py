@@ -5,10 +5,10 @@ import re
 import torch
 
 from alphaholdem.env.analyze_tensor_env import (
+    create_1326_hand_combinations,
     get_preflop_betting_grid,
     get_preflop_range_grid,
     get_preflop_value_grid,
-    create_1326_hand_combinations,
 )
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,

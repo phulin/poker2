@@ -3,8 +3,9 @@
 This provides a lightweight alternative to sklearn's KMedoids for use in DREDPool.
 """
 
-import torch
 from typing import List, Tuple
+
+import torch
 
 
 class SimpleKMedoids:

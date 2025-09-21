@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Comprehensive test suite for k-medoids clustering implementation."""
 
-import torch
-import pytest
 from typing import List, Tuple
+
+import pytest
+import torch
+
 from alphaholdem.rl.kmedoids import SimpleKMedoids, kmedoids_pytorch
 
 

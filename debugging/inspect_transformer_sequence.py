@@ -15,22 +15,21 @@ from typing import Iterable, List
 
 import torch
 
+from alphaholdem.core.structured_config import (
+    Config,
+    EnvConfig,
+    ModelConfig,
+    TrainingConfig,
+)
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.transformer.tokens import (
+    Cls,
     Context,
     Special,
-    Cls,
     get_action_token_id_offset,
     get_card_token_id_offset,
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.core.structured_config import (
-    Config,
-    TrainingConfig,
-    ModelConfig,
-    EnvConfig,
-)
-
 
 RANK_STR = "AKQJT98765432"[::-1]  # -> "23456789TJQKA"
 SUIT_STR = "shdc"
