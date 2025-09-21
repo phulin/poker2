@@ -747,95 +747,88 @@ def main(actions: Iterable[int]) -> None:
                 batch = trainer.replay_buffer.sample_batch(rng, batch_size)
 
                 print(f"Sampled batch size: {batch_size}")
-                print(f"Batch keys: {list(batch.keys())}")
+                print(
+                    f"Batch attributes: {[attr for attr in dir(batch) if not attr.startswith('_')]}"
+                )
 
                 # Show embedding data info
-                if "embedding_data" in batch:
-                    embedding_data = batch["embedding_data"]
-                    print(f"\nEmbedding data type: {type(embedding_data)}")
-                    if hasattr(embedding_data, "token_ids"):
-                        print(f"Lengths: {embedding_data.lengths.tolist()}")
+                embedding_data = batch.embedding_data
+                print(f"\nEmbedding data type: {type(embedding_data)}")
+                if hasattr(embedding_data, "token_ids"):
+                    print(f"Lengths: {embedding_data.lengths.tolist()}")
 
-                        # Show token sequences for sampled transitions
-                        for i in range(min(3, embedding_data.token_ids.shape[0])):
-                            seq_len = int(embedding_data.lengths[i])
-                            print(
-                                f"\n--- Sampled Transition {i} (length={seq_len}) ---"
-                            )
-                            tokens = embedding_data.token_ids[i, :seq_len]
-                            for pos, token in enumerate(tokens):
-                                token = int(token.item())
-                                parts = [f"[{pos:02d}]"]
+                    # Show token sequences for sampled transitions
+                    for i in range(min(3, embedding_data.token_ids.shape[0])):
+                        seq_len = int(embedding_data.lengths[i])
+                        print(f"\n--- Sampled Transition {i} (length={seq_len}) ---")
+                        tokens = embedding_data.token_ids[i, :seq_len]
+                        for pos, token in enumerate(tokens):
+                            token = int(token.item())
+                            parts = [f"[{pos:02d}]"]
 
-                                # Decode token based on type
-                                if token == Special.CLS.value:
-                                    parts.append("CLS")
-                                    if hasattr(embedding_data, "context_features"):
-                                        ctx = embedding_data.context_features[i, pos]
-                                        parts.append(f"sb={ctx[Cls.SB.value]:.3f}")
-                                        parts.append(f"bb={ctx[Cls.BB.value]:.3f}")
-                                        parts.append(
-                                            f"hero_position={ctx[Cls.HERO_POSITION.value]:.0f}"
-                                        )
+                        # Decode token based on type
+                        if token == Special.CLS.value:
+                            parts.append("CLS")
+                            if hasattr(embedding_data, "context_features"):
+                                ctx = embedding_data.context_features[i, pos]
+                                parts.append(f"sb={ctx[Cls.SB.value]:.3f}")
+                                parts.append(f"bb={ctx[Cls.BB.value]:.3f}")
+                                parts.append(
+                                    f"hero_position={ctx[Cls.HERO_POSITION.value]:.0f}"
+                                )
 
-                                elif token == Special.CONTEXT.value:
-                                    parts.append("CONTEXT")
-                                    if hasattr(embedding_data, "context_features"):
-                                        ctx = embedding_data.context_features[i, pos]
-                                        parts.append(
-                                            f"pot={ctx[Context.POT.value]:.3f}"
-                                        )
-                                        parts.append(
-                                            f"stack_p0={ctx[Context.STACK_P0.value]:.3f}"
-                                        )
-                                        parts.append(
-                                            f"stack_p1={ctx[Context.STACK_P1.value]:.3f}"
-                                        )
-                                        parts.append(
-                                            f"bet_to_call={ctx[Context.BET_TO_CALL.value]:.3f}"
-                                        )
-
-                                elif token in [
-                                    Special.STREET_PREFLOP.value,
-                                    Special.STREET_FLOP.value,
-                                    Special.STREET_TURN.value,
-                                    Special.STREET_RIVER.value,
-                                ]:
-                                    street_names = ["PREFLOP", "FLOP", "TURN", "RIVER"]
-                                    street_idx = token - Special.STREET_PREFLOP.value
-                                    if 0 <= street_idx < len(street_names):
-                                        parts.append(
-                                            f"STREET_{street_names[street_idx]}"
-                                        )
-
-                                elif (
-                                    get_card_token_id_offset()
-                                    <= token
-                                    <= get_card_token_id_offset() + 52
-                                ):  # Card tokens
-                                    card_idx = token - get_card_token_id_offset()
-                                    card_str = format_card(card_idx)
-                                    card_rank = RANK_STR[
-                                        trainer.replay_buffer.data.card_ranks[
-                                            traj_idx, pos
-                                        ].item()
-                                    ]
-                                    card_suit = SUIT_STR[
-                                        trainer.replay_buffer.data.card_suits[
-                                            traj_idx, pos
-                                        ].item()
-                                    ]
+                            elif token == Special.CONTEXT.value:
+                                parts.append("CONTEXT")
+                                if hasattr(embedding_data, "context_features"):
+                                    ctx = embedding_data.context_features[i, pos]
+                                    parts.append(f"pot={ctx[Context.POT.value]:.3f}")
                                     parts.append(
-                                        f"CARD_{card_str} (rank={card_rank}, suit={card_suit})"
+                                        f"stack_p0={ctx[Context.STACK_P0.value]:.3f}"
+                                    )
+                                    parts.append(
+                                        f"stack_p1={ctx[Context.STACK_P1.value]:.3f}"
+                                    )
+                                    parts.append(
+                                        f"bet_to_call={ctx[Context.BET_TO_CALL.value]:.3f}"
                                     )
 
-                                elif (
-                                    token >= get_action_token_id_offset()
-                                ):  # Action tokens
-                                    action_idx = token - get_action_token_id_offset()
-                                    parts.append(f"ACTION_{action_idx}")
+                            elif token in [
+                                Special.STREET_PREFLOP.value,
+                                Special.STREET_FLOP.value,
+                                Special.STREET_TURN.value,
+                                Special.STREET_RIVER.value,
+                            ]:
+                                street_names = ["PREFLOP", "FLOP", "TURN", "RIVER"]
+                                street_idx = token - Special.STREET_PREFLOP.value
+                                if 0 <= street_idx < len(street_names):
+                                    parts.append(f"STREET_{street_names[street_idx]}")
 
-                                print(" ".join(parts))
+                            elif (
+                                get_card_token_id_offset()
+                                <= token
+                                <= get_card_token_id_offset() + 52
+                            ):  # Card tokens
+                                card_idx = token - get_card_token_id_offset()
+                                card_str = format_card(card_idx)
+                                card_rank = RANK_STR[
+                                    trainer.replay_buffer.data.card_ranks[
+                                        traj_idx, pos
+                                    ].item()
+                                ]
+                                card_suit = SUIT_STR[
+                                    trainer.replay_buffer.data.card_suits[
+                                        traj_idx, pos
+                                    ].item()
+                                ]
+                                parts.append(
+                                    f"CARD_{card_str} (rank={card_rank}, suit={card_suit})"
+                                )
+
+                            elif token >= get_action_token_id_offset():  # Action tokens
+                                action_idx = token - get_action_token_id_offset()
+                                parts.append(f"ACTION_{action_idx}")
+
+                            print(" ".join(parts))
 
                 # Show other batch information
                 print(f"\nAction indices: {batch['action_indices'].tolist()}")

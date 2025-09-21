@@ -335,30 +335,15 @@ class TestVectorizedReplayBuffer:
         # Sample trajectories
         sampled = buffer.sample_trajectories(2)
 
-        # Check that all required keys are present (transformer mode)
-        expected_keys = {
-            "embedding_data",
-            "action_indices",
-            "log_probs_old",
-            "log_probs_old_full",
-            "advantages",
-            "returns",
-            "legal_masks",
-            "delta2",
-            "delta3",
-        }
-        assert set(sampled.keys()) == expected_keys
-
         # Check that we get data from 2 trajectories (4 total steps)
         # Each trajectory has 2 steps, so 2 trajectories = 4 total steps
-        total_steps = sampled["embedding_data"].token_ids.shape[0]
+        total_steps = sampled.embedding_data.token_ids.shape[0]
         assert total_steps == 4
-        assert sampled["embedding_data"].card_ranks.shape[0] == total_steps
-        assert sampled["action_indices"].shape[0] == total_steps
-        assert sampled["log_probs_old"].shape[0] == total_steps
-        assert sampled["advantages"].shape[0] == total_steps
-        assert sampled["returns"].shape[0] == total_steps
-        assert sampled["legal_masks"].shape[0] == total_steps
+        assert sampled.embedding_data.card_ranks.shape[0] == total_steps
+        assert sampled.action_indices.shape[0] == total_steps
+        assert sampled.log_probs_old.shape[0] == total_steps
+        assert sampled.advantages.shape[0] == total_steps
+        assert sampled.returns.shape[0] == total_steps
 
     def test_sample_empty_buffer(self, buffer):
         """Test sampling from empty buffer raises error."""
@@ -729,30 +714,32 @@ class TestVectorizedReplayBuffer:
         rng = torch.Generator(device=buffer.device)
         sampled = buffer.sample_batch(rng, 5)
 
-        # Check that all required keys are present (transformer mode)
-        expected_keys = {
+        # Check that all required attributes are present (transformer mode)
+        expected_attrs = {
             "embedding_data",
             "action_indices",
             "log_probs_old",
             "log_probs_old_full",
             "advantages",
             "returns",
-            "legal_masks",
             "delta2",
             "delta3",
         }
-        assert set(sampled.keys()) == expected_keys
+
+        actual_attrs = {attr for attr in dir(sampled) if not attr.startswith("_")}
+        assert expected_attrs.issubset(
+            actual_attrs
+        ), f"Missing attributes: {expected_attrs - actual_attrs}"
 
         # Check shapes
-        assert sampled["embedding_data"].token_ids.shape[0] == 5
-        assert sampled["embedding_data"].card_ranks.shape[0] == 5
-        assert sampled["action_indices"].shape[0] == 5
-        assert sampled["log_probs_old"].shape[0] == 5
-        assert sampled["advantages"].shape[0] == 5
-        assert sampled["returns"].shape[0] == 5
-        assert sampled["legal_masks"].shape[0] == 5
-        assert sampled["delta2"].shape[0] == 5
-        assert sampled["delta3"].shape[0] == 5
+        assert sampled.embedding_data.token_ids.shape[0] == 5
+        assert sampled.embedding_data.card_ranks.shape[0] == 5
+        assert sampled.action_indices.shape[0] == 5
+        assert sampled.log_probs_old.shape[0] == 5
+        assert sampled.advantages.shape[0] == 5
+        assert sampled.returns.shape[0] == 5
+        assert sampled.delta2.shape[0] == 5
+        assert sampled.delta3.shape[0] == 5
 
     def test_sample_batch_empty_buffer(self, buffer):
         """Test sample_batch from empty buffer raises error."""
@@ -1445,7 +1432,7 @@ class TestVectorizedReplayBuffer:
         # Sample multiple times to ensure all trajectories are accessible
         for _ in range(10):
             sampled = buffer.sample_batch(rng, batch_size=3)
-            assert len(sampled["embedding_data"]) == 3
+            assert len(sampled.embedding_data) == 3
 
     def test_opponent_rewards_with_wraparound(self, buffer):
         """Test opponent reward updates work correctly with buffer wraparound."""

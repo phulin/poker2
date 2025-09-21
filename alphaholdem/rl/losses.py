@@ -1,216 +1,350 @@
 from __future__ import annotations
 
-from typing import Dict
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Dict, Union
 
 import torch
 import torch.nn.functional as F
 
+from ..models.cnn_embedding_data import CNNEmbeddingData
+from ..models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
+from .vectorized_replay import BatchSample
+
 from ..utils.profiling import profile
 
 
-def trinal_clip_ppo_loss(
-    logits: torch.Tensor,
-    values: torch.Tensor,
-    actions: torch.Tensor,
-    log_probs_old: torch.Tensor,
-    advantages: torch.Tensor,
-    returns: torch.Tensor,
-    legal_masks: torch.Tensor,
-    epsilon: float,
-    delta1: float,
-    delta2: torch.Tensor,
-    delta3: torch.Tensor,
-    value_coef: float,
-    entropy_coef: float,
-    *,
-    value_loss_type: str = "mse",
-    huber_delta: float = 1.0,
-) -> Dict[str, torch.Tensor]:
+@dataclass
+class LossResult:
+    """Dataclass for loss calculation results."""
+
+    total_loss: torch.Tensor
+    policy_loss: torch.Tensor
+    value_loss: torch.Tensor
+    entropy: torch.Tensor
+    ratio_mean: torch.Tensor
+    ratio_std: torch.Tensor
+    clipfrac: torch.Tensor
+    # Optional fields for specific loss types
+    clipped_ratio_mean: torch.Tensor = None
+    clipped_ratio_std: torch.Tensor = None
+
+
+class LossCalculator(ABC):
+    """Abstract base class for loss calculators."""
+
+    def __init__(
+        self,
+        epsilon: float,
+        value_coef: float,
+        entropy_coef: float,
+        value_loss_type: str = "mse",
+        huber_delta: float = 1.0,
+    ):
+        """
+        Initialize the loss calculator with configuration parameters.
+
+        Args:
+            epsilon: PPO clip parameter (typically 0.2)
+            value_coef: Value loss coefficient
+            entropy_coef: Entropy regularization coefficient
+            value_loss_type: Type of value loss ("mse" or "huber")
+            huber_delta: Delta parameter for Huber loss
+        """
+        self.epsilon = epsilon
+        self.value_coef = value_coef
+        self.entropy_coef = entropy_coef
+        self.value_loss_type = value_loss_type
+        self.huber_delta = huber_delta
+
+    @abstractmethod
+    def compute_loss(
+        self,
+        logits: torch.Tensor,
+        values: torch.Tensor,
+        batch: BatchSample,
+    ) -> LossResult:
+        """
+        Compute the loss for the given inputs.
+
+        Args:
+            logits: Policy logits (B, num_actions)
+            values: Value predictions (B,)
+            batch: Batch sample containing actions, advantages, returns, etc.
+
+        Returns:
+            LossResult containing loss components and metrics
+        """
+        pass
+
+
+class TrinalClipPPOLoss(LossCalculator):
     """
     Trinal-Clip PPO loss with policy and value clipping.
 
     According to the paper:
     - Policy loss: clip(ratio, clip(ratio, 1-ε, 1+ε), δ1) * advantages
     - Value loss: clip(returns, -δ2, δ3) - values
-
-    Args:
-        logits: Policy logits (B, num_actions)
-        values: Value predictions (B,)
-        actions: Action indices (B,)
-        log_probs_old: Old log probabilities (B,)
-        advantages: GAE advantages (B,)
-        returns: GAE returns (B,)
-        legal_masks: Legal action masks (B, num_actions) bool
-        epsilon: PPO clip parameter (typically 0.2)
-        delta1: Policy upper bound when advantage < 0 (typically 3.0)
-        delta2, delta3: Value clipping bounds (dynamic based on chips)
-        value_coef: Value loss coefficient
-        entropy_coef: Entropy regularization coefficient
     """
-    # Mask illegal actions
-    masked_logits = torch.where(legal_masks, logits, -1e9)
 
-    # Compute new log probabilities
-    log_probs = F.log_softmax(masked_logits, dim=-1)
-    action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
+    def __init__(
+        self,
+        epsilon: float,
+        delta1: float,
+        value_coef: float,
+        entropy_coef: float,
+        value_loss_type: str = "mse",
+        huber_delta: float = 1.0,
+    ):
+        """
+        Initialize Trinal-Clip PPO loss calculator.
 
-    # Importance sampling ratio
-    ratio = torch.exp(action_log_probs - log_probs_old)
-    ppo_low = 1.0 - epsilon
-    ppo_high = 1.0 + epsilon
-    ppo_clip = torch.clamp(ratio, ppo_low, ppo_high)
+        Args:
+            epsilon: PPO clip parameter (typically 0.2)
+            delta1: Policy upper bound when advantage < 0 (typically 3.0)
+            value_coef: Value loss coefficient
+            entropy_coef: Entropy regularization coefficient
+            value_loss_type: Type of value loss ("mse" or "huber")
+            huber_delta: Delta parameter for Huber loss
+        """
+        super().__init__(
+            epsilon, value_coef, entropy_coef, value_loss_type, huber_delta
+        )
+        self.delta1 = delta1
 
-    # Trinal-Clip policy:
-    #  - For A >= 0: use standard PPO min surrogate (min(ratio, clip(r)))
-    #  - For A < 0: clamp ratio into [1-ε, δ1]
-    is_neg_adv = advantages < 0.0
-    # A>=0 path
-    r_pos = torch.minimum(ratio, ppo_clip)
-    # A<0 path: clamp to [1-ε, δ1]
-    r_neg = torch.clamp(ratio, min=ppo_low, max=delta1)
-    r_tc = torch.where(is_neg_adv, r_neg, r_pos)
+    def compute_loss(
+        self,
+        logits: torch.Tensor,
+        values: torch.Tensor,
+        batch: BatchSample,
+    ) -> LossResult:
+        """
+        Compute Trinal-Clip PPO loss.
 
-    # Policy loss
-    policy_loss_vec = -(r_tc * advantages)
-    policy_loss = policy_loss_vec.mean()
+        Args:
+            logits: Policy logits (B, num_actions)
+            values: Value predictions (B,)
+            batch: Batch sample containing actions, advantages, returns, etc.
 
-    # Value loss with clipping (as per AlphaHoldem paper)
-    # We store delta2 as a negative lower bound (i.e., -chips_opponent/scale),
-    # and delta3 as a positive upper bound (chips_self/scale), so clamp directly.
-    clipped_returns = torch.clamp(returns, delta2, delta3)
+        Returns:
+            LossResult containing loss components and metrics
+        """
+        batch_size = logits.shape[0]
+        device = logits.device
 
-    if value_loss_type == "huber":
-        value_loss = F.smooth_l1_loss(values, clipped_returns, beta=huber_delta)
-    else:
-        value_loss = F.mse_loss(values, clipped_returns)
+        actions = batch.action_indices
+        advantages = batch.advantages
+        returns = batch.returns
+        delta2 = batch.delta2
+        delta3 = batch.delta3
+        legal_masks = batch.legal_masks
 
-    # Entropy regularization
-    probs = F.softmax(masked_logits, dim=-1)
-    entropy = -(probs * log_probs).sum(dim=-1).mean()
+        # Mask illegal actions
+        masked_logits = torch.where(legal_masks, logits, -1e9)
 
-    # Total loss
-    total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
-    # total_loss = value_coef * value_loss
+        # Compute new log probabilities
+        log_probs = F.log_softmax(masked_logits, dim=-1)
+        action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
-    return {
-        "total_loss": total_loss,
-        "policy_loss": policy_loss,
-        "value_loss": value_loss,
-        "entropy": entropy,
-        "ratio_mean": ratio.mean(),
-        "ratio_std": ratio.std(),
-        "advantage_mean": advantages.mean(),
-        "advantage_std": advantages.std(),
-    }
+        # Importance sampling ratio
+        ratio = torch.exp(action_log_probs - batch.selected_log_probs)
+        ppo_low = 1.0 - self.epsilon
+        ppo_high = 1.0 + self.epsilon
+        ppo_clip = torch.clamp(ratio, ppo_low, ppo_high)
+
+        # Trinal-Clip policy:
+        #  - For A >= 0: use standard PPO min surrogate (min(ratio, clip(r)))
+        #  - For A < 0: clamp ratio into [1-ε, δ1]
+        is_neg_adv = advantages < 0.0
+        # A>=0 path
+        r_pos = torch.minimum(ratio, ppo_clip)
+        # A<0 path: clamp to [1-ε, δ1]
+        r_neg = torch.clamp(ratio, min=ppo_low, max=self.delta1)
+        r_tc = torch.where(is_neg_adv, r_neg, r_pos)
+
+        # Policy loss
+        policy_loss_vec = -(r_tc * advantages)
+        policy_loss = policy_loss_vec.mean()
+
+        # Value loss with clipping (as per AlphaHoldem paper)
+        # We store delta2 as a negative lower bound (i.e., -chips_opponent/scale),
+        # and delta3 as a positive upper bound (chips_self/scale), so clamp directly.
+        clipped_returns = torch.clamp(returns, delta2, delta3)
+        clipfrac = (torch.abs(clipped_returns - returns) > 1e-8).float().mean()
+
+        if self.value_loss_type == "huber":
+            value_loss = F.smooth_l1_loss(
+                values, clipped_returns, beta=self.huber_delta
+            )
+        else:
+            value_loss = F.mse_loss(values, clipped_returns)
+
+        # Entropy regularization
+        probs = F.softmax(masked_logits, dim=-1)
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+
+        # Total loss
+        total_loss = (
+            policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+        )
+
+        return LossResult(
+            total_loss=total_loss,
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            entropy=entropy,
+            ratio_mean=ratio.mean(),
+            ratio_std=ratio.std(),
+            clipfrac=clipfrac,
+        )
 
 
-def standard_ppo_loss(
-    logits: torch.Tensor,
-    values: torch.Tensor,
-    actions: torch.Tensor,
-    log_probs_old: torch.Tensor,
-    advantages: torch.Tensor,
-    returns: torch.Tensor,
-    legal_masks: torch.Tensor,
-    epsilon: float = 0.2,
-    value_coef: float = 0.5,
-    entropy_coef: float = 0.01,
-) -> Dict[str, torch.Tensor]:
+class StandardPPOLoss(LossCalculator):
     """Standard PPO loss for comparison."""
-    # Mask illegal actions
-    masked_logits = logits.clone()
-    masked_logits[legal_masks == 0] = -1e9
 
-    # Compute new log probabilities
-    log_probs = F.log_softmax(masked_logits, dim=-1)
-    action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
+    def compute_loss(
+        self,
+        logits: torch.Tensor,
+        values: torch.Tensor,
+        batch: BatchSample,
+    ) -> LossResult:
+        """Compute standard PPO loss."""
+        actions = batch.action_indices
+        advantages = batch.advantages
+        returns = batch.returns
+        legal_masks = batch.embedding_data.legal_masks
 
-    # Compute ratio
-    ratio = torch.exp(action_log_probs - log_probs_old)
+        # Mask illegal actions
+        masked_logits = torch.where(legal_masks, logits, -1e9)
 
-    # Standard PPO policy loss
-    clipped_ratio = torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
-    policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
+        # Compute new log probabilities
+        log_probs = F.log_softmax(masked_logits, dim=-1)
+        action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
-    # Value loss
-    value_loss = F.mse_loss(values, returns)
+        # Compute ratio
+        ratio = torch.exp(action_log_probs - batch.selected_log_probs)
 
-    # Entropy regularization
-    probs = F.softmax(masked_logits, dim=-1)
-    entropy = -(probs * log_probs).sum(dim=-1).mean()
+        # Standard PPO policy loss
+        clipped_ratio = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon)
+        policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
-    # Total loss
-    total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+        # Value loss
+        value_loss = F.mse_loss(values, returns)
 
-    return {
-        "total_loss": total_loss,
-        "policy_loss": policy_loss,
-        "value_loss": value_loss,
-        "entropy": entropy,
-        "ratio_mean": ratio.mean(),
-        "ratio_std": ratio.std(),
-    }
+        # Entropy regularization
+        probs = F.softmax(masked_logits, dim=-1)
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+
+        # Total loss
+        total_loss = (
+            policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+        )
+
+        return LossResult(
+            total_loss=total_loss,
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            entropy=entropy,
+            ratio_mean=ratio.mean(),
+            ratio_std=ratio.std(),
+            clipfrac=torch.tensor(
+                0.0, device=total_loss.device
+            ),  # No clipping in standard PPO
+        )
 
 
-def dual_clip_ppo_loss(
-    logits: torch.Tensor,
-    values: torch.Tensor,
-    actions: torch.Tensor,
-    log_probs_old: torch.Tensor,
-    advantages: torch.Tensor,
-    returns: torch.Tensor,
-    legal_masks: torch.Tensor,
-    epsilon: float,
-    dual_clip: float,
-    value_coef: float,
-    entropy_coef: float,
-) -> Dict[str, torch.Tensor]:
-    """Dual-Clip PPO loss (Ye et al. 2020) with legal action masking.
+class DualClipPPOLoss(LossCalculator):
+    """Dual-Clip PPO loss (Ye et al. 2020) with legal action masking."""
 
-    Policy:
-      - For A>=0: use standard PPO min surrogate
-      - For A<0: cap ratio by dual_clip (r <= dual_clip)
+    def __init__(
+        self,
+        epsilon: float,
+        dual_clip: float,
+        value_coef: float,
+        entropy_coef: float,
+        value_loss_type: str = "mse",
+        huber_delta: float = 1.0,
+    ):
+        """
+        Initialize Dual-Clip PPO loss calculator.
 
-    Value: standard MSE to returns (no value clipping)
-    """
-    # Mask illegal actions
-    masked_logits = logits.clone()
-    masked_logits[legal_masks == 0] = -1e9
+        Args:
+            epsilon: PPO clip parameter
+            dual_clip: Dual clip parameter for negative advantages
+            value_coef: Value loss coefficient
+            entropy_coef: Entropy regularization coefficient
+            value_loss_type: Type of value loss ("mse" or "huber")
+            huber_delta: Delta parameter for Huber loss
+        """
+        super().__init__(
+            epsilon, value_coef, entropy_coef, value_loss_type, huber_delta
+        )
+        self.dual_clip = dual_clip
 
-    # Log-probs and action log-probs
-    log_probs = F.log_softmax(masked_logits, dim=-1)
-    action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
+    def compute_loss(
+        self,
+        logits: torch.Tensor,
+        values: torch.Tensor,
+        batch: BatchSample,
+    ) -> LossResult:
+        """
+        Compute Dual-Clip PPO loss.
 
-    # Ratios
-    ratio = torch.exp(action_log_probs - log_probs_old)
-    clipped = torch.clamp(ratio, 1.0 - epsilon, 1.0 + epsilon)
+        Policy:
+          - For A>=0: use standard PPO min surrogate
+          - For A<0: cap ratio by dual_clip (r <= dual_clip)
 
-    # Dual-clip policy surrogate
-    surr1 = ratio * advantages
-    surr2 = clipped * advantages
-    surr_min = torch.min(surr1, surr2)
-    ratio_dc = torch.clamp(ratio, max=dual_clip)
-    surr_dc = ratio_dc * advantages
-    surr = torch.where(advantages < 0.0, surr_dc, surr_min)
+        Value: standard MSE to returns (no value clipping)
+        """
+        actions = batch.action_indices
+        advantages = batch.advantages
+        returns = batch.returns
+        legal_masks = batch.embedding_data.legal_masks
 
-    policy_loss = -surr.mean()
+        # Mask illegal actions
+        masked_logits = torch.where(legal_masks, logits, -1e9)
 
-    # Value loss (no clipping here)
-    value_loss = F.mse_loss(values, returns)
+        # Log-probs and action log-probs
+        log_probs = F.log_softmax(masked_logits, dim=-1)
+        action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
-    # Entropy
-    probs = F.softmax(masked_logits, dim=-1)
-    entropy = -(probs * log_probs).sum(dim=-1).mean()
+        # Ratios
+        ratio = torch.exp(action_log_probs - batch.selected_log_probs)
+        clipped = torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon)
 
-    total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+        # Dual-clip policy surrogate
+        surr1 = ratio * advantages
+        surr2 = clipped * advantages
+        surr_min = torch.min(surr1, surr2)
+        ratio_dc = torch.clamp(ratio, max=self.dual_clip)
+        surr_dc = ratio_dc * advantages
+        surr = torch.where(advantages < 0.0, surr_dc, surr_min)
 
-    return {
-        "total_loss": total_loss,
-        "policy_loss": policy_loss,
-        "value_loss": value_loss,
-        "entropy": entropy,
-        "ratio_mean": ratio.mean(),
-        "ratio_std": ratio.std(),
-        "clipped_ratio_mean": clipped.mean(),
-        "clipped_ratio_std": clipped.std(),
-    }
+        policy_loss = -surr.mean()
+
+        # Value loss (no clipping here)
+        value_loss = F.mse_loss(values, returns)
+
+        # Entropy
+        probs = F.softmax(masked_logits, dim=-1)
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+
+        total_loss = (
+            policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+        )
+
+        return LossResult(
+            total_loss=total_loss,
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            entropy=entropy,
+            ratio_mean=ratio.mean(),
+            ratio_std=ratio.std(),
+            clipfrac=torch.tensor(
+                0.0, device=total_loss.device
+            ),  # No value clipping in dual-clip PPO
+            clipped_ratio_mean=clipped.mean(),
+            clipped_ratio_std=clipped.std(),
+        )

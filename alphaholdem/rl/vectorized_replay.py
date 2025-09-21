@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, Union
 
 import torch
@@ -7,6 +8,49 @@ import torch
 from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
 from ..models.transformer.tokens import Special
+
+
+@dataclass
+class BatchSample:
+    """Dataclass for batch sampling results."""
+
+    embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData]
+    action_indices: torch.Tensor
+    selected_log_probs: torch.Tensor
+    all_log_probs: torch.Tensor
+    legal_masks: torch.Tensor
+    advantages: torch.Tensor
+    returns: torch.Tensor
+    delta2: torch.Tensor
+    delta3: torch.Tensor
+
+    def to(self, dtype: torch.dtype) -> BatchSample:
+        """Convert all floating-point tensors to specified dtype."""
+        return BatchSample(
+            embedding_data=self.embedding_data.to(dtype),
+            action_indices=self.action_indices,
+            selected_log_probs=self.selected_log_probs.to(dtype),
+            all_log_probs=self.all_log_probs.to(dtype),
+            legal_masks=self.legal_masks,
+            advantages=self.advantages.to(dtype),
+            returns=self.returns.to(dtype),
+            delta2=self.delta2.to(dtype),
+            delta3=self.delta3.to(dtype),
+        )
+
+
+@dataclass
+class TrajectorySample:
+    """Dataclass for trajectory sampling results."""
+
+    embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData]
+    action_indices: torch.Tensor
+    log_probs_old: torch.Tensor
+    log_probs_old_full: torch.Tensor
+    advantages: torch.Tensor
+    returns: torch.Tensor
+    delta2: torch.Tensor
+    delta3: torch.Tensor
 
 
 class VectorizedReplayBuffer:
@@ -500,7 +544,7 @@ class VectorizedReplayBuffer:
         returns = returns * valid.to(dtype) + values[:, :-1] * (~valid).to(dtype)
         return adv, returns
 
-    def sample_trajectories(self, num_trajectories: int) -> Dict[str, torch.Tensor]:
+    def sample_trajectories(self, num_trajectories: int) -> TrajectorySample:
         """Sample complete trajectories for PPO updates. Not currently used."""
         if self.size == 0:
             raise ValueError("No trajectories available")
@@ -517,21 +561,24 @@ class VectorizedReplayBuffer:
         )
         traj_indices = valid_indices[traj_sample_indices]
 
-        return {
-            "embedding_data": self.data[traj_indices],
-            "action_indices": self.action_indices[traj_indices],
-            "log_probs_old": self.log_probs[traj_indices],
-            "log_probs_old_full": self.log_probs[traj_indices],
-            "advantages": self.advantages[traj_indices],
-            "returns": self.returns[traj_indices],
-            "legal_masks": self.legal_masks[traj_indices],
-            "delta2": self.delta2[traj_indices],
-            "delta3": self.delta3[traj_indices],
-        }
+        log_probs_old_full = self.log_probs[traj_indices]
+        action_indices = self.action_indices[traj_indices]
+        action_log_probs = log_probs_old_full.gather(
+            1, action_indices.unsqueeze(1)
+        ).squeeze(1)
 
-    def sample_batch(
-        self, rng: torch.Generator, batch_size: int
-    ) -> Dict[str, torch.Tensor]:
+        return TrajectorySample(
+            embedding_data=self.data[traj_indices],
+            action_indices=action_indices,
+            log_probs_old=action_log_probs,
+            log_probs_old_full=log_probs_old_full,
+            advantages=self.advantages[traj_indices],
+            returns=self.returns[traj_indices],
+            delta2=self.delta2[traj_indices],
+            delta3=self.delta3[traj_indices],
+        )
+
+    def sample_batch(self, rng: torch.Generator, batch_size: int) -> BatchSample:
         """Sample individual transitions for training (vectorized)."""
         if self.size == 0:
             raise ValueError("No trajectories available")
@@ -576,26 +623,22 @@ class VectorizedReplayBuffer:
             )
 
         action_indices_sel = self.action_indices[traj_indices, transition_indices]
-        full_log_probs = self.log_probs[traj_indices, transition_indices]
-        action_log_probs = full_log_probs.gather(
+        all_log_probs = self.log_probs[traj_indices, transition_indices]
+        selected_log_probs = all_log_probs.gather(
             1, action_indices_sel.unsqueeze(1)
         ).squeeze(1)
 
-        batch = {
-            "embedding_data": data,
-            "action_indices": action_indices_sel,
-            # Keep scalar old log-probs for losses/ratios
-            "log_probs_old": action_log_probs,
-            # Provide full old distribution for exact KL
-            "log_probs_old_full": full_log_probs,
-            "advantages": self.advantages[traj_indices, transition_indices],
-            "returns": self.returns[traj_indices, transition_indices],
-            "legal_masks": self.legal_masks[traj_indices, transition_indices],
-            "delta2": self.delta2[traj_indices, transition_indices],
-            "delta3": self.delta3[traj_indices, transition_indices],
-        }
-
-        return batch
+        return BatchSample(
+            embedding_data=data,
+            action_indices=action_indices_sel,
+            selected_log_probs=selected_log_probs,
+            all_log_probs=all_log_probs,
+            legal_masks=self.legal_masks[traj_indices, transition_indices],
+            advantages=self.advantages[traj_indices, transition_indices],
+            returns=self.returns[traj_indices, transition_indices],
+            delta2=self.delta2[traj_indices, transition_indices],
+            delta3=self.delta3[traj_indices, transition_indices],
+        )
 
     def clear(self) -> None:
         """Clear all stored trajectories."""

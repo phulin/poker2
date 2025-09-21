@@ -19,7 +19,12 @@ def apply_rotary_pos_emb(
     """Apply rotary position embedding to query/key pair."""
     cos = cos.to(dtype=q.dtype)
     sin = sin.to(dtype=q.dtype)
-    return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
+
+    # Apply RoPE
+    q_rotated = (q * cos) + (rotate_half(q) * sin)
+    k_rotated = (k * cos) + (rotate_half(k) * sin)
+
+    return q_rotated, k_rotated
 
 
 class RotarySelfAttention(nn.Module):
@@ -63,7 +68,7 @@ class RotarySelfAttention(nn.Module):
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, d_model)
-            attention_mask: Boolean mask of shape (batch_size, seq_len) where True means attend
+            attention_mask: Boolean mask of shape (batch_size, seq_len) where True means block
             cos: Cosine values for RoPE of shape (seq_len, d_head)
             sin: Sine values for RoPE of shape (seq_len, d_head)
             kv_cache: Optional cached key-value pairs from previous forward passes
@@ -73,74 +78,83 @@ class RotarySelfAttention(nn.Module):
             - output_tensor: Attention output of shape (batch_size, seq_len, d_model)
             - new_kv_cache: Updated cache for next forward pass
         """
-        batch_size, seq_len, _ = x.shape
 
-        q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
-        k = self.k_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
-        v = self.v_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head)
+        # x: [B, L_q, d_model]
+        # B: batch size, L_q: sequence length
+        B, L_q, _ = x.shape
+        H = self.n_heads
 
-        q = q.permute(0, 2, 1, 3)
-        k = k.permute(0, 2, 1, 3)
-        v = v.permute(0, 2, 1, 3)
+        q = (
+            self.q_proj(x).view(B, L_q, H, self.d_head).permute(0, 2, 1, 3)
+        )  # [B,H,L_q,D]
+        k = (
+            self.k_proj(x).view(B, L_q, H, self.d_head).permute(0, 2, 1, 3)
+        )  # [B,H,L_q,D]
+        v = self.v_proj(x).view(B, L_q, H, self.d_head).permute(0, 2, 1, 3)
 
-        # Apply rotary position embedding
+        # Apply RoPE to current chunk q/k
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        # Handle KV caching
+        L_cache = 0
         if kv_cache is not None:
-            # Concatenate with cached keys and values
-            cached_k, cached_v = kv_cache
-            k = torch.cat([cached_k, k], dim=2)  # dim=2 is the sequence dimension
-            v = torch.cat([cached_v, v], dim=2)
+            cached_k, cached_v = kv_cache  # [B,H,L_cache,D]
+            L_cache = cached_k.shape[2]
+            # Concatenate cached keys/values first (key length grows)
+            k = torch.cat([cached_k, k], dim=2)  # [B,H,L_cache+L_q,D]
+            v = torch.cat([cached_v, v], dim=2)  # [B,H,L_cache+L_q,D]
 
-        # Always return updated cache
+        # Always return updated cache (the *full* K/V we just built)
         new_kv_cache = (k, v)
 
-        # Get the actual sequence length after caching
-        actual_seq_len = k.shape[2]
+        L_k = L_cache + L_q  # total key length
 
-        # collapse batch and heads for SDPA
-        q = q.reshape(batch_size * self.n_heads, seq_len, self.d_head)
-        k = k.reshape(batch_size * self.n_heads, actual_seq_len, self.d_head)
-        v = v.reshape(batch_size * self.n_heads, actual_seq_len, self.d_head)
+        # ---- Build SDPA boolean attn mask (True = BLOCK) for keys ----
+        # Caller supplies a *current-chunk* blocking mask: [B, L_q], True = block.
+        block_mask_cur = attention_mask.to(torch.bool)
+        assert block_mask_cur.shape == (
+            B,
+            L_q,
+        ), f"attention_mask must be [B,L_q], got {block_mask_cur.shape} vs L_q={L_q}"
 
-        # Prepare attention mask for SDPA
-        # For KV caching, we need to handle the mask differently
-        if kv_cache is not None:
-            # When using cache, we need to create a mask that accounts for the full sequence
-            # The mask should be True for all cached positions and for current positions
-            cached_len = cached_k.shape[2]
-            # Create mask for cached positions (all True)
-            cached_mask = torch.ones(
-                batch_size, cached_len, device=x.device, dtype=torch.bool
-            )
-            # Concatenate with current mask
-            attn_mask = torch.cat([cached_mask, attention_mask], dim=1)
+        if L_cache > 0:
+            # Cached keys are always valid keys (not blocked): zeros
+            cached_block = torch.zeros(B, L_cache, dtype=torch.bool, device=x.device)
+            key_block_mask = torch.cat(
+                [cached_block, block_mask_cur], dim=1
+            )  # [B, L_k]
         else:
-            attn_mask = attention_mask
+            key_block_mask = block_mask_cur  # [B, L_k == L_q]
 
-        # Expand mask for all heads
-        attn_mask = attn_mask.unsqueeze(1).expand(
-            batch_size, self.n_heads, actual_seq_len
-        )
-        attn_mask = attn_mask.reshape(batch_size * self.n_heads, actual_seq_len)
+        assert key_block_mask.shape == (
+            B,
+            L_k,
+        ), f"key_block_mask {key_block_mask.shape} must match total key length L_k={L_k}"
 
-        # For SDPA, we need to create a 3D mask
-        # Only attend to positions where mask is True
-        attn_mask_3d = attn_mask.unsqueeze(1).expand(
-            batch_size * self.n_heads, seq_len, actual_seq_len
+        # Expand to [BH, L_q, L_k] (same key mask for every query position)
+        key_block_mask_bh = (
+            key_block_mask.unsqueeze(1).expand(B, H, L_k).reshape(B * H, L_k)
         )
+        attn_mask_3d = key_block_mask_bh.unsqueeze(1).expand(B * H, L_q, L_k)
+
+        # Optional: safety check — don’t allow fully blocked rows
+        if (key_block_mask_bh.all(dim=1)).any():
+            raise RuntimeError(
+                "Attention mask blocks all keys for at least one (B*H) row."
+            )
+
+        # Reshape q/k/v for SDPA
+        q = q.reshape(B * H, L_q, self.d_head)
+        k = k.reshape(B * H, L_k, self.d_head)
+        v = v.reshape(B * H, L_k, self.d_head)
 
         context = F.scaled_dot_product_attention(
             q,
             k,
             v,
-            attn_mask=attn_mask_3d,
+            attn_mask=attn_mask_3d,  # True = block
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=False,
         )
-        context = context.view(batch_size, self.n_heads, seq_len, self.d_head)
-        context = context.permute(0, 2, 1, 3).contiguous()
-        context = context.view(batch_size, seq_len, self.d_model)
-
+        context = context.view(B, H, L_q, self.d_head).permute(0, 2, 1, 3).contiguous()
+        context = context.view(B, L_q, self.d_model)
         return self.out_proj(context), new_kv_cache

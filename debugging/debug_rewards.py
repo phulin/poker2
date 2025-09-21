@@ -73,32 +73,32 @@ def debug_rewards():
             rng, min(10, trainer.replay_buffer.num_steps())
         )
 
-        print(f"Sample batch size: {sample['observations'].shape[0]}")
+        print(f"Sample batch size: {sample.embedding_data.token_ids.shape[0]}")
         print(f"Returns in sample:")
-        print(f"  Min: {sample['returns'].min().item():.6f}")
-        print(f"  Max: {sample['returns'].max().item():.6f}")
-        print(f"  Mean: {sample['returns'].mean().item():.6f}")
-        print(f"  Std: {sample['returns'].std().item():.6f}")
+        print(f"  Min: {sample.returns.min().item():.6f}")
+        print(f"  Max: {sample.returns.max().item():.6f}")
+        print(f"  Mean: {sample.returns.mean().item():.6f}")
+        print(f"  Std: {sample.returns.std().item():.6f}")
 
         # Show first few returns
-        print(f"First 10 returns: {sample['returns'][:10].tolist()}")
+        print(f"First 10 returns: {sample.returns[:10].tolist()}")
 
         # Check advantages
         print(f"Advantages in sample:")
-        print(f"  Min: {sample['advantages'].min().item():.6f}")
-        print(f"  Max: {sample['advantages'].max().item():.6f}")
-        print(f"  Mean: {sample['advantages'].mean().item():.6f}")
+        print(f"  Min: {sample.advantages.min().item():.6f}")
+        print(f"  Max: {sample.advantages.max().item():.6f}")
+        print(f"  Mean: {sample.advantages.mean().item():.6f}")
 
         # Check delta2 and delta3
         print(f"Delta2 in sample:")
-        print(f"  Min: {sample['delta2'].min().item():.6f}")
-        print(f"  Max: {sample['delta2'].max().item():.6f}")
-        print(f"  Mean: {sample['delta2'].mean().item():.6f}")
+        print(f"  Min: {sample.delta2.min().item():.6f}")
+        print(f"  Max: {sample.delta2.max().item():.6f}")
+        print(f"  Mean: {sample.delta2.mean().item():.6f}")
 
         print(f"Delta3 in sample:")
-        print(f"  Min: {sample['delta3'].min().item():.6f}")
-        print(f"  Max: {sample['delta3'].max().item():.6f}")
-        print(f"  Mean: {sample['delta3'].mean().item():.6f}")
+        print(f"  Min: {sample.delta3.min().item():.6f}")
+        print(f"  Max: {sample.delta3.max().item():.6f}")
+        print(f"  Mean: {sample.delta3.mean().item():.6f}")
 
     # Run a full training step
     print("\n📊 Test 4: Full Training Step")

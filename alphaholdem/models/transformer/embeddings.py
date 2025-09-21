@@ -123,7 +123,7 @@ class PokerFusedEmbedding(nn.Module):
             action_embed = (
                 self.action_actor_emb(actors.int())
                 + self.action_type_emb(action_ids.int())
-                + self.legal_mask_mlp(legal_masks)
+                + self.legal_mask_mlp(legal_masks.float())
             )
             embeddings[rows, cols] += action_embed
 

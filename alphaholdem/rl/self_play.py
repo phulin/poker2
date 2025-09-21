@@ -23,7 +23,7 @@ from ..rl.agent_snapshot import AgentSnapshot
 from ..rl.k_best_pool import KBestOpponentPool
 from ..rl.dred_pool import DREDPool
 from ..utils.kl_divergence import compute_kl_divergence_batch
-from ..rl.losses import trinal_clip_ppo_loss
+from ..rl.losses import TrinalClipPPOLoss
 from ..rl.replay import Trajectory, Transition
 from ..rl.vectorized_replay import VectorizedReplayBuffer
 from ..utils.profiling import profile
@@ -206,16 +206,23 @@ class SelfPlayTrainer:
             self._optimizer_group_scales = [1.0]
 
         # Mixed precision scaler
-        self.scaler = (
-            torch.amp.GradScaler(
-                self.device.type,
-                init_scale=self.loss_scale,
-                growth_factor=2.0,
-                backoff_factor=0.5,
-                growth_interval=2000,
-            )
-            if self.use_mixed_precision
-            else None
+        self.scaler = torch.amp.GradScaler(
+            self.device.type,
+            init_scale=self.loss_scale,
+            growth_factor=2.0,
+            backoff_factor=0.5,
+            growth_interval=2000,
+            enabled=self.use_mixed_precision,
+        )
+
+        # Initialize loss calculator
+        self.loss_calculator = TrinalClipPPOLoss(
+            epsilon=self.epsilon,
+            delta1=self.delta1,
+            value_coef=self.value_coef,
+            entropy_coef=self.entropy_coef,
+            value_loss_type=self.cfg.train.value_loss_type,
+            huber_delta=self.cfg.train.huber_delta,
         )
 
         # Training stats
@@ -648,6 +655,8 @@ class SelfPlayTrainer:
                                 opp_cache = self.kv_cache_manager.get_opponent_cache(
                                     opponent_idx
                                 )
+                                # Ensure opponent model is on the correct device
+                                opponent.model.to(device=self.device)
                                 outputs = opponent.model(
                                     opp_states.to(opponent.model_dtype),
                                     kv_cache=opp_cache,
@@ -893,180 +902,119 @@ class SelfPlayTrainer:
         )
 
         # Initialize tracking variables once before the epoch loop
-        total_loss = 0.0
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
-        total_entropy = 0.0
-        total_approx_kl = 0.0
-        total_clipfrac = 0.0
+        total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
+        total_entropy, total_approx_kl, total_clipfrac = 0.0, 0.0, 0.0
         total_explained_var = 0.0
-        total_minibatches = 0
+        total_advantage_mean_raw, total_advantage_std_raw = 0.0, 0.0
+        minibatch_count = 0
 
         for _ in range(self.num_epochs):
             # Sample batch from vectorized buffer
             batch = self.replay_buffer.sample_batch(self.rng, self.batch_size)
+            batch = batch.to(torch.float32)
 
             # Normalize advantages across the batch for stability (mean=0, std=1)
-            adv = batch["advantages"]
-            adv_mean = adv.mean()
-            adv_std = adv.std().clamp_min(1e-8)
-            batch["advantages"] = (adv - adv_mean) / adv_std
-
-            # Per-sample value clipping bounds computed in prepare_ppo_batch
-            # batch['delta2'] and batch['delta3'] are length-N tensors aligned with samples
-            delta2_vec = batch["delta2"]
-            delta3_vec = batch["delta3"]
-
-            # No minibatches: operate on the full batch at once
-            is_transformer = self.cfg.model.name.startswith("poker_transformer")
+            adv = batch.advantages
+            adv_mean_raw = adv.mean()
+            adv_std_raw = adv.std().clamp_min(1e-8)
+            batch.advantages = (adv - adv_mean_raw) / adv_std_raw
+            total_advantage_mean_raw += adv_mean_raw.item()
+            total_advantage_std_raw += adv_std_raw.item()
 
             with torch.amp.autocast(
                 self.device.type,
                 dtype=torch.bfloat16,
                 enabled=self.use_mixed_precision,
             ):
-                outputs = self.model(batch["embedding_data"])
+                embedding_data = batch.embedding_data
+                outputs = self.model(embedding_data)
                 logits = outputs.policy_logits.float()
                 values = outputs.value.float()
 
-                if is_transformer:
-                    # Transformer-specific loss with auxiliary hand range loss
-                    loss_dict = self._compute_transformer_loss(
-                        outputs, batch, delta2_vec, delta3_vec
-                    )
-                else:
-                    # CNN loss
-                    loss_dict = trinal_clip_ppo_loss(
-                        logits=logits,
-                        values=values,
-                        actions=batch["action_indices"],
-                        log_probs_old=batch["log_probs_old"].float(),
-                        advantages=batch["advantages"].float(),
-                        returns=batch["returns"].float(),
-                        legal_masks=batch["legal_masks"],
-                        epsilon=self.epsilon,
-                        delta1=self.delta1,
-                        delta2=delta2_vec.float(),
-                        delta3=delta3_vec.float(),
-                        value_coef=self.value_coef,
-                        entropy_coef=self.entropy_coef,
-                        value_loss_type=self.cfg.train.value_loss_type,
-                        huber_delta=self.cfg.train.huber_delta,
-                    )
-
-            # Debugging metrics: exact KL (from old full dist), clipfrac, explained variance
-            with torch.no_grad():
-                legal_mb = batch["legal_masks"].bool()
-                masked_logits_new = torch.where(legal_mb, logits, -1e9)
-                log_probs_new_full = torch.log_softmax(masked_logits_new, dim=-1)
-                log_probs_old_full = batch.get("log_probs_old_full")
-                # Compute exact KL: E_{a~p_old}[log p_old - log p_new]
-                p_old = torch.exp(log_probs_old_full)
-                exact_kl_vec = (p_old * (log_probs_old_full - log_probs_new_full)).sum(
-                    dim=-1
+                loss_result = self.loss_calculator.compute_loss(
+                    logits=logits,
+                    values=values,
+                    batch=batch,
                 )
-                approx_kl = exact_kl_vec.mean()
-                # Compute ratio/clipfrac for monitoring
-                a_mb = batch["action_indices"]
-                logp_new = log_probs_new_full.gather(1, a_mb.unsqueeze(1)).squeeze(1)
-                logp_old = batch["log_probs_old"]
-                ratio = torch.exp(logp_new - logp_old)
-                clip_low, clip_high = 1.0 - self.epsilon, 1.0 + self.epsilon
-                clipped = torch.clamp(ratio, clip_low, clip_high)
-                clipfrac = (torch.abs(clipped - ratio) > 1e-8).float().mean()
 
-                # Explained variance calculation using clipped returns (same as loss)
-                ret_mb = batch["returns"].float()
-                d2_mb = delta2_vec.float()
-                d3_mb = delta3_vec.float()
-                # Ensure per-sample bounds are ordered to avoid clamp warnings
-                ret_clipped_mb = torch.clamp(ret_mb, min=d2_mb, max=d3_mb)
-                # Explained variance of value predictions against clipped targets
-                var_y = torch.var(ret_clipped_mb)
-                var_err = torch.var(ret_clipped_mb - values.detach())
+            # Debugging metrics: explained variance
+            with torch.no_grad():
+                # Explained variance of value predictions against targets
+                var_y = torch.var(batch.returns)
+                var_err = torch.var(batch.returns - values.detach())
                 explained_var = 1.0 - (var_err / (var_y + 1e-8))
+
+            total_loss += loss_result.total_loss.item()
+            total_policy_loss += loss_result.policy_loss.item()
+            total_value_loss += loss_result.value_loss.item()
+            total_entropy += loss_result.entropy.item()
+            total_clipfrac += loss_result.clipfrac.item()
+            total_explained_var += explained_var.item()
+            minibatch_count += 1
 
             self.optimizer.zero_grad()
 
-            # Use scaler for mixed precision backward pass
-            if self.scaler is not None:
-                self.scaler.scale(loss_dict["total_loss"]).backward()
+            # Use scaler for mixed precision backward pass. Will have enabled=False if not using mixed precision.
+            self.scaler.scale(loss_result.total_loss).backward()
 
-                # Apply stricter gradient clipping to CNN layers to prevent explosion
-                self.scaler.unscale_(self.optimizer)
-                for name, param in self.model.named_parameters():
-                    if param.grad is not None and "cards_trunk" in name:
-                        torch.nn.utils.clip_grad_norm_(
-                            [param], 0.5
-                        )  # Stricter clipping for CNN
+            # Apply stricter gradient clipping to CNN layers to prevent explosion
+            self.scaler.unscale_(self.optimizer)
+            for name, param in self.model.named_parameters():
+                if param.grad is not None and "cards_trunk" in name:
+                    torch.nn.utils.clip_grad_norm_(
+                        [param], 0.5
+                    )  # Stricter clipping for CNN
 
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                loss_dict["total_loss"].backward()
-
-                # Apply stricter gradient clipping to CNN layers to prevent explosion
-                for name, param in self.model.named_parameters():
-                    if param.grad is not None and "cards_trunk" in name:
-                        torch.nn.utils.clip_grad_norm_(
-                            [param], 0.5
-                        )  # Stricter clipping for CNN
-
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-
-                self.optimizer.step()
-
-            total_loss += loss_dict["total_loss"].item()
-            total_policy_loss += float(loss_dict["policy_loss"].item())
-            total_value_loss += float(loss_dict["value_loss"].item())
-            total_entropy += float(loss_dict["entropy"].item())
-            total_approx_kl += float(approx_kl.item())
-            total_clipfrac += float(clipfrac.item())
-            total_explained_var += float(explained_var.item())
-            total_minibatches += 1
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             # Check if we should add current model to opponent pool
             # Compute KL divergence between current model and last admitted opponent
-            kl_divergence = 0.0
+            # Compute KL divergence between updated model and pre-update model
+            pool_kl_divergence = 0.0
             last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
 
-            if last_admitted_opponent is not None:
+            with (
+                torch.no_grad(),
+                torch.amp.autocast(
+                    self.device.type,
+                    dtype=torch.bfloat16,
+                    enabled=self.use_mixed_precision,
+                ),
+            ):
                 # Take a 64-element sample from the current batch without replacement
-                batch_size = batch["returns"].shape[0]
+                batch_size = batch.returns.shape[0]
                 sample_size = min(64, batch_size)
                 sample_indices = torch.randperm(
-                    batch_size, device=batch["returns"].device
+                    batch_size, device=batch.returns.device
                 )[:sample_size]
-
                 # Get states for KL computation
-                kl_states = batch["embedding_data"][sample_indices]
+                kl_states = batch.embedding_data[sample_indices]
+                kl_legal_masks = batch.legal_masks[sample_indices]
+                new_logits = self.model(kl_states).policy_logits.float()
+                total_approx_kl += compute_kl_divergence_batch(
+                    new_logits,
+                    logits[sample_indices],
+                    kl_legal_masks,
+                )
 
-                # Get current model logits
-                with (
-                    torch.no_grad(),
-                    torch.amp.autocast(
-                        self.device.type,
-                        dtype=torch.bfloat16,
-                        enabled=self.use_mixed_precision,
-                    ),
-                ):
+                if last_admitted_opponent is not None:
                     # Get last admitted opponent model logits
                     opponent_outputs = last_admitted_opponent.model(
                         kl_states.to(last_admitted_opponent.model_dtype)
                     )
                     opponent_logits = opponent_outputs.policy_logits.float()
 
-                # Compute KL divergence
-                current_logits = outputs.policy_logits[sample_indices].float()
-                kl_divergence = compute_kl_divergence_batch(
-                    current_logits, opponent_logits
-                )
+                    # Compute KL divergence
+                    pool_kl_divergence = compute_kl_divergence_batch(
+                        new_logits, opponent_logits, kl_legal_masks
+                    )
 
-            if self.opponent_pool.should_add_snapshot(step, kl_divergence):
-                sample_batch_size = min(1024, len(batch["embedding_data"]))
-                sample_batch = batch["embedding_data"][:sample_batch_size]
+            if self.opponent_pool.should_add_snapshot(step, pool_kl_divergence):
+                sample_batch_size = min(1024, len(batch.embedding_data))
+                sample_batch = batch.embedding_data[:sample_batch_size]
                 if isinstance(self.opponent_pool, DREDPool):
                     self.opponent_pool.add_snapshot(
                         self.model, step, sample_batch=sample_batch
@@ -1085,12 +1033,12 @@ class SelfPlayTrainer:
             print(f"Total step reward: {self.total_step_reward}")
             print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
-        denom = max(1, total_minibatches)
+        denom = max(1, minibatch_count)
         return {
             "avg_reward": avg_reward,
             "num_samples": self.batch_size * self.num_epochs,
-            "delta2_mean": float(delta2_vec.mean().item()),
-            "delta3_mean": float(delta3_vec.mean().item()),
+            "delta2_mean": float(batch.delta2.mean().item()),
+            "delta3_mean": float(batch.delta3.mean().item()),
             "avg_loss": total_loss / denom,
             "policy_loss": total_policy_loss / denom,
             "value_loss": total_value_loss / denom,
@@ -1098,6 +1046,8 @@ class SelfPlayTrainer:
             "approx_kl": total_approx_kl / denom,
             "clipfrac": total_clipfrac / denom,
             "explained_var": total_explained_var / denom,
+            "advantage_mean_raw": total_advantage_mean_raw / denom,
+            "advantage_std_raw": total_advantage_std_raw / denom,
         }
 
     @profile
@@ -1214,10 +1164,22 @@ class SelfPlayTrainer:
         if self.use_tensor_env:
             # Sample 10 opponents for replay buffer filling
             sampled_opponents = self.opponent_pool.sample(k=10)
+
+            # Move opponent models into GPU for inference
+            for opponent in sampled_opponents:
+                if opponent.model is not None:
+                    opponent.model.to(device=self.device, non_blocking=True)
+
             trajectory_rewards = self.collect_tensor_trajectories(
                 min_steps=min_steps,
                 all_opponent_snapshots=sampled_opponents,
             )
+
+            # Move opponent models back to CPU to save GPU memory
+            last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
+            for opponent in sampled_opponents:
+                if opponent.model is not None and opponent != last_admitted_opponent:
+                    opponent.model.to(device="cpu")
 
             self.total_step_reward += trajectory_rewards.sum().item()
             self.step_trajectories_collected += trajectory_rewards.numel()
@@ -1611,34 +1573,3 @@ class SelfPlayTrainer:
             "opponent_results": results,
             "pool_stats": self.opponent_pool.get_pool_stats(),
         }
-
-    def _compute_transformer_loss(
-        self,
-        outputs: ModelOutput,
-        batch: dict,
-        delta2_vec: torch.Tensor,
-        delta3_vec: torch.Tensor,
-    ) -> dict:
-        """Compute transformer-specific loss with auxiliary hand range loss."""
-
-        logits = outputs.policy_logits.float()
-        values = outputs.value.float()
-
-        # Standard PPO policy loss
-        return trinal_clip_ppo_loss(
-            logits=logits,
-            values=values,
-            actions=batch["action_indices"],
-            log_probs_old=batch["log_probs_old"].float(),
-            advantages=batch["advantages"].float(),
-            returns=batch["returns"].float(),
-            legal_masks=batch["legal_masks"],
-            epsilon=self.epsilon,
-            delta1=self.delta1,
-            delta2=delta2_vec.float(),
-            delta3=delta3_vec.float(),
-            value_coef=self.value_coef,
-            entropy_coef=self.entropy_coef,
-            value_loss_type=self.cfg.train.value_loss_type,
-            huber_delta=self.cfg.train.huber_delta,
-        )

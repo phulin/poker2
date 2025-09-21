@@ -19,7 +19,7 @@ from .rotary_attention import RotarySelfAttention
 
 
 class TransformerLayer(nn.Module):
-    """Single transformer encoder block with RoPE attention."""
+    """Single transformer encoder block with RoPE attention (pre-LN)."""
 
     def __init__(self, d_model: int, n_heads: int, dropout: float) -> None:
         super().__init__()
@@ -42,10 +42,18 @@ class TransformerLayer(nn.Module):
         sin: torch.Tensor,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
-        attn_out, new_kv_cache = self.attn(x, attention_mask, cos, sin, kv_cache)
-        x = self.norm1(x + self.dropout(attn_out))
-        ffn_out = self.ffn(x)
-        x = self.norm2(x + self.dropout(ffn_out))
+        # Pre-LN: apply norm before attention
+        x_norm = self.norm1(x)
+        attn_out, new_kv_cache = self.attn(x_norm, attention_mask, cos, sin, kv_cache)
+
+        x = x + self.dropout(attn_out)
+
+        # Pre-LN: apply norm before FFN
+        x_ffn_norm = self.norm2(x)
+        ffn_out = self.ffn(x_ffn_norm)
+
+        x = x + self.dropout(ffn_out)
+
         return x, new_kv_cache
 
 

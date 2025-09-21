@@ -190,12 +190,12 @@ def main():
                     torch.Generator(device=trainer.device),
                     min(trainer.batch_size, trainer.replay_buffer.num_steps()),
                 )
-                batch_size = sample_batch["cards_features"].shape[0]
+                batch_size = sample_batch.embedding_data.cards.shape[0]
                 print(f"\n📦 Sample Batch Size: {batch_size}")
-                print(f"   Cards shape: {sample_batch['cards_features'].shape}")
-                print(f"   Actions shape: {sample_batch['actions_features'].shape}")
-                print(f"   Values shape: {sample_batch['values'].shape}")
-                print(f"   Logits shape: {sample_batch['log_probs'].shape}")
+                print(f"   Cards shape: {sample_batch.embedding_data.cards.shape}")
+                print(f"   Actions shape: {sample_batch.embedding_data.actions.shape}")
+                print(f"   Values shape: {sample_batch.returns.shape}")
+                print(f"   Logits shape: {sample_batch.all_log_probs.shape}")
 
             return result
 

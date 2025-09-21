@@ -67,7 +67,10 @@ train:
   entropy_coef_final: 0.002
   entropy_decay_portion: 0.6
   value_coef: 0.05
+
+  # Scaling/clipping
   grad_clip: 1.0
+  
   
   # Value loss configuration
   value_loss_type: "huber"

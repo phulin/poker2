@@ -33,33 +33,36 @@ def compute_kl_divergence(policy1: torch.Tensor, policy2: torch.Tensor) -> float
     return kl_div.item()
 
 
-def compute_kl_divergence_batch(logits1: torch.Tensor, logits2: torch.Tensor) -> float:
+def compute_kl_divergence_batch(
+    logits1: torch.Tensor,
+    logits2: torch.Tensor,
+    legal_masks: Optional[torch.Tensor] = None,
+) -> float:
     """
-    Compute KL divergence between two batches of policy logits.
+    Compute KL divergence between two batches of policy logits, with optional legal action masking.
 
     Args:
-        logits1: First batch of policy logits
-        logits2: Second batch of policy logits
+        logits1: First (old) batch of policy logits [B, A]
+        logits2: Second (new) batch of policy logits [B, A]
+        legal_masks: Optional boolean mask of shape [B, A] indicating legal actions (True=legal, False=illegal)
 
     Returns:
         Average KL divergence across the batch
     """
-    batch_size = min(logits1.shape[0], logits2.shape[0])
+    assert logits1.shape == logits2.shape
 
-    if batch_size == 0:
-        return 0.0
+    # If legal_masks is provided, mask out illegal actions by setting logits to a large negative value
+    if legal_masks is not None:
+        logits1 = torch.where(legal_masks, logits1, -1e9)
+        logits2 = torch.where(legal_masks, logits2, -1e9)
 
     # Convert to probabilities
-    probs1 = torch.softmax(logits1, dim=-1)
-    probs2 = torch.softmax(logits2, dim=-1)
-
-    # Add small epsilon to avoid log(0)
-    eps = 1e-8
-    probs1 = torch.clamp(probs1, min=eps)
-    probs2 = torch.clamp(probs2, min=eps)
+    log_probs1 = torch.log_softmax(logits1, dim=-1)
+    log_probs2 = torch.log_softmax(logits2, dim=-1)
+    probs1 = log_probs1.exp()
 
     # Compute KL divergence for each sample
-    kl_divs = torch.sum(probs1 * torch.log(probs1 / probs2), dim=-1)
+    kl_divs = torch.sum(probs1 * (log_probs1 - log_probs2), dim=-1)
 
     # Return average KL divergence
     return kl_divs.mean().item()
