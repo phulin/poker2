@@ -98,7 +98,14 @@ class DREDPool(OpponentPool):
         sample_batch: Union[CNNEmbeddingData, StructuredEmbeddingData],
     ) -> torch.Tensor:
         """Generate embedding for a snapshot based on its characteristics."""
-        with torch.no_grad():
+        with (
+            torch.no_grad(),
+            torch.amp.autocast(
+                device_type=sample_batch.device.type,
+                dtype=snapshot.model_dtype,
+                enabled=self.use_mixed_precision,
+            ),
+        ):
             snapshot.model.to(sample_batch.device)
             model_outputs = snapshot.model(sample_batch.to(snapshot.model_dtype))
             snapshot.model.to("cpu")
@@ -249,11 +256,6 @@ class DREDPool(OpponentPool):
             model_dtype=model_dtype,
             is_exploiter=is_exploiter,
         )
-
-        # Reduce memory footprint of snapshot models
-        if model is not None:
-            for p in new_snapshot.model.parameters():
-                p.requires_grad = False
 
         # Add to snapshots list
         self.snapshots.append(new_snapshot)
