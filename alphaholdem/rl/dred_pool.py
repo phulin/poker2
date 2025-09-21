@@ -99,7 +99,9 @@ class DREDPool(OpponentPool):
     ) -> torch.Tensor:
         """Generate embedding for a snapshot based on its characteristics."""
         with torch.no_grad():
+            snapshot.model.to(sample_batch.device)
             model_outputs = snapshot.model(sample_batch.to(snapshot.model_dtype))
+            snapshot.model.to("cpu")
             probs = torch.softmax(model_outputs.policy_logits, dim=-1)
             all_info = torch.cat([probs, model_outputs.value.unsqueeze(-1)], dim=-1)
             return all_info.flatten().detach()
