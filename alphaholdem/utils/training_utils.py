@@ -262,6 +262,7 @@ def print_training_stats(
     d2 = stats.get("delta2_mean")
     d3 = stats.get("delta3_mean")
     epsilon = stats.get("epsilon")
+    lr = stats.get("learning_rate")
     parts = []
     if pol is not None:
         parts.append(f"policy {pol:7.4f}")
@@ -277,8 +278,10 @@ def print_training_stats(
         parts.append(f"ev {ev:6.3f}")
     if d2 is not None and d3 is not None:
         parts.append(f"d2 {d2:.1f} d3 {d3:.1f}")
-    if epsilon is not None:
-        parts.append(f"eps {epsilon:.3f}")
+    # if epsilon is not None:
+    #     parts.append(f"eps {epsilon:.3f}")
+    if lr is not None:
+        parts.append(f"lr {lr:.3f}")
     if parts:
         print("  " + " | ".join(parts))
 

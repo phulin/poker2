@@ -1111,12 +1111,14 @@ class SelfPlayTrainer:
         update_stats = self.update_model(step)
 
         # Prepare training stats for return and logging
+        learning_rate = self.optimizer.param_groups[-1]["lr"]
         training_stats = {
             "step": step,
             "trajectories_collected": self.step_trajectories_collected,
             "total_trajectories_collected": self.total_trajectories_collected,
             "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
+            "learning_rate": learning_rate,
             **update_stats,
         }
 
@@ -1140,7 +1142,7 @@ class SelfPlayTrainer:
                     "explained_var": training_stats["explained_var"],
                     "avg_loss": training_stats["avg_loss"],
                     "num_samples": training_stats["num_samples"],
-                    "lr": self.optimizer.param_groups[-1]["lr"],
+                    "lr": learning_rate,
                     "entropy_coef_current": self.entropy_coef,
                     "epsilon": training_stats["epsilon"],
                 },
@@ -1163,6 +1165,10 @@ class SelfPlayTrainer:
             )
         else:
             lr_now = lr_start
+
+        kl_ratio = self.kl_ema / (self.target_kl + 1e-8)
+        kl_scale = 1.0 / (kl_ratio**0.5)
+        lr_now *= kl_scale
 
         # Update optimizer groups preserving relative scales
         for scale, group in zip(

@@ -23,7 +23,7 @@ class LossResult:
     entropy: torch.Tensor
     ratio_mean: torch.Tensor
     ratio_std: torch.Tensor
-    epsilon: torch.Tensor
+    epsilon: float
     clipfrac: torch.Tensor
     # Optional fields for specific loss types
     clipped_ratio_mean: torch.Tensor = None
@@ -151,7 +151,7 @@ class TrinalClipPPOLoss(LossCalculator):
         epsilon = self.epsilon
         if kl_divergence is not None:
             epsilon = epsilon * (self.target_kl / (kl_divergence + 1e-8))
-            epsilon = min(max(epsilon, self.epsilon / 4), self.epsilon * 4)
+            epsilon = min(max(epsilon, self.epsilon / 2), self.epsilon * 2)
 
         # Importance sampling ratio
         ratio = torch.exp(action_log_probs - batch.selected_log_probs)
