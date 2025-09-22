@@ -14,6 +14,7 @@ from alphaholdem.models.transformer.structured_embedding_data import (
 )
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.models.transformer.tokens import (
+    Context,
     Special,
     get_action_token_id_offset,
     get_card_token_id_offset,
@@ -137,7 +138,7 @@ class TestEmbeddings:
         base = self.embedding(self.data).detach()
 
         modified = self._clone_data()
-        modified.context_features[context_mask] += 1.0
+        modified.context_features[context_mask] += 1
 
         updated = self.embedding(modified)
         assert not torch.allclose(base[context_mask], updated[context_mask])
@@ -240,7 +241,9 @@ class TestPokerTransformerV1:
 
         zeros = torch.zeros_like(token_ids)
         legal = torch.zeros(batch_size, seq_len, num_bet_bins, dtype=torch.bool)
-        ctx = torch.zeros(batch_size, seq_len, 10)
+        ctx = torch.zeros(
+            batch_size, seq_len, Context.NUM_RAW_CONTEXT.value, dtype=torch.int16
+        )
         lengths = (token_ids >= 0).sum(dim=1)
         data = StructuredEmbeddingData(
             token_ids=token_ids,

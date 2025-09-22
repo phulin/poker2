@@ -116,7 +116,7 @@ class DREDPool(OpponentPool):
             ),
         ):
             snapshot.model.to(sample_batch.device)
-            model_outputs = snapshot.model(sample_batch.to(snapshot.model_dtype))
+            model_outputs = snapshot.model(sample_batch)
             snapshot.model.to("cpu")
             probs = torch.softmax(model_outputs.policy_logits, dim=-1)
             all_info = torch.cat([probs, model_outputs.value.unsqueeze(-1)], dim=-1)

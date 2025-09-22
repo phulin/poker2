@@ -15,6 +15,7 @@ from alphaholdem.models.model_outputs import ModelOutput
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
+from alphaholdem.models.transformer.tokens import Context
 
 
 class DummyTransformerModel(torch.nn.Module):
@@ -122,7 +123,9 @@ class DummyStateEncoder:
         token_ids = hole.clone()
         zeros = torch.zeros(M, L, dtype=torch.long, device=self.device)
         legal = torch.ones(M, L, 8, dtype=torch.bool, device=self.device)
-        ctx = torch.zeros(M, L, 13, dtype=torch.float32, device=self.device)
+        ctx = torch.zeros(
+            M, L, Context.NUM_RAW_CONTEXT.value, dtype=torch.int16, device=self.device
+        )
         lengths = torch.full((M,), L, dtype=torch.uint8, device=self.device)
         return StructuredEmbeddingData(
             token_ids=token_ids,

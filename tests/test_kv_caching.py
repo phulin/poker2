@@ -151,7 +151,7 @@ class TestPokerTransformerKVCaching:
             action_legal_masks=torch.ones(
                 batch_size, seq_len, num_bet_bins, dtype=torch.bool
             ),
-            context_features=torch.zeros(batch_size, seq_len, 13),
+            context_features=torch.zeros(batch_size, seq_len, 9, dtype=torch.int16),
             lengths=torch.full((batch_size,), seq_len, dtype=torch.uint8),
         )
 
@@ -173,7 +173,7 @@ class TestPokerTransformerKVCaching:
             action_legal_masks=torch.ones(
                 batch_size, 4, num_bet_bins, dtype=torch.bool
             ),
-            context_features=torch.zeros(batch_size, 4, 13),
+            context_features=torch.zeros(batch_size, 4, 9, dtype=torch.int16),
             lengths=torch.full((batch_size,), 4, dtype=torch.uint8),
         )
 
@@ -356,7 +356,7 @@ class TestKVCachingIntegration:
                 action_legal_masks=torch.ones(
                     batch_size, seq_len, num_bet_bins, dtype=torch.bool
                 ),
-                context_features=torch.zeros(batch_size, seq_len, 13),
+                context_features=torch.zeros(batch_size, seq_len, 9, dtype=torch.int16),
                 lengths=torch.full((batch_size,), seq_len, dtype=torch.uint8),
             )
 

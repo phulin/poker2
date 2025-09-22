@@ -9,7 +9,9 @@ import torch.nn as nn
 
 from ...utils.profiling import profile
 from .tokens import (
+    GAME_INDEX,
     Context,
+    Game,
     Special,
     get_action_token_id_offset,
     get_card_token_id_offset,
@@ -53,8 +55,8 @@ class PokerFusedEmbedding(nn.Module):
         )
 
         # Context components for CLS and dynamic context tokens
-        self.cls_mlp = nn.Sequential(
-            nn.Linear(3, d_model),
+        self.game_mlp = nn.Sequential(
+            nn.Linear(5, d_model),
             nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -71,14 +73,8 @@ class PokerFusedEmbedding(nn.Module):
             nn.Dropout(0.1),
         )
 
-        self.register_buffer(
-            "_padding_idx_tensor",
-            torch.tensor(self.padding_idx, dtype=torch.long),
-            persistent=False,
-        )
-
     @profile
-    def forward(self, data: "StructuredEmbeddingData") -> torch.Tensor:
+    def forward(self, data: StructuredEmbeddingData) -> torch.Tensor:
         """Return fused embeddings for all tokens in the batch."""
 
         N = data.token_ids.shape[0]
@@ -88,7 +84,7 @@ class PokerFusedEmbedding(nn.Module):
         padding_mask = token_ids < 0
         padded_ids = torch.where(
             padding_mask,
-            self._padding_idx_tensor.expand_as(token_ids),
+            self.padding_idx,
             token_ids,
         )
 
@@ -126,17 +122,37 @@ class PokerFusedEmbedding(nn.Module):
             )
             embeddings[rows, cols] += action_embed
 
-        # Special tokens: CLS + dynamic context augmentations
-        # CLS token always at index 0
-        embeddings[:, 0] += self.cls_mlp(data.context_features[:, 0, :3])
+        # GAME token always at index 1 - process raw features
+        game_features = data.context_features[
+            :, GAME_INDEX, : Game.NUM_GAME.value
+        ].float()  # Convert int16 to float
+        sb_value = game_features[:, Game.SB.value]
+        bb_value = game_features[:, Game.BB.value]
+        scale_value = 100.0 * bb_value
+        game_features[:, Game.SCALED_BB.value] = bb_value / scale_value
+        game_features[:, Game.SCALED_SB.value] = sb_value / scale_value
+        embeddings[:, GAME_INDEX] += self.game_mlp(game_features)
 
         context_id = special_offset + Special.CONTEXT.value
         context_mask = padded_ids == context_id
         if context_mask.any():
-            # Expand context features to broadcast to FOURIER_FEATURES features
-            ctx_features = data.context_features[context_mask].view(
-                -1, Context.NUM_CONTEXT.value, 1
+            # Process raw context features: convert to float and apply scaling
+            raw_ctx_features = data.context_features[context_mask].float()
+
+            # Get the batch indices for the context tokens
+            context_batch_indices = torch.where(context_mask)[0]
+
+            # Extract scaling values for the specific context tokens
+            context_bb_value = bb_value[context_batch_indices]
+            context_scale_value = scale_value[context_batch_indices]
+
+            # Apply scaling factors and compute derived features
+            scaled_ctx_features = self._process_context_features(
+                raw_ctx_features, context_bb_value, context_scale_value
             )
+
+            # Expand context features to broadcast to FOURIER_FEATURES features
+            ctx_features = scaled_ctx_features.view(-1, Context.NUM_CONTEXT.value, 1)
             # 2^k * pi * x
             ctx_features_fourier = ctx_features * self.context_fourier.view(
                 1, 1, FOURIER_FEATURES // 2
@@ -162,6 +178,63 @@ class PokerFusedEmbedding(nn.Module):
             embeddings.masked_fill_(padding_mask.unsqueeze(-1), 0)
 
         return embeddings
+
+    def _process_context_features(
+        self,
+        raw_features: torch.Tensor,
+        bb_value: torch.Tensor,
+        scale_value: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Process raw context features by applying scaling and computing derived features.
+
+        Args:
+            raw_features: Raw context features [batch_size, NUM_RAW_CONTEXT] as float
+            bb_value: Big blind value tensor [batch_size]
+            scale_value: Scale value tensor [batch_size] (100 * bb_value)
+
+        Returns:
+            Processed context features [batch_size, NUM_CONTEXT] with scaling and derived features
+        """
+        batch_size = raw_features.shape[0]
+        processed_features = torch.zeros(
+            batch_size,
+            Context.NUM_CONTEXT.value,
+            device=raw_features.device,
+            dtype=raw_features.dtype,
+        )
+
+        # Extract raw features
+        pot = raw_features[:, Context.POT.value]
+        stack_p0 = raw_features[:, Context.STACK_P0.value]
+        stack_p1 = raw_features[:, Context.STACK_P1.value]
+        committed_p0 = raw_features[:, Context.COMMITTED_P0.value]
+        committed_p1 = raw_features[:, Context.COMMITTED_P1.value]
+        position = raw_features[:, Context.POSITION.value]
+        actions_round = raw_features[:, Context.ACTIONS_ROUND.value]
+        min_raise = raw_features[:, Context.MIN_RAISE.value]
+        bet_to_call = raw_features[:, Context.BET_TO_CALL.value]
+
+        # no scaling on these 2 (integers)
+        processed_features[:, Context.POSITION.value] = position
+        processed_features[:, Context.ACTIONS_ROUND.value] = actions_round
+
+        # Store scaled raw features
+        processed_features[:, Context.POT.value] = pot / scale_value
+        processed_features[:, Context.STACK_P0.value] = stack_p0 / scale_value
+        processed_features[:, Context.STACK_P1.value] = stack_p1 / scale_value
+        processed_features[:, Context.COMMITTED_P0.value] = committed_p0 / scale_value
+        processed_features[:, Context.COMMITTED_P1.value] = committed_p1 / scale_value
+        processed_features[:, Context.MIN_RAISE.value] = min_raise / scale_value
+        processed_features[:, Context.BET_TO_CALL.value] = bet_to_call / scale_value
+
+        # Compute derived features using the same BB value
+        processed_features[:, Context.EFFECTIVE_STACK_P0.value] = stack_p0 / bb_value
+        processed_features[:, Context.EFFECTIVE_STACK_P1.value] = stack_p1 / bb_value
+        processed_features[:, Context.SPR_P0.value] = stack_p0 / pot
+        processed_features[:, Context.SPR_P1.value] = stack_p1 / pot
+
+        return processed_features
 
 
 def combine_embeddings(

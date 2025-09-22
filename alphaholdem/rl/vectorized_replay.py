@@ -27,7 +27,7 @@ class BatchSample:
     def to(self, dtype: torch.dtype) -> BatchSample:
         """Convert all floating-point tensors to specified dtype."""
         return BatchSample(
-            embedding_data=self.embedding_data.to(dtype),
+            embedding_data=self.embedding_data,
             action_indices=self.action_indices,
             selected_log_probs=self.selected_log_probs.to(dtype),
             all_log_probs=self.all_log_probs.to(dtype),
@@ -748,7 +748,7 @@ class VectorizedReplayBuffer:
         )
         self.data.context_features[buffer_rows, cols] = embedding_data.context_features[
             rows, cols
-        ].to(self.float_dtype)
+        ]
 
         # Update positions to new_lens
         self.current_token_positions[buffer_rows] = new_lens[rows]
@@ -824,8 +824,8 @@ class VectorizedReplayBuffer:
         context_features = torch.zeros(
             batch_size,
             seq_len,
-            Context.NUM_CONTEXT.value,
-            dtype=self.float_dtype,
+            Context.NUM_RAW_CONTEXT.value,
+            dtype=torch.int16,
             device=self.device,
         )
 

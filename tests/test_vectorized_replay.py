@@ -45,7 +45,7 @@ class TestVectorizedReplayBuffer:
         assert buffer.data.context_features.shape == (
             10,
             50,
-            Ctx.NUM_CONTEXT.value,
+            Ctx.NUM_RAW_CONTEXT.value,
         )  # Context features
         assert buffer.transition_token_ends.shape == (10, 20)
         assert buffer.current_token_positions.shape == (10,)
@@ -1600,7 +1600,7 @@ class TestVectorizedReplayBuffer:
             context_features=torch.randint(
                 0,
                 10,
-                (batch_size, 50, Ctx.NUM_CONTEXT.value),
+                (batch_size, 50, Ctx.NUM_RAW_CONTEXT.value),
                 device=device,
                 dtype=torch.float32,
             ),
@@ -1717,7 +1717,7 @@ class TestVectorizedReplayBuffer:
             ),
             action_legal_masks=torch.ones(batch_size, length, 5, device=device).bool(),
             context_features=torch.randn(
-                batch_size, length, Ctx.NUM_CONTEXT.value, device=device
+                batch_size, length, Ctx.NUM_RAW_CONTEXT.value, device=device
             ),
             lengths=torch.full((batch_size,), length, dtype=torch.long, device=device),
         )

@@ -31,19 +31,14 @@ class StructuredEmbeddingData:
     # Action components [batch_size, seq_len] - all should be long
     action_actors: torch.Tensor  # Actor indices (0-1: player indices)
 
-    # Context components - should match self.dtype (default: float32)
-    action_legal_masks: (
-        torch.Tensor
-    )  # Legal action masks [batch_size, seq_len, 8] - torch.bool
-    context_features: (
-        torch.Tensor
-    )  # Numeric features per token [batch_size, seq_len, 10]
+    # Legal action masks [batch_size, seq_len, 8] - torch.bool
+    action_legal_masks: torch.Tensor
+    # Context components - stored as int16 for memory efficiency
+    # Raw numeric features per token [batch_size, seq_len, NUM_RAW_CONTEXT] - int16
+    context_features: torch.Tensor
 
     # Sequence metadata
     lengths: torch.Tensor  # Actual sequence lengths [batch_size]
-
-    # Dtype control
-    float_dtype: torch.dtype = torch.float32  # Target dtype for context fields
 
     def __post_init__(self):
         """Ensure proper dtypes on creation."""
@@ -56,8 +51,8 @@ class StructuredEmbeddingData:
         self.lengths = self.lengths.to(torch.uint8)
         assert self.action_legal_masks.dtype == torch.bool
 
-        # Convert context fields to specified dtype (self.dtype)
-        self.context_features = self.context_features.to(self.float_dtype)
+        # Convert context features to int16 for storage efficiency
+        self.context_features = self.context_features.to(torch.int16)
 
     def to_dict(self) -> Dict[str, torch.Tensor]:
         """Convert to dictionary format for model forward pass."""
@@ -100,25 +95,7 @@ class StructuredEmbeddingData:
             action_legal_masks=self.action_legal_masks.to(device),
             context_features=self.context_features.to(device),
             lengths=self.lengths.to(device),
-            float_dtype=self.float_dtype,  # Preserve the dtype
         )
-
-    def to(self, dtype: torch.dtype) -> StructuredEmbeddingData:
-        """Convert context fields to specified dtype and update self.dtype. Integer fields remain packed."""
-        # Create new instance without calling __post_init__
-        result = StructuredEmbeddingData.__new__(StructuredEmbeddingData)
-        result.token_ids = self.token_ids  # Keep as int8
-        result.token_streets = self.token_streets  # Keep as uint8
-        result.card_ranks = self.card_ranks  # Keep as uint8
-        result.card_suits = self.card_suits  # Keep as uint8
-        result.action_actors = self.action_actors  # Keep as uint8
-        result.action_legal_masks = self.action_legal_masks  # Keep as bool
-        result.context_features = self.context_features.to(
-            dtype
-        )  # Convert to new dtype
-        result.lengths = self.lengths  # Keep as uint8
-        result.float_dtype = dtype  # Update self.dtype to match
-        return result
 
     def __len__(self) -> int:
         """Return batch size."""
@@ -202,8 +179,8 @@ class StructuredEmbeddingData:
                 (batch_size, seq_len, num_bet_bins), dtype=torch.bool, device=device
             ),
             context_features=torch.zeros(
-                (batch_size, seq_len, Context.NUM_CONTEXT.value),
-                dtype=dtype,
+                (batch_size, seq_len, Context.NUM_RAW_CONTEXT.value),
+                dtype=torch.int16,
                 device=device,
             ),
             lengths=torch.zeros((batch_size), dtype=torch.long, device=device),

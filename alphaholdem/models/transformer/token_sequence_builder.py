@@ -64,7 +64,7 @@ class TokenSequenceBuilder:
             N, L, num_bet_bins, dtype=torch.bool, device=device
         )
         self.context_features = torch.zeros(
-            N, L, Context.NUM_CONTEXT.value, dtype=float_dtype, device=device
+            N, L, Context.NUM_RAW_CONTEXT.value, dtype=torch.int16, device=device
         )
         self.lengths = torch.zeros(N, dtype=torch.long, device=device)
 
@@ -85,57 +85,44 @@ class TokenSequenceBuilder:
             return
         player = 0
         opp = 1 - player
-        scale = 100 * self.tensor_env.bb
         start = self._reserve(idxs, 1)
         self.token_ids[idxs, start] = Special.CONTEXT.value
         self.token_streets[idxs, start] = self.tensor_env.street[idxs]
-        self.context_features[idxs, start, Context.POT.value] = (
-            self.tensor_env.pot[idxs].to(self.float_dtype) / scale
-        )
+
+        # Store raw unscaled values as int16
+        self.context_features[idxs, start, Context.POT.value] = self.tensor_env.pot[
+            idxs
+        ].to(torch.int16)
         self.context_features[idxs, start, Context.STACK_P0.value] = (
-            self.tensor_env.stacks[idxs, player].to(self.float_dtype)
-        ) / scale
+            self.tensor_env.stacks[idxs, player].to(torch.int16)
+        )
         self.context_features[idxs, start, Context.STACK_P1.value] = (
-            self.tensor_env.stacks[idxs, opp].to(self.float_dtype)
-        ) / scale
-        self.context_features[idxs, start, Context.EFFECTIVE_STACK_P0.value] = (
-            self.tensor_env.stacks[idxs, player].to(self.float_dtype)
-            / self.tensor_env.bb
-        )
-        self.context_features[idxs, start, Context.EFFECTIVE_STACK_P1.value] = (
-            self.tensor_env.stacks[idxs, opp].to(self.float_dtype) / self.tensor_env.bb
-        )
-        self.context_features[idxs, start, Context.SPR_P0.value] = (
-            self.tensor_env.stacks[idxs, player].to(self.float_dtype)
-            / self.tensor_env.pot[idxs]
-        )
-        self.context_features[idxs, start, Context.SPR_P1.value] = (
-            self.tensor_env.stacks[idxs, opp].to(self.float_dtype)
-            / self.tensor_env.pot[idxs]
+            self.tensor_env.stacks[idxs, opp].to(torch.int16)
         )
         self.context_features[idxs, start, Context.COMMITTED_P0.value] = (
-            self.tensor_env.committed[idxs, player].to(self.float_dtype)
-        ) / scale
+            self.tensor_env.committed[idxs, player].to(torch.int16)
+        )
         self.context_features[idxs, start, Context.COMMITTED_P1.value] = (
-            self.tensor_env.committed[idxs, opp].to(self.float_dtype)
-        ) / scale
+            self.tensor_env.committed[idxs, opp].to(torch.int16)
+        )
         self.context_features[idxs, start, Context.POSITION.value] = (
             # position 0 is the button, 1 is BB
-            self.tensor_env.button[idxs]
-            != self.tensor_env.to_act[idxs]
-        ).to(self.float_dtype)
+            (self.tensor_env.button[idxs] != self.tensor_env.to_act[idxs]).to(
+                torch.int16
+            )
+        )
         self.context_features[idxs, start, Context.ACTIONS_ROUND.value] = (
-            self.tensor_env.actions_this_round[idxs].to(self.float_dtype)
+            self.tensor_env.actions_this_round[idxs].to(torch.int16)
         )
         self.context_features[idxs, start, Context.MIN_RAISE.value] = (
-            self.tensor_env.min_raise[idxs].to(self.float_dtype)
-        ) / scale
+            self.tensor_env.min_raise[idxs].to(torch.int16)
+        )
         bet_to_call = (
             self.tensor_env.committed[idxs, opp]
             - self.tensor_env.committed[idxs, player]
         )
-        self.context_features[idxs, start, Context.BET_TO_CALL.value] = (
-            bet_to_call.to(self.float_dtype) / scale
+        self.context_features[idxs, start, Context.BET_TO_CALL.value] = bet_to_call.to(
+            torch.int16
         )
 
     def add_cls(self, idxs: Optional[torch.Tensor] = None) -> None:
@@ -152,12 +139,12 @@ class TokenSequenceBuilder:
             return
         start = self._reserve(idxs, 1)
         self.token_ids[idxs, start] = Special.GAME.value
-        # CLS slot (index 0)
-        self.context_features[idxs, start, Game.SB.value] = float(self.tensor_env.sb)
-        self.context_features[idxs, start, Game.BB.value] = float(self.tensor_env.bb)
+        # GAME slot (index 1) - store raw values as int16
+        self.context_features[idxs, start, Game.SB.value] = self.tensor_env.sb
+        self.context_features[idxs, start, Game.BB.value] = self.tensor_env.bb
         self.context_features[idxs, start, Game.HERO_POSITION.value] = (
             self.tensor_env.button[idxs] == 1
-        ).to(self.float_dtype)
+        ).to(torch.int16)
 
     def add_action(
         self,
@@ -256,10 +243,6 @@ class TokenSequenceBuilder:
                 [
                     Context.STACK_P0.value,
                     Context.STACK_P1.value,
-                    Context.EFFECTIVE_STACK_P0.value,
-                    Context.EFFECTIVE_STACK_P1.value,
-                    Context.SPR_P0.value,
-                    Context.SPR_P1.value,
                     Context.COMMITTED_P0.value,
                     Context.COMMITTED_P1.value,
                 ],
@@ -269,10 +252,6 @@ class TokenSequenceBuilder:
                 [
                     Context.STACK_P1.value,
                     Context.STACK_P0.value,
-                    Context.EFFECTIVE_STACK_P1.value,
-                    Context.EFFECTIVE_STACK_P0.value,
-                    Context.SPR_P1.value,
-                    Context.SPR_P0.value,
                     Context.COMMITTED_P1.value,
                     Context.COMMITTED_P0.value,
                 ],

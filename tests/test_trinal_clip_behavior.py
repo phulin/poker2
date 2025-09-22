@@ -32,7 +32,7 @@ def test_trinal_policy_upper_clip_for_negative_advantages():
         card_suits=torch.zeros(batch, 10),
         action_actors=torch.zeros(batch, 10),
         action_legal_masks=torch.zeros(batch, 10, 8, dtype=torch.bool),
-        context_features=torch.zeros(batch, 10, 3),
+        context_features=torch.zeros(batch, 10, 9, dtype=torch.int16),
         lengths=torch.full((batch,), 10),
     )
 
@@ -87,7 +87,7 @@ def test_value_clipping_symmetry():
         card_suits=torch.zeros(batch, 10),
         action_actors=torch.zeros(batch, 10),
         action_legal_masks=torch.zeros(batch, 10, 8, dtype=torch.bool),
-        context_features=torch.zeros(batch, 10, 3),
+        context_features=torch.zeros(batch, 10, 9, dtype=torch.int16),
         lengths=torch.full((batch,), 10),
     )
 

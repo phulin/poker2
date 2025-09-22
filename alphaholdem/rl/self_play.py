@@ -664,7 +664,7 @@ class SelfPlayTrainer:
                                 # Ensure opponent model is on the correct device
                                 opponent.model.to(device=self.device)
                                 outputs = opponent.model(
-                                    opp_states.to(opponent.model_dtype),
+                                    opp_states,
                                     kv_cache=opp_cache,
                                 )
                                 # Update opponent cache
@@ -673,9 +673,7 @@ class SelfPlayTrainer:
                                         opponent_idx, outputs.kv_cache
                                     )
                             else:
-                                outputs = opponent.model(
-                                    opp_states.to(opponent.model_dtype)
-                                )
+                                outputs = opponent.model(opp_states)
                             env_logits[opp_working_env_indices] = (
                                 outputs.policy_logits.float()
                             )
@@ -1023,9 +1021,7 @@ class SelfPlayTrainer:
                 if last_admitted_opponent is not None:
                     # Get last admitted opponent model logits
                     last_admitted_opponent.model.to(last_opp_states.device)
-                    opponent_outputs = last_admitted_opponent.model(
-                        last_opp_states.to(last_admitted_opponent.model_dtype)
-                    )
+                    opponent_outputs = last_admitted_opponent.model(last_opp_states)
                     opponent_logits = opponent_outputs.policy_logits.float()
 
                     new_logits = self.model(last_opp_states).policy_logits.float()
@@ -1182,7 +1178,7 @@ class SelfPlayTrainer:
             lr_now = lr_start
 
         if self.kl_ema_initialized:
-            kl_ratio = self.kl_ema / TARGET_KL
+            kl_ratio = max(1e-8, self.kl_ema / TARGET_KL)
             kl_scale = 1.0 / (kl_ratio**0.5)
             # Clamp lr scaling to a reasonable range
             kl_scale = min(max(kl_scale, 0.25), 4.0)
