@@ -123,14 +123,32 @@ class PokerFusedEmbedding(nn.Module):
             embeddings[rows, cols] += action_embed
 
         # GAME token always at index 1 - process raw features
-        game_features = data.context_features[
-            :, GAME_INDEX, : Game.NUM_GAME.value
+        raw_game_features = data.context_features[
+            :, GAME_INDEX, : Game.NUM_RAW_GAME.value
         ].float()  # Convert int16 to float
-        sb_value = game_features[:, Game.SB.value]
-        bb_value = game_features[:, Game.BB.value]
-        scale_value = 100.0 * bb_value
-        game_features[:, Game.SCALED_BB.value] = bb_value / scale_value
-        game_features[:, Game.SCALED_SB.value] = sb_value / scale_value
+
+        # Extract raw values
+        sb_value = raw_game_features[:, Game.SB.value]
+        bb_value = raw_game_features[:, Game.BB.value]
+        hero_position = raw_game_features[:, Game.HERO_POSITION.value]
+        scale_value = 100.0 * bb_value.float()
+
+        # Create game features tensor with scaled values
+        game_features = torch.zeros(
+            raw_game_features.shape[0],
+            Game.NUM_GAME.value,
+            device=raw_game_features.device,
+            dtype=torch.float32,
+        )
+        game_features[:, Game.SB.value] = sb_value
+        game_features[:, Game.BB.value] = bb_value
+        game_features[:, Game.HERO_POSITION.value] = hero_position
+
+        # Check for division by zero and add small epsilon
+        scale_value_safe = torch.where(scale_value == 0, 1e-8, scale_value)
+        game_features[:, Game.SCALED_BB.value] = bb_value / scale_value_safe
+        game_features[:, Game.SCALED_SB.value] = sb_value / scale_value_safe
+
         embeddings[:, GAME_INDEX] += self.game_mlp(game_features)
 
         context_id = special_offset + Special.CONTEXT.value
@@ -219,20 +237,35 @@ class PokerFusedEmbedding(nn.Module):
         processed_features[:, Context.POSITION.value] = position
         processed_features[:, Context.ACTIONS_ROUND.value] = actions_round
 
-        # Store scaled raw features
-        processed_features[:, Context.POT.value] = pot / scale_value
-        processed_features[:, Context.STACK_P0.value] = stack_p0 / scale_value
-        processed_features[:, Context.STACK_P1.value] = stack_p1 / scale_value
-        processed_features[:, Context.COMMITTED_P0.value] = committed_p0 / scale_value
-        processed_features[:, Context.COMMITTED_P1.value] = committed_p1 / scale_value
-        processed_features[:, Context.MIN_RAISE.value] = min_raise / scale_value
-        processed_features[:, Context.BET_TO_CALL.value] = bet_to_call / scale_value
+        # Store scaled raw features - add safety checks for division by zero
+        scale_value_safe = torch.where(
+            scale_value == 0, torch.ones_like(scale_value), scale_value
+        )
+        processed_features[:, Context.POT.value] = pot / scale_value_safe
+        processed_features[:, Context.STACK_P0.value] = stack_p0 / scale_value_safe
+        processed_features[:, Context.STACK_P1.value] = stack_p1 / scale_value_safe
+        processed_features[:, Context.COMMITTED_P0.value] = (
+            committed_p0 / scale_value_safe
+        )
+        processed_features[:, Context.COMMITTED_P1.value] = (
+            committed_p1 / scale_value_safe
+        )
+        processed_features[:, Context.MIN_RAISE.value] = min_raise / scale_value_safe
+        processed_features[:, Context.BET_TO_CALL.value] = (
+            bet_to_call / scale_value_safe
+        )
 
-        # Compute derived features using the same BB value
-        processed_features[:, Context.EFFECTIVE_STACK_P0.value] = stack_p0 / bb_value
-        processed_features[:, Context.EFFECTIVE_STACK_P1.value] = stack_p1 / bb_value
-        processed_features[:, Context.SPR_P0.value] = stack_p0 / pot
-        processed_features[:, Context.SPR_P1.value] = stack_p1 / pot
+        # Compute derived features using the same BB value - add safety checks
+        bb_value_safe = torch.where(bb_value == 0, torch.ones_like(bb_value), bb_value)
+        pot_safe = torch.where(pot == 0, torch.ones_like(pot), pot)
+        processed_features[:, Context.EFFECTIVE_STACK_P0.value] = (
+            stack_p0 / bb_value_safe
+        )
+        processed_features[:, Context.EFFECTIVE_STACK_P1.value] = (
+            stack_p1 / bb_value_safe
+        )
+        processed_features[:, Context.SPR_P0.value] = stack_p0 / pot_safe
+        processed_features[:, Context.SPR_P1.value] = stack_p1 / pot_safe
 
         return processed_features
 
