@@ -44,6 +44,8 @@ class ModelConfig:
     name: str = "siamese_convnet_v1"
     kwargs: Optional[dict] = None
     policy: Optional[dict] = None
+    # backwards compatibility
+    use_gradient_checkpointing: Optional[bool] = None
 
     def __post_init__(self):
         if self.kwargs is None:

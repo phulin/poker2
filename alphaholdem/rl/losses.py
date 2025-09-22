@@ -119,7 +119,7 @@ class TrinalClipPPOLoss(LossCalculator):
         logits: torch.Tensor,
         values: torch.Tensor,
         batch: BatchSample,
-        kl_divergence: Optional[float] = None,
+        kl_divergence_ema: Optional[float] = None,
     ) -> LossResult:
         """
         Compute Trinal-Clip PPO loss.
@@ -149,8 +149,8 @@ class TrinalClipPPOLoss(LossCalculator):
         action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
         epsilon = self.epsilon
-        if kl_divergence is not None:
-            epsilon = epsilon * (self.target_kl / (kl_divergence + 1e-8))
+        if kl_divergence_ema is not None:
+            epsilon = epsilon * (self.target_kl / (kl_divergence_ema + 1e-8))
             epsilon = min(max(epsilon, self.epsilon / 2), self.epsilon * 2)
 
         # Importance sampling ratio

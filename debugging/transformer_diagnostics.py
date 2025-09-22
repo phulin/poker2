@@ -15,7 +15,6 @@ import os
 import sys
 import argparse
 from omegaconf import OmegaConf
-import math
 from typing import List, Tuple
 
 import torch
@@ -26,6 +25,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
@@ -37,14 +37,13 @@ from alphaholdem.core.structured_config import (
     TrainingConfig,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.models.transformer.tokens import (
     Special,
     get_card_token_id_offset,
     get_action_token_id_offset,
 )
-from alphaholdem.models.transformer.tokens import CLS_INDEX, HOLE0_INDEX, HOLE1_INDEX
+from alphaholdem.models.transformer.tokens import HOLE0_INDEX, HOLE1_INDEX
 from alphaholdem.rl.self_play import SelfPlayTrainer
 
 

@@ -915,13 +915,18 @@ class SelfPlayTrainer:
             gamma=self.gamma, lambda_=self.gae_lambda
         )
 
+        # Compute current logits on sample for diagnostic KL
+        kl_sample_batch_size = min(self.batch_size, max(1, self.batch_size // 8))
+        kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
+        with torch.no_grad():
+            kl_old_logits = self.model(kl_states.embedding_data).policy_logits.float()
+
         # Initialize tracking variables once before the epoch loop
         total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
         total_entropy, total_clipfrac = 0.0, 0.0
         total_explained_var, total_epsilon = 0.0, 0.0
         total_advantage_mean_raw, total_advantage_std_raw = 0.0, 0.0
         minibatch_count = 0
-        first_logits = None
 
         for _ in range(self.num_epochs):
             # Sample batch from vectorized buffer
@@ -944,8 +949,6 @@ class SelfPlayTrainer:
                 embedding_data = batch.embedding_data
                 outputs = self.model(embedding_data)
                 logits = outputs.policy_logits.float()
-                if first_logits is None:
-                    first_logits = logits.clone()
                 values = outputs.value.float()
 
                 if isinstance(self.loss_calculator, TrinalClipPPOLoss):
@@ -953,7 +956,9 @@ class SelfPlayTrainer:
                         logits=logits,
                         values=values,
                         batch=batch,
-                        kl_divergence=self.kl_ema if self.kl_ema_initialized else None,
+                        kl_divergence_ema=(
+                            self.kl_ema if self.kl_ema_initialized else None
+                        ),
                     )
                 else:
                     loss_result = self.loss_calculator.compute_loss(
@@ -998,7 +1003,6 @@ class SelfPlayTrainer:
 
             # Check if we should add current model to opponent pool
             # Compute KL divergence between current model and last admitted opponent
-            # Compute KL divergence between updated model and pre-update model
             pool_kl_divergence = 0.0
             last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
 
@@ -1010,36 +1014,35 @@ class SelfPlayTrainer:
                     enabled=self.use_mixed_precision,
                 ),
             ):
-                # Take a 64-element sample from the current batch without replacement
-                batch_size = batch.returns.shape[0]
-                sample_size = min(64, batch_size)
-                sample_indices = torch.randperm(
-                    batch_size, generator=self.rng, device=batch.returns.device
-                )[:sample_size]
-                last_states = batch.embedding_data[sample_indices]
-                last_legal_masks = batch.legal_masks[sample_indices]
+                # Take a element sample from the current batch without replacement
+                last_opp_batch_size = batch.returns.shape[0]
+                last_opp_sample_size = max(last_opp_batch_size // 16, 16)
+                last_opp_states = batch.embedding_data[:last_opp_sample_size]
+                last_opp_legal_masks = batch.legal_masks[:last_opp_sample_size]
 
                 if last_admitted_opponent is not None:
                     # Get last admitted opponent model logits
-                    last_admitted_opponent.model.to(last_states.device)
+                    last_admitted_opponent.model.to(last_opp_states.device)
                     opponent_outputs = last_admitted_opponent.model(
-                        last_states.to(last_admitted_opponent.model_dtype)
+                        last_opp_states.to(last_admitted_opponent.model_dtype)
                     )
                     opponent_logits = opponent_outputs.policy_logits.float()
 
-                    new_logits = self.model(last_states).policy_logits.float()
+                    new_logits = self.model(last_opp_states).policy_logits.float()
 
                     # Compute KL divergence
                     pool_kl_divergence = compute_kl_divergence_batch(
-                        new_logits, opponent_logits, last_legal_masks
+                        new_logits, opponent_logits, last_opp_legal_masks
                     )
 
             if self.opponent_pool.should_add_snapshot(step, pool_kl_divergence):
-                sample_batch_size = min(1024, len(batch.embedding_data))
-                sample_batch = batch.embedding_data[:sample_batch_size]
+                prune_sample_batch_size = min(
+                    self.batch_size, max(1024, self.batch_size // 16)
+                )
+                prune_sample_batch = batch.embedding_data[:prune_sample_batch_size]
                 if isinstance(self.opponent_pool, DREDPool):
                     self.opponent_pool.add_snapshot(
-                        self.model, step, sample_batch=sample_batch
+                        self.model, step, sample_batch=prune_sample_batch
                     )
                 else:
                     self.opponent_pool.add_snapshot(self.model, step)
@@ -1055,15 +1058,13 @@ class SelfPlayTrainer:
             print(f"Total step reward: {self.total_step_reward}")
             print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
-        # Get states for KL computation from the last batch
-        sample_batch_size = min(512, len(batch.embedding_data))
-        kl_states = batch.embedding_data[:sample_batch_size]
-        kl_legal_masks = batch.legal_masks[:sample_batch_size]
-        new_logits = self.model(kl_states).policy_logits.float()
+        # Compute diagnostic KL: divergence from last model batch.
+        with torch.no_grad():
+            kl_new_logits = self.model(kl_states.embedding_data).policy_logits.float()
         current_kl = compute_kl_divergence_batch(
-            new_logits,
-            first_logits[:sample_batch_size],
-            kl_legal_masks,
+            kl_old_logits,
+            kl_new_logits,
+            kl_states.legal_masks,
         )
 
         # Update KL divergence exponential moving average
