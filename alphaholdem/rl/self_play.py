@@ -1168,9 +1168,10 @@ class SelfPlayTrainer:
         else:
             lr_now = lr_start
 
-        kl_ratio = self.kl_ema / TARGET_KL
-        kl_scale = 1.0 / (kl_ratio**0.5)
-        lr_now *= kl_scale
+        if self.kl_ema_initialized:
+            kl_ratio = self.kl_ema / TARGET_KL
+            kl_scale = 1.0 / (kl_ratio**0.5)
+            lr_now *= kl_scale
 
         # Update optimizer groups preserving relative scales
         for scale, group in zip(
