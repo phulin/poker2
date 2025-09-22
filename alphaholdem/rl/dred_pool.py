@@ -92,6 +92,15 @@ class DREDPool(OpponentPool):
         # Track last admitted snapshot for step-based admission
         self.last_admitted_step: int = -1
 
+        # Last batch of data for getting embeddings when pruning
+        self.last_batch_data: Union[CNNEmbeddingData, StructuredEmbeddingData] = None
+
+    def set_last_batch_data(
+        self, last_batch_data: Union[CNNEmbeddingData, StructuredEmbeddingData]
+    ) -> None:
+        """Set the last batch of data for getting KL divergence when pruning."""
+        self.last_batch_data = last_batch_data
+
     def _generate_embedding(
         self,
         snapshot: AgentSnapshot,
@@ -233,7 +242,6 @@ class DREDPool(OpponentPool):
         model: Any,
         step: int,
         rating: Optional[float] = None,
-        sample_batch: Optional[Union[CNNEmbeddingData, StructuredEmbeddingData]] = None,
         is_exploiter: bool = False,
     ) -> None:
         """
@@ -243,7 +251,6 @@ class DREDPool(OpponentPool):
             model: The model to snapshot
             step: Training step
             rating: ELO rating of the agent
-            sample_batch: Sample batch for embedding generation
             is_exploiter: Whether this snapshot is an exploiter
         """
         # Create new snapshot
@@ -270,9 +277,9 @@ class DREDPool(OpponentPool):
 
         # Prune if over capacity
         if len(self.snapshots) > self.max_size:
-            self._prune(sample_batch)
+            self._prune()
 
-    def _prune(self, sample_batch: Union[CNNEmbeddingData, StructuredEmbeddingData]):
+    def _prune(self):
         """Prune snapshots using DRED strategy while preserving last 5 exploiters."""
         n = len(self.snapshots)
 
@@ -313,7 +320,9 @@ class DREDPool(OpponentPool):
             if non_exploiter_remaining:
                 embeddings = torch.stack(
                     [
-                        self._generate_embedding(self.snapshots[i], sample_batch)
+                        self._generate_embedding(
+                            self.snapshots[i], self.last_batch_data
+                        )
                         for i in non_exploiter_remaining
                     ]
                 )
