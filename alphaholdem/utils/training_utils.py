@@ -281,7 +281,7 @@ def print_training_stats(
     # if epsilon is not None:
     #     parts.append(f"eps {epsilon:.3f}")
     if lr is not None:
-        parts.append(f"lr {lr:.3f}")
+        parts.append(f"lr {lr:.5f}")
     if parts:
         print("  " + " | ".join(parts))
 
