@@ -910,7 +910,7 @@ class SelfPlayTrainer:
         # Initialize tracking variables once before the epoch loop
         total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
         total_entropy, total_approx_kl, total_clipfrac = 0.0, 0.0, 0.0
-        total_explained_var = 0.0
+        total_explained_var, total_epsilon = 0.0, 0.0
         total_advantage_mean_raw, total_advantage_std_raw = 0.0, 0.0
         minibatch_count = 0
 
@@ -964,6 +964,7 @@ class SelfPlayTrainer:
             total_entropy += loss_result.entropy.item()
             total_clipfrac += loss_result.clipfrac.item()
             total_explained_var += explained_var.item()
+            total_epsilon += loss_result.epsilon.item()
             minibatch_count += 1
 
             self.optimizer.zero_grad()
@@ -1073,6 +1074,7 @@ class SelfPlayTrainer:
             "kl_ema": self.kl_ema,
             "clipfrac": total_clipfrac / denom,
             "explained_var": total_explained_var / denom,
+            "epsilon": total_epsilon / denom,
             "advantage_mean_raw": total_advantage_mean_raw / denom,
             "advantage_std_raw": total_advantage_std_raw / denom,
         }
@@ -1140,6 +1142,7 @@ class SelfPlayTrainer:
                     "num_samples": training_stats["num_samples"],
                     "lr": self.optimizer.param_groups[-1]["lr"],
                     "entropy_coef_current": self.entropy_coef,
+                    "epsilon": training_stats["epsilon"],
                 },
                 step=step,
             )
