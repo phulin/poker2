@@ -398,8 +398,9 @@ class DREDPool(OpponentPool):
         # Update DRED-specific stats
         num_wins = (rewards > 0).sum().item()
         num_losses = (rewards < 0).sum().item()
-        opponent.data.alpha += num_wins
-        opponent.data.beta += num_losses
+        if opponent.data is not None:
+            opponent.data.alpha += num_wins
+            opponent.data.beta += num_losses
 
     def get_best_snapshot(self) -> Optional[AgentSnapshot]:
         """Get the snapshot with the highest ELO rating."""

@@ -39,6 +39,7 @@ class SelfDummySnapshot:
         self.draws = 0
         self.games_played = 0
         self.total_rewards = 0.0
+        self.data = None
 
     @property
     def model(self):
