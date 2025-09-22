@@ -29,8 +29,17 @@ def create_state_encoder_for_model(model, env: HUNLTensorEnv, device: torch.devi
     model_class_name = model.__class__.__name__.lower()
 
     if "transformer" in model_class_name:
-        # For transformer models, create TransformerStateEncoder
-        return TokenSequenceBuilder(env, device)
+        # For transformer models, create TokenSequenceBuilder with sane defaults
+        num_bet_bins = env.num_bet_bins
+        sequence_length = 100
+        float_dtype = torch.float32
+        return TokenSequenceBuilder(
+            tensor_env=env,
+            sequence_length=sequence_length,
+            num_bet_bins=num_bet_bins,
+            device=device,
+            float_dtype=float_dtype,
+        )
     elif "siamese" in model_class_name or "cnn" in model_class_name:
         # For CNN models, create CNNStateEncoder with tensor_env and device
         return CNNStateEncoder(env, device)

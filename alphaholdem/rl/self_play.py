@@ -1184,6 +1184,8 @@ class SelfPlayTrainer:
         if self.kl_ema_initialized:
             kl_ratio = self.kl_ema / TARGET_KL
             kl_scale = 1.0 / (kl_ratio**0.5)
+            # Clamp lr scaling to a reasonable range
+            kl_scale = min(max(kl_scale, 0.25), 4.0)
             lr_now *= kl_scale
 
         # Update optimizer groups preserving relative scales

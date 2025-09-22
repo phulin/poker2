@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Union
+from typing import Union
 
 import torch
 
 from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
-from ..models.transformer.tokens import Special
+from ..models.transformer.tokens import Special, Context
 
 
 @dataclass
@@ -561,21 +561,49 @@ class VectorizedReplayBuffer:
         )
         traj_indices = valid_indices[traj_sample_indices]
 
-        log_probs_old_full = self.log_probs[traj_indices]
-        action_indices = self.action_indices[traj_indices]
+        # Get lengths of sampled trajectories
+        traj_lengths = self.trajectory_lengths[traj_indices]  # [num_trajectories]
+
+        # Vectorized: build all (traj_idx, step) pairs for all steps in all sampled trajectories
+        # For each trajectory, create a range [0, traj_length)
+        max_len = traj_lengths.max().item()
+        step_range = torch.arange(max_len, device=self.device)  # [max_len]
+        # Mask for valid steps per trajectory
+        valid_mask = step_range.unsqueeze(0) < traj_lengths.unsqueeze(
+            1
+        )  # [num_trajectories, max_len]
+
+        # Broadcast traj_indices to shape [num_trajectories, max_len]
+        traj_indices_expanded = traj_indices.unsqueeze(1).expand(
+            -1, max_len
+        )  # [num_trajectories, max_len]
+        step_indices_expanded = step_range.unsqueeze(0).expand(
+            traj_indices.shape[0], -1
+        )  # [num_trajectories, max_len]
+
+        # Select only valid (traj_idx, step) pairs
+        traj_indices_tensor = traj_indices_expanded[valid_mask]  # [total_steps]
+        step_indices_tensor = step_indices_expanded[valid_mask]  # [total_steps]
+
+        if traj_indices_tensor.numel() == 0:
+            raise ValueError("No valid steps in sampled trajectories")
+
+        # Extract data for all steps
+        log_probs_old_full = self.log_probs[traj_indices_tensor, step_indices_tensor]
+        action_indices = self.action_indices[traj_indices_tensor, step_indices_tensor]
         action_log_probs = log_probs_old_full.gather(
             1, action_indices.unsqueeze(1)
         ).squeeze(1)
 
         return TrajectorySample(
-            embedding_data=self.data[traj_indices],
+            embedding_data=self.data[traj_indices_tensor],
             action_indices=action_indices,
             log_probs_old=action_log_probs,
             log_probs_old_full=log_probs_old_full,
-            advantages=self.advantages[traj_indices],
-            returns=self.returns[traj_indices],
-            delta2=self.delta2[traj_indices],
-            delta3=self.delta3[traj_indices],
+            advantages=self.advantages[traj_indices_tensor, step_indices_tensor],
+            returns=self.returns[traj_indices_tensor, step_indices_tensor],
+            delta2=self.delta2[traj_indices_tensor, step_indices_tensor],
+            delta3=self.delta3[traj_indices_tensor, step_indices_tensor],
         )
 
     def sample_batch(self, rng: torch.Generator, batch_size: int) -> BatchSample:
@@ -794,7 +822,11 @@ class VectorizedReplayBuffer:
             batch_size, seq_len, self.num_bet_bins, dtype=torch.bool, device=self.device
         )
         context_features = torch.zeros(
-            batch_size, seq_len, 10, dtype=self.float_dtype, device=self.device
+            batch_size,
+            seq_len,
+            Context.NUM_CONTEXT.value,
+            dtype=self.float_dtype,
+            device=self.device,
         )
 
         # Add action tokens (opponent = actor 1)
