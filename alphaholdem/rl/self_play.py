@@ -964,7 +964,7 @@ class SelfPlayTrainer:
             total_entropy += loss_result.entropy.item()
             total_clipfrac += loss_result.clipfrac.item()
             total_explained_var += explained_var.item()
-            total_epsilon += loss_result.epsilon.item()
+            total_epsilon += loss_result.epsilon
             minibatch_count += 1
 
             self.optimizer.zero_grad()
