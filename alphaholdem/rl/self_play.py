@@ -710,9 +710,17 @@ class SelfPlayTrainer:
                         env_values[env_active_opp_acts] = outputs.value.float()
 
                 # Sample actions for active environments only.
+                active_env_logits = env_logits[active_indices]
+                active_env_legal_mask = legal_bins_mask[active_indices]
                 action_bins_active, log_probs_active_full = self.policy.action_batch(
-                    env_logits[active_indices], legal_bins_mask[active_indices]
+                    active_env_logits, active_env_legal_mask
                 )
+                if not active_env_legal_mask.gather(
+                    1, action_bins_active.unsqueeze(1)
+                ).all():
+                    raise ValueError(
+                        f"Action bins {action_bins_active} are not legal in active environments {active_indices}"
+                    )
 
             # Create full-size tensors for stepping (needed by tensor_env.step_bins)
             action_bins = torch.full(
@@ -1006,7 +1014,7 @@ class SelfPlayTrainer:
                 batch_size = batch.returns.shape[0]
                 sample_size = min(64, batch_size)
                 sample_indices = torch.randperm(
-                    batch_size, device=batch.returns.device
+                    batch_size, generator=self.rng, device=batch.returns.device
                 )[:sample_size]
                 last_states = batch.embedding_data[sample_indices]
                 last_legal_masks = batch.legal_masks[sample_indices]

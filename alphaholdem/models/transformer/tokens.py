@@ -2,6 +2,7 @@
 
 from enum import Enum
 
+# Beginning token sequence indices
 CLS_INDEX = 0
 GAME_INDEX = 1
 HOLE0_INDEX = 2

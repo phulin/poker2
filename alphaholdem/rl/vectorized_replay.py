@@ -519,7 +519,7 @@ class VectorizedReplayBuffer:
         device, dtype = rewards.device, rewards.dtype
 
         # Compute lengths from dones: length is the first True in each row, or T if no True, all in torch
-        # Find first done (==1) in each row. There should always be one.
+        # Find first done (==1) in each row. Function presupposes that there is always at least one done.
         first_done_idx = dones.long().argmax(dim=1)
         lengths = first_done_idx + 1
         valid = torch.arange(T, device=device)[None, :] < lengths[:, None]
