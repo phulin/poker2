@@ -99,8 +99,6 @@ class TrinalClipPPOLoss(LossCalculator):
         huber_delta: float,
         target_kl: float,
         kl_ema: EMA,
-        value_mean_ema: EMA,
-        value_std_ema: EMA,
     ):
         """
         Initialize Trinal-Clip PPO loss calculator.
@@ -119,8 +117,6 @@ class TrinalClipPPOLoss(LossCalculator):
         self.delta1 = delta1
         self.target_kl = target_kl
         self.kl_ema = kl_ema
-        self.value_mean_ema = value_mean_ema
-        self.value_std_ema = value_std_ema
 
     def compute_loss(
         self,
