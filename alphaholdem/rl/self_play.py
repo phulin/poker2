@@ -223,7 +223,13 @@ class SelfPlayTrainer:
             entropy_coef=self.entropy_coef,
             value_loss_type=self.cfg.train.value_loss_type,
             huber_delta=self.cfg.train.huber_delta,
+            target_kl=0.015,
         )
+
+        # KL divergence exponential moving average tracking
+        self.kl_ema_decay = 0.99
+        self.kl_ema = 0.0
+        self.kl_ema_initialized = False
 
         # Training stats
         self.step_trajectories_collected = 0
@@ -931,11 +937,19 @@ class SelfPlayTrainer:
                 logits = outputs.policy_logits.float()
                 values = outputs.value.float()
 
-                loss_result = self.loss_calculator.compute_loss(
-                    logits=logits,
-                    values=values,
-                    batch=batch,
-                )
+                if isinstance(self.loss_calculator, TrinalClipPPOLoss):
+                    loss_result = self.loss_calculator.compute_loss(
+                        logits=logits,
+                        values=values,
+                        batch=batch,
+                        kl_divergence=self.kl_ema if self.kl_ema_initialized else None,
+                    )
+                else:
+                    loss_result = self.loss_calculator.compute_loss(
+                        logits=logits,
+                        values=values,
+                        batch=batch,
+                    )
 
             # Debugging metrics: explained variance
             with torch.no_grad():
@@ -1035,6 +1049,17 @@ class SelfPlayTrainer:
             print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
         denom = max(1, minibatch_count)
+
+        # Update KL divergence exponential moving average
+        current_kl = total_approx_kl / denom
+        if not self.kl_ema_initialized:
+            self.kl_ema = current_kl
+            self.kl_ema_initialized = True
+        else:
+            self.kl_ema = (
+                self.kl_ema_decay * self.kl_ema + (1 - self.kl_ema_decay) * current_kl
+            )
+
         return {
             "avg_reward": avg_reward,
             "num_samples": self.batch_size * self.num_epochs,
@@ -1045,6 +1070,7 @@ class SelfPlayTrainer:
             "value_loss": total_value_loss / denom,
             "entropy": total_entropy / denom,
             "approx_kl": total_approx_kl / denom,
+            "kl_ema": self.kl_ema,
             "clipfrac": total_clipfrac / denom,
             "explained_var": total_explained_var / denom,
             "advantage_mean_raw": total_advantage_mean_raw / denom,

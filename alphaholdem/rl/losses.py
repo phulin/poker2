@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -23,6 +23,7 @@ class LossResult:
     entropy: torch.Tensor
     ratio_mean: torch.Tensor
     ratio_std: torch.Tensor
+    epsilon: torch.Tensor
     clipfrac: torch.Tensor
     # Optional fields for specific loss types
     clipped_ratio_mean: torch.Tensor = None
@@ -92,8 +93,9 @@ class TrinalClipPPOLoss(LossCalculator):
         delta1: float,
         value_coef: float,
         entropy_coef: float,
-        value_loss_type: str = "mse",
-        huber_delta: float = 1.0,
+        value_loss_type: str,
+        huber_delta: float,
+        target_kl: float,
     ):
         """
         Initialize Trinal-Clip PPO loss calculator.
@@ -110,12 +112,14 @@ class TrinalClipPPOLoss(LossCalculator):
             epsilon, value_coef, entropy_coef, value_loss_type, huber_delta
         )
         self.delta1 = delta1
+        self.target_kl = target_kl
 
     def compute_loss(
         self,
         logits: torch.Tensor,
         values: torch.Tensor,
         batch: BatchSample,
+        kl_divergence: Optional[float] = None,
     ) -> LossResult:
         """
         Compute Trinal-Clip PPO loss.
@@ -124,12 +128,11 @@ class TrinalClipPPOLoss(LossCalculator):
             logits: Policy logits (B, num_actions)
             values: Value predictions (B,)
             batch: Batch sample containing actions, advantages, returns, etc.
+            kl_divergence: KL divergence between old and new policy logits
 
         Returns:
             LossResult containing loss components and metrics
         """
-        batch_size = logits.shape[0]
-        device = logits.device
 
         actions = batch.action_indices
         advantages = batch.advantages
@@ -145,10 +148,15 @@ class TrinalClipPPOLoss(LossCalculator):
         log_probs = F.log_softmax(masked_logits, dim=-1)
         action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
+        epsilon = self.epsilon
+        if kl_divergence is not None:
+            epsilon = epsilon * (self.target_kl / (kl_divergence + 1e-8))
+            epsilon = min(max(epsilon, self.epsilon / 4), self.epsilon * 4)
+
         # Importance sampling ratio
         ratio = torch.exp(action_log_probs - batch.selected_log_probs)
-        ppo_low = 1.0 - self.epsilon
-        ppo_high = 1.0 + self.epsilon
+        ppo_low = 1.0 - epsilon
+        ppo_high = 1.0 + epsilon
         ppo_clip = torch.clamp(ratio, ppo_low, ppo_high)
 
         # Trinal-Clip policy:
@@ -194,6 +202,7 @@ class TrinalClipPPOLoss(LossCalculator):
             entropy=entropy,
             ratio_mean=ratio.mean(),
             ratio_std=ratio.std(),
+            epsilon=epsilon,
             clipfrac=clipfrac,
         )
 
