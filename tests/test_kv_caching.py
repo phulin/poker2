@@ -163,16 +163,18 @@ class TestPokerTransformerKVCaching:
 
         # Second forward pass with cache
         structured_data2 = StructuredEmbeddingData(
-            token_ids=torch.randint(0, 64, (batch_size, 1)),
-            token_streets=torch.zeros(batch_size, 1),
-            card_ranks=torch.zeros(batch_size, 1),
-            card_suits=torch.zeros(batch_size, 1),
-            action_actors=torch.zeros(batch_size, 1),
+            token_ids=torch.randint(
+                0, 64, (batch_size, 4)
+            ),  # Need at least 4 for HOLE0_INDEX=2, HOLE1_INDEX=3
+            token_streets=torch.zeros(batch_size, 4),
+            card_ranks=torch.zeros(batch_size, 4),
+            card_suits=torch.zeros(batch_size, 4),
+            action_actors=torch.zeros(batch_size, 4),
             action_legal_masks=torch.ones(
-                batch_size, 1, num_bet_bins, dtype=torch.bool
+                batch_size, 4, num_bet_bins, dtype=torch.bool
             ),
-            context_features=torch.zeros(batch_size, 1, 13),
-            lengths=torch.full((batch_size,), 1, dtype=torch.uint8),
+            context_features=torch.zeros(batch_size, 4, 13),
+            lengths=torch.full((batch_size,), 4, dtype=torch.uint8),
         )
 
         output2 = model(structured_data2, kv_cache=output1.kv_cache)
@@ -331,9 +333,11 @@ class TestKVCachingIntegration:
         # Simulate a poker hand with multiple actions
         actions = [
             torch.randint(0, 100, (batch_size, 5)),  # Initial cards + context
-            torch.randint(0, 100, (batch_size, 1)),  # First action
-            torch.randint(0, 100, (batch_size, 1)),  # Second action
-            torch.randint(0, 100, (batch_size, 1)),  # Third action
+            torch.randint(
+                0, 100, (batch_size, 4)
+            ),  # First action (need at least 4 for HOLE0_INDEX=2, HOLE1_INDEX=3)
+            torch.randint(0, 100, (batch_size, 4)),  # Second action
+            torch.randint(0, 100, (batch_size, 4)),  # Third action
         ]
 
         # Initialize cache

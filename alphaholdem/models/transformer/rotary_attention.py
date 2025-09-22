@@ -20,6 +20,11 @@ def apply_rotary_pos_emb(
     cos = cos.to(dtype=q.dtype)
     sin = sin.to(dtype=q.dtype)
 
+    # Slice cos and sin to match query sequence length
+    L_q = q.shape[-2]  # query sequence length
+    cos = cos[..., :L_q, :]  # slice to match query length
+    sin = sin[..., :L_q, :]  # slice to match query length
+
     # Apply RoPE
     q_rotated = (q * cos) + (rotate_half(q) * sin)
     k_rotated = (k * cos) + (rotate_half(k) * sin)
