@@ -34,15 +34,21 @@ class TestVectorizedReplayBuffer:
         assert buffer.position == 0
 
         # Transformer mode fields use a single token stream per trajectory
-        assert buffer.token_ids.shape == (10, 50)  # Token IDs
-        assert buffer.token_streets.shape == (10, 50)  # Token streets
-        assert buffer.card_ranks.shape == (10, 50)  # Card ranks
-        assert buffer.card_suits.shape == (10, 50)  # Card suits
-        assert buffer.action_actors.shape == (10, 50)  # Action actors
-        assert buffer.action_legal_masks.shape == (10, 50, 5)  # Action legal masks
-        assert buffer.context_features.shape == (10, 50, 10)  # Context features
+        assert buffer.data.token_ids.shape == (10, 50)  # Token IDs
+        assert buffer.data.token_streets.shape == (10, 50)  # Token streets
+        assert buffer.data.card_ranks.shape == (10, 50)  # Card ranks
+        assert buffer.data.card_suits.shape == (10, 50)  # Card suits
+        assert buffer.data.action_actors.shape == (10, 50)  # Action actors
+        assert buffer.data.action_legal_masks.shape == (10, 50, 5)  # Action legal masks
+        from alphaholdem.models.transformer.tokens import Context as Ctx
+
+        assert buffer.data.context_features.shape == (
+            10,
+            50,
+            Ctx.NUM_CONTEXT.value,
+        )  # Context features
         assert buffer.transition_token_ends.shape == (10, 20)
-        assert buffer.token_positions.shape == (10,)
+        assert buffer.current_token_positions.shape == (10,)
         assert buffer.action_indices.shape == (10, 20)  # Action indices
         assert buffer.log_probs.shape == (10, 20, 5)
         assert buffer.rewards.shape == (10, 20)
@@ -56,7 +62,7 @@ class TestVectorizedReplayBuffer:
 
         # Check trajectory tracking tensors
         assert buffer.trajectory_lengths.shape == (10,)
-        assert buffer.current_step_positions.shape == (10,)
+        assert buffer.current_transition_counts.shape == (10,)
 
     def test_transformer_add_tokens_initial_and_street_progress(self, buffer):
         device = buffer.device
@@ -69,7 +75,11 @@ class TestVectorizedReplayBuffer:
             (2, buffer.max_sequence_length), -1, dtype=torch.long, device=device
         )
         ctx = torch.zeros(
-            2, buffer.max_sequence_length, 10, dtype=torch.float32, device=device
+            2,
+            buffer.max_sequence_length,
+            buffer.data.context_features.shape[-1],
+            dtype=torch.float32,
+            device=device,
         )
         lengths = torch.full((2,), 5, dtype=torch.long, device=device)
         token_ids[:, 0] = Special.GAME.value
@@ -103,9 +113,9 @@ class TestVectorizedReplayBuffer:
         )
         env_idxs = torch.tensor([0, 1], device=device)
         buffer.add_tokens(emb, env_idxs)
-        assert buffer.token_positions[0] == 5
-        assert buffer.token_ids[0, 0] == Special.GAME.value
-        assert buffer.token_ids[0, 2] == Special.STREET_PREFLOP.value
+        assert buffer.current_token_positions[0] == 5
+        assert buffer.data.token_ids[0, 0] == Special.GAME.value
+        assert buffer.data.token_ids[0, 2] == Special.STREET_PREFLOP.value
 
     def test_transformer_add_opponent_actions(self, buffer):
         device = buffer.device
@@ -135,7 +145,11 @@ class TestVectorizedReplayBuffer:
                 device=device,
             ),
             context_features=torch.zeros(
-                1, buffer.max_sequence_length, 10, dtype=torch.float32, device=device
+                1,
+                buffer.max_sequence_length,
+                buffer.data.context_features.shape[-1],
+                dtype=torch.float32,
+                device=device,
             ),
             lengths=torch.tensor([1], device=device),
         )
@@ -149,27 +163,35 @@ class TestVectorizedReplayBuffer:
             ),
             streets=torch.tensor([0], device=device),
         )
-        pos = buffer.token_positions[0].item()
+        pos = buffer.current_token_positions[0].item()
         assert pos == 2
         # Last written should be action token for opponent (actor=1)
-        assert buffer.action_actors[0, pos - 1].item() == 1
-        assert buffer.token_streets[0, pos - 1].item() == 0
+        assert buffer.data.action_actors[0, pos - 1].item() == 1
+        assert buffer.data.token_streets[0, pos - 1].item() == 0
 
     def test_transformer_add_transitions_appends_context_and_action(self, buffer):
         device = buffer.device
         buffer.start_adding_trajectory_batches(1)
-        from alphaholdem.models.transformer.tokens import Context as Ctx
         from alphaholdem.models.transformer.tokens import Special
 
         # Prepare embedding with context features in slot 0/1
         L = buffer.max_sequence_length
         token_ids = torch.full((1, L), -1, dtype=torch.long, device=device)
-        ctx = torch.zeros(1, L, 10, dtype=torch.float32, device=device)
+        ctx = torch.zeros(
+            1,
+            L,
+            buffer.data.context_features.shape[-1],
+            dtype=torch.float32,
+            device=device,
+        )
         token_ids[:, 0] = Special.GAME.value
         token_ids[:, 1] = Special.CONTEXT.value
-        ctx[:, 0, 0] = 5.0  # sb
-        ctx[:, 0, 1] = 10.0  # bb
-        ctx[:, 1, Ctx.STREET.value] = 0.0
+        # Fill a few context slots for GAME and CONTEXT tokens
+        ctx[:, 0, 0] = 5.0  # POT placeholder
+        ctx[:, 0, 1] = 10.0  # STACK_P0 placeholder
+        token_ids[:, 2] = Special.STREET_PREFLOP.value
+        token_ids[:, 3] = Special.NUM_SPECIAL.value
+        token_ids[:, 4] = Special.NUM_SPECIAL.value + 1
         emb = StructuredEmbeddingData(
             token_ids=token_ids,
             card_ranks=torch.zeros(1, L, dtype=torch.long, device=device),
@@ -200,7 +222,7 @@ class TestVectorizedReplayBuffer:
         )
 
         # Add our action
-        pos_before = buffer.token_positions[0].item()
+        pos_before = buffer.current_token_positions[0].item()
         buffer.add_transitions(
             embedding_data=emb,
             action_indices=torch.tensor([2], device=device),
@@ -216,9 +238,9 @@ class TestVectorizedReplayBuffer:
             trajectory_indices=torch.tensor([0], device=device),
         )
         # Expect two tokens appended: CONTEXT then ACTION
-        assert buffer.token_positions[0] == pos_before + 2
+        assert buffer.current_token_positions[0] == pos_before + 2
         # transition end for step 0 should equal new position
-        assert buffer.transition_token_ends[0, 0] == buffer.token_positions[0]
+        assert buffer.transition_token_ends[0, 0] == buffer.current_token_positions[0]
 
     def test_add_single_transition(self, buffer):
         """Test adding a single transition to a trajectory."""
@@ -231,7 +253,7 @@ class TestVectorizedReplayBuffer:
         # Should not be valid yet (no done flag)
         assert buffer.size == 0
         assert buffer.trajectory_lengths[0] == 0
-        assert buffer.current_step_positions[0] == 1
+        assert buffer.current_transition_counts[0] == 1
 
     def test_add_complete_trajectory(self, buffer):
         """Test adding a complete trajectory by adding transitions one by one."""
@@ -249,7 +271,7 @@ class TestVectorizedReplayBuffer:
         # Should be valid now
         assert buffer.size == 1
         assert buffer.trajectory_lengths[0] == 3
-        assert buffer.current_step_positions[0] == 0  # Reset after completion
+        assert buffer.current_transition_counts[0] == 3  # Final count after completion
 
     def test_add_multiple_trajectories(self, buffer):
         """Test adding multiple trajectories."""
@@ -437,7 +459,7 @@ class TestVectorizedReplayBuffer:
         assert buffer.position == 0
         assert not (buffer.trajectory_lengths > 0).any()
         assert buffer.trajectory_lengths.sum() == 0
-        assert buffer.current_step_positions.sum() == 0
+        assert buffer.current_transition_counts.sum() == 0
 
     def test_finish_adding_trajectory_batches(self, buffer):
         """Test finish_adding_trajectory_batches method."""
@@ -469,13 +491,7 @@ class TestVectorizedReplayBuffer:
 
         # Check that all buffer tensors are on the correct device
         for attr_name in [
-            "token_ids",
-            "token_streets",
-            "card_ranks",
-            "card_suits",
-            "action_actors",
-            "action_legal_masks",
-            "context_features",
+            "data",
             "action_indices",
             "log_probs",
             "rewards",
@@ -487,7 +503,7 @@ class TestVectorizedReplayBuffer:
             "advantages",
             "returns",
             "trajectory_lengths",
-            "current_step_positions",
+            "current_transition_counts",
         ]:
             tensor = getattr(buffer, attr_name)
             assert tensor.device == buffer.device
@@ -523,8 +539,8 @@ class TestVectorizedReplayBuffer:
         assert buffer.size == 2
         assert buffer.trajectory_lengths[0] == 2
         assert buffer.trajectory_lengths[1] == 1
-        assert buffer.current_step_positions[0] == 0
-        assert buffer.current_step_positions[1] == 0
+        assert buffer.current_transition_counts[0] == 2
+        assert buffer.current_transition_counts[1] == 1
 
     def test_start_adding_trajectories(self, buffer):
         """Test start_adding_trajectories method."""
@@ -548,8 +564,8 @@ class TestVectorizedReplayBuffer:
         # Should clear trajectories at positions 0 and 1
         assert buffer.trajectory_lengths[0] == 0
         assert buffer.trajectory_lengths[1] == 0
-        assert buffer.current_step_positions[0] == 0
-        assert buffer.current_step_positions[1] == 0
+        assert buffer.current_transition_counts[0] == 0
+        assert buffer.current_transition_counts[1] == 0
 
         # Previous trajectory at position 2 should still be valid
         assert buffer.trajectory_lengths[2] > 0
@@ -594,7 +610,7 @@ class TestVectorizedReplayBuffer:
         trajectory_indices = torch.tensor([0], device=buffer.device)
         opponent_rewards = torch.tensor([1.5], device=buffer.device)
 
-        buffer.update_opponent_rewards(trajectory_indices, opponent_rewards)
+        buffer.update_last_transition_rewards(trajectory_indices, opponent_rewards)
 
         # Should update the last transition's reward and mark as done
         assert buffer.rewards[0, 2] == 1.5
@@ -605,7 +621,7 @@ class TestVectorizedReplayBuffer:
         # Should not raise error
         trajectory_indices = torch.tensor([], device=buffer.device)
         opponent_rewards = torch.tensor([], device=buffer.device)
-        buffer.update_opponent_rewards(trajectory_indices, opponent_rewards)
+        buffer.update_last_transition_rewards(trajectory_indices, opponent_rewards)
 
     def test_tensor_env_reward_sign_with_opponent_updates(self, buffer):
         """Ensure rewards from tensor env propagate with correct sign when opponent folds."""
@@ -678,7 +694,7 @@ class TestVectorizedReplayBuffer:
         )
 
         # Opponent action ended env0, so update the last reward directly from env output
-        buffer.update_opponent_rewards(
+        buffer.update_last_transition_rewards(
             torch.tensor([0], device=device), rewards_step2[0].unsqueeze(0)
         )
 
@@ -719,8 +735,8 @@ class TestVectorizedReplayBuffer:
         expected_attrs = {
             "embedding_data",
             "action_indices",
-            "log_probs_old",
-            "log_probs_old_full",
+            "selected_log_probs",
+            "all_log_probs",
             "advantages",
             "returns",
             "delta2",
@@ -736,7 +752,7 @@ class TestVectorizedReplayBuffer:
         assert sampled.embedding_data.token_ids.shape[0] == 5
         assert sampled.embedding_data.card_ranks.shape[0] == 5
         assert sampled.action_indices.shape[0] == 5
-        assert sampled.log_probs_old.shape[0] == 5
+        assert sampled.selected_log_probs.shape[0] == 5
         assert sampled.advantages.shape[0] == 5
         assert sampled.returns.shape[0] == 5
         assert sampled.delta2.shape[0] == 5
@@ -852,7 +868,7 @@ class TestVectorizedReplayBuffer:
 
         # The zero-length trajectory should be at the end of the buffer (compacted out)
         # and its data should be zeroed out
-        assert buffer.current_step_positions[2] == 0
+        assert buffer.current_transition_counts[2] == 0
         assert buffer.rewards[2].sum() == 0  # All rewards should be zero
         assert buffer.action_indices[2].sum() == 0  # All action indices should be zero
 
@@ -1193,36 +1209,49 @@ class TestVectorizedReplayBuffer:
 
     def _create_test_batch(self, batch_size: int, device: torch.device) -> dict:
         """Create a test batch with random data."""
+        # Create a temporary buffer to read constants (num_bet_bins, context width, max seq)
+        tmp_buf = VectorizedReplayBuffer(
+            capacity=batch_size,
+            max_trajectory_length=20,
+            num_bet_bins=5,
+            device=device,
+            float_dtype=torch.float32,
+            is_transformer=True,
+            max_sequence_length=50,
+        )
+        S = tmp_buf.max_sequence_length
+        B = tmp_buf.num_bet_bins
+        Cw = tmp_buf.data.context_features.shape[-1]
         embedding_data = StructuredEmbeddingData(
             token_ids=torch.randint(
-                0, 100, (batch_size, 50), device=device, dtype=torch.long
+                0, 100, (batch_size, S), device=device, dtype=torch.long
             ),
             card_ranks=torch.randint(
-                0, 13, (batch_size, 50), device=device, dtype=torch.long
+                0, 13, (batch_size, S), device=device, dtype=torch.long
             ),
             card_suits=torch.randint(
-                0, 4, (batch_size, 50), device=device, dtype=torch.long
+                0, 4, (batch_size, S), device=device, dtype=torch.long
             ),
             token_streets=torch.randint(
-                0, 4, (batch_size, 50), device=device, dtype=torch.long
+                0, 4, (batch_size, S), device=device, dtype=torch.long
             ),
             action_actors=torch.randint(
-                0, 2, (batch_size, 50), device=device, dtype=torch.long
+                0, 2, (batch_size, S), device=device, dtype=torch.long
             ),
-            action_legal_masks=torch.ones(batch_size, 50, 5, device=device).bool(),
+            action_legal_masks=torch.ones(batch_size, S, B, device=device).bool(),
             context_features=torch.randint(
-                0, 10, (batch_size, 50, 10), device=device, dtype=torch.float32
+                0, 10, (batch_size, S, Cw), device=device, dtype=torch.float32
             ),
-            lengths=torch.full((batch_size,), 50, device=device, dtype=torch.long),
+            lengths=torch.full((batch_size,), S, device=device, dtype=torch.long),
         )
         return {
             "embedding_data": embedding_data,
-            "action_indices": torch.randint(0, 5, (batch_size,), device=device),
+            "action_indices": torch.randint(0, B, (batch_size,), device=device),
             # Provide full log-prob distributions per step
-            "log_probs": torch.randn(batch_size, 5, device=device),
+            "log_probs": torch.randn(batch_size, B, device=device),
             "rewards": torch.randn(batch_size, device=device),
             "dones": torch.zeros(batch_size, dtype=torch.bool, device=device),
-            "legal_masks": torch.ones(batch_size, 5, device=device).bool(),
+            "legal_masks": torch.ones(batch_size, B, device=device).bool(),
             "delta2": torch.randn(batch_size, device=device),
             "delta3": torch.randn(batch_size, device=device),
             "values": torch.randn(batch_size, device=device),
@@ -1276,7 +1305,9 @@ class TestVectorizedReplayBuffer:
         opponent_trajectory_indices = torch.tensor([0], device=device)
         opponent_rewards = torch.tensor([1.0], device=device)
 
-        buffer.update_opponent_rewards(opponent_trajectory_indices, opponent_rewards)
+        buffer.update_last_transition_rewards(
+            opponent_trajectory_indices, opponent_rewards
+        )
 
         buffer.finish_adding_trajectory_batches()
 
@@ -1345,7 +1376,9 @@ class TestVectorizedReplayBuffer:
         opponent_trajectory_indices = torch.tensor([0, 1, 2], device=device)
         opponent_rewards = torch.tensor([1.0, -0.5, 0.0], device=device)
 
-        buffer.update_opponent_rewards(opponent_trajectory_indices, opponent_rewards)
+        buffer.update_last_transition_rewards(
+            opponent_trajectory_indices, opponent_rewards
+        )
 
         # Verify trajectories now have proper lengths
         assert buffer.trajectory_lengths[0] == 2
@@ -1414,7 +1447,9 @@ class TestVectorizedReplayBuffer:
         opponent_trajectory_indices = torch.tensor([2, 3], device=device)
         opponent_rewards = torch.tensor([1.0, -0.5], device=device)
 
-        buffer.update_opponent_rewards(opponent_trajectory_indices, opponent_rewards)
+        buffer.update_last_transition_rewards(
+            opponent_trajectory_indices, opponent_rewards
+        )
 
         buffer.finish_adding_trajectory_batches()
 
@@ -1491,7 +1526,9 @@ class TestVectorizedReplayBuffer:
         opponent_trajectory_indices = torch.tensor([10, 11, 12], device=device)
         opponent_rewards = torch.tensor([1.0, -0.5, 2.0], device=device)
 
-        buffer.update_opponent_rewards(opponent_trajectory_indices, opponent_rewards)
+        buffer.update_last_transition_rewards(
+            opponent_trajectory_indices, opponent_rewards
+        )
 
         # Mark trajectories as complete by calling finish_adding_trajectory_batches
         # This will mark them as complete without overwriting the opponent rewards
@@ -1521,6 +1558,8 @@ class TestVectorizedReplayBuffer:
         self, batch_size: int, device: torch.device
     ) -> dict:
         """Create a test batch with random data for single steps."""
+        from alphaholdem.models.transformer.tokens import Context as Ctx
+
         embedding_data = StructuredEmbeddingData(
             token_ids=torch.randint(
                 0,
@@ -1561,7 +1600,7 @@ class TestVectorizedReplayBuffer:
             context_features=torch.randint(
                 0,
                 10,
-                (batch_size, 50, 10),
+                (batch_size, 50, Ctx.NUM_CONTEXT.value),
                 device=device,
                 dtype=torch.float32,
             ),
@@ -1658,6 +1697,8 @@ class TestVectorizedReplayBuffer:
         self, batch_size: int, device: torch.device, length: int
     ) -> StructuredEmbeddingData:
         """Create test embedding data for testing."""
+        from alphaholdem.models.transformer.tokens import Context as Ctx
+
         return StructuredEmbeddingData(
             token_ids=torch.randint(
                 0, 100, (batch_size, length), device=device, dtype=torch.int8
@@ -1675,7 +1716,9 @@ class TestVectorizedReplayBuffer:
                 0, 2, (batch_size, length), device=device, dtype=torch.uint8
             ),
             action_legal_masks=torch.ones(batch_size, length, 5, device=device).bool(),
-            context_features=torch.randn(batch_size, length, 10, device=device),
+            context_features=torch.randn(
+                batch_size, length, Ctx.NUM_CONTEXT.value, device=device
+            ),
             lengths=torch.full((batch_size,), length, dtype=torch.long, device=device),
         )
 
@@ -1707,8 +1750,8 @@ class TestVectorizedReplayBuffer:
     def test_append_from_embedding(self, buffer):
         """Test _append_from_embedding method."""
         # Set initial token positions
-        buffer.token_positions[0] = 3
-        buffer.token_positions[1] = 2
+        buffer.current_token_positions[0] = 3
+        buffer.current_token_positions[1] = 2
 
         # Create embedding data with total lengths (not just new data)
         embedding_data = self._create_test_embedding_data(
@@ -1721,9 +1764,9 @@ class TestVectorizedReplayBuffer:
         buffer_indices = torch.tensor([0, 1], device=buffer.device)
         buffer._append_from_embedding(buffer_indices, embedding_data)
 
-        # Check that token positions were updated to the total lengths
-        assert buffer.token_positions[0] == 8
-        assert buffer.token_positions[1] == 7
+        # Check that the correct positions were updated
+        assert buffer.current_token_positions[0] == 8
+        assert buffer.current_token_positions[1] == 7
 
         # Test error when embedding length decreases
         embedding_data_decreased = self._create_test_embedding_data(2, buffer.device, 5)

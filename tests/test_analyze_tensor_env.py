@@ -10,6 +10,8 @@ from alphaholdem.env.analyze_tensor_env import (
     get_preflop_range_grid,
     get_preflop_value_grid,
 )
+from alphaholdem.env import analyze_tensor_env as ate
+from alphaholdem.models.model_outputs import ModelOutput
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
@@ -28,10 +30,7 @@ class DummyTransformerModel(torch.nn.Module):
         self._values = values
 
     def forward(self, embedding_data):  # embedding_data is unused
-        return {
-            "policy_logits": self._logits,
-            "value": self._values,
-        }
+        return ModelOutput(policy_logits=self._logits, value=self._values)
 
 
 def _parse_grid_values(grid: str) -> list[list[str]]:
@@ -65,7 +64,12 @@ def test_preflop_range_grid_allin_high():
     values = torch.zeros(N)
 
     model = DummyTransformerModel(logits, values)
-    grid = get_preflop_range_grid(model, bin_index=B - 1, device=torch.device("cpu"))
+    device = torch.device("cpu")
+    env = ate.create_169_hand_analysis_setup(model, button=0, device=device)
+    state_encoder = ate.create_state_encoder_for_model(model, env, device)
+    grid = get_preflop_range_grid(
+        model, bin_index=B - 1, state_encoder=state_encoder, device=device
+    )
 
     table = _parse_grid_values(grid)
     # 13 rows x 13 cols
@@ -88,7 +92,10 @@ def test_preflop_betting_grid_prefers_bets():
     values = torch.zeros(N)
 
     model = DummyTransformerModel(logits, values)
-    grid = get_preflop_betting_grid(model, device=torch.device("cpu"))
+    device = torch.device("cpu")
+    env = ate.create_169_hand_analysis_setup(model, button=0, device=device)
+    state_encoder = ate.create_state_encoder_for_model(model, env, device)
+    grid = get_preflop_betting_grid(model, state_encoder=state_encoder, device=device)
 
     table = _parse_grid_values(grid)
     assert len(table) == 13
@@ -114,9 +121,9 @@ class DummyStateEncoder:
         L = 2
         token_ids = hole.clone()
         zeros = torch.zeros(M, L, dtype=torch.long, device=self.device)
-        legal = torch.ones(M, L, 8, dtype=torch.float32, device=self.device)
-        ctx = torch.zeros(M, L, 10, dtype=torch.float32, device=self.device)
-        lengths = torch.full((M,), L, dtype=torch.long, device=self.device)
+        legal = torch.ones(M, L, 8, dtype=torch.bool, device=self.device)
+        ctx = torch.zeros(M, L, 13, dtype=torch.float32, device=self.device)
+        lengths = torch.full((M,), L, dtype=torch.uint8, device=self.device)
         return StructuredEmbeddingData(
             token_ids=token_ids,
             token_streets=zeros,
@@ -148,7 +155,7 @@ class DummyValueModel(torch.nn.Module):
         logits = torch.zeros(
             values.shape[0], 8, dtype=torch.float32, device=values.device
         )
-        return {"policy_logits": logits, "value": values}
+        return ModelOutput(policy_logits=logits, value=values)
 
 
 def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
@@ -159,7 +166,10 @@ def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
     )
 
     model = DummyValueModel()
-    grid = get_preflop_value_grid(model, device=torch.device("cpu"))
+    device = torch.device("cpu")
+    env = ate.create_169_hand_analysis_setup(model, button=0, device=device)
+    state_encoder = ate.create_state_encoder_for_model(model, env, device)
+    grid = get_preflop_value_grid(model, state_encoder=state_encoder, device=device)
 
     # Import inside to keep top-level imports minimal for pytest collection
     from alphaholdem.env.analyze_tensor_env import _create_169_grid  # noqa: F401

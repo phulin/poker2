@@ -12,7 +12,7 @@ from alphaholdem.rl.dred_pool import DREDPool, DREDSnapshotData
 def test_dred_prune_basic():
     """Test basic pruning functionality."""
     # Create a pool with small max_size to trigger pruning
-    pool = DREDPool(max_size=5, embedding_dim=64)
+    pool = DREDPool(max_size=5)
 
     # Create a simple model for testing
     model = SiameseConvNetV1(
@@ -23,6 +23,14 @@ def test_dred_prune_basic():
         fusion_hidden=[1024, 1024],
         num_actions=8,
     )
+
+    # Provide sample batch for embedding generation during pruning
+    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+
+    sample = CNNEmbeddingData(
+        cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
+    )
+    pool.set_last_batch_data(sample)
 
     # Add more snapshots than max_size to trigger pruning
     for i in range(10):
@@ -39,7 +47,7 @@ def test_dred_prune_basic():
 
 def test_dred_prune_top_elo_preserved():
     """Test that top ELO snapshots are preserved during pruning."""
-    pool = DREDPool(max_size=3, embedding_dim=64)
+    pool = DREDPool(max_size=3)
 
     model = SiameseConvNetV1(
         cards_channels=6,
@@ -49,6 +57,14 @@ def test_dred_prune_top_elo_preserved():
         fusion_hidden=[1024, 1024],
         num_actions=8,
     )
+
+    # Provide sample batch for embedding generation during pruning
+    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+
+    sample = CNNEmbeddingData(
+        cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
+    )
+    pool.set_last_batch_data(sample)
 
     # Add snapshots with specific ELO ratings
     pool.add_snapshot(model, step=100, rating=1200)  # Low ELO
@@ -71,7 +87,7 @@ def test_dred_prune_top_elo_preserved():
 
 def test_dred_prune_clustering():
     """Test that pruning uses clustering for diversity."""
-    pool = DREDPool(max_size=4, embedding_dim=64)
+    pool = DREDPool(max_size=4)
 
     model = SiameseConvNetV1(
         cards_channels=6,
@@ -81,6 +97,14 @@ def test_dred_prune_clustering():
         fusion_hidden=[1024, 1024],
         num_actions=8,
     )
+
+    # Provide sample batch for embedding generation during pruning
+    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+
+    sample = CNNEmbeddingData(
+        cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
+    )
+    pool.set_last_batch_data(sample)
 
     # Add snapshots with different characteristics
     # Group 1: High ELO snapshots
@@ -115,7 +139,7 @@ def test_dred_prune_clustering():
 
 def test_dred_prune_edge_cases():
     """Test edge cases for pruning."""
-    pool = DREDPool(max_size=1, embedding_dim=64)
+    pool = DREDPool(max_size=1)
 
     model = SiameseConvNetV1(
         cards_channels=6,
@@ -140,7 +164,7 @@ def test_dred_prune_edge_cases():
 
 def test_dred_prune_no_pruning_needed():
     """Test that pruning doesn't occur when not needed."""
-    pool = DREDPool(max_size=10, embedding_dim=64)
+    pool = DREDPool(max_size=10)
 
     model = SiameseConvNetV1(
         cards_channels=6,
@@ -161,7 +185,7 @@ def test_dred_prune_no_pruning_needed():
 
 def test_dred_prune_age_tracking():
     """Test that pruning preserves age tracking."""
-    pool = DREDPool(max_size=3, embedding_dim=64)
+    pool = DREDPool(max_size=3)
 
     model = SiameseConvNetV1(
         cards_channels=6,
@@ -171,6 +195,14 @@ def test_dred_prune_age_tracking():
         fusion_hidden=[1024, 1024],
         num_actions=8,
     )
+
+    # Provide sample batch for embedding generation during pruning
+    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+
+    sample = CNNEmbeddingData(
+        cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
+    )
+    pool.set_last_batch_data(sample)
 
     # Add snapshots with different steps
     pool.add_snapshot(model, step=100, rating=1200)
@@ -187,7 +219,7 @@ def test_dred_prune_age_tracking():
 
 def test_dred_prune_embedding_generation():
     """Test that pruning works with embedding generation."""
-    pool = DREDPool(max_size=3, embedding_dim=32)
+    pool = DREDPool(max_size=3)
 
     model = SiameseConvNetV1(
         cards_channels=6,
@@ -198,6 +230,14 @@ def test_dred_prune_embedding_generation():
         num_actions=8,
     )
 
+    # Provide sample batch to enable embedding generation during pruning
+    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+
+    sample = CNNEmbeddingData(
+        cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
+    )
+    pool.set_last_batch_data(sample)
+
     # Add snapshots to trigger pruning
     for i in range(8):
         pool.add_snapshot(model, step=i * 100, rating=1200 + i * 5)
@@ -207,14 +247,26 @@ def test_dred_prune_embedding_generation():
 
     # Test that embeddings can still be generated for remaining snapshots
     for snapshot in pool.snapshots:
-        embedding = pool._generate_embedding(snapshot)
-        assert embedding.shape == (32,)  # Should match embedding_dim
+        # Provide a minimal sample batch using zeros matching CNNEmbeddingData
+        from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+
+        sample = CNNEmbeddingData(
+            cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
+        )
+        embedding = pool._generate_embedding(snapshot, sample)
+        assert embedding.dim() == 1
         assert isinstance(embedding, torch.Tensor)
 
 
 def test_dred_prune_kmedoids_integration():
     """Test that pruning integrates properly with k-medoids clustering."""
-    pool = DREDPool(max_size=5, embedding_dim=16)
+    pool = DREDPool(max_size=5)
+    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+
+    sample = CNNEmbeddingData(
+        cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
+    )
+    pool.set_last_batch_data(sample)
 
     model = SiameseConvNetV1(
         cards_channels=6,

@@ -56,6 +56,7 @@ def test_trinal_policy_upper_clip_for_negative_advantages():
         entropy_coef=0.01,
         value_loss_type="mse",
         huber_delta=1.0,
+        target_kl=0.015,
     )
 
     out = loss_calculator.compute_loss(
@@ -110,6 +111,7 @@ def test_value_clipping_symmetry():
         entropy_coef=0.01,
         value_loss_type="mse",
         huber_delta=1.0,
+        target_kl=0.015,
     )
 
     out = loss_calculator.compute_loss(

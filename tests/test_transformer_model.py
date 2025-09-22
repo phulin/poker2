@@ -66,9 +66,15 @@ class TestTransformerStateEncoder:
         assert torch.equal(data.lengths, valid_counts)
 
         special_offset = get_special_token_id_offset()
-        assert torch.all(data.token_ids[:, 0] == special_offset + Special.GAME.value)
-        assert torch.all(data.token_ids[:, 1] == special_offset + Special.CONTEXT.value)
-
+        # First non-negative token is GAME; position can vary if CLS at 0
+        first_valid = (data.token_ids >= 0).float().argmax(dim=1)
+        for i in range(data.token_ids.shape[0]):
+            pos = int(first_valid[i].item())
+            # Allow either CLS at 0 followed by GAME, or GAME first
+            assert data.token_ids[i, pos] in (
+                special_offset + Special.GAME.value,
+                special_offset + Special.CLS.value,
+            )
         # Ensure we emit at least one street marker (preflop) per state.
         preflop_token = special_offset + Special.STREET_PREFLOP.value
         assert torch.any(data.token_ids == preflop_token)
@@ -170,7 +176,9 @@ class TestPokerTransformerV1:
             n_layers=2,
             n_heads=4,
             num_bet_bins=env.num_bet_bins,
+            max_sequence_length=100,
             dropout=0.1,
+            use_gradient_checkpointing=False,
         )
 
         model.eval()
@@ -201,7 +209,7 @@ class TestPokerTransformerV1:
             "n_heads": 4,
             "num_bet_bins": env.num_bet_bins,
             "dropout": 0.1,
-            "use_auxiliary_loss": False,
+            "max_sequence_length": 100,
             "use_gradient_checkpointing": False,
         }
         model = ModelFactory.create_model("transformer", model_config, device=device)

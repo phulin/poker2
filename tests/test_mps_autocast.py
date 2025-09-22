@@ -81,8 +81,8 @@ def test_mps_autocast_forward_pass(mps_config):
 
     with torch.amp.autocast("mps", dtype=torch.bfloat16):
         outputs = trainer.model(embedding_data)
-        logits = outputs["policy_logits"]
-        values = outputs["value"]
+        logits = outputs.policy_logits
+        values = outputs.value
 
     # Verify outputs
     assert (
@@ -117,8 +117,8 @@ def test_mps_autocast_backward_pass(mps_config):
 
     with torch.amp.autocast("mps", dtype=torch.bfloat16):
         outputs = trainer.model(embedding_data)
-        logits = outputs["policy_logits"]
-        values = outputs["value"]
+        logits = outputs.policy_logits
+        values = outputs.value
 
     # Create a dummy loss
     loss = torch.mean(logits) + torch.mean(values)
@@ -166,8 +166,8 @@ def test_mps_autocast_device_consistency(mps_config):
 
     with torch.amp.autocast("mps", dtype=torch.bfloat16):
         outputs = trainer.model(embedding_data)
-        logits = outputs["policy_logits"]
-        values = outputs["value"]
+        logits = outputs.policy_logits
+        values = outputs.value
 
     # Verify device consistency (account for device index)
     assert logits.device.type == device.type, "Logits should be on MPS device"
@@ -201,10 +201,8 @@ def test_mps_autocast_mixed_precision_disabled():
     device = torch.device("mps")
     trainer = SelfPlayTrainer(config, device)
 
-    # Check that scaler is not initialized
-    assert (
-        trainer.scaler is None
-    ), "GradScaler should not be initialized when mixed precision is disabled"
+    # GradScaler exists but is disabled when mixed precision is off
+    assert trainer.scaler is not None
     assert trainer.use_mixed_precision is False, "Mixed precision should be disabled"
 
 
@@ -266,15 +264,15 @@ def test_mps_autocast_integration_with_selfplay_trainer(mps_config):
         with torch.amp.autocast(trainer.device.type, dtype=torch.bfloat16):
             embedding_data = CNNEmbeddingData(cards=cards_float, actions=actions_float)
             outputs = trainer.model(embedding_data)
-            logits = outputs["policy_logits"]
-            values = outputs["value"]
+            logits = outputs.policy_logits
+            values = outputs.value
     else:
         cards_float = cards_features.float()
         actions_float = actions_features.float()
         embedding_data = CNNEmbeddingData(cards=cards_float, actions=actions_float)
         outputs = trainer.model(embedding_data)
-        logits = outputs["policy_logits"]
-        values = outputs["value"]
+        logits = outputs.policy_logits
+        values = outputs.value
 
     # Verify autocast is working
     assert (

@@ -51,8 +51,8 @@ def test_siamese_convnet_forward_and_policy_action():
 
     # Get model outputs
     outputs = model(embedding_data)
-    logits = outputs["policy_logits"]
-    value = outputs["value"]
+    logits = outputs.policy_logits
+    value = outputs.value
     assert logits.shape == (1, nb)
     assert value.shape == (1,)
 

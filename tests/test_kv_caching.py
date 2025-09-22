@@ -96,7 +96,7 @@ class TestTransformerLayerKVCaching:
         batch_size = 2
         seq_len = 10
 
-        layer = TransformerLayer(d_model, n_heads)
+        layer = TransformerLayer(d_model, n_heads, dropout=0.1)
 
         x = torch.randn(batch_size, seq_len, d_model)
         mask = torch.ones(batch_size, seq_len, dtype=torch.bool)
@@ -132,17 +132,27 @@ class TestPokerTransformerKVCaching:
             n_layers=n_layers,
             n_heads=n_heads,
             num_bet_bins=num_bet_bins,
+            max_sequence_length=128,
+            dropout=0.1,
+            use_gradient_checkpointing=False,
         )
 
         # Create mock structured data
         batch_size = 2
         seq_len = 10
 
-        # Mock the structured data (simplified for testing)
+        # Mock the structured data (simplified for testing) using safe token ids
         structured_data = StructuredEmbeddingData(
-            token_ids=torch.randint(0, 100, (batch_size, seq_len)),
-            attention_mask=torch.ones(batch_size, seq_len, dtype=torch.bool),
-            position_ids=torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1),
+            token_ids=torch.randint(0, 64, (batch_size, seq_len)),
+            token_streets=torch.zeros(batch_size, seq_len),
+            card_ranks=torch.zeros(batch_size, seq_len),
+            card_suits=torch.zeros(batch_size, seq_len),
+            action_actors=torch.zeros(batch_size, seq_len),
+            action_legal_masks=torch.ones(
+                batch_size, seq_len, num_bet_bins, dtype=torch.bool
+            ),
+            context_features=torch.zeros(batch_size, seq_len, 13),
+            lengths=torch.full((batch_size,), seq_len, dtype=torch.uint8),
         )
 
         # First forward pass
@@ -153,9 +163,16 @@ class TestPokerTransformerKVCaching:
 
         # Second forward pass with cache
         structured_data2 = StructuredEmbeddingData(
-            token_ids=torch.randint(0, 100, (batch_size, 1)),
-            attention_mask=torch.ones(batch_size, 1, dtype=torch.bool),
-            position_ids=torch.zeros(batch_size, 1, dtype=torch.long),
+            token_ids=torch.randint(0, 64, (batch_size, 1)),
+            token_streets=torch.zeros(batch_size, 1),
+            card_ranks=torch.zeros(batch_size, 1),
+            card_suits=torch.zeros(batch_size, 1),
+            action_actors=torch.zeros(batch_size, 1),
+            action_legal_masks=torch.ones(
+                batch_size, 1, num_bet_bins, dtype=torch.bool
+            ),
+            context_features=torch.zeros(batch_size, 1, 13),
+            lengths=torch.full((batch_size,), 1, dtype=torch.uint8),
         )
 
         output2 = model(structured_data2, kv_cache=output1.kv_cache)
@@ -302,6 +319,9 @@ class TestKVCachingIntegration:
             n_layers=n_layers,
             n_heads=n_heads,
             num_bet_bins=num_bet_bins,
+            max_sequence_length=128,
+            dropout=0.1,
+            use_gradient_checkpointing=False,
         )
 
         batch_size = 1
@@ -324,9 +344,16 @@ class TestKVCachingIntegration:
             seq_len = action_tokens.shape[1]
 
             structured_data = StructuredEmbeddingData(
-                token_ids=action_tokens,
-                attention_mask=torch.ones(batch_size, seq_len, dtype=torch.bool),
-                position_ids=torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1),
+                token_ids=(action_tokens % 64),
+                token_streets=torch.zeros(batch_size, seq_len),
+                card_ranks=torch.zeros(batch_size, seq_len),
+                card_suits=torch.zeros(batch_size, seq_len),
+                action_actors=torch.zeros(batch_size, seq_len),
+                action_legal_masks=torch.ones(
+                    batch_size, seq_len, num_bet_bins, dtype=torch.bool
+                ),
+                context_features=torch.zeros(batch_size, seq_len, 13),
+                lengths=torch.full((batch_size,), seq_len, dtype=torch.uint8),
             )
 
             # Get current cache

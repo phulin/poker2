@@ -111,6 +111,7 @@ def test_trinal_clip_ppo_loss():
         entropy_coef=0.01,
         value_loss_type="mse",
         huber_delta=1.0,
+        target_kl=0.015,
     )
 
     loss_result = loss_calculator.compute_loss(
@@ -470,6 +471,8 @@ def test_basic_training_step():
     # Run a few training steps
     for step in range(3):
         print(f"\n=== Training Step {step} ===")
+        # Disable KL scaling interaction in schedule
+        trainer.kl_ema_initialized = False
         stats = trainer.train_step(step + 1)
 
         print(f"Step {step} stats: {stats}")
