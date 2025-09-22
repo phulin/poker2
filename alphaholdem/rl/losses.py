@@ -168,6 +168,7 @@ class TrinalClipPPOLoss(LossCalculator):
         # A<0 path: clamp to [1-ε, δ1]
         r_neg = torch.clamp(ratio, min=ppo_low, max=self.delta1)
         r_tc = torch.where(is_neg_adv, r_neg, r_pos)
+        clipfrac = (torch.abs(r_tc - ratio) > 1e-8).float().mean()
 
         # Policy loss
         policy_loss_vec = -(r_tc * advantages)
@@ -177,7 +178,6 @@ class TrinalClipPPOLoss(LossCalculator):
         # We store delta2 as a negative lower bound (i.e., -chips_opponent/scale),
         # and delta3 as a positive upper bound (chips_self/scale), so clamp directly.
         clipped_returns = torch.clamp(returns, delta2, delta3)
-        clipfrac = (torch.abs(clipped_returns - returns) > 1e-8).float().mean()
 
         if self.value_loss_type == "huber":
             value_loss = F.smooth_l1_loss(
