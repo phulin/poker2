@@ -1167,6 +1167,8 @@ class SelfPlayTrainer:
                     "explained_var": training_stats["explained_var"],
                     "avg_loss": training_stats["avg_loss"],
                     "num_samples": training_stats["num_samples"],
+                    "advantage_mean_raw": training_stats["advantage_mean_raw"],
+                    "advantage_std_raw": training_stats["advantage_std_raw"],
                     "lr": learning_rate,
                     "entropy_coef_current": self.entropy_coef,
                     "epsilon": training_stats["epsilon"],
