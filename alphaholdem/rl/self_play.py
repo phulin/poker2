@@ -28,6 +28,8 @@ from ..rl.vectorized_replay import VectorizedReplayBuffer
 from ..utils.kl_divergence import compute_kl_divergence_batch
 from ..utils.profiling import profile
 
+TARGET_KL = 0.015
+
 
 class SelfPlayTrainer:
     def __init__(
@@ -223,7 +225,7 @@ class SelfPlayTrainer:
             entropy_coef=self.entropy_coef,
             value_loss_type=self.cfg.train.value_loss_type,
             huber_delta=self.cfg.train.huber_delta,
-            target_kl=0.015,
+            target_kl=TARGET_KL,
         )
 
         # KL divergence exponential moving average tracking
@@ -1166,7 +1168,7 @@ class SelfPlayTrainer:
         else:
             lr_now = lr_start
 
-        kl_ratio = self.kl_ema / (self.target_kl + 1e-8)
+        kl_ratio = self.kl_ema / TARGET_KL
         kl_scale = 1.0 / (kl_ratio**0.5)
         lr_now *= kl_scale
 
