@@ -209,7 +209,6 @@ class TestPokerTransformerV1:
         assert isinstance(inner_model, PokerTransformerV1)
 
     def test_attention_mask_respects_variable_lengths(self):
-        device = torch.device("cpu")
         batch_size, seq_len = 3, 12
         num_bet_bins = 8
         special_offset = get_special_token_id_offset()
@@ -247,7 +246,9 @@ class TestPokerTransformerV1:
         )
 
         mask = data.attention_mask
-        expected = data.token_ids < 0
+        expected = data.token_ids >= 0  # True = allow attention (SDPA semantics)
         assert torch.equal(mask, expected)
         for i, length in enumerate(lengths):
-            assert mask[i].sum().item() == mask.shape[1] - int(length.item())
+            assert mask[i].sum().item() == int(
+                length.item()
+            )  # Sum should equal number of valid tokens

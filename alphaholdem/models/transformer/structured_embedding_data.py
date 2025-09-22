@@ -155,10 +155,10 @@ class StructuredEmbeddingData:
     @property
     def attention_mask(self) -> torch.Tensor:
         """
-        SDPA-style key mask with zeros for valid tokens and ones (True) for padding/invalid.
-        True means 'block'; False/0 means 'allow'.
+        SDPA-style attention mask where True means 'allow' attention, False means 'block'.
+        Valid tokens (token_ids >= 0) should allow attention, padding tokens (token_ids < 0) should block.
         """
-        return self.token_ids < 0  # dtype: bool, shape: [B, S]
+        return self.token_ids >= 0  # dtype: bool, shape: [B, S]
 
     def clone(self) -> StructuredEmbeddingData:
         """Return a copy of the embedding data."""

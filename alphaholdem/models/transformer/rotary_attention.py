@@ -68,7 +68,7 @@ class RotarySelfAttention(nn.Module):
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, d_model)
-            attention_mask: Boolean mask of shape (batch_size, seq_len) where True means block
+            attention_mask: Boolean mask of shape (batch_size, seq_len) where True means allow
             cos: Cosine values for RoPE of shape (seq_len, d_head)
             sin: Sine values for RoPE of shape (seq_len, d_head)
             kv_cache: Optional cached key-value pairs from previous forward passes
@@ -108,36 +108,36 @@ class RotarySelfAttention(nn.Module):
 
         L_k = L_cache + L_q  # total key length
 
-        # ---- Build SDPA boolean attn mask (True = BLOCK) for keys ----
-        # Caller supplies a *current-chunk* blocking mask: [B, L_q], True = block.
-        block_mask_cur = attention_mask.to(torch.bool)
-        assert block_mask_cur.shape == (
+        # ---- Build SDPA boolean attn mask (True = ALLOW) for keys ----
+        # Caller supplies a *current-chunk* allow mask: [B, L_q], True = allow attention.
+        assert attention_mask.shape == (
             B,
             L_q,
-        ), f"attention_mask must be [B,L_q], got {block_mask_cur.shape} vs L_q={L_q}"
+        ), f"attention_mask must be [B,L_q], got {attention_mask.shape} vs L_q={L_q}"
 
         if L_cache > 0:
-            # Cached keys are always valid keys (not blocked): zeros
-            cached_block = torch.zeros(B, L_cache, dtype=torch.bool, device=x.device)
-            key_block_mask = torch.cat(
-                [cached_block, block_mask_cur], dim=1
+            # Cached keys are always valid keys (allow attention): ones
+            cached_allow = torch.ones(B, L_cache, dtype=torch.bool, device=x.device)
+            key_allow_mask = torch.cat(
+                [cached_allow, attention_mask], dim=1
             )  # [B, L_k]
         else:
-            key_block_mask = block_mask_cur  # [B, L_k == L_q]
+            key_allow_mask = attention_mask  # [B, L_k == L_q]
 
-        assert key_block_mask.shape == (
+        assert key_allow_mask.shape == (
             B,
             L_k,
-        ), f"key_block_mask {key_block_mask.shape} must match total key length L_k={L_k}"
+        ), f"key_allow_mask {key_allow_mask.shape} must match total key length L_k={L_k}"
 
         # Expand to [BH, L_q, L_k] (same key mask for every query position)
-        key_block_mask_bh = (
-            key_block_mask.unsqueeze(1).expand(B, H, L_k).reshape(B * H, L_k)
+        key_allow_mask_bh = (
+            key_allow_mask.unsqueeze(1).expand(B, H, L_k).reshape(B * H, L_k)
         )
-        attn_mask_3d = key_block_mask_bh.unsqueeze(1).expand(B * H, L_q, L_k)
+        attn_mask_3d = key_allow_mask_bh.unsqueeze(1).expand(B * H, L_q, L_k)
 
         # Optional: safety check — don't allow fully blocked rows
-        if (key_block_mask_bh.all(dim=1)).any():
+        # Check if any row has ALL False values (completely blocked)
+        if (key_allow_mask_bh.sum(dim=1) == 0).any():
             raise RuntimeError(
                 "Attention mask blocks all keys for at least one (B*H) row."
             )
@@ -151,7 +151,7 @@ class RotarySelfAttention(nn.Module):
             q,
             k,
             v,
-            attn_mask=attn_mask_3d,  # True = block
+            attn_mask=attn_mask_3d,  # True = allow attention
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=False,
         )
