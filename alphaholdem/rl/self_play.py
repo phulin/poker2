@@ -31,6 +31,36 @@ from ..utils.profiling import profile
 TARGET_KL = 0.015
 
 
+class SelfDummySnapshot:
+    def __init__(self, trainer: SelfPlayTrainer):
+        self.trainer = trainer
+        self.wins = 0
+        self.losses = 0
+        self.draws = 0
+        self.games_played = 0
+        self.total_rewards = 0.0
+
+    @property
+    def model(self):
+        return self.trainer.model
+
+    @property
+    def model_dtype(self):
+        return self.trainer.model.dtype
+
+    @property
+    def step(self):
+        return self.trainer.step
+
+    @property
+    def elo(self):
+        return self.trainer.opponent_pool.current_elo
+
+    @elo.setter
+    def elo(self, value):
+        pass
+
+
 class SelfPlayTrainer:
     def __init__(
         self, cfg: Config, device: torch.device, rng_seed: Optional[int] = None
@@ -451,6 +481,54 @@ class SelfPlayTrainer:
                     opponent_rewards,
                 )
 
+    def _model_with_kv_cache(
+        self,
+        model,
+        states,
+        opponent_idx: int = -1,  # -1 for self
+    ):
+        """
+        Run model forward pass with KV cache handling.
+
+        Args:
+            model: The model to run forward pass on
+            states: Input states for the model
+            cache_type: Type of cache ("self" or "opponent")
+            opponent_idx: Index of opponent (only used for opponent cache)
+            move_to_device: Whether to move the model to the correct device first
+
+        Returns:
+            Model outputs
+        """
+        model.to(device=self.device)
+
+        with torch.amp.autocast(
+            self.device.type,
+            dtype=torch.bfloat16,
+            enabled=self.use_mixed_precision,
+        ):
+            if self.is_transformer and self.kv_cache_manager is not None:
+                if opponent_idx == -1:
+                    # Get our cache
+                    cache = self.kv_cache_manager.get_self_cache()
+                    outputs = model(states, kv_cache=cache)
+                    # Update our cache
+                    if outputs.kv_cache is not None:
+                        self.kv_cache_manager.update_self_cache(outputs.kv_cache)
+                else:  # opponent
+                    # Get opponent cache
+                    cache = self.kv_cache_manager.get_opponent_cache(opponent_idx)
+                    outputs = model(states, kv_cache=cache)
+                    # Update opponent cache
+                    if outputs.kv_cache is not None:
+                        self.kv_cache_manager.update_opponent_cache(
+                            opponent_idx, outputs.kv_cache
+                        )
+            else:
+                outputs = model(states)
+
+        return outputs
+
     def _reset_tensor_env_and_encoder_kv(
         self, opponent_snapshots: Optional[list[AgentSnapshot]]
     ) -> None:
@@ -539,13 +617,15 @@ class SelfPlayTrainer:
         # Use the trainer's state_encoder as the TSB for transformer path
 
         # Chunk opponents by tensor env index
-        opp_env_groups = None
         env_indices = torch.arange(self.num_envs, device=self.device)
         if all_opponent_snapshots is not None and len(all_opponent_snapshots) > 0:
             # Use opponent models - assign opponents to environments
             num_opps = len(all_opponent_snapshots)
             # Split active_opp_acts into num_opps approximately equal groups
             opp_env_groups = torch.chunk(env_indices, num_opps)
+        else:
+            all_opponent_snapshots = [SelfDummySnapshot(self)]
+            opp_env_groups = [env_indices]
 
         # Initialize logits and values tensors for active environments only
         env_logits = torch.zeros(
@@ -597,11 +677,6 @@ class SelfPlayTrainer:
                 ):
                     self.state_encoder.add_context(active_indices)
 
-                # Encode states from our perspective (player=0)
-                our_states = self.state_encoder.encode_tensor_states(
-                    player=0, idxs=env_active_we_act
-                )
-
                 env_logits.zero_()
                 env_values.zero_()
 
@@ -609,23 +684,14 @@ class SelfPlayTrainer:
 
                 # Get predictions from our model for our turns
                 if env_active_we_act.numel() > 0:
-                    with torch.amp.autocast(
-                        self.device.type,
-                        dtype=torch.bfloat16,
-                        enabled=self.use_mixed_precision,
-                    ):
-                        # Use KV caching for transformer models
-                        if self.is_transformer and self.kv_cache_manager is not None:
-                            # Get our cache
-                            our_cache = self.kv_cache_manager.get_self_cache()
-                            outputs = self.model(our_states, kv_cache=our_cache)
-                            # Update our cache
-                            if outputs.kv_cache is not None:
-                                self.kv_cache_manager.update_self_cache(
-                                    outputs.kv_cache
-                                )
-                        else:
-                            outputs = self.model(our_states)
+                    # Encode states from our perspective (player=0)
+                    our_states = self.state_encoder.encode_tensor_states(
+                        player=0, idxs=env_active_we_act
+                    )
+
+                    outputs = self._model_with_kv_cache(
+                        self.model, our_states, opponent_idx=-1
+                    )
 
                     env_logits[env_active_we_act] = outputs.policy_logits.float()
                     env_values[env_active_we_act] = outputs.value.float()
@@ -646,68 +712,16 @@ class SelfPlayTrainer:
                             player=1, idxs=opp_working_env_indices
                         )
 
-                        # Use indices directly into active arrays
-                        with torch.amp.autocast(
-                            self.device.type,
-                            dtype=torch.bfloat16,
-                            enabled=self.use_mixed_precision,
-                        ):
-                            # Use KV caching for transformer models
-                            if (
-                                self.is_transformer
-                                and self.kv_cache_manager is not None
-                            ):
-                                # Get opponent cache
-                                opp_cache = self.kv_cache_manager.get_opponent_cache(
-                                    opponent_idx
-                                )
-                                # Ensure opponent model is on the correct device
-                                opponent.model.to(device=self.device)
-                                outputs = opponent.model(
-                                    opp_states,
-                                    kv_cache=opp_cache,
-                                )
-                                # Update opponent cache
-                                if outputs.kv_cache is not None:
-                                    self.kv_cache_manager.update_opponent_cache(
-                                        opponent_idx, outputs.kv_cache
-                                    )
-                            else:
-                                outputs = opponent.model(opp_states)
-                            env_logits[opp_working_env_indices] = (
-                                outputs.policy_logits.float()
-                            )
-                            env_values[opp_working_env_indices] = outputs.value.float()
+                        outputs = self._model_with_kv_cache(
+                            opponent.model,
+                            opp_states,
+                            opponent_idx=opponent_idx,
+                        )
+                        env_logits[opp_working_env_indices] = (
+                            outputs.policy_logits.float()
+                        )
+                        env_values[opp_working_env_indices] = outputs.value.float()
 
-                elif env_active_opp_acts.numel() > 0:
-                    opp_states = self.state_encoder.encode_tensor_states(
-                        player=1, idxs=env_active_opp_acts
-                    )
-                    # Self-play: use our model for opponent turns too
-                    with torch.amp.autocast(
-                        self.device.type,
-                        dtype=torch.bfloat16,
-                        enabled=self.use_mixed_precision,
-                    ):
-                        # Use KV caching for transformer models
-                        if self.is_transformer and self.kv_cache_manager is not None:
-                            # For self-play, we can reuse our own cache for opponent turns
-                            # or create a separate cache for the opponent player
-                            opp_cache = self.kv_cache_manager.get_opponent_cache(
-                                0
-                            )  # Player 1
-                            outputs = self.model(opp_states, kv_cache=opp_cache)
-                            # Update opponent cache
-                            if outputs.kv_cache is not None:
-                                self.kv_cache_manager.update_opponent_cache(
-                                    0, outputs.kv_cache
-                                )
-                        else:
-                            outputs = self.model(opp_states)
-                        env_logits[env_active_opp_acts] = outputs.policy_logits.float()
-                        env_values[env_active_opp_acts] = outputs.value.float()
-
-                # Sample actions for active environments only.
                 active_env_logits = env_logits[active_indices]
                 active_env_legal_mask = legal_bins_mask[active_indices]
                 action_bins_active, log_probs_active_full = self.policy.action_batch(
