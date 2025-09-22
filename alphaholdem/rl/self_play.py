@@ -8,6 +8,8 @@ import torch.nn as nn
 
 import wandb
 
+from alphaholdem.utils.ema import EMA
+
 from ..core.builders import build_components_from_config
 from ..core.structured_config import Config
 from ..encoding.action_mapping import bin_to_action, get_legal_mask
@@ -248,6 +250,9 @@ class SelfPlayTrainer:
             enabled=self.use_mixed_precision,
         )
 
+        # KL divergence exponential moving average tracking
+        self.kl_ema = EMA(decay=0.99, initial_value=0.0)
+
         # Initialize loss calculator
         self.loss_calculator = TrinalClipPPOLoss(
             epsilon=self.epsilon,
@@ -257,12 +262,8 @@ class SelfPlayTrainer:
             value_loss_type=self.cfg.train.value_loss_type,
             huber_delta=self.cfg.train.huber_delta,
             target_kl=TARGET_KL,
+            kl_ema=self.kl_ema,
         )
-
-        # KL divergence exponential moving average tracking
-        self.kl_ema_decay = 0.99
-        self.kl_ema = 0.0
-        self.kl_ema_initialized = False
 
         # Training stats
         self.step_trajectories_collected = 0
@@ -939,6 +940,7 @@ class SelfPlayTrainer:
         total_entropy, total_clipfrac = 0.0, 0.0
         total_explained_var, total_epsilon = 0.0, 0.0
         total_advantage_mean_raw, total_advantage_std_raw = 0.0, 0.0
+        total_return_abs_mean, total_return_abs_std = 0.0, 0.0
         minibatch_count = 0
 
         for _ in range(self.num_epochs):
@@ -953,6 +955,8 @@ class SelfPlayTrainer:
             batch.advantages = (adv - adv_mean_raw) / adv_std_raw
             total_advantage_mean_raw += adv_mean_raw.item()
             total_advantage_std_raw += adv_std_raw.item()
+            total_return_abs_mean += batch.returns.abs().mean().item()
+            total_return_abs_std += batch.returns.abs().std().item()
 
             with torch.amp.autocast(
                 self.device.type,
@@ -964,21 +968,11 @@ class SelfPlayTrainer:
                 logits = outputs.policy_logits.float()
                 values = outputs.value.float()
 
-                if isinstance(self.loss_calculator, TrinalClipPPOLoss):
-                    loss_result = self.loss_calculator.compute_loss(
-                        logits=logits,
-                        values=values,
-                        batch=batch,
-                        kl_divergence_ema=(
-                            self.kl_ema if self.kl_ema_initialized else None
-                        ),
-                    )
-                else:
-                    loss_result = self.loss_calculator.compute_loss(
-                        logits=logits,
-                        values=values,
-                        batch=batch,
-                    )
+                loss_result = self.loss_calculator.compute_loss(
+                    logits=logits,
+                    values=values,
+                    batch=batch,
+                )
 
             # Debugging metrics: explained variance
             with torch.no_grad():
@@ -1077,13 +1071,7 @@ class SelfPlayTrainer:
         )
 
         # Update KL divergence exponential moving average
-        if not self.kl_ema_initialized:
-            self.kl_ema = current_kl
-            self.kl_ema_initialized = True
-        else:
-            self.kl_ema = (
-                self.kl_ema_decay * self.kl_ema + (1 - self.kl_ema_decay) * current_kl
-            )
+        self.kl_ema.update(current_kl)
 
         denom = max(1, minibatch_count)
 
@@ -1103,6 +1091,8 @@ class SelfPlayTrainer:
             "epsilon": total_epsilon / denom,
             "advantage_mean_raw": total_advantage_mean_raw / denom,
             "advantage_std_raw": total_advantage_std_raw / denom,
+            "return_abs_mean": total_return_abs_mean / denom,
+            "return_abs_std": total_return_abs_std / denom,
         }
 
     @profile
@@ -1170,6 +1160,8 @@ class SelfPlayTrainer:
                     "num_samples": training_stats["num_samples"],
                     "advantage_mean_raw": training_stats["advantage_mean_raw"],
                     "advantage_std_raw": training_stats["advantage_std_raw"],
+                    "return_abs_mean": training_stats["return_abs_mean"],
+                    "return_abs_std": training_stats["return_abs_std"],
                     "lr": learning_rate,
                     "entropy_coef_current": self.entropy_coef,
                     "epsilon": training_stats["epsilon"],

@@ -7,8 +7,10 @@ from typing import Dict, Optional, Union
 import torch
 import torch.nn.functional as F
 
+
 from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
+from ..utils.ema import EMA
 from ..utils.profiling import profile
 from .vectorized_replay import BatchSample
 
@@ -96,6 +98,9 @@ class TrinalClipPPOLoss(LossCalculator):
         value_loss_type: str,
         huber_delta: float,
         target_kl: float,
+        kl_ema: EMA,
+        value_mean_ema: EMA,
+        value_std_ema: EMA,
     ):
         """
         Initialize Trinal-Clip PPO loss calculator.
@@ -113,13 +118,15 @@ class TrinalClipPPOLoss(LossCalculator):
         )
         self.delta1 = delta1
         self.target_kl = target_kl
+        self.kl_ema = kl_ema
+        self.value_mean_ema = value_mean_ema
+        self.value_std_ema = value_std_ema
 
     def compute_loss(
         self,
         logits: torch.Tensor,
         values: torch.Tensor,
         batch: BatchSample,
-        kl_divergence_ema: Optional[float] = None,
     ) -> LossResult:
         """
         Compute Trinal-Clip PPO loss.
@@ -149,8 +156,8 @@ class TrinalClipPPOLoss(LossCalculator):
         action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
         epsilon = self.epsilon
-        if kl_divergence_ema is not None:
-            epsilon = epsilon * (self.target_kl / (kl_divergence_ema + 1e-8))
+        if self.kl_ema.initialized:
+            epsilon = epsilon * (self.target_kl / (self.kl_ema.value + 1e-8))
             epsilon = min(max(epsilon, self.epsilon / 2), self.epsilon * 2)
 
         # Importance sampling ratio
