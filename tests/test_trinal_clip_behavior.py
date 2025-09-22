@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.rl.losses import trinal_clip_ppo_loss
+from alphaholdem.rl.losses import TrinalClipPPOLoss
+from alphaholdem.rl.vectorized_replay import BatchSample
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
 
 
 def test_trinal_policy_upper_clip_for_negative_advantages():
@@ -20,23 +24,47 @@ def test_trinal_policy_upper_clip_for_negative_advantages():
     returns = torch.zeros(batch)
     legal_masks = torch.ones(batch, num_actions, dtype=torch.bool)
 
-    out = trinal_clip_ppo_loss(
-        logits=logits,
-        values=values,
-        actions=actions,
-        log_probs_old=log_probs_old,
-        advantages=advantages,
-        returns=returns,
-        legal_masks=legal_masks,
-        epsilon=0.2,
-        delta1=3.0,
-        delta2=torch.tensor(-100.0),
-        delta3=torch.tensor(100.0),
-        value_coef=0.5,
-        entropy_coef=0.01,
+    # Create BatchSample object
+    embedding_data = StructuredEmbeddingData(
+        token_ids=torch.zeros(batch, 10),
+        token_streets=torch.zeros(batch, 10),
+        card_ranks=torch.zeros(batch, 10),
+        card_suits=torch.zeros(batch, 10),
+        action_actors=torch.zeros(batch, 10),
+        action_legal_masks=torch.zeros(batch, 10, 8, dtype=torch.bool),
+        context_features=torch.zeros(batch, 10, 3),
+        lengths=torch.full((batch,), 10),
     )
 
-    assert torch.isfinite(out["total_loss"])  # smoke check
+    batch_sample = BatchSample(
+        embedding_data=embedding_data,
+        action_indices=actions,
+        selected_log_probs=log_probs_old,
+        all_log_probs=log_probs_old,
+        legal_masks=legal_masks,
+        advantages=advantages,
+        returns=returns,
+        delta2=torch.tensor(-100.0),
+        delta3=torch.tensor(100.0),
+    )
+
+    # Create loss calculator and compute loss
+    loss_calculator = TrinalClipPPOLoss(
+        epsilon=0.2,
+        delta1=3.0,
+        value_coef=0.5,
+        entropy_coef=0.01,
+        value_loss_type="mse",
+        huber_delta=1.0,
+    )
+
+    out = loss_calculator.compute_loss(
+        logits=logits,
+        values=values,
+        batch=batch_sample,
+    )
+
+    assert torch.isfinite(out.total_loss)  # smoke check
 
 
 def test_value_clipping_symmetry():
@@ -50,20 +78,45 @@ def test_value_clipping_symmetry():
     returns = torch.tensor([-1000.0, -10.0, 10.0, 1000.0])
     legal_masks = torch.ones(batch, 9, dtype=torch.bool)
 
-    out = trinal_clip_ppo_loss(
-        logits,
-        values,
-        actions,
-        log_probs_old,
-        advantages,
-        returns,
-        legal_masks,
-        epsilon=0.2,
-        delta1=3.0,
+    # Create BatchSample object
+    embedding_data = StructuredEmbeddingData(
+        token_ids=torch.zeros(batch, 10),
+        token_streets=torch.zeros(batch, 10),
+        card_ranks=torch.zeros(batch, 10),
+        card_suits=torch.zeros(batch, 10),
+        action_actors=torch.zeros(batch, 10),
+        action_legal_masks=torch.zeros(batch, 10, 8, dtype=torch.bool),
+        context_features=torch.zeros(batch, 10, 3),
+        lengths=torch.full((batch,), 10),
+    )
+
+    batch_sample = BatchSample(
+        embedding_data=embedding_data,
+        action_indices=actions,
+        selected_log_probs=log_probs_old,
+        all_log_probs=log_probs_old,
+        legal_masks=legal_masks,
+        advantages=advantages,
+        returns=returns,
         delta2=torch.tensor(-100.0),
         delta3=torch.tensor(100.0),
+    )
+
+    # Create loss calculator and compute loss
+    loss_calculator = TrinalClipPPOLoss(
+        epsilon=0.2,
+        delta1=3.0,
         value_coef=0.5,
         entropy_coef=0.01,
+        value_loss_type="mse",
+        huber_delta=1.0,
     )
+
+    out = loss_calculator.compute_loss(
+        logits=logits,
+        values=values,
+        batch=batch_sample,
+    )
+
     # Value loss computed vs clipped returns; ensure finite
-    assert torch.isfinite(out["value_loss"])
+    assert torch.isfinite(out.value_loss)

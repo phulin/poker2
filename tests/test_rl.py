@@ -12,7 +12,7 @@ from alphaholdem.core.structured_config import (
     TrainingConfig,
 )
 from alphaholdem.env.analyze_tensor_env import get_preflop_range_grid
-from alphaholdem.rl.losses import trinal_clip_ppo_loss
+from alphaholdem.rl.losses import TrinalClipPPOLoss
 from alphaholdem.rl.replay import (
     ReplayBuffer,
     Trajectory,
@@ -73,28 +73,57 @@ def test_trinal_clip_ppo_loss():
     returns = torch.randn(batch_size)
     legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
-    # Compute loss
-    loss_dict = trinal_clip_ppo_loss(
-        logits=logits,
-        values=values,
-        actions=actions,
-        log_probs_old=log_probs_old,
-        advantages=advantages,
-        returns=returns,
-        legal_masks=legal_masks,
-        epsilon=0.2,
-        delta1=3.0,
-        delta2=torch.tensor(-100.0),
-        delta3=torch.tensor(100.0),
-        value_coef=0.5,
-        entropy_coef=0.01,
+    # Create BatchSample object
+    from alphaholdem.rl.vectorized_replay import BatchSample
+    from alphaholdem.models.transformer.structured_embedding_data import (
+        StructuredEmbeddingData,
     )
 
-    assert "total_loss" in loss_dict
-    assert "policy_loss" in loss_dict
-    assert "value_loss" in loss_dict
-    assert "entropy" in loss_dict
-    assert torch.isfinite(loss_dict["total_loss"])
+    # Create dummy embedding data
+    embedding_data = StructuredEmbeddingData(
+        token_ids=torch.zeros(batch_size, 10),
+        token_streets=torch.zeros(batch_size, 10),
+        card_ranks=torch.zeros(batch_size, 10),
+        card_suits=torch.zeros(batch_size, 10),
+        action_actors=torch.zeros(batch_size, 10),
+        action_legal_masks=torch.zeros(batch_size, 10, 8, dtype=torch.bool),
+        context_features=torch.zeros(batch_size, 10, 3),
+        lengths=torch.full((batch_size,), 10),
+    )
+
+    batch = BatchSample(
+        embedding_data=embedding_data,
+        action_indices=actions,
+        selected_log_probs=log_probs_old,
+        all_log_probs=log_probs_old,
+        legal_masks=legal_masks,
+        advantages=advantages,
+        returns=returns,
+        delta2=torch.tensor(-100.0),
+        delta3=torch.tensor(100.0),
+    )
+
+    # Create loss calculator and compute loss
+    loss_calculator = TrinalClipPPOLoss(
+        epsilon=0.2,
+        delta1=3.0,
+        value_coef=0.5,
+        entropy_coef=0.01,
+        value_loss_type="mse",
+        huber_delta=1.0,
+    )
+
+    loss_result = loss_calculator.compute_loss(
+        logits=logits,
+        values=values,
+        batch=batch,
+    )
+
+    assert hasattr(loss_result, "total_loss")
+    assert hasattr(loss_result, "policy_loss")
+    assert hasattr(loss_result, "value_loss")
+    assert hasattr(loss_result, "entropy")
+    assert torch.isfinite(loss_result.total_loss)
 
 
 def test_self_play_trainer_basic():
@@ -365,6 +394,7 @@ def test_preflop_range_grid():
         model=ModelConfig(),
         env=EnvConfig(),
         device="cpu",  # Set device to cpu for testing
+        num_envs=2048,  # Make environment bigger than 1326 to avoid index out of bounds
     )
 
     # Set device for testing
@@ -378,6 +408,7 @@ def test_preflop_range_grid():
     # Generate range grid using the new analyze_tensor_env functions
     grid = get_preflop_range_grid(
         model=trainer.model,
+        state_encoder=trainer.state_encoder,
         bin_index=0,  # Fold action
         starting_stack=cfg.env.stack,
         sb=cfg.env.sb,

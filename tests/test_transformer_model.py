@@ -18,7 +18,6 @@ from alphaholdem.models.transformer.tokens import (
     get_action_token_id_offset,
     get_card_token_id_offset,
     get_special_token_id_offset,
-    get_street_token_id_offset,
 )
 
 
@@ -38,10 +37,17 @@ class TestTransformerStateEncoder:
         device = torch.device("cpu")
         env = _build_env(device)
         env.reset()
-        encoder = TokenSequenceBuilder(env, device)
+        encoder = TokenSequenceBuilder(
+            tensor_env=env,
+            sequence_length=100,
+            num_bet_bins=8,
+            device=device,
+            float_dtype=torch.float32,
+        )
         idxs = torch.arange(env.N, device=device)
 
         encoder.add_cls(idxs)
+        encoder.add_context(idxs)
         encoder.add_street(idxs, torch.zeros_like(idxs))
         encoder.add_card(idxs, torch.zeros_like(idxs))
         encoder.add_card(idxs, torch.zeros_like(idxs))
@@ -49,7 +55,7 @@ class TestTransformerStateEncoder:
             idxs,
             torch.zeros_like(idxs),
             torch.zeros_like(idxs),
-            torch.zeros_like(idxs),
+            torch.zeros(2, 8, dtype=torch.bool),  # [batch_size, num_bet_bins]
             torch.zeros_like(idxs),
         )
 
@@ -64,7 +70,7 @@ class TestTransformerStateEncoder:
         assert torch.all(data.token_ids[:, 1] == special_offset + Special.CONTEXT.value)
 
         # Ensure we emit at least one street marker (preflop) per state.
-        preflop_token = get_street_token_id_offset() + Special.STREET_PREFLOP.value
+        preflop_token = special_offset + Special.STREET_PREFLOP.value
         assert torch.any(data.token_ids == preflop_token)
 
 
@@ -73,8 +79,20 @@ class TestEmbeddings:
         self.device = torch.device("cpu")
         self.env = _build_env(self.device)
         self.env.reset()
-        self.encoder = TokenSequenceBuilder(self.env, self.device)
+        self.encoder = TokenSequenceBuilder(
+            tensor_env=self.env,
+            sequence_length=100,
+            num_bet_bins=8,
+            device=self.device,
+            float_dtype=torch.float32,
+        )
         idxs = torch.arange(self.env.N, device=self.device)
+
+        # Build a proper token sequence
+        self.encoder.add_cls(idxs)
+        self.encoder.add_context(idxs)
+        self.encoder.add_street(idxs, torch.zeros_like(idxs))
+
         self.data = self.encoder.encode_tensor_states(player=0, idxs=idxs)
         self.num_bet_bins = self.env.num_bet_bins
         self.d_model = 64
@@ -105,7 +123,7 @@ class TestEmbeddings:
         assert torch.count_nonzero(result[~padding_mask]) > 0
 
     def test_context_features_affect_embeddings(self):
-        special_offset = get_special_token_id_offset(self.num_bet_bins)
+        special_offset = get_special_token_id_offset()
         context_id = special_offset + Special.CONTEXT.value
         context_mask = self.data.token_ids == context_id
         assert torch.any(context_mask)
@@ -129,8 +147,22 @@ class TestPokerTransformerV1:
         device = torch.device("cpu")
         env = _build_env(device)
         env.reset()
-        encoder = TokenSequenceBuilder(env, device)
+        encoder = TokenSequenceBuilder(
+            tensor_env=env,
+            sequence_length=100,
+            num_bet_bins=8,
+            device=device,
+            float_dtype=torch.float32,
+        )
         idxs = torch.arange(env.N, device=device)
+
+        # Build a proper token sequence first
+        encoder.add_cls(idxs)
+        encoder.add_street(idxs, torch.zeros_like(idxs))
+        encoder.add_card(idxs, torch.zeros_like(idxs))
+        encoder.add_card(idxs, torch.zeros_like(idxs))
+        encoder.add_context(idxs)
+
         structured = encoder.encode_tensor_states(player=0, idxs=idxs)
 
         model = PokerTransformerV1(
@@ -145,17 +177,21 @@ class TestPokerTransformerV1:
         with torch.no_grad():
             outputs = model(structured)
 
-        assert outputs["policy_logits"].shape == (
+        assert outputs.policy_logits.shape == (
             structured.batch_size,
             env.num_bet_bins,
         )
-        assert outputs["value"].shape == (structured.batch_size,)
+        assert outputs.value.shape == (structured.batch_size,)
 
     def test_factory_creates_state_encoder_and_model(self):
         device = torch.device("cpu")
         env = _build_env(device)
-        encoder = ModelFactory.create_state_encoder(
-            "transformer", device, tensor_env=env
+        encoder = TokenSequenceBuilder(
+            tensor_env=env,
+            sequence_length=100,
+            num_bet_bins=env.num_bet_bins,
+            device=device,
+            float_dtype=torch.float32,
         )
         assert isinstance(encoder, TokenSequenceBuilder)
 
@@ -196,7 +232,7 @@ class TestPokerTransformerV1:
                 token_ids[i, 5] = action_offset
 
         zeros = torch.zeros_like(token_ids)
-        legal = torch.zeros(batch_size, seq_len, num_bet_bins)
+        legal = torch.zeros(batch_size, seq_len, num_bet_bins, dtype=torch.bool)
         ctx = torch.zeros(batch_size, seq_len, 10)
         lengths = (token_ids >= 0).sum(dim=1)
         data = StructuredEmbeddingData(
@@ -211,7 +247,7 @@ class TestPokerTransformerV1:
         )
 
         mask = data.attention_mask
-        expected = data.token_ids >= 0
+        expected = data.token_ids < 0
         assert torch.equal(mask, expected)
         for i, length in enumerate(lengths):
-            assert mask[i].sum().item() == int(length.item())
+            assert mask[i].sum().item() == mask.shape[1] - int(length.item())

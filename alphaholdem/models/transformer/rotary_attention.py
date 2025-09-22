@@ -136,7 +136,7 @@ class RotarySelfAttention(nn.Module):
         )
         attn_mask_3d = key_block_mask_bh.unsqueeze(1).expand(B * H, L_q, L_k)
 
-        # Optional: safety check — don’t allow fully blocked rows
+        # Optional: safety check — don't allow fully blocked rows
         if (key_block_mask_bh.all(dim=1)).any():
             raise RuntimeError(
                 "Attention mask blocks all keys for at least one (B*H) row."
