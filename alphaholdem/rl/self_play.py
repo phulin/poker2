@@ -1573,11 +1573,15 @@ class SelfPlayTrainer:
             if self.use_tensor_env:
                 # Collect trajectories ONCE against all opponents; size to roughly hit min_games/opponent
                 total_target_trajectories = max(1, min_games * len(opponents))
+                for opp in opponents:
+                    opp.model.to(device=self.device)
                 _ = self.collect_tensor_trajectories(
                     min_trajectories=total_target_trajectories,
                     all_opponent_snapshots=opponents,
                     add_to_replay_buffer=False,
                 )
+                for opp in opponents:
+                    opp.model.to(device="cpu")
             else:
                 # Scalar fallback: play min_games per opponent without adding to replay buffer
                 for opp in opponents:
