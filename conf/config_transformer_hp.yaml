@@ -89,11 +89,12 @@ train:
 model:
   name: "poker_transformer_v1"
   kwargs:
-    maximum_sequence_length: 46
+    max_sequence_length: 47
     d_model: 256           # Larger model dimension
     n_layers: 8            # More layers
     n_heads: 2             # More attention heads
     dropout: 0.1
+    num_bet_bins: 8
     use_gradient_checkpointing: true
   
   # Policy configuration (using existing categorical policy for now)

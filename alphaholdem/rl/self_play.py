@@ -909,10 +909,11 @@ class SelfPlayTrainer:
 
         # Initialize tracking variables once before the epoch loop
         total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
-        total_entropy, total_approx_kl, total_clipfrac = 0.0, 0.0, 0.0
+        total_entropy, total_clipfrac = 0.0, 0.0
         total_explained_var, total_epsilon = 0.0, 0.0
         total_advantage_mean_raw, total_advantage_std_raw = 0.0, 0.0
         minibatch_count = 0
+        first_logits = None
 
         for _ in range(self.num_epochs):
             # Sample batch from vectorized buffer
@@ -935,6 +936,8 @@ class SelfPlayTrainer:
                 embedding_data = batch.embedding_data
                 outputs = self.model(embedding_data)
                 logits = outputs.policy_logits.float()
+                if first_logits is None:
+                    first_logits = logits.clone()
                 values = outputs.value.float()
 
                 if isinstance(self.loss_calculator, TrinalClipPPOLoss):
@@ -1005,27 +1008,22 @@ class SelfPlayTrainer:
                 sample_indices = torch.randperm(
                     batch_size, device=batch.returns.device
                 )[:sample_size]
-                # Get states for KL computation
-                kl_states = batch.embedding_data[sample_indices]
-                kl_legal_masks = batch.legal_masks[sample_indices]
-                new_logits = self.model(kl_states).policy_logits.float()
-                total_approx_kl += compute_kl_divergence_batch(
-                    new_logits,
-                    logits[sample_indices],
-                    kl_legal_masks,
-                )
+                last_states = batch.embedding_data[sample_indices]
+                last_legal_masks = batch.legal_masks[sample_indices]
 
                 if last_admitted_opponent is not None:
                     # Get last admitted opponent model logits
-                    last_admitted_opponent.model.to(kl_states.device)
+                    last_admitted_opponent.model.to(last_states.device)
                     opponent_outputs = last_admitted_opponent.model(
-                        kl_states.to(last_admitted_opponent.model_dtype)
+                        last_states.to(last_admitted_opponent.model_dtype)
                     )
                     opponent_logits = opponent_outputs.policy_logits.float()
 
+                    new_logits = self.model(last_states).policy_logits.float()
+
                     # Compute KL divergence
                     pool_kl_divergence = compute_kl_divergence_batch(
-                        new_logits, opponent_logits, kl_legal_masks
+                        new_logits, opponent_logits, last_legal_masks
                     )
 
             if self.opponent_pool.should_add_snapshot(step, pool_kl_divergence):
@@ -1049,10 +1047,18 @@ class SelfPlayTrainer:
             print(f"Total step reward: {self.total_step_reward}")
             print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
-        denom = max(1, minibatch_count)
+        # Get states for KL computation from the last batch
+        sample_batch_size = min(512, len(batch.embedding_data))
+        kl_states = batch.embedding_data[:sample_batch_size]
+        kl_legal_masks = batch.legal_masks[:sample_batch_size]
+        new_logits = self.model(kl_states).policy_logits.float()
+        current_kl = compute_kl_divergence_batch(
+            new_logits,
+            first_logits[:sample_batch_size],
+            kl_legal_masks,
+        )
 
         # Update KL divergence exponential moving average
-        current_kl = total_approx_kl / denom
         if not self.kl_ema_initialized:
             self.kl_ema = current_kl
             self.kl_ema_initialized = True
@@ -1060,6 +1066,8 @@ class SelfPlayTrainer:
             self.kl_ema = (
                 self.kl_ema_decay * self.kl_ema + (1 - self.kl_ema_decay) * current_kl
             )
+
+        denom = max(1, minibatch_count)
 
         return {
             "avg_reward": avg_reward,
@@ -1070,7 +1078,7 @@ class SelfPlayTrainer:
             "policy_loss": total_policy_loss / denom,
             "value_loss": total_value_loss / denom,
             "entropy": total_entropy / denom,
-            "approx_kl": total_approx_kl / denom,
+            "approx_kl": current_kl,
             "kl_ema": self.kl_ema,
             "clipfrac": total_clipfrac / denom,
             "explained_var": total_explained_var / denom,

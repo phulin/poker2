@@ -65,7 +65,7 @@ class PokerTransformerV1(nn.Module, Model):
 
     def __init__(
         self,
-        maximum_sequence_length: int,
+        max_sequence_length: int,
         d_model: int,
         n_layers: int,
         n_heads: int,
@@ -118,7 +118,7 @@ class PokerTransformerV1(nn.Module, Model):
 
         # Precompute cos/sin for RoPE
         cos, sin = self._build_rope_cache(
-            seq_len=maximum_sequence_length,
+            seq_len=max_sequence_length,
             device=torch.device("cpu"),
             dtype=torch.float32,
         )

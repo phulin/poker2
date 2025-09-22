@@ -614,7 +614,7 @@ def main(actions: Iterable[int]) -> None:
         model=ModelConfig(
             name="poker_transformer_v1",
             kwargs={
-                "maximum_sequence_length": 50,
+                "max_sequence_length": 47,
                 "d_model": 128,
                 "n_layers": 2,
                 "n_heads": 2,
