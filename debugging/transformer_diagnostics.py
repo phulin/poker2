@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 import sys
+import argparse
+from omegaconf import OmegaConf
 import math
 from typing import List, Tuple
 
@@ -43,19 +45,23 @@ from alphaholdem.models.transformer.tokens import (
     get_action_token_id_offset,
 )
 from alphaholdem.models.transformer.tokens import CLS_INDEX, HOLE0_INDEX, HOLE1_INDEX
+from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 @torch.no_grad()
 def build_preflop_batch(
-    device: torch.device, batch_size: int, seq_len: int = 64
+    device: torch.device,
+    batch_size: int,
+    seq_len: int,
+    env_cfg: EnvConfig,
 ) -> Tuple[TokenSequenceBuilder, torch.Tensor, int, int]:
-    # Build env consistent with structured config
+    # Build env using provided env config
     env = HUNLTensorEnv(
         num_envs=batch_size,
-        starting_stack=1000,
-        sb=5,
-        bb=10,
-        bet_bins=[0.5, 1.0, 1.5, 2.0],
+        starting_stack=env_cfg.stack,
+        sb=env_cfg.sb,
+        bb=env_cfg.bb,
+        bet_bins=env_cfg.bet_bins or [0.5, 1.0, 1.5, 2.0],
         device=device,
     )
     env.reset()
@@ -118,14 +124,14 @@ def card_shuffle_invariance(
     # Create shuffled copy
     shuffled = data.clone()
     B = shuffled.token_ids.shape[0]
+    arange = torch.arange(B, device=shuffled.device)
     perm = torch.randperm(B, device=shuffled.device)
-    for b in range(B):
-        shuffled.token_ids[b, HOLE0_INDEX] = data.token_ids[perm[b], HOLE0_INDEX]
-        shuffled.token_ids[b, HOLE1_INDEX] = data.token_ids[perm[b], HOLE1_INDEX]
-        shuffled.card_ranks[b, HOLE0_INDEX] = data.card_ranks[perm[b], HOLE0_INDEX]
-        shuffled.card_ranks[b, HOLE1_INDEX] = data.card_ranks[perm[b], HOLE1_INDEX]
-        shuffled.card_suits[b, HOLE0_INDEX] = data.card_suits[perm[b], HOLE0_INDEX]
-        shuffled.card_suits[b, HOLE1_INDEX] = data.card_suits[perm[b], HOLE1_INDEX]
+    shuffled.token_ids[arange, HOLE0_INDEX] = data.token_ids[perm, HOLE0_INDEX]
+    shuffled.token_ids[arange, HOLE1_INDEX] = data.token_ids[perm, HOLE1_INDEX]
+    shuffled.card_ranks[arange, HOLE0_INDEX] = data.card_ranks[perm, HOLE0_INDEX]
+    shuffled.card_ranks[arange, HOLE1_INDEX] = data.card_ranks[perm, HOLE1_INDEX]
+    shuffled.card_suits[arange, HOLE0_INDEX] = data.card_suits[perm, HOLE0_INDEX]
+    shuffled.card_suits[arange, HOLE1_INDEX] = data.card_suits[perm, HOLE1_INDEX]
 
     logits_shuf = model(shuffled).policy_logits.float()
     delta = (logits_shuf - logits_orig).float()
@@ -244,38 +250,86 @@ def embedding_grad_norms(
 
 
 def main() -> None:
-    device = torch.device("cpu")
+    parser = argparse.ArgumentParser(description="Transformer do-now diagnostics")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to a model checkpoint (.pt) to load before running diagnostics",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="Device to run on (e.g., cpu, cuda, mps)",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="conf/config_transformer_hp.yaml",
+        help="Path to YAML config (defaults to conf/config_transformer_hp.yaml)",
+    )
+    args = parser.parse_args()
+
+    device = torch.device(args.device)
+    # Load config YAML similar to train_kbest
+    cfg_yaml_path = os.path.expanduser(args.config)
+    if not os.path.isfile(cfg_yaml_path):
+        raise FileNotFoundError(f"Config not found: {cfg_yaml_path}")
+    cfg_dict = OmegaConf.to_container(OmegaConf.load(cfg_yaml_path), resolve=True)
+
+    # Construct structured Config
+    train_cfg = TrainingConfig(**cfg_dict.get("train", {}))
+    model_cfg = ModelConfig(**cfg_dict.get("model", {}))
+    env_cfg = EnvConfig(**cfg_dict.get("env", {}))
+    try:
+        from alphaholdem.core.structured_config import StateEncoderConfig, ExploiterConfig  # type: ignore
+
+        state_encoder_cfg = StateEncoderConfig(**cfg_dict.get("state_encoder", {}))
+        exploiter_cfg = ExploiterConfig(**cfg_dict.get("exploiter", {}))
+    except Exception:
+        # Fallback defaults if not present in config
+        from alphaholdem.core.structured_config import StateEncoderConfig as _SEC  # type: ignore
+        from alphaholdem.core.structured_config import ExploiterConfig as _EC  # type: ignore
+
+        state_encoder_cfg = _SEC(**cfg_dict.get("state_encoder", {}))
+        exploiter_cfg = _EC(**cfg_dict.get("exploiter", {}))
+
     cfg = Config(
-        use_wandb=False,
-        num_envs=64,
-        train=TrainingConfig(
-            batch_size=64,
-            num_epochs=1,
-            max_trajectory_length=8,
-            max_sequence_length=64,
-            learning_rate=1e-4,
-        ),
-        model=ModelConfig(
-            name="poker_transformer_v1",
-            kwargs={
-                "d_model": 128,
-                "n_layers": 2,
-                "n_heads": 4,
-                "num_bet_bins": 8,
-            },
-        ),
-        env=EnvConfig(stack=1000, bet_bins=[0.5, 1.0, 1.5, 2.0], sb=5, bb=10),
-        device=str(device),
+        train=train_cfg,
+        model=model_cfg,
+        env=env_cfg,
+        state_encoder=state_encoder_cfg,
+        exploiter=exploiter_cfg,
+        **{
+            k: v
+            for k, v in cfg_dict.items()
+            if k not in ["train", "model", "env", "state_encoder", "exploiter"]
+        },
     )
 
-    # Ensure required args for model
-    model_kwargs = dict(cfg.model.kwargs)
-    model_kwargs.setdefault("max_sequence_length", cfg.train.max_sequence_length)
-    model_kwargs.setdefault("dropout", 0.1)
-    model_kwargs.setdefault("use_gradient_checkpointing", False)
-    model = PokerTransformerV1(**model_kwargs).to(device)
+    # Override device via CLI and set seed
+    if args.device is not None:
+        cfg.device = str(device)
+    torch.manual_seed(cfg.seed)
+
+    cfg.num_envs = 64
+    cfg.use_wandb = False
+    # Build trainer and optionally load checkpoint via trainer API
+    trainer = SelfPlayTrainer(cfg=cfg, device=device)
+    model = trainer.model
+    if args.checkpoint is not None:
+        ckpt_path = os.path.expanduser(args.checkpoint)
+        if not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+        step, _ = trainer.load_checkpoint(ckpt_path)
+        print(f"Loaded checkpoint via trainer at step {step}")
+
     _, data, card_offset, _ = build_preflop_batch(
-        device, batch_size=cfg.num_envs, seq_len=cfg.train.max_sequence_length
+        device,
+        batch_size=cfg.num_envs,
+        seq_len=cfg.train.max_sequence_length,
+        env_cfg=cfg.env,
     )
 
     # 1) Card-shuffle invariance
