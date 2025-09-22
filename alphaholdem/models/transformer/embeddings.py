@@ -123,22 +123,22 @@ class PokerFusedEmbedding(nn.Module):
             embeddings[rows, cols] += action_embed
 
         # GAME token always at index 1 - process raw features
-        raw_game_features = data.context_features[
+        raw_game_features_float = data.context_features[
             :, GAME_INDEX, : Game.NUM_RAW_GAME.value
         ].float()  # Convert int16 to float
 
         # Extract raw values
-        sb_value = raw_game_features[:, Game.SB.value]
-        bb_value = raw_game_features[:, Game.BB.value]
-        hero_position = raw_game_features[:, Game.HERO_POSITION.value]
+        sb_value = raw_game_features_float[:, Game.SB.value]
+        bb_value = raw_game_features_float[:, Game.BB.value]
+        hero_position = raw_game_features_float[:, Game.HERO_POSITION.value]
         scale_value = 100.0 * bb_value.float()
 
         # Create game features tensor with scaled values
         game_features = torch.zeros(
-            raw_game_features.shape[0],
+            raw_game_features_float.shape[0],
             Game.NUM_GAME.value,
-            device=raw_game_features.device,
-            dtype=torch.float32,
+            device=raw_game_features_float.device,
+            dtype=raw_game_features_float.dtype,
         )
         game_features[:, Game.SB.value] = sb_value
         game_features[:, Game.BB.value] = bb_value
@@ -155,7 +155,7 @@ class PokerFusedEmbedding(nn.Module):
         context_mask = padded_ids == context_id
         if context_mask.any():
             # Process raw context features: convert to float and apply scaling
-            raw_ctx_features = data.context_features[context_mask].float()
+            raw_ctx_features_float = data.context_features[context_mask].float()
 
             # Get the batch indices for the context tokens
             context_batch_indices = torch.where(context_mask)[0]
@@ -166,7 +166,7 @@ class PokerFusedEmbedding(nn.Module):
 
             # Apply scaling factors and compute derived features
             scaled_ctx_features = self._process_context_features(
-                raw_ctx_features, context_bb_value, context_scale_value
+                raw_ctx_features_float, context_bb_value, context_scale_value
             )
 
             # Expand context features to broadcast to FOURIER_FEATURES features
