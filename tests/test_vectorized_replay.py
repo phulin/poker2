@@ -72,7 +72,7 @@ class TestVectorizedReplayBuffer:
             2, buffer.max_sequence_length, 10, dtype=torch.float32, device=device
         )
         lengths = torch.full((2,), 5, dtype=torch.long, device=device)
-        token_ids[:, 0] = Special.CLS.value
+        token_ids[:, 0] = Special.GAME.value
         token_ids[:, 1] = Special.CONTEXT.value
         token_ids[:, 2] = Special.STREET_PREFLOP.value
         token_ids[:, 3] = Special.NUM_SPECIAL.value  # first card id offset
@@ -104,7 +104,7 @@ class TestVectorizedReplayBuffer:
         env_idxs = torch.tensor([0, 1], device=device)
         buffer.add_tokens(emb, env_idxs)
         assert buffer.token_positions[0] == 5
-        assert buffer.token_ids[0, 0] == Special.CLS.value
+        assert buffer.token_ids[0, 0] == Special.GAME.value
         assert buffer.token_ids[0, 2] == Special.STREET_PREFLOP.value
 
     def test_transformer_add_opponent_actions(self, buffer):
@@ -165,7 +165,7 @@ class TestVectorizedReplayBuffer:
         L = buffer.max_sequence_length
         token_ids = torch.full((1, L), -1, dtype=torch.long, device=device)
         ctx = torch.zeros(1, L, 10, dtype=torch.float32, device=device)
-        token_ids[:, 0] = Special.CLS.value
+        token_ids[:, 0] = Special.GAME.value
         token_ids[:, 1] = Special.CONTEXT.value
         ctx[:, 0, 0] = 5.0  # sb
         ctx[:, 0, 1] = 10.0  # bb

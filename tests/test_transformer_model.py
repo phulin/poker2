@@ -46,7 +46,7 @@ class TestTransformerStateEncoder:
         )
         idxs = torch.arange(env.N, device=device)
 
-        encoder.add_cls(idxs)
+        encoder.add_game(idxs)
         encoder.add_context(idxs)
         encoder.add_street(idxs, torch.zeros_like(idxs))
         encoder.add_card(idxs, torch.zeros_like(idxs))
@@ -66,7 +66,7 @@ class TestTransformerStateEncoder:
         assert torch.equal(data.lengths, valid_counts)
 
         special_offset = get_special_token_id_offset()
-        assert torch.all(data.token_ids[:, 0] == special_offset + Special.CLS.value)
+        assert torch.all(data.token_ids[:, 0] == special_offset + Special.GAME.value)
         assert torch.all(data.token_ids[:, 1] == special_offset + Special.CONTEXT.value)
 
         # Ensure we emit at least one street marker (preflop) per state.
@@ -89,7 +89,7 @@ class TestEmbeddings:
         idxs = torch.arange(self.env.N, device=self.device)
 
         # Build a proper token sequence
-        self.encoder.add_cls(idxs)
+        self.encoder.add_game(idxs)
         self.encoder.add_context(idxs)
         self.encoder.add_street(idxs, torch.zeros_like(idxs))
 
@@ -157,7 +157,7 @@ class TestPokerTransformerV1:
         idxs = torch.arange(env.N, device=device)
 
         # Build a proper token sequence first
-        encoder.add_cls(idxs)
+        encoder.add_game(idxs)
         encoder.add_street(idxs, torch.zeros_like(idxs))
         encoder.add_card(idxs, torch.zeros_like(idxs))
         encoder.add_card(idxs, torch.zeros_like(idxs))
@@ -219,7 +219,7 @@ class TestPokerTransformerV1:
         # Build sequences of different lengths
         raw_lengths = torch.tensor([5, 7, 3])
         for i, length in enumerate(raw_lengths):
-            token_ids[i, 0] = special_offset + Special.CLS.value
+            token_ids[i, 0] = special_offset + Special.GAME.value
             token_ids[i, 1] = special_offset + Special.CONTEXT.value
             if length > 2:
                 token_ids[i, 2] = special_offset + Special.STREET_PREFLOP.value

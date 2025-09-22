@@ -44,9 +44,6 @@ class ModelConfig:
     name: str = "siamese_convnet_v1"
     kwargs: Optional[dict] = None
     policy: Optional[dict] = None
-    use_gradient_checkpointing: bool = (
-        True  # Enable gradient checkpointing for memory efficiency
-    )
 
     def __post_init__(self):
         if self.kwargs is None:

@@ -41,8 +41,6 @@ def build_components_from_config(cfg) -> Tuple[Any, Any, Any, Any]:
 
     # Pass gradient checkpointing configuration to model
     model_kwargs = cfg.model.kwargs.copy() if cfg.model.kwargs else {}
-    # Ensure gradient checkpointing is set in kwargs
-    model_kwargs["use_gradient_checkpointing"] = cfg.model.use_gradient_checkpointing
     model = registry.build_model(cfg.model.name, **model_kwargs)
 
     policy = registry.build_policy(

@@ -3,6 +3,7 @@
 from enum import Enum
 
 CLS_INDEX = 0
+GAME_INDEX = 1
 HOLE0_INDEX = 2
 HOLE1_INDEX = 3
 
@@ -11,12 +12,13 @@ class Special(Enum):
     """Special tokens used in the variable-length transformer sequence."""
 
     CLS = 0
-    CONTEXT = 1
-    STREET_PREFLOP = 2
-    STREET_FLOP = 3
-    STREET_TURN = 4
-    STREET_RIVER = 5
-    NUM_SPECIAL = 6
+    GAME = 1
+    CONTEXT = 2
+    STREET_PREFLOP = 3
+    STREET_FLOP = 4
+    STREET_TURN = 5
+    STREET_RIVER = 6
+    NUM_SPECIAL = 7
 
 
 class Context(Enum):
@@ -38,7 +40,7 @@ class Context(Enum):
     NUM_CONTEXT = 13
 
 
-class Cls(Enum):
+class Game(Enum):
     """CLS token indices for the transformer model."""
 
     SB = 0

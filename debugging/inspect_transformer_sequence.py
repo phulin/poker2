@@ -23,7 +23,7 @@ from alphaholdem.core.structured_config import (
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.transformer.tokens import (
-    Cls,
+    Game,
     Context,
     Special,
     get_action_token_id_offset,
@@ -78,45 +78,25 @@ def print_environment_state(env: HUNLTensorEnv, step_idx: int) -> None:
 
 
 def make_pretty_tokens(data, bet_bins: List[float], title: str) -> None:
-    """Pretty print token sequence data."""
-    encoder = type(data)  # Get the class for static methods
-    card_offset = encoder.get_card_token_offset(len(bet_bins) + 3)
-    action_offset = encoder.get_action_token_offset(len(bet_bins) + 3)
-    special_offset = encoder.get_special_token_offset(len(bet_bins) + 3)
-
-    print(f"\n--- Token sequence for {title} (length={int(data.lengths[0])}) ---")
-    for pos in range(int(data.lengths[0])):
-        token = int(data.token_ids[0, pos].item())
-        parts: List[str] = [f"[{pos:02d}]"]
-        if special_offset <= token < special_offset + Special.NUM_SPECIAL.value:
-            special_name = Special(token - special_offset).name
-            parts.append(f"special={special_name}")
-            if special_name == "CONTEXT":
-                ctx_vec = data.context_features[0, pos]
-                non_zero = {
-                    Context(idx).name.lower(): float(ctx_vec[idx].item())
-                    for idx in range(len(Context))
-                    if idx < Context.NUM_CONTEXT.value
-                    and abs(float(ctx_vec[idx].item())) > 1e-6
-                }
-                parts.append(f"context={non_zero}")
-        elif card_offset <= token < card_offset + 52:
-            parts.append("type=card")
-            parts.append(f"card={format_card(token - card_offset)}")
-            parts.append(f"street={int(data.token_streets[0, pos].item())}")
-        elif action_offset <= token < action_offset + len(bet_bins) + 3:
-            parts.append("type=action")
-            action_id = token - action_offset
-            parts.append(f"action={describe_action(action_id, bet_bins)}")
-            parts.append(f"actor={int(data.action_actors[0, pos].item())}")
-            parts.append(f"street={int(data.token_streets[0, pos].item())}")
-            legal_mask = data.action_legal_masks[0, pos]
-            legal_bins = [i for i, flag in enumerate(legal_mask.tolist()) if flag]
-            parts.append(f"legal={legal_bins}")
-        else:
-            parts.append(f"token_id={token}")
-
-        print(" ".join(parts))
+    """Pretty print token sequence data using the unified decoder."""
+    length = (
+        int(data.lengths[0]) if hasattr(data, "lengths") else data.token_ids.shape[1]
+    )
+    print(f"\n--- Token sequence for {title} (length={length}) ---")
+    # Provide bet_bins to the decoder via a temporary attribute if missing
+    needs_cleanup = False
+    if not hasattr(data, "bet_bins"):
+        try:
+            setattr(data, "bet_bins", bet_bins)
+            needs_cleanup = True
+        except Exception:
+            pass
+    print_decoded_token_sequence(data, 0, length)
+    if needs_cleanup:
+        try:
+            delattr(data, "bet_bins")
+        except Exception:
+            pass
 
 
 def print_decoded_token_sequence(data, row_idx: int, length: int) -> None:
@@ -132,6 +112,13 @@ def print_decoded_token_sequence(data, row_idx: int, length: int) -> None:
 
         if token == Special.CLS.value:
             parts.append("CLS")
+        elif token == Special.GAME.value:
+            parts.append("GAME")
+            parts.append(f"sb={data.context_features[row_idx, pos, Game.SB.value]:.0f}")
+            parts.append(f"bb={data.context_features[row_idx, pos, Game.BB.value]:.0f}")
+            parts.append(
+                f"hero_position={data.context_features[row_idx, pos, Game.HERO_POSITION.value]:.0f}"
+            )
         elif token == Special.CONTEXT.value:
             parts.append("CONTEXT")
         elif token in [
@@ -147,8 +134,6 @@ def print_decoded_token_sequence(data, row_idx: int, length: int) -> None:
         elif get_card_token_id_offset() <= token < get_action_token_id_offset():
             card_idx = token - get_card_token_id_offset()
             parts.append(f"CARD_{format_card(card_idx)}")
-            if hasattr(data, "token_streets"):
-                parts.append(f"street={int(data.token_streets[row_idx, pos].item())}")
         elif token >= get_action_token_id_offset():
             action_idx = token - get_action_token_id_offset()
             # Use env bet_bins if present for nicer labeling
@@ -169,8 +154,6 @@ def print_decoded_token_sequence(data, row_idx: int, length: int) -> None:
             )
             if hasattr(data, "action_actors"):
                 parts.append(f"actor={int(data.action_actors[row_idx, pos].item())}")
-            if hasattr(data, "token_streets"):
-                parts.append(f"street={int(data.token_streets[row_idx, pos].item())}")
             if hasattr(data, "action_legal_masks"):
                 legal_mask = data.action_legal_masks[row_idx, pos]
                 if legal_mask.dim() > 0:
@@ -182,7 +165,102 @@ def print_decoded_token_sequence(data, row_idx: int, length: int) -> None:
         print(" ".join(parts))
 
 
-def hook_model_forward(model, original_forward):
+def print_token_sequence_data(
+    data,
+    indices: List[int],
+    current_token_positions: torch.Tensor,
+    transition_token_ends: torch.Tensor,
+    trajectory_lengths: torch.Tensor,
+) -> None:
+    """Print the TOKEN SEQUENCE DATA section for given indices."""
+    print(f"\n--- TOKEN SEQUENCE DATA ---")
+    for traj_idx in indices:
+        token_pos = int(current_token_positions[traj_idx])
+        if token_pos <= 0:
+            continue
+        print(f"\nTrajectory {traj_idx} (token_pos={token_pos}):")
+
+        # Valid tokens and their indices
+        valid_tokens = data.token_ids[traj_idx] >= 0
+        valid_token_indices = torch.where(valid_tokens)[0]
+        if len(valid_token_indices) == 0:
+            print("  No valid tokens found")
+            continue
+
+        print(f"  Attention mask: {data.attention_mask[traj_idx].int().tolist()}")
+
+        # Token IDs with transition boundaries
+        token_ids = data.token_ids[traj_idx, valid_token_indices].tolist()
+        print(f"  Token IDs: {token_ids}")
+
+        length = int(trajectory_lengths[traj_idx])
+        token_ends = transition_token_ends[traj_idx, :length].tolist()
+        print(f"  Transition token ends: {token_ends}")
+
+        if len(token_ends) > 0:
+            print(f"  Token sequence with transition boundaries:")
+            boundary_idx = 0
+            line_parts = []
+            current_transition = []
+            for i, token_id in enumerate(token_ids):
+                current_transition.append(f"{token_id}")
+                if boundary_idx < len(token_ends) and i == token_ends[boundary_idx]:
+                    transition_str = " ".join(current_transition)
+                    line_parts.append(f"[{transition_str}]")
+                    current_transition = []
+                    boundary_idx += 1
+            if current_transition:
+                transition_str = " ".join(current_transition)
+                line_parts.append(f"[{transition_str}]")
+            print(f"    {' | '.join(line_parts)}")
+
+        # Card / street info
+        card_ranks = data.card_ranks[traj_idx, valid_token_indices].tolist()
+        card_suits = data.card_suits[traj_idx, valid_token_indices].tolist()
+        token_streets = data.token_streets[traj_idx, valid_token_indices].tolist()
+        print(f"  Card ranks: {card_ranks}")
+        print(f"  Card suits: {card_suits}")
+        print(f"  Token streets: {token_streets}")
+
+        # Action info
+        action_actors = data.action_actors[traj_idx, valid_token_indices].tolist()
+        print(f"  Action actors: {action_actors}")
+
+        # Context features
+        context_features = data.context_features[traj_idx, valid_token_indices]
+        print(f"  Context features shape: {context_features.shape}")
+        context_token_mask = torch.tensor(token_ids) == Special.CONTEXT.value
+        if context_token_mask.any():
+            context_token_indices = torch.where(context_token_mask)[0]
+            print(
+                f"  Context tokens found at positions: {context_token_indices.tolist()}"
+            )
+            print(f"  Context features table:")
+            print(
+                f"    {'Pos':<4} {'POT':<8} {'STACK_P0':<8} {'STACK_P1':<8} {'COMM_P0':<8} {'COMM_P1':<8} {'POS':<4} {'ACT_ROUND':<9} {'MIN_RAISE':<9} {'BET_CALL':<8}"
+            )
+            print(
+                f"    {'-'*4} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*4} {'-'*9} {'-'*9} {'-'*8}"
+            )
+            for j in context_token_indices:
+                ctx = context_features[j].tolist()
+                print(
+                    f"    {j:<4} "
+                    f"{ctx[Context.POT.value]:<8.3f} "
+                    f"{ctx[Context.STACK_P0.value]:<8.3f} "
+                    f"{ctx[Context.STACK_P1.value]:<8.3f} "
+                    f"{ctx[Context.COMMITTED_P0.value]:<8.3f} "
+                    f"{ctx[Context.COMMITTED_P1.value]:<8.3f} "
+                    f"{ctx[Context.POSITION.value]:<4.0f} "
+                    f"{ctx[Context.ACTIONS_ROUND.value]:<9.0f} "
+                    f"{ctx[Context.MIN_RAISE.value]:<9.3f} "
+                    f"{ctx[Context.BET_TO_CALL.value]:<8.3f}"
+                )
+        else:
+            print(f"  No context tokens found in this trajectory")
+
+
+def hook_model_forward(model, original_forward, trainer: SelfPlayTrainer | None = None):
     """Hook into model forward to inspect input data."""
 
     def hooked_forward(embedding_data, kv_cache=None):
@@ -203,6 +281,31 @@ def hook_model_forward(model, original_forward):
                 print(
                     f"\nContext features shape: {embedding_data.context_features.shape}"
                 )
+
+            # Print the same TOKEN SEQUENCE DATA section for inputs
+            indices = list(range(min(3, embedding_data.token_ids.shape[0])))
+            # For model input, we don't have transition boundaries or positions; synthesize minimal arrays
+            masks = [embedding_data.token_ids[i] < 0 for i in indices]
+            seq_pos = torch.tensor(
+                [
+                    (masks[i].int().argmax() if masks[i].any() else masks[i].shape[0])
+                    for i in indices
+                ],
+                dtype=torch.long,
+            )
+            # Build placeholders matching expected shapes
+            max_len = int(embedding_data.token_ids.shape[1])
+            trans_ends = torch.zeros((len(indices), max_len), dtype=torch.long)
+            traj_lens = torch.tensor(
+                [int(embedding_data.lengths[i]) for i in indices], dtype=torch.long
+            )
+            print_token_sequence_data(
+                data=embedding_data,
+                indices=indices,
+                current_token_positions=seq_pos,
+                transition_token_ends=trans_ends,
+                trajectory_lengths=traj_lens,
+            )
 
         # Call original forward
         if kv_cache is not None:
@@ -334,9 +437,6 @@ def print_replay_buffer_token_sequences(trainer: SelfPlayTrainer) -> None:
 def print_sampled_batch_analysis(trainer: SelfPlayTrainer, batch) -> None:
     """Print detailed analysis of a sampled training batch."""
     print(f"Sampled batch size: {min(3, trainer.replay_buffer.num_steps())}")
-    print(
-        f"Batch attributes: {[attr for attr in dir(batch) if not attr.startswith('_')]}"
-    )
 
     embedding_data = batch.embedding_data
     print(f"\nEmbedding data type: {type(embedding_data)}")
@@ -399,97 +499,66 @@ def print_replay_buffer_summary(replay_buffer):
             max_length = replay_buffer.trajectory_lengths[valid_indices].max()
             print(f"Max trajectory length in buffer: {max_length}")
 
-            # Show action indices for first few trajectories
-            print(f"\nAction indices:")
-            for i in range(min(3, len(valid_indices))):
+            # Group info for each trajectory together
+            num_show = min(3, len(valid_indices))
+            for i in range(num_show):
                 traj_idx = valid_indices[i]
                 length = replay_buffer.trajectory_lengths[traj_idx]
-                actions = replay_buffer.action_indices[traj_idx, :length].tolist()
-                print(f"  Trajectory {traj_idx}: {actions}")
+                print(f"\nTrajectory {traj_idx} (length={length}):")
 
-            # Show rewards for first few trajectories
-            print(f"\nRewards:")
-            for i in range(min(3, len(valid_indices))):
-                traj_idx = valid_indices[i]
-                length = replay_buffer.trajectory_lengths[traj_idx]
+                # Action indices
+                actions = replay_buffer.action_indices[traj_idx, :length].tolist()
+                print(f"  Action indices: {actions}")
+
+                # Rewards
                 rewards = replay_buffer.rewards[traj_idx, :length].tolist()
                 formatted_rewards = [f"{r:.3f}" for r in rewards]
-                print(f"  Trajectory {traj_idx}: [{', '.join(formatted_rewards)}]")
+                print(f"  Rewards: [{', '.join(formatted_rewards)}]")
 
-            # Show done flags for first few trajectories
-            print(f"\nDone flags:")
-            for i in range(min(3, len(valid_indices))):
-                traj_idx = valid_indices[i]
-                length = replay_buffer.trajectory_lengths[traj_idx]
+                # Done flags
                 dones = replay_buffer.dones[traj_idx, :length].tolist()
-                print(f"  Trajectory {traj_idx}: {dones}")
+                print(f"  Done flags: {dones}")
 
-            # Show values for first few trajectories
-            print(f"\nValues:")
-            for i in range(min(3, len(valid_indices))):
-                traj_idx = valid_indices[i]
-                length = replay_buffer.trajectory_lengths[traj_idx]
+                # Values
                 values = replay_buffer.values[traj_idx, :length].tolist()
                 formatted_values = [f"{v:.3f}" for v in values]
-                print(f"  Trajectory {traj_idx}: [{', '.join(formatted_values)}]")
+                print(f"  Values: [{', '.join(formatted_values)}]")
 
-            # Show advantages and returns if computed
-            if replay_buffer.advantages.sum() != 0:
-                print(f"\nAdvantages:")
-                for i in range(min(3, len(valid_indices))):
-                    traj_idx = valid_indices[i]
-                    length = replay_buffer.trajectory_lengths[traj_idx]
+                # Advantages and returns if computed
+                if replay_buffer.advantages.sum() != 0:
                     advantages = replay_buffer.advantages[traj_idx, :length].tolist()
                     formatted_advantages = [f"{a:.3f}" for a in advantages]
-                    print(
-                        f"  Trajectory {traj_idx}: [{', '.join(formatted_advantages)}]"
-                    )
+                    print(f"  Advantages: [{', '.join(formatted_advantages)}]")
 
-                print(f"\nReturns:")
-                for i in range(min(3, len(valid_indices))):
-                    traj_idx = valid_indices[i]
-                    length = replay_buffer.trajectory_lengths[traj_idx]
                     returns = replay_buffer.returns[traj_idx, :length].tolist()
                     formatted_returns = [f"{r:.3f}" for r in returns]
-                    print(f"  Trajectory {traj_idx}: [{', '.join(formatted_returns)}]")
+                    print(f"  Returns: [{', '.join(formatted_returns)}]")
 
-            # Show delta2 and delta3 for first few trajectories
-            print(f"\nDelta2:")
-            for i in range(min(3, len(valid_indices))):
-                traj_idx = valid_indices[i]
-                length = replay_buffer.trajectory_lengths[traj_idx]
+                # Delta2
                 delta2 = replay_buffer.delta2[traj_idx, :length].tolist()
                 formatted_delta2 = [f"{d:.3f}" for d in delta2]
-                print(f"  Trajectory {traj_idx}: [{', '.join(formatted_delta2)}]")
+                print(f"  Delta2: [{', '.join(formatted_delta2)}]")
 
-            print(f"\nDelta3:")
-            for i in range(min(3, len(valid_indices))):
-                traj_idx = valid_indices[i]
-                length = replay_buffer.trajectory_lengths[traj_idx]
+                # Delta3
                 delta3 = replay_buffer.delta3[traj_idx, :length].tolist()
                 formatted_delta3 = [f"{d:.3f}" for d in delta3]
-                print(f"  Trajectory {traj_idx}: [{', '.join(formatted_delta3)}]")
+                print(f"  Delta3: [{', '.join(formatted_delta3)}]")
 
-            # Show legal masks for first trajectory
-            print(f"\nLegal masks (first trajectory):")
-            if len(valid_indices) > 0:
-                traj_idx = valid_indices[0]
-                length = replay_buffer.trajectory_lengths[traj_idx]
-                legal_masks = replay_buffer.legal_masks[traj_idx, :length]
-                for step in range(length):
-                    legal_actions = torch.where(legal_masks[step])[0].tolist()
-                    print(f"  Step {step}: legal actions {legal_actions}")
+                # Legal masks (only for first trajectory)
+                if i == 0:
+                    print(f"  Legal masks:")
+                    legal_masks = replay_buffer.legal_masks[traj_idx, :length]
+                    for step in range(length):
+                        legal_actions = torch.where(legal_masks[step])[0].tolist()
+                        print(f"    Step {step}: legal actions {legal_actions}")
 
-            # Show log probabilities for first trajectory
-            print(f"\nLog probabilities (first trajectory):")
-            if len(valid_indices) > 0:
-                traj_idx = valid_indices[0]
-                length = replay_buffer.trajectory_lengths[traj_idx]
-                log_probs = replay_buffer.log_probs[traj_idx, :length]
-                for step in range(length):
-                    probs = log_probs[step].exp().tolist()
-                    formatted_probs = [f"{p:.3f}" for p in probs]
-                    print(f"  Step {step}: [{', '.join(formatted_probs)}]")
+                    # Log probabilities
+                    print(f"  Log probabilities:")
+                    log_probs = replay_buffer.log_probs[traj_idx, :length]
+                    for step in range(length):
+                        probs = log_probs[step].exp().tolist()
+                        formatted_probs = [f"{p:.3f}" for p in probs]
+                        print(f"    Step {step}: [{', '.join(formatted_probs)}]")
 
         if replay_buffer.is_transformer:
             print(f"\n--- TRANSFORMER-SPECIFIC DATA ---")
@@ -508,125 +577,16 @@ def print_replay_buffer_summary(replay_buffer):
                 print(f"  Trajectory {traj_idx}: {token_ends}")
 
             # Show token sequence fields for valid tokens (token_ids >= 0)
-            print(f"\n--- TOKEN SEQUENCE DATA ---")
-            for i in range(min(3, len(valid_indices))):
-                traj_idx = valid_indices[i]
-                token_pos = replay_buffer.current_token_positions[traj_idx]
-
-                if token_pos > 0:
-                    print(f"\nTrajectory {traj_idx} (token_pos={token_pos}):")
-
-                    # Get valid token indices (where token_ids >= 0)
-                    valid_tokens = replay_buffer.data.token_ids[traj_idx] >= 0
-                    valid_token_indices = torch.where(valid_tokens)[0]
-
-                    if len(valid_token_indices) > 0:
-                        # Token IDs with transition boundaries
-                        token_ids = replay_buffer.data.token_ids[
-                            traj_idx, valid_token_indices
-                        ].tolist()
-                        print(f"  Token IDs: {token_ids}")
-
-                        # Show transition boundaries
-                        length = replay_buffer.trajectory_lengths[traj_idx]
-                        token_ends = replay_buffer.transition_token_ends[
-                            traj_idx, :length
-                        ].tolist()
-                        print(f"  Transition token ends: {token_ends}")
-
-                        # Create a visual representation with boundaries
-                        if len(token_ends) > 0:
-                            print(f"  Token sequence with transition boundaries:")
-                            # Create one-line representation with | separators
-                            boundary_idx = 0
-                            line_parts = []
-                            current_transition = []
-
-                            for i, token_id in enumerate(token_ids):
-                                current_transition.append(f"{token_id}")
-
-                                if (
-                                    boundary_idx < len(token_ends)
-                                    and i == token_ends[boundary_idx]
-                                ):
-                                    # End of transition - add to line with | separator
-                                    transition_str = " ".join(current_transition)
-                                    line_parts.append(f"[{transition_str}]")
-                                    current_transition = []
-                                    boundary_idx += 1
-
-                            # Add any remaining tokens
-                            if current_transition:
-                                transition_str = " ".join(current_transition)
-                                line_parts.append(f"[{transition_str}]")
-
-                            # Print the one-line representation
-                            print(f"    {' | '.join(line_parts)}")
-
-                        # Card information
-                        card_ranks = replay_buffer.data.card_ranks[
-                            traj_idx, valid_token_indices
-                        ].tolist()
-                        card_suits = replay_buffer.data.card_suits[
-                            traj_idx, valid_token_indices
-                        ].tolist()
-                        token_streets = replay_buffer.data.token_streets[
-                            traj_idx, valid_token_indices
-                        ].tolist()
-                        print(f"  Card ranks: {card_ranks}")
-                        print(f"  Card suits: {card_suits}")
-                        print(f"  Token streets: {token_streets}")
-
-                        # Action information
-                        action_actors = replay_buffer.data.action_actors[
-                            traj_idx, valid_token_indices
-                        ].tolist()
-                        print(f"  Action actors: {action_actors}")
-
-                        # Context features (show for context tokens only)
-                        context_features = replay_buffer.data.context_features[
-                            traj_idx, valid_token_indices
-                        ]
-                        print(f"  Context features shape: {context_features.shape}")
-
-                        # Show context features for context tokens (token_id == 1) as a table
-                        context_token_mask = (
-                            torch.tensor(token_ids) == Special.CONTEXT.value
-                        )
-                        if context_token_mask.any():
-                            context_token_indices = torch.where(context_token_mask)[0]
-                            print(
-                                f"  Context tokens found at positions: {context_token_indices.tolist()}"
-                            )
-
-                            # Create table header
-                            print(f"  Context features table:")
-                            print(
-                                f"    {'Pos':<4} {'POT':<8} {'STACK_P0':<8} {'STACK_P1':<8} {'COMM_P0':<8} {'COMM_P1':<8} {'POS':<4} {'ACT_ROUND':<9} {'MIN_RAISE':<9} {'BET_CALL':<8}"
-                            )
-                            print(
-                                f"    {'-'*4} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*4} {'-'*9} {'-'*9} {'-'*8}"
-                            )
-
-                            for j in context_token_indices:
-                                ctx = context_features[j].tolist()
-                                print(
-                                    f"    {j:<4} "
-                                    f"{ctx[Context.POT.value]:<8.3f} "
-                                    f"{ctx[Context.STACK_P0.value]:<8.3f} "
-                                    f"{ctx[Context.STACK_P1.value]:<8.3f} "
-                                    f"{ctx[Context.COMMITTED_P0.value]:<8.3f} "
-                                    f"{ctx[Context.COMMITTED_P1.value]:<8.3f} "
-                                    f"{ctx[Context.POSITION.value]:<4.0f} "
-                                    f"{ctx[Context.ACTIONS_ROUND.value]:<9.0f} "
-                                    f"{ctx[Context.MIN_RAISE.value]:<9.3f} "
-                                    f"{ctx[Context.BET_TO_CALL.value]:<8.3f}"
-                                )
-                        else:
-                            print(f"  No context tokens found in this trajectory")
-
-                    else:
-                        print(f"  No valid tokens found")
+            print_token_sequence_data(
+                data=replay_buffer.data,
+                indices=[
+                    int(idx)
+                    for idx in valid_indices[: min(3, len(valid_indices))].tolist()
+                ],
+                current_token_positions=replay_buffer.current_token_positions,
+                transition_token_ends=replay_buffer.transition_token_ends,
+                trajectory_lengths=replay_buffer.trajectory_lengths,
+            )
 
     print("=" * 60)
 
@@ -654,9 +614,12 @@ def main(actions: Iterable[int]) -> None:
         model=ModelConfig(
             name="poker_transformer_v1",
             kwargs={
+                "maximum_sequence_length": 50,
                 "d_model": 128,
                 "n_layers": 2,
-                "n_heads": 4,
+                "n_heads": 2,
+                "dropout": 0.1,
+                "use_gradient_checkpointing": False,
                 "num_bet_bins": 7,  # len(bet_bins) + 3
             },
         ),
@@ -674,7 +637,7 @@ def main(actions: Iterable[int]) -> None:
 
     # Hook into the model to see what gets passed in
     original_forward = trainer.model.forward
-    trainer.model.forward = hook_model_forward(trainer.model, original_forward)
+    trainer.model.forward = hook_model_forward(trainer.model, original_forward, trainer)
 
     # Hook into the policy to see action selection
     original_action_batch = trainer.policy.action_batch

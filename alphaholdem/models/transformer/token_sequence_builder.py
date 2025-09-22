@@ -1,12 +1,13 @@
+from typing import Optional, Union
 import torch
 
 from ...env.hunl_tensor_env import HUNLTensorEnv
 from .structured_embedding_data import StructuredEmbeddingData
 from .tokens import (
-    CLS_INDEX,
+    GAME_INDEX,
     HOLE0_INDEX,
     HOLE1_INDEX,
-    Cls,
+    Game,
     Context,
     Special,
     get_action_token_id_offset,
@@ -67,8 +68,12 @@ class TokenSequenceBuilder:
         )
         self.lengths = torch.zeros(N, dtype=torch.long, device=device)
 
-    def _reserve(self, idxs: torch.Tensor, k: int) -> torch.Tensor:
+        self.add_cls()
+
+    def _reserve(self, idxs: Union[torch.Tensor, slice], k: int) -> torch.Tensor:
         pos = self.lengths[idxs]
+        if isinstance(idxs, slice):
+            pos = pos.clone()
         if ((pos + k) > self.sequence_length).any():
             raise ValueError("Token sequence exceeds configured sequence length")
         start = pos
@@ -133,15 +138,24 @@ class TokenSequenceBuilder:
             bet_to_call.to(self.float_dtype) / scale
         )
 
-    def add_cls(self, idxs: torch.Tensor) -> None:
+    def add_cls(self, idxs: Optional[torch.Tensor] = None) -> None:
+        if idxs is not None and idxs.numel() == 0:
+            return
+
+        select = idxs if idxs is not None else slice(None)
+
+        start = self._reserve(select, 1)
+        self.token_ids[select, start] = Special.CLS.value
+
+    def add_game(self, idxs: torch.Tensor) -> None:
         if idxs.numel() == 0:
             return
         start = self._reserve(idxs, 1)
-        self.token_ids[idxs, start] = Special.CLS.value
+        self.token_ids[idxs, start] = Special.GAME.value
         # CLS slot (index 0)
-        self.context_features[idxs, start, Cls.SB.value] = float(self.tensor_env.sb)
-        self.context_features[idxs, start, Cls.BB.value] = float(self.tensor_env.bb)
-        self.context_features[idxs, start, Cls.HERO_POSITION.value] = (
+        self.context_features[idxs, start, Game.SB.value] = float(self.tensor_env.sb)
+        self.context_features[idxs, start, Game.BB.value] = float(self.tensor_env.bb)
+        self.context_features[idxs, start, Game.HERO_POSITION.value] = (
             self.tensor_env.button[idxs] == 1
         ).to(self.float_dtype)
 
@@ -210,7 +224,7 @@ class TokenSequenceBuilder:
         if player == 1:
             # hero_on_button flag in CLS (binary)
             button = self.tensor_env.button[idxs]
-            result.context_features[:, CLS_INDEX, Cls.HERO_POSITION.value] = (
+            result.context_features[:, GAME_INDEX, Game.HERO_POSITION.value] = (
                 button == int(player)
             ).to(self.float_dtype)
 
@@ -283,14 +297,19 @@ class TokenSequenceBuilder:
 
         return result
 
-    def reset_envs(self, idxs: torch.Tensor) -> None:
-        if idxs.numel() == 0:
+    def reset_envs(self, idxs: Optional[torch.Tensor] = None) -> None:
+        if idxs is not None and idxs.numel() == 0:
             return
-        self.token_ids[idxs] = -1
-        self.token_streets[idxs] = 0
-        self.card_ranks[idxs] = 0
-        self.card_suits[idxs] = 0
-        self.action_actors[idxs] = 0
-        self.action_legal_masks[idxs] = False
-        self.context_features[idxs] = 0
-        self.lengths[idxs] = 0
+
+        select = idxs if idxs is not None else slice(None)
+
+        self.token_ids[select] = -1
+        self.token_streets[select] = 0
+        self.card_ranks[select] = 0
+        self.card_suits[select] = 0
+        self.action_actors[select] = 0
+        self.action_legal_masks[select] = False
+        self.context_features[select] = 0
+        self.lengths[select] = 0
+
+        self.add_cls(idxs)

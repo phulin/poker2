@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 
+
 from ...core.interfaces import Model
 from ...core.registry import register_model
 from ...utils.profiling import profile
@@ -16,6 +17,7 @@ from .embeddings import PokerFusedEmbedding
 from .heads import TransformerPolicyHead, TransformerValueHead
 from .rotary_attention import RotarySelfAttention
 from .structured_embedding_data import StructuredEmbeddingData
+from .tokens import CLS_INDEX, HOLE0_INDEX, HOLE1_INDEX
 
 
 class TransformerLayer(nn.Module):
@@ -63,13 +65,13 @@ class PokerTransformerV1(nn.Module, Model):
 
     def __init__(
         self,
-        d_model: int = 256,
-        n_layers: int = 4,
-        n_heads: int = 4,
-        num_bet_bins: int = 8,
-        dropout: float = 0.1,
-        use_auxiliary_loss: bool = True,
-        use_gradient_checkpointing: bool = False,
+        maximum_sequence_length: int,
+        d_model: int,
+        n_layers: int,
+        n_heads: int,
+        num_bet_bins: int,
+        dropout: float,
+        use_gradient_checkpointing: bool,
     ) -> None:
         super().__init__()
 
@@ -77,7 +79,6 @@ class PokerTransformerV1(nn.Module, Model):
         self.n_layers = n_layers
         self.n_heads = n_heads
         self.num_bet_bins = num_bet_bins
-        self.use_auxiliary_loss = use_auxiliary_loss
         self.use_gradient_checkpointing = use_gradient_checkpointing
 
         # Single fused embedding module for all token types
@@ -88,18 +89,20 @@ class PokerTransformerV1(nn.Module, Model):
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(d_model * 2, d_model),
-            nn.LayerNorm(d_model),
+            # no normalization as TransformerLayer has pre-LN
         )
 
         self.layers = nn.ModuleList(
             [TransformerLayer(d_model, n_heads, dropout) for _ in range(n_layers)]
         )
 
+        # Layers have pre-LN, so we need to normalize the output
+        self.post_norm = nn.LayerNorm(d_model)
+
         self.cls_mlp = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),
+            nn.Linear(d_model * 2, d_model),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model * 2, d_model),
             nn.LayerNorm(d_model),
         )
 
@@ -112,6 +115,15 @@ class PokerTransformerV1(nn.Module, Model):
             10000 ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
         )
         self.register_buffer("rotary_inv_freq", inv_freq, persistent=False)
+
+        # Precompute cos/sin for RoPE
+        cos, sin = self._build_rope_cache(
+            seq_len=maximum_sequence_length,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
 
         self._init_weights()
 
@@ -169,12 +181,6 @@ class PokerTransformerV1(nn.Module, Model):
         x = self.input_ffn(embeddings)
         attention_mask = structured_data.attention_mask
 
-        cos, sin = self._build_rope_cache(
-            seq_len=x.size(1),
-            device=x.device,
-            dtype=x.dtype,
-        )
-
         # Handle KV caching through layers
         new_kv_cache = {}
 
@@ -183,21 +189,33 @@ class PokerTransformerV1(nn.Module, Model):
             # In training mode, we typically don't use caching anyway
             for layer in self.layers:
                 x, _ = torch.utils.checkpoint.checkpoint(
-                    layer, x, attention_mask, cos, sin, None, use_reentrant=False
+                    layer,
+                    x,
+                    attention_mask,
+                    self.cos,
+                    self.sin,
+                    None,
+                    use_reentrant=False,
                 )
         else:
             for layer in self.layers:
                 layer_cache = kv_cache.get(id(layer)) if kv_cache else None
-                x, layer_new_cache = layer(x, attention_mask, cos, sin, layer_cache)
+                x, layer_new_cache = layer(
+                    x, attention_mask, self.cos, self.sin, layer_cache
+                )
                 if layer_new_cache is not None:
                     new_kv_cache[id(layer)] = layer_new_cache
 
-        cls_state = x[:, 0]
-        cls_state = self.cls_mlp(cls_state)
+        x = self.post_norm(x)
+
+        cls_state = x[:, CLS_INDEX]
+        hole_mean = (x[:, HOLE0_INDEX] + x[:, HOLE1_INDEX]) / 2
+        x = torch.cat([cls_state, hole_mean], dim=-1)
+        x = self.cls_mlp(x)
 
         return ModelOutput(
-            policy_logits=self.policy_head(cls_state),
-            value=self.value_head(cls_state),
+            policy_logits=self.policy_head(x),
+            value=self.value_head(x),
             kv_cache=new_kv_cache,
         )
 

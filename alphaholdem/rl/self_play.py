@@ -469,16 +469,10 @@ class SelfPlayTrainer:
 
         all_env_indices = torch.arange(self.num_envs, device=self.device)
         if self.is_transformer and isinstance(self.state_encoder, TokenSequenceBuilder):
-            self.state_encoder.reset_envs(
-                torch.arange(self.num_envs, device=self.device)
-            )
+            self.state_encoder.reset_envs()
 
-            # CLS
-            self.state_encoder.add_cls(all_env_indices)
-            # Preflop street marker
-            self.state_encoder.add_street(
-                all_env_indices, torch.zeros_like(all_env_indices)
-            )
+            # Game-invariant state
+            self.state_encoder.add_game(all_env_indices)
             # Hole cards for P0
             self.state_encoder.add_card(
                 all_env_indices,
@@ -487,6 +481,10 @@ class SelfPlayTrainer:
             self.state_encoder.add_card(
                 all_env_indices,
                 self.tensor_env.hole_indices[all_env_indices, 0, 1],
+            )
+            # Preflop street marker
+            self.state_encoder.add_street(
+                all_env_indices, torch.zeros_like(all_env_indices)
             )
 
     @profile

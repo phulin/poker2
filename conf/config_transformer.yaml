@@ -54,8 +54,8 @@ train:
   batch_size: 512      # Smaller batch size for transformer
   num_epochs: 4
   replay_buffer_batches: 4
-  max_trajectory_length: 20
-  max_sequence_length: 50
+  max_trajectory_length: 9
+  max_sequence_length: 47
   use_kv_cache: true
   
   # PPO hyperparameters
@@ -86,11 +86,11 @@ train:
 model:
   name: "poker_transformer_v1"
   kwargs:
+    maximum_sequence_length: 46
     d_model: 128  # Reduced for better performance
     n_layers: 2   # Reduced for better performance
     n_heads: 2    # Reduced for better performance
     dropout: 0.1
-    use_auxiliary_loss: false  # Disabled for performance
     use_gradient_checkpointing: false  # Disabled for performance
   
   # Policy configuration (using existing categorical policy for now)

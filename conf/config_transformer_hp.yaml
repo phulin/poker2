@@ -55,7 +55,7 @@ train:
   num_epochs: 4
   replay_buffer_batches: 4
   max_trajectory_length: 9
-  max_sequence_length: 46   # Can't be higher than 4 * max_trajectory_length + 14
+  max_sequence_length: 47   # Can't be higher than 4 * max_trajectory_length + 15
   use_kv_cache: true
   
   # PPO hyperparameters
@@ -89,11 +89,11 @@ train:
 model:
   name: "poker_transformer_v1"
   kwargs:
+    maximum_sequence_length: 46
     d_model: 256           # Larger model dimension
     n_layers: 8            # More layers
     n_heads: 2             # More attention heads
     dropout: 0.1
-    use_auxiliary_loss: false
     use_gradient_checkpointing: true
   
   # Policy configuration (using existing categorical policy for now)
