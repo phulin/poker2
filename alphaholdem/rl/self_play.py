@@ -1085,7 +1085,7 @@ class SelfPlayTrainer:
             "value_loss": total_value_loss / denom,
             "entropy": total_entropy / denom,
             "approx_kl": current_kl,
-            "kl_ema": self.kl_ema,
+            "kl_ema": self.kl_ema.value,
             "clipfrac": total_clipfrac / denom,
             "explained_var": total_explained_var / denom,
             "epsilon": total_epsilon / denom,
@@ -1186,8 +1186,8 @@ class SelfPlayTrainer:
         else:
             lr_now = lr_start
 
-        if self.kl_ema_initialized:
-            kl_ratio = max(1e-8, self.kl_ema / TARGET_KL)
+        if self.kl_ema.initialized:
+            kl_ratio = max(1e-8, self.kl_ema.value / TARGET_KL)
             kl_scale = 1.0 / (kl_ratio**0.5)
             # Clamp lr scaling to a reasonable range
             kl_scale = min(max(kl_scale, 0.25), 4.0)
