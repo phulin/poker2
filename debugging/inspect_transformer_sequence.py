@@ -119,6 +119,69 @@ def make_pretty_tokens(data, bet_bins: List[float], title: str) -> None:
         print(" ".join(parts))
 
 
+def print_decoded_token_sequence(data, row_idx: int, length: int) -> None:
+    """Unified, detailed token sequence printer used across the script.
+    data: StructuredEmbeddingData-like object with token_ids and context/token metadata
+    row_idx: which row/trajectory/sample to render
+    length: number of valid tokens to display from the start
+    """
+    tokens = data.token_ids[row_idx, :length]
+    for pos, token_t in enumerate(tokens):
+        token = int(token_t.item())
+        parts = [f"[{pos:02d}]"]
+
+        if token == Special.CLS.value:
+            parts.append("CLS")
+        elif token == Special.CONTEXT.value:
+            parts.append("CONTEXT")
+        elif token in [
+            Special.STREET_PREFLOP.value,
+            Special.STREET_FLOP.value,
+            Special.STREET_TURN.value,
+            Special.STREET_RIVER.value,
+        ]:
+            street_names = ["PREFLOP", "FLOP", "TURN", "RIVER"]
+            street_idx = token - Special.STREET_PREFLOP.value
+            if 0 <= street_idx < len(street_names):
+                parts.append(f"STREET_{street_names[street_idx]}")
+        elif get_card_token_id_offset() <= token < get_action_token_id_offset():
+            card_idx = token - get_card_token_id_offset()
+            parts.append(f"CARD_{format_card(card_idx)}")
+            if hasattr(data, "token_streets"):
+                parts.append(f"street={int(data.token_streets[row_idx, pos].item())}")
+        elif token >= get_action_token_id_offset():
+            action_idx = token - get_action_token_id_offset()
+            # Use env bet_bins if present for nicer labeling
+            bet_bins = None
+            if hasattr(data, "bet_bins"):
+                bet_bins = data.bet_bins
+            # Fallback bet_bins used elsewhere in this script (env config)
+            try:
+                from alphaholdem.core.structured_config import (
+                    EnvConfig,
+                )  # local import safety
+
+                bet_bins = bet_bins or []
+            except Exception:
+                bet_bins = bet_bins or []
+            parts.append(
+                f"ACTION_{describe_action(action_idx, bet_bins if bet_bins else [0.5, 1.0, 1.5, 2.0])}"
+            )
+            if hasattr(data, "action_actors"):
+                parts.append(f"actor={int(data.action_actors[row_idx, pos].item())}")
+            if hasattr(data, "token_streets"):
+                parts.append(f"street={int(data.token_streets[row_idx, pos].item())}")
+            if hasattr(data, "action_legal_masks"):
+                legal_mask = data.action_legal_masks[row_idx, pos]
+                if legal_mask.dim() > 0:
+                    legal_bins = [
+                        i for i, flag in enumerate(legal_mask.tolist()) if flag
+                    ]
+                    parts.append(f"legal={legal_bins}")
+
+        print(" ".join(parts))
+
+
 def hook_model_forward(model, original_forward):
     """Hook into model forward to inspect input data."""
 
@@ -129,89 +192,12 @@ def hook_model_forward(model, original_forward):
             print(f"Token IDs shape: {embedding_data.token_ids.shape}")
             print(f"Lengths: {embedding_data.lengths.tolist()}")
 
-            # Parse and display token sequences for each sample
-            for batch_idx in range(
-                min(3, embedding_data.token_ids.shape[0])
-            ):  # Show first 3 samples
+            # Parse and display token sequences for each sample (unified decoder)
+            max_samples = min(3, embedding_data.token_ids.shape[0])
+            for batch_idx in range(max_samples):
                 seq_len = int(embedding_data.lengths[batch_idx])
                 print(f"\n--- Sample {batch_idx} (length={seq_len}) ---")
-
-                tokens = embedding_data.token_ids[batch_idx, :seq_len]
-                for pos, token in enumerate(tokens):
-                    token = int(token.item())
-                    parts = [f"[{pos:02d}]"]
-
-                    # Decode token based on type
-                    if token == Special.CLS.value:
-                        parts.append("CLS")
-                        if hasattr(embedding_data, "context_features"):
-                            ctx = embedding_data.context_features[batch_idx, pos]
-                            parts.append(f"sb={ctx[Cls.SB.value]:.0f}")
-                            parts.append(f"bb={ctx[Cls.BB.value]:.0f}")
-                            parts.append(
-                                f"hero_position={ctx[Cls.HERO_POSITION.value]:.0f}"
-                            )
-
-                    elif token == Special.CONTEXT.value:
-                        parts.append("CONTEXT")
-                        if hasattr(embedding_data, "context_features"):
-                            ctx = embedding_data.context_features[batch_idx, pos]
-                            parts.append(f"pot={ctx[Context.POT.value]:.0f}")
-                            parts.append(f"stack_p0={ctx[Context.STACK_P0.value]:.0f}")
-                            parts.append(f"stack_p1={ctx[Context.STACK_P1.value]:.0f}")
-                            parts.append(
-                                f"bet_to_call={ctx[Context.BET_TO_CALL.value]:.0f}"
-                            )
-
-                    elif token in [
-                        Special.STREET_PREFLOP.value,
-                        Special.STREET_FLOP.value,
-                        Special.STREET_TURN.value,
-                        Special.STREET_RIVER.value,
-                    ]:
-                        street_names = ["PREFLOP", "FLOP", "TURN", "RIVER"]
-                        street_idx = token - Special.STREET_PREFLOP.value
-                        parts.append(f"STREET_{street_names[street_idx]}")
-
-                    elif (
-                        Special.NUM_SPECIAL.value
-                        <= token
-                        < Special.NUM_SPECIAL.value + 52
-                    ):
-                        # Card token
-                        card_idx = token - Special.NUM_SPECIAL.value
-                        parts.append(f"CARD_{format_card(card_idx)}")
-                        if hasattr(embedding_data, "token_streets"):
-                            street = int(
-                                embedding_data.token_streets[batch_idx, pos].item()
-                            )
-                            parts.append(f"street={street}")
-
-                    elif (
-                        Special.NUM_SPECIAL.value + 52
-                        <= token
-                        < Special.NUM_SPECIAL.value + 52 + 7
-                    ):
-                        # Action token
-                        action_id = token - Special.NUM_SPECIAL.value - 52
-                        parts.append(
-                            f"ACTION_{describe_action(action_id, [0.5, 1.0, 1.5, 2.0])}"
-                        )
-                        if hasattr(embedding_data, "action_actors"):
-                            actor = int(
-                                embedding_data.action_actors[batch_idx, pos].item()
-                            )
-                            parts.append(f"actor={actor}")
-                        if hasattr(embedding_data, "token_streets"):
-                            street = int(
-                                embedding_data.token_streets[batch_idx, pos].item()
-                            )
-                            parts.append(f"street={street}")
-
-                    else:
-                        parts.append(f"UNKNOWN_TOKEN_{token}")
-
-                    print(" ".join(parts))
+                print_decoded_token_sequence(embedding_data, batch_idx, seq_len)
 
             if hasattr(embedding_data, "context_features"):
                 print(
@@ -290,7 +276,7 @@ def hook_replay_buffer_add_transitions(replay_buffer, original_add_transitions):
     return hooked_add_transitions
 
 
-def hook_replay_buffer_update_opponent_rewards(
+def hook_replay_buffer_update_last_transition_rewards(
     replay_buffer, original_update_opponent_rewards
 ):
     """Hook into replay buffer update_opponent_rewards to inspect reward updates."""
@@ -315,6 +301,73 @@ def hook_replay_buffer_update_opponent_rewards(
         return original_update_opponent_rewards(trajectory_indices, opponent_rewards)
 
     return hooked_update_opponent_rewards
+
+
+def print_sampling_debug_info(trainer: SelfPlayTrainer) -> None:
+    """Print high-level sampling debug info for trajectories and token ends."""
+    print(f"\n--- SAMPLING DEBUG INFO ---")
+    valid_indices = torch.where(trainer.replay_buffer.trajectory_lengths > 0)[0]
+    print(f"Valid trajectory indices: {valid_indices.tolist()}")
+    print(
+        f"Trajectory lengths: {trainer.replay_buffer.trajectory_lengths[valid_indices].tolist()}"
+    )
+    print(
+        f"Transition token ends: {trainer.replay_buffer.transition_token_ends[valid_indices].tolist()}"
+    )
+
+
+def print_replay_buffer_token_sequences(trainer: SelfPlayTrainer) -> None:
+    """Print decoded token sequences for valid trajectories in the replay buffer."""
+    print(f"\n--- REPLAY BUFFER TOKEN SEQUENCES ---")
+    valid_indices = torch.where(trainer.replay_buffer.trajectory_lengths > 0)[0]
+    for _, traj_idx in enumerate(valid_indices):
+        print(f"Trajectory {traj_idx}:")
+        token_pos = trainer.replay_buffer.current_token_positions[traj_idx]
+        print(f"  Token position: {token_pos}")
+        if token_pos > 0:
+            # Use the detailed batch-style decoder for consistency
+            print_decoded_token_sequence(
+                trainer.replay_buffer.data, int(traj_idx), int(token_pos)
+            )
+
+
+def print_sampled_batch_analysis(trainer: SelfPlayTrainer, batch) -> None:
+    """Print detailed analysis of a sampled training batch."""
+    print(f"Sampled batch size: {min(3, trainer.replay_buffer.num_steps())}")
+    print(
+        f"Batch attributes: {[attr for attr in dir(batch) if not attr.startswith('_')]}"
+    )
+
+    embedding_data = batch.embedding_data
+    print(f"\nEmbedding data type: {type(embedding_data)}")
+    if hasattr(embedding_data, "token_ids"):
+        print(f"Lengths: {embedding_data.lengths.tolist()}")
+
+        # Show token sequences for sampled transitions (detailed unified printer)
+        for i in range(min(3, embedding_data.token_ids.shape[0])):
+            seq_len = int(embedding_data.lengths[i])
+            print(f"\n--- Sampled Transition {i} (length={seq_len}) ---")
+            print_decoded_token_sequence(embedding_data, i, seq_len)
+
+    # Other batch fields
+    action_indices = batch.action_indices
+    selected_log_probs = batch.selected_log_probs
+    advantages = batch.advantages
+    returns = batch.returns
+    delta2 = batch.delta2
+    delta3 = batch.delta3
+    legal_masks = batch.legal_masks
+
+    print(f"\nAction indices: {action_indices.tolist()}")
+    print(f"Old log probs: {selected_log_probs.tolist()}")
+    print(f"Advantages: {advantages.tolist()}")
+    print(f"Returns: {returns.tolist()}")
+    print(f"Delta2: {delta2.tolist()}")
+    print(f"Delta3: {delta3.tolist()}")
+    print(f"\nLegal masks shape: {legal_masks.shape}")
+    for i in range(min(3, legal_masks.shape[0])):
+        legal_actions = torch.where(legal_masks[i])[0].tolist()
+        print(f"  Sample {i}: legal actions {legal_actions}")
 
 
 def print_replay_buffer_summary(replay_buffer):
@@ -595,6 +648,7 @@ def main(actions: Iterable[int]) -> None:
             batch_size=64,
             num_epochs=4,
             max_trajectory_length=12,
+            max_sequence_length=50,
             learning_rate=1e-4,
         ),
         model=ModelConfig(
@@ -615,11 +669,8 @@ def main(actions: Iterable[int]) -> None:
         device="cpu",
     )
 
-    # Add missing field that SelfPlayTrainer expects
-    config.train.max_sequence_length = 50
-
     # Create trainer
-    trainer = SelfPlayTrainer(config, device)
+    trainer = SelfPlayTrainer(config, device, rng_seed=42)
 
     # Hook into the model to see what gets passed in
     original_forward = trainer.model.forward
@@ -637,12 +688,12 @@ def main(actions: Iterable[int]) -> None:
         trainer.replay_buffer, original_add_transitions
     )
 
-    original_update_opponent_rewards = (
+    original_update_last_transition_rewards = (
         trainer.replay_buffer.update_last_transition_rewards
     )
     trainer.replay_buffer.update_last_transition_rewards = (
-        hook_replay_buffer_update_opponent_rewards(
-            trainer.replay_buffer, original_update_opponent_rewards
+        hook_replay_buffer_update_last_transition_rewards(
+            trainer.replay_buffer, original_update_last_transition_rewards
         )
     )
 
@@ -650,214 +701,31 @@ def main(actions: Iterable[int]) -> None:
     print(f"Actions to take: {list(actions)}")
 
     # Run one iteration of trajectory collection
-    try:
-        # This will collect trajectories and we'll see what gets passed to the model
-        trainer.collect_tensor_trajectories(min_trajectories=1)
-        print("\n=== TRAJECTORY COLLECTION COMPLETED ===")
-        trainer.replay_buffer.compute_gae_returns(
-            gamma=trainer.gamma, lambda_=trainer.gae_lambda
-        )
+    # This will collect trajectories and we'll see what gets passed to the model
+    trainer.collect_tensor_trajectories(min_trajectories=1)
+    print("\n=== TRAJECTORY COLLECTION COMPLETED ===")
+    trainer.replay_buffer.compute_gae_returns(
+        gamma=trainer.gamma, lambda_=trainer.gae_lambda
+    )
 
-        # Print comprehensive replay buffer summary
-        print_replay_buffer_summary(trainer.replay_buffer)
+    # Print comprehensive replay buffer summary
+    print_replay_buffer_summary(trainer.replay_buffer)
 
-        # Sample a batch and show the resulting transition info
-        print("\n" + "=" * 60)
-        print("SAMPLE BATCH ANALYSIS")
-        print("=" * 60)
+    # Sample a batch and show the resulting transition info
+    print("\n" + "=" * 60)
+    print("SAMPLE BATCH ANALYSIS")
+    print("=" * 60)
 
-        try:
-            # Create a random generator for sampling
-            rng = torch.Generator(device=trainer.device)
-            rng.manual_seed(42)  # For reproducible results
+    # Sample a small batch
+    batch_size = min(3, trainer.replay_buffer.num_steps())
+    if batch_size > 0:
+        print_sampling_debug_info(trainer)
+        print_replay_buffer_token_sequences(trainer)
 
-            # Sample a small batch
-            batch_size = min(3, trainer.replay_buffer.num_steps())
-            if batch_size > 0:
-                # Let's manually inspect what's being sampled
-                print(f"\n--- SAMPLING DEBUG INFO ---")
-                valid_indices = torch.where(
-                    trainer.replay_buffer.trajectory_lengths > 0
-                )[0]
-                print(f"Valid trajectory indices: {valid_indices.tolist()}")
-                print(
-                    f"Trajectory lengths: {trainer.replay_buffer.trajectory_lengths[valid_indices].tolist()}"
-                )
-                print(
-                    f"Transition token ends: {trainer.replay_buffer.transition_token_ends[valid_indices].tolist()}"
-                )
-
-                # Let's manually inspect the token sequences in the replay buffer
-                print(f"\n--- REPLAY BUFFER TOKEN SEQUENCES ---")
-                for i, traj_idx in enumerate(valid_indices):
-                    print(f"Trajectory {traj_idx}:")
-                    token_pos = trainer.replay_buffer.current_token_positions[traj_idx]
-                    print(f"  Token position: {token_pos}")
-                    if token_pos > 0:
-                        tokens = trainer.replay_buffer.data.token_ids[
-                            traj_idx, :token_pos
-                        ].tolist()
-                        print(f"  Token IDs: {tokens}")
-
-                        # Show the actual token sequence that should be sampled
-                        print(f"  Decoded sequence:")
-                        for pos, token in enumerate(tokens):
-                            if token >= 0:  # Only show valid tokens
-                                parts = [f"[{pos:02d}]"]
-                                if token == 0:  # CLS
-                                    parts.append("CLS")
-                                elif token == 1:  # CONTEXT
-                                    parts.append("CONTEXT")
-                                elif token == 2:  # STREET_PREFLOP
-                                    parts.append("STREET_PREFLOP")
-                                elif token == 3:  # STREET_FLOP
-                                    parts.append("STREET_FLOP")
-                                elif token == 4:  # STREET_TURN
-                                    parts.append("STREET_TURN")
-                                elif token == 5:  # STREET_RIVER
-                                    parts.append("STREET_RIVER")
-                                elif (
-                                    get_card_token_id_offset()
-                                    <= token
-                                    < get_action_token_id_offset()
-                                ):  # Card tokens
-                                    card_idx = token - get_card_token_id_offset()
-                                    card_str = format_card(card_idx)
-                                    card_rank = RANK_STR[
-                                        trainer.replay_buffer.data.card_ranks[
-                                            traj_idx, pos
-                                        ].item()
-                                    ]
-                                    card_suit = SUIT_STR[
-                                        trainer.replay_buffer.data.card_suits[
-                                            traj_idx, pos
-                                        ].item()
-                                    ]
-                                    parts.append(
-                                        f"CARD_{card_str} (rank={card_rank}, suit={card_suit})"
-                                    )
-                                elif (
-                                    token >= get_action_token_id_offset()
-                                ):  # Action tokens
-                                    action_idx = token - get_action_token_id_offset()
-                                    parts.append(f"ACTION_{action_idx}")
-                                print("    " + " ".join(parts))
-
-                batch = trainer.replay_buffer.sample_batch(rng, batch_size)
-
-                print(f"Sampled batch size: {batch_size}")
-                print(
-                    f"Batch attributes: {[attr for attr in dir(batch) if not attr.startswith('_')]}"
-                )
-
-                # Show embedding data info
-                embedding_data = batch.embedding_data
-                print(f"\nEmbedding data type: {type(embedding_data)}")
-                if hasattr(embedding_data, "token_ids"):
-                    print(f"Lengths: {embedding_data.lengths.tolist()}")
-
-                    # Show token sequences for sampled transitions
-                    for i in range(min(3, embedding_data.token_ids.shape[0])):
-                        seq_len = int(embedding_data.lengths[i])
-                        print(f"\n--- Sampled Transition {i} (length={seq_len}) ---")
-                        tokens = embedding_data.token_ids[i, :seq_len]
-                        for pos, token in enumerate(tokens):
-                            token = int(token.item())
-                            parts = [f"[{pos:02d}]"]
-
-                        # Decode token based on type
-                        if token == Special.CLS.value:
-                            parts.append("CLS")
-                            if hasattr(embedding_data, "context_features"):
-                                ctx = embedding_data.context_features[i, pos]
-                                parts.append(f"sb={ctx[Cls.SB.value]:.3f}")
-                                parts.append(f"bb={ctx[Cls.BB.value]:.3f}")
-                                parts.append(
-                                    f"hero_position={ctx[Cls.HERO_POSITION.value]:.0f}"
-                                )
-
-                            elif token == Special.CONTEXT.value:
-                                parts.append("CONTEXT")
-                                if hasattr(embedding_data, "context_features"):
-                                    ctx = embedding_data.context_features[i, pos]
-                                    parts.append(f"pot={ctx[Context.POT.value]:.3f}")
-                                    parts.append(
-                                        f"stack_p0={ctx[Context.STACK_P0.value]:.3f}"
-                                    )
-                                    parts.append(
-                                        f"stack_p1={ctx[Context.STACK_P1.value]:.3f}"
-                                    )
-                                    parts.append(
-                                        f"bet_to_call={ctx[Context.BET_TO_CALL.value]:.3f}"
-                                    )
-
-                            elif token in [
-                                Special.STREET_PREFLOP.value,
-                                Special.STREET_FLOP.value,
-                                Special.STREET_TURN.value,
-                                Special.STREET_RIVER.value,
-                            ]:
-                                street_names = ["PREFLOP", "FLOP", "TURN", "RIVER"]
-                                street_idx = token - Special.STREET_PREFLOP.value
-                                if 0 <= street_idx < len(street_names):
-                                    parts.append(f"STREET_{street_names[street_idx]}")
-
-                            elif (
-                                get_card_token_id_offset()
-                                <= token
-                                <= get_card_token_id_offset() + 52
-                            ):  # Card tokens
-                                card_idx = token - get_card_token_id_offset()
-                                card_str = format_card(card_idx)
-                                card_rank = RANK_STR[
-                                    trainer.replay_buffer.data.card_ranks[
-                                        traj_idx, pos
-                                    ].item()
-                                ]
-                                card_suit = SUIT_STR[
-                                    trainer.replay_buffer.data.card_suits[
-                                        traj_idx, pos
-                                    ].item()
-                                ]
-                                parts.append(
-                                    f"CARD_{card_str} (rank={card_rank}, suit={card_suit})"
-                                )
-
-                            elif token >= get_action_token_id_offset():  # Action tokens
-                                action_idx = token - get_action_token_id_offset()
-                                parts.append(f"ACTION_{action_idx}")
-
-                            print(" ".join(parts))
-
-                # Show other batch information
-                print(f"\nAction indices: {batch['action_indices'].tolist()}")
-                print(f"Old log probs: {batch['log_probs_old'].tolist()}")
-                print(f"Advantages: {batch['advantages'].tolist()}")
-                print(f"Returns: {batch['returns'].tolist()}")
-                print(f"Delta2: {batch['delta2'].tolist()}")
-                print(f"Delta3: {batch['delta3'].tolist()}")
-
-                # Show legal masks
-                legal_masks = batch["legal_masks"]
-                print(f"\nLegal masks shape: {legal_masks.shape}")
-                for i in range(min(3, legal_masks.shape[0])):
-                    legal_actions = torch.where(legal_masks[i])[0].tolist()
-                    print(f"  Sample {i}: legal actions {legal_actions}")
-
-            else:
-                print("No trajectories available for sampling")
-
-        except Exception as e:
-            print(f"Error during batch sampling: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-    except Exception as e:
-        print(f"Error during collection: {e}")
-        import traceback
-
-        traceback.print_exc()
+        batch = trainer.replay_buffer.sample_batch(trainer.rng, batch_size)
+        print_sampled_batch_analysis(trainer, batch)
+    else:
+        print("No trajectories available for sampling")
 
 
 if __name__ == "__main__":

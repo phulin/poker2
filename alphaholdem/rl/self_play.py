@@ -33,9 +33,7 @@ TARGET_KL = 0.015
 
 class SelfPlayTrainer:
     def __init__(
-        self,
-        cfg: Config,
-        device: torch.device,
+        self, cfg: Config, device: torch.device, rng_seed: Optional[int] = None
     ):
         self.cfg = cfg
         self.device = device
@@ -80,6 +78,8 @@ class SelfPlayTrainer:
 
         # Initialize RNG
         self.rng = torch.Generator(device=self.device)
+        if rng_seed is not None:
+            self.rng.manual_seed(rng_seed)
 
         # Determine model type
         self.is_transformer = cfg.model.name.startswith("poker_transformer")
@@ -956,8 +956,8 @@ class SelfPlayTrainer:
             # Debugging metrics: explained variance
             with torch.no_grad():
                 # Explained variance of value predictions against targets
-                var_y = torch.var(batch.returns)
-                var_err = torch.var(batch.returns - values.detach())
+                var_y = batch.returns.var(correction=0)
+                var_err = (batch.returns - values.detach()).var(correction=0)
                 explained_var = 1.0 - (var_err / (var_y + 1e-8))
 
             total_loss += loss_result.total_loss.item()
