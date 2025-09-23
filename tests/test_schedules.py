@@ -3,6 +3,7 @@ import math
 import torch
 
 from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.utils.ema import EMA
 
 
 class _Cfg:
@@ -61,6 +62,8 @@ def _make_dummy_trainer(
         {"lr": lr},
     ]
 
+    trainer.kl_ema = EMA()
+
     return trainer
 
 
@@ -68,7 +71,7 @@ def test_cosine_lr_decay_monotonic_and_endpoints():
     num_steps = 100
     trainer = _make_dummy_trainer(num_steps=num_steps)
     # Initialize minimal KL EMA fields for schedule
-    trainer.kl_ema_initialized = False
+    trainer.kl_ema.initialized = False
 
     lrs = []
     for step in range(0, num_steps + 1, 10):
@@ -95,7 +98,7 @@ def test_entropy_linear_decay_with_floor():
         ent_final=ent_final,
         ent_portion=portion,
     )
-    trainer.kl_ema_initialized = False
+    trainer.kl_ema.initialized = False
 
     # Step 0: should be start
     trainer._apply_schedules(0)

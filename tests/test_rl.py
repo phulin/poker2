@@ -20,6 +20,7 @@ from alphaholdem.rl.replay import (
     compute_gae_returns,
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.utils.ema import EMA
 
 
 def test_replay_buffer_and_gae():
@@ -112,6 +113,7 @@ def test_trinal_clip_ppo_loss():
         value_loss_type="mse",
         huber_delta=1.0,
         target_kl=0.015,
+        kl_ema=EMA(),
     )
 
     loss_result = loss_calculator.compute_loss(

@@ -7,6 +7,7 @@ from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
+from alphaholdem.utils.ema import EMA
 
 
 def test_trinal_policy_upper_clip_for_negative_advantages():
@@ -57,6 +58,7 @@ def test_trinal_policy_upper_clip_for_negative_advantages():
         value_loss_type="mse",
         huber_delta=1.0,
         target_kl=0.015,
+        kl_ema=EMA(0.99, 0.0),
     )
 
     out = loss_calculator.compute_loss(
@@ -112,6 +114,7 @@ def test_value_clipping_symmetry():
         value_loss_type="mse",
         huber_delta=1.0,
         target_kl=0.015,
+        kl_ema=EMA(),
     )
 
     out = loss_calculator.compute_loss(
