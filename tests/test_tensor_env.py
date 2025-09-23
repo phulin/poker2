@@ -1300,3 +1300,41 @@ def test_button_position_and_blind_posting():
     for i, (pos0, pos1) in enumerate(button_positions):
         assert pos0 in [0, 1], f"Invalid button position {pos0} at reset {i}"
         assert pos1 in [0, 1], f"Invalid button position {pos1} at reset {i}"
+
+
+def test_deck_reset_forced_cards():
+    """Test deck reset logic with 1024 environments to verify correctness at scale."""
+    print("Testing deck reset with 1024 environments...")
+
+    # Create environment with 1024 environments
+    env = _make_env(N=1024, starting_stack=1000, sb=25, bb=50, seed=123)
+
+    # Reset to trigger deck shuffling
+    forced_cards = torch.arange(1024 * 4, device=env.device).reshape(1024, 4) % 52
+    env.reset(force_deck=forced_cards)
+
+    # Check that all decks have correct shape
+    assert env.deck.shape == (
+        1024,
+        9,
+    ), f"Expected deck shape (1024, 9), got {env.deck.shape}"
+
+    # Check that all cards in each deck are unique (no duplicates)
+    for i in range(1024):
+        deck = env.deck[i]
+
+        # Check for duplicates in the first 9 cards
+        unique_cards = torch.unique(deck)
+        if len(unique_cards) != 9:
+            duplicates_found += 1
+            if duplicates_found <= 5:  # Only print first 5 failures
+                print(f"  Environment {i}: Found duplicates in deck {deck.tolist()}")
+
+        # Check that all cards are valid (0-51)
+        if not torch.all((deck >= 0) & (deck < 52)):
+            raise AssertionError(
+                f"Environment {i}: Invalid card values in deck {deck.tolist()}"
+            )
+
+    # Check that we still have every possible card
+    assert torch.unique(env.deck.flatten()).numel() == 52

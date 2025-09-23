@@ -195,65 +195,20 @@ def create_169_hand_analysis_setup(
         flop_showdown=flop_showdown,
     )
 
-    # Reset the environment
-    temp_env.reset(
-        force_button=torch.full((temp_env.N,), button, dtype=torch.long, device=device)
-    )
-
     # Get all 1326 hand combinations
     hands = create_1326_hand_combinations()
 
-    # Set hole cards for each environment
-    for i, (card1, card2) in enumerate(hands):
-        # Convert card strings to integers (assuming standard mapping)
-        card1_int = _card_str_to_int(card1)
-        card2_int = _card_str_to_int(card2)
+    cards = torch.tensor(
+        [(_card_str_to_int(hand[0]), _card_str_to_int(hand[1])) for hand in hands],
+        dtype=torch.long,
+        device=device,
+    )
 
-        # Convert cards to one-hot representation
-        suit1, rank1 = card1_int // 13, card1_int % 13
-        suit2, rank2 = card2_int // 13, card2_int % 13
-
-        # Set hole cards in the tensor environment
-        temp_env.hole_onehot[i, 0, :, :, :] = False
-        temp_env.hole_onehot[i, 0, 0, suit1, rank1] = True
-        temp_env.hole_onehot[i, 0, 1, suit2, rank2] = True
-
-        # Set hole card indices
-        temp_env.hole_indices[i, 0, 0] = card1_int
-        temp_env.hole_indices[i, 0, 1] = card2_int
-
-        # Reshuffle deck without these cards
-        # Remove card1_int and card2_int from the deck and reshuffle
-        # Get the full deck (0..51)
-        full_deck = list(range(52))
-        # Remove the two hole cards
-        deck_minus_hole = [c for c in full_deck if c not in (card1_int, card2_int)]
-        # Shuffle the deck
-        # Place the shuffled deck into temp_env.deck for this env
-        temp_env.deck[i, 0] = card1_int
-        temp_env.deck[i, 1] = card2_int
-        temp_env.deck[i, 2:9] = torch.tensor(deck_minus_hole, device=temp_env.device)[
-            torch.randperm(50)[:7]
-        ]
-
-        # Deal opponent hole cards
-        opp_card1_int = temp_env.deck[i, 2]
-        opp_card2_int = temp_env.deck[i, 3]
-
-        opp_suit1, opp_rank1 = opp_card1_int // 13, opp_card1_int % 13
-        opp_suit2, opp_rank2 = opp_card2_int // 13, opp_card2_int % 13
-
-        # Set hole cards in the tensor environment
-        temp_env.hole_onehot[i, 1, :, :, :] = False
-        temp_env.hole_onehot[i, 1, 0, opp_suit1, opp_rank1] = True
-        temp_env.hole_onehot[i, 1, 1, opp_suit2, opp_rank2] = True
-
-        # Set hole card indices
-        temp_env.hole_indices[i, 1, 0] = opp_card1_int
-        temp_env.hole_indices[i, 1, 1] = opp_card2_int
-
-        # Set deck_pos to 4 (after hole cards)
-        temp_env.deck_pos[i] = 4
+    # Reset the environment
+    temp_env.reset(
+        force_button=torch.full((temp_env.N,), button, dtype=torch.long, device=device),
+        force_deck=cards,
+    )
 
     return temp_env
 

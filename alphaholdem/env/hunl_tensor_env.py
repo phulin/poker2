@@ -170,7 +170,16 @@ class HUNLTensorEnv:
         self,
         env_indices: Optional[torch.Tensor] = None,
         force_button: Optional[torch.Tensor] = None,
+        force_deck: Optional[torch.Tensor] = None,
     ) -> None:
+        """Reset the environment.
+
+        Args:
+            env_indices: Optional[torch.Tensor] - Environment indices to reset.
+            force_button: Optional[torch.Tensor] - Force button for each environment.
+            force_deck: Optional[torch.Tensor] - Force deck for each environment.
+                Shape: [num_reset, 1-9]. If shorter than 9, the rest of the deck is shuffled.
+        """
         if self.debug_step_table:
             print("=" * 49 + " RESET " + "=" * 49)
         # Determine which environments to reset
@@ -185,11 +194,28 @@ class HUNLTensorEnv:
                 return  # Nothing to reset
             num_reset = ids.numel()
 
-        # Shuffle decks for specified environments
-        random_vals = torch.rand(num_reset, 52, generator=self.rng, device=self.device)
-        # Only need 9 cards.
-        _, deck_cards = torch.topk(random_vals, 9, dim=1)
-        self.deck[ids] = deck_cards
+        # Force the forced cards to the front of the deck.
+        decks = torch.arange(52, device=self.device).repeat(num_reset, 1)
+        deck_rows = torch.arange(num_reset, device=self.device)
+        forced = 0 if force_deck is None else force_deck.shape[1]
+        if force_deck is not None:
+            force_deck.sort(dim=1)
+            for i in range(forced):
+                decks[deck_rows, force_deck[:, i]] = i
+                decks[deck_rows, i] = force_deck[:, i]
+
+        # Pick enough of the remaining cards to get to 9 cards.
+        assert forced <= 9
+        left_to_shuffle = 9 - forced
+        decks_left = decks[:, forced:]
+        if left_to_shuffle > 0:
+            random_vals = torch.rand(
+                num_reset, 52 - forced, generator=self.rng, device=self.device
+            )
+            _, deck_cards = torch.topk(random_vals, left_to_shuffle, dim=1)
+            decks_left[:, :left_to_shuffle] = decks_left.gather(1, deck_cards)
+
+        self.deck[ids] = decks[:, :9]
 
         # Deal hole cards: for each env, assign 4 cards in deck order
         # [num_reset, 4] indices into deck for each env
