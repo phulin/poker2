@@ -941,6 +941,7 @@ class SelfPlayTrainer:
         total_explained_var, total_epsilon = 0.0, 0.0
         total_advantage_mean_raw, total_advantage_std_raw = 0.0, 0.0
         total_return_abs_mean, total_return_abs_std = 0.0, 0.0
+        total_small_adv_rate = 0.0
         minibatch_count = 0
 
         for _ in range(self.num_epochs):
@@ -955,6 +956,12 @@ class SelfPlayTrainer:
             batch.advantages = (adv - adv_mean_raw) / adv_std_raw
             total_advantage_mean_raw += adv_mean_raw.item()
             total_advantage_std_raw += adv_std_raw.item()
+
+            # Calculate rate of small advantages (|A_raw| < 1e-3)
+            small_adv_mask = adv.abs() < 1e-3
+            small_adv_rate = small_adv_mask.float().mean().item()
+            total_small_adv_rate += small_adv_rate
+
             total_return_abs_mean += batch.returns.abs().mean().item()
             total_return_abs_std += batch.returns.abs().std().item()
 
@@ -1091,6 +1098,7 @@ class SelfPlayTrainer:
             "epsilon": total_epsilon / denom,
             "advantage_mean_raw": total_advantage_mean_raw / denom,
             "advantage_std_raw": total_advantage_std_raw / denom,
+            "small_adv": total_small_adv_rate / denom,
             "return_abs_mean": total_return_abs_mean / denom,
             "return_abs_std": total_return_abs_std / denom,
         }
@@ -1160,6 +1168,7 @@ class SelfPlayTrainer:
                     "num_samples": training_stats["num_samples"],
                     "advantage_mean_raw": training_stats["advantage_mean_raw"],
                     "advantage_std_raw": training_stats["advantage_std_raw"],
+                    "small_adv": training_stats["small_adv"],
                     "return_abs_mean": training_stats["return_abs_mean"],
                     "return_abs_std": training_stats["return_abs_std"],
                     "lr": learning_rate,
