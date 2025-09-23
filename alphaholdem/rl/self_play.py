@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
 
 import wandb
-
-from alphaholdem.utils.ema import EMA
 
 from ..core.builders import build_components_from_config
 from ..core.structured_config import Config
@@ -27,6 +25,8 @@ from ..rl.k_best_pool import KBestOpponentPool
 from ..rl.losses import TrinalClipPPOLoss
 from ..rl.replay import Trajectory, Transition
 from ..rl.vectorized_replay import VectorizedReplayBuffer
+from ..rl.opponent_pool import OpponentPool
+from ..utils.ema import EMA
 from ..utils.kl_divergence import compute_kl_divergence_batch
 from ..utils.profiling import profile
 
@@ -65,6 +65,56 @@ class SelfDummySnapshot:
 
 
 class SelfPlayTrainer:
+    # Typed instance attributes (PEP 526 annotations)
+    cfg: Config
+    device: torch.device
+    batch_size: int
+    num_epochs: int
+    gamma: float
+    gae_lambda: float
+    epsilon: float
+    replay_buffer_batches: int
+    max_trajectory_length: int
+    delta1: float
+    value_coef: float
+    entropy_coef: float
+    grad_clip: float
+    learning_rate: float
+    learning_rate_final: float
+    lr_schedule: str
+    entropy_coef_start: float
+    entropy_coef_final: float
+    entropy_decay_portion: float
+    k_best_pool_size: int
+    min_elo_diff: float
+    min_step_diff: int
+    k_factor: float
+    use_mixed_precision: bool
+    loss_scale: float
+    use_kv_cache: bool
+    use_tensor_env: bool
+    num_envs: int
+    use_wandb: bool
+    wandb_project: str
+    wandb_name: str
+    wandb_tags: Optional[list[str]]
+    wandb_run_id: Optional[str]
+
+    float_dtype: torch.dtype
+    rng: torch.Generator
+    is_transformer: bool
+
+    tensor_env: HUNLTensorEnv
+    env: Optional[HUNLEnv]
+    model: torch.nn.Module
+    policy: Any
+    state_encoder: Union[TokenSequenceBuilder, CNNStateEncoder]
+    replay_buffer: VectorizedReplayBuffer
+    opponent_pool_type: str
+    opponent_pool: OpponentPool
+
+    kl_ema: EMA
+
     def __init__(
         self, cfg: Config, device: torch.device, rng_seed: Optional[int] = None
     ):
@@ -938,7 +988,7 @@ class SelfPlayTrainer:
         # Initialize tracking variables once before the epoch loop
         total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
         total_entropy, total_clipfrac = 0.0, 0.0
-        total_explained_var, total_epsilon = 0.0, 0.0
+        total_explained_var, total_pearson_r, total_epsilon = 0.0, 0.0, 0.0
         total_advantage_mean_raw, total_advantage_std_raw = 0.0, 0.0
         total_return_abs_mean, total_return_abs_std = 0.0, 0.0
         total_small_adv_rate = 0.0
@@ -983,10 +1033,17 @@ class SelfPlayTrainer:
 
             # Debugging metrics: explained variance
             with torch.no_grad():
+                y = batch.returns
+                yhat = values.detach()
                 # Explained variance of value predictions against targets
-                var_y = batch.returns.var(correction=0)
-                var_err = (batch.returns - values.detach()).var(correction=0)
+                var_y = y.var(correction=0)
+                var_err = (y - yhat).var(correction=0)
                 explained_var = 1.0 - (var_err / (var_y + 1e-8))
+
+                # 3) Also log correlation (often more stable/interpretible)
+                # Use returns (y) and predicted values (yhat)
+                if y.numel() >= 2:
+                    pearson_r = torch.corrcoef(torch.stack([y, yhat]))[0, 1].item()
 
             total_loss += loss_result.total_loss.item()
             total_policy_loss += loss_result.policy_loss.item()
@@ -994,6 +1051,7 @@ class SelfPlayTrainer:
             total_entropy += loss_result.entropy.item()
             total_clipfrac += loss_result.clipfrac.item()
             total_explained_var += explained_var.item()
+            total_pearson_r += pearson_r
             total_epsilon += loss_result.epsilon
             minibatch_count += 1
 
@@ -1080,6 +1138,7 @@ class SelfPlayTrainer:
         # Update KL divergence exponential moving average
         self.kl_ema.update(current_kl)
 
+        avg_trajectory_length = self.replay_buffer.num_steps() / self.replay_buffer.size
         denom = max(1, minibatch_count)
 
         return {
@@ -1087,6 +1146,7 @@ class SelfPlayTrainer:
             "num_samples": self.batch_size * self.num_epochs,
             "delta2_mean": float(batch.delta2.mean().item()),
             "delta3_mean": float(batch.delta3.mean().item()),
+            "avg_trajectory_length": avg_trajectory_length,
             "avg_loss": total_loss / denom,
             "policy_loss": total_policy_loss / denom,
             "value_loss": total_value_loss / denom,
@@ -1095,6 +1155,7 @@ class SelfPlayTrainer:
             "kl_ema": self.kl_ema.value,
             "clipfrac": total_clipfrac / denom,
             "explained_var": total_explained_var / denom,
+            "pearson_r": total_pearson_r / denom,
             "epsilon": total_epsilon / denom,
             "advantage_mean_raw": total_advantage_mean_raw / denom,
             "advantage_std_raw": total_advantage_std_raw / denom,
@@ -1156,6 +1217,7 @@ class SelfPlayTrainer:
                 {
                     "step": step,  # Match CLI display (1-indexed)
                     "trajectories_collected": training_stats["trajectories_collected"],
+                    "avg_trajectory_length": training_stats["avg_trajectory_length"],
                     "avg_reward": training_stats["avg_reward"],
                     "current_elo": training_stats["current_elo"],
                     "policy_loss": training_stats["policy_loss"],
@@ -1164,6 +1226,7 @@ class SelfPlayTrainer:
                     "approx_kl": training_stats["approx_kl"],
                     "clipfrac": training_stats["clipfrac"],
                     "explained_var": training_stats["explained_var"],
+                    "pearson_r": training_stats["pearson_r"],
                     "avg_loss": training_stats["avg_loss"],
                     "num_samples": training_stats["num_samples"],
                     "advantage_mean_raw": training_stats["advantage_mean_raw"],
