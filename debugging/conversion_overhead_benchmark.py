@@ -12,10 +12,6 @@ import sys
 import time
 
 import torch
-
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from hydra import compose, initialize
 from hydra.core.global_hydra import GlobalHydra
 
@@ -27,6 +23,9 @@ import alphaholdem.models.heads
 import alphaholdem.models.siamese_convnet
 from alphaholdem.core.builders import build_components_from_config
 from alphaholdem.rl.self_play import SelfPlayTrainer
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def benchmark_conversion_vs_model():

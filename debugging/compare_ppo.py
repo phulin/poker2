@@ -4,12 +4,13 @@
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import torch
 
 from alphaholdem.rl.losses import standard_ppo_loss, trinal_clip_ppo_loss
+from alphaholdem.rl.replay import compute_gae_returns, prepare_ppo_batch
 from alphaholdem.rl.self_play import SelfPlayTrainer
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def compare_ppo_losses():
@@ -41,8 +42,6 @@ def compare_ppo_losses():
 
         values.append(0.0)
 
-        from alphaholdem.rl.replay import compute_gae_returns
-
         advantages, returns = compute_gae_returns(
             rewards, values, gamma=trainer.gamma, lambda_=trainer.gae_lambda
         )
@@ -52,8 +51,6 @@ def compare_ppo_losses():
             transition.return_ = returns[i]
 
     # Prepare batch
-    from alphaholdem.rl.replay import prepare_ppo_batch
-
     batch = prepare_ppo_batch(trajectories)
 
     # Get model outputs for the batch

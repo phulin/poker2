@@ -7,7 +7,6 @@ from typing import Dict, Optional, Union
 import torch
 import torch.nn.functional as F
 
-
 from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
 from ..utils.ema import EMA

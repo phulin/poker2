@@ -12,11 +12,11 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+from alphaholdem.models.cnn import SiameseConvNetV1
+
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
-
-from alphaholdem.models.cnn import SiameseConvNetV1
 
 
 def format_bytes(bytes_value: int) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from alphaholdem.models.cnn import SiameseConvNetV1
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.dred_pool import DREDPool, DREDSnapshotData
 
@@ -25,8 +26,6 @@ def test_dred_prune_basic():
     )
 
     # Provide sample batch for embedding generation during pruning
-    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-
     sample = CNNEmbeddingData(
         cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
     )
@@ -59,8 +58,6 @@ def test_dred_prune_top_elo_preserved():
     )
 
     # Provide sample batch for embedding generation during pruning
-    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-
     sample = CNNEmbeddingData(
         cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
     )
@@ -99,8 +96,6 @@ def test_dred_prune_clustering():
     )
 
     # Provide sample batch for embedding generation during pruning
-    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-
     sample = CNNEmbeddingData(
         cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
     )
@@ -197,8 +192,6 @@ def test_dred_prune_age_tracking():
     )
 
     # Provide sample batch for embedding generation during pruning
-    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-
     sample = CNNEmbeddingData(
         cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
     )
@@ -231,8 +224,6 @@ def test_dred_prune_embedding_generation():
     )
 
     # Provide sample batch to enable embedding generation during pruning
-    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-
     sample = CNNEmbeddingData(
         cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
     )
@@ -248,8 +239,6 @@ def test_dred_prune_embedding_generation():
     # Test that embeddings can still be generated for remaining snapshots
     for snapshot in pool.snapshots:
         # Provide a minimal sample batch using zeros matching CNNEmbeddingData
-        from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-
         sample = CNNEmbeddingData(
             cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
         )
@@ -261,7 +250,6 @@ def test_dred_prune_embedding_generation():
 def test_dred_prune_kmedoids_integration():
     """Test that pruning integrates properly with k-medoids clustering."""
     pool = DREDPool(max_size=5)
-    from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 
     sample = CNNEmbeddingData(
         cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)

@@ -1,35 +1,40 @@
 from __future__ import annotations
 
-import re
-
-import torch
-import pytest
 import os
+import re
 import sys
 
-from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
+import pytest
+import torch
 
-# Ensure repo root on path for direct pytest runs
-REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-
+from alphaholdem.env import analyze_tensor_env as ate
 from alphaholdem.env.analyze_tensor_env import (
-    create_1326_hand_combinations,
+    _create_169_grid,
     _grid_coords_for_hand,
+    create_1326_hand_combinations,
     get_preflop_betting_grid,
     get_preflop_range_grid,
     get_preflop_value_grid,
     get_probabilities,
 )
-from alphaholdem.env import analyze_tensor_env as ate
 from alphaholdem.models.model_outputs import ModelOutput
+from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.models.transformer.tokens import HOLE0_INDEX, HOLE1_INDEX, Context
-from alphaholdem.models.transformer.tokens import Special, get_card_token_id_offset
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
+from alphaholdem.models.transformer.tokens import (
+    HOLE0_INDEX,
+    HOLE1_INDEX,
+    Context,
+    Special,
+    get_card_token_id_offset,
+)
+
+# Ensure repo root on path for direct pytest runs
+REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 
 RANKS: list[str] = [
@@ -219,8 +224,7 @@ def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
     device = torch.device("cpu")
     grid = get_preflop_value_grid(model, device=device)
 
-    # Import inside to keep top-level imports minimal for pytest collection
-    from alphaholdem.env.analyze_tensor_env import _create_169_grid  # noqa: F401
+    # Symbol imported at module top
 
     table = _parse_grid_values(grid)
     # Convert value cells (scaled by 1000) to ints

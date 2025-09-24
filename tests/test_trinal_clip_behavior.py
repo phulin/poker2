@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.rl.losses import TrinalClipPPOLoss
-from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
+from alphaholdem.rl.losses import TrinalClipPPOLoss
+from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.utils.ema import EMA
 
 

@@ -23,8 +23,8 @@ from alphaholdem.core.structured_config import (
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.transformer.tokens import (
-    Game,
     Context,
+    Game,
     Special,
     get_action_token_id_offset,
     get_card_token_id_offset,
@@ -141,14 +141,8 @@ def print_decoded_token_sequence(data, row_idx: int, length: int) -> None:
             if hasattr(data, "bet_bins"):
                 bet_bins = data.bet_bins
             # Fallback bet_bins used elsewhere in this script (env config)
-            try:
-                from alphaholdem.core.structured_config import (
-                    EnvConfig,
-                )  # local import safety
-
-                bet_bins = bet_bins or []
-            except Exception:
-                bet_bins = bet_bins or []
+            # EnvConfig is available at module import time; no local import needed
+            bet_bins = bet_bins or []
             parts.append(
                 f"ACTION_{describe_action(action_idx, bet_bins if bet_bins else [0.5, 1.0, 1.5, 2.0])}"
             )

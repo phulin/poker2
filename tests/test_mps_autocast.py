@@ -10,9 +10,6 @@ from unittest.mock import patch
 import pytest
 import torch
 
-# Add the project root to the path for imports
-sys.path.insert(0, os.path.abspath("."))
-
 from alphaholdem.core.structured_config import (
     Config,
     EnvConfig,
@@ -21,6 +18,9 @@ from alphaholdem.core.structured_config import (
 )
 from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.rl.self_play import SelfPlayTrainer
+
+# Add the project root to the path for imports
+sys.path.insert(0, os.path.abspath("."))
 
 
 @pytest.fixture

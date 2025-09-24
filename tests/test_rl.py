@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import tempfile
 
 import torch
@@ -75,10 +76,10 @@ def test_trinal_clip_ppo_loss():
     legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
     # Create BatchSample object
-    from alphaholdem.rl.vectorized_replay import BatchSample
     from alphaholdem.models.transformer.structured_embedding_data import (
         StructuredEmbeddingData,
     )
+    from alphaholdem.rl.vectorized_replay import BatchSample
 
     # Create dummy embedding data
     embedding_data = StructuredEmbeddingData(
@@ -156,7 +157,6 @@ def test_self_play_trainer_basic():
     assert trainer.replay_buffer is not None
 
     # Test single trajectory collection with timeout
-    import signal
 
     def timeout_handler(signum, frame):
         raise TimeoutError("Trajectory collection timed out")

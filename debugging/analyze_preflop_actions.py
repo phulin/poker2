@@ -5,6 +5,7 @@ Shows what the model would do when acting first (SB) and as BB when called to ac
 """
 
 import argparse
+import traceback
 from pathlib import Path
 
 import torch
@@ -216,8 +217,6 @@ def main():
         analyze_preflop_actions(str(checkpoint_path), hand_cards, args.device)
     except Exception as e:
         print(f"Error: {e}")
-        import traceback
-
         traceback.print_exc()
 
 

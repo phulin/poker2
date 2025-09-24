@@ -1,11 +1,20 @@
 import pytest
 import torch
 
+from alphaholdem.core.structured_config import (
+    Config,
+    EnvConfig,
+    ModelConfig,
+    TrainingConfig,
+)
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
+from alphaholdem.models.transformer.tokens import Context as Ctx
+from alphaholdem.models.transformer.tokens import Special
+from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
 
 
@@ -40,7 +49,7 @@ class TestVectorizedReplayBuffer:
         assert buffer.data.card_suits.shape == (10, 50)  # Card suits
         assert buffer.data.action_actors.shape == (10, 50)  # Action actors
         assert buffer.data.action_legal_masks.shape == (10, 50, 5)  # Action legal masks
-        from alphaholdem.models.transformer.tokens import Context as Ctx
+        # Ctx imported at module top
 
         assert buffer.data.context_features.shape == (
             10,
@@ -69,7 +78,7 @@ class TestVectorizedReplayBuffer:
         # Start adding trajectories for 2 envs
         buffer.start_adding_trajectory_batches(2)
         # Build minimal initial embedding with CLS+CONTEXT+PREFLOP+2 cards
-        from alphaholdem.models.transformer.tokens import Special
+        # Special imported at module top
 
         token_ids = torch.full(
             (2, buffer.max_sequence_length), -1, dtype=torch.long, device=device
@@ -172,7 +181,7 @@ class TestVectorizedReplayBuffer:
     def test_transformer_add_transitions_appends_context_and_action(self, buffer):
         device = buffer.device
         buffer.start_adding_trajectory_batches(1)
-        from alphaholdem.models.transformer.tokens import Special
+        # Special imported at module top
 
         # Prepare embedding with context features in slot 0/1
         L = buffer.max_sequence_length

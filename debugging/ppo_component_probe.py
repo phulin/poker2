@@ -11,8 +11,6 @@ import argparse
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import torch
 import torch.nn.functional as F
 
@@ -20,6 +18,8 @@ from alphaholdem.env import rules
 from alphaholdem.rl.losses import trinal_clip_ppo_loss
 from alphaholdem.rl.replay import compute_gae_returns, prepare_ppo_batch
 from alphaholdem.rl.self_play import SelfPlayTrainer
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def format_float(x: float) -> str:

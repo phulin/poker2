@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+
 from alphaholdem.utils.ema import EMA
 
 

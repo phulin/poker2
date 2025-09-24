@@ -9,9 +9,9 @@ import sys
 
 import torch
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def compute_gae_non_vectorized(

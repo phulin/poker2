@@ -1,17 +1,17 @@
 import os
+
 import torch
 from omegaconf import OmegaConf
 
 from alphaholdem.core.structured_config import (
     Config,
     EnvConfig,
+    ExploiterConfig,
     ModelConfig,
     StateEncoderConfig,
     TrainingConfig,
-    ExploiterConfig,
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
-
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

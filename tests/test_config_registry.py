@@ -9,6 +9,7 @@ from alphaholdem.core.structured_config import (
     ModelConfig,
     TrainingConfig,
 )
+from alphaholdem.models import cnn, heads  # noqa: F401
 
 
 def test_load_default_config_values():
@@ -35,8 +36,7 @@ def test_load_default_config_values():
 
 
 def test_registries_have_required_components():
-    # Import modules to trigger registration
-    from alphaholdem.models import cnn, heads
+    # Modules are imported at top to trigger registration
 
     # Names in default.yaml should be registered
     assert "cards_planes_v1" in registry.CARD_ENCODERS

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Comprehensive test suite for k-medoids clustering implementation."""
 
+import time
 from typing import List, Tuple
 
 import pytest
@@ -298,7 +299,6 @@ def run_manual_tests():
 
     # Test 4: Performance test
     print("\n4. Testing performance...")
-    import time
 
     torch.manual_seed(42)
     X_large = torch.randn(100, 5)

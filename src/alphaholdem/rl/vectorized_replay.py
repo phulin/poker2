@@ -7,7 +7,7 @@ import torch
 
 from ..models.cnn_embedding_data import CNNEmbeddingData
 from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
-from ..models.transformer.tokens import Special, Context
+from ..models.transformer.tokens import Context, Special
 
 
 @dataclass

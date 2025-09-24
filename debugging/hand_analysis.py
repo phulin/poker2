@@ -9,8 +9,6 @@ showing value and policy calculations at each decision point.
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import hydra
 import torch
 import torch.nn.functional as F
@@ -22,6 +20,8 @@ from alphaholdem.env import rules
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1
 from alphaholdem.rl.self_play import SelfPlayTrainer
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def card_number_to_name(card_num):

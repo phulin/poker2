@@ -23,9 +23,9 @@ from ..rl.agent_snapshot import AgentSnapshot
 from ..rl.dred_pool import DREDPool
 from ..rl.k_best_pool import KBestOpponentPool
 from ..rl.losses import TrinalClipPPOLoss
+from ..rl.opponent_pool import OpponentPool
 from ..rl.replay import Trajectory, Transition
 from ..rl.vectorized_replay import VectorizedReplayBuffer
-from ..rl.opponent_pool import OpponentPool
 from ..utils.ema import EMA
 from ..utils.kl_divergence import compute_kl_divergence_batch
 from ..utils.profiling import profile

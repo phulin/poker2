@@ -4,6 +4,7 @@ SelfPlayTrainer Memory Test - Monitor MPS memory usage during training
 """
 
 import time
+import traceback
 
 import psutil
 import torch
@@ -209,7 +210,7 @@ def main():
 
     except Exception as e:
         print(f"❌ Training step failed: {e}")
-        import traceback
+        # traceback imported at module top
 
         traceback.print_exc()
         return

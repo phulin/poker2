@@ -7,13 +7,10 @@ This script tests the basic functionality of the K-Best opponent pool and self-p
 
 import os
 import sys
+import traceback
 from pathlib import Path
 
 import torch
-
-# Add the project root to the path
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
 
 from alphaholdem.core.structured_config import (
     Config,
@@ -25,6 +22,10 @@ from alphaholdem.models.cnn import SiameseConvNetV1
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.k_best_pool import KBestOpponentPool
 from alphaholdem.rl.self_play import SelfPlayTrainer
+
+# Add the project root to the path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
 
 
 def test_kbest_pool():
@@ -211,8 +212,6 @@ def main():
 
     except Exception as e:
         print(f"Test failed: {e}")
-        import traceback
-
         traceback.print_exc()
         return 1
 

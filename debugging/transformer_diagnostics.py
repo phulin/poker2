@@ -11,24 +11,14 @@ Diagnostics:
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
-import argparse
-from omegaconf import OmegaConf
 from typing import List, Tuple
 
 import torch
 import torch.nn as nn
-
-# Ensure project root is on sys.path when running as a script
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
-from alphaholdem.models.transformer.structured_embedding_data import (
-    StructuredEmbeddingData,
-)
+from omegaconf import OmegaConf
 
 from alphaholdem.core.structured_config import (
     Config,
@@ -37,14 +27,35 @@ from alphaholdem.core.structured_config import (
     TrainingConfig,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.models.transformer.tokens import (
+    HOLE0_INDEX,
+    HOLE1_INDEX,
     Special,
-    get_card_token_id_offset,
     get_action_token_id_offset,
+    get_card_token_id_offset,
 )
-from alphaholdem.models.transformer.tokens import HOLE0_INDEX, HOLE1_INDEX
 from alphaholdem.rl.self_play import SelfPlayTrainer
+
+# Optional structured config types available in some configs
+try:
+    from alphaholdem.core.structured_config import ExploiterConfig, StateEncoderConfig
+except Exception:  # type: ignore
+    from alphaholdem.core.structured_config import (
+        ExploiterConfig as ExploiterConfig,
+    )  # type: ignore; noqa: F401
+    from alphaholdem.core.structured_config import (
+        StateEncoderConfig as StateEncoderConfig,
+    )  # type: ignore; noqa: F401
+
+# Ensure project root is on sys.path when running as a script
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 
 @torch.no_grad()
@@ -281,18 +292,8 @@ def main() -> None:
     train_cfg = TrainingConfig(**cfg_dict.get("train", {}))
     model_cfg = ModelConfig(**cfg_dict.get("model", {}))
     env_cfg = EnvConfig(**cfg_dict.get("env", {}))
-    try:
-        from alphaholdem.core.structured_config import StateEncoderConfig, ExploiterConfig  # type: ignore
-
-        state_encoder_cfg = StateEncoderConfig(**cfg_dict.get("state_encoder", {}))
-        exploiter_cfg = ExploiterConfig(**cfg_dict.get("exploiter", {}))
-    except Exception:
-        # Fallback defaults if not present in config
-        from alphaholdem.core.structured_config import StateEncoderConfig as _SEC  # type: ignore
-        from alphaholdem.core.structured_config import ExploiterConfig as _EC  # type: ignore
-
-        state_encoder_cfg = _SEC(**cfg_dict.get("state_encoder", {}))
-        exploiter_cfg = _EC(**cfg_dict.get("exploiter", {}))
+    state_encoder_cfg = StateEncoderConfig(**cfg_dict.get("state_encoder", {}))
+    exploiter_cfg = ExploiterConfig(**cfg_dict.get("exploiter", {}))
 
     cfg = Config(
         train=train_cfg,

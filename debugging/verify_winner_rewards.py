@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-import sys
 import os
+import sys
 from typing import Optional
 
 import torch
 from omegaconf import OmegaConf
 
+from alphaholdem.core.structured_config import (
+    Config,
+    EnvConfig,
+    ExploiterConfig,
+    ModelConfig,
+    StateEncoderConfig,
+    TrainingConfig,
+)
+from alphaholdem.rl.self_play import SelfPlayTrainer
+
 # Ensure project root on path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from alphaholdem.core.structured_config import (
-    Config,
-    EnvConfig,
-    ModelConfig,
-    StateEncoderConfig,
-    TrainingConfig,
-    ExploiterConfig,
-)
-from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def load_config(config_path: str) -> Config:

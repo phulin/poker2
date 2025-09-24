@@ -6,12 +6,13 @@ Debug script to investigate ELO rating system issues.
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import torch
 
 from alphaholdem.core.config import RootConfig
+from alphaholdem.core.config_loader import get_config
 from alphaholdem.rl.self_play import SelfPlayTrainer
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def debug_elo_system():
@@ -22,7 +23,6 @@ def debug_elo_system():
 
     # Initialize trainer
     device = torch.device("cpu")  # Use CPU for debugging
-    from alphaholdem.core.config_loader import get_config
 
     config = get_config("configs/default.yaml")
 

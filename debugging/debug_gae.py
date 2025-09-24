@@ -6,12 +6,12 @@ Debug script to investigate GAE computation specifically.
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import torch
 
 from alphaholdem.core.config_loader import get_config
 from alphaholdem.rl.self_play import SelfPlayTrainer
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def debug_gae():

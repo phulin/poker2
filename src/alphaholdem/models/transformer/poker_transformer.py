@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 
-
 from ...core.interfaces import Model
 from ...core.registry import register_model
 from ...utils.profiling import profile

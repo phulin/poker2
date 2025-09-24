@@ -9,13 +9,10 @@ for each component to help estimate VRAM requirements.
 import gc
 import os
 import sys
+import traceback
 from typing import Any, Dict
 
 import torch
-
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from hydra import compose, initialize
 from hydra.core.global_hydra import GlobalHydra
 
@@ -27,6 +24,9 @@ import alphaholdem.models.heads
 import alphaholdem.models.siamese_convnet
 from alphaholdem.core.builders import build_components_from_config
 from alphaholdem.rl.self_play import SelfPlayTrainer
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def format_bytes(bytes_value: int) -> str:
@@ -322,7 +322,7 @@ def main():
 
     except Exception as e:
         print(f"❌ Error during analysis: {e}")
-        import traceback
+        # traceback imported at module top
 
         traceback.print_exc()
 

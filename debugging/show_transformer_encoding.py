@@ -13,14 +13,15 @@ from typing import Dict, List
 
 import torch
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
 from alphaholdem.models.transformer.tokens import Context, Special
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 RANKS = "23456789TJQKA"
 SUITS = "shdc"
