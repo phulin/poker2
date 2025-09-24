@@ -196,13 +196,15 @@ class HUNLTensorEnv:
 
         # Force the forced cards to the front of the deck.
         decks = torch.arange(52, device=self.device).repeat(num_reset, 1)
-        deck_rows = torch.arange(num_reset, device=self.device)
         forced = 0 if force_deck is None else force_deck.shape[1]
         if force_deck is not None:
-            force_deck.sort(dim=1)
+            # guarantees swaps only go forward in deck. sorted has sorted[i] >= i.
+            force_deck_sorted = force_deck.sort(dim=1)[0]
             for i in range(forced):
-                decks[deck_rows, force_deck[:, i]] = i
-                decks[deck_rows, i] = force_deck[:, i]
+                decks[ids, i] = decks[ids, force_deck_sorted[:, i]]
+                decks[ids, force_deck_sorted[:, i]] = decks[ids, i]
+            # now unsort the forced portion.
+            decks[ids, :forced] = force_deck
 
         # Pick enough of the remaining cards to get to 9 cards.
         assert forced <= 9

@@ -273,7 +273,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
                     best_checkpoint_path, stats["current_elo"], is_best=True
                 )
 
-            print_preflop_range_grid(trainer, step + 1, seat=0)
+            print_preflop_range_grid(trainer, step + 1)
 
     # Final evaluation
     final_total_time = time.time() - training_start_time
@@ -289,9 +289,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
     trainer.save_checkpoint(final_checkpoint_path, cfg.num_steps)
 
     # Print preflop range grid
-    print_preflop_range_grid(
-        trainer, cfg.num_steps, seat=0, title="Final Preflop Range Grid"
-    )
+    print_preflop_range_grid(trainer, cfg.num_steps, title="Final Preflop Range Grid")
 
     return trainer
 

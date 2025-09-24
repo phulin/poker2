@@ -4,14 +4,21 @@ Debug utilities for HUNLTensorEnv.
 Contains functions for creating test environments and analyzing specific scenarios.
 """
 
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Union
 
 import torch
 
+from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
 from alphaholdem.models.state_encoder import CNNStateEncoder
+from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 
 from .hunl_tensor_env import HUNLTensorEnv
+
+
+class DummyStateEncoder:
+    def encode_tensor_states(self, player: int, idxs: torch.Tensor) -> torch.Tensor:
+        return idxs
 
 
 def create_state_encoder_for_model(model, env: HUNLTensorEnv, device: torch.device):
@@ -25,26 +32,22 @@ def create_state_encoder_for_model(model, env: HUNLTensorEnv, device: torch.devi
     Returns:
         Appropriate state encoder for the model
     """
-    # Detect model type from the model's class name
-    model_class_name = model.__class__.__name__.lower()
 
-    if "transformer" in model_class_name:
+    if isinstance(model, PokerTransformerV1):
         # For transformer models, create TokenSequenceBuilder with sane defaults
-        num_bet_bins = env.num_bet_bins
-        sequence_length = 100
-        float_dtype = torch.float32
         return TokenSequenceBuilder(
             tensor_env=env,
-            sequence_length=sequence_length,
-            num_bet_bins=num_bet_bins,
+            sequence_length=model.max_sequence_length,
+            num_bet_bins=env.num_bet_bins,
             device=device,
-            float_dtype=float_dtype,
+            float_dtype=torch.float32,
         )
-    elif "siamese" in model_class_name or "cnn" in model_class_name:
+    elif isinstance(model, SiameseConvNetV1):
         # For CNN models, create CNNStateEncoder with tensor_env and device
         return CNNStateEncoder(env, device)
     else:
-        raise ValueError(f"Unknown model type: {model_class_name}")
+        # for testing.
+        return DummyStateEncoder()
 
 
 def create_169_hand_combinations() -> List[Tuple[str, str]]:
@@ -148,17 +151,17 @@ def get_probabilities(
 
 
 def create_169_hand_analysis_setup(
-    model,
+    model: Union[PokerTransformerV1, SiameseConvNetV1],
     button: int,
-    starting_stack: int = 20000,
-    sb: int = 50,
-    bb: int = 100,
+    starting_stack: int = 1000,
+    sb: int = 5,
+    bb: int = 10,
     bet_bins: List[int] = None,
     device: torch.device = None,
     rng: torch.Generator = None,
     flop_showdown: bool = False,
 ) -> Tuple[HUNLTensorEnv, Any]:
-    """Create a tensor environment with all 169 preflop hands set up for player 0 and appropriate state encoder.
+    """Create a tensor environment with all 1326 preflop hands set up for player 0 and appropriate state encoder.
 
     Args:
         model: The trained model instance
@@ -210,7 +213,14 @@ def create_169_hand_analysis_setup(
         force_deck=cards,
     )
 
-    return temp_env
+    state_encoder = create_state_encoder_for_model(model, temp_env, device)
+    if isinstance(state_encoder, TokenSequenceBuilder):
+        state_encoder.add_game(torch.arange(temp_env.N, device=device))
+        state_encoder.add_card(torch.arange(temp_env.N, device=device), cards[:, 0])
+        state_encoder.add_card(torch.arange(temp_env.N, device=device), cards[:, 1])
+        state_encoder.add_context(torch.arange(temp_env.N, device=device))
+
+    return temp_env, state_encoder
 
 
 def _card_str_to_int(card_str: str) -> int:
@@ -317,11 +327,10 @@ def _create_169_grid(
 
 def get_preflop_betting_grid(
     model,
-    state_encoder,
     device: torch.device = None,
-    starting_stack: int = 20000,
-    sb: int = 50,
-    bb: int = 100,
+    starting_stack: int = 1000,
+    sb: int = 5,
+    bb: int = 10,
     bet_bins: List[int] = None,
     rng: torch.Generator = None,
     flop_showdown: bool = False,
@@ -346,7 +355,7 @@ def get_preflop_betting_grid(
         device = torch.device("cpu")
 
     # Create 1326-hand environment and state encoder
-    env = create_169_hand_analysis_setup(
+    env, state_encoder = create_169_hand_analysis_setup(
         model,
         button=0,
         starting_stack=starting_stack,
@@ -392,7 +401,10 @@ def get_preflop_betting_grid(
 
 
 def step_sb_action(
-    env: HUNLTensorEnv, sb_action: str = "allin", device: torch.device = None
+    env: HUNLTensorEnv,
+    state_encoder,
+    sb_action: str = "allin",
+    device: torch.device = None,
 ) -> None:
     """Simulate a specific SB action across all environments.
 
@@ -405,24 +417,37 @@ def step_sb_action(
         device = env.device
 
     N = env.N
+    bin = None
     if sb_action == "allin":
-        env.step_bins(torch.full((N,), 7, device=device))
+        bin = 7
     elif sb_action == "call":
-        env.step_bins(torch.full((N,), 1, device=device))
+        bin = 1
     elif sb_action == "fold":
-        env.step_bins(torch.full((N,), 0, device=device))
+        bin = 0
     elif sb_action == "bet":
-        env.step_bins(torch.full((N,), 2, device=device))
+        bin = 2
+
+    assert bin is not None
+    env.step_bins(torch.full((N,), bin, device=device))
+
+    if isinstance(state_encoder, TokenSequenceBuilder):
+        state_encoder.add_action(
+            torch.arange(N, device=device),
+            torch.ones(N, device=device),
+            torch.full((N,), bin, device=device),
+            torch.full((N, env.num_bet_bins + 3), True, device=device),
+            torch.full((N,), 0, device=device),
+        )
+        state_encoder.add_context(torch.arange(N, device=device))
 
 
 def get_preflop_range_grid(
     model,
-    state_encoder,
     bin_index: int,
     device: torch.device = None,
-    starting_stack: int = 20000,
-    sb: int = 50,
-    bb: int = 100,
+    starting_stack: int = 1000,
+    sb: int = 5,
+    bb: int = 10,
     bet_bins: List[int] = None,
     rng: torch.Generator = None,
     flop_showdown: bool = False,
@@ -447,7 +472,7 @@ def get_preflop_range_grid(
         device = torch.device("cpu")
 
     # Create 169-hand environment and state encoder
-    env = create_169_hand_analysis_setup(
+    env, state_encoder = create_169_hand_analysis_setup(
         model,
         button=0,
         starting_stack=starting_stack,
@@ -491,13 +516,12 @@ def get_preflop_range_grid(
 
 
 def get_preflop_range_grid_bb_response(
-    model,
-    state_encoder,
+    model: Union[PokerTransformerV1, SiameseConvNetV1],
     bin_index: int,
     device: torch.device = None,
-    starting_stack: int = 20000,
-    sb: int = 50,
-    bb: int = 100,
+    starting_stack: int = 1000,
+    sb: int = 5,
+    bb: int = 10,
     bet_bins: List[int] = None,
     rng: torch.Generator = None,
     flop_showdown: bool = False,
@@ -523,7 +547,7 @@ def get_preflop_range_grid_bb_response(
 
     # Create 169-hand environment and state encoder
     # Seat 0 (model perspective) is BB, button/SB is p1.
-    env = create_169_hand_analysis_setup(
+    env, state_encoder = create_169_hand_analysis_setup(
         model,
         button=1,
         starting_stack=starting_stack,
@@ -572,12 +596,11 @@ def get_preflop_range_grid_bb_response(
 
 
 def get_preflop_value_grid_bb_response(
-    model,
-    state_encoder,
+    model: Union[PokerTransformerV1, SiameseConvNetV1],
     device: torch.device = None,
-    starting_stack: int = 20000,
-    sb: int = 50,
-    bb: int = 100,
+    starting_stack: int = 1000,
+    sb: int = 5,
+    bb: int = 10,
     bet_bins: List[int] = None,
     rng: torch.Generator = None,
     flop_showdown: bool = False,
@@ -601,7 +624,7 @@ def get_preflop_value_grid_bb_response(
         device = torch.device("cpu")
 
     # Create 169-hand environment and state encoder
-    env = create_169_hand_analysis_setup(
+    env, state_encoder = create_169_hand_analysis_setup(
         model,
         button=1,
         starting_stack=starting_stack,
@@ -614,7 +637,7 @@ def get_preflop_value_grid_bb_response(
     )
 
     # Simulate SB all-in action
-    step_sb_action(env, "allin", device)
+    step_sb_action(env, state_encoder, "allin", device)
 
     # Get values for all 1326 combos
     _, values, _ = get_probabilities(model, state_encoder, env, 0, device)
@@ -645,12 +668,11 @@ def get_preflop_value_grid_bb_response(
 
 
 def get_preflop_value_grid(
-    model,
-    state_encoder,
+    model: Union[PokerTransformerV1, SiameseConvNetV1],
     device: torch.device = None,
-    starting_stack: int = 20000,
-    sb: int = 50,
-    bb: int = 100,
+    starting_stack: int = 1000,
+    sb: int = 5,
+    bb: int = 10,
     bet_bins: List[int] = None,
     rng: torch.Generator = None,
     flop_showdown: bool = False,
@@ -675,7 +697,7 @@ def get_preflop_value_grid(
         device = torch.device("cpu")
 
     # Create 1326-hand environment and state encoder
-    env = create_169_hand_analysis_setup(
+    env, state_encoder = create_169_hand_analysis_setup(
         model,
         button=0,
         starting_stack=starting_stack,

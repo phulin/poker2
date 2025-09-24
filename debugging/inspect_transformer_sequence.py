@@ -237,24 +237,24 @@ def print_token_sequence_data(
             )
             print(f"  Context features table:")
             print(
-                f"    {'Pos':<4} {'POT':<8} {'STACK_P0':<8} {'STACK_P1':<8} {'COMM_P0':<8} {'COMM_P1':<8} {'POS':<4} {'ACT_ROUND':<9} {'MIN_RAISE':<9} {'BET_CALL':<8}"
+                f"    {'Pos':>3} {'POT':>4} {'STACK_P0':>8} {'STACK_P1':>8} {'COMM_P0':>7} {'COMM_P1':>7} {'POS':>3} {'ACT_ROUND':>9} {'MIN_RAISE':>9} {'BET_CALL':>8}"
             )
             print(
-                f"    {'-'*4} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*4} {'-'*9} {'-'*9} {'-'*8}"
+                f"    {'-'*3} {'-'*4} {'-'*8} {'-'*8} {'-'*7} {'-'*7} {'-'*3} {'-'*9} {'-'*9} {'-'*8}"
             )
             for j in context_token_indices:
                 ctx = context_features[j].tolist()
                 print(
-                    f"    {j:<4} "
-                    f"{ctx[Context.POT.value]:<8.3f} "
-                    f"{ctx[Context.STACK_P0.value]:<8.3f} "
-                    f"{ctx[Context.STACK_P1.value]:<8.3f} "
-                    f"{ctx[Context.COMMITTED_P0.value]:<8.3f} "
-                    f"{ctx[Context.COMMITTED_P1.value]:<8.3f} "
-                    f"{ctx[Context.POSITION.value]:<4.0f} "
-                    f"{ctx[Context.ACTIONS_ROUND.value]:<9.0f} "
-                    f"{ctx[Context.MIN_RAISE.value]:<9.3f} "
-                    f"{ctx[Context.BET_TO_CALL.value]:<8.3f}"
+                    f"    {j:>3} "
+                    f"{ctx[Context.POT.value]:>4} "
+                    f"{ctx[Context.STACK_P0.value]:>8} "
+                    f"{ctx[Context.STACK_P1.value]:>8} "
+                    f"{ctx[Context.COMMITTED_P0.value]:>7} "
+                    f"{ctx[Context.COMMITTED_P1.value]:>7} "
+                    f"{ctx[Context.POSITION.value]:>3} "
+                    f"{ctx[Context.ACTIONS_ROUND.value]:>9} "
+                    f"{ctx[Context.MIN_RAISE.value]:>9} "
+                    f"{ctx[Context.BET_TO_CALL.value]:>8}"
                 )
         else:
             print(f"  No context tokens found in this trajectory")

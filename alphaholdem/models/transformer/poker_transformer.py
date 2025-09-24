@@ -79,6 +79,7 @@ class PokerTransformerV1(nn.Module, Model):
         self.n_layers = n_layers
         self.n_heads = n_heads
         self.num_bet_bins = num_bet_bins
+        self.max_sequence_length = max_sequence_length
         self.use_gradient_checkpointing = use_gradient_checkpointing
 
         # Single fused embedding module for all token types
