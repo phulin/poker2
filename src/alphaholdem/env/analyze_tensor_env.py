@@ -427,7 +427,7 @@ def step_sb_action(
         bin = 2
 
     assert bin is not None
-    env.step_bins(torch.full((N,), bin, device=device))
+    env.step_bins(torch.full((N,), bin, dtype=torch.long, device=device))
 
     if isinstance(state_encoder, TokenSequenceBuilder):
         state_encoder.add_action(
