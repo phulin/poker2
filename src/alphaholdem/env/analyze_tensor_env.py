@@ -427,6 +427,7 @@ def step_sb_action(
         bin = 2
 
     assert bin is not None
+    legal_masks = env.legal_bins_mask()
     env.step_bins(torch.full((N,), bin, dtype=torch.long, device=device))
 
     if isinstance(state_encoder, TokenSequenceBuilder):
@@ -434,7 +435,7 @@ def step_sb_action(
             torch.arange(N, device=device),
             torch.ones(N, dtype=torch.long, device=device),
             torch.full((N,), bin, dtype=torch.long, device=device),
-            torch.full((N, env.num_bet_bins), True, dtype=torch.bool, device=device),
+            legal_masks,
             torch.zeros(N, dtype=torch.long, device=device),
         )
         state_encoder.add_context(torch.arange(N, device=device))
