@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """Check advantage distribution during training."""
 
-import os
-import sys
-
 import torch
 
 from alphaholdem.rl.replay import compute_gae_returns
 from alphaholdem.rl.self_play import SelfPlayTrainer
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def check_advantages():

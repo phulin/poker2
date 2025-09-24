@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import torch
-
 from alphaholdem.models.cnn import SiameseConvNetV1
-from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.k_best_pool import KBestOpponentPool
 
 

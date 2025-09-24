@@ -4,14 +4,9 @@ Detailed comparison of vectorized vs non-vectorized GAE implementations.
 Shows step-by-step computation for both approaches.
 """
 
-import os
-import sys
-
 import torch
 
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def compute_gae_non_vectorized(

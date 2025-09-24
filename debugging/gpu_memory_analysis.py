@@ -7,8 +7,6 @@ for each component to help estimate VRAM requirements.
 """
 
 import gc
-import os
-import sys
 import traceback
 from typing import Any, Dict
 
@@ -16,17 +14,8 @@ import torch
 from hydra import compose, initialize
 from hydra.core.global_hydra import GlobalHydra
 
-import alphaholdem.encoding.actions_encoder
-
 # Import modules to register components
-import alphaholdem.encoding.cards_encoder
-import alphaholdem.models.heads
-import alphaholdem.models.siamese_convnet
-from alphaholdem.core.builders import build_components_from_config
 from alphaholdem.rl.self_play import SelfPlayTrainer
-
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def format_bytes(bytes_value: int) -> str:

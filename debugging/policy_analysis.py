@@ -6,15 +6,10 @@ Analyzes how the model's policy changes across different game states
 to verify it's learning to differentiate between situations.
 """
 
-import os
-import sys
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn.functional as F
 
-from alphaholdem.env import rules
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1
 from alphaholdem.rl.self_play import SelfPlayTrainer

@@ -3,16 +3,11 @@
 Debug script to investigate ELO rating system issues.
 """
 
-import os
-import sys
 
 import torch
 
-from alphaholdem.core.config import RootConfig
 from alphaholdem.core.config_loader import get_config
 from alphaholdem.rl.self_play import SelfPlayTrainer
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def debug_elo_system():

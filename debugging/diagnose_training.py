@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """Diagnostic script to debug training issues."""
 
-import os
-import sys
 
 import torch
 
 from alphaholdem.rl.self_play import SelfPlayTrainer
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def main():

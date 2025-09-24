@@ -1,20 +1,12 @@
 import pytest
 import torch
 
-from alphaholdem.core.structured_config import (
-    Config,
-    EnvConfig,
-    ModelConfig,
-    TrainingConfig,
-)
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
 from alphaholdem.models.transformer.tokens import Context as Ctx
 from alphaholdem.models.transformer.tokens import Special
-from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
 
 

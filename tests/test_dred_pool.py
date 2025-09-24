@@ -6,7 +6,6 @@ import torch
 
 from alphaholdem.models.cnn import SiameseConvNetV1
 from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.dred_pool import DREDPool, DREDSnapshotData
 
 

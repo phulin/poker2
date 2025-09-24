@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """Visualize how trajectories_per_step affects training."""
 
-import os
-import sys
-
-import torch
 
 from alphaholdem.rl.self_play import SelfPlayTrainer
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def visualize_trajectories_per_step():

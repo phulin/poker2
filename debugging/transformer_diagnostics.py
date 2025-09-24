@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from typing import List, Tuple
 
 import torch
@@ -23,7 +22,9 @@ from omegaconf import OmegaConf
 from alphaholdem.core.structured_config import (
     Config,
     EnvConfig,
+    ExploiterConfig,
     ModelConfig,
+    StateEncoderConfig,
     TrainingConfig,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
@@ -40,22 +41,6 @@ from alphaholdem.models.transformer.tokens import (
     get_card_token_id_offset,
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
-
-# Optional structured config types available in some configs
-try:
-    from alphaholdem.core.structured_config import ExploiterConfig, StateEncoderConfig
-except Exception:  # type: ignore
-    from alphaholdem.core.structured_config import (  # type: ignore; noqa: F401
-        ExploiterConfig as ExploiterConfig,
-    )
-    from alphaholdem.core.structured_config import (  # type: ignore; noqa: F401
-        StateEncoderConfig as StateEncoderConfig,
-    )
-
-# Ensure project root is on sys.path when running as a script
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
 
 
 @torch.no_grad()

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 from alphaholdem.core import registry
 from alphaholdem.core.structured_config import (
     Config,

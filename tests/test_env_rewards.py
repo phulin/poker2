@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.types import Action
 

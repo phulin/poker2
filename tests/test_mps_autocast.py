@@ -5,7 +5,6 @@ Tests for MPS autocast support in SelfPlayTrainer.
 
 import os
 import sys
-from unittest.mock import patch
 
 import pytest
 import torch

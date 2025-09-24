@@ -14,7 +14,6 @@ from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.factory import ModelFactory
-from alphaholdem.models.model_outputs import ModelOutput
 from alphaholdem.models.state_encoder import CNNStateEncoder
 from alphaholdem.models.transformer.kv_cache_manager import SelfPlayKVCacheManager
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder

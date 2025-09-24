@@ -16,11 +16,6 @@ from alphaholdem.core.structured_config import (
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
 
-# Ensure project root on path
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
 
 def load_config(config_path: str) -> Config:
     hydra_cfg = OmegaConf.load(config_path)

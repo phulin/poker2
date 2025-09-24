@@ -2,7 +2,6 @@
 """Comprehensive test suite for k-medoids clustering implementation."""
 
 import time
-from typing import List, Tuple
 
 import pytest
 import torch

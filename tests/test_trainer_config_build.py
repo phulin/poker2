@@ -8,7 +8,7 @@ from alphaholdem.core.structured_config import (
     ModelConfig,
     TrainingConfig,
 )
-from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
+from alphaholdem.models.cnn import SiameseConvNetV1
 from alphaholdem.models.heads import CategoricalPolicyV1
 from alphaholdem.rl.self_play import SelfPlayTrainer
 

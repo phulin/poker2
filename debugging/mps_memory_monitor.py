@@ -3,7 +3,6 @@
 MPS Memory Monitor - Track actual memory usage on Apple Silicon GPUs
 """
 
-import time
 from typing import Any, Dict
 
 import psutil

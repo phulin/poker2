@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.env.types import Action, GameState, PlayerState
+from alphaholdem.env.types import GameState, PlayerState
 from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1
 
 

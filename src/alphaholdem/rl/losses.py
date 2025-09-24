@@ -2,18 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, Optional, Union
 
 import torch
 import torch.nn.functional as F
 
-from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-from alphaholdem.models.transformer.structured_embedding_data import (
-    StructuredEmbeddingData,
-)
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.utils.ema import EMA
-from alphaholdem.utils.profiling import profile
 
 
 @dataclass
@@ -78,7 +72,6 @@ class LossCalculator(ABC):
         Returns:
             LossResult containing loss components and metrics
         """
-        pass
 
 
 class TrinalClipPPOLoss(LossCalculator):

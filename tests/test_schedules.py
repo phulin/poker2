@@ -1,7 +1,5 @@
 import math
 
-import torch
-
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.utils.ema import EMA
 

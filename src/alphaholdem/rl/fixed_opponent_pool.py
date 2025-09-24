@@ -3,11 +3,9 @@ from __future__ import annotations
 from typing import Any, List, Optional
 
 import torch
-import torch.nn as nn
 
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.opponent_pool import OpponentPool
-from alphaholdem.utils.profiling import profile
 
 
 class FixedOpponentPool(OpponentPool):

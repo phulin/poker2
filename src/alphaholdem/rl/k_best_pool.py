@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import copy
 import random
 from typing import Any, List, Optional
 
 import torch
-import torch.nn as nn
 
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.opponent_pool import OpponentPool

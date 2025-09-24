@@ -11,7 +11,6 @@ from alphaholdem.encoding.action_mapping import (
     _bin_to_target_action,
 )
 from alphaholdem.env.hunl_env import HUNLEnv
-from alphaholdem.env.types import Action
 
 
 def test_variable_bins_mapping_roundtrip(tmp_path):

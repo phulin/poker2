@@ -9,7 +9,6 @@ import torch
 
 from alphaholdem.env import analyze_tensor_env as ate
 from alphaholdem.env.analyze_tensor_env import (
-    _create_169_grid,
     _grid_coords_for_hand,
     create_1326_hand_combinations,
     get_preflop_betting_grid,
@@ -22,7 +21,6 @@ from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.models.transformer.tokens import (
     HOLE0_INDEX,
     HOLE1_INDEX,

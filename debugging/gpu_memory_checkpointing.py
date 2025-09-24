@@ -7,16 +7,10 @@ This script compares memory usage with and without gradient checkpointing on MPS
 
 import sys
 import time
-from pathlib import Path
 
 import torch
-import torch.nn as nn
 
 from alphaholdem.models.cnn import SiameseConvNetV1
-
-# Add project root to path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
 
 
 def format_bytes(bytes_value: int) -> str:
