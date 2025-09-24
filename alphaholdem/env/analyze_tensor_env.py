@@ -560,7 +560,7 @@ def get_preflop_range_grid_bb_response(
     )
 
     # Simulate SB all-in action
-    step_sb_action(env, "allin", device)
+    step_sb_action(env, state_encoder, "allin", device)
 
     # Now next-to-act is p0 (BB)
 
