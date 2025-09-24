@@ -5,8 +5,8 @@ This package contains various utility modules for configuration management,
 profiling, and other common functionality.
 """
 
-from .config_loader import load_config_from_checkpoint
-from .profiling import PROFILE_AVAILABLE, profile
+from alphaholdem.utils.config_loader import load_config_from_checkpoint
+from alphaholdem.utils.profiling import PROFILE_AVAILABLE, profile
 
 __all__ = [
     "load_config_from_checkpoint",

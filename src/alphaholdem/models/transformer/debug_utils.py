@@ -6,9 +6,11 @@ from typing import Dict, List
 
 import torch
 
-from ...env.hunl_tensor_env import HUNLTensorEnv
-from .state_encoder import TransformerStateEncoder
-from .structured_embedding_data import StructuredEmbeddingData
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.transformer.state_encoder import TransformerStateEncoder
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
 
 
 class TransformerStateDebugger:

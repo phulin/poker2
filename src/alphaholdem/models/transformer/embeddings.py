@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from ...utils.profiling import profile
-from .tokens import (
+from alphaholdem.models.transformer.tokens import (
     GAME_INDEX,
     Context,
     Game,
@@ -17,9 +16,12 @@ from .tokens import (
     get_card_token_id_offset,
     get_special_token_id_offset,
 )
+from alphaholdem.utils.profiling import profile
 
 if TYPE_CHECKING:  # pragma: no cover - import guarded for type checkers only
-    from .structured_embedding_data import StructuredEmbeddingData
+    from alphaholdem.models.transformer.structured_embedding_data import (
+        StructuredEmbeddingData,
+    )
 
 FOURIER_FEATURES = 5 * 2
 

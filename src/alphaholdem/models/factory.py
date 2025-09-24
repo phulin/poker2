@@ -7,9 +7,9 @@ from typing import Any, Dict
 import torch
 import torch.nn as nn
 
-from ..core.registry import MODELS
-from .cnn import SiameseConvNetV1
-from .transformer import PokerTransformerV1
+from alphaholdem.core.registry import MODELS
+from alphaholdem.models.cnn import SiameseConvNetV1
+from alphaholdem.models.transformer import PokerTransformerV1
 
 
 class ModelFactory:

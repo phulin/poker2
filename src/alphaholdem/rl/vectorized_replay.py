@@ -5,9 +5,11 @@ from typing import Union
 
 import torch
 
-from ..models.cnn_embedding_data import CNNEmbeddingData
-from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
-from ..models.transformer.tokens import Context, Special
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
+from alphaholdem.models.transformer.tokens import Context, Special
 
 
 @dataclass

@@ -15,11 +15,13 @@ from typing import Any, List, Optional, Union
 
 import torch
 
-from ..models.cnn_embedding_data import CNNEmbeddingData
-from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
-from .agent_snapshot import AgentSnapshot
-from .kmedoids import SimpleKMedoids
-from .opponent_pool import OpponentPool
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
+from alphaholdem.rl.agent_snapshot import AgentSnapshot
+from alphaholdem.rl.kmedoids import SimpleKMedoids
+from alphaholdem.rl.opponent_pool import OpponentPool
 
 
 @dataclass

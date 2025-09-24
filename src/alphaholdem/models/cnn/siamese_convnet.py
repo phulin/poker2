@@ -7,10 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
-from ...core.interfaces import Model
-from ...core.registry import register_model
-from ...models.cnn_embedding_data import CNNEmbeddingData
-from ...models.model_outputs import ModelOutput
+from alphaholdem.core.interfaces import Model
+from alphaholdem.core.registry import register_model
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.model_outputs import ModelOutput
 
 
 def _resize_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:

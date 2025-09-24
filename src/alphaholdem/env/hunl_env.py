@@ -4,8 +4,8 @@ import random
 from dataclasses import replace
 from typing import Any, Dict, List, Tuple
 
-from . import rules
-from .types import Action, GameState, PlayerState
+from alphaholdem.env import rules
+from alphaholdem.env.types import Action, GameState, PlayerState
 
 STREETS = ("preflop", "flop", "turn", "river", "showdown")
 

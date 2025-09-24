@@ -45,12 +45,12 @@ from alphaholdem.rl.self_play import SelfPlayTrainer
 try:
     from alphaholdem.core.structured_config import ExploiterConfig, StateEncoderConfig
 except Exception:  # type: ignore
-    from alphaholdem.core.structured_config import (
+    from alphaholdem.core.structured_config import (  # type: ignore; noqa: F401
         ExploiterConfig as ExploiterConfig,
-    )  # type: ignore; noqa: F401
-    from alphaholdem.core.structured_config import (
+    )
+    from alphaholdem.core.structured_config import (  # type: ignore; noqa: F401
         StateEncoderConfig as StateEncoderConfig,
-    )  # type: ignore; noqa: F401
+    )
 
 # Ensure project root is on sys.path when running as a script
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

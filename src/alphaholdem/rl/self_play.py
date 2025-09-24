@@ -5,30 +5,29 @@ from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
-
 import wandb
 
-from ..core.builders import build_components_from_config
-from ..core.structured_config import Config
-from ..encoding.action_mapping import bin_to_action, get_legal_mask
-from ..env.hunl_env import HUNLEnv
-from ..env.hunl_tensor_env import HUNLTensorEnv
-from ..models.cnn_embedding_data import CNNEmbeddingData
-from ..models.factory import ModelFactory
-from ..models.model_outputs import ModelOutput
-from ..models.state_encoder import CNNStateEncoder
-from ..models.transformer.kv_cache_manager import SelfPlayKVCacheManager
-from ..models.transformer.token_sequence_builder import TokenSequenceBuilder
-from ..rl.agent_snapshot import AgentSnapshot
-from ..rl.dred_pool import DREDPool
-from ..rl.k_best_pool import KBestOpponentPool
-from ..rl.losses import TrinalClipPPOLoss
-from ..rl.opponent_pool import OpponentPool
-from ..rl.replay import Trajectory, Transition
-from ..rl.vectorized_replay import VectorizedReplayBuffer
-from ..utils.ema import EMA
-from ..utils.kl_divergence import compute_kl_divergence_batch
-from ..utils.profiling import profile
+from alphaholdem.core.builders import build_components_from_config
+from alphaholdem.core.structured_config import Config
+from alphaholdem.encoding.action_mapping import bin_to_action, get_legal_mask
+from alphaholdem.env.hunl_env import HUNLEnv
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.factory import ModelFactory
+from alphaholdem.models.model_outputs import ModelOutput
+from alphaholdem.models.state_encoder import CNNStateEncoder
+from alphaholdem.models.transformer.kv_cache_manager import SelfPlayKVCacheManager
+from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
+from alphaholdem.rl.agent_snapshot import AgentSnapshot
+from alphaholdem.rl.dred_pool import DREDPool
+from alphaholdem.rl.k_best_pool import KBestOpponentPool
+from alphaholdem.rl.losses import TrinalClipPPOLoss
+from alphaholdem.rl.opponent_pool import OpponentPool
+from alphaholdem.rl.replay import Trajectory, Transition
+from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
+from alphaholdem.utils.ema import EMA
+from alphaholdem.utils.kl_divergence import compute_kl_divergence_batch
+from alphaholdem.utils.profiling import profile
 
 TARGET_KL = 0.015
 
@@ -1599,7 +1598,7 @@ class SelfPlayTrainer:
 
                 # Restore DRED-specific data if present
                 if "dred_age" in snapshot_data:
-                    from .dred_pool import DREDSnapshotData
+                    from alphaholdem.rl.dred_pool import DREDSnapshotData
 
                     snapshot.data = DREDSnapshotData(
                         age=snapshot_data["dred_age"],
@@ -1614,7 +1613,7 @@ class SelfPlayTrainer:
             pool_path = path.replace(".pt", "_pool.pt")
             try:
                 # For backward compatibility, assume CNN model if separate pool file exists
-                from ..models.cnn import SiameseConvNetV1
+                from alphaholdem.models.cnn import SiameseConvNetV1
 
                 self.opponent_pool.load_pool(pool_path, SiameseConvNetV1)
                 # Ensure snapshot models are on the correct device and dtype

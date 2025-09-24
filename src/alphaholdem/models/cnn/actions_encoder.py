@@ -4,11 +4,11 @@ from typing import Any, List, Optional
 
 import torch
 
-from ...core.interfaces import Encoder
-from ...core.registry import register_action_encoder
-from ...core.structured_config import Config
-from ...encoding.action_mapping import _action_to_bin_idx
-from ...env.types import Action, GameState
+from alphaholdem.core.interfaces import Encoder
+from alphaholdem.core.registry import register_action_encoder
+from alphaholdem.core.structured_config import Config
+from alphaholdem.encoding.action_mapping import _action_to_bin_idx
+from alphaholdem.env.types import Action, GameState
 
 
 @register_action_encoder("actions_hu_v1")

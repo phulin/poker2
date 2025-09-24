@@ -12,8 +12,8 @@ from typing import Any, Iterable, Optional
 
 import torch
 
-from .agent_snapshot import AgentSnapshot
-from .elo_calculator import ELOCalculator
+from alphaholdem.rl.agent_snapshot import AgentSnapshot
+from alphaholdem.rl.elo_calculator import ELOCalculator
 
 
 class OpponentPool(ABC):

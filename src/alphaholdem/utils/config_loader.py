@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from ..core.structured_config import Config
+from alphaholdem.core.structured_config import Config
 
 
 def load_config_from_checkpoint(

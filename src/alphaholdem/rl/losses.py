@@ -7,11 +7,13 @@ from typing import Dict, Optional, Union
 import torch
 import torch.nn.functional as F
 
-from ..models.cnn_embedding_data import CNNEmbeddingData
-from ..models.transformer.structured_embedding_data import StructuredEmbeddingData
-from ..utils.ema import EMA
-from ..utils.profiling import profile
-from .vectorized_replay import BatchSample
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
+from alphaholdem.rl.vectorized_replay import BatchSample
+from alphaholdem.utils.ema import EMA
+from alphaholdem.utils.profiling import profile
 
 
 @dataclass

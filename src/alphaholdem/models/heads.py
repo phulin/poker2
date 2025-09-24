@@ -5,8 +5,8 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 
-from ..core.interfaces import Policy
-from ..core.registry import register_policy
+from alphaholdem.core.interfaces import Policy
+from alphaholdem.core.registry import register_policy
 
 
 @register_policy("categorical_v1")

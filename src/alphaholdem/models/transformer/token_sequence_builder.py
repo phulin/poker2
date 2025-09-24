@@ -2,9 +2,11 @@ from typing import Optional, Union
 
 import torch
 
-from ...env.hunl_tensor_env import HUNLTensorEnv
-from .structured_embedding_data import StructuredEmbeddingData
-from .tokens import (
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
+from alphaholdem.models.transformer.tokens import (
     GAME_INDEX,
     HOLE0_INDEX,
     HOLE1_INDEX,

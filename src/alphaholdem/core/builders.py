@@ -2,18 +2,21 @@ from __future__ import annotations
 
 from typing import Any, Tuple
 
-from ..models import heads  # Import to trigger policy registration
-from ..models.cnn import cards_encoder  # Import to trigger card encoder registration
-from ..models.cnn import siamese_convnet  # Import to trigger model registration
-from ..models.cnn import (
-    actions_encoder,
-)  # Import to trigger action encoder registration
-from ..models.transformer import (
-    poker_transformer,
-)  # Import to trigger transformer model registration
-
 # Import modules to trigger registration
-from . import registry
+from alphaholdem.core import registry
+from alphaholdem.models import heads  # Import to trigger policy registration
+from alphaholdem.models.cnn import (
+    cards_encoder,  # Import to trigger card encoder registration
+)
+from alphaholdem.models.cnn import (
+    siamese_convnet,  # Import to trigger model registration
+)
+from alphaholdem.models.cnn import (  # Import to trigger action encoder registration
+    actions_encoder,
+)
+from alphaholdem.models.transformer import (  # Import to trigger transformer model registration
+    poker_transformer,
+)
 
 
 def build_components_from_config(cfg) -> Tuple[Any, Any, Any, Any]:

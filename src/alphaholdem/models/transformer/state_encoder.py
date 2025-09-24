@@ -7,10 +7,10 @@ from typing import Iterable, Tuple
 
 import torch
 
-from ...env.hunl_env import HUNLEnv
-from ...env.hunl_tensor_env import HUNLTensorEnv
-from .embedding_data import StructuredEmbeddingData
-from .tokens import Context, Special
+from alphaholdem.env.hunl_env import HUNLEnv
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.transformer.embedding_data import StructuredEmbeddingData
+from alphaholdem.models.transformer.tokens import Context, Special
 
 
 class TransformerStateEncoder:

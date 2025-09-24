@@ -12,13 +12,13 @@ import time
 import hydra
 import torch
 
-from ..core.structured_config import Config
-from ..rl.fixed_opponent_pool import FixedOpponentPool
+from alphaholdem.core.structured_config import Config
+from alphaholdem.rl.fixed_opponent_pool import FixedOpponentPool
 
 # Import encoders and models to register them
-from ..rl.self_play import SelfPlayTrainer
-from ..utils.config_loader import load_config_from_checkpoint
-from ..utils.training_utils import (
+from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.utils.config_loader import load_config_from_checkpoint
+from alphaholdem.utils.training_utils import (
     print_checkpoint_info,
     print_evaluation_results,
     print_preflop_range_grid,

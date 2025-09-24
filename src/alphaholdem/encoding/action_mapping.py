@@ -4,7 +4,7 @@ from typing import Optional
 
 import torch
 
-from ..env.types import Action, GameState
+from alphaholdem.env.types import Action, GameState
 
 
 def bin_to_action(bin_idx: int, game_state: GameState, num_bet_bins: int) -> Action:

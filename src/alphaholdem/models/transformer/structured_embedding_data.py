@@ -7,7 +7,7 @@ from typing import Dict
 
 import torch
 
-from .tokens import Context
+from alphaholdem.models.transformer.tokens import Context
 
 
 @dataclass

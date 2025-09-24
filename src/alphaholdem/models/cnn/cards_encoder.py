@@ -4,10 +4,10 @@ from typing import Any, List, Optional
 
 import torch
 
-from ...core.interfaces import Encoder
-from ...core.registry import register_card_encoder
-from ...core.structured_config import Config
-from ...env import rules
+from alphaholdem.core.interfaces import Encoder
+from alphaholdem.core.registry import register_card_encoder
+from alphaholdem.core.structured_config import Config
+from alphaholdem.env import rules
 
 
 def _cards_to_planes(

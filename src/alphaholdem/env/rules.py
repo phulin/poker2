@@ -5,7 +5,7 @@ from typing import List
 
 import torch
 
-from ..utils.profiling import profile
+from alphaholdem.utils.profiling import profile
 
 # Card encoding: 0..51, rank = c % 13 (2..A), suit = c // 13 (0..3)
 

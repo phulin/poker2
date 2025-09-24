@@ -8,15 +8,20 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 
-from ...core.interfaces import Model
-from ...core.registry import register_model
-from ...utils.profiling import profile
-from ..model_outputs import ModelOutput
-from .embeddings import PokerFusedEmbedding
-from .heads import TransformerPolicyHead, TransformerValueHead
-from .rotary_attention import RotarySelfAttention
-from .structured_embedding_data import StructuredEmbeddingData
-from .tokens import CLS_INDEX, HOLE0_INDEX, HOLE1_INDEX
+from alphaholdem.core.interfaces import Model
+from alphaholdem.core.registry import register_model
+from alphaholdem.models.model_outputs import ModelOutput
+from alphaholdem.models.transformer.embeddings import PokerFusedEmbedding
+from alphaholdem.models.transformer.heads import (
+    TransformerPolicyHead,
+    TransformerValueHead,
+)
+from alphaholdem.models.transformer.rotary_attention import RotarySelfAttention
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
+from alphaholdem.models.transformer.tokens import CLS_INDEX, HOLE0_INDEX, HOLE1_INDEX
+from alphaholdem.utils.profiling import profile
 
 
 class TransformerLayer(nn.Module):

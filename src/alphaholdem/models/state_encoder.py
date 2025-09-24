@@ -6,9 +6,9 @@ from typing import Tuple
 
 import torch
 
-from ..env.hunl_env import HUNLEnv
-from ..env.hunl_tensor_env import HUNLTensorEnv
-from .cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.env.hunl_env import HUNLEnv
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
 
 
 class CNNStateEncoder:

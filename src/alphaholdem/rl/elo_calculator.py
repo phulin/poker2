@@ -6,7 +6,7 @@ from typing import Optional
 
 import torch
 
-from .agent_snapshot import AgentSnapshot
+from alphaholdem.rl.agent_snapshot import AgentSnapshot
 
 
 class ELOCalculator:

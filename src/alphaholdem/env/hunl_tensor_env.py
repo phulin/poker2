@@ -4,8 +4,8 @@ from typing import Optional, Tuple
 
 import torch
 
-from ..utils.profiling import profile
-from . import rules
+from alphaholdem.env import rules
+from alphaholdem.utils.profiling import profile
 
 DEBUG_STEP_TABLE_ENVS = 3
 

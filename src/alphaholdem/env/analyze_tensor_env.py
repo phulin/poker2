@@ -8,12 +8,11 @@ from typing import Any, List, Tuple, Union
 
 import torch
 
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
 from alphaholdem.models.state_encoder import CNNStateEncoder
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
-
-from .hunl_tensor_env import HUNLTensorEnv
 
 
 class DummyStateEncoder:
