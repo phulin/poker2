@@ -434,9 +434,7 @@ def step_sb_action(
             torch.arange(N, device=device),
             torch.ones(N, dtype=torch.long, device=device),
             torch.full((N,), bin, dtype=torch.long, device=device),
-            torch.full(
-                (N, env.num_bet_bins + 3), True, dtype=torch.bool, device=device
-            ),
+            torch.full((N, env.num_bet_bins), True, dtype=torch.bool, device=device),
             torch.zeros(N, dtype=torch.long, device=device),
         )
         state_encoder.add_context(torch.arange(N, device=device))
