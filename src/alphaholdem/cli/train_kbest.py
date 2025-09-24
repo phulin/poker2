@@ -294,7 +294,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
     return trainer
 
 
-@hydra.main(version_base=None, config_path="../../conf", config_name="config")
+@hydra.main(version_base=None, config_path="../../../conf", config_name="config")
 def main(cfg) -> None:
     """
     Main training function with Hydra configuration.
