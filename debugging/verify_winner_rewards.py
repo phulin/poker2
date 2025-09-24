@@ -16,6 +16,8 @@ from alphaholdem.core.structured_config import (
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def load_config(config_path: str) -> Config:
     hydra_cfg = OmegaConf.load(config_path)
