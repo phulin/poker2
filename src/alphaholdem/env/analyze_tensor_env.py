@@ -428,6 +428,7 @@ def step_sb_action(
 
     assert bin is not None
     legal_masks = env.legal_bins_mask()
+    assert legal_masks[:, bin].all()
     env.step_bins(torch.full((N,), bin, dtype=torch.long, device=device))
 
     if isinstance(state_encoder, TokenSequenceBuilder):
