@@ -1635,7 +1635,7 @@ class SelfPlayTrainer:
 
         return step, wandb_run_id
 
-    def evaluate_against_pool(self, min_games: int = 100) -> dict:
+    def evaluate_against_pool(self, min_games: int = 200) -> dict:
         """
         Evaluate current model against all opponents in the pool.
 
@@ -1659,9 +1659,7 @@ class SelfPlayTrainer:
             opponents = list(self.opponent_pool.snapshots)
 
             # Snapshot opponent stats BEFORE evaluation
-            before_stats = [
-                (opp.wins, opp.losses, opp.games_played) for opp in opponents
-            ]
+            before_stats = [(opp.losses, opp.games_played) for opp in opponents]
 
             if self.use_tensor_env:
                 # Collect trajectories ONCE against all opponents; size to roughly hit min_games/opponent
@@ -1683,7 +1681,7 @@ class SelfPlayTrainer:
 
             # Compute per-opponent deltas AFTER evaluation
             for i, opp in enumerate(opponents):
-                _, before_losses, before_games_played = before_stats[i]
+                before_losses, before_games_played = before_stats[i]
                 after_losses = opp.losses
                 after_games = opp.games_played
 

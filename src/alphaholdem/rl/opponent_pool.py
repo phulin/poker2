@@ -75,6 +75,9 @@ class OpponentPool(ABC):
             result: 'win', 'loss', or 'draw'
             k_factor: ELO K-factor for rating changes (uses instance default if None)
         """
+
+        original_current_elo = self.current_elo
+
         # Update current ELO
         self.current_elo = self.elo_calculator.update_elo_after_game(
             self.current_elo, opponent, result, k_factor
@@ -83,7 +86,7 @@ class OpponentPool(ABC):
         # Update opponent ELO (opposite change)
         opponent.elo = self.elo_calculator.update_elo_after_game(
             opponent.elo,
-            type("Opponent", (), {"elo": self.current_elo})(),
+            type("Opponent", (), {"elo": original_current_elo})(),
             self._reverse_result(result),
             k_factor,
         )
@@ -118,6 +121,8 @@ class OpponentPool(ABC):
         wins = (rewards > 0).sum().item()
         losses = (rewards < 0).sum().item()
 
+        # rewards on the opponent are from their perspective
+        opponent.total_rewards += -rewards.sum().item()
         opponent.wins += wins
         opponent.losses += losses
         opponent.draws += rewards.numel() - wins - losses

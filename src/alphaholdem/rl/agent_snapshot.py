@@ -43,13 +43,17 @@ class AgentSnapshot:
 
         self.step = step
         self.elo = elo
+        self.is_exploiter = is_exploiter
+
+        # Sum of rewards from all games played by this opponent (this opponent perspective)
         self.total_rewards = 0.0
+
+        # General stats
         self.games_played = 0
         self.wins = 0
         self.losses = 0
         self.draws = 0
         self.data = data  # Additional data that can be filled by the pool
-        self.is_exploiter = is_exploiter
 
     def get_win_rate(self) -> float:
         """Get win rate of this snapshot."""
@@ -59,10 +63,10 @@ class AgentSnapshot:
         return self.wins / total_games
 
     def get_expected_reward(self) -> float:
-        """Get expected reward of this snapshot."""
+        """Get expected reward from playing against this snapshot."""
         if self.games_played == 0:
             return 0.0
-        return self.total_rewards / self.games_played
+        return -self.total_rewards / self.games_played
 
     def update_stats(self, result: str) -> None:
         """Update game statistics."""
