@@ -12,7 +12,6 @@ from alphaholdem.core.structured_config import (
     ModelConfig,
     TrainingConfig,
 )
-from alphaholdem.env.analyze_tensor_env import get_preflop_range_grid
 from alphaholdem.rl.losses import TrinalClipPPOLoss
 from alphaholdem.rl.replay import (
     ReplayBuffer,
@@ -384,67 +383,6 @@ def test_checkpoint_dtype_preservation():
         ), f"Expected float32 parameters, got {param_dtype}"
 
         print("✅ Checkpoint dtype preservation test passed!")
-
-
-def test_preflop_range_grid():
-    """Test preflop range grid generation."""
-
-    # Create a Hydra config
-    cfg = Config(
-        train=TrainingConfig(
-            learning_rate=3e-4, batch_size=8
-        ),  # Small batch for testing
-        model=ModelConfig(),
-        env=EnvConfig(),
-        device="cpu",  # Set device to cpu for testing
-        num_envs=2048,  # Make environment bigger than 1326 to avoid index out of bounds
-    )
-
-    # Set device for testing
-    device = torch.device("cpu")
-
-    trainer = SelfPlayTrainer(
-        cfg=cfg,
-        device=device,
-    )
-
-    # Generate range grid using the new analyze_tensor_env functions
-    grid = get_preflop_range_grid(
-        model=trainer.model,
-        state_encoder=trainer.state_encoder,
-        bin_index=0,  # Fold action
-        starting_stack=cfg.env.stack,
-        sb=cfg.env.sb,
-        bb=cfg.env.bb,
-        bet_bins=cfg.env.bet_bins,
-        device=device,
-    )
-
-    # Basic checks
-    assert isinstance(grid, str), "Grid should be a string"
-    assert (
-        len(grid.split("\n")) >= 15
-    ), "Grid should have at least 15 lines (13 ranks + header + separator)"
-
-    # Check header format
-    lines = grid.split("\n")
-    assert "A" in lines[0], "Header should contain rank A"
-    assert "K" in lines[0], "Header should contain rank K"
-    assert "2" in lines[0], "Header should contain rank 2"
-
-    # Check that we have probability values (numbers)
-    for line in lines[2:]:  # Skip header and separator
-        if line.strip() and "|" in line:
-            # Should contain numbers (percentages)
-            parts = line.split()
-            if len(parts) > 1:
-                # Check that we have numeric values
-                values = [p for p in parts[1:] if p.isdigit()]
-                assert len(values) > 0, f"Line should contain numeric values: {line}"
-
-    print("✅ Preflop range grid test passed!")
-    print("Sample grid:")
-    print(grid[:500] + "..." if len(grid) > 500 else grid)
 
 
 def test_basic_training_step():

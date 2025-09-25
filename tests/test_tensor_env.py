@@ -1320,6 +1320,7 @@ def test_deck_reset_forced_cards():
     ), f"Expected deck shape (1024, 9), got {env.deck.shape}"
 
     # Check that all cards in each deck are unique (no duplicates)
+    duplicates_found = 0
     for i in range(1024):
         deck = env.deck[i]
 

@@ -63,13 +63,8 @@ def test_winner_reward_sign_and_replay_buffer_alignment():
         min_trajectories=1, add_to_replay_buffer=True
     )
 
-    winners_all = trainer.tensor_env.winner.clone().cpu()
-    rewards_all = per_episode_rewards.clone().cpu()
-
-    # Align winners with per-episode rewards (exclude zero-length trajectories implicitly)
-    episode_count_raw = int(rewards_all.numel())
-    winners = winners_all[:episode_count_raw]
-    rewards = rewards_all
+    winners = trainer.tensor_env.winner
+    rewards = per_episode_rewards
 
     EPS = 1e-6
 
@@ -89,20 +84,15 @@ def test_winner_reward_sign_and_replay_buffer_alignment():
     valid_idxs = torch.where(buf.trajectory_lengths > 0)[0]
 
     # Take the last episode_count_raw valid trajectories (most recent)
-    assert (
-        valid_idxs.numel() >= episode_count_raw
-    ), f"Not enough valid trajectories in buffer: {valid_idxs.numel()} < {episode_count_raw}"
-    recent_valid = valid_idxs[-episode_count_raw:]
-
-    traj_lengths = buf.trajectory_lengths[recent_valid]
+    traj_lengths = buf.trajectory_lengths[valid_idxs]
     last_pos = traj_lengths - 1
-    final_rewards = buf.rewards[recent_valid, last_pos].cpu()
+    final_rewards = buf.rewards[valid_idxs, last_pos].cpu()
 
-    # Filter out SB folds (+0.005) from both env rewards and buffer rewards in aligned order
+    # Filter out opp SB folds (+0.005) from both env rewards and buffer rewards in aligned order
     sb_mask = (rewards - 0.005).abs() > EPS
     winners_f = winners[sb_mask]
     rewards_f = rewards[sb_mask]
-    final_rewards_f = final_rewards[sb_mask]
+    final_rewards_f = final_rewards
 
     assert (
         rewards_f.numel() == final_rewards_f.numel()

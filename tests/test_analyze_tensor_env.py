@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-import os
 import re
-import sys
 
 import pytest
 import torch
 
-from alphaholdem.env import analyze_tensor_env as ate
 from alphaholdem.env.analyze_tensor_env import (
+    PreflopAnalyzer,
     _grid_coords_for_hand,
+    _card_str_to_int,
     create_1326_hand_combinations,
-    get_preflop_betting_grid,
-    get_preflop_range_grid,
-    get_preflop_value_grid,
-    get_probabilities,
 )
 from alphaholdem.models.model_outputs import ModelOutput
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
@@ -28,12 +23,6 @@ from alphaholdem.models.transformer.tokens import (
     Special,
     get_card_token_id_offset,
 )
-
-# Ensure repo root on path for direct pytest runs
-REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-
 
 RANKS: list[str] = [
     "A",
@@ -64,7 +53,7 @@ def test_1326_to_169_bucket_counts() -> None:
     combos = create_1326_hand_combinations()
     counts = torch.zeros((13, 13), dtype=torch.int32)
     for c1, c2 in combos:
-        i, j = _grid_coords_for_hand(c1, c2)
+        i, j = _grid_coords_for_hand(_card_str_to_int(c1), _card_str_to_int(c2))
         counts[i, j] += 1
 
     for i in range(13):
@@ -122,7 +111,9 @@ def test_preflop_range_grid_allin_high():
 
     model = DummyTransformerModel(logits, values)
     device = torch.device("cpu")
-    grid = get_preflop_range_grid(model, bin_index=B - 1, device=device)
+
+    analyzer = PreflopAnalyzer(model, button=0, device=device)
+    grid = analyzer.get_preflop_range_grid(bin_index=B - 1)
 
     table = _parse_grid_values(grid)
     # 13 rows x 13 cols
@@ -146,7 +137,9 @@ def test_preflop_betting_grid_prefers_bets():
 
     model = DummyTransformerModel(logits, values)
     device = torch.device("cpu")
-    grid = get_preflop_betting_grid(model, device=device)
+
+    analyzer = PreflopAnalyzer(model, button=0, device=device)
+    grid = analyzer.get_preflop_betting_grid()
 
     table = _parse_grid_values(grid)
     assert len(table) == 13
@@ -220,7 +213,9 @@ def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
 
     model = DummyValueModel()
     device = torch.device("cpu")
-    grid = get_preflop_value_grid(model, device=device)
+
+    analyzer = PreflopAnalyzer(model, button=0, device=device)
+    grid = analyzer.get_preflop_value_grid()
 
     # Symbol imported at module top
 
@@ -263,7 +258,10 @@ class DummyModelFoldAAKKAKs(PokerTransformerV1):
         logits = torch.full((N, 8), -10.0, device=device)
         logits[:, 1] = 10.0
 
-        cards = embedding_data.token_ids[:, HOLE0_INDEX : HOLE1_INDEX + 1]
+        cards = (
+            embedding_data.token_ids[:, HOLE0_INDEX : HOLE1_INDEX + 1]
+            - get_card_token_id_offset()
+        )
         ranks = cards % 13
         suits = cards // 13
         r1, r2 = ranks[:, 0], ranks[:, 1]
@@ -272,7 +270,7 @@ class DummyModelFoldAAKKAKs(PokerTransformerV1):
         is_pair = r1 == r2
         is_aa = is_pair & (r1 == 12)
         is_kk = is_pair & (r1 == 11)
-        is_ak_unordered = ((r1 == 12) & (r2 == 11)) | ((r1 == 11) & (r2 == 12))
+        is_ak_unordered = r1 + r2 == 23
         is_suited = s1 == s2
         is_aks = is_ak_unordered & is_suited
         fold_mask = is_aa | is_kk | is_aks
@@ -289,7 +287,8 @@ def test_dummy_model_range_grid_call_bin() -> None:
     model = DummyModelFoldAAKKAKs()
 
     device = torch.device("cpu")
-    env, encoder = ate.create_169_hand_analysis_setup(
+
+    analyzer = PreflopAnalyzer(
         model=model,
         button=0,
         starting_stack=1000,
@@ -301,26 +300,14 @@ def test_dummy_model_range_grid_call_bin() -> None:
         flop_showdown=False,
     )
 
-    probs, _, _ = get_probabilities(model, encoder, env, seat=0, device=device)
+    probs, _, _ = analyzer.get_probabilities(seat=0)
     call_probs = probs[:, 1]
-
-    grid_sums = torch.zeros(13, 13, dtype=call_probs.dtype, device=device)
-    grid_counts = torch.zeros(13, 13, dtype=torch.long, device=device)
-    combos = create_1326_hand_combinations()
-    for idx, (c1, c2) in enumerate(combos):
-        i, j = _grid_coords_for_hand(c1, c2)
-        grid_sums[i, j] += call_probs[idx]
-        grid_counts[i, j] += 1
-
-    averaged = torch.where(
-        grid_counts > 0,
-        grid_sums / grid_counts.clamp(min=1),
-        torch.zeros_like(grid_sums),
-    )
+    averaged = analyzer.convert_1326_to_169_tensor(call_probs)
 
     a_idx = RANKS.index("A")
     k_idx = RANKS.index("K")
     q_idx = RANKS.index("Q")
+    print(averaged)
     assert averaged[a_idx, a_idx].item() == pytest.approx(0.0, abs=1e-6)
     assert averaged[k_idx, k_idx].item() == pytest.approx(0.0, abs=1e-6)
     assert averaged[a_idx, k_idx].item() == pytest.approx(0.0, abs=1e-6)
@@ -351,11 +338,11 @@ def test_token_sequence_order_cls_game_hole_hole_context() -> None:
         dropout=0.1,
         use_gradient_checkpointing=False,
     )
-    # Create 1326-hand environment and state encoder
-    env, state_encoder = ate.create_169_hand_analysis_setup(model, button=0)
+
+    analyzer = PreflopAnalyzer(model, button=0)
 
     # Get model probabilities for all 1326 combos
-    ate.get_probabilities(model, state_encoder, env, 0, env.device)
+    analyzer.get_probabilities(0)
 
     emb = model.last_embedding
     assert emb is not None
@@ -370,8 +357,8 @@ def test_token_sequence_order_cls_game_hole_hole_context() -> None:
     # GAME at position 1
     assert torch.all(token_ids[:, 1] == Special.GAME.value)
     # HOLE0 and HOLE1 at positions 2 and 3
-    hole0 = env.hole_indices[:, 0, 0]
-    hole1 = env.hole_indices[:, 0, 1]
+    hole0 = analyzer.env.hole_indices[:, 0, 0]
+    hole1 = analyzer.env.hole_indices[:, 0, 1]
     expected_hole0_tokens = get_card_token_id_offset() + hole0
     expected_hole1_tokens = get_card_token_id_offset() + hole1
     assert torch.all(token_ids[:, 2] == expected_hole0_tokens)

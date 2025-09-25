@@ -6,11 +6,7 @@ Utility functions for AlphaHoldem training and analysis.
 from typing import List, Optional, Tuple
 
 from alphaholdem.env.analyze_tensor_env import (
-    get_preflop_betting_grid,
-    get_preflop_range_grid,
-    get_preflop_range_grid_bb_response,
-    get_preflop_value_grid,
-    get_preflop_value_grid_bb_response,
+    PreflopAnalyzer,
 )
 
 
@@ -82,55 +78,34 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
     if title is None:
         title = f"Preflop Range Grid (Step {step})"
 
+    analyzer = PreflopAnalyzer(
+        trainer.model,
+        button=0,
+        starting_stack=trainer.cfg.env.stack,
+        sb=trainer.cfg.env.sb,
+        bb=trainer.cfg.env.bb,
+        bet_bins=trainer.cfg.env.bet_bins,
+        device=trainer.device,
+        rng=trainer.rng,
+        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
+    )
+
     print(f"\n--- {title} ---")
 
     # Generate all grids using the efficient 169-environment approach
-    fold_grid = get_preflop_range_grid(
-        trainer.model,
+    fold_grid = analyzer.get_preflop_range_grid(
         0,
-        trainer.device,
-        starting_stack=trainer.cfg.env.stack,
-        sb=trainer.cfg.env.sb,
-        bb=trainer.cfg.env.bb,
-        bet_bins=trainer.cfg.env.bet_bins,
-        rng=trainer.rng,
-        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
     ).splitlines()
 
-    call_grid = get_preflop_range_grid(
-        trainer.model,
+    call_grid = analyzer.get_preflop_range_grid(
         1,
-        trainer.device,
-        starting_stack=trainer.cfg.env.stack,
-        sb=trainer.cfg.env.sb,
-        bb=trainer.cfg.env.bb,
-        bet_bins=trainer.cfg.env.bet_bins,
-        rng=trainer.rng,
-        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
     ).splitlines()
 
-    allin_grid = get_preflop_range_grid(
-        trainer.model,
+    allin_grid = analyzer.get_preflop_range_grid(
         trainer.num_bet_bins - 1,
-        trainer.device,
-        starting_stack=trainer.cfg.env.stack,
-        sb=trainer.cfg.env.sb,
-        bb=trainer.cfg.env.bb,
-        bet_bins=trainer.cfg.env.bet_bins,
-        rng=trainer.rng,
-        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
     ).splitlines()
 
-    betting_grid = get_preflop_betting_grid(
-        trainer.model,
-        trainer.device,
-        starting_stack=trainer.cfg.env.stack,
-        sb=trainer.cfg.env.sb,
-        bb=trainer.cfg.env.bb,
-        bet_bins=trainer.cfg.env.bet_bins,
-        rng=trainer.rng,
-        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
-    ).splitlines()
+    betting_grid = analyzer.get_preflop_betting_grid().splitlines()
 
     # First row: Fold | Call
     print_combined_tables(
@@ -154,44 +129,19 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
     print("--- Preflop Value Estimates (Step {}) ---".format(step))
     print("Small blind (first) - value estimates (×1000)")
 
-    value_grid = get_preflop_value_grid(
-        trainer.model,
-        trainer.device,
-        starting_stack=trainer.cfg.env.stack,
-        sb=trainer.cfg.env.sb,
-        bb=trainer.cfg.env.bb,
-        bet_bins=trainer.cfg.env.bet_bins,
-        rng=trainer.rng,
-        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
-    )
+    value_grid = analyzer.get_preflop_value_grid()
     print(value_grid)
     print()
 
     # Also print BB response (facing SB all-in), matching debug_tensor_env
     print("--- BB Response vs SB All-in (Step {}) ---".format(step))
 
-    bb_fold_grid = get_preflop_range_grid_bb_response(
-        trainer.model,
+    bb_fold_grid = analyzer.get_preflop_range_grid_bb_response(
         0,  # fold bin
-        device=trainer.device,
-        starting_stack=trainer.cfg.env.stack,
-        sb=trainer.cfg.env.sb,
-        bb=trainer.cfg.env.bb,
-        bet_bins=trainer.cfg.env.bet_bins,
-        rng=trainer.rng,
-        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
     ).splitlines()
 
-    bb_call_grid = get_preflop_range_grid_bb_response(
-        trainer.model,
+    bb_call_grid = analyzer.get_preflop_range_grid_bb_response(
         1,  # call bin
-        device=trainer.device,
-        starting_stack=trainer.cfg.env.stack,
-        sb=trainer.cfg.env.sb,
-        bb=trainer.cfg.env.bb,
-        bet_bins=trainer.cfg.env.bet_bins,
-        rng=trainer.rng,
-        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
     ).splitlines()
 
     print_combined_tables(
@@ -203,16 +153,7 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
     )
 
     print("BB value estimates when facing SB all-in (×1000)")
-    bb_value_grid = get_preflop_value_grid_bb_response(
-        trainer.model,
-        device=trainer.device,
-        starting_stack=trainer.cfg.env.stack,
-        sb=trainer.cfg.env.sb,
-        bb=trainer.cfg.env.bb,
-        bet_bins=trainer.cfg.env.bet_bins,
-        rng=trainer.rng,
-        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
-    )
+    bb_value_grid = analyzer.get_preflop_value_grid_bb_response()
     print(bb_value_grid)
     print()
 
