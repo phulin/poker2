@@ -1181,6 +1181,7 @@ class SelfPlayTrainer:
         self.total_step_reward = 0.0
         self.step_trajectories_collected = 0
 
+        self.model.eval()
         target_steps = self.batch_size * max(self.cfg.train.replay_buffer_batches, 1)
         if self.replay_buffer.num_steps() == 0:
             # Warmup: fill replay buffer with minimum required samples
@@ -1191,7 +1192,9 @@ class SelfPlayTrainer:
             self._fill_replay_buffer(self.batch_size)
 
         # Update model
+        self.model.train()
         update_stats = self.update_model(step)
+        self.model.eval()
 
         # Prepare training stats for return and logging
         learning_rate = self.optimizer.param_groups[-1]["lr"]
