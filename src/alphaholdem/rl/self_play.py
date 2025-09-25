@@ -597,7 +597,7 @@ class SelfPlayTrainer:
 
         all_env_indices = torch.arange(self.num_envs, device=self.device)
         if self.is_transformer and isinstance(self.state_encoder, TokenSequenceBuilder):
-            self.state_encoder.reset_envs()
+            self.state_encoder.reset()
 
             # Game-invariant state
             self.state_encoder.add_game(all_env_indices)

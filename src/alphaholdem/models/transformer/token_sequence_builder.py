@@ -279,7 +279,7 @@ class TokenSequenceBuilder:
 
         return result
 
-    def reset_envs(self, idxs: Optional[torch.Tensor] = None) -> None:
+    def reset(self, idxs: Optional[torch.Tensor] = None) -> None:
         if idxs is not None and idxs.numel() == 0:
             return
 

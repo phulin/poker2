@@ -93,19 +93,12 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
     print(f"\n--- {title} ---")
 
     # Generate all grids using the efficient 169-environment approach
-    fold_grid = analyzer.get_preflop_range_grid(
-        0,
-    ).splitlines()
-
-    call_grid = analyzer.get_preflop_range_grid(
-        1,
-    ).splitlines()
-
-    allin_grid = analyzer.get_preflop_range_grid(
-        trainer.num_bet_bins - 1,
-    ).splitlines()
-
-    betting_grid = analyzer.get_preflop_betting_grid().splitlines()
+    grids = analyzer.get_preflop_grids()
+    fold_grid = grids["ranges"][0].splitlines()
+    call_grid = grids["ranges"][1].splitlines()
+    allin_grid = grids["ranges"][trainer.num_bet_bins - 1].splitlines()
+    betting_grid = grids["betting"].splitlines()
+    value_grid = grids["value"]
 
     # First row: Fold | Call
     print_combined_tables(
@@ -129,20 +122,16 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
     print("--- Preflop Value Estimates (Step {}) ---".format(step))
     print("Small blind (first) - value estimates (×1000)")
 
-    value_grid = analyzer.get_preflop_value_grid()
     print(value_grid)
     print()
 
     # Also print BB response (facing SB all-in), matching debug_tensor_env
     print("--- BB Response vs SB All-in (Step {}) ---".format(step))
 
-    bb_fold_grid = analyzer.get_preflop_range_grid_bb_response(
-        0,  # fold bin
-    ).splitlines()
-
-    bb_call_grid = analyzer.get_preflop_range_grid_bb_response(
-        1,  # call bin
-    ).splitlines()
+    grids = analyzer.get_preflop_grids_allin_response()
+    bb_fold_grid = grids["ranges"][0].splitlines()
+    bb_call_grid = grids["ranges"][1].splitlines()
+    bb_value_grid = grids["value"]
 
     print_combined_tables(
         [
@@ -153,7 +142,6 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
     )
 
     print("BB value estimates when facing SB all-in (×1000)")
-    bb_value_grid = analyzer.get_preflop_value_grid_bb_response()
     print(bb_value_grid)
     print()
 

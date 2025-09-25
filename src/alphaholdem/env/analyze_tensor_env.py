@@ -4,7 +4,7 @@ Debug utilities for HUNLTensorEnv.
 Contains functions for creating test environments and analyzing specific scenarios.
 """
 
-from typing import Any, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import torch
 
@@ -168,6 +168,7 @@ class PreflopAnalyzer:
         )
 
         if isinstance(self.state_encoder, TokenSequenceBuilder):
+            self.state_encoder.reset()
             self.state_encoder.add_game(torch.arange(self.env.N, device=self.device))
             self.state_encoder.add_card(
                 torch.arange(self.env.N, device=self.device), self.all_hands[:, 0]
@@ -204,24 +205,22 @@ class PreflopAnalyzer:
 
         return averaged
 
-    def convert_1326_to_169_grid(
+    def make_range_grid(
         self,
         values_1326: torch.Tensor,
         value_type: str = "probability",
-        default_value: str = " 0.0",
     ) -> str:
         """Convert 1326-hand values to a 169-hand-bucket grid table.
 
         Args:
             values_1326: Tensor of 1326 values for each hand
             value_type: Type of values - "probability", "value", or "raw"
-            default_value: Default value to use if hand not found
 
         Returns:
             String representation of the 13x13 grid
         """
         values_169 = self.convert_1326_to_169_tensor(values_1326)
-        return _create_169_grid(values_169, value_type, default_value)
+        return _create_169_grid(values_169, value_type)
 
     def get_probabilities(
         self, seat: int
@@ -234,6 +233,7 @@ class PreflopAnalyzer:
         Returns:
             Tuple of (probabilities [1326, num_bet_bins], values [1326], legal_masks [1326, num_bet_bins])
         """
+
         # Get model prediction using tensor environment
         with torch.no_grad():
             embedding_data = self.state_encoder.encode_tensor_states(
@@ -284,25 +284,7 @@ class PreflopAnalyzer:
             )
             self.state_encoder.add_context(torch.arange(N, device=self.device))
 
-    def get_preflop_betting_grid(self) -> str:
-        """Get preflop betting probabilities as a grid showing all bet options combined.
-
-        Returns:
-            String representation of the preflop betting grid (all bet options combined)
-        """
-        self.reset(0)
-
-        # Get probabilities and values for all 1326 combos
-        probs, _, _ = self.get_probabilities(0)
-
-        # Sum all betting probabilities (exclude fold=0, call=1, and all-in=num_bet_bins-1)
-        # Betting actions are typically indices 2 through num_bet_bins-2 (excluding all-in)
-        num_bet_bins = probs.shape[1]
-        betting_probs = probs[:, 2 : num_bet_bins - 1].sum(dim=1)  # [1326]
-
-        return self.convert_1326_to_169_grid(betting_probs, "probability", " 0")
-
-    def get_preflop_range_grid(self, bin_index: int) -> str:
+    def get_preflop_grids(self) -> Dict[str, Union[str, List[str]]]:
         """Get preflop range as a grid showing selected action probabilities.
 
         Args:
@@ -314,27 +296,71 @@ class PreflopAnalyzer:
         self.reset(0)
 
         # Get probabilities and values
-        probs, _, _ = self.get_probabilities(0)
+        probs, values, _ = self.get_probabilities(0)
 
-        # Get selected bin probabilities
-        selected = probs[:, bin_index]  # [1326]
+        return {
+            "ranges": [
+                self.make_range_grid(probs[:, bin_index], "probability")
+                for bin_index in range(probs.shape[1])
+            ],
+            "betting": self.make_range_grid(
+                probs[:, 2 : probs.shape[1] - 1].sum(dim=1), "probability"
+            ),
+            "value": self.make_range_grid(values, "value"),
+        }
 
-        return self.convert_1326_to_169_grid(selected, "probability", " 0")
+    def get_preflop_range_grid(self, bin_index: int) -> str:
+        """Get preflop range as a grid for the given bin index.
+
+        Args:
+            bin_index: Index of the betting bin to check
+
+        Returns:
+            String representation of the preflop range grid
+        """
+        return self.get_preflop_grids()["ranges"][bin_index]
+
+    def get_preflop_betting_grid(self) -> str:
+        """Get preflop betting range (sum of all betting bins) as a grid.
+
+        Returns:
+            String representation of the preflop betting grid
+        """
+        return self.get_preflop_grids()["betting"]
 
     def get_preflop_value_grid(self) -> str:
-        """Get preflop value estimates as a grid showing value estimates.
+        """Get preflop value as a grid for the given bin index.
 
         Returns:
             String representation of the preflop value grid
         """
-        self.reset(0)
+        return self.get_preflop_grids()["value"]
 
-        # Get values for all 1326 combos
-        _, values, _ = self.get_probabilities(0)
+    def get_preflop_grids_allin_response(self) -> Dict[str, Union[str, List[str]]]:
+        """Get preflop grids for all-in response.
 
-        return self.convert_1326_to_169_grid(values, "value", " 0.0")
+        Returns:
+            Dictionary of preflop grids
+        """
+        # p1 leads as button/sb
+        self.reset(1)
+        self.step_sb_action("allin")
 
-    def get_preflop_range_grid_bb_response(self, bin_index: int) -> str:
+        # Get probabilities and values
+        probs, values, _ = self.get_probabilities(0)
+
+        return {
+            "ranges": [
+                self.make_range_grid(probs[:, bin_index], "probability")
+                for bin_index in range(probs.shape[1])
+            ],
+            "betting": self.make_range_grid(
+                probs[:, 2 : probs.shape[1] - 1].sum(dim=1), "probability"
+            ),
+            "value": self.make_range_grid(values, "value"),
+        }
+
+    def get_preflop_range_grid_allin_response(self, bin_index: int) -> str:
         """Get preflop range as a grid for BB response after SB all-in.
 
         Args:
@@ -343,34 +369,15 @@ class PreflopAnalyzer:
         Returns:
             String representation of the preflop range grid
         """
-        self.reset(1)
+        return self.get_preflop_grids_allin_response()["ranges"][bin_index]
 
-        # Simulate SB all-in action
-        self.step_sb_action("allin")
-
-        # Get probabilities and values for all 1326 combos
-        probs, _, _ = self.get_probabilities(0)
-
-        # Get selected bin probabilities
-        selected = probs[:, bin_index]  # [1326]
-
-        return self.convert_1326_to_169_grid(selected, "probability", " 0")
-
-    def get_preflop_value_grid_bb_response(self) -> str:
+    def get_preflop_value_grid_allin_response(self) -> str:
         """Get preflop value estimates as a grid for BB response after SB all-in.
 
         Returns:
             String representation of the preflop value grid
         """
-        self.reset(1)
-
-        # Simulate SB all-in action
-        self.step_sb_action("allin")
-
-        # Get values for all 1326 combos
-        _, values, _ = self.get_probabilities(0)
-
-        return self.convert_1326_to_169_grid(values, "value", " 0.0")
+        return self.get_preflop_grids_allin_response()["value"]
 
 
 def _card_str_to_int(card_str: str) -> int:
@@ -406,15 +413,12 @@ def _card_str_to_int(card_str: str) -> int:
     return suit_map[suit] * 13 + rank_map[rank]
 
 
-def _create_169_grid(
-    values: torch.Tensor, value_type: str = "probability", default_value: str = " 0.0"
-) -> str:
+def _create_169_grid(values: torch.Tensor, value_type: str = "probability") -> str:
     """Create a standardized 13x13 grid for 169 preflop hands.
 
     Args:
         values: Tensor of 13x13 values for each hand
         value_type: Type of values - "probability", "value", or "raw"
-        default_value: Default value to use if hand not found
 
     Returns:
         String representation of the 13x13 grid
@@ -450,6 +454,7 @@ def _create_169_grid(
     else:
         grid.append("    " + "".join(f"{rank:>5}" for rank in RANKS))
         grid.append("   +" + "-" * 65)  # Separator line
+
     for i, row in enumerate(formatted_values):
         grid.append(f"{RANKS[i]:>2} |" + "".join(row))
 
