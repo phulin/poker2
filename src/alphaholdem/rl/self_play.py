@@ -1167,6 +1167,9 @@ class SelfPlayTrainer:
         avg_trajectory_length = self.replay_buffer.num_steps() / self.replay_buffer.size
         denom = max(1, minibatch_count)
 
+        # Get PopArt statistics
+        popart_mu, popart_sigma = self.popart_normalizer.get_current_stats()
+
         return {
             "avg_reward": avg_reward,
             "num_samples": self.batch_size * self.num_epochs,
@@ -1188,6 +1191,8 @@ class SelfPlayTrainer:
             "small_adv": total_small_adv_rate / denom,
             "return_abs_mean": total_return_abs_mean / denom,
             "return_abs_std": total_return_abs_std / denom,
+            "popart_mu": popart_mu,
+            "popart_sigma": popart_sigma,
         }
 
     @profile
@@ -1263,6 +1268,8 @@ class SelfPlayTrainer:
                     "small_adv": training_stats["small_adv"],
                     "return_abs_mean": training_stats["return_abs_mean"],
                     "return_abs_std": training_stats["return_abs_std"],
+                    "popart_mu": training_stats["popart_mu"],
+                    "popart_sigma": training_stats["popart_sigma"],
                     "lr": learning_rate,
                     "entropy_coef_current": self.entropy_coef,
                     "epsilon": training_stats["epsilon"],
