@@ -161,7 +161,7 @@ def convert_checkpoint(
     print("Saving converted checkpoint...")
 
     # Use SelfPlayTrainer's save_checkpoint method
-    trainer.save_checkpoint(output_checkpoint_path, step)
+    trainer.save_checkpoint(output_checkpoint_path, step, save_optimizer=False)
 
     print(f"✅ Checkpoint conversion complete!")
     print(f"   Input: {input_checkpoint_path}")

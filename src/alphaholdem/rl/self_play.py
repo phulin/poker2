@@ -1376,7 +1376,9 @@ class SelfPlayTrainer:
                             result = "draw"
                         self.opponent_pool.update_elo_after_game(opponent, result)
 
-    def save_checkpoint(self, path: str, step: int) -> None:
+    def save_checkpoint(
+        self, path: str, step: int, save_optimizer: bool = True
+    ) -> None:
         """Save model checkpoint and opponent pool."""
         # Serialize opponent pool inline
         pool_data = {
@@ -1423,7 +1425,6 @@ class SelfPlayTrainer:
             "total_trajectories_collected": self.total_trajectories_collected,
             "current_elo": self.opponent_pool.current_elo,
             "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
             # Store opponent pool inline for single-file checkpoints
             "opponent_pool": pool_data,
             # Store wandb run ID for resumption
@@ -1446,6 +1447,9 @@ class SelfPlayTrainer:
                 "grad_clip": self.grad_clip,
             },
         }
+
+        if save_optimizer:
+            checkpoint["optimizer_state_dict"] = self.optimizer.state_dict()
 
         # Conditionally include replay buffer based on economize_checkpoints flag
         if not self.cfg.economize_checkpoints:
@@ -1559,7 +1563,8 @@ class SelfPlayTrainer:
         self.model.load_state_dict(
             model_state_dict, strict=self.cfg.strict_model_loading
         )
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
         # Handle both old and new checkpoint formats
         if "total_episodes_completed" in checkpoint:
