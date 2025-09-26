@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Union
 
 import torch
 import torch.nn.functional as F
 
+from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
+from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
+from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.utils.ema import EMA
 
@@ -85,6 +89,7 @@ class TrinalClipPPOLoss(LossCalculator):
 
     def __init__(
         self,
+        popart_normalizer: PopArtNormalizer,
         epsilon: float,
         delta1: float,
         value_coef: float,
@@ -98,6 +103,7 @@ class TrinalClipPPOLoss(LossCalculator):
         Initialize Trinal-Clip PPO loss calculator.
 
         Args:
+            popart_normalizer: PopArtNormalizer instance for value normalization
             epsilon: PPO clip parameter (typically 0.2)
             delta1: Policy upper bound when advantage < 0 (typically 3.0)
             value_coef: Value loss coefficient
@@ -111,6 +117,7 @@ class TrinalClipPPOLoss(LossCalculator):
         self.delta1 = delta1
         self.target_kl = target_kl
         self.kl_ema = kl_ema
+        self.popart = popart_normalizer
 
     def compute_loss(
         self,
@@ -176,12 +183,14 @@ class TrinalClipPPOLoss(LossCalculator):
         # and delta3 as a positive upper bound (chips_self/scale), so clamp directly.
         clipped_returns = torch.clamp(returns, delta2, delta3)
 
+        # Use frozen stats for normalization during training
+        mu_frozen, sigma_frozen = self.popart.get_frozen_stats()
+        values_n = (values - mu_frozen) / (sigma_frozen + 1e-8)
+        targets_n = (clipped_returns - mu_frozen) / (sigma_frozen + 1e-8)
         if self.value_loss_type == "huber":
-            value_loss = F.smooth_l1_loss(
-                values, clipped_returns, beta=self.huber_delta
-            )
+            value_loss = F.smooth_l1_loss(values_n, targets_n, beta=self.huber_delta)
         else:
-            value_loss = F.mse_loss(values, clipped_returns)
+            value_loss = F.mse_loss(values_n, targets_n)
 
         # Entropy regularization
         probs = F.softmax(masked_logits, dim=-1)

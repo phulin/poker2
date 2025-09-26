@@ -102,6 +102,7 @@ class PreflopAnalyzer:
         device: torch.device = None,
         rng: torch.Generator = None,
         flop_showdown: bool = False,
+        popart_normalizer=None,
     ):
         """Initialize the analyzer with cached environment and hands.
 
@@ -115,6 +116,7 @@ class PreflopAnalyzer:
             device: Device to use
             rng: Random number generator
             flop_showdown: Whether to showdown after flop
+            popart_normalizer: Optional PopArt normalizer for denormalizing values
         """
         if bet_bins is None:
             bet_bins = [0.5, 0.75, 1.0, 1.5, 2.0]
@@ -127,6 +129,7 @@ class PreflopAnalyzer:
 
         self.model = model
         self.device = device
+        self.popart_normalizer = popart_normalizer
 
         # Create and cache the environment
         self.env = HUNLTensorEnv(
@@ -250,7 +253,12 @@ class PreflopAnalyzer:
             # Get probabilities
             probs = torch.softmax(masked_logits, dim=-1)  # [N, num_bet_bins]
 
-        return probs, outputs.value, legal_masks
+            # Denormalize values if PopArt normalizer is available
+            values = outputs.value
+            if self.popart_normalizer is not None:
+                values = self.popart_normalizer.denormalize_value(values)
+
+        return probs, values, legal_masks
 
     def step_sb_action(self, sb_action: str = "allin") -> None:
         """Simulate a specific SB action across all environments.

@@ -21,6 +21,7 @@ from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.dred_pool import DREDPool
 from alphaholdem.rl.k_best_pool import KBestOpponentPool
 from alphaholdem.rl.losses import TrinalClipPPOLoss
+from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.opponent_pool import OpponentPool
 from alphaholdem.rl.replay import Trajectory, Transition
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
@@ -301,8 +302,12 @@ class SelfPlayTrainer:
         # KL divergence exponential moving average tracking
         self.kl_ema = EMA(decay=0.99, initial_value=0.0)
 
+        # Initialize PopArt normalizer
+        self.popart_normalizer = PopArtNormalizer()
+
         # Initialize loss calculator
         self.loss_calculator = TrinalClipPPOLoss(
+            popart_normalizer=self.popart_normalizer,
             epsilon=self.epsilon,
             delta1=self.delta1,
             value_coef=self.value_coef,
@@ -744,7 +749,10 @@ class SelfPlayTrainer:
                     )
 
                     env_logits[env_active_we_act] = outputs.policy_logits.float()
-                    env_values[env_active_we_act] = outputs.value.float()
+                    # Denormalize values for GAE computation: V = σf * v̂ + μf
+                    env_values[env_active_we_act] = (
+                        self.popart_normalizer.denormalize_value(outputs.value.float())
+                    )
 
                 # Get predictions from opponent models for opponent turns
                 if opp_env_groups is not None and env_active_opp_acts.numel() > 0:
@@ -770,7 +778,12 @@ class SelfPlayTrainer:
                         env_logits[opp_working_env_indices] = (
                             outputs.policy_logits.float()
                         )
-                        env_values[opp_working_env_indices] = outputs.value.float()
+                        # Denormalize values for GAE computation: V = σf * v̂ + μf
+                        env_values[opp_working_env_indices] = (
+                            self.popart_normalizer.denormalize_value(
+                                outputs.value.float()
+                            )
+                        )
 
                 active_env_logits = env_logits[active_indices]
                 active_env_legal_mask = legal_bins_mask[active_indices]
@@ -992,7 +1005,10 @@ class SelfPlayTrainer:
         total_small_adv_rate = 0.0
         minibatch_count = 0
 
+        # Freeze PopArt stats at the beginning of each epoch cycle
+        self.popart_normalizer.freeze_stats()
         for _ in range(self.num_epochs):
+
             # Sample batch from vectorized buffer
             batch = self.replay_buffer.sample_batch(self.rng, self.batch_size)
             batch = batch.to(torch.float32)
@@ -1071,6 +1087,9 @@ class SelfPlayTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
+            # Update PopArt EMAs in background (current scaling stays frozen)
+            self.popart_normalizer.update_stats(batch.returns)
+
             # Check if we should add current model to opponent pool
             # Compute KL divergence between current model and last admitted opponent
             pool_kl_divergence = 0.0
@@ -1135,6 +1154,15 @@ class SelfPlayTrainer:
 
         # Update KL divergence exponential moving average
         self.kl_ema.update(current_kl)
+
+        # Apply final PopArt rescaling after last epoch
+        if self.popart_normalizer.mean_ema.initialized:
+            weight_scale, bias_adjustment = (
+                self.popart_normalizer.compute_rescaling_adjustments()
+            )
+            if weight_scale is not None and bias_adjustment is not None:
+                # Apply final rescaling to model (pass floats directly)
+                self.model.adjust_scale(weight_scale, bias_adjustment)
 
         avg_trajectory_length = self.replay_buffer.num_steps() / self.replay_buffer.size
         denom = max(1, minibatch_count)

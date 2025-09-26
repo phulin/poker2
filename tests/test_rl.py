@@ -13,6 +13,7 @@ from alphaholdem.core.structured_config import (
     TrainingConfig,
 )
 from alphaholdem.rl.losses import TrinalClipPPOLoss
+from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.replay import (
     ReplayBuffer,
     Trajectory,
@@ -105,7 +106,10 @@ def test_trinal_clip_ppo_loss():
     )
 
     # Create loss calculator and compute loss
+
+    popart_normalizer = PopArtNormalizer()
     loss_calculator = TrinalClipPPOLoss(
+        popart_normalizer=popart_normalizer,
         epsilon=0.2,
         delta1=3.0,
         value_coef=0.5,

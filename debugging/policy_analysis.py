@@ -64,6 +64,13 @@ def analyze_policy_diversity(trainer):
                 logits = logits.squeeze(0)
                 value = value.squeeze(0)
 
+            # Denormalize value if PopArt normalizer is available
+            if (
+                hasattr(trainer, "popart_normalizer")
+                and trainer.popart_normalizer is not None
+            ):
+                value = trainer.popart_normalizer.denormalize_value(value)
+
             # Apply legal mask and compute policy
             masked_logits = logits.clone()
             masked_logits[legal_mask == 0] = -1e9
@@ -153,6 +160,10 @@ def analyze_model_sensitivity(trainer):
             )
             logits = logits.squeeze(0)
             value = value.squeeze(0)
+
+        # Denormalize value if PopArt normalizer is available
+        if trainer.popart_normalizer is not None:
+            value = trainer.popart_normalizer.denormalize_value(value)
 
         masked_logits = logits.clone()
         masked_logits[legal_mask == 0] = -1e9

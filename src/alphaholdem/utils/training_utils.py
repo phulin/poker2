@@ -88,6 +88,7 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
         device=trainer.device,
         rng=trainer.rng,
         flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
+        popart_normalizer=getattr(trainer, "popart_normalizer", None),
     )
 
     print(f"\n--- {title} ---")

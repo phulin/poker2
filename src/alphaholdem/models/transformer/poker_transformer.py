@@ -224,6 +224,25 @@ class PokerTransformerV1(nn.Module, Model):
             kv_cache=new_kv_cache,
         )
 
+    @torch.no_grad()
+    def adjust_scale(self, weight_scale: float, bias_adjustment: float) -> None:
+        """
+        Apply PopArt scaling adjustments to the value head's last linear layer.
+
+        Args:
+            weight_scale: Scaling factor for the weight matrix
+            bias_adjustment: Adjustment term for the bias vector
+        """
+        # Access the last linear layer in the value head
+        last_linear = self.value_head.value_head[-1]
+
+        # Apply weight scaling
+        last_linear.weight.data.mul_(weight_scale)
+
+        # Apply bias adjustment if bias exists
+        if last_linear.bias is not None:
+            last_linear.bias.data.mul_(weight_scale).add_(bias_adjustment)
+
     def get_model_info(self) -> Dict[str, Any]:
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)

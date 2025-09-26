@@ -126,7 +126,7 @@ class Config:
     device: str = "cuda"
     use_tensor_env: bool = True
     num_envs: int = 512
-    use_wandb: bool = True
+    use_wandb: bool = False
     wandb_project: Optional[str] = "poker-kbest"
     wandb_name: Optional[str] = None
     wandb_tags: Optional[List[str]] = None

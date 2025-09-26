@@ -7,7 +7,12 @@ from typing import Dict
 
 import torch
 
-from alphaholdem.models.transformer.tokens import Context
+from alphaholdem.models.transformer.tokens import (
+    Context,
+    HOLE0_INDEX,
+    HOLE1_INDEX,
+    get_card_token_id_offset,
+)
 
 
 @dataclass
@@ -149,6 +154,22 @@ class StructuredEmbeddingData:
             context_features=self.context_features.clone(),
             lengths=self.lengths.clone(),
         )
+
+    def get_hole_cards(self, player: int) -> torch.Tensor:
+        """
+        Return the raw hole card indices for the specified player for each batch item.
+
+        Args:
+            player: Player index (0 or 1)
+
+        Returns:
+            Tensor of shape [B, 2] with integer card indices in [0..51]
+        """
+        # Hole token positions are fixed; token_ids at HOLE slots encode card tokens
+        offset = get_card_token_id_offset()
+        hole0 = self.token_ids[:, HOLE0_INDEX].to(torch.long) - offset
+        hole1 = self.token_ids[:, HOLE1_INDEX].to(torch.long) - offset
+        return torch.stack([hole0, hole1], dim=1)
 
     @classmethod
     def empty(
