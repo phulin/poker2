@@ -135,6 +135,7 @@ class Config:
     seed: int = 42
     config: Optional[str] = None
     economize_checkpoints: bool = False
+    strict_model_loading: bool = False  # Use strict model loading (default: False)
 
     # Nested configs
     train: TrainingConfig = MISSING

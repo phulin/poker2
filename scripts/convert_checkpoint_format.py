@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""
+Checkpoint format conversion script.
+
+This script converts checkpoints from the old cls_mlp input format to the new format.
+It loads the checkpoint with strict=False, reinitializes the cls_mlp and heads,
+and saves a new checkpoint with the updated model state.
+"""
+
+import argparse
+import os
+import sys
+
+import torch
+
+from alphaholdem.core.structured_config import (
+    Config,
+    EnvConfig,
+    ModelConfig,
+    TrainingConfig,
+)
+from alphaholdem.rl.self_play import SelfPlayTrainer
+
+
+def convert_checkpoint(
+    input_checkpoint_path: str, output_checkpoint_path: str, device: str = "cpu"
+) -> None:
+    """
+    Convert a checkpoint from old format to new format.
+
+    Args:
+        input_checkpoint_path: Path to the input checkpoint
+        output_checkpoint_path: Path to save the converted checkpoint
+        device: Device to use for conversion
+    """
+
+    print(f"Converting checkpoint: {input_checkpoint_path}")
+    print(f"Output checkpoint: {output_checkpoint_path}")
+
+    # Check if input checkpoint exists
+    if not os.path.exists(input_checkpoint_path):
+        raise FileNotFoundError(f"Input checkpoint not found: {input_checkpoint_path}")
+
+    # Load the original checkpoint to inspect its structure
+    device_obj = torch.device(device)
+    original_checkpoint = torch.load(
+        input_checkpoint_path, weights_only=False, map_location=device_obj
+    )
+
+    print(f"Original checkpoint keys: {list(original_checkpoint.keys())}")
+
+    # Create a config for the new model
+    config = Config(
+        train=TrainingConfig(batch_size=32),
+        model=ModelConfig(
+            name="poker_transformer_v1",
+            kwargs={
+                "max_sequence_length": 50,
+                "d_model": 128,
+                "n_layers": 2,
+                "n_heads": 2,
+                "num_bet_bins": 8,
+                "dropout": 0.1,
+                "use_gradient_checkpointing": False,
+            },
+        ),
+        env=EnvConfig(bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0]),
+        use_tensor_env=True,
+        num_envs=1,
+        device=device,
+        use_wandb=False,
+        strict_model_loading=False,  # Use non-strict loading for conversion
+    )
+
+    print("Creating new trainer with updated model...")
+
+    # Create trainer with new model architecture
+    trainer = SelfPlayTrainer(config, device_obj)
+
+    print("Loading original checkpoint with strict=False...")
+
+    # Load the original checkpoint (this will skip incompatible parts)
+    try:
+        step, wandb_run_id = trainer.load_checkpoint(input_checkpoint_path)
+        print(f"✅ Successfully loaded checkpoint (step: {step})")
+    except Exception as e:
+        print(f"⚠️ Error loading checkpoint: {e}")
+        print("Continuing with model reinitialization...")
+        step = original_checkpoint.get("step", 0)
+        wandb_run_id = original_checkpoint.get("wandb_run_id")
+
+    print("Reinitializing cls_mlp and heads...")
+
+    # Reinitialize the cls_mlp and heads with new architecture
+    model = trainer.model
+
+    # Get the current d_model
+    d_model = model.d_model
+
+    # Reinitialize cls_mlp with the new architecture
+    # The new cls_mlp takes d_model * 4 input (cls_state + hole_mean + hole_diff + hole_prod)
+    model.cls_mlp = torch.nn.Sequential(
+        torch.nn.Linear(d_model * 4, d_model),
+        torch.nn.GELU(),
+        torch.nn.Dropout(0.1),
+        torch.nn.LayerNorm(d_model),
+    )
+
+    # Reinitialize policy head
+    from alphaholdem.models.transformer.heads import TransformerPolicyHead
+
+    model.policy_head = TransformerPolicyHead(d_model, model.num_bet_bins, 0.1)
+
+    # Reinitialize value head
+    from alphaholdem.models.transformer.heads import TransformerValueHead
+
+    model.value_head = TransformerValueHead(d_model, 0.1)
+
+    print("✅ Reinitialized cls_mlp and heads")
+
+    # Get the updated model state dict (with reinitialized cls_mlp and heads)
+    updated_model_state = model.state_dict()
+
+    # Create new checkpoint with updated model state
+    new_checkpoint = {
+        "step": step,
+        "model_state_dict": updated_model_state,
+        "optimizer_state_dict": trainer.optimizer.state_dict(),
+        "total_trajectories_collected": original_checkpoint.get(
+            "total_trajectories_completed", 0
+        ),
+        "current_elo": original_checkpoint.get("current_elo", 1200.0),
+        "wandb_run_id": wandb_run_id,
+        "wandb_step": original_checkpoint.get("wandb_step", 0),
+        "config": config,
+    }
+
+    # Include opponent pool if it exists
+    if "opponent_pool" in original_checkpoint:
+        new_checkpoint["opponent_pool"] = original_checkpoint["opponent_pool"]
+
+    # Include replay buffer if it exists
+    if "replay_buffer" in original_checkpoint:
+        new_checkpoint["replay_buffer"] = original_checkpoint["replay_buffer"]
+
+    print("Saving converted checkpoint...")
+
+    # Save the new checkpoint
+    torch.save(new_checkpoint, output_checkpoint_path)
+
+    print(f"✅ Checkpoint conversion complete!")
+    print(f"   Input: {input_checkpoint_path}")
+    print(f"   Output: {output_checkpoint_path}")
+    print(f"   Step: {step}")
+    print(f"   ELO: {new_checkpoint['current_elo']}")
+
+    # Verify the new checkpoint can be loaded
+    print("\nVerifying converted checkpoint...")
+
+    try:
+        # Create a new trainer to test loading
+        test_trainer = SelfPlayTrainer(config, device_obj)
+        # Load with strict=True since the converted checkpoint should match the model architecture
+        test_checkpoint = torch.load(
+            output_checkpoint_path, weights_only=False, map_location=device_obj
+        )
+        test_trainer.model.load_state_dict(
+            test_checkpoint["model_state_dict"], strict=True
+        )
+        test_step = test_checkpoint.get("step", 0)
+        print(f"✅ Verification successful! Loaded step: {test_step}")
+    except Exception as e:
+        print(f"❌ Verification failed: {e}")
+        return False
+
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Convert checkpoint from old cls_mlp format to new format"
+    )
+    parser.add_argument(
+        "input_checkpoint", type=str, help="Path to the input checkpoint file"
+    )
+    parser.add_argument(
+        "output_checkpoint", type=str, help="Path to save the converted checkpoint"
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="Device to use for conversion (cpu, cuda, mps)",
+    )
+    parser.add_argument(
+        "--backup",
+        action="store_true",
+        help="Create a backup of the original checkpoint",
+    )
+
+    args = parser.parse_args()
+
+    # Create backup if requested
+    if args.backup:
+        backup_path = args.input_checkpoint + ".backup"
+        print(f"Creating backup: {backup_path}")
+        import shutil
+
+        shutil.copy2(args.input_checkpoint, backup_path)
+
+    # Convert the checkpoint
+    try:
+        success = convert_checkpoint(
+            args.input_checkpoint, args.output_checkpoint, args.device
+        )
+
+        if success:
+            print("\n🎉 Checkpoint conversion completed successfully!")
+            sys.exit(0)
+        else:
+            print("\n❌ Checkpoint conversion failed!")
+            sys.exit(1)
+
+    except Exception as e:
+        print(f"\n❌ Error during conversion: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -105,7 +105,7 @@ class PokerTransformerV1(nn.Module, Model):
         self.post_norm = nn.LayerNorm(d_model)
 
         self.cls_mlp = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
+            nn.Linear(d_model * 4, d_model),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.LayerNorm(d_model),
@@ -215,7 +215,9 @@ class PokerTransformerV1(nn.Module, Model):
 
         cls_state = x[:, CLS_INDEX]
         hole_mean = (x[:, HOLE0_INDEX] + x[:, HOLE1_INDEX]) / 2
-        x = torch.cat([cls_state, hole_mean], dim=-1)
+        hole_diff = (x[:, HOLE0_INDEX] - x[:, HOLE1_INDEX]) / 2
+        hole_prod = x[:, HOLE0_INDEX] * x[:, HOLE1_INDEX]
+        x = torch.cat([cls_state, hole_mean, hole_diff, hole_prod], dim=-1)
         x = self.cls_mlp(x)
 
         return ModelOutput(

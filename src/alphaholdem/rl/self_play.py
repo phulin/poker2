@@ -1536,7 +1536,9 @@ class SelfPlayTrainer:
         # so explicitly allow full load.
         checkpoint = torch.load(path, weights_only=False, map_location=self.device)
 
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.model.load_state_dict(
+            checkpoint["model_state_dict"], strict=self.cfg.strict_model_loading
+        )
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
         # Handle both old and new checkpoint formats

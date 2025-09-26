@@ -24,6 +24,7 @@ use_wandb: true
 wandb_project: "poker-transformer"
 wandb_name: null
 wandb_tags: ["transformer", "poker", "ppo"]
+wandb_run_id: null
 
 # === RESUME CONFIGURATION ===
 resume_from: null
@@ -33,8 +34,8 @@ seed: 42
 
 # === ADDITIONAL CONFIGURATION ===
 config: null
-wandb_run_id: null
 economize_checkpoints: false
+strict_model_loading: false  # Use strict model loading (default: False)
 
 # === EXPLOITER CONFIGURATION ===
 exploiter:

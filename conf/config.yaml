@@ -24,6 +24,7 @@ use_wandb: false
 wandb_project: "poker-kbest"
 wandb_name: null  # Auto-generated if null
 wandb_tags: ["kbest", "poker", "ppo"]
+wandb_run_id: null  # Wandb run ID to resume
 
 # === RESUME CONFIGURATION ===
 resume_from: null
@@ -33,8 +34,8 @@ seed: 42
 
 # === ADDITIONAL CONFIGURATION ===
 config: null  # Path to YAML config for components/hparams
-wandb_run_id: null  # Wandb run ID to resume
 economize_checkpoints: false  # Keep only best_model.pt and latest checkpoint, skip replay buffer
+strict_model_loading: false  # Use strict model loading (default: False)
 
 # === EXPLOITER CONFIGURATION ===
 exploiter:
