@@ -23,7 +23,10 @@ from alphaholdem.rl.self_play import SelfPlayTrainer
 
 
 def convert_checkpoint(
-    input_checkpoint_path: str, output_checkpoint_path: str, device: str = "cpu"
+    input_checkpoint_path: str,
+    output_checkpoint_path: str,
+    device: str = "cpu",
+    drop_prefixes: list[str] = None,
 ) -> None:
     """
     Convert a checkpoint from old format to new format.
@@ -32,10 +35,14 @@ def convert_checkpoint(
         input_checkpoint_path: Path to the input checkpoint
         output_checkpoint_path: Path to save the converted checkpoint
         device: Device to use for conversion
+        drop_prefixes: List of parameter name prefixes to drop from the checkpoint
     """
 
     print(f"Converting checkpoint: {input_checkpoint_path}")
     print(f"Output checkpoint: {output_checkpoint_path}")
+
+    if drop_prefixes:
+        print(f"Dropping parameters with prefixes: {drop_prefixes}")
 
     # Check if input checkpoint exists
     if not os.path.exists(input_checkpoint_path):
@@ -129,42 +136,15 @@ def convert_checkpoint(
 
     # Load the original checkpoint (this will skip incompatible parts)
     try:
-        step, wandb_run_id = trainer.load_checkpoint(input_checkpoint_path)
+        step, wandb_run_id = trainer.load_checkpoint(
+            input_checkpoint_path, drop_prefixes=drop_prefixes
+        )
         print(f"✅ Successfully loaded checkpoint (step: {step})")
     except Exception as e:
         print(f"⚠️ Error loading checkpoint: {e}")
         print("Continuing with model reinitialization...")
         step = original_checkpoint.get("step", 0)
         wandb_run_id = original_checkpoint.get("wandb_run_id")
-
-    print("Reinitializing cls_mlp and heads...")
-
-    # Reinitialize the cls_mlp and heads with new architecture
-    model = trainer.model
-
-    # Get the current d_model
-    d_model = model.d_model
-
-    # Reinitialize cls_mlp with the new architecture
-    # The new cls_mlp takes d_model * 4 input (cls_state + hole_mean + hole_diff + hole_prod)
-    model.cls_mlp = torch.nn.Sequential(
-        torch.nn.Linear(d_model * 4, d_model),
-        torch.nn.GELU(),
-        torch.nn.Dropout(0.1),
-        torch.nn.LayerNorm(d_model),
-    )
-
-    # Reinitialize policy head
-    from alphaholdem.models.transformer.heads import TransformerPolicyHead
-
-    model.policy_head = TransformerPolicyHead(d_model, model.num_bet_bins, 0.1)
-
-    # Reinitialize value head
-    from alphaholdem.models.transformer.heads import TransformerValueHead
-
-    model.value_head = TransformerValueHead(d_model, 0.1)
-
-    print("✅ Reinitialized cls_mlp and heads")
 
     # Update trainer's internal state to match the original checkpoint
     trainer.step = step
@@ -226,6 +206,12 @@ def main():
         action="store_true",
         help="Create a backup of the original checkpoint",
     )
+    parser.add_argument(
+        "--drop-prefixes",
+        nargs="*",
+        default=[],
+        help="Drop all parameters with these prefixes from the checkpoint",
+    )
 
     args = parser.parse_args()
 
@@ -240,7 +226,10 @@ def main():
     # Convert the checkpoint
     try:
         success = convert_checkpoint(
-            args.input_checkpoint, args.output_checkpoint, args.device
+            args.input_checkpoint,
+            args.output_checkpoint,
+            args.device,
+            args.drop_prefixes,
         )
 
         if success:

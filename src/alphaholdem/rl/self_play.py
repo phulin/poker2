@@ -1529,15 +1529,35 @@ class SelfPlayTrainer:
         if deleted_count > 0:
             print(f"Cleaned up {deleted_count} old checkpoint(s)")
 
-    def load_checkpoint(self, path: str) -> tuple[int, str | None]:
+    def load_checkpoint(
+        self, path: str, drop_prefixes: list[str] = None
+    ) -> tuple[int, str | None]:
         """Load model checkpoint and opponent pool. Returns (step_number, wandb_run_id)."""
         # PyTorch 2.6 defaults to weights_only=True which blocks unpickling
         # custom classes like our ReplayBuffer. We trust our local checkpoints,
         # so explicitly allow full load.
         checkpoint = torch.load(path, weights_only=False, map_location=self.device)
 
+        # Filter model state dict to drop parameters with specified prefixes
+        model_state_dict = checkpoint["model_state_dict"]
+        if drop_prefixes:
+            dropped_keys = []
+
+            for key in list(model_state_dict.keys()):
+                should_drop = any(key.startswith(prefix) for prefix in drop_prefixes)
+                if should_drop:
+                    del model_state_dict[key]
+                    dropped_keys.append(key)
+
+            if dropped_keys:
+                print(
+                    f"Dropped {len(dropped_keys)} parameters with specified prefixes:"
+                )
+                for key in dropped_keys:
+                    print(f"  - {key}")
+
         self.model.load_state_dict(
-            checkpoint["model_state_dict"], strict=self.cfg.strict_model_loading
+            model_state_dict, strict=self.cfg.strict_model_loading
         )
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
@@ -1607,7 +1627,23 @@ class SelfPlayTrainer:
                 model = ModelFactory.create_model(
                     self.cfg.model.name, model_kwargs, self.device
                 )
-                model.load_state_dict(snapshot_data["model_state_dict"])
+                model_state_dict = snapshot_data["model_state_dict"]
+                if drop_prefixes:
+                    dropped_keys = []
+
+                    for key in list(model_state_dict.keys()):
+                        should_drop = any(
+                            key.startswith(prefix) for prefix in drop_prefixes
+                        )
+                        if should_drop:
+                            del model_state_dict[key]
+                            dropped_keys.append(key)
+
+                model.load_state_dict(
+                    model_state_dict,
+                    strict=self.cfg.strict_model_loading,
+                )
+
                 # Handle backward compatibility for older snapshots
                 model_dtype = snapshot_data.get("model_dtype", torch.float32)
                 # Handle legacy use_mixed_precision field
