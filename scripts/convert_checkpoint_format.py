@@ -166,41 +166,28 @@ def convert_checkpoint(
 
     print("✅ Reinitialized cls_mlp and heads")
 
-    # Get the updated model state dict (with reinitialized cls_mlp and heads)
-    updated_model_state = model.state_dict()
-
-    # Create new checkpoint with updated model state
-    new_checkpoint = {
-        "step": step,
-        "model_state_dict": updated_model_state,
-        "optimizer_state_dict": trainer.optimizer.state_dict(),
-        "total_trajectories_collected": original_checkpoint.get(
-            "total_trajectories_completed", 0
-        ),
-        "current_elo": original_checkpoint.get("current_elo", 1200.0),
-        "wandb_run_id": wandb_run_id,
-        "wandb_step": original_checkpoint.get("wandb_step", 0),
-        "config": config,
-    }
-
-    # Include opponent pool if it exists
-    if "opponent_pool" in original_checkpoint:
-        new_checkpoint["opponent_pool"] = original_checkpoint["opponent_pool"]
+    # Update trainer's internal state to match the original checkpoint
+    trainer.step = step
+    trainer.wandb_run_id = wandb_run_id
+    trainer.total_trajectories_collected = original_checkpoint.get(
+        "total_trajectories_completed", 0
+    )
+    trainer.wandb_step = original_checkpoint.get("wandb_step", 0)
 
     # Include replay buffer if it exists
     if "replay_buffer" in original_checkpoint:
-        new_checkpoint["replay_buffer"] = original_checkpoint["replay_buffer"]
+        trainer.replay_buffer = original_checkpoint["replay_buffer"]
 
     print("Saving converted checkpoint...")
 
-    # Save the new checkpoint
-    torch.save(new_checkpoint, output_checkpoint_path)
+    # Use SelfPlayTrainer's save_checkpoint method
+    trainer.save_checkpoint(output_checkpoint_path, step)
 
     print(f"✅ Checkpoint conversion complete!")
     print(f"   Input: {input_checkpoint_path}")
     print(f"   Output: {output_checkpoint_path}")
     print(f"   Step: {step}")
-    print(f"   ELO: {new_checkpoint['current_elo']}")
+    print(f"   ELO: {original_checkpoint.get('current_elo', 1200.0)}")
 
     # Verify the new checkpoint can be loaded
     print("\nVerifying converted checkpoint...")
@@ -209,13 +196,7 @@ def convert_checkpoint(
         # Create a new trainer to test loading
         test_trainer = SelfPlayTrainer(config, device_obj)
         # Load with strict=True since the converted checkpoint should match the model architecture
-        test_checkpoint = torch.load(
-            output_checkpoint_path, weights_only=False, map_location=device_obj
-        )
-        test_trainer.model.load_state_dict(
-            test_checkpoint["model_state_dict"], strict=True
-        )
-        test_step = test_checkpoint.get("step", 0)
+        test_step, _ = test_trainer.load_checkpoint(output_checkpoint_path)
         print(f"✅ Verification successful! Loaded step: {test_step}")
     except Exception as e:
         print(f"❌ Verification failed: {e}")
