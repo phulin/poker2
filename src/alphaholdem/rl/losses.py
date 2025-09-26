@@ -185,12 +185,11 @@ class TrinalClipPPOLoss(LossCalculator):
 
         # Use frozen stats for normalization during training
         mu_frozen, sigma_frozen = self.popart.get_frozen_stats()
-        values_n = (values - mu_frozen) / (sigma_frozen + 1e-8)
         targets_n = (clipped_returns - mu_frozen) / (sigma_frozen + 1e-8)
         if self.value_loss_type == "huber":
-            value_loss = F.smooth_l1_loss(values_n, targets_n, beta=self.huber_delta)
+            value_loss = F.smooth_l1_loss(values, targets_n, beta=self.huber_delta)
         else:
-            value_loss = F.mse_loss(values_n, targets_n)
+            value_loss = F.mse_loss(values, targets_n)
 
         # Entropy regularization
         probs = F.softmax(masked_logits, dim=-1)
