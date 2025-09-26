@@ -49,28 +49,76 @@ def convert_checkpoint(
 
     print(f"Original checkpoint keys: {list(original_checkpoint.keys())}")
 
-    # Create a config for the new model
-    config = Config(
-        train=TrainingConfig(batch_size=32),
-        model=ModelConfig(
-            name="poker_transformer_v1",
-            kwargs={
-                "max_sequence_length": 50,
-                "d_model": 128,
-                "n_layers": 2,
-                "n_heads": 2,
-                "num_bet_bins": 8,
-                "dropout": 0.1,
-                "use_gradient_checkpointing": False,
-            },
-        ),
-        env=EnvConfig(bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0]),
-        use_tensor_env=True,
-        num_envs=1,
-        device=device,
-        use_wandb=False,
-        strict_model_loading=False,  # Use non-strict loading for conversion
-    )
+    # Load config from checkpoint if available, otherwise create a default one
+    if "full_config" in original_checkpoint:
+        print("Loading full_config from checkpoint...")
+        config = original_checkpoint["full_config"]
+        # Override device and wandb settings for conversion
+        config.device = device
+        config.use_wandb = False
+        config.strict_model_loading = False  # Use non-strict loading for conversion
+        print(f"✅ Loaded full_config from checkpoint")
+    elif "config" in original_checkpoint:
+        print("Loading config from checkpoint...")
+        config_dict = original_checkpoint["config"]
+        # Create a Config object from the dict
+        config = Config(
+            train=TrainingConfig(
+                batch_size=config_dict.get("batch_size", 32),
+                num_epochs=config_dict.get("num_epochs", 4),
+                gamma=config_dict.get("gamma", 0.999),
+                gae_lambda=config_dict.get("gae_lambda", 0.95),
+                epsilon=config_dict.get("epsilon", 0.2),
+                delta1=config_dict.get("delta1", 3.0),
+                value_coef=config_dict.get("value_coef", 0.05),
+                entropy_coef=config_dict.get("entropy_coef", 0.01),
+                grad_clip=config_dict.get("grad_clip", 1.0),
+            ),
+            model=ModelConfig(
+                name="poker_transformer_v1",
+                kwargs={
+                    "max_sequence_length": 50,
+                    "d_model": 128,
+                    "n_layers": 2,
+                    "n_heads": 2,
+                    "num_bet_bins": config_dict.get("num_bet_bins", 8),
+                    "dropout": 0.1,
+                    "use_gradient_checkpointing": False,
+                },
+            ),
+            env=EnvConfig(bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0]),
+            use_tensor_env=True,
+            num_envs=1,
+            device=device,
+            use_wandb=False,
+            strict_model_loading=False,  # Use non-strict loading for conversion
+        )
+        print(f"✅ Created Config from checkpoint dict")
+    else:
+        print("No config found in checkpoint, creating default config...")
+        # Create a default config for the new model
+        config = Config(
+            train=TrainingConfig(batch_size=32),
+            model=ModelConfig(
+                name="poker_transformer_v1",
+                kwargs={
+                    "max_sequence_length": 50,
+                    "d_model": 128,
+                    "n_layers": 2,
+                    "n_heads": 2,
+                    "num_bet_bins": 8,
+                    "dropout": 0.1,
+                    "use_gradient_checkpointing": False,
+                },
+            ),
+            env=EnvConfig(bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0]),
+            use_tensor_env=True,
+            num_envs=1,
+            device=device,
+            use_wandb=False,
+            strict_model_loading=False,  # Use non-strict loading for conversion
+        )
+        print(f"⚠️ Created default config (may not match original model architecture)")
 
     print("Creating new trainer with updated model...")
 
