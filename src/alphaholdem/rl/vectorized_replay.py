@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Union
+from typing import Union, Optional
 
 import torch
 
@@ -10,6 +10,8 @@ from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
 from alphaholdem.models.transformer.tokens import Context, Special
+from alphaholdem.utils.model_context import model_eval
+from alphaholdem.utils.model_utils import get_logits_log_probs_values
 
 
 @dataclass
@@ -18,6 +20,7 @@ class BatchSample:
 
     embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData]
     action_indices: torch.Tensor
+    logits: torch.Tensor
     selected_log_probs: torch.Tensor
     all_log_probs: torch.Tensor
     legal_masks: torch.Tensor
@@ -31,8 +34,11 @@ class BatchSample:
         return BatchSample(
             embedding_data=self.embedding_data,
             action_indices=self.action_indices,
+            logits=self.logits.to(dtype) if self.logits is not None else None,
             selected_log_probs=self.selected_log_probs.to(dtype),
-            all_log_probs=self.all_log_probs.to(dtype),
+            all_log_probs=(
+                self.all_log_probs.to(dtype) if self.all_log_probs is not None else None
+            ),
             legal_masks=self.legal_masks,
             advantages=self.advantages.to(dtype),
             returns=self.returns.to(dtype),
@@ -47,8 +53,6 @@ class TrajectorySample:
 
     embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData]
     action_indices: torch.Tensor
-    log_probs_old: torch.Tensor
-    log_probs_old_full: torch.Tensor
     advantages: torch.Tensor
     returns: torch.Tensor
     delta2: torch.Tensor
@@ -133,7 +137,7 @@ class VectorizedReplayBuffer:
             )
 
         self.action_indices = torch.zeros(C, T, dtype=torch.long, device=device)
-        # Store full log-prob distributions per step for exact KL and stable ratio
+        self.logits = torch.zeros(C, T, num_bet_bins, dtype=float_dtype, device=device)
         self.log_probs = torch.zeros(
             C, T, num_bet_bins, dtype=float_dtype, device=device
         )
@@ -151,7 +155,6 @@ class VectorizedReplayBuffer:
         self.values = torch.zeros(C, T, dtype=float_dtype, device=device)
         self.advantages = torch.zeros(C, T, dtype=float_dtype, device=device)
         self.returns = torch.zeros(C, T, dtype=float_dtype, device=device)
-        # No separate logits tensor; full distributions are stored in log_probs
 
         # Track trajectory metadata
         self.trajectory_lengths = torch.zeros(capacity, dtype=torch.long, device=device)
@@ -212,7 +215,6 @@ class VectorizedReplayBuffer:
 
         # Common tensors for both model types
         self.action_indices[clear_indices] = 0
-        self.log_probs[clear_indices] = 0
         self.rewards[clear_indices] = 0
         self.dones[clear_indices] = False
         self.legal_masks[clear_indices] = False
@@ -279,7 +281,6 @@ class VectorizedReplayBuffer:
             "trajectory_lengths",
             "current_transition_counts",
             "action_indices",
-            "log_probs",
             "rewards",
             "dones",
             "legal_masks",
@@ -342,7 +343,6 @@ class VectorizedReplayBuffer:
         self,
         embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData],
         action_indices: torch.Tensor,  # [batch_size] - long
-        log_probs: torch.Tensor,
         rewards: torch.Tensor,
         dones: torch.Tensor,
         legal_masks: torch.Tensor,  # [batch_size, legal_mask_dim] - bool
@@ -357,7 +357,6 @@ class VectorizedReplayBuffer:
         Args:
             embedding_data: Either CNNEmbeddingData or StructuredEmbeddingData containing embedding components
             action_indices: [batch_size] - long dtype
-            log_probs: [batch_size] - float dtype
             rewards: [batch_size] - float dtype
             dones: [batch_size] - bool dtype
             legal_masks: [batch_size, legal_mask_dim] - bool dtype
@@ -409,8 +408,6 @@ class VectorizedReplayBuffer:
         self.action_indices[buffer_trajectory_indices, transition_counts] = (
             action_indices
         )
-        # Expect log_probs shape [batch_size, num_bet_bins]
-        self.log_probs[buffer_trajectory_indices, transition_counts, :] = log_probs
         self.rewards[buffer_trajectory_indices, transition_counts] = rewards
         self.dones[buffer_trajectory_indices, transition_counts] = dones
         self.legal_masks[buffer_trajectory_indices, transition_counts, :] = legal_masks
@@ -591,17 +588,10 @@ class VectorizedReplayBuffer:
             raise ValueError("No valid steps in sampled trajectories")
 
         # Extract data for all steps
-        log_probs_old_full = self.log_probs[traj_indices_tensor, step_indices_tensor]
         action_indices = self.action_indices[traj_indices_tensor, step_indices_tensor]
-        action_log_probs = log_probs_old_full.gather(
-            1, action_indices.unsqueeze(1)
-        ).squeeze(1)
-
         return TrajectorySample(
             embedding_data=self.data[traj_indices_tensor],
             action_indices=action_indices,
-            log_probs_old=action_log_probs,
-            log_probs_old_full=log_probs_old_full,
             advantages=self.advantages[traj_indices_tensor, step_indices_tensor],
             returns=self.returns[traj_indices_tensor, step_indices_tensor],
             delta2=self.delta2[traj_indices_tensor, step_indices_tensor],
@@ -653,6 +643,8 @@ class VectorizedReplayBuffer:
             )
 
         action_indices_sel = self.action_indices[traj_indices, transition_indices]
+
+        # Use stored log_probs and logits instead of recomputing
         all_log_probs = self.log_probs[traj_indices, transition_indices]
         selected_log_probs = all_log_probs.gather(
             1, action_indices_sel.unsqueeze(1)
@@ -661,6 +653,7 @@ class VectorizedReplayBuffer:
         return BatchSample(
             embedding_data=data,
             action_indices=action_indices_sel,
+            logits=self.logits[traj_indices, transition_indices],
             selected_log_probs=selected_log_probs,
             all_log_probs=all_log_probs,
             legal_masks=self.legal_masks[traj_indices, transition_indices],
@@ -669,6 +662,68 @@ class VectorizedReplayBuffer:
             delta2=self.delta2[traj_indices, transition_indices],
             delta3=self.delta3[traj_indices, transition_indices],
         )
+
+    def compute_log_probs_for_buffer(self, model: torch.nn.Module) -> None:
+        """
+        Compute log probabilities for all valid transitions in the buffer.
+        This should be called after trajectories are added but before sampling.
+        """
+        if self.size == 0:
+            return
+
+        # Get all valid trajectory indices
+        valid_indices = torch.where(self.trajectory_lengths > 0)[0]
+        if len(valid_indices) == 0:
+            return
+
+        self.logits.zero_()
+        self.log_probs.zero_()
+
+        with torch.no_grad(), model_eval(model):
+            # Fully vectorized collection of all transitions from these trajectories (no for loops or list comprehensions)
+            traj_lengths = self.trajectory_lengths[valid_indices]  # [num_traj]
+            max_len = traj_lengths.max().item()
+            if max_len == 0:
+                return
+
+            # Create a [num_traj, max_len] matrix of step indices
+            step_range = torch.arange(max_len, device=self.device)
+            # Mask: True where step < traj_length for each trajectory
+            mask = step_range.unsqueeze(0) < traj_lengths.unsqueeze(
+                1
+            )  # [num_traj, max_len]
+
+            # Get all (traj_idx, step_idx) pairs for valid steps
+            valid_traj_idx = valid_indices.unsqueeze(1).expand(-1, max_len)[
+                mask
+            ]  # [total_steps]
+            valid_step_idx = step_range.unsqueeze(0).expand(len(valid_indices), -1)[
+                mask
+            ]  # [total_steps]
+
+            if self.is_transformer:
+                all_transitions_data = self._sample_transformer_steps(
+                    valid_traj_idx, valid_step_idx
+                )
+            else:
+                cards = self.cards_features[valid_traj_idx, valid_step_idx].to(
+                    self.float_dtype
+                )
+                actions = self.actions_features[valid_traj_idx, valid_step_idx].to(
+                    self.float_dtype
+                )
+                # For CNN, all_transitions_data will be a CNNEmbeddingData with batch dimension
+                all_transitions_data = CNNEmbeddingData(cards=cards, actions=actions)
+
+            # Get legal masks for all transitions (record on preceding context token)
+            legal_masks = self.legal_masks[valid_traj_idx, valid_step_idx]
+            logits, log_probs, _ = get_logits_log_probs_values(
+                model, all_transitions_data, legal_masks
+            )
+
+            # Store the logits and all log probs
+            self.logits[valid_traj_idx, valid_step_idx] = logits
+            self.log_probs[valid_traj_idx, valid_step_idx] = log_probs
 
     def clear(self) -> None:
         """Clear all stored trajectories."""

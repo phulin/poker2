@@ -98,13 +98,19 @@ def _merge_configs(checkpoint_config: Config, cli_config: Config) -> Config:
         if cli_value is None:
             continue
 
+        # Skip MISSING values (default dataclass values)
+        from omegaconf import MISSING
+
+        if cli_value is MISSING:
+            continue
+
         # Override if values are different
         if cli_value != checkpoint_value:
             setattr(merged_config, field_name, cli_value)
 
     # Handle nested configs specially
     if cli_config.train is not None and checkpoint_config.train is not None:
-        # Check if both are dataclass instances
+        # Check if both are dataclass instances (not MISSING)
         if hasattr(cli_config.train, "__dataclass_fields__") and hasattr(
             checkpoint_config.train, "__dataclass_fields__"
         ):
@@ -123,7 +129,7 @@ def _merge_configs(checkpoint_config: Config, cli_config: Config) -> Config:
             merged_config.train = merged_train
 
     if cli_config.model is not None and checkpoint_config.model is not None:
-        # Check if both are dataclass instances
+        # Check if both are dataclass instances (not MISSING)
         if hasattr(cli_config.model, "__dataclass_fields__") and hasattr(
             checkpoint_config.model, "__dataclass_fields__"
         ):
@@ -142,7 +148,7 @@ def _merge_configs(checkpoint_config: Config, cli_config: Config) -> Config:
             merged_config.model = merged_model
 
     if cli_config.env is not None and checkpoint_config.env is not None:
-        # Check if both are dataclass instances
+        # Check if both are dataclass instances (not MISSING)
         if hasattr(cli_config.env, "__dataclass_fields__") and hasattr(
             checkpoint_config.env, "__dataclass_fields__"
         ):
@@ -164,7 +170,7 @@ def _merge_configs(checkpoint_config: Config, cli_config: Config) -> Config:
         cli_config.state_encoder is not None
         and checkpoint_config.state_encoder is not None
     ):
-        # Check if both are dataclass instances
+        # Check if both are dataclass instances (not MISSING)
         if hasattr(cli_config.state_encoder, "__dataclass_fields__") and hasattr(
             checkpoint_config.state_encoder, "__dataclass_fields__"
         ):

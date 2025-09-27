@@ -92,6 +92,9 @@ class TokenSequenceBuilder:
         self.token_ids[idxs, start] = Special.CONTEXT.value
         self.token_streets[idxs, start] = self.tensor_env.street[idxs]
 
+        # store current legal mask (shown on context + on action itself later)
+        self.action_legal_masks[idxs, start] = self.tensor_env.legal_bins_mask()[idxs]
+
         # Store raw unscaled values as int16
         self.context_features[idxs, start, Context.POT.value] = self.tensor_env.pot[
             idxs

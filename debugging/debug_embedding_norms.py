@@ -19,16 +19,28 @@ import torch
 from alphaholdem.core.structured_config import (
     Config,
     EnvConfig,
+    ExploiterConfig,
     ModelConfig,
+    StateEncoderConfig,
     TrainingConfig,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
+from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.models.transformer.tokens import (
     Special,
     get_card_token_id_offset,
     get_special_token_id_offset,
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
+from alphaholdem.utils.config_loader import load_config_from_checkpoint
+from alphaholdem.utils.model_context import model_eval
+from alphaholdem.utils.model_utils import get_probs_and_values
+
+RANKS = "23456789TJQKA"
+SUITS = "shdc"
 
 
 def analyze_embedding_norms(trainer: SelfPlayTrainer) -> None:
@@ -102,78 +114,101 @@ def analyze_embedding_norms(trainer: SelfPlayTrainer) -> None:
         print(f"  {suit_names[i]:2s}: {norm:.6f}")
 
 
-def create_river_state_with_cards(
-    trainer: SelfPlayTrainer,
-    hole_cards: list[int],
-    board_cards: list[int],
-    device: torch.device,
-) -> HUNLTensorEnv:
-    """Create a river game state with specific cards."""
+def collect_trajectory_with_transitions(
+    trainer: SelfPlayTrainer, min_transitions: int = 3
+) -> tuple[torch.Tensor, torch.Tensor, dict]:
+    """Collect a trajectory until we find one with at least min_transitions."""
+    print(f"Collecting trajectory with at least {min_transitions} transitions...")
 
-    # Create tensor environment
-    env = HUNLTensorEnv(
-        num_envs=1,
-        starting_stack=1000,
-        sb=50,
-        bb=100,
-        bet_bins=trainer.tensor_env.bet_bins,
-        device=device,
+    # Clear the replay buffer to start fresh
+    trainer.replay_buffer.clear()
+
+    # Ensure all components are on the same device
+    print(f"Trainer device: {trainer.device}")
+    print(f"Model device: {next(trainer.model.parameters()).device}")
+    print(f"Tensor env device: {trainer.tensor_env.device}")
+    print(f"Replay buffer device: {trainer.replay_buffer.device}")
+
+    attempts = 0
+    max_attempts = 100
+
+    while attempts < max_attempts:
+        attempts += 1
+
+        # Collect trajectories using tensor environment
+        trainer.collect_tensor_trajectories(
+            min_trajectories=1, add_to_replay_buffer=True
+        )
+
+        # Get the most recent trajectory from replay buffer
+        if trainer.replay_buffer.size > 0:
+            # Get the last trajectory from the replay buffer
+            last_trajectory_idx = (
+                trainer.replay_buffer.position - 1
+            ) % trainer.replay_buffer.capacity
+
+            # Get the number of transitions in this trajectory
+            # Count non-zero transitions by checking where dones are True
+            trajectory_dones = trainer.replay_buffer.dones[last_trajectory_idx]
+            num_transitions = trajectory_dones.sum().item()
+
+            if num_transitions >= min_transitions:
+                print(
+                    f"✅ Found trajectory with {num_transitions} transitions (attempt {attempts})"
+                )
+
+                # Get the last state from StructuredEmbeddingData
+                embedding_data = trainer.replay_buffer.data[last_trajectory_idx]
+                # Get the last legal mask
+                legal_mask = trainer.replay_buffer.legal_masks[
+                    last_trajectory_idx, num_transitions - 1
+                ]
+
+                return embedding_data, legal_mask, {"num_transitions": num_transitions}
+
+        if attempts % 10 == 0:
+            print(f"  Attempt {attempts}: Continuing...")
+
+    raise RuntimeError(
+        f"Could not find trajectory with {min_transitions}+ transitions after {max_attempts} attempts"
     )
-
-    # Reset environment
-    env.reset()
-
-    # Force specific cards by setting the deck
-    # Create a deck with our desired cards first (9 cards total: 2 hole + 5 board + 2 extra)
-    forced_deck = torch.zeros(9, dtype=torch.long, device=device)
-    forced_deck[:7] = torch.tensor(hole_cards + board_cards, device=device)
-
-    # Fill remaining deck with unused cards
-    used_cards = set(hole_cards + board_cards)
-    unused_cards = [i for i in range(52) if i not in used_cards]
-    forced_deck[7:] = torch.tensor(unused_cards[:2], device=device)
-
-    # Reset with forced deck
-    env.reset(force_deck=forced_deck.unsqueeze(0))
-
-    # Advance to river by dealing flop, turn, river
-    # The cards are already in the deck in the right order
-    env.step_bins(torch.tensor([1], device=device))  # Call preflop
-    env.step_bins(torch.tensor([1], device=device))  # Call preflop
-
-    # Deal flop (cards 4, 5, 6)
-    env.step_bins(torch.tensor([1], device=device))  # Call flop
-    env.step_bins(torch.tensor([1], device=device))  # Call flop
-
-    # Deal turn (card 7)
-    env.step_bins(torch.tensor([1], device=device))  # Call turn
-    env.step_bins(torch.tensor([1], device=device))  # Call turn
-
-    # Deal river (card 8)
-    env.step_bins(torch.tensor([1], device=device))  # Call river
-    # Now it's player 0's turn to act on the river
-
-    return env
 
 
 def get_action_predictions(
-    trainer: SelfPlayTrainer, env: HUNLTensorEnv, device: torch.device
+    trainer: SelfPlayTrainer,
+    embedding_data,
+    legal_mask: torch.Tensor,
+    device: torch.device,
 ):
     """Get action predictions from the model for the current state."""
+    from alphaholdem.utils import model_eval
 
-    with torch.no_grad():
-        # Encode the current state
-        embedding_data = trainer.state_encoder.encode_tensor_states(
-            player=0, idxs=torch.tensor([0], device=device)
+    with model_eval(trainer.model), torch.no_grad():
+        # Convert to batch format - StructuredEmbeddingData needs to be batched
+        from alphaholdem.models.transformer.structured_embedding_data import (
+            StructuredEmbeddingData,
         )
 
+        if isinstance(embedding_data, StructuredEmbeddingData):
+            # Create a batch with a single trajectory
+            batched_embedding_data = StructuredEmbeddingData(
+                token_ids=embedding_data.token_ids.unsqueeze(0),  # Add batch dimension
+                token_streets=embedding_data.token_streets.unsqueeze(0),
+                card_ranks=embedding_data.card_ranks.unsqueeze(0),
+                card_suits=embedding_data.card_suits.unsqueeze(0),
+                action_actors=embedding_data.action_actors.unsqueeze(0),
+                action_legal_masks=embedding_data.action_legal_masks.unsqueeze(0),
+                context_features=embedding_data.context_features.unsqueeze(0),
+                lengths=embedding_data.lengths.unsqueeze(0),
+            )
+        else:
+            # Fallback for other types
+            batched_embedding_data = embedding_data
+
         # Get model predictions
-        outputs = trainer.model(embedding_data)
+        outputs = trainer.model(batched_embedding_data)
         logits = outputs.policy_logits.squeeze(0)  # [num_bet_bins]
         value = outputs.value.squeeze(0).item()
-
-        # Get legal actions
-        legal_mask = env.legal_bins_mask()[0]  # [num_bet_bins]
 
         # Apply legal mask
         masked_logits = torch.where(legal_mask == 0, -1e9, logits)
@@ -184,6 +219,13 @@ def get_action_predictions(
         return probs, value, legal_mask
 
 
+def permute_suit(card: int, suit_perm: list[int]) -> int:
+    """Permute the suit of a card."""
+    suit = card // 13
+    new_suit = suit_perm[suit]
+    return new_suit * 13 + (card % 13)
+
+
 def test_suit_permutations(trainer: SelfPlayTrainer, device: torch.device) -> None:
     """Test how suit permutations affect river action predictions."""
 
@@ -191,110 +233,204 @@ def test_suit_permutations(trainer: SelfPlayTrainer, device: torch.device) -> No
     print("RIVER ACTION PREDICTION TEST WITH SUIT PERMUTATIONS")
     print("=" * 80)
 
-    # Define a sample hand: pocket aces vs a board that makes a straight
-    # Hole cards: A♠ A♥ (0, 13)
-    # Board: K♠ Q♠ J♠ T♠ 9♠ (12, 11, 10, 9, 8) - royal flush board
-    hole_cards = [0, 13]  # A♠ A♥
-    base_board = [12, 11, 10, 9, 8]  # K♠ Q♠ J♠ T♠ 9♠
-
-    print(f"Hole cards: A♠ A♥ (indices: {hole_cards})")
-    print(f"Base board: K♠ Q♠ J♠ T♠ 9♠ (indices: {base_board})")
+    # Use the existing trainer - collect trajectories and inspect final decisions
+    print(f"Using existing trainer with {trainer.tensor_env.N} environments")
+    print(f"Environment device: {trainer.tensor_env.device}")
     print()
 
-    # Get all 6 permutations of suits (0,1,2,3)
-    suit_permutations = list(itertools.permutations([0, 1, 2, 3]))
-    suit_names = ["♠", "♥", "♦", "♣"]
+    # Collect trajectories until we find one with at least 3 transitions
+    print("Collecting trajectory with at least 3 transitions...")
 
-    results = []
+    suit_permutations = torch.tensor(
+        list(itertools.permutations([0, 1, 2, 3])), device=device
+    )  # Shape: [6, 4]
 
-    for i, suit_perm in enumerate(suit_permutations):
-        print(f"Permutation {i+1}: {[suit_names[s] for s in suit_perm]}")
+    # Clear the replay buffer to start fresh
+    trainer.replay_buffer.clear()
 
-        # Create board with permuted suits
-        # Keep ranks the same, just change suits
-        permuted_board = []
-        for j, card in enumerate(base_board):
-            rank = card % 13
-            new_suit = suit_perm[j % len(suit_perm)]  # Cycle through permutation
-            new_card = new_suit * 13 + rank
-            permuted_board.append(new_card)
+    attempts = 0
+    max_attempts = 100
 
-        print(
-            f"  Board cards: {[f'{chr(65+12-rank)}{suit_names[card//13]}' for card in permuted_board]}"
-        )
-        print(f"  Board indices: {permuted_board}")
+    while attempts < max_attempts:
+        attempts += 1
 
-        # Create river state
-        env = create_river_state_with_cards(trainer, hole_cards, permuted_board, device)
-
-        # Get predictions
-        probs, value, legal_mask = get_action_predictions(trainer, env, device)
-
-        # Store results
-        results.append(
-            {
-                "permutation": suit_perm,
-                "board": permuted_board,
-                "probs": probs,
-                "value": value,
-                "legal_mask": legal_mask,
-            }
+        # Collect trajectories using tensor environment
+        trainer.collect_tensor_trajectories(
+            min_trajectories=1, add_to_replay_buffer=True
         )
 
-        # Print action probabilities
-        action_names = [
-            "Fold",
-            "Call",
-            "Bet 0.5x",
-            "Bet 1.0x",
-            "Bet 1.5x",
-            "Bet 2.0x",
-            "Bet 2.5x",
-            "Bet 3.0x",
-        ]
-        print(f"  Action probabilities:")
-        for j, (prob, legal) in enumerate(zip(probs, legal_mask)):
-            if legal:
-                print(f"    {action_names[j]:12s}: {prob:.4f}")
-        print(f"  Value estimate: {value:.4f}")
-        print()
-
-    # Compare results
-    print("=" * 80)
-    print("COMPARISON OF PREDICTIONS")
-    print("=" * 80)
-
-    # Find the most different predictions
-    max_diff = 0
-    max_diff_pair = None
-
-    for i in range(len(results)):
-        for j in range(i + 1, len(results)):
-            prob_diff = (
-                torch.abs(results[i]["probs"] - results[j]["probs"]).max().item()
+        # longest trajectory
+        longest_trajectory_idx = (
+            trainer.replay_buffer.trajectory_lengths.argmax().item()
+        )
+        if trainer.replay_buffer.trajectory_lengths[longest_trajectory_idx] >= 4:
+            data = StructuredEmbeddingData.empty(
+                batch_size=24,
+                seq_len=trainer.cfg.train.max_sequence_length,
+                num_bet_bins=trainer.num_bet_bins,
+                dtype=torch.float32,
+                device=device,
             )
-            value_diff = abs(results[i]["value"] - results[j]["value"])
 
-            if prob_diff > max_diff:
-                max_diff = prob_diff
-                max_diff_pair = (i, j)
+            # Copy the trajectory data from the replay buffer
+            data.token_ids[:] = trainer.replay_buffer.data.token_ids[
+                longest_trajectory_idx
+            ][None, :]
+            data.token_streets[:] = trainer.replay_buffer.data.token_streets[
+                longest_trajectory_idx
+            ][None, :]
+            data.card_ranks[:] = trainer.replay_buffer.data.card_ranks[
+                longest_trajectory_idx
+            ][None, :]
+            data.card_suits[:] = trainer.replay_buffer.data.card_suits[
+                longest_trajectory_idx
+            ][None, :]
+            data.action_actors[:] = trainer.replay_buffer.data.action_actors[
+                longest_trajectory_idx
+            ][None, :]
+            data.action_legal_masks[:] = trainer.replay_buffer.data.action_legal_masks[
+                longest_trajectory_idx
+            ][None, :]
+            data.context_features[:] = trainer.replay_buffer.data.context_features[
+                longest_trajectory_idx
+            ][None, :]
+            data.lengths[:] = trainer.replay_buffer.data.lengths[longest_trajectory_idx]
 
-            print(f"Perm {i+1} vs Perm {j+1}:")
-            print(f"  Max prob difference: {prob_diff:.4f}")
-            print(f"  Value difference: {value_diff:.4f}")
+            for i in range(trainer.cfg.train.max_sequence_length):
+                if (
+                    data.token_ids[0, i] >= get_card_token_id_offset()
+                    and data.token_ids[0, i] < get_card_token_id_offset() + 52
+                ):
+                    data.card_suits[:, i] = suit_permutations[
+                        torch.arange(24, device=device), data.card_suits[:, i].long()
+                    ]
+                    data.token_ids[:, i] = (
+                        data.card_suits[:, i] * 13
+                        + data.card_ranks[:, i]
+                        + get_card_token_id_offset()
+                    )
+
+            print(
+                f"  Found trajectory with {trainer.replay_buffer.trajectory_lengths[longest_trajectory_idx]} transitions."
+            )
+            print(f"  Created batch with 24 permuted suit variations.")
+
+            # Show the sequence of actions in the trajectory
+            print("\nTrajectory Action Sequence:")
+            print("-" * 60)
+            trajectory_length = trainer.replay_buffer.trajectory_lengths[
+                longest_trajectory_idx
+            ]
+            for step in range(trajectory_length):
+                action = trainer.replay_buffer.action_indices[
+                    longest_trajectory_idx, step
+                ].item()
+                reward = trainer.replay_buffer.rewards[
+                    longest_trajectory_idx, step
+                ].item()
+                done = trainer.replay_buffer.dones[longest_trajectory_idx, step].item()
+                actor = trainer.replay_buffer.data.action_actors[
+                    longest_trajectory_idx, step
+                ].item()
+                street = trainer.replay_buffer.data.token_streets[
+                    longest_trajectory_idx, step
+                ].item()
+                print(
+                    f"  Step {step+1}: Player {actor} on Street {street} -> Action {action}, Reward {reward:.4f}, Done {done}"
+                )
+            print("-" * 60)
             print()
 
-    if max_diff_pair:
-        i, j = max_diff_pair
-        print(f"Largest difference: Permutation {i+1} vs {j+1}")
-        print(f"Max probability difference: {max_diff:.4f}")
+            # Run the model on the batch with permuted suits
+            with torch.no_grad(), model_eval(trainer.model):
+                # Get legal masks for the last step
+                legal_masks = trainer.replay_buffer.legal_masks[
+                    longest_trajectory_idx, -1
+                ]
 
-        # Show the specific differences
-        prob_diff = torch.abs(results[i]["probs"] - results[j]["probs"])
-        print("Action probability differences:")
-        for k, diff in enumerate(prob_diff):
-            if results[i]["legal_mask"][k] or results[j]["legal_mask"][k]:
-                print(f"  {action_names[k]:12s}: {diff:.4f}")
+                # Get model outputs for all 24 permutations
+                action_probs, value_preds = get_probs_and_values(
+                    trainer.model, data, legal_masks
+                )
+
+            # Compare results across permutations
+            print("=" * 80)
+            print("SUIT PERMUTATION RESULTS")
+            print("=" * 80)
+
+            suit_names = ["♠", "♥", "♦", "♣"]
+            suit_permutations_list = list(itertools.permutations([0, 1, 2, 3]))
+
+            # Find the most different predictions
+            max_value_diff = 0
+            max_value_pair = None
+            max_prob_diff = 0
+            max_prob_pair = None
+
+            for i in range(24):
+                perm_idx = i // 4
+                suit_idx = i % 4
+
+                print(
+                    f"Permutation {perm_idx+1}, Suit {suit_idx+1}: {[suit_names[s] for s in suit_permutations_list[perm_idx]]}"
+                )
+                print(f"  Value: {value_preds[i].item():.4f}")
+                print(f"  Action probs: {action_probs[i].cpu().numpy()}")
+                print()
+
+                # Compare with other permutations
+                for j in range(i + 1, 24):
+                    value_diff = abs(value_preds[i].item() - value_preds[j].item())
+                    prob_diff = (
+                        torch.abs(action_probs[i] - action_probs[j]).max().item()
+                    )
+
+                    if value_diff > max_value_diff:
+                        max_value_diff = value_diff
+                        max_value_pair = (i, j)
+
+                    if prob_diff > max_prob_diff:
+                        max_prob_diff = prob_diff
+                        max_prob_pair = (i, j)
+
+            print("=" * 80)
+            print("COMPARISON SUMMARY")
+            print("=" * 80)
+            print(f"Maximum value difference: {max_value_diff:.6f}")
+            if max_value_pair:
+                print(
+                    f"  Between permutations {max_value_pair[0]//4 + 1} and {max_value_pair[1]//4 + 1}"
+                )
+            print(f"Maximum probability difference: {max_prob_diff:.6f}")
+            if max_prob_pair:
+                print(
+                    f"  Between permutations {max_prob_pair[0]//4 + 1} and {max_prob_pair[1]//4 + 1}"
+                )
+
+            if max_prob_diff < 1e-6:
+                print("✅ All suit permutations give identical action probabilities!")
+                print("The policy head appears to be suit-invariant.")
+            else:
+                print("❌ Suit permutations give different action probabilities!")
+                print("The policy head is NOT suit-invariant.")
+
+            if max_value_diff < 1e-6:
+                print("✅ All suit permutations give identical value estimates!")
+                print("The value head appears to be suit-invariant.")
+            else:
+                print("❌ Suit permutations give different value estimates!")
+                print("The value head is NOT suit-invariant.")
+
+                print("\n" + "=" * 80)
+            return
+
+        print(
+            f"  Attempt {attempts}: No trajectory with 4 transitions found yet. Retrying..."
+        )
+
+    print(
+        f"Failed to collect a trajectory with at least 1 transition after {max_attempts} attempts."
+    )
 
 
 def main():
@@ -322,30 +458,20 @@ def main():
 
     print(f"Loading checkpoint: {args.checkpoint_path}")
 
-    # Load checkpoint to get config info
+    # Set up device
     device_obj = torch.device(args.device)
 
-    # Create a minimal config for debugging
-    config = Config(
-        train=TrainingConfig(batch_size=32),
-        model=ModelConfig(
-            name="poker_transformer_v1",
-            kwargs={
-                "max_sequence_length": 50,
-                "d_model": 128,
-                "n_layers": 2,
-                "n_heads": 2,
-                "num_bet_bins": 8,
-                "dropout": 0.1,
-                "use_gradient_checkpointing": False,
-            },
-        ),
-        env=EnvConfig(bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0]),
-        use_tensor_env=True,
-        num_envs=1,
+    # Create a minimal CLI config for overrides
+    # Only override specific fields, let checkpoint config handle model/env details
+    cli_config = Config(
         device=args.device,
-        use_wandb=False,
+        use_wandb=False,  # Disable wandb for debugging
+        strict_model_loading=args.strict,
+        num_envs=24,
     )
+
+    # Load config from checkpoint with CLI overrides
+    config = load_config_from_checkpoint(args.checkpoint_path, cli_config)
 
     print(f"Creating SelfPlayTrainer...")
 
@@ -354,19 +480,28 @@ def main():
 
     print(f"Loading checkpoint into trainer...")
 
-    # Load the checkpoint
-    if args.strict:
-        # Load checkpoint manually with strict=True
-        checkpoint = torch.load(
-            args.checkpoint_path, weights_only=False, map_location=device_obj
+    # Use the trainer's load_checkpoint method (strict=False by default)
+    step, _ = trainer.load_checkpoint(args.checkpoint_path)
+
+    # Recreate replay buffer if it was loaded from a different device to avoid device mismatch
+    if trainer.replay_buffer.device != device_obj:
+        print(
+            f"Recreating replay buffer (was on {trainer.replay_buffer.device}, need {device_obj})"
         )
-        trainer.model.load_state_dict(checkpoint["model_state_dict"], strict=True)
-        step = checkpoint.get("step", 0)
-        wandb_run_id = checkpoint.get("wandb_run_id")
-        print(f"Checkpoint loaded with strict=True")
-    else:
-        # Use the trainer's load_checkpoint method (strict=False by default)
-        step, wandb_run_id = trainer.load_checkpoint(args.checkpoint_path)
+        from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
+
+        sequence_length = (
+            trainer.state_encoder.sequence_length if trainer.is_transformer else -1
+        )
+        trainer.replay_buffer = VectorizedReplayBuffer(
+            capacity=trainer.batch_size * max(1, 1 + trainer.replay_buffer_batches),
+            max_trajectory_length=trainer.max_trajectory_length,
+            num_bet_bins=trainer.num_bet_bins,
+            device=device_obj,
+            float_dtype=trainer.float_dtype,
+            is_transformer=trainer.is_transformer,
+            max_sequence_length=sequence_length,
+        )
 
     print(f"✅ Checkpoint loaded successfully")
     print(f"   Step: {step}")

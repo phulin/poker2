@@ -27,6 +27,7 @@ from alphaholdem.rl.replay import Trajectory, Transition
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
 from alphaholdem.utils.ema import EMA
 from alphaholdem.utils.kl_divergence import compute_kl_divergence_batch
+from alphaholdem.utils.model_context import model_eval
 from alphaholdem.utils.profiling import profile
 
 TARGET_KL = 0.015
@@ -860,7 +861,6 @@ class SelfPlayTrainer:
                 # Extract tensor values efficiently (no .tolist() calls)
                 active_we_act = torch.where(we_act_mask[active_indices])[0]
                 our_action_indices = action_bins_active[active_we_act]
-                our_log_probs_full = log_probs_active_full[active_we_act]
                 our_values_tensor = env_values[env_active_we_act]
                 our_rewards_tensor = rewards[env_active_we_act]
                 our_dones_tensor = dones[env_active_we_act]
@@ -871,7 +871,6 @@ class SelfPlayTrainer:
                     self.replay_buffer.add_transitions(
                         embedding_data=our_states,
                         action_indices=our_action_indices,
-                        log_probs=our_log_probs_full,
                         rewards=our_rewards_tensor,
                         dones=our_dones_tensor,
                         legal_masks=our_legal_masks_tensor.bool(),
@@ -990,11 +989,13 @@ class SelfPlayTrainer:
             gamma=self.gamma, lambda_=self.gae_lambda
         )
 
+        # Compute log probabilities for all stored transitions
+        self.replay_buffer.compute_log_probs_for_buffer(self.model)
+
         # Compute current logits on sample for diagnostic KL
         kl_sample_batch_size = min(self.batch_size, max(1, self.batch_size // 8))
-        kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
-        with torch.no_grad():
-            kl_old_logits = self.model(kl_states.embedding_data).policy_logits.float()
+        with torch.no_grad(), model_eval(self.model):
+            kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
 
         # Initialize tracking variables once before the epoch loop
         total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
@@ -1097,6 +1098,7 @@ class SelfPlayTrainer:
 
             with (
                 torch.no_grad(),
+                model_eval(self.model),
                 torch.amp.autocast(
                     self.device.type,
                     dtype=torch.bfloat16,
@@ -1144,13 +1146,13 @@ class SelfPlayTrainer:
             print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
         # Compute diagnostic KL: divergence from last model batch.
-        with torch.no_grad():
+        with torch.no_grad(), model_eval(self.model):
             kl_new_logits = self.model(kl_states.embedding_data).policy_logits.float()
-        current_kl = compute_kl_divergence_batch(
-            kl_old_logits,
-            kl_new_logits,
-            kl_states.legal_masks,
-        )
+            current_kl = compute_kl_divergence_batch(
+                kl_states.logits,
+                kl_new_logits,
+                kl_states.legal_masks,
+            )
 
         # Update KL divergence exponential moving average
         self.kl_ema.update(current_kl)

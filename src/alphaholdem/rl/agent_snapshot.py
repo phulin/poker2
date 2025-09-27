@@ -36,6 +36,7 @@ class AgentSnapshot:
         self.model_dtype = model_dtype
         if model is not None:
             self.model = copy.deepcopy(model).to(model_dtype)
+            self.model.eval()
             for p in self.model.parameters():
                 p.requires_grad = False
         else:

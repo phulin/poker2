@@ -330,7 +330,6 @@ def hook_replay_buffer_add_transitions(replay_buffer, original_add_transitions):
     def hooked_add_transitions(
         embedding_data,
         action_indices,
-        log_probs,
         rewards,
         dones,
         legal_masks,
@@ -360,7 +359,6 @@ def hook_replay_buffer_add_transitions(replay_buffer, original_add_transitions):
         return original_add_transitions(
             embedding_data,
             action_indices,
-            log_probs,
             rewards,
             dones,
             legal_masks,

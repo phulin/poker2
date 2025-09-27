@@ -227,7 +227,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=emb,
             action_indices=torch.tensor([2], device=device),
-            log_probs=torch.randn(1, buffer.num_bet_bins, device=device),
             rewards=torch.tensor([0.0], device=device),
             dones=torch.tensor([False], dtype=torch.bool, device=device),
             legal_masks=torch.ones(
@@ -365,7 +364,6 @@ class TestVectorizedReplayBuffer:
         assert total_steps == 4
         assert sampled.embedding_data.card_ranks.shape[0] == total_steps
         assert sampled.action_indices.shape[0] == total_steps
-        assert sampled.log_probs_old.shape[0] == total_steps
         assert sampled.advantages.shape[0] == total_steps
         assert sampled.returns.shape[0] == total_steps
 
@@ -658,7 +656,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=batch_env0["embedding_data"],
             action_indices=batch_env0["action_indices"],
-            log_probs=batch_env0["log_probs"],
             rewards=batch_env0["rewards"],
             dones=batch_env0["dones"],
             legal_masks=batch_env0["legal_masks"],
@@ -684,7 +681,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=batch_env1["embedding_data"],
             action_indices=batch_env1["action_indices"],
-            log_probs=batch_env1["log_probs"],
             rewards=batch_env1["rewards"],
             dones=batch_env1["dones"],
             legal_masks=batch_env1["legal_masks"],
@@ -728,6 +724,38 @@ class TestVectorizedReplayBuffer:
         # Compute GAE first (required for sampling)
         buffer.compute_gae_returns()
 
+        # Create a mock model for computing log probs
+        class MockModel:
+            def __init__(self):
+                self.training = (
+                    False  # Add training attribute for model_eval context manager
+                )
+
+            def eval(self):
+                self.training = False
+
+            def train(self):
+                self.training = True
+
+            def __call__(self, data):
+                class MockOutput:
+                    def __init__(self):
+                        self.policy_logits = torch.randn(
+                            data.token_ids.shape[0],
+                            buffer.num_bet_bins,
+                            device=buffer.device,
+                        )
+                        self.value = torch.randn(
+                            data.token_ids.shape[0], device=buffer.device
+                        )
+
+                return MockOutput()
+
+        mock_model = MockModel()
+
+        # Compute log probs for the buffer
+        buffer.compute_log_probs_for_buffer(mock_model)
+
         # Sample a batch
         rng = torch.Generator(device=buffer.device)
         sampled = buffer.sample_batch(rng, 5)
@@ -736,6 +764,7 @@ class TestVectorizedReplayBuffer:
         expected_attrs = {
             "embedding_data",
             "action_indices",
+            "logits",
             "selected_log_probs",
             "all_log_probs",
             "advantages",
@@ -753,7 +782,9 @@ class TestVectorizedReplayBuffer:
         assert sampled.embedding_data.token_ids.shape[0] == 5
         assert sampled.embedding_data.card_ranks.shape[0] == 5
         assert sampled.action_indices.shape[0] == 5
+        assert sampled.logits.shape == (5, buffer.num_bet_bins)
         assert sampled.selected_log_probs.shape[0] == 5
+        assert sampled.all_log_probs.shape == (5, buffer.num_bet_bins)
         assert sampled.advantages.shape[0] == 5
         assert sampled.returns.shape[0] == 5
         assert sampled.delta2.shape[0] == 5
@@ -1248,8 +1279,6 @@ class TestVectorizedReplayBuffer:
         return {
             "embedding_data": embedding_data,
             "action_indices": torch.randint(0, B, (batch_size,), device=device),
-            # Provide full log-prob distributions per step
-            "log_probs": torch.randn(batch_size, B, device=device),
             "rewards": torch.randn(batch_size, device=device),
             "dones": torch.zeros(batch_size, dtype=torch.bool, device=device),
             "legal_masks": torch.ones(batch_size, B, device=device).bool(),
@@ -1275,7 +1304,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=batch_data["embedding_data"],
             action_indices=batch_data["action_indices"],
-            log_probs=batch_data["log_probs"],
             rewards=batch_data["rewards"],
             dones=batch_data["dones"],
             legal_masks=batch_data["legal_masks"],
@@ -1292,7 +1320,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=batch_data2["embedding_data"],
             action_indices=batch_data2["action_indices"],
-            log_probs=batch_data2["log_probs"],
             rewards=batch_data2["rewards"],
             dones=batch_data2["dones"],
             legal_masks=batch_data2["legal_masks"],
@@ -1340,7 +1367,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=batch_data["embedding_data"],
             action_indices=batch_data["action_indices"],
-            log_probs=batch_data["log_probs"],
             rewards=batch_data["rewards"],
             dones=batch_data["dones"],
             legal_masks=batch_data["legal_masks"],
@@ -1357,7 +1383,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=batch_data2["embedding_data"],
             action_indices=batch_data2["action_indices"],
-            log_probs=batch_data2["log_probs"],
             rewards=batch_data2["rewards"],
             dones=batch_data2["dones"],
             legal_masks=batch_data2["legal_masks"],
@@ -1412,7 +1437,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=batch_data["embedding_data"],
             action_indices=batch_data["action_indices"],
-            log_probs=batch_data["log_probs"],
             rewards=batch_data["rewards"],
             dones=batch_data["dones"],
             legal_masks=batch_data["legal_masks"],
@@ -1434,7 +1458,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=batch_data2["embedding_data"],
             action_indices=batch_data2["action_indices"],
-            log_probs=batch_data2["log_probs"],
             rewards=batch_data2["rewards"],
             dones=batch_data2["dones"],
             legal_masks=batch_data2["legal_masks"],
@@ -1486,7 +1509,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=batch_data["embedding_data"],
             action_indices=batch_data["action_indices"],
-            log_probs=batch_data["log_probs"],
             rewards=batch_data["rewards"],
             dones=batch_data["dones"],
             legal_masks=batch_data["legal_masks"],
@@ -1513,7 +1535,6 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(
             embedding_data=new_batch_data["embedding_data"],
             action_indices=new_batch_data["action_indices"],
-            log_probs=new_batch_data["log_probs"],
             rewards=new_batch_data["rewards"],
             dones=new_batch_data["dones"],
             legal_masks=new_batch_data["legal_masks"],
