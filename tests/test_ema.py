@@ -21,7 +21,7 @@ class TestEMA:
         ema_custom = EMA(decay=0.9, initial_value=5.0)
         assert ema_custom.decay == 0.9
         assert ema_custom.value == 5.0
-        assert not ema_custom.initialized
+        assert ema_custom.initialized
 
     def test_ema_first_update(self):
         """Test that the first update sets the value directly."""
@@ -37,17 +37,17 @@ class TestEMA:
         """Test that subsequent updates use the EMA formula."""
         ema = EMA(decay=0.5, initial_value=0.0)
 
-        # First update
+        # First update: 0.5 * 0.0 + 0.5 * 10.0 = 5.0
         result1 = ema.update(10.0)
-        assert result1 == 10.0
+        assert result1 == 5.0
 
-        # Second update: 0.5 * 10.0 + 0.5 * 20.0 = 15.0
+        # Second update: 0.5 * 5.0 + 0.5 * 20.0 = 12.5
         result2 = ema.update(20.0)
-        assert result2 == 15.0
+        assert result2 == 12.5
 
-        # Third update: 0.5 * 15.0 + 0.5 * 30.0 = 22.5
+        # Third update: 0.5 * 12.5 + 0.5 * 30.0 = 21.25
         result3 = ema.update(30.0)
-        assert result3 == 22.5
+        assert result3 == 21.25
 
     def test_ema_decay_effects(self):
         """Test that different decay values produce expected behavior."""

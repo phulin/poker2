@@ -1,7 +1,10 @@
+from typing import Optional
+
+
 class EMA:
     """Lightweight Exponential Moving Average calculator."""
 
-    def __init__(self, decay: float = 0.99, initial_value: float = 0.0):
+    def __init__(self, decay: float = 0.99, initial_value: Optional[float] = None):
         """
         Initialize EMA calculator.
 
@@ -10,8 +13,8 @@ class EMA:
             initial_value: Initial value for the EMA
         """
         self.decay = decay
-        self.value = initial_value
-        self.initialized = False
+        self.value = initial_value if initial_value is not None else 0.0
+        self.initialized = initial_value is not None
 
     def update(self, new_value: float) -> float:
         """

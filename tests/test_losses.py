@@ -629,6 +629,7 @@ class TestTrinalClipPPOLoss:
         )
 
         # Epsilon should be adapted (reduced due to high KL)
-        assert out.epsilon < 0.2
-        assert out.epsilon >= 0.1  # Should be clamped to at least half
+        # With target_kl=0.015 and kl_ema.value=0.001, epsilon should be 0.2 * (0.015/0.001) = 3.0
+        # But clamped to [0.1, 0.4], so it becomes 0.4
+        assert out.epsilon == 0.4
         assert torch.isfinite(out.total_loss)

@@ -321,7 +321,7 @@ class SelfPlayTrainer:
         )
 
         # KL divergence exponential moving average tracking
-        self.kl_ema = EMA(decay=0.99, initial_value=0.0)
+        self.kl_ema = EMA(decay=0.99, initial_value=TARGET_KL)
 
         # Initialize PopArt normalizer
         self.popart_normalizer = PopArtNormalizer()
