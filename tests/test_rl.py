@@ -96,6 +96,7 @@ def test_trinal_clip_ppo_loss():
     batch = BatchSample(
         embedding_data=embedding_data,
         action_indices=actions,
+        logits=logits,
         selected_log_probs=log_probs_old,
         all_log_probs=log_probs_old,
         legal_masks=legal_masks,
@@ -103,6 +104,7 @@ def test_trinal_clip_ppo_loss():
         returns=returns,
         delta2=torch.tensor(-100.0),
         delta3=torch.tensor(100.0),
+        model_ages=torch.zeros(batch_size, dtype=torch.long),
     )
 
     # Create loss calculator and compute loss
@@ -120,8 +122,13 @@ def test_trinal_clip_ppo_loss():
         kl_ema=EMA(),
     )
 
+    # Compute log_probs from logits
+    import torch.nn.functional as F
+
+    log_probs = F.log_softmax(logits, dim=-1)
+
     loss_result = loss_calculator.compute_loss(
-        logits=logits,
+        log_probs=log_probs,
         values=values,
         batch=batch,
     )

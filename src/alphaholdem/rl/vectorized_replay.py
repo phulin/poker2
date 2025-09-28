@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Union, Optional
+from typing import List, Tuple, Union
 
 import torch
 
@@ -28,6 +28,7 @@ class BatchSample:
     returns: torch.Tensor
     delta2: torch.Tensor
     delta3: torch.Tensor
+    model_ages: torch.Tensor
 
     def to(self, dtype: torch.dtype) -> BatchSample:
         """Convert all floating-point tensors to specified dtype."""
@@ -44,6 +45,41 @@ class BatchSample:
             returns=self.returns.to(dtype),
             delta2=self.delta2.to(dtype),
             delta3=self.delta3.to(dtype),
+            model_ages=self.model_ages,
+        )
+
+    def update_logits_log_probs(
+        self, idxs: torch.Tensor, logits: torch.Tensor, log_probs: torch.Tensor
+    ) -> None:
+        """Update log probabilities for a batch of transitions."""
+        self.logits[idxs] = logits.to(self.logits.dtype)
+        self.all_log_probs[idxs] = log_probs.to(self.all_log_probs.dtype)
+        self.selected_log_probs[idxs] = (
+            log_probs.gather(1, self.action_indices[idxs].unsqueeze(1))
+            .squeeze(1)
+            .to(self.all_log_probs.dtype)
+        )
+
+    def group_by_model_age(self) -> List[Tuple[int, torch.Tensor]]:
+        """Group batch by model age."""
+        return [
+            (age.item(), torch.where(self.model_ages == age)[0])
+            for age in self.model_ages.unique(sorted=False)
+        ]
+
+    def __getitem__(self, idx: torch.Tensor) -> BatchSample:
+        return BatchSample(
+            embedding_data=self.embedding_data[idx],
+            action_indices=self.action_indices[idx],
+            logits=self.logits[idx],
+            selected_log_probs=self.selected_log_probs[idx],
+            all_log_probs=self.all_log_probs[idx],
+            legal_masks=self.legal_masks[idx],
+            advantages=self.advantages[idx],
+            returns=self.returns[idx],
+            delta2=self.delta2[idx],
+            delta3=self.delta3[idx],
+            model_ages=self.model_ages[idx],
         )
 
 
@@ -156,6 +192,9 @@ class VectorizedReplayBuffer:
         self.advantages = torch.zeros(C, T, dtype=float_dtype, device=device)
         self.returns = torch.zeros(C, T, dtype=float_dtype, device=device)
 
+        # Track model age used to generate each transition
+        self.model_ages = torch.zeros(C, dtype=torch.long, device=device)
+
         # Track trajectory metadata
         self.trajectory_lengths = torch.zeros(capacity, dtype=torch.long, device=device)
 
@@ -164,7 +203,9 @@ class VectorizedReplayBuffer:
             capacity, dtype=torch.long, device=device
         )
 
-    def start_adding_trajectory_batches(self, num_trajectories: int) -> None:
+    def start_adding_trajectory_batches(
+        self, num_trajectories: int, model_age: int
+    ) -> None:
         """
         Mark the start of new trajectories being added to the buffer.
         Clear out rows up to position + num_trajectories to prepare for new data.
@@ -223,6 +264,9 @@ class VectorizedReplayBuffer:
         self.values[clear_indices] = 0
         self.advantages[clear_indices] = 0
         self.returns[clear_indices] = 0
+
+        # Record model age used to generate each transition
+        self.model_ages[clear_indices] = model_age
 
     def finish_adding_trajectory_batches(self) -> tuple[int, int]:
         """
@@ -289,6 +333,7 @@ class VectorizedReplayBuffer:
             "values",
             "advantages",
             "returns",
+            "model_ages",
         ]
 
         data_fields = []
@@ -661,6 +706,7 @@ class VectorizedReplayBuffer:
             returns=self.returns[traj_indices, transition_indices],
             delta2=self.delta2[traj_indices, transition_indices],
             delta3=self.delta3[traj_indices, transition_indices],
+            model_ages=self.model_ages[traj_indices],
         )
 
     def compute_log_probs_for_buffer(self, model: torch.nn.Module) -> None:
@@ -731,6 +777,7 @@ class VectorizedReplayBuffer:
         self.size = 0
         self.trajectory_lengths.zero_()
         self.current_transition_counts.zero_()
+        self.model_ages.zero_()
 
     def num_steps(self) -> int:
         """Total number of transitions (steps) stored across all valid trajectories."""
@@ -931,6 +978,8 @@ class VectorizedReplayBuffer:
 
         If use_decision_end is True, cut at decision_end (after CONTEXT), otherwise
         cut at transition_end (after ACTION).
+
+        Only called if self.is_transformer is True.
         """
 
         ends = self.transition_token_ends[traj_indices, step_indices]
@@ -941,6 +990,7 @@ class VectorizedReplayBuffer:
         range_tensor = torch.arange(self.max_sequence_length, device=self.device)
         mask = range_tensor.unsqueeze(0) >= ends.unsqueeze(1)
 
+        # Clear the token sequences after the end token
         result.token_ids[mask] = -1
         result.token_streets[mask] = 0
         result.card_ranks[mask] = 0

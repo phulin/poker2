@@ -11,7 +11,7 @@ import torch.nn as nn
 from alphaholdem.utils.model_context import model_eval, model_train
 
 
-class TestModel(nn.Module):
+class SimpleModel(nn.Module):
     """Simple test model for testing context managers."""
 
     def __init__(self):
@@ -27,7 +27,7 @@ class TestModelContext:
 
     def test_model_train_context_manager(self):
         """Test that model_train context manager works correctly."""
-        model = TestModel()
+        model = SimpleModel()
 
         # Start in eval mode
         model.eval()
@@ -42,7 +42,7 @@ class TestModelContext:
 
     def test_model_train_context_manager_already_training(self):
         """Test model_train context manager when model is already in training mode."""
-        model = TestModel()
+        model = SimpleModel()
 
         # Start in train mode
         model.train()
@@ -57,7 +57,7 @@ class TestModelContext:
 
     def test_model_eval_context_manager(self):
         """Test that model_eval context manager works correctly."""
-        model = TestModel()
+        model = SimpleModel()
 
         # Start in train mode
         model.train()
@@ -72,7 +72,7 @@ class TestModelContext:
 
     def test_model_eval_context_manager_already_eval(self):
         """Test model_eval context manager when model is already in eval mode."""
-        model = TestModel()
+        model = SimpleModel()
 
         # Start in eval mode
         model.eval()
@@ -87,7 +87,7 @@ class TestModelContext:
 
     def test_nested_context_managers(self):
         """Test nested context managers work correctly."""
-        model = TestModel()
+        model = SimpleModel()
 
         # Start in eval mode
         model.eval()
@@ -108,7 +108,7 @@ class TestModelContext:
 
     def test_context_manager_with_exception(self):
         """Test that context managers restore state even when exceptions occur."""
-        model = TestModel()
+        model = SimpleModel()
 
         # Start in eval mode
         model.eval()
@@ -127,8 +127,8 @@ class TestModelContext:
 
     def test_multiple_models(self):
         """Test context managers work with multiple models."""
-        model1 = TestModel()
-        model2 = TestModel()
+        model1 = SimpleModel()
+        model2 = SimpleModel()
 
         # Set different initial states
         model1.train()
@@ -148,7 +148,7 @@ class TestModelContext:
 
     def test_context_manager_with_torch_no_grad(self):
         """Test context managers work correctly with torch.no_grad."""
-        model = TestModel()
+        model = SimpleModel()
 
         # Start in train mode
         model.train()
@@ -163,7 +163,7 @@ class TestModelContext:
 
     def test_context_manager_preserves_grad_state(self):
         """Test that context managers don't affect gradient computation state."""
-        model = TestModel()
+        model = SimpleModel()
         x = torch.randn(5, 10, requires_grad=True)
 
         # Start in train mode

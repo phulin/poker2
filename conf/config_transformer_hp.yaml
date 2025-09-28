@@ -53,8 +53,8 @@ train:
   learning_rate_final: 1e-5
   lr_schedule: cosine
   batch_size: 3500
-  num_epochs: 4
-  replay_buffer_batches: 4
+  num_epochs: 6
+  replay_buffer_batches: 2
   max_trajectory_length: 9
   max_sequence_length: 47   # Can't be higher than 4 * max_trajectory_length + 15
   use_kv_cache: true

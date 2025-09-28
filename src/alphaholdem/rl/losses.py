@@ -121,7 +121,7 @@ class TrinalClipPPOLoss(LossCalculator):
 
     def compute_loss(
         self,
-        logits: torch.Tensor,
+        log_probs: torch.Tensor,
         values: torch.Tensor,
         batch: BatchSample,
     ) -> LossResult:
@@ -143,13 +143,8 @@ class TrinalClipPPOLoss(LossCalculator):
         returns = batch.returns
         delta2 = batch.delta2
         delta3 = batch.delta3
-        legal_masks = batch.legal_masks
-
-        # Mask illegal actions
-        masked_logits = torch.where(legal_masks, logits, -1e9)
 
         # Compute new log probabilities
-        log_probs = F.log_softmax(masked_logits, dim=-1)
         action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
         epsilon = self.epsilon
@@ -192,7 +187,7 @@ class TrinalClipPPOLoss(LossCalculator):
             value_loss = F.mse_loss(values, targets_n)
 
         # Entropy regularization
-        probs = F.softmax(masked_logits, dim=-1)
+        probs = torch.exp(log_probs)
         entropy = -(probs * log_probs).sum(dim=-1).mean()
 
         # Total loss

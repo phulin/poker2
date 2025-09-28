@@ -68,7 +68,7 @@ class TestVectorizedReplayBuffer:
     def test_transformer_add_tokens_initial_and_street_progress(self, buffer):
         device = buffer.device
         # Start adding trajectories for 2 envs
-        buffer.start_adding_trajectory_batches(2)
+        buffer.start_adding_trajectory_batches(2, model_age=0)
         # Build minimal initial embedding with CLS+CONTEXT+PREFLOP+2 cards
         # Special imported at module top
 
@@ -120,7 +120,7 @@ class TestVectorizedReplayBuffer:
 
     def test_transformer_add_opponent_actions(self, buffer):
         device = buffer.device
-        buffer.start_adding_trajectory_batches(1)
+        buffer.start_adding_trajectory_batches(1, model_age=0)
         # Seed initial CLS
         init = StructuredEmbeddingData(
             token_ids=torch.full(
@@ -172,7 +172,7 @@ class TestVectorizedReplayBuffer:
 
     def test_transformer_add_transitions_appends_context_and_action(self, buffer):
         device = buffer.device
-        buffer.start_adding_trajectory_batches(1)
+        buffer.start_adding_trajectory_batches(1, model_age=0)
         # Special imported at module top
 
         # Prepare embedding with context features in slot 0/1
@@ -247,7 +247,7 @@ class TestVectorizedReplayBuffer:
         batch = self._create_test_batch(1, buffer.device)
         trajectory_indices = torch.tensor([0], device=buffer.device)
 
-        buffer.start_adding_trajectory_batches(1)
+        buffer.start_adding_trajectory_batches(1, model_age=0)
         buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Should not be valid yet (no done flag)
@@ -258,7 +258,7 @@ class TestVectorizedReplayBuffer:
     def test_add_complete_trajectory(self, buffer):
         """Test adding a complete trajectory by adding transitions one by one."""
         # Add transitions one by one (as intended by the implementation)
-        buffer.start_adding_trajectory_batches(1)
+        buffer.start_adding_trajectory_batches(1, model_age=0)
         for i in range(3):
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([0], device=buffer.device)
@@ -276,7 +276,7 @@ class TestVectorizedReplayBuffer:
     def test_add_multiple_trajectories(self, buffer):
         """Test adding multiple trajectories."""
         # First and second trajectories in one batch
-        buffer.start_adding_trajectory_batches(2)
+        buffer.start_adding_trajectory_batches(2, model_age=0)
         # First trajectory - add transitions one by one
         for i in range(2):
             batch = self._create_test_batch(1, buffer.device)
@@ -305,7 +305,7 @@ class TestVectorizedReplayBuffer:
 
         # Add 10 trajectories total (exactly at capacity)
         # Use the correct API: start once with total number of trajectories
-        buffer.start_adding_trajectory_batches(10)
+        buffer.start_adding_trajectory_batches(10, model_age=0)
 
         for trajectory_idx in range(10):
             # Use source trajectory index (0, 1, 2, ...)
@@ -331,7 +331,7 @@ class TestVectorizedReplayBuffer:
         trajectory_indices = torch.tensor([0], device=buffer.device)
 
         # Fill trajectory to max length
-        buffer.start_adding_trajectory_batches(1)
+        buffer.start_adding_trajectory_batches(1, model_age=0)
         for _ in range(buffer.max_trajectory_length):
             buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
@@ -344,7 +344,7 @@ class TestVectorizedReplayBuffer:
     def test_sample_trajectories(self, buffer):
         """Test sampling complete trajectories."""
         # Add multiple trajectories - one transition at a time
-        buffer.start_adding_trajectory_batches(3)
+        buffer.start_adding_trajectory_batches(3, model_age=0)
         for i in range(3):
             for j in range(2):
                 batch = self._create_test_batch(1, buffer.device)
@@ -378,7 +378,7 @@ class TestVectorizedReplayBuffer:
         batch = self._create_test_batch(1, buffer.device)
         trajectory_indices = torch.tensor([0], device=buffer.device)
         # No done flags - trajectory not completed
-        buffer.start_adding_trajectory_batches(1)
+        buffer.start_adding_trajectory_batches(1, model_age=0)
         buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         with pytest.raises(ValueError, match="No trajectories available"):
@@ -387,7 +387,7 @@ class TestVectorizedReplayBuffer:
     def test_gae_computation(self, buffer):
         """Test vectorized GAE computation."""
         # Add a complete trajectory one transition at a time
-        buffer.start_adding_trajectory_batches(1)
+        buffer.start_adding_trajectory_batches(1, model_age=0)
         trajectory_indices = torch.tensor([0], device=buffer.device)
         rewards = [0.0, 0.0, 1.0]
 
@@ -414,7 +414,7 @@ class TestVectorizedReplayBuffer:
     def test_gae_with_multiple_trajectories(self, buffer):
         """Test GAE computation with multiple trajectories."""
         # Add two trajectories one transition at a time
-        buffer.start_adding_trajectory_batches(2)
+        buffer.start_adding_trajectory_batches(2, model_age=0)
         rewards = [[0.0, 1.0], [0.0, 1.0]]
 
         for i in range(2):
@@ -439,7 +439,7 @@ class TestVectorizedReplayBuffer:
     def test_clear(self, buffer):
         """Test clearing buffer."""
         # Add some trajectories
-        buffer.start_adding_trajectory_batches(3)
+        buffer.start_adding_trajectory_batches(3, model_age=0)
         for i in range(3):
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([i], device=buffer.device)
@@ -463,7 +463,7 @@ class TestVectorizedReplayBuffer:
     def test_finish_adding_trajectory_batches(self, buffer):
         """Test finish_adding_trajectory_batches method."""
         # Add some trajectories
-        buffer.start_adding_trajectory_batches(3)
+        buffer.start_adding_trajectory_batches(3, model_age=0)
         for i in range(3):
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([i], device=buffer.device)
@@ -485,7 +485,7 @@ class TestVectorizedReplayBuffer:
         batch = self._create_test_batch(1, buffer.device)
         trajectory_indices = torch.tensor([0], device=buffer.device)
         batch["dones"][0] = True
-        buffer.start_adding_trajectory_batches(1)
+        buffer.start_adding_trajectory_batches(1, model_age=0)
         buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         # Check that all buffer tensors are on the correct device
@@ -510,7 +510,7 @@ class TestVectorizedReplayBuffer:
     def test_trajectory_reuse_after_completion(self, buffer):
         """Test that trajectories can be reused after completion."""
         # Add 2 trajectories using the correct API
-        buffer.start_adding_trajectory_batches(2)
+        buffer.start_adding_trajectory_batches(2, model_age=0)
 
         # First trajectory: 2 transitions
         trajectory_indices1 = torch.tensor([0], device=buffer.device)
@@ -544,7 +544,7 @@ class TestVectorizedReplayBuffer:
     def test_start_adding_trajectories(self, buffer):
         """Test start_adding_trajectories method."""
         # Add some trajectories first
-        buffer.start_adding_trajectory_batches(3)
+        buffer.start_adding_trajectory_batches(3, model_age=0)
         for i in range(3):
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([i], device=buffer.device)
@@ -558,7 +558,7 @@ class TestVectorizedReplayBuffer:
         )  # Position doesn't change until finish_adding_trajectory_batches
 
         # Start adding 2 new trajectories
-        buffer.start_adding_trajectory_batches(2)
+        buffer.start_adding_trajectory_batches(2, model_age=0)
 
         # Should clear trajectories at positions 0 and 1
         assert buffer.trajectory_lengths[0] == 0
@@ -572,7 +572,7 @@ class TestVectorizedReplayBuffer:
     def test_start_adding_trajectories_wraparound(self, buffer):
         """Test start_adding_trajectories with wraparound."""
         # Fill buffer to near capacity using correct API
-        buffer.start_adding_trajectory_batches(8)
+        buffer.start_adding_trajectory_batches(8, model_age=0)
 
         for i in range(8):
             batch = self._create_test_batch(1, buffer.device)
@@ -585,7 +585,7 @@ class TestVectorizedReplayBuffer:
         assert buffer.position == 8
 
         # Start adding 3 new trajectories (will wraparound)
-        buffer.start_adding_trajectory_batches(3)
+        buffer.start_adding_trajectory_batches(3, model_age=0)
 
         # Should clear trajectories at positions 8, 9, and 0 (wraparound)
         assert buffer.trajectory_lengths[8] == 0
@@ -595,7 +595,7 @@ class TestVectorizedReplayBuffer:
     def test_update_opponent_rewards(self, buffer):
         """Test update_opponent_rewards method."""
         # Add a trajectory with 3 steps (but don't mark as done yet)
-        buffer.start_adding_trajectory_batches(1)
+        buffer.start_adding_trajectory_batches(1, model_age=0)
         for i in range(3):
             batch = self._create_test_batch(1, buffer.device)
             trajectory_indices = torch.tensor([0], device=buffer.device)
@@ -642,7 +642,7 @@ class TestVectorizedReplayBuffer:
         # Force button assignments: env0 -> player 0 button, env1 -> player 1 button
         env.reset(force_button=torch.tensor([0, 1], device=device))
 
-        buffer.start_adding_trajectory_batches(2)
+        buffer.start_adding_trajectory_batches(2, model_age=0)
 
         # Step 1: player 0 acts in env0, player 1 acts in env1 (both take call/check action)
         actions_step1 = torch.tensor([1, 1], device=device)
@@ -710,7 +710,7 @@ class TestVectorizedReplayBuffer:
     def test_sample_batch(self, buffer):
         """Test sample_batch method."""
         # Add multiple trajectories
-        buffer.start_adding_trajectory_batches(3)
+        buffer.start_adding_trajectory_batches(3, model_age=0)
         for i in range(3):
             for j in range(2):
                 batch = self._create_test_batch(1, buffer.device)
@@ -802,7 +802,7 @@ class TestVectorizedReplayBuffer:
         assert buffer.num_steps() == 0
 
         # Add trajectories with different lengths
-        buffer.start_adding_trajectory_batches(3)
+        buffer.start_adding_trajectory_batches(3, model_age=0)
         for i in range(3):
             length = i + 1  # Trajectories of length 1, 2, 3
             for j in range(length):
@@ -820,7 +820,7 @@ class TestVectorizedReplayBuffer:
     def test_trim_to_steps(self, buffer):
         """Test trim_to_steps method."""
         # Add multiple trajectories
-        buffer.start_adding_trajectory_batches(5)
+        buffer.start_adding_trajectory_batches(5, model_age=0)
         for i in range(5):
             for j in range(2):
                 batch = self._create_test_batch(1, buffer.device)
@@ -844,7 +844,7 @@ class TestVectorizedReplayBuffer:
     def test_trim_to_steps_wraparound(self, buffer):
         """Test trim_to_steps with wraparound."""
         # Fill buffer completely using correct API
-        buffer.start_adding_trajectory_batches(10)
+        buffer.start_adding_trajectory_batches(10, model_age=0)
 
         for i in range(10):
             batch = self._create_test_batch(1, buffer.device)
@@ -872,7 +872,7 @@ class TestVectorizedReplayBuffer:
     def test_compaction_behavior(self, buffer):
         """Test that compaction correctly handles zero-length vs non-zero-length trajectories."""
         # Add some valid trajectories first
-        buffer.start_adding_trajectory_batches(3)
+        buffer.start_adding_trajectory_batches(3, model_age=0)
 
         # Add 2 valid trajectories
         for i in range(2):
@@ -1292,7 +1292,7 @@ class TestVectorizedReplayBuffer:
         device = buffer.device
 
         # Simple test: add one trajectory and verify opponent reward update works
-        buffer.start_adding_trajectory_batches(1)
+        buffer.start_adding_trajectory_batches(1, model_age=0)
 
         # Add one trajectory with environment index 0 - two steps
         env_indices = torch.tensor([0], device=device)
@@ -1356,7 +1356,7 @@ class TestVectorizedReplayBuffer:
         device = buffer.device
 
         # Add incomplete trajectories (no done flags)
-        buffer.start_adding_trajectory_batches(3)
+        buffer.start_adding_trajectory_batches(3, model_age=0)
 
         # Add first step for each trajectory
         batch_data = self._create_test_batch_single_step(3, device)
@@ -1426,7 +1426,7 @@ class TestVectorizedReplayBuffer:
         device = buffer.device
 
         # Fill buffer with mixed complete and incomplete trajectories
-        buffer.start_adding_trajectory_batches(5)
+        buffer.start_adding_trajectory_batches(5, model_age=0)
 
         # Add first step for all trajectories
         batch_data = self._create_test_batch_single_step(5, device)
@@ -1499,7 +1499,7 @@ class TestVectorizedReplayBuffer:
         device = buffer.device
 
         # Fill buffer to capacity to force wraparound
-        buffer.start_adding_trajectory_batches(10)
+        buffer.start_adding_trajectory_batches(10, model_age=0)
 
         batch_data = self._create_test_batch_single_step(10, device)
         batch_data["dones"][:] = True  # Mark all as complete
@@ -1525,7 +1525,7 @@ class TestVectorizedReplayBuffer:
         assert buffer.position == 0  # Wrapped around
 
         # Add new trajectories to overwrite old ones
-        buffer.start_adding_trajectory_batches(3)
+        buffer.start_adding_trajectory_batches(3, model_age=0)
 
         new_batch_data = self._create_test_batch_single_step(3, device)
         new_batch_data["dones"][:] = False  # Mark as incomplete first
@@ -1747,7 +1747,7 @@ class TestVectorizedReplayBuffer:
     def test_sample_transformer_steps(self, buffer):
         """Test _sample_transformer_steps method."""
         # Start adding trajectory batches
-        buffer.start_adding_trajectory_batches(2)
+        buffer.start_adding_trajectory_batches(2, model_age=0)
 
         # Add some tokens to create trajectories
         embedding_data = self._create_test_embedding_data(2, buffer.device, 10)

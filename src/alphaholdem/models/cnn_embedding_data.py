@@ -129,3 +129,27 @@ class CNNEmbeddingData:
                 hole_indices[idx, pos] = (s[i] * 13 + r[i]).to(torch.long)
             return hole_indices
         return self.hole_indices
+
+    def permute_suits(self, generator: torch.Generator) -> None:
+        """
+        Permute suits in the embedding data for data augmentation.
+        Cards tensor shape: [batch_size, 6_channels, 4_suits, 13_ranks]
+        """
+        batch_size = self.cards.shape[0]
+
+        # Generate random suit permutations for each batch item
+        rands = torch.rand((batch_size, 4), device=self.device, generator=generator)
+        suit_permutations = torch.argsort(rands, dim=-1)  # [batch_size, 4]
+
+        # Expand suit_permutations to match cards tensor dimensions
+        # [batch_size, 4] -> [batch_size, 1, 4, 1] for broadcasting
+        suit_permutations_expanded = suit_permutations.unsqueeze(1).unsqueeze(-1)
+
+        # Use torch.gather to permute suits along dimension 2
+        # Gather indices need to be [batch_size, 6_channels, 4_suits, 13_ranks]
+        gather_indices = suit_permutations_expanded.expand(
+            batch_size, self.cards.shape[1], 4, self.cards.shape[3]
+        )
+
+        # Apply permutation using gather
+        self.cards = torch.gather(self.cards, dim=2, index=gather_indices)

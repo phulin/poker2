@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 from typing import Any, Optional, Union
 
@@ -28,6 +29,7 @@ from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
 from alphaholdem.utils.ema import EMA
 from alphaholdem.utils.kl_divergence import compute_kl_divergence_batch
 from alphaholdem.utils.model_context import model_eval
+from alphaholdem.utils.model_utils import get_logits_log_probs_values
 from alphaholdem.utils.profiling import profile
 
 TARGET_KL = 0.015
@@ -62,6 +64,22 @@ class SelfDummySnapshot:
     @elo.setter
     def elo(self, value):
         pass
+
+
+class ModelHistory:
+    def __init__(self):
+        self._models = {}
+
+    def add_model(self, age: int, model: torch.nn.Module) -> None:
+        self._models[age] = copy.deepcopy(model).eval().requires_grad_(False)
+
+    def get_model(self, age: int) -> torch.nn.Module:
+        return self._models[age]
+
+    def clear_before(self, threshold: int) -> None:
+        for age in list(self._models.keys()):
+            if age < threshold:
+                del self._models[age]
 
 
 class SelfPlayTrainer:
@@ -195,6 +213,8 @@ class SelfPlayTrainer:
         _, _, model, policy = build_components_from_config(self.cfg)
         self.model = model
         self.policy = policy
+        self.model_age = 1
+        self.model_history = ModelHistory()
 
         # Ensure bins align with model output size to avoid mask/logit mismatch
         if hasattr(self.model, "policy_head") and hasattr(
@@ -506,6 +526,18 @@ class SelfPlayTrainer:
             final_reward_from_our_perspective,
         )
 
+    def _autocast(self):
+        """
+        Autocast context manager shortcut.
+
+        Disabled if not using mixed precision.
+        """
+        return torch.amp.autocast(
+            self.device.type,
+            dtype=torch.bfloat16,
+            enabled=self.use_mixed_precision,
+        )
+
     def _update_elo_from_rewards(
         self,
         per_env_rewards: torch.Tensor,
@@ -558,11 +590,7 @@ class SelfPlayTrainer:
         """
         model.to(device=self.device)
 
-        with torch.amp.autocast(
-            self.device.type,
-            dtype=torch.bfloat16,
-            enabled=self.use_mixed_precision,
-        ):
+        with self._autocast():
             if self.is_transformer and self.kv_cache_manager is not None:
                 if opponent_idx == -1:
                     # Get our cache
@@ -663,6 +691,9 @@ class SelfPlayTrainer:
         # Track individual episode rewards as list of tensors
         collected_trajectory_rewards = []
 
+        # About to collect trajectories, so add current model to history
+        self.model_history.add_model(self.model_age, self.model)
+
         # Initialize all environments
         self._reset_tensor_env_and_encoder_kv(all_opponent_snapshots)
 
@@ -705,7 +736,9 @@ class SelfPlayTrainer:
         ) and loop_count < max_loops:
             if not adding_trajectories and add_to_replay_buffer:
                 # Initialize trajectory collection; reserve space in buffer.
-                self.replay_buffer.start_adding_trajectory_batches(self.num_envs)
+                self.replay_buffer.start_adding_trajectory_batches(
+                    self.num_envs, self.model_age
+                )
                 adding_trajectories = True
 
             loop_count += 1
@@ -973,6 +1006,12 @@ class SelfPlayTrainer:
         else:
             collected_trajectory_rewards_tensor = torch.tensor([], device=self.device)
 
+        # Now that we've collected trajectories, and overwritten older ones, remove old models from history
+        model_ages_nonzero = self.replay_buffer.model_ages.nonzero()
+        self.model_history.clear_before(
+            self.replay_buffer.model_ages[model_ages_nonzero].min().item()
+        )
+
         return collected_trajectory_rewards_tensor
 
     @profile
@@ -988,9 +1027,6 @@ class SelfPlayTrainer:
         self.replay_buffer.compute_gae_returns(
             gamma=self.gamma, lambda_=self.gae_lambda
         )
-
-        # Compute log probabilities for all stored transitions
-        self.replay_buffer.compute_log_probs_for_buffer(self.model)
 
         # Compute current logits on sample for diagnostic KL
         kl_sample_batch_size = min(self.batch_size, max(1, self.batch_size // 8))
@@ -1008,11 +1044,27 @@ class SelfPlayTrainer:
 
         # Freeze PopArt stats at the beginning of each epoch cycle
         self.popart_normalizer.freeze_stats()
-        for _ in range(self.num_epochs):
-
+        for epoch in range(self.num_epochs):
             # Sample batch from vectorized buffer
             batch = self.replay_buffer.sample_batch(self.rng, self.batch_size)
             batch = batch.to(torch.float32)
+
+            batch.embedding_data.permute_suits(self.rng)
+
+            # Update log-probs. Since we're using transformer, we need to permute suits.
+            for age, batch_idx in batch.group_by_model_age():
+                # Can avoid computing log-probs for current model, as we'll do that in forward pass.
+                # (This is a possibly-unnecessary optimization.)
+                if epoch == 0 and age == self.model_age:
+                    continue
+                model = self.model_history.get_model(age)
+                with torch.no_grad(), model_eval(model), self._autocast():
+                    logits, log_probs, _ = get_logits_log_probs_values(
+                        model,
+                        batch.embedding_data[batch_idx],
+                        batch.legal_masks[batch_idx],
+                    )
+                    batch.update_logits_log_probs(batch_idx, logits, log_probs)
 
             # Normalize advantages across the batch for stability (mean=0, std=1)
             adv = batch.advantages
@@ -1030,18 +1082,23 @@ class SelfPlayTrainer:
             total_return_abs_mean += batch.returns.abs().mean().item()
             total_return_abs_std += batch.returns.abs().std().item()
 
-            with torch.amp.autocast(
-                self.device.type,
-                dtype=torch.bfloat16,
-                enabled=self.use_mixed_precision,
-            ):
+            with self._autocast():
                 embedding_data = batch.embedding_data
-                outputs = self.model(embedding_data)
-                logits = outputs.policy_logits.float()
-                values = outputs.value.float()
+                logits, log_probs, values = get_logits_log_probs_values(
+                    self.model, embedding_data, batch.legal_masks
+                )
+
+                # First epoch: update (old) logits and log probs for current model
+                if epoch == 0:
+                    current_idx = torch.where(batch.model_ages == self.model_age)[0]
+                    batch.update_logits_log_probs(
+                        current_idx,
+                        logits[current_idx].detach(),
+                        log_probs[current_idx].detach(),
+                    )
 
                 loss_result = self.loss_calculator.compute_loss(
-                    logits=logits,
+                    log_probs=log_probs,
                     values=values,
                     batch=batch,
                 )
@@ -1087,6 +1144,7 @@ class SelfPlayTrainer:
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            self.model_age += 1
 
             # Update PopArt EMAs in background (current scaling stays frozen)
             self.popart_normalizer.update_stats(batch.returns)

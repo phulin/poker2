@@ -383,6 +383,8 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
+            logits=torch.randn(batch, 8),
+            model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
         # Create loss calculator and compute loss
@@ -399,8 +401,11 @@ class TestTrinalClipPPOLoss:
             kl_ema=EMA(0.99, 0.0),
         )
 
+        # Compute log_probs from logits
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
         out = loss_calculator.compute_loss(
-            logits=logits,
+            log_probs=log_probs,
             values=values,
             batch=batch_sample,
         )
@@ -444,6 +449,8 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
+            logits=torch.randn(batch, 8),
+            model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
         # Create loss calculator and compute loss
@@ -460,8 +467,11 @@ class TestTrinalClipPPOLoss:
             kl_ema=EMA(),
         )
 
+        # Compute log_probs from logits
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
         out = loss_calculator.compute_loss(
-            logits=logits,
+            log_probs=log_probs,
             values=values,
             batch=batch_sample,
         )
@@ -503,6 +513,8 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
+            logits=torch.randn(batch, 8),
+            model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
         # Test MSE loss
@@ -519,8 +531,11 @@ class TestTrinalClipPPOLoss:
             kl_ema=EMA(),
         )
 
+        # Compute log_probs from logits
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
         out_mse = loss_calculator_mse.compute_loss(
-            logits=logits,
+            log_probs=log_probs,
             values=values,
             batch=batch_sample,
         )
@@ -540,7 +555,7 @@ class TestTrinalClipPPOLoss:
         )
 
         out_huber = loss_calculator_huber.compute_loss(
-            logits=logits,
+            log_probs=log_probs,
             values=values,
             batch=batch_sample,
         )
@@ -584,6 +599,8 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
+            logits=torch.randn(batch, 8),
+            model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
         # Initialize KL EMA with high value
@@ -603,8 +620,11 @@ class TestTrinalClipPPOLoss:
             kl_ema=kl_ema,
         )
 
+        # Compute log_probs from logits
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
         out = loss_calculator.compute_loss(
-            logits=logits,
+            log_probs=log_probs,
             values=values,
             batch=batch_sample,
         )

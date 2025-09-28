@@ -171,6 +171,22 @@ class StructuredEmbeddingData:
         hole1 = self.token_ids[:, HOLE1_INDEX].to(torch.long) - offset
         return torch.stack([hole0, hole1], dim=1)
 
+    def permute_suits(self, generator: torch.Generator) -> None:
+        """Permute the suits of the card tokens."""
+        rands = torch.rand(
+            (self.token_ids.shape[0], 4), device=self.device, generator=generator
+        )
+        suit_permutations = torch.argsort(rands, dim=-1)
+        offset = get_card_token_id_offset()
+        self.card_suits = torch.where(
+            (self.token_ids >= offset) & (self.token_ids < offset + 52),
+            torch.gather(
+                suit_permutations, dim=-1, index=self.card_suits.int().unsqueeze(-1)
+            ).squeeze(-1),
+            0,
+        )
+        self.token_ids = offset + self.card_suits * 13 + self.card_ranks
+
     @classmethod
     def empty(
         cls,

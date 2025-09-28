@@ -41,7 +41,7 @@ class TestTransformerStateEncoder:
         encoder = TokenSequenceBuilder(
             tensor_env=env,
             sequence_length=100,
-            num_bet_bins=8,
+            num_bet_bins=7,
             device=device,
             float_dtype=torch.float32,
         )
@@ -56,7 +56,7 @@ class TestTransformerStateEncoder:
             idxs,
             torch.zeros_like(idxs),
             torch.zeros_like(idxs),
-            torch.zeros(2, 8, dtype=torch.bool),  # [batch_size, num_bet_bins]
+            torch.zeros(2, 7, dtype=torch.bool),  # [batch_size, num_bet_bins]
             torch.zeros_like(idxs),
         )
 
@@ -89,7 +89,7 @@ class TestEmbeddings:
         self.encoder = TokenSequenceBuilder(
             tensor_env=self.env,
             sequence_length=100,
-            num_bet_bins=8,
+            num_bet_bins=7,
             device=self.device,
             float_dtype=torch.float32,
         )
@@ -157,7 +157,7 @@ class TestPokerTransformerV1:
         encoder = TokenSequenceBuilder(
             tensor_env=env,
             sequence_length=100,
-            num_bet_bins=8,
+            num_bet_bins=7,
             device=device,
             float_dtype=torch.float32,
         )

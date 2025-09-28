@@ -30,7 +30,7 @@ class MockModelOutput:
         self.value = value
 
 
-class TestModel(nn.Module):
+class SimpleModel(nn.Module):
     """Simple test model for testing utility functions."""
 
     def __init__(self, num_actions=4):
@@ -89,7 +89,7 @@ class TestModelUtils:
         batch_size, num_actions = 2, 4
 
         # Create test data
-        model = TestModel(num_actions)
+        model = SimpleModel(num_actions)
         data = torch.randn(batch_size, 10)
         legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
@@ -112,7 +112,7 @@ class TestModelUtils:
         batch_size, num_actions = 2, 4
 
         # Create test data
-        model = TestModel(num_actions)
+        model = SimpleModel(num_actions)
         data = torch.randn(batch_size, 10)
         legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
@@ -130,7 +130,7 @@ class TestModelUtils:
         batch_size, num_actions = 2, 4
 
         # Create test data
-        model = TestModel(num_actions)
+        model = SimpleModel(num_actions)
         data = torch.randn(batch_size, 10)
         legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
@@ -149,7 +149,7 @@ class TestModelUtils:
         batch_size, num_actions = 2, 4
 
         # Create test data
-        model = TestModel(num_actions)
+        model = SimpleModel(num_actions)
         data = torch.randn(batch_size, 10)
         legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
@@ -167,7 +167,7 @@ class TestModelUtils:
         batch_size, num_actions = 3, 4
 
         # Create test data
-        model = TestModel(num_actions)
+        model = SimpleModel(num_actions)
         data = torch.randn(batch_size, 10)
         legal_masks = torch.tensor(
             [
@@ -205,7 +205,7 @@ class TestModelUtils:
         data.lengths = torch.tensor([seq_len, seq_len])
 
         # Create model and legal masks
-        model = TestModel(num_actions)
+        model = SimpleModel(num_actions)
         legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
         # Test all utility functions
@@ -235,7 +235,7 @@ class TestModelUtils:
         batch_size, num_actions = 2, 4
 
         # Create test data
-        model = TestModel(num_actions)
+        model = SimpleModel(num_actions)
         data = torch.randn(batch_size, 10)
 
         # Test with different legal mask patterns
@@ -263,7 +263,7 @@ class TestModelUtils:
         batch_size, num_actions = 2, 4
 
         # Create test data with gradients
-        model = TestModel(num_actions)
+        model = SimpleModel(num_actions)
         data = torch.randn(batch_size, 10, requires_grad=True)
         legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
@@ -283,7 +283,7 @@ class TestModelUtils:
         batch_size, num_actions = 2, 4
 
         # Create test data
-        model = TestModel(num_actions)
+        model = SimpleModel(num_actions)
         data = torch.randn(batch_size, 10)
         legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
@@ -299,7 +299,7 @@ class TestModelUtils:
         batch_size, num_actions = 1, 1
 
         # Create test data
-        model = TestModel(num_actions)
+        model = SimpleModel(num_actions)
         data = torch.randn(batch_size, 10)
         legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
