@@ -8,7 +8,6 @@ showing memory usage for model, gradients, activations, etc.
 
 import gc
 import sys
-from pathlib import Path
 
 import torch
 

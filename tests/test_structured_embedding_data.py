@@ -1,6 +1,5 @@
 """Tests for StructuredEmbeddingData."""
 
-import pytest
 import torch
 
 from alphaholdem.models.transformer.structured_embedding_data import (

@@ -22,8 +22,8 @@ from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.dred_pool import DREDPool
 from alphaholdem.rl.k_best_pool import KBestOpponentPool
 from alphaholdem.rl.losses import TrinalClipPPOLoss
-from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.opponent_pool import OpponentPool
+from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.replay import Trajectory, Transition
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
 from alphaholdem.utils.ema import EMA

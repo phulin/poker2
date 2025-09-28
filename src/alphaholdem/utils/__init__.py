@@ -12,11 +12,11 @@ from alphaholdem.utils.model_context import (
 )
 from alphaholdem.utils.model_utils import (
     compute_masked_logits,
+    get_best_action,
     get_log_probs,
     get_logits_log_probs_values,
     get_probs,
     get_probs_and_values,
-    get_best_action,
 )
 from alphaholdem.utils.profiling import PROFILE_AVAILABLE, profile
 

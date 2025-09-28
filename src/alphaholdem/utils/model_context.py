@@ -6,7 +6,7 @@ and automatically restore the original state when exiting the context.
 """
 
 from contextlib import contextmanager
-from typing import Generator, Union
+from typing import Generator
 
 import torch.nn as nn
 

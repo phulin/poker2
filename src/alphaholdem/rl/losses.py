@@ -2,13 +2,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Union
 
 import torch
 import torch.nn.functional as F
 
-from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
-from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.utils.ema import EMA

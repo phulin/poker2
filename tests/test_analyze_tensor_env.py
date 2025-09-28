@@ -7,8 +7,8 @@ import torch
 
 from alphaholdem.env.analyze_tensor_env import (
     PreflopAnalyzer,
-    _grid_coords_for_hand,
     _card_str_to_int,
+    _grid_coords_for_hand,
     create_1326_hand_combinations,
 )
 from alphaholdem.models.model_outputs import ModelOutput
