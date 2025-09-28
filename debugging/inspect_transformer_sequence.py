@@ -330,6 +330,7 @@ def hook_replay_buffer_add_transitions(replay_buffer, original_add_transitions):
     def hooked_add_transitions(
         embedding_data,
         action_indices,
+        logits,
         rewards,
         dones,
         legal_masks,
@@ -341,6 +342,7 @@ def hook_replay_buffer_add_transitions(replay_buffer, original_add_transitions):
         print("\n=== REPLAY BUFFER ADD TRANSITIONS ===")
         print(f"Batch size: {action_indices.shape[0]}")
         print(f"Action indices: {action_indices.tolist()}")
+        print(f"Logits shape: {list(logits.shape)}")
         print(f"Rewards: {rewards.tolist()}")
         print(f"Dones: {dones.tolist()}")
         print(f"Trajectory indices: {trajectory_indices.tolist()}")
@@ -359,6 +361,7 @@ def hook_replay_buffer_add_transitions(replay_buffer, original_add_transitions):
         return original_add_transitions(
             embedding_data,
             action_indices,
+            logits,
             rewards,
             dones,
             legal_masks,

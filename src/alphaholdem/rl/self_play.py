@@ -894,6 +894,7 @@ class SelfPlayTrainer:
                 # Extract tensor values efficiently (no .tolist() calls)
                 active_we_act = torch.where(we_act_mask[active_indices])[0]
                 our_action_indices = action_bins_active[active_we_act]
+                our_logits_tensor = env_logits[env_active_we_act]
                 our_values_tensor = env_values[env_active_we_act]
                 our_rewards_tensor = rewards[env_active_we_act]
                 our_dones_tensor = dones[env_active_we_act]
@@ -904,6 +905,7 @@ class SelfPlayTrainer:
                     self.replay_buffer.add_transitions(
                         embedding_data=our_states,
                         action_indices=our_action_indices,
+                        logits=our_logits_tensor,
                         rewards=our_rewards_tensor,
                         dones=our_dones_tensor,
                         legal_masks=our_legal_masks_tensor.bool(),
@@ -1157,11 +1159,7 @@ class SelfPlayTrainer:
             with (
                 torch.no_grad(),
                 model_eval(self.model),
-                torch.amp.autocast(
-                    self.device.type,
-                    dtype=torch.bfloat16,
-                    enabled=self.use_mixed_precision,
-                ),
+                self._autocast(),
             ):
                 # Take a element sample from the current batch without replacement
                 last_opp_batch_size = batch.returns.shape[0]

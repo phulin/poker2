@@ -112,7 +112,7 @@ def scripted_hand(
                 buffer.add_transitions(
                     embedding_data=our_states,
                     action_indices=torch.tensor([action_idx], device=device),
-                    log_probs=torch.zeros(1, env.num_bet_bins, device=device),
+                    logits=torch.zeros(1, env.num_bet_bins, device=device),
                     rewards=reward[0:1],
                     dones=done[0:1],
                     legal_masks=mask[0:1],

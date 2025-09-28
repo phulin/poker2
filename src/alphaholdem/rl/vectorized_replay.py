@@ -386,6 +386,7 @@ class VectorizedReplayBuffer:
         self,
         embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData],
         action_indices: torch.Tensor,  # [batch_size] - long
+        logits: torch.Tensor,
         rewards: torch.Tensor,
         dones: torch.Tensor,
         legal_masks: torch.Tensor,  # [batch_size, legal_mask_dim] - bool
@@ -400,6 +401,7 @@ class VectorizedReplayBuffer:
         Args:
             embedding_data: Either CNNEmbeddingData or StructuredEmbeddingData containing embedding components
             action_indices: [batch_size] - long dtype
+            logits: [batch_size, num_bet_bins] - float dtype
             rewards: [batch_size] - float dtype
             dones: [batch_size] - bool dtype
             legal_masks: [batch_size, legal_mask_dim] - bool dtype
@@ -451,6 +453,7 @@ class VectorizedReplayBuffer:
         self.action_indices[buffer_trajectory_indices, transition_counts] = (
             action_indices
         )
+        self.logits[buffer_trajectory_indices, transition_counts] = logits
         self.rewards[buffer_trajectory_indices, transition_counts] = rewards
         self.dones[buffer_trajectory_indices, transition_counts] = dones
         self.legal_masks[buffer_trajectory_indices, transition_counts, :] = legal_masks
