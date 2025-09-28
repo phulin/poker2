@@ -268,7 +268,6 @@ def test_suit_permutations(trainer: SelfPlayTrainer, device: torch.device) -> No
                 batch_size=24,
                 seq_len=trainer.cfg.train.max_sequence_length,
                 num_bet_bins=trainer.num_bet_bins,
-                dtype=torch.float32,
                 device=device,
             )
 

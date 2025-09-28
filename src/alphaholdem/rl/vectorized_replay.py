@@ -157,9 +157,7 @@ class VectorizedReplayBuffer:
             )
         else:
             # Transformer structured embedding fields: maintain a single growing token stream per trajectory
-            self.data = StructuredEmbeddingData.empty(
-                C, L, num_bet_bins, float_dtype, device
-            )
+            self.data = StructuredEmbeddingData.empty(C, L, num_bet_bins, device)
             self.current_token_positions = torch.zeros(
                 C,
                 dtype=torch.uint8,

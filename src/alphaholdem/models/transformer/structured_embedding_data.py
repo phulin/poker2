@@ -178,11 +178,10 @@ class StructuredEmbeddingData:
         )
         suit_permutations = torch.argsort(rands, dim=-1)
         offset = get_card_token_id_offset()
+        card_mask = (self.token_ids >= offset) & (self.token_ids < offset + 52)
         self.card_suits = torch.where(
-            (self.token_ids >= offset) & (self.token_ids < offset + 52),
-            torch.gather(
-                suit_permutations, dim=-1, index=self.card_suits.int().unsqueeze(-1)
-            ).squeeze(-1),
+            card_mask,
+            suit_permutations.gather(dim=-1, index=self.card_suits.int()),
             0,
         )
         self.token_ids = offset + self.card_suits * 13 + self.card_ranks
@@ -193,7 +192,6 @@ class StructuredEmbeddingData:
         batch_size: int,
         seq_len: int,
         num_bet_bins: int,
-        dtype: torch.dtype,
         device: torch.device,
     ) -> StructuredEmbeddingData:
         return cls(

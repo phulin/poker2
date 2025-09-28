@@ -196,7 +196,6 @@ class TestModelUtils:
             batch_size=batch_size,
             seq_len=seq_len,
             num_bet_bins=10,
-            dtype=torch.float32,
             device=torch.device("cpu"),
         )
 
