@@ -176,24 +176,16 @@ class StructuredEmbeddingData:
         rands = torch.rand(
             (self.token_ids.shape[0], 4), device=self.device, generator=generator
         )
-        suit_permutations = torch.argsort(rands, dim=-1)
         offset = get_card_token_id_offset()
         card_mask = (self.token_ids >= offset) & (self.token_ids < offset + 52)
+        rows, cols = torch.where(card_mask)
+        ranks = self.card_ranks[rows, cols]
+        suit_permutations = torch.argsort(rands, dim=-1).to(torch.uint8)
 
-        # Only update card_suits for card tokens
-        self.card_suits = torch.where(
-            card_mask,
-            suit_permutations.gather(dim=-1, index=self.card_suits.int()),
-            self.card_suits,  # Keep original suit (0) for non-card tokens
-        )
-
-        # Only update token_ids for card tokens
-        new_card_token_ids = offset + self.card_suits * 13 + self.card_ranks
-        self.token_ids = torch.where(
-            card_mask,
-            new_card_token_ids,
-            self.token_ids,  # Keep original token_ids for non-card tokens
-        )
+        new_suits = suit_permutations[rows, self.card_suits[rows, cols].int()]
+        new_card_token_ids = offset + new_suits * 13 + ranks
+        self.card_suits[rows, cols] = new_suits
+        self.token_ids[rows, cols] = new_card_token_ids.to(torch.int8)
 
     @classmethod
     def empty(

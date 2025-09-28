@@ -25,16 +25,16 @@ class TestStructuredEmbeddingData:
         data = StructuredEmbeddingData.empty(batch_size, seq_len, num_bet_bins, device)
 
         # Set up some card tokens in the sequence
-        # Card 0 (Ace of Spades): token_id = offset + 0*13 + 0 = offset + 0
-        # Card 1 (Ace of Hearts): token_id = offset + 1*13 + 0 = offset + 13
-        # Card 2 (Ace of Diamonds): token_id = offset + 2*13 + 0 = offset + 26
-        # Card 3 (Ace of Clubs): token_id = offset + 3*13 + 0 = offset + 39
+        # Card 0 (Ace of Spades): token_id = offset + 0*13 + 12 = offset + 12
+        # Card 1 (Ace of Hearts): token_id = offset + 1*13 + 12 = offset + 25
+        # Card 2 (Ace of Diamonds): token_id = offset + 2*13 + 12 = offset + 38
+        # Card 3 (Ace of Clubs): token_id = offset + 3*13 + 12 = offset + 51
 
         # Set card tokens at positions 0, 1, 2, 3 for batch 0
-        data.token_ids[0, 0] = offset + 0  # Ace of Spades (suit=0, rank=0)
-        data.token_ids[0, 1] = offset + 13  # Ace of Hearts (suit=1, rank=0)
-        data.token_ids[0, 2] = offset + 26  # Ace of Diamonds (suit=2, rank=0)
-        data.token_ids[0, 3] = offset + 39  # Ace of Clubs (suit=3, rank=0)
+        data.token_ids[0, 0] = offset + 12  # Ace of Spades (suit=0, rank=12)
+        data.token_ids[0, 1] = offset + 25  # Ace of Hearts (suit=1, rank=12)
+        data.token_ids[0, 2] = offset + 38  # Ace of Diamonds (suit=2, rank=12)
+        data.token_ids[0, 3] = offset + 51  # Ace of Clubs (suit=3, rank=12)
 
         # Set corresponding card suits and ranks
         data.card_suits[0, 0] = 0  # Spades
@@ -42,10 +42,10 @@ class TestStructuredEmbeddingData:
         data.card_suits[0, 2] = 2  # Diamonds
         data.card_suits[0, 3] = 3  # Clubs
 
-        data.card_ranks[0, 0] = 0  # Ace
-        data.card_ranks[0, 1] = 0  # Ace
-        data.card_ranks[0, 2] = 0  # Ace
-        data.card_ranks[0, 3] = 0  # Ace
+        data.card_ranks[0, 0] = 12  # Ace
+        data.card_ranks[0, 1] = 12  # Ace
+        data.card_ranks[0, 2] = 12  # Ace
+        data.card_ranks[0, 3] = 12  # Ace
 
         # Set card mask for these positions
         card_mask = (data.token_ids >= offset) & (data.token_ids < offset + 52)
@@ -80,7 +80,7 @@ class TestStructuredEmbeddingData:
         assert set(new_suits.tolist()) == {0, 1, 2, 3}
 
         # Ranks should be unchanged
-        assert torch.equal(data.card_ranks[0, :4], torch.tensor([0, 0, 0, 0]))
+        assert torch.equal(data.card_ranks[0, :4], torch.tensor([12, 12, 12, 12]))
 
     def test_permute_suits_deterministic(self):
         """Test that suit permutation is deterministic with same generator seed."""
@@ -96,20 +96,20 @@ class TestStructuredEmbeddingData:
         data2 = StructuredEmbeddingData.empty(batch_size, seq_len, num_bet_bins, device)
 
         # Set up card tokens
-        data1.token_ids[0, 0] = offset + 0  # Ace of Spades
-        data1.token_ids[0, 1] = offset + 13  # Ace of Hearts
+        data1.token_ids[0, 0] = offset + 12  # Ace of Spades
+        data1.token_ids[0, 1] = offset + 25  # Ace of Hearts
         data1.card_suits[0, 0] = 0
         data1.card_suits[0, 1] = 1
-        data1.card_ranks[0, 0] = 0
-        data1.card_ranks[0, 1] = 0
+        data1.card_ranks[0, 0] = 12
+        data1.card_ranks[0, 1] = 12
 
         # Copy to data2
-        data2.token_ids[0, 0] = offset + 0
-        data2.token_ids[0, 1] = offset + 13
+        data2.token_ids[0, 0] = offset + 12
+        data2.token_ids[0, 1] = offset + 25
         data2.card_suits[0, 0] = 0
         data2.card_suits[0, 1] = 1
-        data2.card_ranks[0, 0] = 0
-        data2.card_ranks[0, 1] = 0
+        data2.card_ranks[0, 0] = 12
+        data2.card_ranks[0, 1] = 12
 
         # Apply same permutation to both
         generator1 = torch.Generator()
@@ -136,17 +136,17 @@ class TestStructuredEmbeddingData:
         data = StructuredEmbeddingData.empty(batch_size, seq_len, num_bet_bins, device)
 
         # Set up mixed tokens: some cards, some non-cards
-        data.token_ids[0, 0] = offset + 0  # Card: Ace of Spades
+        data.token_ids[0, 0] = offset + 12  # Card: Ace of Spades
         data.token_ids[0, 1] = 0  # Non-card: CLS token
-        data.token_ids[0, 2] = offset + 13  # Card: Ace of Hearts
+        data.token_ids[0, 2] = offset + 25  # Card: Ace of Hearts
         data.token_ids[0, 3] = -1  # Non-card: padding
         data.token_ids[0, 4] = 120  # Non-card: some other token (fits in int8)
 
         # Set card suits and ranks only for card positions
         data.card_suits[0, 0] = 0  # Spades
         data.card_suits[0, 2] = 1  # Hearts
-        data.card_ranks[0, 0] = 0  # Ace
-        data.card_ranks[0, 2] = 0  # Ace
+        data.card_ranks[0, 0] = 12  # Ace
+        data.card_ranks[0, 2] = 12  # Ace
 
         # Store original non-card token IDs
         original_non_card_tokens = data.token_ids[0, [1, 3, 4]].clone()
@@ -176,12 +176,12 @@ class TestStructuredEmbeddingData:
 
         # Set up identical card tokens for both batches
         for b in range(batch_size):
-            data.token_ids[b, 0] = offset + 0  # Ace of Spades
-            data.token_ids[b, 1] = offset + 13  # Ace of Hearts
+            data.token_ids[b, 0] = offset + 12  # Ace of Spades
+            data.token_ids[b, 1] = offset + 25  # Ace of Hearts
             data.card_suits[b, 0] = 0
             data.card_suits[b, 1] = 1
-            data.card_ranks[b, 0] = 0
-            data.card_ranks[b, 1] = 0
+            data.card_ranks[b, 0] = 12
+            data.card_ranks[b, 1] = 12
 
         # Apply suit permutation
         generator = torch.Generator()
@@ -251,7 +251,7 @@ class TestStructuredEmbeddingData:
         data = StructuredEmbeddingData.empty(batch_size, seq_len, num_bet_bins, device)
 
         # Set up cards with different ranks
-        data.token_ids[0, 0] = offset + 0  # Ace of Spades (suit=0, rank=0)
+        data.token_ids[0, 0] = offset + 12  # Ace of Spades (suit=0, rank=12)
         data.token_ids[0, 1] = offset + 14  # 2 of Hearts (suit=1, rank=1)
         data.token_ids[0, 2] = offset + 28  # 3 of Diamonds (suit=2, rank=2)
         data.token_ids[0, 3] = offset + 42  # 4 of Clubs (suit=3, rank=3)
@@ -261,7 +261,7 @@ class TestStructuredEmbeddingData:
         data.card_suits[0, 2] = 2
         data.card_suits[0, 3] = 3
 
-        data.card_ranks[0, 0] = 0
+        data.card_ranks[0, 0] = 12
         data.card_ranks[0, 1] = 1
         data.card_ranks[0, 2] = 2
         data.card_ranks[0, 3] = 3
