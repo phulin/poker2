@@ -323,6 +323,7 @@ class VectorizedReplayBuffer:
             "trajectory_lengths",
             "current_transition_counts",
             "action_indices",
+            "logits",
             "rewards",
             "dones",
             "legal_masks",
