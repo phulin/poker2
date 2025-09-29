@@ -75,7 +75,7 @@ train:
   
   # Value loss configuration
   value_loss_type: "huber"
-  huber_delta: 1.0
+  huber_delta: 0.5
   
   # Mixed precision configuration
   use_mixed_precision: true  # Enable for larger model
