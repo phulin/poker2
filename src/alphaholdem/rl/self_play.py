@@ -1268,6 +1268,7 @@ class SelfPlayTrainer:
             "return_abs_std": total_return_abs_std / denom,
             "popart_mu": popart_mu,
             "popart_sigma": popart_sigma,
+            "beta": self.beta_controller.beta,
         }
 
     @profile
@@ -1348,6 +1349,7 @@ class SelfPlayTrainer:
                     "return_abs_std": training_stats["return_abs_std"],
                     "popart_mu": training_stats["popart_mu"],
                     "popart_sigma": training_stats["popart_sigma"],
+                    "beta": training_stats["beta"],
                     "lr": learning_rate,
                     "entropy_coef_current": self.entropy_coef,
                     "epsilon": training_stats["epsilon"],
