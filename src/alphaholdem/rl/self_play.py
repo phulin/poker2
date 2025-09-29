@@ -1147,7 +1147,7 @@ class SelfPlayTrainer:
             minibatch_count += 1
 
             # Update Beta Controller each minibatch based on penalty KL
-            self.beta_controller.update(current_kl)
+            self.beta_controller.update(loss_result.penalty_kl)
 
             self.optimizer.zero_grad()
 
