@@ -398,7 +398,7 @@ class KLPolicyPPOLoss(LossCalculator):
         target_kl: float = 0.015,
         beta_init: float = 1.0,
         beta_min: float = 1e-4,
-        beta_max: float = 1e4,
+        beta_max: float = 1.0,
         kl_type: str = "reverse",  # "forward" (KL(p_old||p_new)) or "reverse" (KL(p_new||p_old))
         kl_ema: EMA | None = None,  # optional, for logging/smoothing
     ):
@@ -464,6 +464,7 @@ class KLPolicyPPOLoss(LossCalculator):
             )
         else:
             # KL(new || old)
+            # can't use F.kl_div because it doesn't backpropagate through the target
             kl_tensor = (p_new * (log_p_new - log_p_old)).sum(dim=-1).mean()
         policy_loss = pg_loss + self.beta * kl_tensor
 
