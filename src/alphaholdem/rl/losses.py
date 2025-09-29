@@ -23,6 +23,8 @@ class LossResult:
     ratio_std: torch.Tensor
     epsilon: float
     clipfrac: torch.Tensor
+    ppo_clipfrac: torch.Tensor
+    return_clipfrac: torch.Tensor
     # Optional fields for specific loss types
     clipped_ratio_mean: torch.Tensor = None
     clipped_ratio_std: torch.Tensor = None
@@ -154,6 +156,7 @@ class TrinalClipPPOLoss(LossCalculator):
         ppo_low = 1.0 - epsilon
         ppo_high = 1.0 + epsilon
         ppo_clip = torch.clamp(ratio, ppo_low, ppo_high)
+        ppo_clipfrac = (torch.abs(ppo_clip - ratio) > 1e-8).float().mean()
 
         # Trinal-Clip policy:
         #  - For A >= 0: use standard PPO min surrogate (min(ratio, clip(r)))
@@ -174,6 +177,9 @@ class TrinalClipPPOLoss(LossCalculator):
         # We store delta2 as a negative lower bound (i.e., -chips_opponent/scale),
         # and delta3 as a positive upper bound (chips_self/scale), so clamp directly.
         clipped_returns = torch.clamp(returns, delta2, delta3)
+
+        # Compute return clipping fraction
+        return_clipfrac = (torch.abs(clipped_returns - returns) > 1e-8).float().mean()
 
         # Use frozen stats for normalization during training
         mu_frozen, sigma_frozen = self.popart.get_frozen_stats()
@@ -201,6 +207,8 @@ class TrinalClipPPOLoss(LossCalculator):
             ratio_std=ratio.std(),
             epsilon=epsilon,
             clipfrac=clipfrac,
+            ppo_clipfrac=ppo_clipfrac,
+            return_clipfrac=return_clipfrac,
         )
 
 
@@ -233,6 +241,9 @@ class StandardPPOLoss(LossCalculator):
         clipped_ratio = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon)
         policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
+        # Compute PPO clipping fraction
+        ppo_clipfrac = (torch.abs(clipped_ratio - ratio) > 1e-8).float().mean()
+
         # Value loss
         value_loss = F.mse_loss(values, returns)
 
@@ -252,9 +263,14 @@ class StandardPPOLoss(LossCalculator):
             entropy=entropy,
             ratio_mean=ratio.mean(),
             ratio_std=ratio.std(),
+            epsilon=self.epsilon,
             clipfrac=torch.tensor(
                 0.0, device=total_loss.device
             ),  # No clipping in standard PPO
+            ppo_clipfrac=ppo_clipfrac,
+            return_clipfrac=torch.tensor(
+                0.0, device=total_loss.device
+            ),  # No return clipping in standard PPO
         )
 
 
@@ -317,6 +333,9 @@ class DualClipPPOLoss(LossCalculator):
         ratio = torch.exp(action_log_probs - batch.selected_log_probs)
         clipped = torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon)
 
+        # Compute PPO clipping fraction
+        ppo_clipfrac = (torch.abs(clipped - ratio) > 1e-8).float().mean()
+
         # Dual-clip policy surrogate
         surr1 = ratio * advantages
         surr2 = clipped * advantages
@@ -345,9 +364,14 @@ class DualClipPPOLoss(LossCalculator):
             entropy=entropy,
             ratio_mean=ratio.mean(),
             ratio_std=ratio.std(),
+            epsilon=self.epsilon,
             clipfrac=torch.tensor(
                 0.0, device=total_loss.device
             ),  # No value clipping in dual-clip PPO
+            ppo_clipfrac=ppo_clipfrac,
+            return_clipfrac=torch.tensor(
+                0.0, device=total_loss.device
+            ),  # No return clipping in dual-clip PPO
             clipped_ratio_mean=clipped.mean(),
             clipped_ratio_std=clipped.std(),
         )

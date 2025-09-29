@@ -1038,6 +1038,7 @@ class SelfPlayTrainer:
         # Initialize tracking variables once before the epoch loop
         total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
         total_entropy, total_clipfrac = 0.0, 0.0
+        total_ppo_clipfrac, total_return_clipfrac = 0.0, 0.0
         total_explained_var, total_pearson_r, total_epsilon = 0.0, 0.0, 0.0
         total_advantage_mean_raw, total_advantage_std_raw = 0.0, 0.0
         total_return_abs_mean, total_return_abs_std = 0.0, 0.0
@@ -1124,6 +1125,8 @@ class SelfPlayTrainer:
             total_value_loss += loss_result.value_loss.item()
             total_entropy += loss_result.entropy.item()
             total_clipfrac += loss_result.clipfrac.item()
+            total_ppo_clipfrac += loss_result.ppo_clipfrac.item()
+            total_return_clipfrac += loss_result.return_clipfrac.item()
             total_explained_var += explained_var.item()
             total_pearson_r += pearson_r
             total_epsilon += loss_result.epsilon
@@ -1241,6 +1244,8 @@ class SelfPlayTrainer:
             "approx_kl": current_kl,
             "kl_ema": self.kl_ema.value,
             "clipfrac": total_clipfrac / denom,
+            "ppo_clipfrac": total_ppo_clipfrac / denom,
+            "return_clipfrac": total_return_clipfrac / denom,
             "explained_var": total_explained_var / denom,
             "pearson_r": total_pearson_r / denom,
             "epsilon": total_epsilon / denom,
@@ -1317,6 +1322,8 @@ class SelfPlayTrainer:
                     "entropy": training_stats["entropy"],
                     "approx_kl": training_stats["approx_kl"],
                     "clipfrac": training_stats["clipfrac"],
+                    "ppo_clipfrac": training_stats["ppo_clipfrac"],
+                    "return_clipfrac": training_stats["return_clipfrac"],
                     "explained_var": training_stats["explained_var"],
                     "pearson_r": training_stats["pearson_r"],
                     "avg_loss": training_stats["avg_loss"],
