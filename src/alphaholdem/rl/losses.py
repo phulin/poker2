@@ -451,6 +451,7 @@ class KLPolicyPPOLoss(LossCalculator):
         # --- Log-probs & distributions
         log_p_new = torch.log_softmax(masked_new_logits, dim=-1)
         new_logp_a = log_p_new.gather(1, actions.unsqueeze(1)).squeeze(1)
+        p_new = log_p_new.exp()
 
         # --- Policy gradient term (no ratio/clipping)
         pg_loss = -(new_logp_a * advantages).mean()
@@ -463,9 +464,7 @@ class KLPolicyPPOLoss(LossCalculator):
             )
         else:
             # KL(new || old)
-            kl_tensor = F.kl_div(
-                log_p_old, log_p_new, log_target=True, reduction="batchmean"
-            )
+            kl_tensor = (p_new * (log_p_new - log_p_old)).sum(dim=-1).mean()
         policy_loss = pg_loss + self.beta * kl_tensor
 
         # --- Value loss (Huber or MSE)
@@ -479,7 +478,6 @@ class KLPolicyPPOLoss(LossCalculator):
             value_loss = F.mse_loss(values, targets_n)
 
         # --- Entropy bonus of the *new* policy
-        p_new = log_p_new.exp()
         entropy = -(p_new * log_p_new).sum(dim=-1).mean()
 
         # --- Total
