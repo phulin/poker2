@@ -763,9 +763,10 @@ class TestVectorizedReplayBuffer:
             "embedding_data",
             "action_indices",
             "original_logits",
-            "computed_logits",
-            "selected_log_probs",
-            "all_log_probs",
+            "frozen_selected_log_probs",
+            "frozen_all_log_probs",
+            "step_selected_log_probs",
+            "step_all_log_probs",
             "advantages",
             "returns",
             "delta2",
@@ -782,8 +783,10 @@ class TestVectorizedReplayBuffer:
         assert sampled.embedding_data.card_ranks.shape[0] == 5
         assert sampled.action_indices.shape[0] == 5
         assert sampled.original_logits.shape == (5, buffer.num_bet_bins)
-        assert sampled.selected_log_probs.shape[0] == 5
-        assert sampled.all_log_probs.shape == (5, buffer.num_bet_bins)
+        assert sampled.frozen_selected_log_probs.shape[0] == 5
+        assert sampled.frozen_all_log_probs.shape == (5, buffer.num_bet_bins)
+        assert sampled.step_selected_log_probs.shape[0] == 5
+        assert sampled.step_all_log_probs.shape == (5, buffer.num_bet_bins)
         assert sampled.advantages.shape[0] == 5
         assert sampled.returns.shape[0] == 5
         assert sampled.delta2.shape[0] == 5

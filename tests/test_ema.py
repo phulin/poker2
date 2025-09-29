@@ -80,12 +80,12 @@ class TestEMA:
         # Reset
         ema.reset(5.0)
         assert ema.value == 5.0
-        assert not ema.initialized
+        assert ema.initialized  # reset with value sets initialized=True
 
         # Reset with default value
         ema.reset()
         assert ema.value == 0.0
-        assert not ema.initialized
+        assert not ema.initialized  # reset without value sets initialized=False
 
     def test_ema_sequence_convergence(self):
         """Test that EMA converges to a stable value with constant input."""
@@ -199,13 +199,14 @@ class TestEMA:
         ema.reset()
         assert ema.value_or_none() is None
 
-        # After reset with custom value, should still return None (not initialized)
+        # After reset with custom value, should return the value (initialized=True)
         ema.reset(5.0)
-        assert ema.value_or_none() is None
+        assert ema.value_or_none() == 5.0
 
-        # After update following reset, should return the value
+        # After update following reset, should apply EMA formula
         ema.update(15.0)
-        assert ema.value_or_none() == 15.0
+        # 0.9 * 5.0 + 0.1 * 15.0 = 4.5 + 1.5 = 6.0
+        assert ema.value_or_none() == 6.0
 
 
 if __name__ == "__main__":

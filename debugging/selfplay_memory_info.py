@@ -196,7 +196,7 @@ def main():
                 print(f"   Cards shape: {sample_batch.embedding_data.cards.shape}")
                 print(f"   Actions shape: {sample_batch.embedding_data.actions.shape}")
                 print(f"   Values shape: {sample_batch.returns.shape}")
-                print(f"   Logits shape: {sample_batch.all_log_probs.shape}")
+                print(f"   Logits shape: {sample_batch.frozen_all_log_probs.shape}")
 
             return result
 

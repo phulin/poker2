@@ -6,6 +6,7 @@ from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import wandb
 
 from alphaholdem.core.builders import build_components_from_config
@@ -30,7 +31,7 @@ from alphaholdem.rl.vectorized_replay import BatchSample, VectorizedReplayBuffer
 from alphaholdem.utils.ema import EMA
 from alphaholdem.utils.kl_divergence import compute_kl_divergence_batch
 from alphaholdem.utils.model_context import model_eval
-from alphaholdem.utils.model_utils import get_logits_log_probs_values
+from alphaholdem.utils.model_utils import get_log_probs, get_logits_log_probs_values
 from alphaholdem.utils.profiling import profile
 
 TARGET_KL = 0.015
@@ -650,22 +651,31 @@ class SelfPlayTrainer:
                 all_env_indices, torch.zeros_like(all_env_indices)
             )
 
-    def _compute_frozen_distribution(self, batch: BatchSample) -> torch.Tensor:
-        """Compute the frozen action distribution for a batch of transitions."""
-        for age, batch_idx in batch.group_by_model_age():
-            # Can avoid computing log-probs for current model, as we'll do that in forward pass.
-            # (This is a possibly-unnecessary optimization.)
-            # NOTE: Can't actually do this b/c here we are under eval() and there we are under train().
-            # if epoch == 0 and age == self.model_age:
-            #     continue
-            frozen_model = self.model_history.get_model(age)
-            with torch.no_grad(), model_eval(frozen_model), self._autocast():
-                logits, log_probs, _ = get_logits_log_probs_values(
-                    frozen_model,
-                    batch.embedding_data[batch_idx],
-                    batch.legal_masks[batch_idx],
+    def _compute_reference_distributions(self, batch: BatchSample) -> torch.Tensor:
+        """Compute the reference action distributions for a batch of transitions."""
+        with torch.no_grad(), model_eval(self.model), self._autocast():
+            # Get indices for current model
+            current_model_indices = torch.where(batch.model_ages == self.model_age)[0]
+            if len(current_model_indices) > 0:
+                log_probs = get_log_probs(
+                    self.model,
+                    batch.embedding_data[current_model_indices],
+                    batch.legal_masks[current_model_indices],
                 )
-                batch.update_logits_log_probs(batch_idx, logits, log_probs)
+                batch.update_step_log_probs(current_model_indices, log_probs)
+
+            for age, batch_indices in batch.group_by_model_age():
+                frozen_model = self.model_history.get_model(age)
+                with model_eval(frozen_model):
+                    log_probs = get_log_probs(
+                        frozen_model,
+                        batch.embedding_data[batch_indices],
+                        batch.legal_masks[batch_indices],
+                    )
+                    batch.update_frozen_log_probs(batch_indices, log_probs)
+                    if age == self.model_age:
+                        # this is self.model.
+                        batch.update_step_log_probs(batch_indices, log_probs)
 
     @profile
     def collect_tensor_trajectories(
@@ -1048,10 +1058,15 @@ class SelfPlayTrainer:
             gamma=self.gamma, lambda_=self.gae_lambda
         )
 
-        # Compute current logits on sample for diagnostic KL
+        # Compute current log probs on sample for diagnostic KL
         kl_sample_batch_size = min(self.batch_size, max(1, self.batch_size // 8))
         kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
-        self._compute_frozen_distribution(kl_states)
+        with torch.no_grad(), model_eval(self.model), self._autocast():
+            kl_old_log_probs = get_log_probs(
+                self.model,
+                kl_states.embedding_data,
+                kl_states.legal_masks,
+            )
 
         # Initialize tracking variables once before the epoch loop
         total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
@@ -1074,7 +1089,7 @@ class SelfPlayTrainer:
             batch.embedding_data.permute_suits(self.rng)
 
             # Update log-probs for the suit-permuted batch.
-            self._compute_frozen_distribution(batch)
+            self._compute_reference_distributions(batch)
 
             # Normalize advantages across the batch for stability (mean=0, std=1)
             adv = batch.advantages
@@ -1094,18 +1109,9 @@ class SelfPlayTrainer:
 
             with self._autocast():
                 embedding_data = batch.embedding_data
-                logits, log_probs, values = get_logits_log_probs_values(
+                logits, _, values = get_logits_log_probs_values(
                     self.model, embedding_data, batch.legal_masks
                 )
-
-                # First epoch: update (old) logits and log probs for current model
-                # if epoch == 0:
-                #     current_idx = torch.where(batch.model_ages == self.model_age)[0]
-                #     batch.update_logits_log_probs(
-                #         current_idx,
-                #         logits[current_idx].detach(),
-                #         log_probs[current_idx].detach(),
-                #     )
 
                 loss_result = self.loss_calculator.compute_loss(
                     logits=logits,
@@ -1214,12 +1220,18 @@ class SelfPlayTrainer:
             print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
         # Compute diagnostic KL: divergence from last model batch.
-        with torch.no_grad(), model_eval(self.model):
-            kl_new_logits = self.model(kl_states.embedding_data).policy_logits.float()
-            current_kl = compute_kl_divergence_batch(
-                kl_states.computed_logits,
-                kl_new_logits,
+        with torch.no_grad(), model_eval(self.model), self._autocast():
+            kl_new_log_probs = get_log_probs(
+                self.model,
+                kl_states.embedding_data,
                 kl_states.legal_masks,
+            )
+            # KL(old || new)
+            current_kl = F.kl_div(
+                kl_new_log_probs,
+                kl_old_log_probs,
+                log_target=True,
+                reduction="batchmean",
             )
 
         # Update KL divergence exponential moving average

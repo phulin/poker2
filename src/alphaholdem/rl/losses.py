@@ -157,7 +157,7 @@ class TrinalClipPPOLoss(LossCalculator):
             epsilon = min(max(epsilon, self.epsilon / 2), self.epsilon * 2)
 
         # Importance sampling ratio - selected_log_probs computed with frozen model
-        ratio = torch.exp(action_log_probs - batch.selected_log_probs)
+        ratio = torch.exp(action_log_probs - batch.frozen_selected_log_probs)
         ppo_low = 1.0 - epsilon
         ppo_high = 1.0 + epsilon
         ppo_clip = torch.clamp(ratio, ppo_low, ppo_high)
@@ -240,7 +240,7 @@ class StandardPPOLoss(LossCalculator):
         action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
         # Compute ratio
-        ratio = torch.exp(action_log_probs - batch.selected_log_probs)
+        ratio = torch.exp(action_log_probs - batch.frozen_selected_log_probs)
 
         # Standard PPO policy loss
         clipped_ratio = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon)
@@ -331,7 +331,7 @@ class DualClipPPOLoss(LossCalculator):
         action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
         # Ratios
-        ratio = torch.exp(action_log_probs - batch.selected_log_probs)
+        ratio = torch.exp(action_log_probs - batch.frozen_selected_log_probs)
         clipped = torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon)
 
         # Compute PPO clipping fraction
@@ -410,7 +410,10 @@ class KLPolicyPPOLoss(LossCalculator):
         returns = batch.returns
         delta2 = batch.delta2
         delta3 = batch.delta3
-        log_p_old = batch.all_log_probs
+        # use frozen log probs for importance ratio
+        log_p_old_a = batch.frozen_selected_log_probs
+        # use step log probs for KL penalty
+        log_p_step = batch.step_all_log_probs
 
         # --- Mask illegal actions
         legal_masks = batch.legal_masks.bool()
@@ -418,23 +421,23 @@ class KLPolicyPPOLoss(LossCalculator):
 
         # --- Log-probs & distributions
         log_p_new = torch.log_softmax(masked_new_logits, dim=-1)
-        new_logp_a = log_p_new.gather(1, actions.unsqueeze(1)).squeeze(1)
+        log_p_new_a = log_p_new.gather(1, actions.unsqueeze(1)).squeeze(1)
         p_new = log_p_new.exp()
 
-        # --- Policy gradient term (no ratio/clipping)
-        pg_loss = -(new_logp_a * advantages).mean()
+        # --- Policy gradient term with importance ratio
+        ratio = torch.exp(log_p_new_a - log_p_old_a)
+        pg_loss = -(ratio * advantages).mean()
 
         # --- KL penalty
         if self.kl_type == "forward":
             # KL(old || new)
-            kl_tensor = F.kl_div(
-                log_p_new, log_p_old, log_target=True, reduction="batchmean"
+            penalty_kl = (
+                (log_p_step.exp() * (log_p_step - log_p_new)).sum(dim=-1).mean()
             )
         else:
             # KL(new || old)
-            # can't use F.kl_div because it doesn't backpropagate through the target
-            kl_tensor = (p_new * (log_p_new - log_p_old)).sum(dim=-1).mean()
-        policy_loss = pg_loss + self.beta_controller.beta * kl_tensor
+            penalty_kl = (p_new * (log_p_new - log_p_step)).sum(dim=-1).mean()
+        policy_loss = pg_loss + self.beta_controller.beta * penalty_kl
 
         # --- Value loss (Huber or MSE)
         clipped_returns = torch.clamp(returns, delta2, delta3)

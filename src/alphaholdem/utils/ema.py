@@ -13,6 +13,10 @@ class EMA:
             initial_value: Initial value for the EMA
         """
         self.decay = decay
+        self.reset(initial_value)
+
+    def reset(self, initial_value: float = None) -> None:
+        """Reset EMA to initial value."""
         self.value = initial_value if initial_value is not None else 0.0
         self.initialized = initial_value is not None
 
@@ -33,11 +37,6 @@ class EMA:
             self.value = self.decay * self.value + (1 - self.decay) * new_value
 
         return self.value
-
-    def reset(self, initial_value: float = 0.0) -> None:
-        """Reset EMA to initial value."""
-        self.value = initial_value
-        self.initialized = False
 
     def value_or_none(self) -> float | None:
         """

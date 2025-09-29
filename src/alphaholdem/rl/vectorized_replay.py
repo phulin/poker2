@@ -10,8 +10,6 @@ from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
 from alphaholdem.models.transformer.tokens import Context, Special
-from alphaholdem.utils.model_context import model_eval
-from alphaholdem.utils.model_utils import get_logits_log_probs_values
 
 
 @dataclass
@@ -21,9 +19,12 @@ class BatchSample:
     embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData]
     action_indices: torch.Tensor
     original_logits: torch.Tensor
-    computed_logits: torch.Tensor
-    selected_log_probs: torch.Tensor
-    all_log_probs: torch.Tensor
+    # Log-probs based on frozen model
+    frozen_selected_log_probs: torch.Tensor
+    frozen_all_log_probs: torch.Tensor
+    # Log-probs based on model at beginning of training step
+    step_selected_log_probs: torch.Tensor
+    step_all_log_probs: torch.Tensor
     legal_masks: torch.Tensor
     advantages: torch.Tensor
     returns: torch.Tensor
@@ -37,9 +38,10 @@ class BatchSample:
             embedding_data=self.embedding_data,
             action_indices=self.action_indices,
             original_logits=self.original_logits.to(dtype),
-            computed_logits=self.computed_logits.to(dtype),
-            selected_log_probs=self.selected_log_probs.to(dtype),
-            all_log_probs=self.all_log_probs.to(dtype),
+            frozen_selected_log_probs=self.frozen_selected_log_probs.to(dtype),
+            frozen_all_log_probs=self.frozen_all_log_probs.to(dtype),
+            step_selected_log_probs=self.step_selected_log_probs.to(dtype),
+            step_all_log_probs=self.step_all_log_probs.to(dtype),
             legal_masks=self.legal_masks,
             advantages=self.advantages.to(dtype),
             returns=self.returns.to(dtype),
@@ -48,16 +50,26 @@ class BatchSample:
             model_ages=self.model_ages,
         )
 
-    def update_logits_log_probs(
-        self, idxs: torch.Tensor, logits: torch.Tensor, log_probs: torch.Tensor
+    def update_frozen_log_probs(
+        self, idxs: torch.Tensor, log_probs: torch.Tensor
     ) -> None:
-        """Update log probabilities for a batch of transitions."""
-        self.computed_logits[idxs] = logits.to(self.computed_logits.dtype)
-        self.all_log_probs[idxs] = log_probs.to(self.all_log_probs.dtype)
-        self.selected_log_probs[idxs] = (
+        """Update frozen model (generation) log probabilities for a batch of transitions."""
+        self.frozen_all_log_probs[idxs] = log_probs.to(self.frozen_all_log_probs.dtype)
+        self.frozen_selected_log_probs[idxs] = (
             log_probs.gather(1, self.action_indices[idxs].unsqueeze(1))
             .squeeze(1)
-            .to(self.all_log_probs.dtype)
+            .to(self.frozen_all_log_probs.dtype)
+        )
+
+    def update_step_log_probs(
+        self, idxs: torch.Tensor, log_probs: torch.Tensor
+    ) -> None:
+        """Update per-step log probabilities for a batch of transitions."""
+        self.step_all_log_probs[idxs] = log_probs.to(self.step_all_log_probs.dtype)
+        self.step_selected_log_probs[idxs] = (
+            log_probs.gather(1, self.action_indices[idxs].unsqueeze(1))
+            .squeeze(1)
+            .to(self.step_all_log_probs.dtype)
         )
 
     def group_by_model_age(self) -> List[Tuple[int, torch.Tensor]]:
@@ -72,9 +84,10 @@ class BatchSample:
             embedding_data=self.embedding_data[idx],
             action_indices=self.action_indices[idx],
             original_logits=self.original_logits[idx],
-            computed_logits=self.computed_logits[idx],
-            selected_log_probs=self.selected_log_probs[idx],
-            all_log_probs=self.all_log_probs[idx],
+            frozen_selected_log_probs=self.frozen_selected_log_probs[idx],
+            frozen_all_log_probs=self.frozen_all_log_probs[idx],
+            step_selected_log_probs=self.step_selected_log_probs[idx],
+            step_all_log_probs=self.step_all_log_probs[idx],
             legal_masks=self.legal_masks[idx],
             advantages=self.advantages[idx],
             returns=self.returns[idx],
@@ -694,14 +707,19 @@ class VectorizedReplayBuffer:
             embedding_data=data,
             action_indices=action_indices_sel,
             original_logits=original_logits,
-            computed_logits=torch.zeros_like(original_logits),
             # these will be filled in later by update_logits_log_probs.
-            selected_log_probs=torch.zeros(
+            frozen_selected_log_probs=torch.zeros(
                 batch_size,
                 dtype=self.float_dtype,
                 device=self.device,
             ),
-            all_log_probs=torch.zeros_like(original_logits),
+            frozen_all_log_probs=torch.zeros_like(original_logits),
+            step_selected_log_probs=torch.zeros(
+                batch_size,
+                dtype=self.float_dtype,
+                device=self.device,
+            ),
+            step_all_log_probs=torch.zeros_like(original_logits),
             legal_masks=self.legal_masks[traj_indices, transition_indices],
             advantages=self.advantages[traj_indices, transition_indices],
             returns=self.returns[traj_indices, transition_indices],
