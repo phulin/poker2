@@ -1225,8 +1225,8 @@ class SelfPlayTrainer:
         # Update KL divergence exponential moving average
         self.kl_ema.update(current_kl)
 
-        # Update Beta Controller based on kl_ema
-        self.beta_controller.update(self.kl_ema.value)
+        # Update Beta Controller based on current KL
+        self.beta_controller.update(current_kl)
 
         # Apply final PopArt rescaling after last epoch
         if self.popart_normalizer.mean_ema.initialized:
