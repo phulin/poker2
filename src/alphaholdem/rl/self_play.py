@@ -25,7 +25,7 @@ from alphaholdem.rl.losses import TrinalClipPPOLoss
 from alphaholdem.rl.opponent_pool import OpponentPool
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.replay import Trajectory, Transition
-from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
+from alphaholdem.rl.vectorized_replay import BatchSample, VectorizedReplayBuffer
 from alphaholdem.utils.ema import EMA
 from alphaholdem.utils.kl_divergence import compute_kl_divergence_batch
 from alphaholdem.utils.model_context import model_eval
@@ -649,6 +649,23 @@ class SelfPlayTrainer:
                 all_env_indices, torch.zeros_like(all_env_indices)
             )
 
+    def _compute_frozen_distribution(self, batch: BatchSample) -> torch.Tensor:
+        """Compute the frozen action distribution for a batch of transitions."""
+        for age, batch_idx in batch.group_by_model_age():
+            # Can avoid computing log-probs for current model, as we'll do that in forward pass.
+            # (This is a possibly-unnecessary optimization.)
+            # NOTE: Can't actually do this b/c here we are under eval() and there we are under train().
+            # if epoch == 0 and age == self.model_age:
+            #     continue
+            frozen_model = self.model_history.get_model(age)
+            with torch.no_grad(), model_eval(frozen_model), self._autocast():
+                logits, log_probs, _ = get_logits_log_probs_values(
+                    frozen_model,
+                    batch.embedding_data[batch_idx],
+                    batch.legal_masks[batch_idx],
+                )
+                batch.update_logits_log_probs(batch_idx, logits, log_probs)
+
     @profile
     def collect_tensor_trajectories(
         self,
@@ -1032,8 +1049,8 @@ class SelfPlayTrainer:
 
         # Compute current logits on sample for diagnostic KL
         kl_sample_batch_size = min(self.batch_size, max(1, self.batch_size // 8))
-        with torch.no_grad(), model_eval(self.model):
-            kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
+        kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
+        self._compute_frozen_distribution(kl_states)
 
         # Initialize tracking variables once before the epoch loop
         total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
@@ -1055,21 +1072,8 @@ class SelfPlayTrainer:
             # Permute suits to augment data.
             batch.embedding_data.permute_suits(self.rng)
 
-            # Update log-probs.
-            for age, batch_idx in batch.group_by_model_age():
-                # Can avoid computing log-probs for current model, as we'll do that in forward pass.
-                # (This is a possibly-unnecessary optimization.)
-                # NOTE: Can't actually do this b/c here we are under eval() and there we are under train().
-                # if epoch == 0 and age == self.model_age:
-                #     continue
-                frozen_model = self.model_history.get_model(age)
-                with torch.no_grad(), model_eval(frozen_model), self._autocast():
-                    logits, log_probs, _ = get_logits_log_probs_values(
-                        frozen_model,
-                        batch.embedding_data[batch_idx],
-                        batch.legal_masks[batch_idx],
-                    )
-                    batch.update_logits_log_probs(batch_idx, logits, log_probs)
+            # Update log-probs for the suit-permuted batch.
+            self._compute_frozen_distribution(batch)
 
             # Normalize advantages across the batch for stability (mean=0, std=1)
             adv = batch.advantages
