@@ -1149,6 +1149,13 @@ class SelfPlayTrainer:
             # Update Beta Controller each minibatch based on penalty KL
             self.beta_controller.update(loss_result.penalty_kl)
 
+            # If we've gone too far from the starting policy, stop updating.
+            if (
+                loss_result.forward_kl is not None
+                and loss_result.forward_kl > 2 * TARGET_KL
+            ):
+                break
+
             self.optimizer.zero_grad()
 
             # Use scaler for mixed precision backward pass. Will have enabled=False if not using mixed precision.
