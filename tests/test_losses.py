@@ -402,11 +402,8 @@ class TestTrinalClipPPOLoss:
             kl_ema=EMA(0.99, 0.0),
         )
 
-        # Compute log_probs from logits
-        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-
         out = loss_calculator.compute_loss(
-            log_probs=log_probs,
+            logits=logits,
             values=values,
             batch=batch_sample,
         )
@@ -471,11 +468,8 @@ class TestTrinalClipPPOLoss:
             kl_ema=EMA(),
         )
 
-        # Compute log_probs from logits
-        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-
         out = loss_calculator.compute_loss(
-            log_probs=log_probs,
+            logits=logits,
             values=values,
             batch=batch_sample,
         )
@@ -538,11 +532,10 @@ class TestTrinalClipPPOLoss:
             kl_ema=EMA(),
         )
 
-        # Compute log_probs from logits
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
 
         out_mse = loss_calculator_mse.compute_loss(
-            log_probs=log_probs,
+            logits=logits,
             values=values,
             batch=batch_sample,
         )
@@ -562,7 +555,7 @@ class TestTrinalClipPPOLoss:
         )
 
         out_huber = loss_calculator_huber.compute_loss(
-            log_probs=log_probs,
+            logits=logits,
             values=values,
             batch=batch_sample,
         )
@@ -634,11 +627,8 @@ class TestTrinalClipPPOLoss:
             kl_ema=kl_ema,
         )
 
-        # Compute log_probs from logits
-        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-
         out = loss_calculator.compute_loss(
-            log_probs=log_probs,
+            logits=logits,
             values=values,
             batch=batch_sample,
         )

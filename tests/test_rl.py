@@ -123,13 +123,8 @@ def test_trinal_clip_ppo_loss():
         kl_ema=EMA(),
     )
 
-    # Compute log_probs from logits
-    import torch.nn.functional as F
-
-    log_probs = F.log_softmax(logits, dim=-1)
-
     loss_result = loss_calculator.compute_loss(
-        log_probs=log_probs,
+        logits=logits,
         values=values,
         batch=batch,
     )

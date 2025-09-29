@@ -122,7 +122,7 @@ class TrinalClipPPOLoss(LossCalculator):
 
     def compute_loss(
         self,
-        log_probs: torch.Tensor,
+        logits: torch.Tensor,
         values: torch.Tensor,
         batch: BatchSample,
     ) -> LossResult:
@@ -145,7 +145,9 @@ class TrinalClipPPOLoss(LossCalculator):
         delta2 = batch.delta2
         delta3 = batch.delta3
 
-        # Compute new log probabilities
+        # Mask illegal actions then compute log probabilities
+        masked_logits = torch.where(batch.legal_masks, logits, -1e9)
+        log_probs = F.log_softmax(masked_logits, dim=-1)
         action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
         epsilon = self.epsilon
@@ -153,7 +155,7 @@ class TrinalClipPPOLoss(LossCalculator):
             epsilon = epsilon * (self.target_kl / (self.kl_ema.value + 1e-8))
             epsilon = min(max(epsilon, self.epsilon / 2), self.epsilon * 2)
 
-        # Importance sampling ratio
+        # Importance sampling ratio - selected_log_probs computed with frozen model
         ratio = torch.exp(action_log_probs - batch.selected_log_probs)
         ppo_low = 1.0 - epsilon
         ppo_high = 1.0 + epsilon
@@ -438,10 +440,9 @@ class KLPolicyPPOLoss(LossCalculator):
         actions = batch.action_indices
         advantages = batch.advantages
         returns = batch.returns
-        # delta2 = batch.delta2
-        # delta3 = batch.delta3
+        delta2 = batch.delta2
+        delta3 = batch.delta3
         old_logits = batch.computed_logits
-        new_logits = logits
 
         # --- Mask illegal actions
         legal_masks = batch.legal_masks.bool()
@@ -457,14 +458,14 @@ class KLPolicyPPOLoss(LossCalculator):
         # --- KL penalty
         if self.kl_type == "forward":
             # KL(old || new)
-            kl_tensor = compute_kl_divergence_batch(old_logits, new_logits, legal_masks)
+            kl_value = compute_kl_divergence_batch(old_logits, logits, legal_masks)
         else:
             # KL(new || old)
-            kl_tensor = compute_kl_divergence_batch(new_logits, old_logits, legal_masks)
-        policy_loss = pg_loss + self.beta * kl_tensor
+            kl_value = compute_kl_divergence_batch(logits, old_logits, legal_masks)
+        policy_loss = pg_loss + self.beta * kl_value
 
         # --- Value loss (Huber or MSE)
-        clipped_returns = returns  # torch.clamp(returns, delta2, delta3)
+        clipped_returns = torch.clamp(returns, delta2, delta3)
         return_clipfrac = (torch.abs(clipped_returns - returns) > 1e-8).float().mean()
         mu_frozen, sigma_frozen = self.popart.get_frozen_stats()
         targets_n = (clipped_returns - mu_frozen) / (sigma_frozen + 1e-8)
@@ -483,7 +484,6 @@ class KLPolicyPPOLoss(LossCalculator):
         )
 
         # --- Adapt beta toward target KL (after computing loss)
-        kl_value = kl_tensor.item()
         self._adapt_beta(kl_value)
 
         # For metrics, reuse fields even if not strictly applicable

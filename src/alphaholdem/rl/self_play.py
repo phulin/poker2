@@ -1117,7 +1117,7 @@ class SelfPlayTrainer:
                 #     )
 
                 loss_result = self.loss_calculator.compute_loss(
-                    log_probs=log_probs,
+                    logits=logits,
                     values=values,
                     batch=batch,
                 )
