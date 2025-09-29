@@ -21,7 +21,7 @@ from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceB
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.dred_pool import DREDPool
 from alphaholdem.rl.k_best_pool import KBestOpponentPool
-from alphaholdem.rl.losses import TrinalClipPPOLoss
+from alphaholdem.rl.losses import KLPolicyPPOLoss, TrinalClipPPOLoss
 from alphaholdem.rl.opponent_pool import OpponentPool
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.replay import Trajectory, Transition
@@ -327,15 +327,25 @@ class SelfPlayTrainer:
         self.popart_normalizer = PopArtNormalizer()
 
         # Initialize loss calculator
-        self.loss_calculator = TrinalClipPPOLoss(
+        # self.loss_calculator = TrinalClipPPOLoss(
+        #     popart_normalizer=self.popart_normalizer,
+        #     epsilon=self.epsilon,
+        #     delta1=self.delta1,
+        #     value_coef=self.value_coef,
+        #     entropy_coef=self.entropy_coef,
+        #     value_loss_type=self.cfg.train.value_loss_type,
+        #     huber_delta=self.cfg.train.huber_delta,
+        #     target_kl=TARGET_KL,
+        #     kl_ema=self.kl_ema,
+        # )
+        self.loss_calculator = KLPolicyPPOLoss(
             popart_normalizer=self.popart_normalizer,
-            epsilon=self.epsilon,
-            delta1=self.delta1,
             value_coef=self.value_coef,
             entropy_coef=self.entropy_coef,
             value_loss_type=self.cfg.train.value_loss_type,
             huber_delta=self.cfg.train.huber_delta,
             target_kl=TARGET_KL,
+            kl_type="reverse",
             kl_ema=self.kl_ema,
         )
 

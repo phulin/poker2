@@ -97,6 +97,7 @@ def test_trinal_clip_ppo_loss():
         embedding_data=embedding_data,
         action_indices=actions,
         original_logits=logits,
+        computed_logits=torch.zeros_like(logits),
         selected_log_probs=log_probs_old,
         all_log_probs=log_probs_old,
         legal_masks=legal_masks,

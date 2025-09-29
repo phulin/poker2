@@ -7,7 +7,8 @@ import torch
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.rl.losses import PopArtNormalizer, TrinalClipPPOLoss
+from alphaholdem.rl.losses import TrinalClipPPOLoss
+from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.utils.ema import EMA
 
@@ -382,7 +383,8 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
-            original_logits=torch.randn(batch, 8),
+            original_logits=torch.randn(batch, num_actions),
+            computed_logits=torch.zeros(batch, num_actions),
             model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
@@ -409,10 +411,12 @@ class TestTrinalClipPPOLoss:
             batch=batch_sample,
         )
 
+        import math
+
         assert torch.isfinite(out.total_loss)  # smoke check
-        assert torch.isfinite(out.policy_loss)
-        assert torch.isfinite(out.value_loss)
-        assert torch.isfinite(out.entropy)
+        assert isinstance(out.policy_loss, float) and math.isfinite(out.policy_loss)
+        assert isinstance(out.value_loss, float) and math.isfinite(out.value_loss)
+        assert isinstance(out.entropy, float) and math.isfinite(out.entropy)
 
     def test_value_clipping_symmetry(self):
         """Test that value clipping works correctly with symmetric bounds."""
@@ -448,7 +452,8 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
-            original_logits=torch.randn(batch, 8),
+            original_logits=torch.randn(batch, 9),
+            computed_logits=torch.zeros(batch, 9),
             model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
@@ -476,7 +481,9 @@ class TestTrinalClipPPOLoss:
         )
 
         # Value loss computed vs clipped returns; ensure finite
-        assert torch.isfinite(out.value_loss)
+        import math
+
+        assert isinstance(out.value_loss, float) and math.isfinite(out.value_loss)
         assert torch.isfinite(out.total_loss)
 
     def test_huber_vs_mse_value_loss(self):
@@ -512,7 +519,8 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
-            original_logits=torch.randn(batch, 8),
+            original_logits=torch.randn(batch, 9),
+            computed_logits=torch.zeros(batch, 9),
             model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
@@ -560,8 +568,14 @@ class TestTrinalClipPPOLoss:
         )
 
         # Both should produce finite losses
-        assert torch.isfinite(out_mse.value_loss)
-        assert torch.isfinite(out_huber.value_loss)
+        import math
+
+        assert isinstance(out_mse.value_loss, float) and math.isfinite(
+            out_mse.value_loss
+        )
+        assert isinstance(out_huber.value_loss, float) and math.isfinite(
+            out_huber.value_loss
+        )
         assert torch.isfinite(out_mse.total_loss)
         assert torch.isfinite(out_huber.total_loss)
 
@@ -598,7 +612,8 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
-            original_logits=torch.randn(batch, 8),
+            original_logits=torch.randn(batch, 9),
+            computed_logits=torch.zeros(batch, 9),
             model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
@@ -628,8 +643,7 @@ class TestTrinalClipPPOLoss:
             batch=batch_sample,
         )
 
-        # Epsilon should be adapted (reduced due to high KL)
-        # With target_kl=0.015 and kl_ema.value=0.001, epsilon should be 0.2 * (0.015/0.001) = 3.0
-        # But clamped to [0.1, 0.4], so it becomes 0.4
+        # Epsilon should be adapted and clamped based on EMA behavior
+        # EMA(0.99) of a single update to 0.1 gives ~0.001, so epsilon scales to ~3.0 and clamps to 0.4
         assert out.epsilon == 0.4
         assert torch.isfinite(out.total_loss)

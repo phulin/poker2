@@ -51,7 +51,7 @@ class TestVectorizedReplayBuffer:
         assert buffer.transition_token_ends.shape == (10, 20)
         assert buffer.current_token_positions.shape == (10,)
         assert buffer.action_indices.shape == (10, 20)  # Action indices
-        assert buffer.log_probs.shape == (10, 20, 5)
+        assert buffer.logits.shape == (10, 20, 5)
         assert buffer.rewards.shape == (10, 20)
         assert buffer.dones.shape == (10, 20)
         assert buffer.legal_masks.shape == (10, 20, 5)
@@ -493,7 +493,7 @@ class TestVectorizedReplayBuffer:
         for attr_name in [
             "data",
             "action_indices",
-            "log_probs",
+            "logits",
             "rewards",
             "dones",
             "legal_masks",
@@ -781,7 +781,7 @@ class TestVectorizedReplayBuffer:
         assert sampled.embedding_data.token_ids.shape[0] == 5
         assert sampled.embedding_data.card_ranks.shape[0] == 5
         assert sampled.action_indices.shape[0] == 5
-        assert sampled.logits.shape == (5, buffer.num_bet_bins)
+        assert sampled.original_logits.shape == (5, buffer.num_bet_bins)
         assert sampled.selected_log_probs.shape[0] == 5
         assert sampled.all_log_probs.shape == (5, buffer.num_bet_bins)
         assert sampled.advantages.shape[0] == 5
@@ -1492,7 +1492,7 @@ class TestVectorizedReplayBuffer:
         assert buffer.trajectory_lengths[4] == 2  # Complete
 
         # Test that we can sample from all trajectories
-        rng = torch.Generator()
+        rng = torch.Generator(device=buffer.device)
         rng.manual_seed(42)
 
         # Sample multiple times to ensure all trajectories are accessible

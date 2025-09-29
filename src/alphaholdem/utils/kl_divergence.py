@@ -48,7 +48,7 @@ def compute_kl_divergence_batch(
         legal_masks: Optional boolean mask of shape [B, A] indicating legal actions (True=legal, False=illegal)
 
     Returns:
-        Average KL divergence across the batch
+        Average KL divergence KL(logits1 || logits2)
     """
     assert logits1.shape == logits2.shape
 

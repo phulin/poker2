@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.utils.ema import EMA
-from alphaholdem.utils.kl_divergence import compute_kl_divergence_batch
 
 
 @dataclass
@@ -388,6 +387,7 @@ class KLPolicyPPOLoss(LossCalculator):
 
     def __init__(
         self,
+        popart_normalizer: PopArtNormalizer,
         value_coef: float,
         entropy_coef: float,
         value_loss_type: str = "huber",
@@ -413,8 +413,9 @@ class KLPolicyPPOLoss(LossCalculator):
         self.target_kl = target_kl
         self.kl_type = kl_type
         self.kl_ema = kl_ema
+        self.popart = popart_normalizer
 
-    def _adapt_beta(self, kl_value: torch.Tensor) -> None:
+    def _adapt_beta(self, kl_value: float) -> None:
         # Simple proportional controller; keep beta bounded.
         with torch.no_grad():
             target = self.target_kl
@@ -429,44 +430,57 @@ class KLPolicyPPOLoss(LossCalculator):
 
     def compute_loss(
         self,
-        logits: torch.Tensor,  # new logits (B, A)
-        values: torch.Tensor,  # new values (B,)
+        log_probs: torch.Tensor,
+        values: torch.Tensor,
         batch: BatchSample,
     ) -> LossResult:
         actions = batch.action_indices
         advantages = batch.advantages
         returns = batch.returns
+        delta2 = batch.delta2
+        delta3 = batch.delta3
 
         # --- Mask illegal actions on BOTH distributions
-        legal_masks = batch.legal_masks  # or batch.embedding_data.legal_masks
-        new_masked = torch.where(
-            legal_masks, logits, torch.tensor(-1e9, device=logits.device)
+        legal_masks = batch.legal_masks.bool()
+        masked_log_p_new = torch.where(
+            legal_masks, log_probs, torch.full_like(log_probs, -1e9)
         )
-        old_logits = batch.original_logits
+        masked_old_logits = torch.where(
+            legal_masks,
+            batch.computed_logits,
+            torch.full_like(batch.computed_logits, -1e9),
+        )
 
         # --- Log-probs & distributions
-        log_p_new = torch.log_softmax(new_masked, dim=-1)
-
-        # log π_theta(a|s) for taken actions
+        log_p_new = masked_log_p_new
+        log_p_old = torch.log_softmax(masked_old_logits, dim=-1)
+        p_new = log_p_new.exp()
+        p_old = log_p_old.exp()
         new_logp_a = log_p_new.gather(1, actions.unsqueeze(1)).squeeze(1)
 
         # --- Policy gradient term (no ratio/clipping)
         pg_loss = -(new_logp_a * advantages).mean()
 
         # --- KL penalty
-        kl = compute_kl_divergence_batch(old_logits, logits, legal_masks)
-        policy_loss = pg_loss + self.beta * kl
+        if self.kl_type == "reverse":
+            # KL(new || old)
+            kl_tensor = (p_new * (log_p_new - log_p_old)).sum(dim=-1).mean()
+        else:
+            # KL(old || new)
+            kl_tensor = (p_old * (log_p_old - log_p_new)).sum(dim=-1).mean()
+        policy_loss = pg_loss + self.beta * kl_tensor
 
         # --- Value loss (Huber or MSE)
+        clipped_returns = returns  # torch.clamp(returns, delta2, delta3)
+        return_clipfrac = (torch.abs(clipped_returns - returns) > 1e-8).float().mean()
+        mu_frozen, sigma_frozen = self.popart.get_frozen_stats()
+        targets_n = (clipped_returns - mu_frozen) / (sigma_frozen + 1e-8)
         if self.value_loss_type == "huber":
-            value_loss = torch.nn.functional.smooth_l1_loss(
-                values, returns, beta=self.huber_delta
-            )
+            value_loss = F.smooth_l1_loss(values, targets_n, beta=self.huber_delta)
         else:
-            value_loss = torch.nn.functional.mse_loss(values, returns)
+            value_loss = F.mse_loss(values, targets_n)
 
         # --- Entropy bonus of the *new* policy
-        p_new = log_p_new.exp()
         entropy = -(p_new * log_p_new).sum(dim=-1).mean()
 
         # --- Total
@@ -475,7 +489,8 @@ class KLPolicyPPOLoss(LossCalculator):
         )
 
         # --- Adapt beta toward target KL (after computing loss)
-        self._adapt_beta(kl)
+        kl_value = float(kl_tensor.detach().item())
+        self._adapt_beta(kl_value)
 
         # For metrics, reuse fields even if not strictly applicable
         return LossResult(
@@ -488,7 +503,7 @@ class KLPolicyPPOLoss(LossCalculator):
             epsilon=0.0,
             clipfrac=0.0,  # no clipping in KL-PPO
             ppo_clipfrac=0.0,  # no PPO clipping in KL-PPO
-            return_clipfrac=0.0,  # no return clipping in KL-PPO
+            return_clipfrac=return_clipfrac.item(),
         )
 
 
