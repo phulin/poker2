@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -9,6 +10,7 @@ import torch.nn.functional as F
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.utils.ema import EMA
+from alphaholdem.utils.kl_divergence import compute_kl_divergence_batch
 
 
 @dataclass
@@ -16,18 +18,18 @@ class LossResult:
     """Dataclass for loss calculation results."""
 
     total_loss: torch.Tensor
-    policy_loss: torch.Tensor
-    value_loss: torch.Tensor
-    entropy: torch.Tensor
-    ratio_mean: torch.Tensor
-    ratio_std: torch.Tensor
+    policy_loss: float
+    value_loss: float
+    entropy: float
+    ratio_mean: float
+    ratio_std: float
     epsilon: float
-    clipfrac: torch.Tensor
-    ppo_clipfrac: torch.Tensor
-    return_clipfrac: torch.Tensor
+    clipfrac: float
+    ppo_clipfrac: float
+    return_clipfrac: float
     # Optional fields for specific loss types
-    clipped_ratio_mean: torch.Tensor = None
-    clipped_ratio_std: torch.Tensor = None
+    clipped_ratio_mean: Optional[float] = None
+    clipped_ratio_std: Optional[float] = None
 
 
 class LossCalculator(ABC):
@@ -200,15 +202,15 @@ class TrinalClipPPOLoss(LossCalculator):
 
         return LossResult(
             total_loss=total_loss,
-            policy_loss=policy_loss,
-            value_loss=value_loss,
-            entropy=entropy,
-            ratio_mean=ratio.mean(),
-            ratio_std=ratio.std(),
+            policy_loss=policy_loss.item(),
+            value_loss=value_loss.item(),
+            entropy=entropy.item(),
+            ratio_mean=ratio.mean().item(),
+            ratio_std=ratio.std().item(),
             epsilon=epsilon,
-            clipfrac=clipfrac,
-            ppo_clipfrac=ppo_clipfrac,
-            return_clipfrac=return_clipfrac,
+            clipfrac=clipfrac.item(),
+            ppo_clipfrac=ppo_clipfrac.item(),
+            return_clipfrac=return_clipfrac.item(),
         )
 
 
@@ -258,19 +260,15 @@ class StandardPPOLoss(LossCalculator):
 
         return LossResult(
             total_loss=total_loss,
-            policy_loss=policy_loss,
-            value_loss=value_loss,
-            entropy=entropy,
-            ratio_mean=ratio.mean(),
-            ratio_std=ratio.std(),
+            policy_loss=policy_loss.item(),
+            value_loss=value_loss.item(),
+            entropy=entropy.item(),
+            ratio_mean=ratio.mean().item(),
+            ratio_std=ratio.std().item(),
             epsilon=self.epsilon,
-            clipfrac=torch.tensor(
-                0.0, device=total_loss.device
-            ),  # No clipping in standard PPO
-            ppo_clipfrac=ppo_clipfrac,
-            return_clipfrac=torch.tensor(
-                0.0, device=total_loss.device
-            ),  # No return clipping in standard PPO
+            clipfrac=0.0,
+            ppo_clipfrac=ppo_clipfrac.item(),
+            return_clipfrac=0.0,
         )
 
 
@@ -359,19 +357,139 @@ class DualClipPPOLoss(LossCalculator):
 
         return LossResult(
             total_loss=total_loss,
-            policy_loss=policy_loss,
-            value_loss=value_loss,
-            entropy=entropy,
-            ratio_mean=ratio.mean(),
-            ratio_std=ratio.std(),
+            policy_loss=policy_loss.item(),
+            value_loss=value_loss.item(),
+            entropy=entropy.item(),
+            ratio_mean=ratio.mean().item(),
+            ratio_std=ratio.std().item(),
             epsilon=self.epsilon,
-            clipfrac=torch.tensor(
-                0.0, device=total_loss.device
-            ),  # No value clipping in dual-clip PPO
-            ppo_clipfrac=ppo_clipfrac,
-            return_clipfrac=torch.tensor(
-                0.0, device=total_loss.device
-            ),  # No return clipping in dual-clip PPO
-            clipped_ratio_mean=clipped.mean(),
-            clipped_ratio_std=clipped.std(),
+            clipfrac=0.0,
+            ppo_clipfrac=ppo_clipfrac.item(),
+            return_clipfrac=0.0,
+            clipped_ratio_mean=clipped.mean().item(),
+            clipped_ratio_std=clipped.std().item(),
         )
+
+
+# --- Add this to losses.py -----------------------------------------------
+class KLPolicyPPOLoss(LossCalculator):
+    """
+    PPO with KL penalty instead of ratio clipping.
+
+    Policy loss:
+      L = -E[ log π_theta(a|s) * A ] + beta * KL(π_old || π_theta)
+    plus value loss and entropy bonus.
+
+    Requirements:
+      - batch.old_logits: masked the same way and computed with the frozen π_old
+      - batch.legal_masks: boolean mask for legal actions
+      - batch.action_indices, batch.advantages, batch.returns
+    """
+
+    def __init__(
+        self,
+        value_coef: float,
+        entropy_coef: float,
+        value_loss_type: str = "huber",
+        huber_delta: float = 1.0,
+        target_kl: float = 0.015,
+        beta_init: float = 1.0,
+        beta_min: float = 1e-4,
+        beta_max: float = 1e4,
+        kl_type: str = "forward",  # "forward" (KL(p_old||p_new)) or "reverse"
+        kl_ema: EMA | None = None,  # optional, for logging/smoothing
+    ):
+        # epsilon unused here; keep API compatibility by passing a dummy (e.g., 0.2)
+        super().__init__(
+            epsilon=0.2,
+            value_coef=value_coef,
+            entropy_coef=entropy_coef,
+            value_loss_type=value_loss_type,
+            huber_delta=huber_delta,
+        )
+        self.beta = beta_init
+        self.beta_min = beta_min
+        self.beta_max = beta_max
+        self.target_kl = target_kl
+        self.kl_type = kl_type
+        self.kl_ema = kl_ema
+
+    def _adapt_beta(self, kl_value: torch.Tensor) -> None:
+        # Simple proportional controller; keep beta bounded.
+        with torch.no_grad():
+            target = self.target_kl
+            # gentle multiplicative adjustments
+            if kl_value > 1.5 * target:
+                self.beta = min(self.beta * 2.0, self.beta_max)
+            elif kl_value < 0.5 * target:
+                self.beta = max(self.beta * 0.5, self.beta_min)
+            # optional EMA logging
+            if self.kl_ema is not None:
+                self.kl_ema.update(float(kl_value))
+
+    def compute_loss(
+        self,
+        logits: torch.Tensor,  # new logits (B, A)
+        values: torch.Tensor,  # new values (B,)
+        batch: BatchSample,
+    ) -> LossResult:
+        actions = batch.action_indices
+        advantages = batch.advantages
+        returns = batch.returns
+
+        # --- Mask illegal actions on BOTH distributions
+        legal_masks = batch.legal_masks  # or batch.embedding_data.legal_masks
+        new_masked = torch.where(
+            legal_masks, logits, torch.tensor(-1e9, device=logits.device)
+        )
+        old_logits = batch.original_logits
+
+        # --- Log-probs & distributions
+        log_p_new = torch.log_softmax(new_masked, dim=-1)
+
+        # log π_theta(a|s) for taken actions
+        new_logp_a = log_p_new.gather(1, actions.unsqueeze(1)).squeeze(1)
+
+        # --- Policy gradient term (no ratio/clipping)
+        pg_loss = -(new_logp_a * advantages).mean()
+
+        # --- KL penalty
+        kl = compute_kl_divergence_batch(old_logits, logits, legal_masks)
+        policy_loss = pg_loss + self.beta * kl
+
+        # --- Value loss (Huber or MSE)
+        if self.value_loss_type == "huber":
+            value_loss = torch.nn.functional.smooth_l1_loss(
+                values, returns, beta=self.huber_delta
+            )
+        else:
+            value_loss = torch.nn.functional.mse_loss(values, returns)
+
+        # --- Entropy bonus of the *new* policy
+        p_new = log_p_new.exp()
+        entropy = -(p_new * log_p_new).sum(dim=-1).mean()
+
+        # --- Total
+        total_loss = (
+            policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+        )
+
+        # --- Adapt beta toward target KL (after computing loss)
+        self._adapt_beta(kl)
+
+        # For metrics, reuse fields even if not strictly applicable
+        return LossResult(
+            total_loss=total_loss,
+            policy_loss=policy_loss.item(),
+            value_loss=value_loss.item(),
+            entropy=entropy.item(),
+            ratio_mean=1.0,
+            ratio_std=0.0,
+            epsilon=0.0,
+            clipfrac=0.0,  # no clipping in KL-PPO
+            ppo_clipfrac=0.0,  # no PPO clipping in KL-PPO
+            return_clipfrac=0.0,  # no return clipping in KL-PPO
+        )
+
+
+# --- end of addition ------------------------------------------------------

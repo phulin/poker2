@@ -410,6 +410,18 @@ class SelfPlayTrainer:
                 nn.init.constant_(module.weight, 1)
                 nn.init.constant_(module.bias, 0)
 
+    def _autocast(self):
+        """
+        Autocast context manager shortcut.
+
+        Disabled if not using mixed precision.
+        """
+        return torch.amp.autocast(
+            self.device.type,
+            dtype=torch.bfloat16,
+            enabled=self.use_mixed_precision,
+        )
+
     @profile
     def collect_trajectory(
         self, opponent_snapshot: Optional[AgentSnapshot] = None
@@ -524,18 +536,6 @@ class SelfPlayTrainer:
                 transitions=transitions,
             ),
             final_reward_from_our_perspective,
-        )
-
-    def _autocast(self):
-        """
-        Autocast context manager shortcut.
-
-        Disabled if not using mixed precision.
-        """
-        return torch.amp.autocast(
-            self.device.type,
-            dtype=torch.bfloat16,
-            enabled=self.use_mixed_precision,
         )
 
     def _update_elo_from_rewards(
@@ -1052,18 +1052,20 @@ class SelfPlayTrainer:
             batch = self.replay_buffer.sample_batch(self.rng, self.batch_size)
             batch = batch.to(torch.float32)
 
+            # Permute suits to augment data.
             batch.embedding_data.permute_suits(self.rng)
 
-            # Update log-probs. Since we're using transformer, we need to permute suits.
+            # Update log-probs.
             for age, batch_idx in batch.group_by_model_age():
                 # Can avoid computing log-probs for current model, as we'll do that in forward pass.
                 # (This is a possibly-unnecessary optimization.)
-                if epoch == 0 and age == self.model_age:
-                    continue
-                model = self.model_history.get_model(age)
-                with torch.no_grad(), model_eval(model), self._autocast():
+                # NOTE: Can't actually do this b/c here we are under eval() and there we are under train().
+                # if epoch == 0 and age == self.model_age:
+                #     continue
+                frozen_model = self.model_history.get_model(age)
+                with torch.no_grad(), model_eval(frozen_model), self._autocast():
                     logits, log_probs, _ = get_logits_log_probs_values(
-                        model,
+                        frozen_model,
                         batch.embedding_data[batch_idx],
                         batch.legal_masks[batch_idx],
                     )
@@ -1092,13 +1094,13 @@ class SelfPlayTrainer:
                 )
 
                 # First epoch: update (old) logits and log probs for current model
-                if epoch == 0:
-                    current_idx = torch.where(batch.model_ages == self.model_age)[0]
-                    batch.update_logits_log_probs(
-                        current_idx,
-                        logits[current_idx].detach(),
-                        log_probs[current_idx].detach(),
-                    )
+                # if epoch == 0:
+                #     current_idx = torch.where(batch.model_ages == self.model_age)[0]
+                #     batch.update_logits_log_probs(
+                #         current_idx,
+                #         logits[current_idx].detach(),
+                #         log_probs[current_idx].detach(),
+                #     )
 
                 loss_result = self.loss_calculator.compute_loss(
                     log_probs=log_probs,
@@ -1109,7 +1111,7 @@ class SelfPlayTrainer:
             # Debugging metrics: explained variance
             with torch.no_grad():
                 y = batch.returns
-                yhat = values.detach()
+                yhat = self.popart_normalizer.denormalize_value(values.detach())
                 # Explained variance of value predictions against targets
                 var_y = y.var(correction=0)
                 var_err = (y - yhat).var(correction=0)
@@ -1117,17 +1119,18 @@ class SelfPlayTrainer:
 
                 # 3) Also log correlation (often more stable/interpretible)
                 # Use returns (y) and predicted values (yhat)
+                pearson_r = 0.0
                 if y.numel() >= 2:
                     pearson_r = torch.corrcoef(torch.stack([y, yhat]))[0, 1].item()
 
             total_loss += loss_result.total_loss.item()
-            total_policy_loss += loss_result.policy_loss.item()
-            total_value_loss += loss_result.value_loss.item()
-            total_entropy += loss_result.entropy.item()
-            total_clipfrac += loss_result.clipfrac.item()
-            total_ppo_clipfrac += loss_result.ppo_clipfrac.item()
-            total_return_clipfrac += loss_result.return_clipfrac.item()
-            total_explained_var += explained_var.item()
+            total_policy_loss += loss_result.policy_loss
+            total_value_loss += loss_result.value_loss
+            total_entropy += loss_result.entropy
+            total_clipfrac += loss_result.clipfrac
+            total_ppo_clipfrac += loss_result.ppo_clipfrac
+            total_return_clipfrac += loss_result.return_clipfrac
+            total_explained_var += explained_var
             total_pearson_r += pearson_r
             total_epsilon += loss_result.epsilon
             minibatch_count += 1
@@ -1208,7 +1211,7 @@ class SelfPlayTrainer:
         with torch.no_grad(), model_eval(self.model):
             kl_new_logits = self.model(kl_states.embedding_data).policy_logits.float()
             current_kl = compute_kl_divergence_batch(
-                kl_states.logits,
+                kl_states.computed_logits,
                 kl_new_logits,
                 kl_states.legal_masks,
             )
@@ -1373,9 +1376,9 @@ class SelfPlayTrainer:
             group["lr"] = lr_now * scale
 
         # Entropy coef linear decay with floor over first portion, then hold
-        ent_start = float(self.entropy_coef_start)
-        ent_final = float(self.entropy_coef_final)
-        portion = float(self.entropy_decay_portion)
+        ent_start = self.entropy_coef_start
+        ent_final = self.entropy_coef_final
+        portion = self.entropy_decay_portion
         if portion > 0:
             if t <= portion:
                 frac = t / portion

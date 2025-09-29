@@ -20,7 +20,8 @@ class BatchSample:
 
     embedding_data: Union[CNNEmbeddingData, StructuredEmbeddingData]
     action_indices: torch.Tensor
-    logits: torch.Tensor
+    original_logits: torch.Tensor
+    computed_logits: torch.Tensor
     selected_log_probs: torch.Tensor
     all_log_probs: torch.Tensor
     legal_masks: torch.Tensor
@@ -35,11 +36,10 @@ class BatchSample:
         return BatchSample(
             embedding_data=self.embedding_data,
             action_indices=self.action_indices,
-            logits=self.logits.to(dtype) if self.logits is not None else None,
+            original_logits=self.original_logits.to(dtype),
+            computed_logits=self.computed_logits.to(dtype),
             selected_log_probs=self.selected_log_probs.to(dtype),
-            all_log_probs=(
-                self.all_log_probs.to(dtype) if self.all_log_probs is not None else None
-            ),
+            all_log_probs=self.all_log_probs.to(dtype),
             legal_masks=self.legal_masks,
             advantages=self.advantages.to(dtype),
             returns=self.returns.to(dtype),
@@ -52,7 +52,7 @@ class BatchSample:
         self, idxs: torch.Tensor, logits: torch.Tensor, log_probs: torch.Tensor
     ) -> None:
         """Update log probabilities for a batch of transitions."""
-        self.logits[idxs] = logits.to(self.logits.dtype)
+        self.computed_logits[idxs] = logits.to(self.computed_logits.dtype)
         self.all_log_probs[idxs] = log_probs.to(self.all_log_probs.dtype)
         self.selected_log_probs[idxs] = (
             log_probs.gather(1, self.action_indices[idxs].unsqueeze(1))
@@ -71,7 +71,8 @@ class BatchSample:
         return BatchSample(
             embedding_data=self.embedding_data[idx],
             action_indices=self.action_indices[idx],
-            logits=self.logits[idx],
+            original_logits=self.original_logits[idx],
+            computed_logits=self.computed_logits[idx],
             selected_log_probs=self.selected_log_probs[idx],
             all_log_probs=self.all_log_probs[idx],
             legal_masks=self.legal_masks[idx],
@@ -172,9 +173,6 @@ class VectorizedReplayBuffer:
 
         self.action_indices = torch.zeros(C, T, dtype=torch.long, device=device)
         self.logits = torch.zeros(C, T, num_bet_bins, dtype=float_dtype, device=device)
-        self.log_probs = torch.zeros(
-            C, T, num_bet_bins, dtype=float_dtype, device=device
-        )
         self.rewards = torch.zeros(C, T, dtype=float_dtype, device=device)
         self.dones = torch.zeros(C, T, dtype=torch.bool, device=device)
         self.legal_masks = torch.zeros(
@@ -690,19 +688,20 @@ class VectorizedReplayBuffer:
             )
 
         action_indices_sel = self.action_indices[traj_indices, transition_indices]
-
-        # Use stored log_probs and logits instead of recomputing
-        all_log_probs = self.log_probs[traj_indices, transition_indices]
-        selected_log_probs = all_log_probs.gather(
-            1, action_indices_sel.unsqueeze(1)
-        ).squeeze(1)
+        original_logits = self.logits[traj_indices, transition_indices]
 
         return BatchSample(
             embedding_data=data,
             action_indices=action_indices_sel,
-            logits=self.logits[traj_indices, transition_indices],
-            selected_log_probs=selected_log_probs,
-            all_log_probs=all_log_probs,
+            original_logits=original_logits,
+            computed_logits=torch.zeros_like(original_logits),
+            # these will be filled in later by update_logits_log_probs.
+            selected_log_probs=torch.zeros(
+                batch_size,
+                dtype=self.float_dtype,
+                device=self.device,
+            ),
+            all_log_probs=torch.zeros_like(original_logits),
             legal_masks=self.legal_masks[traj_indices, transition_indices],
             advantages=self.advantages[traj_indices, transition_indices],
             returns=self.returns[traj_indices, transition_indices],
@@ -710,68 +709,6 @@ class VectorizedReplayBuffer:
             delta3=self.delta3[traj_indices, transition_indices],
             model_ages=self.model_ages[traj_indices],
         )
-
-    def compute_log_probs_for_buffer(self, model: torch.nn.Module) -> None:
-        """
-        Compute log probabilities for all valid transitions in the buffer.
-        This should be called after trajectories are added but before sampling.
-        """
-        if self.size == 0:
-            return
-
-        # Get all valid trajectory indices
-        valid_indices = torch.where(self.trajectory_lengths > 0)[0]
-        if len(valid_indices) == 0:
-            return
-
-        self.logits.zero_()
-        self.log_probs.zero_()
-
-        with torch.no_grad(), model_eval(model):
-            # Fully vectorized collection of all transitions from these trajectories (no for loops or list comprehensions)
-            traj_lengths = self.trajectory_lengths[valid_indices]  # [num_traj]
-            max_len = traj_lengths.max().item()
-            if max_len == 0:
-                return
-
-            # Create a [num_traj, max_len] matrix of step indices
-            step_range = torch.arange(max_len, device=self.device)
-            # Mask: True where step < traj_length for each trajectory
-            mask = step_range.unsqueeze(0) < traj_lengths.unsqueeze(
-                1
-            )  # [num_traj, max_len]
-
-            # Get all (traj_idx, step_idx) pairs for valid steps
-            valid_traj_idx = valid_indices.unsqueeze(1).expand(-1, max_len)[
-                mask
-            ]  # [total_steps]
-            valid_step_idx = step_range.unsqueeze(0).expand(len(valid_indices), -1)[
-                mask
-            ]  # [total_steps]
-
-            if self.is_transformer:
-                all_transitions_data = self._sample_transformer_steps(
-                    valid_traj_idx, valid_step_idx
-                )
-            else:
-                cards = self.cards_features[valid_traj_idx, valid_step_idx].to(
-                    self.float_dtype
-                )
-                actions = self.actions_features[valid_traj_idx, valid_step_idx].to(
-                    self.float_dtype
-                )
-                # For CNN, all_transitions_data will be a CNNEmbeddingData with batch dimension
-                all_transitions_data = CNNEmbeddingData(cards=cards, actions=actions)
-
-            # Get legal masks for all transitions (record on preceding context token)
-            legal_masks = self.legal_masks[valid_traj_idx, valid_step_idx]
-            logits, log_probs, _ = get_logits_log_probs_values(
-                model, all_transitions_data, legal_masks
-            )
-
-            # Store the logits and all log probs
-            self.logits[valid_traj_idx, valid_step_idx] = logits
-            self.log_probs[valid_traj_idx, valid_step_idx] = log_probs
 
     def clear(self) -> None:
         """Clear all stored trajectories."""

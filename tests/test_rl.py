@@ -96,7 +96,7 @@ def test_trinal_clip_ppo_loss():
     batch = BatchSample(
         embedding_data=embedding_data,
         action_indices=actions,
-        logits=logits,
+        original_logits=logits,
         selected_log_probs=log_probs_old,
         all_log_probs=log_probs_old,
         legal_masks=legal_masks,

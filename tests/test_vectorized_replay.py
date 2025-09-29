@@ -754,11 +754,6 @@ class TestVectorizedReplayBuffer:
 
                 return MockOutput()
 
-        mock_model = MockModel()
-
-        # Compute log probs for the buffer
-        buffer.compute_log_probs_for_buffer(mock_model)
-
         # Sample a batch
         rng = torch.Generator(device=buffer.device)
         sampled = buffer.sample_batch(rng, 5)
@@ -767,7 +762,8 @@ class TestVectorizedReplayBuffer:
         expected_attrs = {
             "embedding_data",
             "action_indices",
-            "logits",
+            "original_logits",
+            "computed_logits",
             "selected_log_probs",
             "all_log_probs",
             "advantages",

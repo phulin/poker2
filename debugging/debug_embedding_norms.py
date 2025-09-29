@@ -15,6 +15,7 @@ import os
 import sys
 
 import torch
+import torch.nn as nn
 
 from alphaholdem.core.structured_config import (
     Config,
@@ -23,6 +24,9 @@ from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
 from alphaholdem.models.transformer.tokens import (
+    CLS_INDEX,
+    HOLE0_INDEX,
+    HOLE1_INDEX,
     Special,
     get_card_token_id_offset,
     get_special_token_id_offset,
@@ -314,18 +318,19 @@ def test_suit_permutations(trainer: SelfPlayTrainer, device: torch.device) -> No
                 longest_trajectory_idx
             ]
             for step in range(trajectory_length):
-                action = trainer.replay_buffer.action_indices[
+                buffer = trainer.replay_buffer
+                action = buffer.action_indices[longest_trajectory_idx, step].item()
+                reward = buffer.rewards[longest_trajectory_idx, step].item()
+                done = buffer.dones[longest_trajectory_idx, step].item()
+                transition_end = buffer.transition_token_ends[
                     longest_trajectory_idx, step
                 ].item()
-                reward = trainer.replay_buffer.rewards[
-                    longest_trajectory_idx, step
+                data = buffer.data
+                actor = data.action_actors[
+                    longest_trajectory_idx, transition_end - 1
                 ].item()
-                done = trainer.replay_buffer.dones[longest_trajectory_idx, step].item()
-                actor = trainer.replay_buffer.data.action_actors[
-                    longest_trajectory_idx, step
-                ].item()
-                street = trainer.replay_buffer.data.token_streets[
-                    longest_trajectory_idx, step
+                street = data.token_streets[
+                    longest_trajectory_idx, transition_end - 1
                 ].item()
                 print(
                     f"  Step {step+1}: Player {actor} on Street {street} -> Action {action}, Reward {reward:.4f}, Done {done}"
@@ -367,7 +372,7 @@ def test_suit_permutations(trainer: SelfPlayTrainer, device: torch.device) -> No
                     f"Permutation {perm_idx+1}, Suit {suit_idx+1}: {[suit_names[s] for s in suit_permutations_list[perm_idx]]}"
                 )
                 print(f"  Value: {value_preds[i].item():.4f}")
-                print(f"  Action probs: {action_probs[i].cpu().numpy()}")
+                print(f"  Action probs: {action_probs[i].cpu()}")
                 print()
 
                 # Compare with other permutations
@@ -423,6 +428,213 @@ def test_suit_permutations(trainer: SelfPlayTrainer, device: torch.device) -> No
     print(
         f"Failed to collect a trajectory with at least 1 transition after {max_attempts} attempts."
     )
+
+
+def _extract_state_embedding(
+    model, structured_data: StructuredEmbeddingData
+) -> torch.Tensor:
+    """Return the latent representation used by the policy/value heads."""
+
+    embeddings = model.embedding(structured_data)
+    x = model.input_ffn(embeddings)
+    attention_mask = structured_data.attention_mask
+
+    for layer in model.layers:
+        x, _ = layer(x, attention_mask, model.cos, model.sin, None)
+
+    x = model.post_norm(x)
+
+    cls_state = x[:, CLS_INDEX]
+    hole_mean = (x[:, HOLE0_INDEX] + x[:, HOLE1_INDEX]) / 2
+    hole_diff = (x[:, HOLE0_INDEX] - x[:, HOLE1_INDEX]) / 2
+    hole_prod = x[:, HOLE0_INDEX] * x[:, HOLE1_INDEX]
+    features = torch.cat([cls_state, hole_mean, hole_diff, hole_prod], dim=-1)
+    return model.cls_mlp(features)
+
+
+def _truncate_to_transition(
+    data: StructuredEmbeddingData, end_token: int
+) -> StructuredEmbeddingData:
+    """Truncate a trajectory stream to the tokens observed at a transition."""
+
+    truncated = data.clone()
+    seq_len = truncated.token_ids.shape[1]
+    device = truncated.token_ids.device
+    if end_token < seq_len:
+        mask = torch.arange(seq_len, device=device) >= end_token
+        truncated.token_ids[:, mask] = -1
+        truncated.token_streets[:, mask] = 0
+        truncated.card_ranks[:, mask] = 0
+        truncated.card_suits[:, mask] = 0
+        truncated.action_actors[:, mask] = 0
+        truncated.action_legal_masks[:, mask] = False
+        truncated.context_features[:, mask] = 0
+    truncated.lengths = truncated.lengths.clamp(max=end_token)
+    truncated.lengths[:] = end_token
+    return truncated
+
+
+def collect_linear_probe_dataset(
+    trainer: SelfPlayTrainer,
+    device: torch.device,
+    target_samples: int = 1536,
+    max_collection_rounds: int = 32,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Collect embeddings and labels for linear probe diagnostics."""
+
+    embeddings: list[torch.Tensor] = []
+    labels: list[torch.Tensor] = []
+
+    collection_round = 0
+    card_offset = get_card_token_id_offset()
+
+    while len(embeddings) < target_samples and collection_round < max_collection_rounds:
+        collection_round += 1
+        trainer.collect_tensor_trajectories(
+            min_trajectories=max(1, trainer.tensor_env.N // 2),
+            add_to_replay_buffer=True,
+        )
+
+        total_trajectories = int(trainer.replay_buffer.size)
+        if total_trajectories == 0:
+            continue
+
+        traj_indices = torch.arange(total_trajectories, device=device)
+
+        with model_eval(trainer.model), torch.no_grad():
+            for traj_idx in traj_indices.tolist():
+                traj_length = int(
+                    trainer.replay_buffer.trajectory_lengths[traj_idx].item()
+                )
+                if traj_length == 0:
+                    continue
+
+                full_stream = trainer.replay_buffer.data[traj_idx : traj_idx + 1]
+
+                for step_idx in range(traj_length):
+                    if len(embeddings) >= target_samples:
+                        break
+
+                    end_token = int(
+                        trainer.replay_buffer.transition_token_ends[
+                            traj_idx, step_idx
+                        ].item()
+                    )
+                    if end_token <= HOLE1_INDEX:
+                        continue
+
+                    state = _truncate_to_transition(full_stream, end_token)
+                    if (state.token_ids[:, HOLE0_INDEX] < card_offset).any():
+                        continue
+
+                    latent = _extract_state_embedding(trainer.model, state)
+                    cards = state.get_hole_cards(player=0)
+                    ranks = cards % 13
+                    suits = cards // 13
+                    suited = (suits[:, 0] == suits[:, 1]).float()
+                    gaps = torch.abs(ranks[:, 0] - ranks[:, 1])
+                    gap_leq_one = (gaps <= 1).float()
+                    label = torch.stack([suited, gap_leq_one], dim=1)
+
+                    embeddings.append(latent.squeeze(0).detach().cpu())
+                    labels.append(label.squeeze(0).detach().cpu())
+
+    if len(embeddings) == 0:
+        raise RuntimeError(
+            "Failed to collect any embeddings for linear probe diagnostics."
+        )
+
+    features = torch.stack(embeddings)
+    targets = torch.stack(labels)
+    return features, targets
+
+
+def _compute_probe_accuracy(
+    logits: torch.Tensor, labels: torch.Tensor
+) -> tuple[float, list[float]]:
+    probs = torch.sigmoid(logits)
+    predictions = (probs >= 0.5).float()
+    correct = (predictions == labels).float()
+    per_task = correct.mean(dim=0)
+    overall = correct.mean().item()
+    return overall, per_task.tolist()
+
+
+def run_linear_probe_test(
+    trainer: SelfPlayTrainer,
+    device: torch.device,
+    samples: int = 1536,
+    epochs: int = 15,
+    batch_size: int = 128,
+    learning_rate: float = 5e-3,
+) -> None:
+    """Train linear probes to diagnose representation quality."""
+
+    print("=" * 80)
+    print("LINEAR PROBE DIAGNOSTICS")
+    print("=" * 80)
+
+    features_cpu, targets_cpu = collect_linear_probe_dataset(
+        trainer, device, target_samples=samples
+    )
+    num_samples, feature_dim = features_cpu.shape
+
+    print(f"Collected {num_samples} state embeddings with dimension {feature_dim}.")
+
+    indices = torch.randperm(num_samples)
+    split = max(int(num_samples * 0.8), 1)
+    train_idx = indices[:split]
+    val_idx = indices[split:]
+    if val_idx.numel() == 0:
+        val_idx = train_idx.clone()
+
+    train_features = features_cpu[train_idx].to(device)
+    train_labels = targets_cpu[train_idx].to(device)
+    val_features = features_cpu[val_idx].to(device)
+    val_labels = targets_cpu[val_idx].to(device)
+
+    probe = nn.Linear(feature_dim, 2, device=device)
+    optimizer = torch.optim.AdamW(probe.parameters(), lr=learning_rate)
+    criterion = nn.BCEWithLogitsLoss()
+
+    print("Training linear probe to predict:" "\n  • suited?" "\n  • gap ≤ 1?")
+
+    for epoch in range(1, epochs + 1):
+        probe.train()
+        permutation = torch.randperm(train_features.size(0), device=device)
+        epoch_loss = 0.0
+
+        for start in range(0, permutation.numel(), batch_size):
+            batch_indices = permutation[start : start + batch_size]
+            if batch_indices.numel() == 0:
+                continue
+
+            batch_features = train_features[batch_indices]
+            batch_labels = train_labels[batch_indices]
+
+            optimizer.zero_grad(set_to_none=True)
+            logits = probe(batch_features)
+            loss = criterion(logits, batch_labels)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item() * batch_indices.numel()
+
+        epoch_loss /= train_features.size(0)
+
+        probe.eval()
+        with torch.no_grad():
+            train_logits = probe(train_features)
+            val_logits = probe(val_features)
+
+        train_overall, train_tasks = _compute_probe_accuracy(train_logits, train_labels)
+        val_overall, val_tasks = _compute_probe_accuracy(val_logits, val_labels)
+
+        print(
+            f"Epoch {epoch:02d}: loss={epoch_loss:.4f} | "
+            f"train overall={train_overall:.3f} (suited={train_tasks[0]:.3f}, gap≤1={train_tasks[1]:.3f}) | "
+            f"val overall={val_overall:.3f} (suited={val_tasks[0]:.3f}, gap≤1={val_tasks[1]:.3f})"
+        )
 
 
 def main():
@@ -504,7 +716,10 @@ def main():
     analyze_embedding_norms(trainer)
 
     # Test suit permutations on river
-    test_suit_permutations(trainer, device_obj)
+    # test_suit_permutations(trainer, device_obj)
+
+    # Train linear probes on frozen encoder representations
+    run_linear_probe_test(trainer, device_obj)
 
 
 if __name__ == "__main__":

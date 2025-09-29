@@ -382,7 +382,7 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
-            logits=torch.randn(batch, 8),
+            original_logits=torch.randn(batch, 8),
             model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
@@ -448,7 +448,7 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
-            logits=torch.randn(batch, 8),
+            original_logits=torch.randn(batch, 8),
             model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
@@ -512,7 +512,7 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
-            logits=torch.randn(batch, 8),
+            original_logits=torch.randn(batch, 8),
             model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
@@ -598,7 +598,7 @@ class TestTrinalClipPPOLoss:
             returns=returns,
             delta2=torch.tensor(-100.0),
             delta3=torch.tensor(100.0),
-            logits=torch.randn(batch, 8),
+            original_logits=torch.randn(batch, 8),
             model_ages=torch.zeros(batch, dtype=torch.long),
         )
 
