@@ -654,15 +654,15 @@ class SelfPlayTrainer:
     def _compute_reference_distributions(self, batch: BatchSample) -> torch.Tensor:
         """Compute the reference action distributions for a batch of transitions."""
         with torch.no_grad(), model_eval(self.model), self._autocast():
-            # Get indices for current model
-            current_model_indices = torch.where(batch.model_ages == self.model_age)[0]
-            if len(current_model_indices) > 0:
+            # Get indices for non-current model (current model gets done below)
+            other_model_indices = torch.where(batch.model_ages != self.model_age)[0]
+            if len(other_model_indices) > 0:
                 log_probs = get_log_probs(
                     self.model,
-                    batch.embedding_data[current_model_indices],
-                    batch.legal_masks[current_model_indices],
+                    batch.embedding_data[other_model_indices],
+                    batch.legal_masks[other_model_indices],
                 )
-                batch.update_step_log_probs(current_model_indices, log_probs)
+                batch.update_step_log_probs(other_model_indices, log_probs)
 
             for age, batch_indices in batch.group_by_model_age():
                 frozen_model = self.model_history.get_model(age)
@@ -1147,7 +1147,8 @@ class SelfPlayTrainer:
             minibatch_count += 1
 
             # Update Beta Controller each minibatch based on penalty KL
-            self.beta_controller.update(loss_result.penalty_kl)
+            if loss_result.penalty_kl is not None:
+                self.beta_controller.update(loss_result.penalty_kl)
 
             # If we've gone too far from the starting policy, stop updating.
             if (
