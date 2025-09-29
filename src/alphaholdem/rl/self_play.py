@@ -1166,18 +1166,19 @@ class SelfPlayTrainer:
             pool_kl_divergence = 0.0
             last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
 
-            with (
-                torch.no_grad(),
-                model_eval(self.model),
-                self._autocast(),
-            ):
-                # Take a element sample from the current batch without replacement
-                last_opp_batch_size = batch.returns.shape[0]
-                last_opp_sample_size = max(last_opp_batch_size // 16, 16)
-                last_opp_states = batch.embedding_data[:last_opp_sample_size]
-                last_opp_legal_masks = batch.legal_masks[:last_opp_sample_size]
+            # Take a element sample from the current batch without replacement
+            last_opp_batch_size = batch.returns.shape[0]
+            last_opp_sample_size = max(last_opp_batch_size // 16, 16)
+            last_opp_states = batch.embedding_data[:last_opp_sample_size]
+            last_opp_legal_masks = batch.legal_masks[:last_opp_sample_size]
 
-                if last_admitted_opponent is not None:
+            if last_admitted_opponent is not None:
+                with (
+                    torch.no_grad(),
+                    model_eval(last_admitted_opponent.model),
+                    model_eval(self.model),
+                    self._autocast(),
+                ):
                     # Get last admitted opponent model logits
                     last_admitted_opponent.model.to(last_opp_states.device)
                     opponent_outputs = last_admitted_opponent.model(last_opp_states)
