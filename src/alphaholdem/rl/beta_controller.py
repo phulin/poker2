@@ -11,8 +11,8 @@ class BetaController:
     target_kl: float
     beta_init: float = 1.0
     beta_min: float = 1e-4
-    beta_max: float = 10.0
-    increase_factor: float = 1.4
+    beta_max: float = 1e4
+    increase_factor: float = 2.0
     decrease_factor: float = 0.7
     upper_threshold: float = 1.5
     lower_threshold: float = 0.5

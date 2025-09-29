@@ -28,6 +28,7 @@ class LossResult:
     clipfrac: float
     ppo_clipfrac: float
     return_clipfrac: float
+    penalty_kl: Optional[float] = None
     # Optional fields for specific loss types
     clipped_ratio_mean: Optional[float] = None
     clipped_ratio_std: Optional[float] = None
@@ -437,7 +438,7 @@ class KLPolicyPPOLoss(LossCalculator):
         else:
             # KL(new || old)
             penalty_kl = (p_new * (log_p_new - log_p_step)).sum(dim=-1).mean()
-        policy_loss = pg_loss + self.beta_controller.beta * penalty_kl
+        policy_loss = pg_loss
 
         # --- Value loss (Huber or MSE)
         clipped_returns = torch.clamp(returns, delta2, delta3)
@@ -454,7 +455,10 @@ class KLPolicyPPOLoss(LossCalculator):
 
         # --- Total
         total_loss = (
-            policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+            policy_loss
+            + self.beta_controller.beta * penalty_kl
+            + self.value_coef * value_loss
+            - self.entropy_coef * entropy
         )
 
         # For metrics, reuse fields even if not strictly applicable
@@ -463,6 +467,7 @@ class KLPolicyPPOLoss(LossCalculator):
             policy_loss=policy_loss.item(),
             value_loss=value_loss.item(),
             entropy=entropy.item(),
+            penalty_kl=penalty_kl.item(),
             ratio_mean=1.0,
             ratio_std=0.0,
             epsilon=0.0,

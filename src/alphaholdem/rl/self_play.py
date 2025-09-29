@@ -1146,6 +1146,9 @@ class SelfPlayTrainer:
             total_epsilon += loss_result.epsilon
             minibatch_count += 1
 
+            # Update Beta Controller each minibatch based on penalty KL
+            self.beta_controller.update(current_kl)
+
             self.optimizer.zero_grad()
 
             # Use scaler for mixed precision backward pass. Will have enabled=False if not using mixed precision.
@@ -1236,9 +1239,6 @@ class SelfPlayTrainer:
 
         # Update KL divergence exponential moving average
         self.kl_ema.update(current_kl)
-
-        # Update Beta Controller based on current KL
-        self.beta_controller.update(current_kl)
 
         # Apply final PopArt rescaling after last epoch
         if self.popart_normalizer.mean_ema.initialized:
@@ -1386,12 +1386,12 @@ class SelfPlayTrainer:
         else:
             lr_now = lr_start
 
-        if self.kl_ema.initialized:
-            kl_ratio = max(1e-8, self.kl_ema.value / TARGET_KL)
-            kl_scale = 1.0 / (kl_ratio**0.5)
-            # Clamp lr scaling to a reasonable range
-            kl_scale = min(max(kl_scale, 0.25), 4.0)
-            lr_now *= kl_scale
+        # if self.kl_ema.initialized:
+        #     kl_ratio = max(1e-8, self.kl_ema.value / TARGET_KL)
+        #     kl_scale = 1.0 / (kl_ratio**0.5)
+        #     # Clamp lr scaling to a reasonable range
+        #     kl_scale = min(max(kl_scale, 0.25), 4.0)
+        #     lr_now *= kl_scale
 
         # Update optimizer groups preserving relative scales
         for scale, group in zip(
