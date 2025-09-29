@@ -39,7 +39,7 @@ seed: 0
 learning_rate: 1e-4
 # Batches of 4096, replay buffer 4 * 4096 = 16384, sample 4 batches (=1 epoch) per iteration
 batch_size: 1024
-num_epochs: 4
+episodes_per_step: 4
 replay_buffer_batches: 4
 value_loss_type: huber
 huber_delta: 1.0

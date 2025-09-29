@@ -96,7 +96,7 @@ def test_selfplay_with_kbest():
         train=TrainingConfig(
             learning_rate=1e-3,
             batch_size=4,  # Small batch for testing
-            num_epochs=1,  # Only 1 epoch instead of 4
+            episodes_per_step=1,  # Only 1 epoch instead of 4
         ),
         model=ModelConfig(),
         env=EnvConfig(),

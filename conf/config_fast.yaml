@@ -39,7 +39,7 @@ exploiter:
   training_steps: 20      # Fewer steps for fast testing
   learning_rate: 3e-4     # Higher LR for faster adaptation
   batch_size: 256         # Smaller batch for fast testing
-  num_epochs: 2           # Fewer epochs per update
+  episodes_per_step: 2           # Fewer epochs per update
   entropy_coef: 0.005     # Lower entropy for more focused exploitation
 
 # === TRAINING HYPERPARAMETERS ===
@@ -48,7 +48,7 @@ train:
   learning_rate_final: 1e-4
   lr_schedule: cosine
   batch_size: 256
-  num_epochs: 2
+  episodes_per_step: 2
   replay_buffer_batches: 2
   max_trajectory_length: 20
   max_sequence_length: 50

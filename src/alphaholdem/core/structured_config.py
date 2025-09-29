@@ -11,7 +11,7 @@ class TrainingConfig:
     learning_rate_final: float = 1e-5
     lr_schedule: str = "cosine"  # Learning rate schedule type
     batch_size: int = 1024
-    num_epochs: int = 4
+    episodes_per_step: int = 4
     replay_buffer_batches: int = 4
     max_trajectory_length: int = 12  # Maximum steps per trajectory in replay buffer
     max_sequence_length: int = 50  # Maximum sequence length for transformer models
@@ -105,7 +105,7 @@ class ExploiterConfig:
     training_steps: int = 50  # Number of steps to train exploiter
     learning_rate: float = 3e-4  # Higher LR for faster adaptation
     batch_size: int = 512  # Smaller batch for faster training
-    num_epochs: int = 2  # Fewer epochs per update
+    episodes_per_step: int = 2  # Fewer epochs per update
     entropy_coef: float = 0.005  # Lower entropy for more focused exploitation
 
 

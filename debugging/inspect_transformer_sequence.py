@@ -601,7 +601,7 @@ def main(actions: Iterable[int]) -> None:
         num_envs=1,
         train=TrainingConfig(
             batch_size=64,
-            num_epochs=4,
+            episodes_per_step=4,
             max_trajectory_length=12,
             max_sequence_length=47,
             learning_rate=1e-4,

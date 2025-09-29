@@ -168,7 +168,9 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
         exploiter_cfg = merged_config
         exploiter_cfg.train.learning_rate = merged_config.exploiter.learning_rate
         exploiter_cfg.train.batch_size = merged_config.exploiter.batch_size
-        exploiter_cfg.train.num_epochs = merged_config.exploiter.num_epochs
+        exploiter_cfg.train.episodes_per_step = (
+            merged_config.exploiter.episodes_per_step
+        )
         exploiter_cfg.train.entropy_coef = merged_config.exploiter.entropy_coef
 
         exploiter_trainer = SelfPlayTrainer(cfg=exploiter_cfg, device=device)

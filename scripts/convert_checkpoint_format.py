@@ -72,7 +72,7 @@ def convert_checkpoint(
         config = Config(
             train=TrainingConfig(
                 batch_size=config_dict.get("batch_size", 32),
-                num_epochs=config_dict.get("num_epochs", 4),
+                episodes_per_step=config_dict.get("episodes_per_step", 4),
                 gamma=config_dict.get("gamma", 0.999),
                 gae_lambda=config_dict.get("gae_lambda", 0.95),
                 epsilon=config_dict.get("epsilon", 0.2),

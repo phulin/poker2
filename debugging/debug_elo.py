@@ -30,7 +30,7 @@ def debug_elo_system():
         min_elo_diff=50.0,
         learning_rate=1e-3,
         batch_size=64,
-        num_epochs=4,
+        episodes_per_step=4,
         gamma=0.999,
         gae_lambda=0.95,
         epsilon=0.2,

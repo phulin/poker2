@@ -214,7 +214,7 @@ def benchmark_memory_vs_compute():
     # Estimate compute overhead
     # Based on our benchmarks, conversion adds ~0.02μs per batch
     # Training typically does multiple epochs per step
-    epochs_per_step = cfg.train.num_epochs
+    epochs_per_step = cfg.train.episodes_per_step
     conversion_overhead_per_epoch = 0.02  # μs
     total_conversion_overhead = conversion_overhead_per_epoch * epochs_per_step
 

@@ -89,7 +89,7 @@ class SelfPlayTrainer:
     cfg: Config
     device: torch.device
     batch_size: int
-    num_epochs: int
+    episodes_per_step: int
     gamma: float
     gae_lambda: float
     epsilon: float
@@ -143,7 +143,7 @@ class SelfPlayTrainer:
 
         # Hydra config - extract parameters from nested structure
         self.batch_size = cfg.train.batch_size
-        self.num_epochs = cfg.train.num_epochs
+        self.episodes_per_step = cfg.train.episodes_per_step
         self.gamma = cfg.train.gamma
         self.gae_lambda = cfg.train.gae_lambda
         self.epsilon = cfg.train.ppo_eps
@@ -361,7 +361,7 @@ class SelfPlayTrainer:
                 "config": {
                     "learning_rate": lr,
                     "batch_size": self.batch_size,
-                    "num_epochs": self.num_epochs,
+                    "episodes_per_step": self.episodes_per_step,
                     "gamma": self.gamma,
                     "gae_lambda": self.gae_lambda,
                     "epsilon": self.epsilon,
@@ -1080,7 +1080,7 @@ class SelfPlayTrainer:
 
         # Freeze PopArt stats at the beginning of each epoch cycle
         self.popart_normalizer.freeze_stats()
-        for epoch in range(self.num_epochs):
+        for epoch in range(self.episodes_per_step):
             # Sample batch from vectorized buffer
             batch = self.replay_buffer.sample_batch(self.rng, self.batch_size)
             batch = batch.to(torch.float32)
@@ -1257,7 +1257,7 @@ class SelfPlayTrainer:
 
         return {
             "avg_reward": avg_reward,
-            "num_samples": self.batch_size * self.num_epochs,
+            "num_samples": self.batch_size * self.episodes_per_step,
             "delta2_mean": float(batch.delta2.mean().item()),
             "delta3_mean": float(batch.delta3.mean().item()),
             "avg_trajectory_length": avg_trajectory_length,
@@ -1531,7 +1531,7 @@ class SelfPlayTrainer:
             "config": {
                 "num_bet_bins": self.num_bet_bins,
                 "batch_size": self.batch_size,
-                "num_epochs": self.num_epochs,
+                "episodes_per_step": self.episodes_per_step,
                 "gamma": self.gamma,
                 "gae_lambda": self.gae_lambda,
                 "epsilon": self.epsilon,
