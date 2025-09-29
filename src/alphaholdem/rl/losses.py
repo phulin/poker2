@@ -442,7 +442,7 @@ class KLPolicyPPOLoss(LossCalculator):
         returns = batch.returns
         delta2 = batch.delta2
         delta3 = batch.delta3
-        old_logits = batch.computed_logits
+        log_p_old = batch.all_log_probs
 
         # --- Mask illegal actions
         legal_masks = batch.legal_masks.bool()
@@ -458,11 +458,15 @@ class KLPolicyPPOLoss(LossCalculator):
         # --- KL penalty
         if self.kl_type == "forward":
             # KL(old || new)
-            kl_value = compute_kl_divergence_batch(old_logits, logits, legal_masks)
+            kl_tensor = F.kl_div(
+                log_p_new, log_p_old, log_target=True, reduction="batchmean"
+            )
         else:
             # KL(new || old)
-            kl_value = compute_kl_divergence_batch(logits, old_logits, legal_masks)
-        policy_loss = pg_loss + self.beta * kl_value
+            kl_tensor = F.kl_div(
+                log_p_old, log_p_new, log_target=True, reduction="batchmean"
+            )
+        policy_loss = pg_loss + self.beta * kl_tensor
 
         # --- Value loss (Huber or MSE)
         clipped_returns = torch.clamp(returns, delta2, delta3)
@@ -484,6 +488,7 @@ class KLPolicyPPOLoss(LossCalculator):
         )
 
         # --- Adapt beta toward target KL (after computing loss)
+        kl_value = kl_tensor.item()
         self._adapt_beta(kl_value)
 
         # For metrics, reuse fields even if not strictly applicable
