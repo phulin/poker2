@@ -1225,6 +1225,9 @@ class SelfPlayTrainer:
         # Update KL divergence exponential moving average
         self.kl_ema.update(current_kl)
 
+        # Update Beta Controller based on kl_ema
+        self.beta_controller.update(self.kl_ema.value)
+
         # Apply final PopArt rescaling after last epoch
         if self.popart_normalizer.mean_ema.initialized:
             weight_scale, bias_adjustment = (
@@ -1300,9 +1303,6 @@ class SelfPlayTrainer:
         self.model.train()
         update_stats = self.update_model(step)
         self.model.eval()
-
-        if "approx_kl" in update_stats:
-            self.beta_controller.update(update_stats["approx_kl"])
 
         # Prepare training stats for return and logging
         learning_rate = self.optimizer.param_groups[-1]["lr"]
