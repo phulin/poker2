@@ -29,6 +29,8 @@ class LossResult:
     ppo_clipfrac: float
     return_clipfrac: float
     penalty_kl: Optional[float] = None
+    forward_kl: Optional[float] = None
+    reverse_kl: Optional[float] = None
     # Optional fields for specific loss types
     clipped_ratio_mean: Optional[float] = None
     clipped_ratio_std: Optional[float] = None
@@ -427,18 +429,14 @@ class KLPolicyPPOLoss(LossCalculator):
 
         # --- Policy gradient term with importance ratio
         ratio = torch.exp(log_p_new_a - log_p_old_a)
-        pg_loss = -(ratio * advantages).mean()
+        policy_loss = -(ratio * advantages).mean()
 
         # --- KL penalty
-        if self.kl_type == "forward":
-            # KL(old || new)
-            penalty_kl = (
-                (log_p_step.exp() * (log_p_step - log_p_new)).sum(dim=-1).mean()
-            )
-        else:
-            # KL(new || old)
-            penalty_kl = (p_new * (log_p_new - log_p_step)).sum(dim=-1).mean()
-        policy_loss = pg_loss
+        # KL(old || new)
+        forward_kl = (log_p_step.exp() * (log_p_step - log_p_new)).sum(dim=-1).mean()
+        # KL(new || old)
+        reverse_kl = (p_new * (log_p_new - log_p_step)).sum(dim=-1).mean()
+        penalty_kl = forward_kl if self.kl_type == "forward" else reverse_kl
 
         # --- Value loss (Huber or MSE)
         clipped_returns = torch.clamp(returns, delta2, delta3)
@@ -468,6 +466,8 @@ class KLPolicyPPOLoss(LossCalculator):
             value_loss=value_loss.item(),
             entropy=entropy.item(),
             penalty_kl=penalty_kl.item(),
+            forward_kl=forward_kl.item(),
+            reverse_kl=reverse_kl.item(),
             ratio_mean=1.0,
             ratio_std=0.0,
             epsilon=0.0,

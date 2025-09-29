@@ -1223,19 +1223,23 @@ class SelfPlayTrainer:
             print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
         # Compute diagnostic KL: divergence from last model batch.
-        with torch.no_grad(), model_eval(self.model), self._autocast():
-            kl_new_log_probs = get_log_probs(
-                self.model,
-                kl_states.embedding_data,
-                kl_states.legal_masks,
-            )
-            # KL(old || new)
-            current_kl = F.kl_div(
-                kl_new_log_probs,
-                kl_old_log_probs,
-                log_target=True,
-                reduction="batchmean",
-            )
+        if loss_result.forward_kl is None:
+            with torch.no_grad(), model_eval(self.model), self._autocast():
+                kl_new_log_probs = get_log_probs(
+                    self.model,
+                    kl_states.embedding_data,
+                    kl_states.legal_masks,
+                )
+                # KL(old || new)
+                current_kl = F.kl_div(
+                    kl_new_log_probs,
+                    kl_old_log_probs,
+                    log_target=True,
+                    reduction="batchmean",
+                )
+        else:
+            # If we compute KL for loss, use that.
+            current_kl = loss_result.forward_kl
 
         # Update KL divergence exponential moving average
         self.kl_ema.update(current_kl)
