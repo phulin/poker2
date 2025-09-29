@@ -19,6 +19,7 @@ from alphaholdem.models.state_encoder import CNNStateEncoder
 from alphaholdem.models.transformer.kv_cache_manager import SelfPlayKVCacheManager
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
+from alphaholdem.rl.beta_controller import BetaController
 from alphaholdem.rl.dred_pool import DREDPool
 from alphaholdem.rl.k_best_pool import KBestOpponentPool
 from alphaholdem.rl.losses import KLPolicyPPOLoss, TrinalClipPPOLoss
@@ -326,27 +327,17 @@ class SelfPlayTrainer:
         # Initialize PopArt normalizer
         self.popart_normalizer = PopArtNormalizer()
 
+        self.beta_controller = BetaController(target_kl=TARGET_KL)
+
         # Initialize loss calculator
-        # self.loss_calculator = TrinalClipPPOLoss(
-        #     popart_normalizer=self.popart_normalizer,
-        #     epsilon=self.epsilon,
-        #     delta1=self.delta1,
-        #     value_coef=self.value_coef,
-        #     entropy_coef=self.entropy_coef,
-        #     value_loss_type=self.cfg.train.value_loss_type,
-        #     huber_delta=self.cfg.train.huber_delta,
-        #     target_kl=TARGET_KL,
-        #     kl_ema=self.kl_ema,
-        # )
         self.loss_calculator = KLPolicyPPOLoss(
             popart_normalizer=self.popart_normalizer,
+            beta_controller=self.beta_controller,
             value_coef=self.value_coef,
             entropy_coef=self.entropy_coef,
             value_loss_type=self.cfg.train.value_loss_type,
             huber_delta=self.cfg.train.huber_delta,
-            target_kl=TARGET_KL,
             kl_type="reverse",
-            kl_ema=self.kl_ema,
         )
 
         # Training stats
@@ -1310,6 +1301,9 @@ class SelfPlayTrainer:
         update_stats = self.update_model(step)
         self.model.eval()
 
+        if "approx_kl" in update_stats:
+            self.beta_controller.update(update_stats["approx_kl"])
+
         # Prepare training stats for return and logging
         learning_rate = self.optimizer.param_groups[-1]["lr"]
         training_stats = {
@@ -1319,6 +1313,7 @@ class SelfPlayTrainer:
             "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
             "learning_rate": learning_rate,
+            "beta": self.beta_controller.beta,
             **update_stats,
         }
 
@@ -1516,6 +1511,8 @@ class SelfPlayTrainer:
             "wandb_step": self.wandb_step,
             # Store full config for complete restoration
             "full_config": self.cfg,
+            "beta_controller": self.beta_controller.state_dict(),
+            "popart_normalizer": self.popart_normalizer.state_dict(),
             # Legacy config for backward compatibility
             "config": {
                 "num_bet_bins": self.num_bet_bins,
@@ -1662,6 +1659,14 @@ class SelfPlayTrainer:
             self.total_step_reward = 0.0  # Reset step reward
 
         self.opponent_pool.current_elo = checkpoint.get("current_elo", 1200.0)
+
+        beta_state = checkpoint.get("beta_controller")
+        if beta_state is not None:
+            self.beta_controller.load_state_dict(beta_state)
+
+        popart_state = checkpoint.get("popart_normalizer")
+        if popart_state is not None:
+            self.popart_normalizer.load_state_dict(popart_state)
 
         # Note: step counter is now managed externally
 

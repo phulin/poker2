@@ -7,6 +7,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
+from alphaholdem.rl.beta_controller import BetaController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.utils.ema import EMA
@@ -375,34 +376,18 @@ class DualClipPPOLoss(LossCalculator):
 
 # --- Add this to losses.py -----------------------------------------------
 class KLPolicyPPOLoss(LossCalculator):
-    """
-    PPO with KL penalty instead of ratio clipping.
-
-    Policy loss:
-      L = -E[ log π_theta(a|s) * A ] + beta * KL(π_old || π_theta)
-    plus value loss and entropy bonus.
-
-    Requirements:
-      - batch.old_logits: masked the same way and computed with the frozen π_old
-      - batch.legal_masks: boolean mask for legal actions
-      - batch.action_indices, batch.advantages, batch.returns
-    """
+    """PPO variant that penalizes KL divergence instead of clipping ratios."""
 
     def __init__(
         self,
         popart_normalizer: PopArtNormalizer,
+        beta_controller: BetaController,
         value_coef: float,
         entropy_coef: float,
         value_loss_type: str = "huber",
         huber_delta: float = 1.0,
-        target_kl: float = 0.015,
-        beta_init: float = 1.0,
-        beta_min: float = 1e-4,
-        beta_max: float = 10.0,
-        kl_type: str = "reverse",  # "forward" (KL(p_old||p_new)) or "reverse" (KL(p_new||p_old))
-        kl_ema: EMA | None = None,  # optional, for logging/smoothing
+        kl_type: str = "reverse",
     ):
-        # epsilon unused here; keep API compatibility by passing a dummy (e.g., 0.2)
         super().__init__(
             epsilon=0.2,
             value_coef=value_coef,
@@ -410,26 +395,9 @@ class KLPolicyPPOLoss(LossCalculator):
             value_loss_type=value_loss_type,
             huber_delta=huber_delta,
         )
-        self.beta = beta_init
-        self.beta_min = beta_min
-        self.beta_max = beta_max
-        self.target_kl = target_kl
+        self.beta_controller = beta_controller
         self.kl_type = kl_type
-        self.kl_ema = kl_ema
         self.popart = popart_normalizer
-
-    def _adapt_beta(self, kl_value: float) -> None:
-        # Simple proportional controller; keep beta bounded.
-        with torch.no_grad():
-            target = self.target_kl
-            # gentle multiplicative adjustments
-            if kl_value > 1.5 * target:
-                self.beta = min(self.beta * 2.0, self.beta_max)
-            elif kl_value < 0.5 * target:
-                self.beta = max(self.beta * 0.5, self.beta_min)
-            # optional EMA logging
-            if self.kl_ema is not None:
-                self.kl_ema.update(float(kl_value))
 
     def compute_loss(
         self,
@@ -466,7 +434,7 @@ class KLPolicyPPOLoss(LossCalculator):
             # KL(new || old)
             # can't use F.kl_div because it doesn't backpropagate through the target
             kl_tensor = (p_new * (log_p_new - log_p_old)).sum(dim=-1).mean()
-        policy_loss = pg_loss + self.beta * kl_tensor
+        policy_loss = pg_loss + self.beta_controller.beta * kl_tensor
 
         # --- Value loss (Huber or MSE)
         clipped_returns = torch.clamp(returns, delta2, delta3)
@@ -485,10 +453,6 @@ class KLPolicyPPOLoss(LossCalculator):
         total_loss = (
             policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
         )
-
-        # --- Adapt beta toward target KL (after computing loss)
-        kl_value = kl_tensor.item()
-        self._adapt_beta(kl_value)
 
         # For metrics, reuse fields even if not strictly applicable
         return LossResult(

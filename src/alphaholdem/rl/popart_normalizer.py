@@ -106,3 +106,52 @@ class PopArtNormalizer:
         """
 
         return self.frozen_sigma * normalized_value + self.frozen_mu
+
+    # ------------------------------------------------------------------
+    # Persistence helpers
+
+    def state_dict(self) -> dict:
+        """Serialize the PopArt state for checkpointing."""
+
+        return {
+            "eps": self.eps,
+            "mean": {
+                "value": self.mean_ema.value,
+                "initialized": self.mean_ema.initialized,
+                "decay": self.mean_ema.decay,
+            },
+            "var": {
+                "value": self.var_ema.value,
+                "initialized": self.var_ema.initialized,
+                "decay": self.var_ema.decay,
+            },
+            "frozen_mu": self.frozen_mu,
+            "frozen_sigma": self.frozen_sigma,
+            "stats_frozen": self.stats_frozen,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore PopArt state from a checkpoint."""
+
+        if not state:
+            return
+
+        self.eps = float(state.get("eps", self.eps))
+
+        mean_state = state.get("mean", {})
+        self.mean_ema.decay = mean_state.get("decay", self.mean_ema.decay)
+        self.mean_ema.value = mean_state.get("value", self.mean_ema.value)
+        self.mean_ema.initialized = mean_state.get(
+            "initialized", self.mean_ema.initialized
+        )
+
+        var_state = state.get("var", {})
+        self.var_ema.decay = var_state.get("decay", self.var_ema.decay)
+        self.var_ema.value = var_state.get("value", self.var_ema.value)
+        self.var_ema.initialized = var_state.get(
+            "initialized", self.var_ema.initialized
+        )
+
+        self.frozen_mu = state.get("frozen_mu", self.frozen_mu)
+        self.frozen_sigma = state.get("frozen_sigma", self.frozen_sigma)
+        self.stats_frozen = state.get("stats_frozen", self.stats_frozen)
