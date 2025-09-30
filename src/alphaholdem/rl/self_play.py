@@ -651,14 +651,17 @@ class SelfPlayTrainer:
                 all_env_indices, torch.zeros_like(all_env_indices)
             )
 
-    def _compute_reference_distributions(self, batch: BatchSample) -> torch.Tensor:
+    def _compute_reference_distributions(
+        self, batch: BatchSample, step_start_age: int
+    ) -> torch.Tensor:
         """Compute the reference action distributions for a batch of transitions."""
-        with torch.no_grad(), model_eval(self.model), self._autocast():
+        step_start_model = self.model_history.get_model(step_start_age)
+        with torch.no_grad(), model_eval(step_start_model), self._autocast():
             # Get indices for non-current model (current model gets done below)
-            other_model_indices = torch.where(batch.model_ages != self.model_age)[0]
+            other_model_indices = torch.where(batch.model_ages != step_start_age)[0]
             if len(other_model_indices) > 0:
                 log_probs = get_log_probs(
-                    self.model,
+                    step_start_model,
                     batch.embedding_data[other_model_indices],
                     batch.legal_masks[other_model_indices],
                 )
@@ -673,7 +676,7 @@ class SelfPlayTrainer:
                         batch.legal_masks[batch_indices],
                     )
                     batch.update_frozen_log_probs(batch_indices, log_probs)
-                    if age == self.model_age:
+                    if age == step_start_age:
                         # this is self.model.
                         batch.update_step_log_probs(batch_indices, log_probs)
 
@@ -1107,6 +1110,10 @@ class SelfPlayTrainer:
 
         # Freeze PopArt stats at the beginning of each epoch cycle
         self.popart_normalizer.freeze_stats()
+
+        # Store the age at the beginning of the step for reference distributions
+        step_start_age = self.model_age
+
         for episode in range(self.episodes_per_step):
             # Sample batch from vectorized buffer
             batch = self.replay_buffer.sample_batch(self.rng, self.batch_size)
@@ -1116,7 +1123,7 @@ class SelfPlayTrainer:
             batch.embedding_data.permute_suits(self.rng)
 
             # Update log-probs for the suit-permuted batch.
-            self._compute_reference_distributions(batch)
+            self._compute_reference_distributions(batch, step_start_age)
 
             # Normalize advantages across the batch for stability (mean=0, std=1)
             adv = batch.advantages
