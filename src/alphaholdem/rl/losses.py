@@ -388,11 +388,11 @@ class KLPolicyPPOLoss(LossCalculator):
         value_coef: float,
         entropy_coef: float,
         value_loss_type: str = "huber",
+        clipping: Literal["none", "single", "dual"] = "dual",
         epsilon: float = 0.2,
         dual_clip: float = 1.0,
         huber_delta: float = 1.0,
         kl_type: str = "reverse",
-        clipping: Literal["none", "single", "dual"] = "dual",
     ):
         super().__init__(
             epsilon=0.2,
@@ -401,9 +401,11 @@ class KLPolicyPPOLoss(LossCalculator):
             value_loss_type=value_loss_type,
             huber_delta=huber_delta,
         )
-        self.beta_controller = beta_controller
-        self.kl_type = kl_type
         self.popart = popart_normalizer
+        self.beta_controller = beta_controller
+        self.clipping = clipping
+        self.dual_clip = dual_clip
+        self.kl_type = kl_type
 
     def compute_loss(
         self,
