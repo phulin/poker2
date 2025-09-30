@@ -1269,7 +1269,7 @@ class SelfPlayTrainer:
         popart_mu, popart_sigma = self.popart_normalizer.get_current_stats()
 
         return {
-            "episodes": episode,
+            "episodes": episode + 1,
             "avg_reward": avg_reward,
             "num_samples": self.batch_size * self.episodes_per_step,
             "delta2_mean": float(batch.delta2.mean().item()),
