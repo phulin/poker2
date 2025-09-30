@@ -810,6 +810,33 @@ class SelfPlayTrainer:
                         self.model, our_states, opponent_idx=-1
                     )
 
+                    if torch.isnan(outputs.policy_logits).any():
+                        nan_envs = torch.where(
+                            torch.isnan(outputs.policy_logits).any(dim=-1)
+                        )[0]
+                        print(
+                            "[SelfPlayTrainer] NaN policy logits detected",
+                            {
+                                "env_indices": env_active_we_act[nan_envs].tolist(),
+                                "logits": outputs.policy_logits[nan_envs]
+                                .detach()
+                                .cpu()
+                                .tolist(),
+                            },
+                        )
+                    if torch.isnan(outputs.value).any():
+                        nan_envs = torch.where(torch.isnan(outputs.value))[0]
+                        print(
+                            "[SelfPlayTrainer] NaN values detected",
+                            {
+                                "env_indices": env_active_we_act[nan_envs].tolist(),
+                                "values": outputs.value[nan_envs]
+                                .detach()
+                                .cpu()
+                                .tolist(),
+                            },
+                        )
+
                     env_logits[env_active_we_act] = outputs.policy_logits.float()
                     # Denormalize values for GAE computation: V = σf * v̂ + μf
                     env_values[env_active_we_act] = (
@@ -1028,7 +1055,7 @@ class SelfPlayTrainer:
             )
             print(f"Collected {steps_collected} steps out of {min_steps} requested")
 
-        # Concatenate all episode rewards into a single tensor
+        # Concatenate all trajectory rewards into a single tensor
         if collected_trajectory_rewards:
             collected_trajectory_rewards_tensor = torch.cat(
                 collected_trajectory_rewards, dim=0
@@ -1146,6 +1173,9 @@ class SelfPlayTrainer:
             total_epsilon += loss_result.epsilon
             minibatch_count += 1
 
+            print("forward_kl", loss_result.forward_kl)
+            print("penalty_kl", loss_result.penalty_kl)
+            print("beta", self.beta_controller.beta)
             # Update Beta Controller each minibatch based on penalty KL
             if loss_result.penalty_kl is not None:
                 self.beta_controller.update(loss_result.penalty_kl)
@@ -1155,7 +1185,6 @@ class SelfPlayTrainer:
                 loss_result.forward_kl is not None
                 and loss_result.forward_kl > 2 * TARGET_KL
             ):
-                episode += 1
                 break
 
             self.optimizer.zero_grad()
@@ -1165,16 +1194,53 @@ class SelfPlayTrainer:
 
             # Apply stricter gradient clipping to CNN layers to prevent explosion
             self.scaler.unscale_(self.optimizer)
+            grad_has_nan = False
             for name, param in self.model.named_parameters():
                 if param.grad is not None and "cards_trunk" in name:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        grad_has_nan = True
+                        print(
+                            "[SelfPlayTrainer] NaN/Inf gradient detected",
+                            {"param": name},
+                        )
                     torch.nn.utils.clip_grad_norm_(
                         [param], 0.5
                     )  # Stricter clipping for CNN
-
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            total_grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.grad_clip
+            )
+            if grad_has_nan or not torch.isfinite(total_grad_norm):
+                print(
+                    "[SelfPlayTrainer] Gradient norm issue",
+                    {
+                        "grad_norm": (
+                            float(total_grad_norm.item())
+                            if torch.isfinite(total_grad_norm)
+                            else float("nan")
+                        ),
+                    },
+                )
+            elif total_grad_norm.item() > 1e3:
+                print(
+                    "[SelfPlayTrainer] Large gradient norm",
+                    {"grad_norm": float(total_grad_norm.item())},
+                )
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            with torch.no_grad():
+                param_nan = False
+                for name, param in self.model.named_parameters():
+                    if torch.isnan(param).any() or torch.isinf(param).any():
+                        param_nan = True
+                        print(
+                            "[SelfPlayTrainer] NaN/Inf parameter detected",
+                            {"param": name},
+                        )
+                        break
+                if param_nan:
+                    print("[SelfPlayTrainer] Stopping due to invalid parameters")
+                    raise RuntimeError("Detected NaN/Inf in model parameters")
             self.model_age += 1
 
             # Update PopArt EMAs in background (current scaling stays frozen)

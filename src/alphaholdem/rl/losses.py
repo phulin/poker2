@@ -431,6 +431,16 @@ class KLPolicyPPOLoss(LossCalculator):
         ratio = torch.exp(log_p_new_a - log_p_old_a)
         policy_loss = -(ratio * advantages).mean()
 
+        if policy_loss.detach().abs().item() > 50:
+            print("Policy loss is too high", policy_loss.detach().abs().item())
+            contrib = (ratio * advantages).abs()
+            topk = torch.topk(contrib, k=8).indices
+            print("Top offenders:")
+            for i in topk:
+                print(
+                    f"Index: {i.item()}, Ratio: {ratio[i].item():.4f}, Advantage: {advantages[i].item():.4f}, LogProbDiff: {(log_p_new_a[i] - log_p_old_a[i]).item():.4f}"
+                )
+
         # --- KL penalty
         # KL(old || new)
         forward_kl = (log_p_step.exp() * (log_p_step - log_p_new)).sum(dim=-1).mean()
