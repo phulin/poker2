@@ -1080,7 +1080,7 @@ class SelfPlayTrainer:
 
         # Freeze PopArt stats at the beginning of each epoch cycle
         self.popart_normalizer.freeze_stats()
-        for epoch in range(self.episodes_per_step):
+        for episode in range(self.episodes_per_step):
             # Sample batch from vectorized buffer
             batch = self.replay_buffer.sample_batch(self.rng, self.batch_size)
             batch = batch.to(torch.float32)
@@ -1155,6 +1155,7 @@ class SelfPlayTrainer:
                 loss_result.forward_kl is not None
                 and loss_result.forward_kl > 2 * TARGET_KL
             ):
+                episode += 1
                 break
 
             self.optimizer.zero_grad()
@@ -1230,7 +1231,7 @@ class SelfPlayTrainer:
             print(f"Total step reward: {self.total_step_reward}")
             print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
-        # Compute diagnostic KL: divergence from last model batch.
+        # Estimate diagnostic KL: divergence from last model batch.
         if loss_result.forward_kl is None:
             with torch.no_grad(), model_eval(self.model), self._autocast():
                 kl_new_log_probs = get_log_probs(
@@ -1246,7 +1247,7 @@ class SelfPlayTrainer:
                     reduction="batchmean",
                 )
         else:
-            # If we compute KL for loss, use that.
+            # If we computed KL for loss, use that.
             current_kl = loss_result.forward_kl
 
         # Update KL divergence exponential moving average
@@ -1268,6 +1269,7 @@ class SelfPlayTrainer:
         popart_mu, popart_sigma = self.popart_normalizer.get_current_stats()
 
         return {
+            "episodes": episode,
             "avg_reward": avg_reward,
             "num_samples": self.batch_size * self.episodes_per_step,
             "delta2_mean": float(batch.delta2.mean().item()),

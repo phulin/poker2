@@ -148,7 +148,12 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
 
 
 def print_training_stats(
-    stats: dict, step: int, total_steps: int, step_time: str, total_time: str
+    stats: dict,
+    step: int,
+    total_steps: int,
+    episodes: int,
+    step_time: str,
+    total_time: str,
 ):
     """
     Print training statistics in a consistent format.
@@ -165,11 +170,12 @@ def print_training_stats(
 
     print(
         f"Step {step + 1}/{total_steps} | "
-        f"Avg Reward: {stats['avg_reward']:5.2f} | "
-        f"ELO: {stats['current_elo']:.0f} | "
-        f"Loss: {loss:.4f} | "
-        f"Step Time: {step_time} | "
-        f"Total Time: {total_time}"
+        f"Episodes {episodes} | "
+        f"Avg Reward {stats['avg_reward']:5.2f} | "
+        f"Elo {stats['current_elo']:.0f} | "
+        f"Loss {loss:.4f} | "
+        f"Step Time {step_time} | "
+        f"Total Time {total_time}"
     )
 
     # Detailed PPO metrics (if present)

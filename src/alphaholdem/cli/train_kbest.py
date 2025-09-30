@@ -228,7 +228,9 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
         total_time_str = f"{total_elapsed_time:.1f}s"
 
         # Logging
-        print_training_stats(stats, step, cfg.num_steps, step_time_str, total_time_str)
+        print_training_stats(
+            stats, step, cfg.num_steps, stats["episodes"], step_time_str, total_time_str
+        )
         # Optional clipping debug of first sample in batch
         if "first_ret" in stats:
             print(
