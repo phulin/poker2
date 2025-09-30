@@ -440,6 +440,8 @@ class KLPolicyPPOLoss(LossCalculator):
                 print(
                     f"Index: {i.item()}, Ratio: {ratio[i].item():.4f}, Advantage: {advantages[i].item():.4f}, LogProbDiff: {(log_p_new_a[i] - log_p_old_a[i]).item():.4f}"
                 )
+                print("old log prob", log_p_old_a[i].item())
+                print("new log prob", log_p_new_a[i].item())
 
         # --- KL penalty
         # KL(old || new)
