@@ -509,8 +509,8 @@ class KLPolicyPPOLoss(LossCalculator):
             ratio_mean=1.0,
             ratio_std=0.0,
             epsilon=0.0,
-            clipfrac=0.0,  # no clipping in KL-PPO
-            ppo_clipfrac=0.0,  # no PPO clipping in KL-PPO
+            clipfrac=clipfrac.item(),
+            ppo_clipfrac=ppo_clipfrac.item(),
             return_clipfrac=return_clipfrac.item(),
         )
 
