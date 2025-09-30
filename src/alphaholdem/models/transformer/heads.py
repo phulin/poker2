@@ -16,7 +16,7 @@ class TransformerPolicyHead(nn.Module):
     - Bet bin logits (fold, call, bet_0.5x, bet_1x, bet_1.5x, bet_2x, allin)
     """
 
-    def __init__(self, d_model: int, num_bet_bins: int, dropout: float = 0.1):
+    def __init__(self, d_model: int, num_bet_bins: int):
         super().__init__()
         self.d_model = d_model
         self.num_bet_bins = num_bet_bins
@@ -25,8 +25,7 @@ class TransformerPolicyHead(nn.Module):
         self.bet_bin_head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.LayerNorm(d_model // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.GELU(),
             nn.Linear(d_model // 2, num_bet_bins),
         )
 
@@ -59,7 +58,7 @@ class TransformerPolicyHead(nn.Module):
 class TransformerValueHead(nn.Module):
     """Value head for transformer model."""
 
-    def __init__(self, d_model: int, dropout: float = 0.1):
+    def __init__(self, d_model: int):
         super().__init__()
         self.d_model = d_model
 
@@ -67,12 +66,10 @@ class TransformerValueHead(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.LayerNorm(d_model // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.GELU(),
             nn.Linear(d_model // 2, d_model // 4),
             nn.LayerNorm(d_model // 4),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.GELU(),
             nn.Linear(d_model // 4, 1),
         )
 

@@ -107,12 +107,11 @@ class PokerTransformerV1(nn.Module, Model):
         self.cls_mlp = nn.Sequential(
             nn.Linear(d_model * 4, d_model),
             nn.GELU(),
-            nn.Dropout(dropout),
             nn.LayerNorm(d_model),
         )
 
-        self.policy_head = TransformerPolicyHead(d_model, num_bet_bins, dropout)
-        self.value_head = TransformerValueHead(d_model, dropout)
+        self.policy_head = TransformerPolicyHead(d_model, num_bet_bins)
+        self.value_head = TransformerValueHead(d_model)
 
         # Precompute rotary frequencies
         head_dim = d_model // n_heads
