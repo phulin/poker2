@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
 import torch.nn.functional as F
@@ -388,8 +388,11 @@ class KLPolicyPPOLoss(LossCalculator):
         value_coef: float,
         entropy_coef: float,
         value_loss_type: str = "huber",
+        epsilon: float = 0.2,
+        dual_clip: float = 1.0,
         huber_delta: float = 1.0,
         kl_type: str = "reverse",
+        clipping: Literal["none", "single", "dual"] = "dual",
     ):
         super().__init__(
             epsilon=0.2,
@@ -428,8 +431,27 @@ class KLPolicyPPOLoss(LossCalculator):
         p_new = log_p_new.exp()
 
         # --- Policy gradient term with importance ratio
-        ratio = torch.exp(log_p_new_a - log_p_old_a)
-        policy_loss = -(ratio * advantages).mean()
+        # clamp for numerical stability
+        ratio = torch.exp(torch.clamp(log_p_new_a - log_p_old_a, -20.0, 20.0))
+        ratio_unclipped = ratio
+        if self.clipping == "single" or self.clipping == "dual":
+            ratio = torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon)
+
+        if self.clipping == "single":
+            product = torch.min(ratio_unclipped * advantages, ratio * advantages)
+        elif self.clipping == "dual":
+            product = torch.min(
+                ratio_unclipped * advantages,
+                ratio * advantages,
+            )
+            product = torch.where(
+                advantages < 0.0,
+                torch.max(self.dual_clip * advantages, product),
+                product,
+            )
+        else:
+            product = ratio * advantages
+        policy_loss = -product.mean()
 
         if policy_loss.detach().abs().item() > 50:
             print("Policy loss is too high", policy_loss.detach().abs().item())
@@ -470,6 +492,10 @@ class KLPolicyPPOLoss(LossCalculator):
             + self.value_coef * value_loss
             - self.entropy_coef * entropy
         )
+
+        with torch.no_grad():
+            ppo_clipfrac = (torch.abs(ratio_unclipped - ratio) > 1e-8).float().mean()
+            clipfrac = (torch.abs(product - ratio * advantages) > 1e-8).float().mean()
 
         # For metrics, reuse fields even if not strictly applicable
         return LossResult(

@@ -6,6 +6,9 @@ Run with:
 
 This will run a single iteration of SelfPlayTrainer and hook into the model
 to see what exactly gets passed in as input data.
+
+Use ``--trace-suit-permute`` to dump before/after token sequences when
+``permute_suits`` is invoked on structured transformer batches.
 """
 
 from __future__ import annotations
@@ -157,6 +160,32 @@ def print_decoded_token_sequence(data, row_idx: int, length: int) -> None:
                     parts.append(f"legal={legal_bins}")
 
         print(" ".join(parts))
+
+
+def _print_card_token_table(
+    data,
+    row_idx: int,
+    length: int,
+    title: str,
+) -> None:
+    """Render a per-token card table so suit permutations are easy to spot."""
+    offset = get_card_token_id_offset()
+    tokens = data.token_ids[row_idx, :length]
+    mask = (tokens >= offset) & (tokens < offset + 52)
+    card_positions = torch.where(mask)[0]
+    print(f"  Card tokens for {title}:")
+    if card_positions.numel() == 0:
+        print("    (none)")
+        return
+    header = "    pos token card rank suit"
+    print(header)
+    print("    " + "-" * (len(header) - 4))
+    for pos in card_positions.tolist():
+        token = int(tokens[pos].item())
+        card_idx = token - offset
+        rank = int(data.card_ranks[row_idx, pos].item())
+        suit = int(data.card_suits[row_idx, pos].item())
+        print(f"    {pos:3d} {token:5d} {format_card(card_idx):>4} {rank:4d} {suit:4d}")
 
 
 def print_token_sequence_data(
@@ -401,6 +430,56 @@ def hook_replay_buffer_update_last_transition_rewards(
     return hooked_update_opponent_rewards
 
 
+def enable_permute_suit_trace(max_samples: int = 2) -> None:
+    """Monkey-patch StructuredEmbeddingData.permute_suits to show before/after dumps."""
+
+    try:
+        from alphaholdem.models.transformer.structured_embedding_data import (
+            StructuredEmbeddingData,
+        )
+    except ImportError:
+        print("Could not import StructuredEmbeddingData; suit trace disabled.")
+        return
+
+    original = StructuredEmbeddingData.permute_suits
+
+    def describe_state(data, phase: str) -> None:
+        batch = data.token_ids.shape[0]
+        if batch == 0:
+            print(f"\n=== Suit permutation {phase}: empty batch ===")
+            return
+
+        indices = list(range(min(max_samples, batch)))
+        lengths = data.lengths.to(torch.long).cpu()
+        # Build helper tensors on CPU for printing utilities
+        current_positions = lengths.clone()
+        transition_token_ends = torch.zeros(
+            (batch, data.token_ids.shape[1]), dtype=torch.long
+        )
+
+        print(f"\n=== SUIT PERMUTATION {phase} ===")
+        for idx in indices:
+            length = int(lengths[idx].item())
+            print(f"\n--- Sample {idx} (length={length}) ---")
+            print_decoded_token_sequence(data, idx, length)
+            _print_card_token_table(data, idx, length, title=phase)
+
+        print_token_sequence_data(
+            data=data,
+            indices=indices,
+            current_token_positions=current_positions,
+            transition_token_ends=transition_token_ends,
+            trajectory_lengths=lengths,
+        )
+
+    def wrapped(self, generator: torch.Generator) -> None:
+        describe_state(self, "BEFORE")
+        original(self, generator)
+        describe_state(self, "AFTER")
+
+    StructuredEmbeddingData.permute_suits = wrapped
+
+
 def print_sampling_debug_info(trainer: SelfPlayTrainer) -> None:
     """Print high-level sampling debug info for trajectories and token ends."""
     print(f"\n--- SAMPLING DEBUG INFO ---")
@@ -446,7 +525,12 @@ def print_sampled_batch_analysis(trainer: SelfPlayTrainer, batch) -> None:
 
     # Other batch fields
     action_indices = batch.action_indices
-    selected_log_probs = batch.selected_log_probs
+    selected_log_probs = getattr(batch, "selected_log_probs", None)
+    if selected_log_probs is None:
+        selected_log_probs = batch.frozen_selected_log_probs
+        print("Using frozen_selected_log_probs as selection log-probs snapshot.")
+    if hasattr(batch, "step_selected_log_probs"):
+        print(f"Current-policy log probs: {batch.step_selected_log_probs.tolist()}")
     advantages = batch.advantages
     returns = batch.returns
     delta2 = batch.delta2
@@ -454,7 +538,7 @@ def print_sampled_batch_analysis(trainer: SelfPlayTrainer, batch) -> None:
     legal_masks = batch.legal_masks
 
     print(f"\nAction indices: {action_indices.tolist()}")
-    print(f"Old log probs: {selected_log_probs.tolist()}")
+    print(f"Reference log probs: {selected_log_probs.tolist()}")
     print(f"Advantages: {advantages.tolist()}")
     print(f"Returns: {returns.tolist()}")
     print(f"Delta2: {delta2.tolist()}")
@@ -547,11 +631,18 @@ def print_replay_buffer_summary(replay_buffer):
                         legal_actions = torch.where(legal_masks[step])[0].tolist()
                         print(f"    Step {step}: legal actions {legal_actions}")
 
-                    # Log probabilities
-                    print(f"  Log probabilities:")
-                    log_probs = replay_buffer.log_probs[traj_idx, :length]
+                    # Log probabilities derived from stored logits for completeness
+                    print(f"  Log probabilities (from logits):")
                     for step in range(length):
-                        probs = log_probs[step].exp().tolist()
+                        logits = replay_buffer.logits[traj_idx, step]
+                        legal_mask = replay_buffer.legal_masks[traj_idx, step]
+                        safe_logits = torch.where(
+                            legal_mask,
+                            logits,
+                            torch.full_like(logits, -1e9),
+                        )
+                        log_probs = torch.log_softmax(safe_logits, dim=-1)
+                        probs = log_probs.exp().tolist()
                         formatted_probs = [f"{p:.3f}" for p in probs]
                         print(f"    Step {step}: [{', '.join(formatted_probs)}]")
 
@@ -592,7 +683,9 @@ def parse_actions(arg: str) -> List[int]:
     return [int(item.strip()) for item in arg.split(",") if item.strip()]
 
 
-def main(actions: Iterable[int]) -> None:
+def main(
+    actions: Iterable[int], trace_suit_permute: bool, trace_suit_max_samples: int
+) -> None:
     device = torch.device("cpu")
 
     # Create config manually
@@ -626,6 +719,9 @@ def main(actions: Iterable[int]) -> None:
         ),
         device="cpu",
     )
+
+    if trace_suit_permute:
+        enable_permute_suit_trace(max_samples=trace_suit_max_samples)
 
     # Create trainer
     trainer = SelfPlayTrainer(config, device, rng_seed=42)
@@ -682,6 +778,10 @@ def main(actions: Iterable[int]) -> None:
 
         batch = trainer.replay_buffer.sample_batch(trainer.rng, batch_size)
         print_sampled_batch_analysis(trainer, batch)
+
+        if trace_suit_permute and hasattr(batch.embedding_data, "permute_suits"):
+            print("\n=== MANUAL SUIT PERMUTATION TRACE ON SAMPLED BATCH ===")
+            batch.embedding_data.permute_suits(trainer.rng)
     else:
         print("No trajectories available for sampling")
 
@@ -693,9 +793,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--actions",
         type=str,
-        default="2,1",
+        default="3,1",
         help="Comma-separated list of discrete bet bin indices to play sequentially.",
+    )
+    parser.add_argument(
+        "--trace-suit-permute",
+        action="store_true",
+        help="Print before/after token dumps when permute_suits is invoked.",
+    )
+    parser.add_argument(
+        "--trace-suit-max-samples",
+        type=int,
+        default=2,
+        help="Number of samples to display when tracing suit permutations.",
     )
     args = parser.parse_args()
     action_list = parse_actions(args.actions)
-    main(action_list)
+    main(action_list, args.trace_suit_permute, args.trace_suit_max_samples)
