@@ -1173,9 +1173,6 @@ class SelfPlayTrainer:
             total_epsilon += loss_result.epsilon
             minibatch_count += 1
 
-            print("forward_kl", loss_result.forward_kl)
-            print("penalty_kl", loss_result.penalty_kl)
-            print("beta", self.beta_controller.beta)
             # Update Beta Controller each minibatch based on penalty KL
             if loss_result.penalty_kl is not None:
                 self.beta_controller.update(loss_result.penalty_kl)
