@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from typing import Dict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from alphaholdem.models.transformer.orthogonal_linear import OrthogonalLinear
 
 
 class TransformerPolicyHead(nn.Module):
@@ -23,22 +26,11 @@ class TransformerPolicyHead(nn.Module):
 
         # Bet bin head (discrete)
         self.bet_bin_head = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
+            OrthogonalLinear(d_model, d_model // 2, gain=math.sqrt(2.0)),
             nn.LayerNorm(d_model // 2),
             nn.GELU(),
-            nn.Linear(d_model // 2, num_bet_bins),
+            OrthogonalLinear(d_model // 2, num_bet_bins, gain=0.01),
         )
-
-        # Initialize weights
-        self._init_weights()
-
-    def _init_weights(self):
-        """Initialize head weights."""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Forward pass for policy head.
@@ -64,25 +56,14 @@ class TransformerValueHead(nn.Module):
 
         # Value head
         self.value_head = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
+            OrthogonalLinear(d_model, d_model // 2, gain=math.sqrt(2.0)),
             nn.LayerNorm(d_model // 2),
             nn.GELU(),
-            nn.Linear(d_model // 2, d_model // 4),
+            OrthogonalLinear(d_model // 2, d_model // 4, gain=math.sqrt(2.0)),
             nn.LayerNorm(d_model // 4),
             nn.GELU(),
-            nn.Linear(d_model // 4, 1),
+            OrthogonalLinear(d_model // 4, 1, gain=1.0),
         )
-
-        # Initialize weights
-        self._init_weights()
-
-    def _init_weights(self):
-        """Initialize head weights."""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass for value head.

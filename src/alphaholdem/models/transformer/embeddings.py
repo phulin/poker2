@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from alphaholdem.models.transformer.orthogonal_linear import OrthogonalLinear
 from alphaholdem.models.transformer.tokens import (
     GAME_INDEX,
     Context,
@@ -50,7 +51,7 @@ class PokerFusedEmbedding(nn.Module):
         self.action_actor_emb = nn.Embedding(2, d_model)
         self.action_type_emb = nn.Embedding(num_bet_bins, d_model)
         self.legal_mask_mlp = nn.Sequential(
-            nn.Linear(num_bet_bins, d_model),
+            OrthogonalLinear(num_bet_bins, d_model),
             nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -58,7 +59,7 @@ class PokerFusedEmbedding(nn.Module):
 
         # Context components for CLS and dynamic context tokens
         self.game_mlp = nn.Sequential(
-            nn.Linear(5, d_model),
+            OrthogonalLinear(5, d_model),
             nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -69,7 +70,9 @@ class PokerFusedEmbedding(nn.Module):
             persistent=False,
         )
         self.context_mlp = nn.Sequential(
-            nn.Linear(Context.NUM_CONTEXT.value * (1 + FOURIER_FEATURES), d_model),
+            OrthogonalLinear(
+                Context.NUM_CONTEXT.value * (1 + FOURIER_FEATURES), d_model
+            ),
             nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(0.1),

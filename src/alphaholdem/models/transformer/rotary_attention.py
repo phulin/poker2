@@ -1,10 +1,13 @@
 """Rotary Position Embedding (RoPE) attention implementation."""
 
+import math
 from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from alphaholdem.models.transformer.orthogonal_linear import OrthogonalLinear
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -35,7 +38,13 @@ def apply_rotary_pos_emb(
 class RotarySelfAttention(nn.Module):
     """Multi-head self-attention with RoPE positional encoding."""
 
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1) -> None:
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        dropout: float = 0.1,
+        residual_scale: float = 1.0,
+    ) -> None:
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         self.d_model = d_model
@@ -45,10 +54,16 @@ class RotarySelfAttention(nn.Module):
             self.d_head % 2 == 0
         ), "Rotary embeddings require an even projected head dimension"
 
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
+        gain = math.sqrt(2.0)
+        self.q_proj = OrthogonalLinear(d_model, d_model, gain=gain)
+        self.k_proj = OrthogonalLinear(d_model, d_model, gain=gain)
+        self.v_proj = OrthogonalLinear(d_model, d_model, gain=gain)
+        self.out_proj = OrthogonalLinear(
+            d_model,
+            d_model,
+            gain=gain,
+            output_scale=residual_scale,
+        )
 
         self.dropout = dropout
 

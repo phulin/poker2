@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -16,6 +17,7 @@ from alphaholdem.models.transformer.heads import (
     TransformerPolicyHead,
     TransformerValueHead,
 )
+from alphaholdem.models.transformer.orthogonal_linear import OrthogonalLinear
 from alphaholdem.models.transformer.rotary_attention import RotarySelfAttention
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
@@ -27,16 +29,23 @@ from alphaholdem.utils.profiling import profile
 class TransformerLayer(nn.Module):
     """Single transformer encoder block with RoPE attention (pre-LN)."""
 
-    def __init__(self, d_model: int, n_heads: int, dropout: float) -> None:
+    def __init__(
+        self, d_model: int, n_heads: int, dropout: float, residual_scale: float
+    ) -> None:
         super().__init__()
-        self.attn = RotarySelfAttention(d_model, n_heads, dropout)
+        self.attn = RotarySelfAttention(d_model, n_heads, dropout, residual_scale)
         self.dropout = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 4),
+            OrthogonalLinear(d_model, d_model * 4, gain=math.sqrt(2.0)),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model * 4, d_model),
+            OrthogonalLinear(
+                d_model * 4,
+                d_model,
+                gain=1.0,
+                output_scale=residual_scale,
+            ),
         )
         self.norm2 = nn.LayerNorm(d_model)
 
@@ -90,22 +99,26 @@ class PokerTransformerV1(nn.Module, Model):
         self.embedding = PokerFusedEmbedding(num_bet_bins=num_bet_bins, d_model=d_model)
 
         self.input_ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),
+            OrthogonalLinear(d_model, d_model * 2, gain=math.sqrt(2.0)),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model * 2, d_model),
+            OrthogonalLinear(d_model * 2, d_model, gain=1.0),
             # no normalization as TransformerLayer has pre-LN
         )
 
+        residual_scale = 1.0 / math.sqrt(n_layers) if n_layers > 0 else 1.0
         self.layers = nn.ModuleList(
-            [TransformerLayer(d_model, n_heads, dropout) for _ in range(n_layers)]
+            [
+                TransformerLayer(d_model, n_heads, dropout, residual_scale)
+                for _ in range(n_layers)
+            ]
         )
 
         # Layers have pre-LN, so we need to normalize the output
         self.post_norm = nn.LayerNorm(d_model)
 
         self.cls_mlp = nn.Sequential(
-            nn.Linear(d_model * 4, d_model),
+            OrthogonalLinear(d_model * 4, d_model, gain=math.sqrt(2.0)),
             nn.GELU(),
             nn.LayerNorm(d_model),
         )
@@ -142,13 +155,13 @@ class PokerTransformerV1(nn.Module, Model):
         return cache
 
     def _init_weights(self) -> None:
-        """Initialize parameters with Xavier uniform where appropriate."""
+        """Initialize parameters using orthogonal defaults suitable for PPO."""
 
         for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
+            if isinstance(module, OrthogonalLinear):
+                module.reset_parameters()
+            elif isinstance(module, nn.Linear):
+                raise RuntimeError("All linear layers should be OrthogonalLinear")
             elif isinstance(module, nn.LayerNorm):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)

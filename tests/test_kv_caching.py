@@ -96,7 +96,7 @@ class TestTransformerLayerKVCaching:
         batch_size = 2
         seq_len = 10
 
-        layer = TransformerLayer(d_model, n_heads, dropout=0.1)
+        layer = TransformerLayer(d_model, n_heads, dropout=0.1, residual_scale=1.0)
 
         x = torch.randn(batch_size, seq_len, d_model)
         mask = torch.ones(batch_size, seq_len, dtype=torch.bool)
