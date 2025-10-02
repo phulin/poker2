@@ -140,6 +140,52 @@ def test_n2_independence_and_mixed_actions():
         assert env.is_allin[1].any().item() is True
 
 
+def test_legal_mask_handles_all_in_states():
+    """Ensure legal mask behaviour stays correct for all-in scenarios across envs."""
+    device = torch.device("cpu")
+    env = _make_env(N=3, device=device)
+
+    # Scenario 0: opponent (player 1) already all-in, hero (player 0) to act
+    env.to_act[0] = 0
+    env.is_allin[0] = torch.tensor([0, 1], dtype=torch.bool, device=device)
+    env.stacks[0] = torch.tensor([600, 0], dtype=torch.long, device=device)
+    env.committed[0] = torch.tensor([50, 450], dtype=torch.long, device=device)
+    env.min_raise[0] = 50
+
+    # Scenario 1: hero (player 1) already all-in
+    env.to_act[1] = 1
+    env.is_allin[1] = torch.tensor([0, 1], dtype=torch.bool, device=device)
+    env.stacks[1] = torch.tensor([900, 0], dtype=torch.long, device=device)
+    env.committed[1] = torch.tensor([200, 200], dtype=torch.long, device=device)
+    env.min_raise[1] = 50
+
+    # Scenario 2: both players all-in
+    env.to_act[2] = 0
+    env.is_allin[2] = torch.tensor([1, 1], dtype=torch.bool, device=device)
+    env.stacks[2] = torch.tensor([0, 0], dtype=torch.long, device=device)
+    env.committed[2] = torch.tensor([350, 350], dtype=torch.long, device=device)
+    env.min_raise[2] = 50
+
+    _, mask = env.legal_bins_amounts_and_mask()
+
+    # Opponent all-in: only fold/call remain, betting bins (including shove) disabled
+    mask_opp_allin = mask[0]
+    assert mask_opp_allin[0].item() is True
+    assert mask_opp_allin[1].item() is True
+    assert not mask_opp_allin[2:-1].any().item()
+    assert mask_opp_allin[-1].item() is False
+
+    # Hero all-in: only call stays
+    mask_me_allin = mask[1]
+    assert mask_me_allin[1].item() is True
+    assert mask_me_allin.sum().item() == 1
+
+    # Both all-in should match hero-all-in behaviour
+    mask_both_allin = mask[2]
+    assert mask_both_allin[1].item() is True
+    assert mask_both_allin.sum().item() == 1
+
+
 def test_n2_reset_done_partial():
     env = _make_env(N=2, seed=42)
     # Force env0 to all-in, env1 to check once

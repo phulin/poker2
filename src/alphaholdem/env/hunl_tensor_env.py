@@ -344,9 +344,9 @@ class HUNLTensorEnv:
         amounts[:, B - 1] = me_stack
         mask[:, B - 1] = me_stack > 0
 
-        me_allin = torch.where(self.is_allin[:, me])[0]
-        opp_allin = torch.where(self.is_allin[:, opp])[0]
-        mask[opp_allin, 0:2] = True  # fold is not legal when we are all-in
+        me_allin = torch.where(self.is_allin[self.arange_n, me])[0]
+        opp_allin = torch.where(self.is_allin[self.arange_n, opp])[0]
+        mask[opp_allin, 0:2] = True  # only fold/call are legal when opp is all-in
         mask[opp_allin, 2:] = False
         # if both allin, this will override the opp_allin path.
         mask[me_allin, :] = False
