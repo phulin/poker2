@@ -236,6 +236,12 @@ class SelfPlayTrainer:
         self.policy = CategoricalPolicyV1()
         self.model_age = 1
         self.model_history = ModelHistory()
+        self.last_action_mix = {
+            "fold": 0,
+            "check_call": 0,
+            "bet": 0,
+            "all_in": 0,
+        }
 
         self.value_head_type = "quantile" if value_head_type == "quantile" else "scalar"
         self.quantile_num_buckets = (
@@ -998,6 +1004,23 @@ class SelfPlayTrainer:
                 our_dones_tensor = dones[env_active_we_act]
                 our_legal_masks_tensor = legal_bins_mask[env_active_we_act]
 
+                # Track action type counts for metrics
+                self.last_action_mix["fold"] += (our_action_indices == 0).sum().item()
+                self.last_action_mix["check_call"] += (
+                    (our_action_indices == 1).sum().item()
+                )
+                self.last_action_mix["bet"] += (
+                    (
+                        (our_action_indices >= 2)
+                        & (our_action_indices < (self.num_bet_bins - 1))
+                    )
+                    .sum()
+                    .item()
+                )
+                self.last_action_mix["all_in"] += (
+                    ((our_action_indices == (self.num_bet_bins - 1))).sum().item()
+                )
+
                 # Add transitions immediately using vectorized operations
                 if add_to_replay_buffer:
                     self.replay_buffer.add_transitions(
@@ -1457,6 +1480,7 @@ class SelfPlayTrainer:
         learning_rate = self.optimizer.param_groups[-1]["lr"]
         self.total_transitions_trained += update_stats["episodes"] * self.batch_size
         self.total_episodes += update_stats["episodes"]
+        total_actions = sum(self.last_action_mix.values())
         training_stats = {
             "step": step,
             "trajectories_collected": self.step_trajectories_collected,
@@ -1467,12 +1491,22 @@ class SelfPlayTrainer:
             "pool_stats": self.opponent_pool.get_pool_stats(),
             "learning_rate": learning_rate,
             "beta": self.beta_controller.beta,
+            **{
+                ("action_rate_" + k): v / total_actions
+                for k, v in self.last_action_mix.items()
+            },
             **update_stats,
         }
 
         # Reset step counters for next training step
         self.total_step_reward = 0.0
         self.step_trajectories_collected = 0
+        self.last_action_mix = {
+            "fold": 0,
+            "check_call": 0,
+            "bet": 0,
+            "all_in": 0,
+        }
 
         # Log to wandb if enabled
         if self.use_wandb:
