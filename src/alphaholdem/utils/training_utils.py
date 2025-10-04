@@ -132,7 +132,7 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
     print(
         f"Call: Suited {100 * suited_vs_offsuit[1][0]:4.0f}%, Offsuit {100 * suited_vs_offsuit[1][1]:4.0f}%"
     )
-    betting_suited_vs_offsuit = suited_vs_offsuit[2:-1].mean(dim=0)
+    betting_suited_vs_offsuit = suited_vs_offsuit[2:-1].sum(dim=0)
     print(
         f"Bet: Suited {100 * betting_suited_vs_offsuit[0]:4.0f}%, Offsuit {100 * betting_suited_vs_offsuit[1]:4.0f}%"
     )
