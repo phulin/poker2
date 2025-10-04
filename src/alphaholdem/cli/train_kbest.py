@@ -166,6 +166,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
 
         # Create exploiter trainer with same config but different hyperparameters
         exploiter_cfg = merged_config
+        exploiter_cfg.use_wandb = False
         exploiter_cfg.train.learning_rate = merged_config.exploiter.learning_rate
         exploiter_cfg.train.batch_size = merged_config.exploiter.batch_size
         exploiter_cfg.train.episodes_per_step = (
