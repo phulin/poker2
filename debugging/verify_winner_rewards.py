@@ -11,7 +11,6 @@ from alphaholdem.core.structured_config import (
     EnvConfig,
     ExploiterConfig,
     ModelConfig,
-    StateEncoderConfig,
     TrainingConfig,
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
@@ -26,14 +25,12 @@ def load_config(config_path: str) -> Config:
     train_config = TrainingConfig(**cfg_dict.get("train", {}))
     model_config = ModelConfig(**cfg_dict.get("model", {}))
     env_config = EnvConfig(**cfg_dict.get("env", {}))
-    state_encoder_config = StateEncoderConfig(**cfg_dict.get("state_encoder", {}))
     exploiter_config = ExploiterConfig(**cfg_dict.get("exploiter", {}))
 
     return Config(
         train=train_config,
         model=model_config,
         env=env_config,
-        state_encoder=state_encoder_config,
         exploiter=exploiter_config,
         **{
             k: v

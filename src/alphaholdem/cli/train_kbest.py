@@ -315,7 +315,6 @@ def main(cfg) -> None:
         EnvConfig,
         ExploiterConfig,
         ModelConfig,
-        StateEncoderConfig,
         TrainingConfig,
     )
 
@@ -325,7 +324,6 @@ def main(cfg) -> None:
     train_config = TrainingConfig(**cfg_dict.get("train", {}))
     model_config = ModelConfig(**cfg_dict.get("model", {}))
     env_config = EnvConfig(**cfg_dict.get("env", {}))
-    state_encoder_config = StateEncoderConfig(**cfg_dict.get("state_encoder", {}))
     exploiter_config = ExploiterConfig(**cfg_dict.get("exploiter", {}))
 
     # Create Config dataclass
@@ -333,7 +331,6 @@ def main(cfg) -> None:
         train=train_config,
         model=model_config,
         env=env_config,
-        state_encoder=state_encoder_config,
         exploiter=exploiter_config,
         **{
             k: v

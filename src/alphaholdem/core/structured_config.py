@@ -110,16 +110,6 @@ class EnvConfig:
 
 
 @dataclass
-class StateEncoderConfig:
-    name: str = "cnn"  # "cnn" or "transformer"
-    kwargs: Optional[dict] = None
-
-    def __post_init__(self):
-        if self.kwargs is None:
-            self.kwargs = {}
-
-
-@dataclass
 class ExploiterConfig:
     """Configuration for exploiter training."""
 

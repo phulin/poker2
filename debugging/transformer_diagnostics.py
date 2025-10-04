@@ -24,7 +24,6 @@ from alphaholdem.core.structured_config import (
     EnvConfig,
     ExploiterConfig,
     ModelConfig,
-    StateEncoderConfig,
     TrainingConfig,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
@@ -277,14 +276,12 @@ def main() -> None:
     train_cfg = TrainingConfig(**cfg_dict.get("train", {}))
     model_cfg = ModelConfig(**cfg_dict.get("model", {}))
     env_cfg = EnvConfig(**cfg_dict.get("env", {}))
-    state_encoder_cfg = StateEncoderConfig(**cfg_dict.get("state_encoder", {}))
     exploiter_cfg = ExploiterConfig(**cfg_dict.get("exploiter", {}))
 
     cfg = Config(
         train=train_cfg,
         model=model_cfg,
         env=env_cfg,
-        state_encoder=state_encoder_cfg,
         exploiter=exploiter_cfg,
         **{
             k: v
