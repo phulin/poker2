@@ -166,26 +166,4 @@ def _merge_configs(checkpoint_config: Config, cli_config: Config) -> Config:
                     setattr(merged_env, field_name, cli_value)
             merged_config.env = merged_env
 
-    if (
-        cli_config.state_encoder is not None
-        and checkpoint_config.state_encoder is not None
-    ):
-        # Check if both are dataclass instances (not MISSING)
-        if hasattr(cli_config.state_encoder, "__dataclass_fields__") and hasattr(
-            checkpoint_config.state_encoder, "__dataclass_fields__"
-        ):
-            merged_state_encoder = copy.deepcopy(merged_config.state_encoder)
-            for field_name in cli_config.state_encoder.__dataclass_fields__:
-                cli_value = getattr(cli_config.state_encoder, field_name)
-                checkpoint_value = getattr(checkpoint_config.state_encoder, field_name)
-
-                # Skip None values (not set)
-                if cli_value is None:
-                    continue
-
-                # Override if values are different
-                if cli_value != checkpoint_value:
-                    setattr(merged_state_encoder, field_name, cli_value)
-            merged_config.state_encoder = merged_state_encoder
-
     return merged_config

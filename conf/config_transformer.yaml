@@ -98,11 +98,6 @@ model:
     num_bet_bins: 8
     use_gradient_checkpointing: false  # Disabled for performance
   
-# === STATE ENCODER CONFIGURATION ===
-state_encoder:
-  name: "transformer"
-  kwargs: {}
-
 # === ENVIRONMENT CONFIGURATION ===
 env:
   # Game configuration

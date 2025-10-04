@@ -164,7 +164,6 @@ class Config:
     train: TrainingConfig = MISSING
     model: ModelConfig = MISSING
     env: EnvConfig = MISSING
-    state_encoder: StateEncoderConfig = MISSING
     exploiter: ExploiterConfig = MISSING
 
     def __post_init__(self):
@@ -178,5 +177,4 @@ cs.store(name="config", node=Config)
 cs.store(group="train", name="default", node=TrainingConfig)
 cs.store(group="model", name="default", node=ModelConfig)
 cs.store(group="env", name="default", node=EnvConfig)
-cs.store(group="state_encoder", name="default", node=StateEncoderConfig)
 cs.store(group="exploiter", name="default", node=ExploiterConfig)

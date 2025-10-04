@@ -112,8 +112,3 @@ env:
   
   # Debug configuration
   debug_step_table: false  # Print debug table during step_bins when batch_size <= 8
-
-# === STATE ENCODER CONFIGURATION ===
-state_encoder:
-  name: "cnn"  # "cnn" or "transformer"
-  kwargs: {}
