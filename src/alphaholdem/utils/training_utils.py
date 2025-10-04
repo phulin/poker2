@@ -100,6 +100,7 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
     allin_grid = grids["ranges"][trainer.num_bet_bins - 1].splitlines()
     betting_grid = grids["betting"].splitlines()
     value_grid = grids["value"]
+    suited_vs_offsuit = grids["suited_vs_offsuit"]
 
     # First row: Fold | Call
     print_combined_tables(
@@ -107,7 +108,6 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
             (fold_grid, "Small blind (first) - fold (%)"),
             (call_grid, "Small blind (first) - call (%)"),
         ],
-        "First Row: Fold | Call",
     )
 
     # Second row: Betting | All-in
@@ -116,7 +116,6 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
             (betting_grid, "Small blind (first) - betting (%)"),
             (allin_grid, "Small blind (first) - all-in (%)"),
         ],
-        "Second Row: Betting | All-in",
     )
 
     # Print value estimates grid
@@ -124,6 +123,23 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
     print("Small blind (first) - value estimates (×1000)")
 
     print(value_grid)
+    print()
+
+    print("--- Preflop Suited vs Offsuit (Step {}) ---".format(step))
+    print(
+        f"Fold: Suited {100 * suited_vs_offsuit[0][0]:4.0f}%, Offsuit {100 * suited_vs_offsuit[0][1]:4.0f}%"
+    )
+    print(
+        f"Call: Suited {100 * suited_vs_offsuit[1][0]:4.0f}%, Offsuit {100 * suited_vs_offsuit[1][1]:4.0f}%"
+    )
+    betting_suited_vs_offsuit = suited_vs_offsuit[2:-1].mean(dim=0)
+    print(
+        f"Bet: Suited {100 * betting_suited_vs_offsuit[0]:4.0f}%, Offsuit {100 * betting_suited_vs_offsuit[1]:4.0f}%"
+    )
+
+    print(
+        f"All-in: Suited {100 * suited_vs_offsuit[-1][0]:4.0f}%, Offsuit {100 * suited_vs_offsuit[-1][1]:4.0f}%"
+    )
     print()
 
     # Also print BB response (facing SB all-in), matching debug_tensor_env
@@ -139,7 +155,6 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
             (bb_fold_grid, "Big blind (facing all-in) - fold (%)"),
             (bb_call_grid, "Big blind (facing all-in) - call (%)"),
         ],
-        "BB Response: Fold | Call",
     )
 
     print("BB value estimates when facing SB all-in (×1000)")

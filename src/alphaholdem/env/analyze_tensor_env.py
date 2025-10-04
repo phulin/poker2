@@ -292,6 +292,15 @@ class PreflopAnalyzer:
             )
             self.state_encoder.add_context(torch.arange(N, device=self.device))
 
+    def calculate_suited_vs_offsuit(self, probs: torch.Tensor) -> torch.Tensor:
+        """Calculate the suited vs offsuit probability for the given action for each hand."""
+        values_169 = self.convert_1326_to_169_tensor(probs)
+        suited_rows, suited_cols = torch.triu_indices(13, 13, offset=1)
+        offsuit_rows, offsuit_cols = torch.tril_indices(13, 13, offset=-1)
+        suited_probs = values_169[suited_rows, suited_cols].mean()
+        offsuit_probs = values_169[offsuit_rows, offsuit_cols].mean()
+        return torch.stack([suited_probs, offsuit_probs], dim=0)
+
     def get_preflop_grids(self) -> Dict[str, Union[str, List[str]]]:
         """Get preflop range as a grid showing selected action probabilities.
 
@@ -315,6 +324,13 @@ class PreflopAnalyzer:
                 probs[:, 2 : probs.shape[1] - 1].sum(dim=1), "probability"
             ),
             "value": self.make_range_grid(values, "value"),
+            "suited_vs_offsuit": torch.stack(
+                [
+                    self.calculate_suited_vs_offsuit(probs[:, bin_index])
+                    for bin_index in range(probs.shape[1])
+                ],
+                dim=0,
+            ),
         }
 
     def get_preflop_range_grid(self, bin_index: int) -> str:
