@@ -84,11 +84,6 @@ model:
     fusion_hidden: [512, 512]
     num_actions: 8
   
-  # Policy configuration
-  policy:
-    name: "categorical_v1"
-    kwargs: {}
-
 # === ENVIRONMENT CONFIGURATION ===
 env:
   # Game configuration
