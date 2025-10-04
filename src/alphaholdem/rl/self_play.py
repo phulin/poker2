@@ -383,6 +383,8 @@ class SelfPlayTrainer:
         self.total_trajectories_collected = (
             0  # Keep track of total episodes across all steps
         )
+        self.total_episodes = 0
+        self.total_transitions_trained = 0
         self.opponent_pool.current_elo = 1200.0  # Starting ELO rating
 
         # Weights & Biases setup
@@ -1453,10 +1455,14 @@ class SelfPlayTrainer:
 
         # Prepare training stats for return and logging
         learning_rate = self.optimizer.param_groups[-1]["lr"]
+        self.total_transitions_trained += update_stats["episodes"] * self.batch_size
+        self.total_episodes += update_stats["episodes"]
         training_stats = {
             "step": step,
             "trajectories_collected": self.step_trajectories_collected,
             "total_trajectories_collected": self.total_trajectories_collected,
+            "total_transitions_trained": self.total_transitions_trained,
+            "total_episodes": self.total_episodes,
             "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
             "learning_rate": learning_rate,
@@ -1473,32 +1479,9 @@ class SelfPlayTrainer:
             wandb.log(
                 {
                     "step": step,  # Match CLI display (1-indexed)
-                    "trajectories_collected": training_stats["trajectories_collected"],
-                    "avg_trajectory_length": training_stats["avg_trajectory_length"],
-                    "avg_reward": training_stats["avg_reward"],
-                    "current_elo": training_stats["current_elo"],
-                    "policy_loss": training_stats["policy_loss"],
-                    "value_loss": training_stats["value_loss"],
-                    "entropy": training_stats["entropy"],
-                    "approx_kl": training_stats["approx_kl"],
-                    "clipfrac": training_stats["clipfrac"],
-                    "ppo_clipfrac": training_stats["ppo_clipfrac"],
-                    "return_clipfrac": training_stats["return_clipfrac"],
-                    "explained_var": training_stats["explained_var"],
-                    "pearson_r": training_stats["pearson_r"],
-                    "avg_loss": training_stats["avg_loss"],
-                    "num_samples": training_stats["num_samples"],
-                    "advantage_mean_raw": training_stats["advantage_mean_raw"],
-                    "advantage_std_raw": training_stats["advantage_std_raw"],
-                    "small_adv": training_stats["small_adv"],
-                    "return_abs_mean": training_stats["return_abs_mean"],
-                    "return_abs_std": training_stats["return_abs_std"],
-                    "popart_mu": training_stats["popart_mu"],
-                    "popart_sigma": training_stats["popart_sigma"],
-                    "beta": training_stats["beta"],
                     "lr": learning_rate,
                     "entropy_coef_current": self.entropy_coef,
-                    "epsilon": training_stats["epsilon"],
+                    **training_stats,
                 },
                 step=step,
             )
