@@ -38,6 +38,9 @@ class TrainingConfig:
 
     use_kv_cache: bool = True
 
+    # Distributional critic configuration
+    quantile_huber_kappa: float = 1.0
+
 
 @dataclass
 class ModelConfig:
@@ -46,6 +49,8 @@ class ModelConfig:
     policy: Optional[dict] = None
     # backwards compatibility
     use_gradient_checkpointing: Optional[bool] = None
+    value_head_type: Optional[str] = None
+    value_head_num_quantiles: Optional[int] = None
 
     def __post_init__(self):
         if self.kwargs is None:
@@ -59,6 +64,10 @@ class ModelConfig:
             }
         if self.policy is None:
             self.policy = {"name": "categorical_v1", "kwargs": {}}
+        if self.value_head_type is None:
+            self.value_head_type = "scalar"
+        if self.value_head_num_quantiles is None:
+            self.value_head_num_quantiles = 51
 
 
 @dataclass

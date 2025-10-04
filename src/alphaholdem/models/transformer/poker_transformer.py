@@ -15,6 +15,7 @@ from alphaholdem.models.model_outputs import ModelOutput
 from alphaholdem.models.transformer.embeddings import PokerFusedEmbedding
 from alphaholdem.models.transformer.heads import (
     TransformerPolicyHead,
+    TransformerQuantileValueHead,
     TransformerValueHead,
 )
 from alphaholdem.models.transformer.orthogonal_linear import OrthogonalLinear
@@ -85,6 +86,8 @@ class PokerTransformerV1(nn.Module, Model):
         num_bet_bins: int,
         dropout: float,
         use_gradient_checkpointing: bool,
+        value_head_type: str = "scalar",
+        value_head_num_quantiles: int = 1,
     ) -> None:
         super().__init__()
 
@@ -94,6 +97,10 @@ class PokerTransformerV1(nn.Module, Model):
         self.num_bet_bins = num_bet_bins
         self.max_sequence_length = max_sequence_length
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.value_head_type = value_head_type
+        self.num_value_quantiles = int(value_head_num_quantiles)
+        if self.value_head_type == "quantile" and self.num_value_quantiles <= 1:
+            self.num_value_quantiles = 2
 
         # Single fused embedding module for all token types
         self.embedding = PokerFusedEmbedding(num_bet_bins=num_bet_bins, d_model=d_model)
@@ -124,7 +131,14 @@ class PokerTransformerV1(nn.Module, Model):
         )
 
         self.policy_head = TransformerPolicyHead(d_model, num_bet_bins)
-        self.value_head = TransformerValueHead(d_model)
+        if self.value_head_type == "quantile":
+            self.value_head = TransformerQuantileValueHead(
+                d_model, self.num_value_quantiles
+            )
+        else:
+            self.value_head = TransformerValueHead(d_model)
+            self.num_value_quantiles = 1
+            self.value_head_type = "scalar"
 
         # Precompute rotary frequencies
         head_dim = d_model // n_heads
@@ -232,9 +246,18 @@ class PokerTransformerV1(nn.Module, Model):
         x = torch.cat([cls_state, hole_mean, hole_diff, hole_prod], dim=-1)
         x = self.cls_mlp(x)
 
+        policy_logits = self.policy_head(x)
+        if self.value_head_type == "quantile":
+            value_quantiles = self.value_head(x)
+            value = value_quantiles.mean(dim=-1)
+        else:
+            value_quantiles = None
+            value = self.value_head(x)
+
         return ModelOutput(
-            policy_logits=self.policy_head(x),
-            value=self.value_head(x),
+            policy_logits=policy_logits,
+            value=value,
+            value_quantiles=value_quantiles,
             kv_cache=new_kv_cache,
         )
 
@@ -247,6 +270,10 @@ class PokerTransformerV1(nn.Module, Model):
             weight_scale: Scaling factor for the weight matrix
             bias_adjustment: Adjustment term for the bias vector
         """
+        if self.value_head_type == "quantile":
+            # PopArt scaling does not apply when using quantile heads
+            return
+
         # Access the last linear layer in the value head
         last_linear = self.value_head.value_head[-1]
 
@@ -266,7 +293,6 @@ class PokerTransformerV1(nn.Module, Model):
             "n_layers": self.n_layers,
             "n_heads": self.n_heads,
             "num_bet_bins": self.num_bet_bins,
-            "use_auxiliary_loss": self.use_auxiliary_loss,
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
         }

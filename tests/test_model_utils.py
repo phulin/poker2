@@ -25,9 +25,10 @@ from alphaholdem.utils.model_utils import (
 class MockModelOutput:
     """Mock model output for testing."""
 
-    def __init__(self, policy_logits, value):
+    def __init__(self, policy_logits, value, value_quantiles=None):
         self.policy_logits = policy_logits
         self.value = value
+        self.value_quantiles = value_quantiles
 
 
 class SimpleModel(nn.Module):
@@ -94,7 +95,7 @@ class TestModelUtils:
         legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
         # Get logits, log probs and values
-        logits, log_probs, values = get_logits_log_probs_values(
+        logits, log_probs, values, value_quantiles = get_logits_log_probs_values(
             model, data, legal_masks
         )
 
@@ -106,6 +107,7 @@ class TestModelUtils:
         # Check that logits and log probs are finite
         assert torch.all(torch.isfinite(logits))
         assert torch.all(torch.isfinite(log_probs))
+        assert value_quantiles is None
 
     def test_get_log_probs(self):
         """Test get_log_probs function."""
@@ -210,7 +212,7 @@ class TestModelUtils:
         # Test all utility functions
         log_probs = get_log_probs(model, data, legal_masks)
         log_probs2 = get_probs(model, data, legal_masks)
-        logits, log_probs_vals, values = get_logits_log_probs_values(
+        logits, log_probs_vals, values, value_quantiles = get_logits_log_probs_values(
             model, data, legal_masks
         )
         log_probs_vals2, values2 = get_probs_and_values(model, data, legal_masks)
@@ -224,6 +226,7 @@ class TestModelUtils:
         assert log_probs_vals2.shape == (batch_size, num_actions)
         assert values.shape == (batch_size,)
         assert values2.shape == (batch_size,)
+        assert value_quantiles is None
         assert best_actions.shape == (batch_size,)
 
         # Check that values are consistent

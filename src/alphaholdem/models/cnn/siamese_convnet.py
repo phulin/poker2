@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -147,9 +147,15 @@ class SiameseConvNetV1(nn.Module, Model):
         fusion_hidden: int | Sequence[int],
         num_actions: int,
         use_gradient_checkpointing: bool = True,
+        value_head_type: str = "scalar",
+        value_head_num_quantiles: int = 1,
     ):
         super().__init__()
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.value_head_type = value_head_type
+        self.num_value_quantiles = int(value_head_num_quantiles)
+        if self.value_head_type == "quantile" and self.num_value_quantiles <= 1:
+            self.num_value_quantiles = 2
         self.cards_trunk = CardsConvTrunk(cards_channels, hidden=cards_hidden)
         self.actions_trunk = ActionsConvTrunk(actions_channels, hidden=actions_hidden)
         fusion_in = cards_hidden + actions_hidden
@@ -180,6 +186,9 @@ class SiameseConvNetV1(nn.Module, Model):
             nn.Linear(256, num_actions),
         )
         # Critic MLP head for more stable value learning
+        value_output_dim = (
+            self.num_value_quantiles if self.value_head_type == "quantile" else 1
+        )
         self.value_head = nn.Sequential(
             nn.Linear(in_dim, 512),  # Larger hidden
             nn.LayerNorm(512),
@@ -188,8 +197,11 @@ class SiameseConvNetV1(nn.Module, Model):
             nn.Linear(512, 256),
             nn.LayerNorm(256),
             nn.SiLU(),
-            nn.Linear(256, 1),
+            nn.Linear(256, value_output_dim),
         )
+        if self.value_head_type != "quantile":
+            self.value_head_type = "scalar"
+            self.num_value_quantiles = 1
 
     def forward(self, embedding_data: CNNEmbeddingData) -> ModelOutput:
         # Extract cards and actions from embedding data and convert to float
@@ -212,10 +224,17 @@ class SiameseConvNetV1(nn.Module, Model):
         x = torch.cat([x_cards, x_actions], dim=1)
         h = self.fusion(x)
         logits = self.policy_head(h)
-        value = self.value_head(h).squeeze(-1)
+        value_raw = self.value_head(h)
+        if self.value_head_type == "quantile":
+            value_quantiles = value_raw
+            value = value_quantiles.mean(dim=-1)
+        else:
+            value_quantiles = None
+            value = value_raw.squeeze(-1)
         return ModelOutput(
             policy_logits=logits,
             value=value,
+            value_quantiles=value_quantiles,
         )
 
     @torch.no_grad()
@@ -227,6 +246,9 @@ class SiameseConvNetV1(nn.Module, Model):
             weight_scale: Scaling factor for the weight matrix
             bias_adjustment: Adjustment term for the bias vector
         """
+        if self.value_head_type == "quantile":
+            return
+
         # Access the last linear layer in the value head
         last_linear = self.value_head[-1]
 

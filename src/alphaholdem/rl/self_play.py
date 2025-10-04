@@ -9,14 +9,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 
-from alphaholdem.core.builders import build_components_from_config
+from alphaholdem.core import registry
+from alphaholdem.models import heads as _policy_heads  # noqa: F401
 from alphaholdem.core.structured_config import Config
 from alphaholdem.encoding.action_mapping import bin_to_action, get_legal_mask
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-from alphaholdem.models.factory import ModelFactory
+from alphaholdem.models.cnn import siamese_convnet as _cnn_models  # noqa: F401
+from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
 from alphaholdem.models.state_encoder import CNNStateEncoder
+from alphaholdem.models.transformer import (
+    poker_transformer as _transformer_models,
+)  # noqa: F401
+from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.kv_cache_manager import SelfPlayKVCacheManager
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
@@ -153,6 +159,7 @@ class SelfPlayTrainer:
         self.value_coef = cfg.train.value_coef
         self.entropy_coef = cfg.train.entropy_coef
         self.grad_clip = cfg.train.grad_clip
+        self.quantile_huber_kappa = cfg.train.quantile_huber_kappa
         self.learning_rate = cfg.train.learning_rate
         # LR and entropy schedules (assumed present in config)
         self.learning_rate_final = cfg.train.learning_rate_final
@@ -211,12 +218,44 @@ class SelfPlayTrainer:
                 bb=self.cfg.env.bb,
             )
 
+        if self.cfg.model.value_head_type == "quantile":
+            value_head_type = "quantile"
+            value_head_quantiles = max(2, self.cfg.model.value_head_num_quantiles)
+        else:
+            value_head_type = "scalar"
+            value_head_quantiles = 1
+
+        if self.is_transformer:
+            self.model = PokerTransformerV1(
+                **self.cfg.model.kwargs,
+                value_head_type=value_head_type,
+                value_head_num_quantiles=value_head_quantiles,
+            )
+        else:
+            self.model = SiameseConvNetV1(
+                **self.cfg.model.kwargs,
+                value_head_type=value_head_type,
+                value_head_num_quantiles=value_head_quantiles,
+            )
+
         # Config-driven components
-        _, _, model, policy = build_components_from_config(self.cfg)
-        self.model = model
-        self.policy = policy
+        policy_cfg = self.cfg.model.policy or {"name": "categorical_v1", "kwargs": {}}
+        policy_kwargs = policy_cfg.get("kwargs", {})
+        policy_name = policy_cfg.get("name", "categorical_v1")
+
+        if policy_name != "categorical_v1":
+            raise ValueError(
+                "SelfPlayTrainer currently supports only 'categorical_v1' policy"
+            )
+        self.policy = registry.build_policy(policy_name, **policy_kwargs)
         self.model_age = 1
         self.model_history = ModelHistory()
+
+        self.value_head_type = "quantile" if value_head_type == "quantile" else "scalar"
+        self.quantile_num_buckets = (
+            value_head_quantiles if self.value_head_type == "quantile" else 1
+        )
+        self.use_quantile_value_head = self.value_head_type == "quantile"
 
         # Ensure bins align with model output size to avoid mask/logit mismatch
         if hasattr(self.model, "policy_head") and hasattr(
@@ -325,20 +364,31 @@ class SelfPlayTrainer:
         # KL divergence exponential moving average tracking
         self.kl_ema = EMA(decay=0.99, initial_value=TARGET_KL)
 
-        # Initialize PopArt normalizer
-        self.popart_normalizer = PopArtNormalizer()
+        # Initialize PopArt normalizer (disabled when using quantile value head)
+        self.popart_normalizer = (
+            None if self.use_quantile_value_head else PopArtNormalizer()
+        )
 
         self.beta_controller = BetaController(target_kl=TARGET_KL)
 
         # Initialize loss calculator
+        loss_value_type = (
+            "quantile"
+            if self.use_quantile_value_head
+            else self.cfg.train.value_loss_type
+        )
         self.loss_calculator = KLPolicyPPOLoss(
             popart_normalizer=self.popart_normalizer,
             beta_controller=self.beta_controller,
             value_coef=self.value_coef,
             entropy_coef=self.entropy_coef,
-            value_loss_type=self.cfg.train.value_loss_type,
+            value_loss_type=loss_value_type,
             huber_delta=self.cfg.train.huber_delta,
             kl_type="reverse",
+            quantile_kappa=self.quantile_huber_kappa,
+            num_quantiles=(
+                self.quantile_num_buckets if self.use_quantile_value_head else None
+            ),
         )
 
         # Training stats
@@ -841,10 +891,12 @@ class SelfPlayTrainer:
                         )
 
                     env_logits[env_active_we_act] = outputs.policy_logits.float()
-                    # Denormalize values for GAE computation: V = σf * v̂ + μf
-                    env_values[env_active_we_act] = (
-                        self.popart_normalizer.denormalize_value(outputs.value.float())
-                    )
+                    value_tensor = outputs.value.float()
+                    if self.popart_normalizer is not None:
+                        value_tensor = self.popart_normalizer.denormalize_value(
+                            value_tensor
+                        )
+                    env_values[env_active_we_act] = value_tensor
 
                 # Get predictions from opponent models for opponent turns
                 if opp_env_groups is not None and env_active_opp_acts.numel() > 0:
@@ -870,12 +922,12 @@ class SelfPlayTrainer:
                         env_logits[opp_working_env_indices] = (
                             outputs.policy_logits.float()
                         )
-                        # Denormalize values for GAE computation: V = σf * v̂ + μf
-                        env_values[opp_working_env_indices] = (
-                            self.popart_normalizer.denormalize_value(
-                                outputs.value.float()
+                        value_tensor = outputs.value.float()
+                        if self.popart_normalizer is not None:
+                            value_tensor = self.popart_normalizer.denormalize_value(
+                                value_tensor
                             )
-                        )
+                        env_values[opp_working_env_indices] = value_tensor
 
                 active_env_logits = env_logits[active_indices]
                 active_env_legal_mask = legal_bins_mask[active_indices]
@@ -1108,8 +1160,9 @@ class SelfPlayTrainer:
         total_small_adv_rate = 0.0
         minibatch_count = 0
 
-        # Freeze PopArt stats at the beginning of each epoch cycle
-        self.popart_normalizer.freeze_stats()
+        # Freeze value normalizer (PopArt) at the beginning of each epoch cycle
+        if self.popart_normalizer is not None:
+            self.popart_normalizer.freeze_stats()
 
         # Store the age at the beginning of the step for reference distributions
         step_start_age = self.model_age
@@ -1143,7 +1196,7 @@ class SelfPlayTrainer:
 
             with self._autocast():
                 embedding_data = batch.embedding_data
-                logits, _, values = get_logits_log_probs_values(
+                logits, _, values, value_quantiles = get_logits_log_probs_values(
                     self.model, embedding_data, batch.legal_masks
                 )
 
@@ -1151,12 +1204,16 @@ class SelfPlayTrainer:
                     logits=logits,
                     values=values,
                     batch=batch,
+                    value_quantiles=value_quantiles,
                 )
 
             # Debugging metrics: explained variance
             with torch.no_grad():
                 y = batch.returns
-                yhat = self.popart_normalizer.denormalize_value(values.detach())
+                if self.popart_normalizer is not None:
+                    yhat = self.popart_normalizer.denormalize_value(values.detach())
+                else:
+                    yhat = values.detach()
                 # Explained variance of value predictions against targets
                 var_y = y.var(correction=0)
                 var_err = (y - yhat).var(correction=0)
@@ -1247,8 +1304,9 @@ class SelfPlayTrainer:
                     raise RuntimeError("Detected NaN/Inf in model parameters")
             self.model_age += 1
 
-            # Update PopArt EMAs in background (current scaling stays frozen)
-            self.popart_normalizer.update_stats(batch.returns)
+            # Update value normalizer stats in background (if enabled)
+            if self.popart_normalizer is not None:
+                self.popart_normalizer.update_stats(batch.returns)
 
             # Check if we should add current model to opponent pool
             # Compute KL divergence between current model and last admitted opponent
@@ -1324,7 +1382,10 @@ class SelfPlayTrainer:
         self.kl_ema.update(current_kl)
 
         # Apply final PopArt rescaling after last epoch
-        if self.popart_normalizer.mean_ema.initialized:
+        if (
+            self.popart_normalizer is not None
+            and self.popart_normalizer.mean_ema.initialized
+        ):
             weight_scale, bias_adjustment = (
                 self.popart_normalizer.compute_rescaling_adjustments()
             )
@@ -1336,7 +1397,10 @@ class SelfPlayTrainer:
         denom = max(1, minibatch_count)
 
         # Get PopArt statistics
-        popart_mu, popart_sigma = self.popart_normalizer.get_current_stats()
+        if self.popart_normalizer is not None:
+            popart_mu, popart_sigma = self.popart_normalizer.get_current_stats()
+        else:
+            popart_mu, popart_sigma = 0.0, 1.0
 
         return {
             "episodes": episode + 1,
@@ -1610,7 +1674,11 @@ class SelfPlayTrainer:
             # Store full config for complete restoration
             "full_config": self.cfg,
             "beta_controller": self.beta_controller.state_dict(),
-            "popart_normalizer": self.popart_normalizer.state_dict(),
+            "popart_normalizer": (
+                self.popart_normalizer.state_dict()
+                if self.popart_normalizer is not None
+                else None
+            ),
             # Legacy config for backward compatibility
             "config": {
                 "num_bet_bins": self.num_bet_bins,
@@ -1763,7 +1831,7 @@ class SelfPlayTrainer:
             self.beta_controller.load_state_dict(beta_state)
 
         popart_state = checkpoint.get("popart_normalizer")
-        if popart_state is not None:
+        if popart_state is not None and self.popart_normalizer is not None:
             self.popart_normalizer.load_state_dict(popart_state)
 
         # Note: step counter is now managed externally
@@ -1808,16 +1876,10 @@ class SelfPlayTrainer:
             )
             self.opponent_pool.snapshots = []
             for snapshot_data in pool_data.get("snapshots", []):
-                # Create model using ModelFactory to support both CNN and transformer
-                model_kwargs = (
-                    self.cfg.model.kwargs.copy() if self.cfg.model.kwargs else {}
-                )
-                model_kwargs["use_gradient_checkpointing"] = (
-                    self.cfg.model.use_gradient_checkpointing
-                )
-                model = ModelFactory.create_model(
-                    self.cfg.model.name, model_kwargs, self.device
-                )
+                if self.is_transformer:
+                    model = PokerTransformerV1(**self._model_kwargs)
+                else:
+                    model = SiameseConvNetV1(**self._model_kwargs)
                 model_state_dict = snapshot_data["model_state_dict"]
                 if drop_prefixes:
                     dropped_keys = []
@@ -1879,8 +1941,6 @@ class SelfPlayTrainer:
             pool_path = path.replace(".pt", "_pool.pt")
             try:
                 # For backward compatibility, assume CNN model if separate pool file exists
-                from alphaholdem.models.cnn import SiameseConvNetV1
-
                 self.opponent_pool.load_pool(pool_path, SiameseConvNetV1)
                 # Ensure snapshot models are on the correct device and dtype
                 for snap in self.opponent_pool.snapshots:

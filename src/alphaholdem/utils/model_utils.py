@@ -5,12 +5,13 @@ This module provides utility functions for getting predictions from models,
 converting between different data formats, and handling legal action masks.
 """
 
-from typing import Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 
 from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.model_outputs import ModelOutput
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
@@ -28,7 +29,7 @@ def get_logits_log_probs_values(
     model: nn.Module,
     data: Union[CNNEmbeddingData, StructuredEmbeddingData],
     legal_masks: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """
     Get log probabilities and values from a model given data and legal masks.
 
@@ -38,18 +39,21 @@ def get_logits_log_probs_values(
         legal_masks: Legal action masks [batch_size, num_actions]
 
     Returns:
-        Tuple of (log_probs, values) where:
+        Tuple of (logits, log_probs, values, value_quantiles) where:
+        - logits: [batch_size, num_actions]
         - log_probs: [batch_size, num_actions]
         - values: [batch_size]
+        - value_quantiles: Optional[batch_size, num_quantiles]
     """
-    outputs = model(data)
+    outputs: ModelOutput = model(data)
     logits = outputs.policy_logits
     values = outputs.value
+    value_quantiles = outputs.value_quantiles
 
     # Apply legal mask
     masked_logits = compute_masked_logits(logits, legal_masks)
 
-    return logits, torch.log_softmax(masked_logits, dim=-1), values
+    return logits, torch.log_softmax(masked_logits, dim=-1), values, value_quantiles
 
 
 def get_log_probs(
@@ -88,14 +92,8 @@ def get_probs_and_values(
         - probs: [batch_size, num_actions]
         - values: [batch_size]
     """
-    outputs = model(data)
-    logits = outputs.policy_logits
-    values = outputs.value
-
-    # Apply legal mask
-    masked_logits = compute_masked_logits(logits, legal_masks)
-
-    return torch.log_softmax(masked_logits, dim=-1), values
+    _, log_probs, values, _ = get_logits_log_probs_values(model, data, legal_masks)
+    return log_probs, values
 
 
 def get_probs(

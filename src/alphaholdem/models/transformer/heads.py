@@ -78,6 +78,30 @@ class TransformerValueHead(nn.Module):
         return value.squeeze(-1)
 
 
+class TransformerQuantileValueHead(nn.Module):
+    """Quantile value head that predicts a distribution over returns."""
+
+    def __init__(self, d_model: int, num_quantiles: int):
+        super().__init__()
+        if num_quantiles <= 0:
+            raise ValueError("num_quantiles must be positive")
+        self.num_quantiles = int(num_quantiles)
+
+        self.quantile_head = nn.Sequential(
+            OrthogonalLinear(d_model, d_model // 2, gain=math.sqrt(2.0)),
+            nn.LayerNorm(d_model // 2),
+            nn.GELU(),
+            OrthogonalLinear(d_model // 2, d_model // 4, gain=math.sqrt(2.0)),
+            nn.LayerNorm(d_model // 4),
+            nn.GELU(),
+            OrthogonalLinear(d_model // 4, self.num_quantiles, gain=1.0),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return quantile estimates shaped [batch_size, num_quantiles]."""
+        return self.quantile_head(x)
+
+
 class HandRangeHead(nn.Module):
     """Auxiliary head for predicting opponent's hand range.
 

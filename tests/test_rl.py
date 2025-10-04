@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import signal
 import tempfile
@@ -192,6 +193,42 @@ def test_self_play_trainer_basic():
         signal.alarm(0)
         # If it times out, just check that trainer was created successfully
         assert trainer is not None
+
+
+def test_train_step_with_quantile_loss_runs():
+    """Ensure the training loop runs successfully when using quantile value loss."""
+
+    model_cfg = ModelConfig()
+    model_cfg.value_head_type = "quantile"
+    model_cfg.value_head_num_quantiles = 7
+
+    cfg = Config(
+        num_steps=1,
+        train=TrainingConfig(
+            batch_size=4,
+            episodes_per_step=1,
+            replay_buffer_batches=1,
+            max_trajectory_length=5,
+            value_loss_type="quantile",
+            quantile_huber_kappa=1.0,
+            use_kv_cache=False,
+        ),
+        model=model_cfg,
+        env=EnvConfig(),
+        use_tensor_env=True,
+        num_envs=4,
+        device="cpu",
+    )
+
+    trainer = SelfPlayTrainer(cfg=cfg, device=torch.device("cpu"))
+
+    assert trainer.loss_calculator.value_loss_type == "quantile"
+
+    stats = trainer.train_step(step=1)
+
+    assert "value_loss" in stats
+    assert math.isfinite(stats["value_loss"])
+    assert stats["beta"] >= 0.0
 
 
 def test_checkpoint_save_load():

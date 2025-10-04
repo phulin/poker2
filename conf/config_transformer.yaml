@@ -71,8 +71,9 @@ train:
   grad_clip: 1.0
   
   # Value loss configuration
-  value_loss_type: "huber"
+  value_loss_type: "quantile"
   huber_delta: 0.5
+  quantile_huber_kappa: 1.0
   
   # Mixed precision configuration
   use_mixed_precision: true
@@ -86,6 +87,8 @@ train:
 # === MODEL CONFIGURATION ===
 model:
   name: "poker_transformer_v1"
+  value_head_type: "quantile"
+  value_head_num_quantiles: 51
   kwargs:
     max_sequence_length: 47
     d_model: 128  # Reduced for better performance

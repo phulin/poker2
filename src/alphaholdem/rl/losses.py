@@ -69,6 +69,7 @@ class LossCalculator(ABC):
         logits: torch.Tensor,
         values: torch.Tensor,
         batch: BatchSample,
+        value_quantiles: Optional[torch.Tensor] = None,
     ) -> LossResult:
         """
         Compute the loss for the given inputs.
@@ -129,6 +130,7 @@ class TrinalClipPPOLoss(LossCalculator):
         logits: torch.Tensor,
         values: torch.Tensor,
         batch: BatchSample,
+        value_quantiles: Optional[torch.Tensor] = None,
     ) -> LossResult:
         """
         Compute Trinal-Clip PPO loss.
@@ -228,6 +230,7 @@ class StandardPPOLoss(LossCalculator):
         logits: torch.Tensor,
         values: torch.Tensor,
         batch: BatchSample,
+        value_quantiles: Optional[torch.Tensor] = None,
     ) -> LossResult:
         """Compute standard PPO loss."""
         actions = batch.action_indices
@@ -383,7 +386,7 @@ class KLPolicyPPOLoss(LossCalculator):
 
     def __init__(
         self,
-        popart_normalizer: PopArtNormalizer,
+        popart_normalizer: Optional[PopArtNormalizer],
         beta_controller: BetaController,
         value_coef: float,
         entropy_coef: float,
@@ -393,6 +396,8 @@ class KLPolicyPPOLoss(LossCalculator):
         dual_clip: float = 1.0,
         huber_delta: float = 1.0,
         kl_type: str = "reverse",
+        quantile_kappa: float = 1.0,
+        num_quantiles: Optional[int] = None,
     ):
         super().__init__(
             epsilon=0.2,
@@ -406,12 +411,15 @@ class KLPolicyPPOLoss(LossCalculator):
         self.clipping = clipping
         self.dual_clip = dual_clip
         self.kl_type = kl_type
+        self.quantile_kappa = quantile_kappa
+        self.num_quantiles = num_quantiles
 
     def compute_loss(
         self,
         logits: torch.Tensor,
         values: torch.Tensor,
         batch: BatchSample,
+        value_quantiles: Optional[torch.Tensor] = None,
     ) -> LossResult:
         actions = batch.action_indices
         advantages = batch.advantages
@@ -474,15 +482,52 @@ class KLPolicyPPOLoss(LossCalculator):
         reverse_kl = (p_new * (log_p_new - log_p_step)).sum(dim=-1).mean()
         penalty_kl = forward_kl if self.kl_type == "forward" else reverse_kl
 
-        # --- Value loss (Huber or MSE)
+        # --- Value loss
         clipped_returns = torch.clamp(returns, delta2, delta3)
         return_clipfrac = (torch.abs(clipped_returns - returns) > 1e-8).float().mean()
-        mu_frozen, sigma_frozen = self.popart.get_frozen_stats()
-        targets_n = (clipped_returns - mu_frozen) / (sigma_frozen + 1e-8)
-        if self.value_loss_type == "huber":
-            value_loss = F.smooth_l1_loss(values, targets_n, beta=self.huber_delta)
+        if self.value_loss_type == "quantile":
+            if value_quantiles is None:
+                raise ValueError(
+                    "value_quantiles must be provided for quantile value loss"
+                )
+            if not self.num_quantiles:
+                raise ValueError("num_quantiles must be set for quantile value loss")
+            targets = clipped_returns.unsqueeze(-1)
+            diff = targets - value_quantiles
+            abs_diff = diff.abs()
+            if self.quantile_kappa > 0:
+                kappa = self.quantile_kappa
+                huber = (
+                    torch.where(
+                        abs_diff <= kappa,
+                        0.5 * diff.pow(2),
+                        kappa * (abs_diff - 0.5 * kappa),
+                    )
+                    / kappa
+                )
+            else:
+                huber = abs_diff
+            taus = (
+                torch.arange(
+                    self.num_quantiles,
+                    device=value_quantiles.device,
+                    dtype=value_quantiles.dtype,
+                )
+                + 0.5
+            ) / self.num_quantiles
+            taus = taus.view(1, -1)
+            indicator = (diff.detach() < 0).float()
+            quantile_loss = torch.abs(taus - indicator) * huber
+            value_loss = quantile_loss.sum(dim=-1).mean() / self.num_quantiles
         else:
-            value_loss = F.mse_loss(values, targets_n)
+            if self.popart is None:
+                raise ValueError("PopArt normalizer is required for non-quantile loss")
+            mu_frozen, sigma_frozen = self.popart.get_frozen_stats()
+            targets_n = (clipped_returns - mu_frozen) / (sigma_frozen + 1e-8)
+            if self.value_loss_type == "huber":
+                value_loss = F.smooth_l1_loss(values, targets_n, beta=self.huber_delta)
+            else:
+                value_loss = F.mse_loss(values, targets_n)
 
         # --- Entropy bonus of the *new* policy
         entropy = -(p_new * log_p_new).sum(dim=-1).mean()
@@ -515,6 +560,3 @@ class KLPolicyPPOLoss(LossCalculator):
             ppo_clipfrac=ppo_clipfrac.item(),
             return_clipfrac=return_clipfrac.item(),
         )
-
-
-# --- end of addition ------------------------------------------------------
