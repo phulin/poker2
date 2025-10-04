@@ -233,7 +233,7 @@ class SelfPlayTrainer:
                 value_head_num_quantiles=value_head_quantiles,
             )
 
-        self.policy = CategoricalPolicyV1(**self.cfg.model.policy.kwargs)
+        self.policy = CategoricalPolicyV1()
         self.model_age = 1
         self.model_history = ModelHistory()
 
@@ -1863,9 +1863,9 @@ class SelfPlayTrainer:
             self.opponent_pool.snapshots = []
             for snapshot_data in pool_data.get("snapshots", []):
                 if self.is_transformer:
-                    model = PokerTransformerV1(**self._model_kwargs)
+                    model = PokerTransformerV1(**self.cfg.model.kwargs)
                 else:
-                    model = SiameseConvNetV1(**self._model_kwargs)
+                    model = SiameseConvNetV1(**self.cfg.model.kwargs)
                 model_state_dict = snapshot_data["model_state_dict"]
                 if drop_prefixes:
                     dropped_keys = []

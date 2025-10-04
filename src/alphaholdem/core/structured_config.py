@@ -46,7 +46,6 @@ class TrainingConfig:
 class ModelConfig:
     name: str = "siamese_convnet_v1"
     kwargs: Optional[dict] = None
-    policy: Optional[dict] = None
     # backwards compatibility
     use_gradient_checkpointing: Optional[bool] = None
     value_head_type: Optional[str] = None
@@ -62,8 +61,6 @@ class ModelConfig:
                 "fusion_hidden": [1024, 1024],
                 "num_actions": 8,
             }
-        if self.policy is None:
-            self.policy = {"name": "categorical_v1", "kwargs": {}}
         if self.value_head_type is None:
             self.value_head_type = "scalar"
         if self.value_head_num_quantiles is None:
