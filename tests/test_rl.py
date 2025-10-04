@@ -12,6 +12,7 @@ from alphaholdem.core.structured_config import (
     EnvConfig,
     ModelConfig,
     TrainingConfig,
+    ValueLossType,
 )
 from alphaholdem.rl.losses import TrinalClipPPOLoss
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
@@ -222,7 +223,7 @@ def test_train_step_with_quantile_loss_runs():
 
     trainer = SelfPlayTrainer(cfg=cfg, device=torch.device("cpu"))
 
-    assert trainer.loss_calculator.value_loss_type == "quantile"
+    assert trainer.loss_calculator.value_loss_type == ValueLossType.quantile
 
     stats = trainer.train_step(step=1)
 

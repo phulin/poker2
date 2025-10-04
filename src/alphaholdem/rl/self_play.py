@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 
-from alphaholdem.core.structured_config import Config
+from alphaholdem.core.structured_config import Config, LrSchedule, ValueHeadType
 from alphaholdem.encoding.action_mapping import bin_to_action, get_legal_mask
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
@@ -102,7 +102,7 @@ class SelfPlayTrainer:
     grad_clip: float
     learning_rate: float
     learning_rate_final: float
-    lr_schedule: str
+    lr_schedule: LrSchedule
     entropy_coef_start: float
     entropy_coef_final: float
     entropy_decay_portion: float
@@ -213,24 +213,21 @@ class SelfPlayTrainer:
                 bb=self.cfg.env.bb,
             )
 
-        if self.cfg.model.value_head_type == "quantile":
-            value_head_type = "quantile"
-            value_head_quantiles = max(2, self.cfg.model.value_head_num_quantiles)
-        else:
-            value_head_type = "scalar"
-            value_head_quantiles = 1
+        self.value_head_type = self.cfg.model.value_head_type
+        self.value_head_num_quantiles = self.cfg.model.value_head_num_quantiles
+        self.use_quantile_value_head = self.value_head_type == ValueHeadType.quantile
 
         if self.is_transformer:
             self.model = PokerTransformerV1(
                 **self.cfg.model.kwargs,
-                value_head_type=value_head_type,
-                value_head_num_quantiles=value_head_quantiles,
+                value_head_type=self.value_head_type,
+                value_head_num_quantiles=self.value_head_num_quantiles,
             )
         else:
             self.model = SiameseConvNetV1(
                 **self.cfg.model.kwargs,
-                value_head_type=value_head_type,
-                value_head_num_quantiles=value_head_quantiles,
+                value_head_type=self.value_head_type,
+                value_head_num_quantiles=self.value_head_num_quantiles,
             )
 
         self.policy = CategoricalPolicyV1()
@@ -242,12 +239,6 @@ class SelfPlayTrainer:
             "bet": 0,
             "all_in": 0,
         }
-
-        self.value_head_type = "quantile" if value_head_type == "quantile" else "scalar"
-        self.quantile_num_buckets = (
-            value_head_quantiles if self.value_head_type == "quantile" else 1
-        )
-        self.use_quantile_value_head = self.value_head_type == "quantile"
 
         # Ensure bins align with model output size to avoid mask/logit mismatch
         if hasattr(self.model, "policy_head") and hasattr(
@@ -379,7 +370,7 @@ class SelfPlayTrainer:
             kl_type="reverse",
             quantile_kappa=self.quantile_huber_kappa,
             num_quantiles=(
-                self.quantile_num_buckets if self.use_quantile_value_head else None
+                self.value_head_num_quantiles if self.use_quantile_value_head else None
             ),
         )
 
@@ -1530,7 +1521,7 @@ class SelfPlayTrainer:
         # Learning rate schedule
         lr_start = float(self.learning_rate)
         lr_final = float(self.learning_rate_final)
-        if self.lr_schedule == "cosine" and lr_final != lr_start:
+        if self.lr_schedule == LrSchedule.cosine and lr_final != lr_start:
             lr_now = lr_final + 0.5 * (lr_start - lr_final) * (
                 1.0 + math.cos(math.pi * t)
             )

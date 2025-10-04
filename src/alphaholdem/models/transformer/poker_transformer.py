@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.utils.checkpoint
 
 from alphaholdem.core.interfaces import Model
+from alphaholdem.core.structured_config import ValueHeadType
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.models.transformer.embeddings import PokerFusedEmbedding
 from alphaholdem.models.transformer.heads import (
@@ -97,7 +98,10 @@ class PokerTransformerV1(nn.Module, Model):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.value_head_type = value_head_type
         self.num_value_quantiles = int(value_head_num_quantiles)
-        if self.value_head_type == "quantile" and self.num_value_quantiles <= 1:
+        if (
+            self.value_head_type == ValueHeadType.quantile
+            and self.num_value_quantiles <= 1
+        ):
             self.num_value_quantiles = 2
 
         # Single fused embedding module for all token types
@@ -129,7 +133,7 @@ class PokerTransformerV1(nn.Module, Model):
         )
 
         self.policy_head = TransformerPolicyHead(d_model, num_bet_bins)
-        if self.value_head_type == "quantile":
+        if self.value_head_type == ValueHeadType.quantile:
             self.value_head = TransformerQuantileValueHead(
                 d_model, self.num_value_quantiles
             )
@@ -245,7 +249,7 @@ class PokerTransformerV1(nn.Module, Model):
         x = self.cls_mlp(x)
 
         policy_logits = self.policy_head(x)
-        if self.value_head_type == "quantile":
+        if self.value_head_type == ValueHeadType.quantile:
             value_quantiles = self.value_head(x)
             value = value_quantiles.mean(dim=-1)
         else:
@@ -268,7 +272,7 @@ class PokerTransformerV1(nn.Module, Model):
             weight_scale: Scaling factor for the weight matrix
             bias_adjustment: Adjustment term for the bias vector
         """
-        if self.value_head_type == "quantile":
+        if self.value_head_type == ValueHeadType.quantile:
             # PopArt scaling does not apply when using quantile heads
             return
 

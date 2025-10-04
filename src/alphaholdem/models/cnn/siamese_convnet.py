@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
 from alphaholdem.core.interfaces import Model
+from alphaholdem.core.structured_config import ValueHeadType
 from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.model_output import ModelOutput
 
@@ -152,7 +153,10 @@ class SiameseConvNetV1(nn.Module, Model):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.value_head_type = value_head_type
         self.num_value_quantiles = int(value_head_num_quantiles)
-        if self.value_head_type == "quantile" and self.num_value_quantiles <= 1:
+        if (
+            self.value_head_type == ValueHeadType.quantile
+            and self.num_value_quantiles <= 1
+        ):
             self.num_value_quantiles = 2
         self.cards_trunk = CardsConvTrunk(cards_channels, hidden=cards_hidden)
         self.actions_trunk = ActionsConvTrunk(actions_channels, hidden=actions_hidden)
@@ -185,7 +189,9 @@ class SiameseConvNetV1(nn.Module, Model):
         )
         # Critic MLP head for more stable value learning
         value_output_dim = (
-            self.num_value_quantiles if self.value_head_type == "quantile" else 1
+            self.num_value_quantiles
+            if self.value_head_type == ValueHeadType.quantile
+            else 1
         )
         self.value_head = nn.Sequential(
             nn.Linear(in_dim, 512),  # Larger hidden
@@ -197,7 +203,7 @@ class SiameseConvNetV1(nn.Module, Model):
             nn.SiLU(),
             nn.Linear(256, value_output_dim),
         )
-        if self.value_head_type != "quantile":
+        if self.value_head_type != ValueHeadType.quantile:
             self.value_head_type = "scalar"
             self.num_value_quantiles = 1
 
@@ -223,7 +229,7 @@ class SiameseConvNetV1(nn.Module, Model):
         h = self.fusion(x)
         logits = self.policy_head(h)
         value_raw = self.value_head(h)
-        if self.value_head_type == "quantile":
+        if self.value_head_type == ValueHeadType.quantile:
             value_quantiles = value_raw
             value = value_quantiles.mean(dim=-1)
         else:
@@ -244,7 +250,7 @@ class SiameseConvNetV1(nn.Module, Model):
             weight_scale: Scaling factor for the weight matrix
             bias_adjustment: Adjustment term for the bias vector
         """
-        if self.value_head_type == "quantile":
+        if self.value_head_type == ValueHeadType.quantile:
             return
 
         # Access the last linear layer in the value head

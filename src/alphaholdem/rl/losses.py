@@ -7,6 +7,7 @@ from typing import Literal, Optional
 import torch
 import torch.nn.functional as F
 
+from alphaholdem.core.structured_config import ValueLossType
 from alphaholdem.rl.beta_controller import BetaController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
@@ -43,7 +44,7 @@ class LossCalculator(ABC):
         epsilon: float,
         value_coef: float,
         entropy_coef: float,
-        value_loss_type: str = "mse",
+        value_loss_type: ValueLossType = ValueLossType.mse,
         huber_delta: float = 1.0,
     ):
         """
@@ -99,7 +100,7 @@ class TrinalClipPPOLoss(LossCalculator):
         delta1: float,
         value_coef: float,
         entropy_coef: float,
-        value_loss_type: str,
+        value_loss_type: ValueLossType,
         huber_delta: float,
         target_kl: float,
         kl_ema: EMA,
@@ -193,7 +194,7 @@ class TrinalClipPPOLoss(LossCalculator):
         # Use frozen stats for normalization during training
         mu_frozen, sigma_frozen = self.popart.get_frozen_stats()
         targets_n = (clipped_returns - mu_frozen) / (sigma_frozen + 1e-8)
-        if self.value_loss_type == "huber":
+        if self.value_loss_type == ValueLossType.huber:
             value_loss = F.smooth_l1_loss(values, targets_n, beta=self.huber_delta)
         else:
             value_loss = F.mse_loss(values, targets_n)
@@ -289,7 +290,7 @@ class DualClipPPOLoss(LossCalculator):
         dual_clip: float,
         value_coef: float,
         entropy_coef: float,
-        value_loss_type: str = "mse",
+        value_loss_type: ValueLossType = ValueLossType.mse,
         huber_delta: float = 1.0,
     ):
         """
@@ -389,7 +390,7 @@ class KLPolicyPPOLoss(LossCalculator):
         beta_controller: BetaController,
         value_coef: float,
         entropy_coef: float,
-        value_loss_type: str = "huber",
+        value_loss_type: ValueLossType = ValueLossType.huber,
         clipping: Literal["none", "single", "dual"] = "dual",
         epsilon: float = 0.2,
         dual_clip: float = 1.0,
@@ -484,7 +485,7 @@ class KLPolicyPPOLoss(LossCalculator):
         # --- Value loss
         clipped_returns = torch.clamp(returns, delta2, delta3)
         return_clipfrac = (torch.abs(clipped_returns - returns) > 1e-8).float().mean()
-        if self.value_loss_type == "quantile":
+        if self.value_loss_type == ValueLossType.quantile:
             if value_quantiles is None:
                 raise ValueError(
                     "value_quantiles must be provided for quantile value loss"
@@ -523,7 +524,7 @@ class KLPolicyPPOLoss(LossCalculator):
                 raise ValueError("PopArt normalizer is required for non-quantile loss")
             mu_frozen, sigma_frozen = self.popart.get_frozen_stats()
             targets_n = (clipped_returns - mu_frozen) / (sigma_frozen + 1e-8)
-            if self.value_loss_type == "huber":
+            if self.value_loss_type == ValueLossType.huber:
                 value_loss = F.smooth_l1_loss(values, targets_n, beta=self.huber_delta)
             else:
                 value_loss = F.mse_loss(values, targets_n)

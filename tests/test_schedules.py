@@ -1,5 +1,6 @@
 import math
 
+from alphaholdem.core.structured_config import LrSchedule
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.utils.ema import EMA
 
@@ -14,7 +15,7 @@ class _Train:
         self,
         lr: float,
         lr_final: float,
-        lr_schedule: str,
+        lr_schedule: LrSchedule,
         ent_start: float,
         ent_final: float,
         ent_portion: float,

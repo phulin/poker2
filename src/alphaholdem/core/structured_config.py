@@ -1,15 +1,32 @@
 from dataclasses import dataclass
 from typing import List, Optional, Literal
+from enum import Enum
 
 from hydra.core.config_store import ConfigStore
 from omegaconf import MISSING
+
+
+class ValueLossType(str, Enum):
+    huber = "huber"
+    mse = "mse"
+    quantile = "quantile"
+
+
+class LrSchedule(str, Enum):
+    cosine = "cosine"
+    linear = "linear"
+
+
+class ValueHeadType(str, Enum):
+    scalar = "scalar"
+    quantile = "quantile"
 
 
 @dataclass
 class TrainingConfig:
     learning_rate: float = 1e-4
     learning_rate_final: float = 1e-5
-    lr_schedule: Literal["cosine", "linear"] = "cosine"  # Learning rate schedule type
+    lr_schedule: LrSchedule = LrSchedule.cosine
     batch_size: int = 1024
     episodes_per_step: int = 4
     replay_buffer_batches: int = 4
@@ -24,7 +41,7 @@ class TrainingConfig:
     entropy_coef_final: float = 0.002
     entropy_decay_portion: float = 0.6  # Portion of training for linear entropy decay
     grad_clip: float = 1.0
-    value_loss_type: Literal["huber", "mse", "quantile"] = "huber"
+    value_loss_type: ValueLossType = ValueLossType.huber
     huber_delta: float = 1.0
     use_mixed_precision: bool = False  # Enable automatic mixed precision
     loss_scale: float = 128.0  # Initial loss scale for mixed precision
@@ -48,7 +65,7 @@ class ModelConfig:
     kwargs: Optional[dict] = None
     # backwards compatibility
     use_gradient_checkpointing: Optional[bool] = None
-    value_head_type: Literal["scalar", "quantile"] = "scalar"
+    value_head_type: ValueHeadType = ValueHeadType.scalar
     value_head_num_quantiles: Optional[int] = None
 
     def __post_init__(self):
@@ -62,7 +79,7 @@ class ModelConfig:
                 "num_actions": 8,
             }
         if self.value_head_type is None:
-            self.value_head_type = "scalar"
+            self.value_head_type = ValueHeadType.scalar
         if self.value_head_num_quantiles is None:
             self.value_head_num_quantiles = 51
 
