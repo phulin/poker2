@@ -1,9 +1,13 @@
 """Poker CFR solver package."""
 
-from .game_adapter import GameNodeBatch, HUNLGameTreeAdapter
-from .information_set import InformationSetKey, InformationSetEncoder, TensorHasher
-from .regret_store import RegretStoreConfig, TensorRegretStore
-from .solver import CFRConfig, CFRSolver
+from pokercfr.game_adapter import GameNodeBatch, HUNLGameTreeAdapter
+from pokercfr.information_set import (
+    InformationSetEncoder,
+    InformationSetKey,
+    TensorHasher,
+)
+from pokercfr.regret_store import RegretStoreConfig, TensorRegretStore
+from pokercfr.solver import CFRConfig, CFRSolver
 
 __all__ = [
     "GameNodeBatch",

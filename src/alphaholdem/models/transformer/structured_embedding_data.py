@@ -8,9 +8,9 @@ from typing import Dict
 import torch
 
 from alphaholdem.models.transformer.tokens import (
-    Context,
     HOLE0_INDEX,
     HOLE1_INDEX,
+    Context,
     get_card_token_id_offset,
 )
 

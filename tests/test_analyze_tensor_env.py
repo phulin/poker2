@@ -11,7 +11,7 @@ from alphaholdem.env.analyze_tensor_env import (
     _grid_coords_for_hand,
     create_1326_hand_combinations,
 )
-from alphaholdem.models.model_outputs import ModelOutput
+from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,

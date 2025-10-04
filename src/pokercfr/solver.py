@@ -7,9 +7,9 @@ from typing import Callable, Optional
 
 import torch
 
-from .game_adapter import EnvAdapter, GameNodeBatch
-from .information_set import InformationSetEncoder, TensorHasher
-from .regret_store import RegretStoreConfig, TensorRegretStore
+from pokercfr.game_adapter import EnvAdapter, GameNodeBatch
+from pokercfr.information_set import InformationSetEncoder, TensorHasher
+from pokercfr.regret_store import RegretStoreConfig, TensorRegretStore
 
 
 @dataclass

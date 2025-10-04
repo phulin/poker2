@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Sequence
 
 import torch
 import torch.nn as nn
@@ -8,9 +8,8 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
 from alphaholdem.core.interfaces import Model
-from alphaholdem.core.registry import register_model
-from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-from alphaholdem.models.model_outputs import ModelOutput
+from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.model_output import ModelOutput
 
 
 def _resize_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
@@ -136,7 +135,6 @@ class ActionsConvTrunk(nn.Module):
         return out.flatten(1)
 
 
-@register_model("siamese_convnet_v1")
 class SiameseConvNetV1(nn.Module, Model):
     def __init__(
         self,

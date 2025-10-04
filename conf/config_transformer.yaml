@@ -98,11 +98,6 @@ model:
     num_bet_bins: 8
     use_gradient_checkpointing: false  # Disabled for performance
   
-  # Policy configuration (using existing categorical policy for now)
-  policy:
-    name: "categorical_v1"
-    kwargs: {}
-
 # === STATE ENCODER CONFIGURATION ===
 state_encoder:
   name: "transformer"

@@ -5,7 +5,6 @@ from typing import Any, List, Optional
 import torch
 
 from alphaholdem.core.interfaces import Encoder
-from alphaholdem.core.registry import register_card_encoder
 from alphaholdem.core.structured_config import Config
 from alphaholdem.env import rules
 
@@ -19,7 +18,6 @@ def _cards_to_planes(
     return planes
 
 
-@register_card_encoder("cards_planes_v1")
 class CardsPlanesV1(Encoder):
     def __init__(self, config: Config | None = None):
         # Store config (not currently used but kept for consistency)

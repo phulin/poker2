@@ -9,7 +9,7 @@ from alphaholdem.core.structured_config import (
     TrainingConfig,
 )
 from alphaholdem.models.cnn import SiameseConvNetV1
-from alphaholdem.models.heads import CategoricalPolicyV1
+from alphaholdem.models.policy import CategoricalPolicyV1
 from alphaholdem.rl.self_play import SelfPlayTrainer
 
 

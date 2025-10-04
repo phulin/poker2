@@ -8,7 +8,7 @@ import alphaholdem.encoding.actions_encoder  # noqa: F401
 
 # Ensure registries are populated via side-effect imports
 import alphaholdem.encoding.cards_encoder  # noqa: F401
-import alphaholdem.models.heads  # noqa: F401
+import alphaholdem.models.policy  # noqa: F401
 import alphaholdem.models.siamese_convnet  # noqa: F401
 from alphaholdem.core.builders import build_components_from_config
 from alphaholdem.core.structured_config import Config

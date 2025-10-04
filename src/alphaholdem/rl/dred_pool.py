@@ -15,7 +15,7 @@ from typing import Any, List, Optional, Union
 
 import torch
 
-from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )

@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from alphaholdem.models.model_outputs import ModelOutput
+from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.models.transformer.kv_cache_manager import (
     KVCacheManager,
     SelfPlayKVCacheManager,

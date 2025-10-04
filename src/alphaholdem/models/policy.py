@@ -6,10 +6,8 @@ import torch
 import torch.nn.functional as F
 
 from alphaholdem.core.interfaces import Policy
-from alphaholdem.core.registry import register_policy
 
 
-@register_policy("categorical_v1")
 class CategoricalPolicyV1(Policy):
     def action(
         self, logits: torch.Tensor, legal_mask: Optional[torch.Tensor] = None

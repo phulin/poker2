@@ -8,7 +8,7 @@ import torch
 
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
 
 
 class CNNStateEncoder:

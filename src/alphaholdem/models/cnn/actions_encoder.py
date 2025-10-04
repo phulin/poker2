@@ -5,13 +5,11 @@ from typing import Any, List, Optional
 import torch
 
 from alphaholdem.core.interfaces import Encoder
-from alphaholdem.core.registry import register_action_encoder
 from alphaholdem.core.structured_config import Config
 from alphaholdem.encoding.action_mapping import _action_to_bin_idx
 from alphaholdem.env.types import Action, GameState
 
 
-@register_action_encoder("actions_hu_v1")
 class ActionsHUEncoderV1(Encoder):
     def __init__(
         self, history_actions_per_round: int = 6, config: Config | None = None

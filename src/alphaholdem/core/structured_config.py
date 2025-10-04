@@ -53,7 +53,7 @@ class ModelConfig:
     value_head_num_quantiles: Optional[int] = None
 
     def __post_init__(self):
-        if self.kwargs is None:
+        if self.kwargs is None and self.name == "siamese_convnet_v1":
             self.kwargs = {
                 "cards_channels": 6,
                 "actions_channels": 24,

@@ -15,7 +15,7 @@ from alphaholdem.core.structured_config import (
     ModelConfig,
     TrainingConfig,
 )
-from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.rl.self_play import SelfPlayTrainer
 
 # Add the project root to the path for imports

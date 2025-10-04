@@ -6,8 +6,8 @@ from alphaholdem.encoding.action_mapping import bin_to_action, get_legal_mask
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.types import GameState, PlayerState
 from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
-from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-from alphaholdem.models.heads import CategoricalPolicyV1
+from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.policy import CategoricalPolicyV1
 
 
 def make_state(street: str, board: list[int]) -> GameState:

@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 
 import torch
 
-from .information_set import InformationSetKey
+from pokercfr.information_set import InformationSetKey
 
 KeyType = Tuple[int, int]
 

@@ -9,27 +9,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 
-from alphaholdem.core import registry
-from alphaholdem.models import heads as _policy_heads  # noqa: F401
 from alphaholdem.core.structured_config import Config
 from alphaholdem.encoding.action_mapping import bin_to_action, get_legal_mask
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.cnn_embedding_data import CNNEmbeddingData
-from alphaholdem.models.cnn import siamese_convnet as _cnn_models  # noqa: F401
+from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
-from alphaholdem.models.state_encoder import CNNStateEncoder
-from alphaholdem.models.transformer import (
-    poker_transformer as _transformer_models,
-)  # noqa: F401
-from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
+from alphaholdem.models.cnn.state_encoder import CNNStateEncoder
+from alphaholdem.models.policy import CategoricalPolicyV1
 from alphaholdem.models.transformer.kv_cache_manager import SelfPlayKVCacheManager
+from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.beta_controller import BetaController
 from alphaholdem.rl.dred_pool import DREDPool
 from alphaholdem.rl.k_best_pool import KBestOpponentPool
-from alphaholdem.rl.losses import KLPolicyPPOLoss, TrinalClipPPOLoss
+from alphaholdem.rl.losses import KLPolicyPPOLoss
 from alphaholdem.rl.opponent_pool import OpponentPool
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.replay import Trajectory, Transition
@@ -238,16 +233,7 @@ class SelfPlayTrainer:
                 value_head_num_quantiles=value_head_quantiles,
             )
 
-        # Config-driven components
-        policy_cfg = self.cfg.model.policy or {"name": "categorical_v1", "kwargs": {}}
-        policy_kwargs = policy_cfg.get("kwargs", {})
-        policy_name = policy_cfg.get("name", "categorical_v1")
-
-        if policy_name != "categorical_v1":
-            raise ValueError(
-                "SelfPlayTrainer currently supports only 'categorical_v1' policy"
-            )
-        self.policy = registry.build_policy(policy_name, **policy_kwargs)
+        self.policy = CategoricalPolicyV1(**self.cfg.model.policy.kwargs)
         self.model_age = 1
         self.model_history = ModelHistory()
 

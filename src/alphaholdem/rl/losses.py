@@ -11,7 +11,6 @@ from alphaholdem.rl.beta_controller import BetaController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.utils.ema import EMA
-from alphaholdem.utils.kl_divergence import compute_kl_divergence_batch
 
 
 @dataclass

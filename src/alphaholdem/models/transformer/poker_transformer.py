@@ -10,8 +10,7 @@ import torch.nn as nn
 import torch.utils.checkpoint
 
 from alphaholdem.core.interfaces import Model
-from alphaholdem.core.registry import register_model
-from alphaholdem.models.model_outputs import ModelOutput
+from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.models.transformer.embeddings import PokerFusedEmbedding
 from alphaholdem.models.transformer.heads import (
     TransformerPolicyHead,
@@ -73,7 +72,6 @@ class TransformerLayer(nn.Module):
         return x, new_kv_cache
 
 
-@register_model("poker_transformer_v1")
 class PokerTransformerV1(nn.Module, Model):
     """Transformer-based poker model with variable-length input encoding."""
 

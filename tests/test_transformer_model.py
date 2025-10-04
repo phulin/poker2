@@ -3,7 +3,6 @@
 import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.factory import ModelFactory
 from alphaholdem.models.transformer.embeddings import (
     PokerFusedEmbedding,
     combine_embeddings,
@@ -204,16 +203,15 @@ class TestPokerTransformerV1:
         )
         assert isinstance(encoder, TokenSequenceBuilder)
 
-        model_config = {
-            "d_model": 64,
-            "n_layers": 1,
-            "n_heads": 4,
-            "num_bet_bins": env.num_bet_bins,
-            "dropout": 0.1,
-            "max_sequence_length": 100,
-            "use_gradient_checkpointing": False,
-        }
-        model = ModelFactory.create_model("transformer", model_config, device=device)
+        model = PokerTransformerV1(
+            d_model=64,
+            n_layers=1,
+            n_heads=4,
+            num_bet_bins=env.num_bet_bins,
+            dropout=0.1,
+            max_sequence_length=100,
+            use_gradient_checkpointing=False,
+        )
         inner_model = model._orig_mod if hasattr(model, "_orig_mod") else model
         assert isinstance(inner_model, PokerTransformerV1)
 
