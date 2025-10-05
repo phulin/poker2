@@ -422,7 +422,6 @@ class SelfPlayTrainer:
                     )
                 else:
                     wandb.init(**wandb_init_kwargs)
-                wandb.watch(self.model, log="all", log_freq=10)
                 print(f"Wandb initialized new run for project: {self.wandb_project}")
             except Exception as exc:  # pragma: no cover - offline fallback path
                 print(
