@@ -1115,6 +1115,83 @@ class SelfPlayTrainer:
 
         return collected_trajectory_rewards_tensor
 
+    def _compute_pool_kl_divergence(self, batch: BatchSample) -> float:
+        """
+        Compute KL divergence between current model and last admitted opponent.
+
+        Args:
+            batch: Current batch sample
+
+        Returns:
+            KL divergence value (0.0 if no last admitted opponent)
+        """
+        pool_kl_divergence = 0.0
+        last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
+
+        if last_admitted_opponent is not None:
+            # Take a element sample from the current batch without replacement
+            last_opp_batch_size = batch.returns.shape[0]
+            last_opp_sample_size = max(last_opp_batch_size // 16, 16)
+            last_opp_states = batch.embedding_data[:last_opp_sample_size]
+            last_opp_legal_masks = batch.legal_masks[:last_opp_sample_size]
+
+            with (
+                torch.no_grad(),
+                model_eval(last_admitted_opponent.model),
+                model_eval(self.model),
+                self._autocast(),
+            ):
+                # Get last admitted opponent model logits
+                last_admitted_opponent.model.to(last_opp_states.device)
+                opponent_outputs = last_admitted_opponent.model(last_opp_states)
+                opponent_logits = opponent_outputs.policy_logits.float()
+
+                new_logits = self.model(last_opp_states).policy_logits.float()
+
+                # Compute KL divergence
+                pool_kl_divergence = compute_kl_divergence_batch(
+                    new_logits, opponent_logits, last_opp_legal_masks
+                )
+
+        return pool_kl_divergence
+
+    def _compute_diagnostic_kl_divergence(self, step_start_age: int) -> torch.Tensor:
+        """
+        Compute diagnostic KL divergence between current model and old model.
+
+        Args:
+            step_start_age: Age of the model at the start of the step
+
+        Returns:
+            KL divergence value computed from current and old model
+        """
+        # Compute current log probs on sample for diagnostic KL
+        kl_sample_batch_size = min(self.batch_size, max(8, self.batch_size // 8))
+        kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
+        old_model = self.model_history.get_model(step_start_age)
+        with (
+            torch.no_grad(),
+            model_eval(self.model),
+            self._autocast(),
+        ):
+            kl_old_log_probs = get_log_probs(
+                old_model,
+                kl_states.embedding_data,
+                kl_states.legal_masks,
+            )
+            kl_new_log_probs = get_log_probs(
+                self.model,
+                kl_states.embedding_data,
+                kl_states.legal_masks,
+            )
+            # KL(old || new)
+            return F.kl_div(
+                kl_new_log_probs,
+                kl_old_log_probs,
+                log_target=True,
+                reduction="batchmean",
+            )
+
     @profile
     def update_model(self, step: int) -> dict:
         """Perform PPO update on collected trajectories."""
@@ -1221,11 +1298,7 @@ class SelfPlayTrainer:
             total_epsilon += loss_result.epsilon
             minibatch_count += 1
 
-            # Update Beta Controller each minibatch based on penalty KL
-            if loss_result.penalty_kl is not None:
-                self.beta_controller.update(loss_result.penalty_kl)
-
-            # If we've gone too far from the starting policy, stop updating.
+            # If we've gone too far from the starting policy, stop (skip this update).
             if (
                 loss_result.forward_kl is not None
                 and loss_result.forward_kl > 2 * TARGET_KL
@@ -1296,34 +1369,7 @@ class SelfPlayTrainer:
                 self.popart_normalizer.update_stats(batch.returns)
 
             # Check if we should add current model to opponent pool
-            # Compute KL divergence between current model and last admitted opponent
-            pool_kl_divergence = 0.0
-            last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
-
-            # Take a element sample from the current batch without replacement
-            last_opp_batch_size = batch.returns.shape[0]
-            last_opp_sample_size = max(last_opp_batch_size // 16, 16)
-            last_opp_states = batch.embedding_data[:last_opp_sample_size]
-            last_opp_legal_masks = batch.legal_masks[:last_opp_sample_size]
-
-            if last_admitted_opponent is not None:
-                with (
-                    torch.no_grad(),
-                    model_eval(last_admitted_opponent.model),
-                    model_eval(self.model),
-                    self._autocast(),
-                ):
-                    # Get last admitted opponent model logits
-                    last_admitted_opponent.model.to(last_opp_states.device)
-                    opponent_outputs = last_admitted_opponent.model(last_opp_states)
-                    opponent_logits = opponent_outputs.policy_logits.float()
-
-                    new_logits = self.model(last_opp_states).policy_logits.float()
-
-                    # Compute KL divergence
-                    pool_kl_divergence = compute_kl_divergence_batch(
-                        new_logits, opponent_logits, last_opp_legal_masks
-                    )
+            pool_kl_divergence = self._compute_pool_kl_divergence(batch)
 
             if self.opponent_pool.should_add_snapshot(step, pool_kl_divergence):
                 if isinstance(self.opponent_pool, DREDPool):
@@ -1335,48 +1381,15 @@ class SelfPlayTrainer:
 
                 self.opponent_pool.add_snapshot(self.model, step)
 
-        # Calculate average reward for this update step using captured values
-        avg_reward = (
-            self.total_step_reward / max(1, self.step_trajectories_collected)
-            if self.step_trajectories_collected > 0
-            else 0.0
-        )
-        if abs(avg_reward) > 1:
-            print(f"Warning: Avg reward is {avg_reward}, which is outside [-1, 1].")
-            print(f"Total step reward: {self.total_step_reward}")
-            print(f"Step trajectories collected: {self.step_trajectories_collected}")
-
         # Estimate diagnostic KL: divergence from last model batch.
         if loss_result.forward_kl is None:
-            # Compute current log probs on sample for diagnostic KL
-            kl_sample_batch_size = min(self.batch_size, max(8, self.batch_size // 8))
-            kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
-            old_model = self.model_history.get_model(step_start_age)
-            with (
-                torch.no_grad(),
-                model_eval(self.model),
-                self._autocast(),
-            ):
-                kl_old_log_probs = get_log_probs(
-                    old_model,
-                    kl_states.embedding_data,
-                    kl_states.legal_masks,
-                )
-                kl_new_log_probs = get_log_probs(
-                    self.model,
-                    kl_states.embedding_data,
-                    kl_states.legal_masks,
-                )
-                # KL(old || new)
-                current_kl = F.kl_div(
-                    kl_new_log_probs,
-                    kl_old_log_probs,
-                    log_target=True,
-                    reduction="batchmean",
-                )
+            current_kl = self._compute_diagnostic_kl_divergence(step_start_age)
         else:
             # If we are using a loss that computed KL, use that.
             current_kl = loss_result.forward_kl
+
+        # Update Beta Controller each epoch based on penalty KL
+        self.beta_controller.update(current_kl)
 
         # Update KL divergence exponential moving average
         self.kl_ema.update(current_kl)
@@ -1392,6 +1405,19 @@ class SelfPlayTrainer:
             if weight_scale is not None and bias_adjustment is not None:
                 # Apply final rescaling to model (pass floats directly)
                 self.model.adjust_scale(weight_scale, bias_adjustment)
+
+        # Calculate average reward for this update step using captured values
+        # (These values all come from trajectory collection, compute it here to include
+        # in training stats)
+        avg_reward = (
+            self.total_step_reward / max(1, self.step_trajectories_collected)
+            if self.step_trajectories_collected > 0
+            else 0.0
+        )
+        if abs(avg_reward) > 1:
+            print(f"Warning: Avg reward is {avg_reward}, which is outside [-1, 1].")
+            print(f"Total step reward: {self.total_step_reward}")
+            print(f"Step trajectories collected: {self.step_trajectories_collected}")
 
         avg_trajectory_length = self.replay_buffer.num_steps() / self.replay_buffer.size
         denom = max(1, minibatch_count)
@@ -1450,9 +1476,15 @@ class SelfPlayTrainer:
         # Apply LR/entropy schedules for this step
         self._apply_schedules(step)
 
-        # These are updated while filling the replay buffer
-        self.total_step_reward = 0.0
+        # This is updated while filling the replay buffer
         self.step_trajectories_collected = 0
+        self.total_step_reward = 0.0
+        self.last_action_mix = {
+            "fold": 0,
+            "check_call": 0,
+            "bet": 0,
+            "all_in": 0,
+        }
 
         self.model.eval()
         target_steps = self.batch_size * max(self.cfg.train.replay_buffer_batches, 1)
@@ -1488,16 +1520,6 @@ class SelfPlayTrainer:
             "entropy_coef_current": self.entropy_coef,
             "action_rates": action_rates,
             **update_stats,
-        }
-
-        # Reset step counters for next training step
-        self.total_step_reward = 0.0
-        self.step_trajectories_collected = 0
-        self.last_action_mix = {
-            "fold": 0,
-            "check_call": 0,
-            "bet": 0,
-            "all_in": 0,
         }
 
         # Log to wandb if enabled
@@ -1582,6 +1604,7 @@ class SelfPlayTrainer:
             self.total_step_reward += trajectory_rewards.sum().item()
             self.step_trajectories_collected += trajectory_rewards.numel()
             self.total_trajectories_collected += trajectory_rewards.numel()
+
         else:
             steps_added = 0
             while steps_added < min_steps:
