@@ -1160,6 +1160,7 @@ class SelfPlayTrainer:
         total_advantage_mean_raw, total_advantage_std_raw = 0.0, 0.0
         total_return_abs_mean, total_return_abs_std = 0.0, 0.0
         total_small_adv_rate = 0.0
+        total_grad_norm_unclipped, total_grad_norm_clipped = 0.0, 0.0
         minibatch_count = 0
 
         # Freeze value normalizer (PopArt) at the beginning of each epoch cycle
@@ -1255,39 +1256,43 @@ class SelfPlayTrainer:
             # Use scaler for mixed precision backward pass. Will have enabled=False if not using mixed precision.
             self.scaler.scale(loss_result.total_loss).backward()
 
-            # Apply stricter gradient clipping to CNN layers to prevent explosion
             self.scaler.unscale_(self.optimizer)
+
+            total_grad_norm_unclipped += torch.nn.utils.get_total_norm(
+                self.model.parameters()
+            ).item()
+
             grad_has_nan = False
             for name, param in self.model.named_parameters():
+                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                    grad_has_nan = True
+                    print(
+                        "[SelfPlayTrainer] NaN/Inf gradient detected",
+                        {"param": name},
+                    )
+            # Apply stricter gradient clipping to CNN layers to prevent explosion
+            for name, param in self.model.named_parameters():
                 if param.grad is not None and "cards_trunk" in name:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        grad_has_nan = True
-                        print(
-                            "[SelfPlayTrainer] NaN/Inf gradient detected",
-                            {"param": name},
-                        )
                     torch.nn.utils.clip_grad_norm_(
                         [param], 0.5
                     )  # Stricter clipping for CNN
-            total_grad_norm = torch.nn.utils.clip_grad_norm_(
+            grad_norm_clipped = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.grad_clip
-            )
-            if grad_has_nan or not torch.isfinite(total_grad_norm):
+            ).item()
+
+            if grad_has_nan or not math.isfinite(grad_norm_clipped):
                 print(
                     "[SelfPlayTrainer] Gradient norm issue",
-                    {
-                        "grad_norm": (
-                            float(total_grad_norm.item())
-                            if torch.isfinite(total_grad_norm)
-                            else float("nan")
-                        ),
-                    },
+                    {"grad_norm": grad_norm_clipped},
                 )
-            elif total_grad_norm.item() > 1e3:
+            elif grad_norm_clipped > 1e3:
                 print(
                     "[SelfPlayTrainer] Large gradient norm",
-                    {"grad_norm": float(total_grad_norm.item())},
+                    {"grad_norm": grad_norm_clipped},
                 )
+
+            # Accumulate gradient norm for averaging
+            total_grad_norm_clipped += grad_norm_clipped
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -1398,18 +1403,12 @@ class SelfPlayTrainer:
         avg_trajectory_length = self.replay_buffer.num_steps() / self.replay_buffer.size
         denom = max(1, minibatch_count)
 
-        # Get PopArt statistics
-        if self.popart_normalizer is not None:
-            popart_mu, popart_sigma = self.popart_normalizer.get_current_stats()
-        else:
-            popart_mu, popart_sigma = 0.0, 1.0
-
-        return {
+        result = {
             "episodes": episode + 1,
             "avg_reward": avg_reward,
             "num_samples": self.batch_size * self.episodes_per_step,
-            "delta2_mean": float(batch.delta2.mean().item()),
-            "delta3_mean": float(batch.delta3.mean().item()),
+            "delta2_mean": batch.delta2.mean().item(),
+            "delta3_mean": batch.delta3.mean().item(),
             "avg_trajectory_length": avg_trajectory_length,
             "avg_loss": total_loss / denom,
             "policy_loss": total_policy_loss / denom,
@@ -1428,10 +1427,18 @@ class SelfPlayTrainer:
             "small_adv": total_small_adv_rate / denom,
             "return_abs_mean": total_return_abs_mean / denom,
             "return_abs_std": total_return_abs_std / denom,
-            "popart_mu": popart_mu,
-            "popart_sigma": popart_sigma,
+            "grad_norm_unclipped": total_grad_norm_unclipped / denom,
+            "grad_norm_clipped": total_grad_norm_clipped / denom,
             "beta": self.beta_controller.beta,
         }
+
+        # Get PopArt statistics
+        if self.popart_normalizer is not None:
+            popart_mu, popart_sigma = self.popart_normalizer.get_current_stats()
+            result["popart_mu"] = popart_mu
+            result["popart_sigma"] = popart_sigma
+
+        return result
 
     @profile
     def train_step(self, step: int) -> dict:
