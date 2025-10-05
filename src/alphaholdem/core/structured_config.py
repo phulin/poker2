@@ -22,6 +22,12 @@ class ValueHeadType(str, Enum):
     quantile = "quantile"
 
 
+class PPOClipping(str, Enum):
+    none = "none"
+    single = "single"
+    dual = "dual"
+
+
 @dataclass
 class TrainingConfig:
     learning_rate: float = 1e-4
@@ -36,7 +42,7 @@ class TrainingConfig:
     gae_lambda: float = 0.95
     ppo_eps: float = 0.2
     ppo_delta1: float = 3.0
-    ppo_clipping: str = "dual"  # PPO clipping mode: "none", "single", or "dual"
+    ppo_clipping: PPOClipping = PPOClipping.dual
     ppo_dual_clip: float = 1.0  # Dual clip parameter for negative advantages
     kl_type: str = "reverse"  # KL divergence type: "forward" or "reverse"
     value_coef: float = 0.05

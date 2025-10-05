@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
 
-from alphaholdem.core.structured_config import ValueLossType
+from alphaholdem.core.structured_config import PPOClipping, ValueLossType
 from alphaholdem.rl.beta_controller import BetaController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
@@ -391,7 +391,7 @@ class KLPolicyPPOLoss(LossCalculator):
         value_coef: float,
         entropy_coef: float,
         value_loss_type: ValueLossType = ValueLossType.huber,
-        clipping: Literal["none", "single", "dual"] = "dual",
+        clipping: PPOClipping = PPOClipping.dual,
         return_clipping: bool = True,
         epsilon: float = 0.2,
         dual_clip: float = 1.0,
@@ -446,12 +446,12 @@ class KLPolicyPPOLoss(LossCalculator):
         # clamp for numerical stability
         ratio = torch.exp(torch.clamp(log_p_new_a - log_p_old_a, -20.0, 20.0))
         ratio_unclipped = ratio
-        if self.clipping == "single" or self.clipping == "dual":
+        if self.clipping == PPOClipping.single or self.clipping == PPOClipping.dual:
             ratio = torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon)
 
-        if self.clipping == "single":
+        if self.clipping == PPOClipping.single:
             product = torch.min(ratio_unclipped * advantages, ratio * advantages)
-        elif self.clipping == "dual":
+        elif self.clipping == PPOClipping.dual:
             product = torch.min(
                 ratio_unclipped * advantages,
                 ratio * advantages,
