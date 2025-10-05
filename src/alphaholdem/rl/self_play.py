@@ -1162,6 +1162,7 @@ class SelfPlayTrainer:
         total_return_abs_mean, total_return_std = 0.0, 0.0
         total_small_adv_rate = 0.0
         total_grad_norm_unclipped, total_grad_norm_clipped = 0.0, 0.0
+        all_returns = []
         minibatch_count = 0
 
         # Freeze value normalizer (PopArt) at the beginning of each epoch cycle
@@ -1197,6 +1198,7 @@ class SelfPlayTrainer:
 
             total_return_abs_mean += batch.returns.abs().mean().item()
             total_return_std += batch.returns.std().item()
+            all_returns.append(batch.returns)
 
             with self._autocast():
                 embedding_data = batch.embedding_data
@@ -1400,6 +1402,11 @@ class SelfPlayTrainer:
                 # Apply final rescaling to model (pass floats directly)
                 self.model.adjust_scale(weight_scale, bias_adjustment)
 
+        all_returns = torch.cat(all_returns)
+        return_quantiles = torch.quantile(
+            all_returns, torch.arange(0, 10, device=self.device) / 10
+        )
+
         avg_trajectory_length = self.replay_buffer.num_steps() / self.replay_buffer.size
         denom = max(1, minibatch_count)
 
@@ -1427,6 +1434,7 @@ class SelfPlayTrainer:
             "small_adv": total_small_adv_rate / denom,
             "return_abs_mean": total_return_abs_mean / denom,
             "return_std": total_return_std / denom,
+            "return_quantiles": return_quantiles.tolist(),
             "grad_norm_unclipped": total_grad_norm_unclipped / denom,
             "grad_norm_clipped": total_grad_norm_clipped / denom,
             "beta": self.beta_controller.beta,
