@@ -1259,10 +1259,6 @@ class SelfPlayTrainer:
 
             self.scaler.unscale_(self.optimizer)
 
-            total_grad_norm_unclipped += torch.nn.utils.get_total_norm(
-                self.model.parameters()
-            ).item()
-
             grad_has_nan = False
             for name, param in self.model.named_parameters():
                 if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
@@ -1277,23 +1273,26 @@ class SelfPlayTrainer:
                     torch.nn.utils.clip_grad_norm_(
                         [param], 0.5
                     )  # Stricter clipping for CNN
-            grad_norm_clipped = torch.nn.utils.clip_grad_norm_(
+            grad_norm_unclipped = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.grad_clip
             ).item()
 
-            if grad_has_nan or not math.isfinite(grad_norm_clipped):
+            if grad_has_nan or not math.isfinite(grad_norm_unclipped):
                 print(
                     "[SelfPlayTrainer] Gradient norm issue",
-                    {"grad_norm": grad_norm_clipped},
+                    {"grad_norm": grad_norm_unclipped},
                 )
-            elif grad_norm_clipped > 1e3:
+            elif grad_norm_unclipped > 1e3:
                 print(
                     "[SelfPlayTrainer] Large gradient norm",
-                    {"grad_norm": grad_norm_clipped},
+                    {"grad_norm": grad_norm_unclipped},
                 )
 
             # Accumulate gradient norm for averaging
-            total_grad_norm_clipped += grad_norm_clipped
+            total_grad_norm_unclipped += grad_norm_unclipped
+            total_grad_norm_clipped += torch.nn.utils.get_total_norm(
+                p.grad for p in self.model.parameters()
+            ).item()
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -1490,6 +1489,7 @@ class SelfPlayTrainer:
             "pool_stats": self.opponent_pool.get_pool_stats(),
             "learning_rate": learning_rate,
             "beta": self.beta_controller.beta,
+            "entropy_coef_current": self.entropy_coef,
             **{
                 ("action_rate_" + k): v / total_actions
                 for k, v in self.last_action_mix.items()
@@ -1509,15 +1509,7 @@ class SelfPlayTrainer:
 
         # Log to wandb if enabled
         if self.use_wandb:
-            wandb.log(
-                {
-                    "step": step,  # Match CLI display (1-indexed)
-                    "lr": learning_rate,
-                    "entropy_coef_current": self.entropy_coef,
-                    **training_stats,
-                },
-                step=step,
-            )
+            wandb.log(training_stats, step=step)
 
         return training_stats
 
