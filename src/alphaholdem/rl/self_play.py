@@ -1158,7 +1158,7 @@ class SelfPlayTrainer:
         total_ppo_clipfrac, total_return_clipfrac = 0.0, 0.0
         total_explained_var, total_pearson_r, total_epsilon = 0.0, 0.0, 0.0
         total_advantage_mean_raw, total_advantage_std_raw = 0.0, 0.0
-        total_return_abs_mean, total_return_abs_std = 0.0, 0.0
+        total_return_abs_mean, total_return_std = 0.0, 0.0
         total_small_adv_rate = 0.0
         total_grad_norm_unclipped, total_grad_norm_clipped = 0.0, 0.0
         minibatch_count = 0
@@ -1195,7 +1195,7 @@ class SelfPlayTrainer:
             total_small_adv_rate += small_adv_rate
 
             total_return_abs_mean += batch.returns.abs().mean().item()
-            total_return_abs_std += batch.returns.abs().std().item()
+            total_return_std += batch.returns.std().item()
 
             with self._autocast():
                 embedding_data = batch.embedding_data
@@ -1426,7 +1426,7 @@ class SelfPlayTrainer:
             "advantage_std_raw": total_advantage_std_raw / denom,
             "small_adv": total_small_adv_rate / denom,
             "return_abs_mean": total_return_abs_mean / denom,
-            "return_abs_std": total_return_abs_std / denom,
+            "return_std": total_return_std / denom,
             "grad_norm_unclipped": total_grad_norm_unclipped / denom,
             "grad_norm_clipped": total_grad_norm_clipped / denom,
             "beta": self.beta_controller.beta,
