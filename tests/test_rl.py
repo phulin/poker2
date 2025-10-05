@@ -16,52 +16,8 @@ from alphaholdem.core.structured_config import (
 )
 from alphaholdem.rl.losses import TrinalClipPPOLoss
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
-from alphaholdem.rl.replay import (
-    ReplayBuffer,
-    Trajectory,
-    Transition,
-    compute_gae_returns,
-)
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.utils.ema import EMA
-
-
-def test_replay_buffer_and_gae():
-    buffer = ReplayBuffer(capacity=10)
-
-    # Create a simple trajectory
-    transitions = [
-        Transition(
-            observation=torch.randn(6, 4, 13),
-            action=1,
-            log_prob=-1.0,
-            reward=0.0,
-            done=False,
-            legal_mask=torch.ones(8),
-            chips_placed=50,
-        ),
-        Transition(
-            observation=torch.randn(6, 4, 13),
-            action=2,
-            log_prob=-1.5,
-            reward=100.0,
-            done=True,
-            legal_mask=torch.ones(8),
-            chips_placed=100,
-        ),
-    ]
-
-    trajectory = Trajectory(transitions=transitions)
-    buffer.add_trajectory(trajectory)
-
-    # Test GAE computation
-    rewards = [0.0, 100.0]
-    values = [0.0, 0.0, 0.0]  # including final value
-    advantages, returns = compute_gae_returns(rewards, values)
-
-    assert len(advantages) == 2
-    assert len(returns) == 2
-    assert advantages[1] > advantages[0]  # later advantage should be higher
 
 
 def test_trinal_clip_ppo_loss():

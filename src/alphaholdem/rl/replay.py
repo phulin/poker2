@@ -32,41 +32,6 @@ class Trajectory:
     transitions: List[Transition]
 
 
-class ReplayBuffer:
-    def __init__(self, capacity: int = 10000):
-        self.capacity = capacity
-        self.trajectories: List[Trajectory] = []
-        self.position = 0
-
-    def add_trajectory(self, trajectory: Trajectory) -> None:
-        if len(self.trajectories) < self.capacity:
-            self.trajectories.append(trajectory)
-        else:
-            self.trajectories[self.position] = trajectory
-            self.position = (self.position + 1) % self.capacity
-
-    def sample_trajectories(self, num_trajectories: int) -> List[Trajectory]:
-        """Sample trajectories for PPO updates."""
-        if len(self.trajectories) == 0:
-            return []
-        indices = torch.randint(0, len(self.trajectories), (num_trajectories,))
-        return [self.trajectories[i] for i in indices]
-
-    def clear(self) -> None:
-        self.trajectories.clear()
-        self.position = 0
-
-    def num_steps(self) -> int:
-        """Total number of transitions (steps) stored across all trajectories."""
-        return sum(len(t.transitions) for t in self.trajectories)
-
-    def trim_to_steps(self, max_steps: int) -> None:
-        """Trim oldest trajectories until total steps <= max_steps."""
-        while self.num_steps() > max_steps and self.trajectories:
-            # Remove the oldest trajectory (FIFO semantics)
-            self.trajectories.pop(0)
-
-
 def compute_gae_returns(
     rewards: List[float],
     values: List[float],
