@@ -394,7 +394,7 @@ class KLPolicyPPOLoss(LossCalculator):
         clipping: PPOClipping = PPOClipping.dual,
         return_clipping: bool = True,
         epsilon: float = 0.2,
-        dual_clip: float = 1.0,
+        dual_clip: float = 3.0,
         huber_delta: float = 1.0,
         kl_type: str = "reverse",
         quantile_kappa: float = 1.0,
