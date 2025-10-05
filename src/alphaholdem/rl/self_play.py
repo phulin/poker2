@@ -116,6 +116,7 @@ class SelfPlayTrainer:
     use_kv_cache: bool
     use_tensor_env: bool
     num_envs: int
+    offload_opponent_models: bool
     use_wandb: bool
     wandb_project: str
     wandb_name: str
@@ -174,6 +175,7 @@ class SelfPlayTrainer:
         self.use_kv_cache = cfg.train.use_kv_cache
         self.use_tensor_env = cfg.use_tensor_env
         self.num_envs = cfg.num_envs
+        self.offload_opponent_models = cfg.offload_opponent_models
         self.use_wandb = cfg.use_wandb
         self.wandb_project = cfg.wandb_project
         self.wandb_name = cfg.wandb_name
@@ -1564,11 +1566,15 @@ class SelfPlayTrainer:
                 all_opponent_snapshots=sampled_opponents,
             )
 
-            # Move opponent models back to CPU to save GPU memory
-            last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
-            for opponent in sampled_opponents:
-                if opponent.model is not None and opponent != last_admitted_opponent:
-                    opponent.model.to(device="cpu")
+            # Move opponent models back to CPU to save GPU memory (if enabled)
+            if self.offload_opponent_models:
+                last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
+                for opponent in sampled_opponents:
+                    if (
+                        opponent.model is not None
+                        and opponent != last_admitted_opponent
+                    ):
+                        opponent.model.to(device="cpu")
 
             self.total_step_reward += trajectory_rewards.sum().item()
             self.step_trajectories_collected += trajectory_rewards.numel()
@@ -1995,8 +2001,9 @@ class SelfPlayTrainer:
                     all_opponent_snapshots=opponents,
                     add_to_replay_buffer=False,
                 )
-                for opp in opponents:
-                    opp.model.to(device="cpu")
+                if self.offload_opponent_models:
+                    for opp in opponents:
+                        opp.model.to(device="cpu")
             else:
                 # Scalar fallback: play min_games per opponent without adding to replay buffer
                 for opp in opponents:

@@ -130,9 +130,8 @@ class Config:
     opponent_pool_type: str = "k_best"  # "k_best" or "dred"
     k_best_pool_size: int = 10
     min_elo_diff: float = 50.0
-    min_step_diff: int = (
-        300  # Minimum step difference before considering for pool updates
-    )
+    # Minimum step difference before considering for pool updates
+    min_step_diff: int = 300
     k_factor: float = 32.0  # ELO K-factor for rating changes
     checkpoint_interval: int = 50
     eval_interval: int = 100
@@ -140,6 +139,8 @@ class Config:
     device: str = "cuda"
     use_tensor_env: bool = True
     num_envs: int = 512
+    # Move opponent models back to CPU after inference to save GPU memory
+    offload_opponent_models: bool = True
     use_wandb: bool = False
     wandb_project: Optional[str] = "poker-kbest"
     wandb_name: Optional[str] = None

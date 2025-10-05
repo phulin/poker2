@@ -18,6 +18,7 @@ device: cuda
 # === ENVIRONMENT CONFIGURATION ===
 use_tensor_env: true
 num_envs: 2400
+offload_opponent_models: true  # Move opponent models to CPU after inference to save GPU memory
 
 # === WANDB CONFIGURATION ===
 use_wandb: true
@@ -72,7 +73,6 @@ train:
   # Scaling/clipping
   grad_clip: 1.0
   
-  
   # Value loss configuration
   value_loss_type: "quantile"
   huber_delta: 0.5
@@ -82,7 +82,7 @@ train:
   # Mixed precision configuration
   use_mixed_precision: true  # Enable for larger model
   loss_scale: 128.0
-  
+
   # Transformer-specific training parameters
   auxiliary_loss_coef: 0.1
   warmup_steps: 2000       # Longer warmup for larger model

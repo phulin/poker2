@@ -18,6 +18,7 @@ device: cuda
 # === ENVIRONMENT CONFIGURATION ===
 use_tensor_env: true
 num_envs: 7000 # make this around 60% batch size
+offload_opponent_models: true  # Move opponent models to CPU after inference to save GPU memory
 
 # === WANDB CONFIGURATION ===
 use_wandb: true

@@ -18,6 +18,7 @@ device: mps
 # === ENVIRONMENT CONFIGURATION ===
 use_tensor_env: true
 num_envs: 512
+offload_opponent_models: true  # Move opponent models to CPU after inference to save GPU memory
 
 # === WANDB CONFIGURATION ===
 use_wandb: true
