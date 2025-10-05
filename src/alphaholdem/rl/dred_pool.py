@@ -319,7 +319,7 @@ class DREDPool(OpponentPool):
                 i for i in remaining_indices if i not in keep_exploiters
             ]
 
-            if non_exploiter_remaining:
+            if non_exploiter_remaining and self.last_batch_data is not None:
                 embeddings = torch.stack(
                     [
                         self._generate_embedding(
@@ -348,6 +348,21 @@ class DREDPool(OpponentPool):
                 else:
                     # If only one cluster, keep all remaining non-exploiter indices
                     keep_indices.update(non_exploiter_remaining)
+
+        # Ensure we always keep the weakest opponent when we have room to encourage diversity
+        target_size = min(self.max_size, n)
+        if len(keep_indices) < target_size:
+            weakest_idx = torch.argmin(elos).item()
+            keep_indices.add(weakest_idx)
+
+        # Ensure we retain enough snapshots to fill the pool budget
+        if len(keep_indices) < target_size:
+            for idx_tensor in sorted_indices:
+                idx = idx_tensor.item()
+                if idx not in keep_indices:
+                    keep_indices.add(idx)
+                if len(keep_indices) >= target_size:
+                    break
 
         # Final reservoir sampling if still over budget
         if len(keep_indices) > self.max_size:
