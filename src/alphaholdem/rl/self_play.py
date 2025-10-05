@@ -1190,10 +1190,10 @@ class SelfPlayTrainer:
             adv = batch.advantages
             adv_mean_raw = adv.mean()
             adv_std_raw = adv.std().clamp_min(1e-8)
+            advantage_quantile_calculator.log(batch.advantages)
             batch.advantages = (adv - adv_mean_raw) / adv_std_raw
             total_advantage_mean_raw += adv_mean_raw.item()
             total_advantage_std_raw += adv_std_raw.item()
-            advantage_quantile_calculator.log(batch.advantages)
 
             # Calculate rate of small advantages (|A_raw| < 1e-3)
             small_adv_mask = adv.abs() < 1e-3
@@ -1430,11 +1430,11 @@ class SelfPlayTrainer:
             "epsilon": total_epsilon / denom,
             "advantage_mean_raw": total_advantage_mean_raw / denom,
             "advantage_std_raw": total_advantage_std_raw / denom,
+            "advantage_quantiles": advantage_quantile_calculator.compute_wandb(10),
             "small_adv": total_small_adv_rate / denom,
             "return_abs_mean": total_return_abs_mean / denom,
             "return_std": total_return_std / denom,
             "return_quantiles": return_quantile_calculator.compute_wandb(10),
-            "advantage_quantiles": advantage_quantile_calculator.compute_wandb(10),
             "grad_norm_unclipped": total_grad_norm_unclipped / denom,
             "grad_norm_clipped": total_grad_norm_clipped / denom,
             "beta": self.beta_controller.beta,
