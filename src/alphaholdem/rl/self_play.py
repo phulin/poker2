@@ -1487,6 +1487,7 @@ class SelfPlayTrainer:
         self.total_transitions_trained += update_stats["episodes"] * self.batch_size
         self.total_episodes += update_stats["episodes"]
         total_actions = sum(self.last_action_mix.values())
+        action_rates = {k: v / total_actions for k, v in self.last_action_mix.items()}
         training_stats = {
             "step": step,
             "trajectories_collected": self.step_trajectories_collected,
@@ -1498,10 +1499,7 @@ class SelfPlayTrainer:
             "learning_rate": learning_rate,
             "beta": self.beta_controller.beta,
             "entropy_coef_current": self.entropy_coef,
-            **{
-                ("action_rate_" + k): v / total_actions
-                for k, v in self.last_action_mix.items()
-            },
+            "action_rates": action_rates,
             **update_stats,
         }
 
