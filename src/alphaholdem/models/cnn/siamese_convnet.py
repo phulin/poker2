@@ -211,7 +211,7 @@ class SiameseConvNetV1(nn.Module, Model):
 
     def _initialize_weights(self):
         """Initialize model weights to prevent dead neurons."""
-        for module in self.model.modules():
+        for module in self.modules():
             if isinstance(module, nn.Conv2d):
                 nn.init.kaiming_normal_(
                     module.weight, mode="fan_out", nonlinearity="relu"
