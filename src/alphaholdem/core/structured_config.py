@@ -43,6 +43,7 @@ class TrainingConfig:
     grad_clip: float = 1.0
     value_loss_type: ValueLossType = ValueLossType.huber
     huber_delta: float = 1.0
+    return_clipping: bool = True  # Enable return clipping in value loss
     use_mixed_precision: bool = False  # Enable automatic mixed precision
     loss_scale: float = 128.0  # Initial loss scale for mixed precision
 

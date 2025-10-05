@@ -67,6 +67,7 @@ train:
   # Value loss configuration
   value_loss_type: "huber"
   huber_delta: 1.0
+  return_clipping: true  # Enable return clipping in value loss
   
   # Mixed precision configuration
   use_mixed_precision: false  # Disabled for fast testing

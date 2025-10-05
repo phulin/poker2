@@ -367,6 +367,7 @@ class SelfPlayTrainer:
             entropy_coef=self.entropy_coef,
             value_loss_type=loss_value_type,
             huber_delta=self.cfg.train.huber_delta,
+            return_clipping=self.cfg.train.return_clipping,
             kl_type="reverse",
             quantile_kappa=self.quantile_huber_kappa,
             num_quantiles=(

@@ -392,6 +392,7 @@ class KLPolicyPPOLoss(LossCalculator):
         entropy_coef: float,
         value_loss_type: ValueLossType = ValueLossType.huber,
         clipping: Literal["none", "single", "dual"] = "dual",
+        return_clipping: bool = True,
         epsilon: float = 0.2,
         dual_clip: float = 1.0,
         huber_delta: float = 1.0,
@@ -410,6 +411,7 @@ class KLPolicyPPOLoss(LossCalculator):
         self.beta_controller = beta_controller
         self.clipping = clipping
         self.dual_clip = dual_clip
+        self.return_clipping = return_clipping
         self.kl_type = kl_type
         self.quantile_kappa = quantile_kappa
         self.num_quantiles = num_quantiles
@@ -483,7 +485,10 @@ class KLPolicyPPOLoss(LossCalculator):
         penalty_kl = forward_kl if self.kl_type == "forward" else reverse_kl
 
         # --- Value loss
-        clipped_returns = torch.clamp(returns, delta2, delta3)
+        if self.return_clipping:
+            clipped_returns = torch.clamp(returns, delta2, delta3)
+        else:
+            clipped_returns = returns
         return_clipfrac = (torch.abs(clipped_returns - returns) > 1e-8).float().mean()
         if self.value_loss_type == ValueLossType.quantile:
             if value_quantiles is None:
@@ -553,9 +558,9 @@ class KLPolicyPPOLoss(LossCalculator):
             penalty_kl=penalty_kl.item(),
             forward_kl=forward_kl.item(),
             reverse_kl=reverse_kl.item(),
-            ratio_mean=1.0,
-            ratio_std=0.0,
-            epsilon=0.0,
+            ratio_mean=ratio.mean().item(),
+            ratio_std=ratio.std().item(),
+            epsilon=self.epsilon,
             clipfrac=clipfrac.item(),
             ppo_clipfrac=ppo_clipfrac.item(),
             return_clipfrac=return_clipfrac.item(),
