@@ -127,18 +127,18 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
 
     print("--- Preflop Suited vs Offsuit (Step {}) ---".format(step))
     print(
-        f"Fold: Suited {100 * suited_vs_offsuit[0][0]:4.0f}%, Offsuit {100 * suited_vs_offsuit[0][1]:4.0f}%"
+        f"Fold:   Suited {100 * suited_vs_offsuit[0][0]:3.0f}%, Offsuit {100 * suited_vs_offsuit[0][1]:3.0f}%"
     )
     print(
-        f"Call: Suited {100 * suited_vs_offsuit[1][0]:4.0f}%, Offsuit {100 * suited_vs_offsuit[1][1]:4.0f}%"
+        f"Call:   Suited {100 * suited_vs_offsuit[1][0]:3.0f}%, Offsuit {100 * suited_vs_offsuit[1][1]:3.0f}%"
     )
     betting_suited_vs_offsuit = suited_vs_offsuit[2:-1].sum(dim=0)
     print(
-        f"Bet: Suited {100 * betting_suited_vs_offsuit[0]:4.0f}%, Offsuit {100 * betting_suited_vs_offsuit[1]:4.0f}%"
+        f"Bet:    Suited {100 * betting_suited_vs_offsuit[0]:3.0f}%, Offsuit {100 * betting_suited_vs_offsuit[1]:3.0f}%"
     )
 
     print(
-        f"All-in: Suited {100 * suited_vs_offsuit[-1][0]:4.0f}%, Offsuit {100 * suited_vs_offsuit[-1][1]:4.0f}%"
+        f"All-in: Suited {100 * suited_vs_offsuit[-1][0]:3.0f}%, Offsuit {100 * suited_vs_offsuit[-1][1]:3.0f}%"
     )
     print()
 
