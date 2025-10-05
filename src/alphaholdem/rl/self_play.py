@@ -325,7 +325,7 @@ class SelfPlayTrainer:
 
         # Handle different model types
         if cards_params:  # CNN model
-            self.optimizer = torch.optim.Adam(
+            self.optimizer = torch.optim.AdamW(
                 [
                     {"params": cards_params, "lr": lr * 0.1},  # 10x lower for CNN
                     {"params": other_params, "lr": lr},
@@ -333,7 +333,7 @@ class SelfPlayTrainer:
             )
             self._optimizer_group_scales = [0.1, 1.0]
         else:  # Transformer model (no cards_trunk)
-            self.optimizer = torch.optim.Adam([{"params": other_params, "lr": lr}])
+            self.optimizer = torch.optim.AdamW([{"params": other_params, "lr": lr}])
             self._optimizer_group_scales = [1.0]
 
         # Mixed precision scaler
