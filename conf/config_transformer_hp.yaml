@@ -2,7 +2,7 @@
 # Configuration for transformer-based poker model with larger capacity
 
 # === TRAINING CONFIGURATION ===
-num_steps: 2000
+num_steps: 100000
 opponent_pool_type: "dred"  # "k_best" or "dred"
 k_best_pool_size: 10
 min_elo_diff: 50.0
@@ -17,7 +17,7 @@ device: cuda
 
 # === ENVIRONMENT CONFIGURATION ===
 use_tensor_env: true
-num_envs: 2400
+num_envs: 1800
 offload_opponent_models: true  # Move opponent models to CPU after inference to save GPU memory
 
 # === WANDB CONFIGURATION ===
@@ -80,7 +80,7 @@ train:
   value_loss_type: "quantile"
   huber_delta: 0.5
   quantile_huber_kappa: 1.0
-  return_clipping: true  # Enable return clipping in value loss
+  return_clipping: false  # Enable return clipping in value loss
   
   # Mixed precision configuration
   use_mixed_precision: true  # Enable for larger model

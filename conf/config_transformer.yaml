@@ -78,7 +78,7 @@ train:
   value_loss_type: "quantile"
   huber_delta: 0.5
   quantile_huber_kappa: 1.0
-  return_clipping: true  # Enable return clipping in value loss
+  return_clipping: false  # Enable return clipping in value loss
   
   # Mixed precision configuration
   use_mixed_precision: true
