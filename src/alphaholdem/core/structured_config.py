@@ -36,6 +36,9 @@ class TrainingConfig:
     gae_lambda: float = 0.95
     ppo_eps: float = 0.2
     ppo_delta1: float = 3.0
+    ppo_clipping: str = "dual"  # PPO clipping mode: "none", "single", or "dual"
+    ppo_dual_clip: float = 1.0  # Dual clip parameter for negative advantages
+    kl_type: str = "reverse"  # KL divergence type: "forward" or "reverse"
     value_coef: float = 0.05
     entropy_coef: float = 0.01
     entropy_coef_final: float = 0.002

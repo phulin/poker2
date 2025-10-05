@@ -368,9 +368,12 @@ class SelfPlayTrainer:
             value_coef=self.value_coef,
             entropy_coef=self.entropy_coef,
             value_loss_type=loss_value_type,
+            clipping=self.cfg.train.ppo_clipping,
+            epsilon=self.cfg.train.ppo_eps,
+            dual_clip=self.cfg.train.ppo_dual_clip,
             huber_delta=self.cfg.train.huber_delta,
             return_clipping=self.cfg.train.return_clipping,
-            kl_type="reverse",
+            kl_type=self.cfg.train.kl_type,
             quantile_kappa=self.quantile_huber_kappa,
             num_quantiles=(
                 self.value_head_num_quantiles if self.use_quantile_value_head else None

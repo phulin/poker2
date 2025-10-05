@@ -57,6 +57,9 @@ train:
   # PPO hyperparameters
   ppo_eps: 0.2
   ppo_delta1: 3.0
+  ppo_clipping: "dual"  # Clipping mode: "none", "single", or "dual"
+  ppo_dual_clip: 1.0    # Dual clip parameter for negative advantages
+  kl_type: "reverse"    # KL divergence type: "forward" or "reverse"
   gae_lambda: 0.95
   gamma: 0.999
   entropy_coef: 0.01
