@@ -1434,7 +1434,7 @@ class SelfPlayTrainer:
             "return_abs_mean": total_return_abs_mean / denom,
             "return_std": total_return_std / denom,
             "return_quantiles": return_quantile_calculator.compute_wandb(10),
-            "advantage_quantiles": return_quantile_calculator.compute_wandb(10),
+            "advantage_quantiles": advantage_quantile_calculator.compute_wandb(10),
             "grad_norm_unclipped": total_grad_norm_unclipped / denom,
             "grad_norm_clipped": total_grad_norm_clipped / denom,
             "beta": self.beta_controller.beta,
