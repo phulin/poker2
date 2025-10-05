@@ -1124,16 +1124,6 @@ class SelfPlayTrainer:
             gamma=self.gamma, lambda_=self.gae_lambda
         )
 
-        # Compute current log probs on sample for diagnostic KL
-        kl_sample_batch_size = min(self.batch_size, max(1, self.batch_size // 8))
-        kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
-        with torch.no_grad(), model_eval(self.model), self._autocast():
-            kl_old_log_probs = get_log_probs(
-                self.model,
-                kl_states.embedding_data,
-                kl_states.legal_masks,
-            )
-
         # Initialize tracking variables once before the epoch loop
         total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
         total_entropy, total_clipfrac = 0.0, 0.0
@@ -1353,7 +1343,20 @@ class SelfPlayTrainer:
 
         # Estimate diagnostic KL: divergence from last model batch.
         if loss_result.forward_kl is None:
-            with torch.no_grad(), model_eval(self.model), self._autocast():
+            # Compute current log probs on sample for diagnostic KL
+            kl_sample_batch_size = min(self.batch_size, max(8, self.batch_size // 8))
+            kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
+            old_model = self.model_history.get_model(step_start_age)
+            with (
+                torch.no_grad(),
+                model_eval(self.model),
+                self._autocast(),
+            ):
+                kl_old_log_probs = get_log_probs(
+                    old_model,
+                    kl_states.embedding_data,
+                    kl_states.legal_masks,
+                )
                 kl_new_log_probs = get_log_probs(
                     self.model,
                     kl_states.embedding_data,
@@ -1367,7 +1370,7 @@ class SelfPlayTrainer:
                     reduction="batchmean",
                 )
         else:
-            # If we computed KL for loss, use that.
+            # If we are using a loss that computed KL, use that.
             current_kl = loss_result.forward_kl
 
         # Update KL divergence exponential moving average
