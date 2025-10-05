@@ -265,7 +265,6 @@ class SelfPlayTrainer:
             self.state_encoder = CNNStateEncoder(self.tensor_env, self.device)
 
         self.model.to(self.device)  # Move model to device
-        self._initialize_weights()  # Initialize with better weights
         # Replay buffer capacity in steps is batch_size * replay_buffer_batches
         # Add an extra batch so we can reserve space for the next batch.
         buffer_capacity = self.batch_size * max(1, 1 + self.replay_buffer_batches)
@@ -430,25 +429,6 @@ class SelfPlayTrainer:
                     f"Wandb initialization failed ({exc}); continuing without wandb logging."
                 )
                 self.use_wandb = False
-
-    def _initialize_weights(self):
-        """Initialize model weights to prevent dead neurons."""
-        for module in self.model.modules():
-            if isinstance(module, nn.Conv2d):
-                nn.init.kaiming_normal_(
-                    module.weight, mode="fan_out", nonlinearity="relu"
-                )
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-            elif isinstance(module, (nn.BatchNorm2d, nn.GroupNorm)):
-                nn.init.constant_(module.weight, 1)
-                nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.LayerNorm):
-                nn.init.constant_(module.weight, 1)
-                nn.init.constant_(module.bias, 0)
 
     def _autocast(self):
         """
