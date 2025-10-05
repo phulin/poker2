@@ -34,6 +34,7 @@ from alphaholdem.utils.kl_divergence import compute_kl_divergence_batch
 from alphaholdem.utils.model_context import model_eval
 from alphaholdem.utils.model_utils import get_log_probs, get_logits_log_probs_values
 from alphaholdem.utils.profiling import profile
+from alphaholdem.utils.quantile_calculator import QuantileCalculator
 
 TARGET_KL = 0.015
 
@@ -422,6 +423,7 @@ class SelfPlayTrainer:
                     )
                 else:
                     wandb.init(**wandb_init_kwargs)
+                wandb.watch(self.model, log="all", log_freq=10)
                 print(f"Wandb initialized new run for project: {self.wandb_project}")
             except Exception as exc:  # pragma: no cover - offline fallback path
                 print(
@@ -1162,7 +1164,8 @@ class SelfPlayTrainer:
         total_return_abs_mean, total_return_std = 0.0, 0.0
         total_small_adv_rate = 0.0
         total_grad_norm_unclipped, total_grad_norm_clipped = 0.0, 0.0
-        all_returns = []
+        return_quantile_calculator = QuantileCalculator(self.device)
+        advantage_quantile_calculator = QuantileCalculator(self.device)
         minibatch_count = 0
 
         # Freeze value normalizer (PopArt) at the beginning of each epoch cycle
@@ -1190,6 +1193,7 @@ class SelfPlayTrainer:
             batch.advantages = (adv - adv_mean_raw) / adv_std_raw
             total_advantage_mean_raw += adv_mean_raw.item()
             total_advantage_std_raw += adv_std_raw.item()
+            advantage_quantile_calculator.log(batch.advantages)
 
             # Calculate rate of small advantages (|A_raw| < 1e-3)
             small_adv_mask = adv.abs() < 1e-3
@@ -1198,7 +1202,7 @@ class SelfPlayTrainer:
 
             total_return_abs_mean += batch.returns.abs().mean().item()
             total_return_std += batch.returns.std().item()
-            all_returns.append(batch.returns)
+            return_quantile_calculator.log(batch.returns)
 
             with self._autocast():
                 embedding_data = batch.embedding_data
@@ -1402,11 +1406,6 @@ class SelfPlayTrainer:
                 # Apply final rescaling to model (pass floats directly)
                 self.model.adjust_scale(weight_scale, bias_adjustment)
 
-        all_returns = torch.cat(all_returns)
-        return_quantiles = torch.quantile(
-            all_returns, torch.arange(0, 10, device=self.device) / 10
-        )
-
         avg_trajectory_length = self.replay_buffer.num_steps() / self.replay_buffer.size
         denom = max(1, minibatch_count)
 
@@ -1434,7 +1433,8 @@ class SelfPlayTrainer:
             "small_adv": total_small_adv_rate / denom,
             "return_abs_mean": total_return_abs_mean / denom,
             "return_std": total_return_std / denom,
-            "return_quantiles": return_quantiles.tolist(),
+            "return_quantiles": return_quantile_calculator.compute_wandb(10),
+            "advantage_quantiles": return_quantile_calculator.compute_wandb(10),
             "grad_norm_unclipped": total_grad_norm_unclipped / denom,
             "grad_norm_clipped": total_grad_norm_clipped / denom,
             "beta": self.beta_controller.beta,
