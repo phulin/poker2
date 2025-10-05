@@ -46,3 +46,20 @@ class EMA:
             Current EMA value if initialized, None otherwise
         """
         return self.value if self.initialized else None
+
+    def state_dict(self) -> dict:
+        """Return a serializable snapshot of the EMA state."""
+        return {
+            "decay": self.decay,
+            "value": self.value,
+            "initialized": self.initialized,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore EMA state from a snapshot produced by state_dict."""
+        self.decay = state.get("decay", self.decay)
+        if state.get("initialized", False):
+            self.value = state.get("value", self.value)
+            self.initialized = True
+        else:
+            self.reset()

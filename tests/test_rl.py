@@ -248,6 +248,29 @@ def test_checkpoint_save_load():
         assert (
             abs(new_trainer.total_step_reward - trainer.total_step_reward) < 1e-6
         ), "Total reward not restored"
+        assert (
+            new_trainer.total_trajectories_collected
+            == trainer.total_trajectories_collected
+        ), "Total trajectories not restored"
+        assert (
+            new_trainer.total_episodes == trainer.total_episodes
+        ), "Total episodes not restored"
+        assert (
+            new_trainer.total_transitions_trained == trainer.total_transitions_trained
+        ), "Total transitions not restored"
+        assert new_trainer.kl_ema.initialized == trainer.kl_ema.initialized
+        assert math.isclose(
+            new_trainer.kl_ema.decay,
+            trainer.kl_ema.decay,
+            rel_tol=0.0,
+            abs_tol=0.0,
+        ), "KL EMA decay not restored"
+        assert math.isclose(
+            new_trainer.kl_ema.value,
+            trainer.kl_ema.value,
+            rel_tol=1e-6,
+            abs_tol=1e-6,
+        ), "KL EMA value not restored"
 
         # Verify model parameters are the same
         for param1, param2 in zip(

@@ -1663,6 +1663,8 @@ class SelfPlayTrainer:
         checkpoint = {
             "step": step,  # Store the training step
             "total_trajectories_collected": self.total_trajectories_collected,
+            "total_episodes": self.total_episodes,
+            "total_transitions_trained": self.total_transitions_trained,
             "current_elo": self.opponent_pool.current_elo,
             "model_state_dict": self.model.state_dict(),
             # Store opponent pool inline for single-file checkpoints
@@ -1674,6 +1676,7 @@ class SelfPlayTrainer:
             # Store full config for complete restoration
             "full_config": self.cfg,
             "beta_controller": self.beta_controller.state_dict(),
+            "kl_ema": self.kl_ema.state_dict(),
             "popart_normalizer": (
                 self.popart_normalizer.state_dict()
                 if self.popart_normalizer is not None
@@ -1814,15 +1817,30 @@ class SelfPlayTrainer:
 
         # Handle both old and new checkpoint formats
         if "total_episodes_completed" in checkpoint:
-            # New format
+            # Newer checkpoints (before rename) stored this field
             self.total_trajectories_collected = checkpoint["total_episodes_completed"]
-            self.step_trajectories_collected = 0  # Reset step counter
-            self.total_step_reward = 0.0  # Reset step reward
+        elif "total_trajectories_collected" in checkpoint:
+            # Current checkpoints save this field directly
+            self.total_trajectories_collected = checkpoint[
+                "total_trajectories_collected"
+            ]
         else:
-            # Old format - migrate to new format
+            # Backwards compatibility with the oldest format
             self.total_trajectories_collected = checkpoint.get("episode_count", 0)
-            self.step_trajectories_collected = 0  # Reset step counter
-            self.total_step_reward = 0.0  # Reset step reward
+
+        # Per-step counters rebuilt each run
+        self.step_trajectories_collected = 0
+        self.total_step_reward = 0.0
+
+        # Restore aggregate logging counters when present
+        self.total_episodes = checkpoint.get("total_episodes", self.total_episodes)
+        self.total_transitions_trained = checkpoint.get(
+            "total_transitions_trained", self.total_transitions_trained
+        )
+
+        kl_state = checkpoint.get("kl_ema")
+        if kl_state is not None:
+            self.kl_ema.load_state_dict(kl_state)
 
         self.opponent_pool.current_elo = checkpoint.get("current_elo", 1200.0)
 
