@@ -90,6 +90,7 @@ class DREDPool(OpponentPool):
         self.use_mixed_precision = use_mixed_precision
 
         self.snapshots: List[AgentSnapshot] = []
+        self.deletion_queue: List[AgentSnapshot] = []
 
         # Track last admitted snapshot for step-based admission
         self.last_admitted_step: int = -1
@@ -119,14 +120,14 @@ class DREDPool(OpponentPool):
         ):
             snapshot.model.to(sample_batch.device)
             model_outputs = snapshot.model(sample_batch)
-            snapshot.model.to("cpu")
+            snapshot.model.to("cpu", non_blocking=True)
             probs = torch.softmax(model_outputs.policy_logits, dim=-1)
             all_info = torch.cat([probs, model_outputs.value.unsqueeze(-1)], dim=-1)
             return all_info.flatten().detach()
 
     def sample(self, k: int = 1) -> List[AgentSnapshot]:
         """
-        Sample k opponents from the pool.
+        Sample k opponents from the pool (including deletion queue).
 
         Args:
             k: Number of opponents to sample
@@ -134,15 +135,20 @@ class DREDPool(OpponentPool):
         Returns:
             List of sampled opponent snapshots
         """
-        if not self.snapshots:
+        # Combine snapshots and deletion queue for sampling
+        all_snapshots = self.snapshots + self.deletion_queue
+
+        if not all_snapshots:
             return []
 
-        # If we have fewer snapshots than requested, return all
-        if len(self.snapshots) <= k:
-            return self.snapshots.copy()
+        n_snapshots = len(all_snapshots)
 
-        # Sample with DRED weighting
-        weights = self._calculate_weights()
+        # If we have fewer snapshots than requested, return all
+        if n_snapshots <= k:
+            return all_snapshots.copy()
+
+        # Sample with DRED weighting (calculate weights for combined pool)
+        weights = self._calculate_weights(all_snapshots)
 
         # Defensive: ensure weights form a valid multinomial distribution
         if (
@@ -153,28 +159,39 @@ class DREDPool(OpponentPool):
             print("Warning: Invalid weights in DRED pool")
             print(weights)
             # Fallback to uniform sampling
-            weights = torch.ones(len(self.snapshots)) / len(self.snapshots)
+            weights = torch.ones(n_snapshots) / n_snapshots
 
-        # Sample with replacement using DRED weights
-        sampled_indices = torch.multinomial(weights, num_samples=k, replacement=True)
+        # Sample (with replacement if needed) using DRED weights
+        sampled_indices = torch.multinomial(
+            weights, num_samples=k, replacement=n_snapshots < k
+        )
 
-        return [self.snapshots[i.item()] for i in sampled_indices]
+        return [all_snapshots[i.item()] for i in sampled_indices]
 
-    def _calculate_weights(self) -> torch.Tensor:
-        """Calculate DRED sampling weights for all snapshots."""
-        if not self.snapshots:
+    def _calculate_weights(
+        self, snapshots: Optional[List[AgentSnapshot]] = None
+    ) -> torch.Tensor:
+        """Calculate DRED sampling weights for all snapshots.
+
+        Args:
+            snapshots: List of snapshots to calculate weights for. If None, uses self.snapshots.
+        """
+        if snapshots is None:
+            snapshots = self.snapshots
+
+        if not snapshots:
             raise ValueError("No snapshots available")
 
-        n = len(self.snapshots)
+        n = len(snapshots)
 
         # ELO-based skill weighting
-        elos = torch.tensor([s.elo for s in self.snapshots], dtype=torch.float32)
+        elos = torch.tensor([s.elo for s in snapshots], dtype=torch.float32)
         # Clamp ELO values to prevent extreme exponentials
         elos_clamped = torch.clamp(elos, min=-1000, max=1000)
         skill_weights = torch.exp(self.beta * elos_clamped)
 
         # Age-based decay
-        ages = torch.tensor([s.data.age for s in self.snapshots], dtype=torch.float32)
+        ages = torch.tensor([s.data.age for s in snapshots], dtype=torch.float32)
         # Clamp ages to prevent extreme exponentials
         ages_clamped = torch.clamp(ages, min=0, max=1000)
         age_weights = torch.exp(-self.lam * ages_clamped)
@@ -182,7 +199,7 @@ class DREDPool(OpponentPool):
         # Difficulty estimation via Beta distribution
         # Use win/loss ratios to estimate difficulty
         difficulties = []
-        for s in self.snapshots:
+        for s in snapshots:
             if s.games_played > 0:
                 # Convert to Beta parameters (simplified)
                 alpha = s.wins + 1
@@ -255,6 +272,13 @@ class DREDPool(OpponentPool):
             rating: ELO rating of the agent
             is_exploiter: Whether this snapshot is an exploiter
         """
+        # Remove one item from deletion queue when adding a new snapshot
+        if self.deletion_queue:
+            removed = self.deletion_queue.pop(0)
+            print(
+                f"=> Removed snapshot from deletion queue (step {removed.step}, ELO {removed.elo:.1f})"
+            )
+
         # Create new snapshot
         model_dtype = torch.bfloat16 if self.use_mixed_precision else torch.float32
         new_snapshot = AgentSnapshot(
@@ -272,17 +296,22 @@ class DREDPool(OpponentPool):
         # Update tracking for admission criteria (only when actually adding)
         self.last_admitted_step = step
 
-        # Age all other snapshots
+        # Age all other snapshots (including those in deletion queue)
         for snapshot in self.snapshots:
             if snapshot is not new_snapshot:
                 snapshot.data.age += 1
+        for snapshot in self.deletion_queue:
+            snapshot.data.age += 1
 
         # Prune if over capacity
         if len(self.snapshots) > self.max_size:
             self._prune()
 
     def _prune(self):
-        """Prune snapshots using DRED strategy while preserving last 5 exploiters."""
+        """Prune snapshots using DRED strategy while preserving last 5 exploiters.
+
+        Pruned snapshots are moved to a deletion queue instead of being immediately removed.
+        """
         n = len(self.snapshots)
 
         print("=> Pool size exceeded. Pruning...")
@@ -353,8 +382,18 @@ class DREDPool(OpponentPool):
         if len(keep_indices) > self.max_size:
             keep_indices = set(list(keep_indices)[: self.max_size])
 
-        # Update snapshots list
-        self.snapshots = [self.snapshots[i] for i in sorted(keep_indices)]
+        # Move pruned snapshots to deletion queue instead of removing them
+        keep_indices_sorted = sorted(keep_indices)
+        pruned_snapshots = [
+            self.snapshots[i] for i in range(n) if i not in keep_indices
+        ]
+
+        if pruned_snapshots:
+            print(f"=> Moving {len(pruned_snapshots)} snapshots to deletion queue")
+            self.deletion_queue.extend(pruned_snapshots)
+
+        # Update snapshots list with only kept snapshots
+        self.snapshots = [self.snapshots[i] for i in keep_indices_sorted]
 
     def update_elo_after_game(
         self, opponent: AgentSnapshot, result: str, k_factor: Optional[float] = None
@@ -448,10 +487,13 @@ class DREDPool(OpponentPool):
         return False
 
     def get_pool_stats(self) -> dict:
-        """Get statistics about the opponent pool."""
-        if not self.snapshots:
+        """Get statistics about the opponent pool (including deletion queue)."""
+        all_snapshots = self.snapshots + self.deletion_queue
+
+        if not all_snapshots:
             return {
                 "pool_size": 0,
+                "deletion_queue_size": 0,
                 "avg_elo": 0.0,
                 "min_elo": 0.0,
                 "max_elo": 0.0,
@@ -460,12 +502,12 @@ class DREDPool(OpponentPool):
                 "avg_difficulty": 0.0,
             }
 
-        elos = [snapshot.elo for snapshot in self.snapshots]
-        ages = [snapshot.data.age for snapshot in self.snapshots]
+        elos = [snapshot.elo for snapshot in all_snapshots]
+        ages = [snapshot.data.age for snapshot in all_snapshots]
 
         # Calculate average difficulty
         difficulties = []
-        for snapshot in self.snapshots:
+        for snapshot in all_snapshots:
             if snapshot.games_played > 0:
                 alpha = snapshot.data.alpha
                 beta_param = snapshot.data.beta
@@ -476,6 +518,7 @@ class DREDPool(OpponentPool):
 
         return {
             "pool_size": len(self.snapshots),
+            "deletion_queue_size": len(self.deletion_queue),
             "avg_elo": sum(elos) / len(elos),
             "min_elo": min(elos),
             "max_elo": max(elos),
@@ -483,6 +526,80 @@ class DREDPool(OpponentPool):
             "avg_age": sum(ages) / len(ages),
             "avg_difficulty": sum(difficulties) / len(difficulties),
         }
+
+    def _serialize_snapshot(self, snapshot: AgentSnapshot) -> dict:
+        """Serialize a single snapshot to a dictionary.
+
+        Args:
+            snapshot: The snapshot to serialize
+
+        Returns:
+            Dictionary containing snapshot data
+        """
+        snapshot_data = {
+            "step": snapshot.step,
+            "elo": snapshot.elo,
+            "games_played": snapshot.games_played,
+            "wins": snapshot.wins,
+            "losses": snapshot.losses,
+            "draws": snapshot.draws,
+            "model_state_dict": snapshot.model.state_dict(),
+            "model_dtype": snapshot.model_dtype,
+            "is_exploiter": snapshot.is_exploiter,
+        }
+
+        # Add DRED-specific data
+        if hasattr(snapshot, "data") and snapshot.data is not None:
+            snapshot_data["dred_age"] = snapshot.data.age
+            snapshot_data["dred_alpha"] = snapshot.data.alpha
+            snapshot_data["dred_beta"] = snapshot.data.beta
+
+        return snapshot_data
+
+    def _deserialize_snapshot(self, snapshot_data: dict, model_class) -> AgentSnapshot:
+        """Deserialize a snapshot from a dictionary.
+
+        Args:
+            snapshot_data: Dictionary containing snapshot data
+            model_class: The model class to instantiate
+
+        Returns:
+            Reconstructed AgentSnapshot
+        """
+        # Create model instance
+        model = model_class()
+        model.load_state_dict(snapshot_data["model_state_dict"])
+
+        # Get model dtype with backward compatibility
+        model_dtype = snapshot_data.get("model_dtype", torch.float32)
+
+        # Convert model to the stored dtype
+        model = model.to(model_dtype)
+
+        # Create snapshot
+        snapshot = AgentSnapshot(
+            model=model,
+            step=snapshot_data["step"],
+            elo=snapshot_data["elo"],
+            model_dtype=model_dtype,
+            is_exploiter=snapshot_data.get("is_exploiter", False),
+        )
+
+        # Restore game statistics
+        snapshot.games_played = snapshot_data["games_played"]
+        snapshot.wins = snapshot_data["wins"]
+        snapshot.losses = snapshot_data["losses"]
+        snapshot.draws = snapshot_data["draws"]
+
+        # Restore DRED-specific data
+        if "dred_age" in snapshot_data:
+            snapshot.data = DREDSnapshotData(
+                age=snapshot_data["dred_age"],
+                alpha=snapshot_data.get("dred_alpha", 1.0),
+                beta=snapshot_data.get("dred_beta", 1.0),
+            )
+
+        return snapshot
 
     def save_pool(self, path: str):
         """Save the DRED opponent pool to disk."""
@@ -501,27 +618,18 @@ class DREDPool(OpponentPool):
             "k_factor": self.k_factor,
             "last_admitted_step": self.last_admitted_step,
             "snapshots": [],
+            "deletion_queue": [],
         }
 
-        for snapshot in self.snapshots:
-            snapshot_data = {
-                "step": snapshot.step,
-                "elo": snapshot.elo,
-                "games_played": snapshot.games_played,
-                "wins": snapshot.wins,
-                "losses": snapshot.losses,
-                "draws": snapshot.draws,
-                "model_state_dict": snapshot.model.state_dict(),
-                "model_dtype": snapshot.model_dtype,
-            }
+        # Save active snapshots
+        pool_data["snapshots"] = [
+            self._serialize_snapshot(snapshot) for snapshot in self.snapshots
+        ]
 
-            # Add DRED-specific data
-            if hasattr(snapshot, "data") and snapshot.data is not None:
-                snapshot_data["dred_age"] = snapshot.data.age
-                snapshot_data["dred_alpha"] = snapshot.data.alpha
-                snapshot_data["dred_beta"] = snapshot.data.beta
-
-            pool_data["snapshots"].append(snapshot_data)
+        # Save deletion queue
+        pool_data["deletion_queue"] = [
+            self._serialize_snapshot(snapshot) for snapshot in self.deletion_queue
+        ]
 
         torch.save(pool_data, path)
 
@@ -543,38 +651,14 @@ class DREDPool(OpponentPool):
         self.k_factor = pool_data.get("k_factor", 32.0)
         self.last_admitted_step = pool_data.get("last_admitted_step", 0)
 
-        self.snapshots = []
-        for snapshot_data in pool_data["snapshots"]:
-            # Create model instance
-            model = model_class()
-            model.load_state_dict(snapshot_data["model_state_dict"])
+        # Load active snapshots
+        self.snapshots = [
+            self._deserialize_snapshot(snapshot_data, model_class)
+            for snapshot_data in pool_data["snapshots"]
+        ]
 
-            # Get model dtype with backward compatibility
-            model_dtype = snapshot_data.get("model_dtype", torch.float32)
-
-            # Convert model to the stored dtype
-            model = model.to(model_dtype)
-
-            # Create snapshot
-            snapshot = AgentSnapshot(
-                model=model,
-                step=snapshot_data["step"],
-                elo=snapshot_data["elo"],
-                model_dtype=model_dtype,
-            )
-
-            # Restore game statistics
-            snapshot.games_played = snapshot_data["games_played"]
-            snapshot.wins = snapshot_data["wins"]
-            snapshot.losses = snapshot_data["losses"]
-            snapshot.draws = snapshot_data["draws"]
-
-            # Restore DRED-specific data
-            if "dred_age" in snapshot_data:
-                snapshot.data = DREDSnapshotData(
-                    age=snapshot_data["dred_age"],
-                    alpha=snapshot_data.get("dred_alpha", 1.0),
-                    beta=snapshot_data.get("dred_beta", 1.0),
-                )
-
-            self.snapshots.append(snapshot)
+        # Load deletion queue (with backward compatibility)
+        self.deletion_queue = [
+            self._deserialize_snapshot(snapshot_data, model_class)
+            for snapshot_data in pool_data.get("deletion_queue", [])
+        ]

@@ -15,6 +15,7 @@ from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
+from alphaholdem.rl.vectorized_replay import BatchSample
 
 
 def compute_masked_logits(
@@ -72,6 +73,22 @@ def get_log_probs(
         Log probabilities [batch_size, num_actions]
     """
     return get_logits_log_probs_values(model, data, legal_masks)[1]
+
+
+def get_log_probs(
+    model: nn.Module,
+    batch: BatchSample,
+) -> torch.Tensor:
+    """Get log probabilities from a model given data and legal masks.
+
+    Args:
+        model: The PyTorch model to get predictions from
+        batch: Batch sample
+
+    Returns:
+        Log probabilities [batch_size, num_actions]
+    """
+    return get_log_probs(model, batch.embedding_data, batch.legal_masks)
 
 
 def get_probs_and_values(

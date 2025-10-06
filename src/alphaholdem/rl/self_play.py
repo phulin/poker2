@@ -30,7 +30,6 @@ from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.replay import Trajectory, Transition
 from alphaholdem.rl.vectorized_replay import BatchSample, VectorizedReplayBuffer
 from alphaholdem.utils.ema import EMA
-from alphaholdem.utils.kl_divergence import compute_kl_divergence_batch
 from alphaholdem.utils.model_context import model_eval
 from alphaholdem.utils.model_utils import get_log_probs, get_logits_log_probs_values
 from alphaholdem.utils.profiling import profile
@@ -647,21 +646,13 @@ class SelfPlayTrainer:
             # Get indices for non-current model (current model gets done below)
             other_model_indices = torch.where(batch.model_ages != step_start_age)[0]
             if len(other_model_indices) > 0:
-                log_probs = get_log_probs(
-                    step_start_model,
-                    batch.embedding_data[other_model_indices],
-                    batch.legal_masks[other_model_indices],
-                )
+                log_probs = get_log_probs(step_start_model, batch[other_model_indices])
                 batch.update_step_log_probs(other_model_indices, log_probs)
 
             for age, batch_indices in batch.group_by_model_age():
                 frozen_model = self.model_history.get_model(age)
                 with model_eval(frozen_model):
-                    log_probs = get_log_probs(
-                        frozen_model,
-                        batch.embedding_data[batch_indices],
-                        batch.legal_masks[batch_indices],
-                    )
+                    log_probs = get_log_probs(frozen_model, batch[batch_indices])
                     batch.update_frozen_log_probs(batch_indices, log_probs)
                     if age == step_start_age:
                         # this is self.model.
@@ -1080,26 +1071,23 @@ class SelfPlayTrainer:
 
         return collected_trajectory_rewards_tensor
 
-    def _compute_pool_kl_divergence(self, batch: BatchSample) -> float:
+    def _compute_pool_kl_divergence(
+        self, batch: BatchSample, log_probs: torch.Tensor
+    ) -> float:
         """
         Compute KL divergence between current model and last admitted opponent.
 
         Args:
             batch: Current batch sample
+            log_probs: Log probs from current model forward pass
 
         Returns:
             KL divergence value (0.0 if no last admitted opponent)
         """
-        pool_kl_divergence = 0.0
         last_admitted_opponent = self.opponent_pool.get_last_admitted_snapshot()
-
-        if last_admitted_opponent is not None:
-            # Take a element sample from the current batch without replacement
-            last_opp_batch_size = batch.returns.shape[0]
-            last_opp_sample_size = max(last_opp_batch_size // 16, 16)
-            last_opp_states = batch.embedding_data[:last_opp_sample_size]
-            last_opp_legal_masks = batch.legal_masks[:last_opp_sample_size]
-
+        if last_admitted_opponent is None:
+            return 0.0
+        else:
             with (
                 torch.no_grad(),
                 model_eval(last_admitted_opponent.model),
@@ -1107,20 +1095,20 @@ class SelfPlayTrainer:
                 self._autocast(),
             ):
                 # Get last admitted opponent model logits
-                last_admitted_opponent.model.to(last_opp_states.device)
-                opponent_outputs = last_admitted_opponent.model(last_opp_states)
-                opponent_logits = opponent_outputs.policy_logits.float()
+                last_admitted_opponent.model.to(self.device)
+                opponent_log_probs = get_log_probs(last_admitted_opponent.model, batch)
 
-                new_logits = self.model(last_opp_states).policy_logits.float()
-
-                # Compute KL divergence
-                pool_kl_divergence = compute_kl_divergence_batch(
-                    new_logits, opponent_logits, last_opp_legal_masks
+                # KL(opponent || current model)
+                return F.kl_div(
+                    log_probs,
+                    opponent_log_probs,
+                    log_target=True,
+                    reduction="batchmean",
                 )
 
-        return pool_kl_divergence
-
-    def _compute_diagnostic_kl_divergence(self, step_start_age: int) -> torch.Tensor:
+    def _compute_diagnostic_kl_divergence(
+        self, step_start_age: int, batch: BatchSample, final_log_probs: torch.Tensor
+    ) -> torch.Tensor:
         """
         Compute diagnostic KL divergence between current model and old model.
 
@@ -1131,27 +1119,16 @@ class SelfPlayTrainer:
             KL divergence value computed from current and old model
         """
         # Compute current log probs on sample for diagnostic KL
-        kl_sample_batch_size = min(self.batch_size, max(8, self.batch_size // 8))
-        kl_states = self.replay_buffer.sample_batch(self.rng, kl_sample_batch_size)
         old_model = self.model_history.get_model(step_start_age)
         with (
             torch.no_grad(),
-            model_eval(self.model),
+            model_eval(old_model),
             self._autocast(),
         ):
-            kl_old_log_probs = get_log_probs(
-                old_model,
-                kl_states.embedding_data,
-                kl_states.legal_masks,
-            )
-            kl_new_log_probs = get_log_probs(
-                self.model,
-                kl_states.embedding_data,
-                kl_states.legal_masks,
-            )
+            kl_old_log_probs = get_log_probs(old_model, batch)
             # KL(old || new)
             return F.kl_div(
-                kl_new_log_probs,
+                final_log_probs,
                 kl_old_log_probs,
                 log_target=True,
                 reduction="batchmean",
@@ -1190,6 +1167,7 @@ class SelfPlayTrainer:
 
         # Store the age at the beginning of the step for reference distributions
         step_start_age = self.model_age
+        stopped_early = False
 
         for episode in range(self.episodes_per_step):
             # Sample batch from vectorized buffer
@@ -1222,8 +1200,10 @@ class SelfPlayTrainer:
 
             with self._autocast():
                 embedding_data = batch.embedding_data
-                logits, _, values, value_quantiles = get_logits_log_probs_values(
-                    self.model, embedding_data, batch.legal_masks
+                logits, log_probs, values, value_quantiles = (
+                    get_logits_log_probs_values(
+                        self.model, embedding_data, batch.legal_masks
+                    )
                 )
 
                 loss_result = self.loss_calculator.compute_loss(
@@ -1268,6 +1248,7 @@ class SelfPlayTrainer:
                 loss_result.forward_kl is not None
                 and loss_result.forward_kl > 2 * TARGET_KL
             ):
+                stopped_early = True
                 break
 
             self.optimizer.zero_grad()
@@ -1329,29 +1310,35 @@ class SelfPlayTrainer:
                     raise RuntimeError("Detected NaN/Inf in model parameters")
             self.model_age += 1
 
-            # Update value normalizer stats in background (if enabled)
+            # Update value normalizer stats (if enabled)
             if self.popart_normalizer is not None:
                 self.popart_normalizer.update_stats(batch.returns)
 
-            # Check if we should add current model to opponent pool
-            pool_kl_divergence = self._compute_pool_kl_divergence(batch)
+        # Get log probs for final diagnostic statistics.
+        diagnostic_batch_size = min(self.batch_size, max(8, self.batch_size // 4))
+        diagnostic_batch = batch[:diagnostic_batch_size]
+        if stopped_early:
+            # If we stopped early, skipped last update => log probs up to date.
+            final_log_probs = log_probs[:diagnostic_batch_size].detach()
+        else:
+            # Else our log probs are one update behind, so we have to recompute.
+            with torch.no_grad(), model_eval(self.model), self._autocast():
+                final_log_probs = get_log_probs(self.model, diagnostic_batch)
 
-            if self.opponent_pool.should_add_snapshot(step, pool_kl_divergence):
-                if isinstance(self.opponent_pool, DREDPool):
-                    prune_sample_batch_size = min(
-                        self.batch_size, max(1024, self.batch_size // 16)
-                    )
-                    prune_sample_batch = batch.embedding_data[:prune_sample_batch_size]
-                    self.opponent_pool.set_last_batch_data(prune_sample_batch)
+        # Check if we should add current model to opponent pool
+        pool_kl_divergence = self._compute_pool_kl_divergence(
+            diagnostic_batch, final_log_probs
+        )
+        if self.opponent_pool.should_add_snapshot(step, pool_kl_divergence):
+            if isinstance(self.opponent_pool, DREDPool):
+                self.opponent_pool.set_last_batch_data(batch.embedding_data)
 
-                self.opponent_pool.add_snapshot(self.model, step)
+            self.opponent_pool.add_snapshot(self.model, step)
 
         # Estimate diagnostic KL: divergence from last model batch.
-        if loss_result.forward_kl is None:
-            current_kl = self._compute_diagnostic_kl_divergence(step_start_age)
-        else:
-            # If we are using a loss that computed KL, use that.
-            current_kl = loss_result.forward_kl
+        current_kl = self._compute_diagnostic_kl_divergence(
+            step_start_age, diagnostic_batch, final_log_probs
+        )
 
         # Update Beta Controller each epoch based on penalty KL
         self.beta_controller.update(current_kl)
