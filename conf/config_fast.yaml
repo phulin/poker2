@@ -1,3 +1,7 @@
+defaults:
+  - config_transformer
+  - _self_
+
 # AlphaHoldem Fast Configuration
 # Fast configuration for testing and development
 
@@ -12,26 +16,15 @@ checkpoint_interval: 25
 eval_interval: 50
 checkpoint_dir: "checkpoints-fast"
 
-# === DEVICE CONFIGURATION ===
-device: "cpu"  # Use CPU for fast testing
-
-# === ENVIRONMENT CONFIGURATION ===
+# === DEVICE/ENV OVERRIDES ===
+device: "cpu"
 use_tensor_env: false
 num_envs: 64
-offload_opponent_models: true  # Move opponent models to CPU after inference to save GPU memory
 
 # === WANDB CONFIGURATION ===
 use_wandb: false
 
-# === RESUME CONFIGURATION ===
-resume_from: null
-
-# === RANDOM SEED ===
-seed: 42
-
-# === ADDITIONAL CONFIGURATION ===
-config: null  # Path to YAML config for components/hparams
-economize_checkpoints: true  # Enable checkpoint economization for fast testing
+economize_checkpoints: true
 
 # === EXPLOITER CONFIGURATION ===
 exploiter:
@@ -47,43 +40,15 @@ exploiter:
 train:
   learning_rate: 1e-3
   learning_rate_final: 1e-4
-  lr_schedule: cosine
   batch_size: 256
-  episodes_per_step: 2
   replay_buffer_batches: 2
   max_trajectory_length: 20
-  max_sequence_length: 50
-  
-  # PPO hyperparameters
-  ppo_eps: 0.2
-  ppo_delta1: 3.0
-  ppo_clipping: "dual"  # Clipping mode: "none", "single", or "dual"
-  ppo_dual_clip: 3.0    # Dual clip parameter for negative advantages
-  kl_type: "reverse"    # KL divergence type: "forward" or "reverse"
-  gae_lambda: 0.95
-  gamma: 0.999
-  entropy_coef: 0.01
-  entropy_coef_final: 0.002
-  entropy_decay_portion: 0.6
-  value_coef: 0.05
-  grad_clip: 1.0
-  
-  # Value loss configuration
-  value_loss_type: "huber"
-  huber_delta: 1.0
-  return_clipping: false  # Enable return clipping in value loss
-  
-  # Mixed precision configuration
-  use_mixed_precision: false  # Disabled for fast testing
-  loss_scale: 128.0  # Initial loss scale for mixed precision
+  use_mixed_precision: false
 
 # === MODEL CONFIGURATION ===
 model:
   name: "siamese_convnet_v1"
-  use_gradient_checkpointing: false
   kwargs:
-    cards_channels: 6
-    actions_channels: 24
     cards_hidden: 128
     actions_hidden: 128
     fusion_hidden: [512, 512]
@@ -91,24 +56,4 @@ model:
   
 # === ENVIRONMENT CONFIGURATION ===
 env:
-  # Game configuration
-  stack: 1000
-  sb: 5
-  bb: 10
-  
-  # Betting configuration
-  bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]
-  
-  # Card encoder configuration
-  card_encoder:
-    name: "cards_planes_v1"
-    kwargs: {}
-  
-  # Action encoder configuration
-  action_encoder:
-    name: "actions_hu_v1"
-    kwargs:
-      history_actions_per_round: 6
-  
-  # Debug configuration
-  debug_step_table: false  # Print debug table during step_bins when batch_size <= 8
+  # keep base env; no overrides here

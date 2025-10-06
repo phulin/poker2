@@ -56,6 +56,10 @@ class TrainingConfig:
     use_mixed_precision: bool = False  # Enable automatic mixed precision
     loss_scale: float = 128.0  # Initial loss scale for mixed precision
 
+    # KL beta controller bounds
+    beta_min: float = 1e-4
+    beta_max: float = 1e4
+
     # Transformer-specific training parameters
     auxiliary_loss_coef: float = (
         0.0  # Coefficient for auxiliary losses (e.g., hand range prediction)
@@ -141,7 +145,7 @@ class Config:
     min_elo_diff: float = 50.0
     # Minimum step difference before considering for pool updates
     min_step_diff: int = 300
-    k_factor: float = 32.0  # ELO K-factor for rating changes
+    k_factor: float = 1.0  # ELO K-factor for rating changes
     checkpoint_interval: int = 50
     eval_interval: int = 100
     checkpoint_dir: str = "checkpoints"

@@ -354,7 +354,11 @@ class SelfPlayTrainer:
             None if self.use_quantile_value_head else PopArtNormalizer()
         )
 
-        self.beta_controller = BetaController(target_kl=TARGET_KL)
+        self.beta_controller = BetaController(
+            target_kl=TARGET_KL,
+            beta_min=float(self.cfg.train.beta_min),
+            beta_max=float(self.cfg.train.beta_max),
+        )
 
         # Initialize loss calculator
         loss_value_type = (

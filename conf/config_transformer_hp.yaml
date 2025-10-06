@@ -1,42 +1,26 @@
+defaults:
+  - config_transformer
+  - _self_
+
 # AlphaHoldem Transformer High-Performance Configuration
 # Configuration for transformer-based poker model with larger capacity
 
 # === TRAINING CONFIGURATION ===
 num_steps: 100000
 opponent_pool_type: "dred"  # "k_best" or "dred"
-k_best_pool_size: 10
-min_elo_diff: 50.0
-min_step_diff: 300
-k_factor: 1.0
 checkpoint_interval: 100
 eval_interval: 500
 checkpoint_dir: "checkpoints-transformer-hp"
 
-# === DEVICE CONFIGURATION ===
+# === DEVICE/ENV OVERRIDES ===
 device: cuda
-
-# === ENVIRONMENT CONFIGURATION ===
-use_tensor_env: true
 num_envs: 1800
-offload_opponent_models: true  # Move opponent models to CPU after inference to save GPU memory
 
 # === WANDB CONFIGURATION ===
 use_wandb: true
 wandb_project: "poker-transformer-hp"
-wandb_name: null
-wandb_tags: ["transformer", "poker", "ppo", "high-performance"]
-wandb_run_id: null
 
-# === RESUME CONFIGURATION ===
-resume_from: null
-
-# === RANDOM SEED ===
-seed: 42
-
-# === ADDITIONAL CONFIGURATION ===
-config: null
 economize_checkpoints: true
-strict_model_loading: false  # Use strict model loading (default: False)
 
 # === EXPLOITER CONFIGURATION ===
 exploiter:
@@ -50,72 +34,20 @@ exploiter:
 
 # === TRAINING HYPERPARAMETERS ===
 train:
-  learning_rate: 3e-4
-  learning_rate_final: 1e-5
-  lr_schedule: cosine
   batch_size: 3500
   episodes_per_step: 6
   replay_buffer_batches: 2
-  max_trajectory_length: 9
-  max_sequence_length: 47   # Can't be higher than 4 * max_trajectory_length + 15
-  use_kv_cache: false
-  
-  # PPO hyperparameters
-  ppo_eps: 0.2
-  ppo_delta1: 3.0
-  ppo_clipping: "dual"  # Clipping mode: "none", "single", or "dual"
-  ppo_dual_clip: 3.0    # Dual clip parameter for negative advantages
-  kl_type: "reverse"    # KL divergence type: "forward" or "reverse"
-  gae_lambda: 0.95
-  gamma: 0.999
-  entropy_coef: 0.01
-  entropy_coef_final: 0.002
-  entropy_decay_portion: 0.6
-  value_coef: 0.5
-
-  # Scaling/clipping
-  grad_clip: 1.0
-  
-  # Value loss configuration
-  value_loss_type: "quantile"
-  huber_delta: 0.5
-  quantile_huber_kappa: 1.0
-  return_clipping: false  # Enable return clipping in value loss
-  
-  # Mixed precision configuration
-  use_mixed_precision: true  # Enable for larger model
-  loss_scale: 128.0
-
-  # Transformer-specific training parameters
+  use_mixed_precision: true
   auxiliary_loss_coef: 0.1
-  warmup_steps: 2000       # Longer warmup for larger model
-  weight_decay: 0.01
+  warmup_steps: 2000
 
 # === MODEL CONFIGURATION ===
 model:
-  name: "poker_transformer_v1"
-  value_head_type: "quantile"
-  value_head_num_quantiles: 51
   kwargs:
-    max_sequence_length: 47
-    d_model: 256           # Larger model dimension
-    n_layers: 8            # More layers
-    n_heads: 2             # More attention heads
-    dropout: 0.0
-    num_bet_bins: 8
+    d_model: 256
+    n_layers: 8
     use_gradient_checkpointing: true
   
 # === ENVIRONMENT CONFIGURATION ===
 env:
-  # Game configuration
-  stack: 1000
-  sb: 5
-  bb: 10
-  
-  # Betting configuration
-  bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]
-  
-  # Debug configuration
-  debug_step_table: false
-
-  flop_showdown: false
+  # keep base env; no overrides here

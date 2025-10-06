@@ -7,7 +7,7 @@ opponent_pool_type: "dred"  # "k_best" or "dred"
 k_best_pool_size: 10
 min_elo_diff: 50.0
 min_step_diff: 300
-k_factor: 4.0
+k_factor: 1.0
 checkpoint_interval: 50
 eval_interval: 100
 checkpoint_dir: "checkpoints-transformer"
@@ -83,6 +83,10 @@ train:
   # Mixed precision configuration
   use_mixed_precision: true
   loss_scale: 128.0
+
+  # KL beta controller
+  beta_min: 1.0e-4
+  beta_max: 10.0
   
   # Transformer-specific training parameters
   auxiliary_loss_coef: 0.1  # Coefficient for hand range auxiliary loss
