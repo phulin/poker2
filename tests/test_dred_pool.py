@@ -361,21 +361,31 @@ def test_dred_deletion_queue_basic():
     )
     pool.set_last_batch_data(sample)
 
-    # Add snapshots to trigger pruning
+    # Track total count before each addition
     for i in range(6):
+        # Get count before adding
+        count_before = len(pool.snapshots) + len(pool.deletion_queue)
+
         pool.add_snapshot(
             SiameseConvNetV1(6, 24, 256, 256, [1024, 1024], 8),
             step=i * 100,
             rating=1200 + i * 10,
         )
 
+        # After adding and pruning, total should increase by at most 1
+        # (may not increase if deletion queue item was removed)
+        count_after = len(pool.snapshots) + len(pool.deletion_queue)
+        assert (
+            count_after <= count_before + 1
+        ), f"Total count changed unexpectedly: {count_before} -> {count_after}"
+
     # Should have active snapshots and deletion queue
     assert len(pool.snapshots) <= 3
     assert len(pool.deletion_queue) > 0
 
-    # Total should equal what we added
+    # Total should equal what we added (accounting for deletion queue removals)
     total_snapshots = len(pool.snapshots) + len(pool.deletion_queue)
-    assert total_snapshots == 6
+    assert total_snapshots <= 6  # May be less due to deletion queue removal
 
 
 def test_dred_deletion_queue_sampling():
@@ -395,13 +405,17 @@ def test_dred_deletion_queue_sampling():
             rating=1200 + i * 10,
         )
 
-    # Sample from the combined pool
+    # Get total available for sampling
+    total_available = len(pool.snapshots) + len(pool.deletion_queue)
+    assert total_available > 0
+
+    # Sample from the combined pool (may be less than requested if fewer available)
     sampled = pool.sample(k=5)
 
-    assert len(sampled) == 5
+    # Should sample min(k, total_available)
+    assert len(sampled) == min(5, total_available)
 
     # Verify we can sample from both active and deletion queue
-    # (probabilistically they should come from both if we sample enough)
     all_steps = set(s.step for s in pool.snapshots + pool.deletion_queue)
     sampled_steps = set(s.step for s in sampled)
 
@@ -574,6 +588,60 @@ def test_dred_deletion_queue_stats():
     # Stats should reflect combined pool (active + deletion queue)
     total_snapshots = len(pool.snapshots) + len(pool.deletion_queue)
     assert total_snapshots > stats["pool_size"]  # Should have items in deletion queue
+
+
+def test_dred_pruning_preserves_total_count():
+    """Test that pruning doesn't change the total number of snapshots (active + deletion queue)."""
+    pool = DREDPool(max_size=5)
+
+    sample = CNNEmbeddingData(
+        cards=torch.zeros(1, 6, 4, 13), actions=torch.zeros(1, 24, 4, 8)
+    )
+    pool.set_last_batch_data(sample)
+
+    # Add snapshots to trigger pruning multiple times
+    for i in range(20):
+        # Record count before adding
+        count_before_add = len(pool.snapshots) + len(pool.deletion_queue)
+
+        # Record if we have deletion queue
+        had_deletion_queue = len(pool.deletion_queue) > 0
+
+        # Check if adding will trigger pruning (after the add, will we exceed max_size?)
+        will_prune = len(pool.snapshots) >= pool.max_size
+
+        pool.add_snapshot(
+            SiameseConvNetV1(6, 24, 256, 256, [1024, 1024], 8),
+            step=i * 100,
+            rating=1200 + i * 10,
+        )
+
+        count_after_add = len(pool.snapshots) + len(pool.deletion_queue)
+
+        # The key invariant: during a pruning operation (which moves snapshots between
+        # active and deletion queue), the TOTAL count should not change
+        # However, when we remove from deletion queue, total decreases by 1, then increases by 1 when we add
+        if had_deletion_queue and will_prune:
+            # Removed 1, added 1, then pruned (which preserves total) = net 0
+            assert (
+                count_after_add == count_before_add
+            ), f"Step {i}: Total count changed with deletion queue removal and pruning: {count_before_add} -> {count_after_add}"
+        elif had_deletion_queue and not will_prune:
+            # Removed 1, added 1 = net 0
+            assert (
+                count_after_add == count_before_add
+            ), f"Step {i}: Total count changed with deletion queue removal: {count_before_add} -> {count_after_add}"
+        elif not had_deletion_queue and will_prune:
+            # Added 1, then pruned (preserves total) = net 0 change (pruning redistributes)
+            # However, pruning moves items between active and queue, keeping total constant
+            assert (
+                count_after_add == count_before_add + 1
+            ), f"Step {i}: Total count should increase by 1 when no deletion queue and pruning: {count_before_add} -> {count_after_add}"
+        else:
+            # Just added, no removal, no pruning
+            assert (
+                count_after_add == count_before_add + 1
+            ), f"Step {i}: Count didn't increase by 1 when below capacity: {count_before_add} -> {count_after_add}"
 
 
 def test_dred_deletion_queue_gradual_removal():

@@ -345,7 +345,7 @@ class DREDPool(OpponentPool):
         if remaining_indices.numel() > 1:
             # Generate embeddings for remaining snapshots (excluding preserved exploiters)
             non_exploiter_remaining = [
-                i for i in remaining_indices if i not in keep_exploiters
+                i for i in remaining_indices.tolist() if i not in keep_exploiters
             ]
 
             if non_exploiter_remaining and self.last_batch_data is not None:
