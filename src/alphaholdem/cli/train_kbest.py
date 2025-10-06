@@ -10,6 +10,8 @@ import os
 import time
 
 import hydra
+import wandb
+from contextlib import nullcontext
 import torch
 
 from alphaholdem.core.structured_config import Config
@@ -156,147 +158,194 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
         else:
             print("No wandb run ID found in checkpoint")
 
-    # Initialize trainer with merged config
-    trainer = SelfPlayTrainer(cfg=merged_config, device=device)
+    # Initialize WANDB run as a context manager if enabled
+    run_cm = nullcontext()
+    if merged_config.use_wandb:
+        init_kwargs = {
+            "project": merged_config.wandb_project,
+            "name": merged_config.wandb_name,
+            "tags": merged_config.wandb_tags or [],
+            "config": {
+                "learning_rate": merged_config.train.learning_rate,
+                "batch_size": merged_config.train.batch_size,
+                "episodes_per_step": merged_config.train.episodes_per_step,
+                "gamma": merged_config.train.gamma,
+                "gae_lambda": merged_config.train.gae_lambda,
+                "epsilon": merged_config.train.ppo_eps,
+                "delta1": merged_config.train.ppo_delta1,
+                "value_coef": merged_config.train.value_coef,
+                "entropy_coef": merged_config.train.entropy_coef,
+                "grad_clip": merged_config.train.grad_clip,
+                "k_best_pool_size": merged_config.k_best_pool_size,
+                "min_elo_diff": merged_config.min_elo_diff,
+                "use_tensor_env": merged_config.use_tensor_env,
+                "num_envs": merged_config.num_envs,
+                "device": str(device),
+            },
+        }
+        if merged_config.wandb_run_id:
+            init_kwargs["id"] = merged_config.wandb_run_id
+            init_kwargs["resume"] = "must"
+        try:
+            run_cm = wandb.init(**init_kwargs)
+            print(f"Wandb initialized (project={merged_config.wandb_project})")
+        except Exception as exc:
+            print(f"Wandb init failed: {exc}. Continuing without wandb.")
+            merged_config.use_wandb = False
+            run_cm = nullcontext()
 
-    # Initialize exploiter trainer if enabled
-    exploiter_trainer = None
-    if merged_config.exploiter.enabled:
-        print("🤖 Exploiter training enabled")
+    with run_cm as run:
+        # Initialize trainer with merged config
+        trainer = SelfPlayTrainer(cfg=merged_config, device=device)
 
-        # Create exploiter trainer with same config but different hyperparameters
-        exploiter_cfg = merged_config
-        exploiter_cfg.use_wandb = False
-        exploiter_cfg.train.learning_rate = merged_config.exploiter.learning_rate
-        exploiter_cfg.train.batch_size = merged_config.exploiter.batch_size
-        exploiter_cfg.train.episodes_per_step = (
-            merged_config.exploiter.episodes_per_step
-        )
-        exploiter_cfg.train.entropy_coef = merged_config.exploiter.entropy_coef
+        # Initialize exploiter trainer if enabled
+        exploiter_trainer = None
+        if merged_config.exploiter.enabled:
+            print("🤖 Exploiter training enabled")
 
-        exploiter_trainer = SelfPlayTrainer(cfg=exploiter_cfg, device=device)
+            # Create exploiter trainer with same config but different hyperparameters
+            exploiter_cfg = merged_config
+            exploiter_cfg.use_wandb = False
+            exploiter_cfg.train.learning_rate = merged_config.exploiter.learning_rate
+            exploiter_cfg.train.batch_size = merged_config.exploiter.batch_size
+            exploiter_cfg.train.episodes_per_step = (
+                merged_config.exploiter.episodes_per_step
+            )
+            exploiter_cfg.train.entropy_coef = merged_config.exploiter.entropy_coef
 
-        # Replace exploiter's opponent pool with a fixed opponent pool
-        exploiter_trainer.opponent_pool = FixedOpponentPool(
-            k_factor=merged_config.k_factor,
-            use_mixed_precision=merged_config.train.use_mixed_precision,
-        )
+            exploiter_trainer = SelfPlayTrainer(cfg=exploiter_cfg, device=device)
 
-        print("✅ Exploiter trainer initialized")
-    else:
-        print("❌ Exploiter training disabled")
+            # Replace exploiter's opponent pool with a fixed opponent pool
+            exploiter_trainer.opponent_pool = FixedOpponentPool(
+                k_factor=merged_config.k_factor,
+                use_mixed_precision=merged_config.train.use_mixed_precision,
+            )
 
-    # Load checkpoint if specified (after trainer initialization for wandb resumption)
-    if cfg.resume_from and os.path.exists(cfg.resume_from):
-        print(f"Loading checkpoint: {cfg.resume_from}")
-        start_step, _ = trainer.load_checkpoint(cfg.resume_from)
+            print("✅ Exploiter trainer initialized")
+        else:
+            print("❌ Exploiter training disabled")
 
-    # Record training start time
-    training_start_time = time.time()
+        # Load checkpoint if specified (after trainer initialization for wandb resumption)
+        if cfg.resume_from and os.path.exists(cfg.resume_from):
+            print(f"Loading checkpoint: {cfg.resume_from}")
+            start_step, _ = trainer.load_checkpoint(cfg.resume_from)
 
-    print(f"Starting K-Best training from step {start_step}")
-    if cfg.use_tensor_env:
-        print(f"Using tensorized environment with {cfg.num_envs} parallel environments")
-    else:
-        print("Using scalar environment")
-    if cfg.env.flop_showdown:
-        print("Using FLOP SHOWDOWN environment")
-    if cfg.use_wandb:
-        print(f"📊 Wandb logging enabled - check https://wandb.ai for real-time plots!")
-        print(f"   Project: {cfg.wandb_project}")
-        if cfg.wandb_name:
-            print(f"   Run name: {cfg.wandb_name}")
-        print(f"   Tags: {cfg.wandb_tags}")
-    # Collection runs until batch_size steps; no fixed trajectories per step
-    print(
-        f"Training start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))}"
-    )
-    print()
+        # Record training start time
+        training_start_time = time.time()
 
-    # Training loop
-    for step in range(start_step, cfg.num_steps):
-        step_start_time = time.time()
-
-        # Training step: collects until batch_size steps
-        stats = trainer.train_step(step + 1)  # Pass 1-indexed step for consistency
-
-        # Calculate times
-        step_elapsed_time = time.time() - step_start_time
-        total_elapsed_time = time.time() - training_start_time
-
-        # Format times
-        step_time_str = f"{step_elapsed_time:.2f}s"
-        total_time_str = f"{total_elapsed_time:.1f}s"
-
-        # Logging
-        print_training_stats(
-            stats, step, cfg.num_steps, stats["episodes"], step_time_str, total_time_str
-        )
-        # Optional clipping debug of first sample in batch
-        if "first_ret" in stats:
+        print(f"Starting K-Best training from step {start_step}")
+        if cfg.use_tensor_env:
             print(
-                "  clip_debug "
-                f"ret0 {stats['first_ret']:.4f} "
-                f"d2 {stats['first_d2']:.4f} d3 {stats['first_d3']:.4f} "
-                f"min {stats['first_min_b']:.4f} max {stats['first_max_b']:.4f} "
-                f"retc {stats['first_ret_clipped']:.4f} "
-                f"out_of_bounds {bool(stats['first_ret_out_of_bounds'])}"
+                f"Using tensorized environment with {cfg.num_envs} parallel environments"
             )
-
-        # Evaluation against pool
-        if (step + 1) % cfg.eval_interval == 0:
-            eval_results = trainer.evaluate_against_pool(min_games=50)
-            print_evaluation_results(eval_results)
-
-        # Exploiter training
-        if (
-            merged_config.exploiter.enabled
-            and exploiter_trainer is not None
-            and (step + 1) % merged_config.exploiter.training_interval == 0
-        ):
-            exploiter_stats = train_exploiter(
-                trainer, exploiter_trainer, step, merged_config
+        else:
+            print("Using scalar environment")
+        if cfg.env.flop_showdown:
+            print("Using FLOP SHOWDOWN environment")
+        if cfg.use_wandb:
+            print(
+                f"📊 Wandb logging enabled - check https://wandb.ai for real-time plots!"
             )
+            print(f"   Project: {cfg.wandb_project}")
+            if cfg.wandb_name:
+                print(f"   Run name: {cfg.wandb_name}")
+            print(f"   Tags: {cfg.wandb_tags}")
+        # Collection runs until batch_size steps; no fixed trajectories per step
+        print(
+            f"Training start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))}"
+        )
+        print()
 
-        # Checkpointing
-        if (step + 1) % cfg.checkpoint_interval == 0:
-            checkpoint_path = os.path.join(
-                cfg.checkpoint_dir, f"checkpoint_step_{step + 1}.pt"
+        # Training loop
+        for step in range(start_step, cfg.num_steps):
+            step_start_time = time.time()
+
+            # Training step: collects until batch_size steps
+            stats = trainer.train_step(step + 1)  # Pass 1-indexed step for consistency
+
+            # Calculate times
+            step_elapsed_time = time.time() - step_start_time
+            total_elapsed_time = time.time() - training_start_time
+
+            # Format times
+            step_time_str = f"{step_elapsed_time:.2f}s"
+            total_time_str = f"{total_elapsed_time:.1f}s"
+
+            # Logging
+            print_training_stats(
+                stats,
+                step,
+                cfg.num_steps,
+                stats["episodes"],
+                step_time_str,
+                total_time_str,
             )
-            trainer.save_checkpoint(checkpoint_path, step + 1)
-            checkpoint_path = os.path.join(cfg.checkpoint_dir, f"latest_model.pt")
-            trainer.save_checkpoint(checkpoint_path, step + 1)
-
-            # Also save the best model if it has the highest ELO
-            best_checkpoint_path = os.path.join(cfg.checkpoint_dir, "best_model.pt")
-            if (
-                not os.path.exists(best_checkpoint_path)
-                or stats["current_elo"] > trainer.opponent_pool.get_best_snapshot().elo
-            ):
-                trainer.save_checkpoint(best_checkpoint_path, step + 1)
-                print_checkpoint_info(
-                    best_checkpoint_path, stats["current_elo"], is_best=True
+            # Optional clipping debug of first sample in batch
+            if "first_ret" in stats:
+                print(
+                    "  clip_debug "
+                    f"ret0 {stats['first_ret']:.4f} "
+                    f"d2 {stats['first_d2']:.4f} d3 {stats['first_d3']:.4f} "
+                    f"min {stats['first_min_b']:.4f} max {stats['first_max_b']:.4f} "
+                    f"retc {stats['first_ret_clipped']:.4f} "
+                    f"out_of_bounds {bool(stats['first_ret_out_of_bounds'])}"
                 )
 
-            print_preflop_range_grid(trainer, step + 1)
+            # Evaluation against pool
+            if (step + 1) % cfg.eval_interval == 0:
+                eval_results = trainer.evaluate_against_pool(min_games=50)
+                print_evaluation_results(eval_results)
 
-    # Final evaluation
-    final_total_time = time.time() - training_start_time
-    print(f"\nFinal evaluation against opponent pool...")
-    final_eval = trainer.evaluate_against_pool(min_games=100)
-    print_evaluation_results(final_eval)
-    print(
-        f"Total training time: {final_total_time:.1f}s ({final_total_time/3600:.2f} hours)"
-    )
+            # Exploiter training
+            if (
+                merged_config.exploiter.enabled
+                and exploiter_trainer is not None
+                and (step + 1) % merged_config.exploiter.training_interval == 0
+            ):
+                exploiter_stats = train_exploiter(
+                    trainer, exploiter_trainer, step, merged_config
+                )
 
-    # Save final checkpoint
-    final_checkpoint_path = os.path.join(cfg.checkpoint_dir, "final_checkpoint.pt")
-    trainer.save_checkpoint(final_checkpoint_path, cfg.num_steps)
+            # Checkpointing
+            if (step + 1) % cfg.checkpoint_interval == 0:
+                checkpoint_path = os.path.join(
+                    cfg.checkpoint_dir, f"checkpoint_step_{step + 1}.pt"
+                )
+                trainer.save_checkpoint(checkpoint_path, step + 1)
+                checkpoint_path = os.path.join(cfg.checkpoint_dir, f"latest_model.pt")
+                trainer.save_checkpoint(checkpoint_path, step + 1)
 
-    # Print preflop range grid
-    print_preflop_range_grid(trainer, cfg.num_steps, title="Final Preflop Range Grid")
+                # Also save the best model if it has the highest ELO
+                best_checkpoint_path = os.path.join(cfg.checkpoint_dir, "best_model.pt")
+                if (
+                    not os.path.exists(best_checkpoint_path)
+                    or stats["current_elo"]
+                    > trainer.opponent_pool.get_best_snapshot().elo
+                ):
+                    trainer.save_checkpoint(best_checkpoint_path, step + 1)
+                    print_checkpoint_info(
+                        best_checkpoint_path, stats["current_elo"], is_best=True
+                    )
 
-    return trainer
+                print_preflop_range_grid(trainer, step + 1)
+
+        # Final evaluation
+        final_total_time = time.time() - training_start_time
+        print(f"\nFinal evaluation against opponent pool...")
+        final_eval = trainer.evaluate_against_pool(min_games=100)
+        print_evaluation_results(final_eval)
+        print(
+            f"Total training time: {final_total_time:.1f}s ({final_total_time/3600:.2f} hours)"
+        )
+
+        # Save final checkpoint
+        final_checkpoint_path = os.path.join(cfg.checkpoint_dir, "final_checkpoint.pt")
+        trainer.save_checkpoint(final_checkpoint_path, cfg.num_steps)
+
+        # Print preflop range grid
+        print_preflop_range_grid(
+            trainer, cfg.num_steps, title="Final Preflop Range Grid"
+        )
 
 
 @hydra.main(version_base=None, config_path="../../../conf", config_name="config")

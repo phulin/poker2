@@ -396,49 +396,8 @@ class SelfPlayTrainer:
         self.total_transitions_trained = 0
         self.opponent_pool.current_elo = 1200.0  # Starting ELO rating
 
-        # Weights & Biases setup
-        self.use_wandb = self.use_wandb
+        # Weights & Biases setup (managed by CLI). Keep counters only.
         self.wandb_step = 0
-        if self.use_wandb:
-            # Determine if we're resuming an existing run
-            wandb_init_kwargs = {
-                "project": self.wandb_project,
-                "name": self.wandb_name,
-                "tags": self.wandb_tags or [],
-                "config": {
-                    "learning_rate": lr,
-                    "batch_size": self.batch_size,
-                    "episodes_per_step": self.episodes_per_step,
-                    "gamma": self.gamma,
-                    "gae_lambda": self.gae_lambda,
-                    "epsilon": self.epsilon,
-                    "delta1": self.delta1,
-                    "value_coef": self.value_coef,
-                    "entropy_coef": self.entropy_coef,
-                    "grad_clip": self.grad_clip,
-                    "k_best_pool_size": self.k_best_pool_size,
-                    "min_elo_diff": self.min_elo_diff,
-                    "use_tensor_env": self.use_tensor_env,
-                    "num_envs": self.num_envs,
-                    "device": str(self.device),
-                },
-            }
-            try:
-                if self.wandb_run_id:
-                    wandb_init_kwargs["id"] = self.wandb_run_id
-                    wandb_init_kwargs["resume"] = "must"
-                    wandb.init(**wandb_init_kwargs)
-                    print(
-                        f"Wandb resumed run {self.wandb_run_id} for project: {self.wandb_project}"
-                    )
-                else:
-                    wandb.init(**wandb_init_kwargs)
-                print(f"Wandb initialized new run for project: {self.wandb_project}")
-            except Exception as exc:  # pragma: no cover - offline fallback path
-                print(
-                    f"Wandb initialization failed ({exc}); continuing without wandb logging."
-                )
-                self.use_wandb = False
 
     def _autocast(self):
         """
