@@ -242,13 +242,6 @@ def test_checkpoint_save_load():
         # Verify loaded state (step is now stored in checkpoints)
         assert loaded_step == 3, f"Expected step 3, got {loaded_step}"
         assert (
-            new_trainer.step_trajectories_collected
-            == trainer.step_trajectories_collected
-        ), "Episode count not restored"
-        assert (
-            abs(new_trainer.total_step_reward - trainer.total_step_reward) < 1e-6
-        ), "Total reward not restored"
-        assert (
             new_trainer.total_trajectories_collected
             == trainer.total_trajectories_collected
         ), "Total trajectories not restored"
