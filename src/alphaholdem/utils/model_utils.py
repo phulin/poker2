@@ -75,7 +75,7 @@ def get_log_probs(
     return get_logits_log_probs_values(model, data, legal_masks)[1]
 
 
-def get_log_probs(
+def get_batch_log_probs(
     model: nn.Module,
     batch: BatchSample,
 ) -> torch.Tensor:

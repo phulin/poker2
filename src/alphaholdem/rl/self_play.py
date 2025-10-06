@@ -31,7 +31,10 @@ from alphaholdem.rl.replay import Trajectory, Transition
 from alphaholdem.rl.vectorized_replay import BatchSample, VectorizedReplayBuffer
 from alphaholdem.utils.ema import EMA
 from alphaholdem.utils.model_context import model_eval
-from alphaholdem.utils.model_utils import get_log_probs, get_logits_log_probs_values
+from alphaholdem.utils.model_utils import (
+    get_batch_log_probs,
+    get_logits_log_probs_values,
+)
 from alphaholdem.utils.profiling import profile
 from alphaholdem.utils.quantile_calculator import QuantileCalculator
 
@@ -646,13 +649,15 @@ class SelfPlayTrainer:
             # Get indices for non-current model (current model gets done below)
             other_model_indices = torch.where(batch.model_ages != step_start_age)[0]
             if len(other_model_indices) > 0:
-                log_probs = get_log_probs(step_start_model, batch[other_model_indices])
+                log_probs = get_batch_log_probs(
+                    step_start_model, batch[other_model_indices]
+                )
                 batch.update_step_log_probs(other_model_indices, log_probs)
 
             for age, batch_indices in batch.group_by_model_age():
                 frozen_model = self.model_history.get_model(age)
                 with model_eval(frozen_model):
-                    log_probs = get_log_probs(frozen_model, batch[batch_indices])
+                    log_probs = get_batch_log_probs(frozen_model, batch[batch_indices])
                     batch.update_frozen_log_probs(batch_indices, log_probs)
                     if age == step_start_age:
                         # this is self.model.
@@ -1096,7 +1101,9 @@ class SelfPlayTrainer:
             ):
                 # Get last admitted opponent model logits
                 last_admitted_opponent.model.to(self.device)
-                opponent_log_probs = get_log_probs(last_admitted_opponent.model, batch)
+                opponent_log_probs = get_batch_log_probs(
+                    last_admitted_opponent.model, batch
+                )
 
                 # KL(opponent || current model)
                 return F.kl_div(
@@ -1125,7 +1132,7 @@ class SelfPlayTrainer:
             model_eval(old_model),
             self._autocast(),
         ):
-            kl_old_log_probs = get_log_probs(old_model, batch)
+            kl_old_log_probs = get_batch_log_probs(old_model, batch)
             # KL(old || new)
             return F.kl_div(
                 final_log_probs,
@@ -1323,7 +1330,7 @@ class SelfPlayTrainer:
         else:
             # Else our log probs are one update behind, so we have to recompute.
             with torch.no_grad(), model_eval(self.model), self._autocast():
-                final_log_probs = get_log_probs(self.model, diagnostic_batch)
+                final_log_probs = get_batch_log_probs(self.model, diagnostic_batch)
 
         # Check if we should add current model to opponent pool
         pool_kl_divergence = self._compute_pool_kl_divergence(
