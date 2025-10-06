@@ -52,5 +52,5 @@ model:
     num_actions: 8
   
 # === ENVIRONMENT CONFIGURATION ===
-env:
-  # keep base env; no overrides here
+# keep base env; no overrides here
+env: {}

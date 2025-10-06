@@ -49,5 +49,5 @@ model:
     use_gradient_checkpointing: true
   
 # === ENVIRONMENT CONFIGURATION ===
-env:
-  # keep base env; no overrides here
+# keep base env; no overrides here
+env: {}
