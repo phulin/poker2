@@ -87,6 +87,8 @@ train:
   # KL beta controller
   beta_min: 1.0e-4
   beta_max: 10.0
+  beta_increase_factor: 2.0
+  beta_decrease_factor: 0.5
   
   # Transformer-specific training parameters
   auxiliary_loss_coef: 0.1  # Coefficient for hand range auxiliary loss

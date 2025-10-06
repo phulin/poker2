@@ -58,7 +58,12 @@ class TrainingConfig:
 
     # KL beta controller bounds
     beta_min: float = 1e-4
-    beta_max: float = 1e4
+    beta_max: float = 10.0
+
+    # KL beta controller dynamics
+    beta_increase_factor: float = 2.0
+    # If None, defaults to 1.0 / beta_increase_factor
+    beta_decrease_factor: float = 0.5
 
     # Transformer-specific training parameters
     auxiliary_loss_coef: float = (

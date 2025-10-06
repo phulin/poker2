@@ -358,6 +358,8 @@ class SelfPlayTrainer:
             target_kl=TARGET_KL,
             beta_min=float(self.cfg.train.beta_min),
             beta_max=float(self.cfg.train.beta_max),
+            increase_factor=float(self.cfg.train.beta_increase_factor),
+            decrease_factor=float(self.cfg.train.beta_decrease_factor),
         )
 
         # Initialize loss calculator
