@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 
-from alphaholdem.core.structured_config import Config, LrSchedule, ValueHeadType
+from alphaholdem.core.structured_config import Config, KLType, LrSchedule, ValueHeadType
 from alphaholdem.encoding.action_mapping import bin_to_action, get_legal_mask
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
@@ -1348,7 +1348,8 @@ class SelfPlayTrainer:
         )
 
         # Update Beta Controller each epoch based on penalty KL
-        self.beta_controller.update(current_kl)
+        if self.cfg.train.kl_type != KLType.none:
+            self.beta_controller.update(current_kl)
 
         # Update KL divergence exponential moving average
         self.kl_ema.update(current_kl)
