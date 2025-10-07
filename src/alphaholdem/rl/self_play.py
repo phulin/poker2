@@ -1168,6 +1168,7 @@ class SelfPlayTrainer:
 
         # Initialize tracking variables once before the epoch loop
         total_loss, total_policy_loss, total_value_loss = 0.0, 0.0, 0.0
+        total_kl_loss = 0.0
         total_entropy, total_clipfrac = 0.0, 0.0
         total_ppo_clipfrac, total_return_clipfrac = 0.0, 0.0
         total_explained_var, total_pearson_r, total_epsilon = 0.0, 0.0, 0.0
@@ -1248,6 +1249,7 @@ class SelfPlayTrainer:
             total_loss += loss_result.total_loss.item()
             total_policy_loss += loss_result.policy_loss
             total_value_loss += loss_result.value_loss
+            total_kl_loss += loss_result.penalty_kl * self.beta_controller.beta
             total_entropy += loss_result.entropy
             total_clipfrac += loss_result.clipfrac
             total_ppo_clipfrac += loss_result.ppo_clipfrac
@@ -1404,6 +1406,7 @@ class SelfPlayTrainer:
             "avg_loss": total_loss / denom,
             "policy_loss": total_policy_loss / denom,
             "value_loss": total_value_loss / denom,
+            "kl_loss": total_kl_loss / denom,
             "entropy": total_entropy / denom,
             "approx_kl": current_kl,
             "kl_ema": self.kl_ema.value,
