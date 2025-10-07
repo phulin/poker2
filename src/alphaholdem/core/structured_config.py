@@ -115,21 +115,10 @@ class EnvConfig:
     sb: int = 5
     bb: int = 10
     bet_bins: List[float] = field(default_factory=lambda: [0.5, 0.75, 1.0, 1.5, 2.0])
-    card_encoder: Optional[dict] = None
-    action_encoder: Optional[dict] = None
     debug_step_table: bool = (
         False  # Print debug table during step_bins when batch_size <= 8
     )
     flop_showdown: bool = False  # Skip turn/river, go directly to showdown after flop
-
-    def __post_init__(self):
-        if self.card_encoder is None:
-            self.card_encoder = {"name": "cards_planes_v1", "kwargs": {}}
-        if self.action_encoder is None:
-            self.action_encoder = {
-                "name": "actions_hu_v1",
-                "kwargs": {"history_actions_per_round": 6},
-            }
 
 
 @dataclass
