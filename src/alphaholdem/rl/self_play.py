@@ -36,7 +36,6 @@ from alphaholdem.utils.model_utils import (
     get_logits_log_probs_values,
 )
 from alphaholdem.utils.profiling import profile
-from alphaholdem.utils.quantile_calculator import QuantileCalculator
 
 TARGET_KL = 0.015
 
@@ -1164,8 +1163,6 @@ class SelfPlayTrainer:
         total_return_abs_mean, total_return_std = 0.0, 0.0
         total_small_adv_rate = 0.0
         total_grad_norm_unclipped, total_grad_norm_clipped = 0.0, 0.0
-        return_quantile_calculator = QuantileCalculator(self.device)
-        advantage_quantile_calculator = QuantileCalculator(self.device)
         minibatch_count = 0
 
         # Freeze value normalizer (PopArt) at the beginning of each epoch cycle
@@ -1191,7 +1188,6 @@ class SelfPlayTrainer:
             adv = batch.advantages
             adv_mean_raw = adv.mean()
             adv_std_raw = adv.std().clamp_min(1e-8)
-            advantage_quantile_calculator.log(batch.advantages)
             batch.advantages = (adv - adv_mean_raw) / adv_std_raw
             total_advantage_mean_raw += adv_mean_raw.item()
             total_advantage_std_raw += adv_std_raw.item()
@@ -1203,7 +1199,6 @@ class SelfPlayTrainer:
 
             total_return_abs_mean += batch.returns.abs().mean().item()
             total_return_std += batch.returns.std().item()
-            return_quantile_calculator.log(batch.returns)
 
             with self._autocast():
                 embedding_data = batch.embedding_data
@@ -1382,6 +1377,11 @@ class SelfPlayTrainer:
         avg_trajectory_length = self.replay_buffer.num_steps() / self.replay_buffer.size
         denom = max(1, minibatch_count)
 
+        # Get all valid returns and advantages from replay buffer for histograms
+        valid = torch.where(self.replay_buffer.trajectory_lengths > 0)[0]
+        valid_returns = self.replay_buffer.returns[valid]
+        valid_advantages = self.replay_buffer.advantages[valid]
+
         result = {
             "episodes": episode + 1,
             "avg_reward": avg_reward,
@@ -1403,11 +1403,11 @@ class SelfPlayTrainer:
             "epsilon": total_epsilon / denom,
             "advantage_mean_raw": total_advantage_mean_raw / denom,
             "advantage_std_raw": total_advantage_std_raw / denom,
-            "advantage_quantiles": advantage_quantile_calculator.compute_wandb(10),
+            "advantage_histogram": wandb.Histogram(valid_advantages),
             "small_adv": total_small_adv_rate / denom,
             "return_abs_mean": total_return_abs_mean / denom,
             "return_std": total_return_std / denom,
-            "return_quantiles": return_quantile_calculator.compute_wandb(10),
+            "return_histogram": wandb.Histogram(valid_returns),
             "grad_norm_unclipped": total_grad_norm_unclipped / denom,
             "grad_norm_clipped": total_grad_norm_clipped / denom,
             "beta": self.beta_controller.beta,
