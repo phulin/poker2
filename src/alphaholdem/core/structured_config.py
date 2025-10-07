@@ -97,7 +97,7 @@ class ModelConfig:
     actions_channels: int = 24
     cards_hidden: int = 256
     actions_hidden: int = 256
-    fusion_hidden: list = field(default_factory=lambda: [1024, 1024])
+    fusion_hidden: list[int] = field(default_factory=lambda: [1024, 1024])
     num_actions: int = 8
 
     # Transformer-specific parameters (with defaults)
@@ -114,7 +114,7 @@ class EnvConfig:
     stack: int = 1000
     sb: int = 5
     bb: int = 10
-    bet_bins: Optional[List[float]] = None
+    bet_bins: List[float] = field(default_factory=lambda: [0.5, 0.75, 1.0, 1.5, 2.0])
     card_encoder: Optional[dict] = None
     action_encoder: Optional[dict] = None
     debug_step_table: bool = (
@@ -123,8 +123,6 @@ class EnvConfig:
     flop_showdown: bool = False  # Skip turn/river, go directly to showdown after flop
 
     def __post_init__(self):
-        if self.bet_bins is None:
-            self.bet_bins = [0.5, 0.75, 1.0, 1.5, 2.0]
         if self.card_encoder is None:
             self.card_encoder = {"name": "cards_planes_v1", "kwargs": {}}
         if self.action_encoder is None:
