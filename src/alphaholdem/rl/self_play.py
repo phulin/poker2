@@ -1392,9 +1392,8 @@ class SelfPlayTrainer:
         denom = max(1, minibatch_count)
 
         # Get all valid returns and advantages from replay buffer for histograms
-        valid = torch.where(self.replay_buffer.trajectory_lengths > 0)[0]
-        valid_returns = self.replay_buffer.returns[valid]
-        valid_advantages = self.replay_buffer.advantages[valid]
+        valid_returns = self.replay_buffer.get_valid_returns()
+        valid_advantages = self.replay_buffer.get_valid_advantages()
 
         result = {
             "episodes": episode + 1,

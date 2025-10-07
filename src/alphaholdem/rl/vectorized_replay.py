@@ -556,6 +556,31 @@ class VectorizedReplayBuffer:
         self.advantages[valid_indices, :max_length] = advantages
         self.returns[valid_indices, :max_length] = returns
 
+    def _collect_valid_steps(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Return a flattened view of all valid steps for the given per-step tensor."""
+        valid_indices = torch.where(self.trajectory_lengths > 0)[0]
+        if valid_indices.numel() == 0:
+            return tensor.new_empty((0,), dtype=tensor.dtype)
+
+        lengths = self.trajectory_lengths[valid_indices]
+        max_length = lengths.max().item()
+        if max_length == 0:
+            return tensor.new_empty((0,), dtype=tensor.dtype)
+
+        data = tensor[valid_indices, :max_length]
+        step_range = torch.arange(max_length, device=tensor.device)
+        mask = step_range.unsqueeze(0) < lengths.unsqueeze(1)
+
+        return data[mask]
+
+    def get_valid_returns(self) -> torch.Tensor:
+        """Return concatenated returns for every valid transition in the buffer."""
+        return self._collect_valid_steps(self.returns)
+
+    def get_valid_advantages(self) -> torch.Tensor:
+        """Return concatenated advantages for every valid transition in the buffer."""
+        return self._collect_valid_steps(self.advantages)
+
     def _compute_gae_vectorized(self, rewards, values, dones, gamma=0.99, lam=0.95):
         """
         Vectorized GAE computation for multiple trajectories.
