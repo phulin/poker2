@@ -28,6 +28,12 @@ class PPOClipping(str, Enum):
     dual = "dual"
 
 
+class KLType(str, Enum):
+    forward = "forward"
+    reverse = "reverse"
+    none = "none"
+
+
 @dataclass
 class TrainingConfig:
     learning_rate: float = 1e-4
@@ -44,7 +50,8 @@ class TrainingConfig:
     ppo_delta1: float = 3.0
     ppo_clipping: PPOClipping = PPOClipping.dual
     ppo_dual_clip: float = 3.0  # Dual clip parameter for negative advantages
-    kl_type: str = "reverse"  # KL divergence type: "forward" or "reverse"
+    # KL divergence type: "forward", "reverse", or "none"
+    kl_type: KLType = KLType.reverse
     value_coef: float = 0.05
     entropy_coef: float = 0.01
     entropy_coef_final: float = 0.002

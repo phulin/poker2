@@ -7,7 +7,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-from alphaholdem.core.structured_config import PPOClipping, ValueLossType
+from alphaholdem.core.structured_config import KLType, PPOClipping, ValueLossType
 from alphaholdem.rl.beta_controller import BetaController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
@@ -396,7 +396,7 @@ class KLPolicyPPOLoss(LossCalculator):
         epsilon: float = 0.2,
         dual_clip: float = 3.0,
         huber_delta: float = 1.0,
-        kl_type: str = "reverse",
+        kl_type: KLType = KLType.reverse,
         quantile_kappa: float = 1.0,
         num_quantiles: Optional[int] = None,
     ):
@@ -482,7 +482,11 @@ class KLPolicyPPOLoss(LossCalculator):
         forward_kl = (log_p_step.exp() * (log_p_step - log_p_new)).sum(dim=-1).mean()
         # KL(new || old)
         reverse_kl = (p_new * (log_p_new - log_p_step)).sum(dim=-1).mean()
-        penalty_kl = forward_kl if self.kl_type == "forward" else reverse_kl
+        penalty_kl = (
+            torch.zeros_like(forward_kl)
+            if self.kl_type == KLType.none
+            else forward_kl if self.kl_type == KLType.forward else reverse_kl
+        )
 
         # --- Value loss
         if self.return_clipping:
