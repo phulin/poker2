@@ -18,7 +18,7 @@ checkpoint_dir: "checkpoints-fast"
 
 # === DEVICE/ENV OVERRIDES ===
 device: "cpu"
-use_tensor_env: false
+use_tensor_env: true
 num_envs: 64
 
 # === WANDB CONFIGURATION ===
@@ -48,11 +48,12 @@ train:
 # === MODEL CONFIGURATION ===
 model:
   name: "siamese_convnet_v1"
-  kwargs:
-    cards_hidden: 128
-    actions_hidden: 128
-    fusion_hidden: [512, 512]
-    num_actions: 8
+  cards_channels: 6
+  actions_channels: 24
+  cards_hidden: 128
+  actions_hidden: 128
+  fusion_hidden: [512, 512]
+  num_actions: 8
   
 # === ENVIRONMENT CONFIGURATION ===
 # keep base env; no overrides here

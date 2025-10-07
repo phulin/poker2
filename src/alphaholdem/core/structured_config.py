@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import List, Optional, Literal
+from dataclasses import dataclass, field
+from typing import List, Optional
 from enum import Enum
 
 from hydra.core.config_store import ConfigStore
@@ -88,26 +88,25 @@ class TrainingConfig:
 @dataclass
 class ModelConfig:
     name: str = "siamese_convnet_v1"
-    kwargs: Optional[dict] = None
-    # backwards compatibility
-    use_gradient_checkpointing: Optional[bool] = None
     value_head_type: ValueHeadType = ValueHeadType.scalar
-    value_head_num_quantiles: Optional[int] = None
+    value_head_num_quantiles: int = 51
+    use_gradient_checkpointing: bool = True
 
-    def __post_init__(self):
-        if self.kwargs is None and self.name == "siamese_convnet_v1":
-            self.kwargs = {
-                "cards_channels": 6,
-                "actions_channels": 24,
-                "cards_hidden": 256,
-                "actions_hidden": 256,
-                "fusion_hidden": [1024, 1024],
-                "num_actions": 8,
-            }
-        if self.value_head_type is None:
-            self.value_head_type = ValueHeadType.scalar
-        if self.value_head_num_quantiles is None:
-            self.value_head_num_quantiles = 51
+    # CNN-specific parameters (with defaults)
+    cards_channels: int = 6
+    actions_channels: int = 24
+    cards_hidden: int = 256
+    actions_hidden: int = 256
+    fusion_hidden: list = field(default_factory=lambda: [1024, 1024])
+    num_actions: int = 8
+
+    # Transformer-specific parameters (with defaults)
+    max_sequence_length: int = 47
+    d_model: int = 128
+    n_layers: int = 2
+    n_heads: int = 2
+    dropout: float = 0.0
+    num_bet_bins: int = 8
 
 
 @dataclass

@@ -100,14 +100,13 @@ model:
   name: "poker_transformer_v1"
   value_head_type: "quantile"
   value_head_num_quantiles: 51
-  kwargs:
-    max_sequence_length: 47
-    d_model: 128  # Reduced for better performance
-    n_layers: 2   # Reduced for better performance
-    n_heads: 2    # Reduced for better performance
-    dropout: 0.0
-    num_bet_bins: 8
-    use_gradient_checkpointing: false  # Disabled for performance
+  max_sequence_length: 47
+  d_model: 128  # Reduced for better performance
+  n_layers: 2   # Reduced for better performance
+  n_heads: 2    # Reduced for better performance
+  dropout: 0.0
+  num_bet_bins: 8
+  use_gradient_checkpointing: false  # Disabled for performance
   
 # === ENVIRONMENT CONFIGURATION ===
 env:

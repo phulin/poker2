@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 # AlphaHoldem Default Configuration
-# Balanced configuration for general training
+# CNN-specific overrides over transformer defaults
 
 # === TRAINING CONFIGURATION ===
 opponent_pool_type: "k_best"
@@ -28,18 +28,21 @@ train:
   batch_size: 1024
   episodes_per_step: 4
   max_trajectory_length: 20
-  max_sequence_length: 50
   value_loss_type: "huber"
   use_mixed_precision: false
 
 # === MODEL CONFIGURATION ===
 model:
   name: "siamese_convnet_v1"
-  kwargs:
-    cards_hidden: 192
-    actions_hidden: 192
-    fusion_hidden: [1024, 1024]
-    num_actions: 8
+  value_head_type: "scalar"
+  value_head_num_quantiles: 1
+  cards_channels: 6
+  actions_channels: 24
+  cards_hidden: 192
+  actions_hidden: 192
+  fusion_hidden: [1024, 1024]
+  num_actions: 8
+  use_gradient_checkpointing: true
   
 # === ENVIRONMENT CONFIGURATION ===
 # keep base env; no overrides here

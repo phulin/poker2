@@ -221,18 +221,38 @@ class SelfPlayTrainer:
         self.value_head_num_quantiles = self.cfg.model.value_head_num_quantiles
         self.use_quantile_value_head = self.value_head_type == ValueHeadType.quantile
 
+        self.num_bet_bins = len(self.cfg.env.bet_bins) + 3
+
         if self.is_transformer:
             self.model = PokerTransformerV1(
-                **self.cfg.model.kwargs,
+                max_sequence_length=self.cfg.model.max_sequence_length,
+                d_model=self.cfg.model.d_model,
+                n_layers=self.cfg.model.n_layers,
+                n_heads=self.cfg.model.n_heads,
+                num_bet_bins=self.num_bet_bins,
+                dropout=self.cfg.model.dropout,
+                use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
                 value_head_type=self.value_head_type,
                 value_head_num_quantiles=self.value_head_num_quantiles,
             )
         else:
             self.model = SiameseConvNetV1(
-                **self.cfg.model.kwargs,
+                cards_channels=self.cfg.model.cards_channels,
+                actions_channels=self.cfg.model.actions_channels,
+                cards_hidden=self.cfg.model.cards_hidden,
+                actions_hidden=self.cfg.model.actions_hidden,
+                fusion_hidden=self.cfg.model.fusion_hidden,
+                num_actions=self.num_bet_bins,
+                use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
                 value_head_type=self.value_head_type,
                 value_head_num_quantiles=self.value_head_num_quantiles,
             )
+
+        # Ensure bins align with model output size to avoid mask/logit mismatch
+        if hasattr(self.model, "policy_head") and hasattr(
+            self.model.policy_head, "out_features"
+        ):
+            assert self.num_bet_bins == int(self.model.policy_head.out_features)
 
         self.policy = CategoricalPolicyV1()
         self.model_age = 1
@@ -243,14 +263,6 @@ class SelfPlayTrainer:
             "bet": 0,
             "all_in": 0,
         }
-
-        # Ensure bins align with model output size to avoid mask/logit mismatch
-        if hasattr(self.model, "policy_head") and hasattr(
-            self.model.policy_head, "out_features"
-        ):
-            self.num_bet_bins = int(self.model.policy_head.out_features)
-        else:
-            self.num_bet_bins = len(self.cfg.env.bet_bins) + 3
 
         # Create state encoder based on model type (TSB becomes the encoder for transformer)
         if self.is_transformer:
@@ -1869,9 +1881,29 @@ class SelfPlayTrainer:
             self.opponent_pool.snapshots = []
             for snapshot_data in pool_data.get("snapshots", []):
                 if self.is_transformer:
-                    model = PokerTransformerV1(**self.cfg.model.kwargs)
+                    model = PokerTransformerV1(
+                        max_sequence_length=self.cfg.model.max_sequence_length,
+                        d_model=self.cfg.model.d_model,
+                        n_layers=self.cfg.model.n_layers,
+                        n_heads=self.cfg.model.n_heads,
+                        num_bet_bins=self.num_bet_bins,
+                        dropout=self.cfg.model.dropout,
+                        use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
+                        value_head_type=self.value_head_type,
+                        value_head_num_quantiles=self.value_head_num_quantiles,
+                    )
                 else:
-                    model = SiameseConvNetV1(**self.cfg.model.kwargs)
+                    model = SiameseConvNetV1(
+                        cards_channels=self.cfg.model.cards_channels,
+                        actions_channels=self.cfg.model.actions_channels,
+                        cards_hidden=self.cfg.model.cards_hidden,
+                        actions_hidden=self.cfg.model.actions_hidden,
+                        fusion_hidden=self.cfg.model.fusion_hidden,
+                        num_actions=self.num_bet_bins,
+                        use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
+                        value_head_type=self.value_head_type,
+                        value_head_num_quantiles=self.value_head_num_quantiles,
+                    )
                 model_state_dict = snapshot_data["model_state_dict"]
                 if drop_prefixes:
                     dropped_keys = []

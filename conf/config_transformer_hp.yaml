@@ -43,10 +43,10 @@ train:
 
 # === MODEL CONFIGURATION ===
 model:
-  kwargs:
-    d_model: 256
-    n_layers: 8
-    use_gradient_checkpointing: true
+  d_model: 256
+  n_layers: 8
+  n_heads: 2
+  use_gradient_checkpointing: true
   
 # === ENVIRONMENT CONFIGURATION ===
 # keep base env; no overrides here

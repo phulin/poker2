@@ -45,11 +45,12 @@ train:
 # === MODEL CONFIGURATION ===
 model:
   name: "siamese_convnet_v1"
-  kwargs:
-    cards_hidden: 192
-    actions_hidden: 192
-    fusion_hidden: [2048, 2048]
-    num_actions: 8
+  cards_channels: 6
+  actions_channels: 24
+  cards_hidden: 192
+  actions_hidden: 192
+  fusion_hidden: [2048, 2048]
+  num_actions: 8
   
 # === ENVIRONMENT CONFIGURATION ===
 # keep base env; no overrides here
