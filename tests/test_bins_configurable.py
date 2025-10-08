@@ -23,11 +23,6 @@ def test_variable_bins_mapping_roundtrip(tmp_path):
             sb=5,
             bb=10,
             bet_bins=[0.4, 0.9, 1.3, 2.1],
-            card_encoder={"name": "cards_planes_v1", "kwargs": {}},
-            action_encoder={
-                "name": "actions_hu_v1",
-                "kwargs": {"history_actions_per_round": 6},
-            },
         ),
         device="cpu",  # Set device to cpu for testing
     )
