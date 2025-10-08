@@ -84,6 +84,14 @@ class TrainingConfig:
     # Distributional critic configuration
     quantile_huber_kappa: float = 1.0
 
+    # Learning rate configuration for different model components
+    value_head_learning_rate: float = 1e-4  # Learning rate for value head
+    value_head_learning_rate_final: float = 1e-5  # Final learning rate for value head
+    policy_trunk_learning_rate: float = 1e-4  # Learning rate for policy head and trunk
+    policy_trunk_learning_rate_final: float = (
+        1e-5  # Final learning rate for policy head and trunk
+    )
+
 
 @dataclass
 class ModelConfig:

@@ -249,12 +249,16 @@ class PokerTransformerV1(nn.Module, Model):
         x = self.cls_mlp(x)
 
         policy_logits = self.policy_head(x)
+
+        # Detach value head from trunk to prevent gradients from flowing back
+        # This allows separate learning rates for value head vs policy/trunk
+        x_detached = x.detach()
         if self.value_head_type == ValueHeadType.quantile:
-            value_quantiles = self.value_head(x)
+            value_quantiles = self.value_head(x_detached)
             value = value_quantiles.mean(dim=-1)
         else:
             value_quantiles = None
-            value = self.value_head(x)
+            value = self.value_head(x_detached)
 
         return ModelOutput(
             policy_logits=policy_logits,

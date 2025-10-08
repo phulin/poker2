@@ -158,10 +158,14 @@ class SelfPlayTrainer:
         self.entropy_coef = cfg.train.entropy_coef
         self.grad_clip = cfg.train.grad_clip
         self.quantile_huber_kappa = cfg.train.quantile_huber_kappa
-        self.learning_rate = cfg.train.learning_rate
-        # LR and entropy schedules (assumed present in config)
-        self.learning_rate_final = cfg.train.learning_rate_final
         self.lr_schedule = cfg.train.lr_schedule
+        # Separate learning rates for value head vs policy/trunk
+        self.value_head_learning_rate = cfg.train.value_head_learning_rate
+        self.value_head_learning_rate_final = cfg.train.value_head_learning_rate_final
+        self.policy_trunk_learning_rate = cfg.train.policy_trunk_learning_rate
+        self.policy_trunk_learning_rate_final = (
+            cfg.train.policy_trunk_learning_rate_final
+        )
         self.entropy_coef_start = cfg.train.entropy_coef
         self.entropy_coef_final = cfg.train.entropy_coef_final
         self.entropy_decay_portion = cfg.train.entropy_decay_portion
@@ -324,30 +328,46 @@ class SelfPlayTrainer:
             self.kv_cache_manager = None
 
         # Optimizer with different learning rates for different components
-        # CNN layers (cards_trunk) need lower learning rate to prevent gradient explosion
-        lr = self.learning_rate
-
+        # Separate learning rates for value head vs policy/trunk
+        value_head_params = []
+        policy_trunk_params = []
         cards_params = []
-        other_params = []
 
         for name, param in self.model.named_parameters():
-            if "cards_trunk" in name:
+            if "value_head" in name:
+                value_head_params.append(param)
+            elif "cards_trunk" in name:
                 cards_params.append(param)
             else:
-                other_params.append(param)
+                policy_trunk_params.append(param)
 
-        # Handle different model types
+        # Handle different model types with separate learning rates
         if cards_params:  # CNN model
             self.optimizer = torch.optim.AdamW(
                 [
-                    {"params": cards_params, "lr": lr * 0.1},  # 10x lower for CNN
-                    {"params": other_params, "lr": lr},
+                    {
+                        "params": cards_params,
+                        "lr": self.policy_trunk_learning_rate * 0.1,
+                    },  # 10x lower for CNN
+                    {
+                        "params": policy_trunk_params,
+                        "lr": self.policy_trunk_learning_rate,
+                    },
+                    {"params": value_head_params, "lr": self.value_head_learning_rate},
                 ]
             )
-            self._optimizer_group_scales = [0.1, 1.0]
+            self._optimizer_group_scales = [0.1, 1.0, 1.0]
         else:  # Transformer model (no cards_trunk)
-            self.optimizer = torch.optim.AdamW([{"params": other_params, "lr": lr}])
-            self._optimizer_group_scales = [1.0]
+            self.optimizer = torch.optim.AdamW(
+                [
+                    {
+                        "params": policy_trunk_params,
+                        "lr": self.policy_trunk_learning_rate,
+                    },
+                    {"params": value_head_params, "lr": self.value_head_learning_rate},
+                ]
+            )
+            self._optimizer_group_scales = [1.0, 1.0]
 
         # Mixed precision scaler
         self.scaler = torch.amp.GradScaler(
@@ -1477,7 +1497,8 @@ class SelfPlayTrainer:
         self.model.eval()
 
         # Prepare training stats for return and logging
-        learning_rate = self.optimizer.param_groups[-1]["lr"]
+        policy_learning_rate = self.optimizer.param_groups[0]["lr"]  # Policy/trunk LR
+        value_learning_rate = self.optimizer.param_groups[-1]["lr"]  # Value head LR
         self.total_transitions_trained += update_stats["episodes"] * self.batch_size
         self.total_episodes += update_stats["episodes"]
         total_actions = sum(self.last_action_mix.values())
@@ -1490,7 +1511,8 @@ class SelfPlayTrainer:
             "total_episodes": self.total_episodes,
             "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
-            "learning_rate": learning_rate,
+            "learning_rate_policy": policy_learning_rate,
+            "learning_rate_value": value_learning_rate,
             "beta": self.beta_controller.current_value,
             "grad_scale": self.scaler.get_scale(),
             "entropy_coef_current": self.entropy_coef,
@@ -1509,28 +1531,45 @@ class SelfPlayTrainer:
         total_steps = max(1, self.cfg.num_steps)
         t = min(1.0, max(0.0, step / float(total_steps)))
 
-        # Learning rate schedule
-        lr_start = float(self.learning_rate)
-        lr_final = float(self.learning_rate_final)
-        if self.lr_schedule == LrSchedule.cosine and lr_final != lr_start:
-            lr_now = lr_final + 0.5 * (lr_start - lr_final) * (
+        # Learning rate schedules for different components
+        # Policy/trunk learning rate schedule
+        policy_lr_start = float(self.policy_trunk_learning_rate)
+        policy_lr_final = float(self.policy_trunk_learning_rate_final)
+        if self.lr_schedule == LrSchedule.cosine and policy_lr_final != policy_lr_start:
+            policy_lr_now = policy_lr_final + 0.5 * (
+                policy_lr_start - policy_lr_final
+            ) * (1.0 + math.cos(math.pi * t))
+        else:
+            policy_lr_now = policy_lr_start
+
+        # Value head learning rate schedule
+        value_lr_start = float(self.value_head_learning_rate)
+        value_lr_final = float(self.value_head_learning_rate_final)
+        if self.lr_schedule == LrSchedule.cosine and value_lr_final != value_lr_start:
+            value_lr_now = value_lr_final + 0.5 * (value_lr_start - value_lr_final) * (
                 1.0 + math.cos(math.pi * t)
             )
         else:
-            lr_now = lr_start
+            value_lr_now = value_lr_start
 
-        # if self.kl_ema.initialized:
-        #     kl_ratio = max(1e-8, self.kl_ema.value / TARGET_KL)
-        #     kl_scale = 1.0 / (kl_ratio**0.5)
-        #     # Clamp lr scaling to a reasonable range
-        #     kl_scale = min(max(kl_scale, 0.25), 4.0)
-        #     lr_now *= kl_scale
-
-        # Update optimizer groups preserving relative scales
-        for scale, group in zip(
-            self._optimizer_group_scales, self.optimizer.param_groups
-        ):
-            group["lr"] = lr_now * scale
+        # Update optimizer groups with separate learning rates
+        if (
+            len(self.optimizer.param_groups) == 3
+        ):  # CNN model: cards, policy/trunk, value_head
+            self.optimizer.param_groups[0]["lr"] = policy_lr_now * 0.1  # cards_trunk
+            self.optimizer.param_groups[1]["lr"] = policy_lr_now  # policy/trunk
+            self.optimizer.param_groups[2]["lr"] = value_lr_now  # value_head
+        elif (
+            len(self.optimizer.param_groups) == 2
+        ):  # Transformer model: policy/trunk, value_head
+            self.optimizer.param_groups[0]["lr"] = policy_lr_now  # policy/trunk
+            self.optimizer.param_groups[1]["lr"] = value_lr_now  # value_head
+        else:
+            # Fallback to old behavior if structure is unexpected
+            for scale, group in zip(
+                self._optimizer_group_scales, self.optimizer.param_groups
+            ):
+                group["lr"] = policy_lr_now * scale
 
         # Entropy coef linear decay with floor over first portion, then hold
         ent_start = self.entropy_coef_start

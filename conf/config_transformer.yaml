@@ -84,11 +84,11 @@ train:
   use_mixed_precision: true
   loss_scale: 128.0
 
-  # KL beta controller
-  beta_min: 1.0e-4
-  beta_max: 10.0
-  beta_increase_factor: 2.0
-  beta_decrease_factor: 0.5
+  # Learning rate configuration for different model components
+  value_head_learning_rate: 1e-4  # Learning rate for value head
+  value_head_learning_rate_final: 1e-5  # Final learning rate for value head
+  policy_trunk_learning_rate: 3e-4  # Learning rate for policy head and trunk
+  policy_trunk_learning_rate_final: 1e-5  # Final learning rate for policy head and trunk
   
   # Transformer-specific training parameters
   auxiliary_loss_coef: 0.1  # Coefficient for hand range auxiliary loss

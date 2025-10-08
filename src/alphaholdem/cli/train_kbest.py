@@ -166,7 +166,6 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
             "name": merged_config.wandb_name,
             "tags": merged_config.wandb_tags or [],
             "config": {
-                "learning_rate": merged_config.train.learning_rate,
                 "batch_size": merged_config.train.batch_size,
                 "episodes_per_step": merged_config.train.episodes_per_step,
                 "gamma": merged_config.train.gamma,
@@ -206,7 +205,12 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
             # Create exploiter trainer with same config but different hyperparameters
             exploiter_cfg = merged_config
             exploiter_cfg.use_wandb = False
-            exploiter_cfg.train.learning_rate = merged_config.exploiter.learning_rate
+            exploiter_cfg.train.value_head_learning_rate = (
+                merged_config.exploiter.learning_rate
+            )
+            exploiter_cfg.train.policy_trunk_learning_rate = (
+                merged_config.exploiter.learning_rate
+            )
             exploiter_cfg.train.batch_size = merged_config.exploiter.batch_size
             exploiter_cfg.train.episodes_per_step = (
                 merged_config.exploiter.episodes_per_step

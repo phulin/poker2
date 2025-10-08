@@ -30,6 +30,11 @@ train:
   max_trajectory_length: 20
   value_loss_type: "huber"
   use_mixed_precision: false
+  # Learning rate configuration for different model components
+  value_head_learning_rate: 1e-4  # Learning rate for value head
+  value_head_learning_rate_final: 1e-5  # Final learning rate for value head
+  policy_trunk_learning_rate: 1e-4  # Learning rate for policy head and trunk
+  policy_trunk_learning_rate_final: 1e-5  # Final learning rate for policy head and trunk
 
 # === MODEL CONFIGURATION ===
 model:

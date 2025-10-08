@@ -246,7 +246,11 @@ class SiameseConvNetV1(nn.Module, Model):
         x = torch.cat([x_cards, x_actions], dim=1)
         h = self.fusion(x)
         logits = self.policy_head(h)
-        value_raw = self.value_head(h)
+
+        # Detach value head from trunk to prevent gradients from flowing back
+        # This allows separate learning rates for value head vs policy/trunk
+        h_detached = h.detach()
+        value_raw = self.value_head(h_detached)
         if self.value_head_type == ValueHeadType.quantile:
             value_quantiles = value_raw
             value = value_quantiles.mean(dim=-1)
