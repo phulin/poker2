@@ -327,8 +327,7 @@ class SelfPlayTrainer:
         else:
             self.kv_cache_manager = None
 
-        # Optimizer with different learning rates for different components
-        # Separate learning rates for value head vs policy/trunk
+        # Separate optimizers for different components
         value_head_params = []
         policy_trunk_params = []
         cards_params = []
@@ -341,9 +340,9 @@ class SelfPlayTrainer:
             else:
                 policy_trunk_params.append(param)
 
-        # Handle different model types with separate learning rates
+        # Create separate optimizers
         if cards_params:  # CNN model
-            self.optimizer = torch.optim.AdamW(
+            self.policy_trunk_optimizer = torch.optim.AdamW(
                 [
                     {
                         "params": cards_params,
@@ -353,21 +352,23 @@ class SelfPlayTrainer:
                         "params": policy_trunk_params,
                         "lr": self.policy_trunk_learning_rate,
                     },
-                    {"params": value_head_params, "lr": self.value_head_learning_rate},
                 ]
             )
-            self._optimizer_group_scales = [0.1, 1.0, 1.0]
         else:  # Transformer model (no cards_trunk)
-            self.optimizer = torch.optim.AdamW(
+            self.policy_trunk_optimizer = torch.optim.AdamW(
                 [
                     {
                         "params": policy_trunk_params,
                         "lr": self.policy_trunk_learning_rate,
                     },
-                    {"params": value_head_params, "lr": self.value_head_learning_rate},
                 ]
             )
-            self._optimizer_group_scales = [1.0, 1.0]
+
+        self.value_head_optimizer = torch.optim.AdamW(
+            [
+                {"params": value_head_params, "lr": self.value_head_learning_rate},
+            ]
+        )
 
         # Mixed precision scaler
         self.scaler = torch.amp.GradScaler(
@@ -1205,7 +1206,8 @@ class SelfPlayTrainer:
 
         # Store the age at the beginning of the step for reference distributions
         step_start_age = self.model_age
-        stopped_early = False
+        policy_episodes = 0
+        value_only = False
 
         for episode in range(self.episodes_per_step):
             # Sample batch from vectorized buffer
@@ -1269,7 +1271,7 @@ class SelfPlayTrainer:
 
             total_loss += loss_result.total_loss.item()
             total_policy_loss += loss_result.policy_loss
-            total_value_loss += loss_result.value_loss
+            total_value_loss += loss_result.value_loss.item()
             total_kl_loss += loss_result.penalty_kl * self.beta_controller.current_value
             total_entropy += loss_result.entropy
             total_clipfrac += loss_result.clipfrac
@@ -1280,20 +1282,27 @@ class SelfPlayTrainer:
             total_epsilon += loss_result.epsilon
             minibatch_count += 1
 
+            self.policy_trunk_optimizer.zero_grad()
+            self.value_head_optimizer.zero_grad()
+
             # If we've gone too far from the starting policy, stop (skip this update).
             if (
                 loss_result.forward_kl is not None
                 and loss_result.forward_kl > 2 * TARGET_KL
             ):
-                stopped_early = True
-                break
-
-            self.optimizer.zero_grad()
+                value_only = True
+                loss = loss_result.value_loss * self.value_coef
+                # Don't break; instead just train value.
+            else:
+                policy_episodes += 1
+                loss = loss_result.total_loss
 
             # Use scaler for mixed precision backward pass. Will have enabled=False if not using mixed precision.
-            self.scaler.scale(loss_result.total_loss).backward()
+            self.scaler.scale(loss).backward()
 
-            self.scaler.unscale_(self.optimizer)
+            # Always unscale both optimizers for gradient norm computation
+            self.scaler.unscale_(self.value_head_optimizer)
+            self.scaler.unscale_(self.policy_trunk_optimizer)
 
             grad_has_nan = False
             for name, param in self.model.named_parameters():
@@ -1324,13 +1333,18 @@ class SelfPlayTrainer:
                     {"grad_norm": grad_norm_unclipped},
                 )
 
-            # Accumulate gradient norm for averaging
-            total_grad_norm_unclipped += grad_norm_unclipped
-            total_grad_norm_clipped += torch.nn.utils.get_total_norm(
-                p.grad for p in self.model.parameters()
-            ).item()
+            # Accumulate gradient norm for averaging (always compute, but only step conditionally)
+            if not value_only:
+                total_grad_norm_unclipped += grad_norm_unclipped
+                total_grad_norm_clipped += torch.nn.utils.get_total_norm(
+                    p.grad for p in self.model.parameters()
+                ).item()
 
-            self.scaler.step(self.optimizer)
+            # Only step optimizers conditionally based on whether policy was trained
+            self.scaler.step(self.value_head_optimizer)
+            if not value_only:
+                self.scaler.step(self.policy_trunk_optimizer)
+
             self.scaler.update()
             with torch.no_grad():
                 param_nan = False
@@ -1354,7 +1368,7 @@ class SelfPlayTrainer:
         # Get log probs for final diagnostic statistics.
         diagnostic_batch_size = min(self.batch_size, max(8, self.batch_size // 4))
         diagnostic_batch = batch[:diagnostic_batch_size]
-        if stopped_early:
+        if value_only:
             # If we stopped early, skipped last update => log probs up to date.
             final_log_probs = log_probs[:diagnostic_batch_size].detach()
         else:
@@ -1418,6 +1432,7 @@ class SelfPlayTrainer:
 
         result = {
             "episodes": episode + 1,
+            "policy_episodes": policy_episodes,
             "avg_reward": avg_reward,
             "num_samples": self.batch_size * self.episodes_per_step,
             "delta2_mean": batch.delta2.mean().item(),
@@ -1443,8 +1458,8 @@ class SelfPlayTrainer:
             "return_abs_mean": total_return_abs_mean / denom,
             "return_std": total_return_std / denom,
             "return_histogram": wandb.Histogram(valid_returns.cpu()),
-            "grad_norm_unclipped": total_grad_norm_unclipped / denom,
-            "grad_norm_clipped": total_grad_norm_clipped / denom,
+            "grad_norm_unclipped": total_grad_norm_unclipped / max(1, policy_episodes),
+            "grad_norm_clipped": total_grad_norm_clipped / max(1, policy_episodes),
             "beta": self.beta_controller.current_value,
         }
 
@@ -1497,8 +1512,12 @@ class SelfPlayTrainer:
         self.model.eval()
 
         # Prepare training stats for return and logging
-        policy_learning_rate = self.optimizer.param_groups[0]["lr"]  # Policy/trunk LR
-        value_learning_rate = self.optimizer.param_groups[-1]["lr"]  # Value head LR
+        policy_learning_rate = self.policy_trunk_optimizer.param_groups[-1][
+            "lr"
+        ]  # Policy/trunk LR
+        value_learning_rate = self.value_head_optimizer.param_groups[0][
+            "lr"
+        ]  # Value head LR
         self.total_transitions_trained += update_stats["episodes"] * self.batch_size
         self.total_episodes += update_stats["episodes"]
         total_actions = sum(self.last_action_mix.values())
@@ -1552,24 +1571,20 @@ class SelfPlayTrainer:
         else:
             value_lr_now = value_lr_start
 
-        # Update optimizer groups with separate learning rates
+        # Update separate optimizers with their respective learning rates
         if (
-            len(self.optimizer.param_groups) == 3
-        ):  # CNN model: cards, policy/trunk, value_head
-            self.optimizer.param_groups[0]["lr"] = policy_lr_now * 0.1  # cards_trunk
-            self.optimizer.param_groups[1]["lr"] = policy_lr_now  # policy/trunk
-            self.optimizer.param_groups[2]["lr"] = value_lr_now  # value_head
-        elif (
-            len(self.optimizer.param_groups) == 2
-        ):  # Transformer model: policy/trunk, value_head
-            self.optimizer.param_groups[0]["lr"] = policy_lr_now  # policy/trunk
-            self.optimizer.param_groups[1]["lr"] = value_lr_now  # value_head
-        else:
-            # Fallback to old behavior if structure is unexpected
-            for scale, group in zip(
-                self._optimizer_group_scales, self.optimizer.param_groups
-            ):
-                group["lr"] = policy_lr_now * scale
+            len(self.policy_trunk_optimizer.param_groups) > 1
+        ):  # CNN model has cards_trunk
+            self.policy_trunk_optimizer.param_groups[0]["lr"] = (
+                policy_lr_now * 0.1
+            )  # cards_trunk
+            self.policy_trunk_optimizer.param_groups[1][
+                "lr"
+            ] = policy_lr_now  # policy/trunk
+        else:  # Transformer model
+            self.policy_trunk_optimizer.param_groups[0]["lr"] = policy_lr_now
+
+        self.value_head_optimizer.param_groups[0]["lr"] = value_lr_now
 
         # Entropy coef linear decay with floor over first portion, then hold
         ent_start = self.entropy_coef_start
@@ -1727,7 +1742,12 @@ class SelfPlayTrainer:
         }
 
         if save_optimizer:
-            checkpoint["optimizer_state_dict"] = self.optimizer.state_dict()
+            checkpoint["policy_trunk_optimizer_state_dict"] = (
+                self.policy_trunk_optimizer.state_dict()
+            )
+            checkpoint["value_head_optimizer_state_dict"] = (
+                self.value_head_optimizer.state_dict()
+            )
 
         # Conditionally include replay buffer based on economize_checkpoints flag
         if not self.cfg.economize_checkpoints:
@@ -1841,8 +1861,25 @@ class SelfPlayTrainer:
         self.model.load_state_dict(
             model_state_dict, strict=self.cfg.strict_model_loading
         )
-        if "optimizer_state_dict" in checkpoint:
-            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "policy_trunk_optimizer_state_dict" in checkpoint:
+            self.policy_trunk_optimizer.load_state_dict(
+                checkpoint["policy_trunk_optimizer_state_dict"]
+            )
+        if "value_head_optimizer_state_dict" in checkpoint:
+            self.value_head_optimizer.load_state_dict(
+                checkpoint["value_head_optimizer_state_dict"]
+            )
+
+        # Handle backward compatibility with old single optimizer checkpoints
+        if (
+            "optimizer_state_dict" in checkpoint
+            and "policy_trunk_optimizer_state_dict" not in checkpoint
+        ):
+            print(
+                "Warning: Loading old single optimizer checkpoint. This may not work correctly with separate optimizers."
+            )
+            # For now, we'll skip loading the old optimizer state
+            # In a real migration, you'd need to split the old optimizer state
 
         # Handle both old and new checkpoint formats
         if "total_episodes_completed" in checkpoint:

@@ -20,7 +20,7 @@ class LossResult:
 
     total_loss: torch.Tensor
     policy_loss: float
-    value_loss: float
+    value_loss: torch.Tensor
     entropy: float
     ratio_mean: float
     ratio_std: float
@@ -211,7 +211,7 @@ class TrinalClipPPOLoss(LossCalculator):
         return LossResult(
             total_loss=total_loss,
             policy_loss=policy_loss.item(),
-            value_loss=value_loss.item(),
+            value_loss=value_loss,
             entropy=entropy.item(),
             ratio_mean=ratio.mean().item(),
             ratio_std=ratio.std().item(),
@@ -270,7 +270,7 @@ class StandardPPOLoss(LossCalculator):
         return LossResult(
             total_loss=total_loss,
             policy_loss=policy_loss.item(),
-            value_loss=value_loss.item(),
+            value_loss=value_loss,
             entropy=entropy.item(),
             ratio_mean=ratio.mean().item(),
             ratio_std=ratio.std().item(),
@@ -367,7 +367,7 @@ class DualClipPPOLoss(LossCalculator):
         return LossResult(
             total_loss=total_loss,
             policy_loss=policy_loss.item(),
-            value_loss=value_loss.item(),
+            value_loss=value_loss,
             entropy=entropy.item(),
             ratio_mean=ratio.mean().item(),
             ratio_std=ratio.std().item(),
@@ -557,7 +557,7 @@ class KLPolicyPPOLoss(LossCalculator):
         return LossResult(
             total_loss=total_loss,
             policy_loss=policy_loss.item(),
-            value_loss=value_loss.item(),
+            value_loss=value_loss,
             entropy=entropy.item(),
             penalty_kl=penalty_kl.item(),
             forward_kl=forward_kl.item(),

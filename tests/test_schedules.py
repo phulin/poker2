@@ -97,11 +97,14 @@ def _make_dummy_trainer(
         policy_trunk_lr_final if policy_trunk_lr_final is not None else lr_final
     )
 
-    # Optimizer stub with param groups for separate learning rates
-    trainer._optimizer_group_scales = [1.0, 1.0]  # policy/trunk, value_head
-    trainer.optimizer = type("_Opt", (), {})()
-    trainer.optimizer.param_groups = [
+    # Optimizer stubs with separate optimizers
+    trainer.policy_trunk_optimizer = type("_PolicyOpt", (), {})()
+    trainer.policy_trunk_optimizer.param_groups = [
         {"lr": trainer.policy_trunk_learning_rate},  # policy/trunk
+    ]
+
+    trainer.value_head_optimizer = type("_ValueOpt", (), {})()
+    trainer.value_head_optimizer.param_groups = [
         {"lr": trainer.value_head_learning_rate},  # value_head
     ]
 
@@ -121,9 +124,11 @@ def test_cosine_lr_decay_monotonic_and_endpoints():
     for step in range(0, num_steps + 1, 10):
         trainer._apply_schedules(step)
         policy_lrs.append(
-            trainer.optimizer.param_groups[0]["lr"]
+            trainer.policy_trunk_optimizer.param_groups[0]["lr"]
         )  # policy/trunk group lr
-        value_lrs.append(trainer.optimizer.param_groups[1]["lr"])  # value head group lr
+        value_lrs.append(
+            trainer.value_head_optimizer.param_groups[0]["lr"]
+        )  # value head group lr
 
     # Start and end match configured values for both groups
     assert math.isclose(policy_lrs[0], 3e-4, rel_tol=1e-6, abs_tol=1e-12)
@@ -155,19 +160,31 @@ def test_separate_learning_rates():
     # Test initial values
     trainer._apply_schedules(0)
     assert math.isclose(
-        trainer.optimizer.param_groups[0]["lr"], 2e-4, rel_tol=1e-6, abs_tol=1e-12
+        trainer.policy_trunk_optimizer.param_groups[0]["lr"],
+        2e-4,
+        rel_tol=1e-6,
+        abs_tol=1e-12,
     )
     assert math.isclose(
-        trainer.optimizer.param_groups[1]["lr"], 1e-4, rel_tol=1e-6, abs_tol=1e-12
+        trainer.value_head_optimizer.param_groups[0]["lr"],
+        1e-4,
+        rel_tol=1e-6,
+        abs_tol=1e-12,
     )
 
     # Test final values
     trainer._apply_schedules(num_steps)
     assert math.isclose(
-        trainer.optimizer.param_groups[0]["lr"], 8e-6, rel_tol=1e-6, abs_tol=1e-12
+        trainer.policy_trunk_optimizer.param_groups[0]["lr"],
+        8e-6,
+        rel_tol=1e-6,
+        abs_tol=1e-12,
     )
     assert math.isclose(
-        trainer.optimizer.param_groups[1]["lr"], 5e-6, rel_tol=1e-6, abs_tol=1e-12
+        trainer.value_head_optimizer.param_groups[0]["lr"],
+        5e-6,
+        rel_tol=1e-6,
+        abs_tol=1e-12,
     )
 
 
