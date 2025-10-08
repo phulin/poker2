@@ -1491,6 +1491,7 @@ class SelfPlayTrainer:
             "pool_stats": self.opponent_pool.get_pool_stats(),
             "learning_rate": learning_rate,
             "beta": self.beta_controller.beta,
+            "grad_scale": self.scaler.get_scale(),
             "entropy_coef_current": self.entropy_coef,
             "action_rates": action_rates,
             **update_stats,
