@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import KLType, PPOClipping, ValueLossType
-from alphaholdem.rl.beta_controller import BetaController
+from alphaholdem.rl.exponential_controller import ExponentialController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.utils.ema import EMA
@@ -387,7 +387,7 @@ class KLPolicyPPOLoss(LossCalculator):
     def __init__(
         self,
         popart_normalizer: Optional[PopArtNormalizer],
-        beta_controller: BetaController,
+        beta_controller: ExponentialController,
         value_coef: float,
         entropy_coef: float,
         value_loss_type: ValueLossType = ValueLossType.huber,
@@ -544,7 +544,7 @@ class KLPolicyPPOLoss(LossCalculator):
         # --- Total
         total_loss = (
             policy_loss
-            + self.beta_controller.beta * penalty_kl
+            + self.beta_controller.current_value * penalty_kl
             + self.value_coef * value_loss
             - self.entropy_coef * entropy
         )

@@ -21,7 +21,7 @@ from alphaholdem.models.transformer.kv_cache_manager import SelfPlayKVCacheManag
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
-from alphaholdem.rl.beta_controller import BetaController
+from alphaholdem.rl.exponential_controller import ExponentialController
 from alphaholdem.rl.dred_pool import DREDPool
 from alphaholdem.rl.k_best_pool import KBestOpponentPool
 from alphaholdem.rl.losses import KLPolicyPPOLoss
@@ -367,10 +367,11 @@ class SelfPlayTrainer:
             None if self.use_quantile_value_head else PopArtNormalizer()
         )
 
-        self.beta_controller = BetaController(
-            target_kl=TARGET_KL,
-            beta_min=float(self.cfg.train.beta_min),
-            beta_max=float(self.cfg.train.beta_max),
+        self.beta_controller = ExponentialController(
+            target_value=TARGET_KL,
+            init_value=1.0,
+            min_value=float(self.cfg.train.beta_min),
+            max_value=float(self.cfg.train.beta_max),
             increase_factor=float(self.cfg.train.beta_increase_factor),
             decrease_factor=float(self.cfg.train.beta_decrease_factor),
         )
@@ -1249,7 +1250,7 @@ class SelfPlayTrainer:
             total_loss += loss_result.total_loss.item()
             total_policy_loss += loss_result.policy_loss
             total_value_loss += loss_result.value_loss
-            total_kl_loss += loss_result.penalty_kl * self.beta_controller.beta
+            total_kl_loss += loss_result.penalty_kl * self.beta_controller.current_value
             total_entropy += loss_result.entropy
             total_clipfrac += loss_result.clipfrac
             total_ppo_clipfrac += loss_result.ppo_clipfrac
@@ -1424,7 +1425,7 @@ class SelfPlayTrainer:
             "return_histogram": wandb.Histogram(valid_returns.cpu()),
             "grad_norm_unclipped": total_grad_norm_unclipped / denom,
             "grad_norm_clipped": total_grad_norm_clipped / denom,
-            "beta": self.beta_controller.beta,
+            "beta": self.beta_controller.current_value,
         }
 
         # Get PopArt statistics
@@ -1490,7 +1491,7 @@ class SelfPlayTrainer:
             "current_elo": self.opponent_pool.current_elo,
             "pool_stats": self.opponent_pool.get_pool_stats(),
             "learning_rate": learning_rate,
-            "beta": self.beta_controller.beta,
+            "beta": self.beta_controller.current_value,
             "grad_scale": self.scaler.get_scale(),
             "entropy_coef_current": self.entropy_coef,
             "action_rates": action_rates,
