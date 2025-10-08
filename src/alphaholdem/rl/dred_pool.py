@@ -274,10 +274,7 @@ class DREDPool(OpponentPool):
         """
         # Remove one item from deletion queue when adding a new snapshot
         if self.deletion_queue:
-            removed = self.deletion_queue.pop(0)
-            print(
-                f"=> Removed snapshot from deletion queue (step {removed.step}, ELO {removed.elo:.1f})"
-            )
+            self.deletion_queue.pop(0)
 
         # Create new snapshot
         model_dtype = torch.bfloat16 if self.use_mixed_precision else torch.float32
