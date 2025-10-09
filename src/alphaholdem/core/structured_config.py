@@ -92,6 +92,18 @@ class TrainingConfig:
         1e-5  # Final learning rate for policy head and trunk
     )
 
+    # KL divergence configuration
+    target_kl: float = 0.01  # Target KL divergence for adaptive controllers
+
+    # Learning rate scaling controller
+    lr_scaling_init_value: float = 1.0  # Initial LR scaling factor
+    lr_scaling_min_value: float = 3e-2  # Minimum LR scaling factor
+    lr_scaling_max_value: float = 3e0  # Maximum LR scaling factor
+    lr_scaling_increase_factor: float = 1.5  # Factor to increase LR scaling
+    lr_scaling_decrease_factor: float = 1.0 / 1.5  # Factor to decrease LR scaling
+    lr_scaling_upper_threshold: float = 1.5  # Upper threshold multiplier
+    lr_scaling_lower_threshold: float = 0.67  # Lower threshold multiplier
+
 
 @dataclass
 class ModelConfig:

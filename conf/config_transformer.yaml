@@ -90,6 +90,18 @@ train:
   policy_trunk_learning_rate: 3e-4  # Learning rate for policy head and trunk
   policy_trunk_learning_rate_final: 1e-5  # Final learning rate for policy head and trunk
   
+  # KL divergence configuration
+  target_kl: 0.015  # Target KL divergence for adaptive controllers
+  
+  # Learning rate scaling controller
+  lr_scaling_init_value: 1.0  # Initial LR scaling factor
+  lr_scaling_min_value: 3e-2  # Minimum LR scaling factor
+  lr_scaling_max_value: 3e0  # Maximum LR scaling factor
+  lr_scaling_increase_factor: 1.5  # Factor to increase LR scaling
+  lr_scaling_decrease_factor: 0.67  # Factor to decrease LR scaling
+  lr_scaling_upper_threshold: 2.0  # Upper threshold multiplier
+  lr_scaling_lower_threshold: 0.5  # Lower threshold multiplier
+  
   # Transformer-specific training parameters
   auxiliary_loss_coef: 0.1  # Coefficient for hand range auxiliary loss
   warmup_steps: 1000       # Learning rate warmup steps

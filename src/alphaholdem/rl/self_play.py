@@ -37,8 +37,6 @@ from alphaholdem.utils.model_utils import (
 )
 from alphaholdem.utils.profiling import profile
 
-TARGET_KL = 0.015
-
 
 class SelfDummySnapshot:
     def __init__(self, trainer: SelfPlayTrainer):
@@ -166,6 +164,15 @@ class SelfPlayTrainer:
         self.policy_trunk_learning_rate_final = (
             cfg.train.policy_trunk_learning_rate_final
         )
+
+        # Learning rate scaling controller
+        self.lr_scaling_init_value = cfg.train.lr_scaling_init_value
+        self.lr_scaling_min_value = cfg.train.lr_scaling_min_value
+        self.lr_scaling_max_value = cfg.train.lr_scaling_max_value
+        self.lr_scaling_increase_factor = cfg.train.lr_scaling_increase_factor
+        self.lr_scaling_decrease_factor = cfg.train.lr_scaling_decrease_factor
+        self.lr_scaling_upper_threshold = cfg.train.lr_scaling_upper_threshold
+        self.lr_scaling_lower_threshold = cfg.train.lr_scaling_lower_threshold
         self.entropy_coef_start = cfg.train.entropy_coef
         self.entropy_coef_final = cfg.train.entropy_coef_final
         self.entropy_decay_portion = cfg.train.entropy_decay_portion
@@ -381,7 +388,7 @@ class SelfPlayTrainer:
         )
 
         # KL divergence exponential moving average tracking
-        self.kl_ema = EMA(decay=0.99, initial_value=TARGET_KL)
+        self.kl_ema = EMA(decay=0.99, initial_value=self.cfg.train.target_kl)
 
         # Initialize PopArt normalizer (disabled when using quantile value head)
         self.popart_normalizer = (
@@ -389,12 +396,24 @@ class SelfPlayTrainer:
         )
 
         self.beta_controller = ExponentialController(
-            target_value=TARGET_KL,
+            target_value=self.cfg.train.target_kl,
             init_value=1.0,
             min_value=float(self.cfg.train.beta_min),
             max_value=float(self.cfg.train.beta_max),
             increase_factor=float(self.cfg.train.beta_increase_factor),
             decrease_factor=float(self.cfg.train.beta_decrease_factor),
+        )
+
+        # Learning rate scaling controller
+        self.lr_scaling_controller = ExponentialController(
+            target_value=self.cfg.train.target_kl,
+            init_value=self.lr_scaling_init_value,
+            min_value=self.lr_scaling_min_value,
+            max_value=self.lr_scaling_max_value,
+            increase_factor=self.lr_scaling_increase_factor,
+            decrease_factor=self.lr_scaling_decrease_factor,
+            upper_threshold=self.lr_scaling_upper_threshold,
+            lower_threshold=self.lr_scaling_lower_threshold,
         )
 
         # Initialize loss calculator
@@ -1288,7 +1307,7 @@ class SelfPlayTrainer:
             # If we've gone too far from the starting policy, stop (skip this update).
             if (
                 loss_result.forward_kl is not None
-                and loss_result.forward_kl > 2 * TARGET_KL
+                and loss_result.forward_kl > 2 * self.cfg.train.target_kl
             ):
                 value_only = True
                 loss = loss_result.value_loss * self.value_coef
@@ -1394,6 +1413,9 @@ class SelfPlayTrainer:
         # Update Beta Controller each epoch based on penalty KL
         if self.cfg.train.kl_type != KLType.none:
             self.beta_controller.update(current_kl)
+
+        # Update LR scaling controller based on per-epoch diagnostic KL
+        self.lr_scaling_controller.update(current_kl)
 
         # Update KL divergence exponential moving average
         self.kl_ema.update(current_kl)
@@ -1532,6 +1554,7 @@ class SelfPlayTrainer:
             "pool_stats": self.opponent_pool.get_pool_stats(),
             "learning_rate_policy": policy_learning_rate,
             "learning_rate_value": value_learning_rate,
+            "lr_scaling_factor": self.lr_scaling_controller.current_value,
             "beta": self.beta_controller.current_value,
             "grad_scale": self.scaler.get_scale(),
             "entropy_coef_current": self.entropy_coef,
@@ -1570,6 +1593,10 @@ class SelfPlayTrainer:
             )
         else:
             value_lr_now = value_lr_start
+
+        # Apply LR scaling factor to both learning rates
+        policy_lr_now *= self.lr_scaling_controller.current_value
+        value_lr_now *= self.lr_scaling_controller.current_value
 
         # Update separate optimizers with their respective learning rates
         if (
@@ -1720,6 +1747,7 @@ class SelfPlayTrainer:
             # Store full config for complete restoration
             "full_config": self.cfg,
             "beta_controller": self.beta_controller.state_dict(),
+            "lr_scaling_controller": self.lr_scaling_controller.state_dict(),
             "kl_ema": self.kl_ema.state_dict(),
             "popart_normalizer": (
                 self.popart_normalizer.state_dict()
@@ -1913,6 +1941,10 @@ class SelfPlayTrainer:
         beta_state = checkpoint.get("beta_controller")
         if beta_state is not None:
             self.beta_controller.load_state_dict(beta_state)
+
+        lr_scaling_state = checkpoint.get("lr_scaling_controller")
+        if lr_scaling_state is not None:
+            self.lr_scaling_controller.load_state_dict(lr_scaling_state)
 
         popart_state = checkpoint.get("popart_normalizer")
         if popart_state is not None and self.popart_normalizer is not None:
