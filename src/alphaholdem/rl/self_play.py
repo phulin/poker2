@@ -384,7 +384,7 @@ class SelfPlayTrainer:
             growth_factor=2.0,
             backoff_factor=0.5,
             growth_interval=2000,
-            enabled=self.use_mixed_precision,
+            enabled=False,  # self.use_mixed_precision,
         )
 
         # KL divergence exponential moving average tracking
