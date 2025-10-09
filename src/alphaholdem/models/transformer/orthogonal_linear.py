@@ -21,11 +21,13 @@ class OrthogonalLinear(nn.Linear):
         *,
         gain: float = math.sqrt(2.0),
         output_scale: Optional[float] = None,
+        rng: Optional[torch.Generator] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
         self._gain = gain
         self._output_scale = output_scale
+        self._rng = rng
 
         super().__init__(
             in_features,
@@ -36,7 +38,7 @@ class OrthogonalLinear(nn.Linear):
         )
 
     def reset_parameters(self) -> None:  # type: ignore[override]
-        nn.init.orthogonal_(self.weight, gain=self._gain)
+        nn.init.orthogonal_(self.weight, gain=self._gain, generator=self._rng)
         if self._output_scale is not None:
             self.weight.data.mul_(self._output_scale)
         if self.bias is not None:
@@ -56,6 +58,7 @@ class OrthogonalLinearNoScale(OrthogonalLinear):
         bias: bool = True,
         *,
         gain: float = math.sqrt(2.0),
+        rng: Optional[torch.Generator] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
@@ -65,6 +68,7 @@ class OrthogonalLinearNoScale(OrthogonalLinear):
             bias=bias,
             gain=gain,
             output_scale=1.0,
+            rng=rng,
             device=device,
             dtype=dtype,
         )

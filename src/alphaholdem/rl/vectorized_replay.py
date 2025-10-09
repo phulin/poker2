@@ -626,7 +626,9 @@ class VectorizedReplayBuffer:
         returns = returns * valid.to(dtype) + values[:, :-1] * (~valid).to(dtype)
         return adv, returns
 
-    def sample_trajectories(self, num_trajectories: int) -> TrajectorySample:
+    def sample_trajectories(
+        self, rng: torch.Generator, num_trajectories: int
+    ) -> TrajectorySample:
         """Sample complete trajectories for PPO updates. Not currently used."""
         if self.size == 0:
             raise ValueError("No trajectories available")
@@ -639,7 +641,11 @@ class VectorizedReplayBuffer:
 
         # Sample trajectory indices (with replacement)
         traj_sample_indices = torch.randint(
-            0, len(valid_indices), (num_trajectories,), device=self.device
+            0,
+            len(valid_indices),
+            (num_trajectories,),
+            device=self.device,
+            generator=rng,
         )
         traj_indices = valid_indices[traj_sample_indices]
 

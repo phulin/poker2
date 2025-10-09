@@ -137,9 +137,7 @@ class SelfPlayTrainer:
 
     kl_ema: EMA
 
-    def __init__(
-        self, cfg: Config, device: torch.device, rng_seed: Optional[int] = None
-    ):
+    def __init__(self, cfg: Config, device: torch.device):
         self.cfg = cfg
         self.device = device
 
@@ -196,10 +194,9 @@ class SelfPlayTrainer:
 
         self.float_dtype = torch.float32
 
-        # Initialize RNG
+        # Initialize RNG (manually-seeded for reproducibility)
         self.rng = torch.Generator(device=self.device)
-        if rng_seed is not None:
-            self.rng.manual_seed(rng_seed)
+        self.rng.manual_seed(self.cfg.seed)
 
         # Determine model type
         self.is_transformer = cfg.model.name.startswith("poker_transformer")
@@ -245,6 +242,7 @@ class SelfPlayTrainer:
                 use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
                 value_head_type=self.value_head_type,
                 value_head_num_quantiles=self.value_head_num_quantiles,
+                rng=self.rng,
             )
         else:
             self.model = SiameseConvNetV1(
@@ -257,6 +255,7 @@ class SelfPlayTrainer:
                 use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
                 value_head_type=self.value_head_type,
                 value_head_num_quantiles=self.value_head_num_quantiles,
+                rng=self.rng,
             )
 
         # Ensure bins align with model output size to avoid mask/logit mismatch

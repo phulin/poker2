@@ -10,7 +10,10 @@ from alphaholdem.core.interfaces import Policy
 
 class CategoricalPolicyV1(Policy):
     def action(
-        self, logits: torch.Tensor, legal_mask: Optional[torch.Tensor] = None
+        self,
+        logits: torch.Tensor,
+        legal_mask: Optional[torch.Tensor] = None,
+        rng: Optional[torch.Generator] = None,
     ) -> Tuple[int, float]:
         if legal_mask is not None:
             # mask out illegal actions
@@ -18,13 +21,16 @@ class CategoricalPolicyV1(Policy):
         # Fast sampling: log_softmax -> exp -> multinomial
         log_probs_vec = F.log_softmax(logits.float(), dim=-1)
         probs_vec = log_probs_vec.exp()
-        a = torch.multinomial(probs_vec, num_samples=1)
+        a = torch.multinomial(probs_vec, num_samples=1, generator=rng)
         action_idx = int(a.item())
         logp = log_probs_vec[action_idx]
         return action_idx, float(logp.item())
 
     def action_batch(
-        self, logits: torch.Tensor, legal_masks: Optional[torch.Tensor] = None
+        self,
+        logits: torch.Tensor,
+        legal_masks: Optional[torch.Tensor] = None,
+        rng: Optional[torch.Generator] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Sample actions for a batch of environments.
@@ -107,6 +113,8 @@ class CategoricalPolicyV1(Policy):
             log_probs = F.log_softmax(logits, dim=-1)
             probs = log_probs.exp()
 
-        action_indices = torch.multinomial(probs, num_samples=1).squeeze(1)
+        action_indices = torch.multinomial(probs, num_samples=1, generator=rng).squeeze(
+            1
+        )
 
         return action_indices, log_probs

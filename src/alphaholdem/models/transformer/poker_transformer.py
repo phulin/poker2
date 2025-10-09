@@ -87,6 +87,7 @@ class PokerTransformerV1(nn.Module, Model):
         use_gradient_checkpointing: bool,
         value_head_type: str = "scalar",
         value_head_num_quantiles: int = 1,
+        rng: Optional[torch.Generator] = None,
     ) -> None:
         super().__init__()
 
@@ -108,10 +109,10 @@ class PokerTransformerV1(nn.Module, Model):
         self.embedding = PokerFusedEmbedding(num_bet_bins=num_bet_bins, d_model=d_model)
 
         self.input_ffn = nn.Sequential(
-            OrthogonalLinear(d_model, d_model * 2, gain=math.sqrt(2.0)),
+            OrthogonalLinear(d_model, d_model * 2, gain=math.sqrt(2.0), rng=rng),
             nn.GELU(),
             nn.Dropout(dropout),
-            OrthogonalLinear(d_model * 2, d_model, gain=1.0),
+            OrthogonalLinear(d_model * 2, d_model, gain=1.0, rng=rng),
             # no normalization as TransformerLayer has pre-LN
         )
 
@@ -127,7 +128,7 @@ class PokerTransformerV1(nn.Module, Model):
         self.post_norm = nn.LayerNorm(d_model)
 
         self.cls_mlp = nn.Sequential(
-            OrthogonalLinear(d_model * 4, d_model, gain=math.sqrt(2.0)),
+            OrthogonalLinear(d_model * 4, d_model, gain=math.sqrt(2.0), rng=rng),
             nn.GELU(),
             nn.LayerNorm(d_model),
         )

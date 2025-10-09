@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+import torch
+
 
 class Env(ABC):
     @abstractmethod
@@ -35,7 +37,10 @@ class Model(ABC):
 class Policy(ABC):
     @abstractmethod
     def action(
-        self, logits: Any, legal_mask: Optional[Any] = None
+        self,
+        logits: Any,
+        legal_mask: Optional[Any] = None,
+        rng: Optional[torch.Generator] = None,
     ) -> Tuple[int, float]:
         """Select an action id and return (action_id, log_prob)."""
         ...
