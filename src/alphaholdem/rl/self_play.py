@@ -1595,9 +1595,9 @@ class SelfPlayTrainer:
         else:
             value_lr_now = value_lr_start
 
-        # Apply LR scaling factor to both learning rates
+        # Apply LR scaling factor to both learning rates (but don't reduce value)
         policy_lr_now *= self.lr_scaling_controller.current_value
-        value_lr_now *= self.lr_scaling_controller.current_value
+        value_lr_now *= max(1.0, self.lr_scaling_controller.current_value)
 
         # Update separate optimizers with their respective learning rates
         if (
