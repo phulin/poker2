@@ -1326,6 +1326,8 @@ class SelfPlayTrainer:
 
             grad_has_nan = False
             for name, param in self.model.named_parameters():
+                if param.grad is None:
+                    continue
                 if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
                     grad_has_nan = True
                     print(
