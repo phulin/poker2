@@ -93,7 +93,7 @@ class TrainingConfig:
     )
 
     # KL divergence configuration
-    target_kl: float = 0.01  # Target KL divergence for adaptive controllers
+    target_kl: float = 0.02  # Target KL divergence for adaptive controllers
 
     # Learning rate scaling controller
     lr_scaling_init_value: float = 1.0  # Initial LR scaling factor

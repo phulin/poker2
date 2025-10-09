@@ -91,7 +91,7 @@ train:
   policy_trunk_learning_rate_final: 1e-5  # Final learning rate for policy head and trunk
   
   # KL divergence configuration
-  target_kl: 0.015  # Target KL divergence for adaptive controllers
+  target_kl: 0.02  # Target KL divergence for adaptive controllers
   
   # Learning rate scaling controller
   lr_scaling_init_value: 1.0  # Initial LR scaling factor
