@@ -1543,8 +1543,10 @@ class SelfPlayTrainer:
         value_learning_rate = self.value_head_optimizer.param_groups[0][
             "lr"
         ]  # Value head LR
-        self.total_transitions_trained += update_stats["episodes"] * self.batch_size
-        self.total_episodes += update_stats["episodes"]
+        self.total_transitions_trained += (
+            update_stats["policy_episodes"] * self.batch_size
+        )
+        self.total_episodes += update_stats["policy_episodes"]
         total_actions = sum(self.last_action_mix.values())
         action_rates = {k: v / total_actions for k, v in self.last_action_mix.items()}
         training_stats = {

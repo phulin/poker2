@@ -280,7 +280,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
                 stats,
                 step,
                 cfg.num_steps,
-                stats["episodes"],
+                stats["policy_episodes"],
                 step_time_str,
                 total_time_str,
             )
