@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, Optional, TypeVar
+from typing import Generic, Literal, Optional, TypeVar
 
 T = TypeVar("T", bound=float)
 
@@ -18,6 +18,7 @@ class ExponentialController(Generic[T]):
     init_value: T
     min_value: T
     max_value: T
+    direction: Literal["straight", "reverse"] = "straight"
     increase_factor: float = 2.0
     decrease_factor: float = 1.0 / 2.0
     upper_threshold: float = 2.0
@@ -42,14 +43,24 @@ class ExponentialController(Generic[T]):
 
         self.last_measured_value = float(measured_value)
 
-        if self.last_measured_value > self.upper_threshold * self.target_value:
-            self._current_value = min(
-                self._current_value * self.increase_factor, self.max_value
-            )
-        elif self.last_measured_value < self.lower_threshold * self.target_value:
-            self._current_value = max(
-                self._current_value * self.decrease_factor, self.min_value
-            )
+        if self.direction == "straight":
+            if self.last_measured_value > self.upper_threshold * self.target_value:
+                self._current_value = min(
+                    self._current_value * self.increase_factor, self.max_value
+                )
+            elif self.last_measured_value < self.lower_threshold * self.target_value:
+                self._current_value = max(
+                    self._current_value * self.decrease_factor, self.min_value
+                )
+        else:
+            if self.last_measured_value > self.upper_threshold * self.target_value:
+                self._current_value = max(
+                    self._current_value * self.decrease_factor, self.min_value
+                )
+            elif self.last_measured_value < self.lower_threshold * self.target_value:
+                self._current_value = min(
+                    self._current_value * self.increase_factor, self.max_value
+                )
 
     def state_dict(self) -> dict:
         """Return the current state for checkpointing."""

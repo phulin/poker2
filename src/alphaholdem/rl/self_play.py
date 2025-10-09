@@ -414,6 +414,7 @@ class SelfPlayTrainer:
             decrease_factor=self.lr_scaling_decrease_factor,
             upper_threshold=self.lr_scaling_upper_threshold,
             lower_threshold=self.lr_scaling_lower_threshold,
+            direction="reverse",
         )
 
         # Initialize loss calculator
