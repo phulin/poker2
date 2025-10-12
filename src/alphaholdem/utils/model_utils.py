@@ -23,7 +23,13 @@ def compute_masked_logits(
     legal_masks: torch.Tensor,
 ) -> torch.Tensor:
     """Compute masked logits from a model given data and legal masks."""
-    return torch.where(legal_masks, logits, -1e9)
+    if not logits.is_floating_point():
+        raise TypeError(
+            f"compute_masked_logits expected floating-point logits, got {logits.dtype}"
+        )
+    legal_masks_bool = legal_masks.to(torch.bool)
+    mask_value = torch.finfo(logits.dtype).min
+    return logits.masked_fill(~legal_masks_bool, mask_value)
 
 
 def get_logits_log_probs_values(

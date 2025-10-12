@@ -33,6 +33,7 @@ from alphaholdem.rl.vectorized_replay import BatchSample, VectorizedReplayBuffer
 from alphaholdem.utils.ema import EMA
 from alphaholdem.utils.model_context import model_eval
 from alphaholdem.utils.model_utils import (
+    compute_masked_logits,
     get_batch_log_probs,
     get_logits_log_probs_values,
 )
@@ -1346,7 +1347,7 @@ class SelfPlayTrainer:
 
                     # Compute KL divergence between model policy and CFR target
                     # Get model policy in 4-action space
-                    masked_logits = torch.where(batch.legal_masks, logits, -1e9)
+                    masked_logits = compute_masked_logits(logits, batch.legal_masks)
                     model_probs_full = F.softmax(masked_logits, dim=-1)
                     model_probs_4 = CFRManager.collapse_policy_full_to_4(
                         model_probs_full

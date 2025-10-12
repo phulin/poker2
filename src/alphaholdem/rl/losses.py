@@ -13,6 +13,7 @@ from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.search.cfr_manager import CFRManager
 from alphaholdem.utils.ema import EMA
+from alphaholdem.utils.model_utils import compute_masked_logits
 
 
 @dataclass
@@ -157,7 +158,7 @@ class TrinalClipPPOLoss(LossCalculator):
         delta3 = batch.delta3
 
         # Mask illegal actions then compute log probabilities
-        masked_logits = torch.where(batch.legal_masks, logits, -1e9)
+        masked_logits = compute_masked_logits(logits, batch.legal_masks)
         log_probs = F.log_softmax(masked_logits, dim=-1)
         action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
 
@@ -244,7 +245,7 @@ class StandardPPOLoss(LossCalculator):
         legal_masks = batch.embedding_data.legal_masks
 
         # Mask illegal actions
-        masked_logits = torch.where(legal_masks, logits, -1e9)
+        masked_logits = compute_masked_logits(logits, legal_masks)
 
         # Compute new log probabilities
         log_probs = F.log_softmax(masked_logits, dim=-1)
@@ -335,7 +336,7 @@ class DualClipPPOLoss(LossCalculator):
         legal_masks = batch.embedding_data.legal_masks
 
         # Mask illegal actions
-        masked_logits = torch.where(legal_masks, logits, -1e9)
+        masked_logits = compute_masked_logits(logits, legal_masks)
 
         # Log-probs and action log-probs
         log_probs = F.log_softmax(masked_logits, dim=-1)
@@ -440,7 +441,7 @@ class KLPolicyPPOLoss(LossCalculator):
 
         # --- Mask illegal actions
         legal_masks = batch.legal_masks.bool()
-        masked_new_logits = torch.where(legal_masks, logits, -1e9)
+        masked_new_logits = compute_masked_logits(logits, legal_masks)
 
         # --- Log-probs & distributions
         log_p_new = torch.log_softmax(masked_new_logits, dim=-1)
@@ -640,7 +641,7 @@ class CFRDistillationLoss(LossCalculator):
 
         # Mask illegal actions
         legal_masks = batch.legal_masks.bool()
-        masked_logits = torch.where(legal_masks, logits, -1e9)
+        masked_logits = compute_masked_logits(logits, legal_masks)
 
         # Get model policy in full action space
         model_probs_full = F.softmax(masked_logits, dim=-1)
