@@ -38,7 +38,6 @@ from alphaholdem.utils.model_utils import (
 )
 from alphaholdem.utils.profiling import profile
 from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
-from alphaholdem.search.dcfr import run_dcfr
 from alphaholdem.rl.losses import CFRDistillationLoss
 
 
@@ -429,23 +428,34 @@ class SelfPlayTrainer:
             if self.use_quantile_value_head
             else self.cfg.train.value_loss_type
         )
-        self.loss_calculator = KLPolicyPPOLoss(
-            popart_normalizer=self.popart_normalizer,
-            beta_controller=self.beta_controller,
-            value_coef=self.value_coef,
-            entropy_coef=self.entropy_coef,
-            value_loss_type=loss_value_type,
-            clipping=self.cfg.train.ppo_clipping,
-            epsilon=self.cfg.train.ppo_eps,
-            dual_clip=self.cfg.train.ppo_dual_clip,
-            huber_delta=self.cfg.train.huber_delta,
-            return_clipping=self.cfg.train.return_clipping,
-            kl_type=self.cfg.train.kl_type,
-            quantile_kappa=self.quantile_huber_kappa,
-            num_quantiles=(
-                self.value_head_num_quantiles if self.use_quantile_value_head else None
-            ),
-        )
+        if self.cfg.search.enabled:
+            self.loss_calculator = CFRDistillationLoss(
+                popart_normalizer=self.popart_normalizer,
+                value_coef=self.value_coef,
+                entropy_coef=self.entropy_coef,
+                value_loss_type=loss_value_type,
+                huber_delta=self.cfg.train.huber_delta,
+            )
+        else:
+            self.loss_calculator = KLPolicyPPOLoss(
+                popart_normalizer=self.popart_normalizer,
+                beta_controller=self.beta_controller,
+                value_coef=self.value_coef,
+                entropy_coef=self.entropy_coef,
+                value_loss_type=loss_value_type,
+                clipping=self.cfg.train.ppo_clipping,
+                epsilon=self.cfg.train.ppo_eps,
+                dual_clip=self.cfg.train.ppo_dual_clip,
+                huber_delta=self.cfg.train.huber_delta,
+                return_clipping=self.cfg.train.return_clipping,
+                kl_type=self.cfg.train.kl_type,
+                quantile_kappa=self.quantile_huber_kappa,
+                num_quantiles=(
+                    self.value_head_num_quantiles
+                    if self.use_quantile_value_head
+                    else None
+                ),
+            )
 
         # Training stats
         self.step_trajectories_collected = 0
@@ -1293,108 +1303,78 @@ class SelfPlayTrainer:
                     )
                 )
 
-                # Optional: training-time CFR distillation
-                search_time_ms = 0.0
-                cfr_kl_div = 0.0
-                if (
-                    getattr(self.cfg, "search", None) is not None
-                    and self.cfg.search.enabled
-                ):
-                    search_start_time = time.time()
+            # Optional: training-time CFR distillation
+            search_time_ms = 0.0
+            cfr_kl_div = 0.0
+            if self.cfg.search.enabled:
+                search_start_time = time.time()
 
-                    # Build manager and seed roots from current minibatch rows
-                    B = len(batch)
-                    root_entropy = 0.0
-                    with torch.no_grad(), model_eval(self.model):
-                        mgr = CFRManager(
-                            batch_size=B,
-                            env_proto=self.tensor_env,
-                            bet_bins=self.bet_bins,
-                            sequence_length=(
-                                self.state_encoder.sequence_length
-                                if self.is_transformer
-                                else 8
-                            ),
-                            device=self.device,
-                            float_dtype=self.float_dtype,
-                            cfg=SearchConfig(
-                                depth=self.cfg.search.depth,
-                                iterations=self.cfg.search.iterations,
-                                branching=4,
-                            ),
-                            popart_normalizer=self.popart_normalizer,
-                        )
-                        # Seed roots from sampled PBS snapshots held in the batch
-                        src_indices = torch.arange(B, device=self.device)
-                        _ = mgr.seed_roots(batch.snapshot_env, src_indices)
-                        collapsed_target = mgr.run_search(self.model)
+                # Build manager and seed roots from current minibatch rows
+                B = len(batch)
+                root_entropy = 0.0
+                with torch.no_grad(), model_eval(self.model), self._autocast():
+                    mgr = CFRManager(
+                        batch_size=B,
+                        env_proto=self.tensor_env,
+                        bet_bins=self.bet_bins,
+                        sequence_length=self.cfg.train.max_sequence_length,
+                        device=self.device,
+                        float_dtype=self.float_dtype,
+                        cfg=self.cfg.search,
+                        popart_normalizer=self.popart_normalizer,
+                    )
+                    # Seed roots from sampled PBS snapshots held in the batch
+                    src_indices = torch.arange(B, device=self.device)
+                    _ = mgr.seed_roots(batch.snapshot_env, src_indices)
+                    collapsed_target = mgr.run_search(self.model)
 
-                        # Normalize CFR target to ensure valid probabilities
-                        cfr_target = collapsed_target / collapsed_target.sum(
-                            dim=-1, keepdim=True
-                        )
-                        cfr_target = cfr_target.clamp(min=1e-8)
-                        # Root policy entropy for diagnostics
-                        root_entropy = (
-                            -(cfr_target * (cfr_target + 1e-8).log())
-                            .sum(dim=-1)
-                            .mean()
-                            .item()
-                        )
+                    # Normalize CFR target to ensure valid probabilities
+                    cfr_target = collapsed_target / collapsed_target.sum(
+                        dim=-1, keepdim=True
+                    )
+                    cfr_target = cfr_target.clamp(min=1e-8)
+                    # Root policy entropy for diagnostics
+                    root_entropy = (
+                        -(cfr_target * (cfr_target + 1e-8).log())
+                        .sum(dim=-1)
+                        .mean()
+                        .item()
+                    )
 
                     search_end_time = time.time()
                     search_time_ms = (search_end_time - search_start_time) * 1000
 
                     # Compute KL divergence between model policy and CFR target
-                    with torch.no_grad():
-                        if cfr_target is not None:
-                            # Get model policy in 4-action space
-                            masked_logits = torch.where(batch.legal_masks, logits, -1e9)
-                            model_probs_full = F.softmax(masked_logits, dim=-1)
-                            model_probs_4 = CFRManager.collapse_policy_full_to_4(
-                                model_probs_full
-                            )
-
-                            # Normalize probabilities
-                            cfr_target_stable = cfr_target + 1e-8
-                            model_probs_4_stable = model_probs_4 + 1e-8
-                            cfr_target_norm = cfr_target_stable / cfr_target_stable.sum(
-                                dim=-1, keepdim=True
-                            )
-                            model_probs_4_norm = (
-                                model_probs_4_stable
-                                / model_probs_4_stable.sum(dim=-1, keepdim=True)
-                            )
-
-                            cfr_kl_div = (
-                                (
-                                    cfr_target_norm
-                                    * torch.log(cfr_target_norm / model_probs_4_norm)
-                                )
-                                .sum(dim=-1)
-                                .mean()
-                                .item()
-                            )
-                        else:
-                            cfr_kl_div = 0.0
-
-                # Use CFR distillation loss when search is enabled
-                if (
-                    getattr(self.cfg, "search", None) is not None
-                    and self.cfg.search.enabled
-                    and "cfr_target" in locals()
-                    and cfr_target is not None
-                ):
-                    # Create CFR distillation loss calculator
-                    cfr_loss_calculator = CFRDistillationLoss(
-                        popart_normalizer=self.popart_normalizer,
-                        value_coef=self.loss_calculator.value_coef,
-                        entropy_coef=self.loss_calculator.entropy_coef,
-                        value_loss_type=self.loss_calculator.value_loss_type,
-                        huber_delta=self.loss_calculator.huber_delta,
+                    # Get model policy in 4-action space
+                    masked_logits = torch.where(batch.legal_masks, logits, -1e9)
+                    model_probs_full = F.softmax(masked_logits, dim=-1)
+                    model_probs_4 = CFRManager.collapse_policy_full_to_4(
+                        model_probs_full
                     )
 
-                    loss_result = cfr_loss_calculator.compute_loss(
+                    # Normalize probabilities
+                    cfr_target_stable = cfr_target + 1e-8
+                    model_probs_4_stable = model_probs_4 + 1e-8
+                    cfr_target_norm = cfr_target_stable / cfr_target_stable.sum(
+                        dim=-1, keepdim=True
+                    )
+                    model_probs_4_norm = (
+                        model_probs_4_stable
+                        / model_probs_4_stable.sum(dim=-1, keepdim=True)
+                    )
+
+                    cfr_kl_div = (
+                        (
+                            cfr_target_norm
+                            * torch.log(cfr_target_norm / model_probs_4_norm)
+                        )
+                        .sum(dim=-1)
+                        .mean()
+                        .item()
+                    )
+
+                if self.cfg.search.enabled:
+                    loss_result = self.loss_calculator.compute_loss(
                         logits=logits,
                         values=values,
                         batch=batch,
@@ -1402,7 +1382,6 @@ class SelfPlayTrainer:
                         cfr_target=cfr_target,
                     )
                 else:
-                    # Use standard loss calculator
                     loss_result = self.loss_calculator.compute_loss(
                         logits=logits,
                         values=values,
@@ -1637,18 +1616,10 @@ class SelfPlayTrainer:
             result["popart_sigma"] = popart_sigma
 
         # Add search metrics
-        result["search_enabled"] = (
-            getattr(self.cfg, "search", None) is not None and self.cfg.search.enabled
-        )
-        result["search_time_ms"] = search_time_ms
-        result["search_iterations"] = (
-            self.cfg.search.iterations if result["search_enabled"] else 0
-        )
-        result["cfr_kl_div"] = cfr_kl_div
-        # Optional: CFR diagnostics
-        result["search/root_entropy"] = (
-            root_entropy if result["search_enabled"] else 0.0
-        )
+        if self.cfg.search.enabled:
+            result["search_time_ms"] = search_time_ms
+            result["cfr_kl_div"] = cfr_kl_div
+            result["search.root_entropy"] = root_entropy
 
         return result
 

@@ -347,15 +347,20 @@ class CFRManager:
             ta = to_act_slice
             p0_rows = idxs[(ta == 0) & not_done_mask]
             p1_rows = idxs[(ta == 1) & not_done_mask]
+            chunk_size = max(1, 2 * self.batch_size)
             if p0_rows.numel() > 0:
-                embed0 = self.encode_states(player=0, idxs=p0_rows)
-                out0 = model(embed0)
-                logits_full[p0_rows] = out0.policy_logits.float()
+                for start in range(0, p0_rows.numel(), chunk_size):
+                    rows = p0_rows[start : start + chunk_size]
+                    emb = self.encode_states(player=0, idxs=rows)
+                    out = model(emb)
+                    logits_full[rows] = out.policy_logits.float()
                 # Assign values for non-terminal leaves at last depth later
             if p1_rows.numel() > 0:
-                embed1 = self.encode_states(player=1, idxs=p1_rows)
-                out1 = model(embed1)
-                logits_full[p1_rows] = out1.policy_logits.float()
+                for start in range(0, p1_rows.numel(), chunk_size):
+                    rows = p1_rows[start : start + chunk_size]
+                    emb = self.encode_states(player=1, idxs=rows)
+                    out = model(emb)
+                    logits_full[rows] = out.policy_logits.float()
 
             # Expand and step children for next depth
             if d < self.depth:
@@ -376,21 +381,26 @@ class CFRManager:
             to_act = self.env.to_act[leaf_not_done]
             p0 = leaf_not_done[to_act == 0]
             p1 = leaf_not_done[to_act == 1]
+            chunk_size = max(1, 2 * self.batch_size)
             if p0.numel() > 0:
-                emb0 = self.encode_states(0, p0)
-                out0 = model(emb0)
-                v0 = out0.value.float().squeeze(-1)
-                if self.popart is not None:
-                    v0 = self.popart.denormalize_value(v0)
-                values[p0] = v0
+                for start in range(0, p0.numel(), chunk_size):
+                    rows = p0[start : start + chunk_size]
+                    emb = self.encode_states(0, rows)
+                    out = model(emb)
+                    v = out.value.float().squeeze(-1)
+                    if self.popart is not None:
+                        v = self.popart.denormalize_value(v)
+                    values[rows] = v
             if p1.numel() > 0:
-                emb1 = self.encode_states(1, p1)
-                out1 = model(emb1)
-                # Flip perspective so values are always from p0 perspective
-                v1 = out1.value.float().squeeze(-1)
-                if self.popart is not None:
-                    v1 = self.popart.denormalize_value(v1)
-                values[p1] = -v1
+                for start in range(0, p1.numel(), chunk_size):
+                    rows = p1[start : start + chunk_size]
+                    emb = self.encode_states(1, rows)
+                    out = model(emb)
+                    v = out.value.float().squeeze(-1)
+                    if self.popart is not None:
+                        v = self.popart.denormalize_value(v)
+                    # Flip perspective so values are always from p0 perspective
+                    values[rows] = -v
 
         return logits_full, legal_full, values, to_act
 
