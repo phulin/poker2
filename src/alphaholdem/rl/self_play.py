@@ -1374,7 +1374,7 @@ class SelfPlayTrainer:
                         .item()
                     )
 
-                if self.cfg.search.enabled:
+                with self._autocast():
                     loss_result = self.loss_calculator.compute_loss(
                         logits=logits,
                         values=values,
@@ -1382,7 +1382,8 @@ class SelfPlayTrainer:
                         value_quantiles=value_quantiles,
                         cfr_target=cfr_target,
                     )
-                else:
+            else:
+                with self._autocast():
                     loss_result = self.loss_calculator.compute_loss(
                         logits=logits,
                         values=values,
