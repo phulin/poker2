@@ -209,7 +209,7 @@ def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
     # Monkeypatch factory to use DummyStateEncoder so model sees hole indices
     monkeypatch.setattr(
         "alphaholdem.env.analyze_tensor_env.create_state_encoder_for_model",
-        lambda model, env, device: DummyStateEncoder(env, device),
+        lambda model, env, device, num_bet_bins: DummyStateEncoder(env, device),
     )
 
     model = DummyValueModel()
