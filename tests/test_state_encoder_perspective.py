@@ -94,14 +94,16 @@ def test_transformer_state_encoder_perspective_behavior():
     device = torch.device("cpu")
 
     # Create a tensor environment with some action history
+    bet_bins = [0.5, 1.0, 1.5, 2.0]
     env = HUNLTensorEnv(
         num_envs=2,
         starting_stack=1000,
         sb=50,
         bb=100,
-        default_bet_bins=[0.5, 1.0, 1.5, 2.0],
+        default_bet_bins=bet_bins,
         device=device,
     )
+    num_bet_bins = len(bet_bins) + 3
 
     # Reset and create some action history
     env.reset()
@@ -119,7 +121,7 @@ def test_transformer_state_encoder_perspective_behavior():
     encoder = TokenSequenceBuilder(
         tensor_env=env,
         sequence_length=100,
-        num_bet_bins=env.num_bet_bins,
+        bet_bins=bet_bins,
         device=device,
         float_dtype=torch.float32,
     )
@@ -139,10 +141,10 @@ def test_transformer_state_encoder_perspective_behavior():
     # Identify action tokens dynamically now that the sequence is variable-length.
     action_offset = get_action_token_id_offset()
     action_mask_p0 = (states_p0.token_ids[0] >= action_offset) & (
-        states_p0.token_ids[0] < action_offset + env.num_bet_bins
+        states_p0.token_ids[0] < action_offset + num_bet_bins
     )
     action_mask_p1 = (states_p1.token_ids[0] >= action_offset) & (
-        states_p1.token_ids[0] < action_offset + env.num_bet_bins
+        states_p1.token_ids[0] < action_offset + num_bet_bins
     )
 
     active_actors_p0 = action_actors_p0[action_mask_p0]
@@ -174,5 +176,4 @@ def test_transformer_state_encoder_perspective_behavior():
 if __name__ == "__main__":
     test_cnn_state_encoder_perspective_behavior()
     test_transformer_state_encoder_perspective_behavior()
-    test_both_encoders_consistency()
     print("All perspective behavior tests passed!")

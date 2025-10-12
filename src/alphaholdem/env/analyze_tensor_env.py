@@ -27,7 +27,7 @@ def create_state_encoder_for_model(
     model,
     env: HUNLTensorEnv,
     device: torch.device,
-    num_bet_bins: int,
+    bet_bins: list[float],
 ):
     """Create the appropriate state encoder based on the model type.
 
@@ -45,7 +45,7 @@ def create_state_encoder_for_model(
         return TokenSequenceBuilder(
             tensor_env=env,
             sequence_length=model.max_sequence_length,
-            num_bet_bins=num_bet_bins,
+            bet_bins=bet_bins,
             device=device,
             float_dtype=torch.float32,
         )
@@ -149,7 +149,7 @@ class PreflopAnalyzer:
         )
 
         self.state_encoder = create_state_encoder_for_model(
-            model, self.env, device, len(bet_bins) + 3
+            model, self.env, device, bet_bins
         )
 
         # Cache the 1326 hand combinations

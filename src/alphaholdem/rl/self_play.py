@@ -280,7 +280,7 @@ class SelfPlayTrainer:
             self.state_encoder = TokenSequenceBuilder(
                 tensor_env=self.tensor_env,
                 sequence_length=self.cfg.train.max_sequence_length,
-                num_bet_bins=self.num_bet_bins,
+                bet_bins=self.bet_bins,
                 device=self.device,
                 float_dtype=self.float_dtype,
             )

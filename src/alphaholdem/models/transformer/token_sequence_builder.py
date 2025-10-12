@@ -29,7 +29,7 @@ class TokenSequenceBuilder:
 
     tensor_env: HUNLTensorEnv
     sequence_length: int
-    num_bet_bins: int
+    bet_bins: list[float]
     device: torch.device
     float_dtype: torch.dtype
 
@@ -47,13 +47,14 @@ class TokenSequenceBuilder:
         self,
         tensor_env: HUNLTensorEnv,
         sequence_length: int,
-        num_bet_bins: int,
+        bet_bins: list[float],
         device: torch.device,
         float_dtype: torch.dtype,
     ) -> None:
         self.tensor_env = tensor_env
         self.sequence_length = sequence_length
-        self.num_bet_bins = num_bet_bins
+        self.bet_bins = bet_bins
+        self.num_bet_bins = len(bet_bins) + 3
         self.device = device
         self.float_dtype = float_dtype
 
@@ -65,7 +66,7 @@ class TokenSequenceBuilder:
         self.card_suits = torch.zeros(N, L, dtype=torch.long, device=device)
         self.action_actors = torch.zeros(N, L, dtype=torch.long, device=device)
         self.action_legal_masks = torch.zeros(
-            N, L, num_bet_bins, dtype=torch.bool, device=device
+            N, L, self.num_bet_bins, dtype=torch.bool, device=device
         )
         self.action_amounts = torch.zeros(N, L, dtype=torch.long, device=device)
         self.context_features = torch.zeros(
@@ -95,7 +96,9 @@ class TokenSequenceBuilder:
         self.token_streets[idxs, start] = self.tensor_env.street[idxs]
 
         # store current legal mask (shown on context + on action itself later)
-        self.action_legal_masks[idxs, start] = self.tensor_env.legal_bins_mask()[idxs]
+        self.action_legal_masks[idxs, start] = self.tensor_env.legal_bins_mask(
+            self.bet_bins
+        )[idxs]
 
         # Store raw unscaled values as int16
         self.context_features[idxs, start, Context.POT.value] = self.tensor_env.pot[

@@ -692,6 +692,7 @@ def main(
     config = Config(
         use_wandb=False,
         num_envs=1,
+        seed=42,
         train=TrainingConfig(
             batch_size=64,
             episodes_per_step=4,
@@ -701,7 +702,7 @@ def main(
         ),
         model=ModelConfig(
             name="poker_transformer_v1",
-            kwargs={
+            **{
                 "max_sequence_length": 47,
                 "d_model": 128,
                 "n_layers": 2,
@@ -724,7 +725,7 @@ def main(
         enable_permute_suit_trace(max_samples=trace_suit_max_samples)
 
     # Create trainer
-    trainer = SelfPlayTrainer(config, device, rng_seed=42)
+    trainer = SelfPlayTrainer(config, device)
 
     # Hook into the model to see what gets passed in
     original_forward = trainer.model.forward

@@ -20,6 +20,9 @@ from alphaholdem.models.transformer.tokens import (
     get_special_token_id_offset,
 )
 
+BET_BINS = [0.5, 1.0, 1.5, 2.0]
+NUM_BET_BINS = len(BET_BINS) + 3
+
 
 def _build_env(device: torch.device) -> HUNLTensorEnv:
     return HUNLTensorEnv(
@@ -27,7 +30,7 @@ def _build_env(device: torch.device) -> HUNLTensorEnv:
         starting_stack=20000,
         sb=50,
         bb=100,
-        default_bet_bins=[0.5, 1.0, 1.5, 2.0],
+        default_bet_bins=BET_BINS,
         device=device,
     )
 
@@ -40,7 +43,7 @@ class TestTransformerStateEncoder:
         encoder = TokenSequenceBuilder(
             tensor_env=env,
             sequence_length=100,
-            num_bet_bins=7,
+            bet_bins=BET_BINS,
             device=device,
             float_dtype=torch.float32,
         )
@@ -55,7 +58,9 @@ class TestTransformerStateEncoder:
             idxs,
             torch.zeros_like(idxs),
             torch.zeros_like(idxs),
-            torch.zeros(2, 7, dtype=torch.bool),  # [batch_size, num_bet_bins]
+            torch.zeros(
+                2, NUM_BET_BINS, dtype=torch.bool
+            ),  # [batch_size, num_bet_bins]
             torch.zeros_like(idxs),
             torch.zeros_like(idxs),  # token_streets
         )
@@ -89,7 +94,7 @@ class TestEmbeddings:
         self.encoder = TokenSequenceBuilder(
             tensor_env=self.env,
             sequence_length=100,
-            num_bet_bins=7,
+            bet_bins=BET_BINS,
             device=self.device,
             float_dtype=torch.float32,
         )
@@ -101,7 +106,7 @@ class TestEmbeddings:
         self.encoder.add_street(idxs, torch.zeros_like(idxs))
 
         self.data = self.encoder.encode_tensor_states(player=0, idxs=idxs)
-        self.num_bet_bins = len(self.env.default_bet_bins) + 3
+        self.num_bet_bins = NUM_BET_BINS
         self.d_model = 64
         self.embedding = PokerFusedEmbedding(self.num_bet_bins, d_model=self.d_model)
         self.embedding.eval()  # disable dropout for deterministic assertions
@@ -158,7 +163,7 @@ class TestPokerTransformerV1:
         encoder = TokenSequenceBuilder(
             tensor_env=env,
             sequence_length=100,
-            num_bet_bins=7,
+            bet_bins=BET_BINS,
             device=device,
             float_dtype=torch.float32,
         )
@@ -177,7 +182,7 @@ class TestPokerTransformerV1:
             d_model=128,
             n_layers=2,
             n_heads=4,
-            num_bet_bins=7,
+            num_bet_bins=NUM_BET_BINS,
             max_sequence_length=100,
             dropout=0.1,
             use_gradient_checkpointing=False,
@@ -199,7 +204,7 @@ class TestPokerTransformerV1:
         encoder = TokenSequenceBuilder(
             tensor_env=env,
             sequence_length=100,
-            num_bet_bins=len(env.default_bet_bins) + 3,
+            bet_bins=BET_BINS,
             device=device,
             float_dtype=torch.float32,
         )
@@ -209,7 +214,7 @@ class TestPokerTransformerV1:
             d_model=64,
             n_layers=1,
             n_heads=4,
-            num_bet_bins=len(env.default_bet_bins) + 3,
+            num_bet_bins=NUM_BET_BINS,
             dropout=0.1,
             max_sequence_length=100,
             use_gradient_checkpointing=False,
@@ -219,7 +224,7 @@ class TestPokerTransformerV1:
 
     def test_attention_mask_respects_variable_lengths(self):
         batch_size, seq_len = 3, 12
-        num_bet_bins = 8
+        num_bet_bins = NUM_BET_BINS
         special_offset = get_special_token_id_offset()
         card_offset = get_card_token_id_offset()
         action_offset = get_action_token_id_offset()
