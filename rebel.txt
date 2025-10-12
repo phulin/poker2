@@ -1,0 +1,2047 @@
+Noam Brown∗ Anton Bakhtin∗ Adam Lerer Qucheng Gong
+Facebook AI Research
+{noambrown,yolo,alerer,qucheng}@fb.com
+
+Abstract
+The combination of deep reinforcement learning and search at both training and test
+time is a powerful paradigm that has led to a number of successes in single-agent
+settings and perfect-information games, best exemplified by AlphaZero. However,
+prior algorithms of this form cannot cope with imperfect-information games. This
+paper presents ReBeL, a general framework for self-play reinforcement learning
+and search that provably converges to a Nash equilibrium in any two-player zerosum game. In the simpler setting of perfect-information games, ReBeL reduces to
+an algorithm similar to AlphaZero. Results in two different imperfect-information
+games show ReBeL converges to an approximate Nash equilibrium. We also show
+ReBeL achieves superhuman performance in heads-up no-limit Texas hold’em
+poker, while using far less domain knowledge than any prior poker AI.
+
+1
+
+Introduction
+
+Combining reinforcement learning with search at both training and test time (RL+Search) has led to
+a number of major successes in AI in recent years. For example, the AlphaZero algorithm achieves
+state-of-the-art performance in the perfect-information games of Go, chess, and shogi [55].
+However, prior RL+Search algorithms do not work in imperfect-information games because they
+make a number of assumptions that no longer hold in these settings. An example of this is illustrated
+in Figure 1a, which shows a modified form of Rock-Paper-Scissors in which the winner receives two
+points (and the loser loses two points) when either player chooses Scissors [15]. The figure shows the
+game in a sequential form in which player 2 acts after player 1 but does not observe player 1’s action.
+𝑷𝟏
+𝑃 = 0.4
+
+𝑃 = 0.2
+
+𝑷𝟐
+
+𝑷𝟐
+
+2,-2
+
+1,-1 0,0 -2,2
+
+0
+
+0
+
+0
+
+Paper
+
+Paper
+
+Paper
+0,0 -1,1
+
+𝑷𝟏
+
+Paper
+
+𝑃 = 0.4
+
+𝑷𝟐
+
+Paper
+
+arXiv:2007.13544v2 [cs.GT] 29 Nov 2020
+
+Combining Deep Reinforcement Learning and Search
+for Imperfect-Information Games
+
+-2,2
+
+2,-2 0,0
+
+(1a) Variant of Rock-Paper-Scissors in which the optimal player 1 policy is (R=0.4, P=0.4, S=0.2). Terminal
+values are color-coded. The dotted lines mean player 2
+does not know which node they are in.
+
+(1b) The player 1 subgame when using perfectinformation one-ply search. Leaf values are determined by the full-game equilibrium. There is insufficient information for finding (R=0.4, P=0.4, S=0.2).
+
+The optimal policy for both players in this modified version of the game is to choose Rock and Paper
+with 40% probability, and Scissors with 20%. In that case, each action results in an expected value of
+zero. However, as shown in Figure 1b, if player 1 were to conduct one-ply lookahead search as is
+∗
+
+Equal contribution
+
+34th Conference on Neural Information Processing Systems (NeurIPS 2020), Vancouver, Canada.
+
+done in perfect-information games (in which the equilibrium value of a state is substituted at a leaf
+node), then there would not be enough information for player 1 to arrive at this optimal policy.
+This illustrates a critical challenge of imperfect-information games: unlike perfect-information
+games and single-agent settings, the value of an action may depend on the probability it is chosen.
+Thus, a state defined only by the sequence of actions and observations does not have a unique
+value and therefore existing RL+Search algorithms such as AlphaZero are not sound in imperfectinformation games. Recent AI breakthroughs in imperfect-information games have highlighted the
+importance of search at test time [40, 12, 14, 37], but combining RL and search during training in
+imperfect-information games has been an open problem.
+This paper introduces ReBeL (Recursive Belief-based Learning), a general RL+Search framework
+that converges to a Nash equilibrium in two-player zero-sum games. ReBeL builds on prior work in
+which the notion of “state” is expanded to include the probabilistic belief distribution of all agents
+about what state they may be in, based on common knowledge observations and policies for all
+agents. Our algorithm trains a value network and a policy network for these expanded states through
+self-play reinforcement learning. Additionally, the algorithm uses the value and policy network for
+search during self play.
+ReBeL provably converges to a Nash equilibrium in all two-player zero-sum games. In perfectinformation games, ReBeL simplifies to an algorithm similar to AlphaZero, with the major difference
+being in the type of search algorithm used. Experimental results show that ReBeL is effective in
+large-scale games and defeats a top human professional with statistical significance in the benchmark
+game of heads-up no-limit Texas hold’em poker while using far less expert domain knowledge than
+any previous poker AI. We also show that ReBeL approximates a Nash equilibrium in Liar’s Dice,
+another benchmark imperfect-information game, and open source our implementation of it.2
+
+2
+
+Related Work
+
+At a high level, ReBeL resembles past RL+Search algorithms used in perfect-information games [59,
+56, 1, 55, 50]. These algorithms train a value network through self play. During training, a search
+algorithm is used in which the values of leaf nodes are determined via the value function. Additionally,
+a policy network may be used to guide search. These forms of RL+Search have been critical to
+achieving superhuman performance in benchmark perfect-information games. For example, so far no
+AI agent has achieved superhuman performance in Go without using search at both training and test
+time. However, these RL+Search algorithms are not theoretically sound in imperfect-information
+games and have not been shown to be successful in such settings.
+A critical element of our imperfect-information RL+Search framework is to use an expanded notion of
+“state”, which we refer to as a public belief state (PBS). PBSs are defined by a common-knowledge
+belief distribution over states, determined by the public observations shared by all agents and the
+policies of all agents. PBSs can be viewed as a multi-agent generalization of belief states used in
+partially observable Markov decision processes (POMDPs) [31]. The concept of PBSs originated
+in work on decentralized multi-agent POMDPs [43, 45, 19] and has been widely used since then in
+imperfect-information games more broadly [40, 20, 53, 29].
+ReBeL builds upon the idea of using a PBS value function during search, which was previously
+used in the poker AI DeepStack [40]. However, DeepStack’s value function was trained not through
+self-play RL, but rather by generating random PBSs, including random probability distributions, and
+estimating their values using search. This would be like learning a value function for Go by randomly
+placing stones on the board. This is not an efficient way of learning a value function because the vast
+majority of randomly generated situations would not be relevant in actual play. DeepStack coped with
+this by using handcrafted features to reduce the dimensionality of the public belief state space, by
+sampling PBSs from a distribution based on expert domain knowledge, and by using domain-specific
+abstractions to circumvent the need for a value network when close to the end of the game.
+An alternative approach for depth-limited search in imperfect-information games that does not use
+a value function for PBSs was used in the Pluribus poker AI to defeat elite humans in multiplayer
+poker [15, 14]. This approach trains a population of “blueprint” policies without using search. At
+test time, the approach conducts depth-limited search by allowing each agent to choose a blueprint
+policy from the population at leaf nodes. The value of the leaf node is the expected value of each
+2
+
+https://github.com/facebookresearch/rebel
+
+2
+
+agent playing their chosen blueprint policy against all the other agents’ choice for the rest of the
+game. While this approach has been successful in poker, it does not use search during training and
+therefore requires strong blueprint policies to be computed without search. Also, the computational
+cost of the search algorithm grows linearly with the number of blueprint policies.
+
+3
+
+Notation and Background
+
+We assume that the rules of the game and the agents’ policies (including search algorithms) are
+common knowledge [2].3 That is, they are known by all agents, all agents know they are known by
+all agents, etc. However, the outcome of stochastic algorithms (i.e., the random seeds) are not known.
+In Section 6 we show how to remove the assumption that we know another player’s policy.
+Our notation is based on that of factored observation games [34] which is a modification of partially
+observable stochastic games [26] that distinguishes between private and public observations. We
+consider a game with N = {1, 2, ..., N } agents.
+A world state w ∈ W is a state in the game. A = A1 × A2 × ... × AN is the space of joint actions.
+Ai (w) denotes the legal actions for agent i at w and a = (a1 , a2 , ..., aN ) ∈ A denotes a joint action.
+After a joint action a is chosen, a transition function T determines the next world state w0 drawn from
+the probability distribution T (w, a) ∈ ∆W. After joint action a, agent i receives a reward Ri (w, a).
+Upon transition from world state w to w0 via joint action a, agent i receives a private observation
+from a function Opriv(i) (w, a, w0 ). Additionally, all agents receive a public observation from a
+function Opub (w, a, w0 ). Public observations may include observations of publicly taken actions by
+agents. For example, in many recreational games, including poker, all betting actions are public.
+A history (also called a trajectory) is a finite sequence of legal actions and world states, denoted
+h = (w0 , a0 , w1 , a1 , ..., wt ). An infostate (also called an action-observation history (AOH)) for
+agent i is a sequence of an agent’s observations and actions
+si = (Oi0 , a0i , Oi1 , a1i , ..., Oit ) where
+
+k
+k−1 k−1
+k
+k−1 k−1
+k
+Oi = Opriv(i) (w
+,a
+, w ), Opub (w
+,a
+, w ) . The unique infostate corresponding to a
+history h for agent i is denoted si (h). The set of histories that correspond to si is denoted H(si ).
+0
+1
+t
+A public state is a sequence spub = (Opub
+, Opub
+, ..., Opub
+) of public observations. The unique public
+state corresponding to a history h and an infostate si is denoted spub (h) and spub (si ), respectively.
+The set of histories that match the sequence of public observation of spub is denoted H(spub ).
+
+For example, consider a game where two players roll two six-sided dice each. One die of each player
+is publicly visible; the other die is only observed by the player who rolled it. Suppose player 1 rolls a
+3 and a 4 (with 3 being the hidden die), and player 2 rolls a 5 and a 6 (with 5 being the hidden die).
+The history (and world state) is h = (3, 4), (5, 6) . The set of histories corresponding to player 2’s
+infostate is H(s2 ) = (x, 4), (5, 6) | x ∈ {1, 2, 3,
+ 4, 5, 6} , so |H(s2 )| = 6. The set of histories
+corresponding to spub is H(spub ) = (x, 4), (y, 6) | x, y ∈ {1, 2, 3, 4, 5, 6} , so |H(spub )| = 36 .
+Public states provide an easy way to reason about common knowledge in a game. All agents observe
+the same public sequence spub , and therefore it is common knowledge among all agents that the true
+history is some h ∈ H(spub ).4
+An agent’s policy πi is a function mapping from an infostate to a probability distribution over actions.
+A policy profile π is a tuple of policies (π1 , π2 , ..., πN ). The expected sum of future rewards (also
+called the expected value (EV)) for agent i in history h when all agents play policy profile π is
+denoted viπ (h). The EV for the entire game is denoted vi (π). A Nash equilibrium is a policy profile
+such that no agent can achieve a higher EV by switching to a different policy [42]. Formally, π ∗ is
+∗
+a Nash equilibrium if for every agent i, vi (π ∗ ) = maxπi vi (πi , π−i
+) where π−i denotes the policy
+of all agents other than i. A Nash equilibrium policy is a policy πi∗ that is part of some Nash
+equilibrium π ∗ .
+A subgame is defined by a root history h in a perfect-information game and all histories that can
+be reached going forward. In other words, it is identical to the original game except it starts at h.
+3
+This is a common assumption in game theory. One argument for it is that in repeated play an adversary
+would eventually determine an agent’s policy.
+4
+As explained in [34], it may be possible for agents to infer common knowledge beyond just public
+observations. However, doing this additional reasoning is inefficient both theoretically and practically.
+
+3
+
+A depth-limited subgame is a subgame that extends only for a limited number of actions into the
+future. Histories at the bottom of a depth-limited subgame (i.e., histories that have no legal actions
+in the depth-limited subgame) but that have at least one legal action in the full game are called leaf
+nodes. In this paper, we assume for simplicity that search is performed over fixed-size depth-limited
+subgame (as opposed to Monte Carlo Tree Search, which grows the subgame over time [23]).
+A game is two-player zero-sum (2p0s) if there are exactly two players and R1 (w, a) = −R2 (w, a)
+for every world state w and action a. In 2p0s perfect-information games, there always exists a Nash
+equilibrium that depends only on the current world state w rather than the entire history h. Thus, in
+2p0s perfect-information games a policy can be defined for world states and a subgame can be defined
+as rooted at a world state. Additionally, in 2p0s perfect-information games every world state w has
+a unique value vi (w) for each agent i, where v1 (w) = −v2 (w), defined by both agents playing a
+Nash equilibrium in any subgame rooted at that world state. Our theoretical and empirical results are
+limited to 2p0s games, though related techniques have been empirically successful in some settings
+with more players [14]. A typical goal for RL in 2p0s perfect-information games is to learn vi . With
+that value function, an agent can compute its optimal next move by solving a depth-limited subgame
+that is rooted at its current world state and where the value of every leaf node z is set to vi (z) [54, 49].
+
+4
+
+From World States to Public Belief States
+
+In this section we describe a mechanism for converting any imperfect-information game into a
+continuous state (and action) space perfect-information game where the state description contains the
+probabilistic belief distribution of all agents. In this way, techniques that have been applied to perfectinformation games can also be applied to imperfect-information games (with some modifications).
+For intuition, consider a game in which one of 52 cards is privately dealt to each player. On each
+turn, a player chooses between three actions: fold, call, and raise. Eventually the game ends and
+players receive a reward. Now consider a modification of this game in which the players cannot see
+their private cards; instead, their cards are seen by a “referee”. On a player’s turn, they announce the
+probability they would take each action with each possible private card. The referee then samples an
+action on the player’s behalf from the announced probability distribution for the player’s true private
+card. When this game starts, each player’s belief distribution about their private card is uniform
+random. However, after each action by the referee, players can update their belief distribution about
+which card they are holding via Bayes’ Rule. Likewise, players can update their belief distribution
+about the opponent’s private card through the same operation. Thus, the probability that each player
+is holding each private card is common knowledge among all players at all times in this game.
+A critical insight is that these two games are strategically identical, but the latter contains no private
+information and is instead a continuous state (and action) space perfect-information game. While
+players do not announce their action probabilities for each possible card in the first game, we assume
+(as stated in Section 3) that all players’ policies are common knowledge, and therefore the probability
+that a player would choose each action for each possible card is indeed known by all players. Of
+course, at test time (e.g., when our agent actually plays against a human opponent) the opponent does
+not actually announce their entire policy and therefore our agent does not know the true probability
+distribution over opponent cards. We later address this problem in Section 6.
+We refer to the first game as the discrete representation and the second game as the belief representation. In the example above, a history in the belief representation, which we refer to as a public
+belief state (PBS), is described by the sequence of public observations and 104 probabilities (the
+probability that each player holds each of the 52 possible private card); an “action” is described by
+156 probabilities (one per discrete action per private card). In general terms, a PBS is described by a
+joint probability distribution over the agents’ possible infostates [43, 45, 19].5 Formally, let Si (spub )
+be the set of infostates that player i may be in given a public state spub and let ∆S1 (spub ) denote a
+probability distribution over the elements of S1 (spub ). Then PBS β = (∆S1 (spub ), ..., ∆SN (spub )).6
+In perfect-information games, the discrete representation and belief representation are identical.
+5
+One could alternatively define a PBS as a probability distribution over histories in H(spub ) for public state
+spub . However, it is proven that any PBS that can arise in play can always be described by a joint probability
+distribution over the agents’ possible infostates [45, 52], so we use this latter definition for simplicity.
+6
+Frequently, a PBS can be compactly summarized by discarding parts of the history that are no longer
+relevant. For example, in poker we do not need to track the entire history of actions, but just the amount of
+money each player has in the pot, the public board cards, and whether there were any bets in the current round.
+
+4
+
+Since a PBS is a history of the perfect-information belief-representation game, a subgame can be
+rooted at a PBS.7 The discrete-representation interpretation of such a subgame is that at the start of
+the subgame a history is sampled from the joint probability distribution of the PBS, and then the
+game proceeds as it would inP
+the original game. The value for agent i of PBS β when all players play
+policy profile π is Viπ (β) = h∈H(spub (β)) (p(h|β)viπ (h)). Just as world states have unique values in
+2p0s perfect-information games, in 2p0s games (both perfect-information and imperfect-information)
+every PBS β has a unique value Vi (β) for each agent i, where V1 (β) = −V2 (β), defined by both
+players playing a Nash equilibrium in the subgame rooted at the PBS.
+Since any imperfect-information game can be viewed as a perfect-information game consisting of
+PBSs (i.e., the belief representation), in theory we could approximate a solution of any 2p0s imperfectinformation game by running a perfect-information RL+Search algorithm on a discretization of the
+belief representation. However, as shown in the example above, belief representations can be very
+high-dimensional continuous spaces, so conducting search (i.e., approximating the optimal policy in a
+depth-limited subgame) as is done in perfect-information games would be intractable. Fortunately, in
+2p0s games, these high-dimensional belief representations are convex optimization problems. ReBeL
+leverages this fact by conducting search via an iterative gradient-ascent-like algorithm.
+ReBeL’s search algorithm operates on supergradients (the equivalent of subgradients but for concave
+functions) of the PBS value function at leaf nodes, rather than on PBS values directly. Specifically,
+the search algorithms require the values of infostates for PBSs [16, 40]. In a 2p0sum game, the value
+of infostate si in β assuming all other players play Nash equilibrium π ∗ is the maximum value that
+player i could obtain for si through any policy in the subgame rooted at β. Formally,
+∗
+
+viπ (si |β) = max
+πi
+
+∗
+hπi ,π−i
+i
+
+X
+
+p(h|si , β−i )vi
+
+(h)
+
+(1)
+
+h∈H(si )
+
+where p(h|si , β−i ) is the probability of being in history h assuming si is reached and the joint
+probability distribution over infostates for players other than i is β−i . Theorem 1 proves that infostate
+values can be interpreted as a supergradient of the PBS value function in 2p0s games.
+Theorem 1. For any PBS β = (β1 , β2 ) (for the beliefs over player 1 and 2 infostates respectively)
+and any policy π ∗ that is a Nash equilibrium of the subgame rooted at β,
+∗
+
+v1π (s1 |β) = V1 (β) + ḡ · ŝ1
+
+(2)
+
+where ḡ is a supergradient of an extension of V1 (β) to unnormalized belief distributions and ŝ1 is the
+unit vector in direction s1 .
+All proofs are presented in the appendix.
+Since ReBeL’s search algorithm uses infostate values, so rather than learn a PBS value function
+ReBeL instead learns an infostate-value function v̂ : B → R|S1 |+|S2 | that directly approximates for
+∗
+each si the average of the sampled viπ (si |β) values produced by ReBeL at β.8
+
+5
+
+Self Play Reinforcement Learning and Search for Public Belief States
+
+In this section we describe ReBeL and prove that it approximates a Nash equilibrium in 2p0s games.
+At the start of the game, a depth-limited subgame rooted at the initial PBS βr is generated. This
+subgame is solved (i.e., a Nash equilibrium is approximated) by running T iterations of an iterative
+equilibrium-finding algorithm in the discrete representation of the game, but using the learned value
+network v̂ to approximate leaf values on every iteration. During training, the infostate values at βr
+computed during search are added as training examples for v̂ and (optionally) the subgame policies
+are added as training examples for the policy network. Next, a leaf node z is sampled and the process
+repeats with the PBS at z being the new subgame root. Appendix B shows detailed pseudocode.
+7
+
+Past work defines a subgame to be rooted at a public state [16, 8, 41, 40, 11, 33, 57, 52]. However,
+imperfect-information subgames rooted at a public state do not have well-defined values.
+8
+Unlike the PBS value Vi (β), the infostate values may not be unique and may depend on which Nash
+equilibrium is played in the subgame. Nevertheless, any linear combination of supergradients is itself a
+supergradient since the set of all supergradients is a convex set [48].
+
+5
+
+Algorithm 1 ReBeL: RL and Search for Imperfect-Information Games
+function S ELF P LAY(βr , θv , θπ , Dv , Dπ )
+. βr is the current PBS
+while !I S T ERMINAL(βr ) do
+G ← C ONSTRUCT S UBGAME(βr )
+π̄, π twarm ← I NITIALIZE P OLICY(G, θπ ) . twarm = 0 and π 0 is uniform if no warm start
+G ← S ET L EAF VALUES(G, π̄, π twarm , θv )
+v(βr ) ← C OMPUTE EV(G, π twarm )
+tsample ∼ unif{twarm + 1, T }
+. Sample an iteration
+for t = (twarm + 1)..T do
+if t = tsample then
+βr0 ← S AMPLE L EAF(G, π t−1 )
+. Sample one or multiple leaf PBSs
+t
+π ← U PDATE P OLICY(G, π t−1 )
+t
+1
+π̄ ← t+1
+π̄ + t+1
+πt
+G ← S ET L EAF VALUES(G, π̄, π t , θv )
+t
+1
+v(βr ) ← t+1
+v(βr ) + t+1
+C OMPUTE EV(G, π t )
+Add {βr , v(βr )} to Dv
+for β ∈ G do
+Add {β, π̄(β)} to Dπ
+βr ← βr0
+
+. Add to value net training data
+. Loop over the PBS at every public state in G
+. Add to policy net training data (optional)
+
+5.1 Search in a depth-limited imperfect-information subgame
+In this section we describe the search algorithm ReBeL uses to solve depth-limited subgames. We
+assume for simplicity that the depth of the subgame is pre-determined and fixed. The subgame is
+solved in the discrete representation and the solution is then converted to the belief representation.
+There exist a number of iterative algorithms for solving imperfect-information games [5, 61, 28,
+36, 35]. We describe ReBeL assuming the counterfactual regret minimization - decomposition
+(CFR-D) algorithm is used [61, 16, 40]. CFR is the most popular equilibrium-finding algorithm for
+imperfect-information games, and CFR-D is an algorithm that solves depth-limited subgames via
+CFR. However, ReBeL is flexible with respect to the choice of search algorithm and in Section 8 we
+also show experimental results for fictitious play (FP) [5].
+On each iteration t, CFR-D determines a policy profile π t in the subgame. Next, the value of every
+t
+t
+discrete representation leaf node z is set to v̂(si (z)|βzπ ), where βzπ denotes the PBS at z when
+agents play according to π t . This means that the value of a leaf node during search is conditional
+on π t . Thus, the leaf node values change every iteration. Given π t and the leaf node values, each
+t
+infostate in βr has a well-defined value. This vector of values, denoted v π (βr ), is stored. Next,
+CFR-D chooses a new policy profile π t+1 , and the process repeats for T iterations.
+When using CFR-D, the average policy profile π̄ T converges to a Nash equilibrium as T → ∞, rather
+than the policy on the final iteration. Therefore, after running CFR-D for T iterations in the subgame
+PT
+t
+rooted at PBS βr , the value vector ( t=1 v π (βr ))/T is added to the training data for v̂(βr ).
+Appendix I introduces CFR-AVG, a modification of CFR-D that sets the value of leaf node z to
+t
+t
+v̂(si (z)|βzπ̄ ) rather than v̂(si (z)|βzπ ), where π̄ t denotes the average policy profile up to iteration t.
+CFR-AVG addresses some weaknesses of CFR-D.
+5.2 Self-play reinforcement learning
+We now explain how ReBeL trains a PBS value network through self play. After solving a subgame
+rooted at PBS βr via search (as described in Section 5.1), the value vector for the root infostates is
+added to the training dataset for v̂. Next, a leaf PBS βr0 is sampled and a new subgame rooted at βr0 is
+solved. This process repeats until the game ends.
+Since the subgames are solved using an iterative algorithm, we want v̂ to be accurate for leaf PBSs
+on every iteration. Therefore, a leaf node z is sampled according to π t on a random iteration
+t ∼ unif{0, T − 1}, where T is the number of iterations of the search algorithm.9 To ensure sufficient
+9
+
+t
+For FP, we pick a random agent i and sample according to (πit , π̄−i
+) to reflect the search operation.
+
+6
+
+t
+
+exploration, one agent samples random actions with probabilility  > 0.10 In CFR-D βr0 = βzπ ,
+t
+while in CFR-AVG and FP βr0 = βzπ̄ .
+Theorem 2 states that, with perfect function approximation, running Algorithm 1 will produce a
+value network whose error is bounded by O( √1T ) for any PBS that could be encountered during play,
+where T is the number of CFR iterations being run in subgames.
+Theorem 2. Consider an idealized value approximator that returns the most recent sample of the
+value for sampled PBSs, and 0 otherwise. Running Algorithm 1 with T iterations of CFR in each
+subgame will produce a value approximator that has error of at most √CT for any PBS that could be
+encountered during play, where C is a game-dependent constant.
+ReBeL as described so far trains the value network through bootstrapping. One could alternatively
+train the value network using rewards actually received over the course of the game when the agents do
+not go off-policy. There is a trade-off between bias and variance between these two approaches [51].
+5.3 Adding a policy network
+Algorithm 1 will result in v̂ converging correctly even if a policy network is not used. However,
+initializing the subgame policy via a policy network may reduce the number of iterations needed
+to closely approximate a Nash equilibrium. Additionally, it may improve the accuracy of the value
+network by allowing the value network to focus on predicting PBS values over a more narrow domain.
+Algorithm 1 can train a policy network Π̂ : β → (∆A)|S1 |+|S2 | by adding π̄ T (β) for each PBS β in
+the subgame to a training dataset each time a subgame is solved (i.e., T iterations of CFR have been
+run in the subgame). Appendix J describes a technique, based on [10], for warm starting equilibrium
+finding given the initial policy from the policy network.
+
+6
+
+Playing According to an Equilibrium at Test Time
+
+This section proves that running Algorithm 1 at test time with an accurately trained PBS value
+network will result in playing a Nash equilibrium policy in expectation even if we do not know the
+opponent’s policy. During self play training we assumed, as stated in Section 3, that both players’
+policies are common knowledge. This allows us to exactly compute the PBS we are in. However, at
+test time we do not know our opponent’s entire policy, and therefore we do not know the PBS. This is
+a problem for conducting search, because search is always rooted at a PBS. For example, consider
+again the game of modified Rock-Paper-Scissors illustrated in Figure 1a. For simplicity, assume that
+v̂ is perfect. Suppose that we are player 2 and player 1 has just acted. In order to now conduct search
+as player 2, our algorithm requires a root PBS. What should this PBS be?
+An intuitive choice, referred to as unsafe search [25, 22], is to first run CFR for T iterations for
+player 1’s first move (for some large T ), which results in a player 1 policy such as (R = 0.4001, P =
+0.3999, S = 0.2). Unsafe search passes down the beliefs resulting from that policy, and then
+computes our optimal policy as player 2. This would result in a policy of (R = 0, P = 1, S = 0) for
+player 2. Clearly, this is not a Nash equilibrium. Moreover, if our opponent knew we would end up
+playing this policy (which we assume they would know since we assume they know the algorithm we
+run to generate the policy), then they could exploit us by playing (R = 0, P = 0, S = 1).
+This problem demonstrates the need for safe search, which is a search algorithm that ensures we
+play a Nash equilibrium policy in expectation. Importantly, it is not necessary for the policy that the
+algorithm outputs to always be a Nash equilibrium. It is only necessary that the algorithm outputs a
+Nash equilibrium policy in expectation. For example, in modified Rock-Paper-Scissors it is fine for
+an algorithm to output a policy of 100% Rock, so long as the probability it outputs that policy is 40%.
+All past safe search approaches introduce additional constraints to the search algorithm [16, 41, 11, 57].
+Those additional constraints hurt performance in practice compared to unsafe search [16, 11] and
+greatly complicate search, so they were never fully used in any competitive agent. Instead, all
+previous search-based imperfect-information game agents used unsafe search either partially or
+entirely [40, 12, 15, 14, 53]. Moreover, using prior safe search techniques at test time may result in
+the agent encountering PBSs that were not encountered during self-play training and therefore may
+result in poor approximations from the value and policy network.
+10
+
+The algorithm is still correct if all agents sample random actions with probability , but that is less efficient
+because the value of a leaf node that can only be reached if both agents go off policy is irrelevant.
+
+7
+
+We now prove that safe search can be achieved without any additional constraints by simply running
+the same algorithm at test time that we described for training. This result applies regardless of
+how the value network was trained and so can be applied to prior algorithms that use PBS value
+functions [40, 53]. Specifically, when conducting search at test time we pick a random iteration and
+assume all players’ policies match the policies on that iteration. Theorem 3, the proof of which is in
+Section G, states that once a value network is trained according to Theorem 2, using Algorithm 1 at
+test time (without off-policy exploration) will approximate a Nash equilibrium.
+Theorem 3. If Algorithm 1 is run at test time with no off-policy exploration, a value network with
+error at most δ for any leaf PBS that was trained to convergence as described in Theorem 2, and with
+√ 2 )-Nash
+T iterations of CFR being used to solve subgames, then the algorithm plays a (δC1 + δC
+T
+equilibrium, where C1 , C2 are game-specific constants.
+Since a random iteration is selected, we may select a very early iteration, or even the first iteration,
+in which the policy is extremely poor. This can be mitigated by using modern equilibrium-finding
+algorithms, such as Linear CFR [13], that assign little or no weight to the early iterations.
+
+7
+
+Experimental Setup
+
+P
+∗
+We measure exploitability of a policy π ∗ , which is i∈N maxπ vi (π, π−i
+)/|N |. All CFR experiments use alternating-updates Linear CFR [13]. All FP experiments use alternating-updates Linear
+Optimistic FP, which is a novel variant we present in Appendix H.
+We evaluate on the benchmark imperfect-information games of heads-up no-limit Texas hold’em
+poker (HUNL) and Liar’s Dice. The rules for both games are provided in Appendix C. We also
+evaluate our techniques on turn endgame hold’em (TEH), a variant of no-limit Texas hold’em in
+which both players automatically check/call for the first two of the four betting rounds in the game.
+In HUNL and TEH, we reduce the action space to at most nine actions using domain knowledge of
+typical bet sizes. However, our agent responds to any “off-tree” action at test time by adding the
+action to the subgame [15, 14]. The bet sizes and stack sizes are randomized during training. For
+TEH we train on the full game and measure exploitability on the case of both players having $20,000,
+unperturbed bet sizes, and the first four board cards being 3♠7♥T♦K♠. For HUNL, our agent uses
+far less domain knowledge than any prior competitive AI agent. Appendix D discusses the poker
+domain knowledge we leveraged in ReBeL.
+We approximate the value and policy functions using artificial neural networks. Both networks are
+MLPs with GeLU [27] activation functions and LayerNorm [3]. Both networks are trained with
+Adam [32]. We use pointwise Huber loss as the criterion for the value function and mean squared
+error (MSE) over probabilities for the policy. In preliminary experiments we found MSE for the value
+network and cross entropy for the policy network did worse. See Appendix E for the hyperparameters.
+We use PyTorch [46] to train the networks. We found data generation to be the bottleneck due to the
+sequential nature of the FP and CFR algorithms and the evaluation of all leaf nodes on each iteration.
+For this reason we use a single machine for training and up to 128 machines with 8 GPUs each for
+data generation.
+
+8
+
+Experimental Results
+
+Figure 2 shows ReBeL reaches a level of exploitability in TEH equivalent to running about 125
+iterations of full-game tabular CFR. For context, top poker agents typically use between 100 and
+1,000 tabular CFR iterations [4, 40, 12, 15, 14]. Our self-play algorithm is key to this success;
+Figure 2 shows a value network trained on random PBSs fails to learn anything valuable.
+Table 1 shows results for ReBeL in HUNL. We compare ReBeL to BabyTartanian8 [9] and Slumbot,
+prior champions of the Computer Poker Competition, and to the local best response (LBR) [39]
+algorithm. We also present results against Dong Kim, a top human HUNL expert that did best among
+the four top humans that played against Libratus. Kim played 7,500 hands. Variance was reduced
+by using AIVAT [17]. ReBeL played faster than 2 seconds per hand and never needed more than 5
+seconds for a decision.
+Beyond just poker, Table 2 shows ReBeL also converges to an approximate Nash in several versions
+of Liar’s Dice. Of course, tabular CFR does better than ReBeL when using the same number of CFR
+iterations, but tabular CFR quickly becomes intractable to run as the game grows in size.
+8
+
+Exploitabilityn
+(Relative to Initial Pot Size)
+
+Self-Play Value Net (250 Search Iterations)
+
+Random Beliefs Value Net
+Full Game
+Perfect Value Net
+Self-Play Value Net
+Self-Play Value/Policy Net
+
+10 1
+10 2
+10 3
+0
+
+50
+
+100
+150
+Search Iterations
+
+200
+
+250 0
+
+50
+
+100
+
+150
+200
+Training Epochs
+
+250
+
+300
+
+Figure 2: Convergence of different techniques in TEH. All subgames are solved using CFR-AVG. Perfect Value
+Net uses an oracle function to return the exact value of leaf nodes on each iteration. Self-Play Value Net uses a
+value function trained through self play. Self-Play Value/Policy Net additionally uses a policy network to warm
+start CFR. Random Beliefs trains the value net by sampling PBSs at random.
+
+Bot Name
+
+Slumbot
+
+BabyTartanian8 [9]
+
+LBR [39]
+
+Top Humans
+
+DeepStack [40]
+
+-
+
+-
+
+383 ± 112
+
+-
+
+Libratus [12]
+
+-
+
+63 ± 14
+
+-
+
+147 ± 39
+
+Modicum [15]
+
+11 ± 5
+
+6±3
+
+-
+
+-
+
+ReBeL (Ours)
+
+45 ± 5
+
+9±4
+
+881 ± 94
+
+165 ± 69
+
+Table 1: Head-to-head results of our agent against benchmark bots BabyTartanian8 and Slumbot, as well as top
+human expert Dong Kim, measured in thousandths of a big blind per game. We also show performance against
+LBR [39] where the LBR agent must call for the first two betting rounds, and can either fold, call, bet 1× pot, or
+bet all-in on the last two rounds. The ± shows one standard deviation. For Libratus, we list the score against all
+top humans in aggregate; Libratus beat Dong Kim by 29 with an estimated ± of 78.
+
+Algorithm
+
+1x4f
+
+1x5f
+
+1x6f
+
+2x3f
+
+Full-game FP
+Full-game CFR
+
+0.012
+0.001
+
+0.024
+0.001
+
+0.039
+0.002
+
+0.057
+0.002
+
+ReBeL FP
+ReBeL CFR-D
+
+0.041
+0.017
+
+0.020
+0.015
+
+0.040
+0.024
+
+0.020
+0.017
+
+Table 2: Exploitability of different algorithms of 4 variants of Liar’s Dice: 1 die with 4, 5, or 6 faces and 2 dice
+with 3 faces. The top two rows represent baseline numbers when a tabular version of the algorithms is run on the
+entire game for 1,024 iterations. The bottom 2 lines show the performance of ReBeL operating on subgames of
+depth 2 with 1,024 search iterations. For exploitability computation of the bottom two rows, we averaged the
+policies of 1,024 playthroughs and thus the numbers are upper bounds on exploitability.
+
+9
+
+Conclusions
+
+We present ReBeL, an algorithm that generalizes the paradigm of self-play reinforcement learning
+and search to imperfect-information games. We prove that ReBeL computes an approximate Nash
+equilibrium in two-player zero-sum games, demonstrate convergence in Liar’s Dice, and demonstrate
+that it produces superhuman performance in the benchmark game of heads-up no-limit Texas hold’em.
+ReBeL has some limitations that present avenues for future research. Most prominently, the input to
+its value and policy functions currently grows linearly with the number of infostates in a public state.
+This is intractable in games such as Recon Chess [44] that have strategic depth but very little common
+knowledge. ReBeL’s theoretical guarantees are also limited only to two-player zero-sum games.
+Nevertheless, ReBeL achieves low exploitability in benchmark games and superhuman performance
+in heads-up no-limit Texas hold’em while leveraging far less expert knowledge than any prior bot.
+We view this as a major step toward developing universal techniques for multi-agent interactions.
+9
+
+Broader Impact
+We believe ReBeL is a major step toward general equilibrium-finding algorithms that can be deployed
+in large-scale multi-agent settings while requiring relatively little domain knowledge. There are
+numerous potential future applications of this work, including auctions, negotiations, cybersecurity,
+and autonomous vehicle navigation, all of which are imperfect-information multi-agent interactions.
+The most immediate risk posed by this work is its potential for cheating in recreational games such as
+poker. While AI algorithms already exist that can achieve superhuman performance in poker, these
+algorithms generally assume that participants have a certain number of chips or use certain bet sizes.
+Retraining the algorithms to account for arbitrary chip stacks or unanticipated bet sizes requires more
+computation than is feasible in real time. However, ReBeL can compute a policy for arbitrary stack
+sizes and arbitrary bet sizes in seconds.
+Partly for this reason, we have decided not to release the code for poker. We instead open source our
+implementation for Liar’s Dice, a recreational game that is not played as competitively by humans.
+The implementation in Liar’s Dice is also easier to understand and the size of Liar’s Dice can be more
+easily adjusted, which we believe makes the game more suitable as a domain for research.
+
+References
+[1] Thomas Anthony, Zheng Tian, and David Barber. Thinking fast and slow with deep learning
+and tree search. In Advances in Neural Information Processing Systems, pages 5360–5370,
+2017.
+[2] Robert J Aumann. Agreeing to disagree. The annals of statistics, pages 1236–1239, 1976.
+[3] Jimmy Lei Ba, Jamie Ryan Kiros, and Geoffrey E Hinton. Layer normalization. arXiv preprint
+arXiv:1607.06450, 2016.
+[4] Michael Bowling, Neil Burch, Michael Johanson, and Oskari Tammelin. Heads-up limit
+hold’em poker is solved. Science, 347(6218):145–149, 2015.
+[5] George W Brown. Iterative solution of games by fictitious play. Activity analysis of production
+and allocation, 13(1):374–376, 1951.
+[6] Noam Brown, Sam Ganzfried, and Tuomas Sandholm. Hierarchical abstraction, distributed
+equilibrium computation, and post-processing, with application to a champion no-limit texas
+hold’em agent. In Proceedings of the 2015 International Conference on Autonomous Agents
+and Multiagent Systems, pages 7–15. International Foundation for Autonomous Agents and
+Multiagent Systems, 2015.
+[7] Noam Brown, Adam Lerer, Sam Gross, and Tuomas Sandholm. Deep counterfactual regret
+minimization. In International Conference on Machine Learning, pages 793–802, 2019.
+[8] Noam Brown and Tuomas Sandholm. Simultaneous abstraction and equilibrium finding in
+games. In Twenty-Fourth International Joint Conference on Artificial Intelligence, 2015.
+[9] Noam Brown and Tuomas Sandholm. Baby tartanian8: Winning agent from the 2016 annual
+computer poker competition. In IJCAI, pages 4238–4239, 2016.
+[10] Noam Brown and Tuomas Sandholm. Strategy-based warm starting for regret minimization in
+games. In Thirtieth AAAI Conference on Artificial Intelligence, 2016.
+[11] Noam Brown and Tuomas Sandholm. Safe and nested subgame solving for imperfectinformation games. In Advances in neural information processing systems, pages 689–699,
+2017.
+[12] Noam Brown and Tuomas Sandholm. Superhuman AI for heads-up no-limit poker: Libratus
+beats top professionals. Science, page eaao1733, 2017.
+[13] Noam Brown and Tuomas Sandholm. Solving imperfect-information games via discounted regret minimization. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 33,
+pages 1829–1836, 2019.
+[14] Noam Brown and Tuomas Sandholm. Superhuman AI for multiplayer poker. Science, page
+eaay2400, 2019.
+10
+
+[15] Noam Brown, Tuomas Sandholm, and Brandon Amos. Depth-limited solving for imperfectinformation games. In Advances in Neural Information Processing Systems, pages 7663–7674,
+2018.
+[16] Neil Burch, Michael Johanson, and Michael Bowling. Solving imperfect information games
+using decomposition. In Twenty-Eighth AAAI Conference on Artificial Intelligence, 2014.
+[17] Neil Burch, Martin Schmid, Matej Moravcik, Dustin Morill, and Michael Bowling. Aivat:
+A new variance reduction technique for agent evaluation in imperfect information games. In
+Thirty-Second AAAI Conference on Artificial Intelligence, 2018.
+[18] Chao-Kai Chiang, Tianbao Yang, Chia-Jung Lee, Mehrdad Mahdavi, Chi-Jen Lu, Rong Jin,
+and Shenghuo Zhu. Online optimization with gradual variations. In Conference on Learning
+Theory, pages 6–1, 2012.
+[19] Jilles Steeve Dibangoye, Christopher Amato, Olivier Buffet, and François Charpillet. Optimally
+solving dec-pomdps as continuous-state mdps. Journal of Artificial Intelligence Research,
+55:443–497, 2016.
+[20] Jakob Foerster, Francis Song, Edward Hughes, Neil Burch, Iain Dunning, Shimon Whiteson,
+Matthew Botvinick, and Michael Bowling. Bayesian action decoder for deep multi-agent
+reinforcement learning. In International Conference on Machine Learning, pages 1942–1951,
+2019.
+[21] Sam Ganzfried and Tuomas Sandholm. Potential-aware imperfect-recall abstraction with earth
+mover’s distance in imperfect-information games. In Proceedings of the Twenty-Eighth AAAI
+Conference on Artificial Intelligence, pages 682–690, 2014.
+[22] Sam Ganzfried and Tuomas Sandholm. Endgame solving in large imperfect-information games.
+In Proceedings of the 2015 International Conference on Autonomous Agents and Multiagent Systems, pages 37–45. International Foundation for Autonomous Agents and Multiagent Systems,
+2015.
+[23] Sylvain Gelly and David Silver. Combining online and offline knowledge in uct. In Proceedings
+of the 24th international conference on Machine learning, pages 273–280, 2007.
+[24] Andrew Gilpin and Tuomas Sandholm. Optimal rhode island hold’em poker. In Proceedings of
+the 20th national conference on Artificial intelligence-Volume 4, pages 1684–1685, 2005.
+[25] Andrew Gilpin and Tuomas Sandholm. A competitive texas hold’em poker player via automated
+abstraction and real-time equilibrium computation. In Proceedings of the National Conference
+on Artificial Intelligence, volume 21, page 1007. Menlo Park, CA; Cambridge, MA; London;
+AAAI Press; MIT Press; 1999, 2006.
+[26] Eric A Hansen, Daniel S Bernstein, and Shlomo Zilberstein. Dynamic programming for partially
+observable stochastic games. In AAAI, volume 4, pages 709–715, 2004.
+[27] Dan Hendrycks and Kevin Gimpel. Gaussian error linear units (gelus). arXiv preprint
+arXiv:1606.08415, 2016.
+[28] Samid Hoda, Andrew Gilpin, Javier Pena, and Tuomas Sandholm. Smoothing techniques
+for computing nash equilibria of sequential games. Mathematics of Operations Research,
+35(2):494–512, 2010.
+[29] Karel Horák and Branislav Bošanskỳ. Solving partially observable stochastic games with public
+observations. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 33,
+pages 2029–2036, 2019.
+[30] Michael Johanson, Nolan Bard, Neil Burch, and Michael Bowling. Finding optimal abstract
+strategies in extensive-form games. In Proceedings of the Twenty-Sixth AAAI Conference on
+Artificial Intelligence, pages 1371–1379, 2012.
+[31] Leslie Pack Kaelbling, Michael L Littman, and Anthony R Cassandra. Planning and acting in
+partially observable stochastic domains. Artificial intelligence, 101(1-2):99–134, 1998.
+[32] Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+arXiv:1412.6980, 2014.
+[33] Vojtěch Kovařík and Viliam Lisỳ. Problems with the efg formalism: a solution attempt using
+observations. arXiv preprint arXiv:1906.06291, 2019.
+11
+
+[34] Vojtěch Kovařík, Martin Schmid, Neil Burch, Michael Bowling, and Viliam Lisỳ. Rethinking formal models of partially observable multiagent decision making. arXiv preprint
+arXiv:1906.11110, 2019.
+[35] Christian Kroer, Gabriele Farina, and Tuomas Sandholm. Solving large sequential games with
+the excessive gap technique. In Advances in Neural Information Processing Systems, pages
+864–874, 2018.
+[36] Christian Kroer, Kevin Waugh, Fatma Kılınç-Karzan, and Tuomas Sandholm. Faster algorithms for extensive-form game solving via improved smoothing functions. Mathematical
+Programming, pages 1–33, 2018.
+[37] Adam Lerer, Hengyuan Hu, Jakob Foerster, and Noam Brown. Improving policies via search in
+cooperative partially observable games. In AAAI Conference on Artificial Intelligence, 2020.
+[38] David S Leslie and Edmund J Collins. Generalised weakened fictitious play. Games and
+Economic Behavior, 56(2):285–298, 2006.
+[39] Viliam Lisy and Michael Bowling. Eqilibrium approximation quality of current no-limit poker
+bots. In Workshops at the Thirty-First AAAI Conference on Artificial Intelligence, 2017.
+[40] Matej Moravčík, Martin Schmid, Neil Burch, Viliam Lisỳ, Dustin Morrill, Nolan Bard, Trevor
+Davis, Kevin Waugh, Michael Johanson, and Michael Bowling. Deepstack: Expert-level
+artificial intelligence in heads-up no-limit poker. Science, 356(6337):508–513, 2017.
+[41] Matej Moravcik, Martin Schmid, Karel Ha, Milan Hladik, and Stephen J Gaukrodger. Refining
+subgames in large imperfect information games. In Thirtieth AAAI Conference on Artificial
+Intelligence, 2016.
+[42] John Nash. Non-cooperative games. Annals of mathematics, pages 286–295, 1951.
+[43] Ashutosh Nayyar, Aditya Mahajan, and Demosthenis Teneketzis. Decentralized stochastic
+control with partial history sharing: A common information approach. IEEE Transactions on
+Automatic Control, 58(7):1644–1658, 2013.
+[44] Andrew J Newman, Casey L Richardson, Sean M Kain, Paul G Stankiewicz, Paul R Guseman,
+Blake A Schreurs, and Jeffrey A Dunne. Reconnaissance blind multi-chess: an experimentation platform for isr sensor fusion and resource management. In Signal Processing, Sensor/Information Fusion, and Target Recognition XXV, volume 9842, page 984209. International
+Society for Optics and Photonics, 2016.
+[45] Frans Adriaan Oliehoek. Sufficient plan-time statistics for decentralized pomdps. In TwentyThird International Joint Conference on Artificial Intelligence, 2013.
+[46] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan,
+Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative
+style, high-performance deep learning library. In Advances in neural information processing
+systems, pages 8026–8037, 2019.
+[47] Alexander Rakhlin and Karthik Sridharan. Online learning with predictable sequences. 2013.
+[48] R Tyrrell Rockafellar. Convex analysis. Number 28. Princeton university press, 1970.
+[49] Arthur L Samuel. Some studies in machine learning using the game of checkers. IBM Journal
+of research and development, 3(3):210–229, 1959.
+[50] Julian Schrittwieser, Ioannis Antonoglou, Thomas Hubert, Karen Simonyan, Laurent Sifre, Simon Schmitt, Arthur Guez, Edward Lockhart, Demis Hassabis, Thore Graepel, et al. Mastering
+atari, go, chess and shogi by planning with a learned model. arXiv preprint arXiv:1911.08265,
+2019.
+[51] John Schulman, Philipp Moritz, Sergey Levine, Michael I. Jordan, and Pieter Abbeel. Highdimensional continuous control using generalized advantage estimation. In International
+Conference on Learning Representations (ICLR), 2016.
+[52] Dominik Seitz, Vojtech Kovarík, Viliam Lisỳ, Jan Rudolf, Shuo Sun, and Karel Ha. Value
+functions for depth-limited solving in imperfect-information games beyond poker. arXiv preprint
+arXiv:1906.06412, 2019.
+[53] Jack Serrino, Max Kleiman-Weiner, David C Parkes, and Josh Tenenbaum. Finding friend
+and foe in multi-agent games. In Advances in Neural Information Processing Systems, pages
+1249–1259, 2019.
+12
+
+[54] Claude E Shannon. Programming a computer for playing chess. The London, Edinburgh, and
+Dublin Philosophical Magazine and Journal of Science, 41(314):256–275, 1950.
+[55] David Silver, Thomas Hubert, Julian Schrittwieser, Ioannis Antonoglou, Matthew Lai, Arthur
+Guez, Marc Lanctot, Laurent Sifre, Dharshan Kumaran, Thore Graepel, et al. A general
+reinforcement learning algorithm that masters chess, shogi, and go through self-play. Science,
+362(6419):1140–1144, 2018.
+[56] David Silver, Julian Schrittwieser, Karen Simonyan, Ioannis Antonoglou, Aja Huang, Arthur
+Guez, Thomas Hubert, Lucas Baker, Matthew Lai, Adrian Bolton, et al. Mastering the game of
+go without human knowledge. Nature, 550(7676):354, 2017.
+[57] Michal Šustr, Vojtěch Kovařík, and Viliam Lisỳ. Monte carlo continual resolving for online
+strategy computation in imperfect information games. In Proceedings of the 18th International
+Conference on Autonomous Agents and MultiAgent Systems, pages 224–232. International
+Foundation for Autonomous Agents and Multiagent Systems, 2019.
+[58] Vasilis Syrgkanis, Alekh Agarwal, Haipeng Luo, and Robert E Schapire. Fast convergence of
+regularized learning in games. In Advances in Neural Information Processing Systems, pages
+2989–2997, 2015.
+[59] Gerald Tesauro. TD-Gammon, a self-teaching backgammon program, achieves master-level
+play. Neural computation, 6(2):215–219, 1994.
+[60] Ben Van der Genugten. A weakened form of fictitious play in two-person zero-sum games.
+International Game Theory Review, 2(04):307–328, 2000.
+[61] Martin Zinkevich, Michael Johanson, Michael Bowling, and Carmelo Piccione. Regret minimization in games with incomplete information. In Advances in neural information processing
+systems, pages 1729–1736, 2008.
+
+13
+
+A
+
+List of contributions
+
+This paper makes several contributions, which we summarize here.
+• RL+Search in two-player zero-sum imperfect-information games. Prior work has developed RL+Search for two-player zero-sum perfect-information games. There has also
+been prior work on learning value functions in fully cooperative imperfect-information
+games [19] and limited subsets of zero-sum imperfect-information games [29]. However,
+we are not aware of any prior RL+Search algorithms for two-player zero-sum games in
+general. We view this as the central contribution of this paper.
+• Alternative to safe search techniques. Theorem 3 proves that, when doing search at test
+time with an accurate PBS value function, one can empirically play according to a Nash
+equilibrium by sampling a random iteration and passing down the beliefs produced by that
+iteration’s policy. This result applies regardless of how the value function was trained and
+therefore applies to earlier techniques that use a PBS value function, such as DeepStack [40].
+• Subgame decomposition via CFR-AVG. We describe the CFR-AVG algorithm in Appendix I. CFR-D [16] is a way to conduct depth-limited solving of a subgame with CFR
+when given a value function for PBSs. CFR-D is theoretically sound but has certain properties that may reduce performance in a self-play setting. CFR-AVG is a theoretically sound
+alternative to CFR-D that does not have these weaknesses. However, in order to implement
+CFR-AVG efficiently, in our experiments we modify the algorithm in a way that is not
+theoretically sound but empirically performs well in poker. Whether or not this modified
+form of CFR-AVG is theoretically sound remains an open question.
+• Connection between PBS gradients and infostate values. Theorem 1 proves that all of
+the algorithms described in this paper can in theory be conducted using only V1 , not v̂ (that
+is, a value function that outputs a single value for a PBS, rather than a vector of values
+for the infostates in the PBS). While this connection does not have immediate practical
+consequences, it does point toward a way of deploying the ideas in this paper to settings
+with billions or more infostates per PBS.
+• Fictitious Linear Optimistic Play (FLOP). Section H introduces FLOP, a novel variant
+of Fictitious Play that is inspired by recent work on regret minimization algorithms [13].
+We show that FLOP empirically achieves near-O( T1 ) convergence in the limit in both poker
+and Liar’s Dice, does far better than any previous variant of FP, and in some domains is a
+reasonable alternative to CFR.
+
+B
+
+Pseudocode for ReBeL
+
+Algorithm 2 presents ReBeL in more detail.
+We define the average of two policies to be the policy that is, in expectation, identical to picking one
+of the two policies and playing that policy for the entire game. Formally, if π = απ1 + (1 − α)π2 ,
+(xπ1 (si )α)π1 (si )+(xπi 2 (si )(1−α))π2 (si )
+then π(si ) = i
+where xπi 1 (si ) is the product of the probabilities
+π
+π
+x 1 (s )α+x 2 (s )(1−α)
+i
+
+i
+
+i
+
+i
+
+for all agent i actions leading to si . Formally, xπi (si ) of infostate si = (Oi0 , a0i , Oi1 , a1i , ..., Oit ) is
+xπi (si ) = Πt (ati ).
+
+C
+
+Description of Games used for Evaluation
+
+C.1
+
+Heads-up no-limit Texas hold’em poker (HUNL)
+
+HUNL is the two-player version of no-limit Texas hold’em poker, which is the most popular variant
+of poker in the world. For each “hand” (game) of poker, each player has some number of chips (the
+stack) in front of them. In our experiments, stack size varies during training between $5,000 and
+$25,000 but during testing is always $20,000, as is standard in the AI research community. Before
+play begins, Player 1 commits a small blind of $50 to the pot and Player 2 commits a big blind of
+$100 to the pot.
+14
+
+Algorithm 2 ReBeL
+function R EBEL -L INEAR -CFR-D(βr , θv , θπ , Dv , Dπ )
+. βr is the current PBS
+while !I S T ERMINAL(βr ) do
+G ← C ONSTRUCT S UBGAME(βr )
+π̄, π twarm ← I NITIALIZE P OLICY(G, θπ ) . twarm = 0 and π 0 is uniform if no warm start
+G ← S ET L EAF VALUES(βr , π twarm , θv )
+v(βr ) ← C OMPUTE EV(G, π twarm )
+tsample ∼ linear{twarm + 1, T }
+. Probability of sampling iteration t is proportional to t
+for t = (twarm + 1)..T do
+if t = tsample then
+βr0 ← S AMPLE L EAF(G, π t−1 )
+. Sample one or multiple leaf PBSs
+t
+t−1
+π ← U PDATE P OLICY(G, π )
+t
+2
+π̄ ← t+2
+π̄ + t+2
+πt
+G ← S ET L EAF VALUES(βr , π t , θv )
+t
+2
+v(βr ) ← t+2
+v(βr ) + t+2
+C OMPUTE EV(G, π t )
+Add {βr , v(βr )} to Dv
+for β ∈ G do
+Add {β, π̄(β)} to Dπ
+βr ← βr0
+
+. Add to value net training data
+. Loop over the PBS at every public state in G
+. Add to policy net training data (optional)
+
+function S ET L EAF VALUES(β, π, θv )
+if I S L EAF(β) then
+for si ∈ β do
+v(si ) = v̂(si |β, θv )
+else
+for a ∈ A(β) do
+S ET L EAF VALUES(T (β, π, a), π, θv )
+
+. For each infostate si corresponding to β
+
+function S AMPLE L EAF(G, π)
+i∗ ∼ unif{1, N }, h ∼ βr . Sample a history randomly from the root PBS and a random player
+while !I S L EAF(h) do
+c ∼ unif[0, 1]
+for i = 1..N do
+if i == i∗ and c <  then
+. we set  = 0.25 during training,  = 0 at test time
+sample an action ai uniform random
+else
+sample an action ai according to πi (si (h))
+h ∼ τ (h, a)
+return βh
+. Return the PBS corresponding to leaf node h
+
+15
+
+Once players commit their blinds, they receive two private cards from a standard 52-card deck. The
+first of four rounds of betting then occurs. On each round of betting, players take turns deciding
+whether to fold, call, or raise. If a player folds, the other player receives the money in the pot and the
+hand immediately ends. If a player calls, that player matches the opponent’s number of chips in the
+pot. If a player raises, that player adds more chips to the pot than the opponent. The initial raise of
+the round must be at least $100, and every subsequent raise on the round must be at least as large as
+the previous raise. A player cannot raise more than either player’s stack size. A round ends when
+both players have acted in the round and the most recent player to act has called. Player 1 acts first on
+the first round. On every subsequent round, player 2 acts first.
+Upon completion of the first round of betting, three community cards are publicly revealed. Upon
+completion of the second betting round, another community card is revealed, and upon completion of
+the third betting round a final fifth community card is revealed. After the fourth betting round, if no
+player has folded, then the player with the best five-card poker hand, formed from the player’s two
+private cards and the five community cards, is the winner and takes the money in the pot. In case of a
+tie, the money is split.
+C.2
+
+Turn endgame hold’em (TEH)
+
+TEH is identical to HUNL except both players automatically call for the first two betting rounds, and
+there is an initial $1,000 per player in the pot at the start of the third betting round. We randomize the
+stack sizes during training to be between $5,000 and $50,000 per player. The action space of TEH is
+reduced to at most three raise sizes (0.5× pot, 1× pot, or all-in for the first raise in a round, and 0.75×
+pot or all-in for subsequent raises), but the raise sizes for non-all-in raises are randomly perturbed by
+up to ±0.1× pot each game during training. Although we train on randomized stack sizes, bet sizes,
+and board cards, we measure exploitability on the case of both players having $20,000, unperturbed
+bet sizes, and the first four board cards being 3♠7♥T♦K♠. In this way we can train on a massive
+game while still measuring NashConv tractably. Even without the randomized stack and bet sizes,
+TEH has roughly 2 · 1011 infostates.
+C.3
+
+Liar’s Dice
+
+Liar’s Dice is a two-player zero-sum game in our experiments, though in general it can be played
+with more than two players. At the beginning of a game each player privately rolls d dice with f
+faces each. After that a betting stage starts where players take turns trying to predict how many dice
+of a specific kind there are among all the players, e.g., 4 dice with face 5. A player’s bid must either
+be for more dice than the previous player’s bid, or the same number of dice but a higher face. The
+round ends when a player challenges the previous bid (a call of liar). If all players together have at
+least as many dice of the specified face as was predicted by the last bid, then the player who made the
+bid wins. Otherwise the player who challenged the bid wins. We use the highest face as a wild face,
+i.e., dice with this face count towards a bid for any face.
+
+D
+
+Domain Knowledge Leveraged in our Poker AI Agent
+
+The most prominent form of domain knowledge in our ReBeL poker agent is the simplification of the
+action space during self play so that there are at most 8 actions at each decision point. The bet sizes
+are hand-chosen based on conventional poker wisdom and are fixed fractions of the pot, though each
+bet size is perturbed by ±0.1× pot during training to ensure diversity in the training data.
+We specifically chose not to leverage domain knowledge that has been widely used in previous poker
+AI agents:
+• All prior top poker agents, including DeepStack [40], Libratus [12], and Pluribus [14], have
+used information abstraction to bucket similar infostates together based on domain-specific
+features [30, 21, 6]. Even when computing an exact policy, such as during search or when
+solving a poker game in its entirety [24, 4], past agents have used lossless abstraction in
+which strategically identical infostates are bucketed together. For example, a flush of spades
+may be strategically identical to a flush of hearts.
+Our agent does not use any information abstraction, whether lossy or lossless. The agent
+computes a unique policy for each infostate. The agent’s input to its value and policy
+16
+
+network is a probability distribution over pairs of cards for each player, as well as all public
+board cards, the amount of money in the pot relative to the stacks of the players, and a flag
+for whether a bet has occurred on this betting round yet.
+• DeepStack trained its value network on random PBSs. In addition to reducing the dimensionality of its value network input by using information abstraction, DeepStack also sampled
+PBSs according to a handcrafted algorithm that would sample more realistic PBSs compared
+to sampling uniform random. We show in Section 8 that training on PBSs sampled uniformly
+randomly without information abstraction results in extremely poor performance in a value
+network.
+Our agent collects training data purely from self play without any additional heuristics
+guiding which PBSs are sampled, other than an exploration hyperparameter that was set to
+ = 0.25 in all experiments.
+• In cases where both players bet all their chips before all board cards are revealed, past poker
+AIs compute the exact expected value of all possible remaining board card outcomes. This
+is expensive to do in real time on earlier rounds, so past agents pre-compute this expected
+value and look it up during training and testing. Using the exact expected value reduces
+variance and makes learning easier.
+Our agent does not use this shortcut. Instead, the agent learns these “all-in” expected values
+on its own. When both agents have bet all their chips, the game proceeds as normal except
+neither player is allowed to bet.
+• The search space in DeepStack [40] extends to the start of the next betting round, except
+for the third betting round (out of four) where it instead extends to the end of the game.
+Searching to the end of the game on the third betting round was made tractable by using
+information abstraction on the fourth betting round (see above). Similarly, Libratus [11],
+Modicum [15], and Pluribus [14] all search to the end of the game when on the third betting
+round. Searching to the end of the game has the major benefit of not requiring the value
+network to learn values for the end of the third betting round. Thus, instead of the game being
+three “levels” deep, it is only two levels deep. This reduces the potential for propogation of
+errors.
+Our agent always solves to the end of the current betting round, regardless of which round it
+is on.
+• The depth-limited subgames in DeepStack extended to the start of the next betting round on
+the second betting round. On the first betting round, it extended to the end of the first betting
+round for most of training and to the start of the next betting round for the last several CFR
+iterations. Searching to the start of the next betting round was only tractable due to the
+abstractions mentioned previously and due to careful optimizations, such as implementing
+CFR on a GPU.
+Our agent always solves to the end of the current betting round regardless of which round it
+is on. We implement CFR only on a single-thread CPU and avoid any abstractions. Since a
+subgame starts at the beginning of a betting round and ends at the start of the next betting
+round, our agent must learn six “layers” of values (end of first round, start of second round,
+end of second round, start of third round, end of third round, start of fourth round) compared
+to three for DeepStack (end of first round, start of second round, start of third round).
+• DeepStack used a separate value network for each of the three “layers” of values (end of first
+round, start of second round, start of third round). Our agent uses a single value network for
+all situations.
+
+E
+
+Hyper parameters
+
+In this section we provide details of the value and policy networks and the training procedures.
+We approximate the value and policy functions using artificial neural networks. The input to the value
+network consists of three components for both games: agent index, representation of the public state,
+and a probability distribution over infostates for both agents. For poker, the public state representation
+consists of the board cards and the common pot size divided by stack size; for Liar’s Dice it is the last
+bid and the acting agent. The output of the network is a vector of values for each possible infostate of
+the indexed agent, e.g., each possible poker hand she can hold.
+17
+
+We trained a policy network only for poker. The policy network state representation additionally
+contains pot size fractions for both agents separately as well as a flag for whether there have been
+any bets so far in the round. The output is a probability distribution over the legal actions for each
+infostate.
+As explained in section 7 we use Multilayer perceptron with GeLU [27] activation functions and
+LayerNorm [3] for both value and policy networks.
+For poker we represent the public state as a concatenation of a vector of indices of the board cards,
+current pot size relative to the stack sizes, and binary flag for the acting player. The size of the full
+input is
+1(agent index) + 1(acting agent) + 1(pot) + 5(board) + 2 × 1326(infostate beliefs)
+We use card embedding for the board cards similar to [7] and then apply MLP. Both the value and
+the policy networks contain 6 hidden layers with 1536 layers each. For all experiments we set the
+probability to explore a random action to  = 25% (see Section 5.2). To store the training data we
+use a simple circular buffer of size 12M and sample uniformly. Since our action abstraction contains
+at most 9 legal actions, the size of the target vector for the policy network is 9 times bigger than one
+used for the value network. In order to make it manageable, we apply linear quantization to the policy
+values. As initial data is produced with a random value network, we remove half of the data from the
+replay buffer after 20 epochs.
+For the full game we train the network with Adam optimizer with learning rate 3 × 10−4 and halved
+the learning rate every 800 epochs. One epoch is 2,560,000 examples and the batch size 1024. We
+used 90 DGX-1 machines, each with 8 × 32GB Nvidia V100 GPUs for data generation. We report
+results after 1,750 epochs. For TEH experiments we use higher initial learning rate 4 × 10−4 , but
+halve it every 100 epochs. We report results after 300 epochs.
+For Liar’s Dice we represent the state as a concatenation of a one hot vector for the last bid and binary
+flag for the acting player. The size of the full input is
+1(agent index) + 1(acting agent) + ndice nfaces (last bid) + 2nfaces ndice (infostate beliefs).
+The value network contains 2 hidden layers with 256 layers each. We train the network with Adam
+optimizer with learning rate 3 × 10−4 and halved the learning rate every 400 epochs. One epoch
+is 25,600 examples and the batch size 512. During both training and evaluation we run the search
+algorithm for 1024 iterations. We use single GPU for training and 60 CPU threads for data generation.
+We trained the network for 1000 epochs. To reduce the variance in RL+Search results, we evaluated
+the three last checkpoints and reported averages in table 2.
+E.1
+
+Human Experiments for HUNL
+
+We evaluated our HUNL agent against Dong Kim, a top human professional specializing in HUNL.
+Kim was one of four humans that played against Libratus [12] in the man-machine competition which
+Libratus won. Kim lost the least to Libratus. However, due to high variance, it is impossible to
+statistically compare the performance of the individual humans that participated in the competition.
+A total of 7,500 hands were played between Kim and the bot. Kim was able to play from home at
+his own pace on any schedule he wanted. He was also able to play up to four games simultaneously
+against the bot. To incentivize strong play, Kim was offered a base compensation of $1 ± $0.05x
+for each hand played, where x signifies his average win/loss rate in terms of big blinds per hundred
+hands played. Kim was guaranteed a minimum of $0.75 per hand and could earn no more than $2 per
+hand. Since final compensation was based on the variance-reduced score rather than the raw score,
+Kim was not aware of his precise performance during the experiment.
+The bot played at an extremely fast pace. No decision required more than 5 seconds, and the bot
+on average plays faster than 2 seconds per hand in self play. To speed up play even further, the bot
+cached subgames it encountered on the preflop. When the same subgame was encountered again, it
+would simply reuse the solution it had already computed previously.
+Kim’s variance-reduced score, which we report in Section 8, was a loss of 165 ± 69 where the ±
+indicates one standard error. His raw score was a loss of 358 ± 188.
+18
+
+F
+
+Proof Related to Value Functions (Theorem 1)
+
+We start by proving some preliminary Lemmas. For simplicity, we will sometimes prove results for
+only one player, but the results hold WLOG for both players.
+For some policy profile π = (π1 , π2 ), let viπ (β) : B → R|Si | be a function that takes as input a PBS
+and outputs infostate values for player i.
+Lemma 1. Let V1π2 (β) be player 1’s value at β assuming that player 2 plays π2 in a 2p0s game.
+V1π2 (β) is linear in β1 .
+Proof. This follows directly from the definition of viπ (si |β) along with the definition of V1 ,
+X
+V1π2 (β) =
+β1 (s1 )v1 (s1 |β, (BR(π2 ), π2 ))
+s1 ∈S1 (spub )
+
+Lemma 2. V1 (β) = minπ2 V1π2 (β), and the set of π2 that attain V1 (β) at β0 are precisely the Nash
+equilibrium policies at β0 . This also implies that V1 (β) is concave.
+Proof. By definition, the Nash equilibrium at β is the minimum among all choices of π2 of the value
+to player 1 of her best response to π2 . Any π2 that achieves this Nash equilibrium value when playing
+a best response is a Nash equilibrium policy.
+From Lemma 1, we know that each V1π2 (β) is linear, which implies that V1 (β) is concave since any
+function that is the minimum of linear functions is concave.
+
+Figure 3: Illustration of Lemma 2. In this simple example, the subgame begins with some probability β(heads)
+of a coin being heads-up, which player 1 observes. Player 2 then guesses if the coin is heads or tails, and wins if
+he guesses correctly. The payoffs for Player 2’s pure strategies are shown as the lines marked π2heads and π2tails .
+The payoffs for a mixed strategy is a linear combination of the pure strategies. The value for player 1 is the
+minimum among all the lines corresponding to player 2 strategies, denoted by the solid lines.
+
+Now we can turn to proving the Theorem.
+Consider a function Ṽ1 that is an extension of V1 to unnormalized probability distributions over
+S1 and S2 ; i.e. Ṽi ((spub , b1 , b2 )) = Vi ((spub , b1 /|b1 |1 , b2 /|b2 |1 )). Ṽi = Vi on the simplex of valid
+|s |
+beliefs, but we extend it in this way to R≥01 \ ~0 so that we can consider gradients w.r.t. p(s1 ).
+We will use the term ‘supergradient’ to be the equivalent of the subgradient for concave functions.
+Formally, g is a supergradient of concave function F at x0 iff for any x in the domain of F ,
+F (x) − F (x0 ) ≤ g · (x − x0 ).
+Also, superg(F ) = −subg(−F ).
+19
+
+Theorem (Restatement of Theorem 1). For any belief β = (β1 , β2 ) (for the beliefs over player 1 and
+2 infostates respectively) and any policy π ∗ that is a Nash equilibrium of the subgame rooted at β,
+∗
+
+v1π (s1 |β) = V1 (β) + ḡ · ŝ1
+(3)
+for some supergradient ḡ of Ṽ1 (β) with respect to β1 , where ŝ1 is the unit vector in direction s1 .
+Proof. Lemma 2 shows that V1 (β) is a concave function in β1 , and its extension Ṽ off the simplex is
+constant perpendicular to the simplex, so Ṽ is concave as well. Therefore the notion of a supergradient
+is well-defined.
+π∗
+
+Now, consider some policy profile π ∗ = (π1∗ , π2∗ ) that is a Nash equilibrium of G(β0 ). V1 2 is a linear
+function and tangent to V1 at β0 ; therefore, its gradient is a supergradient of V1 at β0 . Its gradient is
+π∗
+
+π∗
+
+X
+
+∇β1 V1 2 (β) = ∇β1
+
+β1 (s1 )v1 2 (s1 |β)
+
+(4)
+
+s1 ∈S1 (spub )
+
+X
+
+=
+
+π∗
+
+∗
+
+ŝ1 v1 2 (s1 |β) + β(s1 )∇β1 v π2 (s1 |β)
+
+(5)
+
+s1 ∈S1 (spub )
+
+X
+
+=
+
+π∗
+
+ŝ1 v1 2 (s1 |β)
+
+(6)
+
+s1 ∈S1 (spub )
+
+Equation 6 follows from the fact that for a fixed opponent policy π2∗ , each player 1 infostate s1 is
+π∗
+an independent MDP whose value v1 2 (s1 |β) doesn’t depend on the probabilities β1 of being in the
+different infostates (although it might depend on β2 since player 1 doesn’t observe these).
+π∗
+
+Note also that the gradient of V1 2 is correct even when some infostates s1 have probability 0, due
+to the fact that we defined v1π2 (s1 |β) as the value of player 1 playing a best response to π2 at each
+infostate s1 (rather than just playing the equilibrium policy π1∗ , which may play arbitrarily at unvisited
+infostates).
+Finally, let’s compute g · ŝ1 at some β1 on the simplex (i.e. |β1 |1 = 1).
+
+
+∗
+d
+β1
+g = ∇β1 /|β1 |1 V1π (spub , β1 /|β1 |, β2 ) ·
+dβ1 |β1 |1
+
+
+X
+∗
+=
+ŝ01 v1π (s01 |β) · (|β1 |1 − β1 )/(|β1 |1 )2
+
+(chain rule)
+
+(7)
+
+(Eq. 4)
+
+(8)
+
+s01 ∈S1 (spub )
+
+
+
+
+∗
+
+X
+
+=
+
+ŝ01 v1π (s01 |β) · (1 − β1 )
+
+(since |β1 |1 = 1)
+
+(9)
+
+s01 ∈S1 (spub )
+
+=
+
+X
+
+∗
+
+ŝ01 v1π (s01 |β) −
+
+s01 ∈S1 (spub )
+
+=
+
+X
+
+X
+
+∗
+
+β1 (s01 )v1π (s01 |β)
+
+(10)
+
+s01 ∈S1 (spub )
+∗
+
+ŝ01 v1π (s01 |β) − V1 (β)
+
+(11)
+
+s01 ∈S1 (spub )
+∗
+
+g · ŝ1 = v1π (s1 |β) − V1 (β)
+
+(12)
+
+And we’re done.
+
+G
+
+Proofs Related to Subgame Solving (Theorems 2 and 3)
+
+Lemma 3. Running Algorithm 1 for N → ∞ times in a depth-limited subgame rooted at PBS βr
+∗
+will compute an infostate value vector viπ (βr ) corresponding to the values of the infostates when π ∗
+20
+
+is played in the (not depth-limited) subgame rooted at βr , where π ∗ is a √CT -Nash equilibrium for
+some constant C.
+Proof. A key part of our proof is the insight that Algorithm 1 resembles the CFR-D algorithm
+from [16] if Algorithm 1 were modified such that there was no random sampling and every call to the
+value network was replaced with a recursive call to the CFR-D algorithm.
+Suppose the subgame rooted at βr extends to the end of the game and therefore there are no calls to
+the neural network. Then CFR is proven to compute a √CT -Nash equilibrium [61], which we will call
+∗
+
+π ∗ , and Algorithm 1 will indeed learn a value vector viπ (βr ) for βr corresponding to the infostate
+values of βr when π ∗ is played in the subgame. Thus, the base case for the inductive proof holds.
+t
+
+Now suppose we have a depth-limited subgame rooted at βr . Assume that for every leaf PBS βzπ for
+iterations t ≤ T , where π t is the policy in the subgame on iteration t, that we have already computed
+∗
+t
+t
+an infostate value vector viπ (βzπ ) corresponding to the values of the infostates in βzπ when π ∗
+t
+is played in the subgame rooted at βzπ , where π ∗ is a √CT -Nash equilibrium for some constant C.
+Assume also that Lemma 3 holds for all leaf PBSs βzπ
+
+T +1
+
+.
+
+First, for leaf PBSs that neither player reaches with positive probability, the values for the leaf PBS
+have no affect on CFR or the values computed for the root infostates because CFR weights the values
+by the probability the player reaches the PBS [61].
+∗
+
+T +1
+
+t
+
+Now consider a leaf PBS βzπ
+that some player reaches with positive probability. Since viπ (βzπ )
+t
+∗
+t
+has already been computed for all βzπ and since we are running a deterministic algorithm, so viπ (βzπ )
+t
+will not change with subsequent calls of Algorithm 1 on βzπ for all t ≤ T . Thus, π t will be the same
+T +1
+for all t ≤ T . Since Algorithm 1 samples a random CFR iteration, and since the leaf PBS βzπ
+is
+sampled with positive probability for some player when iteration T + 1 is sampled, so the algorithm
+T +1
+T +1
+will sample βzπ
+N 0 times, where N 0 → ∞ as N → ∞. Since Lemma 3 holds for βzπ , so
+∗
+T +1
+T +1
+eventually viπ (βzπ ) will be computed for βzπ . Therefore, due to CFR-D [16], Lemma 3 will
+hold for βr and the inductive step is proven.
+Theorem (Restatement of Theorem 2). Consider an idealized value approximator that returns the
+most recent sample of the value for sampled PBSs, and 0 otherwise. Running Algorithm 1 with T
+iterations of CFR in each subgame will produce a value approximator that produces values that
+correspond to a √CT -equilibrium policy for any PBS that could be encountered during play, where C
+is a game-dependent constant.
+Proof. Since we run Algorithm 1 for N → ∞ times at the root of the game, so by Lemma 3,
+Theorem 2 is true.
+Theorem (Restatement of Theorem 3). If Algorithm 1 is run at test time with no off-policy exploration,
+a value network that has error at most δ for any leaf PBS, and with T iterations of CFR being used
+√ 2 )-Nash equilibrium, where C1 , C2 are
+to solve subgames, then the algorithm plays a (δC1 + δC
+T
+game-specific constants.
+Proof. We prove the theorem inductively. Consider first a subgame near the end of the game that is
+not depth-limited. I.e., it has no leaf nodes. Clearly, the policy π ∗ that Algorithm 1 using CFR plays
+in expectation is a √k1T -Nash equilibrium for game-specific constant k1 in this subgame.
+Rather than play the average policy over all T iterations π̄ T , one can equivalently pick a random
+iteration t ∼ uniform{1, T } and play according to π t , the policy on iteration t. This algorithm is
+also a √k1T -Nash equilibrium in expectation.
+Next, consider a depth-limited subgame G such that for any leaf PBS β t on any CFR iteration t, the
+policy that Algorithm 1 plays in the subgame rooted at β t is in expectation a δ-Nash equilibrium in
+the subgame. If one computes a policy for G using tabular CFR-D [16] (or, as discussed in Section I,
+using CFR-AVG), then by Theorem 2 in [16], the average policy over all iterations is k2 δ + √k3T -Nash
+equilibrium.
+21
+
+Just as before, rather than play according to this average policy π̄ T , one can equivalently pick a
+random iteration t ∼ uniform{1, T } and play according to π t . Doing so would also result in a
+k2 δ + √k3T -Nash equilibrium in expectation. This is exactly what Algorithm 1 does.
+Since there are a finite number of “levels” in a game, which is a game-specific constant, Algorithm 1
+√ 2 -Nash equilibrium.
+plays according to a δC1 + δC
+T
+
+H
+
+Fictitious Linear Optimistic Play
+
+Fictitious Play (FP) [5] is an extremely simple iterative algorithm that is proven to converge to a Nash
+equilibrium in two-player zero-sum games. However, in practice it does so at an extremely slow rate.
+On the first iteration, all agents choose a uniform policy πi0 and the average policy π̄i0 is set identically.
+On each subsequent iteration t, agents compute a best response to the other agents’ average policy
+t−1
+t−1
+πit = argmaxπi vi (πi , π̄−i
+) and update their average policies to be π̄it = t−1
++ 1t πit . As
+t π̄i
+t
+t → ∞, π̄ converges to a Nash equilibrium in two-player zero-sum games.
+It has also been proven that a family of algorithms similar to FP known as generalized weakened fictitious play (GWFP) also converge to a Nash equilibrium so long as they satisfy certain
+properties [60, 38], mostly notably that in the limit the policies on each iteration converge to best
+responses.
+In this section we introduce a novel variant of FP we call Fictitious Linear Optimistic Play (FLOP)
+which is a form of GWFP. FLOP is inspired by related variants in CFR, in particular Linear CFR [13].
+FLOP converges to a Nash equilibrium much faster than FP while still being an extremely simple
+algorithm. However, variants of CFR such as Linear CFR and Discounted CFR [13] still converge
+much faster in most large-scale games.
+In FLOP, the initial policy πi0 is uniform. On each subsequent iteration t, agents compute a best
+t−1
+response to an optimistic [18, 47, 58] form of the opponent’s average policy in which π−i
+is given
+t−1
+t−1
+t
+2
+t
+extra weight: πi = argmaxπi vi (πi , t+2 π̄−i + t+2 π−i ). The average policy is updated to be
+t−1
+2
+π̄it = t−1
++ t+1
+πit . Theorem 4 proves that FLOP is a form of GWFP and therefore converges
+t+1 π̄i
+to a Nash equilibrium as t → ∞.
+Theorem 4. FLOP is a form of Generalized Weakened Fictitious Play.
+t−1
+t
+Proof. Assume that the range of payoffs in the game is M . Since πit = argmaxπi vi (πi , t+2
+π̄−i
++
+t−1
+t−1
+2
+2
+t
+π
+),
+so
+π
+is
+an
+
+-best
+response
+to
+π̄
+where
+
+<
+M
+and
+
+→
+0
+as
+t
+→
+∞.
+Thus,
+t
+t
+t
+i
+−i
+t+2 −i
+t+2
+FLOP is a form of GWFP with αt = 2t .
+
+I
+
+CFR-AVG: CFR Decomposition using Average Strategy
+t
+
+On each iteration t of CFR-D, the value of every leaf node z is set to v̂(si (z)|βzπ ). Other than
+changing the values of leaf nodes every iteration, CFR-D is otherwise identical to CFR. If T iterations
+of CFR-D are conducted with a value network
+√ that has error at most δ for each infostate value, then
+π̄ T has exploitability of at most k1 δ + k2 / T where k1 and k2 are game-specific constants [40].
+Since it is the average policy profile π̄ t , not π t , that converges to a Nash equilibrium as t → ∞, and
+since the leaf PBSs are set based on π t , the input to the value network v̂ may span the entire domain
+of inputs even as t → ∞. For example, suppose in a Nash equilibrium π ∗ the probability distribution
+∗
+t
+at βzπ was uniform. Then the probability distribution at βzπ for any individual iteration t could be
+anything, because regardless of what the probability distribution is, the average over all iterations
+could still be uniform in the end. Thus, v̂ may need to be accurate over the entire domain of inputs
+∗
+rather than just the subspace near βzπ .
+In CFR-AVG, leaf values are instead set according to the average policy π̄ t on iteration t. When a
+leaf PBS is sampled, the leaf node is sampled with probability determined by π t , but the PBS itself is
+defined using π̄ t .
+22
+
+1x4f
+
+1x5f
+FP
+Linear FP
+FLOP
+Linear CFR
+
+Exploitability
+
+10 1
+10 2
+
+FP
+Linear FP
+FLOP
+Linear CFR
+
+10 3
+10 4
+64
+
+128
+
+256
+
+512 1024 2048 4096 8192 16384
+
+64
+
+128
+
+256
+
+1x6f
+
+512 1024 2048 4096 8192 16384
+
+2x3f
+
+Exploitability
+
+10 1
+10 2
+FP
+Linear FP
+FLOP
+Linear CFR
+
+10 3
+10 4
+64
+
+128
+
+FP
+Linear FP
+FLOP
+Linear CFR
+
+256
+
+512 1024 2048 4096 8192 16384
+64 128 256 512 1024 2048 4096 8192 16384
+Search Iterations
+Search Iterations
+Figure 4: Exploitability of different algorithms of 4 variants of Liar’s Dice: 1 die with 4, 5, or 6 faces and 2 dice
+with 3 faces. For all games FLOP outperforms Linear FP, but does not match the convergence of Linear CFR.
+
+Exploitabilityn
+(Relative to Initial Pot Size)
+
+100
+10 1
+10 2
+
+Non-alternating FP
+FP
+Optimistic FP
+Linear FP
+Linear Optimistic FP (FLOP)
+Linear CFR
+
+10 3
+10
+
+15
+
+22
+
+33
+
+49
+
+73
+
+109
+163
+244
+366
+549
+823
+Search Iterations
+Figure 5: Exploitability of different algorithms for Turn Endgame Hold’em.
+
+1234
+
+We first describe the tabular form of CFR-D [16]. Consider a game G0 and a depth-limited subgame
+G, where both G0 and G share a root but G extends only a limited number of actions into the future.
+Suppose that T iterations of a modified form of CFR are conducted in G0 . On each iteration t ≤ T ,
+the policy π(si ) is set according to CFR for each si ∈ G. However, for every infostate s0i ∈ G0 \ G,
+the policy is set differently than what CFR would call for. At each leaf public state s0pub of G, we
+t
+solve a subgame rooted at βsπ0 by running T 0 iterations of CFR. For each s0i in the subgame rooted
+pub
+
+t
+
+at βsπ0 , we set π t (s0i ) = π̄ T (s0i ) (where π t (s0i ) is the policy for the infostate in G and π̄ T (s0i ) is
+pub
+
+t
+
+the policy for the infostate in the subgame rooted at βsπ0 ). It is proven that as T 0 → ∞, CFR-D
+pub
+
+converges to a O( √1T )-Nash equilibrium [16].
+CFR-AVG is identical to CFR-D, except the subgames that are solved on each iteration t are rooted
+t
+t
+at βsπ̄0 rather than βsπ0 . Theorem 5 proves that CFR-AVG achieves the same bound on convergence
+pub
+pub
+to a Nash equilibrium as CFR-D.
+Theorem 5. Suppose that T iterations of CFR-AVG are run in a depth-limited subgame, where on
+t
+each iteration t ≤ T the subgame rooted at each leaf PBS βsπ̄0 is solved completely. Then π̄ T is a
+pub
+
+√C -Nash equilibrium for a game-specific constant C.
+T
+
+23
+
+CFR-AVG has a number of potential benefits over CFR-D:
+• Since π̄ t converges to a Nash equilibrium as t → ∞, CFR-AVG allows v̂ to focus on being
+accurate over a more narrow subspace of inputs.
+• When combined with a policy network (as introduced in Section 5.3), CFR-AVG may allow
+v̂ to focus on an even more narrow subspace of inputs.
+• Since π̄ t+1 is much closer to π̄ t than π t+1 is to π t , in practice as t becomes large one can
+avoid querying the value network on every iteration and instead recycle the values from a
+previous iteration. This may be particularly valuable for Monte Carlo versions of CFR.
+While CFR-AVG is theoretically sound, we modify its implementation in our experiments to make it
+more efficient in a way that has not been proven to be theoretically sound. The reason for this is that
+t
+while the input to the value network is βsπ̄0 (i.e., the leaf PBS corresponding to π̄ t being played in G,
+pub
+
+the output needs to be the value of each infostate si given that π t is played in G. Thus, unlike CFR-D
+and FP, in CFR-AVG there is a mismatch between the input policy and the output policy.
+t
+
+t
+
+One way to cope with this is to have the input consist of both βsπ̄0 and βsπ0 . However, we found this
+pub
+pub
+performed relatively poorly in preliminary experiments when trained through self play.
+t−1
+
+Instead, on iteration t − 1 we store the output from v̂(si |βsπ̄0
+
+pub
+
+) for each si and on iteration t we
+
+t
+t−1
+set v (si ) to be tv̂(si |βsπ̄0 ) − (t − 1)v̂(si |βsπ̄0 ) (in vanilla CFR). The motivation for this is that
+pub
+pub
+t
+t
+t−1
+t
+t−1
+
+t
+
+π = tπ̄ − (t − 1)π̄ . If v (h) = v (h) for each history h in the leaf PBS, then this modification
+of CFR-AVG is sound. Since v t (h) = v t−1 (h) when h is a full-game terminal node (i.e., it has no
+actions), this modified form of CFR-AVG is identical to CFR in a non-depth-limited game. However,
+that is not the case in a depth-limited subgame, and it remains an open question whether this modified
+form of CFR-AVG is theoretically sound in depth-limited subgames. Empirically, however, we found
+that it converges to a Nash equilibrium in turn endgame hold’em for every set of parameters (e.g., bet
+sizes, stack sizes, and initial beliefs) that we tested.
+
+Exploitabilityn
+(Relative to Initial Pot Size)
+
+Figure 6 shows the performance of CFR-D, CFR-AVG, our modified form of CFR-AVG, and FP
+in TEH when using an oracle function for the value network. It also shows the performance of
+CFR-D, our modified form of CFR-AVG, and FP in TEH when using a value network trained through
+self-play. Surprisingly, the theoretically sound form of CFR-AVG does worse than CFR-D when
+using an oracle function. However, the modified form of CFR-AVG does better than CFR-D when
+using an oracle function and also when trained through self play.
+CFR-D Oracle Value Net
+CFR-AVG Oracle Value Net
+Modified CFR-AVG Oracle Value Net
+FP Oracle Value Net
+
+10 1
+10 2
+
+CFR-D Self-Play Value Net
+Modified CFR-AVG Self-Play Value Net
+FP Self-Play Value Net
+
+10 3
+0
+
+50
+
+100
+150
+200
+250 0
+50
+100
+150
+200
+250
+Search Iterations
+Search Iterations
+Figure 6: Left: comparison of CFR-D, CFR-AVG, modified CFR-AVG, and FP using an oracle value network
+which returns exact values for leaf PBSs. Right: comparison of CFR-D, modified CFR-AVG, and FP using a
+value network learned through 300 epochs of self play.
+
+We also trained a model on HUNL with training parameters that were identical to the one reported in
+Section 8, but using CFR-D rather than CFR-AVG. That model lost to BabyTartanian8 by 10 ± 3
+whereas the CFR-AVG model won by 9 ± 4. The CFR-D model also beat Slumbot by 39 ± 6 whereas
+the CFR-AVG model won by 45 ± 5.
+I.1
+
+Proof of Theorem 5
+
+Our proof closely follows from [16] and [40].
+24
+
+Proof. Let Rt (si ) be the (cumulative) regret
+√ of infostates si on iteration t. We show that the regrets
+0
+of all infostates
+in
+G
+are
+bounded
+by
+O(
+T ) and therefore the regret of the entire game is bounded
+√
+by O( T ).
+First, consider the infostates in √
+G. Since their policies are chosen according to CFR each iteration,
+their regrets are bounded by O( T ) regardless of the policies played in descendant infostates.
+t
+
+Next consider an infostate si ∈ G0 \ G. We prove inductively that Rt (si ) ≤ 0. Let β π be the PBS
+t
+at the root of the subgame containing si in CFR-D, and β π̄ be the PBS at the root of the subgame
+t
+t
+containing si in CFR-AVG. On the first iteration, β π = β π̄ . Since we assume CFR-AVG computes
+t
+t
+an exact equilibrium in the subgame rooted at β π̄ = β π , so Rt (si ) = 0 on the first iteration.
+Next, we prove Rt+1 (si ) ≤ Rt (si ). We define a∗,t as
+a∗,t
+i = argmax
+ai
+
+t
+X
+
+0
+
+v t (si , ai )
+
+(13)
+
+t0 =0
+
+By definition of regret,
+Rt+1 (si ) =
+
+t+1
+X
+
+0
+
+0
+
+v t (si , a∗,t+1
+) − v t (si )
+i
+
+
+
+(14)
+
+t0 =0
+
+Separating iteration t + 1 from the summation we get
+Rt+1 (si ) =
+
+t
+X
+
+
+
+0
+0
+v t (si , a∗,t+1
+) − v t (si ) + v t+1 (si , ai∗,t+1 ) − v t+1 (si )
+i
+
+(15)
+
+t0 =0
+
+By definition of a∗,t
+i we know
+Rt+1 (si ) ≤
+
+t
+X
+
+Pt
+
+t0 =0 v
+
+t0
+
+(si , a∗,t+1
+)≤
+i
+
+Pt
+
+t0 =0 v
+
+t0
+
+(si , a∗,t
+i ), so
+
+
+
+0
+t0
+t+1
+v t (si , a∗,t
+(si , a∗,t+1
+) − v t+1 (si )
+i ) − v (si ) + v
+i
+
+(16)
+
+t0 =0
+
+Since
+
+Pt
+
+t0 =0
+
+
+0
+t0
+t
+v t (si , a∗,t
+i ) − v (si ) is the definition of R (si ) we get
+
+Rt+1 (si ) ≤ Rt (si ) + v t+1 (si , a∗,t+1
+) − v t+1 (si )
+i
+
+(17)
+
+Since π t+1 = π ∗,t+1 in the subgame where π ∗,t+1 is an exact equilibrium of the subgame rooted at
+t+1
+β π̄ , so π t+1 is a best response to π̄ t+1 in the subgame and therefore v t+1 (si , a∗,t+1
+) = v t+1 (si ).
+i
+Thus,
+Rt+1 (si ) ≤ Rt (si )
+(18)
+
+J
+
+CFR Warm Start Algorithm Used
+
+Our warm start technique for CFR is based on [10], which requires only a policy profile to warm start
+CFR soundly. That techniques computes a “soft” best response to the policy profile, which results in
+instantaneous regrets for each infostate. Those instantaneous regrets are scaled up to be equivalent
+to some number of CFR iterations. However, that technique requires careful parameter tuning to
+achieve good performance in practice.
+We instead use a simplified warm start technique in which an exact best response to the policy profile
+is computed. That best response results in instantaneous regrets at each infostate. Those regrets are
+scaled up by a factor of 15 to imitate 15 CFR iterations. Similarly, the average policy effectively
+assumes that the warm start policy was played for the first 15 iterations of CFR. CFR then proceeds
+as if 15 iterations have already occurred.
+
+25
+
+
