@@ -717,6 +717,7 @@ class SelfPlayTrainer:
                         batch.update_step_log_probs(batch_indices, log_probs)
 
     @profile
+    @torch.no_grad()
     def collect_tensor_trajectories(
         self,
         min_steps: int = 0,
@@ -826,106 +827,100 @@ class SelfPlayTrainer:
             )
 
             # Get model predictions for active environments only
-            with torch.no_grad():
-                # Add pre-action context token
-                if self.is_transformer and isinstance(
-                    self.state_encoder, TokenSequenceBuilder
-                ):
-                    self.state_encoder.add_context(active_indices)
+            # Add pre-action context token
+            if self.is_transformer and isinstance(
+                self.state_encoder, TokenSequenceBuilder
+            ):
+                self.state_encoder.add_context(active_indices)
 
-                env_logits.zero_()
-                env_values.zero_()
+            env_logits.zero_()
+            env_values.zero_()
 
-                # active_first_action = ~self.tensor_env.acted_since_reset[active_indices]
+            # active_first_action = ~self.tensor_env.acted_since_reset[active_indices]
 
-                # Get predictions from our model for our turns
-                if env_active_we_act.numel() > 0:
-                    # Encode states from our perspective (player=0)
-                    our_states = self.state_encoder.encode_tensor_states(
-                        player=0, idxs=env_active_we_act
+            # Get predictions from our model for our turns
+            if env_active_we_act.numel() > 0:
+                # Encode states from our perspective (player=0)
+                our_states = self.state_encoder.encode_tensor_states(
+                    player=0, idxs=env_active_we_act
+                )
+
+                outputs = self._model_with_kv_cache(
+                    self.model, our_states, opponent_idx=-1
+                )
+
+                if torch.isnan(outputs.policy_logits).any():
+                    nan_envs = torch.where(
+                        torch.isnan(outputs.policy_logits).any(dim=-1)
+                    )[0]
+                    print(
+                        "[SelfPlayTrainer] NaN policy logits detected",
+                        {
+                            "env_indices": env_active_we_act[nan_envs].tolist(),
+                            "logits": outputs.policy_logits[nan_envs]
+                            .detach()
+                            .cpu()
+                            .tolist(),
+                        },
+                    )
+                if torch.isnan(outputs.value).any():
+                    nan_envs = torch.where(torch.isnan(outputs.value))[0]
+                    print(
+                        "[SelfPlayTrainer] NaN values detected",
+                        {
+                            "env_indices": env_active_we_act[nan_envs].tolist(),
+                            "values": outputs.value[nan_envs].detach().cpu().tolist(),
+                        },
+                    )
+
+                env_logits[env_active_we_act] = outputs.policy_logits.float()
+                value_tensor = outputs.value.float()
+                if self.popart_normalizer is not None:
+                    value_tensor = self.popart_normalizer.denormalize_value(
+                        value_tensor
+                    )
+                env_values[env_active_we_act] = value_tensor
+
+            # Get predictions from opponent models for opponent turns
+            if opp_env_groups is not None and env_active_opp_acts.numel() > 0:
+                for opponent_idx, opp_env_indices in enumerate(opp_env_groups):
+                    opponent = all_opponent_snapshots[opponent_idx]
+
+                    opp_working_env_indices = opp_env_indices[
+                        env_active_opp_acts_mask[opp_env_indices]
+                    ]
+
+                    if opp_working_env_indices.numel() == 0:
+                        continue
+
+                    opp_states = self.state_encoder.encode_tensor_states(
+                        player=1, idxs=opp_working_env_indices
                     )
 
                     outputs = self._model_with_kv_cache(
-                        self.model, our_states, opponent_idx=-1
+                        opponent.model,
+                        opp_states,
+                        opponent_idx=opponent_idx,
                     )
-
-                    if torch.isnan(outputs.policy_logits).any():
-                        nan_envs = torch.where(
-                            torch.isnan(outputs.policy_logits).any(dim=-1)
-                        )[0]
-                        print(
-                            "[SelfPlayTrainer] NaN policy logits detected",
-                            {
-                                "env_indices": env_active_we_act[nan_envs].tolist(),
-                                "logits": outputs.policy_logits[nan_envs]
-                                .detach()
-                                .cpu()
-                                .tolist(),
-                            },
-                        )
-                    if torch.isnan(outputs.value).any():
-                        nan_envs = torch.where(torch.isnan(outputs.value))[0]
-                        print(
-                            "[SelfPlayTrainer] NaN values detected",
-                            {
-                                "env_indices": env_active_we_act[nan_envs].tolist(),
-                                "values": outputs.value[nan_envs]
-                                .detach()
-                                .cpu()
-                                .tolist(),
-                            },
-                        )
-
-                    env_logits[env_active_we_act] = outputs.policy_logits.float()
+                    env_logits[opp_working_env_indices] = outputs.policy_logits.float()
                     value_tensor = outputs.value.float()
                     if self.popart_normalizer is not None:
                         value_tensor = self.popart_normalizer.denormalize_value(
                             value_tensor
                         )
-                    env_values[env_active_we_act] = value_tensor
+                    env_values[opp_working_env_indices] = value_tensor
 
-                # Get predictions from opponent models for opponent turns
-                if opp_env_groups is not None and env_active_opp_acts.numel() > 0:
-                    for opponent_idx, opp_env_indices in enumerate(opp_env_groups):
-                        opponent = all_opponent_snapshots[opponent_idx]
-
-                        opp_working_env_indices = opp_env_indices[
-                            env_active_opp_acts_mask[opp_env_indices]
-                        ]
-
-                        if opp_working_env_indices.numel() == 0:
-                            continue
-
-                        opp_states = self.state_encoder.encode_tensor_states(
-                            player=1, idxs=opp_working_env_indices
-                        )
-
-                        outputs = self._model_with_kv_cache(
-                            opponent.model,
-                            opp_states,
-                            opponent_idx=opponent_idx,
-                        )
-                        env_logits[opp_working_env_indices] = (
-                            outputs.policy_logits.float()
-                        )
-                        value_tensor = outputs.value.float()
-                        if self.popart_normalizer is not None:
-                            value_tensor = self.popart_normalizer.denormalize_value(
-                                value_tensor
-                            )
-                        env_values[opp_working_env_indices] = value_tensor
-
-                active_env_logits = env_logits[active_indices]
-                active_env_legal_mask = legal_bins_mask[active_indices]
-                action_bins_active, log_probs_active_full = self.policy.action_batch(
-                    active_env_logits, active_env_legal_mask
+            active_env_logits = env_logits[active_indices]
+            active_env_legal_mask = legal_bins_mask[active_indices]
+            action_bins_active, log_probs_active_full = self.policy.action_batch(
+                active_env_logits, active_env_legal_mask
+            )
+            if not active_env_legal_mask.gather(
+                1, action_bins_active.unsqueeze(1)
+            ).all():
+                raise ValueError(
+                    f"Action bins {action_bins_active} are not legal in active environments {active_indices}"
                 )
-                if not active_env_legal_mask.gather(
-                    1, action_bins_active.unsqueeze(1)
-                ).all():
-                    raise ValueError(
-                        f"Action bins {action_bins_active} are not legal in active environments {active_indices}"
-                    )
 
             # Create full-size tensors for stepping (needed by tensor_env.step_bins)
             action_bins = torch.full(
