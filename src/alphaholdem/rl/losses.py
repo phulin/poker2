@@ -33,6 +33,7 @@ class LossResult:
     penalty_kl: Optional[float] = None
     forward_kl: Optional[float] = None
     reverse_kl: Optional[float] = None
+    cfr_kl: Optional[float] = None
     # Optional fields for specific loss types
     clipped_ratio_mean: Optional[float] = None
     clipped_ratio_std: Optional[float] = None
@@ -710,5 +711,5 @@ class CFRDistillationLoss(LossCalculator):
             clipfrac=0.0,  # Not applicable for CFR
             ppo_clipfrac=0.0,  # Not applicable for CFR
             return_clipfrac=return_clipfrac.item(),
-            forward_kl=cfr_model_kl,  # Use forward_kl field for CFR-model KL
+            cfr_kl=cfr_model_kl,  # Use forward_kl field for CFR-model KL
         )

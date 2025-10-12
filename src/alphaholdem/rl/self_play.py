@@ -1345,35 +1345,6 @@ class SelfPlayTrainer:
                     search_end_time = time.time()
                     search_time_ms = (search_end_time - search_start_time) * 1000
 
-                    # Compute KL divergence between model policy and CFR target
-                    # Get model policy in 4-action space
-                    masked_logits = compute_masked_logits(logits, batch.legal_masks)
-                    model_probs_full = F.softmax(masked_logits, dim=-1)
-                    model_probs_4 = CFRManager.collapse_policy_full_to_4(
-                        model_probs_full
-                    )
-
-                    # Normalize probabilities
-                    cfr_target_stable = cfr_target + 1e-8
-                    model_probs_4_stable = model_probs_4 + 1e-8
-                    cfr_target_norm = cfr_target_stable / cfr_target_stable.sum(
-                        dim=-1, keepdim=True
-                    )
-                    model_probs_4_norm = (
-                        model_probs_4_stable
-                        / model_probs_4_stable.sum(dim=-1, keepdim=True)
-                    )
-
-                    cfr_kl_div = (
-                        (
-                            cfr_target_norm
-                            * torch.log(cfr_target_norm / model_probs_4_norm)
-                        )
-                        .sum(dim=-1)
-                        .mean()
-                        .item()
-                    )
-
                 with self._autocast():
                     loss_result = self.loss_calculator.compute_loss(
                         logits=logits,
@@ -1620,7 +1591,7 @@ class SelfPlayTrainer:
         # Add search metrics
         if self.cfg.search.enabled:
             result["search_time_ms"] = search_time_ms
-            result["cfr_kl_div"] = cfr_kl_div
+            result["cfr_kl_div"] = loss_result.cfr_kl
             result["search.root_entropy"] = root_entropy
 
         return result
