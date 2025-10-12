@@ -8,6 +8,7 @@ from alphaholdem.models.transformer.structured_embedding_data import (
 from alphaholdem.models.transformer.tokens import Context as Ctx
 from alphaholdem.models.transformer.tokens import Special
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
+from alphaholdem.core.structured_config import Config
 
 
 class TestVectorizedReplayBuffer:
@@ -17,14 +18,21 @@ class TestVectorizedReplayBuffer:
     def buffer(self):
         """Create a test buffer."""
         device = torch.device("cpu")  # Use CPU for testing
+        cfg = Config()
+        cfg.env.stack = 1000
+        cfg.env.sb = 5
+        cfg.env.bb = 10
+        cfg.env.bet_bins = [0.5, 0.75, 1.0]
+        cfg.env.flop_showdown = False
+        cfg.model.num_bet_bins = 6
+        cfg.train.max_trajectory_length = 20
+        cfg.train.max_sequence_length = 50
         return VectorizedReplayBuffer(
             capacity=10,  # Number of trajectories
-            max_trajectory_length=20,  # Max steps per trajectory
-            num_bet_bins=5,  # Number of bet bins (replaces legal_mask_dim)
+            cfg=cfg,
             device=device,
             float_dtype=torch.float32,  # Add missing float_dtype parameter
             is_transformer=True,  # Use transformer mode for tests
-            max_sequence_length=50,  # Sequence length for transformer
         )
 
     def test_initialization(self, buffer):
@@ -40,7 +48,11 @@ class TestVectorizedReplayBuffer:
         assert buffer.data.card_ranks.shape == (10, 50)  # Card ranks
         assert buffer.data.card_suits.shape == (10, 50)  # Card suits
         assert buffer.data.action_actors.shape == (10, 50)  # Action actors
-        assert buffer.data.action_legal_masks.shape == (10, 50, 5)  # Action legal masks
+        assert buffer.data.action_legal_masks.shape == (
+            10,
+            50,
+            buffer.num_bet_bins,
+        )  # Action legal masks
         # Ctx imported at module top
 
         assert buffer.data.context_features.shape == (
@@ -51,10 +63,10 @@ class TestVectorizedReplayBuffer:
         assert buffer.transition_token_ends.shape == (10, 20)
         assert buffer.current_token_positions.shape == (10,)
         assert buffer.action_indices.shape == (10, 20)  # Action indices
-        assert buffer.logits.shape == (10, 20, 5)
+        assert buffer.logits.shape == (10, 20, buffer.num_bet_bins)
         assert buffer.rewards.shape == (10, 20)
         assert buffer.dones.shape == (10, 20)
-        assert buffer.legal_masks.shape == (10, 20, 5)
+        assert buffer.legal_masks.shape == (10, 20, buffer.num_bet_bins)
         assert buffer.delta2.shape == (10, 20)
         assert buffer.delta3.shape == (10, 20)
         assert buffer.values.shape == (10, 20)
@@ -615,7 +627,7 @@ class TestVectorizedReplayBuffer:
         rewards_step1, dones_step1, *_ = env.step_bins(actions_step1)
 
         # Record our action for env0 (player 0 acted)
-        batch_env0 = self._create_test_batch_single_step(1, device)
+        batch_env0 = self._create_test_batch_single_step(1, buffer.num_bet_bins, device)
         batch_env0["action_indices"][0] = actions_step1[0]
         batch_env0["rewards"][0] = rewards_step1[0]
         batch_env0["dones"][0] = dones_step1[0]
@@ -641,7 +653,7 @@ class TestVectorizedReplayBuffer:
         assert rewards_step2[1] < 0  # Player 0 loses when folding
 
         # Record our action for env1 (player 0 folded)
-        batch_env1 = self._create_test_batch_single_step(1, device)
+        batch_env1 = self._create_test_batch_single_step(1, buffer.num_bet_bins, device)
         batch_env1["action_indices"][0] = actions_step2[1]
         batch_env1["rewards"][0] = rewards_step2[1]
         batch_env1["dones"][0] = dones_step2[1]
@@ -1209,14 +1221,19 @@ class TestVectorizedReplayBuffer:
     def _create_test_batch(self, batch_size: int, device: torch.device) -> dict:
         """Create a test batch with random data."""
         # Create a temporary buffer to read constants (num_bet_bins, context width, max seq)
+        cfg = Config()
+        cfg.env.stack = 1000
+        cfg.env.sb = 5
+        cfg.env.bb = 10
+        cfg.env.bet_bins = [0.5, 0.75, 1.0]
+        cfg.env.flop_showdown = False
+        cfg.model.num_bet_bins = 5
         tmp_buf = VectorizedReplayBuffer(
             capacity=batch_size,
-            max_trajectory_length=20,
-            num_bet_bins=5,
+            cfg=cfg,
             device=device,
             float_dtype=torch.float32,
             is_transformer=True,
-            max_sequence_length=50,
         )
         S = tmp_buf.max_sequence_length
         B = tmp_buf.num_bet_bins
@@ -1267,7 +1284,7 @@ class TestVectorizedReplayBuffer:
         env_indices = torch.tensor([0], device=device)
 
         # First step
-        batch_data = self._create_test_batch_single_step(1, device)
+        batch_data = self._create_test_batch_single_step(1, buffer.num_bet_bins, device)
         batch_data["dones"][:] = False  # Not done yet
 
         buffer.add_transitions(
@@ -1284,7 +1301,9 @@ class TestVectorizedReplayBuffer:
         )
 
         # Second step
-        batch_data2 = self._create_test_batch_single_step(1, device)
+        batch_data2 = self._create_test_batch_single_step(
+            1, buffer.num_bet_bins, device
+        )
         batch_data2["dones"][:] = True  # Mark as done
 
         buffer.add_transitions(
@@ -1330,7 +1349,7 @@ class TestVectorizedReplayBuffer:
         buffer.start_adding_trajectory_batches(3, model_age=0)
 
         # Add first step for each trajectory
-        batch_data = self._create_test_batch_single_step(3, device)
+        batch_data = self._create_test_batch_single_step(3, buffer.num_bet_bins, device)
         batch_data["dones"][:] = False  # Not done yet
 
         env_indices = torch.tensor([0, 1, 2], device=device)
@@ -1349,7 +1368,9 @@ class TestVectorizedReplayBuffer:
         )
 
         # Add second step for each trajectory
-        batch_data2 = self._create_test_batch_single_step(3, device)
+        batch_data2 = self._create_test_batch_single_step(
+            3, buffer.num_bet_bins, device
+        )
         batch_data2["dones"][:] = False  # Still not done
 
         buffer.add_transitions(
@@ -1402,7 +1423,7 @@ class TestVectorizedReplayBuffer:
         buffer.start_adding_trajectory_batches(5, model_age=0)
 
         # Add first step for all trajectories
-        batch_data = self._create_test_batch_single_step(5, device)
+        batch_data = self._create_test_batch_single_step(5, buffer.num_bet_bins, device)
         batch_data["dones"][:] = False  # Not done yet
 
         env_indices = torch.tensor([0, 1, 2, 3, 4], device=device)
@@ -1421,7 +1442,9 @@ class TestVectorizedReplayBuffer:
         )
 
         # Add second step for all trajectories
-        batch_data2 = self._create_test_batch_single_step(5, device)
+        batch_data2 = self._create_test_batch_single_step(
+            5, buffer.num_bet_bins, device
+        )
         # Mark some trajectories as complete, others as incomplete
         batch_data2["dones"][0] = True  # Trajectory 0: complete
         batch_data2["dones"][1] = True  # Trajectory 1: complete
@@ -1476,7 +1499,9 @@ class TestVectorizedReplayBuffer:
         # Fill buffer to capacity to force wraparound
         buffer.start_adding_trajectory_batches(10, model_age=0)
 
-        batch_data = self._create_test_batch_single_step(10, device)
+        batch_data = self._create_test_batch_single_step(
+            10, buffer.num_bet_bins, device
+        )
         batch_data["dones"][:] = True  # Mark all as complete
 
         env_indices = torch.arange(10, device=device)
@@ -1503,7 +1528,9 @@ class TestVectorizedReplayBuffer:
         # Add new trajectories to overwrite old ones
         buffer.start_adding_trajectory_batches(3, model_age=0)
 
-        new_batch_data = self._create_test_batch_single_step(3, device)
+        new_batch_data = self._create_test_batch_single_step(
+            3, buffer.num_bet_bins, device
+        )
         new_batch_data["dones"][:] = False  # Mark as incomplete first
 
         new_env_indices = torch.tensor([10, 11, 12], device=device)
@@ -1554,11 +1581,9 @@ class TestVectorizedReplayBuffer:
         assert buffer.trajectory_lengths[2] == 1
 
     def _create_test_batch_single_step(
-        self, batch_size: int, device: torch.device
+        self, batch_size: int, num_bet_bins: int, device: torch.device
     ) -> dict:
         """Create a test batch with random data for single steps."""
-        from alphaholdem.models.transformer.tokens import Context as Ctx
-
         embedding_data = StructuredEmbeddingData(
             token_ids=torch.randint(
                 0,
@@ -1595,7 +1620,9 @@ class TestVectorizedReplayBuffer:
                 device=device,
                 dtype=torch.long,
             ),
-            action_legal_masks=torch.ones(batch_size, 50, 5, device=device).bool(),
+            action_legal_masks=torch.ones(
+                batch_size, 50, num_bet_bins, device=device
+            ).bool(),
             action_amounts=torch.randint(
                 0, 100, (batch_size, 50), device=device, dtype=torch.int32
             ),
@@ -1610,18 +1637,24 @@ class TestVectorizedReplayBuffer:
         )
         return {
             "embedding_data": embedding_data,
-            "action_indices": torch.randint(0, 5, (batch_size,), device=device),
-            "logits": torch.randn(batch_size, 5, device=device),
+            "action_indices": torch.randint(
+                0, num_bet_bins, (batch_size,), device=device
+            ),
+            "logits": torch.randn(batch_size, num_bet_bins, device=device),
             "rewards": torch.randn(batch_size, device=device),
             "dones": torch.zeros(batch_size, dtype=torch.bool, device=device),
-            "legal_masks": torch.ones(batch_size, 5, device=device).bool(),
+            "legal_masks": torch.ones(batch_size, num_bet_bins, device=device).bool(),
             "delta2": torch.randn(batch_size, device=device),
             "delta3": torch.randn(batch_size, device=device),
             "values": torch.randn(batch_size, device=device),
         }
 
     def _create_test_batch_complete(
-        self, batch_size: int, device: torch.device, trajectory_length: int = 3
+        self,
+        batch_size: int,
+        num_bet_bins: int,
+        device: torch.device,
+        trajectory_length: int = 3,
     ) -> dict:
         """Create a test batch with random data for complete trajectories."""
         embedding_data = StructuredEmbeddingData(
@@ -1661,7 +1694,7 @@ class TestVectorizedReplayBuffer:
                 dtype=torch.uint8,
             ),
             action_legal_masks=torch.ones(
-                batch_size, trajectory_length, 50, 5, device=device
+                batch_size, trajectory_length, 50, num_bet_bins, device=device
             ).bool(),
             action_amounts=torch.zeros(
                 batch_size, trajectory_length, 50, dtype=torch.int32, device=device
@@ -1691,7 +1724,7 @@ class TestVectorizedReplayBuffer:
                 batch_size, trajectory_length, dtype=torch.bool, device=device
             ),
             "legal_masks": torch.ones(
-                batch_size, trajectory_length, 5, device=device
+                batch_size, trajectory_length, num_bet_bins, device=device
             ).bool(),
             "delta2": torch.randn(batch_size, trajectory_length, device=device),
             "delta3": torch.randn(batch_size, trajectory_length, device=device),
@@ -1699,10 +1732,9 @@ class TestVectorizedReplayBuffer:
         }
 
     def _create_test_embedding_data(
-        self, batch_size: int, device: torch.device, length: int
+        self, batch_size: int, num_bet_bins: int, device: torch.device, length: int
     ) -> StructuredEmbeddingData:
         """Create test embedding data for testing."""
-        from alphaholdem.models.transformer.tokens import Context as Ctx
 
         return StructuredEmbeddingData(
             token_ids=torch.randint(
@@ -1720,7 +1752,9 @@ class TestVectorizedReplayBuffer:
             action_actors=torch.randint(
                 0, 2, (batch_size, length), device=device, dtype=torch.uint8
             ),
-            action_legal_masks=torch.ones(batch_size, length, 5, device=device).bool(),
+            action_legal_masks=torch.ones(
+                batch_size, length, num_bet_bins, device=device
+            ).bool(),
             action_amounts=torch.randint(
                 0, 100, (batch_size, length), device=device, dtype=torch.uint16
             ),
@@ -1736,7 +1770,9 @@ class TestVectorizedReplayBuffer:
         buffer.start_adding_trajectory_batches(2, model_age=0)
 
         # Add some tokens to create trajectories
-        embedding_data = self._create_test_embedding_data(2, buffer.device, 10)
+        embedding_data = self._create_test_embedding_data(
+            2, buffer.num_bet_bins, buffer.device, 10
+        )
         trajectory_indices = torch.tensor([0, 1], device=buffer.device)
         buffer.add_tokens(embedding_data, trajectory_indices)
 
@@ -1763,7 +1799,7 @@ class TestVectorizedReplayBuffer:
 
         # Create embedding data with total lengths (not just new data)
         embedding_data = self._create_test_embedding_data(
-            2, buffer.device, 8
+            2, buffer.num_bet_bins, buffer.device, 8
         )  # Total length 8
         embedding_data.lengths[0] = 8  # Total length for first trajectory
         embedding_data.lengths[1] = 7  # Total length for second trajectory
@@ -1777,7 +1813,9 @@ class TestVectorizedReplayBuffer:
         assert buffer.current_token_positions[1] == 7
 
         # Test error when embedding length decreases
-        embedding_data_decreased = self._create_test_embedding_data(2, buffer.device, 5)
+        embedding_data_decreased = self._create_test_embedding_data(
+            2, buffer.num_bet_bins, buffer.device, 5
+        )
         embedding_data_decreased.lengths[0] = 2  # Less than current position 8
         embedding_data_decreased.lengths[1] = 1  # Less than current position 7
         with pytest.raises(
@@ -1786,7 +1824,9 @@ class TestVectorizedReplayBuffer:
             buffer._append_from_embedding(buffer_indices, embedding_data_decreased)
 
         # Test error when sequence length exceeded
-        embedding_data_too_long = self._create_test_embedding_data(2, buffer.device, 60)
+        embedding_data_too_long = self._create_test_embedding_data(
+            2, buffer.num_bet_bins, buffer.device, 60
+        )
         embedding_data_too_long.lengths[0] = 60  # Exceeds max sequence length
         embedding_data_too_long.lengths[1] = 60
         with pytest.raises(

@@ -11,6 +11,7 @@ from alphaholdem.core.structured_config import KLType, PPOClipping, ValueLossTyp
 from alphaholdem.rl.exponential_controller import ExponentialController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.vectorized_replay import BatchSample
+from alphaholdem.search.cfr_manager import CFRManager
 from alphaholdem.utils.ema import EMA
 
 
@@ -144,7 +145,6 @@ class TrinalClipPPOLoss(LossCalculator):
             logits: Policy logits (B, num_actions)
             values: Value predictions (B,)
             batch: Batch sample containing actions, advantages, returns, etc.
-            kl_divergence: KL divergence between old and new policy logits
 
         Returns:
             LossResult containing loss components and metrics
@@ -255,7 +255,7 @@ class StandardPPOLoss(LossCalculator):
 
         # Standard PPO policy loss
         clipped_ratio = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon)
-        policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
+        policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
 
         # Compute PPO clipping fraction
         ppo_clipfrac = (torch.abs(clipped_ratio - ratio) > 1e-8).float().mean()
@@ -573,4 +573,141 @@ class KLPolicyPPOLoss(LossCalculator):
             clipfrac=clipfrac.item(),
             ppo_clipfrac=ppo_clipfrac.item(),
             return_clipfrac=return_clipfrac.item(),
+        )
+
+
+class CFRDistillationLoss(LossCalculator):
+    """
+    CFR Distillation Loss that trains policy to match CFR equilibrium targets.
+
+    Uses KL divergence between model policy and CFR target policy for policy loss,
+    while keeping standard value loss and entropy regularization.
+    """
+
+    def __init__(
+        self,
+        popart_normalizer: Optional[PopArtNormalizer],
+        value_coef: float = 1.0,
+        entropy_coef: float = 0.01,
+        value_loss_type: ValueLossType = ValueLossType.mse,
+        huber_delta: float = 1.0,
+    ):
+        """
+        Initialize CFR Distillation loss calculator.
+
+        Args:
+            popart_normalizer: PopArtNormalizer instance for value normalization
+            value_coef: Value loss coefficient
+            entropy_coef: Entropy regularization coefficient
+            value_loss_type: Type of value loss ("mse" or "huber")
+            huber_delta: Delta parameter for Huber loss
+        """
+        super().__init__(
+            epsilon=0.2,  # Not used but required by parent
+            value_coef=value_coef,
+            entropy_coef=entropy_coef,
+            value_loss_type=value_loss_type,
+            huber_delta=huber_delta,
+        )
+        self.popart = popart_normalizer
+
+    def compute_loss(
+        self,
+        logits: torch.Tensor,
+        values: torch.Tensor,
+        batch: BatchSample,
+        value_quantiles: Optional[torch.Tensor] = None,
+        cfr_target: Optional[torch.Tensor] = None,
+    ) -> LossResult:
+        """
+        Compute CFR Distillation loss.
+
+        Args:
+            logits: Policy logits (B, num_actions)
+            values: Value predictions (B,)
+            batch: Batch sample containing actions, advantages, returns, etc.
+            cfr_target: CFR target policy for distillation (B, 4)
+
+        Returns:
+            LossResult containing loss components and metrics
+        """
+        if cfr_target is None:
+            raise ValueError("CFRDistillationLoss requires cfr_target to be provided")
+
+        returns = batch.returns
+        delta2 = batch.delta2
+        delta3 = batch.delta3
+
+        # Mask illegal actions
+        legal_masks = batch.legal_masks.bool()
+        masked_logits = torch.where(legal_masks, logits, -1e9)
+
+        # Get model policy in full action space
+        model_probs_full = F.softmax(masked_logits, dim=-1)
+
+        # Collapse model policy to 4 actions for comparison with CFR target
+        model_probs_4 = CFRManager.collapse_policy_full_to_4(model_probs_full)
+
+        # Compute KL divergence: KL(cfr_target || model_probs_4)
+        # Add small epsilon for numerical stability
+        cfr_target_stable = cfr_target + 1e-8
+        model_probs_4_stable = model_probs_4 + 1e-8
+
+        # Normalize probabilities
+        cfr_target_norm = cfr_target_stable / cfr_target_stable.sum(
+            dim=-1, keepdim=True
+        )
+        model_probs_4_norm = model_probs_4_stable / model_probs_4_stable.sum(
+            dim=-1, keepdim=True
+        )
+
+        # Compute KL divergence per sample
+        kl_div_per_sample = (
+            cfr_target_norm * torch.log(cfr_target_norm / model_probs_4_norm)
+        ).sum(dim=-1)
+
+        # Policy loss is mean KL divergence
+        policy_loss = kl_div_per_sample.mean()
+
+        # Value loss with clipping (as per AlphaHoldem paper)
+        clipped_returns = torch.clamp(returns, delta2, delta3)
+        return_clipfrac = (torch.abs(clipped_returns - returns) > 1e-8).float().mean()
+
+        # Use frozen stats for normalization during training
+        mu_frozen, sigma_frozen = self.popart.get_frozen_stats()
+        targets_n = (clipped_returns - mu_frozen) / (sigma_frozen + 1e-8)
+
+        if self.value_loss_type == ValueLossType.huber:
+            value_loss = F.smooth_l1_loss(values, targets_n, beta=self.huber_delta)
+        else:
+            value_loss = F.mse_loss(values, targets_n)
+
+        # Entropy regularization (compute only if enabled)
+        if self.entropy_coef != 0.0:
+            log_probs = F.log_softmax(masked_logits, dim=-1)
+            probs = torch.exp(log_probs)
+            entropy = -(probs * log_probs).sum(dim=-1).mean()
+        else:
+            entropy = torch.tensor(0.0, dtype=values.dtype, device=values.device)
+
+        # Total loss (pass back through total_loss; policy_loss field can be 0)
+        total_loss = (
+            policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+        )
+
+        # Compute CFR vs model KL for logging
+        cfr_model_kl = kl_div_per_sample.mean().item()
+
+        return LossResult(
+            total_loss=total_loss,
+            policy_loss=policy_loss.item(),
+            value_loss_tensor=value_loss,
+            entropy=entropy.item(),
+            ratio_mean=0.0,  # Not applicable for CFR
+            ratio_std=0.0,  # Not applicable for CFR
+            epsilon=0.0,  # Not applicable for CFR
+            clipfrac=0.0,  # Not applicable for CFR
+            ppo_clipfrac=0.0,  # Not applicable for CFR
+            return_clipfrac=return_clipfrac.item(),
+            forward_kl=cfr_model_kl,  # Use forward_kl field for CFR-model KL
         )

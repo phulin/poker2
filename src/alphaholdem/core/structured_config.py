@@ -155,6 +155,14 @@ class ExploiterConfig:
 
 
 @dataclass
+class SearchConfig:
+    enabled: bool = False
+    depth: int = 2
+    iterations: int = 100
+    branching: int = 4
+
+
+@dataclass
 class Config:
     # Training parameters
     num_steps: int = 2000
@@ -184,10 +192,11 @@ class Config:
     strict_model_loading: bool = False  # Use strict model loading (default: False)
 
     # Nested configs
-    train: TrainingConfig = MISSING
-    model: ModelConfig = MISSING
-    env: EnvConfig = MISSING
-    exploiter: ExploiterConfig = MISSING
+    train: TrainingConfig = field(default_factory=TrainingConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    env: EnvConfig = field(default_factory=EnvConfig)
+    exploiter: ExploiterConfig = field(default_factory=ExploiterConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
 
     def __post_init__(self):
         if self.wandb_tags is None:
@@ -201,3 +210,4 @@ cs.store(group="train", name="default", node=TrainingConfig)
 cs.store(group="model", name="default", node=ModelConfig)
 cs.store(group="env", name="default", node=EnvConfig)
 cs.store(group="exploiter", name="default", node=ExploiterConfig)
+cs.store(group="search", name="default", node=SearchConfig)

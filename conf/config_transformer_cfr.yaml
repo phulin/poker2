@@ -1,0 +1,15 @@
+defaults:
+  - config_transformer_hp
+  - _self_
+
+# Enable CFR search during update
+search:
+  enabled: true
+  depth: 2
+  iterations: 100
+
+# Use scalar value head for CFR
+model:
+  value_head_type: "scalar"
+
+

@@ -10,6 +10,8 @@ from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
 from alphaholdem.models.transformer.tokens import Context, Special
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.core.structured_config import Config
 
 
 @dataclass
@@ -31,6 +33,8 @@ class BatchSample:
     delta2: torch.Tensor
     delta3: torch.Tensor
     model_ages: torch.Tensor
+    # Environment snapshot for each sampled transition (size = batch_size)
+    snapshot_env: HUNLTensorEnv | None = None
 
     def to(self, dtype: torch.dtype) -> BatchSample:
         """Convert all floating-point tensors to specified dtype."""
@@ -48,6 +52,7 @@ class BatchSample:
             delta2=self.delta2.to(dtype),
             delta3=self.delta3.to(dtype),
             model_ages=self.model_ages,
+            snapshot_env=self.snapshot_env,
         )
 
     def update_frozen_log_probs(
@@ -79,6 +84,9 @@ class BatchSample:
             for age in self.model_ages.unique(sorted=False)
         ]
 
+    def __len__(self) -> int:
+        return len(self.embedding_data)
+
     def __getitem__(self, idx: torch.Tensor) -> BatchSample:
         return BatchSample(
             embedding_data=self.embedding_data[idx],
@@ -94,6 +102,9 @@ class BatchSample:
             delta2=self.delta2[idx],
             delta3=self.delta3[idx],
             model_ages=self.model_ages[idx],
+            snapshot_env=(
+                self.snapshot_env[idx] if self.snapshot_env is not None else None
+            ),
         )
 
 
@@ -119,20 +130,19 @@ class VectorizedReplayBuffer:
     def __init__(
         self,
         capacity: int,  # Number of trajectories (not steps)
-        max_trajectory_length: int,  # Maximum steps per trajectory
-        num_bet_bins: int,  # Batch size for tensor operations
+        cfg: Config,
         device: torch.device,
-        float_dtype: torch.dtype = torch.float32,  # Dtype for float tensors
-        is_transformer: bool = False,  # Whether this buffer is for transformer models
-        max_sequence_length: int = 50,  # Sequence length for transformer models
+        is_transformer: bool = False,
+        float_dtype: torch.dtype = torch.float32,
     ):
         self.capacity = capacity  # Number of trajectories
-        self.max_trajectory_length = max_trajectory_length
-        self.max_sequence_length = max_sequence_length
+        self.max_trajectory_length = cfg.train.max_trajectory_length
+        self.max_sequence_length = cfg.train.max_sequence_length
         self.device = device
         self.float_dtype = float_dtype  # Store float dtype for use in methods
         self.is_transformer = is_transformer  # Store transformer flag
-        self.num_bet_bins = num_bet_bins
+        # Use cfg for bet bins
+        self.num_bet_bins = len(cfg.env.bet_bins) + 3
         self.position = 0  # Next trajectory write position (end of ring buffer)
         self.size = 0  # Total number of valid trajectories
 
@@ -142,10 +152,10 @@ class VectorizedReplayBuffer:
 
         # T is the maximum number of transitions per trajectory
         # L is the maximum number of tokens per trajectory (should be > T)
-        C, T, L = capacity, max_trajectory_length, max_sequence_length
+        C, T, L = capacity, self.max_trajectory_length, self.max_sequence_length
 
         # Pre-allocate tensors for all transition fields: (capacity, max_trajectory_length, ...)
-        if not is_transformer:
+        if not self.is_transformer:
             # CNN model tensors
             # Cards features tensor: (capacity, max_trajectory_length, 6, 4, 13) - bool dtype for memory efficiency
             self.cards_features = torch.zeros(
@@ -165,13 +175,13 @@ class VectorizedReplayBuffer:
                 T,
                 24,
                 4,
-                num_bet_bins,
+                self.num_bet_bins,
                 dtype=torch.bool,
                 device=device,
             )
         else:
             # Transformer structured embedding fields: maintain a single growing token stream per trajectory
-            self.data = StructuredEmbeddingData.empty(C, L, num_bet_bins, device)
+            self.data = StructuredEmbeddingData.empty(C, L, self.num_bet_bins, device)
             self.current_token_positions = torch.zeros(
                 C,
                 dtype=torch.uint8,
@@ -185,13 +195,15 @@ class VectorizedReplayBuffer:
             )
 
         self.action_indices = torch.zeros(C, T, dtype=torch.long, device=device)
-        self.logits = torch.zeros(C, T, num_bet_bins, dtype=float_dtype, device=device)
+        self.logits = torch.zeros(
+            C, T, self.num_bet_bins, dtype=float_dtype, device=device
+        )
         self.rewards = torch.zeros(C, T, dtype=float_dtype, device=device)
         self.dones = torch.zeros(C, T, dtype=torch.bool, device=device)
         self.legal_masks = torch.zeros(
             C,
             T,
-            num_bet_bins,
+            self.num_bet_bins,
             dtype=torch.bool,  # Changed to bool
             device=device,
         )
@@ -211,6 +223,21 @@ class VectorizedReplayBuffer:
         self.current_transition_counts = torch.zeros(
             capacity, dtype=torch.long, device=device
         )
+
+        # --- PBS snapshot env sized for every transition slot ---------------
+        # Stores state at each transition: capacity * max_trajectory_length rows.
+        # Row index mapping for (traj_row, step_idx): row = traj_row * T + step_idx.
+        self.snapshot_env = HUNLTensorEnv(
+            num_envs=capacity * self.max_trajectory_length,
+            starting_stack=cfg.env.stack,
+            sb=cfg.env.sb,
+            bb=cfg.env.bb,
+            default_bet_bins=cfg.env.bet_bins,
+            device=device,
+            float_dtype=float_dtype,
+            flop_showdown=cfg.env.flop_showdown,
+        )
+        # (debug snapshot zeroing removed)
 
     def start_adding_trajectory_batches(
         self, num_trajectories: int, model_age: int
@@ -365,6 +392,7 @@ class VectorizedReplayBuffer:
                 "card_suits",
                 "action_actors",
                 "action_legal_masks",
+                "action_amounts",
                 "context_features",
                 "lengths",
             ]
@@ -380,6 +408,48 @@ class VectorizedReplayBuffer:
             buf[compacted_indices] = buf[nonzero_indices]
             # Zero out the now-unused slots at the end of the window
             buf[unused_indices] = 0
+
+        # Compact snapshot_env rows to match trajectory compaction
+        # Old and new trajectory rows within the window [indices]
+        k_valid = num_valid
+        if k_valid > 0:
+            T = self.max_trajectory_length
+            old_traj = nonzero_indices
+            new_traj = compacted_indices
+            step_range = torch.arange(T, device=self.device)
+            old_rows = (old_traj.view(-1, 1) * T + step_range.view(1, -1)).flatten()
+            new_rows = (new_traj.view(-1, 1) * T + step_range.view(1, -1)).flatten()
+
+            # Create temporary env to avoid in-place overlap issues
+            temp_env = HUNLTensorEnv(
+                num_envs=k_valid * T,
+                starting_stack=self.snapshot_env.starting_stack,
+                sb=self.snapshot_env.sb,
+                bb=self.snapshot_env.bb,
+                default_bet_bins=self.snapshot_env.default_bet_bins,
+                device=self.device,
+                rng=self.snapshot_env.rng,
+                float_dtype=self.snapshot_env.float_dtype,
+                flop_showdown=self.snapshot_env.flop_showdown,
+            )
+            # (debug snapshot zeroing removed)
+            temp_indices = torch.arange(k_valid * T, device=self.device)
+            # Copy old rows into temp
+            temp_env.copy_state_from(
+                src_env=self.snapshot_env,
+                src_indices=old_rows,
+                dst_indices=temp_indices,
+                copy_deck=True,
+            )
+            # Copy from temp into new rows
+            self.snapshot_env.copy_state_from(
+                src_env=temp_env,
+                src_indices=temp_indices,
+                dst_indices=new_rows,
+                copy_deck=True,
+            )
+
+            # (debug unused-row zeroing removed)
 
         # Only advance position and size by the number of valid (nonzero-length) trajectories
         trajectories_added = num_valid
@@ -406,6 +476,7 @@ class VectorizedReplayBuffer:
         delta3: torch.Tensor,
         values: torch.Tensor,
         trajectory_indices: torch.Tensor,  # Which trajectory each transition belongs to
+        env_state: HUNLTensorEnv | None = None,
     ) -> None:
         """
         Add a batch of transitions to the buffer using embedding data.
@@ -472,6 +543,21 @@ class VectorizedReplayBuffer:
         self.delta2[buffer_trajectory_indices, transition_counts] = delta2
         self.delta3[buffer_trajectory_indices, transition_counts] = delta3
         self.values[buffer_trajectory_indices, transition_counts] = values
+
+        # Snapshot current PBS for these trajectories at this transition, if provided
+        if env_state is not None:
+            # Map (traj_row, step_idx) -> flat row index in snapshot_env
+            step_idx = transition_counts  # current step index before increment
+            flat_rows = (
+                buffer_trajectory_indices * self.max_trajectory_length + step_idx
+            )
+            # Copy current env rows at those trajectory indices
+            self.snapshot_env.copy_state_from(
+                src_env=env_state,
+                src_indices=torch.arange(env_state.N, device=self.device),
+                dst_indices=flat_rows,
+                copy_deck=True,
+            )
 
         # Advance step positions
         self.current_transition_counts[buffer_trajectory_indices] += 1
@@ -673,6 +759,11 @@ class VectorizedReplayBuffer:
         action_indices_sel = self.action_indices[traj_indices, transition_indices]
         original_logits = self.logits[traj_indices, transition_indices]
 
+        # Build per-sample snapshot env with one row per sampled transition
+        # Gather flat indices for each sampled (traj_idx, step_idx)
+        flat_indices = traj_indices * self.max_trajectory_length + transition_indices
+        batch_snapshot_env = self.snapshot_env[flat_indices]
+
         return BatchSample(
             embedding_data=data,
             action_indices=action_indices_sel,
@@ -696,6 +787,7 @@ class VectorizedReplayBuffer:
             delta2=self.delta2[traj_indices, transition_indices],
             delta3=self.delta3[traj_indices, transition_indices],
             model_ages=self.model_ages[traj_indices],
+            snapshot_env=batch_snapshot_env,
         )
 
     def clear(self) -> None:

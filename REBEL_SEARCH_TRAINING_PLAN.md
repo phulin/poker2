@@ -13,8 +13,7 @@ Add lightweight training-time search (depth-limited CFR-D) during the model upda
 
 - Action set: {fold, check/call, 1x pot raise, all-in} only. Map 1x pot raise via `legal_bins_amounts_and_mask([1.0])`; fold/call/all-in map to fixed bins.
 - Value head must be non-quantile (scalar); enforce guard in trainer init.
-- Depth D is small (e.g., 1–2 initially); iterations K small (e.g., 1–4). Budget O(B * 4^D) memory/time.
-- For initial implementation, restrict search to remain within the current betting round (no additional board cards dealt). This avoids needing deck state for search; leaf evaluation happens at round end or depth limit using the value head.
+- Depth D initial: 2; iterations K initial: 100. Budget O(B * 4^D) memory/time.
 
 ## Components to add
 
@@ -31,11 +30,11 @@ Add lightweight training-time search (depth-limited CFR-D) during the model upda
 2) `alphaholdem/search/dcfr.py`
 - Batched depth-limited search driver implementing CFR-D update rules.
 - Key dataclasses / functions:
-  - `@dataclass class SearchConfig`: `depth: int`, `iterations: int`, `branching: int = 4`, `use_avg: bool = False` (pure CFR-D for v1), `within_round_only: bool = True`.
+  - `@dataclass class SearchConfig`: `depth: int = 2`, `iterations: int = 100`, `branching: int = 4`, `use_avg: bool = False` (pure CFR-D for v1).
   - `def run_dcfr(model, search_env, tsb_like, indices_root: Tensor, cfg: SearchConfig) -> Tensor`
     - Returns improved root policy over 4 actions for each root index (shape [B, 4]) and optional node stats.
   - Internals (CFR-D):
-    - On iteration t, leaf values use V(·) conditioned on β derived from π^t (per `rebel.txt`).
+    - On iteration t, leaf values use actual env rewards when `done` (terminal), else V(·) conditioned on β derived from π^t (per `rebel.txt`).
     - Update regrets at interior nodes from counterfactual values; compute π^{t+1} via regret matching.
     - Optionally track average policy π̄ if needed for diagnostics.
 
@@ -47,9 +46,8 @@ Division of responsibilities:
 - Config gate: `cfg.search.enabled`, `cfg.search.depth`, `cfg.search.iterations`.
 - Guard: assert `self.value_head_type != ValueHeadType.quantile` if search enabled.
 - In `update_model` before computing policy loss:
-  - Extract a `SearchStateSnapshot` minibatch from the sampled `BatchSample` (see Replay Buffer changes below).
-  - Use `CFRManager` to run batched CFR-D over these roots and get root CFR policy targets over 4 actions; map to full-bin action space for loss.
-  - Replace PPO policy loss with a distillation loss to the CFR target (e.g., `KL(target||model)` or CE with soft targets). Keep value loss and entropy regularization as configured.
+  - Use `CFRManager` to run batched CFR-D over the current minibatch roots (seeded into the manager-owned env) and get root CFR policy targets over 4 actions; map to full-bin action space for loss.
+  - Replace PPO policy loss with a new LossCalculator distillation loss to the CFR target (e.g., `KL(target||model)` or CE with soft targets). Keep value loss and entropy regularization as configured.
 - Logging: Add counters for search time per update, CFR iterations actually run, and diagnostic KL between model and CFR policy.
 
 ## Mapping: 4 collapsed actions → bin indices
@@ -106,9 +104,7 @@ Add vectorized utilities to support manager operations:
     - In `update_model`, call `CFRManager` to compute CFR targets for the minibatch.
     - Replace PPO policy loss with supervised distillation to CFR target (configurable).
   - `src/alphaholdem/models/transformer/token_sequence_builder.py`
-    - Ensure `encode_tensor_states` works on the manager-owned env (same field names); no changes expected.
-  - `src/alphaholdem/rl/vectorized_replay.py`
-    - Extend stored transition data to include a minimal `SearchStateSnapshot` sufficient to seed search at training time (see below).
+    - see below.
   - `src/alphaholdem/env/hunl_tensor_env.py`
     - Add `copy_state_from`, `clone_states`, and `legal_mask_bins(indices)` helpers used by `CFRManager`.
 ### Token sequences for search (transformer models)
@@ -119,15 +115,6 @@ Add vectorized utilities to support manager operations:
   - Before evaluating a node set, call `add_context(indices)` to snapshot current legality and context, then after stepping, call `add_action(indices, actors, action_ids, legal_masks, action_amounts, token_streets)` to append action tokens.
   - For v1 (within-round only), do not append street/card tokens; future versions can add `add_street`/`add_card` when allowing round advancement.
 - `dcfr` remains unaware of token sequences; it receives `StructuredEmbeddingData` from the manager via `TokenSequenceBuilder.encode_tensor_states(player, idxs)` for both our and opponent nodes.
-### Minimal `SearchStateSnapshot`
-
-Store per-transition tensors needed to reconstruct round-local state for search:
-- `to_act`, `street`, `button`
-- `pot`, `min_raise`, `actions_this_round`
-- `stacks[2]`, `committed[2]`, `has_folded[2]`, `is_allin[2]`
-- `board_indices[5]`, `hole_indices[2,2]`
-
-These are sufficient for simulating within-round actions and computing legality; no deck is needed when search is constrained to the current round.
 
 ## Config additions
 
@@ -157,7 +144,7 @@ Guard: `assert cfg.model.value_head_type != "quantile"` if `search.enabled`.
 
 ## Performance considerations
 
-- Depth and branching controlled to keep compute bounded. Start with D=1, K=1.
+- Depth and branching controlled to keep compute bounded. Start with D=2, K=100.
 - Use vectorized cloning and stepping; avoid Python loops over nodes.
 - Re-use model with autocast and no_grad.
 - If transformer KV-cache is used, search likely disables KV cache for now (short tree); or use a separate cache manager per depth if trivial.

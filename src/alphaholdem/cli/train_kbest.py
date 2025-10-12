@@ -369,6 +369,7 @@ def main(cfg) -> None:
         ExploiterConfig,
         ModelConfig,
         TrainingConfig,
+        SearchConfig,
     )
 
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
@@ -378,6 +379,7 @@ def main(cfg) -> None:
     model_config = ModelConfig(**cfg_dict.get("model", {}))
     env_config = EnvConfig(**cfg_dict.get("env", {}))
     exploiter_config = ExploiterConfig(**cfg_dict.get("exploiter", {}))
+    search_config = SearchConfig(**cfg_dict.get("search", {}))
 
     # Create Config dataclass
     config = Config(
@@ -385,10 +387,12 @@ def main(cfg) -> None:
         model=model_config,
         env=env_config,
         exploiter=exploiter_config,
+        search=search_config,
         **{
             k: v
             for k, v in cfg_dict.items()
-            if k not in ["train", "model", "env", "state_encoder", "exploiter"]
+            if k
+            not in ["train", "model", "env", "state_encoder", "exploiter", "search"]
         },
     )
 

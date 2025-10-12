@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import math
+import time
 from typing import Any, Optional, Tuple, Union
 
 import torch
@@ -36,6 +37,9 @@ from alphaholdem.utils.model_utils import (
     get_logits_log_probs_values,
 )
 from alphaholdem.utils.profiling import profile
+from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
+from alphaholdem.search.dcfr import run_dcfr
+from alphaholdem.rl.losses import CFRDistillationLoss
 
 
 class SelfDummySnapshot:
@@ -291,22 +295,22 @@ class SelfPlayTrainer:
             )
 
         self.model.to(self.device)  # Move model to device
+
+        # Search config guard: disable when using quantile value head
+        if self.cfg.search.enabled and self.use_quantile_value_head:
+            raise ValueError(
+                "Training-time CFR search requires non-quantile value head"
+            )
+
         # Replay buffer capacity in steps is batch_size * replay_buffer_batches
         # Add an extra batch so we can reserve space for the next batch.
         buffer_capacity = self.batch_size * max(1, 1 + self.replay_buffer_batches)
-
-        # Use vectorized replay buffer for efficient tensor operations
-        sequence_length = (
-            self.state_encoder.sequence_length if self.is_transformer else -1
-        )
         self.replay_buffer = VectorizedReplayBuffer(
             capacity=buffer_capacity,  # Number of trajectories
-            max_trajectory_length=self.max_trajectory_length,  # Maximum steps per trajectory
-            num_bet_bins=self.num_bet_bins,  # Number of bet bins for actions tensor
+            cfg=self.cfg,
             device=self.device,
-            float_dtype=self.float_dtype,  # Use appropriate dtype for mixed precision
             is_transformer=self.is_transformer,  # Whether this buffer is for transformer models
-            max_sequence_length=sequence_length,  # Sequence length for transformer models
+            float_dtype=self.float_dtype,  # Use appropriate dtype for mixed precision
         )
 
         # Initialize opponent pool based on configuration
@@ -967,6 +971,7 @@ class SelfPlayTrainer:
             rewards, dones, _, new_streets, dealt_cards = self.tensor_env.step_bins(
                 action_bins, legal_bins_amounts, legal_bins_mask, self.bet_bins
             )
+            self.tensor_env.sanity_check(indices=active_indices, label="after step")
             newly_done_mask = dones & active_mask
 
             # After environment step, append any newly revealed non-action tokens
@@ -1032,6 +1037,10 @@ class SelfPlayTrainer:
 
                 # Add transitions immediately using vectorized operations
                 if add_to_replay_buffer:
+                    if env_active_we_act.numel() > 0:
+                        self.tensor_env.sanity_check(
+                            indices=env_active_we_act, label="pre-snapshot"
+                        )
                     self.replay_buffer.add_transitions(
                         embedding_data=our_states,
                         action_indices=our_action_indices,
@@ -1043,6 +1052,7 @@ class SelfPlayTrainer:
                         delta3=our_delta3_tensor,
                         values=our_values_tensor,
                         trajectory_indices=env_active_we_act,
+                        env_state=self.tensor_env[env_active_we_act],
                     )
 
                 batch_steps_collected += env_active_we_act.numel()
@@ -1281,12 +1291,122 @@ class SelfPlayTrainer:
                     )
                 )
 
-                loss_result = self.loss_calculator.compute_loss(
-                    logits=logits,
-                    values=values,
-                    batch=batch,
-                    value_quantiles=value_quantiles,
-                )
+                # Optional: training-time CFR distillation
+                search_time_ms = 0.0
+                cfr_kl_div = 0.0
+                if (
+                    getattr(self.cfg, "search", None) is not None
+                    and self.cfg.search.enabled
+                ):
+                    search_start_time = time.time()
+
+                    # Build manager and seed roots from current minibatch rows
+                    B = len(batch)
+                    root_entropy = 0.0
+                    with torch.no_grad(), model_eval(self.model):
+                        mgr = CFRManager(
+                            batch_size=B,
+                            env_proto=self.tensor_env,
+                            bet_bins=self.bet_bins,
+                            sequence_length=(
+                                self.state_encoder.sequence_length
+                                if self.is_transformer
+                                else 8
+                            ),
+                            device=self.device,
+                            float_dtype=self.float_dtype,
+                            cfg=SearchConfig(
+                                depth=self.cfg.search.depth,
+                                iterations=self.cfg.search.iterations,
+                                branching=4,
+                            ),
+                            popart_normalizer=self.popart_normalizer,
+                        )
+                        # Seed roots from sampled PBS snapshots held in the batch
+                        src_indices = torch.arange(B, device=self.device)
+                        _ = mgr.seed_roots(batch.snapshot_env, src_indices)
+                        collapsed_target = mgr.run_search(self.model)
+
+                        # Normalize CFR target to ensure valid probabilities
+                        cfr_target = collapsed_target / collapsed_target.sum(
+                            dim=-1, keepdim=True
+                        )
+                        cfr_target = cfr_target.clamp(min=1e-8)
+                        # Root policy entropy for diagnostics
+                        root_entropy = (
+                            -(cfr_target * (cfr_target + 1e-8).log())
+                            .sum(dim=-1)
+                            .mean()
+                            .item()
+                        )
+
+                    search_end_time = time.time()
+                    search_time_ms = (search_end_time - search_start_time) * 1000
+
+                    # Compute KL divergence between model policy and CFR target
+                    with torch.no_grad():
+                        if cfr_target is not None:
+                            # Get model policy in 4-action space
+                            masked_logits = torch.where(batch.legal_masks, logits, -1e9)
+                            model_probs_full = F.softmax(masked_logits, dim=-1)
+                            model_probs_4 = CFRManager.collapse_policy_full_to_4(
+                                model_probs_full
+                            )
+
+                            # Normalize probabilities
+                            cfr_target_stable = cfr_target + 1e-8
+                            model_probs_4_stable = model_probs_4 + 1e-8
+                            cfr_target_norm = cfr_target_stable / cfr_target_stable.sum(
+                                dim=-1, keepdim=True
+                            )
+                            model_probs_4_norm = (
+                                model_probs_4_stable
+                                / model_probs_4_stable.sum(dim=-1, keepdim=True)
+                            )
+
+                            cfr_kl_div = (
+                                (
+                                    cfr_target_norm
+                                    * torch.log(cfr_target_norm / model_probs_4_norm)
+                                )
+                                .sum(dim=-1)
+                                .mean()
+                                .item()
+                            )
+                        else:
+                            cfr_kl_div = 0.0
+
+                # Use CFR distillation loss when search is enabled
+                if (
+                    getattr(self.cfg, "search", None) is not None
+                    and self.cfg.search.enabled
+                    and "cfr_target" in locals()
+                    and cfr_target is not None
+                ):
+                    # Create CFR distillation loss calculator
+                    cfr_loss_calculator = CFRDistillationLoss(
+                        popart_normalizer=self.popart_normalizer,
+                        value_coef=self.loss_calculator.value_coef,
+                        entropy_coef=self.loss_calculator.entropy_coef,
+                        value_loss_type=self.loss_calculator.value_loss_type,
+                        huber_delta=self.loss_calculator.huber_delta,
+                    )
+
+                    loss_result = cfr_loss_calculator.compute_loss(
+                        logits=logits,
+                        values=values,
+                        batch=batch,
+                        value_quantiles=value_quantiles,
+                        cfr_target=cfr_target,
+                    )
+                else:
+                    # Use standard loss calculator
+                    loss_result = self.loss_calculator.compute_loss(
+                        logits=logits,
+                        values=values,
+                        batch=batch,
+                        value_quantiles=value_quantiles,
+                    )
 
             # Debugging metrics: explained variance
             with torch.no_grad():
@@ -1309,7 +1429,10 @@ class SelfPlayTrainer:
             total_loss += loss_result.total_loss.item()
             total_policy_loss += loss_result.policy_loss
             total_value_loss += loss_result.value_loss
-            total_kl_loss += loss_result.penalty_kl * self.beta_controller.current_value
+            if loss_result.penalty_kl is not None:
+                total_kl_loss += (
+                    loss_result.penalty_kl * self.beta_controller.current_value
+                )
             total_entropy += loss_result.entropy
             total_clipfrac += loss_result.clipfrac
             total_ppo_clipfrac += loss_result.ppo_clipfrac
@@ -1510,6 +1633,20 @@ class SelfPlayTrainer:
             popart_mu, popart_sigma = self.popart_normalizer.get_current_stats()
             result["popart_mu"] = popart_mu
             result["popart_sigma"] = popart_sigma
+
+        # Add search metrics
+        result["search_enabled"] = (
+            getattr(self.cfg, "search", None) is not None and self.cfg.search.enabled
+        )
+        result["search_time_ms"] = search_time_ms
+        result["search_iterations"] = (
+            self.cfg.search.iterations if result["search_enabled"] else 0
+        )
+        result["cfr_kl_div"] = cfr_kl_div
+        # Optional: CFR diagnostics
+        result["search/root_entropy"] = (
+            root_entropy if result["search_enabled"] else 0.0
+        )
 
         return result
 
@@ -1802,9 +1939,7 @@ class SelfPlayTrainer:
                 self.value_head_optimizer.state_dict()
             )
 
-        # Conditionally include replay buffer based on economize_checkpoints flag
-        if not self.cfg.economize_checkpoints:
-            checkpoint["replay_buffer"] = self.replay_buffer
+        # Exclude replay buffer to avoid fragile serialization of generators/devices
 
         torch.save(checkpoint, path, _use_new_zipfile_serialization=True)
 

@@ -361,6 +361,124 @@ class HUNLTensorEnv:
             "done": self.done,
         }
 
+    def legal_mask_bins_for(
+        self, indices: torch.Tensor, bet_bins: Optional[list[float]] = None
+    ) -> torch.Tensor:
+        """Return legal mask for a subset of environments: shape [len(indices), B]."""
+        if indices.numel() == 0:
+            return torch.zeros(
+                0, len(self.default_bet_bins) + 3, dtype=torch.bool, device=self.device
+            )
+        full_mask = self.legal_bins_mask(bet_bins)
+        return full_mask[indices]
+
+    # --- Sanity helpers -------------------------------------------------------
+    def sanity_check(
+        self,
+        indices: Optional[torch.Tensor] = None,
+        label: Optional[str] = None,
+    ) -> None:
+        """Validate deck and deck_pos bounds for all or a subset of rows.
+
+        Args:
+            indices: Optional subset of env rows to check. If None, checks all.
+            label: Optional context label for assertion messages.
+        """
+        if indices is None:
+            deck = self.deck
+            deck_pos = self.deck_pos
+        else:
+            if indices.numel() == 0:
+                return
+            deck = self.deck[indices]
+            deck_pos = self.deck_pos[indices]
+
+        ctx = f" ({label})" if label else ""
+        assert (deck >= 0).all() and (deck < 52).all(), (
+            f"Sanity check failed{ctx}: deck out of range: "
+            f"min={int(deck.min().item())}, max={int(deck.max().item())}"
+        )
+        # deck_pos can be 0..9 inclusive (up to 9 staged cards)
+        assert (deck_pos >= 0).all() and (deck_pos <= 9).all(), (
+            f"Sanity check failed{ctx}: deck_pos out of range: "
+            f"min={int(deck_pos.min().item())}, max={int(deck_pos.max().item())}"
+        )
+
+    def copy_state_from(
+        self,
+        src_env: HUNLTensorEnv,
+        src_indices: torch.Tensor,
+        dst_indices: torch.Tensor,
+        copy_deck: bool = True,
+    ) -> None:
+        """Vectorized copy of state rows from src_env[src_indices] to self[dst_indices]."""
+        if src_indices.numel() == 0:
+            return
+        assert src_indices.shape[0] == dst_indices.shape[0]
+        # Disallow overlap when copying within the same env to avoid aliasing
+        if src_env is self:
+            smin = int(src_indices.min().item())
+            smax = int(src_indices.max().item())
+            dmin = int(dst_indices.min().item())
+            dmax = int(dst_indices.max().item())
+            # Ranges must not overlap
+            if not (smax < dmin or dmax < smin):
+                raise AssertionError(
+                    "copy_state_from requires non-overlapping index ranges when copying within the same env"
+                )
+
+        # Scalars / vectors
+        self.button[dst_indices] = src_env.button[src_indices]
+        self.street[dst_indices] = src_env.street[src_indices]
+        self.to_act[dst_indices] = src_env.to_act[src_indices]
+        self.pot[dst_indices] = src_env.pot[src_indices]
+        self.min_raise[dst_indices] = src_env.min_raise[src_indices]
+        self.actions_this_round[dst_indices] = src_env.actions_this_round[src_indices]
+        self.acted_since_reset[dst_indices] = src_env.acted_since_reset[src_indices]
+
+        # 2-player tensors
+        self.stacks[dst_indices] = src_env.stacks[src_indices]
+        self.committed[dst_indices] = src_env.committed[src_indices]
+        self.has_folded[dst_indices] = src_env.has_folded[src_indices]
+        self.is_allin[dst_indices] = src_env.is_allin[src_indices]
+        self.chips_placed[dst_indices] = src_env.chips_placed[src_indices]
+
+        # Card state
+        self.board_onehot[dst_indices] = src_env.board_onehot[src_indices]
+        self.hole_onehot[dst_indices] = src_env.hole_onehot[src_indices]
+        self.board_indices[dst_indices] = src_env.board_indices[src_indices]
+        self.hole_indices[dst_indices] = src_env.hole_indices[src_indices]
+
+        # Done/winner
+        self.done[dst_indices] = src_env.done[src_indices]
+        self.winner[dst_indices] = src_env.winner[src_indices]
+
+        if copy_deck:
+            # Sanity check via helper on source rows
+            src_env.sanity_check(indices=src_indices, label="copy_state_from src")
+            self.deck[dst_indices] = src_env.deck[src_indices]
+            self.deck_pos[dst_indices] = src_env.deck_pos[src_indices]
+            # Optional: verify destination rows after copy
+            self.sanity_check(indices=dst_indices, label="copy_state_from dst")
+
+    def clone_states(
+        self, dst_children: torch.Tensor, src_parents: torch.Tensor
+    ) -> None:
+        """Clone rows within the same env from parents to children (vectorized)."""
+        if dst_children.numel() == 0:
+            return
+        assert dst_children.shape[0] == src_parents.shape[0]
+        # Disallow overlap in ranges to avoid aliasing issues
+        smin = int(src_parents.min().item())
+        smax = int(src_parents.max().item())
+        dmin = int(dst_children.min().item())
+        dmax = int(dst_children.max().item())
+        assert (
+            smax < dmin or dmax < smin
+        ), "clone_states requires non-overlapping index ranges between src_parents and dst_children"
+        # Snapshot source slices to avoid overlap aliasing during assignment
+        self.copy_state_from(self, src_parents, dst_children, copy_deck=True)
+
     def get_action_history(self) -> torch.Tensor:
         """Return action history planes tensor if allocated, else None."""
         # TODO: Make this work again.
@@ -608,6 +726,7 @@ class HUNLTensorEnv:
             flop_mask = s == 0
             flop_ids = round_closed_idx[flop_mask]
             pos = self.deck_pos[flop_ids]
+            # (debug assertions removed)
             self.deck_pos[flop_ids] = pos + 3
             self.board_onehot[flop_ids, 0] = self.card_onehot_cache[
                 self.deck[flop_ids, pos]
@@ -633,6 +752,7 @@ class HUNLTensorEnv:
             turn_mask = s == 1
             turn_ids = round_closed_idx[turn_mask]
             pos = self.deck_pos[turn_ids]
+            # (debug assertions removed)
             c = self.deck[turn_ids, pos]
             self.deck_pos[turn_ids] = pos + 1
             self.board_onehot[turn_ids, 3] = self.card_onehot_cache[c]
@@ -647,6 +767,7 @@ class HUNLTensorEnv:
             river_mask = s == 2
             river_ids = round_closed_idx[river_mask]
             pos = self.deck_pos[river_ids]
+            # (debug assertions removed)
             c = self.deck[river_ids, pos]
             self.deck_pos[river_ids] = pos + 1
             # Use cached one-hot matrix for river card
@@ -856,3 +977,32 @@ class HUNLTensorEnv:
         if ids.numel() == 0:
             return  # Nothing to reset
         self.reset(env_indices=ids)
+
+    # --- Utility: slicing ------------------------------------------------------
+    def __getitem__(self, indices: torch.Tensor | slice) -> "HUNLTensorEnv":
+        """Return a new env containing copies of the selected rows.
+
+        This creates a fresh HUNLTensorEnv of size len(indices) and copies state
+        from the current env into it. The copy is deep for all state tensors.
+        """
+        if isinstance(indices, slice):
+            indices = torch.arange(self.N, device=self.device)[indices]
+        k = indices.numel()
+        # Sanity: validate source rows before copy
+        # Remove heavy debug asserts now that bug is fixed
+        dst = HUNLTensorEnv(
+            num_envs=k,
+            starting_stack=self.starting_stack,
+            sb=self.sb,
+            bb=self.bb,
+            default_bet_bins=self.default_bet_bins,
+            device=self.device,
+            rng=self.rng,
+            float_dtype=self.float_dtype,
+            debug_step_table=self.debug_step_table,
+            flop_showdown=self.flop_showdown,
+        )
+        dst.copy_state_from(
+            self, indices, torch.arange(k, device=self.device), copy_deck=True
+        )
+        return dst

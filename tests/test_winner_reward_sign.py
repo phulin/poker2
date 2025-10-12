@@ -8,6 +8,7 @@ from alphaholdem.core.structured_config import (
     EnvConfig,
     ExploiterConfig,
     ModelConfig,
+    SearchConfig,
     TrainingConfig,
 )
 from alphaholdem.rl.self_play import SelfPlayTrainer
@@ -23,16 +24,19 @@ def _load_config(config_path: str) -> Config:
     model_config = ModelConfig(**cfg_dict.get("model", {}))
     env_config = EnvConfig(**cfg_dict.get("env", {}))
     exploiter_config = ExploiterConfig(**cfg_dict.get("exploiter", {}))
+    search_config = SearchConfig(**cfg_dict.get("search", {}))
 
     return Config(
         train=train_config,
         model=model_config,
         env=env_config,
         exploiter=exploiter_config,
+        search=search_config,
         **{
             k: v
             for k, v in cfg_dict.items()
-            if k not in ["train", "model", "env", "state_encoder", "exploiter"]
+            if k
+            not in ["train", "model", "env", "state_encoder", "exploiter", "search"]
         },
     )
 

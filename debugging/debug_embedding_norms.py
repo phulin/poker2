@@ -699,12 +699,10 @@ def main():
         )
         trainer.replay_buffer = VectorizedReplayBuffer(
             capacity=trainer.batch_size * max(1, 1 + trainer.replay_buffer_batches),
-            max_trajectory_length=trainer.max_trajectory_length,
-            num_bet_bins=trainer.num_bet_bins,
+            cfg=trainer.cfg,
             device=device_obj,
             float_dtype=trainer.float_dtype,
             is_transformer=trainer.is_transformer,
-            max_sequence_length=sequence_length,
         )
 
     print(f"✅ Checkpoint loaded successfully")

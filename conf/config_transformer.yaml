@@ -135,3 +135,9 @@ env:
   
   # Debug configuration
   debug_step_table: false
+
+# === SEARCH CONFIGURATION ===
+search:
+  enabled: false
+  depth: 2
+  iterations: 100

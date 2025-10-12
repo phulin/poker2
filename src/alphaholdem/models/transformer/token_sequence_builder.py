@@ -306,3 +306,20 @@ class TokenSequenceBuilder:
         self.lengths[select] = 0
 
         self.add_cls(idxs)
+
+    def clone_tokens(
+        self, dst_children: torch.Tensor, src_parents: torch.Tensor
+    ) -> None:
+        """Clone token buffers for a set of rows (vectorized)."""
+        if dst_children.numel() == 0:
+            return
+        assert dst_children.shape[0] == src_parents.shape[0]
+        self.token_ids[dst_children] = self.token_ids[src_parents]
+        self.token_streets[dst_children] = self.token_streets[src_parents]
+        self.card_ranks[dst_children] = self.card_ranks[src_parents]
+        self.card_suits[dst_children] = self.card_suits[src_parents]
+        self.action_actors[dst_children] = self.action_actors[src_parents]
+        self.action_legal_masks[dst_children] = self.action_legal_masks[src_parents]
+        self.action_amounts[dst_children] = self.action_amounts[src_parents]
+        self.context_features[dst_children] = self.context_features[src_parents]
+        self.lengths[dst_children] = self.lengths[src_parents]
