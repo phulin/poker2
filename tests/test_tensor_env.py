@@ -555,6 +555,7 @@ def test_reward_calculation_consistency():
 def test_fold_reward_assignment():
     """Test that fold rewards are assigned correctly based on the folding player's perspective."""
     env = _make_env(N=2, starting_stack=1000, sb=25, bb=50, default_bet_bins=[0.5, 1.0])
+    env.reset(force_button=torch.tensor([0, 0], device=env.device))
 
     # Test 1: Player 0 folds in env 0 (should get negative reward)
     mask = env.legal_bins_mask()

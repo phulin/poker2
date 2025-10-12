@@ -1,6 +1,7 @@
 import math
 
 from alphaholdem.core.structured_config import LrSchedule
+from alphaholdem.rl.exponential_controller import ExponentialController
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.utils.ema import EMA
 
@@ -109,6 +110,7 @@ def _make_dummy_trainer(
     ]
 
     trainer.kl_ema = EMA()
+    trainer.lr_scaling_controller = ExponentialController(1.0, 1.0, 1.0, 1.0)
 
     return trainer
 

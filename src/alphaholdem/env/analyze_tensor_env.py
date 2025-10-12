@@ -24,7 +24,10 @@ class DummyStateEncoder:
 
 
 def create_state_encoder_for_model(
-    model, env: HUNLTensorEnv, num_bet_bins: int, device: torch.device
+    model,
+    env: HUNLTensorEnv,
+    device: torch.device,
+    num_bet_bins: int,
 ):
     """Create the appropriate state encoder based on the model type.
 
@@ -139,13 +142,14 @@ class PreflopAnalyzer:
             starting_stack=starting_stack,
             sb=sb,
             bb=bb,
+            default_bet_bins=bet_bins,
             device=device,
             rng=rng,
             flop_showdown=flop_showdown,
         )
 
         self.state_encoder = create_state_encoder_for_model(
-            model, self.env, len(bet_bins) + 3, device
+            model, self.env, device, len(bet_bins) + 3
         )
 
         # Cache the 1326 hand combinations

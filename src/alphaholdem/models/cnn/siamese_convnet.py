@@ -208,24 +208,6 @@ class SiameseConvNetV1(nn.Module, Model):
             self.value_head_type = "scalar"
             self.num_value_quantiles = 1
 
-        self._initialize_weights(rng=rng)
-
-    def _initialize_weights(self, rng: torch.Generator | None = None):
-        """Initialize model weights to prevent dead neurons."""
-        for module in self.modules():
-            if isinstance(module, nn.Conv2d):
-                nn.init.kaiming_normal_(
-                    module.weight, mode="fan_out", nonlinearity="relu", generator=rng
-                )
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-            elif isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, nn.GroupNorm)):
-                nn.init.constant_(module.weight, 1)
-                nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight, generator=rng)
-                nn.init.constant_(module.bias, 0)
-
     def forward(self, embedding_data: CNNEmbeddingData) -> ModelOutput:
         # Extract cards and actions from embedding data and convert to float
         cards_tensor = embedding_data.cards.float()

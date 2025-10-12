@@ -179,9 +179,7 @@ class SelfPlayTrainer:
         self.min_elo_diff = cfg.min_elo_diff
         self.min_step_diff = cfg.min_step_diff
         self.k_factor = cfg.k_factor
-        self.use_mixed_precision = (
-            cfg.train.use_mixed_precision and self.device.type in ["cuda", "mps"]
-        )
+        self.use_mixed_precision = cfg.train.use_mixed_precision
         self.loss_scale = cfg.train.loss_scale
         self.use_kv_cache = cfg.train.use_kv_cache
         self.use_tensor_env = cfg.use_tensor_env
@@ -231,6 +229,7 @@ class SelfPlayTrainer:
         self.bet_bins = self.cfg.env.bet_bins
         self.num_bet_bins = len(self.bet_bins) + 3
 
+        torch.zeros((1,), device=self.device)
         if self.is_transformer:
             self.model = PokerTransformerV1(
                 max_sequence_length=self.cfg.model.max_sequence_length,
@@ -1293,7 +1292,7 @@ class SelfPlayTrainer:
 
             total_loss += loss_result.total_loss.item()
             total_policy_loss += loss_result.policy_loss
-            total_value_loss += loss_result.value_loss.item()
+            total_value_loss += loss_result.value_loss
             total_kl_loss += loss_result.penalty_kl * self.beta_controller.current_value
             total_entropy += loss_result.entropy
             total_clipfrac += loss_result.clipfrac
@@ -1313,7 +1312,7 @@ class SelfPlayTrainer:
                 and loss_result.forward_kl > 2 * self.cfg.train.target_kl
             ):
                 value_only = True
-                loss = loss_result.value_loss * self.value_coef
+                loss = loss_result.value_loss_tensor * self.value_coef
                 # Don't break; instead just train value.
             else:
                 policy_episodes += 1
@@ -1602,8 +1601,11 @@ class SelfPlayTrainer:
             value_lr_now = value_lr_start
 
         # Apply LR scaling factor to both learning rates (but don't reduce value)
-        policy_lr_now *= self.lr_scaling_controller.current_value
-        value_lr_now *= max(1.0, self.lr_scaling_controller.current_value)
+        lr_scale = self.lr_scaling_controller.current_value
+        value_lr_scale = max(1.0, lr_scale)
+
+        policy_lr_now *= lr_scale
+        value_lr_now *= value_lr_scale
 
         # Update separate optimizers with their respective learning rates
         if (

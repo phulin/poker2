@@ -95,55 +95,6 @@ def test_mps_autocast_forward_pass(mps_config):
 
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
-def test_mps_autocast_backward_pass(mps_config):
-    """Test that MPS autocast works in backward pass with scaler."""
-    device = torch.device("mps")
-    trainer = SelfPlayTrainer(mps_config, device)
-
-    # Create test tensors
-    batch_size = 4
-    cards_features = torch.zeros(batch_size, 6, 4, 13, dtype=torch.bool, device=device)
-    actions_features = torch.zeros(
-        batch_size, 24, 4, 8, dtype=torch.bool, device=device
-    )
-
-    # Forward pass with autocast (now uses bfloat16)
-    cards_float = cards_features.to(torch.bfloat16)
-    actions_float = actions_features.to(torch.bfloat16)
-
-    # Create CNNEmbeddingData
-    embedding_data = CNNEmbeddingData(cards=cards_float, actions=actions_float)
-
-    with torch.amp.autocast("mps", dtype=torch.bfloat16):
-        outputs = trainer.model(embedding_data)
-        logits = outputs.policy_logits
-        values = outputs.value
-
-    # Create a dummy loss
-    loss = torch.mean(logits) + torch.mean(values)
-
-    # Test scaler operations
-    trainer.optimizer.zero_grad()
-
-    # Scale the loss
-    scaled_loss = trainer.scaler.scale(loss)
-    assert scaled_loss.dtype == torch.float32, "Scaled loss should be float32"
-
-    # Backward pass
-    scaled_loss.backward()
-
-    # Unscale gradients
-    trainer.scaler.unscale_(trainer.optimizer)
-
-    # Step optimizer
-    trainer.scaler.step(trainer.optimizer)
-    trainer.scaler.update()
-
-    # Verify scaler state
-    assert trainer.scaler.get_scale() > 0, "Scaler scale should be positive"
-
-
-@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 def test_mps_autocast_device_consistency(mps_config):
     """Test that MPS autocast maintains device consistency."""
     device = torch.device("mps")

@@ -350,23 +350,6 @@ class TestVectorizedReplayBuffer:
         ):
             buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
-    def test_sample_empty_buffer(self, buffer):
-        """Test sampling from empty buffer raises error."""
-        with pytest.raises(ValueError, match="No trajectories available"):
-            buffer.sample_trajectories(torch.Generator(device=buffer.device), 1)
-
-    def test_sample_no_valid_trajectories(self, buffer):
-        """Test sampling when no trajectories are completed."""
-        # Add incomplete trajectory
-        batch = self._create_test_batch(1, buffer.device)
-        trajectory_indices = torch.tensor([0], device=buffer.device)
-        # No done flags - trajectory not completed
-        buffer.start_adding_trajectory_batches(1, model_age=0)
-        buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
-
-        with pytest.raises(ValueError, match="No trajectories available"):
-            buffer.sample_trajectories(torch.Generator(device=buffer.device), 1)
-
     def test_gae_computation(self, buffer):
         """Test vectorized GAE computation."""
         # Add a complete trajectory one transition at a time

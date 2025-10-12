@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
@@ -20,7 +20,7 @@ class LossResult:
 
     total_loss: torch.Tensor
     policy_loss: float
-    value_loss: torch.Tensor
+    value_loss_tensor: torch.Tensor
     entropy: float
     ratio_mean: float
     ratio_std: float
@@ -34,6 +34,11 @@ class LossResult:
     # Optional fields for specific loss types
     clipped_ratio_mean: Optional[float] = None
     clipped_ratio_std: Optional[float] = None
+    value_loss: float = field(init=False)
+
+    def __post_init__(self) -> None:
+        # Provide a scalar view for logging/tests while keeping tensor for backprop.
+        self.value_loss = float(self.value_loss_tensor.detach().item())
 
 
 class LossCalculator(ABC):
@@ -211,7 +216,7 @@ class TrinalClipPPOLoss(LossCalculator):
         return LossResult(
             total_loss=total_loss,
             policy_loss=policy_loss.item(),
-            value_loss=value_loss,
+            value_loss_tensor=value_loss,
             entropy=entropy.item(),
             ratio_mean=ratio.mean().item(),
             ratio_std=ratio.std().item(),
@@ -270,7 +275,7 @@ class StandardPPOLoss(LossCalculator):
         return LossResult(
             total_loss=total_loss,
             policy_loss=policy_loss.item(),
-            value_loss=value_loss,
+            value_loss_tensor=value_loss,
             entropy=entropy.item(),
             ratio_mean=ratio.mean().item(),
             ratio_std=ratio.std().item(),
@@ -367,7 +372,7 @@ class DualClipPPOLoss(LossCalculator):
         return LossResult(
             total_loss=total_loss,
             policy_loss=policy_loss.item(),
-            value_loss=value_loss,
+            value_loss_tensor=value_loss,
             entropy=entropy.item(),
             ratio_mean=ratio.mean().item(),
             ratio_std=ratio.std().item(),
@@ -557,7 +562,7 @@ class KLPolicyPPOLoss(LossCalculator):
         return LossResult(
             total_loss=total_loss,
             policy_loss=policy_loss.item(),
-            value_loss=value_loss,
+            value_loss_tensor=value_loss,
             entropy=entropy.item(),
             penalty_kl=penalty_kl.item(),
             forward_kl=forward_kl.item(),

@@ -75,6 +75,7 @@ class HUNLTensorEnv:
         self.sb = int(sb)
         self.bb = int(bb)
         self.default_bet_bins = default_bet_bins or DEFAULT_BET_BINS
+        self.num_bet_bins = len(self.default_bet_bins) + 3
         self.scale = float(self.bb) * 100.0
         self.debug_step_table = debug_step_table
         self.flop_showdown = flop_showdown
@@ -176,6 +177,16 @@ class HUNLTensorEnv:
         # Force the forced cards to the front of the deck.
         decks = torch.arange(52, device=self.device).repeat(num_reset, 1)
         forced = 0 if force_deck is None else force_deck.shape[1]
+
+        if force_button is not None:
+            button = force_button.clone()
+        else:
+            button = torch.randint(
+                0, 2, (num_reset,), generator=self.rng, device=self.device
+            )
+        p_sb = button
+        p_bb = 1 - button
+
         if force_deck is not None:
             # guarantees swaps only go forward in deck. sorted has sorted[i] >= i.
             force_deck_sorted = force_deck.sort(dim=1)[0]
@@ -202,16 +213,6 @@ class HUNLTensorEnv:
         # [num_reset, 4] indices into deck for each env
         cards = self.deck[ids, :4]
         self.deck_pos[ids] = 4
-
-        # Randomize button for specified environments
-        if force_button is not None:
-            button = force_button.clone()
-        else:
-            button = torch.randint(
-                0, 2, (num_reset,), generator=self.rng, device=self.device
-            )
-        p_sb = button
-        p_bb = 1 - button
 
         # Assign hole cards
         _c0_1 = cards[:, 0]
@@ -364,7 +365,13 @@ class HUNLTensorEnv:
         """Return action history planes tensor if allocated, else None."""
         # TODO: Make this work again.
         return torch.zeros(
-            self.N, 4, 6, 4, len(self.default_bet_bins) + 3, device=self.device
+            self.N,
+            4,
+            6,
+            4,
+            len(self.default_bet_bins) + 3,
+            dtype=torch.bool,
+            device=self.device,
         )
 
     def bet(self, env_indices: torch.Tensor, chips: torch.Tensor) -> None:
@@ -422,12 +429,31 @@ class HUNLTensorEnv:
         if bin_amounts is None or legal_masks is None:
             bin_amounts, legal_masks = self.legal_bins_amounts_and_mask(bet_bins)
 
-        bet_indices = torch.where(
-            (bin_indices >= 2) & (bin_indices < len(bet_bins) - 1)
-        )[0]
+        num_bins = len(bet_bins) + 3
+        all_in_index = num_bins - 1
+
+        action_indices = torch.full_like(bin_indices, -1)
+        action_indices[bin_indices == 0] = 0  # fold
+        action_indices[bin_indices == 1] = 1  # check/call
+
+        bet_mask = (bin_indices >= 2) & (bin_indices < all_in_index)
+        bet_indices = torch.where(bet_mask)[0]
         bet_amounts = torch.zeros_like(bin_indices)
-        bet_amounts[bet_indices] = bin_amounts[bet_indices, bin_indices[bet_indices]]
-        return self.step(bin_indices, bet_amounts)
+        if bet_indices.numel() > 0:
+            bet_amounts[bet_indices] = bin_amounts[
+                bet_indices, bin_indices[bet_indices]
+            ]
+            action_indices[bet_indices] = 2
+
+        action_indices[bin_indices == all_in_index] = 3  # all-in
+
+        invalid_mask = (bin_indices >= 0) & (action_indices == -1)
+        if invalid_mask.any():
+            raise ValueError(
+                f"Received unsupported bet bin indices: {bin_indices[invalid_mask]}"
+            )
+
+        return self.step(action_indices, bet_amounts)
 
     def step(
         self, action_indices: torch.Tensor, bet_amounts: torch.Tensor
