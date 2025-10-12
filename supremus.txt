@@ -1,0 +1,764 @@
+Unlocking the Potential of
+Deep Counterfactual Value Networks
+
+arXiv:2007.10442v1 [cs.AI] 20 Jul 2020
+
+Ryan Zarick
+Minimal AI
+
+Bryan Pellegrino
+Minimal AI
+
+Noam Brown
+Facebook AI Research
+
+Caleb Banister
+Minimal AI
+
+Abstract
+Deep counterfactual value networks combined with continual resolving provide a
+way to conduct depth-limited search in imperfect-information games. However,
+since their introduction in the DeepStack poker AI, deep counterfactual value
+networks have not seen widespread adoption. In this paper we introduce several
+improvements to deep counterfactual value networks, as well as counterfactual
+regret minimization, and analyze the effects of each change. We combined these
+improvements to create the poker AI Supremus. We show that while a reimplementation of DeepStack loses head-to-head against the strong benchmark agent
+Slumbot, Supremus successfully beats Slumbot by an extremely large margin and
+also achieves a lower exploitability than DeepStack against a local best response.
+Together, these results show that with our key improvements, deep counterfactual
+value networks can achieve state-of-the-art performance.
+
+1
+
+Introduction
+
+Imperfect-information games model strategic interactions between multiple agents that may have
+access to hidden information. Since an agent may not know what exact state they are in (due to
+the other agents’ private information), many algorithms that are successful in perfect-information
+games, such as Q-learning and Monte Carlo tree search, are not sound in imperfect-information
+games. Instead, very different sets of algorithms are used.
+The classic benchmark for zero-sum imperfect-information games is poker, and in particular no-limit
+Texas hold’em poker, which is the most popular form of poker played by humans. In 2017, both
+DeepStack [37] and Libratus [12] claimed victory over human professionals in two-player no-limit
+Texas hold’em (HUNL). This was followed by Pluribus [14], which defeated top humans in six-player
+no-limit Texas hold’em. These victories were considered major milestone achievements for the field
+of AI.
+The key to victory for all these algorithms was lookahead search, but the way they conduct search
+is very different from what is used in perfect-information game algorithms. A major challenge in
+search for imperfect-information games is determining what value to substitute at leaf nodes. In
+perfect-information games this is straightforward: the value at a leaf node is the estimated value of
+both players playing optimally from that point forward. However, since in imperfect-information
+games neither agent knows exactly what state they are in, the optimal policy for the remaining game
+is not well-defined when given only a state.
+To address this challenge, DeepStack introduced deep counterfactual value networks (CFVnets),
+which can in theory estimate the value of a state by conditioning the value of that state on the
+probability distribution over possible states that each player might be in [37]. However, CFVnets
+did not become widely adopted. State-of-the-art approaches instead search to the end of the game
+using an abstraction to reduce the size of the game beyond the depth limit [12], or pre-determine
+several policies for beyond the depth limit and solve the smaller meta-game where agents are limited
+Preprint. Under review.
+
+to choosing one of those few policies for play beyond the depth limit [15, 14]. This is true even for
+leading commercial poker assistance software [1, 2].
+In this paper, we first present a reimplementation of DeepStack for HUNL and find that while it is not
+exploitable by a local best response [36], it loses by a considerable margin to Slumbot [25], a publicly
+available non-searching poker AI that was a top contender in the 2017 Annual Computer Poker
+Competition and the winner of the 2018 competition. We then introduce a series of improvements that,
+together, result in extremely strong performance. These improvements include an equilibrium-finding
+algorithm that achieves a far better empirical convergence rate than past algorithms, an efficient
+GPU-based implementation of this algorithm, more iterations resulting in much closer convergence
+to an equilibrium when conducting search, a larger search space, and far more training data. We
+measure the impact of each of these changes in the benchmark game of HUNL. Finally, we combine
+these improvements into a HUNL bot called Supremus and show that it beats Slumbot, one of the
+strongest abstraction-based poker AIs ever developed, by a massive margin. We also show that it
+performs far better than DeepStack against a local best response.
+
+2
+
+Notation and Background
+
+We consider a game with N agents where the agents may have access to private observations. In this
+paper we generally assume N = 2. However, empirically many of the algorithms perform well in
+some large-scale games involving more than two players [14]. The true state of the world, including
+the entire sequence of actions and all observations by any player, is denoted s ∈ S and is referred to
+as a world state or history. The set of world states that a player cannot distinguish between is referred
+to as an information state (infostate) or simply state. Finally, a public state is a set of histories such
+that for any history s in the public state, if s and s0 share an infostate for any player then s0 is in the
+public state as well.
+Typically, in imperfect-information games, the goal is to compute a Nash equilibrium which is defined
+by a policy for each agent such that no agent can gain by deviating to a different policy [39]. Formally,
+a Nash equilibrium is a policy πi for each agent i such that vi (πi , π−i ) = arg maxπi∗ vi (πi∗ , π−i ),
+where π−i is the policy of all other agents and vi (πi , π−i ) is the value to agent i of playing policy πi
+against π−i . In two-player zero-sum games, this is identical to a min-max equilibrium.
+Computing an exact equilibrium in large-scale imperfect-information games is often intractable.
+Instead, one can approximate an equilibrium using an algorithm that ideally converges to an exact
+equilibrium. We measure the total exploitability (or simply exploitability) of policies π1 and π2 as
+arg maxπ1∗ v1 (π1∗ , π2 ) + arg maxπ2∗ v2 (π1 , π2∗ ). In an exact equilibrium, exploitability is zero.
+2.1
+
+Equilibrium-Finding Algorithms
+
+For small-scale imperfect-information games, linear programming methods can be used to precisely
+compute a Nash equilibrium. However, these techniques do not scale to extremely large games.
+For large imperfect-information games, iterative algorithms that repeatedly traverse the game tree or
+portions of the game tree are used to approximate a Nash equilibrium. While there are many such
+iterative algorithms [7, 34, 23, 22, 32, 33], variants of the counterfactual regret minimization (CFR)
+algorithm have shown the best empirical performance [51, 47, 48]. Variants of CFR have been used to
+solve heads-up limit Texas hold’em [5], and to defeat humans in no-limit Texas hold’em [37, 12, 14].
+The leading CFR variants are Discounted CFR (DCFR) and Linear CFR (LCFR) [13]. DCFR is
+usually the better choice, though LCFR is better when there is a wide range of payoffs or when there
+is sampling involved.
+For extremely large games, such as HUNL which has more than 10160 states [28], traversing the entire
+game tree with a CFR-like algorithm and updating the policy for each possible state is intractable.
+Prior to 2017, the state-of-the-art approach to large-scale two-player zero-sum imperfect-information
+games (measured in the benchmark game of poker) was to first reduce the size of the game by
+bucketing together different states using techniques like k-means clustering and then approximating
+the solution for that simplified game. The solution for the game was stored as a lookup table
+for use during actual play against an opponent [29, 30, 26, 4, 8, 10, 6]. Algorithms also exist
+that implicitly conduct abstraction by using function approximation instead of predetermining the
+abstraction [50, 9, 46, 35].
+2
+
+Around 2017, search algorithms that determine a policy for the next few moves in real time became
+popular [16, 27, 20, 38, 37, 11, 15]. These search algorithms were the key breakthrough that led to
+victories over humans in no-limit Texas hold’em poker.
+2.2
+
+Counterfactual Value Networks
+
+Lookahead search has been a key component of superhuman AIs in perfect-information games such
+as backgammon [49], chess [18], and Go [43, 45, 44]. In these algorithms, whenever an agent must
+act it first generates a depth-limited subgame consisting of the next several moves. At the end of the
+subgame are leaf nodes, whose values are either known from the rules of the game (e.g., a checkmate
+in chess), or are determined via a value function. This value function takes as input the state of
+the game (e.g., the configuration of a chess board) and outputs an estimated value for each player
+assuming all players play optimally from that point forward. The value function may be a handcrafted
+heuristic or it may be learned from data.
+In imperfect-information games, the input to a value function cannot simply be the state of the world,
+because optimal play also depends on the beliefs of players about the state of the world, the other
+agent’s beliefs about the state of the world, and so on. For example, the value to player 1 of holding
+the second-strongest poker hand when player 2 holds the third-strongest poker hand is very different
+depending on whether player 1 knows that player 2 holds the weaker poker hand, or if player 1 thinks
+that player 2 holds a stronger poker hand. In the latter case, player 1 may simply fold and actually
+lose money.
+One way to cope with this is to condition the value of a state on the beliefs of all players about the
+probability that each player is in each state. This concept was originally developed for partially
+observable Markov decision processes [40], and later independently developed for two-player zerosum imperfect-information games and called counterfactual value networks (CFVnets) [37]. Since
+there are 1,326 combinations of private cards in HUNL, the input to the CFVnet would normally be
+1,326 probabilities (summing to 1) for both players, the number of chips in the pot relative to the
+number of chips with which the players start, and the visible board cards. However, to reduce the
+complexity of the function approximation, the input size is reduced in both DeepStack and Supremus
+by using bucketing.
+Similarly, the output would normally be 1,326 values – one for each hand the player could be holding.
+This too is reduced in both DeepStack and Supremus by using bucketing. One could alternatively add
+as an input the specific hand the player is holding, and then output only the value for that hand, but
+this is wasteful since determining the optimal policy in the subgame requires computing the policy
+for every feasible hand anyway.
+2.3
+
+Continual Resolving
+
+Another challenge of conducting lookahead search in imperfect-information games is that because
+the opponent’s policy leading up to the current situation is unknown, the distribution over states at
+the start of the lookahead search is unknown. If any assumption is made that the opponent has a
+particular fixed policy, then the opponent could potentially adapt their policy to take advantage of
+that assumption.
+A classic example of this is in rock-paper-scissors (RPS). Consider a sequential game of RPS in
+which player 1 acts and then player 2 acts without having observed the action of player 1. If player 2
+conducts search and assumes that player 1 plays the equilibrium policy of choosing rock, paper, and
+scissors with 13 probability each, then player 2 could reasonably decide to always choose rock. This
+has the same expected value as any other policy: zero. But if player 2 were to actually always throw
+rock, then player 1 could shift their policy to throwing paper more often.
+Safe resolving [16, 27, 38, 11] copes with this challenge by adding constraints that the opponent’s
+value for any state cannot improve in the new policy resulting from lookahead search compared
+to the value that was estimated from before lookahead search. Safe resolving provably bounds the
+exploitability of the lookahead search policy based on the accuracy of the value function.
+Since the branching factor in HUNL is almost 20,000 actions, all competitive HUNL agents reduce
+the branching factor to a small number of raise sizes that are represented as fractions of the pot
+(typically in addition to fold, call, and raising all remaining chips). This is generally fine so long as
+3
+
+enough actions are included in the action abstraction because a near-optimal policy can be computed
+that uses just a few actions in each situation. Indeed, professional poker players typically consider
+only one or two different raise sizes for a particular situation. However, if the opponent chooses a
+raise size that is not in the action abstraction then no policy is defined for responding to that action.
+Past poker bots coped with this through action translation, in which the opponent raise size is rounded
+to a nearby in-abstraction size and treated as if it were that size [3, 21, 42, 41, 19]. However, action
+translation is potentially highly exploitable. Thus, bots that use action translation typically add a
+large number of action for the opponent in order to minimize the error due to action translation. This
+results in an exponential blowup in the size of the abstract game tree.
+Continual resolving, developed independently and simultaneously for both Libratus [11] and DeepStack [37], repeatedly applies safe resolving as play proceeds down the game tree. If an opponent
+chooses an action that is not in the lookahead search, continual resolving computes a policy in
+response to that action while attempting to ensure that the opponent’s value for that action is no higher
+than any alternative action already in the lookahead search action abstraction. This eliminates any
+error due to action translation; the only potential for suboptimality comes from the opponent possibly
+choosing an action with a higher expected value than one that is already in the abstraction. However,
+this is in practice not a risk so long as a small number of good actions are added to the abstraction.
+The only downside is that continual resolving requires recomputing the policy potentially as often as
+every action rather than simply applying a lookup table.
+2.4
+
+Description of Heads-Up No-Limit Texas Hold’em
+
+Heads-up no-limit Texas hold’em (HUNL) is a two-player zero-sum imperfect-information game.
+As is standard in the literature, we assume both players have $20,000 in chips. The position of the
+players alternates after each hand. When it is a player’s turn to act, they may either fold, call, or raise.
+If a player folds, they immediately lose the game and the other player receives all the money in the
+pot. If a player calls, they must put into the pot the same amount of money the other player has put in.
+If a player raises, they must first match the amount of money the other player has put in the pot, and
+then add any additional amount (so long as it is at least $100, at least as big as any previous raise
+amount, and at most the player’s remaining chips). A round ends when a player calls after another
+player has called or raised.
+At the start of HUNL, both players are dealt two private cards from a standard 52-card deck. Player 1
+must immediately place a small blind of $50 in the pot and player 2 must immediately place a big
+blind of $100 in the pot. A round of betting (called a round) then occurs starting with player 1. The
+first round is referred to as the preflop. After the preflop round ends, three community cards are dealt
+face up. At the end of the game, both players may use these community cards, in addition to their two
+private cards, to make their final hand. Next, another round occurs, referred to as the flop, starting
+with player 2. Once the round is over, another community card is dealt face up and another betting
+round occurs called the turn. Finally, one more card is dealt face up and the last round, called the
+river, occurs. If no player has folded by the end of the river, then the player with the best five-card
+poker hand constructed from their two private cards and the five community cards wins the money in
+the pot. If the players tie then the pot is split evenly (i.e., both players receive a reward of 0).
+In the standardized form of HUNL used in the Annual Computer Poker Competition and past
+man-machine matches, the chip stacks for each player reset to $20,000 after each game (hand).
+Performance is evaluated in milli big blinds per game (mbb/g), which is the average number of big
+blinds that an agent wins per 1,000 games.
+
+3
+
+Reimplementation of DeepStack
+
+Our reimplementation of DeepStack closely follows what was described in the paper. The neural
+networks were trained in the same manner using Adam [31] with Huber loss [24] as an evaluation
+metric. For the reimplementation, all rounds except for the turn use a depth-limited lookahead tree
+identical to the one used in DeepStack. In the DeepStack implementation, when a player is on the
+turn they solve until the end of the game using a bucketed abstraction for all river actions. The details
+of this bucketing were never presented, so instead we solve only to the start of the river and then use
+the river neural network from Supremus. All architecture around the network inputs and outputs are
+identical to DeepStack.
+4
+
+The validation errors for the CFVnets in our reimplementation were 0.016 for the turn network
+(compared to 0.026 reported for DeepStack), 0.028 for the flop network (compared to 0.034 reported
+for DeepStack), and 0.000099 for the preflop auxiliary network (compared to 0.000055 reported for
+DeepStack). While the preflop auxiliary network has higher error, the errors are so small that the
+effect is likely minimal and greatly outweighed by the reduced errors on the flop and turn networks.
+To confirm that the reimplementation was similar to DeepStack, we looked at the frequencies of
+actions for various hands played by both DeepStack (in the 45,037-hand logs that were publicly
+released) and our reimplementation. Since many of the human opponents that DeepStack played
+against acted far from what poker AIs and human professionals have well established as sound
+strategy, it was difficult to make accurate comparisons for situation in which an opponent had already
+acted. Therefore, we compared the action frequencies where the agent was the very first player to act
+and had no prior state influencing it. Figure 4 shows the frequencies are similar for both DeepStack
+and the DeepStack reimplemenation.
+DeepStack was evaluated with two metrics: performance against human participants and performance
+against a local best response (LBR) [36]. While we cannot evaluate our reimplementation against the
+same human participants, we evaluate our reimplementation against LBR. Throughout this paper, we
+use ± to show the value of one standard error in results. In the DeepStack paper, when tested against
+LBR with fold and call as its only actions, DeepStack won 428 ± 87 mbb/g, while prior agents lost
+400 mbb/g or more. When measured against LBR, our DeepStack reimplementation won 536 ± 68
+mbb/g, which is slightly better than the original DeepStack result reports.
+We also evaluated the DeepStack reimplementation in head-to-head performance against Slumbot,
+which is considered to be an extremely strong abstraction-based agent that was a top contender in
+the 2017 Annual Computer Poker Competition and winner of the 2018 competition. Slumbot does
+not conduct lookahead search; its entire policy is precomputed and used as a lookup table. This
+match used the standard HUNL format described in Section 2.4 that was used in both the ACPC
+and man-machine competitions. The two agents played each other for 150,000 hands. To reduce
+variance, all-in situations (in which both players have committed all their chips to the pot) that
+occurred before the final round were scored based on the expected value over all possible community
+card outcomes. This is a standard variance-reduction technique when evaluating win rates. The
+DeepStack reimplementation lost 948,096 chips to Slumbot, equating to a loss of 63 ± 40 mbb/g.
+The results can be seen in Figures 1 and 2 respectively.
+
+4
+
+Methods
+
+In this section, we introduce Supremus, the first HUNL agent using counterfactual value networks
+to demonstrate state-of-the-art performance against a leading agent. Supremus is comprised of two
+major components: a sparse lookahead tree with continual resolving that is solved using an improved
+CFR variant, and neural network value functions used at the end of each round.
+Supremus’s neural network value functions were built with the same architecture as DeepStack, using
+a feedforward network with seven fully connected hidden layers and 500 nodes for each hidden layer,
+and an external network to enforce that the weighted averages of the outputs for each player sum
+to zero. The input to the network is a flattened array of length 2,001 which contains an encoded
+version of each player’s probability distribution over private observations (poker hands) and public
+community cards compressed into a single array of length 1,000 and represented as probabilities
+over those buckets, as well as a final element containing the current pot size as a fraction of the
+starting number of chips. The network’s outputs are the expected values of each of the 1,000 buckets,
+represented as a fraction of the current pot size.
+Like DeepStack, Supremus uses the CFR-D continual resolving algorithm described in Section 2.3.
+The lookahead tree uses a limited predefined set of actions, shown in Table 2, to build a game tree
+that extend to the end of the current round. At the leaf nodes at the end of the current round, the value
+network is used to estimate the value at that point (except on the final round, which always extends to
+the end of the game).
+Unlike DeepStack, Supremus uses value functions at the end of the round for every round (except
+the final one). Without using a value function at the end of a round, lookahead trees require very
+coarse-grained action abstractions to be feasible to solve in real time because the number of nodes
+5
+
+3500000
+3000000
+2500000
+
+Chips Won
+
+2000000
+1500000
+1000000
+500000
+0
+-500000
+-1000000
+-1500000
+-2000000
+25000
+
+50000
+
+75000
+
+100000
+
+125000
+
+Games Played
+
+Figure 1: Performance of DeepStack reimplementation versus Slumbot in chips won over
+150,000 hands.
+500
+
+mbb / game
+
+250
+
+0
+
+-250
+
+-500
+25000
+
+50000
+
+75000
+
+100000
+
+125000
+
+Games Played
+
+Exploitability
+
+Figure 2: Performance of DeepStack reimplementation versus Slumbot in mbb/g over 150,000
+hands.
+
+1
+
+0.5
+
+0.1
+
+200
+
+400
+
+600
+
+800
+
+Figure 4: Probabilities for not folding as the first
+action for each possible hand. The bottom-left half
+shows the policy when the suits of the two private
+cards do not match, and the top-right half shows
+the policy when the suits of the two private cards
+match.
+
+1000
+
+Iterations
+DeepStack CFR+
+DCFR+
+DCFR(1.5,0,2)
+
+DCFR(1.5,0,2) Alt
+CFR+ Alt
+
+CFR+
+
+Figure 3: Performance of DCFR+ and popular
+CFR variants.
+
+in a tree grows at a rate of O(nd ) (where n is the number of actions and d is the depth of the tree)
+and the amount of time it takes to solve a tree scales linearly with the number of nodes in the tree.
+Additionally, at the end of each round in poker there is a large branching factor due to chance (due to
+additional community cards being revealed). Using a value function at the end of the round before
+any additional actions occur eliminates the rapid growth due to chance and future actions.
+As described in Section 3, DeepStack used LBR to compare itself against other agents. In the
+DeepStack paper, when tested against LBR with fold and call as it’s only actions, DeepStack won 428
+± 87 mbb/g, while prior agents lost 400 mbb/g or more. When measured against LBR, our DeepStack
+Reimplementation won 536 ± 68 mbb/g, and Supremus won 951 ± 96 mbb/g, almost doubling the
+winnings of DeepStack against the same configuration.
+Supremus has several improvements over existing methods, including our modified CFR variant
+DCFR+, neural networks on all lookahead trees, and a complete end-to-end GPU implementation.
+6
+
+For the remainder of this paper, we will describe each aspect in detail as well as benchmark them
+against existing approaches.
+4.1
+
+DCFR+
+
+In this section we introduce DCFR+, a modification of DCFR [13] that achieves faster convergence
+over practical time horizons by delaying the starting point at which the average policy is tracked, as
+originally proposed in [47], and by using a linear weighting scheme for the average policy rather
+than quadratic. We also show empirically that when using deep counterfactual value networks, CFR
+converges faster when updating the regrets for both players simultaneously rather than alternating
+their updates.
+Specifically, we modify the DCFR algorithm so that rather than having iteration t receive a weight
+of t2 when computing the average policy, it instead receives a weight of max{0, t − d} for some
+constant d. In our experiments, d = 100. Since only a constant number of iterations receive a weight
+of zero and since the weights are non-decreasing, DCFR+ is still guaranteed to converge to a Nash
+equilibrium with a bound of O( √1T ) on exploitability, where T is the number of iterations [13].
+Figure 3 measures the convergence rate of our DCFR+ algorithm against popular CFR variants,
+including the version used by DeepStack, when a counterfactual value network is used at the depth
+limit on the first betting round. Surprisingly, we observed faster convergence when updating both
+players simultaneously rather than alternating when a counterfactual value network is used at leaf
+nodes, while the opposite has historically been observed when not using counterfactual value networks.
+The best-known asymptotic convergence bound for both forms is similar [17].
+4.2
+
+GPU
+
+Supremus is a custom implementation written in CUDA with C++ to run entirely on a GPU. It has
+custom kernels optimized to achieve optimal performance and throughput. It has a single on-ramp to
+load the initial tree into GPU memory and an off-ramp when DCFR+ is complete. This allows the
+software to never move memory in and out of the GPU, greatly reducing the memory latency during
+run-time. When comparing the speed of the two implementations using the same action abstraction
+on the flop, Supremus completes 1,000 iterations in 0.8 seconds, over 6x faster than DeepStack. The
+faster GPU implementation combined with the use of DCFR+ results in Supremus achieving an
+exploitability of 3 mbb/g over 5,000x faster on the same hardware.
+4.3
+
+Neural Networks
+
+Supremus uses neural networks for a value function at the start of each round (except the preflop,
+where an auxiliary value function is trained for the end of the round). The value network for each
+round was built by solving random subgames rooted at the start of that round, and using the value
+function of the round below for leaf nodes. Thus, the river network was trained first, followed by the
+turn network, followed by the flop network, and finally followed by the preflop auxiliary network.
+The random subgames were generated in a manner identical to DeepStack. Each subgame was solved
+with 4,000 iterations per player of DCFR+.
+The river network was trained on 50 million samples of randomly generated subgames, the turn
+network was trained on 20 million subgames, the flop network was trained on 5 million subgames,
+and the preflop auxiliary network was trained on 10 million situations. For comparison, DeepStack
+used 10 million examples for its turn network, 1 million for its flop network, and 10 million for its
+preflop auxiliary network (DeepStack did not use a river network).
+As noted in Table 1, the river network achieved an average Huber loss of 0.010 and 0.015 on the
+training and validation data, respectively. The turn network reached an average Huber loss of 0.008
+on the training data and 0.010 on the validation data. The flop network achieved an average Huber
+loss of 0.0092 on the training and 0.011 on the validation data. It is important to note that the flop
+validation average Huber loss is three times lower than that of DeepStack’s loss. The auxiliary
+network was trained to 0.000069 and 0.000070 average Huber loss for the training and validation
+data, respectively.
+7
+
+Table 1: Supremus versus DeepStack Huber loss results.
+Supremus
+Trained
+Validation
+
+Network
+
+DeepStack
+Trained
+Validation
+
+River
+
+0.01
+
+0.015
+
+N/A
+
+Turn
+
+0.008
+
+0.01
+
+0.016
+
+0.026
+
+Flop
+
+0.0092
+
+0.011
+
+0.008
+
+0.034
+
+0.000069
+
+0.000070
+
+0.000053
+
+0.000055
+
+Auxiliary
+
+N/A
+
+Table 2: Actions used within each implementation’s action abstraction. F, C, A refer to Fold, Call and
+All-In respectively while all remaining numbers refer to the fraction of the size of the pot being bet.
+
+4.4
+
+Name
+
+First Action
+
+Second Action
+
+Third Action
+
+Remaining
+
+DeepStack
+
+F, C, 0.5,1.0, 2.0, A
+
+F, C, 0.5,1.0, 2.0, A
+
+F, C, 1.0, A
+
+F, C, 1.0, A
+
+Supremus
+
+F, C, 0.33, 0.5, 0.75,
+1.0, 1.25, 2.0, A
+
+F, C, 0.25, 0.5, 1.0, A
+
+F, C, 0.25, A
+
+F, C, 1.0, A
+
+Supremus versus Slumbot
+
+Supremus was evaluated by playing 150,000 hands against Slumbot, using the same time constraints
+as those used by DeepStack. This match used the standard HUNL format described in section 2.4.
+Supremus won 2,637,277 chips, equating to a win of 176 ± 44 mbb/g. These results can be seen in
+Figures 5 and 6 respectively. Compared to the DeepStack reimplementation, which lost to Slumbot by
+63 ± 40 mbb/g, our improvements resulted in an increase of 239 mbb/g against a strong benchmark
+agent.
+
+5
+
+Conclusions
+
+Deep CFVnets were introduced more than three years ago, but have not seen widespread adoption. This may be due to the original deep CFVnet results not displaying superior head-to-head
+performance compared to alternative techniques. Indeed, we find that our reimplementation of DeepStack loses to the prior benchmark agent Slumbot by 63 ± 40 mbb/g. In this paper, we introduced
+a series of improvements to the construction and use of deep CFVnets, including more accurate
+CFR convergence, lower neural network error, and a finer-grained discretization of the action space.
+With these improvements, our agent Supremus defeats Slumbot by 176 ± 44 mbb/g. These results
+show that achieving state-of-the-art performance with deep CFVnets is indeed possible with our key
+improvements.
+
+3500000
+
+500
+
+3000000
+2500000
+250
+
+1500000
+
+mbb / game
+
+Chips Won
+
+2000000
+1000000
+500000
+0
+-500000
+
+0
+
+-250
+
+-1000000
+-1500000
+-2000000
+
+-500
+25000
+
+50000
+
+75000
+
+100000
+
+125000
+
+25000
+
+Games Played
+
+50000
+
+75000
+
+100000
+
+125000
+
+Games Played
+
+Figure 5: Performance of Supremus versus Slumbot in chips won over 150,000 hands.
+
+Figure 6: Performance of Supremus versus Slumbot in mbb/g over 150,000 hands.
+8
+
+References
+[1] Piosolver. https://www.piosolver.com/. Accessed: 2020-02-04.
+[2] Simple postflop. https://simplepoker.com. Accessed: 2020-02-04.
+[3] Rickard Andersson. Pseudo-optimal strategies in no-limit poker. ICGA Journal, 29(3):143–149,
+2006.
+[4] Nolan Bard, Michael Johanson, and Michael Bowling. Asymmetric abstractions for adversarial
+settings. In Proceedings of the 2014 international conference on Autonomous agents and
+multi-agent systems, pages 501–508, 2014.
+[5] Michael Bowling, Neil Burch, Michael Johanson, and Oskari Tammelin. Heads-up limit
+hold’em poker is solved. Science, 347(6218):145–149, 2015.
+[6] Michael Bowling, Neil Burch, Michael Johanson, and Oskari Tammelin. Heads-up limit
+hold’em poker is solved. Communications of the ACM, 60(11):81–88, 2017.
+[7] George W Brown. Iterative solution of games by fictitious play. Activity analysis of production
+and allocation, 13(1):374–376, 1951.
+[8] Noam Brown, Sam Ganzfried, and Tuomas Sandholm. Hierarchical abstraction, distributed
+equilibrium computation, and post-processing, with application to a champion no-limit texas
+hold’em agent. In Proceedings of the 2015 International Conference on Autonomous Agents
+and Multiagent Systems, pages 7–15. International Foundation for Autonomous Agents and
+Multiagent Systems, 2015.
+[9] Noam Brown, Adam Lerer, Sam Gross, and Tuomas Sandholm. Deep counterfactual regret
+minimization. In International Conference on Machine Learning, pages 793–802, 2019.
+[10] Noam Brown and Tuomas Sandholm. Baby tartanian8: winning agent from the 2016 annual
+computer poker competition. In Twenty-Fifth International Joint Conference on Artificial
+Intelligence, pages 4238–4239. AAAI Press, 2016.
+[11] Noam Brown and Tuomas Sandholm. Safe and nested subgame solving for imperfectinformation games. In Advances in neural information processing systems, pages 689–699,
+2017.
+[12] Noam Brown and Tuomas Sandholm. Superhuman AI for heads-up no-limit poker: Libratus
+beats top professionals. Science, page eaao1733, 2017.
+[13] Noam Brown and Tuomas Sandholm. Solving imperfect-information games via discounted regret minimization. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 33,
+pages 1829–1836, 2019.
+[14] Noam Brown and Tuomas Sandholm. Superhuman AI for multiplayer poker. Science, page
+eaay2400, 2019.
+[15] Noam Brown, Tuomas Sandholm, and Brandon Amos. Depth-limited solving for imperfectinformation games. In Advances in Neural Information Processing Systems, pages 7663–7674,
+2018.
+[16] Neil Burch, Michael Johanson, and Michael Bowling. Solving imperfect information games
+using decomposition. In Twenty-Eighth AAAI Conference on Artificial Intelligence, 2014.
+[17] Neil Burch, Matej Moravcik, and Martin Schmid. Revisiting cfr+ and alternating updates.
+Journal of Artificial Intelligence Research, 64:429–443, 2019.
+[18] Murray Campbell, A Joseph Hoane Jr, and Feng-hsiung Hsu. Deep Blue. Artificial intelligence,
+134(1-2):57–83, 2002.
+[19] Sam Ganzfried and Tuomas Sandholm. Action translation in extensive-form games with
+large action spaces: axioms, paradoxes, and the pseudo-harmonic mapping. In Twenty-Third
+international joint conference on Artificial Intelligence, pages 120–128. AAAI Press, 2013.
+[20] Sam Ganzfried and Tuomas Sandholm. Endgame solving in large imperfect-information games.
+In Proceedings of the 2015 International Conference on Autonomous Agents and Multiagent Systems, pages 37–45. International Foundation for Autonomous Agents and Multiagent Systems,
+2015.
+9
+
+[21] Andrew Gilpin, Tuomas Sandholm, and Troels Bjerre Sørensen. A heads-up no-limit texas
+hold’em poker player: discretized betting models and automatically generated equilibriumfinding programs. In Proceedings of the 7th international joint conference on Autonomous agents
+and multiagent systems-Volume 2, pages 911–918. International Foundation for Autonomous
+Agents and Multiagent Systems, 2008.
+[22] Johannes Heinrich, Marc Lanctot, and David Silver. Fictitious self-play in extensive-form
+games. In International Conference on Machine Learning, pages 805–813, 2015.
+[23] Samid Hoda, Andrew Gilpin, Javier Pena, and Tuomas Sandholm. Smoothing techniques
+for computing nash equilibria of sequential games. Mathematics of Operations Research,
+35(2):494–512, 2010.
+[24] Peter J Huber. Robust estimation of a location parameter. In Breakthroughs in statistics, pages
+492–518. Springer, 1992.
+[25] Eric Jackson. Slumbot. https://www.slumbot.com/, 2017. Accessed: 2020-02-04.
+[26] Eric Griffin Jackson. Slumbot nl: Solving large games with counterfactual regret minimization using sampling and distributed processing. In Workshops at the Twenty-Seventh AAAI
+Conference on Artificial Intelligence, 2013.
+[27] Eric Griffin Jackson. A time and space efficient algorithm for approximately solving large
+imperfect information games. In Workshops at the Twenty-Eighth AAAI Conference on Artificial
+Intelligence, 2014.
+[28] Michael Johanson. Measuring the size of large no-limit poker games. Technical Report TR13-01,
+Department of Computing Science, University of Alberta, 2013.
+[29] Michael Johanson, Nolan Bard, Neil Burch, and Michael Bowling. Finding optimal abstract
+strategies in extensive-form games. In Twenty-sixth AAAI conference on artificial intelligence,
+2012.
+[30] Michael Johanson, Neil Burch, Richard Valenzano, and Michael Bowling. Evaluating statespace abstractions in extensive-form games. In Proceedings of the 2013 international conference
+on Autonomous agents and multi-agent systems, pages 271–278, 2013.
+[31] Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+arXiv:1412.6980, 2014.
+[32] Christian Kroer, Gabriele Farina, and Tuomas Sandholm. Solving large sequential games with
+the excessive gap technique. In Advances in Neural Information Processing Systems, pages
+864–874, 2018.
+[33] Christian Kroer, Kevin Waugh, Fatma Kılınç-Karzan, and Tuomas Sandholm. Faster algorithms for extensive-form game solving via improved smoothing functions. Mathematical
+Programming, pages 1–33, 2018.
+[34] David S Leslie and Edmund J Collins. Generalised weakened fictitious play. Games and
+Economic Behavior, 56(2):285–298, 2006.
+[35] Hui Li, Kailiang Hu, Shaohua Zhang, Yuan Qi, and Le Song. Double neural counterfactual
+regret minimization. In International Conference on Learning Representations, 2020.
+[36] Viliam Lisy and Michael Bowling. Eqilibrium approximation quality of current no-limit poker
+bots. In Workshops at the Thirty-First AAAI Conference on Artificial Intelligence, 2017.
+[37] Matej Moravčík, Martin Schmid, Neil Burch, Viliam Lisỳ, Dustin Morrill, Nolan Bard, Trevor
+Davis, Kevin Waugh, Michael Johanson, and Michael Bowling. Deepstack: Expert-level
+artificial intelligence in heads-up no-limit poker. Science, 356(6337):508–513, 2017.
+[38] Matej Moravcik, Martin Schmid, Karel Ha, Milan Hladik, and Stephen J Gaukrodger. Refining
+subgames in large imperfect information games. In Thirtieth AAAI Conference on Artificial
+Intelligence, 2016.
+[39] John F Nash et al. Equilibrium points in n-person games. Proceedings of the national academy
+of sciences, 36(1):48–49, 1950.
+[40] Ashutosh Nayyar, Aditya Mahajan, and Demosthenis Teneketzis. Decentralized stochastic
+control with partial history sharing: A common information approach. IEEE Transactions on
+Automatic Control, 58(7):1644–1658, 2013.
+10
+
+[41] Jonathan Rubin and Ian Watson. Case-based strategies in computer poker. AI Communications,
+25(1):19–48, 2012.
+[42] David Schnizlein, Michael Bowling, and Duane Szafron. Probabilistic state translation in
+extensive games with large action sets. In Proceedings of the 21st international jont conference
+on Artifical intelligence, pages 278–284, 2009.
+[43] David Silver, Aja Huang, Chris J Maddison, Arthur Guez, Laurent Sifre, George Van Den Driessche, Julian Schrittwieser, Ioannis Antonoglou, Veda Panneershelvam, Marc Lanctot, et al.
+Mastering the game of go with deep neural networks and tree search. Nature, 529(7587):484,
+2016.
+[44] David Silver, Thomas Hubert, Julian Schrittwieser, Ioannis Antonoglou, Matthew Lai, Arthur
+Guez, Marc Lanctot, Laurent Sifre, Dharshan Kumaran, Thore Graepel, et al. A general
+reinforcement learning algorithm that masters chess, shogi, and go through self-play. Science,
+362(6419):1140–1144, 2018.
+[45] David Silver, Julian Schrittwieser, Karen Simonyan, Ioannis Antonoglou, Aja Huang, Arthur
+Guez, Thomas Hubert, Lucas Baker, Matthew Lai, Adrian Bolton, et al. Mastering the game of
+go without human knowledge. Nature, 550(7676):354, 2017.
+[46] Eric Steinberger.
+Single deep counterfactual regret minimization.
+arXiv preprint
+arXiv:1901.07621, 2019.
+[47] Oskari Tammelin. Solving large imperfect information games using cfr+. arXiv preprint
+arXiv:1407.5042, 2014.
+[48] Oskari Tammelin, Neil Burch, Michael Johanson, and Michael Bowling. Solving heads-up limit
+texas hold’em. In Twenty-Fourth International Joint Conference on Artificial Intelligence, 2015.
+[49] Gerald Tesauro. TD-Gammon, a self-teaching backgammon program, achieves master-level
+play. Neural computation, 6(2):215–219, 1994.
+[50] Kevin Waugh, Dustin Morrill, James Andrew Bagnell, and Michael Bowling. Solving games
+with functional regret estimation. In AAAI Conference on Artificial Intelligence, 2015.
+[51] Martin Zinkevich, Michael Johanson, Michael Bowling, and Carmelo Piccione. Regret minimization in games with incomplete information. In Advances in neural information processing
+systems, pages 1729–1736, 2008.
+
+11
+
+

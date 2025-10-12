@@ -55,7 +55,6 @@ def build_preflop_batch(
         starting_stack=env_cfg.stack,
         sb=env_cfg.sb,
         bb=env_cfg.bb,
-        bet_bins=env_cfg.bet_bins or [0.5, 1.0, 1.5, 2.0],
         device=device,
     )
     env.reset()

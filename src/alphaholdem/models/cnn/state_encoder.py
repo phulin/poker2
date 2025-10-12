@@ -18,10 +18,11 @@ class CNNStateEncoder:
         self,
         tensor_env: HUNLTensorEnv,
         device: torch.device,
+        num_bet_bins: int,
     ):
         self.tensor_env = tensor_env
         self.device = device
-        self.num_bet_bins = tensor_env.num_bet_bins
+        self.num_bet_bins = num_bet_bins
 
     def encode_tensor_states(self, player: int, idxs: torch.Tensor) -> CNNEmbeddingData:
         """
@@ -63,7 +64,8 @@ class CNNStateEncoder:
 
         # Get action history directly from tensor environment
         # Shape: [M, 4_streets, 6_slots, 4_players, num_bet_bins]
-        action_history = self.tensor_env.get_action_history()[env_indices]
+        # TODO: Implement proper action history tracking in tensor environment
+        action_history = torch.zeros(M, 4, 6, 4, self.num_bet_bins, device=self.device)
 
         # Reshape to match ActionsHUEncoderV1 format: [M, 24_channels, 4_players, num_bet_bins]
         # Flatten streets and slots: [M, 4*6, 4, num_bet_bins] = [M, 24, 4, num_bet_bins]

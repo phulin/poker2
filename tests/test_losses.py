@@ -369,6 +369,7 @@ class TestTrinalClipPPOLoss:
             card_suits=torch.zeros(batch, 10),
             action_actors=torch.zeros(batch, 10),
             action_legal_masks=torch.zeros(batch, 10, 8, dtype=torch.bool),
+            action_amounts=torch.zeros(batch, 10, dtype=torch.int32),
             context_features=torch.zeros(batch, 10, 9, dtype=torch.int16),
             lengths=torch.full((batch,), 10),
         )
@@ -436,6 +437,7 @@ class TestTrinalClipPPOLoss:
             card_suits=torch.zeros(batch, 10),
             action_actors=torch.zeros(batch, 10),
             action_legal_masks=torch.zeros(batch, 10, 8, dtype=torch.bool),
+            action_amounts=torch.zeros(batch, 10, dtype=torch.int32),
             context_features=torch.zeros(batch, 10, 9, dtype=torch.int16),
             lengths=torch.full((batch,), 10),
         )
@@ -501,6 +503,7 @@ class TestTrinalClipPPOLoss:
             card_suits=torch.zeros(batch, 10),
             action_actors=torch.zeros(batch, 10),
             action_legal_masks=torch.zeros(batch, 10, 8, dtype=torch.bool),
+            action_amounts=torch.zeros(batch, 10, dtype=torch.int32),
             context_features=torch.zeros(batch, 10, 9, dtype=torch.int16),
             lengths=torch.full((batch,), 10),
         )
@@ -594,6 +597,7 @@ class TestTrinalClipPPOLoss:
             card_suits=torch.zeros(batch, 10),
             action_actors=torch.zeros(batch, 10),
             action_legal_masks=torch.zeros(batch, 10, 8, dtype=torch.bool),
+            action_amounts=torch.zeros(batch, 10, dtype=torch.int32),
             context_features=torch.zeros(batch, 10, 9, dtype=torch.int16),
             lengths=torch.full((batch,), 10),
         )

@@ -109,6 +109,9 @@ class TestVectorizedReplayBuffer:
                 dtype=torch.bool,
                 device=device,
             ),
+            action_amounts=torch.zeros(
+                2, buffer.max_sequence_length, dtype=torch.int32, device=device
+            ),
             context_features=ctx,
             lengths=lengths,
         )
@@ -144,6 +147,9 @@ class TestVectorizedReplayBuffer:
                 buffer.num_bet_bins,
                 dtype=torch.bool,
                 device=device,
+            ),
+            action_amounts=torch.zeros(
+                1, buffer.max_sequence_length, dtype=torch.int32, device=device
             ),
             context_features=torch.zeros(
                 1,
@@ -202,6 +208,7 @@ class TestVectorizedReplayBuffer:
             action_legal_masks=torch.zeros(
                 1, L, buffer.num_bet_bins, dtype=torch.bool, device=device
             ),
+            action_amounts=torch.zeros(1, L, dtype=torch.int32, device=device),
             context_features=ctx,
             lengths=torch.tensor([3], device=device),
         )
@@ -216,6 +223,7 @@ class TestVectorizedReplayBuffer:
                 action_legal_masks=torch.zeros(
                     1, L, buffer.num_bet_bins, dtype=torch.bool, device=device
                 ),
+                action_amounts=torch.zeros(1, L, dtype=torch.int32, device=device),
                 context_features=ctx,
                 lengths=torch.tensor([1], device=device),
             ),
@@ -342,36 +350,10 @@ class TestVectorizedReplayBuffer:
         ):
             buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
-    def test_sample_trajectories(self, buffer):
-        """Test sampling complete trajectories."""
-        # Add multiple trajectories - one transition at a time
-        buffer.start_adding_trajectory_batches(3, model_age=0)
-        for i in range(3):
-            for j in range(2):
-                batch = self._create_test_batch(1, buffer.device)
-                trajectory_indices = torch.tensor([i], device=buffer.device)
-                batch["dones"][0] = j == 1  # Only last transition is done
-                buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
-
-        # Commit completed trajectories
-        buffer.finish_adding_trajectory_batches()
-
-        # Sample trajectories
-        sampled = buffer.sample_trajectories(2)
-
-        # Check that we get data from 2 trajectories (4 total steps)
-        # Each trajectory has 2 steps, so 2 trajectories = 4 total steps
-        total_steps = sampled.embedding_data.token_ids.shape[0]
-        assert total_steps == 4
-        assert sampled.embedding_data.card_ranks.shape[0] == total_steps
-        assert sampled.action_indices.shape[0] == total_steps
-        assert sampled.advantages.shape[0] == total_steps
-        assert sampled.returns.shape[0] == total_steps
-
     def test_sample_empty_buffer(self, buffer):
         """Test sampling from empty buffer raises error."""
         with pytest.raises(ValueError, match="No trajectories available"):
-            buffer.sample_trajectories(1)
+            buffer.sample_trajectories(torch.Generator(device=buffer.device), 1)
 
     def test_sample_no_valid_trajectories(self, buffer):
         """Test sampling when no trajectories are completed."""
@@ -383,7 +365,7 @@ class TestVectorizedReplayBuffer:
         buffer.add_transitions(trajectory_indices=trajectory_indices, **batch)
 
         with pytest.raises(ValueError, match="No trajectories available"):
-            buffer.sample_trajectories(1)
+            buffer.sample_trajectories(torch.Generator(device=buffer.device), 1)
 
     def test_gae_computation(self, buffer):
         """Test vectorized GAE computation."""
@@ -635,7 +617,7 @@ class TestVectorizedReplayBuffer:
             starting_stack=1000,
             sb=5,
             bb=10,
-            bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0],
+            default_bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0],
             device=device,
             rng=rng,
         )
@@ -1273,6 +1255,7 @@ class TestVectorizedReplayBuffer:
                 0, 2, (batch_size, S), device=device, dtype=torch.long
             ),
             action_legal_masks=torch.ones(batch_size, S, B, device=device).bool(),
+            action_amounts=torch.zeros(batch_size, S, dtype=torch.int32, device=device),
             context_features=torch.randint(
                 0, 10, (batch_size, S, Cw), device=device, dtype=torch.float32
             ),
@@ -1630,6 +1613,9 @@ class TestVectorizedReplayBuffer:
                 dtype=torch.long,
             ),
             action_legal_masks=torch.ones(batch_size, 50, 5, device=device).bool(),
+            action_amounts=torch.randint(
+                0, 100, (batch_size, 50), device=device, dtype=torch.int32
+            ),
             context_features=torch.randint(
                 0,
                 10,
@@ -1694,6 +1680,9 @@ class TestVectorizedReplayBuffer:
             action_legal_masks=torch.ones(
                 batch_size, trajectory_length, 50, 5, device=device
             ).bool(),
+            action_amounts=torch.zeros(
+                batch_size, trajectory_length, 50, dtype=torch.int32, device=device
+            ),
             context_features=torch.randint(
                 0,
                 10,
@@ -1749,6 +1738,9 @@ class TestVectorizedReplayBuffer:
                 0, 2, (batch_size, length), device=device, dtype=torch.uint8
             ),
             action_legal_masks=torch.ones(batch_size, length, 5, device=device).bool(),
+            action_amounts=torch.randint(
+                0, 100, (batch_size, length), device=device, dtype=torch.uint16
+            ),
             context_features=torch.randn(
                 batch_size, length, Ctx.NUM_RAW_CONTEXT.value, device=device
             ),

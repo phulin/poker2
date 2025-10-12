@@ -106,7 +106,9 @@ class PokerTransformerV1(nn.Module, Model):
             self.num_value_quantiles = 2
 
         # Single fused embedding module for all token types
-        self.embedding = PokerFusedEmbedding(num_bet_bins=num_bet_bins, d_model=d_model)
+        self.embedding = PokerFusedEmbedding(
+            num_bet_bins=num_bet_bins, d_model=d_model, dropout=dropout
+        )
 
         self.input_ffn = nn.Sequential(
             OrthogonalLinear(d_model, d_model * 2, gain=math.sqrt(2.0), rng=rng),

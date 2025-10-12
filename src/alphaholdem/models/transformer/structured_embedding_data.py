@@ -38,6 +38,10 @@ class StructuredEmbeddingData:
 
     # Legal action masks [batch_size, seq_len, 8] - torch.bool
     action_legal_masks: torch.Tensor
+
+    # Action amounts [batch_size, seq_len] - int32 for indexing compatibility
+    action_amounts: torch.Tensor  # Action amounts
+
     # Context components - stored as int16 for memory efficiency
     # Raw numeric features per token [batch_size, seq_len, NUM_RAW_CONTEXT] - int16
     context_features: torch.Tensor
@@ -53,6 +57,7 @@ class StructuredEmbeddingData:
         self.card_ranks = self.card_ranks.to(torch.uint8)
         self.card_suits = self.card_suits.to(torch.uint8)
         self.action_actors = self.action_actors.to(torch.uint8)
+        self.action_amounts = self.action_amounts.to(torch.int32)
         self.lengths = self.lengths.to(torch.uint8)
         assert self.action_legal_masks.dtype == torch.bool
 
@@ -68,6 +73,7 @@ class StructuredEmbeddingData:
             "card_suits": self.card_suits,
             "action_actors": self.action_actors,
             "action_legal_masks": self.action_legal_masks,
+            "action_amounts": self.action_amounts,
             "context_features": self.context_features,
             "lengths": self.lengths,
         }
@@ -85,6 +91,7 @@ class StructuredEmbeddingData:
             card_suits=data["card_suits"],
             action_actors=data["action_actors"],
             action_legal_masks=data["action_legal_masks"],
+            action_amounts=data["action_amounts"],
             context_features=data["context_features"],
             lengths=lengths,
         )
@@ -98,6 +105,7 @@ class StructuredEmbeddingData:
             card_suits=self.card_suits.to(device),
             action_actors=self.action_actors.to(device),
             action_legal_masks=self.action_legal_masks.to(device),
+            action_amounts=self.action_amounts.to(device),
             context_features=self.context_features.to(device),
             lengths=self.lengths.to(device),
         )
@@ -130,6 +138,7 @@ class StructuredEmbeddingData:
             card_suits=self.card_suits[indices],
             action_actors=self.action_actors[indices],
             action_legal_masks=self.action_legal_masks[indices],
+            action_amounts=self.action_amounts[indices],
             context_features=self.context_features[indices],
             lengths=self.lengths[indices],
         )
@@ -151,6 +160,7 @@ class StructuredEmbeddingData:
             card_suits=self.card_suits.clone(),
             action_actors=self.action_actors.clone(),
             action_legal_masks=self.action_legal_masks.clone(),
+            action_amounts=self.action_amounts.clone(),
             context_features=self.context_features.clone(),
             lengths=self.lengths.clone(),
         )
@@ -213,6 +223,9 @@ class StructuredEmbeddingData:
             ),
             action_legal_masks=torch.zeros(
                 (batch_size, seq_len, num_bet_bins), dtype=torch.bool, device=device
+            ),
+            action_amounts=torch.zeros(
+                (batch_size, seq_len), dtype=torch.int32, device=device
             ),
             context_features=torch.zeros(
                 (batch_size, seq_len, Context.NUM_RAW_CONTEXT.value),

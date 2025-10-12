@@ -47,6 +47,7 @@ def test_trinal_clip_ppo_loss():
         card_suits=torch.zeros(batch_size, 10),
         action_actors=torch.zeros(batch_size, 10),
         action_legal_masks=torch.zeros(batch_size, 10, 8, dtype=torch.bool),
+        action_amounts=torch.zeros(batch_size, 10, dtype=torch.int32),
         context_features=torch.zeros(batch_size, 10, 9, dtype=torch.int16),
         lengths=torch.full((batch_size,), 10),
     )

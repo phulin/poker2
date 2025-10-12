@@ -10,13 +10,10 @@ def _make_env(
     starting_stack=1000,
     sb=5,
     bb=10,
-    bet_bins=None,
+    default_bet_bins=None,
     device=None,
     seed=123,
 ):
-    if bet_bins is None:
-        bet_bins = [0.5, 0.75, 1.0, 1.5, 2.0]
-
     # Create RNG
     if device is None:
         device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -29,7 +26,7 @@ def _make_env(
         starting_stack=starting_stack,
         sb=sb,
         bb=bb,
-        bet_bins=bet_bins,
+        default_bet_bins=default_bet_bins,
         device=device,
         rng=rng,
     )
@@ -269,7 +266,7 @@ def test_blinds_correctly_entered_after_reset():
         starting_stack=starting_stack,
         sb=sb,
         bb=bb,
-        bet_bins=[0.5, 1.0, 1.5],
+        default_bet_bins=[0.5, 1.0, 1.5],
         device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
     )
 
@@ -316,7 +313,7 @@ def test_blinds_correctly_entered_after_reset():
         starting_stack=2000,
         sb=sb2,
         bb=bb2,
-        bet_bins=[0.5, 1.0],
+        default_bet_bins=[0.5, 1.0],
         device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
     )
 
@@ -366,7 +363,7 @@ def test_reward_assignment_perspective():
         starting_stack=1000,
         sb=25,
         bb=50,
-        bet_bins=[0.5, 1.0],
+        default_bet_bins=[0.5, 1.0],
         device=torch.device("cpu"),  # Use CPU to avoid device issues
     )
 
@@ -399,7 +396,7 @@ def test_reward_assignment_perspective():
         starting_stack=2000,
         sb=50,
         bb=100,
-        bet_bins=[0.5, 1.0],
+        default_bet_bins=[0.5, 1.0],
         device=torch.device("cpu"),  # Use CPU to avoid device issues
     )
 
@@ -443,7 +440,7 @@ def test_reward_assignment_perspective():
         starting_stack=1000,
         sb=25,
         bb=50,
-        bet_bins=[0.5, 1.0],
+        default_bet_bins=[0.5, 1.0],
         device=torch.device("cpu"),  # Use CPU to avoid device issues
     )
     env3.reset()
@@ -468,7 +465,7 @@ def test_reward_assignment_perspective():
         starting_stack=1000,
         sb=25,
         bb=50,
-        bet_bins=[0.5, 1.0],
+        default_bet_bins=[0.5, 1.0],
         device=torch.device("cpu"),
     )
     env4.reset()
@@ -501,7 +498,7 @@ def test_reward_calculation_consistency():
         starting_stack=1500,
         sb=30,
         bb=60,
-        bet_bins=[0.5, 1.0, 1.5],
+        default_bet_bins=[0.5, 1.0, 1.5],
         device=torch.device("mps" if torch.backends.mps.is_available() else "cpu"),
     )
 
@@ -557,7 +554,7 @@ def test_reward_calculation_consistency():
 
 def test_fold_reward_assignment():
     """Test that fold rewards are assigned correctly based on the folding player's perspective."""
-    env = _make_env(N=2, starting_stack=1000, sb=25, bb=50, bet_bins=[0.5, 1.0])
+    env = _make_env(N=2, starting_stack=1000, sb=25, bb=50, default_bet_bins=[0.5, 1.0])
 
     # Test 1: Player 0 folds in env 0 (should get negative reward)
     mask = env.legal_bins_mask()
@@ -600,13 +597,13 @@ def _make_flop_showdown_env(
     starting_stack=1000,
     sb=5,
     bb=10,
-    bet_bins=None,
+    default_bet_bins=None,
     device=None,
     seed=123,
     flop_showdown=True,
 ):
     """Helper function to create environment with flop_showdown mode."""
-    if bet_bins is None:
+    if default_bet_bins is None:
         bet_bins = [0.5, 0.75, 1.0, 1.5, 2.0]
 
     # Create RNG
@@ -621,7 +618,7 @@ def _make_flop_showdown_env(
         starting_stack=starting_stack,
         sb=sb,
         bb=bb,
-        bet_bins=bet_bins,
+        default_bet_bins=bet_bins,
         device=device,
         rng=rng,
         flop_showdown=flop_showdown,

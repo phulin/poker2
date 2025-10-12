@@ -53,7 +53,7 @@ def test_winner_reward_sign_and_replay_buffer_alignment():
     torch.manual_seed(cfg.seed)
     device = torch.device("cpu")
 
-    trainer = SelfPlayTrainer(cfg=cfg, device=device, rng_seed=cfg.seed)
+    trainer = SelfPlayTrainer(cfg=cfg, device=device)
 
     # Collect one completed round of trajectories; store into replay buffer
     per_episode_rewards = trainer.collect_tensor_trajectories(

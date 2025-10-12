@@ -30,7 +30,9 @@ FOURIER_FEATURES = 5 * 2
 class PokerFusedEmbedding(nn.Module):
     """Single fused embedding module covering all transformer token types."""
 
-    def __init__(self, num_bet_bins: int, d_model: int = 256) -> None:
+    def __init__(
+        self, num_bet_bins: int, d_model: int = 256, dropout: float = 0.1
+    ) -> None:
         super().__init__()
         self.num_bet_bins = num_bet_bins
         self.d_model = d_model
@@ -54,7 +56,13 @@ class PokerFusedEmbedding(nn.Module):
             OrthogonalLinear(num_bet_bins, d_model),
             nn.LayerNorm(d_model),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
+        )
+        self.action_amount_mlp = nn.Sequential(
+            OrthogonalLinear(1, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout),
         )
 
         # Context components for CLS and dynamic context tokens
@@ -62,7 +70,7 @@ class PokerFusedEmbedding(nn.Module):
             OrthogonalLinear(5, d_model),
             nn.LayerNorm(d_model),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
         )
         self.register_buffer(
             "context_fourier",
@@ -75,7 +83,7 @@ class PokerFusedEmbedding(nn.Module):
             ),
             nn.LayerNorm(d_model),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
         )
 
     @profile
@@ -120,10 +128,12 @@ class PokerFusedEmbedding(nn.Module):
             actors = data.action_actors[rows, cols].clamp(min=0, max=1)
             action_ids = padded_ids[rows, cols] - action_offset
             legal_masks = data.action_legal_masks[rows, cols]
+            action_amounts = data.action_amounts[rows, cols].view(-1, 1)
             action_embed = (
                 self.action_actor_emb(actors.int())
                 + self.action_type_emb(action_ids.int())
                 + self.legal_mask_mlp(legal_masks.float())
+                + self.action_amount_mlp(action_amounts.float())
             )
             embeddings[rows, cols] += action_embed
 

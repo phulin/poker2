@@ -39,6 +39,7 @@ class TokenSequenceBuilder:
     card_suits: torch.Tensor
     action_actors: torch.Tensor
     action_legal_masks: torch.Tensor
+    action_amounts: torch.Tensor
     context_features: torch.Tensor
     lengths: torch.Tensor
 
@@ -66,6 +67,7 @@ class TokenSequenceBuilder:
         self.action_legal_masks = torch.zeros(
             N, L, num_bet_bins, dtype=torch.bool, device=device
         )
+        self.action_amounts = torch.zeros(N, L, dtype=torch.long, device=device)
         self.context_features = torch.zeros(
             N, L, Context.NUM_RAW_CONTEXT.value, dtype=torch.int16, device=device
         )
@@ -158,6 +160,7 @@ class TokenSequenceBuilder:
         actors: torch.Tensor,
         action_ids: torch.Tensor,
         legal_masks: torch.Tensor,
+        action_amounts: torch.Tensor,
         token_streets: torch.Tensor,
     ) -> None:
         if idxs.numel() == 0:
@@ -167,6 +170,7 @@ class TokenSequenceBuilder:
         self.token_streets[idxs, start] = token_streets
         self.action_actors[idxs, start] = actors
         self.action_legal_masks[idxs, start, :] = legal_masks
+        self.action_amounts[idxs, start] = action_amounts
 
     def add_card(
         self,
@@ -210,6 +214,7 @@ class TokenSequenceBuilder:
             card_suits=self.card_suits[idxs],
             action_actors=self.action_actors[idxs],
             action_legal_masks=self.action_legal_masks[idxs],
+            action_amounts=self.action_amounts[idxs],
             context_features=self.context_features[idxs],
             lengths=self.lengths[idxs],
         )

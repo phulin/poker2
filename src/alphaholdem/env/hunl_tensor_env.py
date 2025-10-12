@@ -8,6 +8,7 @@ from alphaholdem.env import rules
 from alphaholdem.utils.profiling import profile
 
 DEBUG_STEP_TABLE_ENVS = 3
+DEFAULT_BET_BINS = [0.5, 0.75, 1.0, 1.5, 2.0]
 
 
 class HUNLTensorEnv:
@@ -29,8 +30,6 @@ class HUNLTensorEnv:
     sb: int
     bb: int
     device: torch.device
-    bet_bins: list[float]
-    store_action_history: bool
     rng: torch.Generator
     # deck tensor and per-env draw position
     deck: torch.Tensor
@@ -51,11 +50,6 @@ class HUNLTensorEnv:
     hole_indices: torch.Tensor
     done: torch.Tensor
     winner: torch.Tensor
-    # action history
-    # shape: [N, 4 streets, S rounds per street, 4 rows (p0,p1,sum,legal), num_bins]
-    # rows: 0=p0 action one-hot, 1=p1 action one-hot, 2=sum, 3=legal mask
-    action_history: torch.Tensor
-    history_slots: int
 
     def __init__(
         self,
@@ -63,8 +57,7 @@ class HUNLTensorEnv:
         starting_stack: int,
         sb: int,
         bb: int,
-        bet_bins: list[float],
-        store_action_history: bool = False,
+        default_bet_bins: Optional[list[float]] = None,
         device: Optional[torch.device] = None,
         rng: Optional[torch.Generator] = None,
         float_dtype: torch.dtype = torch.float32,
@@ -81,17 +74,10 @@ class HUNLTensorEnv:
         self.starting_stack = int(starting_stack)
         self.sb = int(sb)
         self.bb = int(bb)
+        self.default_bet_bins = default_bet_bins or DEFAULT_BET_BINS
         self.scale = float(self.bb) * 100.0
-        self.bet_bins = bet_bins
-        self.store_action_history = store_action_history
         self.debug_step_table = debug_step_table
         self.flop_showdown = flop_showdown
-        # Cache bet bins as tensor for fast indexing
-        self.bet_bins_t = torch.tensor(
-            [0] * 2 + self.bet_bins + [0], dtype=float_dtype, device=self.device
-        )
-        # Number of discrete bins: 0=fold, 1=check/call, 2..(B-2)=presets, (B-1)=all-in
-        self.num_bet_bins = len(self.bet_bins) + 3
 
         # Use provided RNG or create a new one
         if rng is not None:
@@ -144,13 +130,6 @@ class HUNLTensorEnv:
         self.winner = torch.full(
             (self.N,), -1, dtype=torch.long, device=self.device
         )  # -1 split
-        # history config
-        self.history_slots = 6
-        self.action_history = torch.zeros(
-            (self.N, 4, self.history_slots, 4, self.num_bet_bins),
-            dtype=torch.bool,
-            device=self.device,
-        )
 
         # Cache one-hot card encodings for all 52 cards
         # Precompute full 4x13 one-hot matrices for all cards 0-51
@@ -280,16 +259,15 @@ class HUNLTensorEnv:
         self.hole_indices[ids, 1, 0] = _c1_1
         self.hole_indices[ids, 1, 1] = _c1_2
 
-        # Reset history planes for specified environments
-        self.action_history[ids].zero_()
-
         # Reset chip tracking for specified environments and account for posted blinds
         self.chips_placed[ids, p_sb] = self.sb
         self.chips_placed[ids, p_bb] = self.bb
 
     # --- Legality ---------------------------------------------------------------
 
-    def legal_bins_amounts_and_mask(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def legal_bins_amounts_and_mask(
+        self, bet_bins: Optional[list[float]] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute (amounts, mask) for discrete bins, allowing integer bets, no deduplication.
         Amounts is the concrete additional amount the player would commit to the pot.
 
@@ -302,9 +280,13 @@ class HUNLTensorEnv:
         amounts: [N, B] with -1 for non-preset bins or illegal presets
         mask:    [N, B] bool mask of legal bins (fold/check-call/presets/all-in)
         """
+
+        if bet_bins is None:
+            bet_bins = self.default_bet_bins
+
         N = self.N
         device = self.device
-        B = self.num_bet_bins
+        B = len(bet_bins) + 3
         amounts = torch.full((N, B), -1, dtype=torch.long, device=device)
         mask = torch.zeros(N, B, dtype=torch.bool, device=device)
 
@@ -323,9 +305,12 @@ class HUNLTensorEnv:
         mask[:, 1] = 1
 
         # Pre-compute candidate concrete amounts for preset bins 2..B-2
+        bet_bins_t = torch.tensor(
+            [0] * 2 + bet_bins + [0], dtype=torch.float32, device=self.device
+        )
         can_bet_raise = (me_stack > 0) & (opp_stack > 0)
         additional_amounts = (
-            self.bet_bins_t[2:-1].view(1, B - 3) * self.pot.view(N, 1)
+            bet_bins_t[2:-1].view(1, B - 3) * self.pot.view(N, 1)
         ).long()
         bet_raise_amounts = to_call.view(N, 1) + additional_amounts  # [N, B-3]
 
@@ -354,9 +339,9 @@ class HUNLTensorEnv:
 
         return amounts, mask
 
-    def legal_bins_mask(self) -> torch.Tensor:
+    def legal_bins_mask(self, bet_bins: Optional[list[float]] = None) -> torch.Tensor:
         """Return [N, B] mask of legal bins with deduplication."""
-        _, mask = self.legal_bins_amounts_and_mask()
+        _, mask = self.legal_bins_amounts_and_mask(bet_bins)
         return mask
 
     # --- Helper APIs -----------------------------------------------------------
@@ -377,7 +362,10 @@ class HUNLTensorEnv:
 
     def get_action_history(self) -> torch.Tensor:
         """Return action history planes tensor if allocated, else None."""
-        return self.action_history
+        # TODO: Make this work again.
+        return torch.zeros(
+            self.N, 4, 6, 4, len(self.default_bet_bins) + 3, device=self.device
+        )
 
     def bet(self, env_indices: torch.Tensor, chips: torch.Tensor) -> None:
         """
@@ -422,12 +410,27 @@ class HUNLTensorEnv:
 
     # --- Step ------------------------------------------------------------------
 
-    @profile
     def step_bins(
         self,
         bin_indices: torch.Tensor,
         bin_amounts: Optional[torch.Tensor] = None,
         legal_masks: Optional[torch.Tensor] = None,
+        bet_bins: Optional[list[float]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if bet_bins is None:
+            bet_bins = self.default_bet_bins
+        if bin_amounts is None or legal_masks is None:
+            bin_amounts, legal_masks = self.legal_bins_amounts_and_mask(bet_bins)
+
+        bet_indices = torch.where(
+            (bin_indices >= 2) & (bin_indices < len(bet_bins) - 1)
+        )[0]
+        bet_amounts = torch.zeros_like(bin_indices)
+        bet_amounts[bet_indices] = bin_amounts[bet_indices, bin_indices[bet_indices]]
+        return self.step(bin_indices, bet_amounts)
+
+    def step(
+        self, action_indices: torch.Tensor, bet_amounts: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Step all envs using discrete bet bin indices tensor [N]. -1 means no action.
         bin_indices: [N] bet bin indices
@@ -442,12 +445,9 @@ class HUNLTensorEnv:
           - dealt_cards [N, 3]: indices of newly dealt cards this step; -1 where not applicable
         Rewards are from p0's perspective, scaled by 100bb.
         """
-        assert bin_indices.shape[0] == self.N
+        assert action_indices.shape[0] == self.N
         N = self.N
         device = self.device
-
-        if bin_amounts is None or legal_masks is None:
-            bin_amounts, legal_masks = self.legal_bins_amounts_and_mask()
 
         actor_idx = self.to_act
         other_idx = 1 - self.to_act
@@ -462,13 +462,13 @@ class HUNLTensorEnv:
         dealt_cards = torch.full((N, 3), -1, dtype=torch.long, device=device)
 
         # Group masks by action type
-        is_fold = bin_indices == 0
-        is_check_call = bin_indices == 1
-        is_allin = bin_indices == (self.num_bet_bins - 1)
-        is_bet_raise = ~(is_fold | is_check_call | is_allin)
+        is_fold = action_indices == 0
+        is_check_call = action_indices == 1
+        is_bet_raise = action_indices == 2
+        is_allin = action_indices == 3
 
         # -1 bet bin index means no action
-        acting_mask = bin_indices >= 0
+        acting_mask = action_indices >= 0
         acting = torch.where(acting_mask)[0]
         if self.done[acting].any():
             print(
@@ -484,21 +484,6 @@ class HUNLTensorEnv:
         if self.debug_step_table:
             starting_street = self.street[:DEBUG_STEP_TABLE_ENVS].clone()
             starting_to_act = self.to_act[:DEBUG_STEP_TABLE_ENVS].clone()
-
-        if self.store_action_history:
-            # Record current action into history (actor rows and sum row)
-            round_idx = self.street.clamp(min=0, max=3)[acting]
-            slot_idx = torch.clamp(self.actions_this_round, max=self.history_slots - 1)[
-                acting
-            ]
-            # set actor-specific one-hot
-            self.action_history[
-                acting, round_idx, slot_idx, self.to_act[acting], bin_indices[acting]
-            ] = 1
-            # sum row
-            self.action_history[acting, round_idx, slot_idx, 2, bin_indices[acting]] = 1
-            # Write legal mask for this decision into history legal row
-            self.action_history[acting, round_idx, slot_idx, 3, :] = legal_masks[acting]
 
         # Handle different actions.
         # Fold: immediate terminal, award pot to opp
@@ -524,7 +509,7 @@ class HUNLTensorEnv:
         # So if you bet $10, opponent raises to $20 total, half pot means you put $10 to
         # call the $20 and then half of the starting pot ($30 total => $15 raise).
         action_idx = torch.where(is_bet_raise)[0]
-        bet_raise_amount = bin_amounts[action_idx, bin_indices[action_idx]]
+        bet_raise_amount = bet_amounts[action_idx]
         self.bet(action_idx, bet_raise_amount)
         self.min_raise[action_idx] = torch.maximum(
             self.min_raise[action_idx], bet_raise_amount - to_call[action_idx]
@@ -652,7 +637,7 @@ class HUNLTensorEnv:
 
         if self.debug_step_table:
             self._print_debug_table(
-                bin_indices[:3],
+                action_indices[:3],
                 rewards[:3],
                 acting[:3],
                 starting_street[:3],
@@ -700,12 +685,13 @@ class HUNLTensorEnv:
                 act = "f"
             elif bi == 1:
                 act = "c"
-            elif bi == (self.num_bet_bins - 1):
+            elif bi == 3:
                 act = "ALL"
             else:
+                # TODO: FIX
                 mult_idx = bi - 2
-                if 0 <= mult_idx < len(self.bet_bins):
-                    mult = self.bet_bins[mult_idx]
+                if 0 <= mult_idx < len(self.default_bet_bins):
+                    mult = self.default_bet_bins[mult_idx]
                     # Format like 0.5, 1.0, 1.5 etc
                     act = f"{mult:.2f}".rstrip("0").rstrip(".")
                 else:

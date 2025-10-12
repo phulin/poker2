@@ -626,67 +626,6 @@ class VectorizedReplayBuffer:
         returns = returns * valid.to(dtype) + values[:, :-1] * (~valid).to(dtype)
         return adv, returns
 
-    def sample_trajectories(
-        self, rng: torch.Generator, num_trajectories: int
-    ) -> TrajectorySample:
-        """Sample complete trajectories for PPO updates. Not currently used."""
-        if self.size == 0:
-            raise ValueError("No trajectories available")
-
-        # Get valid trajectory indices
-        valid_indices = torch.where(self.trajectory_lengths > 0)[0]
-
-        if len(valid_indices) == 0:
-            raise ValueError("No valid trajectories available")
-
-        # Sample trajectory indices (with replacement)
-        traj_sample_indices = torch.randint(
-            0,
-            len(valid_indices),
-            (num_trajectories,),
-            device=self.device,
-            generator=rng,
-        )
-        traj_indices = valid_indices[traj_sample_indices]
-
-        # Get lengths of sampled trajectories
-        traj_lengths = self.trajectory_lengths[traj_indices]  # [num_trajectories]
-
-        # Vectorized: build all (traj_idx, step) pairs for all steps in all sampled trajectories
-        # For each trajectory, create a range [0, traj_length)
-        max_len = traj_lengths.max().item()
-        step_range = torch.arange(max_len, device=self.device)  # [max_len]
-        # Mask for valid steps per trajectory
-        valid_mask = step_range.unsqueeze(0) < traj_lengths.unsqueeze(
-            1
-        )  # [num_trajectories, max_len]
-
-        # Broadcast traj_indices to shape [num_trajectories, max_len]
-        traj_indices_expanded = traj_indices.unsqueeze(1).expand(
-            -1, max_len
-        )  # [num_trajectories, max_len]
-        step_indices_expanded = step_range.unsqueeze(0).expand(
-            traj_indices.shape[0], -1
-        )  # [num_trajectories, max_len]
-
-        # Select only valid (traj_idx, step) pairs
-        traj_indices_tensor = traj_indices_expanded[valid_mask]  # [total_steps]
-        step_indices_tensor = step_indices_expanded[valid_mask]  # [total_steps]
-
-        if traj_indices_tensor.numel() == 0:
-            raise ValueError("No valid steps in sampled trajectories")
-
-        # Extract data for all steps
-        action_indices = self.action_indices[traj_indices_tensor, step_indices_tensor]
-        return TrajectorySample(
-            embedding_data=self.data[traj_indices_tensor],
-            action_indices=action_indices,
-            advantages=self.advantages[traj_indices_tensor, step_indices_tensor],
-            returns=self.returns[traj_indices_tensor, step_indices_tensor],
-            delta2=self.delta2[traj_indices_tensor, step_indices_tensor],
-            delta3=self.delta3[traj_indices_tensor, step_indices_tensor],
-        )
-
     def sample_batch(self, rng: torch.Generator, batch_size: int) -> BatchSample:
         """Sample individual transitions for training (vectorized)."""
         if self.size == 0:
@@ -838,6 +777,9 @@ class VectorizedReplayBuffer:
         self.data.action_legal_masks[buffer_rows, cols] = (
             embedding_data.action_legal_masks[rows, cols]
         )
+        self.data.action_amounts[buffer_rows, cols] = embedding_data.action_amounts[
+            rows, cols
+        ]
         self.data.context_features[buffer_rows, cols] = embedding_data.context_features[
             rows, cols
         ]
@@ -913,6 +855,9 @@ class VectorizedReplayBuffer:
         action_legal_masks_tensor = torch.zeros(
             batch_size, seq_len, self.num_bet_bins, dtype=torch.bool, device=self.device
         )
+        action_amounts = torch.zeros(
+            (batch_size, seq_len), dtype=torch.long, device=self.device
+        )
         context_features = torch.zeros(
             batch_size,
             seq_len,
@@ -931,6 +876,7 @@ class VectorizedReplayBuffer:
                 action_actors[i, pos] = 1  # Opponent
                 token_streets[i, pos] = streets[i].item()
                 action_legal_masks_tensor[i, pos] = legal_masks[i]
+                # TODO: Add action amount
 
         lengths = self.current_token_positions[buffer_trajectory_indices] + 1
 
@@ -941,6 +887,7 @@ class VectorizedReplayBuffer:
             card_suits=card_suits,
             action_actors=action_actors,
             action_legal_masks=action_legal_masks_tensor,
+            action_amounts=action_amounts,
             context_features=context_features,
             lengths=lengths,
         )

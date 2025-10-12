@@ -177,6 +177,7 @@ class DummyStateEncoder:
             card_suits=zeros,
             action_actors=zeros,
             action_legal_masks=legal,
+            action_amounts=zeros.to(torch.int32),
             context_features=ctx,
             lengths=lengths,
         )

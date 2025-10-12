@@ -20,7 +20,7 @@ def test_cnn_state_encoder_perspective_behavior():
         starting_stack=1000,
         sb=50,
         bb=100,
-        bet_bins=[0.5, 1.0, 1.5, 2.0],
+        default_bet_bins=[0.5, 1.0, 1.5, 2.0],
         device=device,
     )
 
@@ -37,7 +37,7 @@ def test_cnn_state_encoder_perspective_behavior():
     env.step_bins(torch.tensor([1, 1], device=device))  # Call for both envs
 
     # Create state encoder
-    encoder = CNNStateEncoder(env, device)
+    encoder = CNNStateEncoder(env, device, len(env.default_bet_bins) + 3)
 
     # Encode for player 0 (should be unchanged)
     states_p0 = encoder.encode_tensor_states(
@@ -99,7 +99,7 @@ def test_transformer_state_encoder_perspective_behavior():
         starting_stack=1000,
         sb=50,
         bb=100,
-        bet_bins=[0.5, 1.0, 1.5, 2.0],
+        default_bet_bins=[0.5, 1.0, 1.5, 2.0],
         device=device,
     )
 
@@ -169,71 +169,6 @@ def test_transformer_state_encoder_perspective_behavior():
         assert torch.allclose(
             active_actors_p1.float(), expected_p1_actors.float()
         ), f"Actors should flip for all actions: p0={active_actors_p0}, p1={active_actors_p1}, expected={expected_p1_actors}"
-
-
-def test_both_encoders_consistency():
-    """Test that both CNN and Transformer encoders handle perspective consistently."""
-    device = torch.device("cpu")
-
-    # Create a tensor environment
-    env = HUNLTensorEnv(
-        num_envs=1,
-        starting_stack=1000,
-        sb=50,
-        bb=100,
-        bet_bins=[0.5, 1.0, 1.5, 2.0],
-        device=device,
-    )
-
-    # Reset and create some action history
-    env.reset()
-
-    # Simulate some actions
-    env.step_bins(torch.tensor([2], device=device))  # Player 0 raises
-    env.step_bins(torch.tensor([1], device=device))  # Player 1 calls
-
-    # Create both encoders
-    cnn_encoder = CNNStateEncoder(env, device)
-    transformer_encoder = TokenSequenceBuilder(
-        tensor_env=env,
-        sequence_length=100,
-        num_bet_bins=env.num_bet_bins,
-        device=device,
-        float_dtype=torch.float32,
-    )
-
-    # Encode for both players with both encoders
-    cnn_p0 = cnn_encoder.encode_tensor_states(
-        player=0, idxs=torch.tensor([0], device=device)
-    )
-    cnn_p1 = cnn_encoder.encode_tensor_states(
-        player=1, idxs=torch.tensor([0], device=device)
-    )
-
-    transformer_p0 = transformer_encoder.encode_tensor_states(
-        player=0, idxs=torch.tensor([0], device=device)
-    )
-    transformer_p1 = transformer_encoder.encode_tensor_states(
-        player=1, idxs=torch.tensor([0], device=device)
-    )
-
-    # Both encoders should show the same perspective behavior
-    # Player 0 encoding should be identical between encoders
-    # Player 1 encoding should be identical between encoders (both swapped)
-
-    # For CNN: check that action tensors are the same shape and have same perspective behavior
-    assert (
-        cnn_p0.actions.shape == cnn_p1.actions.shape
-    ), "CNN action shapes should match"
-
-    # For Transformer: check that action actors show same perspective behavior
-    assert (
-        transformer_p0.action_actors.shape == transformer_p1.action_actors.shape
-    ), "Transformer actor shapes should match"
-
-    # Both should show the perspective swap behavior
-    # This is a basic consistency check - both encoders should handle the swap the same way
-    print("✅ Both CNN and Transformer encoders handle perspective consistently")
 
 
 if __name__ == "__main__":

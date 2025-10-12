@@ -27,7 +27,7 @@ def _build_env(device: torch.device) -> HUNLTensorEnv:
         starting_stack=20000,
         sb=50,
         bb=100,
-        bet_bins=[0.5, 1.0, 1.5, 2.0],
+        default_bet_bins=[0.5, 1.0, 1.5, 2.0],
         device=device,
     )
 
@@ -57,6 +57,7 @@ class TestTransformerStateEncoder:
             torch.zeros_like(idxs),
             torch.zeros(2, 7, dtype=torch.bool),  # [batch_size, num_bet_bins]
             torch.zeros_like(idxs),
+            torch.zeros_like(idxs),  # token_streets
         )
 
         data = encoder.encode_tensor_states(player=0, idxs=idxs)
@@ -100,7 +101,7 @@ class TestEmbeddings:
         self.encoder.add_street(idxs, torch.zeros_like(idxs))
 
         self.data = self.encoder.encode_tensor_states(player=0, idxs=idxs)
-        self.num_bet_bins = self.env.num_bet_bins
+        self.num_bet_bins = len(self.env.default_bet_bins) + 3
         self.d_model = 64
         self.embedding = PokerFusedEmbedding(self.num_bet_bins, d_model=self.d_model)
         self.embedding.eval()  # disable dropout for deterministic assertions
@@ -113,6 +114,7 @@ class TestEmbeddings:
             card_suits=self.data.card_suits.clone(),
             action_actors=self.data.action_actors.clone(),
             action_legal_masks=self.data.action_legal_masks.clone(),
+            action_amounts=self.data.action_amounts.clone(),
             context_features=self.data.context_features.clone(),
             lengths=self.data.lengths.clone(),
         )
@@ -175,7 +177,7 @@ class TestPokerTransformerV1:
             d_model=128,
             n_layers=2,
             n_heads=4,
-            num_bet_bins=env.num_bet_bins,
+            num_bet_bins=7,
             max_sequence_length=100,
             dropout=0.1,
             use_gradient_checkpointing=False,
@@ -187,7 +189,7 @@ class TestPokerTransformerV1:
 
         assert outputs.policy_logits.shape == (
             structured.batch_size,
-            env.num_bet_bins,
+            7,
         )
         assert outputs.value.shape == (structured.batch_size,)
 
@@ -197,7 +199,7 @@ class TestPokerTransformerV1:
         encoder = TokenSequenceBuilder(
             tensor_env=env,
             sequence_length=100,
-            num_bet_bins=env.num_bet_bins,
+            num_bet_bins=len(env.default_bet_bins) + 3,
             device=device,
             float_dtype=torch.float32,
         )
@@ -207,7 +209,7 @@ class TestPokerTransformerV1:
             d_model=64,
             n_layers=1,
             n_heads=4,
-            num_bet_bins=env.num_bet_bins,
+            num_bet_bins=len(env.default_bet_bins) + 3,
             dropout=0.1,
             max_sequence_length=100,
             use_gradient_checkpointing=False,
@@ -250,6 +252,7 @@ class TestPokerTransformerV1:
             card_suits=zeros,
             action_actors=zeros,
             action_legal_masks=legal,
+            action_amounts=zeros.to(torch.int32),
             context_features=ctx,
             lengths=lengths,
         )

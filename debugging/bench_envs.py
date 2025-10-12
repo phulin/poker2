@@ -51,7 +51,6 @@ def bench_tensor_env(
         starting_stack=1000,
         sb=5,
         bb=10,
-        bet_bins=[0.5, 0.75, 1.0, 1.5, 2.0],
         device=device_tensor,
         rng=rng,
     )

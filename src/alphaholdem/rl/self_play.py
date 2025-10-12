@@ -91,6 +91,7 @@ class SelfPlayTrainer:
     device: torch.device
     batch_size: int
     episodes_per_step: int
+    bet_bins: list[float]
     gamma: float
     gae_lambda: float
     epsilon: float
@@ -208,8 +209,6 @@ class SelfPlayTrainer:
             starting_stack=self.cfg.env.stack,
             sb=self.cfg.env.sb,
             bb=self.cfg.env.bb,
-            bet_bins=self.cfg.env.bet_bins,
-            store_action_history=not self.is_transformer,
             device=self.device,
             rng=self.rng,
             float_dtype=self.float_dtype,
@@ -229,7 +228,8 @@ class SelfPlayTrainer:
         self.value_head_num_quantiles = self.cfg.model.value_head_num_quantiles
         self.use_quantile_value_head = self.value_head_type == ValueHeadType.quantile
 
-        self.num_bet_bins = len(self.cfg.env.bet_bins) + 3
+        self.bet_bins = self.cfg.env.bet_bins
+        self.num_bet_bins = len(self.bet_bins) + 3
 
         if self.is_transformer:
             self.model = PokerTransformerV1(
@@ -287,7 +287,9 @@ class SelfPlayTrainer:
             )
         else:
             # Use CNN state encoder
-            self.state_encoder = CNNStateEncoder(self.tensor_env, self.device)
+            self.state_encoder = CNNStateEncoder(
+                self.tensor_env, self.device, self.num_bet_bins
+            )
 
         self.model.to(self.device)  # Move model to device
         # Replay buffer capacity in steps is batch_size * replay_buffer_batches
@@ -941,13 +943,14 @@ class SelfPlayTrainer:
                     self.tensor_env.to_act[active_indices],
                     action_bins_active,
                     legal_bins_mask[active_indices],
+                    legal_bins_amounts[active_indices, action_bins_active],
                     self.tensor_env.street[active_indices],
                 )
 
             # Take steps in all environments (tensor_env expects full-size tensors)
             # NOTE: THIS CHANGES self.tensor_env.to_act!!
             rewards, dones, _, new_streets, dealt_cards = self.tensor_env.step_bins(
-                action_bins, legal_bins_amounts, legal_bins_mask
+                action_bins, legal_bins_amounts, legal_bins_mask, self.bet_bins
             )
             newly_done_mask = dones & active_mask
 
