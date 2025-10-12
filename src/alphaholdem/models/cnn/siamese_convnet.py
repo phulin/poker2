@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -148,7 +148,6 @@ class SiameseConvNetV1(nn.Module, Model):
         use_gradient_checkpointing: bool = True,
         value_head_type: str = "scalar",
         value_head_num_quantiles: int = 1,
-        rng: torch.Generator | None = None,
     ):
         super().__init__()
         self.use_gradient_checkpointing = use_gradient_checkpointing
@@ -208,6 +207,8 @@ class SiameseConvNetV1(nn.Module, Model):
             self.value_head_type = "scalar"
             self.num_value_quantiles = 1
 
+        self.init_weights()
+
     def forward(self, embedding_data: CNNEmbeddingData) -> ModelOutput:
         # Extract cards and actions from embedding data and convert to float
         cards_tensor = embedding_data.cards.float()
@@ -245,6 +246,21 @@ class SiameseConvNetV1(nn.Module, Model):
             value=value,
             value_quantiles=value_quantiles,
         )
+
+    def init_weights(self, rng: Optional[torch.Generator] = None) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(
+                    module.weight, mode="fan_out", nonlinearity="relu", generator=rng
+                )
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight, generator=rng)
+                nn.init.constant_(module.bias, 0)
 
     @torch.no_grad()
     def adjust_scale(self, weight_scale: float, bias_adjustment: float) -> None:

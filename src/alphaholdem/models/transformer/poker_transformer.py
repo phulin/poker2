@@ -87,7 +87,6 @@ class PokerTransformerV1(nn.Module, Model):
         use_gradient_checkpointing: bool,
         value_head_type: str = "scalar",
         value_head_num_quantiles: int = 1,
-        rng: Optional[torch.Generator] = None,
     ) -> None:
         super().__init__()
 
@@ -111,10 +110,10 @@ class PokerTransformerV1(nn.Module, Model):
         )
 
         self.input_ffn = nn.Sequential(
-            OrthogonalLinear(d_model, d_model * 2, gain=math.sqrt(2.0), rng=rng),
+            OrthogonalLinear(d_model, d_model * 2, gain=math.sqrt(2.0)),
             nn.GELU(),
             nn.Dropout(dropout),
-            OrthogonalLinear(d_model * 2, d_model, gain=1.0, rng=rng),
+            OrthogonalLinear(d_model * 2, d_model, gain=1.0),
             # no normalization as TransformerLayer has pre-LN
         )
 
@@ -130,7 +129,7 @@ class PokerTransformerV1(nn.Module, Model):
         self.post_norm = nn.LayerNorm(d_model)
 
         self.cls_mlp = nn.Sequential(
-            OrthogonalLinear(d_model * 4, d_model, gain=math.sqrt(2.0), rng=rng),
+            OrthogonalLinear(d_model * 4, d_model, gain=math.sqrt(2.0)),
             nn.GELU(),
             nn.LayerNorm(d_model),
         )
@@ -161,7 +160,7 @@ class PokerTransformerV1(nn.Module, Model):
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-        self._init_weights()
+        self.init_weights()
 
     def create_empty_cache(
         self, batch_size: int, device: torch.device
@@ -173,12 +172,12 @@ class PokerTransformerV1(nn.Module, Model):
             cache[id(layer)] = layer_cache
         return cache
 
-    def _init_weights(self) -> None:
+    def init_weights(self, rng: Optional[torch.Generator] = None) -> None:
         """Initialize parameters using orthogonal defaults suitable for PPO."""
 
         for module in self.modules():
             if isinstance(module, OrthogonalLinear):
-                module.reset_parameters()
+                module.init_weights(rng)
             elif isinstance(module, nn.Linear):
                 raise RuntimeError("All linear layers should be OrthogonalLinear")
             elif isinstance(module, nn.LayerNorm):

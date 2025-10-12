@@ -245,7 +245,6 @@ class SelfPlayTrainer:
                 use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
                 value_head_type=self.value_head_type,
                 value_head_num_quantiles=self.value_head_num_quantiles,
-                rng=self.rng,
             )
         else:
             self.model = SiameseConvNetV1(
@@ -258,8 +257,11 @@ class SelfPlayTrainer:
                 use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
                 value_head_type=self.value_head_type,
                 value_head_num_quantiles=self.value_head_num_quantiles,
-                rng=self.rng,
             )
+
+        cpu_rng = torch.Generator(device=torch.device("cpu"))
+        cpu_rng.manual_seed(self.cfg.seed)
+        self.model.init_weights(cpu_rng)
 
         # Ensure bins align with model output size to avoid mask/logit mismatch
         if hasattr(self.model, "policy_head") and hasattr(
