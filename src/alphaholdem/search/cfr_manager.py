@@ -417,17 +417,21 @@ class CFRManager:
             iterations=self.cfg.iterations,
         )
 
+        root_sl = slice(self.depth_offsets[0], self.depth_offsets[1])
+        root_prior = self.logits_to_collapsed_probs(
+            logits_full[root_sl], legal_full[root_sl]
+        )
         collapsed_target = res.root_policy_collapsed
 
         # Error handling: check for valid CFR target
         if collapsed_target is None or collapsed_target.numel() == 0:
             print("Warning: CFR returned empty target, falling back to PPO")
-            return None
+            return root_prior
         elif torch.isnan(collapsed_target).any() or torch.isinf(collapsed_target).any():
             print("Warning: CFR returned invalid target (NaN/Inf), falling back to PPO")
-            return None
+            return root_prior
         elif (collapsed_target < 0).any():
             print("Warning: CFR returned negative probabilities, falling back to PPO")
-            return None
+            return root_prior
 
         return collapsed_target

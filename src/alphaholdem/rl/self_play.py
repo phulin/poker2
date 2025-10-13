@@ -1306,7 +1306,6 @@ class SelfPlayTrainer:
 
             # Optional: training-time CFR distillation
             search_time_ms = 0.0
-            cfr_kl_div = 0.0
             if self.cfg.search.enabled:
                 search_start_time = time.time()
 

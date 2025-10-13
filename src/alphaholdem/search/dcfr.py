@@ -109,10 +109,12 @@ def run_dcfr(
             z = masked_pol.sum(dim=1, keepdim=True).clamp_min(1e-12)
             masked_pol = masked_pol / z
             # expected value
-            v = (masked_pol * child_vals_adj).sum(dim=1)
-            node_values[par_sl] = v
+            v_actor = (masked_pol * child_vals_adj).sum(dim=1)
+            # store values from player 0 perspective so parents always read p0-oriented values
+            v_p0 = torch.where(par_to_act == 0, v_actor, -v_actor)
+            node_values[par_sl] = v_p0
             # instantaneous regrets Q - V
-            inst_reg = child_vals_adj - v.unsqueeze(1)
+            inst_reg = child_vals_adj - v_actor.unsqueeze(1)
             # zero out illegal actions
             inst_reg = torch.where(par_leg, inst_reg, torch.zeros_like(inst_reg))
             regrets[par_sl] += inst_reg
