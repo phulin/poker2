@@ -323,3 +323,34 @@ class TokenSequenceBuilder:
         self.action_amounts[dst_children] = self.action_amounts[src_parents]
         self.context_features[dst_children] = self.context_features[src_parents]
         self.lengths[dst_children] = self.lengths[src_parents]
+
+    def copy_from_structured(
+        self, dst_indices: torch.Tensor, data: StructuredEmbeddingData
+    ) -> None:
+        """Copy token streams from a StructuredEmbeddingData batch into dst rows."""
+        if dst_indices.numel() == 0:
+            return
+        if dst_indices.shape[0] != len(data):
+            raise ValueError(
+                "dst_indices and StructuredEmbeddingData batch size must match"
+            )
+
+        self.token_ids[dst_indices] = data.token_ids.to(self.token_ids.dtype)
+        self.token_streets[dst_indices] = data.token_streets.to(
+            self.token_streets.dtype
+        )
+        self.card_ranks[dst_indices] = data.card_ranks.to(self.card_ranks.dtype)
+        self.card_suits[dst_indices] = data.card_suits.to(self.card_suits.dtype)
+        self.action_actors[dst_indices] = data.action_actors.to(
+            self.action_actors.dtype
+        )
+        self.action_legal_masks[dst_indices] = data.action_legal_masks.to(
+            self.action_legal_masks.dtype
+        )
+        self.action_amounts[dst_indices] = data.action_amounts.to(
+            self.action_amounts.dtype
+        )
+        self.context_features[dst_indices] = data.context_features.to(
+            self.context_features.dtype
+        )
+        self.lengths[dst_indices] = data.lengths.to(self.lengths.dtype)

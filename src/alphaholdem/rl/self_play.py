@@ -20,6 +20,9 @@ from alphaholdem.models.cnn.state_encoder import CNNStateEncoder
 from alphaholdem.models.policy import CategoricalPolicyV1
 from alphaholdem.models.transformer.kv_cache_manager import SelfPlayKVCacheManager
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.exponential_controller import ExponentialController
@@ -1324,7 +1327,11 @@ class SelfPlayTrainer:
                     )
                     # Seed roots from sampled PBS snapshots held in the batch
                     src_indices = torch.arange(B, device=self.device)
-                    _ = mgr.seed_roots(batch.snapshot_env, src_indices)
+                    mgr.seed_roots(
+                        batch.snapshot_env,
+                        src_indices,
+                        batch.embedding_data,
+                    )
                     collapsed_target = mgr.run_search(self.model)
 
                     # Normalize CFR target to ensure valid probabilities

@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
@@ -46,7 +47,7 @@ class CFRManager:
             starting_stack=env_proto.starting_stack,
             sb=env_proto.sb,
             bb=env_proto.bb,
-            default_bet_bins=env_proto.default_bet_bins,
+            default_bet_bins=self.bet_bins,
             device=device,
             rng=env_proto.rng,
             float_dtype=float_dtype,
@@ -78,7 +79,10 @@ class CFRManager:
         return slice(self.depth_offsets[d], self.depth_offsets[d + 1])
 
     def seed_roots(
-        self, src_env: HUNLTensorEnv, src_indices: torch.Tensor
+        self,
+        src_env: HUNLTensorEnv,
+        src_indices: torch.Tensor,
+        src_tokens: StructuredEmbeddingData | CNNEmbeddingData,
     ) -> torch.Tensor:
         """Copy root minibatch states into depth-0 slice and seed tokens.
 
@@ -94,12 +98,10 @@ class CFRManager:
         # Validate destination rows after copy
         self.env.sanity_check(indices=roots, label="cfr seed_roots dst")
 
-        # (debug assertions removed)
-
         # Seed tokens for roots
-        self.tsb.reset(roots)
-        self.tsb.add_game(roots)
-        self.tsb.add_context(roots)
+        if isinstance(src_tokens, StructuredEmbeddingData):
+            self.tsb.copy_from_structured(roots, src_tokens)
+
         # Mark roots initialized
         self.initialized[roots] = True
         return roots

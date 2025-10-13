@@ -711,5 +711,5 @@ class CFRDistillationLoss(LossCalculator):
             clipfrac=0.0,  # Not applicable for CFR
             ppo_clipfrac=0.0,  # Not applicable for CFR
             return_clipfrac=return_clipfrac.item(),
-            cfr_kl=cfr_model_kl,  # Use forward_kl field for CFR-model KL
+            cfr_kl=cfr_model_kl,
         )

@@ -237,7 +237,6 @@ class VectorizedReplayBuffer:
             float_dtype=float_dtype,
             flop_showdown=cfg.env.flop_showdown,
         )
-        # (debug snapshot zeroing removed)
 
     def start_adding_trajectory_batches(
         self, num_trajectories: int, model_age: int

@@ -4,6 +4,13 @@ import torch.nn as nn
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
 from alphaholdem.search.dcfr import run_dcfr
+from alphaholdem.models.transformer.structured_embedding_data import (
+    StructuredEmbeddingData,
+)
+from alphaholdem.models.transformer.tokens import (
+    Special,
+    get_card_token_id_offset,
+)
 
 
 class DummyModel(nn.Module):
@@ -70,10 +77,70 @@ def test_manager_seed_and_expand():
         float_dtype=base.float_dtype,
         cfg=SearchConfig(depth=1, iterations=2, branching=4),
     )
-    roots = mgr.seed_roots(base, torch.tensor([0, 1], device=base.device))
+    roots = mgr.seed_roots(
+        base,
+        torch.tensor([0, 1], device=base.device),
+        StructuredEmbeddingData.empty(2, 8, len(bet_bins) + 3, base.device),
+    )
     assert roots.shape[0] == 2
     children = mgr.expand_children(roots, depth=0)
     assert children.shape[0] == 8
+
+
+def test_seed_roots_copies_structured_tokens():
+    base = make_env(2)
+    bet_bins = base.default_bet_bins
+    mgr = CFRManager(
+        batch_size=2,
+        env_proto=base,
+        bet_bins=bet_bins,
+        sequence_length=10,
+        device=base.device,
+        float_dtype=base.float_dtype,
+        cfg=SearchConfig(depth=1, iterations=1, branching=4),
+    )
+
+    src_indices = torch.tensor([0, 1], device=base.device)
+    # Build structured data with custom tokens
+    seq_len = mgr.tsb.sequence_length
+    num_bins = len(bet_bins) + 3
+    data = StructuredEmbeddingData.empty(2, seq_len, num_bins, base.device)
+
+    # Populate minimal sequences (CLS, GAME, HOLE0, HOLE1)
+    card_offset = get_card_token_id_offset()
+    data.lengths[:] = 4
+    data.token_ids[:, 0] = Special.CLS.value
+    data.token_ids[:, 1] = Special.GAME.value
+    data.token_ids[:, 2] = (card_offset + torch.tensor([3, 17], dtype=torch.int8)).to(
+        data.token_ids.dtype
+    )
+    data.token_ids[:, 3] = (card_offset + torch.tensor([25, 31], dtype=torch.int8)).to(
+        data.token_ids.dtype
+    )
+    data.card_ranks[:, 2] = torch.tensor([3, 4], dtype=torch.uint8)
+    data.card_ranks[:, 3] = torch.tensor([12, 5], dtype=torch.uint8)
+    data.card_suits[:, 2] = torch.tensor([0, 1], dtype=torch.uint8)
+    data.card_suits[:, 3] = torch.tensor([1, 2], dtype=torch.uint8)
+    data.action_legal_masks[:, 0, 0] = True
+
+    roots = mgr.seed_roots(base, src_indices, data)
+
+    torch.testing.assert_close(
+        mgr.tsb.lengths[roots],
+        data.lengths.to(mgr.tsb.lengths.dtype),
+    )
+    torch.testing.assert_close(
+        mgr.tsb.token_ids[roots, :4],
+        data.token_ids.to(mgr.tsb.token_ids.dtype)[:, :4],
+    )
+    torch.testing.assert_close(
+        mgr.tsb.card_ranks[roots, :4],
+        data.card_ranks.to(mgr.tsb.card_ranks.dtype)[:, :4],
+    )
+    torch.testing.assert_close(
+        mgr.tsb.card_suits[roots, :4],
+        data.card_suits.to(mgr.tsb.card_suits.dtype)[:, :4],
+    )
 
 
 def test_cfr_integration_pipeline():
@@ -99,7 +166,11 @@ def test_cfr_integration_pipeline():
 
     # Seed roots from test states
     src_indices = torch.tensor([0, 1], device=base.device)
-    roots = mgr.seed_roots(base, src_indices)
+    roots = mgr.seed_roots(
+        base,
+        src_indices,
+        StructuredEmbeddingData.empty(2, 8, len(bet_bins) + 3, base.device),
+    )
 
     # Build tree and run CFR
     dummy_model = DummyModel(num_actions=len(bet_bins) + 3)

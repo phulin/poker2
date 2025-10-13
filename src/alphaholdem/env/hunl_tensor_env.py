@@ -87,7 +87,7 @@ class HUNLTensorEnv:
             self.rng = torch.Generator(device=self.device)
 
         # Per-env decks as tensor and draw positions
-        self.deck = torch.empty(self.N, 9, dtype=torch.long, device=self.device)
+        self.deck = torch.zeros(self.N, 9, dtype=torch.long, device=self.device)
         self.deck_pos = torch.zeros(self.N, dtype=torch.long, device=self.device)
 
         # Tensors (initialized in reset)

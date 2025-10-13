@@ -187,4 +187,4 @@ def test_cfr_distillation_loss():
     assert result.policy_loss > 0  # KL divergence should be positive
     assert result.value_loss_tensor > 0  # MSE loss should be positive
     assert result.entropy >= 0  # Entropy should be non-negative
-    assert result.forward_kl >= 0  # KL divergence should be non-negative
+    assert result.cfr_kl >= 0  # KL divergence should be non-negative
