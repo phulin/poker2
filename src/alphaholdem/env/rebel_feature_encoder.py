@@ -15,7 +15,7 @@ from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 class RebelFeatureEncoder:
     """Construct flat ReBeL-style feature vectors from tensor env states."""
 
-    feature_dim: int = 2660
+    feature_dim: int = 2661
     belief_dim: int = 1326
 
     def __init__(
@@ -43,6 +43,17 @@ class RebelFeatureEncoder:
         board[board < 0] = -1.0
         board[board >= 0] /= 51.0
         return board
+
+    def _has_bet_flag(self, idxs: torch.Tensor) -> torch.Tensor:
+        """Return [B] float flag: 1.0 if a bet/raise has occurred this round, else 0.0.
+
+        Approximation based on unequal committed chips and at least one action.
+        """
+        committed = self.env.committed[idxs]  # [B, 2]
+        unequal = committed[:, 0] != committed[:, 1]
+        acted = self.env.actions_this_round[idxs] > 0
+        flag = (unequal & acted).to(torch.float32)
+        return flag
 
     def _hero_cards(self, idxs: torch.Tensor, agents: torch.Tensor) -> torch.Tensor:
         return self.env.hole_indices[idxs, agents]
@@ -181,6 +192,7 @@ class RebelFeatureEncoder:
         features[:, 1] = self.env.to_act[idxs].to(self.dtype)
         features[:, 2] = self._pot_fraction(idxs)
         features[:, 3:8] = self._board_features(idxs)
+        features[:, 8] = self._has_bet_flag(idxs)
 
         if hero_beliefs is not None and opp_beliefs is not None:
             hero_vec = hero_beliefs.to(device=self.device, dtype=self.dtype)
@@ -190,6 +202,6 @@ class RebelFeatureEncoder:
             board_cards = self.env.board_indices[idxs]
             hero_vec, opp_vec = self._belief_vectors(hero_cards, board_cards)
 
-        features[:, 8 : 8 + self.belief_dim] = hero_vec
-        features[:, 8 + self.belief_dim :] = opp_vec
+        features[:, 9 : 9 + self.belief_dim] = hero_vec
+        features[:, 9 + self.belief_dim :] = opp_vec
         return features

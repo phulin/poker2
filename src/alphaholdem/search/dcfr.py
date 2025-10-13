@@ -11,6 +11,9 @@ import torch.nn.functional as F
 class DCFRResult:
     root_policy_collapsed: torch.Tensor  # [B, 4]
     root_policy_avg_collapsed: torch.Tensor | None = None  # [B, 4] when available
+    root_policy_sampled_collapsed: torch.Tensor | None = (
+        None  # [B, 4] policy from a sampled iteration
+    )
     root_values_p0: torch.Tensor | None = None  # [B]
     root_values_actor: torch.Tensor | None = None  # [B]
     root_sample_weights: torch.Tensor | None = None  # [B]
@@ -100,6 +103,18 @@ def run_dcfr(
     # Buffers
     node_values = torch.zeros(M, dtype=values.dtype, device=device)
 
+    # Sample an iteration index with probability proportional to t (Linear CFR-style)
+    # If iterations == 1, this gives 1
+    with torch.no_grad():
+        ts = torch.arange(
+            1, max(1, iterations) + 1, device=device, dtype=logits_full.dtype
+        )
+        probs = ts / ts.sum()
+        # Multinomial on CPU-friendly dtype
+        sampled_t = int(torch.multinomial(probs, 1).item())
+
+    sampled_root_policy: torch.Tensor | None = None
+
     for it in range(1, iterations + 1):
         # Set leaf values (deepest depth)
         leaf_sl = slice(depth_offsets[depth], depth_offsets[depth + 1])
@@ -161,6 +176,11 @@ def run_dcfr(
                 avg_policy_sum[par_sl] += masked_pol * weight_tensor
                 avg_policy_weight[par_sl] += weight_tensor
 
+        # Capture the root policy for the sampled iteration
+        if it == sampled_t:
+            root_sl = slice(depth_offsets[0], depth_offsets[1])
+            sampled_root_policy = policy[root_sl].clone()
+
     root_sl = slice(depth_offsets[0], depth_offsets[1])
     root_values_p0 = node_values[root_sl]
     root_to_act = to_act[root_sl]
@@ -180,6 +200,9 @@ def run_dcfr(
     return DCFRResult(
         root_policy_collapsed=root_policy,
         root_policy_avg_collapsed=avg_policy,
+        root_policy_sampled_collapsed=(
+            sampled_root_policy if sampled_root_policy is not None else root_policy
+        ),
         root_values_p0=root_values_p0,
         root_values_actor=root_values_actor,
         root_sample_weights=torch.ones_like(root_values_p0, dtype=logits_full.dtype),

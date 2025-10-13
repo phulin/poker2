@@ -737,6 +737,58 @@ class CFRManager:
     def _run_search_once(self, model) -> "DCFRResult":
         """Single DCFR run for current environment state."""
         logits_full, legal_full, values_full, to_act = self.build_tree_tensors(model)
+
+        def _leaf_value_cb_factory():
+            # Recompute deepest leaf values each iteration using current model
+            leaf_sl = self.depth_slice(self.depth)
+            leaf_idxs = torch.arange(leaf_sl.start, leaf_sl.stop, device=self.device)
+
+            def _cb(_it: int) -> torch.Tensor:
+                # Start with original values_full and overwrite leaf slice
+                updated_values = values_full.clone()
+                leaf_not_done = leaf_idxs[~self.env.done[leaf_idxs]]
+                if leaf_not_done.numel() == 0:
+                    return updated_values
+                to_act_leaf = self.env.to_act[leaf_not_done]
+                chunk_size = max(1, 2 * self.root_batch_size)
+                # Player 0
+                p0 = leaf_not_done[to_act_leaf == 0]
+                if p0.numel() > 0:
+                    for start in range(0, p0.numel(), chunk_size):
+                        rows = p0[start : start + chunk_size]
+                        emb = self.encode_states(0, rows)
+                        out = model(emb)
+                        if out.hand_values is None:
+                            raise ValueError(
+                                "Model must provide hand_values for ReBeL search."
+                            )
+                        hv = out.hand_values.float()
+                        selected = self._select_hand_value(
+                            rows=rows, hand_values=hv, player=0
+                        )
+                        updated_values[rows] = selected.to(self.float_dtype)
+                # Player 1
+                p1 = leaf_not_done[to_act_leaf == 1]
+                if p1.numel() > 0:
+                    for start in range(0, p1.numel(), chunk_size):
+                        rows = p1[start : start + chunk_size]
+                        emb = self.encode_states(1, rows)
+                        out = model(emb)
+                        if out.hand_values is None:
+                            raise ValueError(
+                                "Model must provide hand_values for ReBeL search."
+                            )
+                        hv = out.hand_values.float()
+                        selected = self._select_hand_value(
+                            rows=rows, hand_values=hv, player=1
+                        )
+                        updated_values[rows] = (-selected).to(self.float_dtype)
+                return updated_values
+
+            return _cb
+
+        leaf_cb = _leaf_value_cb_factory()
+
         res = run_dcfr(
             logits_full=logits_full,
             legal_mask_full=legal_full,
@@ -749,6 +801,7 @@ class CFRManager:
             beta=self.cfg.dcfr_beta,
             gamma=self.cfg.dcfr_gamma,
             include_average=self.cfg.include_average_policy,
+            leaf_value_callback=leaf_cb,
         )
 
         root_sl = slice(self.depth_offsets[0], self.depth_offsets[1])
@@ -758,6 +811,11 @@ class CFRManager:
         root_avg = (
             res.root_policy_avg_collapsed
             if res.root_policy_avg_collapsed is not None
+            else res.root_policy_collapsed
+        )
+        root_sampled = (
+            res.root_policy_sampled_collapsed
+            if res.root_policy_sampled_collapsed is not None
             else res.root_policy_collapsed
         )
         collapsed_target = res.root_policy_collapsed
@@ -774,6 +832,7 @@ class CFRManager:
             return DCFRResult(
                 root_policy_collapsed=root_prior,
                 root_policy_avg_collapsed=root_prior,
+                root_policy_sampled_collapsed=root_prior,
                 root_values_p0=zeros,
                 root_values_actor=zeros,
                 root_sample_weights=ones,
@@ -790,6 +849,7 @@ class CFRManager:
             return DCFRResult(
                 root_policy_collapsed=root_prior,
                 root_policy_avg_collapsed=root_prior,
+                root_policy_sampled_collapsed=root_prior,
                 root_values_p0=zeros,
                 root_values_actor=zeros,
                 root_sample_weights=ones,
@@ -806,6 +866,7 @@ class CFRManager:
             return DCFRResult(
                 root_policy_collapsed=root_prior,
                 root_policy_avg_collapsed=root_prior,
+                root_policy_sampled_collapsed=root_prior,
                 root_values_p0=zeros,
                 root_values_actor=zeros,
                 root_sample_weights=ones,

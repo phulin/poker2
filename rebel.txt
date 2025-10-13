@@ -373,40 +373,44 @@ supergradient since the set of all supergradients is a convex set [48].
 5
 
 Algorithm 1 ReBeL: RL and Search for Imperfect-Information Games
-function S ELF P LAY(βr , θv , θπ , Dv , Dπ )
-. βr is the current PBS
-while !I S T ERMINAL(βr ) do
-G ← C ONSTRUCT S UBGAME(βr )
-π̄, π twarm ← I NITIALIZE P OLICY(G, θπ ) . twarm = 0 and π 0 is uniform if no warm start
-G ← S ET L EAF VALUES(G, π̄, π twarm , θv )
-v(βr ) ← C OMPUTE EV(G, π twarm )
-tsample ∼ unif{twarm + 1, T }
-. Sample an iteration
-for t = (twarm + 1)..T do
-if t = tsample then
-βr0 ← S AMPLE L EAF(G, π t−1 )
-. Sample one or multiple leaf PBSs
-t
-π ← U PDATE P OLICY(G, π t−1 )
-t
-1
-π̄ ← t+1
-π̄ + t+1
-πt
-G ← S ET L EAF VALUES(G, π̄, π t , θv )
-t
-1
-v(βr ) ← t+1
-v(βr ) + t+1
-C OMPUTE EV(G, π t )
-Add {βr , v(βr )} to Dv
-for β ∈ G do
-Add {β, π̄(β)} to Dπ
-βr ← βr0
+function SELFPLAY(β_r, θ^v, θ^π, D^v, D^π)
+  while NOT IsTerminal(β_r) do                     ▷ β_r is the current PBS
 
-. Add to value net training data
-. Loop over the PBS at every public state in G
-. Add to policy net training data (optional)
+    G ← ConstructSubgame(β_r)
+
+    (π̄, π^{t_warm}) ← InitializePolicy(G, θ^π)     ▷ t_warm = 0 and π^0 is uniform if no warm start
+
+    G ← SetLeafValues(G, π̄, π^{t_warm}, θ^v)
+
+    v(β_r) ← ComputeEV(G, π^{t_warm})
+
+    t_sample ~ Uniform{t_warm + 1, T}              ▷ Sample an iteration
+
+    for t = (t_warm + 1) .. T do
+
+      if t = t_sample then
+        β'_r ← SampleLeaf(G, π^{t−1})              ▷ Sample one or multiple leaf PBSs
+      end if
+
+      π^t ← UpdatePolicy(G, π^{t−1})
+
+      π̄ ← (t / (t + 1)) * π̄  +  (1 / (t + 1)) * π^t
+
+      G ← SetLeafValues(G, π̄, π^t, θ^v)
+
+      v(β_r) ← (t / (t + 1)) * v(β_r)  +  (1 / (t + 1)) * ComputeEV(G, π^t)
+
+      Add {β_r, v(β_r)} to D^v                     ▷ Add to value net training data
+
+      for β ∈ G do
+        Add {β, π̄(β)} to D^π                      ▷ Add to policy net training data (optional)
+      end for
+
+      β_r ← β'_r
+
+    end for
+  end while
+end function
 
 5.1 Search in a depth-limited imperfect-information subgame
 In this section we describe the search algorithm ReBeL uses to solve depth-limited subgames. We

@@ -8,6 +8,7 @@ search-driven supervision metrics to Weights & Biases.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 import os
 import time
 from contextlib import nullcontext
@@ -133,18 +134,9 @@ def train_rebel(cfg: Config) -> None:
 
             if cfg.use_wandb:
                 log_data: Dict[str, Any] = {
-                    "train/step_time_s": step_elapsed,
-                    "train/buffer_size": metrics.buffer_size,
-                    "search/cfr_entropy": metrics.cfr_entropy,
+                    "step_time_s": step_elapsed,
+                    **asdict(metrics),
                 }
-                if metrics.loss is not None:
-                    log_data["train/loss"] = metrics.loss
-                if metrics.policy_loss is not None:
-                    log_data["train/policy_loss"] = metrics.policy_loss
-                if metrics.value_loss is not None:
-                    log_data["train/value_loss"] = metrics.value_loss
-                if metrics.entropy is not None:
-                    log_data["train/entropy"] = metrics.entropy
                 wandb.log(log_data, step=metrics.step)
 
             if metrics.step % cfg.checkpoint_interval == 0:

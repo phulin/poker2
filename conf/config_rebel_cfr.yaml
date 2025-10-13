@@ -27,7 +27,7 @@ train:
 
 model:
   name: "rebel_ffn"
-  input_dim: 2660
+  input_dim: 2661
   num_actions: -1
   hidden_dim: 1536
   num_hidden_layers: 6

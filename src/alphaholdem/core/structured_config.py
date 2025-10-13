@@ -104,6 +104,9 @@ class TrainingConfig:
     lr_scaling_upper_threshold: float = 1.5  # Upper threshold multiplier
     lr_scaling_lower_threshold: float = 0.67  # Lower threshold multiplier
 
+    # ReBeL/DCFR self-play exploration
+    cfr_action_epsilon: float = 0.25  # Epsilon for action sampling during self-play
+
 
 @dataclass
 class ModelConfig:

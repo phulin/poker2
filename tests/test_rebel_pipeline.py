@@ -32,11 +32,11 @@ def test_rebel_feature_encoder_shapes():
     for player in (0, 1):
         agents = torch.full((2,), player, dtype=torch.long, device=env.device)
         features = encoder.encode(idxs, agents)
-        assert features.shape == (2, encoder.feature_dim)
-        hero = features[:, 8 : 8 + encoder.belief_dim]
-        opp = features[:, 8 + encoder.belief_dim :]
-        torch.testing.assert_close(hero.sum(dim=1), torch.ones(2, device=env.device))
-        torch.testing.assert_close(opp.sum(dim=1), torch.ones(2, device=env.device))
+    assert features.shape == (2, encoder.feature_dim)
+    hero = features[:, 9 : 9 + encoder.belief_dim]
+    opp = features[:, 9 + encoder.belief_dim :]
+    torch.testing.assert_close(hero.sum(dim=1), torch.ones(2, device=env.device))
+    torch.testing.assert_close(opp.sum(dim=1), torch.ones(2, device=env.device))
 
 
 def test_cfr_manager_rebel_mode_runs():
@@ -54,7 +54,7 @@ def test_cfr_manager_rebel_mode_runs():
     )
     roots = manager.seed_roots(env, torch.tensor([0, 1]), src_tokens=None)
     model = RebelFFN(
-        input_dim=2660,
+        input_dim=2661,
         num_actions=len(bet_bins) + 3,
         hidden_dim=32,
         num_hidden_layers=2,

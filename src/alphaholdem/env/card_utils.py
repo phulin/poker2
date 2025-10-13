@@ -60,3 +60,13 @@ def mask_conflicting_combos(
     # Broadcast compare combos against occupied cards and check membership
     intersects = torch.isin(combos, occupied).any(dim=1)
     return ~intersects
+
+
+@lru_cache(maxsize=1)
+def combo_blocking_tensor(device: torch.device | None = None) -> torch.Tensor:
+    """Return [1326, 1326] tensor of blocked hands for each combo."""
+    combo_lookup = combo_lookup_tensor(device=device)
+    combo_onehot = torch.zeros(1326, 52, dtype=torch.uint8, device=device)
+    combo_onehot[torch.arange(1326, device=device), combo_lookup[:, 0]] = True
+    combo_onehot[torch.arange(1326, device=device), combo_lookup[:, 1]] = True
+    return (combo_onehot @ combo_onehot.T).clamp(0, 1).to(torch.bool)
