@@ -260,7 +260,7 @@ class PokerTransformerV1(nn.Module, Model):
             value = value_quantiles.mean(dim=-1)
         else:
             value_quantiles = None
-            value = self.value_head(x_detached)
+            value = self.value_head(x)
 
         return ModelOutput(
             policy_logits=policy_logits,
