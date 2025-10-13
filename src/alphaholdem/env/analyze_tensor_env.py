@@ -291,11 +291,14 @@ class PreflopAnalyzer:
 
         if isinstance(self.state_encoder, TokenSequenceBuilder):
             self.state_encoder.add_action(
-                torch.arange(N, device=self.device),
-                torch.ones(N, dtype=torch.long, device=self.device),
-                torch.full((N,), bin, dtype=torch.long, device=self.device),
-                legal_masks,
-                torch.zeros(N, dtype=torch.long, device=self.device),
+                idxs=torch.arange(N, device=self.device),
+                actors=torch.ones(N, dtype=torch.long, device=self.device),
+                action_ids=torch.full((N,), bin, dtype=torch.long, device=self.device),
+                legal_masks=legal_masks,
+                action_amounts=torch.full(
+                    (N,), self.env.pot // 2, dtype=torch.long, device=self.device
+                ),
+                token_streets=torch.zeros(N, dtype=torch.long, device=self.device),
             )
             self.state_encoder.add_context(torch.arange(N, device=self.device))
 

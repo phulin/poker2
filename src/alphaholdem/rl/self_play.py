@@ -1311,7 +1311,6 @@ class SelfPlayTrainer:
 
                 # Build manager and seed roots from current minibatch rows
                 B = len(batch)
-                root_entropy = 0.0
                 with torch.no_grad(), model_eval(self.model), self._autocast():
                     mgr = CFRManager(
                         batch_size=B,
