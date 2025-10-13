@@ -118,7 +118,7 @@ class ModelConfig:
     cards_hidden: int = 256
     actions_hidden: int = 256
     fusion_hidden: list[int] = field(default_factory=lambda: [1024, 1024])
-    num_actions: int = 8
+    num_actions: int = -1
 
     # Transformer-specific parameters (with defaults)
     max_sequence_length: int = 47
@@ -127,6 +127,11 @@ class ModelConfig:
     n_heads: int = 2
     dropout: float = 0.0
     num_bet_bins: int = 8
+    # ReBeL FFN parameters
+    input_dim: int = 2660
+    hidden_dim: int = 1536
+    num_hidden_layers: int = 6
+    detach_value_head: bool = True
 
 
 @dataclass
@@ -160,6 +165,12 @@ class SearchConfig:
     depth: int = 2
     iterations: int = 100
     branching: int = 4
+    belief_samples: int = 16
+    max_belief_enumeration: int = 0  # 0 -> use belief_samples uniformly
+    dcfr_alpha: float = 1.5
+    dcfr_beta: float = 0.0
+    dcfr_gamma: float = 2.0
+    include_average_policy: bool = True
 
 
 @dataclass
@@ -201,6 +212,8 @@ class Config:
     def __post_init__(self):
         if self.wandb_tags is None:
             self.wandb_tags = ["kbest", "poker", "ppo"]
+        # Derive action space size directly from bet bins so search/env/model stay aligned.
+        self.model.num_actions = len(self.env.bet_bins) + 3
 
 
 # Register with Hydra

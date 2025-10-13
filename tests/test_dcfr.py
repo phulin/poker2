@@ -68,6 +68,20 @@ def test_run_dcfr_shapes_and_masking():
         iterations=10,
     )
     assert res.root_policy_collapsed.shape == (BATCH, 4)
+    assert res.root_policy_avg_collapsed is not None
+    torch.testing.assert_close(
+        res.root_policy_avg_collapsed.sum(dim=1),
+        torch.ones(BATCH),
+    )
+    assert res.root_sample_weights is not None
+    torch.testing.assert_close(
+        res.root_sample_weights,
+        torch.ones(
+            BATCH,
+            dtype=res.root_sample_weights.dtype,
+            device=res.root_sample_weights.device,
+        ),
+    )
     # probabilities are valid
     s = res.root_policy_collapsed.sum(dim=1)
     torch.testing.assert_close(s, torch.ones(BATCH))

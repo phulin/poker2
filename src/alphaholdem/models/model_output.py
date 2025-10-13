@@ -21,6 +21,9 @@ class ModelOutput:
     value_quantiles: Optional[torch.Tensor] = None
     """Optional quantile value estimates of shape (batch_size, num_quantiles)"""
 
+    hand_values: Optional[torch.Tensor] = None
+    """Optional per-hand value estimates of shape (batch_size, num_players, num_combos)"""
+
     kv_cache: Optional[Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = None
     """KV cache dictionary keyed by layer ID for incremental generation (transformer only)"""
 
@@ -32,6 +35,8 @@ class ModelOutput:
         }
         if self.value_quantiles is not None:
             result["value_quantiles"] = self.value_quantiles
+        if self.hand_values is not None:
+            result["hand_values"] = self.hand_values
         if self.kv_cache is not None:
             result["kv_cache"] = self.kv_cache
         return result
@@ -43,5 +48,6 @@ class ModelOutput:
             policy_logits=data["policy_logits"],
             value=data["value"],
             value_quantiles=data.get("value_quantiles"),
+            hand_values=data.get("hand_values"),
             kv_cache=data.get("kv_cache"),
         )

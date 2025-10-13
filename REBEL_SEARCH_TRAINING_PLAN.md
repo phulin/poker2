@@ -171,3 +171,23 @@ Guard: `assert cfg.model.value_head_type != "quantile"` if `search.enabled`.
 - Transformer sequence length for hypothetical nodes → for D≤2 the added tokens are small; still ensure builder length guard is respected.
 
 
+
+## ReBeL FFN Integration Plan (2025-09-19)
+
+1. Introduce a ReBeL-style feed-forward poker model: add `RebelFFN` with six 1536-unit GeLU+LayerNorm blocks, shared trunk feeding policy/value heads; wire model selection into the model registry and supply a Hydra config (`conf/model_rebel_ffn.yaml`).
+2. Extend tensor encodings: confirm `HUNLTensorEnv` and token builders can emit ReBeL flat features (public cards, pot fraction, acting player, belief vectors); add helpers if gaps exist and hook them into the FFN input pipeline.
+3. Upgrade `CFRManager`: after seeding roots, support iterative DCFR rollouts using the FFN for priors/values, capture average policy/regret tensors, and export replay-ready training tuples.
+4. Build a CFR-specific trainer (`rl/cfr_trainer.py`): replace PPO update loop with one that samples env states, runs CFR search, and optimizes the FFN using ReBeL hyperparameters (Adam 3e-4, 1024 batch, ε = 0.25 exploration).
+5. Implement a ReBeL replay buffer path: extend or parallel `VectorizedReplayBuffer` to store flat embeddings, CFR policy targets (≤9 actions), counterfactual values, reach weights, and mimic the 12M circular buffer with scheduled pruning.
+6. Add supervised CFR losses: create a dual-head objective module matching ReBeL (policy CE/KL vs CFR targets, value MSE with optional PopArt) and integrate it into the trainer.
+7. Update configs and tooling: expose new knobs in `config_transformer_cfr.yaml` / `config_transformer_hp.yaml`, ensure W&B/checkpoints understand the new trainer, and document usage + remaining TODOs.
+8. Testing & validation: craft unit tests for action collapsing, replay storage, and CFR manager outputs; design a smoke script to run a short CFR training loop and log diagnostics.
+
+
+## Implementation Notes (2025-09-19)
+
+- Added `src/alphaholdem/models/mlp/rebel_ffn.py` introducing a 6-layer 1536-unit FFN mirroring ReBeL.
+- Introduced `RebelFeatureEncoder` and 1326-combo utilities to emit PBS vectors for the CFR stack.
+- Extended `CFRManager` to operate with flat features and to return DCFR values alongside root policies.
+- Built a CFR-first training path (`src/alphaholdem/rl/cfr_trainer.py`) with dedicated replay storage and supervised loss.
+- New tests in `tests/test_rebel_pipeline.py` cover feature encoding, CFR manager in FFN mode, the replay buffer, loss, and a smoke run of the trainer.

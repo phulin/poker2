@@ -1,0 +1,14 @@
+# ReBeL-style feed-forward poker model configuration
+
+defaults:
+  - _self_
+
+model:
+  name: "rebel_ffn"
+  input_dim: 2660        # 1 agent + 1 to_act + 1 pot + 5 board + 2*1326 beliefs
+  num_actions: -1        # derive from bet bins at runtime
+  hidden_dim: 1536
+  num_hidden_layers: 6
+  value_head_type: "scalar"
+  value_head_num_quantiles: 1
+  detach_value_head: true

@@ -9,6 +9,7 @@ from alphaholdem.models.transformer.structured_embedding_data import (
 )
 from alphaholdem.models.transformer.tokens import (
     Special,
+    get_action_token_id_offset,
     get_card_token_id_offset,
 )
 
@@ -188,6 +189,211 @@ def test_cfr_integration_pipeline():
     # Verify results
     assert dcfr_res.root_policy_collapsed.shape == (batch_size, 4)
     assert (dcfr_res.root_policy_collapsed >= 0).all()  # Non-negative probabilities
-    assert dcfr_res.root_policy_collapsed.sum(dim=-1).allclose(
-        torch.ones(batch_size)
+    torch.testing.assert_close(
+        dcfr_res.root_policy_collapsed.sum(dim=-1),
+        torch.ones(batch_size),
     )  # Sum to 1
+    assert dcfr_res.root_policy_avg_collapsed is not None
+    torch.testing.assert_close(
+        dcfr_res.root_policy_avg_collapsed.sum(dim=-1),
+        torch.ones(batch_size),
+    )
+    assert dcfr_res.root_sample_weights is not None
+    torch.testing.assert_close(
+        dcfr_res.root_sample_weights,
+        torch.ones(
+            batch_size,
+            dtype=dcfr_res.root_sample_weights.dtype,
+            device=dcfr_res.root_sample_weights.device,
+        ),
+    )
+
+
+def test_cfr_model_input_preserves_canonical_sequence():
+    base = make_env(1)
+    bet_bins = base.default_bet_bins
+    mgr = CFRManager(
+        batch_size=1,
+        env_proto=base,
+        bet_bins=bet_bins,
+        sequence_length=16,
+        device=base.device,
+        float_dtype=base.float_dtype,
+        cfg=SearchConfig(depth=2, iterations=1, branching=4),
+    )
+
+    card_offset = get_card_token_id_offset()
+    action_offset = get_action_token_id_offset()
+    num_bins = len(bet_bins) + 3
+    seq_len = mgr.tsb.sequence_length
+
+    tokens = StructuredEmbeddingData.empty(1, seq_len, num_bins, base.device)
+    tokens.lengths[0] = 11
+
+    # Canonical token order: CLS, GAME, HOLE0, HOLE1, STREET_PREFLOP, CONTEXT,
+    # ACTION, STREET_FLOP, FLOP_CARD1, FLOP_CARD2, FLOP_CARD3
+    token_ids = [
+        Special.CLS.value,
+        Special.GAME.value,
+        card_offset + 3,
+        card_offset + 17,
+        Special.STREET_PREFLOP.value,
+        Special.CONTEXT.value,
+        action_offset + 1,  # call/check action for illustration
+        Special.STREET_FLOP.value,
+        card_offset + 20,
+        card_offset + 21,
+        card_offset + 22,
+        Special.CONTEXT.value,
+    ]
+
+    streets = [
+        0,  # CLS
+        0,  # GAME
+        0,  # HOLE0
+        0,  # HOLE1
+        0,  # STREET_PREFLOP
+        0,  # CONTEXT
+        0,  # ACTION
+        1,  # STREET_FLOP
+        1,  # FLOP_CARD1
+        1,  # FLOP_CARD2
+        1,  # FLOP_CARD3
+        0,  # CONTEXT
+    ]
+
+    ranks = [0, 0, 3 % 13, 17 % 13, 0, 0, 0, 0, 20 % 13, 21 % 13, 22 % 13, 0]
+    suits = [0, 0, 3 // 13, 17 // 13, 0, 0, 0, 0, 20 // 13, 21 // 13, 22 // 13, 0]
+
+    tokens.token_ids[0, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.int8)
+    tokens.token_streets[0, : len(streets)] = torch.tensor(streets, dtype=torch.uint8)
+    tokens.card_ranks[0, : len(ranks)] = torch.tensor(ranks, dtype=torch.uint8)
+    tokens.card_suits[0, : len(suits)] = torch.tensor(suits, dtype=torch.uint8)
+    tokens.action_actors[0, 6] = 0
+    tokens.action_amounts[0, 6] = 0
+    tokens.action_legal_masks[0, 6] = False
+    tokens.action_legal_masks[0, 6, 1] = True  # ensure action is legal
+
+    src_indices = torch.tensor([0], device=base.device)
+    mgr.seed_roots(base, src_indices, tokens)
+
+    class CaptureModel(nn.Module):
+        def __init__(self, num_actions: int):
+            super().__init__()
+            self.num_actions = num_actions
+            self.captured: list[StructuredEmbeddingData] = []
+
+        def forward(self, embedding_data: StructuredEmbeddingData):
+            self.captured.append(embedding_data.clone())
+
+            class Output:
+                pass
+
+            out = Output()
+            out.policy_logits = torch.zeros(
+                embedding_data.token_ids.shape[0],
+                self.num_actions,
+                device=embedding_data.token_ids.device,
+            )
+            out.value = torch.zeros(
+                embedding_data.token_ids.shape[0],
+                1,
+                device=embedding_data.token_ids.device,
+            )
+            return out
+
+    capture_model = CaptureModel(num_actions=len(bet_bins) + 3)
+    mgr.build_tree_tensors(capture_model)
+
+    assert len(capture_model.captured) > 0
+    observed = capture_model.captured[0]
+    length = observed.lengths[0].item()
+    assert length == len(token_ids)
+
+    observed_ids = observed.token_ids[0, :length].to(torch.long)
+    expected_prefix = torch.tensor(
+        token_ids, dtype=torch.long, device=observed_ids.device
+    )
+    torch.testing.assert_close(observed_ids[: len(token_ids)], expected_prefix)
+
+    action_offset = get_action_token_id_offset()
+
+    def assert_suffix_pattern(ids: torch.Tensor) -> None:
+        IDs = ids.tolist()
+        # Locate flop street marker to examine post-flop suffix.
+        try:
+            flop_pos = IDs.index(Special.STREET_FLOP.value)
+        except ValueError:
+            raise AssertionError("Missing STREET_FLOP token in sequence")
+        suffix = IDs[flop_pos + 4 :]  # skip street token + three cards
+        if not suffix:
+            return
+        assert suffix[0] == Special.CONTEXT.value
+        for i in range(1, len(suffix)):
+            if i % 2 == 1:
+                # Odd index -> action
+                assert suffix[i] >= action_offset
+            else:
+                assert suffix[i] == Special.CONTEXT.value
+
+    assert_suffix_pattern(observed_ids)
+
+    # Check that all child nodes maintain the context/action alternating pattern.
+    depth1 = mgr.depth_slice(1)
+    for row in range(depth1.start, depth1.stop):
+        row_len = mgr.tsb.lengths[row].item()
+        row_ids = mgr.tsb.token_ids[row, :row_len].to(torch.long)
+        assert_suffix_pattern(row_ids)
+
+
+class DummyRebelModel(nn.Module):
+    def __init__(self, num_actions: int):
+        super().__init__()
+        self.num_actions = num_actions
+
+    def forward(self, features: torch.Tensor):
+        batch = features.shape[0]
+
+        class Output:
+            pass
+
+        out = Output()
+        out.policy_logits = torch.zeros(batch, self.num_actions, device=features.device)
+        out.value = torch.zeros(batch, 1, device=features.device)
+        return out
+
+
+def test_belief_sampling_restores_original_cards():
+    base = make_env(2)
+    base.reset()
+    bet_bins = base.default_bet_bins
+    cfg = SearchConfig(depth=0, iterations=1, branching=4, belief_samples=3)
+    mgr = CFRManager(
+        batch_size=2,
+        env_proto=base,
+        bet_bins=bet_bins,
+        sequence_length=8,
+        device=base.device,
+        float_dtype=base.float_dtype,
+        cfg=cfg,
+        use_rebel_features=True,
+    )
+
+    src_indices = torch.tensor([0, 1], device=base.device)
+    roots = mgr.seed_roots(base, src_indices)
+    original_cards = base.hole_indices[src_indices].clone()
+
+    dummy_model = DummyRebelModel(num_actions=len(bet_bins) + 3)
+    res = mgr.run_search(dummy_model)
+
+    restored_cards = mgr.env.hole_indices[roots]
+    torch.testing.assert_close(
+        restored_cards.sort(dim=-1).values,
+        original_cards.sort(dim=-1).values,
+    )
+    torch.testing.assert_close(
+        res.root_policy_collapsed.sum(dim=-1),
+        torch.ones(src_indices.shape[0], device=base.device),
+    )
+    assert res.root_sample_weights is not None
+    assert torch.all(res.root_sample_weights > 0)

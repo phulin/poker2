@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""
+Training script for ReBeL-style CFR with the feed-forward model.
+
+Mirrors the structure of train_kbest.py but drives the RebelCFRTrainer and logs
+search-driven supervision metrics to Weights & Biases.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from contextlib import nullcontext
+from typing import Any, Dict
+
+import hydra
+import torch
+import wandb
+from omegaconf import OmegaConf
+
+from alphaholdem.core.structured_config import (
+    Config,
+    EnvConfig,
+    ModelConfig,
+    SearchConfig,
+    TrainingConfig,
+)
+from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
+
+
+def _device_from_config(cfg: Config) -> torch.device:
+    if cfg.device == "cuda" and torch.cuda.is_available():
+        return torch.device("cuda")
+    if cfg.device == "mps" and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _init_wandb(cfg: Config, device: torch.device) -> Any:
+    if not cfg.use_wandb:
+        return nullcontext()
+
+    init_kwargs: Dict[str, Any] = {
+        "project": cfg.wandb_project,
+        "name": cfg.wandb_name,
+        "tags": cfg.wandb_tags or [],
+        "config": {
+            "learning_rate": cfg.train.learning_rate,
+            "batch_size": cfg.train.batch_size,
+            "replay_batches": cfg.train.replay_buffer_batches,
+            "value_coef": cfg.train.value_coef,
+            "entropy_coef": cfg.train.entropy_coef,
+            "grad_clip": cfg.train.grad_clip,
+            "num_envs": cfg.num_envs,
+            "device": str(device),
+            "search_depth": cfg.search.depth,
+            "search_iterations": cfg.search.iterations,
+            "model_hidden_dim": cfg.model.hidden_dim,
+            "model_layers": cfg.model.num_hidden_layers,
+        },
+    }
+    if cfg.wandb_run_id:
+        init_kwargs["id"] = cfg.wandb_run_id
+        init_kwargs["resume"] = "must"
+
+    try:
+        return wandb.init(**init_kwargs)
+    except Exception as exc:
+        print(f"Wandb init failed ({exc}); continuing without logging.")
+        cfg.use_wandb = False
+        return nullcontext()
+
+
+def train_rebel(cfg: Config) -> None:
+    os.makedirs(cfg.checkpoint_dir, exist_ok=True)
+    device = _device_from_config(cfg)
+    print(f"Using device: {device}")
+
+    torch.manual_seed(cfg.seed)
+
+    run_cm = _init_wandb(cfg, device)
+
+    with run_cm as run:
+        trainer = RebelCFRTrainer(cfg=cfg, device=device)
+
+        start_step = 0
+        if cfg.resume_from and os.path.exists(cfg.resume_from):
+            print(f"Resuming from checkpoint: {cfg.resume_from}")
+            start_step = trainer.load_checkpoint(cfg.resume_from)
+            print(f"Resumed at global step {start_step}")
+
+        print(
+            f"Starting ReBeL CFR training for {cfg.num_steps - start_step} steps "
+            f"(total target: {cfg.num_steps})"
+        )
+        if cfg.use_wandb:
+            print(
+                f"📊 Wandb logging to project '{cfg.wandb_project}'"
+                + (f" as run '{cfg.wandb_name}'" if cfg.wandb_name else "")
+            )
+
+        training_start = time.time()
+
+        for step in range(start_step, cfg.num_steps):
+            step_start = time.time()
+            metrics = trainer.train_step(step)
+            step_elapsed = time.time() - step_start
+            total_elapsed = time.time() - training_start
+
+            loss_str = f"{metrics.loss:.4f}" if metrics.loss is not None else "N/A"
+            policy_str = (
+                f"{metrics.policy_loss:.4f}"
+                if metrics.policy_loss is not None
+                else "N/A"
+            )
+            value_str = (
+                f"{metrics.value_loss:.4f}" if metrics.value_loss is not None else "N/A"
+            )
+            entropy_str = (
+                f"{metrics.cfr_entropy:.4f}"
+                if metrics.cfr_entropy is not None
+                else "N/A"
+            )
+
+            print(
+                f"[Step {metrics.step:05d}] "
+                f"loss={loss_str} "
+                f"policy={policy_str} "
+                f"value={value_str} "
+                f"cfr_entropy={entropy_str} "
+                f"time={step_elapsed:.2f}s total={total_elapsed/60:.1f}m"
+            )
+
+            if cfg.use_wandb:
+                log_data: Dict[str, Any] = {
+                    "train/step_time_s": step_elapsed,
+                    "train/buffer_size": metrics.buffer_size,
+                    "search/cfr_entropy": metrics.cfr_entropy,
+                }
+                if metrics.loss is not None:
+                    log_data["train/loss"] = metrics.loss
+                if metrics.policy_loss is not None:
+                    log_data["train/policy_loss"] = metrics.policy_loss
+                if metrics.value_loss is not None:
+                    log_data["train/value_loss"] = metrics.value_loss
+                if metrics.entropy is not None:
+                    log_data["train/entropy"] = metrics.entropy
+                wandb.log(log_data, step=metrics.step)
+
+            if metrics.step % cfg.checkpoint_interval == 0:
+                ckpt_path = os.path.join(
+                    cfg.checkpoint_dir, f"rebel_step_{step + 1}.pt"
+                )
+                trainer.save_checkpoint(ckpt_path, metrics.step)
+                trainer.save_checkpoint(
+                    os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"), metrics.step
+                )
+                print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
+
+        final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
+        trainer.save_checkpoint(final_path, cfg.num_steps)
+        total_elapsed = time.time() - training_start
+        print(
+            f"Training complete in {total_elapsed/3600:.2f} hours. "
+            f"Final checkpoint: {final_path}"
+        )
+
+
+@hydra.main(
+    version_base=None, config_path="../../../conf", config_name="config_rebel_cfr"
+)
+def main(cfg) -> None:
+    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+
+    train_config = TrainingConfig(**cfg_dict.get("train", {}))
+    model_config = ModelConfig(**cfg_dict.get("model", {}))
+    env_config = EnvConfig(**cfg_dict.get("env", {}))
+    search_config = SearchConfig(**cfg_dict.get("search", {}))
+
+    config = Config(
+        train=train_config,
+        model=model_config,
+        env=env_config,
+        search=search_config,
+        **{
+            k: v
+            for k, v in cfg_dict.items()
+            if k not in ["train", "model", "env", "search"]
+        },
+    )
+
+    train_rebel(config)
+
+
+if __name__ == "__main__":
+    main()

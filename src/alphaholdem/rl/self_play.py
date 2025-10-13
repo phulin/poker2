@@ -1332,7 +1332,8 @@ class SelfPlayTrainer:
                         src_indices,
                         batch.embedding_data,
                     )
-                    collapsed_target = mgr.run_search(self.model)
+                    search_res = mgr.run_search(self.model)
+                    collapsed_target = search_res.root_policy_collapsed
 
                     # Normalize CFR target to ensure valid probabilities
                     cfr_target = collapsed_target / collapsed_target.sum(

@@ -1,0 +1,155 @@
+import math
+import torch
+
+from alphaholdem.core.structured_config import Config, ValueHeadType
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
+from alphaholdem.models.mlp.rebel_ffn import RebelFFN
+from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
+from alphaholdem.rl.losses import RebelSupervisedLoss
+from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
+from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
+
+
+def make_env(num_envs: int = 4) -> HUNLTensorEnv:
+    env = HUNLTensorEnv(
+        num_envs=num_envs,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=torch.device("cpu"),
+        float_dtype=torch.float32,
+        flop_showdown=False,
+    )
+    env.reset()
+    return env
+
+
+def test_rebel_feature_encoder_shapes():
+    env = make_env(2)
+    encoder = RebelFeatureEncoder(env, device=env.device, dtype=torch.float32)
+    idxs = torch.tensor([0, 1], device=env.device)
+    for player in (0, 1):
+        agents = torch.full((2,), player, dtype=torch.long, device=env.device)
+        features = encoder.encode(idxs, agents)
+        assert features.shape == (2, encoder.feature_dim)
+        hero = features[:, 8 : 8 + encoder.belief_dim]
+        opp = features[:, 8 + encoder.belief_dim :]
+        torch.testing.assert_close(hero.sum(dim=1), torch.ones(2, device=env.device))
+        torch.testing.assert_close(opp.sum(dim=1), torch.ones(2, device=env.device))
+
+
+def test_cfr_manager_rebel_mode_runs():
+    env = make_env(2)
+    bet_bins = env.default_bet_bins
+    manager = CFRManager(
+        batch_size=2,
+        env_proto=env,
+        bet_bins=bet_bins,
+        sequence_length=4,
+        device=env.device,
+        float_dtype=torch.float32,
+        cfg=SearchConfig(depth=0, iterations=1, branching=4),
+        use_rebel_features=True,
+    )
+    roots = manager.seed_roots(env, torch.tensor([0, 1]), src_tokens=None)
+    model = RebelFFN(
+        input_dim=2660,
+        num_actions=len(bet_bins) + 3,
+        hidden_dim=32,
+        num_hidden_layers=2,
+    )
+    model.to(env.device)
+    res = manager.run_search(model)
+    assert res.root_policy_collapsed.shape == (2, 4)
+    torch.testing.assert_close(
+        res.root_policy_collapsed.sum(dim=1), torch.ones(2, device=env.device)
+    )
+    assert res.root_hand_values is not None
+    assert res.root_hand_value_weights is not None
+    belief_dim = manager.rebel_encoder.belief_dim if manager.rebel_encoder else 1326
+    assert res.root_hand_values.shape == (2, 2, belief_dim)
+
+
+def test_rebel_replay_buffer_roundtrip():
+    buffer = RebelReplayBuffer(
+        capacity=16,
+        feature_dim=10,
+        num_actions=5,
+        belief_dim=8,
+        num_players=2,
+        device=torch.device("cpu"),
+    )
+    features = torch.randn(4, 10)
+    policy_targets = torch.softmax(torch.randn(4, 5), dim=-1)
+    value_targets = torch.randn(4, 2, 8)
+    value_weights = torch.ones(4, 2, 8)
+    legal_masks = torch.ones(4, 5, dtype=torch.bool)
+    acting = torch.zeros(4, dtype=torch.long)
+    buffer.add_batch(
+        features,
+        policy_targets,
+        value_targets,
+        legal_masks,
+        acting,
+        value_weights=value_weights,
+    )
+    assert len(buffer) == 4
+    batch = buffer.sample(2)
+    assert batch.features.shape == (2, 10)
+    assert batch.policy_targets.shape == (2, 5)
+    assert batch.value_targets.shape == (2, 2, 8)
+
+
+def test_rebel_supervised_loss_finite():
+    loss_fn = RebelSupervisedLoss()
+    logits = torch.randn(3, 5, requires_grad=True)
+    hand_values = torch.randn(3, 2, 4, requires_grad=True)
+    policy_targets = torch.softmax(torch.randn(3, 5), dim=-1)
+    legal_masks = torch.ones(3, 5, dtype=torch.bool)
+    batch = RebelBatch(
+        features=torch.randn(3, 10),
+        policy_targets=policy_targets,
+        value_targets=torch.randn(3, 2, 4),
+        value_weights=torch.ones(3, 2, 4),
+        legal_masks=legal_masks,
+        acting_players=torch.zeros(3, dtype=torch.long),
+    )
+    loss_dict = loss_fn(logits, hand_values, batch)
+    assert torch.isfinite(loss_dict["total_loss"]).all()
+    loss_dict["total_loss"].backward()
+
+
+def test_rebel_cfr_trainer_single_step_cpu():
+    cfg = Config()
+    cfg.num_steps = 1
+    cfg.train.batch_size = 4
+    cfg.train.replay_buffer_batches = 1
+    cfg.train.learning_rate = 3e-4
+    cfg.train.value_coef = 1.0
+    cfg.train.entropy_coef = 0.0
+    cfg.train.grad_clip = 1.0
+    cfg.train.max_sequence_length = 16
+    cfg.env.bet_bins = [0.5, 1.0]
+    cfg.env.stack = 1000
+    cfg.env.sb = 5
+    cfg.env.bb = 10
+    cfg.env.flop_showdown = False
+    cfg.model.name = "rebel_ffn"
+    cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+    cfg.model.input_dim = 2660
+    cfg.model.hidden_dim = 64
+    cfg.model.num_hidden_layers = 2
+    cfg.model.value_head_type = ValueHeadType.scalar
+    cfg.model.detach_value_head = True
+    cfg.search.enabled = True
+    cfg.search.depth = 0
+    cfg.search.iterations = 1
+    cfg.search.branching = 4
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    metrics = trainer.train(num_steps=1)
+    assert len(metrics) == 1
+    assert metrics[0].policy_loss is not None
+    assert metrics[0].loss is not None
+    assert not math.isnan(metrics[0].policy_loss)

@@ -1,0 +1,49 @@
+# ReBeL-style CFR training configuration using the feed-forward model.
+
+defaults:
+  - _self_
+
+num_steps: 1000
+use_tensor_env: true
+num_envs: 512
+device: cuda
+checkpoint_dir: "checkpoints-rebel"
+checkpoint_interval: 50
+resume_from: null
+use_wandb: true
+wandb_project: "poker-rebel-cfr"
+wandb_name: null
+wandb_tags: ["rebel", "cfr"]
+wandb_run_id: null
+
+train:
+  learning_rate: 3e-4
+  batch_size: 512
+  replay_buffer_batches: 4
+  value_coef: 1.0
+  entropy_coef: 0.0
+  grad_clip: 1.0
+  max_sequence_length: 32
+
+model:
+  name: "rebel_ffn"
+  input_dim: 2660
+  num_actions: -1
+  hidden_dim: 1536
+  num_hidden_layers: 6
+  value_head_type: "scalar"
+  value_head_num_quantiles: 1
+  detach_value_head: true
+
+env:
+  stack: 1000
+  sb: 5
+  bb: 10
+  bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]
+  flop_showdown: false
+
+search:
+  enabled: true
+  depth: 2
+  iterations: 100
+  branching: 4
