@@ -295,9 +295,7 @@ class PreflopAnalyzer:
                 actors=torch.ones(N, dtype=torch.long, device=self.device),
                 action_ids=torch.full((N,), bin, dtype=torch.long, device=self.device),
                 legal_masks=legal_masks,
-                action_amounts=torch.full(
-                    (N,), self.env.pot // 2, dtype=torch.long, device=self.device
-                ),
+                action_amounts=self.env.pot // 2,
                 token_streets=torch.zeros(N, dtype=torch.long, device=self.device),
             )
             self.state_encoder.add_context(torch.arange(N, device=self.device))
