@@ -13,7 +13,7 @@ from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_replay import RebelReplayBuffer
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
+from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator, T_WARM
 from alphaholdem.utils.model_context import model_eval
 
 
@@ -126,8 +126,11 @@ class RebelCFRTrainer:
         return RebelCFREvaluator(
             search_batch_size=self.batch_size,
             env_proto=self.env,
+            model=self.model,
             bet_bins=self.bet_bins,
-            max_depth=self.cfg.search.depth,
+            max_depth=max(1, self.cfg.search.depth),
+            cfr_iterations=max(T_WARM + 1, self.cfg.search.iterations),
+            sample_count=max(1, getattr(self.cfg.search, "belief_samples", 1)),
             device=self.device,
             float_dtype=self.float_dtype,
             belief_samples=max(
@@ -225,6 +228,7 @@ class RebelCFRTrainer:
                 encoded = self.feature_encoder.encode(
                     player_indices, agents, hero_beliefs, opp_beliefs
                 )
+                encoded = encoded[:, : self.cfg.model.input_dim]
                 features[mask] = encoded
 
         # Get hand values and weights from CFR result
@@ -239,6 +243,8 @@ class RebelCFRTrainer:
             ),
         )
         hand_weights = torch.ones_like(hand_values)
+
+        features = features[:, : self.model.input_dim]
 
         # Sample weights from CFR result
         sample_weights = torch.ones(

@@ -65,8 +65,9 @@ def mask_conflicting_combos(
 @lru_cache(maxsize=1)
 def combo_blocking_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 1326] tensor of blocked hands for each combo."""
-    combo_lookup = combo_lookup_tensor(device=device)
+    combos = hand_combos_tensor(device=device)  # [1326, 2]
     combo_onehot = torch.zeros(1326, 52, dtype=torch.uint8, device=device)
-    combo_onehot[torch.arange(1326, device=device), combo_lookup[:, 0]] = True
-    combo_onehot[torch.arange(1326, device=device), combo_lookup[:, 1]] = True
-    return (combo_onehot @ combo_onehot.T).clamp(0, 1).to(torch.bool)
+    idx = torch.arange(1326, device=device)
+    combo_onehot[idx, combos[:, 0]] = 1
+    combo_onehot[idx, combos[:, 1]] = 1
+    return (combo_onehot @ combo_onehot.T).clamp_(0, 1).to(torch.bool)

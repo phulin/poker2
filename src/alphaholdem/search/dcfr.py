@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, List
+from typing import Tuple, List, Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -70,6 +70,7 @@ def run_dcfr(
     beta: float = 0.0,
     gamma: float = 2.0,
     include_average: bool = True,
+    leaf_value_callback: Optional[Callable[[int], torch.Tensor]] = None,
 ) -> DCFRResult:
     """Vectorized DCFR-like updates over a fixed 4-ary tree.
 
@@ -102,6 +103,7 @@ def run_dcfr(
 
     # Buffers
     node_values = torch.zeros(M, dtype=values.dtype, device=device)
+    values_current = values
 
     # Sample an iteration index with probability proportional to t (Linear CFR-style)
     # If iterations == 1, this gives 1
@@ -116,9 +118,13 @@ def run_dcfr(
     sampled_root_policy: torch.Tensor | None = None
 
     for it in range(1, iterations + 1):
+        if leaf_value_callback is not None:
+            refreshed = leaf_value_callback(it)
+            if refreshed is not None:
+                values_current = refreshed
         # Set leaf values (deepest depth)
         leaf_sl = slice(depth_offsets[depth], depth_offsets[depth + 1])
-        node_values[leaf_sl] = values[leaf_sl]
+        node_values[leaf_sl] = values_current[leaf_sl]
 
         # Bottom-up backup and regret updates
         for d in range(depth - 1, -1, -1):

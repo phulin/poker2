@@ -674,14 +674,20 @@ class CFRManager:
                     rows = p0_rows[start : start + chunk_size]
                     emb = self.encode_states(player=0, idxs=rows)
                     out = model(emb)
-                    logits_full[rows] = out.policy_logits.float()
+                    logits = out.policy_logits
+                    if logits.dim() == 3:
+                        logits = logits.mean(dim=-1)
+                    logits_full[rows] = logits.float()
                 # Assign values for non-terminal leaves at last depth later
             if p1_rows.numel() > 0:
                 for start in range(0, p1_rows.numel(), chunk_size):
                     rows = p1_rows[start : start + chunk_size]
                     emb = self.encode_states(player=1, idxs=rows)
                     out = model(emb)
-                    logits_full[rows] = out.policy_logits.float()
+                    logits = out.policy_logits
+                    if logits.dim() == 3:
+                        logits = logits.mean(dim=-1)
+                    logits_full[rows] = logits.float()
 
             # Expand and step children for next depth
             if d < self.depth:
