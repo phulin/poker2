@@ -14,6 +14,7 @@ from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_replay import RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator, T_WARM
+from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 from alphaholdem.utils.model_context import model_eval
 
 
@@ -103,17 +104,21 @@ class RebelCFRTrainer:
         )
         self.grad_clip = cfg.train.grad_clip
 
-        # Replay buffer stores samples on CPU
-        self.replay_buffer = RebelReplayBuffer(
-            capacity=self.replay_capacity,
-            feature_dim=cfg.model.input_dim,
-            num_actions=self.num_actions,
-            belief_dim=self.belief_dim,
-            num_players=self.num_players,
-            device=self.buffer_device,
-            dtype=self.float_dtype,
+        self.cfr_manager = RebelCFREvaluator(
+            search_batch_size=self.batch_size,
+            env_proto=self.env,
+            model=self.model,
+            bet_bins=self.bet_bins,
+            max_depth=max(1, self.cfg.search.depth),
+            cfr_iterations=max(T_WARM + 1, self.cfg.search.iterations),
+            device=self.device,
+            float_dtype=self.float_dtype,
+            generator=self.rng,
         )
-        self.cfr_manager = self._build_cfr_manager()
+        self.data_generator = RebelDataGenerator(
+            env_proto=self.env,
+            evaluator=self.cfr_manager,
+        )
 
         # Feature encoder for belief computation
         self.feature_encoder = RebelFeatureEncoder(
@@ -122,185 +127,14 @@ class RebelCFRTrainer:
             dtype=self.float_dtype,
         )
 
-    def _build_cfr_manager(self) -> RebelCFREvaluator:
-        return RebelCFREvaluator(
-            search_batch_size=self.batch_size,
-            env_proto=self.env,
-            model=self.model,
-            bet_bins=self.bet_bins,
-            max_depth=max(1, self.cfg.search.depth),
-            cfr_iterations=max(T_WARM + 1, self.cfg.search.iterations),
-            sample_count=max(1, getattr(self.cfg.search, "belief_samples", 1)),
-            device=self.device,
-            float_dtype=self.float_dtype,
-            belief_samples=max(
-                1,
-                (
-                    self.cfg.search.belief_samples
-                    if hasattr(self.cfg.search, "belief_samples")
-                    else 1
-                ),
-            ),
-        )
-
     def _compute_entropy(self, probs: torch.Tensor) -> float:
         eps = 1e-8
         norm = probs.clamp_min(eps)
         entropy = -(norm * norm.log()).sum(dim=-1).mean()
         return float(entropy.item())
 
-    def _reset_done_envs(self) -> None:
-        done = torch.where(self.env.done)[0]
-        if done.numel() > 0:
-            self.env.reset(done)
-            self.reach_probs[done] = 1.0
-
-    @torch.no_grad()
-    def _self_play_iteration(self) -> Dict[str, float]:
-        self._reset_done_envs()
-        manager = self.cfr_manager
-
-        # Initialize search with current environment state
-        env_indices = torch.arange(self.batch_size, device=self.device)
-        manager.initialize_search(self.env, env_indices)
-
-        # Run CFR search with ReBeL-style strategy-conditioned belief updates
-        with model_eval(self.model):
-            result = manager.run_cfr_iterations(
-                num_iterations=self.cfg.search.iterations, value_network=self.model
-            )
-
-        # Extract results
-        valid_mask = ~self.env.done[env_indices]
-
-        if not torch.any(valid_mask):
-            return {"cfr_entropy": 0.0, "num_samples": 0}
-
-        # Use sampled policy for action selection (safe search per ReBeL)
-        policy_sampled = result.root_policy_sampled
-        policy_avg = result.root_policy_avg
-
-        # Convert to full action space if needed
-        # For now, assume we're working with collapsed 4-action space
-        policy_full = policy_sampled  # Simplified for integration
-
-        valid_env_indices = env_indices[valid_mask]
-        valid_policy = policy_full[valid_mask]
-
-        num_valid = valid_env_indices.numel()
-
-        # Generate features for replay buffer
-        features = torch.zeros(
-            num_valid,
-            self.cfg.model.input_dim,
-            dtype=self.float_dtype,
-            device=self.device,
-        )
-
-        # Encode states for each player
-        valid_to_act = self.env.to_act[valid_env_indices]
-        for player in (0, 1):
-            mask = valid_to_act == player
-            if mask.any():
-                player_indices = valid_env_indices[mask]
-                # Use feature encoder to encode current states
-                agents = torch.full(
-                    (player_indices.numel(),),
-                    player,
-                    device=self.device,
-                    dtype=torch.long,
-                )
-
-                # Get belief states from the CFR result
-                beliefs = result.belief_states.get(
-                    0,
-                    torch.zeros(
-                        player_indices.numel(),
-                        2,
-                        self.belief_dim,
-                        device=self.device,
-                        dtype=self.float_dtype,
-                    ),
-                )
-                hero_beliefs = beliefs[mask, player] if beliefs.numel() > 0 else None
-                opp_beliefs = beliefs[mask, 1 - player] if beliefs.numel() > 0 else None
-
-                encoded = self.feature_encoder.encode(
-                    player_indices, agents, hero_beliefs, opp_beliefs
-                )
-                encoded = encoded[:, : self.cfg.model.input_dim]
-                features[mask] = encoded
-
-        # Get hand values and weights from CFR result
-        hand_values = result.training_targets.get(
-            "values_depth_0",
-            torch.zeros(
-                num_valid,
-                2,
-                self.belief_dim,
-                device=self.device,
-                dtype=self.float_dtype,
-            ),
-        )
-        hand_weights = torch.ones_like(hand_values)
-
-        features = features[:, : self.model.input_dim]
-
-        # Sample weights from CFR result
-        sample_weights = torch.ones(
-            num_valid, device=self.device, dtype=self.float_dtype
-        )
-
-        state_reach = self.reach_probs[valid_env_indices] * sample_weights
-
-        self.replay_buffer.add_batch(
-            features=features.detach().to(self.buffer_device),
-            policy_targets=valid_policy.detach().to(self.buffer_device),
-            value_targets=hand_values.detach().to(self.buffer_device),
-            legal_masks=torch.ones(
-                num_valid, self.num_actions, device=self.buffer_device, dtype=torch.bool
-            ),
-            acting_players=valid_to_act.detach().to(self.buffer_device),
-            reach_weights=state_reach.detach().to(self.buffer_device),
-            value_weights=hand_weights.detach().to(self.buffer_device),
-        )
-
-        # Epsilon-greedy action selection on sampled-iteration policy
-        eps = float(self.cfg.train.cfr_action_epsilon)
-        # Mix with uniform over legal actions
-        legal_float = torch.ones(
-            num_valid, self.num_actions, device=self.device, dtype=self.float_dtype
-        )
-        num_legal = legal_float.sum(dim=1, keepdim=True).clamp_min(1.0)
-        uniform = legal_float / num_legal
-        mixed = (1.0 - eps) * valid_policy + eps * uniform
-        mixed = mixed / mixed.sum(dim=1, keepdim=True).clamp_min(1e-8)
-
-        # Sample actions for self-play using mixed distribution
-        sampled_bins = torch.multinomial(mixed, 1).squeeze(1)
-        selected_probs = mixed.gather(1, sampled_bins.unsqueeze(1)).squeeze(1)
-        self.reach_probs[valid_env_indices] = self.reach_probs[
-            valid_env_indices
-        ] * selected_probs.clamp_min(1e-8)
-
-        actions_full = torch.full(
-            (self.batch_size,),
-            -1,
-            dtype=torch.long,
-            device=self.device,
-        )
-        actions_full[valid_env_indices] = sampled_bins
-        self.env.step_bins(actions_full, bet_bins=self.bet_bins)
-        self._reset_done_envs()
-
-        cfr_entropy = self._compute_entropy(valid_policy)
-        return {"cfr_entropy": cfr_entropy, "num_samples": num_valid}
-
     def _update_model(self) -> Optional[Dict[str, float]]:
-        if len(self.replay_buffer) < self.batch_size:
-            return None
-        batch_cpu = self.replay_buffer.sample(self.batch_size, self.buffer_rng)
-        batch = batch_cpu.to(self.device)
+        batch = self.data_generator.generate_data()
 
         self.model.train()
         self.optimizer.zero_grad()
@@ -329,15 +163,8 @@ class RebelCFRTrainer:
         step_public = step + 1
         metrics = TrainerMetrics(step=step_public)
 
-        iterations = max(1, self.cfg.train.episodes_per_step)
         entropy_weighted = 0.0
         total_samples = 0
-        for _ in range(iterations):
-            info = self._self_play_iteration()
-            samples = info.get("num_samples", 0)
-            if samples > 0:
-                entropy_weighted += info["cfr_entropy"] * samples
-                total_samples += samples
 
         update_info = self._update_model()
 

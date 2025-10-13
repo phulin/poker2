@@ -14,6 +14,7 @@ from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.search.cfr_manager import CFRManager
+from alphaholdem.search.rebel_data_generator import TrainingData
 from alphaholdem.utils.ema import EMA
 from alphaholdem.utils.model_utils import compute_masked_logits
 
@@ -735,7 +736,7 @@ class RebelSupervisedLoss(nn.Module):
         self,
         logits: torch.Tensor,
         hand_values: torch.Tensor,
-        batch: RebelBatch,
+        batch: TrainingData,
     ) -> dict[str, torch.Tensor]:
         """
         Args:
@@ -746,44 +747,23 @@ class RebelSupervisedLoss(nn.Module):
             Dict of scalar tensors for loss components and diagnostics.
         """
         legal_masks = batch.legal_masks
-        masked_logits = logits.masked_fill(~legal_masks, float("-inf"))
+        masked_logits = compute_masked_logits(logits, legal_masks)
         log_probs = F.log_softmax(masked_logits, dim=-1)
-        log_probs = torch.where(legal_masks, log_probs, torch.zeros_like(log_probs))
-        probs = torch.where(legal_masks, log_probs.exp(), torch.zeros_like(log_probs))
-
-        policy_targets = batch.policy_targets
-        policy_loss_vec = -(policy_targets * log_probs).sum(dim=-1)
+        probs = log_probs.exp()
 
         if hand_values is None:
             raise ValueError("RebelSupervisedLoss requires hand value predictions.")
-        if hand_values.shape != batch.value_targets.shape:
+        if hand_values.shape != batch.values.shape:
             raise ValueError(
                 f"Hand value shape mismatch: predicted {hand_values.shape}, "
-                f"target {batch.value_targets.shape}"
+                f"target {batch.values.shape}"
             )
-        value_diff = hand_values - batch.value_targets
-        sq = value_diff.pow(2)
-        if batch.value_weights is not None:
-            weights_per_hand = batch.value_weights.to(hand_values.dtype)
-            weighted_sq = sq * weights_per_hand
-            denom = weights_per_hand.sum(dim=(1, 2)).clamp_min(1e-8)
-            value_loss_vec = weighted_sq.sum(dim=(1, 2)) / denom
-        else:
-            value_loss_vec = sq.view(sq.size(0), -1).mean(dim=-1)
 
-        if batch.reach_weights is not None:
-            weights = batch.reach_weights.to(logits.dtype)
-            weight_sum = weights.sum().clamp_min(1e-8)
-        else:
-            weights = torch.ones_like(policy_loss_vec, dtype=logits.dtype)
-            weight_sum = weights.sum().clamp_min(1e-8)
-
-        policy_loss = (policy_loss_vec * weights).sum() / weight_sum
-        value_loss = (value_loss_vec * weights).sum() / weight_sum
+        policy_loss = F.huber_loss(probs, batch.policy, delta=1.0)
+        value_loss = F.mse_loss(hand_values, batch.values)
 
         if self.entropy_coef != 0.0:
-            entropy_vec = -(probs * log_probs).sum(dim=-1)
-            entropy = (entropy_vec * weights).sum() / weight_sum
+            entropy = -(probs * log_probs).sum(dim=-1)
         else:
             entropy = torch.tensor(0.0, dtype=logits.dtype, device=logits.device)
 

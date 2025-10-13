@@ -30,40 +30,26 @@ class CFRResult:
 
 
 @dataclass
-class TrainingBatch:
-    """Training data extracted from CFR search."""
-
-    features: torch.Tensor  # [batch_size, feature_dim]
-    policy_targets: torch.Tensor  # [batch_size, num_actions]
-    value_targets: torch.Tensor  # [batch_size, num_players, belief_dim]
-    belief_states: torch.Tensor  # [batch_size, num_players, belief_dim]
-    weights: torch.Tensor  # [batch_size]
-
-
-@dataclass
 class PublicBeliefState:
     """Public belief state for both players (? TODO)."""
 
     env: HUNLTensorEnv
-    beliefs: torch.Tensor  # [batch_size, num_players, belief_dim]
+    beliefs: torch.Tensor  # [batch_size, num_players, NUM_HANDS]
 
     @classmethod
     def from_proto(
-        cls, proto: HUNLTensorEnv, beliefs: torch.Tensor
+        cls,
+        env_proto: HUNLTensorEnv,
+        beliefs: torch.Tensor,
+        num_envs: Optional[int] = None,
     ) -> PublicBeliefState:
         return PublicBeliefState(
-            env=HUNLTensorEnv(
-                num_envs=proto.num_envs,
-                starting_stack=proto.starting_stack,
-                sb=proto.sb,
-                bb=proto.bb,
-                default_bet_bins=proto.default_bet_bins,
-                device=proto.device,
-                float_dtype=proto.float_dtype,
-                flop_showdown=proto.flop_showdown,
-            ),
+            env=HUNLTensorEnv.from_proto(env_proto, num_envs=num_envs),
             beliefs=beliefs,
         )
+
+    def __post_init__(self):
+        assert self.beliefs.shape[0] == self.env.N
 
 
 class RebelCFREvaluator:
@@ -77,10 +63,9 @@ class RebelCFREvaluator:
         bet_bins: list[float],
         max_depth: int,
         cfr_iterations: int,
-        sample_count: int,
         device: torch.device,
         float_dtype: torch.dtype,
-        belief_samples: int = 1,
+        generator: Optional[torch.Generator] = None,
         warm_start_iterations: int = T_WARM,
     ):
         assert cfr_iterations > warm_start_iterations
@@ -91,10 +76,9 @@ class RebelCFREvaluator:
         self.bet_bins = bet_bins
         self.warm_start_iterations = warm_start_iterations
         self.cfr_iterations = cfr_iterations
-        self.sample_count = sample_count
         self.device = device
         self.float_dtype = float_dtype
-        self.belief_samples = belief_samples
+        self.generator = generator
 
         self.num_players = 2
         self.num_actions = len(bet_bins) + 3
@@ -114,15 +98,9 @@ class RebelCFREvaluator:
             self.all_depths[self.depth_offsets[i] : self.depth_offsets[i + 1]] = i
 
         # Subgame environment
-        self.env = HUNLTensorEnv(
+        self.env = HUNLTensorEnv.from_proto(
+            env_proto,
             num_envs=self.total_nodes,
-            starting_stack=env_proto.starting_stack,
-            sb=env_proto.sb,
-            bb=env_proto.bb,
-            default_bet_bins=self.bet_bins,
-            device=device,
-            float_dtype=float_dtype,
-            flop_showdown=env_proto.flop_showdown,
         )
         self.valid_mask = torch.zeros(
             self.total_nodes, dtype=torch.bool, device=self.device
@@ -259,7 +237,7 @@ class RebelCFREvaluator:
             )
             return self.model(empty)
 
-        features = self._encode_current_states(eval_indices)
+        features = self.encode_current_states(eval_indices)
         return self.model(features)
 
     def initialize_policy(self, model_output: ModelOutput) -> None:
@@ -382,17 +360,21 @@ class RebelCFREvaluator:
         self.set_leaf_values(model_output)
         self.values = self.compute_expected_values()
 
+        leaf_indices = torch.where(self.valid_mask & self.leaf_mask & ~self.env.done)[0]
+        sample_count = min(leaf_indices.numel(), self.search_batch_size)
         next_pbs = PublicBeliefState.from_proto(
-            env=self.env,
-            beliefs=torch.zeros(self.sample_count, self.num_players, NUM_HANDS),
+            env_proto=self.env,
+            beliefs=torch.zeros(sample_count, self.num_players, NUM_HANDS),
+            num_envs=sample_count,
         )
 
-        leaf_indices = self._leaf_node_indices()
         sample_envs = leaf_indices[
-            torch.randint(0, leaf_indices.numel(), (self.sample_count,))
+            torch.randperm(leaf_indices.numel(), generator=self.generator)[
+                :sample_count
+            ]
         ]
         t_sample = torch.randint(
-            self.warm_start_iterations, self.cfr_iterations, (self.sample_count,)
+            self.warm_start_iterations, self.cfr_iterations, (sample_count,)
         )
 
         for t in range(self.warm_start_iterations, self.cfr_iterations):
@@ -486,7 +468,7 @@ class RebelCFREvaluator:
 
         return hero, opp
 
-    def _encode_current_states(self, indices: torch.Tensor) -> torch.Tensor:
+    def encode_current_states(self, indices: torch.Tensor) -> torch.Tensor:
         """Encode environment states for policy network input."""
         if indices.numel() == 0:
             return torch.empty(

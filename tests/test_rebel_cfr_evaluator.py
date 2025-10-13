@@ -74,7 +74,6 @@ def make_evaluator(
         bet_bins=bet_bins,
         max_depth=max_depth,
         cfr_iterations=max(32, cfr_iterations),
-        sample_count=1,
         device=env.device,
         float_dtype=env.float_dtype,
     )

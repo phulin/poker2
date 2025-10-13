@@ -144,6 +144,23 @@ class HUNLTensorEnv:
         )
         self.card_onehot_cache[all_cards, suits, ranks] = True
 
+    @classmethod
+    def from_proto(
+        cls, proto: HUNLTensorEnv, num_envs: Optional[int] = None
+    ) -> HUNLTensorEnv:
+        return HUNLTensorEnv(
+            num_envs=num_envs or proto.num_envs,
+            starting_stack=proto.starting_stack,
+            sb=proto.sb,
+            bb=proto.bb,
+            default_bet_bins=proto.default_bet_bins,
+            device=proto.device,
+            rng=proto.rng,
+            float_dtype=proto.float_dtype,
+            debug_step_table=proto.debug_step_table,
+            flop_showdown=proto.flop_showdown,
+        )
+
     # --- Reset -----------------------------------------------------------------
 
     def reset(
