@@ -740,13 +740,16 @@ class RebelSupervisedLoss(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """
         Args:
-            logits: [B, num_actions] raw policy logits.
+            logits: [B, num_actions] or [B, num_hands, num_actions] raw policy logits.
             hand_values: [B, num_players, num_combos] per-hand value predictions.
-            batch: RebelBatch with policy/value targets.
+            batch: TrainingData with policy/value targets.
         Returns:
             Dict of scalar tensors for loss components and diagnostics.
         """
         legal_masks = batch.legal_masks
+        if logits.dim() == 3 and legal_masks.dim() == 2:
+            legal_masks = legal_masks.unsqueeze(1)
+
         masked_logits = compute_masked_logits(logits, legal_masks)
         log_probs = F.log_softmax(masked_logits, dim=-1)
         probs = log_probs.exp()
@@ -759,11 +762,20 @@ class RebelSupervisedLoss(nn.Module):
                 f"target {batch.values.shape}"
             )
 
-        policy_loss = F.huber_loss(probs, batch.policy, delta=1.0)
+        policy_targets = batch.policy
+        if probs.dim() == 3 and policy_targets.dim() == 2:
+            policy_targets = policy_targets.unsqueeze(1)
+        if probs.shape != policy_targets.shape:
+            raise ValueError(
+                f"Policy shape mismatch: predicted {probs.shape}, "
+                f"target {policy_targets.shape}"
+            )
+
+        policy_loss = F.huber_loss(probs, policy_targets, delta=1.0)
         value_loss = F.mse_loss(hand_values, batch.values)
 
         if self.entropy_coef != 0.0:
-            entropy = -(probs * log_probs).sum(dim=-1)
+            entropy = -(probs * log_probs).sum(dim=-1).mean()
         else:
             entropy = torch.tensor(0.0, dtype=logits.dtype, device=logits.device)
 

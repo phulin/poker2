@@ -676,7 +676,7 @@ class CFRManager:
                     out = model(emb)
                     logits = out.policy_logits
                     if logits.dim() == 3:
-                        logits = logits.mean(dim=-1)
+                        logits = logits.mean(dim=-2)
                     logits_full[rows] = logits.float()
                 # Assign values for non-terminal leaves at last depth later
             if p1_rows.numel() > 0:
@@ -686,7 +686,7 @@ class CFRManager:
                     out = model(emb)
                     logits = out.policy_logits
                     if logits.dim() == 3:
-                        logits = logits.mean(dim=-1)
+                        logits = logits.mean(dim=-2)
                     logits_full[rows] = logits.float()
 
             # Expand and step children for next depth

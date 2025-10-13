@@ -74,7 +74,6 @@ class RebelFFN(nn.Module, Model):
 
         # Heads
         self.policy_head = nn.Linear(hidden_dim, num_actions * NUM_HANDS)
-        self.value_head = nn.Linear(hidden_dim, 1)
         self.hand_value_head = nn.Linear(hidden_dim, num_players * NUM_HANDS)
 
     def forward(self, features: torch.Tensor, *_: Any, **__: Any) -> ModelOutput:
@@ -95,14 +94,12 @@ class RebelFFN(nn.Module, Model):
         x = self.trunk(features)
         x = self.post_norm(x)
 
-        policy_logits = self.policy_head(x).reshape(-1, self.num_actions, NUM_HANDS)
-
-        value_input = x.detach() if self.detach_value_head else x
-        value = self.value_head(value_input).squeeze(-1)
+        policy_logits = self.policy_head(x).reshape(-1, NUM_HANDS, self.num_actions)
 
         hand_value_input = x.detach() if self.detach_value_head else x
         hand_values = self.hand_value_head(hand_value_input)
         hand_values = hand_values.view(features.shape[0], self.num_players, NUM_HANDS)
+        value = hand_values.mean(dim=-1)
 
         return ModelOutput(
             policy_logits=policy_logits,

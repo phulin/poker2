@@ -65,6 +65,14 @@ class RebelCFRTrainer:
                 f"to match bet bin configuration."
             )
             cfg.model.num_actions = self.num_actions
+        expected_input_dim = RebelFeatureEncoder.feature_dim
+        if cfg.model.input_dim != expected_input_dim:
+            print(
+                f"[RebelCFRTrainer] Overriding model.input_dim "
+                f"({cfg.model.input_dim}) -> {expected_input_dim} "
+                f"to match feature encoder output."
+            )
+            cfg.model.input_dim = expected_input_dim
 
         # Environment used to provide root states for CFR search
         self.env = HUNLTensorEnv(
@@ -168,7 +176,7 @@ class RebelCFRTrainer:
 
         update_info = self._update_model()
 
-        metrics.buffer_size = len(self.replay_buffer)
+        # metrics.buffer_size = len(self.replay_buffer)
         if total_samples > 0:
             metrics.cfr_entropy = entropy_weighted / total_samples
         if update_info is not None:

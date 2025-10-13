@@ -123,7 +123,7 @@ def test_initialize_policy_respects_legal_mask(monkeypatch: pytest.MonkeyPatch) 
 
     logits = torch.arange(float(num_actions), dtype=env.float_dtype)
     evaluator.model = ConstantModel(logits=logits)  # type: ignore[assignment]
-    model_output = evaluator.evaluate_model_on_valid()
+    model_output = evaluator.evaluate_model_on_all()
     evaluator.initialize_policy(model_output)
 
     expected = torch.softmax(

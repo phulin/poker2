@@ -9,6 +9,7 @@ from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
 from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
+from alphaholdem.search.rebel_data_generator import NUM_HANDS, TrainingData
 
 
 def make_env(num_envs: int = 4) -> HUNLTensorEnv:
@@ -54,7 +55,7 @@ def test_cfr_manager_rebel_mode_runs():
     )
     roots = manager.seed_roots(env, torch.tensor([0, 1]), src_tokens=None)
     model = RebelFFN(
-        input_dim=2661,
+        input_dim=RebelFeatureEncoder.feature_dim,
         num_actions=len(bet_bins) + 3,
         hidden_dim=32,
         num_hidden_layers=2,
@@ -103,17 +104,19 @@ def test_rebel_replay_buffer_roundtrip():
 
 def test_rebel_supervised_loss_finite():
     loss_fn = RebelSupervisedLoss()
-    logits = torch.randn(3, 5, requires_grad=True)
-    hand_values = torch.randn(3, 2, 4, requires_grad=True)
-    policy_targets = torch.softmax(torch.randn(3, 5), dim=-1)
-    legal_masks = torch.ones(3, 5, dtype=torch.bool)
-    batch = RebelBatch(
-        features=torch.randn(3, 10),
-        policy_targets=policy_targets,
-        value_targets=torch.randn(3, 2, 4),
+    batch_size, num_actions = 3, 5
+    logits = torch.randn(batch_size, NUM_HANDS, num_actions, requires_grad=True)
+    hand_values = torch.randn(batch_size, 2, NUM_HANDS, requires_grad=True)
+    policy_targets = torch.softmax(
+        torch.randn(batch_size, NUM_HANDS, num_actions), dim=-1
+    )
+    legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
+    values = torch.randn(batch_size, 2, NUM_HANDS)
+    batch = TrainingData(
+        features=torch.randn(batch_size, RebelFeatureEncoder.feature_dim),
         legal_masks=legal_masks,
-        acting_players=torch.zeros(3, dtype=torch.long),
-        value_weights=torch.ones(3, 2, 4),
+        values=values,
+        policy=policy_targets,
     )
     loss_dict = loss_fn(logits, hand_values, batch)
     assert torch.isfinite(loss_dict["total_loss"]).all()
@@ -137,7 +140,7 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.env.flop_showdown = False
     cfg.model.name = "rebel_ffn"
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
-    cfg.model.input_dim = 2660
+    cfg.model.input_dim = RebelFeatureEncoder.feature_dim
     cfg.model.hidden_dim = 64
     cfg.model.num_hidden_layers = 2
     cfg.model.value_head_type = ValueHeadType.scalar

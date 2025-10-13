@@ -27,9 +27,8 @@ def compute_masked_logits(
         raise TypeError(
             f"compute_masked_logits expected floating-point logits, got {logits.dtype}"
         )
-    legal_masks_bool = legal_masks.to(torch.bool)
     mask_value = torch.finfo(logits.dtype).min
-    return logits.masked_fill(~legal_masks_bool, mask_value)
+    return logits.masked_fill(~legal_masks, mask_value)
 
 
 def get_logits_log_probs_values(

@@ -66,11 +66,20 @@ class RebelDataGenerator:
             )
             pbs.beliefs[accum_start:accum_end] = next_pbs.beliefs[start:end]
 
-            if start + needed >= next_pbs.env.N:
+            consumed = end - start
+            if consumed == 0:
+                # Nothing copied; discard exhausted PBS to avoid infinite loop.
+                self.next_pbs_idx = 0
+                self.pbs_queue.pop(0)
+                continue
+
+            if end == next_pbs.env.N:
                 self.next_pbs_idx = 0
                 self.pbs_queue.pop(0)
             else:
-                self.next_pbs_idx = start + needed
+                self.next_pbs_idx = end
+
+            accum_start = accum_end
 
         # any remaining: initialize uniform beliefs
         if accum_start < batch_size:

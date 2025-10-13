@@ -208,6 +208,9 @@ class RebelCFREvaluator:
                     & ~self.leaf_mask[offset:offset_next]
                 )
                 current_legal_indices = torch.where(current_legal_mask)[0] + offset
+                if current_legal_indices.numel() == 0:
+                    continue
+
                 new_legal_indices = current_legal_indices + (action + 1) * B**depth * N
                 assert new_legal_indices.max().item() < M
 
@@ -226,18 +229,10 @@ class RebelCFREvaluator:
         leaf_end = self.depth_offsets[self.max_depth]
         self.leaf_mask[leaf_start:leaf_end] |= self.valid_mask[leaf_start:leaf_end]
 
-    def evaluate_model_on_valid(self) -> ModelOutput:
-        eval_indices = torch.where(self.valid_mask)[0]
-        if eval_indices.numel() == 0:
-            empty = torch.empty(
-                0,
-                self.feature_encoder.feature_dim,
-                device=self.device,
-                dtype=self.float_dtype,
-            )
-            return self.model(empty)
-
-        features = self.encode_current_states(eval_indices)
+    def evaluate_model_on_all(self) -> ModelOutput:
+        features = self.encode_current_states(
+            torch.arange(self.total_nodes, device=self.device)
+        )
         return self.model(features)
 
     def initialize_policy(self, model_output: ModelOutput) -> None:
@@ -246,7 +241,7 @@ class RebelCFREvaluator:
         non_leaf_indices = torch.where(self.valid_mask & ~self.leaf_mask)[0]
         logits = model_output.policy_logits[non_leaf_indices]
         valid_legal_masks = self.env.legal_bins_mask()[non_leaf_indices]
-        masked_logits = compute_masked_logits(logits, valid_legal_masks)
+        masked_logits = compute_masked_logits(logits, valid_legal_masks[:, None, :])
         self.policy_probs[non_leaf_indices] = F.softmax(masked_logits, dim=-1)
 
         # TODO: Warm-start CFR sim per appendix J with best-response.
@@ -280,16 +275,13 @@ class RebelCFREvaluator:
 
     def set_leaf_values(self, model_output: ModelOutput) -> None:
         """Set leaf node values using model output."""
-        if self._current_eval_indices is None:
-            raise RuntimeError("Model must be evaluated before setting leaf values.")
         if model_output.hand_values is None:
             raise ValueError("Model must provide hand_values for ReBeL search.")
 
-        eval_indices = self._current_eval_indices
-        leaf_mask = self.leaf_mask[eval_indices]
+        leaf_mask = self.leaf_mask & self.valid_mask
         if not leaf_mask.any():
             return
-        leaf_indices = eval_indices[leaf_mask]
+        leaf_indices = torch.where(leaf_mask)[0]
         hand_values = model_output.hand_values[leaf_mask].to(self.float_dtype)
         self.values[leaf_indices] = hand_values
 
@@ -354,7 +346,7 @@ class RebelCFREvaluator:
 
     def self_play_iteration(self) -> PublicBeliefState:
         self.construct_subgame()
-        model_output = self.evaluate_model_on_valid()
+        model_output = self.evaluate_model_on_all()
         self.initialize_policy(model_output)
         self.initialize_beliefs(model_output)
         self.set_leaf_values(model_output)
@@ -393,7 +385,7 @@ class RebelCFREvaluator:
                 + self.policy_probs[self.valid_mask]
             ) / (t + 1)
 
-            model_output = self.evaluate_model_on_valid()
+            model_output = self.evaluate_model_on_all()
             self.set_leaf_values(model_output)
 
             new_expected_values = self.compute_expected_values()
