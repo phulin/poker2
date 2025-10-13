@@ -111,9 +111,9 @@ def test_rebel_supervised_loss_finite():
         features=torch.randn(3, 10),
         policy_targets=policy_targets,
         value_targets=torch.randn(3, 2, 4),
-        value_weights=torch.ones(3, 2, 4),
         legal_masks=legal_masks,
         acting_players=torch.zeros(3, dtype=torch.long),
+        value_weights=torch.ones(3, 2, 4),
     )
     loss_dict = loss_fn(logits, hand_values, batch)
     assert torch.isfinite(loss_dict["total_loss"]).all()

@@ -11,21 +11,21 @@ class RebelBatch:
     features: torch.Tensor
     policy_targets: torch.Tensor
     value_targets: torch.Tensor
-    value_weights: Optional[torch.Tensor] = None
     legal_masks: torch.Tensor
     acting_players: torch.Tensor
+    value_weights: Optional[torch.Tensor] = None
     reach_weights: Optional[torch.Tensor] = None
 
-    def to(self, device: torch.device) -> "RebelBatch":
+    def to(self, device: torch.device) -> RebelBatch:
         return RebelBatch(
             features=self.features.to(device),
             policy_targets=self.policy_targets.to(device),
             value_targets=self.value_targets.to(device),
+            legal_masks=self.legal_masks.to(device),
+            acting_players=self.acting_players.to(device),
             value_weights=(
                 None if self.value_weights is None else self.value_weights.to(device)
             ),
-            legal_masks=self.legal_masks.to(device),
-            acting_players=self.acting_players.to(device),
             reach_weights=(
                 None if self.reach_weights is None else self.reach_weights.to(device)
             ),
@@ -175,9 +175,9 @@ class RebelReplayBuffer:
             features=self.features[idxs],
             policy_targets=self.policy_targets[idxs],
             value_targets=self.value_targets[idxs],
-            value_weights=self.value_weights[idxs],
             legal_masks=self.legal_masks[idxs],
             acting_players=self.acting_players[idxs],
+            value_weights=self.value_weights[idxs],
             reach_weights=self.reach_weights[idxs],
         )
 

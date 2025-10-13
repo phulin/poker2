@@ -47,3 +47,9 @@ search:
   depth: 2
   iterations: 100
   branching: 4
+  belief_samples: 16
+  max_belief_enumeration: 0
+  dcfr_alpha: 1.5
+  dcfr_beta: 0.0
+  dcfr_gamma: 2.0
+  include_average_policy: true

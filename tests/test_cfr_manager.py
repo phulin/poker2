@@ -32,6 +32,13 @@ class DummyModel(nn.Module):
         out.value = torch.randn(
             embedding_data.token_ids.shape[0], 1, device=embedding_data.token_ids.device
         )
+        # Add hand_values for compatibility with ReBeL features
+        out.hand_values = torch.randn(
+            embedding_data.token_ids.shape[0],
+            2,
+            1326,
+            device=embedding_data.token_ids.device,
+        )
         return out
 
 
@@ -300,6 +307,13 @@ def test_cfr_model_input_preserves_canonical_sequence():
                 1,
                 device=embedding_data.token_ids.device,
             )
+            # Add hand_values for compatibility with ReBeL features
+            out.hand_values = torch.zeros(
+                embedding_data.token_ids.shape[0],
+                2,
+                1326,
+                device=embedding_data.token_ids.device,
+            )
             return out
 
     capture_model = CaptureModel(num_actions=len(bet_bins) + 3)
@@ -360,6 +374,8 @@ class DummyRebelModel(nn.Module):
         out = Output()
         out.policy_logits = torch.zeros(batch, self.num_actions, device=features.device)
         out.value = torch.zeros(batch, 1, device=features.device)
+        # Add hand_values for compatibility with ReBeL features
+        out.hand_values = torch.zeros(batch, 2, 1326, device=features.device)
         return out
 
 
