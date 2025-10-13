@@ -43,6 +43,7 @@ class RebelCFRTrainer:
     def __init__(self, cfg: Config, device: torch.device) -> None:
         self.cfg = cfg
         self.device = device
+        self.rng = torch.Generator(device=self.device)
         self.float_dtype = torch.float32
         self.search_cfg = cfg.search
         self.bet_bins = cfg.env.bet_bins
@@ -51,6 +52,7 @@ class RebelCFRTrainer:
         self.buffer_device = torch.device("cpu")
         self.buffer_rng = torch.Generator(device=self.buffer_device)
         if hasattr(cfg, "seed") and cfg.seed is not None:
+            self.rng.manual_seed(int(cfg.seed))
             self.buffer_rng.manual_seed(int(cfg.seed))
         self.num_actions = len(self.bet_bins) + 3
         self.num_players = 2
@@ -80,24 +82,15 @@ class RebelCFRTrainer:
         )
 
         # Model
-        value_head_type = (
-            cfg.model.value_head_type
-            if isinstance(cfg.model.value_head_type, ValueHeadType)
-            else ValueHeadType(cfg.model.value_head_type)
-        )
         self.model = RebelFFN(
             input_dim=cfg.model.input_dim,
             num_actions=self.num_actions,
             hidden_dim=cfg.model.hidden_dim,
             num_hidden_layers=cfg.model.num_hidden_layers,
-            value_head_type=value_head_type.value,
-            value_head_num_quantiles=cfg.model.value_head_num_quantiles,
             detach_value_head=cfg.model.detach_value_head,
-            belief_dim=self.belief_dim,
             num_players=self.num_players,
         ).to(self.device)
-        cpu_rng = torch.Generator(device=torch.device("cpu"))
-        self.model.init_weights(cpu_rng)
+        self.model.init_weights(self.rng)
 
         # Optimizer & loss
         self.optimizer = torch.optim.Adam(

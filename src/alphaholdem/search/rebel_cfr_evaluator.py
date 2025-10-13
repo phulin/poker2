@@ -81,13 +81,16 @@ class RebelCFREvaluator:
         device: torch.device,
         float_dtype: torch.dtype,
         belief_samples: int = 1,
+        warm_start_iterations: int = T_WARM,
     ):
-        assert cfr_iterations > T_WARM
+        assert cfr_iterations > warm_start_iterations
+        assert sample_count > 0
 
         self.search_batch_size = search_batch_size
         self.model = model
         self.max_depth = max_depth
         self.bet_bins = bet_bins
+        self.warm_start_iterations = warm_start_iterations
         self.cfr_iterations = cfr_iterations
         self.sample_count = sample_count
         self.device = device
@@ -96,16 +99,14 @@ class RebelCFREvaluator:
 
         self.num_players = 2
         self.num_actions = len(bet_bins) + 3
+        self.all_hands = torch.arange(NUM_HANDS, device=self.device)
 
-        self.depth_offsets = (
-            (
-                self.search_batch_size
-                * torch.pow(self.num_actions, torch.arange(max_depth + 1))
-            )
-            .cumsum(0)
-            .tolist()
-        )
-        self.depth_offsets.insert(0, 0)
+        # Compute depth offsets: slice i holds nodes at depth i
+        self.depth_offsets: list[int] = [0]
+        nodes_at_depth = self.search_batch_size
+        for _ in range(self.max_depth):
+            self.depth_offsets.append(self.depth_offsets[-1] + nodes_at_depth)
+            nodes_at_depth *= self.num_actions
         self.total_nodes = self.depth_offsets[-1]
         self.all_depths = torch.zeros(
             self.total_nodes, dtype=torch.long, device=self.device
@@ -165,6 +166,9 @@ class RebelCFREvaluator:
             device=self.device,
             dtype=self.float_dtype,
         )
+        # Compatibility matrix: compatibility[i, j] = 1 if combos i and j do not overlap
+        blocking = combo_blocking_tensor(device=self.device)
+        self.combo_compat = (~blocking).to(dtype=self.float_dtype)
 
         # Feature encoder for belief computation
         self.feature_encoder = RebelFeatureEncoder(
@@ -177,7 +181,7 @@ class RebelCFREvaluator:
         self,
         src_env: HUNLTensorEnv,
         src_indices: torch.Tensor,
-        initial_beliefs: torch.Tensor,
+        initial_beliefs: torch.Tensor | None = None,
     ) -> None:
         """Initialize search tree structure for given root states.
 
@@ -186,19 +190,30 @@ class RebelCFREvaluator:
             src_indices: Indices of root states in source environment
         """
         assert src_indices.shape[0] == self.search_batch_size
-        assert src_indices.min().item() == 0
-        assert src_indices.max().item() == self.total_nodes - 1
-        assert initial_beliefs.shape[0] == src_indices.shape[0]
+        assert src_indices.min().item() >= 0
+        if initial_beliefs is None:
+            initial_beliefs = torch.full(
+                (self.search_batch_size, self.num_players, NUM_HANDS),
+                1.0 / NUM_HANDS,
+                dtype=self.float_dtype,
+                device=self.device,
+            )
+        else:
+            assert initial_beliefs.shape[0] == src_indices.shape[0]
+            initial_beliefs = initial_beliefs.to(
+                device=self.device, dtype=self.float_dtype
+            )
 
-        self.env.copy_state_from(src_env, src_indices, src_indices, copy_deck=True)
+        dest_indices = torch.arange(self.search_batch_size, device=self.device)
+        self.env.copy_state_from(src_env, src_indices, dest_indices, copy_deck=True)
         self.valid_mask.zero_()
-        self.valid_mask[src_indices] = True
+        self.valid_mask[dest_indices] = True
         self.leaf_mask.zero_()
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
         self.values.zero_()
         self.beliefs.zero_()
-        self.beliefs[src_indices] = initial_beliefs
+        self.beliefs[dest_indices] = initial_beliefs
 
     def construct_subgame(self) -> None:
         N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
@@ -230,20 +245,32 @@ class RebelCFREvaluator:
             self.env.step_bins(action_bins, legal_masks=legal_masks)
             self.leaf_mask[action_bins >= 0] |= self.env.done[action_bins >= 0]
 
-        self.leaf_mask[offset:offset_next] |= self.valid_mask[offset:offset_next]
+        leaf_start = self.depth_offsets[self.max_depth - 1]
+        leaf_end = self.depth_offsets[self.max_depth]
+        self.leaf_mask[leaf_start:leaf_end] |= self.valid_mask[leaf_start:leaf_end]
 
     def evaluate_model_on_valid(self) -> ModelOutput:
-        features = self._encode_current_states()
+        eval_indices = torch.where(self.valid_mask)[0]
+        if eval_indices.numel() == 0:
+            empty = torch.empty(
+                0,
+                self.feature_encoder.feature_dim,
+                device=self.device,
+                dtype=self.float_dtype,
+            )
+            return self.model(empty)
+
+        features = self._encode_current_states(eval_indices)
         return self.model(features)
 
     def initialize_policy(self, model_output: ModelOutput) -> None:
         """Initialize policy for all nodes."""
 
-        valid_indices = torch.where(self.valid_mask & ~self.leaf_mask)[0]
-        valid_legal_masks = self.env.legal_bins_mask()[valid_indices]
-        self.policy_probs[valid_indices] = F.softmax(
-            compute_masked_logits(model_output.policy_logits, valid_legal_masks), dim=-1
-        )
+        non_leaf_indices = torch.where(self.valid_mask & ~self.leaf_mask)[0]
+        logits = model_output.policy_logits[non_leaf_indices]
+        valid_legal_masks = self.env.legal_bins_mask()[non_leaf_indices]
+        masked_logits = compute_masked_logits(logits, valid_legal_masks)
+        self.policy_probs[non_leaf_indices] = F.softmax(masked_logits, dim=-1)
 
         # TODO: Warm-start CFR sim per appendix J with best-response.
 
@@ -264,62 +291,76 @@ class RebelCFREvaluator:
                     & self.valid_mask[offset:offset_next]
                     & ~self.leaf_mask[offset:offset_next]
                 )
+                if not current_legal_mask.any():
+                    continue
+
                 current_legal_indices = torch.where(current_legal_mask)[0] + offset
-                actor = self.env.to_act[current_legal_indices]
+                actor = self.env.to_act[current_legal_indices].to(torch.long)
 
                 next_legal_indices = current_legal_indices + (action + 1) * B**depth * N
                 assert next_legal_indices.max().item() < M
                 assert self.valid_mask[next_legal_indices].all().item()
 
-                probs = self.policy_probs[current_legal_indices]
+                probs = self.policy_probs[current_legal_indices, :, action]
 
-                # Bayesian update assuming both players are playing the same policy.
-                self.beliefs[next_legal_indices, actor] = (
-                    self.beliefs[current_legal_indices, actor] * probs[:, None, :]
-                )
+                # Bayesian update assuming both players follow the same policy.
+                updated_actor = self.beliefs[current_legal_indices, actor] * probs
+                self.beliefs[next_legal_indices, actor] = updated_actor
                 self.beliefs[next_legal_indices, 1 - actor] = self.beliefs[
                     current_legal_indices, 1 - actor
                 ]
 
-        # Normalize all beliefs.
-        valid_beliefs = self.beliefs[self.valid_mask]
-        self.beliefs = valid_beliefs / valid_beliefs.sum(dim=-1, keepdim=True)
+        # Normalize beliefs in-place for valid nodes.
+        valid_indices = torch.where(self.valid_mask)[0]
+        if valid_indices.numel() > 0:
+            beliefs = self.beliefs[valid_indices]
+            denom = beliefs.sum(dim=-1, keepdim=True).clamp_min_(1e-12)
+            self.beliefs[valid_indices] = beliefs / denom
 
     def set_leaf_values(self, model_output: ModelOutput) -> None:
         """Set leaf node values using model output."""
-        leaf_indices = torch.where(self.leaf_mask)[0]
-        self.values[leaf_indices] = model_output.hand_values[leaf_indices]
+        if self._current_eval_indices is None:
+            raise RuntimeError("Model must be evaluated before setting leaf values.")
+        if model_output.hand_values is None:
+            raise ValueError("Model must provide hand_values for ReBeL search.")
+
+        eval_indices = self._current_eval_indices
+        leaf_mask = self.leaf_mask[eval_indices]
+        if not leaf_mask.any():
+            return
+        leaf_indices = eval_indices[leaf_mask]
+        hand_values = model_output.hand_values[leaf_mask].to(self.float_dtype)
+        self.values[leaf_indices] = hand_values
 
     def compute_expected_values(self) -> torch.Tensor:
         """Compute expected value of the current subgame using the given policy."""
         N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
 
         legal_masks = self.env.legal_bins_mask()
-        new_values = torch.zeros_like(self.values)
+        new_values = self.values.clone()
 
-        # Leaf values are already set, so start at max - 2
+        # Leaf values already populated; back up expectations for interior nodes
         for depth in range(self.max_depth - 2, -1, -1):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
 
-            # Compute EV by taking the weighted average of the next-depth values
             for action in range(B):
                 current_legal_mask = (
                     legal_masks[offset:offset_next, action]
                     & self.valid_mask[offset:offset_next]
                     & ~self.leaf_mask[offset:offset_next]
                 )
+                if not current_legal_mask.any():
+                    continue
+
                 current_legal_indices = torch.where(current_legal_mask)[0] + offset
                 next_legal_indices = current_legal_indices + (action + 1) * B**depth * N
                 assert next_legal_indices.max().item() < M
                 assert self.valid_mask[next_legal_indices].all().item()
 
-                # [n, num_actions]
-                probs = self.policy_probs[next_legal_indices]
-                next_values = self.values[next_legal_indices]
-                new_values[current_legal_indices] += (
-                    probs[:, None, None, :] * next_values[:, :, None, None]
-                ).sum(dim=-1)
+                probs = self.policy_probs[current_legal_indices, :, action]
+                child_values = new_values[next_legal_indices]
+                new_values[current_legal_indices] += child_values * probs[:, None, :]
 
         return new_values
 
@@ -328,7 +369,6 @@ class RebelCFREvaluator:
 
         N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
 
-        blocked = combo_blocking_tensor(device=self.device)
         regret_indices = torch.where(self.valid_mask & ~self.leaf_mask)[0]
 
         legal_masks = self.env.legal_bins_mask()
@@ -344,56 +384,72 @@ class RebelCFREvaluator:
                     & self.valid_mask[offset:offset_next]
                     & ~self.leaf_mask[offset:offset_next]
                 )
+                if not current_legal_mask.any():
+                    continue
+
                 current_legal_indices = torch.where(current_legal_mask)[0] + offset
                 actor = self.env.to_act[current_legal_indices]
+                row_ids = torch.arange(
+                    current_legal_indices.numel(), device=self.device, dtype=torch.long
+                )
 
-                weights = self.beliefs[current_legal_indices, 1 - actor] @ ~blocked
+                opp_beliefs = self.beliefs[current_legal_indices][row_ids, 1 - actor]
+                weights = opp_beliefs @ self.combo_compat
 
                 next_legal_indices = current_legal_indices + (action + 1) * B**depth * N
                 assert next_legal_indices.max().item() < M
                 assert self.valid_mask[next_legal_indices].all().item()
 
-                regrets[current_legal_indices] += (
-                    weights
-                    * (
-                        self.values[next_legal_indices]
-                        - self.values[current_legal_indices]
-                    )
-                ).sum(dim=-1)
+                next_vals = self.values[next_legal_indices, actor]
+                current_vals = self.values[current_legal_indices, actor]
+                advantages = next_vals - current_vals
+                regrets[current_legal_indices, :, action] = weights * advantages
 
-        regrets = regrets.clamp(min=0)
-        regret_sum = regrets[regret_indices].sum(dim=-1, keepdim=True)
-        self.policy_probs[regret_indices] = torch.where(
-            regret_sum > 1e-8,
-            regrets[regret_indices] / regret_sum,
-            1.0 / self.num_actions,
+        # Zero out invalid actions explicitly
+        regrets *= legal_masks.unsqueeze(1).to(self.float_dtype)
+
+        positive_regrets = regrets.clamp(min=0)
+        regret_sum = positive_regrets[regret_indices].sum(dim=-1, keepdim=True)
+        legal = legal_masks[regret_indices]
+        legal_float = legal.to(dtype=self.float_dtype)
+        uniform_policy = legal_float / legal_float.sum(dim=-1, keepdim=True).clamp_min(
+            1.0
         )
+        uniform_policy = uniform_policy.unsqueeze(1).expand(-1, NUM_HANDS, -1)
+        updated = torch.where(
+            regret_sum > 1e-8,
+            positive_regrets[regret_indices] / regret_sum.clamp_min(1e-8),
+            uniform_policy,
+        )
+        # Ensure illegal actions remain zero
+        updated *= legal.unsqueeze(1)
+        self.policy_probs[regret_indices] = updated
 
     def self_play_iteration(self) -> PublicBeliefState:
-        N = self.search_batch_size, self.total_nodes
-
         self.construct_subgame()
         model_output = self.evaluate_model_on_valid()
         self.initialize_policy(model_output)
         self.initialize_beliefs(model_output)
         self.set_leaf_values(model_output)
-        self.compute_expected_values()
+        self.values = self.compute_expected_values()
 
         next_pbs = PublicBeliefState.from_proto(
             env=self.env,
             beliefs=torch.zeros(self.sample_count, self.num_players, NUM_HANDS),
         )
-        value_training_data = []
 
         leaf_indices = self._leaf_node_indices()
         sample_envs = leaf_indices[
             torch.randint(0, leaf_indices.numel(), (self.sample_count,))
         ]
-        t_sample = torch.randint(T_WARM, self.cfr_iterations, (self.sample_count,))
-        for t in range(T_WARM, self.cfr_iterations):
+        t_sample = torch.randint(
+            self.warm_start_iterations, self.cfr_iterations, (self.sample_count,)
+        )
+
+        for t in range(self.warm_start_iterations, self.cfr_iterations):
             # If t == t_sample, sample leaf PBS
             sample_now = torch.where(t_sample == t)[0]
-            if sample_now.numel() > 0:
+            if sample_now.numel() > 0 and sample_envs.numel() > 0:
                 src_indices = sample_envs[sample_now]
                 next_pbs.env.copy_state_from(self.env, src_indices, sample_now)
                 next_pbs.beliefs[sample_now] = self.beliefs[src_indices]
@@ -401,9 +457,9 @@ class RebelCFREvaluator:
             self.update_policy()
 
             # Update average policy.
-            policy_probs = F.softmax(self.policy_probs[self.valid_mask], dim=-1)
             self.policy_probs_avg[self.valid_mask] = (
-                t * self.policy_probs_avg[self.valid_mask] + policy_probs
+                t * self.policy_probs_avg[self.valid_mask]
+                + self.policy_probs[self.valid_mask]
             ) / (t + 1)
 
             model_output = self.evaluate_model_on_valid()
@@ -414,38 +470,58 @@ class RebelCFREvaluator:
 
         return next_pbs
 
-    def _encode_current_states(self) -> torch.Tensor:
-        """Encode current environment states for policy network input."""
-        # FIXME: Indexing order...
-        # Get current acting players
-        to_act = self.env.to_act[: self.search_batch_size]
+    def _split_beliefs(
+        self, indices: torch.Tensor, to_act: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return (hero_beliefs, opp_beliefs) aligned with `indices`.
 
-        # Encode features for each player
-        features = []
-        for player in range(self.num_players):
-            player_mask = to_act == player
-            if player_mask.any():
-                player_indices = torch.where(player_mask)[0]
-                agents = torch.full(
-                    (player_indices.numel(),),
-                    player,
-                    device=self.device,
-                    dtype=torch.long,
-                )
+        We interpret self.beliefs[idx, player] as the belief over `player`'s private hands.
+        """
+        if indices.numel() == 0:
+            empty = torch.empty(
+                0, NUM_HANDS, device=self.device, dtype=self.float_dtype
+            )
+            return empty, empty
 
-                # Get belief states for encoding
-                beliefs = self._compute_current_beliefs()
-                hero_beliefs = (
-                    beliefs[player_indices, player] if beliefs.numel() > 0 else None
-                )
-                opp_beliefs = (
-                    beliefs[player_indices, 1 - player] if beliefs.numel() > 0 else None
-                )
+        beliefs = self.beliefs[indices]
+        hero = torch.zeros(
+            indices.numel(), NUM_HANDS, device=self.device, dtype=self.float_dtype
+        )
+        opp = torch.zeros_like(hero)
 
-                encoded = self.feature_encoder.encode(
-                    player_indices, agents, hero_beliefs, opp_beliefs
-                )
-                features.append(encoded)
+        to_act = to_act.to(torch.long)
+        idxs = torch.arange(indices.numel(), device=self.device, dtype=torch.long)
+        mask_p0 = to_act == 0
+        if mask_p0.any():
+            hero[mask_p0] = beliefs[idxs[mask_p0], 0]
+            opp[mask_p0] = beliefs[idxs[mask_p0], 1]
+        mask_p1 = to_act == 1
+        if mask_p1.any():
+            hero[mask_p1] = beliefs[idxs[mask_p1], 1]
+            opp[mask_p1] = beliefs[idxs[mask_p1], 0]
 
-        assert features
-        return torch.cat(features, dim=0)
+        return hero, opp
+
+    def _encode_current_states(self, indices: torch.Tensor) -> torch.Tensor:
+        """Encode environment states for policy network input."""
+        if indices.numel() == 0:
+            return torch.empty(
+                0,
+                self.feature_encoder.feature_dim,
+                device=self.device,
+                dtype=self.float_dtype,
+            )
+
+        to_act = self.env.to_act[indices]
+        hero_beliefs, opp_beliefs = self._split_beliefs(indices, to_act)
+        return self.feature_encoder.encode(
+            indices,
+            to_act.to(torch.long),
+            hero_beliefs=hero_beliefs,
+            opp_beliefs=opp_beliefs,
+        )
+
+    def _leaf_node_indices(self) -> torch.Tensor:
+        """Return flattened indices for valid nodes marked as leaves."""
+        return torch.where(self.valid_mask & self.leaf_mask)[0]
