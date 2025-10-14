@@ -357,7 +357,9 @@ class RebelCFREvaluator:
         sample_count = min(leaf_indices.numel(), self.search_batch_size)
         next_pbs = PublicBeliefState.from_proto(
             env_proto=self.env,
-            beliefs=torch.zeros(sample_count, self.num_players, NUM_HANDS),
+            beliefs=torch.zeros(
+                sample_count, self.num_players, NUM_HANDS, device=self.device
+            ),
             num_envs=sample_count,
         )
 
@@ -367,7 +369,10 @@ class RebelCFREvaluator:
             )[:sample_count]
         ]
         t_sample = torch.randint(
-            self.warm_start_iterations, self.cfr_iterations, (sample_count,)
+            self.warm_start_iterations,
+            self.cfr_iterations,
+            (sample_count,),
+            device=self.device,
         )
 
         for t in range(self.warm_start_iterations, self.cfr_iterations):

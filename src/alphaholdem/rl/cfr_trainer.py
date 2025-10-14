@@ -98,8 +98,12 @@ class RebelCFRTrainer:
             num_hidden_layers=cfg.model.num_hidden_layers,
             detach_value_head=cfg.model.detach_value_head,
             num_players=self.num_players,
-        ).to(self.device)
-        self.model.init_weights(self.rng)
+        )
+        cpu_rng = torch.Generator(device="cpu")
+        if self.cfg.seed is not None:
+            cpu_rng.manual_seed(self.cfg.seed)
+        self.model.init_weights(cpu_rng)
+        self.model.to(self.device)
 
         # Optimizer & loss
         self.optimizer = torch.optim.Adam(
