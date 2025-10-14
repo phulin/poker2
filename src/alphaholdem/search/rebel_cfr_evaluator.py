@@ -354,6 +354,7 @@ class RebelCFREvaluator:
         self.values = self.compute_expected_values()
 
         leaf_indices = torch.where(self.valid_mask & self.leaf_mask & ~self.env.done)[0]
+        assert leaf_indices.numel() > 0
         sample_count = min(leaf_indices.numel(), self.search_batch_size)
         next_pbs = PublicBeliefState.from_proto(
             env_proto=self.env,
