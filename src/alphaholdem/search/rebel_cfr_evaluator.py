@@ -362,9 +362,9 @@ class RebelCFREvaluator:
         )
 
         sample_envs = leaf_indices[
-            torch.randperm(leaf_indices.numel(), generator=self.generator)[
-                :sample_count
-            ]
+            torch.randperm(
+                leaf_indices.numel(), generator=self.generator, device=self.device
+            )[:sample_count]
         ]
         t_sample = torch.randint(
             self.warm_start_iterations, self.cfr_iterations, (sample_count,)
