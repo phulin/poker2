@@ -406,11 +406,12 @@ class RebelCFREvaluator:
             assert self.valid_mask[active_nodes].all()
 
             to_act = self.env.to_act[active_nodes]
+            player_mask = players[active_mask]
             sample_uniformly = (
                 torch.rand(active_count, generator=self.generator, device=self.device)
                 < sample_epsilon
             )
-            sample_uniformly &= to_act == players
+            sample_uniformly &= to_act == player_mask
 
             policy_probs_active = self.policy_probs[
                 active_nodes, selected_hands[active_nodes]

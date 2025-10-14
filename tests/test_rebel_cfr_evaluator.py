@@ -34,6 +34,8 @@ class ConstantModel:
         hand_values: torch.Tensor | None = None,
     ) -> None:
         if logits.dim() == 1:
+            logits = logits.unsqueeze(0).unsqueeze(0).expand(1, NUM_HANDS, -1)
+        elif logits.dim() == 2:
             logits = logits.unsqueeze(0)
         self.logits = logits
         if hand_values is None:
@@ -46,7 +48,7 @@ class ConstantModel:
         dtype = features.dtype
         logits = self.logits.to(device=device, dtype=dtype)
         if logits.shape[0] != batch:
-            logits = logits.expand(batch, -1)
+            logits = logits.expand(batch, -1, -1)
         hand_values = self.hand_values.to(device=device, dtype=dtype)
         if hand_values.shape[0] != batch:
             hand_values = hand_values.expand(batch, -1, -1)
@@ -465,6 +467,29 @@ def test_sample_leaf_copies_selected_nodes(monkeypatch: pytest.MonkeyPatch) -> N
     torch.testing.assert_close(pbs.beliefs[0], evaluator.beliefs[expected_index])
     assert pbs.env.to_act[0] == evaluator.env.to_act[expected_index]
     assert pbs.env.pot[0] == evaluator.env.pot[expected_index]
+
+
+def test_sample_leaf_handles_partial_masks(monkeypatch: pytest.MonkeyPatch) -> None:
+    evaluator, env = make_evaluator(batch_size=3, max_depth=2)
+    roots = torch.arange(evaluator.search_batch_size, device=env.device)
+    evaluator.initialize_search(env, roots)
+
+    evaluator.construct_subgame()
+    model_output = evaluator.evaluate_model_on_all()
+    evaluator.initialize_policy(model_output)
+    evaluator.initialize_beliefs(model_output)
+
+    root_indices = torch.tensor([0, 2], device=env.device)
+    pbs = PublicBeliefState.from_proto(
+        env_proto=evaluator.env,
+        beliefs=torch.zeros(2, evaluator.num_players, NUM_HANDS, device=env.device),
+        num_envs=2,
+    )
+
+    evaluator.sample_leaf(root_indices, pbs, 0, training_mode=True)
+
+    assert pbs.env.N == 2
+    assert pbs.beliefs.shape == (2, evaluator.num_players, NUM_HANDS)
 
 
 def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) -> None:
