@@ -32,6 +32,13 @@ class PublicBeliefState:
         beliefs: torch.Tensor,
         num_envs: Optional[int] = None,
     ) -> PublicBeliefState:
+        """Create a new belief state with an environment cloned from `env_proto`.
+
+        Args:
+            env_proto: Template environment whose configuration should be reused.
+            beliefs: Initial belief tensor shaped `[batch, players, NUM_HANDS]`.
+            num_envs: Optional override for the number of vectorised environments.
+        """
         return PublicBeliefState(
             env=HUNLTensorEnv.from_proto(env_proto, num_envs=num_envs),
             beliefs=beliefs,
@@ -151,11 +158,12 @@ class RebelCFREvaluator:
         src_indices: torch.Tensor,
         initial_beliefs: torch.Tensor | None = None,
     ) -> None:
-        """Initialize search tree structure for given root states.
+        """Copy root states into the search tree and reset per-node buffers.
 
         Args:
-            src_env: Source environment containing root states
-            src_indices: Indices of root states in source environment
+            src_env: Batched environment that holds the source root public states.
+            src_indices: Row indices inside `src_env` to copy into the tree roots.
+            initial_beliefs: Optional belief tensor aligned with `src_indices`.
         """
         assert src_indices.shape[0] == self.search_batch_size
         assert src_indices.min().item() >= 0
@@ -184,6 +192,7 @@ class RebelCFREvaluator:
         self.beliefs[dest_indices] = initial_beliefs
 
     def construct_subgame(self) -> None:
+        """Expand the tree by cloning legal successor states at each depth."""
         N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
 
         for depth in range(self.max_depth - 1):
@@ -208,13 +217,13 @@ class RebelCFREvaluator:
                 self.env.copy_state_from(
                     self.env, current_legal_indices, new_legal_indices
                 )
+                self.valid_mask[new_legal_indices] = True
 
                 action_bins[new_legal_indices] = action
 
             # TODO: To stop on street, capture new_streets here.
             self.env.step_bins(action_bins, legal_masks=legal_masks)
             self.leaf_mask[action_bins >= 0] |= self.env.done[action_bins >= 0]
-            self.valid_mask[action_bins >= 0] = True
 
         leaf_start = self.depth_offsets[self.max_depth - 1]
         leaf_end = self.depth_offsets[self.max_depth]
@@ -222,13 +231,14 @@ class RebelCFREvaluator:
 
     @torch.no_grad()
     def evaluate_model_on_all(self) -> ModelOutput:
+        """Query the policy/value network for every node currently tracked."""
         features = self.encode_current_states(
             torch.arange(self.total_nodes, device=self.device)
         )
         return self.model(features)
 
     def initialize_policy(self, model_output: ModelOutput) -> None:
-        """Initialize policy for all nodes."""
+        """Mask logits and store normalized policy probabilities for each node."""
 
         non_leaf_indices = torch.where(self.valid_mask & ~self.leaf_mask)[0]
         if non_leaf_indices.numel() == 0:
@@ -247,7 +257,7 @@ class RebelCFREvaluator:
         # TODO: Warm-start CFR sim per appendix J with best-response.
 
     def initialize_beliefs(self, model_output: ModelOutput) -> None:
-        """Initialize beliefs for all nodes."""
+        """Push public beliefs down the tree using the freshly initialised policy."""
 
         legal_masks = self.env.legal_bins_mask()
         self.beliefs[self.search_batch_size :].zero_()
@@ -274,7 +284,7 @@ class RebelCFREvaluator:
             self.beliefs[valid_indices] = beliefs / denom
 
     def set_leaf_values(self, model_output: ModelOutput) -> None:
-        """Set leaf node values using model output."""
+        """Populate cached per-hand payoffs for nodes marked as leaves."""
         if model_output.hand_values is None:
             raise ValueError("Model must provide hand_values for ReBeL search.")
 
@@ -286,7 +296,7 @@ class RebelCFREvaluator:
         self.values[leaf_indices] = hand_values
 
     def compute_expected_values(self) -> torch.Tensor:
-        """Compute expected value of the current subgame using the given policy."""
+        """Back up leaf hand values to their ancestors under the current policy."""
 
         legal_masks = self.env.legal_bins_mask()
         new_values = self.values.clone()
@@ -304,7 +314,7 @@ class RebelCFREvaluator:
         return new_values
 
     def update_policy(self) -> None:
-        """Update the policy using CFR."""
+        """Apply a regret-matching update to every valid non-leaf information set."""
 
         regret_indices = torch.where(self.valid_mask & ~self.leaf_mask)[0]
 
@@ -354,6 +364,14 @@ class RebelCFREvaluator:
         pbs_start_idx: int,
         training_mode: bool,
     ) -> None:
+        """Roll out from `root_indices` and copy the reached leaves into `pbs`.
+
+        Args:
+            root_indices: Indices of root nodes to sample trajectories from.
+            pbs: Destination public belief state that will hold sampled leaves.
+            pbs_start_idx: Offset inside `pbs` to start writing sampled rows.
+            training_mode: Whether epsilon-greedy exploration is enabled.
+        """
         N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
         valid_leaf_mask = self.valid_mask & self.leaf_mask & ~self.env.done
         count = root_indices.numel()
@@ -420,6 +438,7 @@ class RebelCFREvaluator:
     def self_play_iteration(
         self, training_mode: bool = True
     ) -> Optional[PublicBeliefState]:
+        """Run one CFR iteration and optionally produce leaf samples for replay."""
         self.construct_subgame()
         model_output = self.evaluate_model_on_all()
         self.initialize_policy(model_output)
@@ -476,6 +495,7 @@ class RebelCFREvaluator:
         return next_pbs
 
     def sample_data(self) -> RebelBatch:
+        """Aggregate model targets from the current root batch for supervised learning."""
         indices = torch.where(self.valid_mask[: self.search_batch_size])[0]
         return RebelBatch(
             features=self.encode_current_states(indices),
@@ -486,6 +506,7 @@ class RebelCFREvaluator:
         )
 
     def _valid_nodes(self) -> Generator[tuple[int, torch.Tensor]]:
+        """Yield `(depth, indices)` pairs for nodes marked as valid."""
         for depth in range(self.max_depth):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
@@ -496,6 +517,7 @@ class RebelCFREvaluator:
     def _valid_actions(
         self, legal_masks: Optional[torch.Tensor] = None, bottom_up: bool = False
     ) -> Generator[tuple[int, int, torch.Tensor, torch.Tensor]]:
+        """Iterate over legal transitions, optionally in bottom-up order."""
         N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
         if legal_masks is None:
             legal_masks = self.env.legal_bins_mask()

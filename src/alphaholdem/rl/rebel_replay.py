@@ -25,6 +25,15 @@ class RebelBatch:
     def __len__(self) -> int:
         return self.features.shape[0]
 
+    def __getitem__(self, idx: torch.Tensor | slice | int) -> RebelBatch:
+        return RebelBatch(
+            features=self.features[idx],
+            policy_targets=self.policy_targets[idx],
+            value_targets=self.value_targets[idx],
+            legal_masks=self.legal_masks[idx],
+            acting_players=self.acting_players[idx],
+        )
+
     def to(self, device: torch.device) -> RebelBatch:
         return RebelBatch(
             features=self.features.to(device),
@@ -87,8 +96,21 @@ class RebelReplayBuffer:
         if batch_size == 0:
             return
 
-        insert_start = self.position
-        insert_end = self.position + batch_size
+        if batch_size >= self.capacity:
+            keep_start = batch_size - self.capacity
+            batch = RebelBatch(
+                features=batch.features[keep_start:],
+                policy_targets=batch.policy_targets[keep_start:],
+                value_targets=batch.value_targets[keep_start:],
+                legal_masks=batch.legal_masks[keep_start:],
+                acting_players=batch.acting_players[keep_start:],
+            )
+            batch_size = self.capacity
+            insert_start = 0
+            insert_end = self.capacity
+        else:
+            insert_start = self.position
+            insert_end = self.position + batch_size
 
         if insert_end <= self.capacity:
             sl = slice(insert_start, insert_end)
@@ -103,30 +125,32 @@ class RebelReplayBuffer:
             self.acting_players[sl] = batch.acting_players.to(self.device)
         else:
             first = self.capacity - insert_start
+            remainder = insert_end % self.capacity
             sl1 = slice(insert_start, self.capacity)
-            sl2 = slice(0, insert_end % self.capacity)
+            sl2 = slice(0, remainder)
             self.features[sl1] = batch.features[:first].to(
-                self.device, dtype=self.dtype
-            )
-            self.features[sl2] = batch.features[first:].to(
                 self.device, dtype=self.dtype
             )
             self.policy_targets[sl1] = batch.policy_targets[:first].to(
                 self.device, dtype=self.dtype
             )
-            self.policy_targets[sl2] = batch.policy_targets[first:].to(
-                self.device, dtype=self.dtype
-            )
             self.value_targets[sl1] = batch.value_targets[:first].to(
                 self.device, dtype=self.dtype
             )
-            self.value_targets[sl2] = batch.value_targets[first:].to(
-                self.device, dtype=self.dtype
-            )
             self.legal_masks[sl1] = batch.legal_masks[:first].to(self.device)
-            self.legal_masks[sl2] = batch.legal_masks[first:].to(self.device)
             self.acting_players[sl1] = batch.acting_players[:first].to(self.device)
-            self.acting_players[sl2] = batch.acting_players[first:].to(self.device)
+            if remainder > 0:
+                self.features[sl2] = batch.features[first:].to(
+                    self.device, dtype=self.dtype
+                )
+                self.policy_targets[sl2] = batch.policy_targets[first:].to(
+                    self.device, dtype=self.dtype
+                )
+                self.value_targets[sl2] = batch.value_targets[first:].to(
+                    self.device, dtype=self.dtype
+                )
+                self.legal_masks[sl2] = batch.legal_masks[first:].to(self.device)
+                self.acting_players[sl2] = batch.acting_players[first:].to(self.device)
 
         self.position = insert_end % self.capacity
         self.size = min(self.size + batch_size, self.capacity)

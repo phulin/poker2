@@ -7,11 +7,8 @@ import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState
-from alphaholdem.search.rebel_data_generator import (
-    NUM_HANDS,
-    RebelDataGenerator,
-    TrainingData,
-)
+from alphaholdem.search.rebel_data_generator import NUM_HANDS, RebelDataGenerator
+from alphaholdem.rl.rebel_replay import RebelBatch
 
 
 class DummyEnv:
@@ -41,8 +38,11 @@ class DummyEnv:
         self.copy_history.append((src.clone(), dest.clone()))
         self.states[dest] = src_env.states[src]
 
-    def reset(self, indices: torch.Tensor) -> None:
-        ids = indices.to(dtype=torch.long)
+    def reset(self, indices: torch.Tensor | None = None) -> None:
+        if indices is None:
+            ids = torch.arange(self.N, dtype=torch.long)
+        else:
+            ids = indices.to(dtype=torch.long)
         if ids.numel() == 0:
             return
         self.reset_history.append(ids.clone())
@@ -50,6 +50,20 @@ class DummyEnv:
 
     def legal_bins_mask(self) -> torch.Tensor:
         return self._legal_mask.clone()
+
+
+class DummyBuffer:
+    """Replay buffer stub that records appended batches."""
+
+    def __init__(self) -> None:
+        self.batches: list[RebelBatch] = []
+
+    def add_batch(self, batch: RebelBatch) -> None:
+        self.batches.append(batch)
+
+    @property
+    def total_rows(self) -> int:
+        return sum(len(batch) for batch in self.batches)
 
 
 class DummyEvaluator:
@@ -103,6 +117,7 @@ class DummyEvaluator:
         self.last_beliefs: torch.Tensor | None = None
         self.future_pbs: list[PublicBeliefState] = []
         self.self_play_calls = 0
+        self.sample_calls = 0
 
     def initialize_search(
         self,
@@ -128,6 +143,19 @@ class DummyEvaluator:
 
     def encode_current_states(self, indices: torch.Tensor) -> torch.Tensor:
         return self.feature_matrix[indices]
+
+    def sample_data(self) -> RebelBatch:
+        self.sample_calls += 1
+        count = self.search_batch_size
+        indices = torch.arange(count, dtype=torch.long)
+        acting_players = torch.arange(count, dtype=torch.long) % self.num_players
+        return RebelBatch(
+            features=self.encode_current_states(indices),
+            policy_targets=self.policy_probs_avg[:count],
+            value_targets=self.values[:count],
+            legal_masks=self.env.legal_bins_mask()[indices],
+            acting_players=acting_players,
+        )
 
 
 def fake_from_proto(proto: SimpleNamespace, num_envs: int | None = None) -> DummyEnv:
@@ -157,10 +185,13 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
         PublicBeliefState(env=future_env, beliefs=future_beliefs)
     )
 
-    generator = RebelDataGenerator(env_proto=env_proto, evaluator=evaluator)
+    buffer = DummyBuffer()
+    generator = RebelDataGenerator(
+        env_proto=env_proto, evaluator=evaluator, buffer=buffer
+    )
     batch = generator.generate_data()
 
-    assert isinstance(batch, TrainingData)
+    assert isinstance(batch, RebelBatch)
     torch.testing.assert_close(
         batch.features, evaluator.feature_matrix[: evaluator.search_batch_size]
     )
@@ -169,10 +200,10 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
         evaluator.env.legal_bins_mask()[: evaluator.search_batch_size],
     )
     torch.testing.assert_close(
-        batch.values, evaluator.values[: evaluator.search_batch_size]
+        batch.value_targets, evaluator.values[: evaluator.search_batch_size]
     )
     torch.testing.assert_close(
-        batch.policy, evaluator.policy_probs_avg[: evaluator.search_batch_size]
+        batch.policy_targets, evaluator.policy_probs_avg[: evaluator.search_batch_size]
     )
     assert evaluator.initialize_args
     torch.testing.assert_close(
@@ -180,7 +211,12 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
         torch.arange(evaluator.search_batch_size),
     )
     assert evaluator.self_play_calls == 1
-    assert len(generator.pbs_queue) == 1  # only the freshly generated PBS remains
+    assert evaluator.sample_calls >= 1
+    assert buffer.total_rows == evaluator.search_batch_size
+    assert generator.next_pbs_idx == 0
+    assert len(generator.pbs_queue) == 1
+    assert generator.pbs_queue[0].env is future_env
+    torch.testing.assert_close(generator.pbs_queue[0].beliefs, future_beliefs)
 
 
 def test_rebel_data_generator_does_not_reset_when_queue_suffices(
@@ -194,7 +230,10 @@ def test_rebel_data_generator_does_not_reset_when_queue_suffices(
         num_players=2,
         num_actions=env_proto.num_actions,
     )
-    generator = RebelDataGenerator(env_proto=env_proto, evaluator=evaluator)
+    buffer = DummyBuffer()
+    generator = RebelDataGenerator(
+        env_proto=env_proto, evaluator=evaluator, buffer=buffer
+    )
     generator.next_pbs_idx = 0
 
     seeded_env = DummyEnv(2, env_proto.num_actions, base_state=10)
@@ -211,12 +250,49 @@ def test_rebel_data_generator_does_not_reset_when_queue_suffices(
 
     batch = generator.generate_data()
 
-    assert isinstance(batch, TrainingData)
+    assert isinstance(batch, RebelBatch)
     env = evaluator.last_initialized_env
     assert env is not None
     assert env.reset_history == []
-    assert env.copy_history
     torch.testing.assert_close(env.states, seeded_env.states)
     assert evaluator.self_play_calls == 1
+    assert evaluator.sample_calls >= 1
+    assert buffer.total_rows == evaluator.search_batch_size
     assert generator.next_pbs_idx == 0
-    assert len(generator.pbs_queue) == 1  # only the newly appended PBS remains
+    assert len(generator.pbs_queue) == 1
+    assert generator.pbs_queue[0].env is next_env
+    torch.testing.assert_close(generator.pbs_queue[0].beliefs, next_beliefs)
+
+
+def test_rebel_data_generator_reuses_appended_pbs(monkeypatch, env_proto):
+    monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
+    evaluator = DummyEvaluator(
+        env_proto=env_proto,
+        search_batch_size=2,
+        total_nodes=4,
+        num_players=2,
+        num_actions=env_proto.num_actions,
+    )
+    buffer = DummyBuffer()
+    generator = RebelDataGenerator(
+        env_proto=env_proto, evaluator=evaluator, buffer=buffer
+    )
+
+    generator.generate_data()
+    assert len(generator.pbs_queue) == 1
+    queued_pbs = generator.pbs_queue[0]
+    queued_env = queued_pbs.env
+    queued_beliefs = queued_pbs.beliefs.clone()
+    buffer_total_before = buffer.total_rows
+
+    evaluator.future_pbs = []
+    evaluator.self_play_calls = 0
+    evaluator.sample_calls = 0
+
+    generator.generate_data()
+
+    assert evaluator.last_initialized_env is queued_env
+    torch.testing.assert_close(evaluator.last_beliefs, queued_beliefs)
+    assert evaluator.self_play_calls >= 1
+    assert buffer.total_rows == buffer_total_before + evaluator.search_batch_size
+    assert generator.next_pbs_idx == 0

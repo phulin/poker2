@@ -9,7 +9,7 @@ from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
 from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
-from alphaholdem.search.rebel_data_generator import NUM_HANDS, TrainingData
+from alphaholdem.search.rebel_data_generator import NUM_HANDS
 
 
 def make_env(num_envs: int = 4) -> HUNLTensorEnv:
@@ -77,29 +77,29 @@ def test_rebel_replay_buffer_roundtrip():
         capacity=16,
         feature_dim=10,
         num_actions=5,
-        belief_dim=8,
         num_players=2,
         device=torch.device("cpu"),
     )
     features = torch.randn(4, 10)
-    policy_targets = torch.softmax(torch.randn(4, 5), dim=-1)
-    value_targets = torch.randn(4, 2, 8)
-    value_weights = torch.ones(4, 2, 8)
+    policy_targets = torch.softmax(torch.randn(4, NUM_HANDS, 5), dim=-1)
+    value_targets = torch.randn(4, 2, NUM_HANDS)
     legal_masks = torch.ones(4, 5, dtype=torch.bool)
-    acting = torch.zeros(4, dtype=torch.long)
-    buffer.add_batch(
-        features,
-        policy_targets,
-        value_targets,
-        legal_masks,
-        acting,
-        value_weights=value_weights,
+    acting = torch.tensor([0, 1, 0, 1], dtype=torch.long)
+    batch = RebelBatch(
+        features=features,
+        policy_targets=policy_targets,
+        value_targets=value_targets,
+        legal_masks=legal_masks,
+        acting_players=acting,
     )
+    buffer.add_batch(batch)
     assert len(buffer) == 4
-    batch = buffer.sample(2)
-    assert batch.features.shape == (2, 10)
-    assert batch.policy_targets.shape == (2, 5)
-    assert batch.value_targets.shape == (2, 2, 8)
+    sample = buffer.sample(2)
+    assert sample.features.shape == (2, 10)
+    assert sample.policy_targets.shape == (2, NUM_HANDS, 5)
+    assert sample.value_targets.shape == (2, 2, NUM_HANDS)
+    assert sample.legal_masks.shape == (2, 5)
+    assert sample.acting_players.shape == (2,)
 
 
 def test_rebel_supervised_loss_finite():
@@ -112,11 +112,13 @@ def test_rebel_supervised_loss_finite():
     )
     legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
     values = torch.randn(batch_size, 2, NUM_HANDS)
-    batch = TrainingData(
+    acting = torch.zeros(batch_size, dtype=torch.long)
+    batch = RebelBatch(
         features=torch.randn(batch_size, RebelFeatureEncoder.feature_dim),
+        policy_targets=policy_targets,
+        value_targets=values,
         legal_masks=legal_masks,
-        values=values,
-        policy=policy_targets,
+        acting_players=acting,
     )
     loss_dict = loss_fn(logits, hand_values, batch)
     assert torch.isfinite(loss_dict["total_loss"]).all()

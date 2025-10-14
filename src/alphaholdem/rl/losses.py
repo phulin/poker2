@@ -14,7 +14,7 @@ from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.search.cfr_manager import CFRManager
-from alphaholdem.search.rebel_data_generator import TrainingData
+from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.utils.ema import EMA
 from alphaholdem.utils.model_utils import compute_masked_logits
 
@@ -736,13 +736,13 @@ class RebelSupervisedLoss(nn.Module):
         self,
         logits: torch.Tensor,
         hand_values: torch.Tensor,
-        batch: TrainingData,
+        batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
         """
         Args:
             logits: [B, num_actions] or [B, num_hands, num_actions] raw policy logits.
             hand_values: [B, num_players, num_combos] per-hand value predictions.
-            batch: TrainingData with policy/value targets.
+            batch: RebelBatch with policy/value targets.
         Returns:
             Dict of scalar tensors for loss components and diagnostics.
         """
@@ -756,13 +756,13 @@ class RebelSupervisedLoss(nn.Module):
 
         if hand_values is None:
             raise ValueError("RebelSupervisedLoss requires hand value predictions.")
-        if hand_values.shape != batch.values.shape:
+        if hand_values.shape != batch.value_targets.shape:
             raise ValueError(
                 f"Hand value shape mismatch: predicted {hand_values.shape}, "
-                f"target {batch.values.shape}"
+                f"target {batch.value_targets.shape}"
             )
 
-        policy_targets = batch.policy
+        policy_targets = batch.policy_targets
         if probs.dim() == 3 and policy_targets.dim() == 2:
             policy_targets = policy_targets.unsqueeze(1)
         if probs.shape != policy_targets.shape:
@@ -772,7 +772,7 @@ class RebelSupervisedLoss(nn.Module):
             )
 
         policy_loss = F.huber_loss(probs, policy_targets, delta=1.0)
-        value_loss = F.mse_loss(hand_values, batch.values)
+        value_loss = F.mse_loss(hand_values, batch.value_targets)
 
         if self.entropy_coef != 0.0:
             entropy = -(probs * log_probs).sum(dim=-1).mean()

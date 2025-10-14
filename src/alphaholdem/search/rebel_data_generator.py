@@ -1,17 +1,8 @@
-from dataclasses import dataclass
 import torch
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
-from alphaholdem.rl.rebel_replay import RebelReplayBuffer
+from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState, RebelCFREvaluator
-
-
-@dataclass
-class TrainingData:
-    features: torch.Tensor
-    legal_masks: torch.Tensor
-    values: torch.Tensor
-    policy: torch.Tensor
 
 
 class RebelDataGenerator:
@@ -26,21 +17,21 @@ class RebelDataGenerator:
         self.evaluator = evaluator
         self.buffer = buffer
         self.device = evaluator.device
-        self.pbs_queue = [
-            PublicBeliefState.from_proto(
-                env_proto=self.env_proto,
-                beliefs=torch.full(
-                    (
-                        self.evaluator.search_batch_size,
-                        self.evaluator.num_players,
-                        NUM_HANDS,
-                    ),
-                    1.0 / NUM_HANDS,
-                    device=self.device,
+        initial_pbs = PublicBeliefState.from_proto(
+            env_proto=self.env_proto,
+            beliefs=torch.full(
+                (
+                    self.evaluator.search_batch_size,
+                    self.evaluator.num_players,
+                    NUM_HANDS,
                 ),
-                num_envs=self.evaluator.search_batch_size,
-            )
-        ]
+                1.0 / NUM_HANDS,
+                device=self.device,
+            ),
+            num_envs=self.evaluator.search_batch_size,
+        )
+        initial_pbs.env.reset()
+        self.pbs_queue = [initial_pbs]
 
     def _new_pbs(self, target_batch_size: int) -> PublicBeliefState:
         pbs = PublicBeliefState.from_proto(
@@ -55,42 +46,55 @@ class RebelDataGenerator:
         pbs.env.reset()
         return pbs
 
-    def generate_data(self) -> TrainingData:
+    def generate_data(self) -> RebelBatch:
         batch_size = self.evaluator.search_batch_size
-        accum_start = 0
-        total_street = 0
+        root_indices = torch.arange(batch_size, device=self.device)
+        collected = 0
 
-        while accum_start < batch_size:
-            next_pbs = self._new_pbs(batch_size)
+        while collected < batch_size:
+            if self.next_pbs_idx >= len(self.pbs_queue):
+                self.pbs_queue.append(self._new_pbs(batch_size))
+
+            current_pbs = self.pbs_queue[self.next_pbs_idx]
+            self.next_pbs_idx += 1
             self.evaluator.initialize_search(
-                next_pbs.env, torch.arange(batch_size), next_pbs.beliefs
+                current_pbs.env,
+                root_indices,
+                current_pbs.beliefs,
             )
-            while next_pbs is not None:
+
+            while collected < batch_size:
                 next_pbs = self.evaluator.self_play_iteration()
                 batch = self.evaluator.sample_data()
-                self.buffer.add_batch(batch)
-                accum_start += len(batch)
-                print("self_play_iteration", accum_start)
-                print(
-                    "street",
-                    self.evaluator.env.street[:batch_size].float().mean().item(),
-                )
-                total_street += self.evaluator.env.street[:batch_size].sum().item()
+                batch_len = len(batch)
+                if batch_len > 0:
+                    self.buffer.add_batch(batch)
+                    collected += batch_len
+                if next_pbs is not None:
+                    self.pbs_queue.append(next_pbs)
+                if next_pbs is None or collected >= batch_size:
+                    break
 
-        print(
-            f"=> collected {accum_start}/{batch_size} samples, average street {total_street / accum_start}"
-        )
+        if self.next_pbs_idx > 0:
+            self.pbs_queue = self.pbs_queue[self.next_pbs_idx :]
+            self.next_pbs_idx = 0
 
         # Snapshot tensors for supervised targets; detach to break autograd graph.
-        root_indices = torch.arange(batch_size, device=self.device)
-        features = self.evaluator.encode_current_states(root_indices)
-        legal_masks = self.evaluator.env.legal_bins_mask()[:batch_size]
+        features = self.evaluator.encode_current_states(root_indices).detach()
+        legal_masks = self.evaluator.env.legal_bins_mask()[:batch_size].detach()
         values = self.evaluator.values[:batch_size].detach()
         policy = self.evaluator.policy_probs_avg[:batch_size].detach()
+        if hasattr(self.evaluator.env, "to_act"):
+            acting_players = self.evaluator.env.to_act[root_indices].detach()
+        else:
+            acting_players = torch.zeros(
+                batch_size, dtype=torch.long, device=self.device
+            )
 
-        return TrainingData(
+        return RebelBatch(
             features=features,
+            policy_targets=policy,
+            value_targets=values,
             legal_masks=legal_masks,
-            values=values,
-            policy=policy,
+            acting_players=acting_players,
         )

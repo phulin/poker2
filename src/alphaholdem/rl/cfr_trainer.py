@@ -51,7 +51,7 @@ class RebelCFRTrainer:
         self.num_bet_bins = len(self.bet_bins) + 3
         self.batch_size = cfg.train.batch_size
         self.replay_capacity = self.batch_size * max(1, cfg.train.replay_buffer_batches)
-        self.buffer_device = torch.device("cpu")
+        self.buffer_device = self.device
         self.buffer_rng = torch.Generator(device=self.buffer_device)
         if hasattr(cfg, "seed") and cfg.seed is not None:
             self.rng.manual_seed(int(cfg.seed))
