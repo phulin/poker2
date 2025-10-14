@@ -149,7 +149,7 @@ class HUNLTensorEnv:
         cls, proto: HUNLTensorEnv, num_envs: Optional[int] = None
     ) -> HUNLTensorEnv:
         return HUNLTensorEnv(
-            num_envs=num_envs or proto.num_envs,
+            num_envs=num_envs or proto.N,
             starting_stack=proto.starting_stack,
             sb=proto.sb,
             bb=proto.bb,
