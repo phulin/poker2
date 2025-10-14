@@ -46,6 +46,18 @@ class RebelDataGenerator:
         pbs.env.reset()
         return pbs
 
+    def _ensure_batch_sized(self, pbs: PublicBeliefState) -> PublicBeliefState:
+        if pbs.env.N == self.evaluator.search_batch_size:
+            return pbs
+
+        padded = self._new_pbs(self.evaluator.search_batch_size)
+        count = pbs.env.N
+        if count > 0:
+            src_indices = torch.arange(count, device=self.device)
+            padded.env.copy_state_from(pbs.env, src_indices, src_indices)
+            padded.beliefs[src_indices] = pbs.beliefs
+        return padded
+
     def generate_data(self) -> RebelBatch:
         batch_size = self.evaluator.search_batch_size
         root_indices = torch.arange(batch_size, device=self.device)
@@ -55,7 +67,8 @@ class RebelDataGenerator:
             if self.next_pbs_idx >= len(self.pbs_queue):
                 self.pbs_queue.append(self._new_pbs(batch_size))
 
-            current_pbs = self.pbs_queue[self.next_pbs_idx]
+            current_pbs = self._ensure_batch_sized(self.pbs_queue[self.next_pbs_idx])
+            self.pbs_queue[self.next_pbs_idx] = current_pbs
             self.next_pbs_idx += 1
             self.evaluator.initialize_search(
                 current_pbs.env,

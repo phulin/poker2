@@ -185,6 +185,7 @@ class RebelCFREvaluator:
         self.valid_mask.zero_()
         self.valid_mask[dest_indices] = True
         self.leaf_mask.zero_()
+        self.leaf_mask[dest_indices] = self.env.done[dest_indices]
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
         self.values.zero_()
@@ -396,10 +397,9 @@ class RebelCFREvaluator:
         # start with root nodes and descend to leaves
         sampled_nodes = root_indices.clone()
 
-        # mask into sampled_nodes array
         depth = 0
-        active_mask = torch.ones(count, dtype=torch.bool, device=self.device)
-        while not self.leaf_mask[sampled_nodes].all():
+        active_mask = ~self.leaf_mask[sampled_nodes]
+        while active_mask.any():
             assert depth < self.max_depth
             active_nodes = sampled_nodes[active_mask]
             active_count = active_nodes.numel()
@@ -427,7 +427,7 @@ class RebelCFREvaluator:
             ).squeeze(1)
 
             sampled_nodes[active_mask] = active_nodes + (actions + 1) * B**depth * N
-            active_mask &= ~self.leaf_mask[sampled_nodes]
+            active_mask = ~self.leaf_mask[sampled_nodes]
             depth += 1
 
         dest_indices = torch.arange(
@@ -543,7 +543,7 @@ class RebelCFREvaluator:
                 current_legal_indices = torch.where(current_legal_mask)[0] + offset
                 next_legal_indices = current_legal_indices + (action + 1) * B**depth * N
                 assert next_legal_indices.max().item() < M
-                assert self.valid_mask[next_legal_indices].all().item()
+                assert self.valid_mask[next_legal_indices].all()
 
                 yield depth, action, current_legal_indices, next_legal_indices
 

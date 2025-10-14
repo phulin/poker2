@@ -112,6 +112,15 @@ def test_initialize_search_sets_uniform_beliefs() -> None:
     torch.testing.assert_close(root_beliefs[0, 1].cpu(), uniform)
 
 
+def test_initialize_search_marks_done_roots_as_leaves() -> None:
+    evaluator, env = make_evaluator(batch_size=2, max_depth=1)
+    env.done[0] = True
+    roots = torch.arange(evaluator.search_batch_size, device=env.device)
+    evaluator.initialize_search(env, roots)
+    assert evaluator.leaf_mask[0]
+    assert not evaluator.leaf_mask[1]
+
+
 def test_initialize_policy_respects_legal_mask(monkeypatch: pytest.MonkeyPatch) -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.search_batch_size, device=env.device)

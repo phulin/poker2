@@ -296,3 +296,27 @@ def test_rebel_data_generator_reuses_appended_pbs(monkeypatch, env_proto):
     assert evaluator.self_play_calls >= 1
     assert buffer.total_rows == buffer_total_before + evaluator.search_batch_size
     assert generator.next_pbs_idx == 0
+
+
+def test_rebel_data_generator_pads_smaller_pbs(monkeypatch, env_proto):
+    monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
+    evaluator = DummyEvaluator(
+        env_proto=env_proto,
+        search_batch_size=2,
+        total_nodes=3,
+        num_players=2,
+        num_actions=env_proto.num_actions,
+    )
+    buffer = DummyBuffer()
+    generator = RebelDataGenerator(
+        env_proto=env_proto, evaluator=evaluator, buffer=buffer
+    )
+
+    small_env = DummyEnv(1, env_proto.num_actions, base_state=30)
+    small_beliefs = torch.full((1, evaluator.num_players, NUM_HANDS), 0.6)
+    generator.pbs_queue = [PublicBeliefState(env=small_env, beliefs=small_beliefs)]
+
+    batch = generator.generate_data()
+    assert isinstance(batch, RebelBatch)
+    assert batch.features.shape[0] == evaluator.search_batch_size
+    assert generator.pbs_queue[0].env.N == evaluator.search_batch_size
