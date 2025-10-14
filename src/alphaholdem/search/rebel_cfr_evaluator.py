@@ -240,8 +240,14 @@ class RebelCFREvaluator:
         """Initialize policy for all nodes."""
 
         non_leaf_indices = torch.where(self.valid_mask & ~self.leaf_mask)[0]
+        if non_leaf_indices.numel() == 0:
+            return
+
         logits = model_output.policy_logits[non_leaf_indices]
         valid_legal_masks = self.env.legal_bins_mask()[non_leaf_indices]
+        has_legal = valid_legal_masks.any(dim=-1)
+        assert has_legal.all(), "Every valid node must have at least one legal action."
+
         masked_logits = compute_masked_logits(logits, valid_legal_masks[:, None, :])
         self.policy_probs[non_leaf_indices] = F.softmax(masked_logits, dim=-1)
 
@@ -293,7 +299,7 @@ class RebelCFREvaluator:
         new_values = self.values.clone()
         # First iteration: leaf values already populated; back propagate expectations
         for _, action, current_indices, next_indices in self._valid_actions(
-            legal_masks
+            legal_masks, bottom_up=True
         ):
             probs = self.policy_probs[current_indices, :, action]
             child_values = new_values[next_indices]
@@ -411,13 +417,17 @@ class RebelCFREvaluator:
             yield depth, offset + torch.where(mask)[0]
 
     def _valid_actions(
-        self, legal_masks: Optional[torch.Tensor] = None
+        self, legal_masks: Optional[torch.Tensor] = None, bottom_up: bool = False
     ) -> Generator[tuple[int, int, torch.Tensor, torch.Tensor]]:
         N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
         if legal_masks is None:
             legal_masks = self.env.legal_bins_mask()
 
-        for depth in range(self.max_depth - 1):
+        for depth in (
+            range(self.max_depth - 1)
+            if not bottom_up
+            else range(self.max_depth - 2, -1, -1)
+        ):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
 
