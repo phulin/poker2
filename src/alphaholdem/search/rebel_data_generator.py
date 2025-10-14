@@ -89,7 +89,8 @@ class RebelDataGenerator:
         self.evaluator.initialize_search(pbs.env, torch.arange(pbs.env.N), pbs.beliefs)
 
         next_pbs = self.evaluator.self_play_iteration()
-        self.pbs_queue.append(next_pbs)
+        if next_pbs is not None:
+            self.pbs_queue.append(next_pbs)
 
         # Snapshot tensors for supervised targets; detach to break autograd graph.
         root_indices = torch.arange(batch_size, device=self.device)

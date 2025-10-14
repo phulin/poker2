@@ -345,7 +345,7 @@ class RebelCFREvaluator:
         updated *= legal.unsqueeze(1)
         self.policy_probs[regret_indices] = updated
 
-    def self_play_iteration(self) -> PublicBeliefState:
+    def self_play_iteration(self) -> Optional[PublicBeliefState]:
         self.construct_subgame()
         model_output = self.evaluate_model_on_all()
         self.initialize_policy(model_output)
@@ -354,35 +354,37 @@ class RebelCFREvaluator:
         self.values = self.compute_expected_values()
 
         leaf_indices = torch.where(self.valid_mask & self.leaf_mask & ~self.env.done)[0]
-        assert leaf_indices.numel() > 0
         sample_count = min(leaf_indices.numel(), self.search_batch_size)
-        next_pbs = PublicBeliefState.from_proto(
-            env_proto=self.env,
-            beliefs=torch.zeros(
-                sample_count, self.num_players, NUM_HANDS, device=self.device
-            ),
-            num_envs=sample_count,
-        )
+        next_pbs = None
+        if sample_count > 0:
+            next_pbs = PublicBeliefState.from_proto(
+                env_proto=self.env,
+                beliefs=torch.zeros(
+                    sample_count, self.num_players, NUM_HANDS, device=self.device
+                ),
+                num_envs=sample_count,
+            )
 
-        sample_envs = leaf_indices[
-            torch.randperm(
-                leaf_indices.numel(), generator=self.generator, device=self.device
-            )[:sample_count]
-        ]
-        t_sample = torch.randint(
-            self.warm_start_iterations,
-            self.cfr_iterations,
-            (sample_count,),
-            device=self.device,
-        )
+            sample_envs = leaf_indices[
+                torch.randperm(
+                    leaf_indices.numel(), generator=self.generator, device=self.device
+                )[:sample_count]
+            ]
+            t_sample = torch.randint(
+                self.warm_start_iterations,
+                self.cfr_iterations,
+                (sample_count,),
+                device=self.device,
+            )
 
         for t in range(self.warm_start_iterations, self.cfr_iterations):
-            # If t == t_sample, sample leaf PBS
-            sample_now = torch.where(t_sample == t)[0]
-            if sample_now.numel() > 0 and sample_envs.numel() > 0:
-                src_indices = sample_envs[sample_now]
-                next_pbs.env.copy_state_from(self.env, src_indices, sample_now)
-                next_pbs.beliefs[sample_now] = self.beliefs[src_indices]
+            if sample_count > 0:
+                # If t == t_sample, sample leaf PBS
+                sample_now = torch.where(t_sample == t)[0]
+                if sample_now.numel() > 0 and sample_envs.numel() > 0:
+                    src_indices = sample_envs[sample_now]
+                    next_pbs.env.copy_state_from(self.env, src_indices, sample_now)
+                    next_pbs.beliefs[sample_now] = self.beliefs[src_indices]
 
             self.update_policy()
 
