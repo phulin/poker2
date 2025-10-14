@@ -66,7 +66,7 @@ def mask_conflicting_combos(
 def combo_blocking_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 1326] tensor of blocked hands for each combo."""
     combos = hand_combos_tensor(device=device)  # [1326, 2]
-    combo_onehot = torch.zeros(1326, 52, dtype=torch.uint8, device=device)
+    combo_onehot = torch.zeros(1326, 52, dtype=torch.int32, device=device)
     idx = torch.arange(1326, device=device)
     combo_onehot[idx, combos[:, 0]] = 1
     combo_onehot[idx, combos[:, 1]] = 1
