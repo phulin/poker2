@@ -205,7 +205,7 @@ class RebelCFREvaluator:
                 current_legal_mask = (
                     legal_masks[offset:offset_next, action]
                     & self.valid_mask[offset:offset_next]
-                    & ~self.leaf_mask[offset:offset_next]
+                    & ~self.env.done[offset:offset_next]
                 )
                 current_legal_indices = torch.where(current_legal_mask)[0] + offset
                 if current_legal_indices.numel() == 0:
