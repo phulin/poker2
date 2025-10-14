@@ -215,7 +215,7 @@ class RebelCFREvaluator:
                 assert new_legal_indices.max().item() < M
 
                 self.env.copy_state_from(
-                    self.env, new_legal_indices, current_legal_indices
+                    self.env, current_legal_indices, new_legal_indices
                 )
                 self.valid_mask[new_legal_indices] = True
 
@@ -249,7 +249,9 @@ class RebelCFREvaluator:
         assert has_legal.all(), "Every valid node must have at least one legal action."
 
         masked_logits = compute_masked_logits(logits, valid_legal_masks[:, None, :])
-        self.policy_probs[non_leaf_indices] = F.softmax(masked_logits, dim=-1)
+        policy_probs = F.softmax(masked_logits, dim=-1)
+        self.policy_probs[non_leaf_indices] = policy_probs
+        self.policy_probs_avg[non_leaf_indices] = policy_probs
 
         # TODO: Warm-start CFR sim per appendix J with best-response.
 
@@ -297,6 +299,9 @@ class RebelCFREvaluator:
 
         legal_masks = self.env.legal_bins_mask()
         new_values = self.values.clone()
+        non_leaf_mask = self.valid_mask & ~self.leaf_mask
+        if non_leaf_mask.any():
+            new_values[non_leaf_mask] = 0.0
         # First iteration: leaf values already populated; back propagate expectations
         for _, action, current_indices, next_indices in self._valid_actions(
             legal_masks, bottom_up=True

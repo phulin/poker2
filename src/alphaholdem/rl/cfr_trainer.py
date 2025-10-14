@@ -126,6 +126,7 @@ class RebelCFRTrainer:
             device=self.device,
             float_dtype=self.float_dtype,
             generator=self.rng,
+            warm_start_iterations=0,
         )
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,
