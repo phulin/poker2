@@ -91,10 +91,16 @@ class RebelDataGenerator:
         next_pbs = self.evaluator.self_play_iteration()
         self.pbs_queue.append(next_pbs)
 
-        # TODO: For now we keep value/policy data the same; could use more policy data.
+        # Snapshot tensors for supervised targets; detach to break autograd graph.
+        root_indices = torch.arange(batch_size, device=self.device)
+        features = self.evaluator.encode_current_states(root_indices)
+        legal_masks = self.evaluator.env.legal_bins_mask()[:batch_size]
+        values = self.evaluator.values[:batch_size].detach()
+        policy = self.evaluator.policy_probs_avg[:batch_size].detach()
+
         return TrainingData(
-            features=self.evaluator.encode_current_states(torch.arange(batch_size)),
-            legal_masks=self.evaluator.env.legal_bins_mask()[:batch_size],
-            values=self.evaluator.values[:batch_size],
-            policy=self.evaluator.policy_probs_avg[:batch_size],
+            features=features,
+            legal_masks=legal_masks,
+            values=values,
+            policy=policy,
         )

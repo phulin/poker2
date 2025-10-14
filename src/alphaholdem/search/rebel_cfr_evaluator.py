@@ -229,6 +229,7 @@ class RebelCFREvaluator:
         leaf_end = self.depth_offsets[self.max_depth]
         self.leaf_mask[leaf_start:leaf_end] |= self.valid_mask[leaf_start:leaf_end]
 
+    @torch.no_grad()
     def evaluate_model_on_all(self) -> ModelOutput:
         features = self.encode_current_states(
             torch.arange(self.total_nodes, device=self.device)
