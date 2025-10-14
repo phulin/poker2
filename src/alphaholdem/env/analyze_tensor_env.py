@@ -9,8 +9,11 @@ from typing import Dict, List, Tuple, Union
 import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.env.card_utils import combo_lookup_tensor
+from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
 from alphaholdem.models.cnn.state_encoder import CNNStateEncoder
+from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 
@@ -21,6 +24,19 @@ SUITS = ["s", "h", "d", "c"]
 class DummyStateEncoder:
     def encode_tensor_states(self, player: int, idxs: torch.Tensor) -> torch.Tensor:
         return idxs
+
+
+class RebelStateEncoderWrapper:
+    """Adapter so PreflopAnalyzer can use RebelFeatureEncoder like other encoders."""
+
+    def __init__(self, env: HUNLTensorEnv, device: torch.device):
+        self.encoder = RebelFeatureEncoder(env=env, device=device)
+        self.env = env
+        self.device = device
+
+    def encode_tensor_states(self, player: int, idxs: torch.Tensor) -> torch.Tensor:
+        agents = torch.full_like(idxs, fill_value=player, dtype=torch.long)
+        return self.encoder.encode(idxs, agents)
 
 
 def create_state_encoder_for_model(
@@ -52,6 +68,8 @@ def create_state_encoder_for_model(
     elif isinstance(model, SiameseConvNetV1):
         # For CNN models, create CNNStateEncoder with tensor_env and device
         return CNNStateEncoder(env, device)
+    elif isinstance(model, RebelFFN):
+        return RebelStateEncoderWrapper(env, device)
     else:
         # for testing.
         return DummyStateEncoder()
@@ -98,7 +116,7 @@ class PreflopAnalyzer:
 
     def __init__(
         self,
-        model: Union[PokerTransformerV1, SiameseConvNetV1],
+        model: Union[PokerTransformerV1, SiameseConvNetV1, RebelFFN],
         button: int = 0,
         starting_stack: int = 1000,
         sb: int = 5,
@@ -135,6 +153,7 @@ class PreflopAnalyzer:
         self.model = model
         self.device = device
         self.popart_normalizer = popart_normalizer
+        self.combo_lookup = combo_lookup_tensor(device=self.device)
 
         # Create and cache the environment
         self.env = HUNLTensorEnv(
@@ -246,24 +265,41 @@ class PreflopAnalyzer:
 
         # Get model prediction using tensor environment
         with torch.no_grad():
-            embedding_data = self.state_encoder.encode_tensor_states(
-                seat, torch.arange(self.env.N, device=self.device)  # All environments
-            )
+            env_indices = torch.arange(self.env.N, device=self.device)
+            embedding_data = self.state_encoder.encode_tensor_states(seat, env_indices)
             outputs = self.model(embedding_data)
 
             # Get legal actions from tensor environment
             legal_masks = self.env.legal_bins_mask()  # [N, num_bet_bins]
 
-            # Apply legal mask
-            masked_logits = torch.where(legal_masks == 0, -1e9, outputs.policy_logits)
+            if isinstance(self.model, RebelFFN):
+                hero_cards = self.env.hole_indices[env_indices, seat]
+                card_a = hero_cards[:, 0]
+                card_b = hero_cards[:, 1]
+                combo_idx = self.combo_lookup[card_a, card_b]
+
+                batch_idx = torch.arange(self.env.N, device=self.device)
+                logits = outputs.policy_logits[batch_idx, combo_idx]
+                if outputs.hand_values is None:
+                    raise ValueError(
+                        "RebelFFN must provide hand_values for per-combo analysis."
+                    )
+                values = outputs.hand_values[batch_idx, seat, combo_idx]
+            else:
+                logits = outputs.policy_logits
+                values = outputs.value
+
+            # Apply legal mask with broadcast handling
+            masked_logits = torch.where(legal_masks == 0, -1e9, logits)
 
             # Get probabilities
             probs = torch.softmax(masked_logits, dim=-1)  # [N, num_bet_bins]
 
             # Denormalize values if PopArt normalizer is available
-            values = outputs.value
             if self.popart_normalizer is not None:
                 values = self.popart_normalizer.denormalize_value(values)
+            if values.dim() > 1:
+                values = values.squeeze(-1)
 
         return probs, values, legal_masks
 

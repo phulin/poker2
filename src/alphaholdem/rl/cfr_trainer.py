@@ -48,6 +48,7 @@ class RebelCFRTrainer:
         self.float_dtype = torch.float32
         self.search_cfg = cfg.search
         self.bet_bins = cfg.env.bet_bins
+        self.num_bet_bins = len(self.bet_bins) + 3
         self.batch_size = cfg.train.batch_size
         self.replay_capacity = self.batch_size * max(1, cfg.train.replay_buffer_batches)
         self.buffer_device = torch.device("cpu")
@@ -86,8 +87,12 @@ class RebelCFRTrainer:
             flop_showdown=cfg.env.flop_showdown,
         )
         self.env.reset()
-        self.reach_probs = torch.ones(
-            self.batch_size, dtype=self.float_dtype, device=self.device
+        self.buffer = RebelReplayBuffer(
+            capacity=self.replay_capacity,
+            feature_dim=cfg.model.input_dim,
+            num_actions=self.num_actions,
+            num_players=self.num_players,
+            device=self.device,
         )
 
         # Model
@@ -117,7 +122,7 @@ class RebelCFRTrainer:
         self.grad_clip = cfg.train.grad_clip
 
         self.cfr_manager = RebelCFREvaluator(
-            search_batch_size=self.batch_size,
+            search_batch_size=self.cfg.num_envs,
             env_proto=self.env,
             model=self.model,
             bet_bins=self.bet_bins,
@@ -131,6 +136,7 @@ class RebelCFRTrainer:
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,
             evaluator=self.cfr_manager,
+            buffer=self.buffer,
         )
 
         # Feature encoder for belief computation
@@ -147,7 +153,8 @@ class RebelCFRTrainer:
         return float(entropy.item())
 
     def _update_model(self) -> Optional[Dict[str, float]]:
-        batch = self.data_generator.generate_data()
+        self.data_generator.generate_data()
+        batch = self.buffer.sample(self.batch_size, generator=self.buffer_rng)
 
         self.model.train()
         self.optimizer.zero_grad()

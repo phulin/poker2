@@ -3,30 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Generator, Optional
 
+from pandas.compat.numpy.function import validate_all
 import torch
 import torch.nn.functional as F
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.card_utils import combo_blocking_tensor
 from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
+from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS, RebelFFN
 from alphaholdem.models.model_output import ModelOutput
+from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.utils.model_utils import compute_masked_logits
 
 T_WARM = 15
-NUM_HANDS = 1326
-
-
-@dataclass
-class CFRResult:
-    """Result from CFR search containing policies, values, and belief states."""
-
-    root_policy: torch.Tensor  # [batch_size, num_actions]
-    root_policy_avg: torch.Tensor  # [batch_size, num_actions]
-    root_policy_sampled: torch.Tensor  # [batch_size, num_actions] for safe search
-    root_values: torch.Tensor  # [batch_size]
-    belief_states: Dict[int, torch.Tensor]  # depth -> belief states
-    training_targets: Dict[str, torch.Tensor]  # for value network training
 
 
 @dataclass
@@ -67,6 +56,7 @@ class RebelCFREvaluator:
         float_dtype: torch.dtype,
         generator: Optional[torch.Generator] = None,
         warm_start_iterations: int = T_WARM,
+        sample_epsilon: float = 0.25,
     ):
         assert cfr_iterations > warm_start_iterations
 
@@ -74,8 +64,9 @@ class RebelCFREvaluator:
         self.model = model
         self.max_depth = max_depth
         self.bet_bins = bet_bins
-        self.warm_start_iterations = warm_start_iterations
         self.cfr_iterations = cfr_iterations
+        self.warm_start_iterations = warm_start_iterations
+        self.sample_epsilon = sample_epsilon
         self.device = device
         self.float_dtype = float_dtype
         self.generator = generator
@@ -217,13 +208,13 @@ class RebelCFREvaluator:
                 self.env.copy_state_from(
                     self.env, current_legal_indices, new_legal_indices
                 )
-                self.valid_mask[new_legal_indices] = True
 
                 action_bins[new_legal_indices] = action
 
             # TODO: To stop on street, capture new_streets here.
             self.env.step_bins(action_bins, legal_masks=legal_masks)
             self.leaf_mask[action_bins >= 0] |= self.env.done[action_bins >= 0]
+            self.valid_mask[action_bins >= 0] = True
 
         leaf_start = self.depth_offsets[self.max_depth - 1]
         leaf_end = self.depth_offsets[self.max_depth]
@@ -356,7 +347,79 @@ class RebelCFREvaluator:
         updated *= legal.unsqueeze(1)
         self.policy_probs[regret_indices] = updated
 
-    def self_play_iteration(self) -> Optional[PublicBeliefState]:
+    def sample_leaf(
+        self,
+        root_indices: torch.Tensor,
+        pbs: PublicBeliefState,
+        pbs_start_idx: int,
+        training_mode: bool,
+    ) -> None:
+        N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
+        valid_leaf_mask = self.valid_mask & self.leaf_mask & ~self.env.done
+        count = root_indices.numel()
+        assert count > 0
+        assert count <= valid_leaf_mask.sum().item()
+
+        players = torch.randint(
+            0, 2, (count,), generator=self.generator, device=self.device
+        )
+        sample_epsilon = self.sample_epsilon if training_mode else 0.0
+        legal_masks = self.env.legal_bins_mask()
+        legal_counts = legal_masks.float().sum(dim=-1, keepdim=True)
+        uniform = torch.where(legal_masks, 1 / legal_counts, 0)
+
+        # select a hand for every valid node
+        selected_hands = torch.zeros(M, dtype=torch.long, device=self.device)
+        valid_indices = torch.where(self.valid_mask)[0]
+        selected_hands[valid_indices] = torch.multinomial(
+            self.beliefs[valid_indices, self.env.to_act[valid_indices]], 1
+        ).squeeze(1)
+
+        # start with root nodes and descend to leaves
+        sampled_nodes = root_indices.clone()
+
+        # mask into sampled_nodes array
+        depth = 0
+        active_mask = torch.ones(count, dtype=torch.bool, device=self.device)
+        while not self.leaf_mask[sampled_nodes].all():
+            assert depth < self.max_depth
+            active_nodes = sampled_nodes[active_mask]
+            active_count = active_nodes.numel()
+            assert self.valid_mask[active_nodes].all()
+
+            to_act = self.env.to_act[active_nodes]
+            sample_uniformly = (
+                torch.rand(active_count, generator=self.generator, device=self.device)
+                < sample_epsilon
+            )
+            sample_uniformly &= to_act == players
+
+            policy_probs_active = self.policy_probs[
+                active_nodes, selected_hands[active_nodes]
+            ]
+            actions = torch.multinomial(
+                torch.where(
+                    sample_uniformly.view(-1, 1),
+                    uniform[active_nodes],
+                    policy_probs_active,
+                ),
+                num_samples=1,
+                generator=self.generator,
+            ).squeeze(1)
+
+            sampled_nodes[active_mask] = active_nodes + (actions + 1) * B**depth * N
+            active_mask &= ~self.leaf_mask[sampled_nodes]
+            depth += 1
+
+        dest_indices = torch.arange(
+            pbs_start_idx, pbs_start_idx + count, device=self.device
+        )
+        pbs.env.copy_state_from(self.env, sampled_nodes, dest_indices)
+        pbs.beliefs[pbs_start_idx : pbs_start_idx + count] = self.beliefs[sampled_nodes]
+
+    def self_play_iteration(
+        self, training_mode: bool = True
+    ) -> Optional[PublicBeliefState]:
         self.construct_subgame()
         model_output = self.evaluate_model_on_all()
         self.initialize_policy(model_output)
@@ -367,6 +430,7 @@ class RebelCFREvaluator:
         leaf_indices = torch.where(self.valid_mask & self.leaf_mask & ~self.env.done)[0]
         sample_count = min(leaf_indices.numel(), self.search_batch_size)
         next_pbs = None
+        next_pbs_idx = 0
         if sample_count > 0:
             next_pbs = PublicBeliefState.from_proto(
                 env_proto=self.env,
@@ -375,12 +439,6 @@ class RebelCFREvaluator:
                 ),
                 num_envs=sample_count,
             )
-
-            sample_envs = leaf_indices[
-                torch.randperm(
-                    leaf_indices.numel(), generator=self.generator, device=self.device
-                )[:sample_count]
-            ]
             t_sample = torch.randint(
                 self.warm_start_iterations,
                 self.cfr_iterations,
@@ -392,10 +450,14 @@ class RebelCFREvaluator:
             if sample_count > 0:
                 # If t == t_sample, sample leaf PBS
                 sample_now = torch.where(t_sample == t)[0]
-                if sample_now.numel() > 0 and sample_envs.numel() > 0:
-                    src_indices = sample_envs[sample_now]
-                    next_pbs.env.copy_state_from(self.env, src_indices, sample_now)
-                    next_pbs.beliefs[sample_now] = self.beliefs[src_indices]
+                if sample_now.numel() > 0:
+                    self.sample_leaf(
+                        sample_now,
+                        next_pbs,
+                        next_pbs_idx,
+                        training_mode=training_mode,
+                    )
+                    next_pbs_idx += sample_now.numel()
 
             self.update_policy()
 
@@ -412,6 +474,16 @@ class RebelCFREvaluator:
             self.values = (t * self.values + new_expected_values) / (t + 1)
 
         return next_pbs
+
+    def sample_data(self) -> RebelBatch:
+        indices = torch.where(self.valid_mask[: self.search_batch_size])[0]
+        return RebelBatch(
+            features=self.encode_current_states(indices),
+            policy_targets=self.policy_probs_avg[indices],
+            value_targets=self.values[indices],
+            legal_masks=self.env.legal_bins_mask()[indices],
+            acting_players=self.env.to_act[indices],
+        )
 
     def _valid_nodes(self) -> Generator[tuple[int, torch.Tensor]]:
         for depth in range(self.max_depth):

@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 import torch
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
+from alphaholdem.rl.rebel_replay import RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState, RebelCFREvaluator
-
-NUM_HANDS = 1326
 
 
 @dataclass
@@ -19,10 +19,12 @@ class RebelDataGenerator:
         self,
         env_proto: HUNLTensorEnv,
         evaluator: RebelCFREvaluator,
+        buffer: RebelReplayBuffer,
     ):
         self.env_proto = env_proto
         self.next_pbs_idx = 0
         self.evaluator = evaluator
+        self.buffer = buffer
         self.device = evaluator.device
         self.pbs_queue = [
             PublicBeliefState.from_proto(
@@ -40,57 +42,44 @@ class RebelDataGenerator:
             )
         ]
 
-    def generate_data(self) -> TrainingData:
-        batch_size = self.evaluator.search_batch_size
-        total_size = self.evaluator.total_nodes
-
+    def _new_pbs(self, target_batch_size: int) -> PublicBeliefState:
         pbs = PublicBeliefState.from_proto(
             env_proto=self.env_proto,
-            beliefs=torch.zeros(batch_size, self.evaluator.num_players, NUM_HANDS),
-            num_envs=batch_size,
+            beliefs=torch.full(
+                (target_batch_size, self.evaluator.num_players, NUM_HANDS),
+                1.0 / NUM_HANDS,
+                device=self.device,
+            ),
+            num_envs=target_batch_size,
         )
+        pbs.env.reset()
+        return pbs
+
+    def generate_data(self) -> TrainingData:
+        batch_size = self.evaluator.search_batch_size
         accum_start = 0
+        total_street = 0
 
-        # greedily take samples from the queue
-        while accum_start < batch_size and len(self.pbs_queue) > 0:
-            needed = batch_size - accum_start
-            next_pbs = self.pbs_queue[0]
-            start = self.next_pbs_idx
-            end = min(start + needed, next_pbs.env.N)
-            accum_end = accum_start + end - start
-
-            pbs.env.copy_state_from(
-                next_pbs.env,
-                torch.arange(start, end),
-                torch.arange(accum_start, accum_end),
+        while accum_start < batch_size:
+            next_pbs = self._new_pbs(batch_size)
+            self.evaluator.initialize_search(
+                next_pbs.env, torch.arange(batch_size), next_pbs.beliefs
             )
-            pbs.beliefs[accum_start:accum_end] = next_pbs.beliefs[start:end]
+            while next_pbs is not None:
+                next_pbs = self.evaluator.self_play_iteration()
+                batch = self.evaluator.sample_data()
+                self.buffer.add_batch(batch)
+                accum_start += len(batch)
+                print("self_play_iteration", accum_start)
+                print(
+                    "street",
+                    self.evaluator.env.street[:batch_size].float().mean().item(),
+                )
+                total_street += self.evaluator.env.street[:batch_size].sum().item()
 
-            consumed = end - start
-            if consumed == 0:
-                # Nothing copied; discard exhausted PBS to avoid infinite loop.
-                self.next_pbs_idx = 0
-                self.pbs_queue.pop(0)
-                continue
-
-            if end == next_pbs.env.N:
-                self.next_pbs_idx = 0
-                self.pbs_queue.pop(0)
-            else:
-                self.next_pbs_idx = end
-
-            accum_start = accum_end
-
-        # any remaining: initialize uniform beliefs
-        if accum_start < batch_size:
-            pbs.env.reset(torch.arange(accum_start, batch_size))
-            pbs.beliefs[accum_start:batch_size] = 1.0 / NUM_HANDS
-
-        self.evaluator.initialize_search(pbs.env, torch.arange(pbs.env.N), pbs.beliefs)
-
-        next_pbs = self.evaluator.self_play_iteration()
-        if next_pbs is not None:
-            self.pbs_queue.append(next_pbs)
+        print(
+            f"=> collected {accum_start}/{batch_size} samples, average street {total_street / accum_start}"
+        )
 
         # Snapshot tensors for supervised targets; detach to break autograd graph.
         root_indices = torch.arange(batch_size, device=self.device)

@@ -27,6 +27,7 @@ from alphaholdem.core.structured_config import (
     TrainingConfig,
 )
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
+from alphaholdem.utils.training_utils import print_preflop_range_grid
 
 
 def _device_from_config(cfg: Config) -> torch.device:
@@ -148,6 +149,7 @@ def train_rebel(cfg: Config) -> None:
                     os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"), metrics.step
                 )
                 print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
+                print_preflop_range_grid(trainer, metrics.step)
 
         final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
         trainer.save_checkpoint(final_path, cfg.num_steps)
@@ -155,6 +157,9 @@ def train_rebel(cfg: Config) -> None:
         print(
             f"Training complete in {total_elapsed/3600:.2f} hours. "
             f"Final checkpoint: {final_path}"
+        )
+        print_preflop_range_grid(
+            trainer, cfg.num_steps, title="Final Preflop Range Grid"
         )
 
 
