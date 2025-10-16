@@ -426,6 +426,7 @@ def test_compute_expected_values_matches_child_values(
     evaluator, env = make_evaluator(batch_size=1, max_depth=2)
     roots = torch.arange(evaluator.search_batch_size, device=env.device)
     evaluator.initialize_search(env, roots)
+    evaluator.construct_subgame()
 
     num_actions = evaluator.num_actions
     legal_mask = torch.ones(

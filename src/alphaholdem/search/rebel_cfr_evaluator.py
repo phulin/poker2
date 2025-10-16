@@ -257,10 +257,33 @@ class RebelCFREvaluator:
         masked_logits = compute_masked_logits(logits, legal_masks[:, None, :])
         return F.softmax(masked_logits, dim=-1)
 
+    def _propagate_beliefs(
+        self,
+        action: int,
+        current_legal_indices: torch.Tensor,
+        next_legal_indices: torch.Tensor,
+    ) -> None:
+        """Propagate beliefs from current legal indices to next legal indices."""
+        combo_onehot = combo_to_onehot_tensor(device=self.device).float()
+        legal_actor = self.env.to_act[current_legal_indices]
+        self.beliefs[next_legal_indices, legal_actor] = (
+            self.beliefs[current_legal_indices, legal_actor]
+            * self.policy_probs[current_legal_indices, :, action]
+        )
+        self.beliefs[next_legal_indices, 1 - legal_actor] = self.beliefs[
+            current_legal_indices, 1 - legal_actor
+        ]
+        # [N, 52] @ [52, 1326]
+        board_onehot = (
+            self.env.board_onehot[next_legal_indices].any(dim=1).view(-1, 52).float()
+        )
+        blocked = (board_onehot @ combo_onehot.T) > 0
+        self.beliefs[next_legal_indices] *= ~blocked[:, None, :]
+
     @torch.no_grad()
     def initialize_policy_and_beliefs(self) -> None:
         """Push public beliefs down the tree using the freshly initialised policy."""
-        N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
+        N, B = self.search_batch_size, self.num_actions
 
         self.policy_probs.zero_()
         self.beliefs[self.search_batch_size :].zero_()
@@ -271,27 +294,22 @@ class RebelCFREvaluator:
             self.policy_probs[current_indices] = probs
             self.policy_probs_avg[current_indices] = probs
 
-            if depth < self.max_depth:
-                actor = self.env.to_act[current_indices]
-                legal_masks = self.legal_masks[current_indices]
+            if depth >= self.max_depth:
+                continue
 
-                # Bayesian update assuming both players follow the same policy.
-                for action in range(self.num_actions):
-                    legal = legal_masks[:, action]
-                    next_indices = current_indices + (action + 1) * B**depth * N
-                    current_legal_indices = current_indices[legal]
-                    if current_legal_indices.numel() == 0:
-                        continue
-                    next_legal_indices = next_indices[legal]
-                    legal_actor = self.env.to_act[current_legal_indices]
-                    self.beliefs[next_legal_indices, legal_actor] = (
-                        self.beliefs[current_legal_indices, legal_actor]
-                        * self.policy_probs[current_legal_indices, :, action]
-                    )
-                    self.beliefs[next_legal_indices, 1 - legal_actor] = self.beliefs[
-                        current_legal_indices, 1 - legal_actor
-                    ]
-                    # TODO: Add blocking matrix here
+            legal_masks = self.legal_masks[current_indices]
+
+            # Bayesian update assuming both players follow the same policy.
+            for action in range(self.num_actions):
+                legal = legal_masks[:, action]
+                next_indices = current_indices + (action + 1) * B**depth * N
+                current_legal_indices = current_indices[legal]
+                if current_legal_indices.numel() == 0:
+                    continue
+                next_legal_indices = next_indices[legal]
+                self._propagate_beliefs(
+                    action, current_legal_indices, next_legal_indices
+                )
 
         # Normalize beliefs in-place for valid nodes.
         valid_indices = torch.where(self.valid_mask)[0]
@@ -362,14 +380,13 @@ class RebelCFREvaluator:
     def compute_expected_values(self) -> torch.Tensor:
         """Back up leaf hand values to their ancestors under the current policy."""
 
-        legal_masks = self.env.legal_bins_mask()
         new_values = self.values.clone()
         non_leaf_mask = self.valid_mask & ~self.leaf_mask
         if non_leaf_mask.any():
             new_values[non_leaf_mask] = 0.0
         # First iteration: leaf values already populated; back propagate expectations
         for _, action, current_indices, next_indices in self._valid_actions(
-            legal_masks, bottom_up=True
+            bottom_up=True
         ):
             probs = self.policy_probs[current_indices, :, action]
             child_values = new_values[next_indices]
@@ -380,12 +397,9 @@ class RebelCFREvaluator:
     def compute_regrets(self, values: torch.Tensor) -> torch.Tensor:
         """Compute regrets for every valid non-leaf information set."""
 
-        legal_masks = self.legal_masks
         regrets = torch.zeros_like(self.policy_probs)
 
-        for _, action, current_indices, next_indices in self._valid_actions(
-            legal_masks
-        ):
+        for _, action, current_indices, next_indices in self._valid_actions():
             actor = self.env.to_act[current_indices]
             row_ids = torch.arange(
                 current_indices.numel(), device=self.device, dtype=torch.long
@@ -400,7 +414,7 @@ class RebelCFREvaluator:
             regrets[current_indices, :, action] = weights * advantages
 
         # Zero out invalid actions explicitly
-        regrets *= legal_masks.unsqueeze(1).to(self.float_dtype)
+        regrets *= self.legal_masks.unsqueeze(1).to(self.float_dtype)
         return regrets
 
     def update_policy(self, regrets: torch.Tensor) -> None:
@@ -424,6 +438,9 @@ class RebelCFREvaluator:
         # Ensure illegal actions remain zero
         updated *= legal.unsqueeze(1)
         self.policy_probs[regret_indices] = updated
+
+        for _, action, current_indices, next_indices in self._valid_actions():
+            self._propagate_beliefs(action, current_indices, next_indices)
 
     def sample_leaf(
         self,
@@ -743,12 +760,10 @@ class RebelCFREvaluator:
             yield depth, offset + torch.where(mask)[0]
 
     def _valid_actions(
-        self, legal_masks: Optional[torch.Tensor] = None, bottom_up: bool = False
+        self, bottom_up: bool = False
     ) -> Generator[tuple[int, int, torch.Tensor, torch.Tensor]]:
         """Iterate over legal transitions, optionally in bottom-up order."""
         N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
-        if legal_masks is None:
-            legal_masks = self.env.legal_bins_mask()
 
         for depth in (
             range(self.max_depth)
@@ -760,7 +775,7 @@ class RebelCFREvaluator:
 
             for action in range(B):
                 current_legal_mask = (
-                    legal_masks[offset:offset_next, action]
+                    self.legal_masks[offset:offset_next, action]
                     & self.valid_mask[offset:offset_next]
                     & ~self.leaf_mask[offset:offset_next]
                 )
