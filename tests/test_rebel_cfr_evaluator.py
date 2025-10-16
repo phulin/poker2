@@ -686,8 +686,9 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
     evaluator.values[2, 0] = -1.0  # Negative advantage for action 1
 
     # Compute regrets first, then update policy
-    regrets = evaluator.compute_regrets(evaluator.values)
-    evaluator.update_policy(regrets)
+    regrets = evaluator.compute_instantaneous_regrets(evaluator.values)
+    evaluator.cumulative_regrets += regrets
+    evaluator.update_policy()
 
     root_policy = evaluator.policy_probs[root_index, 0]
     expected = torch.zeros(num_actions, dtype=env.float_dtype)

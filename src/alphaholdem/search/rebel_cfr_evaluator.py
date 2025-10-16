@@ -87,6 +87,7 @@ class RebelCFREvaluator:
     leaf_mask: torch.Tensor
     policy_probs: torch.Tensor
     policy_probs_avg: torch.Tensor
+    cumulative_regrets: torch.Tensor
     values: torch.Tensor
     beliefs: torch.Tensor
     legal_masks: Optional[torch.Tensor]
@@ -143,6 +144,7 @@ class RebelCFREvaluator:
         )
         # If finished, don't continue searching below this node.
         # Different from env.done, which is set when the node is terminal.
+        # Should be a subset of valid_mask.
         self.leaf_mask = torch.zeros(
             self.total_nodes, dtype=torch.bool, device=self.device
         )
@@ -154,13 +156,9 @@ class RebelCFREvaluator:
             device=self.device,
             dtype=self.float_dtype,
         )
-        self.policy_probs_avg = torch.zeros(
-            self.total_nodes,
-            NUM_HANDS,
-            self.num_actions,
-            device=self.device,
-            dtype=self.float_dtype,
-        )
+        self.policy_probs_avg = torch.zeros_like(self.policy_probs)
+        self.cumulative_regrets = torch.zeros_like(self.policy_probs)
+
         # One value per node per player per hand
         self.values = torch.zeros(
             self.total_nodes,
@@ -224,6 +222,7 @@ class RebelCFREvaluator:
             )
 
         dest_indices = torch.arange(self.search_batch_size, device=self.device)
+        self.env.reset()
         self.env.copy_state_from(src_env, src_indices, dest_indices, copy_deck=True)
         self.valid_mask.zero_()
         self.valid_mask[dest_indices] = True
@@ -231,6 +230,7 @@ class RebelCFREvaluator:
         self.leaf_mask[dest_indices] = self.env.done[dest_indices]
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
+        self.cumulative_regrets.zero_()
         self.values.zero_()
         self.beliefs.zero_()
         self.beliefs[dest_indices] = initial_beliefs
@@ -270,15 +270,16 @@ class RebelCFREvaluator:
 
             # TODO: To stop on street, capture new_streets here.
             rewards, _, _ = self.env.step_bins(action_bins, legal_masks=legal_masks)
-            self.leaf_mask[action_bins >= 0] |= self.env.done[action_bins >= 0]
 
-            finished = (action_bins >= 0) & self.env.done
-            self.values[finished, 0] = rewards[finished].view(-1, 1)
-            self.values[finished, 1] = -rewards[finished].view(-1, 1)
+            # Showdown values get set in set_leaf_values.
+            finished_folded = (action_bins == 0) & self.env.done
+            self.values[finished_folded, 0] = rewards[finished_folded].view(-1, 1)
+            self.values[finished_folded, 1] = -rewards[finished_folded].view(-1, 1)
 
         leaf_start = self.depth_offsets[self.max_depth]
         leaf_end = self.depth_offsets[self.max_depth + 1]
-        self.leaf_mask[leaf_start:leaf_end] |= self.valid_mask[leaf_start:leaf_end]
+        self.leaf_mask[leaf_start:leaf_end] = self.valid_mask[leaf_start:leaf_end]
+        self.leaf_mask[self.valid_mask & self.env.done] = True
 
         self.legal_masks = self.env.legal_bins_mask()
         valid_legal_masks = self.legal_masks[self.valid_mask & ~self.leaf_mask]
@@ -313,7 +314,7 @@ class RebelCFREvaluator:
 
     def _block_beliefs(self) -> None:
         """Block beliefs based on the board."""
-        combo_onehot = combo_to_onehot_tensor().float()
+        combo_onehot = combo_to_onehot_tensor(device=self.device).float()
         board_onehot = (
             self.env.board_onehot[self.valid_mask].any(dim=1).view(-1, 52).float()
         )
@@ -327,9 +328,20 @@ class RebelCFREvaluator:
         if valid_indices.numel() > 0:
             beliefs = self.beliefs[valid_indices]
             denom = beliefs.sum(dim=-1, keepdim=True)
+            # If the action probability of getting to a node is 0, our
+            # bayesian update will make the beliefs in that state all 0.
+            # So we set them to uniform.
             self.beliefs[valid_indices] = torch.where(
                 denom > 1e-9, beliefs / denom, 1.0 / NUM_HANDS
             )
+
+    def _block_and_normalize_beliefs(self) -> None:
+        # A little inefficient, but normalize twice to handle the case where
+        # the action probability of getting to a node is 0 (restore uniform beliefs
+        # in the first normalize and then block/normalize again).
+        self._normalize_beliefs()
+        self._block_beliefs()
+        self._normalize_beliefs()
 
     @torch.no_grad()
     def initialize_policy_and_beliefs(self) -> None:
@@ -362,11 +374,11 @@ class RebelCFREvaluator:
                     action, current_legal_indices, next_legal_indices
                 )
 
-        self._block_beliefs()
-        self._normalize_beliefs()
+        self._block_and_normalize_beliefs()
 
     def warm_start(self) -> None:
         N, B = self.search_batch_size, self.num_actions
+        min_value = torch.finfo(self.float_dtype).min
 
         leaf_indices = torch.where(self.leaf_mask)[0]
         # [M, ]
@@ -391,24 +403,28 @@ class RebelCFREvaluator:
             actor_action_values = (
                 self.policy_probs[current_indices].permute(0, 2, 1) * next_actor_values
             ).sum(dim=-1)
-            opp_action_values = (
+            opp_action_values_all = (
                 self.policy_probs[current_indices].permute(0, 2, 1) * next_opp_values
-            ).sum(dim=-1)
+            )
+            opp_action_values = opp_action_values_all.sum(dim=-1)
 
             # take the player-to-act's best action, and the other player's average action
-            actor_action_values *= self.legal_masks[current_indices].float()
-            opp_action_values *= self.legal_masks[current_indices].float()
+            actor_action_values.masked_fill_(
+                ~self.legal_masks[current_indices], min_value
+            )
+            opp_action_values.masked_fill_(~self.legal_masks[current_indices], 0)
             all_indices = torch.arange(current_indices.numel(), device=self.device)
             temp_values[current_indices, actor] = next_actor_values[
                 all_indices, actor_action_values.argmax(dim=-1)
             ]
-            temp_values[current_indices, opp] = (
-                next_opp_values * self.policy_probs[current_indices].permute(0, 2, 1)
-            ).sum(dim=1)
+            temp_values[current_indices, opp] = opp_action_values_all.sum(dim=1)
+
+        assert temp_values[self.valid_mask].isfinite().all()
 
         # heuristic: scale regrets by the number of warm start iterations
-        regrets = self.compute_regrets(temp_values)
-        self.update_policy(self.warm_start_iterations * regrets)
+        regrets = self.compute_instantaneous_regrets(temp_values)
+        self.cumulative_regrets += self.warm_start_iterations * regrets
+        self.update_policy()
         self.policy_probs_avg[:] = self.policy_probs
 
     @torch.no_grad()
@@ -427,7 +443,7 @@ class RebelCFREvaluator:
         # Fold values were set in construct_subgame and don't need updating.
         # Showdown values need to be updated based on beliefs.
         # The env has hands it uses for showdown, but those are fake.
-        showdown = torch.where(self.env.street == 3)[0]
+        showdown = torch.where(self.env.street == 4)[0]
         assert self.env.done[showdown].all()
         assert self.leaf_mask[showdown].all()
         showdown_values = self._showdown_value(showdown)
@@ -451,7 +467,7 @@ class RebelCFREvaluator:
 
         return new_values
 
-    def compute_regrets(self, values: torch.Tensor) -> torch.Tensor:
+    def compute_instantaneous_regrets(self, values: torch.Tensor) -> torch.Tensor:
         """Compute regrets for every valid non-leaf information set."""
 
         regrets = torch.zeros_like(self.policy_probs)
@@ -474,13 +490,13 @@ class RebelCFREvaluator:
         regrets *= self.legal_masks.unsqueeze(1).to(self.float_dtype)
         return regrets
 
-    def update_policy(self, regrets: torch.Tensor) -> None:
+    def update_policy(self) -> None:
         """Apply a regret-matching update to every valid non-leaf information set."""
 
         regret_indices = torch.where(self.valid_mask & ~self.leaf_mask)[0]
 
-        positive_regrets = regrets.clamp(min=0)
-        regret_sum = positive_regrets[regret_indices].sum(dim=-1, keepdim=True)
+        positive_regrets = self.cumulative_regrets[regret_indices].clamp(min=0)
+        regret_sum = positive_regrets.sum(dim=-1, keepdim=True)
         legal = self.legal_masks[regret_indices]
         legal_float = legal.to(dtype=self.float_dtype)
         uniform_policy = legal_float / legal_float.sum(dim=-1, keepdim=True).clamp_min(
@@ -489,7 +505,7 @@ class RebelCFREvaluator:
         uniform_policy = uniform_policy.unsqueeze(1).expand(-1, NUM_HANDS, -1)
         updated = torch.where(
             regret_sum > 1e-8,
-            positive_regrets[regret_indices] / regret_sum.clamp_min(1e-8),
+            positive_regrets / regret_sum.clamp_min(1e-8),
             uniform_policy,
         )
         # Ensure illegal actions remain zero
@@ -499,8 +515,7 @@ class RebelCFREvaluator:
         for _, action, current_indices, next_indices in self._valid_actions():
             self._propagate_beliefs(action, current_indices, next_indices)
 
-        self._block_beliefs()
-        self._normalize_beliefs()
+        self._block_and_normalize_beliefs()
 
     def sample_leaf(
         self,
@@ -624,8 +639,9 @@ class RebelCFREvaluator:
                     )
                     next_pbs_idx += sample_now.numel()
 
-            regrets = self.compute_regrets(self.values)
-            self.update_policy(regrets)
+            regrets = self.compute_instantaneous_regrets(self.values)
+            self.cumulative_regrets += regrets
+            self.update_policy()
 
             # Update average policy.
             self.policy_probs_avg[self.valid_mask] = (
