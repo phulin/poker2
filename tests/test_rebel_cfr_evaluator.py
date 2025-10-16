@@ -147,18 +147,27 @@ def _get_child_nodes(evaluator: RebelCFREvaluator, env: HUNLTensorEnv) -> torch.
     )[0]
 
 
+RANKS = "23456789TJQKA"
+SUITS = "shdc"
+
+
 def card(rank: int, suit: int) -> int:
     """Return numeric card index given rank 0..12 (2..A) and suit 0..3."""
     return suit * 13 + rank
+
+
+def make_board(cards: str, device: torch.device | None = None) -> torch.Tensor:
+    """Return numeric board indices given a string of card names."""
+    return torch.tensor(
+        [card(RANKS.index(c[0]), SUITS.index(c[1])) for c in cards.split()],
+        device=device,
+    )
 
 
 def compute_reference_showdown_ev(
     board: torch.Tensor,
     opp_beliefs: torch.Tensor,
     potential: float,
-    *,
-    device: torch.device,
-    dtype: torch.dtype,
 ) -> torch.Tensor:
     """
     Compute per-hand showdown EVs by enumerating opponent holdings.
@@ -170,19 +179,19 @@ def compute_reference_showdown_ev(
         device: Target device.
         dtype: Floating dtype for computation.
     """
-    board = board.to(device=device)
-    opp_beliefs = opp_beliefs.to(device=device, dtype=dtype)
-    potential_tensor = torch.tensor(potential, device=device, dtype=dtype)
 
-    board_mask = mask_conflicting_combos(board, device=device)
+    if not isinstance(potential, torch.Tensor):
+        potential = torch.tensor(potential)
+
+    board_mask = mask_conflicting_combos(board)
     opp_masked = opp_beliefs * board_mask
     opp_probs = opp_masked / opp_masked.sum().clamp_min(1e-12)
 
-    blocking = combo_blocking_tensor(device=device)
+    blocking = combo_blocking_tensor()
     hand_ranks, _ = rank_hands(board.unsqueeze(0))
     hand_ranks = hand_ranks.squeeze(0)
 
-    ev_per_hand = torch.zeros(NUM_HANDS, device=device, dtype=dtype)
+    ev_per_hand = torch.zeros(NUM_HANDS)
     valid_indices = torch.where(board_mask)[0]
     for combo_idx in valid_indices.tolist():
         compat_mask = (~blocking[combo_idx]) & board_mask
@@ -197,7 +206,7 @@ def compute_reference_showdown_ev(
         win_prob = (opp_cond * (opp_ranks < hero_rank)).sum()
         tie_prob = (opp_cond * (opp_ranks == hero_rank)).sum()
 
-        ev_per_hand[combo_idx] = potential_tensor * (win_prob + 0.5 * tie_prob)
+        ev_per_hand[combo_idx] = potential * (win_prob + 0.5 * tie_prob)
 
     return ev_per_hand
 
@@ -427,6 +436,8 @@ def test_compute_expected_values_matches_child_values(
     roots = torch.arange(evaluator.search_batch_size, device=env.device)
     evaluator.initialize_search(env, roots)
     evaluator.construct_subgame()
+    evaluator.initialize_policy_and_beliefs()
+    evaluator.set_leaf_values()
 
     num_actions = evaluator.num_actions
     legal_mask = torch.ones(
@@ -727,44 +738,51 @@ def test_sample_data_returns_root_batch() -> None:
     torch.testing.assert_close(batch.policy_targets, expected_policy)
 
 
-def test_showdown_value_uniform_beliefs_matches_reference() -> None:
+def setup_showdown_evaluator(
+    board: str | list[int],
+    beliefs: torch.Tensor | None = None,
+) -> tuple[RebelCFREvaluator, HUNLTensorEnv, torch.Tensor]:
+    """Common initialization for showdown_value tests."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=0)
-    roots = torch.arange(evaluator.search_batch_size, device=env.device)
-    evaluator.initialize_search(env, roots)
+    if isinstance(board, str):
+        board = make_board(board)
+    else:
+        board = torch.tensor(board)
+    all_cards = torch.arange(52)
+    used_mask = torch.isin(all_cards, board)
+    unused_cards = torch.where(~used_mask)[0]
+    deck = torch.concat([unused_cards[:4], board])
+    env.reset(force_deck=deck[None, :])
+    for _ in range(8):
+        env.step_bins(torch.tensor([1]))
+    env.chips_placed[:] = 100
+    env.pot[:] = 200
+    env.stacks[:] = 900
 
-    idx = torch.tensor([0], device=env.device)
-    board = torch.tensor(
-        [
-            [
-                card(12, 3),  # Ace of suit 3
-                card(10, 1),  # Queen of suit 1
-                card(7, 2),  # Nine of suit 2
-                card(5, 0),  # Seven of suit 0
-                card(2, 1),  # Four of suit 1
-            ]
-        ],
-        device=env.device,
-    )
-    evaluator.env.board_indices[idx] = board
-    evaluator.env.street[idx] = 3
-    evaluator.env.pot[idx] = torch.tensor([200], device=env.device, dtype=torch.long)
-    evaluator.env.stacks[idx, 0] = torch.tensor(
-        [900], device=env.device, dtype=torch.long
-    )
-
-    potential = float(
+    roots = torch.arange(evaluator.search_batch_size)
+    if beliefs is None:
+        beliefs = torch.full((1, NUM_HANDS), 1.0 / NUM_HANDS)
+    evaluator.initialize_search(env, roots, beliefs)
+    evaluator.construct_subgame()
+    evaluator.initialize_policy_and_beliefs()
+    idx = torch.tensor([0])
+    potential = (
         evaluator.env.stacks[idx, 0]
         + evaluator.env.pot[idx]
         - evaluator.env.starting_stack
     )
 
+    return evaluator, env, idx, potential
+
+
+def test_showdown_value_uniform_beliefs_matches_reference() -> None:
+    evaluator, _, idx, potential = setup_showdown_evaluator(
+        "Ac Qh 9d 7s 4h",
+    )
+
     opp_beliefs = evaluator.beliefs[idx, 1].squeeze(0)
     expected = compute_reference_showdown_ev(
-        board.squeeze(0),
-        opp_beliefs,
-        potential,
-        device=env.device,
-        dtype=env.float_dtype,
+        evaluator.env.board_indices[0], opp_beliefs, potential
     )
 
     actual = evaluator._showdown_value(idx).squeeze(0)
@@ -772,131 +790,54 @@ def test_showdown_value_uniform_beliefs_matches_reference() -> None:
 
 
 def test_showdown_value_single_hand_belief_returns_potential() -> None:
-    evaluator, env = make_evaluator(batch_size=1, max_depth=0)
-    roots = torch.arange(evaluator.search_batch_size, device=env.device)
-    evaluator.initialize_search(env, roots)
-
-    idx = torch.tensor([0], device=env.device)
-    board = torch.tensor(
-        [
-            [
-                card(12, 2),  # Ace hearts
-                card(11, 2),  # King hearts
-                card(10, 2),  # Queen hearts
-                card(9, 2),  # Jack hearts
-                card(0, 0),  # Two clubs
-            ]
-        ],
-        device=env.device,
-    )
-    evaluator.env.board_indices[idx] = board
-    evaluator.env.street[idx] = 3
-    evaluator.env.pot[idx] = torch.tensor([200], device=env.device, dtype=torch.long)
-    evaluator.env.stacks[idx, 0] = torch.tensor(
-        [900], device=env.device, dtype=torch.long
-    )
-
     hero_combo = combo_index(card(8, 2), card(7, 2))  # Ten and Nine hearts
-    evaluator.beliefs[idx, 0].zero_()
-    evaluator.beliefs[idx, 0, hero_combo] = 1.0
-
-    potential = float(
-        evaluator.env.stacks[idx, 0]
-        + evaluator.env.pot[idx]
-        - evaluator.env.starting_stack
-    )
+    beliefs = torch.zeros(1, NUM_HANDS)
+    beliefs[0, hero_combo] = 1.0
+    evaluator, _, idx, potential = setup_showdown_evaluator("Ad Kd Qd Jd 2s", beliefs)
 
     opp_beliefs = evaluator.beliefs[idx, 1].squeeze(0)
     expected = compute_reference_showdown_ev(
-        board.squeeze(0),
-        opp_beliefs,
-        potential,
-        device=env.device,
-        dtype=env.float_dtype,
+        evaluator.env.board_indices[0], opp_beliefs, potential
     )
 
     actual = evaluator._showdown_value(idx).squeeze(0)
-    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(actual, expected)
 
 
 def test_showdown_value_all_ties_returns_half_potential() -> None:
-    evaluator, env = make_evaluator(batch_size=1, max_depth=0)
-    roots = torch.arange(evaluator.search_batch_size, device=env.device)
-    evaluator.initialize_search(env, roots)
-
-    idx = torch.tensor([0], device=env.device)
-    board = torch.tensor(
-        [
-            [
-                card(12, 2),  # Ace hearts
-                card(11, 2),  # King hearts
-                card(10, 2),  # Queen hearts
-                card(9, 2),  # Jack hearts
-                card(8, 2),  # Ten hearts
-            ]
-        ],
-        device=env.device,
-    )
-    evaluator.env.board_indices[idx] = board
-    evaluator.env.street[idx] = 3
-    evaluator.env.pot[idx] = torch.tensor([240], device=env.device, dtype=torch.long)
-    evaluator.env.stacks[idx, 0] = torch.tensor(
-        [900], device=env.device, dtype=torch.long
-    )
-
-    potential = float(
-        evaluator.env.stacks[idx, 0]
-        + evaluator.env.pot[idx]
-        - evaluator.env.starting_stack
-    )
+    evaluator, _, idx, potential = setup_showdown_evaluator("Ah Kh Qh Jh Th")
 
     opp_beliefs = evaluator.beliefs[idx, 1].squeeze(0)
     expected = compute_reference_showdown_ev(
-        board.squeeze(0),
-        opp_beliefs,
-        potential,
-        device=env.device,
-        dtype=env.float_dtype,
+        evaluator.env.board_indices[0], opp_beliefs, potential
     )
     actual = evaluator._showdown_value(idx).squeeze(0)
-    board_mask = mask_conflicting_combos(board.squeeze(0), device=env.device)
+    board_mask = mask_conflicting_combos(evaluator.env.board_indices[0])
     torch.testing.assert_close(
-        actual[~board_mask], torch.zeros_like(actual[~board_mask]), atol=1e-6, rtol=1e-6
+        actual[~board_mask], torch.zeros_like(actual[~board_mask])
     )
-    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(actual, expected)
 
 
-def test_showdown_value_zero_when_opponent_range_invalid() -> None:
-    evaluator, env = make_evaluator(batch_size=1, max_depth=0)
-    roots = torch.arange(evaluator.search_batch_size, device=env.device)
-    evaluator.initialize_search(env, roots)
-
-    idx = torch.tensor([0], device=env.device)
-    board = torch.tensor(
-        [
-            [
-                card(9, 1),  # Jack diamonds
-                card(6, 0),  # Eight clubs
-                card(4, 3),  # Six spades
-                card(2, 1),  # Four diamonds
-                card(0, 2),  # Two hearts
-            ]
-        ],
-        device=env.device,
-    )
-    evaluator.env.board_indices[idx] = board
-    evaluator.env.street[idx] = 3
-
-    board_mask = mask_conflicting_combos(board.squeeze(0), device=env.device)
+def test_showdown_value_fail_when_opponent_range_invalid() -> None:
+    board_tensor = make_board("Jh 8s 6c 4h 2d")[None, :]
+    beliefs = torch.zeros(1, NUM_HANDS)
+    board_mask = mask_conflicting_combos(board_tensor[0])
     conflicting_indices = torch.where(~board_mask)[0]
     assert conflicting_indices.numel() > 0
 
-    root = int(idx.item())
-    evaluator.beliefs[root, 1].zero_()
-    evaluator.beliefs[root, 1, conflicting_indices[:10]] = 1.0
+    beliefs[0].zero_()
+    beliefs[0, conflicting_indices[:10]] = 0.1
 
-    actual = evaluator._showdown_value(idx).squeeze(0)
-    torch.testing.assert_close(actual, torch.zeros_like(actual), atol=1e-5, rtol=1e-5)
+    evaluator, _, idx, _ = setup_showdown_evaluator("Jh 8s 6c 4h 2d", beliefs)
+
+    # Should get uniform beliefs since all beliefs were blocked
+    torch.testing.assert_close(
+        evaluator.beliefs[idx], torch.full((1, 2, NUM_HANDS), 1.0 / NUM_HANDS)
+    )
+
+    with pytest.raises(AssertionError):
+        evaluator._showdown_value(idx).squeeze(0)
 
 
 @pytest.mark.parametrize(
@@ -910,32 +851,11 @@ def test_showdown_value_zero_when_opponent_range_invalid() -> None:
 def test_showdown_value_matches_reference_on_diverse_boards(
     board_cards: list[int],
 ) -> None:
-    evaluator, env = make_evaluator(batch_size=1, max_depth=0)
-    roots = torch.arange(evaluator.search_batch_size, device=env.device)
-    evaluator.initialize_search(env, roots)
-
-    idx = torch.tensor([0], device=env.device)
-    board = torch.tensor([board_cards], device=env.device)
-    evaluator.env.board_indices[idx] = board
-    evaluator.env.street[idx] = 3
-    evaluator.env.pot[idx] = torch.tensor([220], device=env.device, dtype=torch.long)
-    evaluator.env.stacks[idx, 0] = torch.tensor(
-        [880], device=env.device, dtype=torch.long
-    )
-
-    potential = float(
-        evaluator.env.stacks[idx, 0]
-        + evaluator.env.pot[idx]
-        - evaluator.env.starting_stack
-    )
+    evaluator, _, idx, potential = setup_showdown_evaluator(board_cards)
 
     opp_beliefs = evaluator.beliefs[idx, 1].squeeze(0)
     expected = compute_reference_showdown_ev(
-        board.squeeze(0),
-        opp_beliefs,
-        potential,
-        device=env.device,
-        dtype=env.float_dtype,
+        evaluator.env.board_indices[0], opp_beliefs, potential
     )
     actual = evaluator._showdown_value(idx).squeeze(0)
 

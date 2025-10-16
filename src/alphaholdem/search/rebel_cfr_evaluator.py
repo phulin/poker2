@@ -51,8 +51,48 @@ class PublicBeliefState:
         assert self.beliefs.shape[0] == self.env.N
 
 
+@dataclass
+class HandRankData:
+    sorted_indices: torch.Tensor
+    inv_sorted: torch.Tensor
+    H: torch.Tensor
+    card_ok: torch.Tensor
+    hand_ok_mask: torch.Tensor
+    hand_ok_mask_sorted: torch.Tensor
+    hands_c1c2_sorted: torch.Tensor
+    L_idx: torch.Tensor
+    R_idx: torch.Tensor
+
+
 class RebelCFREvaluator:
     """ReBeL CFR Evaluator implementing the precise SELFPLAY algorithm."""
+
+    search_batch_size: int
+    model: RebelFFN
+    max_depth: int
+    bet_bins: list[float]
+    cfr_iterations: int
+    warm_start_iterations: int
+    sample_epsilon: float
+    device: torch.device
+    float_dtype: torch.dtype
+    generator: Optional[torch.Generator]
+    num_players: int
+    num_actions: int
+    all_hands: torch.Tensor
+    depth_offsets: list[int]
+    total_nodes: int
+    env: HUNLTensorEnv
+    valid_mask: torch.Tensor
+    leaf_mask: torch.Tensor
+    policy_probs: torch.Tensor
+    policy_probs_avg: torch.Tensor
+    values: torch.Tensor
+    beliefs: torch.Tensor
+    legal_masks: Optional[torch.Tensor]
+    combo_compat: torch.Tensor
+    feature_encoder: RebelFeatureEncoder
+    hand_rank_data: Optional[HandRankData]
 
     def __init__(
         self,
@@ -153,6 +193,8 @@ class RebelCFREvaluator:
             dtype=float_dtype,
         )
 
+        self.hand_rank_data = None
+
     def initialize_search(
         self,
         src_env: HUNLTensorEnv,
@@ -192,6 +234,8 @@ class RebelCFREvaluator:
         self.values.zero_()
         self.beliefs.zero_()
         self.beliefs[dest_indices] = initial_beliefs
+        self.legal_masks = None
+        self.hand_rank_data = None
 
     def construct_subgame(self) -> None:
         """Expand the tree by cloning legal successor states at each depth."""
@@ -265,12 +309,26 @@ class RebelCFREvaluator:
         self.beliefs[next_legal_indices, 1 - legal_actor] = self.beliefs[
             current_legal_indices, 1 - legal_actor
         ]
-        # [N, 52] @ [52, 1326]
+
+    def _block_beliefs(self) -> None:
+        """Block beliefs based on the board."""
+        combo_onehot = combo_to_onehot_tensor().float()
         board_onehot = (
-            self.env.board_onehot[next_legal_indices].any(dim=1).view(-1, 52).float()
+            self.env.board_onehot[self.valid_mask].any(dim=1).view(-1, 52).float()
         )
-        blocked = (board_onehot @ combo_onehot.T) > 0
-        self.beliefs[next_legal_indices] *= ~blocked[:, None, :]
+        # [N, 52] @ [52, 1326]
+        blocked = (board_onehot @ combo_onehot.T).clamp(0, 1)
+        self.beliefs[self.valid_mask] *= 1 - blocked[:, None, :]
+
+    def _normalize_beliefs(self) -> None:
+        """Normalize beliefs across hands in-place for valid nodes."""
+        valid_indices = torch.where(self.valid_mask)[0]
+        if valid_indices.numel() > 0:
+            beliefs = self.beliefs[valid_indices]
+            denom = beliefs.sum(dim=-1, keepdim=True)
+            self.beliefs[valid_indices] = torch.where(
+                denom > 1e-9, beliefs / denom, 1.0 / NUM_HANDS
+            )
 
     @torch.no_grad()
     def initialize_policy_and_beliefs(self) -> None:
@@ -303,16 +361,11 @@ class RebelCFREvaluator:
                     action, current_legal_indices, next_legal_indices
                 )
 
-        # Normalize beliefs in-place for valid nodes.
-        valid_indices = torch.where(self.valid_mask)[0]
-        if valid_indices.numel() > 0:
-            beliefs = self.beliefs[valid_indices]
-            denom = beliefs.sum(dim=-1, keepdim=True)
-            assert (denom > 1e-9).all()
-            self.beliefs[valid_indices] = beliefs / denom
+        self._block_beliefs()
+        self._normalize_beliefs()
 
     def warm_start(self) -> None:
-        N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
+        N, B = self.search_batch_size, self.num_actions
 
         leaf_indices = torch.where(self.leaf_mask)[0]
         # [M, ]
@@ -372,14 +425,13 @@ class RebelCFREvaluator:
 
         # Fold values were set in construct_subgame and don't need updating.
         # Showdown values need to be updated based on beliefs.
-        # Override the rewards with the belief-based EV.
         # The env has hands it uses for showdown, but those are fake.
         showdown = torch.where(self.env.street == 3)[0]
         assert self.env.done[showdown].all()
         assert self.leaf_mask[showdown].all()
         showdown_values = self._showdown_value(showdown)
-        self.values[showdown, 0] = showdown_values.view(-1, 1)
-        self.values[showdown, 1] = -showdown_values.view(-1, 1)
+        self.values[showdown, 0] = showdown_values
+        self.values[showdown, 1] = -showdown_values
 
     def compute_expected_values(self) -> torch.Tensor:
         """Back up leaf hand values to their ancestors under the current policy."""
@@ -445,6 +497,9 @@ class RebelCFREvaluator:
 
         for _, action, current_indices, next_indices in self._valid_actions():
             self._propagate_beliefs(action, current_indices, next_indices)
+
+        self._block_beliefs()
+        self._normalize_beliefs()
 
     def sample_leaf(
         self,
@@ -611,56 +666,92 @@ class RebelCFREvaluator:
         b_opp = beliefs[:, 1, :].to(dtype)  # (M,1326)
         board = self.env.board_indices[indices].long()  # (M,5)
 
-        # --- Ranks & sorted order per env (river deterministic strength) ---
-        # hand_ranks: (M,1326) any integer/monotone rank key s.t. equal => tie
-        # sorted_indices: argsort by (rank, tiebreak) ascending (weaker -> stronger)
-        hand_ranks, sorted_indices = rank_hands(board)  # both (M,1326)
-        hand_ranks = hand_ranks.long()
-
-        # Ranks in sorted order
-        ranks_sorted = torch.gather(hand_ranks, 1, sorted_indices)  # (M,1326)
-
-        # --- Tie groups: start flags, group ids, [L,R] spans per sorted position ---
-        is_start = torch.ones_like(ranks_sorted, dtype=torch.bool)  # (M,1326)
-        is_start[:, 1:] = ranks_sorted[:, 1:] != ranks_sorted[:, :-1]
-        group_id = is_start.cumsum(dim=1) - 1  # (M,1326), 0..G-1
-
         # Sorted position k (0..1325) replicated across batch
         k = torch.arange(NUM_HANDS, device=device).expand(M, -1)  # (M,1326)
 
-        # For each group id, store first/last index in sorted order
-        starts = torch.full((M, NUM_HANDS), NUM_HANDS, device=device)
-        ends = torch.full((M, NUM_HANDS), -1, device=device)
-        # scatter_reduce_ requires PyTorch >= 2.0
-        starts.scatter_reduce_(1, group_id, k, reduce="amin", include_self=True)
-        ends.scatter_reduce_(1, group_id, k, reduce="amax", include_self=True)
+        if self.hand_rank_data is None:
+            # --- Ranks & sorted order per env (river deterministic strength) ---
+            # hand_ranks: (M,1326) any integer/monotone rank key s.t. equal => tie
+            # sorted_indices: argsort by (rank, tiebreak) ascending (weaker -> stronger)
+            hand_ranks, sorted_indices = rank_hands(board)  # both (M,1326)
+            hand_ranks = hand_ranks.long()
 
-        # L,R per sorted position
-        L = torch.gather(starts, 1, group_id)  # (M,1326)
-        R = torch.gather(ends, 1, group_id)  # (M,1326)
+            # Ranks in sorted order
+            ranks_sorted = torch.gather(hand_ranks, 1, sorted_indices)  # (M,1326)
 
-        # Inverse permutation (sorted->original) for mapping EV back
-        inv_sorted = torch.argsort(sorted_indices, dim=1)  # (M,1326)
+            # --- Tie groups: start flags, group ids, [L,R] spans per sorted position ---
+            is_start = torch.ones_like(ranks_sorted, dtype=torch.bool)  # (M,1326)
+            is_start[:, 1:] = ranks_sorted[:, 1:] != ranks_sorted[:, :-1]
+            group_id = is_start.cumsum(dim=1) - 1  # (M,1326), 0..G-1
 
-        # --- Hand/card incidence & board masking ---
-        combo_to_onehot = combo_to_onehot_tensor(device=device).bool()  # (1326,52)
-        hands_c1c2 = hand_combos_tensor(device=device).long()  # (1326,2)
+            # For each group id, store first/last index in sorted order
+            starts = torch.full((M, NUM_HANDS), NUM_HANDS, device=device)
+            ends = torch.full((M, NUM_HANDS), -1, device=device)
+            # scatter_reduce_ requires PyTorch >= 2.0
+            starts.scatter_reduce_(1, group_id, k, reduce="amin", include_self=True)
+            ends.scatter_reduce_(1, group_id, k, reduce="amax", include_self=True)
 
-        # Per-env mask for cards not on the board: True = usable card
-        card_ok = torch.ones((M, 52), dtype=torch.bool, device=device)
-        card_ok.scatter_(1, board, False)  # False for board cards
+            # L,R per sorted position
+            L = torch.gather(starts, 1, group_id)  # (M,1326)
+            R = torch.gather(ends, 1, group_id)  # (M,1326)
+            L_idx = L.clamp(min=0)
+            R_idx = (R + 1).clamp(max=NUM_HANDS)
 
-        # Hand usable mask (unsorted): hand must use only ok cards
-        H = combo_to_onehot.unsqueeze(0).expand(M, -1, -1)  # (M,1326,52)
-        conflicts = H & (~card_ok.unsqueeze(1))  # mark hands using any blocked card
-        hand_ok_mask = ~conflicts.any(dim=2)  # True only if both cards are available
-        hand_ok_mask_sorted = torch.gather(hand_ok_mask, 1, sorted_indices)
+            # Inverse permutation (sorted->original) for mapping EV back
+            inv_sorted = torch.argsort(sorted_indices, dim=1)  # (M,1326)
 
-        # Zero & renormalize beliefs, guard against zero-sum
-        b_self = (b_self * hand_ok_mask).to(dtype)
-        b_opp = (b_opp * hand_ok_mask).to(dtype)
-        b_self = b_self / b_self.sum(dim=1, keepdim=True).clamp_min(1e-12)
-        b_opp = b_opp / b_opp.sum(dim=1, keepdim=True).clamp_min(1e-12)
+            # --- Hand/card incidence & board masking ---
+            combo_to_onehot = combo_to_onehot_tensor(device=device)  # (1326,52)
+            hands_c1c2 = hand_combos_tensor(device=device)  # (1326,2)
+
+            # Per-env mask for cards not on the board: True = usable card
+            card_ok = torch.ones((M, 52), dtype=torch.bool, device=device)
+            card_ok.scatter_(1, board, False)  # False for board cards
+
+            # Hand usable mask (unsorted): hand must use only ok cards
+            H = combo_to_onehot.unsqueeze(0).expand(M, -1, -1)  # (M,1326,52)
+            conflicts = H & (~card_ok.unsqueeze(1))  # mark hands using any blocked card
+            hand_ok_mask = ~conflicts.any(
+                dim=2
+            )  # True only if both cards are available
+            hand_ok_mask_sorted = torch.gather(hand_ok_mask, 1, sorted_indices)
+
+            # Cards (c1,c2) of each *sorted* hand per env
+            hands_c1c2_sorted = torch.gather(
+                hands_c1c2.unsqueeze(0).expand(M, -1, -1),  # (M,1326,2)
+                1,
+                sorted_indices.unsqueeze(-1).expand(-1, -1, 2),
+            )  # (M,1326,2)
+
+            self.hand_rank_data = HandRankData(
+                sorted_indices=sorted_indices,
+                inv_sorted=inv_sorted,
+                H=H,
+                card_ok=card_ok,
+                hand_ok_mask=hand_ok_mask,
+                hand_ok_mask_sorted=hand_ok_mask_sorted,
+                hands_c1c2_sorted=hands_c1c2_sorted,
+                L_idx=L_idx,
+                R_idx=R_idx,
+            )
+        else:
+            sorted_indices = self.hand_rank_data.sorted_indices
+            inv_sorted = self.hand_rank_data.inv_sorted
+            H = self.hand_rank_data.H
+            card_ok = self.hand_rank_data.card_ok
+            hand_ok_mask = self.hand_rank_data.hand_ok_mask
+            hand_ok_mask_sorted = self.hand_rank_data.hand_ok_mask_sorted
+            hands_c1c2_sorted = self.hand_rank_data.hands_c1c2_sorted
+            L_idx = self.hand_rank_data.L_idx
+            R_idx = self.hand_rank_data.R_idx
+
+        assert not (b_self * ~hand_ok_mask).any()
+        assert not (b_opp * ~hand_ok_mask).any()
+        assert torch.allclose(b_self.sum(dim=1), torch.ones_like(b_self.sum(dim=1)))
+        assert torch.allclose(b_opp.sum(dim=1), torch.ones_like(b_opp.sum(dim=1)))
+
+        c1 = hands_c1c2_sorted[..., 0]  # (M,1326)
+        c2 = hands_c1c2_sorted[..., 1]  # (M,1326)
 
         # Sort opponent marginal by strength order
         b_opp_sorted = torch.gather(b_opp, 1, sorted_indices)  # (M,1326)
@@ -668,15 +759,6 @@ class RebelCFREvaluator:
         # Hand->card incidence in sorted order with board columns zeroed
         H_sorted = torch.gather(H, 1, sorted_indices.unsqueeze(-1).expand(-1, -1, 52))
         H_sorted = H_sorted & card_ok.unsqueeze(1)  # (M,1326,52)
-
-        # Cards (c1,c2) of each *sorted* hand per env
-        hands_c1c2_sorted = torch.gather(
-            hands_c1c2.unsqueeze(0).expand(M, -1, -1),  # (M,1326,2)
-            1,
-            sorted_indices.unsqueeze(-1).expand(-1, -1, 2),
-        )  # (M,1326,2)
-        c1 = hands_c1c2_sorted[..., 0]  # (M,1326)
-        c2 = hands_c1c2_sorted[..., 1]  # (M,1326)
 
         # --- Prefix sums over opponent mass (global and per-card), left-padded ---
         P = torch.cumsum(b_opp_sorted, dim=1)  # (M,1326)
@@ -691,16 +773,12 @@ class RebelCFREvaluator:
         )  # (M,1327,52)
 
         # --- Win/tie masses for each sorted position ---
-        km1 = k  # using left-padded P/Pcards ⇒ P[:,km1] = sum up to <k
-        L_idx = L.clamp_min(0)
-        R_idx = (R + 1).clamp_max(NUM_HANDS)
-
-        gkm1 = km1.unsqueeze(-1)  # (M,1326,1)
+        gkm1 = k.unsqueeze(-1)  # (M,1326,1)
         gL = L_idx.unsqueeze(-1)
         gR = R_idx.unsqueeze(-1)
 
         # win_mass = P[k] - Pcards[k, c1] - Pcards[k, c2]
-        P_k = torch.gather(P, 1, km1)  # (M,1326)
+        P_k = torch.gather(P, 1, k)  # (M,1326)
         Pc_k = torch.gather(Pcards, 1, gkm1.expand(-1, -1, 52))  # (M,1326,52)
         Pc_k_c1 = Pc_k.gather(2, c1.unsqueeze(-1)).squeeze(-1)  # (M,1326)
         Pc_k_c2 = Pc_k.gather(2, c2.unsqueeze(-1)).squeeze(-1)  # (M,1326)

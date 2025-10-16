@@ -20,7 +20,7 @@ def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
 
 @lru_cache(maxsize=1)
 def combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
-    """Return [52, 52] tensor mapping unordered card pairs to combo indices."""
+    """Return [52, 52] long tensor mapping unordered card pairs to combo indices."""
     lookup = torch.full((52, 52), -1, dtype=torch.long)
     combos = hand_combos_tensor()
     for idx, (c1, c2) in enumerate(combos.tolist()):
@@ -43,7 +43,7 @@ def combo_index(card_a: int, card_b: int) -> int:
 
 def mask_conflicting_combos(
     occupied_cards: torch.Tensor,
-    device: torch.device,
+    device: torch.device | None = None,
 ) -> torch.Tensor:
     """
     Return [1326] bool mask where True means combo does NOT intersect occupied cards.
@@ -63,7 +63,7 @@ def mask_conflicting_combos(
 
 @lru_cache(maxsize=1)
 def combo_to_onehot_tensor(device: torch.device | None = None) -> torch.Tensor:
-    """Return [1326, 52] tensor of one-hot encoded combos."""
+    """Return [1326, 52] bool tensor of one-hot encoded combos."""
     combos = hand_combos_tensor(device=device)  # [1326, 2]
     combo_onehot = torch.zeros(1326, 52, dtype=bool, device=device)
     idx = torch.arange(1326, device=device)
