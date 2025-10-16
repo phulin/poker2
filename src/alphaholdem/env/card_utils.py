@@ -75,5 +75,5 @@ def combo_to_onehot_tensor(device: torch.device | None = None) -> torch.Tensor:
 @lru_cache(maxsize=1)
 def combo_blocking_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 1326] tensor of blocked hands for each combo."""
-    combo_onehot = combo_to_onehot_tensor(device=device).int()
-    return (combo_onehot @ combo_onehot.T).clamp_(0, 1).to(torch.bool)
+    combo_onehot = combo_to_onehot_tensor(device=device).float()
+    return (combo_onehot @ combo_onehot.T).clamp_(0, 1) > 0.5
