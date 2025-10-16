@@ -623,9 +623,7 @@ class CFRManager:
 
         # (debug assertions removed)
 
-        rewards, dones, _, _, _ = self.env.step_bins(
-            full_actions, bet_bins=self.bet_bins
-        )
+        self.env.step_bins(full_actions, bet_bins=self.bet_bins)
         # Return children
         return children
 

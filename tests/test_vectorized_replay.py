@@ -646,9 +646,9 @@ class TestVectorizedReplayBuffer:
 
         # Step 2: opponents fold in env0, player 0 folds in env1
         actions_step2 = torch.tensor([0, 0], device=device)
-        rewards_step2, dones_step2, *_ = env.step_bins(actions_step2)
+        rewards_step2, *_ = env.step_bins(actions_step2)
 
-        assert dones_step2.tolist() == [True, True]
+        assert env.done.tolist() == [True, True]
         assert rewards_step2[0] > 0  # Player 0 wins when opponent folds
         assert rewards_step2[1] < 0  # Player 0 loses when folding
 
@@ -656,7 +656,7 @@ class TestVectorizedReplayBuffer:
         batch_env1 = self._create_test_batch_single_step(1, buffer.num_bet_bins, device)
         batch_env1["action_indices"][0] = actions_step2[1]
         batch_env1["rewards"][0] = rewards_step2[1]
-        batch_env1["dones"][0] = dones_step2[1]
+        batch_env1["dones"][0] = env.done[1]
         buffer.add_transitions(
             embedding_data=batch_env1["embedding_data"],
             action_indices=batch_env1["action_indices"],

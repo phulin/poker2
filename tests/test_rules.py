@@ -526,5 +526,85 @@ def test_boundary_straight_cases():
     assert_all_compares(wheel, six_high, -1)  # 6-high beats wheel
 
 
+def test_rank_hands_orders_strong_hands():
+    """Ensure rank_hands orders all stronger combos on a quads board."""
+    board = torch.tensor(
+        [[C(8, 0), C(8, 1), C(8, 2), C(0, 0), C(1, 0)]],
+        dtype=torch.long,
+    )
+    ranks, _ = rules.rank_hands(board)
+    lookup = rules.combo_lookup_tensor()
+
+    def combo_idx(a: int, b: int) -> int:
+        x, y = sorted((a, b))
+        return int(lookup[x, y].item())
+
+    ten_club = C(8, 3)
+    # All hands that can beat (or tie) flushes and overfulls on this board
+    # i.e., all the quads with kicker, boats, flushes, and all full house/straight/flushes above, strongest downward
+    hole_desc = [
+        ("quads, ace kicker", combo_idx(ten_club, C(12, 1))),
+        ("quads, king kicker", combo_idx(ten_club, C(11, 2))),
+        ("quads, queen kicker", combo_idx(ten_club, C(10, 3))),
+        ("quads, jack kicker", combo_idx(ten_club, C(9, 3))),
+        ("quads, 5 kicker", combo_idx(ten_club, C(3, 1))),
+        ("aces full", combo_idx(C(12, 0), C(12, 3))),
+        ("kings full", combo_idx(C(11, 0), C(11, 3))),
+        ("ace-high flush", combo_idx(C(12, 0), C(2, 0))),
+        ("king-high flush", combo_idx(C(11, 0), C(2, 0))),
+        ("queen-high flush", combo_idx(C(10, 0), C(2, 0))),
+        ("jack-high flush", combo_idx(C(9, 0), C(2, 0))),
+        ("9-high flush", combo_idx(C(7, 0), C(2, 0))),
+        ("three Ts, ace king kicker", combo_idx(C(12, 1), C(11, 0))),
+        ("three Ts, ace kicker", combo_idx(C(12, 0), C(7, 3))),
+        ("three Ts, 7 kicker", combo_idx(C(5, 1), C(3, 1))),
+    ]
+    for (name1, idx1), (name2, idx2) in zip(hole_desc, hole_desc[1:]):
+        assert (
+            ranks[0, idx1] > ranks[0, idx2]
+        ), f"{name1} should be stronger than {name2}"
+
+
+def test_rank_hands_orders_weak_hands():
+    """
+    Ensure rank_hands orders all weaker hole-card combos on a relatively dry board,
+    including all hand types up to flush/straight on this board.
+    """
+    # Board: 3♣ 4♣ 5♣ 9♦ A♦ (rainbow except two clubs, enables flush and straight possibilities)
+    board = torch.tensor(
+        [[C(1, 1), C(2, 1), C(3, 1), C(7, 2), C(12, 2)]],  # 3c 4c 5c 9d Ad
+        dtype=torch.long,
+    )
+    ranks, _ = rules.rank_hands(board)
+    lookup = rules.combo_lookup_tensor()
+
+    def combo_idx(a: int, b: int) -> int:
+        x, y = sorted((a, b))
+        return int(lookup[x, y].item())
+
+    # Construct hands to cover all relevant hand types on this board (strongest to weakest)
+    hole_desc = [
+        ("ace-high flush", combo_idx(C(9, 1), C(12, 1))),  # 9c Ac (3459A clubs)
+        ("nine-high flush", combo_idx(C(6, 1), C(9, 1))),  # 8c 9c (34589 clubs)
+        ("7-high straight", combo_idx(C(4, 0), C(5, 2))),  # 6h 7s: 3-4-5-6-7
+        (
+            "wheel straight",
+            combo_idx(C(0, 2), C(6, 3)),
+        ),  # 2d 8s: 2-3-4-5-A wheel straight
+        ("three of a kind, nines", combo_idx(C(7, 0), C(7, 3))),  # 9h 9s: sets
+        ("two pair, aces and fives", combo_idx(C(12, 0), C(3, 2))),  # Ac 5d
+        ("one pair, aces, king kicker", combo_idx(C(12, 3), C(11, 2))),  # As Kd
+        ("one pair, aces", combo_idx(C(12, 3), C(6, 2))),  # As 8d
+        ("one pair, nincs", combo_idx(C(7, 0), C(6, 2))),  # 9h 8s
+        ("king and queen high", combo_idx(C(11, 0), C(10, 3))),  # Kc Qs
+        ("ten high", combo_idx(C(8, 3), C(6, 0))),  # Ts 8h
+        ("eight high", combo_idx(C(6, 0), C(5, 0))),  # 8h 7h (lowest comp hand)
+    ]
+    for (name1, idx1), (name2, idx2) in zip(hole_desc, hole_desc[1:]):
+        assert (
+            ranks[0, idx1] > ranks[0, idx2]
+        ), f"{name1} should be stronger than {name2}"
+
+
 # Performance tests removed due to tensor size issues in create_comparison_vector
 # These would need to be fixed in the rules.py implementation

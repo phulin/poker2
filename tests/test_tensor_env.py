@@ -58,8 +58,8 @@ def test_n1_round_closure_and_deal():
     for _ in range(2):
         mask = env.legal_bins_mask()
         assert mask[0, 1]
-        r, d, *_ = env.step_bins(torch.tensor([1], device=env.device))
-        assert not d.item()
+        r, *_ = env.step_bins(torch.tensor([1], device=env.device))
+        assert not env.done.item()
     # After two actions with equal committed, street should be flop
     assert env.street.item() in (1, 2, 3)  # progressed
     # If on flop now, there should be 3 board cards set
@@ -560,14 +560,14 @@ def test_fold_reward_assignment():
     # Test 1: Player 0 folds in env 0 (should get negative reward)
     mask = env.legal_bins_mask()
     if mask[0, 0]:  # Can fold
-        r, d, *_ = env.step_bins(
+        r, *_ = env.step_bins(
             torch.tensor([0, -1], device=env.device)
         )  # Player 0 folds in env 0, no action in env 1
         assert (
             r[0].item() < 0
         ), f"Player 0 folded but got positive reward: {r[0].item()}"
-        assert d[0].item(), "Environment 0 should be done after player 0 folds"
-        assert not d[1].item(), "Environment 1 should not be done"
+        assert env.done[0].item(), "Environment 0 should be done after player 0 folds"
+        assert not env.done[1].item(), "Environment 1 should not be done"
 
     # Reset and test player 1 folding in env 0
     env.reset()
@@ -577,13 +577,15 @@ def test_fold_reward_assignment():
     for _ in range(3):  # Try a few steps to get player 1 to act
         mask = env.legal_bins_mask()
         if env.to_act[0].item() == 1 and mask[0, 0]:  # Player 1 can fold in env 0
-            r, d, *_ = env.step_bins(
+            r, *_ = env.step_bins(
                 torch.tensor([0, -1], device=env.device)
             )  # Player 1 folds in env 0, no action in env 1
             assert (
                 r[0].item() > 0
             ), f"Player 1 folded but got negative reward for us (Player 0): {r[0].item()}"
-            assert d[0].item(), "Environment 0 should be done after player 1 folds"
+            assert env.done[
+                0
+            ].item(), "Environment 0 should be done after player 1 folds"
             break
         elif mask[0, 1]:  # Can check/call
             env.step_bins(
@@ -644,8 +646,8 @@ def test_flop_showdown_skips_turn_river():
     # Play through preflop betting
     for _ in range(2):  # SB and BB actions
         actions = torch.tensor([1, 1], device=env.device)  # Check/call
-        _, d, *_ = env.step_bins(actions)
-        if d.all():
+        env.step_bins(actions)
+        if env.done.all():
             break
 
     # Should be on flop now (street 1)
@@ -775,10 +777,10 @@ def test_flop_showdown_with_betting():
             else:
                 actions.append(0)  # Fold
 
-        r, d, *_ = env.step_bins(torch.tensor(actions, device=env.device))
+        r, *_ = env.step_bins(torch.tensor(actions, device=env.device))
         steps += 1
 
-        if d.all():
+        if env.done.all():
             break
 
     # Should reach showdown

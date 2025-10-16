@@ -5,6 +5,8 @@ from typing import List
 
 import torch
 
+from alphaholdem.env.card_utils import combo_lookup_tensor, hand_combos_tensor
+from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 from alphaholdem.utils.profiling import profile
 
 # Card encoding: 0..51, rank = c % 13 (2..A), suit = c // 13 (0..3)
@@ -48,7 +50,76 @@ def unfold_conv1d_ones(input_tensor: torch.Tensor, kernel_size: int) -> torch.Te
     return torch.sum(unfolded, dim=-1)
 
 
-@profile
+def rank_hands(board: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rank all 1326 hands on a [N, 1326] batch of boards.
+
+    Args:
+        board: [N, 5] - batch of board card indices
+
+    Returns:
+        [N, 1326] - batch of hand ranks (higher number means stronger hand)
+        [N, 1326] - batch of sorted indices
+    """
+    N = board.size(0)
+    device = board.device
+
+    # Enumerate all possible 2-card poker hands
+    all_combos = torch.arange(NUM_HANDS, device=device)
+    # Get the [1326, 2] tensor mapping combo index to two card indices
+    combo_to_hand = hand_combos_tensor(device=device)
+    # Convert to suit and rank tensors for each hole card
+    combo_to_suits, combo_to_ranks = cards_to_onehot_indices(combo_to_hand)
+
+    # Construct a tensor of zeros, to be filled with ones for each card in each hand plus the board
+    hand_vectors = torch.zeros(N, NUM_HANDS, 4, 13, device=device)
+    # For each hand, set the relevant entries (hand holecards) to 1
+    for card_idx in range(2):
+        hand_vectors[
+            :, all_combos, combo_to_suits[:, card_idx], combo_to_ranks[:, card_idx]
+        ] = 1
+
+    # For each board, set the relevant entries (board cards) in all hand vectors to 1
+    board_suits, board_ranks = cards_to_onehot_indices(board)
+    hand_vectors[:, :, board_suits, board_ranks] = 1
+
+    # Compute the 26-field (4 bits per field) comparison vector for every hand+board in the batch
+    comparison_vectors = create_comparison_vector(hand_vectors)
+
+    # Add 1 so that -1 becomes 0 and 0..13 => 1..14 (so all values are >= 0 for bit packing)
+    cv = (comparison_vectors + 1).to(torch.long)  # [N, 1326, 26]
+
+    # Prepare offsets for bit-packing each 13-field group of 4 bits, most significant fields first
+    offsets = 4 * (12 - torch.arange(13, device=cv.device, dtype=torch.long))
+    # Pack the upper and lower 13 fields of the vector into two integers (lo, hi)
+    lo = ((cv[..., 13:26] & 0xF) << offsets).sum(dim=-1)
+    hi = ((cv[..., :13] & 0xF) << offsets).sum(dim=-1)
+
+    # Sort hands primarily by lo, then by hi (breaking ties)
+    sorted_lo = torch.argsort(lo, dim=1, stable=True)
+    hi_perm = hi.gather(1, sorted_lo)
+    sorted_hi = torch.argsort(hi_perm, dim=1, stable=True)
+    sorted_indices = sorted_lo.gather(1, sorted_hi)
+
+    # Sort lo and hi values with final permutation, for group identification
+    lo_sorted = lo.gather(1, sorted_indices)
+    hi_sorted = hi.gather(1, sorted_indices)
+
+    # A hand is the start of a new group (unique hand strength) if lo or hi changes from previous
+    is_group_start = (lo_sorted[:, :-1] != lo_sorted[:, 1:]) | (
+        hi_sorted[:, :-1] != hi_sorted[:, 1:]
+    )
+    # Always start with a group at the first position
+    is_group_start = torch.cat([torch.ones(N, 1, device=device), is_group_start], dim=1)
+    # Assign a unique increasing label (group id, i.e. rank) to each group
+    group_ids = torch.cumsum(is_group_start, dim=1, dtype=torch.long)
+
+    # Scatter those ranks (group_ids) back to the original hand order for each batch
+    result = torch.zeros(N, NUM_HANDS, dtype=torch.long, device=device)
+    result.scatter_(1, sorted_indices, group_ids)
+
+    return result, sorted_indices
+
+
 def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     """Create comparison vector for poker hand evaluation.
 

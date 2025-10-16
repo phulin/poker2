@@ -809,7 +809,7 @@ class HUNLTensorEnv:
                 after_betting_committed[:3],
             )
 
-        return rewards, self.done, self.to_act, new_streets, dealt_cards
+        return rewards, new_streets, dealt_cards
 
     def _print_debug_table(
         self,

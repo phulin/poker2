@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Tuple
 
 import torch
 
@@ -63,11 +62,18 @@ def mask_conflicting_combos(
 
 
 @lru_cache(maxsize=1)
+def combo_to_onehot_tensor(device: torch.device | None = None) -> torch.Tensor:
+    """Return [1326, 52] tensor of one-hot encoded combos."""
+    combos = hand_combos_tensor(device=device)  # [1326, 2]
+    combo_onehot = torch.zeros(1326, 52, dtype=bool, device=device)
+    idx = torch.arange(1326, device=device)
+    combo_onehot[idx, combos[:, 0]] = True
+    combo_onehot[idx, combos[:, 1]] = True
+    return combo_onehot
+
+
+@lru_cache(maxsize=1)
 def combo_blocking_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 1326] tensor of blocked hands for each combo."""
-    combos = hand_combos_tensor(device=device)  # [1326, 2]
-    combo_onehot = torch.zeros(1326, 52, dtype=torch.float32, device=device)
-    idx = torch.arange(1326, device=device)
-    combo_onehot[idx, combos[:, 0]] = 1
-    combo_onehot[idx, combos[:, 1]] = 1
+    combo_onehot = combo_to_onehot_tensor(device=device).int()
     return (combo_onehot @ combo_onehot.T).clamp_(0, 1).to(torch.bool)

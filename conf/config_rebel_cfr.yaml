@@ -46,6 +46,7 @@ search:
   enabled: true
   depth: 2
   iterations: 100
+  warm_start_iterations: 15
   branching: 4
   belief_samples: 16
   max_belief_enumeration: 0

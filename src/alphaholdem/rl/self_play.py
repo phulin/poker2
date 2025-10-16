@@ -984,11 +984,11 @@ class SelfPlayTrainer:
 
             # Take steps in all environments (tensor_env expects full-size tensors)
             # NOTE: THIS CHANGES self.tensor_env.to_act!!
-            rewards, dones, _, new_streets, dealt_cards = self.tensor_env.step_bins(
+            rewards, new_streets, dealt_cards = self.tensor_env.step_bins(
                 action_bins, legal_bins_amounts, legal_bins_mask, self.bet_bins
             )
             self.tensor_env.sanity_check(indices=active_indices, label="after step")
-            newly_done_mask = dones & active_mask
+            newly_done_mask = self.tensor_env.done & active_mask
 
             # After environment step, append any newly revealed non-action tokens
             if self.is_transformer and isinstance(
@@ -1031,7 +1031,7 @@ class SelfPlayTrainer:
                 our_logits_tensor = env_logits[env_active_we_act]
                 our_values_tensor = env_values[env_active_we_act]
                 our_rewards_tensor = rewards[env_active_we_act]
-                our_dones_tensor = dones[env_active_we_act]
+                our_dones_tensor = self.tensor_env.done[env_active_we_act]
                 our_legal_masks_tensor = legal_bins_mask[env_active_we_act]
 
                 # Track action type counts for metrics
@@ -1119,7 +1119,7 @@ class SelfPlayTrainer:
                 self.tensor_env.done[bad_indices] = True
 
             # If all environments are done, reset all of them and take credit for steps and trajectories collected
-            if dones.all():
+            if self.tensor_env.done.all():
                 if add_to_replay_buffer:
                     num_trajectories, _ = (
                         self.replay_buffer.finish_adding_trajectory_batches()
@@ -1134,7 +1134,10 @@ class SelfPlayTrainer:
                     print(f"=> Updating ELO from rewards", per_env_rewards)
 
                 self._update_elo_from_rewards(
-                    per_env_rewards, dones, opp_env_groups, all_opponent_snapshots
+                    per_env_rewards,
+                    self.tensor_env.done,
+                    opp_env_groups,
+                    all_opponent_snapshots,
                 )
 
                 steps_collected += batch_steps_collected

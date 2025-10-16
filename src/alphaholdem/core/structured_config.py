@@ -167,6 +167,7 @@ class SearchConfig:
     enabled: bool = False
     depth: int = 2
     iterations: int = 100
+    warm_start_iterations: int = 15
     branching: int = 4
     belief_samples: int = 16
     max_belief_enumeration: int = 0  # 0 -> use belief_samples uniformly

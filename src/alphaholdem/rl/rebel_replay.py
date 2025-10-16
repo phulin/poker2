@@ -91,68 +91,32 @@ class RebelReplayBuffer:
 
     def add_batch(self, batch: RebelBatch) -> None:
         """Append a batch of RebelBatch samples to the replay buffer."""
-        # Accepts a RebelBatch object as input.
-        batch_size = batch.features.shape[0]
+        batch_size = len(batch)
         if batch_size == 0:
             return
 
         if batch_size >= self.capacity:
-            keep_start = batch_size - self.capacity
-            batch = RebelBatch(
-                features=batch.features[keep_start:],
-                policy_targets=batch.policy_targets[keep_start:],
-                value_targets=batch.value_targets[keep_start:],
-                legal_masks=batch.legal_masks[keep_start:],
-                acting_players=batch.acting_players[keep_start:],
-            )
+            batch = batch[-self.capacity :]
             batch_size = self.capacity
-            insert_start = 0
-            insert_end = self.capacity
-        else:
-            insert_start = self.position
-            insert_end = self.position + batch_size
 
-        if insert_end <= self.capacity:
-            sl = slice(insert_start, insert_end)
-            self.features[sl] = batch.features.to(self.device, dtype=self.dtype)
-            self.policy_targets[sl] = batch.policy_targets.to(
-                self.device, dtype=self.dtype
-            )
-            self.value_targets[sl] = batch.value_targets.to(
-                self.device, dtype=self.dtype
-            )
-            self.legal_masks[sl] = batch.legal_masks.to(self.device)
-            self.acting_players[sl] = batch.acting_players.to(self.device)
-        else:
-            first = self.capacity - insert_start
-            remainder = insert_end % self.capacity
-            sl1 = slice(insert_start, self.capacity)
-            sl2 = slice(0, remainder)
-            self.features[sl1] = batch.features[:first].to(
-                self.device, dtype=self.dtype
-            )
-            self.policy_targets[sl1] = batch.policy_targets[:first].to(
-                self.device, dtype=self.dtype
-            )
-            self.value_targets[sl1] = batch.value_targets[:first].to(
-                self.device, dtype=self.dtype
-            )
-            self.legal_masks[sl1] = batch.legal_masks[:first].to(self.device)
-            self.acting_players[sl1] = batch.acting_players[:first].to(self.device)
-            if remainder > 0:
-                self.features[sl2] = batch.features[first:].to(
-                    self.device, dtype=self.dtype
-                )
-                self.policy_targets[sl2] = batch.policy_targets[first:].to(
-                    self.device, dtype=self.dtype
-                )
-                self.value_targets[sl2] = batch.value_targets[first:].to(
-                    self.device, dtype=self.dtype
-                )
-                self.legal_masks[sl2] = batch.legal_masks[first:].to(self.device)
-                self.acting_players[sl2] = batch.acting_players[first:].to(self.device)
+        features = batch.features.to(self.device, dtype=self.dtype)
+        policy_targets = batch.policy_targets.to(self.device, dtype=self.dtype)
+        value_targets = batch.value_targets.to(self.device, dtype=self.dtype)
+        legal_masks = batch.legal_masks.to(self.device)
+        acting_players = batch.acting_players.to(self.device)
 
-        self.position = insert_end % self.capacity
+        insert_start = self.position
+        dest_indices = (
+            torch.arange(batch_size, device=self.device) + insert_start
+        ) % self.capacity
+
+        self.features[dest_indices] = features
+        self.policy_targets[dest_indices] = policy_targets
+        self.value_targets[dest_indices] = value_targets
+        self.legal_masks[dest_indices] = legal_masks
+        self.acting_players[dest_indices] = acting_players
+
+        self.position = (insert_start + batch_size) % self.capacity
         self.size = min(self.size + batch_size, self.capacity)
 
     def sample(self, batch_size: int, generator: Optional[torch.Generator] = None):
