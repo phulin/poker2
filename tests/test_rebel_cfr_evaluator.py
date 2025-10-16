@@ -433,26 +433,23 @@ def test_compute_expected_values_matches_child_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=2)
-    roots = torch.arange(evaluator.search_batch_size, device=env.device)
+    roots = torch.arange(evaluator.search_batch_size)
     evaluator.initialize_search(env, roots)
+
+    num_actions = evaluator.num_actions
+    legal_mask = torch.ones((evaluator.total_nodes, num_actions), dtype=torch.bool)
+    monkeypatch.setattr(
+        evaluator.env,
+        "legal_bins_mask",
+        lambda bet_bins=None: legal_mask.clone(),
+    )
+
     evaluator.construct_subgame()
     evaluator.initialize_policy_and_beliefs()
     evaluator.set_leaf_values()
 
-    num_actions = evaluator.num_actions
-    legal_mask = torch.ones(
-        (evaluator.total_nodes, num_actions),
-        dtype=torch.bool,
-        device=env.device,
-    )
-    monkeypatch.setattr(
-        evaluator.env,
-        "legal_bins_mask",
-        lambda bet_bins=None: legal_mask,
-    )
-
-    root_index = torch.tensor([0], device=env.device)
-    child_indices = torch.arange(1, evaluator.total_nodes, device=env.device)
+    root_index = torch.tensor([0])
+    child_indices = torch.arange(1, evaluator.total_nodes)
 
     evaluator.valid_mask[root_index] = True
     evaluator.valid_mask[child_indices] = True

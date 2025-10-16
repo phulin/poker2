@@ -23,7 +23,7 @@ T_WARM = 15
 
 @dataclass
 class PublicBeliefState:
-    """Public belief state for both players (? TODO)."""
+    """Public belief state for both players."""
 
     env: HUNLTensorEnv
     beliefs: torch.Tensor  # [batch_size, num_players, NUM_HANDS]
@@ -246,6 +246,7 @@ class RebelCFREvaluator:
             offset_next = self.depth_offsets[depth + 1]
 
             action_bins = torch.full((M,), -1, dtype=torch.long, device=self.device)
+            # don't currently have a way to get a subset of the masks
             legal_masks = self.env.legal_bins_mask()
             for action in range(self.num_actions):
                 current_legal_mask = (
