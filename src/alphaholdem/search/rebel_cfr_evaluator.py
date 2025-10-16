@@ -227,17 +227,9 @@ class RebelCFREvaluator:
             rewards, _, _ = self.env.step_bins(action_bins, legal_masks=legal_masks)
             self.leaf_mask[action_bins >= 0] |= self.env.done[action_bins >= 0]
 
-            # FIXME: Assign rewards correctly based on beliefs in showdown (not just in fold)
             finished = (action_bins >= 0) & self.env.done
             self.values[finished, 0] = rewards[finished].view(-1, 1)
             self.values[finished, 1] = -rewards[finished].view(-1, 1)
-
-            # On showdown, override the rewards with the belief-based EV.
-            # The env has hands it uses for showdown, but those are fake.
-            showdown = torch.where(self.env.street == 3)[0]
-            showdown_values = self._showdown_value(showdown)
-            self.values[showdown, 0] = showdown_values.view(-1, 1)
-            self.values[showdown, 1] = -showdown_values.view(-1, 1)
 
         leaf_start = self.depth_offsets[self.max_depth]
         leaf_end = self.depth_offsets[self.max_depth + 1]
@@ -369,6 +361,7 @@ class RebelCFREvaluator:
     def set_leaf_values(self) -> None:
         """Populate cached per-hand payoffs for nodes marked as leaves."""
 
+        # Set estimated leaf value from model for non-terminal nodes.
         leaf_indices = torch.where(self.leaf_mask & ~self.env.done)[0]
         if leaf_indices.numel() == 0:
             return
@@ -376,6 +369,17 @@ class RebelCFREvaluator:
         features = self.encode_current_states(leaf_indices)
         model_output = self.model(features)
         self.values[leaf_indices] = model_output.hand_values
+
+        # Fold values were set in construct_subgame and don't need updating.
+        # Showdown values need to be updated based on beliefs.
+        # Override the rewards with the belief-based EV.
+        # The env has hands it uses for showdown, but those are fake.
+        showdown = torch.where(self.env.street == 3)[0]
+        assert self.env.done[showdown].all()
+        assert self.leaf_mask[showdown].all()
+        showdown_values = self._showdown_value(showdown)
+        self.values[showdown, 0] = showdown_values.view(-1, 1)
+        self.values[showdown, 1] = -showdown_values.view(-1, 1)
 
     def compute_expected_values(self) -> torch.Tensor:
         """Back up leaf hand values to their ancestors under the current policy."""
