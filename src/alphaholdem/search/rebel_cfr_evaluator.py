@@ -841,7 +841,7 @@ class RebelCFREvaluator:
             - self.env.starting_stack
         )
 
-        return EV_hand * potential[:, None]
+        return EV_hand * potential[:, None] / self.env.scale
 
     def _valid_nodes(
         self, bottom_up: bool = False
