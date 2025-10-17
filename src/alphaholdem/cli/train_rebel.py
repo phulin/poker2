@@ -9,6 +9,7 @@ search-driven supervision metrics to Weights & Biases.
 from __future__ import annotations
 
 from dataclasses import asdict
+import glob
 import os
 import time
 from contextlib import nullcontext
@@ -28,6 +29,38 @@ from alphaholdem.core.structured_config import (
 )
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.utils.training_utils import print_preflop_range_grid
+
+
+def _cleanup_old_checkpoints(checkpoint_dir: str, current_path: str) -> None:
+    """Clean up old checkpoints, keeping only best_model.pt and latest checkpoint."""
+    # Resolve symlinks to get the actual checkpoint file
+    actual_current_path = os.path.realpath(current_path)
+
+    if not os.path.exists(checkpoint_dir):
+        return
+
+    # Find all checkpoint files
+    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "rebel_step_*.pt"))
+
+    # Keep best_model.pt and the current checkpoint
+    files_to_keep = {
+        os.path.join(checkpoint_dir, "latest_model.pt"),
+        os.path.join(checkpoint_dir, "best_model.pt"),
+        actual_current_path,  # Keep the current checkpoint (resolved path)
+    }
+
+    # Remove old checkpoint files
+    deleted_count = 0
+    for file_path in checkpoint_files:
+        if file_path not in files_to_keep:
+            try:
+                os.remove(file_path)
+                deleted_count += 1
+            except OSError as e:
+                print(f"Warning: Could not delete {file_path}: {e}")
+
+    if deleted_count > 0:
+        print(f"Cleaned up {deleted_count} old checkpoint(s)")
 
 
 def _device_from_config(cfg: Config) -> torch.device:
@@ -148,6 +181,11 @@ def train_rebel(cfg: Config) -> None:
                 trainer.save_checkpoint(
                     os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"), metrics.step
                 )
+
+                # Clean up old checkpoints if economize_checkpoints is enabled
+                if cfg.economize_checkpoints:
+                    _cleanup_old_checkpoints(cfg.checkpoint_dir, ckpt_path)
+
                 print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
                 print_preflop_range_grid(trainer, metrics.step)
 

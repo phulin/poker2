@@ -9,6 +9,7 @@ num_envs: 512
 device: cuda
 checkpoint_dir: "checkpoints-rebel"
 checkpoint_interval: 50
+economize_checkpoints: true
 resume_from: null
 use_wandb: true
 wandb_project: "poker-rebel-cfr"
