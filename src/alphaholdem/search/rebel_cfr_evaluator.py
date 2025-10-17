@@ -150,10 +150,10 @@ class RebelCFREvaluator:
             self.total_nodes, dtype=torch.bool, device=self.device
         )
 
-        # Policy probs are stored in the destination node.
         self.policy_probs = torch.zeros(
             self.total_nodes,
             NUM_HANDS,
+            self.num_actions,
             device=self.device,
             dtype=self.float_dtype,
         )
@@ -303,6 +303,7 @@ class RebelCFREvaluator:
 
     def _propagate_beliefs(
         self,
+        action: int,
         current_legal_indices: torch.Tensor,
         next_legal_indices: torch.Tensor,
     ) -> None:
@@ -310,7 +311,7 @@ class RebelCFREvaluator:
         legal_actor = self.env.to_act[current_legal_indices]
         self.beliefs[next_legal_indices, legal_actor] = (
             self.beliefs[current_legal_indices, legal_actor]
-            * self.policy_probs[next_legal_indices]
+            * self.policy_probs[current_legal_indices, :, action]
         )
         self.beliefs[next_legal_indices, 1 - legal_actor] = self.beliefs[
             current_legal_indices, 1 - legal_actor
@@ -358,6 +359,9 @@ class RebelCFREvaluator:
         for depth, current_indices in self._valid_nodes():
             probs = self._get_model_policy_probs(current_indices)
 
+            self.policy_probs[current_indices] = probs
+            self.policy_probs_avg[current_indices] = probs
+
             if depth >= self.max_depth:
                 continue
 
@@ -371,11 +375,9 @@ class RebelCFREvaluator:
                 if current_legal_indices.numel() == 0:
                     continue
                 next_legal_indices = next_indices[legal]
-
-                probs_legal = probs[legal]
-                self.policy_probs[next_legal_indices, :, action] = probs_legal
-                self.policy_probs_avg[next_legal_indices, :, action] = probs_legal
-                self._propagate_beliefs(current_legal_indices, next_legal_indices)
+                self._propagate_beliefs(
+                    action, current_legal_indices, next_legal_indices
+                )
 
         self._block_and_normalize_beliefs()
 
