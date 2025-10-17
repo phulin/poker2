@@ -226,5 +226,5 @@ class RebelCFRTrainer:
         ckpt = torch.load(path, map_location=self.device)
         self.model.load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
-        self.rng.set_state(ckpt["rng"].to(self.device))
+        # self.rng.set_state(ckpt["rng"].to(self.device))
         return int(ckpt["step"])
