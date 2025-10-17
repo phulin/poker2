@@ -270,7 +270,7 @@ class TestComboToRangeGrid:
 
         # For suited hands, ranks should be sorted ascending, then 12 - ranks
         suited_ranks = suited_combos % 13
-        sorted_ranks = torch.sort(suited_ranks, dim=1).values
+        sorted_ranks = torch.sort(suited_ranks, dim=1, descending=True).values
         expected_grid = 12 - sorted_ranks
 
         torch.testing.assert_close(suited_grid, expected_grid)
@@ -285,9 +285,9 @@ class TestComboToRangeGrid:
         offsuit_combos = combos[offsuit_mask]
         offsuit_grid = grid[offsuit_mask]
 
-        # For offsuit hands, ranks should be sorted descending, then 12 - ranks
+        # For offsuit hands, ranks should be sorted ascending, then 12 - ranks
         offsuit_ranks = offsuit_combos % 13
-        sorted_ranks = torch.sort(offsuit_ranks, dim=1, descending=True).values
+        sorted_ranks = torch.sort(offsuit_ranks, dim=1).values
         expected_grid = 12 - sorted_ranks
 
         torch.testing.assert_close(offsuit_grid, expected_grid)

@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 
 from alphaholdem.env.analyze_tensor_env import (
     PreflopAnalyzer,
+    RebelPreflopAnalyzer,
 )
 
 
@@ -65,7 +66,9 @@ def print_combined_tables(
     print()
 
 
-def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
+def print_preflop_range_grid(
+    trainer, step: int, title: Optional[str] = None, rebel=False
+):
     """
     Print preflop range grids for the given trainer and step.
 
@@ -78,18 +81,34 @@ def print_preflop_range_grid(trainer, step: int, title: Optional[str] = None):
     if title is None:
         title = f"Preflop Range Grid (Step {step})"
 
-    analyzer = PreflopAnalyzer(
-        trainer.model,
-        button=0,
-        starting_stack=trainer.cfg.env.stack,
-        sb=trainer.cfg.env.sb,
-        bb=trainer.cfg.env.bb,
-        bet_bins=trainer.cfg.env.bet_bins,
-        device=trainer.device,
-        rng=trainer.rng,
-        flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
-        popart_normalizer=getattr(trainer, "popart_normalizer", None),
-    )
+    if rebel:
+        analyzer = RebelPreflopAnalyzer(
+            trainer.model,
+            button=0,
+            starting_stack=trainer.cfg.env.stack,
+            sb=trainer.cfg.env.sb,
+            bb=trainer.cfg.env.bb,
+            bet_bins=trainer.cfg.env.bet_bins,
+            device=trainer.device,
+            rng=trainer.rng,
+            flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
+            popart_normalizer=getattr(trainer, "popart_normalizer", None),
+            cfr_iterations=trainer.cfg.search.cfr_iterations,
+            max_depth=trainer.cfg.search.max_depth,
+        )
+    else:
+        analyzer = PreflopAnalyzer(
+            trainer.model,
+            button=0,
+            starting_stack=trainer.cfg.env.stack,
+            sb=trainer.cfg.env.sb,
+            bb=trainer.cfg.env.bb,
+            bet_bins=trainer.cfg.env.bet_bins,
+            device=trainer.device,
+            rng=trainer.rng,
+            flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
+            popart_normalizer=getattr(trainer, "popart_normalizer", None),
+        )
 
     print(f"\n--- {title} ---")
 

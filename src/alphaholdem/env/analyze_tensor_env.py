@@ -13,9 +13,10 @@ from alphaholdem.env.card_utils import combo_lookup_tensor
 from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
 from alphaholdem.models.cnn.state_encoder import CNNStateEncoder
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
+from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS, RebelFFN
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
+from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator, PublicBeliefState
 
 RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
 SUITS = ["s", "h", "d", "c"]
@@ -36,7 +37,15 @@ class RebelStateEncoderWrapper:
 
     def encode_tensor_states(self, player: int, idxs: torch.Tensor) -> torch.Tensor:
         agents = torch.full_like(idxs, fill_value=player, dtype=torch.long)
-        return self.encoder.encode(idxs, agents)
+        hero_beliefs = torch.full_like(
+            idxs, fill_value=1.0 / NUM_HANDS, dtype=torch.float32
+        )
+        opp_beliefs = torch.full_like(
+            idxs, fill_value=1.0 / NUM_HANDS, dtype=torch.float32
+        )
+        return self.encoder.encode(
+            idxs, agents, hero_beliefs=hero_beliefs, opp_beliefs=opp_beliefs
+        )
 
 
 def create_state_encoder_for_model(
@@ -446,6 +455,183 @@ class PreflopAnalyzer:
             String representation of the preflop value grid
         """
         return self.get_preflop_grids_allin_response()["value"]
+
+
+class RebelPreflopAnalyzer(PreflopAnalyzer):
+    """Proper ReBeL preflop analyzer using uniform belief states and CFR search.
+
+    This analyzer correctly implements ReBeL by:
+    1. Using uniform belief states for both players (no private information leakage)
+    2. Running CFR search to compute proper policies
+    3. Generating range grids from the CFR-computed policies
+    """
+
+    def __init__(
+        self,
+        model: RebelFFN,
+        button: int = 0,
+        starting_stack: int = 1000,
+        sb: int = 5,
+        bb: int = 10,
+        bet_bins: List[int] = None,
+        device: torch.device = None,
+        rng: torch.Generator = None,
+        flop_showdown: bool = False,
+        popart_normalizer=None,
+        cfr_iterations: int = 100,
+        max_depth: int = 2,
+    ):
+        """Initialize the ReBeL analyzer with CFR search capabilities.
+
+        Args:
+            model: The trained RebelFFN model
+            button: Which player is the button
+            starting_stack: Starting stack size
+            sb: Small blind amount
+            bb: Big blind amount
+            bet_bins: List of bet bin values
+            device: Device to use
+            rng: Random number generator
+            flop_showdown: Whether to showdown after flop
+            popart_normalizer: Optional PopArt normalizer for denormalizing values
+            cfr_iterations: Number of CFR iterations to run
+            max_depth: Maximum search depth
+        """
+        if bet_bins is None:
+            bet_bins = [0.5, 0.75, 1.0, 1.5, 2.0]
+
+        if device is None:
+            device = torch.device("cpu")
+
+        if rng is None:
+            rng = torch.Generator(device=device)
+
+        self.model = model
+        self.device = device
+        self.popart_normalizer = popart_normalizer
+        self.cfr_iterations = cfr_iterations
+        self.max_depth = max_depth
+        self.combo_lookup = combo_lookup_tensor(device=self.device)
+
+        # Create single environment for CFR search
+        self.env = HUNLTensorEnv(
+            num_envs=1,  # Single environment for analysis
+            starting_stack=starting_stack,
+            sb=sb,
+            bb=bb,
+            default_bet_bins=bet_bins,
+            device=device,
+            rng=rng,
+            flop_showdown=flop_showdown,
+        )
+
+        # Set up CFR evaluator
+        self.cfr_evaluator = RebelCFREvaluator(
+            search_batch_size=1,  # Single environment
+            env_proto=self.env,
+            model=self.model,
+            bet_bins=bet_bins,
+            max_depth=max_depth,
+            cfr_iterations=cfr_iterations,
+            device=device,
+            float_dtype=torch.float32,
+            generator=rng,
+        )
+
+        # Cache the 1326 hand combinations for grid conversion
+        self.all_hands_str = create_1326_hand_combinations()
+        self.all_hands = torch.tensor(
+            [
+                (_card_str_to_int(hand[0]), _card_str_to_int(hand[1]))
+                for hand in self.all_hands_str
+            ],
+            dtype=torch.long,
+            device=device,
+        )
+
+        self.reset(button)
+
+    def reset(self, button: int):
+        """Reset the environment and CFR evaluator to initial state with uniform beliefs."""
+        # Reset environment
+        self.env.reset(
+            force_button=torch.tensor([button], dtype=torch.long, device=self.device),
+            force_deck=self.all_hands[:1],  # Use first hand as placeholder
+        )
+
+        # Create uniform belief state for both players
+        uniform_beliefs = torch.full(
+            (1, 2, NUM_HANDS),  # [batch_size, num_players, NUM_HANDS]
+            1.0 / NUM_HANDS,
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+        # Set up public belief state
+        self.pbs = PublicBeliefState(
+            env=self.env,
+            beliefs=uniform_beliefs,
+        )
+
+        # Reset CFR evaluator with uniform beliefs
+        self.cfr_evaluator.beliefs = uniform_beliefs
+        self.cfr_evaluator.env = self.env
+
+        self.current_index = 0
+        self.current_depth = 0
+
+    def get_probabilities_from_cfr(
+        self, seat: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Get probabilities and values by running CFR search with uniform beliefs.
+
+        Args:
+            seat: Seat position (0 for SB, 1 for BB)
+
+        Returns:
+            Tuple of (probabilities [1326, num_bet_bins], values [1326], legal_masks [1326, num_bet_bins])
+        """
+        # Run CFR search to compute policies
+        self.cfr_evaluator.initialize_search(
+            self.pbs.env,
+            torch.tensor([0], dtype=torch.long, device=self.device),
+            self.pbs.beliefs,
+        )
+        self.cfr_evaluator.self_play_iteration()
+
+        # Get the root node policy (index 0) [NUM_HANDS, num_actions]
+        root_policy = self.cfr_evaluator.policy_probs_avg[self.current_index]
+
+        # Get legal actions
+        legal_masks = self.env.legal_bins_mask()[self.current_index]  # [num_actions]
+        legal_masks = legal_masks[None, :].expand(NUM_HANDS, -1)
+        assert (root_policy[~legal_masks] == 0.0).all()
+
+        # Get values from CFR
+        root_values = self.cfr_evaluator.values[self.current_index, seat]  # [NUM_HANDS]
+
+        # Denormalize values if PopArt normalizer is available
+        if self.popart_normalizer is not None:
+            root_values = self.popart_normalizer.denormalize_value(root_values)
+
+        return root_policy, root_values, legal_masks
+
+    def get_probabilities(
+        self, seat: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Override to use CFR-computed probabilities instead of direct model inference."""
+        return self.get_probabilities_from_cfr(seat)
+
+    def step_sb_action(self, sb_action: str = "allin") -> None:
+        """Override to handle single environment CFR search."""
+        # For CFR-based analysis, we don't step individual actions
+        # Instead, we run CFR search from the current state
+        N, B = self.cfr_evaluator.search_batch_size, self.cfr_evaluator.num_actions
+        action = 0 if sb_action == "fold" else 1 if sb_action == "call" else B - 1
+        self.current_index = (
+            self.current_index + (action + 1) * B**self.current_depth * N
+        )
+        self.current_depth += 1
 
 
 def _card_str_to_int(card_str: str) -> int:
