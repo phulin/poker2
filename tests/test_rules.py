@@ -211,7 +211,7 @@ def test_all_same_suit():
     all_hearts = [C(12, 1), C(11, 1), C(10, 1), C(9, 1), C(8, 1), C(7, 1), C(5, 1)]
     # All spades: A-K-Q-J-10-9-6 (not a straight flush)
     all_spades = [C(12, 0), C(11, 0), C(10, 0), C(9, 0), C(8, 0), C(7, 0), C(4, 0)]
-    assert_all_compares(all_hearts, all_spades, 1)  # 7-high beats 6-high
+    assert_all_compares(all_hearts, all_spades, 0)  # 7 and 6 don't play
 
 
 def test_duplicate_cards_validation():

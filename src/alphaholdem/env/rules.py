@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 import random
 from typing import List
 
@@ -13,6 +14,20 @@ from alphaholdem.utils.profiling import profile
 
 RANKS = list(range(13))  # 0..12 means 2..A
 SUITS = list(range(4))
+
+
+class HandType(Enum):
+    NUM_HAND_TYPES = 10
+    STRAIGHT_FLUSH = 9
+    FOUR_OF_A_KIND = 8
+    FULL_HOUSE = 7
+    FLUSH = 6
+    STRAIGHT = 5
+    THREE_OF_A_KIND = 4
+    TWO_PAIR = 3
+    ONE_PAIR = 2
+    HIGH_CARD = 1
+    EMPTY = 0
 
 
 def new_shuffled_deck(rng: random.Random) -> List[int]:
@@ -38,7 +53,7 @@ def cards_to_onehot_indices(cards: torch.Tensor) -> tuple[torch.Tensor, torch.Te
     cards: tensor of any shape with integral dtype; returns tensors of same shape
     containing suit indices [0..3] and rank indices [0..12].
     """
-    cards = cards.to(torch.long)
+    cards = cards.to(torch.int)
     suits = cards // 13
     ranks = cards % 13
     return suits, ranks
@@ -86,35 +101,29 @@ def rank_hands(board: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     comparison_vectors = create_comparison_vector(hand_vectors)
 
     # Add 1 so that -1 becomes 0 and 0..13 => 1..14 (so all values are >= 0 for bit packing)
-    cv = (comparison_vectors + 1).to(torch.long)  # [N, 1326, 26]
+    cv = comparison_vectors.to(torch.int)  # [N, 1326, 6]
 
-    # Prepare offsets for bit-packing each 13-field group of 4 bits, most significant fields first
-    offsets = 4 * (12 - torch.arange(13, device=cv.device, dtype=torch.long))
-    # Pack the upper and lower 13 fields of the vector into two integers (lo, hi)
-    lo = ((cv[..., 13:26] & 0xF) << offsets).sum(dim=-1)
-    hi = ((cv[..., :13] & 0xF) << offsets).sum(dim=-1)
+    # Prepare offsets for bit-packing the 6-field group of 4 bits, most significant fields first
+    offsets = 4 * (5 - torch.arange(6, device=cv.device, dtype=torch.int))
+    packed = (cv << offsets[None, None, :]).sum(dim=-1)
 
     # Sort hands primarily by lo, then by hi (breaking ties)
-    sorted_lo = torch.argsort(lo, dim=1, stable=True)
-    hi_perm = hi.gather(1, sorted_lo)
-    sorted_hi = torch.argsort(hi_perm, dim=1, stable=True)
-    sorted_indices = sorted_lo.gather(1, sorted_hi)
+    sorted_indices = torch.argsort(packed, dim=1, stable=True)
 
     # Sort lo and hi values with final permutation, for group identification
-    lo_sorted = lo.gather(1, sorted_indices)
-    hi_sorted = hi.gather(1, sorted_indices)
+    sorted_packed = packed.gather(1, sorted_indices)
 
     # A hand is the start of a new group (unique hand strength) if lo or hi changes from previous
-    is_group_start = (lo_sorted[:, :-1] != lo_sorted[:, 1:]) | (
-        hi_sorted[:, :-1] != hi_sorted[:, 1:]
-    )
+    is_group_start = sorted_packed[:, :-1] != sorted_packed[:, 1:]
+
     # Always start with a group at the first position
     is_group_start = torch.cat([torch.ones(N, 1, device=device), is_group_start], dim=1)
+
     # Assign a unique increasing label (group id, i.e. rank) to each group
-    group_ids = torch.cumsum(is_group_start, dim=1, dtype=torch.long)
+    group_ids = torch.cumsum(is_group_start, dim=1, dtype=torch.int)
 
     # Scatter those ranks (group_ids) back to the original hand order for each batch
-    result = torch.zeros(N, NUM_HANDS, dtype=torch.long, device=device)
+    result = torch.zeros(N, NUM_HANDS, dtype=torch.int, device=device)
     result.scatter_(1, sorted_indices, group_ids)
 
     return result, sorted_indices
@@ -131,8 +140,13 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     """
     N = ab_batch.size(0)
     P = ab_batch.size(1)
-    dtype = torch.long
+    dtype = torch.int
     device = ab_batch.device
+
+    # 9 hands, 1 slot for hand type, 5 slots for kickers
+    result = torch.zeros(
+        N, P, HandType.NUM_HAND_TYPES.value, 6, device=device, dtype=dtype
+    )
 
     # Sort ranks by count (descending), then by rank (descending)
     # Use topk instead of full argsort for better performance
@@ -143,7 +157,7 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     )  # [N, P, 5] - only need top 5 for all hand types
     top_ranks_values = top_ranks_values >> 8  # Convert back to actual counts
 
-    # == 1. STRAIGHT FLUSH ==
+    # == 9. STRAIGHT FLUSH ==
     # Stack to [N, P, 4, 13] and check each for straight flush using a convolution with [1, 1, 1, 1]
     # Create a second tensor for straight-checking which copies the last rank column back to the beginning
     # For straight checking, pad/copy last rank (Ace) to the front for wheel
@@ -159,26 +173,37 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     sf_last = (sf_win_mask.to(windows.dtype) * windows).amax(
         dim=2, keepdim=True
     )  # [N, P, 1]
-    sf_ranks = torch.where(
-        sf_win_mask.any(dim=2, keepdim=True), sf_last, -1
+    has_sf = sf_win_mask.any(dim=2)
+    result[:, :, HandType.STRAIGHT_FLUSH.value, 0] = torch.where(
+        has_sf, HandType.STRAIGHT_FLUSH.value, 0
+    )
+    result[:, :, HandType.STRAIGHT_FLUSH.value, 1:2] = torch.where(
+        has_sf[:, :, None], sf_last, -1
     )  # [N, P, 1]
 
-    # == 2. FOUR OF A KIND ==
+    # == 8. FOUR OF A KIND ==
     has_quads_0 = (top_ranks_values[:, :, 0] >= 4).view(N, P, 1)
-    four_with_kickers = torch.where(
+    result[:, :, HandType.FOUR_OF_A_KIND.value, 0:1].masked_fill_(
+        has_quads_0, HandType.FOUR_OF_A_KIND.value
+    )
+    result[:, :, HandType.FOUR_OF_A_KIND.value, 1:3] = torch.where(
         has_quads_0,
         top_ranks_indices[:, :, :2],
-        -1,
-    )
+        0,
+    )  # [N, P, 2]
 
-    # == 3. FULL HOUSE ==
+    # == 7. FULL HOUSE ==
     has_triple_0 = (top_ranks_values[:, :, 0] >= 3).view(N, P, 1)
     has_pair_0 = (top_ranks_values[:, :, 0] >= 2).view(N, P, 1)
     has_pair_1 = (top_ranks_values[:, :, 1] >= 2).view(N, P, 1)
-    full_house = torch.where(
-        has_triple_0 & has_pair_1,
+    has_full_house = has_triple_0 & has_pair_1
+    result[:, :, HandType.FULL_HOUSE.value, 0:1].masked_fill_(
+        has_full_house, HandType.FULL_HOUSE.value
+    )
+    result[:, :, HandType.FULL_HOUSE.value, 1:3] = torch.where(
+        has_full_house,
         top_ranks_indices[:, :, :2],
-        -1,
+        0,
     )
 
     # == 4. FLUSH ==
@@ -200,10 +225,11 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     top_suit_ranks = top_suit_cards.argsort(dim=2, descending=True)[
         :, :, :5
     ]  # [N, P, 5]
-    flush = torch.where(
-        flush_mask.view(N, P, 1),
+    result[:, :, HandType.FLUSH.value, 0].masked_fill_(flush_mask, HandType.FLUSH.value)
+    result[:, :, HandType.FLUSH.value, 1:6] = torch.where(
+        flush_mask[:, :, None],
         top_suit_ranks,
-        -1,
+        0,
     )
 
     # == 5. STRAIGHT ==
@@ -213,54 +239,60 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     )  # [N, P, 14]
     conv_straight = unfold_conv1d_ones(rank_presence_straight, 5)
     straight_mask = torch.amax(conv_straight, dim=2) == 5  # [N, P]
-    straight_high = conv_straight.argmax(dim=2)  # [N, P]
-    straight = torch.where(
+    straight_low = conv_straight.argmax(dim=2)  # [N, P]
+    result[:, :, HandType.STRAIGHT.value, 0].masked_fill_(
+        straight_mask, HandType.STRAIGHT.value
+    )
+    result[:, :, HandType.STRAIGHT.value, 1] = torch.where(
         straight_mask,
-        straight_high,
-        -1,
+        straight_low,
+        0,
+    )
+
+    # == 4. THREE OF A KIND ==
+    has_three = (top_ranks_values[:, :, 0] >= 3).view(N, P, 1)
+    result[:, :, HandType.THREE_OF_A_KIND.value, 0:1].masked_fill_(
+        has_three, HandType.THREE_OF_A_KIND.value
+    )
+    result[:, :, HandType.THREE_OF_A_KIND.value, 1:4] = torch.where(
+        has_three,
+        top_ranks_indices[:, :, :3],
+        0,
+    )
+
+    # == 3. TWO PAIR ==
+    has_two_pair = (top_ranks_values[:, :, 0] >= 2).view(N, P, 1) & (
+        top_ranks_values[:, :, 1] >= 2
     ).view(N, P, 1)
-
-    # == 6. THREE OF A KIND ==
-    three_with_kickers = torch.where(
-        has_triple_0,
+    result[:, :, HandType.TWO_PAIR.value, 0:1].masked_fill_(
+        has_two_pair, HandType.TWO_PAIR.value
+    )
+    result[:, :, HandType.TWO_PAIR.value, 1:4] = torch.where(
+        has_two_pair,
         top_ranks_indices[:, :, :3],
-        -1,
+        0,
     )
 
-    # == 7. TWO PAIR ==
-    two_pair_with_kickers = torch.where(
-        has_pair_0 & has_pair_1,
-        top_ranks_indices[:, :, :3],
-        -1,
+    # == 2. ONE PAIR ==
+    has_pair_0 = (top_ranks_values[:, :, 0] >= 2).view(N, P, 1)
+    result[:, :, HandType.ONE_PAIR.value, 0:1].masked_fill_(
+        has_pair_0, HandType.ONE_PAIR.value
     )
-
-    # == 8. ONE PAIR ==
-    one_pair_with_kickers = torch.where(
+    result[:, :, HandType.ONE_PAIR.value, 1:5] = torch.where(
         has_pair_0,
         top_ranks_indices[:, :, :4],
-        -1,
+        0,
     )
 
-    # == 9. HIGH CARD ==
+    # == 1. HIGH CARD ==
     high_card_with_kickers = top_ranks_indices[:, :, :5]
+    result[:, :, HandType.HIGH_CARD.value, 0] = 1
+    result[:, :, HandType.HIGH_CARD.value, 1:6] = high_card_with_kickers
 
-    # Concatenate all hand types
-    compare = torch.cat(
-        [
-            sf_ranks,
-            four_with_kickers,
-            full_house,
-            flush,
-            straight,
-            three_with_kickers,
-            two_pair_with_kickers,
-            one_pair_with_kickers,
-            high_card_with_kickers,
-        ],
-        dim=2,
-    )
-
-    return compare
+    first_nonzero_row = result[:, :, :, 0].argmax(dim=2)
+    return result.gather(
+        2, first_nonzero_row[:, :, None, None].expand(-1, -1, -1, 6)
+    ).squeeze(2, 3)
 
 
 def debug_comparison_vector(compare: torch.Tensor, hand_index: int = 0) -> str:
@@ -333,8 +365,8 @@ def compare_7(a_cards: List[int], b_cards: List[int]) -> int:
     assert len(b_cards) == 7, f"Expected 7 cards for hand B, got {len(b_cards)}"
 
     # Convert card lists to one-hot planes
-    a_onehot = torch.zeros(4, 13, dtype=torch.long)
-    b_onehot = torch.zeros(4, 13, dtype=torch.long)
+    a_onehot = torch.zeros(4, 13, dtype=torch.int)
+    b_onehot = torch.zeros(4, 13, dtype=torch.int)
 
     for card in a_cards:
         suit_idx = card // 13
@@ -365,18 +397,12 @@ def compare_7_single_batch(ab_batch: torch.Tensor) -> torch.Tensor:
     assert ab_batch.dtype == torch.bool
 
     # Create comparison vector
-    compare = create_comparison_vector(ab_batch)  # [N, 2, 20]
-    # print(debug_comparison_vector(compare))
+    compare = create_comparison_vector(ab_batch)  # [N, 2, 6]
 
-    # Compare hands
-    diff = compare[:, 0, :] - compare[:, 1, :]  # [N, 20]
-    diff_nonzero = (diff != 0).long()  # [N, 20]
-    first_nonzero = diff_nonzero.argmax(dim=1)  # [N]
-    has_nonzero = diff_nonzero.any(dim=1)  # [N]
-    # Gather the first nonzero value for each row
-    first_values = torch.gather(diff, 1, first_nonzero.unsqueeze(1)).squeeze(1)  # [N]
-    # If no nonzero, set to 0
-    return torch.where(has_nonzero, first_values.clamp(-1, 1), 0)
+    offsets = 4 * (5 - torch.arange(6, device=compare.device, dtype=torch.int))
+    packed = (compare << offsets[None, None, :]).sum(dim=-1)
+
+    return (packed[:, 0] - packed[:, 1]).clamp(-1, 1)
 
 
 def compare_7_batches(
