@@ -106,9 +106,9 @@ class RebelCFRTrainer:
         cpu_rng = torch.Generator(device="cpu")
         if self.cfg.seed is not None:
             cpu_rng.manual_seed(self.cfg.seed)
+            self.rng.manual_seed(self.cfg.seed)
         self.model.init_weights(cpu_rng)
         self.model.to(self.device)
-        self.rng.set_state(cpu_rng.get_state().to(self.device))
 
         # Optimizer & loss
         self.optimizer = torch.optim.AdamW(
