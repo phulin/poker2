@@ -865,10 +865,10 @@ def test_showdown_value_matches_reference_on_diverse_boards(
 
 
 def test_self_play_iteration_returns_public_belief_state() -> None:
-    evaluator, env = make_evaluator(batch_size=1, max_depth=1)
+    evaluator, env = make_evaluator(batch_size=2, max_depth=1)
     roots = torch.arange(evaluator.search_batch_size, device=env.device)
     evaluator.initialize_search(env, roots)
-    evaluator.warm_start_iterations = 0
+    # evaluator.warm_start_iterations = 0
     evaluator.cfr_iterations = 2
     evaluator.generator = torch.Generator(device=env.device)
     evaluator.generator.manual_seed(1)
