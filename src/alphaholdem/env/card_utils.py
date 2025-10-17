@@ -73,6 +73,19 @@ def combo_to_onehot_tensor(device: torch.device | None = None) -> torch.Tensor:
 
 
 @lru_cache(maxsize=1)
+def combo_to_range_grid(device: torch.device | None = None) -> torch.Tensor:
+    """Return [1326, 2] tensor of range grid index (suited/offsuit) for each combo."""
+    combos = hand_combos_tensor(device=device)  # [1326, 2]
+    combos_suited = combos[:, 0] // 13 == combos[:, 1] // 13
+    combo_ranks = combos % 13
+    combo_ranks_lower = combo_ranks.sort(dim=1).values
+    combo_ranks_upper = combo_ranks_lower.flip(dims=(1,))
+    return 12 - torch.where(
+        combos_suited[:, None], combo_ranks_upper, combo_ranks_lower
+    )
+
+
+@lru_cache(maxsize=1)
 def combo_blocking_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 1326] tensor of blocked hands for each combo."""
     combo_onehot = combo_to_onehot_tensor(device=device).float()
