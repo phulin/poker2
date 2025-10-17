@@ -15,7 +15,6 @@ from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_replay import RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator, T_WARM
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
-from alphaholdem.utils.model_context import model_eval
 
 
 @dataclass
@@ -109,10 +108,13 @@ class RebelCFRTrainer:
             cpu_rng.manual_seed(self.cfg.seed)
         self.model.init_weights(cpu_rng)
         self.model.to(self.device)
+        self.rng.set_state(cpu_rng.get_state().to(self.device))
 
         # Optimizer & loss
-        self.optimizer = torch.optim.Adam(
-            self.model.parameters(), lr=cfg.train.learning_rate
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=cfg.train.learning_rate,
+            weight_decay=cfg.train.weight_decay,
         )
         self.loss_fn = RebelSupervisedLoss(
             policy_weight=1.0,
@@ -213,6 +215,7 @@ class RebelCFRTrainer:
         state = {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "rng": self.rng.get_state(),
             "step": step,
         }
         torch.save(state, path)
@@ -221,4 +224,5 @@ class RebelCFRTrainer:
         ckpt = torch.load(path, map_location=self.device)
         self.model.load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
+        self.rng.set_state(ckpt["rng"].to(self.device))
         return int(ckpt["step"])

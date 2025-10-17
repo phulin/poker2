@@ -782,6 +782,7 @@ def test_showdown_value_uniform_beliefs_matches_reference() -> None:
     expected = compute_reference_showdown_ev(
         evaluator.env.board_indices[0], opp_beliefs, potential
     )
+    expected /= evaluator.env.scale
 
     actual = evaluator._showdown_value(idx).squeeze(0)
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
@@ -797,6 +798,7 @@ def test_showdown_value_single_hand_belief_returns_potential() -> None:
     expected = compute_reference_showdown_ev(
         evaluator.env.board_indices[0], opp_beliefs, potential
     )
+    expected = expected / evaluator.env.scale
 
     actual = evaluator._showdown_value(idx).squeeze(0)
     torch.testing.assert_close(actual, expected)
@@ -809,6 +811,7 @@ def test_showdown_value_all_ties_returns_half_potential() -> None:
     expected = compute_reference_showdown_ev(
         evaluator.env.board_indices[0], opp_beliefs, potential
     )
+    expected = expected / evaluator.env.scale
     actual = evaluator._showdown_value(idx).squeeze(0)
     board_mask = mask_conflicting_combos(evaluator.env.board_indices[0])
     torch.testing.assert_close(
@@ -855,6 +858,7 @@ def test_showdown_value_matches_reference_on_diverse_boards(
     expected = compute_reference_showdown_ev(
         evaluator.env.board_indices[0], opp_beliefs, potential
     )
+    expected = expected / evaluator.env.scale
     actual = evaluator._showdown_value(idx).squeeze(0)
 
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
