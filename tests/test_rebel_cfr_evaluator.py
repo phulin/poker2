@@ -266,7 +266,7 @@ def test_initialize_policy_respects_legal_mask(monkeypatch: pytest.MonkeyPatch) 
     )
 
     # Initialize legal_masks before calling initialize_policy_and_beliefs
-    evaluator.legal_masks = evaluator.env.legal_bins_mask()
+    evaluator.legal_mask = evaluator.env.legal_bins_mask()
 
     logits = torch.arange(float(num_actions), dtype=env.float_dtype)
     evaluator.model = MockModel(logits=logits)  # type: ignore[assignment]
@@ -414,7 +414,7 @@ def test_initialize_beliefs_updates_child_nodes(
     )
 
     # Initialize legal_masks before calling initialize_policy_and_beliefs
-    evaluator.legal_masks = evaluator.env.legal_bins_mask()
+    evaluator.legal_mask = evaluator.env.legal_bins_mask()
 
     evaluator.initialize_policy_and_beliefs()
 

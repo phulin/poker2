@@ -3,6 +3,7 @@ from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState, RebelCFREvaluator
+from alphaholdem.utils.profiling import profile
 
 
 class RebelDataGenerator:
@@ -58,6 +59,7 @@ class RebelDataGenerator:
             padded.beliefs[src_indices] = pbs.beliefs
         return padded
 
+    @profile
     def generate_data(self) -> RebelBatch:
         batch_size = self.evaluator.search_batch_size
         root_indices = torch.arange(batch_size, device=self.device)

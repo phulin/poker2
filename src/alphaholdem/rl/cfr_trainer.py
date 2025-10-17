@@ -15,6 +15,7 @@ from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_replay import RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator, T_WARM
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
+from alphaholdem.utils.profiling import profile
 
 
 @dataclass
@@ -154,6 +155,7 @@ class RebelCFRTrainer:
         entropy = -(norm * norm.log()).sum(dim=-1).mean()
         return float(entropy.item())
 
+    @profile
     def _update_model(self) -> Optional[Dict[str, float]]:
         self.data_generator.generate_data()
         batch = self.buffer.sample(self.batch_size, generator=self.buffer_rng)
