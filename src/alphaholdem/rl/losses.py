@@ -774,20 +774,21 @@ class RebelSupervisedLoss(nn.Module):
         policy_loss = F.huber_loss(probs, policy_targets, delta=1.0)
         value_loss = F.mse_loss(hand_values, batch.value_targets)
 
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
         if self.entropy_coef != 0.0:
-            entropy = -(probs * log_probs).sum(dim=-1).mean()
+            entropy_loss = entropy
         else:
-            entropy = torch.tensor(0.0, dtype=logits.dtype, device=logits.device)
+            entropy_loss = torch.tensor(0.0, dtype=logits.dtype, device=logits.device)
 
         total_loss = (
             self.policy_weight * policy_loss
             + self.value_weight * value_loss
-            - self.entropy_coef * entropy
+            - self.entropy_coef * entropy_loss
         )
 
         return {
             "total_loss": total_loss,
-            "policy_loss": policy_loss.detach(),
-            "value_loss": value_loss.detach(),
-            "entropy": entropy.detach(),
+            "policy_loss": policy_loss.item(),
+            "value_loss": value_loss.item(),
+            "entropy": entropy.item(),
         }

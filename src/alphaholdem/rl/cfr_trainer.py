@@ -7,7 +7,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from alphaholdem.core.structured_config import Config, ValueHeadType
+from alphaholdem.core.structured_config import Config
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp import RebelFFN
@@ -177,10 +177,10 @@ class RebelCFRTrainer:
         self.optimizer.step()
 
         return {
-            "loss": float(loss.item()),
-            "policy_loss": float(loss_dict["policy_loss"].item()),
-            "value_loss": float(loss_dict["value_loss"].item()),
-            "entropy": float(loss_dict["entropy"].item()),
+            "loss": loss.item(),
+            "policy_loss": loss_dict["policy_loss"],
+            "value_loss": loss_dict["value_loss"],
+            "entropy": loss_dict["entropy"],
         }
 
     def train_step(self, step: int) -> TrainerMetrics:
