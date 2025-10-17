@@ -187,14 +187,9 @@ class RebelCFRTrainer:
         step_public = step + 1
         metrics = TrainerMetrics(step=step_public)
 
-        entropy_weighted = 0.0
-        total_samples = 0
-
         update_info = self._update_model()
 
-        # metrics.buffer_size = len(self.replay_buffer)
-        if total_samples > 0:
-            metrics.cfr_entropy = entropy_weighted / total_samples
+        metrics.buffer_size = len(self.buffer)
         if update_info is not None:
             metrics.update(update_info)
 
