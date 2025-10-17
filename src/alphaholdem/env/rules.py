@@ -222,7 +222,7 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     top_suit_cards = ab_batch.gather(2, flush_suit_expanded.unsqueeze(2)).squeeze(
         2
     )  # [N, P, 13]
-    top_suit_ranks = top_suit_cards.argsort(dim=2, descending=True)[
+    top_suit_ranks = top_suit_cards.int().argsort(dim=2, descending=True)[
         :, :, :5
     ]  # [N, P, 5]
     result[:, :, HandType.FLUSH.value, 0].masked_fill_(flush_mask, HandType.FLUSH.value)
