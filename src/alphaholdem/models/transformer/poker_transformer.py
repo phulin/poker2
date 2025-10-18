@@ -24,7 +24,6 @@ from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
 from alphaholdem.models.transformer.tokens import CLS_INDEX, HOLE0_INDEX, HOLE1_INDEX
-from alphaholdem.utils.profiling import profile
 
 
 class TransformerLayer(nn.Module):
@@ -195,7 +194,6 @@ class PokerTransformerV1(nn.Module, Model):
         sin = emb.sin()[None, None, :, :]
         return cos, sin
 
-    @profile
     def forward(
         self,
         structured_data: StructuredEmbeddingData,

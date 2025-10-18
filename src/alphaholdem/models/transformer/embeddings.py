@@ -86,7 +86,6 @@ class PokerFusedEmbedding(nn.Module):
             nn.Dropout(dropout),
         )
 
-    @profile
     def forward(self, data: StructuredEmbeddingData) -> torch.Tensor:
         """Return fused embeddings for all tokens in the batch."""
 

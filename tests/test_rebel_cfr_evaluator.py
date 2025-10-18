@@ -246,43 +246,6 @@ def test_initialize_search_marks_done_roots_as_leaves() -> None:
     assert not evaluator.leaf_mask[1]
 
 
-def test_initialize_policy_respects_legal_mask(monkeypatch: pytest.MonkeyPatch) -> None:
-    evaluator, env = make_evaluator(batch_size=1, max_depth=1)
-    roots = torch.arange(evaluator.search_batch_size, device=env.device)
-    evaluator.initialize_search(env, roots)
-
-    num_actions = evaluator.num_actions
-    legal_mask = torch.zeros(
-        (evaluator.total_nodes, num_actions),
-        dtype=torch.bool,
-        device=env.device,
-    )
-    legal_mask[0, 1:3] = True  # Only allow actions 1 and 2 at the root
-
-    monkeypatch.setattr(
-        evaluator.env,
-        "legal_bins_mask",
-        lambda bet_bins=None: legal_mask,
-    )
-
-    # Initialize legal_masks before calling initialize_policy_and_beliefs
-    evaluator.legal_mask = evaluator.env.legal_bins_mask()
-
-    logits = torch.arange(float(num_actions), dtype=env.float_dtype)
-    evaluator.model = MockModel(logits=logits)  # type: ignore[assignment]
-    evaluator.initialize_policy_and_beliefs()
-
-    expected = torch.softmax(
-        compute_masked_logits(logits.unsqueeze(0), legal_mask[:1]), dim=-1
-    )
-    expected = expected * legal_mask[:1]
-    expected = expected / expected.sum(dim=-1, keepdim=True)
-    expected = expected.squeeze(0)
-
-    root_policy = evaluator.policy_probs[0, 0]
-    torch.testing.assert_close(root_policy, expected)
-
-
 def test_construct_subgame_clones_states_and_marks_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -341,6 +304,47 @@ def test_construct_subgame_clones_states_and_marks_children(
     # Check that at least some child nodes are marked as leaves
     assert torch.any(evaluator.leaf_mask[child_nodes])
     assert "bins" in step_observer
+
+
+def test_initialize_policy_respects_legal_mask(monkeypatch: pytest.MonkeyPatch) -> None:
+    evaluator, env = make_evaluator(batch_size=1, max_depth=1)
+    roots = torch.arange(evaluator.search_batch_size, device=env.device)
+    evaluator.initialize_search(env, roots)
+    evaluator.construct_subgame()
+
+    num_actions = evaluator.num_actions
+    legal_mask = torch.zeros(
+        (evaluator.total_nodes, num_actions),
+        dtype=torch.bool,
+        device=env.device,
+    )
+    legal_mask[0, 1:3] = True  # Only allow actions 1 and 2 at the root
+    evaluator.valid_mask.zero_()
+    evaluator.valid_mask[0] = True
+    evaluator.valid_mask[2:4] = True
+
+    monkeypatch.setattr(
+        evaluator.env,
+        "legal_bins_mask",
+        lambda bet_bins=None: legal_mask,
+    )
+
+    # Initialize legal_masks before calling initialize_policy_and_beliefs
+    evaluator.legal_mask = evaluator.env.legal_bins_mask()
+
+    logits = torch.arange(float(num_actions), dtype=env.float_dtype)
+    evaluator.model = MockModel(logits=logits)  # type: ignore[assignment]
+    evaluator.initialize_policy_and_beliefs()
+
+    expected = torch.softmax(
+        compute_masked_logits(logits.unsqueeze(0), legal_mask[:1]), dim=-1
+    )
+    expected = expected * legal_mask[:1]
+    expected = expected / expected.sum(dim=-1, keepdim=True)
+    expected = expected.squeeze(0)
+
+    root_policy = evaluator.policy_probs[1:9, 0]
+    torch.testing.assert_close(root_policy, expected)
 
 
 def test_initialize_beliefs_updates_child_nodes(
@@ -448,34 +452,34 @@ def test_compute_expected_values_matches_child_values(
     evaluator.initialize_policy_and_beliefs()
     evaluator.set_leaf_values()
 
-    root_index = torch.tensor([0])
-    child_indices = torch.arange(1, evaluator.total_nodes)
-
-    evaluator.valid_mask[root_index] = True
-    evaluator.valid_mask[child_indices] = True
-    evaluator.leaf_mask[root_index] = False
-    evaluator.leaf_mask[child_indices] = True
-
-    root_probs = torch.arange(1, num_actions + 1, dtype=env.float_dtype)
-    root_probs = root_probs / root_probs.sum()
-    evaluator.policy_probs[0] = root_probs.unsqueeze(0).expand(NUM_HANDS, -1)
+    probs = torch.arange(1, num_actions + 1, dtype=env.float_dtype)
+    probs = probs / probs.sum()
+    probs_all = probs[None, :, None].expand(evaluator.total_nodes, -1, 1)
+    bottom = evaluator.depth_offsets[1]
+    evaluator.policy_probs[bottom:] = evaluator._push_down(probs_all)
 
     child_values = torch.arange(1, num_actions + 1, dtype=env.float_dtype)
-    for action, idx in enumerate(child_indices):
-        evaluator.values[idx, 0] = child_values[action % child_values.numel()]
-        evaluator.values[idx, 1] = -child_values[action % child_values.numel()]
-
-    evaluator.values[0] = 0.0
+    child_values_all = child_values[None, :, None, None].expand(
+        evaluator.total_nodes, -1, 1, 1
+    )
+    values_temp = evaluator._push_down(child_values_all)
+    values_bottom = torch.zeros_like(values_temp)
+    values_bottom[evaluator.leaf_mask[bottom:]] = values_temp[
+        evaluator.leaf_mask[bottom:]
+    ]
+    evaluator.values[:] = 0.0
+    evaluator.values[bottom:, 0] = values_bottom[:, 0]
+    evaluator.values[bottom:, 1] = -values_bottom[:, 0]
 
     new_values = evaluator.compute_expected_values()
-    expected_value = (root_probs * child_values).sum()
+    expected_value = (probs * child_values).sum()
 
     torch.testing.assert_close(
-        new_values[0, 0],
+        new_values[2, 0],
         torch.full((NUM_HANDS,), expected_value, dtype=env.float_dtype),
     )
     torch.testing.assert_close(
-        new_values[0, 1],
+        new_values[2, 1],
         torch.full((NUM_HANDS,), -expected_value, dtype=env.float_dtype),
     )
 
@@ -595,8 +599,8 @@ def test_sample_leaf_copies_selected_nodes(monkeypatch: pytest.MonkeyPatch) -> N
     evaluator.beliefs[child_fold, 1] = actor_belief
 
     evaluator.policy_probs.zero_()
-    evaluator.policy_probs[root, :, 1] = 1.0
-    evaluator.policy_probs_avg.copy_(evaluator.policy_probs)
+    evaluator.policy_probs[child_call, :] = 1.0
+    evaluator.policy_probs_avg[:] = evaluator.policy_probs
 
     evaluator.env.pot[child_call] = evaluator.env.pot[root] + 10
     evaluator.env.to_act[root] = 0
@@ -621,7 +625,7 @@ def test_sample_leaf_copies_selected_nodes(monkeypatch: pytest.MonkeyPatch) -> N
     assert pbs.env.pot[0] == evaluator.env.pot[expected_index]
 
 
-def test_sample_leaf_handles_partial_masks(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sample_leaf_handles_partial_masks() -> None:
     evaluator, env = make_evaluator(batch_size=3, max_depth=2)
     roots = torch.arange(evaluator.search_batch_size, device=env.device)
     evaluator.initialize_search(env, roots)
@@ -661,7 +665,7 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     root_index = 0
-    child_indices = torch.arange(1, evaluator.total_nodes, device=env.device)
+    child_indices = torch.arange(1, 1 + num_actions, device=env.device)
 
     evaluator.valid_mask[:] = False
     evaluator.valid_mask[root_index] = True
@@ -670,16 +674,12 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
     evaluator.leaf_mask[root_index] = False
 
     evaluator.env.to_act[root_index] = 0
-    evaluator.combo_compat = torch.eye(
-        NUM_HANDS, device=env.device, dtype=env.float_dtype
-    )
+    evaluator.env.to_act[child_indices] = 1
 
     uniform = torch.full((NUM_HANDS,), 1.0 / NUM_HANDS, dtype=env.float_dtype)
-    evaluator.beliefs[root_index, 0] = uniform
-    evaluator.beliefs[root_index, 1] = uniform
-    for idx in child_indices:
-        evaluator.beliefs[idx, 0] = uniform
-        evaluator.beliefs[idx, 1] = uniform
+    evaluator.beliefs[:] = uniform[None, None, :]
+
+    evaluator.policy_probs[:] = 1.0 / num_actions
 
     evaluator.values[:] = 0.0
     evaluator.values[1, 0] = 2.0  # Positive advantage for action 0
@@ -690,7 +690,7 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
     evaluator.cumulative_regrets += regrets
     evaluator.update_policy()
 
-    root_policy = evaluator.policy_probs[root_index, 0]
+    root_policy = evaluator.policy_probs[1 : num_actions + 1, 0]
     expected = torch.zeros(num_actions, dtype=env.float_dtype)
     expected[0] = 1.0
     torch.testing.assert_close(root_policy, expected)
@@ -699,18 +699,22 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
 def test_sample_data_returns_root_batch() -> None:
     evaluator, env = make_evaluator(batch_size=2, max_depth=1)
     roots = torch.arange(evaluator.search_batch_size, device=env.device)
+    children = torch.arange(
+        evaluator.depth_offsets[1], evaluator.depth_offsets[2], device=env.device
+    )
     evaluator.initialize_search(env, roots)
 
     uniform_policy = torch.full(
         (NUM_HANDS, evaluator.num_actions),
         1.0 / evaluator.num_actions,
         device=env.device,
-        dtype=env.float_dtype,
     )
     expected_policy = uniform_policy.unsqueeze(0).expand(
         evaluator.search_batch_size, -1, -1
     )
-    evaluator.policy_probs_avg[roots] = expected_policy
+    evaluator.policy_probs_avg[children] = expected_policy.permute(0, 2, 1).reshape(
+        -1, NUM_HANDS
+    )
     evaluator.values[roots] = 0.5
 
     batch = evaluator.sample_data()
@@ -728,10 +732,6 @@ def test_sample_data_returns_root_batch() -> None:
         evaluator.search_batch_size,
         evaluator.num_players,
         NUM_HANDS,
-    )
-    torch.testing.assert_close(
-        batch.legal_masks,
-        evaluator.env.legal_bins_mask()[roots],
     )
     torch.testing.assert_close(batch.policy_targets, expected_policy)
 

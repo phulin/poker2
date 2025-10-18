@@ -10,6 +10,7 @@ from alphaholdem.env.card_utils import (
     mask_conflicting_combos,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.utils.profiling import profile
 
 
 class RebelFeatureEncoder:
@@ -40,8 +41,8 @@ class RebelFeatureEncoder:
     def _board_features(self, idxs: torch.Tensor) -> torch.Tensor:
         board = self.env.board_indices[idxs]  # [B, 5]
         board = board.to(torch.float32)
-        board[board < 0] = -1.0
-        board[board >= 0] /= 51.0
+        board /= 51.0
+        board.masked_fill_(board < 0, -1.0)
         return board
 
     def _has_bet_flag(self, idxs: torch.Tensor) -> torch.Tensor:
@@ -157,12 +158,12 @@ class RebelFeatureEncoder:
         belief[nonzero] = belief[nonzero] / sums[nonzero]
         return belief
 
+    @profile
     def encode(
         self,
         idxs: torch.Tensor,
         agents: torch.Tensor,
-        hero_beliefs: Optional[torch.Tensor] = None,
-        opp_beliefs: Optional[torch.Tensor] = None,
+        beliefs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Build ReBeL flat features for a batch of env indices and agent ids.
@@ -170,8 +171,7 @@ class RebelFeatureEncoder:
         Args:
             idxs: Tensor of environment indices, shape [B].
             agents: Tensor of agent ids (0 or 1), shape [B].
-            hero_beliefs: Optional tensor [B, 1326] for acting player's belief.
-            opp_beliefs: Optional tensor [B, 1326] for opponent's belief.
+            beliefs: Optional tensor [B, 2, 1326] for beliefs (about p0 and p1).
         Returns:
             Tensor [B, 2660] of float32 features.
         """
@@ -181,7 +181,6 @@ class RebelFeatureEncoder:
             )
 
         idxs = idxs.to(torch.long)
-        agents = agents.to(torch.long)
         B = idxs.shape[0]
 
         features = torch.zeros(
@@ -194,14 +193,6 @@ class RebelFeatureEncoder:
         features[:, 3:8] = self._board_features(idxs)
         features[:, 8] = self._has_bet_flag(idxs)
 
-        if hero_beliefs is not None and opp_beliefs is not None:
-            hero_vec = hero_beliefs.to(device=self.device, dtype=self.dtype)
-            opp_vec = opp_beliefs.to(device=self.device, dtype=self.dtype)
-        else:
-            hero_cards = self._hero_cards(idxs, agents)
-            board_cards = self.env.board_indices[idxs]
-            hero_vec, opp_vec = self._belief_vectors(hero_cards, board_cards)
-
-        features[:, 9 : 9 + self.belief_dim] = hero_vec
-        features[:, 9 + self.belief_dim :] = opp_vec
+        features[:, 9 : 9 + self.belief_dim] = beliefs[:, 0]
+        features[:, 9 + self.belief_dim :] = beliefs[:, 1]
         return features
