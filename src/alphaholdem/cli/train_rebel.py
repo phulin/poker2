@@ -75,6 +75,21 @@ def _init_wandb(cfg: Config, device: torch.device) -> Any:
     if not cfg.use_wandb:
         return nullcontext()
 
+    # Handle wandb resumption from checkpoint
+    wandb_run_id_from_checkpoint = None
+    if cfg.resume_from and os.path.exists(cfg.resume_from):
+        print(f"Loading checkpoint to extract wandb run ID: {cfg.resume_from}")
+
+        # Extract wandb run ID from checkpoint
+        checkpoint = torch.load(
+            cfg.resume_from, weights_only=False, map_location=device
+        )
+        wandb_run_id_from_checkpoint = checkpoint.get("wandb_run_id")
+        if wandb_run_id_from_checkpoint:
+            print(f"Found wandb run ID in checkpoint: {wandb_run_id_from_checkpoint}")
+        else:
+            print("No wandb run ID found in checkpoint")
+
     init_kwargs: Dict[str, Any] = {
         "project": cfg.wandb_project,
         "name": cfg.wandb_name,
@@ -94,7 +109,7 @@ def _init_wandb(cfg: Config, device: torch.device) -> Any:
             "model_layers": cfg.model.num_hidden_layers,
         },
     }
-    if cfg.wandb_run_id:
+    if wandb_run_id_from_checkpoint:
         init_kwargs["id"] = cfg.wandb_run_id
         init_kwargs["resume"] = "must"
 

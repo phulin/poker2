@@ -1,4 +1,6 @@
 import math
+import os
+import tempfile
 import torch
 
 from alphaholdem.core.structured_config import Config, ValueHeadType
@@ -161,3 +163,79 @@ def test_rebel_cfr_trainer_single_step_cpu():
     assert metrics[0].policy_loss is not None
     assert metrics[0].loss is not None
     assert not math.isnan(metrics[0].policy_loss)
+
+
+def test_rebel_cfr_trainer_checkpoint_wandb_resumption():
+    """Test that RebelCFRTrainer saves and loads wandb_run_id correctly."""
+
+    # Create a temporary directory for checkpoints
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Create a config with wandb enabled
+        cfg = Config()
+        cfg.num_steps = 1
+        cfg.train.batch_size = 4
+        cfg.train.replay_buffer_batches = 1
+        cfg.train.learning_rate = 3e-4
+        cfg.train.value_coef = 1.0
+        cfg.train.entropy_coef = 0.0
+        cfg.train.grad_clip = 1.0
+        cfg.train.max_sequence_length = 16
+        cfg.env.bet_bins = [0.5, 1.0]
+        cfg.env.stack = 1000
+        cfg.env.sb = 5
+        cfg.env.bb = 10
+        cfg.env.flop_showdown = False
+        cfg.model.name = "rebel_ffn"
+        cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+        cfg.model.input_dim = RebelFeatureEncoder.feature_dim
+        cfg.model.hidden_dim = 64
+        cfg.model.num_hidden_layers = 2
+        cfg.model.value_head_type = ValueHeadType.scalar
+        cfg.model.detach_value_head = True
+        cfg.search.enabled = True
+        cfg.search.depth = 0
+        cfg.search.iterations = 1
+        cfg.search.branching = 4
+        cfg.use_wandb = True
+        cfg.wandb_project = "test_project"
+        cfg.wandb_name = "test_run"
+
+        device = torch.device("cpu")
+        trainer = RebelCFRTrainer(cfg, device)
+
+        # Run a training step
+        trainer.train_step(1)
+
+        # Save checkpoint
+        checkpoint_path = os.path.join(temp_dir, "test_checkpoint.pt")
+        trainer.save_checkpoint(checkpoint_path, step=1)
+
+        # Verify file exists
+        assert os.path.exists(checkpoint_path), "Checkpoint file not created"
+
+        # Load checkpoint and verify wandb_run_id is None (since wandb is not actually initialized)
+        loaded_step, wandb_run_id = trainer.load_checkpoint(checkpoint_path)
+
+        # Verify loaded state
+        assert loaded_step == 1, f"Expected step 1, got {loaded_step}"
+        assert (
+            wandb_run_id is None
+        ), "Expected wandb_run_id to be None when wandb is not initialized"
+
+        # Test with a mock wandb run ID
+        mock_wandb_run_id = "test_run_id_123"
+
+        # Create a checkpoint with a mock wandb run ID
+        checkpoint_data = torch.load(checkpoint_path, map_location=device)
+        checkpoint_data["wandb_run_id"] = mock_wandb_run_id
+        torch.save(checkpoint_data, checkpoint_path)
+
+        # Load checkpoint and verify wandb_run_id is extracted correctly
+        loaded_step, loaded_wandb_run_id = trainer.load_checkpoint(checkpoint_path)
+
+        assert loaded_step == 1, f"Expected step 1, got {loaded_step}"
+        assert (
+            loaded_wandb_run_id == mock_wandb_run_id
+        ), f"Expected wandb_run_id {mock_wandb_run_id}, got {loaded_wandb_run_id}"
+
+        print("✅ RebelCFRTrainer wandb resumption test passed!")

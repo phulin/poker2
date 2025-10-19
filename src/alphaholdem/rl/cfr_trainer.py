@@ -228,6 +228,7 @@ class RebelCFRTrainer:
             "optimizer": self.optimizer.state_dict(),
             "rng": self.rng.get_state(),
             "step": step,
+            # Store wandb run ID for resumption            "wandb_run_id": wandb.run.id if self.cfg.use_wandb and wandb.run else None,
         }
         torch.save(state, path)
 
