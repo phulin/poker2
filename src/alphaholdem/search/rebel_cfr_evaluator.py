@@ -1113,9 +1113,9 @@ class RebelCFREvaluator:
             .int()
             .tolist()
         ):
-            self.stats[f"cfr_kl_{t}"] = torch.nn.functional.kl_div(
-                self.policy_probs.log(), old_policy_probs, reduction="batchmean"
-            ).item()
+            self.stats[f"cfr_delta.{t}"] = (
+                (self.policy_probs - old_policy_probs).abs().sum(dim=-1).mean().item()
+            )
 
     def _valid_nodes(
         self, bottom_up: bool = False
