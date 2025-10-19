@@ -60,7 +60,7 @@ class RebelDataGenerator:
         return padded
 
     @profile
-    def generate_data(self) -> RebelBatch:
+    def generate_data(self) -> None:
         batch_size = self.evaluator.search_batch_size
         root_indices = torch.arange(batch_size, device=self.device)
         collected = 0
@@ -93,23 +93,3 @@ class RebelDataGenerator:
         if self.next_pbs_idx > 0:
             self.pbs_queue = self.pbs_queue[self.next_pbs_idx :]
             self.next_pbs_idx = 0
-
-        # Snapshot tensors for supervised targets; detach to break autograd graph.
-        features = self.evaluator.encode_current_states()[:batch_size].detach()
-        legal_masks = self.evaluator.env.legal_bins_mask()[:batch_size].detach()
-        values = self.evaluator.values[:batch_size].detach()
-        policy = self.evaluator.policy_probs_avg[:batch_size].detach()
-        if hasattr(self.evaluator.env, "to_act"):
-            acting_players = self.evaluator.env.to_act[root_indices].detach()
-        else:
-            acting_players = torch.zeros(
-                batch_size, dtype=torch.long, device=self.device
-            )
-
-        return RebelBatch(
-            features=features,
-            policy_targets=policy,
-            value_targets=values,
-            legal_masks=legal_masks,
-            acting_players=acting_players,
-        )

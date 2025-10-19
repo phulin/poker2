@@ -180,7 +180,8 @@ class RebelCFRTrainer:
             "loss": loss.item(),
             "policy_loss": loss_dict["policy_loss"],
             "value_loss": loss_dict["value_loss"],
-            "entropy": loss_dict["entropy"],
+            "cfr_entropy": loss_dict["entropy"],
+            "buffer_size": len(self.buffer),
         }
 
     def train_step(self, step: int) -> TrainerMetrics:
@@ -188,10 +189,7 @@ class RebelCFRTrainer:
         metrics = TrainerMetrics(step=step_public)
 
         update_info = self._update_model()
-
-        metrics.buffer_size = len(self.buffer)
-        if update_info is not None:
-            metrics.update(update_info)
+        metrics.update(update_info)
 
         return metrics
 

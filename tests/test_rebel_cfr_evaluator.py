@@ -387,10 +387,7 @@ def test_initialize_beliefs_updates_child_nodes(
         (total_nodes, num_actions), dtype=torch.bool, device=env.device
     )
     legal_mask[0, 0:2] = True
-    # Ensure all nodes have at least one legal action
-    for i in range(total_nodes):
-        if not legal_mask[i].any():
-            legal_mask[i, 0] = True
+    legal_mask[1:, 1] = True
 
     monkeypatch.setattr(
         evaluator.env,
@@ -499,15 +496,15 @@ def test_compute_expected_values_matches_child_values(
     evaluator.values[bottom:, 0] = values_bottom[:, 0]
     evaluator.values[bottom:, 1] = -values_bottom[:, 0]
 
-    new_values = evaluator.compute_expected_values()
+    evaluator.compute_expected_values()
     expected_value = (probs * child_values).sum()
 
     torch.testing.assert_close(
-        new_values[2, 0],
+        evaluator.values[2, 0],
         torch.full((NUM_HANDS,), expected_value, dtype=env.float_dtype),
     )
     torch.testing.assert_close(
-        new_values[2, 1],
+        evaluator.values[2, 1],
         torch.full((NUM_HANDS,), -expected_value, dtype=env.float_dtype),
     )
 
@@ -896,7 +893,7 @@ def test_self_play_iteration_returns_public_belief_state() -> None:
     evaluator, env = make_evaluator(batch_size=2, max_depth=1)
     roots = torch.arange(evaluator.search_batch_size, device=env.device)
     evaluator.initialize_search(env, roots)
-    # evaluator.warm_start_iterations = 0
+    evaluator.warm_start_iterations = 0
     evaluator.cfr_iterations = 2
     evaluator.generator = torch.Generator(device=env.device)
     evaluator.generator.manual_seed(1)
