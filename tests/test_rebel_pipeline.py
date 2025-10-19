@@ -208,19 +208,17 @@ def test_rebel_cfr_trainer_checkpoint_wandb_resumption():
 
         # Save checkpoint
         checkpoint_path = os.path.join(temp_dir, "test_checkpoint.pt")
-        trainer.save_checkpoint(checkpoint_path, step=1)
+        trainer.save_checkpoint(checkpoint_path, step=1, wandb_run_id=None)
 
         # Verify file exists
         assert os.path.exists(checkpoint_path), "Checkpoint file not created"
 
         # Load checkpoint and verify wandb_run_id is None (since wandb is not actually initialized)
-        loaded_step, wandb_run_id = trainer.load_checkpoint(checkpoint_path)
+        loaded_step = trainer.load_checkpoint(checkpoint_path)
 
         # Verify loaded state
+        assert trainer.cfg.wandb_run_id is None
         assert loaded_step == 1, f"Expected step 1, got {loaded_step}"
-        assert (
-            wandb_run_id is None
-        ), "Expected wandb_run_id to be None when wandb is not initialized"
 
         # Test with a mock wandb run ID
         mock_wandb_run_id = "test_run_id_123"
@@ -231,11 +229,9 @@ def test_rebel_cfr_trainer_checkpoint_wandb_resumption():
         torch.save(checkpoint_data, checkpoint_path)
 
         # Load checkpoint and verify wandb_run_id is extracted correctly
-        loaded_step, loaded_wandb_run_id = trainer.load_checkpoint(checkpoint_path)
+        loaded_step = trainer.load_checkpoint(checkpoint_path)
 
+        assert trainer.cfg.wandb_run_id == mock_wandb_run_id
         assert loaded_step == 1, f"Expected step 1, got {loaded_step}"
-        assert (
-            loaded_wandb_run_id == mock_wandb_run_id
-        ), f"Expected wandb_run_id {mock_wandb_run_id}, got {loaded_wandb_run_id}"
 
         print("✅ RebelCFRTrainer wandb resumption test passed!")

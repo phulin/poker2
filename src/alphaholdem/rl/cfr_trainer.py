@@ -219,7 +219,9 @@ class RebelCFRTrainer:
 
         return history
 
-    def save_checkpoint(self, path: str, step: int) -> None:
+    def save_checkpoint(
+        self, path: str, step: int, wandb_run_id: Optional[str] = None
+    ) -> None:
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)
@@ -228,7 +230,8 @@ class RebelCFRTrainer:
             "optimizer": self.optimizer.state_dict(),
             "rng": self.rng.get_state(),
             "step": step,
-            # Store wandb run ID for resumption            "wandb_run_id": wandb.run.id if self.cfg.use_wandb and wandb.run else None,
+            # Store wandb run ID for resumption
+            "wandb_run_id": wandb_run_id,
         }
         torch.save(state, path)
 
@@ -236,5 +239,6 @@ class RebelCFRTrainer:
         ckpt = torch.load(path, map_location=self.device)
         self.model.load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
+        self.cfg.wandb_run_id = ckpt["wandb_run_id"]
         # self.rng.set_state(ckpt["rng"].to(self.device))
         return int(ckpt["step"])

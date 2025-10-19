@@ -192,9 +192,14 @@ def train_rebel(cfg: Config) -> None:
                 ckpt_path = os.path.join(
                     cfg.checkpoint_dir, f"rebel_step_{step + 1}.pt"
                 )
-                trainer.save_checkpoint(ckpt_path, metrics.step)
+                wandb_run_id = run.id if run else None
                 trainer.save_checkpoint(
-                    os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"), metrics.step
+                    ckpt_path, metrics.step, wandb_run_id=wandb_run_id
+                )
+                trainer.save_checkpoint(
+                    os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"),
+                    metrics.step,
+                    wandb_run_id=wandb_run_id,
                 )
 
                 # Clean up old checkpoints if economize_checkpoints is enabled
