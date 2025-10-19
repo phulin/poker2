@@ -452,17 +452,18 @@ class RebelCFREvaluator:
         if target is None:
             target = self.beliefs
 
-        denom = target.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+        denom = target.sum(dim=-1, keepdim=True)
         # If the action probability of getting to a node is 0, our
         # bayesian update will make the beliefs in that state all 0.
         # So we set them to uniform.
         allowed_hands_prob = self.allowed_hands.float() / self.allowed_hands.sum(
             dim=-1, keepdim=True
-        )
-        target = torch.where(
+        ).clamp(min=1)
+        torch.where(
             denom > 1e-10,
-            target / denom,
+            target / denom.clamp(min=1e-12),
             allowed_hands_prob[:, None, :],
+            out=target,
         )
 
     @torch.no_grad()
@@ -842,6 +843,7 @@ class RebelCFREvaluator:
             t_sample = torch.multinomial(
                 distribution, sample_count, replacement=True, generator=self.generator
             )
+            t_sample += sample_low
 
         for t in range(self.warm_start_iterations + 1, self.cfr_iterations + 1):
             self.profiler_step()  # Profile start of CFR iteration
