@@ -110,6 +110,7 @@ class RebelCFREvaluator:
         float_dtype: torch.dtype,
         generator: Optional[torch.Generator] = None,
         warm_start_iterations: int = T_WARM,
+        linear_cfr: bool = False,
         cfr_avg: bool = True,
         sample_epsilon: float = 0.25,
     ):
@@ -121,6 +122,7 @@ class RebelCFREvaluator:
         self.bet_bins = bet_bins
         self.cfr_iterations = cfr_iterations
         self.warm_start_iterations = warm_start_iterations
+        self.linear_cfr = linear_cfr
         self.cfr_avg = cfr_avg
         self.sample_epsilon = sample_epsilon
         self.device = device
@@ -769,13 +771,14 @@ class RebelCFREvaluator:
         reach_avg_actor = torch.gather(reach_avg, 1, prev_actor_indices).squeeze(1)
 
         # Reach probability is proportional to belief, so we can use beliefs to mix
+        divisor = t + 2 if self.linear_cfr else t + 1
         self.policy_probs_avg *= reach_avg_actor
         self.policy_probs_avg *= t
         self.policy_probs_avg += self.policy_probs * reach_actor
         torch.where(
             self.policy_probs_avg.abs() > 1e-8,
             self.policy_probs_avg
-            / (t + 1)
+            / divisor
             / (reach_avg_actor + reach_actor).clamp(min=1e-8),
             torch.zeros_like(self.policy_probs_avg),
             out=self.policy_probs_avg,
@@ -812,14 +815,19 @@ class RebelCFREvaluator:
                 ),
                 num_envs=sample_count,
             )
-            sample_low = min(self.warm_start_iterations, self.cfr_iterations - 1)
+            sample_low = min(self.warm_start_iterations + 1, self.cfr_iterations)
             sample_low = max(sample_low, 0)
-            sample_high = max(self.cfr_iterations, sample_low + 1)
-            t_sample = torch.randint(
-                sample_low,
-                sample_high,
-                (sample_count,),
-                device=self.device,
+            sample_high = max(self.cfr_iterations + 1, sample_low + 1)
+            distribution = (
+                torch.arange(
+                    sample_low, sample_high, dtype=torch.float32, device=self.device
+                )
+                if self.linear_cfr
+                else torch.ones(sample_high - sample_low, device=self.device)
+            )
+            distribution /= distribution.sum()
+            t_sample = torch.multinomial(
+                distribution, sample_count, generator=self.generator
             )
 
         for t in range(self.warm_start_iterations + 1, self.cfr_iterations + 1):
@@ -839,6 +847,11 @@ class RebelCFREvaluator:
                     self.profiler_step()  # Profile after leaf sampling
 
             regrets = self.compute_instantaneous_regrets(self.values)
+            if self.linear_cfr:
+                # Alternate updates.
+                regrets.masked_fill_(
+                    self.env.to_act[:, None] == t % self.num_players, 0.0
+                )
             self.cumulative_regrets += regrets
 
             old_policy_probs = self.policy_probs.clone()
@@ -851,7 +864,7 @@ class RebelCFREvaluator:
 
             self.values_avg *= t
             self.values_avg += self.values
-            self.values_avg /= t + 1
+            self.values_avg /= t + 2 if self.linear_cfr else t + 1
 
         # Debug logging for extreme values
         max_hand_value = self.env.starting_stack / self.env.scale * 4
@@ -866,6 +879,10 @@ class RebelCFREvaluator:
             print(f"  Extreme values count: {extreme_count}")
             print(f"  Value range: [{min_val:.2f}, {max_val:.2f}]")
             print(f"  Max allowed: {max_hand_value:.2f}")
+
+        self.stats["mean_positive_regret"] = (
+            self.cumulative_regrets.clamp(min=0).mean().item()
+        )
 
         return next_pbs
 
