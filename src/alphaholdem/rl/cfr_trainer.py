@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -100,15 +100,13 @@ class RebelCFRTrainer:
         )
 
         # Model
-        self.model = torch.compile(
-            RebelFFN(
-                input_dim=cfg.model.input_dim,
-                num_actions=self.num_actions,
-                hidden_dim=cfg.model.hidden_dim,
-                num_hidden_layers=cfg.model.num_hidden_layers,
-                detach_value_head=cfg.model.detach_value_head,
-                num_players=self.num_players,
-            )
+        self.model = RebelFFN(
+            input_dim=cfg.model.input_dim,
+            num_actions=self.num_actions,
+            hidden_dim=cfg.model.hidden_dim,
+            num_hidden_layers=cfg.model.num_hidden_layers,
+            detach_value_head=cfg.model.detach_value_head,
+            num_players=self.num_players,
         )
         cpu_rng = torch.Generator(device="cpu")
         if self.cfg.seed is not None:
@@ -205,22 +203,21 @@ class RebelCFRTrainer:
             **self.cfr_evaluator.stats,
         }
 
-    def train_step(self, step: int) -> TrainerMetrics:
+    def train_step(self, step: int) -> Dict[str, any]:
         step_public = step + 1
-        metrics = TrainerMetrics(step=step_public)
 
         update_info = self._update_model()
-        metrics.update(update_info)
+        update_info["step"] = step_public
 
-        return metrics
+        return update_info
 
-    def train(self, num_steps: Optional[int] = None) -> list[TrainerMetrics]:
+    def train(self, num_steps: Optional[int] = None) -> List[Dict[str, any]]:
         total_steps = num_steps or self.cfg.num_steps
-        history: list[TrainerMetrics] = []
+        history: List[Dict[str, any]] = []
 
         for step in range(total_steps):
-            metrics = self.train_step(step)
-            history.append(metrics)
+            update_info = self.train_step(step)
+            history.append(update_info)
 
         return history
 

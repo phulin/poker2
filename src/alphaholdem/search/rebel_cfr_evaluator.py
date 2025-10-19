@@ -93,6 +93,7 @@ class RebelCFREvaluator:
     values: torch.Tensor
     values_avg: torch.Tensor
     beliefs: torch.Tensor
+    beliefs_avg: torch.Tensor
     legal_mask: Optional[torch.Tensor]
     feature_encoder: RebelFeatureEncoder
     hand_rank_data: Optional[HandRankData]
@@ -186,6 +187,8 @@ class RebelCFREvaluator:
             device=self.device,
             dtype=self.float_dtype,
         )
+        if self.cfr_avg:
+            self.beliefs_avg = torch.zeros_like(self.beliefs)
 
         self.legal_mask = None
 
@@ -408,26 +411,33 @@ class RebelCFREvaluator:
         return reach_weights
 
     @profile
-    def _propagate_all_beliefs(self) -> torch.Tensor:
+    def _propagate_all_beliefs(
+        self, target: torch.Tensor | None = None, source: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Propagate beliefs from all valid nodes to all valid nodes."""
 
         N, M = self.search_batch_size, self.total_nodes
+
+        if target is None:
+            target = self.beliefs
+        if source is None:
+            source = self.policy_probs
 
         prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
         prev_actor[N:] = self._fan_out(self.env.to_act)
 
         factor = M // N - 1
-        self.beliefs[N:] = (
-            self.beliefs[:N, None]
+        target[N:] = (
+            target[:N, None]
             .expand(-1, factor, -1, -1)
             .reshape(-1, self.num_players, NUM_HANDS)
         )
-        self.beliefs *= self._calculate_reach_weights(self.policy_probs)
+        target *= self._calculate_reach_weights(source)
 
-        self._block_beliefs()
-        self._normalize_beliefs()
+        self._block_beliefs(target)
+        self._normalize_beliefs(target)
 
-        self.beliefs.masked_fill_(~self.valid_mask[:, None, None], 0.0)
+        target.masked_fill_(~self.valid_mask[:, None, None], 0.0)
 
     @profile
     def _block_beliefs(self, target: torch.Tensor | None = None) -> torch.Tensor:
@@ -437,18 +447,21 @@ class RebelCFREvaluator:
         target.masked_fill_(~self.allowed_hands[:, None, :], 0.0)
 
     @profile
-    def _normalize_beliefs(self) -> torch.Tensor:
+    def _normalize_beliefs(self, target: torch.Tensor | None = None) -> torch.Tensor:
         """Normalize beliefs across hands in-place for valid nodes."""
-        denom = self.beliefs.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+        if target is None:
+            target = self.beliefs
+
+        denom = target.sum(dim=-1, keepdim=True).clamp(min=1e-12)
         # If the action probability of getting to a node is 0, our
         # bayesian update will make the beliefs in that state all 0.
         # So we set them to uniform.
         allowed_hands_prob = self.allowed_hands.float() / self.allowed_hands.sum(
             dim=-1, keepdim=True
         )
-        self.beliefs = torch.where(
+        target = torch.where(
             denom > 1e-10,
-            self.beliefs / denom,
+            target / denom,
             allowed_hands_prob[:, None, :],
         )
 
@@ -470,6 +483,8 @@ class RebelCFREvaluator:
         self.policy_probs_avg[:] = self.policy_probs
 
         self._propagate_all_beliefs()
+        if self.cfr_avg:
+            self._propagate_all_beliefs(self.beliefs_avg, self.policy_probs_avg)
 
     @profile
     def warm_start(self) -> None:
@@ -662,6 +677,8 @@ class RebelCFREvaluator:
         )
 
         self._propagate_all_beliefs()
+        if self.cfr_avg:
+            self._propagate_all_beliefs(self.beliefs_avg, self.policy_probs_avg)
 
     @profile
     def sample_leaf(

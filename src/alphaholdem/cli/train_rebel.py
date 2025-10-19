@@ -144,23 +144,27 @@ def train_rebel(cfg: Config) -> None:
             step_elapsed = time.time() - step_start
             total_elapsed = time.time() - training_start
 
-            loss_str = f"{metrics.loss:.4f}" if metrics.loss is not None else "N/A"
+            loss_str = (
+                f"{metrics["loss"]:.4f}" if metrics["loss"] is not None else "N/A"
+            )
             policy_str = (
-                f"{metrics.policy_loss:.4f}"
-                if metrics.policy_loss is not None
+                f"{metrics["policy_loss"]:.4f}"
+                if metrics["policy_loss"] is not None
                 else "N/A"
             )
             value_str = (
-                f"{metrics.value_loss:.4f}" if metrics.value_loss is not None else "N/A"
+                f"{metrics["value_loss"]:.4f}"
+                if metrics["value_loss"] is not None
+                else "N/A"
             )
             entropy_str = (
-                f"{metrics.cfr_entropy:.4f}"
-                if metrics.cfr_entropy is not None
+                f"{metrics["cfr_entropy"]:.4f}"
+                if metrics["cfr_entropy"] is not None
                 else "N/A"
             )
 
             print(
-                f"[Step {metrics.step:05d}] "
+                f"[Step {metrics["step"]:05d}] "
                 f"loss={loss_str} "
                 f"policy={policy_str} "
                 f"value={value_str} "
@@ -169,23 +173,20 @@ def train_rebel(cfg: Config) -> None:
             )
 
             if cfg.use_wandb:
-                log_data: Dict[str, Any] = {
-                    "step_time_s": step_elapsed,
-                    **asdict(metrics),
-                }
-                wandb.log(log_data, step=metrics.step)
+                metrics["step_time_s"] = step_elapsed
+                wandb.log(metrics, step=metrics["step"])
 
-            if metrics.step % cfg.checkpoint_interval == 0:
+            if metrics["step"] % cfg.checkpoint_interval == 0:
                 ckpt_path = os.path.join(
                     cfg.checkpoint_dir, f"rebel_step_{step + 1}.pt"
                 )
                 wandb_run_id = run.id if run else None
                 trainer.save_checkpoint(
-                    ckpt_path, metrics.step, wandb_run_id=wandb_run_id
+                    ckpt_path, metrics["step"], wandb_run_id=wandb_run_id
                 )
                 trainer.save_checkpoint(
                     os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"),
-                    metrics.step,
+                    metrics["step"],
                     wandb_run_id=wandb_run_id,
                 )
 
@@ -194,7 +195,7 @@ def train_rebel(cfg: Config) -> None:
                     _cleanup_old_checkpoints(cfg.checkpoint_dir, ckpt_path)
 
                 print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
-                print_preflop_range_grid(trainer, metrics.step)
+                print_preflop_range_grid(trainer, metrics["step"], rebel=True)
 
         final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
         trainer.save_checkpoint(final_path, cfg.num_steps)
@@ -204,7 +205,7 @@ def train_rebel(cfg: Config) -> None:
             f"Final checkpoint: {final_path}"
         )
         print_preflop_range_grid(
-            trainer, cfg.num_steps, title="Final Preflop Range Grid"
+            trainer, cfg.num_steps, title="Final Preflop Range Grid", rebel=True
         )
 
 
