@@ -94,7 +94,7 @@ def _init_wandb(cfg: Config, device: torch.device) -> Any:
         "project": cfg.wandb_project,
         "name": cfg.wandb_name,
         "tags": cfg.wandb_tags or [],
-        "config": OmegaConf.to_container(cfg, resolve=True),
+        "config": asdict(cfg),
     }
     if wandb_run_id_from_checkpoint:
         init_kwargs["id"] = cfg.wandb_run_id
