@@ -261,6 +261,17 @@ def test_construct_subgame_keeps_to_call_non_negative() -> None:
     assert torch.all(to_call[mask] >= 0)
 
 
+def test_construct_subgame_keeps_stacks_non_negative() -> None:
+    evaluator, env = make_evaluator(batch_size=32, max_depth=2)
+    roots = torch.arange(evaluator.search_batch_size, device=env.device)
+    evaluator.initialize_search(env, roots)
+    evaluator.construct_subgame()
+
+    env_state = evaluator.env
+    mask = evaluator.valid_mask & ~env_state.done
+    assert torch.all(env_state.stacks[mask] >= 0)
+
+
 def test_construct_subgame_clones_states_and_marks_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
