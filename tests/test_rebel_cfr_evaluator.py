@@ -676,6 +676,8 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
     roots = torch.arange(evaluator.search_batch_size, device=env.device)
     evaluator.initialize_search(env, roots)
     evaluator.construct_subgame()
+    evaluator.initialize_policy_and_beliefs()
+    evaluator.set_leaf_values()
 
     num_actions = evaluator.num_actions
     legal_mask = torch.ones(
@@ -709,6 +711,7 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
     evaluator.values[:] = 0.0
     evaluator.values[1, 0] = 2.0  # Positive advantage for action 0
     evaluator.values[2, 0] = -1.0  # Negative advantage for action 1
+    evaluator.compute_expected_values()
 
     # Compute regrets first, then update policy
     regrets = evaluator.compute_instantaneous_regrets(evaluator.values)

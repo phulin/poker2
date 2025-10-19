@@ -161,7 +161,9 @@ class RebelCFRTrainer:
     @profile
     def _update_model(self) -> Optional[Dict[str, float]]:
         self.data_generator.generate_data()
-        batch = self.buffer.sample(self.batch_size, generator=self.buffer_rng)
+        batch = self.buffer.sample(self.batch_size, generator=self.buffer_rng).to(
+            self.device
+        )
 
         self.model.train()
         self.optimizer.zero_grad()

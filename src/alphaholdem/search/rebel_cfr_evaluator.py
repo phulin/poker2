@@ -577,6 +577,9 @@ class RebelCFREvaluator:
         actor_dest[bottom:] = self._fan_out(self.env.to_act)
 
         src_actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
+        src_actor_indices_fanout = self._fan_out(self.env.to_act)[:, None, None].expand(
+            -1, -1, NUM_HANDS
+        )
         src_opp_indices = (1 - self.env.to_act)[:, None, None].expand(-1, -1, NUM_HANDS)
 
         # This represents the opponent's reach prob at the src node.
@@ -585,10 +588,13 @@ class RebelCFREvaluator:
         src_opp_beliefs_fanout = self._fan_out(src_opp_beliefs)
 
         # The value at a node is already the EV over all actions.
-        actor_values = values.gather(1, src_actor_indices).squeeze(1)
-        actor_values_fanout = self._fan_out(actor_values)
+        actor_values = values.gather(1, src_actor_indices).squeeze(1)  # bottom
+        actor_values_expected = self._fan_out(actor_values)
+        actor_values_achieved = (
+            values[bottom:].gather(1, src_actor_indices_fanout).squeeze(1)
+        )
 
-        advantages = actor_values[bottom:] - actor_values_fanout
+        advantages = actor_values_achieved - actor_values_expected
 
         # The goal here is to compute opp_range @ compatible (= opp_beliefs)
         # blocking = combo_onehot_float @ combo_onehot_float.T - torch.eye(1326)
