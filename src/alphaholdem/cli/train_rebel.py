@@ -145,20 +145,20 @@ def train_rebel(cfg: Config) -> None:
             total_elapsed = time.time() - training_start
 
             loss_str = (
-                f"{metrics["loss"]:.4f}" if metrics["loss"] is not None else "N/A"
+                f"{metrics['loss']:.4f}" if metrics["loss"] is not None else "N/A"
             )
             policy_str = (
-                f"{metrics["policy_loss"]:.4f}"
+                f"{metrics['policy_loss']:.4f}"
                 if metrics["policy_loss"] is not None
                 else "N/A"
             )
             value_str = (
-                f"{metrics["value_loss"]:.4f}"
+                f"{metrics['value_loss']:.4f}"
                 if metrics["value_loss"] is not None
                 else "N/A"
             )
             entropy_str = (
-                f"{metrics["cfr_entropy"]:.4f}"
+                f"{metrics['cfr_entropy']:.4f}"
                 if metrics["cfr_entropy"] is not None
                 else "N/A"
             )
