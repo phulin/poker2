@@ -100,13 +100,15 @@ class RebelCFRTrainer:
         )
 
         # Model
-        self.model = RebelFFN(
-            input_dim=cfg.model.input_dim,
-            num_actions=self.num_actions,
-            hidden_dim=cfg.model.hidden_dim,
-            num_hidden_layers=cfg.model.num_hidden_layers,
-            detach_value_head=cfg.model.detach_value_head,
-            num_players=self.num_players,
+        self.model = torch.compile(
+            RebelFFN(
+                input_dim=cfg.model.input_dim,
+                num_actions=self.num_actions,
+                hidden_dim=cfg.model.hidden_dim,
+                num_hidden_layers=cfg.model.num_hidden_layers,
+                detach_value_head=cfg.model.detach_value_head,
+                num_players=self.num_players,
+            )
         )
         cpu_rng = torch.Generator(device="cpu")
         if self.cfg.seed is not None:
