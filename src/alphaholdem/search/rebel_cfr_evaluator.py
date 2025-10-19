@@ -823,7 +823,7 @@ class RebelCFREvaluator:
             )
             distribution /= distribution.sum()
             t_sample = torch.multinomial(
-                distribution, sample_count, generator=self.generator
+                distribution, sample_count, replacement=True, generator=self.generator
             )
 
         for t in range(self.warm_start_iterations + 1, self.cfr_iterations + 1):
