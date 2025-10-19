@@ -120,10 +120,10 @@ class CFRManager:
             self.depth_offsets[0], self.depth_offsets[1], device=self.device
         )
         # Validate source rows then copy
-        src_env.sanity_check(indices=src_indices, label="cfr seed_roots src")
+        src_env.sanity_check(select=src_indices, label="cfr seed_roots src")
         self.env.copy_state_from(src_env, src_indices, roots, copy_deck=True)
         # Validate destination rows after copy
-        self.env.sanity_check(indices=roots, label="cfr seed_roots dst")
+        self.env.sanity_check(select=roots, label="cfr seed_roots dst")
 
         # Seed tokens for roots
         if src_tokens is not None and self.tsb is not None:
@@ -325,12 +325,12 @@ class CFRManager:
         ), "children slice bounds mismatch"
         # Sanity: parents rows valid before cloning
         self.env.sanity_check(
-            indices=rep_parents, label=f"cfr clone depth {depth} parents"
+            select=rep_parents, label=f"cfr clone depth {depth} parents"
         )
         self.env.clone_states(children, rep_parents)
         # Sanity: children rows valid after cloning
         self.env.sanity_check(
-            indices=children, label=f"cfr clone depth {depth} children"
+            select=children, label=f"cfr clone depth {depth} children"
         )
         if self.tsb is not None:
             self.tsb.clone_tokens(children, rep_parents)
@@ -371,14 +371,7 @@ class CFRManager:
                 dtype=torch.long,
                 device=self.device,
             )
-            hero_belief = self.get_beliefs_for_player(player, idxs)
-            opp_belief = self.get_beliefs_for_player(1 - player, idxs)
-            return self.rebel_encoder.encode(
-                idxs,
-                agents,
-                hero_beliefs=hero_belief,
-                opp_beliefs=opp_belief,
-            )
+            return self.rebel_encoder.encode(agents, self._pbs_beliefs)[idxs]
         return self.tsb.encode_tensor_states(player=player, idxs=idxs)
 
     def get_beliefs_for_player(

@@ -987,7 +987,7 @@ class SelfPlayTrainer:
             rewards, new_streets, dealt_cards = self.tensor_env.step_bins(
                 action_bins, legal_bins_amounts, legal_bins_mask, self.bet_bins
             )
-            self.tensor_env.sanity_check(indices=active_indices, label="after step")
+            self.tensor_env.sanity_check(select=active_indices, label="after step")
             newly_done_mask = self.tensor_env.done & active_mask
 
             # After environment step, append any newly revealed non-action tokens
@@ -1055,7 +1055,7 @@ class SelfPlayTrainer:
                 if add_to_replay_buffer:
                     if env_active_we_act.numel() > 0:
                         self.tensor_env.sanity_check(
-                            indices=env_active_we_act, label="pre-snapshot"
+                            select=env_active_we_act, label="pre-snapshot"
                         )
                     self.replay_buffer.add_transitions(
                         embedding_data=our_states,

@@ -32,7 +32,10 @@ def test_rebel_feature_encoder_shapes():
     idxs = torch.tensor([0, 1], device=env.device)
     for player in (0, 1):
         agents = torch.full((2,), player, dtype=torch.long, device=env.device)
-        features = encoder.encode(idxs, agents)
+        beliefs = torch.full(
+            (2, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
+        )
+        features = encoder.encode(agents, beliefs)[idxs]
     assert features.shape == (2, encoder.feature_dim)
     hero = features[:, 9 : 9 + encoder.belief_dim]
     opp = features[:, 9 + encoder.belief_dim :]

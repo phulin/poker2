@@ -436,15 +436,15 @@ class VectorizedReplayBuffer:
             # Copy old rows into temp
             temp_env.copy_state_from(
                 src_env=self.snapshot_env,
-                src_indices=old_rows,
-                dst_indices=temp_indices,
+                src_select=old_rows,
+                dest_select=temp_indices,
                 copy_deck=True,
             )
             # Copy from temp into new rows
             self.snapshot_env.copy_state_from(
                 src_env=temp_env,
-                src_indices=temp_indices,
-                dst_indices=new_rows,
+                src_select=temp_indices,
+                dest_select=new_rows,
                 copy_deck=True,
             )
 
@@ -553,8 +553,8 @@ class VectorizedReplayBuffer:
             # Copy current env rows at those trajectory indices
             self.snapshot_env.copy_state_from(
                 src_env=env_state,
-                src_indices=torch.arange(env_state.N, device=self.device),
-                dst_indices=flat_rows,
+                src_select=torch.arange(env_state.N, device=self.device),
+                dest_select=flat_rows,
                 copy_deck=True,
             )
 

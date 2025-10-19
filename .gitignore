@@ -157,3 +157,4 @@ profile_output*.txt
 /checkpoints-*/
 /secret*
 /outputs/
+/profiler_logs/

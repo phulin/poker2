@@ -392,23 +392,23 @@ class HUNLTensorEnv:
     # --- Sanity helpers -------------------------------------------------------
     def sanity_check(
         self,
-        indices: Optional[torch.Tensor] = None,
+        select: torch.Tensor | slice | None = None,
         label: Optional[str] = None,
     ) -> None:
         """Validate deck and deck_pos bounds for all or a subset of rows.
 
         Args:
-            indices: Optional subset of env rows to check. If None, checks all.
+            select: Optional subset of env rows to check. If None, checks all.
             label: Optional context label for assertion messages.
         """
-        if indices is None:
+        if select is None:
             deck = self.deck
             deck_pos = self.deck_pos
         else:
-            if indices.numel() == 0:
+            if isinstance(select, torch.Tensor) and select.numel() == 0:
                 return
-            deck = self.deck[indices]
-            deck_pos = self.deck_pos[indices]
+            deck = self.deck[select]
+            deck_pos = self.deck_pos[select]
 
         ctx = f" ({label})" if label else ""
         assert (deck >= 0).all() and (deck < 52).all(), (
@@ -424,59 +424,68 @@ class HUNLTensorEnv:
     def copy_state_from(
         self,
         src_env: HUNLTensorEnv,
-        src_indices: torch.Tensor,
-        dst_indices: torch.Tensor,
+        src_select: torch.Tensor | slice,
+        dest_select: torch.Tensor | slice,
         copy_deck: bool = True,
     ) -> None:
         """Vectorized copy of state rows from src_env[src_indices] to self[dst_indices]."""
-        if src_indices.numel() == 0:
-            return
-        assert src_indices.shape[0] == dst_indices.shape[0]
+        if isinstance(src_select, slice):
+            src_size = (src_select.stop - src_select.start) // src_select.step
+            dest_size = (dest_select.stop - dest_select.start) // dest_select.step
+            src_min, src_max = src_select.start, src_select.start + src_size
+            dest_min, dest_max = dest_select.start, dest_select.start + dest_size
+        else:
+            if src_select.numel() == 0:
+                return
+
+            src_size, dest_size = src_select.numel(), dest_select.numel()
+            src_min = int(src_select.min().item())
+            src_max = int(src_select.max().item())
+            dest_min = int(dest_select.min().item())
+            dest_max = int(dest_select.max().item())
+
+        assert src_size == dest_size
         # Disallow overlap when copying within the same env to avoid aliasing
         if src_env is self:
-            smin = int(src_indices.min().item())
-            smax = int(src_indices.max().item())
-            dmin = int(dst_indices.min().item())
-            dmax = int(dst_indices.max().item())
             # Ranges must not overlap
-            if not (smax < dmin or dmax < smin):
+            if not (src_max < dest_min or dest_max < src_min):
                 raise AssertionError(
                     "copy_state_from requires non-overlapping index ranges when copying within the same env"
                 )
 
         # Scalars / vectors
-        self.button[dst_indices] = src_env.button[src_indices]
-        self.street[dst_indices] = src_env.street[src_indices]
-        self.to_act[dst_indices] = src_env.to_act[src_indices]
-        self.pot[dst_indices] = src_env.pot[src_indices]
-        self.min_raise[dst_indices] = src_env.min_raise[src_indices]
-        self.actions_this_round[dst_indices] = src_env.actions_this_round[src_indices]
-        self.acted_since_reset[dst_indices] = src_env.acted_since_reset[src_indices]
+        self.button[dest_select] = src_env.button[src_select]
+        self.street[dest_select] = src_env.street[src_select]
+        self.to_act[dest_select] = src_env.to_act[src_select]
+        self.pot[dest_select] = src_env.pot[src_select]
+        self.min_raise[dest_select] = src_env.min_raise[src_select]
+        self.actions_this_round[dest_select] = src_env.actions_this_round[src_select]
+        self.acted_since_reset[dest_select] = src_env.acted_since_reset[src_select]
 
         # 2-player tensors
-        self.stacks[dst_indices] = src_env.stacks[src_indices]
-        self.committed[dst_indices] = src_env.committed[src_indices]
-        self.has_folded[dst_indices] = src_env.has_folded[src_indices]
-        self.is_allin[dst_indices] = src_env.is_allin[src_indices]
-        self.chips_placed[dst_indices] = src_env.chips_placed[src_indices]
+        self.stacks[dest_select] = src_env.stacks[src_select]
+        self.committed[dest_select] = src_env.committed[src_select]
+        self.has_folded[dest_select] = src_env.has_folded[src_select]
+        self.is_allin[dest_select] = src_env.is_allin[src_select]
+        self.chips_placed[dest_select] = src_env.chips_placed[src_select]
 
         # Card state
-        self.board_onehot[dst_indices] = src_env.board_onehot[src_indices]
-        self.hole_onehot[dst_indices] = src_env.hole_onehot[src_indices]
-        self.board_indices[dst_indices] = src_env.board_indices[src_indices]
-        self.hole_indices[dst_indices] = src_env.hole_indices[src_indices]
+        self.board_onehot[dest_select] = src_env.board_onehot[src_select]
+        self.hole_onehot[dest_select] = src_env.hole_onehot[src_select]
+        self.board_indices[dest_select] = src_env.board_indices[src_select]
+        self.hole_indices[dest_select] = src_env.hole_indices[src_select]
 
         # Done/winner
-        self.done[dst_indices] = src_env.done[src_indices]
-        self.winner[dst_indices] = src_env.winner[src_indices]
+        self.done[dest_select] = src_env.done[src_select]
+        self.winner[dest_select] = src_env.winner[src_select]
 
         if copy_deck:
             # Sanity check via helper on source rows
-            src_env.sanity_check(indices=src_indices, label="copy_state_from src")
-            self.deck[dst_indices] = src_env.deck[src_indices]
-            self.deck_pos[dst_indices] = src_env.deck_pos[src_indices]
+            src_env.sanity_check(select=src_select, label="copy_state_from src")
+            self.deck[dest_select] = src_env.deck[src_select]
+            self.deck_pos[dest_select] = src_env.deck_pos[src_select]
             # Optional: verify destination rows after copy
-            self.sanity_check(indices=dst_indices, label="copy_state_from dst")
+            self.sanity_check(select=dest_select, label="copy_state_from dst")
 
     def clone_states(
         self, dst_children: torch.Tensor, src_parents: torch.Tensor

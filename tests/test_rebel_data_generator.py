@@ -141,8 +141,8 @@ class DummyEvaluator:
         )
         return PublicBeliefState(env=env, beliefs=beliefs)
 
-    def encode_current_states(self, indices: torch.Tensor) -> torch.Tensor:
-        return self.feature_matrix[indices]
+    def encode_current_states(self) -> torch.Tensor:
+        return self.feature_matrix
 
     def sample_data(self) -> RebelBatch:
         self.sample_calls += 1
@@ -150,7 +150,7 @@ class DummyEvaluator:
         indices = torch.arange(count, dtype=torch.long)
         acting_players = torch.arange(count, dtype=torch.long) % self.num_players
         return RebelBatch(
-            features=self.encode_current_states(indices),
+            features=self.encode_current_states()[indices],
             policy_targets=self.policy_probs_avg[:count],
             value_targets=self.values[:count],
             legal_masks=self.env.legal_bins_mask()[indices],
