@@ -164,7 +164,7 @@ def train_rebel(cfg: Config) -> None:
             )
 
             print(
-                f"[Step {metrics["step"]:05d}] "
+                f"[Step {metrics['step']:05d}] "
                 f"loss={loss_str} "
                 f"policy={policy_str} "
                 f"value={value_str} "
