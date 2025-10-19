@@ -55,3 +55,5 @@ search:
   dcfr_beta: 0.0
   dcfr_gamma: 2.0
   include_average_policy: true
+  linear_cfr: true
+  cfr_avg: true

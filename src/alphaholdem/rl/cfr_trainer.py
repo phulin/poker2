@@ -140,6 +140,8 @@ class RebelCFRTrainer:
             float_dtype=self.float_dtype,
             generator=self.rng,
             warm_start_iterations=self.cfg.search.warm_start_iterations,
+            linear_cfr=self.cfg.search.linear_cfr,
+            cfr_avg=self.cfg.search.cfr_avg,
         )
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,

@@ -424,9 +424,6 @@ class RebelCFREvaluator:
         )
         self.beliefs *= self._calculate_reach_weights(self.policy_probs)
 
-        # A little inefficient, but normalize twice to handle the case where
-        # the action probability of getting to a node is 0 (restore uniform beliefs
-        # in the first normalize and then block/normalize again).
         self._block_beliefs()
         self._normalize_beliefs()
 
@@ -454,7 +451,6 @@ class RebelCFREvaluator:
             self.beliefs / denom,
             allowed_hands_prob[:, None, :],
         )
-        self.beliefs.masked_fill_(~self.valid_mask[:, None, None], 0.0)
 
     @torch.no_grad()
     @profile

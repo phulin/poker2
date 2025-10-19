@@ -141,3 +141,5 @@ search:
   enabled: false
   depth: 2
   iterations: 100
+  linear_cfr: false
+  cfr_avg: true
