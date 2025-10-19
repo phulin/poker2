@@ -94,20 +94,7 @@ def _init_wandb(cfg: Config, device: torch.device) -> Any:
         "project": cfg.wandb_project,
         "name": cfg.wandb_name,
         "tags": cfg.wandb_tags or [],
-        "config": {
-            "learning_rate": cfg.train.learning_rate,
-            "batch_size": cfg.train.batch_size,
-            "replay_batches": cfg.train.replay_buffer_batches,
-            "value_coef": cfg.train.value_coef,
-            "entropy_coef": cfg.train.entropy_coef,
-            "grad_clip": cfg.train.grad_clip,
-            "num_envs": cfg.num_envs,
-            "device": str(device),
-            "search_depth": cfg.search.depth,
-            "search_iterations": cfg.search.iterations,
-            "model_hidden_dim": cfg.model.hidden_dim,
-            "model_layers": cfg.model.num_hidden_layers,
-        },
+        "config": OmegaConf.to_container(cfg, resolve=True),
     }
     if wandb_run_id_from_checkpoint:
         init_kwargs["id"] = cfg.wandb_run_id
