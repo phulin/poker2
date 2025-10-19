@@ -319,7 +319,9 @@ def test_checkpoint_dtype_preservation():
         # Test with mixed precision enabled (use MPS if available, otherwise CPU)
         device_name = "mps" if torch.backends.mps.is_available() else "cpu"
         cfg = Config(
-            train=TrainingConfig(batch_size=4, use_mixed_precision=True),
+            train=TrainingConfig(
+                batch_size=2, use_mixed_precision=True, replay_buffer_batches=1
+            ),
             model=ModelConfig(),
             env=EnvConfig(),
             use_tensor_env=True,

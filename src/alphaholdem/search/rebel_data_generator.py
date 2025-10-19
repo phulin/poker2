@@ -48,7 +48,9 @@ class RebelDataGenerator:
 
             while collected < batch_size:
                 next_pbs = self.evaluator.self_play_iteration()
-                self.buffer.add_batch(self.evaluator.sample_data())
+                batch = self.evaluator.sample_data()
+                self.buffer.add_batch(batch)
+                collected += len(batch)
 
                 if next_pbs is None or collected >= batch_size:
                     break
