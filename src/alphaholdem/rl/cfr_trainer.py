@@ -127,7 +127,7 @@ class RebelCFRTrainer:
         )
         self.grad_clip = cfg.train.grad_clip
 
-        self.cfr_manager = RebelCFREvaluator(
+        self.cfr_evaluator = RebelCFREvaluator(
             search_batch_size=self.cfg.num_envs,
             env_proto=self.env,
             model=self.model,
@@ -141,7 +141,7 @@ class RebelCFRTrainer:
         )
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,
-            evaluator=self.cfr_manager,
+            evaluator=self.cfr_evaluator,
             buffer=self.buffer,
         )
 
@@ -198,6 +198,7 @@ class RebelCFRTrainer:
             "cfr_entropy": loss_dict["entropy"],
             "buffer_size": len(self.buffer),
             "grad_norm_unclipped": grad_norm_unclipped,
+            **self.cfr_evaluator.stats,
         }
 
     def train_step(self, step: int) -> TrainerMetrics:

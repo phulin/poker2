@@ -96,6 +96,7 @@ class RebelCFREvaluator:
     legal_mask: Optional[torch.Tensor]
     feature_encoder: RebelFeatureEncoder
     hand_rank_data: Optional[HandRankData]
+    stats: dict[str, float]
 
     def __init__(
         self,
@@ -199,6 +200,7 @@ class RebelCFREvaluator:
         )
 
         self.hand_rank_data = None
+        self.stats = {}
 
         # PyTorch profiler setup
         self.profiler_enabled = False
@@ -838,8 +840,11 @@ class RebelCFREvaluator:
 
             regrets = self.compute_instantaneous_regrets(self.values)
             self.cumulative_regrets += regrets
+
+            old_policy_probs = self.policy_probs.clone()
             self.update_policy()
             self.update_average_policy(t)
+            self._record_stats(t, old_policy_probs)
 
             self.set_leaf_values()
             self.compute_expected_values()
@@ -1065,6 +1070,20 @@ class RebelCFREvaluator:
         )
 
         return EV_hand * potential[:, None] / self.env.scale
+
+    def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
+        """Record statistics about the policy update."""
+
+        if (
+            t
+            in torch.linspace(self.warm_start_iterations + 1, self.cfr_iterations, 5)
+            .round()
+            .int()
+            .tolist()
+        ):
+            self.stats[f"cfr_kl_{t}"] = torch.nn.functional.kl_div(
+                self.policy_probs.log(), old_policy_probs, reduction="batchmean"
+            ).item()
 
     def _valid_nodes(
         self, bottom_up: bool = False
