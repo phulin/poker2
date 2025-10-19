@@ -175,6 +175,8 @@ class SearchConfig:
     dcfr_beta: float = 0.0
     dcfr_gamma: float = 2.0
     include_average_policy: bool = True
+    linear_cfr: bool = True
+    cfr_avg: bool = True
 
 
 @dataclass
