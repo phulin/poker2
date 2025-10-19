@@ -261,7 +261,7 @@ def test_construct_subgame_clones_states_and_marks_children(
     # Make sure all valid nodes have at least one legal action
     legal_mask[0, 0:2] = True  # Root has actions 0 and 1
     # For child nodes, we need to ensure they have legal actions too
-    for i in range(1, min(total_nodes, 7)):  # Cover first few child nodes
+    for i in range(1, total_nodes):  # Cover first few child nodes
         legal_mask[i, 1] = True  # Give them at least action 1
 
     monkeypatch.setattr(
@@ -274,6 +274,7 @@ def test_construct_subgame_clones_states_and_marks_children(
 
     def fake_step_bins(
         bin_indices: torch.Tensor,
+        bin_amounts: torch.Tensor | None = None,
         legal_masks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         step_observer["bins"] = bin_indices.clone()
@@ -442,10 +443,11 @@ def test_compute_expected_values_matches_child_values(
 
     num_actions = evaluator.num_actions
     legal_mask = torch.ones((evaluator.total_nodes, num_actions), dtype=torch.bool)
+    bin_amounts, _ = evaluator.env.legal_bins_amounts_and_mask()
     monkeypatch.setattr(
         evaluator.env,
-        "legal_bins_mask",
-        lambda bet_bins=None: legal_mask.clone(),
+        "legal_bins_amounts_and_mask",
+        lambda bet_bins=None: (bin_amounts.clone(), legal_mask.clone()),
     )
 
     evaluator.construct_subgame()

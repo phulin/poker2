@@ -455,22 +455,20 @@ class RebelCFREvaluator:
             next_actor_values = temp_values[next_indices, actor[:, None]]
             next_opp_values = temp_values[next_indices, opp[:, None]]
 
-            # [n, B] - dot product over ranges of hand values
-            actor_action_values = (
-                self.policy_probs[next_indices] * next_actor_values
-            ).sum(dim=-1)
+            legal_mask = self.legal_mask[current_indices]
             opp_action_values_all = self.policy_probs[next_indices] * next_opp_values
-            opp_action_values = opp_action_values_all.sum(dim=-1)
+            opp_action_values_all.masked_fill_(~legal_mask[:, :, None], 0.0)
+
+            # Best-response per hand (mask illegal actions to -inf)
+            actor_values_masked = next_actor_values.clone()
+            actor_values_masked.masked_fill_(~legal_mask[:, :, None], min_value)
+            best_actions = actor_values_masked.argmax(dim=1)  # [n, 1326]
+            best_values = actor_values_masked.gather(
+                1, best_actions.unsqueeze(1)
+            ).squeeze(1)
 
             # take the player-to-act's best action, and the other player's average action
-            actor_action_values.masked_fill_(
-                ~self.legal_mask[current_indices], min_value
-            )
-            opp_action_values.masked_fill_(~self.legal_mask[current_indices], 0)
-            all_indices = torch.arange(current_indices.numel(), device=self.device)
-            temp_values[current_indices, actor] = next_actor_values[
-                all_indices, actor_action_values.argmax(dim=-1)
-            ]
+            temp_values[current_indices, actor] = best_values
             temp_values[current_indices, opp] = opp_action_values_all.sum(dim=1)
 
         assert temp_values[self.valid_mask].isfinite().all()
@@ -722,6 +720,7 @@ class RebelCFREvaluator:
         next_pbs = None
         next_pbs_idx = 0
         if sample_count > 0:
+            sampled_leaf_indices = leaf_indices[:sample_count]
             next_pbs = PublicBeliefState.from_proto(
                 env_proto=self.env,
                 beliefs=torch.zeros(
@@ -750,7 +749,7 @@ class RebelCFREvaluator:
                 sample_now = torch.where(t_sample == t)[0]
                 if sample_now.numel() > 0:
                     self.sample_leaf(
-                        sample_now,
+                        sampled_leaf_indices[sample_now],
                         next_pbs,
                         next_pbs_idx,
                         training_mode=training_mode,
@@ -777,15 +776,10 @@ class RebelCFREvaluator:
             new_expected_values = self.compute_expected_values()
             self.profiler_step()  # Profile after expected values computation
 
-            # Clip accumulated values to prevent extreme outliers
-            # Typical poker hand values should be bounded by stack size
-            max_hand_value = (
-                self.env.starting_stack / self.env.scale * 4
-            )  # 2x starting stack in scaled units
-
             self.values = (t * self.values + new_expected_values) / (t + 1)
 
         # Debug logging for extreme values
+        max_hand_value = self.env.starting_stack / self.env.scale * 4
         extreme_values = self.valid_mask[:, None, None] & (
             torch.abs(new_expected_values) > max_hand_value
         )
