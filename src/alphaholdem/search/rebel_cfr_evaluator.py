@@ -784,29 +784,17 @@ class RebelCFREvaluator:
         self, training_mode: bool = True
     ) -> Optional[PublicBeliefState]:
         """Run one iteration through the CFR loop and produce leaf samples for replay."""
-        self.profiler_step()  # Profile start of iteration
 
         self.construct_subgame()
-        self.profiler_step()  # Profile after subgame construction
-
         self.initialize_policy_and_beliefs()
-        self.profiler_step()  # Profile after policy initialization
 
         if self.warm_start_iterations > 0:
             self.set_leaf_values()
-            self.profiler_step()  # Profile after leaf values
-
             self.compute_expected_values()
-            self.profiler_step()  # Profile after expected values computation
-
             self.warm_start()
-            self.profiler_step()  # Profile after warm start
 
         self.set_leaf_values()
-        self.profiler_step()  # Profile after leaf values
-
         self.compute_expected_values()
-        self.profiler_step()  # Profile after expected values computation
 
         leaf_indices = torch.where(self.leaf_mask & ~self.env.done)[0]
         sample_cap = max(1, self.search_batch_size // 2)
@@ -849,21 +837,12 @@ class RebelCFREvaluator:
                     self.profiler_step()  # Profile after leaf sampling
 
             regrets = self.compute_instantaneous_regrets(self.values)
-            self.profiler_step()  # Profile after regret computation
-
             self.cumulative_regrets += regrets
             self.update_policy()
-            self.profiler_step()  # Profile after policy update
-
-            # Update average policy.
             self.update_average_policy(t)
-            self.profiler_step()  # Profile after average policy update
 
             self.set_leaf_values()
-            self.profiler_step()  # Profile after leaf values update
-
             self.compute_expected_values()
-            self.profiler_step()  # Profile after expected values computation
 
             self.values_avg *= t
             self.values_avg += self.values
