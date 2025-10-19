@@ -246,6 +246,21 @@ def test_initialize_search_marks_done_roots_as_leaves() -> None:
     assert not evaluator.leaf_mask[1]
 
 
+def test_construct_subgame_keeps_to_call_non_negative() -> None:
+    evaluator, env = make_evaluator(batch_size=32, max_depth=2)
+    roots = torch.arange(evaluator.search_batch_size, device=env.device)
+    evaluator.initialize_search(env, roots)
+    evaluator.construct_subgame()
+
+    env_state = evaluator.env
+    indices = torch.arange(env_state.N, device=env_state.device)
+    to_act = env_state.to_act
+    opp = 1 - to_act
+    to_call = env_state.committed[indices, opp] - env_state.committed[indices, to_act]
+    mask = evaluator.valid_mask & ~env_state.done
+    assert torch.all(to_call[mask] >= 0)
+
+
 def test_construct_subgame_clones_states_and_marks_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

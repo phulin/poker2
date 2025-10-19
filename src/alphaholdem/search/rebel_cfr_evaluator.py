@@ -285,8 +285,8 @@ class RebelCFREvaluator:
         """Expand the tree by cloning legal successor states at each depth."""
         N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
 
+        bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
         for depth in range(self.max_depth):
-            bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
 
@@ -315,6 +315,7 @@ class RebelCFREvaluator:
                 action_bins[new_legal_indices] = action
 
             # TODO: To stop on street, capture new_streets here.
+            bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
             rewards, _, _ = self.env.step_bins(
                 action_bins, bin_amounts=bin_amounts, legal_masks=legal_masks
             )
