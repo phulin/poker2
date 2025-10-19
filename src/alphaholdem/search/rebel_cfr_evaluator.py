@@ -549,13 +549,11 @@ class RebelCFREvaluator:
                 self.values[offset_next:offset_next_next]
                 * self.policy_probs[offset_next:offset_next_next, None, :]
             )
-            values_src = values_weighted.reshape(
-                -1, self.num_actions, self.num_players, NUM_HANDS
-            )
+            values_src = self._pull_back(values_weighted, sliced=True).sum(dim=1)
             torch.where(
                 self.leaf_mask[offset:offset_next, None, None],
                 self.values[offset:offset_next],
-                values_src.sum(dim=1),
+                values_src,
                 out=self.values[offset:offset_next],
             )
             self.values[offset:offset_next].masked_fill_(
@@ -564,38 +562,46 @@ class RebelCFREvaluator:
 
     @profile
     def compute_instantaneous_regrets(self, values: torch.Tensor) -> torch.Tensor:
-        """Compute regrets for every valid non-leaf information set."""
+        """Compute regrets for every valid non-leaf information set.
+
+        Returns:
+            regrets: [M, 1326] tensor of regrets for taking the action to get to the node.
+        """
+
+        M = self.total_nodes
+        bottom = self.depth_offsets[1]
 
         regrets = torch.zeros_like(self.policy_probs)
 
-        bottom = self.depth_offsets[1]
+        actor_dest = torch.zeros(M, dtype=torch.long, device=self.device)
+        actor_dest[bottom:] = self._fan_out(self.env.to_act)
 
-        actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
-        actor_beliefs = (
-            self.beliefs[bottom:].gather(1, actor_indices[bottom:]).squeeze(1)
-        )
-        # Flip actor as the child actor is reversed.
-        actor_values = values.gather(1, 1 - actor_indices).squeeze(1)
-        # opp_values = values.gather(1, actor_indices).squeeze(1)
+        src_actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
+        src_opp_indices = (1 - self.env.to_act)[:, None, None].expand(-1, -1, NUM_HANDS)
 
-        actor_values_weighted = actor_values * self.policy_probs
-        actor_values_weighted_src = self._pull_back(actor_values_weighted)
-        actor_values_expected = actor_values_weighted_src.sum(dim=1)
-        actor_values_expected_dest = self._fan_out(actor_values_expected)
+        # This represents the opponent's reach prob at the src node.
+        # Then actor acts at the transition src -> dest node.
+        src_opp_beliefs = self.beliefs.gather(1, src_opp_indices).squeeze(1)
+        src_opp_beliefs_fanout = self._fan_out(src_opp_beliefs)
 
-        advantages = actor_values[bottom:] - actor_values_expected_dest
+        # The value at a node is already the EV over all actions.
+        actor_values = values.gather(1, src_actor_indices).squeeze(1)
+        actor_values_fanout = self._fan_out(actor_values)
 
-        # combo_compat = combo_onehot_float @ combo_onehot_float.T - torch.eye(1326)
-        # combo_compat = ~combo_blocking_tensor(device=self.device)
-        combo_onehot = combo_to_onehot_tensor(device=self.device).float()
+        advantages = actor_values[bottom:] - actor_values_fanout
+
+        # The goal here is to compute opp_range @ compatible (= opp_beliefs)
+        # blocking = combo_onehot_float @ combo_onehot_float.T - torch.eye(1326)
+        # => compatible = ~blocking = (1 - blocking)
+        # => the below weight computation is equivalent to opp_beliefs @ compatible
+        combo_onehot = self.combo_onehot_float
         weights = (
-            actor_beliefs.sum(dim=-1, keepdim=True)
-            - actor_beliefs @ combo_onehot @ combo_onehot.T
-            + actor_beliefs
+            src_opp_beliefs_fanout.sum(dim=-1, keepdim=True)
+            - src_opp_beliefs_fanout @ combo_onehot @ combo_onehot.T
+            + src_opp_beliefs_fanout
         )
         regrets[bottom:] = weights * advantages
 
-        regrets[: self.search_batch_size] = 0.0
         regrets.masked_fill_(~self.valid_mask[:, None], 0.0)
         return regrets
 

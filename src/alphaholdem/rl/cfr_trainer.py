@@ -27,6 +27,7 @@ class TrainerMetrics:
     entropy: Optional[float] = None
     buffer_size: Optional[int] = None
     cfr_entropy: Optional[float] = None
+    grad_norm_unclipped: Optional[float] = None
 
     def update(self, dict: Dict[str, float]) -> None:
         self.step = dict.get("step", self.step)
@@ -36,6 +37,9 @@ class TrainerMetrics:
         self.entropy = dict.get("entropy", self.entropy)
         self.buffer_size = dict.get("buffer_size", self.buffer_size)
         self.cfr_entropy = dict.get("cfr_entropy", self.cfr_entropy)
+        self.grad_norm_unclipped = dict.get(
+            "grad_norm_unclipped", self.grad_norm_unclipped
+        )
 
 
 class RebelCFRTrainer:
@@ -51,9 +55,9 @@ class RebelCFRTrainer:
         self.num_bet_bins = len(self.bet_bins) + 3
         self.batch_size = cfg.train.batch_size
         self.replay_capacity = self.batch_size * max(1, cfg.train.replay_buffer_batches)
-        self.buffer_device = self.device
+        self.buffer_device = torch.device("cpu")
         self.buffer_rng = torch.Generator(device=self.buffer_device)
-        if hasattr(cfg, "seed") and cfg.seed is not None:
+        if cfg.seed is not None:
             self.rng.manual_seed(int(cfg.seed))
             self.buffer_rng.manual_seed(int(cfg.seed))
         self.num_actions = len(self.bet_bins) + 3
@@ -92,7 +96,7 @@ class RebelCFRTrainer:
             feature_dim=cfg.model.input_dim,
             num_actions=self.num_actions,
             num_players=self.num_players,
-            device=self.device,
+            device=self.buffer_device,
         )
 
         # Model
@@ -107,7 +111,6 @@ class RebelCFRTrainer:
         cpu_rng = torch.Generator(device="cpu")
         if self.cfg.seed is not None:
             cpu_rng.manual_seed(self.cfg.seed)
-            self.rng.manual_seed(self.cfg.seed)
         self.model.init_weights(cpu_rng)
         self.model.to(self.device)
 
@@ -172,6 +175,16 @@ class RebelCFRTrainer:
         )
         loss = loss_dict["total_loss"]
         loss.backward()
+
+        grad_norm_unclipped = (
+            sum(
+                p.grad.norm(2) ** 2
+                for p in self.model.parameters()
+                if p.grad is not None
+            )
+            ** 0.5
+        )
+
         if self.grad_clip is not None and self.grad_clip > 0:
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
         self.optimizer.step()
@@ -182,6 +195,7 @@ class RebelCFRTrainer:
             "value_loss": loss_dict["value_loss"],
             "cfr_entropy": loss_dict["entropy"],
             "buffer_size": len(self.buffer),
+            "grad_norm_unclipped": grad_norm_unclipped,
         }
 
     def train_step(self, step: int) -> TrainerMetrics:

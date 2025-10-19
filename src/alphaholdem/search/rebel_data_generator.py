@@ -33,6 +33,14 @@ class RebelDataGenerator:
         pbs.env.reset()
         return pbs
 
+    def _extend_pbs(self, pbs: PublicBeliefState) -> PublicBeliefState:
+        current_size = pbs.env.N
+        indices = torch.arange(current_size, device=self.device)
+        new_pbs = self._new_pbs(self.evaluator.search_batch_size)
+        new_pbs.env.copy_state_from(pbs.env, indices, indices)
+        new_pbs.beliefs[:current_size] = pbs.beliefs
+        return new_pbs
+
     @profile
     def generate_data(self) -> None:
         batch_size = self.evaluator.search_batch_size
@@ -40,17 +48,19 @@ class RebelDataGenerator:
         collected = 0
 
         while collected < batch_size:
+            if self.current_pbs is None:
+                self.current_pbs = self._new_pbs(batch_size)
+            elif self.current_pbs.env.N < batch_size:
+                self.current_pbs = self._extend_pbs(self.current_pbs)
+
             self.evaluator.initialize_search(
                 self.current_pbs.env,
                 root_indices,
                 self.current_pbs.beliefs,
             )
 
-            while collected < batch_size:
-                next_pbs = self.evaluator.self_play_iteration()
-                batch = self.evaluator.sample_data()
-                self.buffer.add_batch(batch)
-                collected += len(batch)
+            self.current_pbs = self.evaluator.self_play_iteration()
 
-                if next_pbs is None or collected >= batch_size:
-                    break
+            batch = self.evaluator.sample_data()
+            self.buffer.add_batch(batch)
+            collected += len(batch)
