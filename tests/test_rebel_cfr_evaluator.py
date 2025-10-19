@@ -861,12 +861,14 @@ def test_showdown_value_fail_when_opponent_range_invalid() -> None:
     evaluator, _, idx, _ = setup_showdown_evaluator("Jh 8s 6c 4h 2d", beliefs)
 
     # Should get uniform beliefs since all beliefs were blocked
-    torch.testing.assert_close(
-        evaluator.beliefs[idx], torch.full((1, 2, NUM_HANDS), 1.0 / NUM_HANDS)
+    allowed = evaluator.allowed_hands[idx].float() / evaluator.allowed_hands[idx].sum(
+        dim=-1, keepdim=True
     )
 
-    with pytest.raises(AssertionError):
-        evaluator._showdown_value(idx).squeeze(0)
+    torch.testing.assert_close(
+        evaluator.beliefs[idx],
+        allowed[:, None, :].expand(1, 2, -1),
+    )
 
 
 @pytest.mark.parametrize(

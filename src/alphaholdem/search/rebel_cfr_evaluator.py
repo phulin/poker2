@@ -86,6 +86,7 @@ class RebelCFREvaluator:
     env: HUNLTensorEnv
     valid_mask: torch.Tensor
     leaf_mask: torch.Tensor
+    allowed_hands: torch.Tensor
     policy_probs: torch.Tensor
     policy_probs_avg: torch.Tensor
     cumulative_regrets: torch.Tensor
@@ -186,6 +187,9 @@ class RebelCFREvaluator:
         self.legal_mask = None
 
         self.combo_onehot_float = combo_to_onehot_tensor(device=self.device).float()
+        self.allowed_hands = torch.zeros(
+            self.total_nodes, NUM_HANDS, device=self.device, dtype=torch.bool
+        )
 
         # Feature encoder for belief computation
         self.feature_encoder = RebelFeatureEncoder(
@@ -341,6 +345,11 @@ class RebelCFREvaluator:
         leaf_end = self.depth_offsets[self.max_depth + 1]
         self.leaf_mask[leaf_start:leaf_end] = self.valid_mask[leaf_start:leaf_end]
 
+        self.allowed_hands[:] = (
+            self.env.board_onehot.any(dim=1).view(-1, 52).float()
+            @ self.combo_onehot_float.T
+        ) < 0.5
+
         self.legal_mask = self.env.legal_bins_mask()
         valid_legal_masks = self.legal_mask[self.valid_mask & ~self.leaf_mask]
         has_legal = valid_legal_masks.any(dim=-1)
@@ -414,22 +423,17 @@ class RebelCFREvaluator:
         # A little inefficient, but normalize twice to handle the case where
         # the action probability of getting to a node is 0 (restore uniform beliefs
         # in the first normalize and then block/normalize again).
-        self._normalize_beliefs()
         self._block_beliefs()
         self._normalize_beliefs()
+
+        self.beliefs.masked_fill_(~self.valid_mask[:, None, None], 0.0)
 
     @profile
     def _block_beliefs(self, target: torch.Tensor | None = None) -> torch.Tensor:
         """Block beliefs based on the board."""
         if target is None:
             target = self.beliefs
-        combo_onehot = combo_to_onehot_tensor(device=self.device).float()
-        board_onehot = self.env.board_onehot.any(dim=1).view(-1, 52).float()
-        # [N, 52] @ [52, 1326]
-        blocked = (board_onehot @ combo_onehot.T).clamp(0, 1)
-        target.masked_fill_(
-            ~self.valid_mask[:, None, None] | (blocked[:, None, :] > 0.5), 0.0
-        )
+        target.masked_fill_(~self.allowed_hands[:, None, :], 0.0)
 
     @profile
     def _normalize_beliefs(self) -> torch.Tensor:
@@ -438,7 +442,14 @@ class RebelCFREvaluator:
         # If the action probability of getting to a node is 0, our
         # bayesian update will make the beliefs in that state all 0.
         # So we set them to uniform.
-        self.beliefs = torch.where(denom > 1e-12, self.beliefs / denom, 1.0 / NUM_HANDS)
+        allowed_hands_prob = self.allowed_hands.float() / self.allowed_hands.sum(
+            dim=-1, keepdim=True
+        )
+        self.beliefs = torch.where(
+            denom > 1e-10,
+            self.beliefs / denom,
+            allowed_hands_prob[:, None, :],
+        )
         self.beliefs.masked_fill_(~self.valid_mask[:, None, None], 0.0)
 
     @torch.no_grad()
@@ -466,7 +477,7 @@ class RebelCFREvaluator:
         min_value = torch.finfo(self.float_dtype).min
 
         # [M, ]
-        temp_values = torch.where(self.leaf_mask[:, None, None], self.values, 0.0)
+        values_br = torch.where(self.leaf_mask[:, None, None], self.values, 0.0)
 
         all_actions = torch.arange(B, device=self.device)[None, :]
         assert (self.values[~self.valid_mask] == 0.0).all()
@@ -484,9 +495,9 @@ class RebelCFREvaluator:
             opp = 1 - actor
             legal_mask = self.legal_mask[current_indices]
             # [n, B, 1326]
-            next_actor_values = temp_values[next_indices, actor[:, None]]
+            next_actor_values = values_br[next_indices, actor[:, None]]
             next_actor_values.masked_fill_(~legal_mask[:, :, None], min_value)
-            next_opp_values = temp_values[next_indices, opp[:, None]]
+            next_opp_values = values_br[next_indices, opp[:, None]]
 
             opp_action_values_all = self.policy_probs[next_indices] * next_opp_values
             opp_action_values_all.masked_fill_(~legal_mask[:, :, None], 0.0)
@@ -498,13 +509,15 @@ class RebelCFREvaluator:
             ).squeeze(1)
 
             # take the player-to-act's best action, and the other player's average action
-            temp_values[current_indices, actor] = best_values
-            temp_values[current_indices, opp] = opp_action_values_all.sum(dim=1)
+            values_br[current_indices, actor] = best_values
+            values_br[current_indices, opp] = opp_action_values_all.sum(dim=1)
 
-        assert temp_values[self.valid_mask].isfinite().all()
+        assert values_br[self.valid_mask].isfinite().all()
 
         # heuristic: scale regrets by the number of warm start iterations
-        regrets = self.compute_instantaneous_regrets(temp_values)
+        regrets = self.compute_instantaneous_regrets(
+            values_achieved=values_br, values_expected=self.values
+        )
         self.cumulative_regrets += self.warm_start_iterations * regrets
         self.update_policy()
         self.policy_probs_avg[:] = self.policy_probs
@@ -561,12 +574,21 @@ class RebelCFREvaluator:
             )
 
     @profile
-    def compute_instantaneous_regrets(self, values: torch.Tensor) -> torch.Tensor:
+    def compute_instantaneous_regrets(
+        self, values_achieved: torch.Tensor, values_expected: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Compute regrets for every valid non-leaf information set.
+
+        Args:
+            values: [M, 2, 1326] tensor of values for each node.
+            values_expected: [M, 2, 1326] tensor of expected values for each node, or none to use values.
 
         Returns:
             regrets: [M, 1326] tensor of regrets for taking the action to get to the node.
         """
+
+        if values_expected is None:
+            values_expected = values_achieved
 
         M = self.total_nodes
         bottom = self.depth_offsets[1]
@@ -588,10 +610,10 @@ class RebelCFREvaluator:
         src_opp_beliefs_fanout = self._fan_out(src_opp_beliefs)
 
         # The value at a node is already the EV over all actions.
-        actor_values = values.gather(1, src_actor_indices).squeeze(1)  # bottom
+        actor_values = values_expected.gather(1, src_actor_indices).squeeze(1)  # bottom
         actor_values_expected = self._fan_out(actor_values)
         actor_values_achieved = (
-            values[bottom:].gather(1, src_actor_indices_fanout).squeeze(1)
+            values_achieved[bottom:].gather(1, src_actor_indices_fanout).squeeze(1)
         )
 
         advantages = actor_values_achieved - actor_values_expected
@@ -748,8 +770,13 @@ class RebelCFREvaluator:
         self.policy_probs_avg *= reach_avg_actor
         self.policy_probs_avg *= t
         self.policy_probs_avg += self.policy_probs * reach_actor
-        self.policy_probs_avg /= (t + 1) * (reach_avg_actor + reach_actor).clamp(
-            min=1e-8
+        torch.where(
+            self.policy_probs_avg.abs() > 1e-8,
+            self.policy_probs_avg
+            / (t + 1)
+            / (reach_avg_actor + reach_actor).clamp(min=1e-8),
+            torch.zeros_like(self.policy_probs_avg),
+            out=self.policy_probs_avg,
         )
 
     @profile
@@ -768,6 +795,9 @@ class RebelCFREvaluator:
         if self.warm_start_iterations > 0:
             self.set_leaf_values()
             self.profiler_step()  # Profile after leaf values
+
+            self.compute_expected_values()
+            self.profiler_step()  # Profile after expected values computation
 
             self.warm_start()
             self.profiler_step()  # Profile after warm start
@@ -978,8 +1008,8 @@ class RebelCFREvaluator:
 
         assert not (b_self * ~hand_ok_mask).any()
         assert not (b_opp * ~hand_ok_mask).any()
-        assert torch.allclose(b_self.sum(dim=1), torch.ones_like(b_self.sum(dim=1)))
-        assert torch.allclose(b_opp.sum(dim=1), torch.ones_like(b_opp.sum(dim=1)))
+        assert torch.allclose(b_self.sum(dim=1), self.valid_mask[indices].float())
+        assert torch.allclose(b_opp.sum(dim=1), self.valid_mask[indices].float())
 
         c1 = hands_c1c2_sorted[..., 0]  # (M,1326)
         c2 = hands_c1c2_sorted[..., 1]  # (M,1326)
