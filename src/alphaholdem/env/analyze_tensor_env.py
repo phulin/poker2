@@ -43,7 +43,7 @@ class RebelStateEncoderWrapper:
             device=idxs.device,
             dtype=torch.float32,
         )
-        return self.encoder.encode(idxs, agents, beliefs=beliefs)
+        return self.encoder.encode(agents, beliefs=beliefs)[idxs]
 
 
 def create_state_encoder_for_model(

@@ -95,7 +95,7 @@ class RebelDataGenerator:
             self.next_pbs_idx = 0
 
         # Snapshot tensors for supervised targets; detach to break autograd graph.
-        features = self.evaluator.encode_current_states(root_indices).detach()
+        features = self.evaluator.encode_current_states()[:batch_size].detach()
         legal_masks = self.evaluator.env.legal_bins_mask()[:batch_size].detach()
         values = self.evaluator.values[:batch_size].detach()
         policy = self.evaluator.policy_probs_avg[:batch_size].detach()

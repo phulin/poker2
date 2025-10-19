@@ -161,12 +161,6 @@ class RebelCFREvaluator:
         self.policy_probs_avg = torch.zeros_like(self.policy_probs)
         # Cumulative regret of taking this node vs the best at the parent node.
         self.cumulative_regrets = torch.zeros_like(self.policy_probs)
-        self.parent_index = torch.full(
-            (self.total_nodes,), -1, dtype=torch.long, device=self.device
-        )
-        self.parent_action = torch.full(
-            (self.total_nodes,), -1, dtype=torch.long, device=self.device
-        )
 
         # One value per node per player per hand
         self.values = torch.zeros(
@@ -188,7 +182,6 @@ class RebelCFREvaluator:
         )
 
         self.legal_mask = None
-        self.illegal_mask = None
 
         self.combo_onehot_float = combo_to_onehot_tensor(device=self.device).float()
 
@@ -269,24 +262,23 @@ class RebelCFREvaluator:
                 device=self.device, dtype=self.float_dtype
             )
 
-        dest_indices = torch.arange(self.search_batch_size, device=self.device)
+        N = self.search_batch_size
+
+        dest_indices = torch.arange(N, device=self.device)
         self.env.reset()
         self.env.copy_state_from(src_env, src_indices, dest_indices, copy_deck=True)
         self.valid_mask.zero_()
-        self.valid_mask[dest_indices] = True
+        self.valid_mask[:N] = True
         self.leaf_mask.zero_()
-        self.leaf_mask[dest_indices] = self.env.done[dest_indices]
+        self.leaf_mask[:N] = self.env.done[:N]
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
         self.cumulative_regrets.zero_()
         self.values.zero_()
         self.beliefs.zero_()
-        self.beliefs[dest_indices] = initial_beliefs
+        self.beliefs[:N] = initial_beliefs
         self.legal_mask = None
-        self.illegal_mask = None
         self.hand_rank_data = None
-        self.parent_index.fill_(-1)
-        self.parent_action.fill_(-1)
 
     @profile
     def construct_subgame(self) -> None:
@@ -294,12 +286,12 @@ class RebelCFREvaluator:
         N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
 
         for depth in range(self.max_depth):
+            bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
 
             action_bins = torch.full((M,), -1, dtype=torch.long, device=self.device)
             # don't currently have a way to get a subset of the masks
-            legal_masks = self.env.legal_bins_mask()
             for action in range(self.num_actions):
                 current_legal_mask = (
                     legal_masks[offset:offset_next, action]
@@ -319,26 +311,25 @@ class RebelCFREvaluator:
                     self.env, current_legal_indices, new_legal_indices
                 )
                 self.valid_mask[new_legal_indices] = True
-                self.parent_index[new_legal_indices] = current_legal_indices
-                self.parent_action[new_legal_indices] = action
 
                 action_bins[new_legal_indices] = action
 
             # TODO: To stop on street, capture new_streets here.
-            rewards, _, _ = self.env.step_bins(action_bins, legal_masks=legal_masks)
+            rewards, _, _ = self.env.step_bins(
+                action_bins, bin_amounts=bin_amounts, legal_masks=legal_masks
+            )
 
             # Showdown values get set in set_leaf_values.
-            finished_folded = (action_bins == 0) & self.env.done
+            finished_folded = self.valid_mask & (action_bins == 0) & self.env.done
             self.values[finished_folded, 0] = rewards[finished_folded].view(-1, 1)
             self.values[finished_folded, 1] = -rewards[finished_folded].view(-1, 1)
 
         leaf_start = self.depth_offsets[self.max_depth]
         leaf_end = self.depth_offsets[self.max_depth + 1]
         self.leaf_mask[leaf_start:leaf_end] = self.valid_mask[leaf_start:leaf_end]
-        self.leaf_mask[self.valid_mask & self.env.done] = True
+        self.leaf_mask |= self.valid_mask & self.env.done
 
         self.legal_mask = self.env.legal_bins_mask()
-        self.illegal_mask = ~self.legal_mask
         valid_legal_masks = self.legal_mask[self.valid_mask & ~self.leaf_mask]
         has_legal = valid_legal_masks.any(dim=-1)
         assert has_legal.all(), "Every valid node must have at least one legal action."
@@ -348,8 +339,8 @@ class RebelCFREvaluator:
     @torch.no_grad()
     @profile
     def _get_model_policy_probs(self, indices: torch.Tensor) -> torch.Tensor:
-        features = self.encode_current_states(indices)
-        model_output = self.model(features)
+        features = self.encode_current_states()
+        model_output = self.model(features[indices])
         logits = model_output.policy_logits
         legal_masks = self.legal_mask[indices]
         masked_logits = compute_masked_logits(logits, legal_masks[:, None, :])
@@ -443,10 +434,8 @@ class RebelCFREvaluator:
         N, B = self.search_batch_size, self.num_actions
         min_value = torch.finfo(self.float_dtype).min
 
-        leaf_indices = torch.where(self.leaf_mask)[0]
         # [M, ]
-        temp_values = torch.zeros_like(self.values)
-        temp_values[leaf_indices] = self.values[leaf_indices]
+        temp_values = torch.where(self.leaf_mask[:, None, None], self.values, 0.0)
 
         all_actions = torch.arange(B, device=self.device)[None, :]
         assert (self.values[~self.valid_mask] == 0.0).all()
@@ -498,13 +487,11 @@ class RebelCFREvaluator:
         """Populate cached per-hand payoffs for nodes marked as leaves."""
 
         # Set estimated leaf value from model for non-terminal nodes.
-        leaf_indices = torch.where(self.leaf_mask & ~self.env.done)[0]
-        if leaf_indices.numel() == 0:
-            return
+        model_mask = self.leaf_mask & ~self.env.done
 
-        features = self.encode_current_states(leaf_indices)
-        model_output = self.model(features)
-        self.values[leaf_indices] = model_output.hand_values
+        features = self.encode_current_states()
+        model_output = self.model(features[model_mask])
+        self.values[model_mask] = model_output.hand_values
 
         # Fold values were set in construct_subgame and don't need updating.
         # Showdown values need to be updated based on beliefs.
@@ -779,10 +766,9 @@ class RebelCFREvaluator:
             self.profiler_step()  # Profile after policy update
 
             # Update average policy.
-            self.policy_probs_avg[self.valid_mask] = (
-                t * self.policy_probs_avg[self.valid_mask]
-                + self.policy_probs[self.valid_mask]
-            ) / (t + 1)
+            self.policy_probs_avg *= t
+            self.policy_probs_avg += self.policy_probs
+            self.policy_probs_avg /= t + 1
             self.profiler_step()  # Profile after average policy update
 
             self.set_leaf_values()
@@ -797,20 +783,20 @@ class RebelCFREvaluator:
                 self.env.starting_stack / self.env.scale * 4
             )  # 2x starting stack in scaled units
 
-            # Debug logging for extreme values
-            extreme_values = (
-                torch.abs(new_expected_values[self.valid_mask]) > max_hand_value
-            )
-            if torch.any(extreme_values):  # Warn at 80% of max
-                extreme_count = extreme_values.sum().item()
-                max_val = new_expected_values[self.valid_mask].max().item()
-                min_val = new_expected_values[self.valid_mask].min().item()
-                print(f"WARNING: Large hand values detected at iteration {t}")
-                print(f"  Extreme values count: {extreme_count}")
-                print(f"  Value range: [{min_val:.2f}, {max_val:.2f}]")
-                print(f"  Max allowed: {max_hand_value:.2f}")
-
             self.values = (t * self.values + new_expected_values) / (t + 1)
+
+        # Debug logging for extreme values
+        extreme_values = self.valid_mask[:, None, None] & (
+            torch.abs(new_expected_values) > max_hand_value
+        )
+        if torch.any(extreme_values):  # Warn at 80% of max
+            extreme_count = extreme_values.sum().item()
+            max_val = new_expected_values[self.valid_mask].max().item()
+            min_val = new_expected_values[self.valid_mask].min().item()
+            print(f"WARNING: Large hand values detected")
+            print(f"  Extreme values count: {extreme_count}")
+            print(f"  Value range: [{min_val:.2f}, {max_val:.2f}]")
+            print(f"  Max allowed: {max_hand_value:.2f}")
 
         return next_pbs
 
@@ -820,7 +806,7 @@ class RebelCFREvaluator:
         level_1_end = self.depth_offsets[2]
         policy_targets = self._pull_back(self.policy_probs_avg[:level_1_end])
         return RebelBatch(
-            features=self.encode_current_states(indices),
+            features=self.encode_current_states()[indices],
             policy_targets=policy_targets.permute(0, 2, 1),
             value_targets=self.values[indices],
             legal_masks=self.env.legal_bins_mask()[indices],
@@ -1072,7 +1058,6 @@ class RebelCFREvaluator:
             Data by source node/action, shape [M - N * B ** D, B, *data.shape[1:]].
         """
         bottom = self.depth_offsets[1] if not sliced else 0
-        assert data[bottom:].shape[0] == self.total_nodes - self.search_batch_size
         return data[bottom:].view(-1, self.num_actions, *data.shape[1:])
 
     def _push_down(self, data: torch.Tensor) -> torch.Tensor:
@@ -1102,20 +1087,11 @@ class RebelCFREvaluator:
         )
 
     @profile
-    def encode_current_states(self, indices: torch.Tensor) -> torch.Tensor:
+    def encode_current_states(self) -> torch.Tensor:
         """Encode environment states for policy network input."""
-        if indices.numel() == 0:
-            return torch.empty(
-                0,
-                self.feature_encoder.feature_dim,
-                device=self.device,
-                dtype=self.float_dtype,
-            )
-
         return self.feature_encoder.encode(
-            indices,
-            self.env.to_act[indices],
-            beliefs=self.beliefs[indices],
+            self.env.to_act,
+            beliefs=self.beliefs,
         )
 
     def _leaf_node_indices(self) -> torch.Tensor:
