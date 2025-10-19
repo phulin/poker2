@@ -227,10 +227,15 @@ class PreflopAnalyzer:
         grid_sums = torch.zeros(13, 13, dtype=values_1326.dtype, device=self.device)
         grid_counts = torch.zeros(13, 13, dtype=torch.long, device=self.device)
 
-        for idx, (c1, c2) in enumerate(self.all_hands):
-            i, j = _grid_coords_for_hand(c1, c2)
-            grid_sums[i, j] += values_1326[idx]
-            grid_counts[i, j] += 1
+        suits = self.all_hands // 13
+        ranks = 12 - self.all_hands % 13
+        ranks_flat = torch.where(
+            suits[:, 0] == suits[:, 1],
+            ranks[:, 0] * 13 + ranks[:, 1],
+            ranks[:, 1] * 13 + ranks[:, 0],
+        )
+        grid_counts.flatten().scatter_add_(0, ranks_flat, torch.ones_like(ranks_flat))
+        grid_sums.flatten().scatter_add_(0, ranks_flat, values_1326)
 
         # Avoid div by zero
         averaged = torch.where(
@@ -566,17 +571,14 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         )
 
         # Set up public belief state
-        self.pbs = PublicBeliefState(
-            env=self.env,
+        self.pbs = PublicBeliefState.from_proto(
+            env_proto=self.env,
             beliefs=uniform_beliefs,
         )
 
-        # Reset CFR evaluator with uniform beliefs
-        self.cfr_evaluator.beliefs = uniform_beliefs
-        self.cfr_evaluator.env = self.env
-
-        self.current_index = 0
-        self.current_depth = 0
+        # start at depth 1 since that's where actions are
+        self.current_index = 1
+        self.current_depth = 1
 
     def get_probabilities_from_cfr(
         self, seat: int
@@ -598,21 +600,27 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         self.cfr_evaluator.self_play_iteration()
 
         # Get the root node policy (index 0) [NUM_HANDS, num_actions]
-        root_policy = self.cfr_evaluator.policy_probs_avg[self.current_index]
+        actions_slice = slice(
+            self.current_index,
+            self.current_index + self.cfr_evaluator.num_actions,
+        )
+        root_policy = self.cfr_evaluator.policy_probs_avg[actions_slice]
+        root_policy /= root_policy.sum(dim=0, keepdim=True).clamp_min(1e-12)
 
         # Get legal actions
-        legal_masks = self.env.legal_bins_mask()[self.current_index]  # [num_actions]
+        legal_masks = self.cfr_evaluator.valid_mask[actions_slice]
         legal_masks = legal_masks[None, :].expand(NUM_HANDS, -1)
-        assert (root_policy[~legal_masks] == 0.0).all()
 
         # Get values from CFR
-        root_values = self.cfr_evaluator.values[self.current_index, seat]  # [NUM_HANDS]
+        root_values = (
+            self.cfr_evaluator.values[actions_slice, seat] * root_policy
+        ).sum(dim=0)
 
         # Denormalize values if PopArt normalizer is available
         if self.popart_normalizer is not None:
             root_values = self.popart_normalizer.denormalize_value(root_values)
 
-        return root_policy, root_values, legal_masks
+        return root_policy.T, root_values, legal_masks
 
     def get_probabilities(
         self, seat: int
@@ -626,8 +634,13 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         # Instead, we run CFR search from the current state
         N, B = self.cfr_evaluator.search_batch_size, self.cfr_evaluator.num_actions
         action = 0 if sb_action == "fold" else 1 if sb_action == "call" else B - 1
+        offset = (
+            self.current_index - self.cfr_evaluator.depth_offsets[self.current_depth]
+        )
         self.current_index = (
-            self.current_index + (action + 1) * B**self.current_depth * N
+            self.cfr_evaluator.depth_offsets[self.current_depth + 1]
+            + offset * B
+            + action
         )
         self.current_depth += 1
 

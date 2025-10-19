@@ -93,8 +93,8 @@ def print_preflop_range_grid(
             rng=trainer.rng,
             flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
             popart_normalizer=getattr(trainer, "popart_normalizer", None),
-            cfr_iterations=trainer.cfg.search.cfr_iterations,
-            max_depth=trainer.cfg.search.max_depth,
+            cfr_iterations=trainer.cfg.search.iterations,
+            max_depth=trainer.cfg.search.depth,
         )
     else:
         analyzer = PreflopAnalyzer(
