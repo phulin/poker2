@@ -14,25 +14,11 @@ class RebelDataGenerator:
         buffer: RebelReplayBuffer,
     ):
         self.env_proto = env_proto
-        self.next_pbs_idx = 0
         self.evaluator = evaluator
         self.buffer = buffer
         self.device = evaluator.device
-        initial_pbs = PublicBeliefState.from_proto(
-            env_proto=self.env_proto,
-            beliefs=torch.full(
-                (
-                    self.evaluator.search_batch_size,
-                    self.evaluator.num_players,
-                    NUM_HANDS,
-                ),
-                1.0 / NUM_HANDS,
-                device=self.device,
-            ),
-            num_envs=self.evaluator.search_batch_size,
-        )
-        initial_pbs.env.reset()
-        self.pbs_queue = [initial_pbs]
+        initial_pbs = self._new_pbs(evaluator.search_batch_size)
+        self.current_pbs = initial_pbs
 
     def _new_pbs(self, target_batch_size: int) -> PublicBeliefState:
         pbs = PublicBeliefState.from_proto(
@@ -47,18 +33,6 @@ class RebelDataGenerator:
         pbs.env.reset()
         return pbs
 
-    def _ensure_batch_sized(self, pbs: PublicBeliefState) -> PublicBeliefState:
-        if pbs.env.N == self.evaluator.search_batch_size:
-            return pbs
-
-        padded = self._new_pbs(self.evaluator.search_batch_size)
-        count = pbs.env.N
-        if count > 0:
-            src_indices = torch.arange(count, device=self.device)
-            padded.env.copy_state_from(pbs.env, src_indices, src_indices)
-            padded.beliefs[src_indices] = pbs.beliefs
-        return padded
-
     @profile
     def generate_data(self) -> None:
         batch_size = self.evaluator.search_batch_size
@@ -66,30 +40,15 @@ class RebelDataGenerator:
         collected = 0
 
         while collected < batch_size:
-            if self.next_pbs_idx >= len(self.pbs_queue):
-                self.pbs_queue.append(self._new_pbs(batch_size))
-
-            current_pbs = self._ensure_batch_sized(self.pbs_queue[self.next_pbs_idx])
-            self.pbs_queue[self.next_pbs_idx] = current_pbs
-            self.next_pbs_idx += 1
             self.evaluator.initialize_search(
-                current_pbs.env,
+                self.current_pbs.env,
                 root_indices,
-                current_pbs.beliefs,
+                self.current_pbs.beliefs,
             )
 
             while collected < batch_size:
                 next_pbs = self.evaluator.self_play_iteration()
-                batch = self.evaluator.sample_data()
-                batch_len = len(batch)
-                if batch_len > 0:
-                    self.buffer.add_batch(batch)
-                    collected += batch_len
-                if next_pbs is not None:
-                    self.pbs_queue.append(next_pbs)
+                self.buffer.add_batch(self.evaluator.sample_data())
+
                 if next_pbs is None or collected >= batch_size:
                     break
-
-        if self.next_pbs_idx > 0:
-            self.pbs_queue = self.pbs_queue[self.next_pbs_idx :]
-            self.next_pbs_idx = 0

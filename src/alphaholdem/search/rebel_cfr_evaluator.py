@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generator, Optional, ContextManager
+from typing import Generator, Optional
 import os
-import time
 
 import torch
 import torch.nn.functional as F
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.card_utils import (
-    combo_blocking_tensor,
     combo_to_onehot_tensor,
     hand_combos_tensor,
 )
@@ -421,13 +419,15 @@ class RebelCFREvaluator:
         self._normalize_beliefs()
 
     @profile
-    def _block_beliefs(self) -> torch.Tensor:
+    def _block_beliefs(self, target: torch.Tensor | None = None) -> torch.Tensor:
         """Block beliefs based on the board."""
+        if target is None:
+            target = self.beliefs
         combo_onehot = combo_to_onehot_tensor(device=self.device).float()
         board_onehot = self.env.board_onehot.any(dim=1).view(-1, 52).float()
         # [N, 52] @ [52, 1326]
         blocked = (board_onehot @ combo_onehot.T).clamp(0, 1)
-        self.beliefs.masked_fill_(
+        target.masked_fill_(
             ~self.valid_mask[:, None, None] | (blocked[:, None, :] > 0.5), 0.0
         )
 
@@ -722,7 +722,9 @@ class RebelCFREvaluator:
         prev_actor[N:] = self._fan_out(self.env.to_act)
 
         reach = self._calculate_reach_weights(self.policy_probs)
+        self._block_beliefs(reach)
         reach_avg = self._calculate_reach_weights(self.policy_probs_avg)
+        self._block_beliefs(reach_avg)
 
         # In the root nodes, prev_actor is invalid, but that's OK because
         # reach_weights is the same (1.0) for all players there.
