@@ -305,11 +305,11 @@ class RebelCFREvaluator:
             offset_next_next = self.depth_offsets[depth + 2]
 
             action_bins = torch.full((M,), -1, dtype=torch.long, device=self.device)
+            legal_masks_1 = self.env.legal_bins_mask()
             for action in range(self.num_actions):
                 # don't currently have a way to get a subset of the masks
-                bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
                 current_legal_mask = (
-                    legal_masks[offset:offset_next, action]
+                    legal_masks_1[offset:offset_next, action]
                     & self.valid_mask[offset:offset_next]
                     & ~self.env.done[offset:offset_next]
                 )
@@ -329,9 +329,9 @@ class RebelCFREvaluator:
                 action_bins[new_legal_indices] = action
 
             # now that we've copied the states, update the legal masks and amounts
-            bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
+            bin_amounts_2, legal_masks_2 = self.env.legal_bins_amounts_and_mask()
             rewards, _, _ = self.env.step_bins(
-                action_bins, bin_amounts=bin_amounts, legal_masks=legal_masks
+                action_bins, bin_amounts=bin_amounts_2, legal_masks=legal_masks_2
             )
 
             # New street -> mark as done. Don't want to deal w/ chance nodes.
