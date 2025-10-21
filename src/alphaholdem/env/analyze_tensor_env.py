@@ -4,7 +4,7 @@ Debug utilities for HUNLTensorEnv.
 Contains functions for creating test environments and analyzing specific scenarios.
 """
 
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -16,7 +16,11 @@ from alphaholdem.models.cnn.state_encoder import CNNStateEncoder
 from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS, RebelFFN
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator, PublicBeliefState
+from alphaholdem.search.rebel_cfr_evaluator import (
+    T_WARM,
+    RebelCFREvaluator,
+    PublicBeliefState,
+)
 
 RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
 SUITS = ["s", "h", "d", "c"]
@@ -86,9 +90,17 @@ def create_1326_hand_combinations() -> List[Tuple[str, str]]:
     """Create all 1326 distinct preflop combinations (ordered hole cards, no overlap).
 
     Returns pairs like ("As", "Kh"). Offsuit/suited and pairs fully enumerated.
+    Uses the same ordering as hand_combos_tensor() for consistency.
     """
-    # Build full deck strings
-    deck = [r + s for r in RANKS for s in SUITS]
+    # Build full deck strings in canonical order (0-51)
+    # Cards are indexed as suit * 13 + rank, where suit=0,1,2,3 and rank=0,1,2,...,12
+    deck = []
+    for suit_idx in range(4):  # 0=spades, 1=hearts, 2=diamonds, 3=clubs
+        for rank_idx in range(13):  # 0=2, 1=3, ..., 12=A
+            suit = SUITS[suit_idx]
+            rank = RANKS[rank_idx]
+            deck.append(rank + suit)
+
     hands: List[Tuple[str, str]] = []
     for i in range(len(deck)):
         for j in range(i + 1, len(deck)):
@@ -102,7 +114,9 @@ def _grid_coords_for_hand(card1: int, card2: int) -> Tuple[int, int]:
     s1, s2 = card1 // 13, card2 // 13
 
     # Grid is reversed, higher ranks first.
-    i, j = 12 - card1 % 13, 12 - card2 % 13
+    # With new rank mapping: A=0, K=1, ..., 2=12
+    # Grid shows A at top (position 0), so we use rank directly
+    i, j = card1 % 13, card2 % 13
 
     # Suited if same suit and not pair → top-right triangle; else bottom-left
     if s1 == s2:
@@ -133,6 +147,7 @@ class PreflopAnalyzer:
         rng: torch.Generator = None,
         flop_showdown: bool = False,
         popart_normalizer=None,
+        reset=True,
     ):
         """Initialize the analyzer with cached environment and hands.
 
@@ -190,8 +205,18 @@ class PreflopAnalyzer:
             dtype=torch.long,
             device=device,
         )
+        # Align card ordering with the canonical 1326 ordering used by ReBeL.
+        combo_ids = self.combo_lookup[self.all_hands[:, 0], self.all_hands[:, 1]]
+        sort_order = torch.argsort(combo_ids)
+        self.all_hands = self.all_hands[sort_order]
+        if sort_order.device.type != "cpu":
+            sort_order_cpu = sort_order.cpu()
+        else:
+            sort_order_cpu = sort_order
+        self.all_hands_str = [self.all_hands_str[i] for i in sort_order_cpu.tolist()]
 
-        self.reset(button)
+        if reset:
+            self.reset(button)
 
     def reset(self, button: int):
         """Reset the environment and state encoder to initial state."""
@@ -228,7 +253,7 @@ class PreflopAnalyzer:
         grid_counts = torch.zeros(13, 13, dtype=torch.long, device=self.device)
 
         suits = self.all_hands // 13
-        ranks = 12 - self.all_hands % 13
+        ranks = self.all_hands % 13  # With new rank mapping: A=0, K=1, ..., 2=12
         ranks_flat = torch.where(
             suits[:, 0] == suits[:, 1],
             ranks[:, 0] * 13 + ranks[:, 1],
@@ -509,15 +534,32 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         if rng is None:
             rng = torch.Generator(device=device)
 
-        self.model = model
-        self.device = device
-        self.popart_normalizer = popart_normalizer
+        if cfr_iterations <= T_WARM:
+            raise ValueError(
+                f"RebelPreflopAnalyzer requires cfr_iterations > T_WARM ({T_WARM}); "
+                f"got {cfr_iterations}."
+            )
+
+        super().__init__(
+            model=model,
+            button=button,
+            starting_stack=starting_stack,
+            sb=sb,
+            bb=bb,
+            bet_bins=bet_bins,
+            device=device,
+            rng=rng,
+            flop_showdown=flop_showdown,
+            popart_normalizer=popart_normalizer,
+            reset=False,
+        )
+
         self.cfr_iterations = cfr_iterations
         self.max_depth = max_depth
         self.combo_lookup = combo_lookup_tensor(device=self.device)
 
         # Create single environment for CFR search
-        self.env = HUNLTensorEnv(
+        self.cfr_env = HUNLTensorEnv(
             num_envs=1,  # Single environment for analysis
             starting_stack=starting_stack,
             sb=sb,
@@ -528,10 +570,9 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             flop_showdown=flop_showdown,
         )
 
-        # Set up CFR evaluator
         self.cfr_evaluator = RebelCFREvaluator(
             search_batch_size=1,  # Single environment
-            env_proto=self.env,
+            env_proto=self.cfr_env,
             model=self.model,
             bet_bins=bet_bins,
             max_depth=max_depth,
@@ -551,32 +592,45 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             dtype=torch.long,
             device=device,
         )
+        combo_ids = self.combo_lookup[self.all_hands[:, 0], self.all_hands[:, 1]]
+        sort_order = torch.argsort(combo_ids)
+        self.all_hands = self.all_hands[sort_order]
+        if sort_order.device.type != "cpu":
+            sort_order_cpu = sort_order.cpu()
+        else:
+            sort_order_cpu = sort_order
+        self.all_hands_str = [self.all_hands_str[i] for i in sort_order_cpu.tolist()]
 
+        # Reinitialize both the base and CFR environments now that CFR state is set up.
         self.reset(button)
 
     def reset(self, button: int):
-        """Reset the environment and CFR evaluator to initial state with uniform beliefs."""
-        # Reset environment
-        self.env.reset(
+        """Reset cached environments for both direct model inference and CFR search."""
+        super().reset(button)
+
+        self.cfr_env.reset(
             force_button=torch.tensor([button], dtype=torch.long, device=self.device),
-            force_deck=self.all_hands[:1],  # Use first hand as placeholder
         )
 
-        # Create uniform belief state for both players
         uniform_beliefs = torch.full(
-            (1, 2, NUM_HANDS),  # [batch_size, num_players, NUM_HANDS]
+            (1, 2, NUM_HANDS),
             1.0 / NUM_HANDS,
             device=self.device,
             dtype=torch.float32,
         )
 
-        # Set up public belief state
         self.pbs = PublicBeliefState.from_proto(
-            env_proto=self.env,
+            env_proto=self.cfr_env,
             beliefs=uniform_beliefs,
         )
+        root_idx = torch.tensor([0], dtype=torch.long, device=self.device)
+        self.pbs.env.copy_state_from(
+            self.cfr_env,
+            root_idx,
+            root_idx,
+            copy_deck=True,
+        )
 
-        # start at depth 1 since that's where actions are
         self.current_index = 1
         self.current_depth = 1
 
@@ -591,6 +645,10 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         Returns:
             Tuple of (probabilities [1326, num_bet_bins], values [1326], legal_masks [1326, num_bet_bins])
         """
+        assert (
+            self.cfr_evaluator is not None and self.cfr_env is not None
+        ), "RebelPreflopAnalyzer must initialize CFR evaluator."
+
         # Run CFR search to compute policies
         self.cfr_evaluator.initialize_search(
             self.pbs.env,
@@ -625,24 +683,34 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
     def get_probabilities(
         self, seat: int
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Override to use CFR-computed probabilities instead of direct model inference."""
+        """Override to use CFR search when configured, else belief-averaged model outputs."""
         return self.get_probabilities_from_cfr(seat)
 
     def step_sb_action(self, sb_action: str = "allin") -> None:
-        """Override to handle single environment CFR search."""
-        # For CFR-based analysis, we don't step individual actions
-        # Instead, we run CFR search from the current state
-        N, B = self.cfr_evaluator.search_batch_size, self.cfr_evaluator.num_actions
-        action = 0 if sb_action == "fold" else 1 if sb_action == "call" else B - 1
-        offset = (
-            self.current_index - self.cfr_evaluator.depth_offsets[self.current_depth]
+        """Override to apply the SB action inside the CFR root environment."""
+        super().step_sb_action(sb_action)
+
+        bin_map = {
+            "fold": 0,
+            "call": 1,
+            "bet": 2,
+            "allin": self.cfr_evaluator.num_actions - 1,
+        }
+        action_bin = bin_map[sb_action]
+
+        legal_masks = self.cfr_env.legal_bins_mask()
+        bin_tensor = torch.full(
+            (self.cfr_env.N,), action_bin, dtype=torch.long, device=self.device
         )
-        self.current_index = (
-            self.cfr_evaluator.depth_offsets[self.current_depth + 1]
-            + offset * B
-            + action
+        self.cfr_env.step_bins(bin_tensor, legal_masks=legal_masks)
+
+        root_indices = torch.arange(self.cfr_env.N, device=self.device)
+        self.pbs.env.copy_state_from(
+            self.cfr_env,
+            root_indices,
+            root_indices,
+            copy_deck=True,
         )
-        self.current_depth += 1
 
 
 def _card_str_to_int(card_str: str) -> int:
@@ -655,19 +723,19 @@ def _card_str_to_int(card_str: str) -> int:
         Integer index (0-51) representing the card
     """
     rank_map = {
-        "A": 12,
-        "K": 11,
-        "Q": 10,
-        "J": 9,
-        "T": 8,
-        "9": 7,
+        "A": 0,
+        "K": 1,
+        "Q": 2,
+        "J": 3,
+        "T": 4,
+        "9": 5,
         "8": 6,
-        "7": 5,
-        "6": 4,
-        "5": 3,
-        "4": 2,
-        "3": 1,
-        "2": 0,
+        "7": 7,
+        "6": 8,
+        "5": 9,
+        "4": 10,
+        "3": 11,
+        "2": 12,
     }
     suit_map = {"s": 0, "h": 1, "d": 2, "c": 3}
 

@@ -7,11 +7,15 @@ import torch
 
 from alphaholdem.env.analyze_tensor_env import (
     PreflopAnalyzer,
+    RebelPreflopAnalyzer,
     _card_str_to_int,
     _grid_coords_for_hand,
     create_1326_hand_combinations,
 )
+from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
+from alphaholdem.env.card_utils import hand_combos_tensor
 from alphaholdem.models.model_output import ModelOutput
+from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
@@ -63,6 +67,64 @@ def test_1326_to_169_bucket_counts() -> None:
     assert counts.sum().item() == 1326
 
 
+def test_preflop_analyzer_uses_canonical_combo_order() -> None:
+    dummy_model = object()
+    analyzer = PreflopAnalyzer(dummy_model, device=torch.device("cpu"))
+    expected_combos = hand_combos_tensor()
+
+    assert torch.equal(analyzer.all_hands.cpu(), expected_combos)
+    # Ensure the cached string representations match the integer deck indices.
+    for (card_a, card_b), (idx_a, idx_b) in zip(
+        analyzer.all_hands_str, expected_combos.tolist()
+    ):
+        assert _card_str_to_int(card_a) == idx_a
+        assert _card_str_to_int(card_b) == idx_b
+
+
+def test_rebel_preflop_analyzer_uses_canonical_combo_order() -> None:
+    model = RebelFFN(
+        input_dim=RebelFeatureEncoder.feature_dim,
+        num_actions=8,
+        hidden_dim=32,
+        num_hidden_layers=1,
+    )
+    analyzer = RebelPreflopAnalyzer(model, device=torch.device("cpu"))
+    expected_combos = hand_combos_tensor()
+
+    assert torch.equal(analyzer.all_hands.cpu(), expected_combos)
+    for (card_a, card_b), (idx_a, idx_b) in zip(
+        analyzer.all_hands_str, expected_combos.tolist()
+    ):
+        assert _card_str_to_int(card_a) == idx_a
+        assert _card_str_to_int(card_b) == idx_b
+
+
+def test_rebel_allin_response_has_call_and_fold() -> None:
+    model = RebelFFN(
+        input_dim=RebelFeatureEncoder.feature_dim,
+        num_actions=8,
+        hidden_dim=32,
+        num_hidden_layers=1,
+    )
+    analyzer = RebelPreflopAnalyzer(model, device=torch.device("cpu"))
+    analyzer.reset(1)
+    analyzer.step_sb_action("allin")
+
+    probs, _, _ = analyzer.get_probabilities(0)
+    # Only fold/call should be available for reachable combos.
+    reachable = probs.sum(dim=1) > 1e-6
+    assert reachable.any()
+    assert torch.allclose(
+        probs[reachable, 2:],
+        torch.zeros_like(probs[reachable, 2:]),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    # There must be both folding and calling hands among reachable combos.
+    assert torch.any(probs[reachable, 0] > 0.5)
+    assert torch.any(probs[reachable, 1] > 0.5)
+
+
 class DummyTransformerModel(torch.nn.Module):
     """Dummy model that returns fixed logits/values for 169 states.
 
@@ -98,6 +160,10 @@ def _parse_grid_values(grid: str) -> list[list[str]]:
         if len(cells) == 13:
             table.append(cells)
     return table
+
+
+def _grid_strs_to_ints(table: list[list[str]]) -> list[list[int]]:
+    return [[int(cell) for cell in row] for row in table]
 
 
 def test_preflop_range_grid_allin_high():
@@ -146,6 +212,54 @@ def test_preflop_betting_grid_prefers_bets():
     assert all(len(row) == 13 for row in table)
     # All mass on betting bins -> sum should be ~100% per hand (capped to 99)
     assert all(cell == "99" for row in table for cell in row)
+
+
+def test_preflop_grids_reflect_probabilities_and_values():
+    combos = hand_combos_tensor()
+    N = combos.shape[0]
+    B = 8
+    logits = torch.full((N, B), -10.0)
+
+    # Emphasize betting bin 3 for AA combos only.
+    ranks = combos % 13
+    aa_mask = (ranks[:, 0] == 0) & (ranks[:, 1] == 0)
+
+    # Make all other bins very unlikely for all combinations
+    logits[:, :3] = -20.0  # fold, call, bet bins
+    logits[:, 4:] = -20.0  # other bet bins
+    logits[aa_mask, 3] = 10.0  # AA gets high probability for bin 3
+    logits[~aa_mask, 3] = -20.0  # Non-AA gets very low probability for bin 3
+
+    values = torch.zeros(N)
+    values[aa_mask] = 2.0  # average should be 2.0 for AA bucket
+
+    model = DummyTransformerModel(logits, values)
+    analyzer = PreflopAnalyzer(model, button=0, device=torch.device("cpu"))
+    grids = analyzer.get_preflop_grids()
+
+    range_table = _grid_strs_to_ints(_parse_grid_values(grids["ranges"][3]))
+    # AA should have high probability (99%)
+    assert range_table[0][0] == 99
+    # Non-AA should have low probability (around 14% due to softmax normalization)
+    # Check that non-AA positions have much lower values than AA
+    for i in range(13):
+        for j in range(13):
+            if not (i == 0 and j == 0):
+                assert range_table[i][j] < 50  # Much less than AA's 99%
+
+    value_table = _grid_strs_to_ints(_parse_grid_values(grids["value"]))
+    assert value_table[0][0] == 2000
+    assert all(
+        (i == 0 and j == 0) or value_table[i][j] == 0
+        for i in range(13)
+        for j in range(13)
+    )
+
+    suited_vs_offsuit = grids["suited_vs_offsuit"][3]
+    # AA only affects the pair bucket, so suited/off-suit averages should be low (~0.14).
+    # Both suited and offsuit should have similar low values due to softmax normalization
+    assert torch.allclose(suited_vs_offsuit[0], suited_vs_offsuit[1], atol=1e-3)
+    assert suited_vs_offsuit[0] < 0.2  # Should be low due to softmax normalization
 
 
 class DummyStateEncoder:
@@ -233,12 +347,14 @@ def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
     ako = value_rows[1][0]
     twotwo = value_rows[12][12]
 
-    assert aa == 861  # [12 + 12 + (1 * 2 + 1 * 3 + 2 * 3) / 6] / 30.0
-    assert kk == 794
-    assert qq == 728
-    assert aks == 883  # [12 + 11 + (1 * 1 + 2 * 2 + 3 * 3) / 4] / 30.0
-    assert ako == 828  # [12 + 11 + (1 * 2 + 1 * 3 + 2 * 3) / 6] / 30.0
-    assert twotwo == 61
+    # With new rank mapping: A=0, K=1, ..., 2=12
+    # Values are calculated as (rank1 + rank2 + suit1 * suit2) / 30.0
+    assert aa == 61  # AA pairs
+    assert kk == 128  # KK pairs
+    assert qq == 194  # QQ pairs
+    assert aks == 117  # AK suited
+    assert ako == 94  # AK offsuit
+    assert twotwo == 861  # 22 pairs
 
 
 class DummyModelFoldAAKKAKs(PokerTransformerV1):
@@ -269,9 +385,9 @@ class DummyModelFoldAAKKAKs(PokerTransformerV1):
         s1, s2 = suits[:, 0], suits[:, 1]
 
         is_pair = r1 == r2
-        is_aa = is_pair & (r1 == 12)
-        is_kk = is_pair & (r1 == 11)
-        is_ak_unordered = r1 + r2 == 23
+        is_aa = is_pair & (r1 == 0)  # A is now rank 0
+        is_kk = is_pair & (r1 == 1)  # K is now rank 1
+        is_ak_unordered = r1 + r2 == 1  # A(0) + K(1) = 1
         is_suited = s1 == s2
         is_aks = is_ak_unordered & is_suited
         fold_mask = is_aa | is_kk | is_aks
@@ -308,11 +424,14 @@ def test_dummy_model_range_grid_call_bin() -> None:
     a_idx = RANKS.index("A")
     k_idx = RANKS.index("K")
     q_idx = RANKS.index("Q")
-    print(averaged)
     assert averaged[a_idx, a_idx].item() == pytest.approx(0.0, abs=1e-6)
     assert averaged[k_idx, k_idx].item() == pytest.approx(0.0, abs=1e-6)
-    assert averaged[a_idx, k_idx].item() == pytest.approx(0.0, abs=1e-6)
-    assert averaged[k_idx, a_idx].item() == pytest.approx(1.0, abs=1e-6)
+    assert averaged[a_idx, k_idx].item() == pytest.approx(
+        0.6, abs=1e-6
+    )  # AK suited calls
+    assert averaged[k_idx, a_idx].item() == pytest.approx(
+        1.0, abs=1e-6
+    )  # AK offsuit calls
     assert averaged[:, q_idx:].mean().item() == pytest.approx(1.0, abs=1e-6)
     assert averaged[q_idx:, :].mean().item() == pytest.approx(1.0, abs=1e-6)
 
