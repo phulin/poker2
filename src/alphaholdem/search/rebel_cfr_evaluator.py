@@ -328,6 +328,8 @@ class RebelCFREvaluator:
 
                 action_bins[new_legal_indices] = action
 
+            # now that we've copied the states, update the legal masks and amounts
+            bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
             rewards, _, _ = self.env.step_bins(
                 action_bins, bin_amounts=bin_amounts, legal_masks=legal_masks
             )
