@@ -97,7 +97,7 @@ def _init_wandb(cfg: Config, device: torch.device) -> Any:
         "config": asdict(cfg),
     }
     if wandb_run_id_from_checkpoint:
-        init_kwargs["id"] = cfg.wandb_run_id
+        init_kwargs["id"] = cfg.wandb_run_id or wandb_run_id_from_checkpoint
         init_kwargs["resume"] = "must"
 
     try:
