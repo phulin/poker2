@@ -456,6 +456,13 @@ def test_initialize_beliefs_updates_child_nodes(
     torch.testing.assert_close(evaluator.beliefs[child_b, 0], expected_child_b)
     torch.testing.assert_close(evaluator.beliefs[child_b, 1], root_opp)
 
+    policy_probs_src = evaluator._pull_back(evaluator.policy_probs)
+    valid_mask_src = evaluator.valid_mask[: policy_probs_src.shape[0]]
+    prob_sum = policy_probs_src[valid_mask_src].sum(dim=1)
+    belief_sum = evaluator.beliefs[evaluator.valid_mask].sum(dim=2)
+    torch.testing.assert_close(prob_sum, torch.ones_like(prob_sum))
+    torch.testing.assert_close(belief_sum, torch.ones_like(belief_sum))
+
 
 def test_compute_expected_values_matches_child_values(
     monkeypatch: pytest.MonkeyPatch,
@@ -906,9 +913,9 @@ def test_self_play_iteration_returns_public_belief_state() -> None:
     next_pbs = evaluator.self_play_iteration(training_mode=False)
 
     assert next_pbs is not None
-    assert next_pbs.env.N == 1
-    assert next_pbs.beliefs.shape == (1, evaluator.num_players, NUM_HANDS)
+    assert next_pbs.env.N == 2
+    assert next_pbs.beliefs.shape == (2, evaluator.num_players, NUM_HANDS)
     torch.testing.assert_close(
         next_pbs.beliefs.sum(dim=-1),
-        torch.ones((1, evaluator.num_players), device=env.device),
+        torch.ones((2, evaluator.num_players), device=env.device),
     )
