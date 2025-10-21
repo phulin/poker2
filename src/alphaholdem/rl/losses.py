@@ -776,7 +776,7 @@ class RebelSupervisedLoss(nn.Module):
 
         total_loss = self.policy_weight * policy_loss + self.value_weight * value_loss
 
-        entropy = -(probs * log_probs).sum(dim=-1).mean()
+        entropy = -(probs * log_probs).sum(dim=1).mean()
         if self.entropy_coef is not None and self.entropy_coef != 0.0:
             total_loss -= self.entropy_coef * entropy
 

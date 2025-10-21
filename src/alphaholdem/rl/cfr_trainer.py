@@ -18,30 +18,6 @@ from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 from alphaholdem.utils.profiling import profile
 
 
-@dataclass
-class TrainerMetrics:
-    step: int
-    loss: Optional[float] = None
-    policy_loss: Optional[float] = None
-    value_loss: Optional[float] = None
-    entropy: Optional[float] = None
-    buffer_size: Optional[int] = None
-    cfr_entropy: Optional[float] = None
-    grad_norm_unclipped: Optional[float] = None
-
-    def update(self, dict: Dict[str, float]) -> None:
-        self.step = dict.get("step", self.step)
-        self.loss = dict.get("loss", self.loss)
-        self.policy_loss = dict.get("policy_loss", self.policy_loss)
-        self.value_loss = dict.get("value_loss", self.value_loss)
-        self.entropy = dict.get("entropy", self.entropy)
-        self.buffer_size = dict.get("buffer_size", self.buffer_size)
-        self.cfr_entropy = dict.get("cfr_entropy", self.cfr_entropy)
-        self.grad_norm_unclipped = dict.get(
-            "grad_norm_unclipped", self.grad_norm_unclipped
-        )
-
-
 class RebelCFRTrainer:
     """Trainer that couples DCFR search with a ReBeL-style FFN."""
 
@@ -197,7 +173,7 @@ class RebelCFRTrainer:
             "loss": loss.item(),
             "policy_loss": loss_dict["policy_loss"],
             "value_loss": loss_dict["value_loss"],
-            "cfr_entropy": loss_dict["entropy"],
+            "entropy_loss": loss_dict["entropy"],
             "buffer_size": len(self.buffer),
             "grad_norm_unclipped": grad_norm_unclipped,
             **self.cfr_evaluator.stats,
