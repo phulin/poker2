@@ -195,8 +195,7 @@ class RebelCFREvaluator:
             device=self.device,
             dtype=self.float_dtype,
         )
-        if self.cfr_avg:
-            self.beliefs_avg = torch.zeros_like(self.beliefs)
+        self.beliefs_avg = torch.zeros_like(self.beliefs)
 
         self.legal_mask = None
 
@@ -386,7 +385,10 @@ class RebelCFREvaluator:
     @torch.no_grad()
     @profile
     def _get_model_policy_probs(self, indices: torch.Tensor) -> torch.Tensor:
-        features = self.encode_current_states()
+        features = self.feature_encoder.encode(
+            self.env.to_act,
+            self.beliefs,
+        )
         model_output = self.model(features[indices])
         logits = model_output.policy_logits
         legal_masks = self.legal_mask[indices]
@@ -539,8 +541,7 @@ class RebelCFREvaluator:
             self._normalize_beliefs()
 
         self.policy_probs_avg[:] = self.policy_probs
-        if self.cfr_avg:
-            self.beliefs_avg[:] = self.beliefs
+        self.beliefs_avg[:] = self.beliefs
 
     @profile
     def warm_start(self) -> None:
@@ -589,18 +590,20 @@ class RebelCFREvaluator:
             values_achieved=values_br, values_expected=self.values
         )
         self.cumulative_regrets += self.warm_start_iterations * regrets
-        self.update_policy()
-        self.policy_probs_avg[:] = self.policy_probs
+        self.update_policy(self.warm_start_iterations + 1)
 
     @torch.no_grad()
     @profile
     def set_leaf_values(self) -> None:
-        """Populate cached per-hand payoffs for nodes marked as leaves."""
+        """Populate per-hand payoffs for nodes marked as leaves."""
 
         # Set estimated leaf value from model for non-terminal nodes.
         model_mask = self.leaf_mask & ~self.env.done
 
-        features = self.encode_current_states()
+        features = self.feature_encoder.encode(
+            self.env.to_act,
+            self.beliefs_avg if self.cfr_avg else self.beliefs,
+        )
         model_output = self.model(features[model_mask])
         self.values[model_mask] = model_output.hand_values
 
@@ -731,7 +734,7 @@ class RebelCFREvaluator:
         return regrets
 
     @profile
-    def update_policy(self) -> None:
+    def update_policy(self, t: int) -> None:
         """Apply a regret-matching update to every valid non-leaf information set."""
 
         bottom = self.depth_offsets[1]
@@ -758,9 +761,10 @@ class RebelCFREvaluator:
             out=self.policy_probs[bottom:],
         )
 
-        self._propagate_all_beliefs()
-        if self.cfr_avg:
-            self._propagate_all_beliefs(self.beliefs_avg, self.policy_probs_avg)
+        self._propagate_all_beliefs(self.beliefs, self.policy_probs)
+
+        self.update_average_policy(t)
+        self._propagate_all_beliefs(self.beliefs_avg, self.policy_probs_avg)
 
     @profile
     def sample_leaf(
@@ -778,7 +782,7 @@ class RebelCFREvaluator:
             pbs_start_idx: Offset inside `pbs` to start writing sampled rows.
             training_mode: Whether epsilon-greedy exploration is enabled.
         """
-        N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
+        M, B = self.total_nodes, self.num_actions
         valid_leaf_mask = self.leaf_mask & ~self.env.done
         count = root_indices.numel()
         assert count > 0
@@ -968,8 +972,7 @@ class RebelCFREvaluator:
             self.cumulative_regrets += regrets
 
             old_policy_probs = self.policy_probs.clone()
-            self.update_policy()
-            self.update_average_policy(t)
+            self.update_policy(t)
             self._record_stats(t, old_policy_probs)
 
             self.set_leaf_values()
@@ -989,15 +992,21 @@ class RebelCFREvaluator:
 
     def sample_data(self) -> RebelBatch:
         """Aggregate model targets from the current root batch for supervised learning."""
-        indices = torch.where(self.valid_mask[: self.search_batch_size])[0]
+        N = self.search_batch_size
         level_1_end = self.depth_offsets[2]
         policy_targets = self._pull_back(self.policy_probs_avg[:level_1_end])
+
+        # Nominally we'd need to divide by reach weights here, but since we're only
+        # taking the first level of the tree, those weights would all be 1.
+        value_targets = self.values_avg[:N]
+        if value_targets.abs().max() > 100:
+            print("WARNING: Value targets are too large")
         return RebelBatch(
-            features=self.encode_current_states()[indices],
+            features=self.feature_encoder.encode(self.env.to_act, self.beliefs_avg)[:N],
             policy_targets=policy_targets.permute(0, 2, 1),
-            value_targets=self.values_avg[indices],
-            legal_masks=self.env.legal_bins_mask()[indices],
-            acting_players=self.env.to_act[indices],
+            value_targets=value_targets,
+            legal_masks=self.env.legal_bins_mask()[:N],
+            acting_players=self.env.to_act[:N],
         )
 
     @profile
@@ -1309,14 +1318,6 @@ class RebelCFREvaluator:
             data_sliced.expand(-1, self.num_actions, *data.shape[1:])
             .clone()
             .view(-1, *data.shape[1:])
-        )
-
-    @profile
-    def encode_current_states(self) -> torch.Tensor:
-        """Encode environment states for policy network input."""
-        return self.feature_encoder.encode(
-            self.env.to_act,
-            beliefs=self.beliefs,
         )
 
     def _leaf_node_indices(self) -> torch.Tensor:
