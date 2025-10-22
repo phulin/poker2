@@ -354,7 +354,11 @@ class RebelCFREvaluator:
             )
 
             # Showdown and fold values get set in set_leaf_values.
-            self.folded_mask[:] = self.valid_mask & (action_bins == 0) & self.env.done
+            self.folded_mask[offset_next:offset_next_next] = (
+                self.valid_mask[offset_next:offset_next_next]
+                & (action_bins[offset_next:offset_next_next] == 0)
+                & self.env.done[offset_next:offset_next_next]
+            )
             self.folded_rewards[:] = torch.where(self.folded_mask, rewards, 0.0)
 
         self.values_avg[:] = self.values
@@ -1227,7 +1231,7 @@ class RebelCFREvaluator:
         self.stats["action_mix"] = {
             "fold": actions[mask, 0].mean().item(),
             "call": actions[mask, 1].mean().item(),
-            "bet": actions[mask, 2 : B - 1].sum(dim=-1).mean().item(),
+            "bet": actions[mask, 2 : B - 1].sum(dim=1).mean().item(),
             "allin": actions[mask, 3].mean().item(),
         }
 
