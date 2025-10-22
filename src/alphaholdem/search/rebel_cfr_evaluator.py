@@ -865,15 +865,14 @@ class RebelCFREvaluator:
         reach_avg_actor = torch.gather(reach_avg, 1, prev_actor_indices).squeeze(1)
 
         # Reach probability is proportional to belief, so we can use beliefs to mix
-        divisor = t + 2 if self.linear_cfr else t + 1
+        weight = 2 if self.linear_cfr else 1
         self.policy_probs_avg *= reach_avg_actor
         self.policy_probs_avg *= t
-        self.policy_probs_avg += self.policy_probs * reach_actor
+        self.policy_probs_avg += weight * self.policy_probs * reach_actor
         torch.where(
             self.policy_probs_avg.abs() > 1e-8,
             self.policy_probs_avg
-            / divisor
-            / (t * reach_avg_actor + reach_actor).clamp(min=1e-8),
+            / (t * reach_avg_actor + weight * reach_actor).clamp(min=1e-8),
             torch.zeros_like(self.policy_probs_avg),
             out=self.policy_probs_avg,
         )
