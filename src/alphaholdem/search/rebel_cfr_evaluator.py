@@ -359,7 +359,11 @@ class RebelCFREvaluator:
                 & (action_bins[offset_next:offset_next_next] == 0)
                 & self.env.done[offset_next:offset_next_next]
             )
-            self.folded_rewards[:] = torch.where(self.folded_mask, rewards, 0.0)
+            self.folded_rewards[offset_next:offset_next_next] = torch.where(
+                self.folded_mask[offset_next:offset_next_next],
+                rewards[offset_next:offset_next_next],
+                0.0,
+            )
 
         self.values_avg[:] = self.values
 
