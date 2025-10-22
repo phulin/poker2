@@ -349,7 +349,7 @@ class PreflopAnalyzer:
         N = self.env.N
         bin = None
         if sb_action == "allin":
-            bin = 7
+            bin = len(self.env.default_bet_bins) + 3 - 1
         elif sb_action == "call":
             bin = 1
         elif sb_action == "fold":
