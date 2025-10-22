@@ -157,6 +157,14 @@ class RebelCFREvaluator:
             self.total_nodes, dtype=torch.bool, device=self.device
         )
 
+        # Set in construct_subgame and not updated.
+        self.folded_mask = torch.zeros(
+            self.total_nodes, dtype=torch.bool, device=self.device
+        )
+        self.folded_rewards = torch.zeros(
+            self.total_nodes, dtype=self.float_dtype, device=self.device
+        )
+
         # Notionally, at its parent, what is the probability of acting to get to this node?
         self.policy_probs = torch.zeros(
             self.total_nodes,
@@ -284,6 +292,8 @@ class RebelCFREvaluator:
         self.valid_mask[:N] = True
         self.leaf_mask.zero_()
         self.leaf_mask[:N] = self.env.done[:N]
+        self.folded_mask.zero_()
+        self.folded_rewards.zero_()
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
         self.cumulative_regrets.zero_()
@@ -343,10 +353,9 @@ class RebelCFREvaluator:
                 == 0
             )
 
-            # Showdown values get set in set_leaf_values.
-            finished_folded = self.valid_mask & (action_bins == 0) & self.env.done
-            self.values[finished_folded, 0] = rewards[finished_folded].view(-1, 1)
-            self.values[finished_folded, 1] = -rewards[finished_folded].view(-1, 1)
+            # Showdown and fold values get set in set_leaf_values.
+            self.folded_mask[:] = self.valid_mask & (action_bins == 0) & self.env.done
+            self.folded_rewards[:] = torch.where(self.folded_mask, rewards, 0.0)
 
         self.values_avg[:] = self.values
 
@@ -552,9 +561,7 @@ class RebelCFREvaluator:
             next_actor_values = values_br[next_indices, actor[:, None]]
             next_actor_values.masked_fill_(~legal_mask[:, :, None], min_value)
             next_opp_values = values_br[next_indices, opp[:, None]]
-
-            opp_action_values_all = self.policy_probs[next_indices] * next_opp_values
-            opp_action_values_all.masked_fill_(~legal_mask[:, :, None], 0.0)
+            next_opp_values.masked_fill_(~legal_mask[:, :, None], 0.0)
 
             # Best-response per hand (mask illegal actions to -inf)
             best_actions = next_actor_values.argmax(dim=1)  # [n, 1326]
@@ -563,8 +570,9 @@ class RebelCFREvaluator:
             ).squeeze(1)
 
             # take the player-to-act's best action, and the other player's average action
+            # (NB see set_leaf_values note for why we use the sum)
             values_br[current_indices, actor] = best_values
-            values_br[current_indices, opp] = opp_action_values_all.sum(dim=1)
+            values_br[current_indices, opp] = next_opp_values.sum(dim=1)
 
         assert values_br[self.valid_mask].isfinite().all()
 
@@ -588,6 +596,22 @@ class RebelCFREvaluator:
         model_output = self.model(features[model_mask])
         self.values[model_mask] = model_output.hand_values
 
+        reach_weights = self._calculate_reach_weights(self.policy_probs)
+
+        folded_reward = torch.stack(
+            [
+                self.folded_rewards[:, None] * reach_weights[:, 1],
+                -self.folded_rewards[:, None] * reach_weights[:, 0],
+            ],
+            dim=1,
+        )
+        torch.where(
+            self.folded_mask[:, None, None],
+            folded_reward,
+            self.values,
+            out=self.values,
+        )
+
         # Fold values were set in construct_subgame and don't need updating.
         # Showdown values need to be updated based on beliefs.
         # The env has hands it uses for showdown, but those are fake.
@@ -595,8 +619,8 @@ class RebelCFREvaluator:
         # assert self.env.done[showdown].all()
         # assert self.leaf_mask[showdown].all()
         showdown_values = self._showdown_value(showdown)
-        self.values[showdown, 0] = showdown_values
-        self.values[showdown, 1] = -showdown_values
+        self.values[showdown, 0] = showdown_values * reach_weights[showdown, 1]
+        self.values[showdown, 1] = -showdown_values * reach_weights[showdown, 0]
 
     @profile
     def compute_expected_values(self) -> torch.Tensor:
@@ -611,11 +635,21 @@ class RebelCFREvaluator:
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
 
-            # pull back values to the source nodes
-            values_weighted = (
-                self.values[offset_next:offset_next_next]
-                * self.policy_probs[offset_next:offset_next_next, None, :]
+            former_actor = self._fan_out(self.env.to_act[offset:offset_next])
+            dest_indices = torch.arange(
+                offset_next_next - offset_next, device=self.device
             )
+
+            # Pull back values to the source nodes.
+            # NB: we are strategically ignoring the effect of blockers here.
+            # It's a minor change, but it makes the computation much simpler:
+            # all we have to do is add the opponent values as they already include
+            # opponent reach (so effectively includes policy probability).
+            # The original ReBeL source code does this too.
+            values_weighted = self.values[offset_next:offset_next_next]
+            values_weighted[dest_indices, former_actor] *= self.policy_probs[
+                offset_next:offset_next_next
+            ]
             values_src = self._pull_back(values_weighted, sliced=True).sum(dim=1)
             torch.where(
                 self.leaf_mask[offset:offset_next, None, None],
@@ -976,7 +1010,7 @@ class RebelCFREvaluator:
     def _showdown_value(self, indices: torch.Tensor) -> torch.Tensor:
         """
         Exact river showdown EV using rank-CDF + blocker correction.
-        Returns EV and per-hand EV (unsorted/original hand order) per env.
+        Returns per-hand EV [N, 1326] (unsorted/original hand order) per env.
         """
 
         M = indices.numel()

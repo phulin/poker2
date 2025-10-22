@@ -499,20 +499,24 @@ def test_compute_expected_values_matches_child_values(
     values_bottom[evaluator.leaf_mask[bottom:]] = values_temp[
         evaluator.leaf_mask[bottom:]
     ]
+
+    reach_weights = evaluator._calculate_reach_weights(evaluator.policy_probs)
     evaluator.values[:] = 0.0
-    evaluator.values[bottom:, 0] = values_bottom[:, 0]
-    evaluator.values[bottom:, 1] = -values_bottom[:, 0]
+    evaluator.values[bottom:, 0] = values_bottom[:, 0] * reach_weights[bottom:, 1]
+    evaluator.values[bottom:, 1] = -values_bottom[:, 0] * reach_weights[bottom:, 0]
 
     evaluator.compute_expected_values()
-    expected_value = (probs * child_values).sum()
+
+    expected_value_actor = (probs * child_values).sum()
+    expected_value_opp = -child_values.sum()
 
     torch.testing.assert_close(
         evaluator.values[2, 0],
-        torch.full((NUM_HANDS,), expected_value, dtype=env.float_dtype),
+        torch.full((NUM_HANDS,), expected_value_actor, dtype=env.float_dtype),
     )
     torch.testing.assert_close(
         evaluator.values[2, 1],
-        torch.full((NUM_HANDS,), -expected_value, dtype=env.float_dtype),
+        torch.full((NUM_HANDS,), expected_value_opp, dtype=env.float_dtype),
     )
 
 
