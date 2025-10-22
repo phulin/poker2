@@ -975,20 +975,6 @@ class RebelCFREvaluator:
             self.values_avg += self.values
             self.values_avg /= t + 2 if self.linear_cfr else t + 1
 
-        # Debug logging for extreme values
-        max_hand_value = self.env.starting_stack / self.env.scale * 4
-        extreme_values = self.valid_mask[:, None, None] & (
-            torch.abs(self.values) > max_hand_value
-        )
-        if torch.any(extreme_values):  # Warn at 80% of max
-            extreme_count = extreme_values.sum().item()
-            max_val = self.values[self.valid_mask].max().item()
-            min_val = self.values[self.valid_mask].min().item()
-            print(f"WARNING: Large hand values detected")
-            print(f"  Extreme values count: {extreme_count}")
-            print(f"  Value range: [{min_val:.2f}, {max_val:.2f}]")
-            print(f"  Max allowed: {max_hand_value:.2f}")
-
         self.stats["mean_positive_regret"] = (
             self.cumulative_regrets.clamp(min=0).mean().item()
         )
