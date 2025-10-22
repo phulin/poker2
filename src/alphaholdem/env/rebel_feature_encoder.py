@@ -7,7 +7,6 @@ import torch
 from alphaholdem.env.card_utils import (
     combo_lookup_tensor,
     hand_combos_tensor,
-    mask_conflicting_combos,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
@@ -56,47 +55,6 @@ class RebelFeatureEncoder:
         acted = self.env.actions_this_round > 0
         flag = (unequal & acted).to(torch.float32)
         return flag
-
-    def aggregate_beliefs_from_samples(
-        self,
-        cards: torch.Tensor,
-        weights: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Convert sampled hole-card combinations with weights into belief vectors.
-
-        Args:
-            cards: Tensor [S, B, 2] of combo card indices per sample.
-            weights: Tensor [S, B] of non-negative sample weights.
-        Returns:
-            Aggregated belief tensor [B, 1326] normalized per row.
-        """
-        if cards.numel() == 0:
-            return torch.empty(0, self.belief_dim, device=self.device, dtype=self.dtype)
-
-        samples, batch_size, _ = cards.shape
-        belief = torch.zeros(
-            batch_size, self.belief_dim, dtype=self.dtype, device=self.device
-        )
-        if samples == 0 or batch_size == 0:
-            return belief
-
-        row_indices = torch.arange(batch_size, device=self.device)
-        for sample_idx in range(samples):
-            weight_row = weights[sample_idx]
-            card_row = cards[sample_idx]
-            valid = (weight_row > 0) & (card_row[:, 0] >= 0) & (card_row[:, 1] >= 0)
-            if not torch.any(valid):
-                continue
-            combos_idx = self._combo_lookup[card_row[valid, 0], card_row[valid, 1]].to(
-                torch.long
-            )
-            belief[row_indices[valid], combos_idx] += weight_row[valid]
-
-        sums = belief.sum(dim=1, keepdim=True)
-        nonzero = sums.squeeze(1) > 0
-        belief[nonzero] = belief[nonzero] / sums[nonzero]
-        return belief
 
     @profile
     def encode(

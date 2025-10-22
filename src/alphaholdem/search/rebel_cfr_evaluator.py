@@ -873,7 +873,7 @@ class RebelCFREvaluator:
             self.policy_probs_avg.abs() > 1e-8,
             self.policy_probs_avg
             / divisor
-            / (reach_avg_actor + reach_actor).clamp(min=1e-8),
+            / (t * reach_avg_actor + reach_actor).clamp(min=1e-8),
             torch.zeros_like(self.policy_probs_avg),
             out=self.policy_probs_avg,
         )
