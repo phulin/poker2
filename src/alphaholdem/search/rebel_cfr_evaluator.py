@@ -605,6 +605,7 @@ class RebelCFREvaluator:
         self.values[model_mask] = model_output.hand_values
 
         reach_weights = self._calculate_reach_weights(self.policy_probs)
+        self.values[model_mask] *= reach_weights[model_mask].flip(dims=[1])
 
         folded_reward = torch.stack(
             [
