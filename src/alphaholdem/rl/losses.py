@@ -14,7 +14,6 @@ from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.search.cfr_manager import CFRManager
-from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.utils.ema import EMA
 from alphaholdem.utils.model_utils import compute_masked_logits
 

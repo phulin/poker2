@@ -12,7 +12,7 @@ from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_replay import RebelReplayBuffer
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator, T_WARM
+from alphaholdem.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 from alphaholdem.utils.profiling import profile
 

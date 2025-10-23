@@ -8,11 +8,11 @@ search-driven supervision metrics to Weights & Biases.
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import glob
 import os
 import time
 from contextlib import nullcontext
+from dataclasses import asdict
 from typing import Any, Dict
 
 import hydra

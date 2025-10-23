@@ -12,10 +12,10 @@ from alphaholdem.env.analyze_tensor_env import (
     _grid_coords_for_hand,
     create_1326_hand_combinations,
 )
-from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.env.card_utils import hand_combos_tensor
-from alphaholdem.models.model_output import ModelOutput
+from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
+from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Generator, Optional
-import os
 
 import torch
 import torch.nn.functional as F
 
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.card_utils import (
     combo_to_onehot_tensor,
     hand_combos_tensor,
 )
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS, RebelFFN
@@ -1244,7 +1244,6 @@ class RebelCFREvaluator:
 
     def _record_action_mix(self) -> None:
         """Record the action mix of the policy."""
-        B = self.num_actions
         actions = self._pull_back(self.policy_probs_avg)
         mask = self.valid_mask & ~self.leaf_mask
         mask = mask[: actions.shape[0]]

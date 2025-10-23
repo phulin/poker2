@@ -17,7 +17,6 @@ from alphaholdem.models.transformer.tokens import (
     get_card_token_id_offset,
     get_special_token_id_offset,
 )
-from alphaholdem.utils.profiling import profile
 
 if TYPE_CHECKING:  # pragma: no cover - import guarded for type checkers only
     from alphaholdem.models.transformer.structured_embedding_data import (

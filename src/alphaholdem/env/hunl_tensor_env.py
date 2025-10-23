@@ -5,7 +5,6 @@ from typing import Optional, Tuple
 import torch
 
 from alphaholdem.env import rules
-from alphaholdem.utils.profiling import profile
 
 DEBUG_STEP_TABLE_ENVS = 3
 DEFAULT_BET_BINS = [0.5, 0.75, 1.0, 1.5, 2.0]

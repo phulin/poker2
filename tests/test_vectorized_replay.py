@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from alphaholdem.core.structured_config import Config
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
@@ -8,7 +9,6 @@ from alphaholdem.models.transformer.structured_embedding_data import (
 from alphaholdem.models.transformer.tokens import Context as Ctx
 from alphaholdem.models.transformer.tokens import Special
 from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
-from alphaholdem.core.structured_config import Config
 
 
 class TestVectorizedReplayBuffer:

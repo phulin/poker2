@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 
 from alphaholdem.core.interfaces import Model
-from alphaholdem.core.structured_config import ValueHeadType
 from alphaholdem.models.model_output import ModelOutput
 
 NUM_HANDS = 1326

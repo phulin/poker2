@@ -3,23 +3,23 @@ from __future__ import annotations
 from typing import Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.core.structured_config import SearchConfig
 from alphaholdem.env.card_utils import (
     combo_lookup_tensor,
     hand_combos_tensor,
     mask_conflicting_combos,
 )
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
-from alphaholdem.core.structured_config import SearchConfig
-import torch.nn.functional as F
-from alphaholdem.search.dcfr import DCFRResult, run_dcfr
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
+from alphaholdem.search.dcfr import DCFRResult, run_dcfr
 
 
 class CFRManager:

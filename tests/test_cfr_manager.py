@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
-from alphaholdem.search.dcfr import run_dcfr
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
@@ -12,6 +10,8 @@ from alphaholdem.models.transformer.tokens import (
     get_action_token_id_offset,
     get_card_token_id_offset,
 )
+from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
+from alphaholdem.search.dcfr import run_dcfr
 
 
 class DummyModel(nn.Module):

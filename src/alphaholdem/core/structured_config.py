@@ -1,9 +1,8 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
 from enum import Enum
+from typing import List, Optional
 
 from hydra.core.config_store import ConfigStore
-from omegaconf import MISSING
 
 
 class ValueLossType(str, Enum):

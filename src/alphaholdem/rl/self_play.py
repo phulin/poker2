@@ -6,7 +6,6 @@ import time
 from typing import Any, Optional, Tuple, Union
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 
@@ -20,29 +19,24 @@ from alphaholdem.models.cnn.state_encoder import CNNStateEncoder
 from alphaholdem.models.policy import CategoricalPolicyV1
 from alphaholdem.models.transformer.kv_cache_manager import SelfPlayKVCacheManager
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
-from alphaholdem.models.transformer.structured_embedding_data import (
-    StructuredEmbeddingData,
-)
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
-from alphaholdem.rl.exponential_controller import ExponentialController
 from alphaholdem.rl.dred_pool import DREDPool
+from alphaholdem.rl.exponential_controller import ExponentialController
 from alphaholdem.rl.k_best_pool import KBestOpponentPool
-from alphaholdem.rl.losses import KLPolicyPPOLoss
+from alphaholdem.rl.losses import CFRDistillationLoss, KLPolicyPPOLoss
 from alphaholdem.rl.opponent_pool import OpponentPool
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.replay import Trajectory, Transition
 from alphaholdem.rl.vectorized_replay import BatchSample, VectorizedReplayBuffer
+from alphaholdem.search.cfr_manager import CFRManager
 from alphaholdem.utils.ema import EMA
 from alphaholdem.utils.model_context import model_eval
 from alphaholdem.utils.model_utils import (
-    compute_masked_logits,
     get_batch_log_probs,
     get_logits_log_probs_values,
 )
 from alphaholdem.utils.profiling import profile
-from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
-from alphaholdem.rl.losses import CFRDistillationLoss
 
 
 class SelfDummySnapshot:

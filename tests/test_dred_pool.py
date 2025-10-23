@@ -493,8 +493,8 @@ def test_dred_deletion_queue_age_tracking():
 
 def test_dred_deletion_queue_save_load():
     """Test that deletion queue is properly saved and loaded."""
-    import tempfile
     import os
+    import tempfile
 
     pool = DREDPool(max_size=3)
 

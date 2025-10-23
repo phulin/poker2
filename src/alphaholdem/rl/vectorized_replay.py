@@ -5,13 +5,13 @@ from typing import List, Tuple, Union
 
 import torch
 
+from alphaholdem.core.structured_config import Config
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
 from alphaholdem.models.transformer.tokens import Context, Special
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.core.structured_config import Config
 
 
 @dataclass

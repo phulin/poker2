@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import torch
-import pytest
 from typing import Callable
+
+import pytest
+import torch
 
 from alphaholdem.env.card_utils import (
     combo_blocking_tensor,
@@ -13,9 +14,9 @@ from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.search.rebel_cfr_evaluator import (
-    RebelCFREvaluator,
     NUM_HANDS,
     PublicBeliefState,
+    RebelCFREvaluator,
 )
 from alphaholdem.utils.model_utils import compute_masked_logits
 

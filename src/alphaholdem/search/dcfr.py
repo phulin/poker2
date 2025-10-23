@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, List, Callable, Optional
+from typing import Callable, List, Optional
 
 import torch
 import torch.nn.functional as F

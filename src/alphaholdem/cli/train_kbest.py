@@ -8,11 +8,11 @@ where the agent maintains a pool of K best historical versions and trains agains
 
 import os
 import time
+from contextlib import nullcontext
 
 import hydra
-import wandb
-from contextlib import nullcontext
 import torch
+import wandb
 
 from alphaholdem.core.structured_config import Config
 from alphaholdem.rl.fixed_opponent_pool import FixedOpponentPool
@@ -368,8 +368,8 @@ def main(cfg) -> None:
         EnvConfig,
         ExploiterConfig,
         ModelConfig,
-        TrainingConfig,
         SearchConfig,
+        TrainingConfig,
     )
 
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)

@@ -1,12 +1,12 @@
 import torch
 
+from alphaholdem.rl.losses import CFRDistillationLoss, ValueLossType
+from alphaholdem.search.cfr_manager import CFRManager
 from alphaholdem.search.dcfr import (
-    collapse_policy_full_to_4,
     collapse_legal_full_to_4,
+    collapse_policy_full_to_4,
     run_dcfr,
 )
-from alphaholdem.search.cfr_manager import CFRManager
-from alphaholdem.rl.losses import CFRDistillationLoss, ValueLossType
 
 
 def test_collapse_policy_full_to_4_sums_raise_bins():

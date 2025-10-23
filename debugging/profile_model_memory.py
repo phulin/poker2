@@ -16,16 +16,16 @@ def _add_src_to_path() -> None:
 
 _add_src_to_path()
 
-from alphaholdem.models.transformer.poker_transformer import (
+from alphaholdem.models.transformer.poker_transformer import (  # noqa: E402
     PokerTransformerV1,
-)  # noqa: E402
+)
 from alphaholdem.models.transformer.structured_embedding_data import (  # noqa: E402
     StructuredEmbeddingData,
 )
 from alphaholdem.models.transformer.tokens import (  # noqa: E402
-    Special,
     CLS_INDEX,
     GAME_INDEX,
+    Special,
 )
 
 

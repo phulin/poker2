@@ -6,10 +6,10 @@ import pytest
 import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState
-from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 from alphaholdem.rl.rebel_replay import RebelBatch
+from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState
+from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 
 
 class DummyEnv:
