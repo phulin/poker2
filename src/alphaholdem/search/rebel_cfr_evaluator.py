@@ -440,7 +440,10 @@ class RebelCFREvaluator:
 
     @profile
     def _propagate_all_beliefs(
-        self, target: torch.Tensor | None = None, source: torch.Tensor | None = None
+        self,
+        target: torch.Tensor | None = None,
+        source: torch.Tensor | None = None,
+        reach_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Propagate beliefs from all valid nodes to all valid nodes."""
 
@@ -455,7 +458,7 @@ class RebelCFREvaluator:
         prev_actor[N:] = self._fan_out(self.env.to_act)
 
         self._initialize_with_copy(target)
-        target *= self._calculate_reach_weights(source)
+        target *= reach_weights
 
         self._block_beliefs(target)
         self._normalize_beliefs(target)
@@ -605,13 +608,12 @@ class RebelCFREvaluator:
         model_output = self.model(features[model_mask])
         self.values[model_mask] = model_output.hand_values
 
-        reach_weights = self._calculate_reach_weights(self.policy_probs)
-        self.values[model_mask] *= reach_weights[model_mask].flip(dims=[1])
+        self.values[model_mask] *= self.reach_weights[model_mask].flip(dims=[1])
 
         folded_reward = torch.stack(
             [
-                self.folded_rewards[:, None] * reach_weights[:, 1],
-                -self.folded_rewards[:, None] * reach_weights[:, 0],
+                self.folded_rewards[:, None] * self.reach_weights[:, 1],
+                -self.folded_rewards[:, None] * self.reach_weights[:, 0],
             ],
             dim=1,
         )
@@ -629,8 +631,8 @@ class RebelCFREvaluator:
         # assert self.env.done[showdown].all()
         # assert self.leaf_mask[showdown].all()
         showdown_values = self._showdown_value(showdown)
-        self.values[showdown, 0] = showdown_values * reach_weights[showdown, 1]
-        self.values[showdown, 1] = -showdown_values * reach_weights[showdown, 0]
+        self.values[showdown, 0] = showdown_values * self.reach_weights[showdown, 1]
+        self.values[showdown, 1] = -showdown_values * self.reach_weights[showdown, 0]
 
     @profile
     def compute_expected_values(self) -> torch.Tensor:
@@ -759,10 +761,17 @@ class RebelCFREvaluator:
             out=self.policy_probs[bottom:],
         )
 
-        self._propagate_all_beliefs(self.beliefs, self.policy_probs)
+        self._propagate_all_beliefs(self.beliefs, self.policy_probs, self.reach_weights)
 
         self.update_average_policy(t)
-        self._propagate_all_beliefs(self.beliefs_avg, self.policy_probs_avg)
+        self._propagate_all_beliefs(
+            self.beliefs_avg, self.policy_probs_avg, self.reach_weights_avg
+        )
+
+        self.reach_weights = self._calculate_reach_weights(self.policy_probs)
+        self._block_beliefs(self.reach_weights)
+        self.reach_weights_avg = self._calculate_reach_weights(self.policy_probs_avg)
+        self._block_beliefs(self.reach_weights_avg)
 
     @profile
     def sample_leaf(
@@ -858,16 +867,13 @@ class RebelCFREvaluator:
         prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
         prev_actor[N:] = self._fan_out(self.env.to_act)
 
-        reach = self._calculate_reach_weights(self.policy_probs)
-        self._block_beliefs(reach)
-        reach_avg = self._calculate_reach_weights(self.policy_probs_avg)
-        self._block_beliefs(reach_avg)
-
         # In the root nodes, prev_actor is invalid, but that's OK because
         # reach_weights is the same (1.0) for all players there.
         prev_actor_indices = prev_actor[:, None, None].expand(-1, -1, NUM_HANDS)
-        reach_actor = torch.gather(reach, 1, prev_actor_indices).squeeze(1)
-        reach_avg_actor = torch.gather(reach_avg, 1, prev_actor_indices).squeeze(1)
+        reach_actor = torch.gather(self.reach_weights, 1, prev_actor_indices).squeeze(1)
+        reach_avg_actor = torch.gather(
+            self.reach_weights_avg, 1, prev_actor_indices
+        ).squeeze(1)
 
         # Reach probability is proportional to belief, so we can use beliefs to mix
         weight = 2 if self.linear_cfr else 1
