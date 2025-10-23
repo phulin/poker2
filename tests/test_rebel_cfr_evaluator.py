@@ -523,12 +523,12 @@ def test_compute_expected_values_matches_child_values(
 
 def test_set_leaf_values_only_updates_marked_nodes() -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=2)
-    roots = torch.arange(evaluator.search_batch_size, device=env.device)
+    roots = torch.arange(evaluator.search_batch_size)
     evaluator.initialize_search(env, roots)
     evaluator.construct_subgame()
     evaluator.initialize_policy_and_beliefs()
 
-    leaf_indices = torch.tensor([1, 2], device=env.device)
+    leaf_indices = torch.tensor([2, 4])
     evaluator.valid_mask[leaf_indices] = True
     evaluator.leaf_mask.zero_()
     evaluator.leaf_mask[leaf_indices] = True
@@ -539,21 +539,10 @@ def test_set_leaf_values_only_updates_marked_nodes() -> None:
         evaluator.total_nodes,
         evaluator.num_players,
         NUM_HANDS,
-        device=env.device,
         dtype=env.float_dtype,
     )
-    hand_values[leaf_indices[0]] = torch.full(
-        (evaluator.num_players, NUM_HANDS),
-        2.5,
-        device=env.device,
-        dtype=env.float_dtype,
-    )
-    hand_values[leaf_indices[1]] = torch.full(
-        (evaluator.num_players, NUM_HANDS),
-        -1.25,
-        device=env.device,
-        dtype=env.float_dtype,
-    )
+    hand_values[2] = 2.5
+    hand_values[4] = -1.25
 
     # Mock the model to return the expected hand values
     def custom_hand_values_fn(features):
@@ -562,32 +551,36 @@ def test_set_leaf_values_only_updates_marked_nodes() -> None:
             batch_size,
             evaluator.num_players,
             NUM_HANDS,
-            device=env.device,
             dtype=env.float_dtype,
         )
-        for i in range(batch_size):
-            model_hand_values[i] = hand_values[leaf_indices[i].item()]
+        model_hand_values[:] = hand_values[leaf_indices]
         return model_hand_values
 
     evaluator.model = MockModel(
         custom_hand_values_fn=custom_hand_values_fn,
         num_actions=len(evaluator.bet_bins) + 3,
         num_players=evaluator.num_players,
-        device=env.device,
         dtype=env.float_dtype,
     )
 
     evaluator.set_leaf_values()
 
+    torch.testing.assert_close(evaluator.values[2, 0], hand_values[2, 0])
     torch.testing.assert_close(
-        evaluator.values[leaf_indices[0]],
-        hand_values[leaf_indices[0]],
+        evaluator.values[2, 1],
+        hand_values[2, 1] * evaluator.reach_weights[2, 0],
     )
+    torch.testing.assert_close(evaluator.values[4, 0], hand_values[4, 0])
     torch.testing.assert_close(
-        evaluator.values[leaf_indices[1]],
-        hand_values[leaf_indices[1]],
+        evaluator.values[4, 1],
+        hand_values[4, 1] * evaluator.reach_weights[4, 0],
     )
-    assert torch.count_nonzero(evaluator.values[roots]) == 0
+    assert (
+        torch.count_nonzero(
+            evaluator.values[~evaluator.env.done & ~evaluator.leaf_mask]
+        )
+        == 0
+    )
 
 
 def test_sample_leaf_copies_selected_nodes(monkeypatch: pytest.MonkeyPatch) -> None:

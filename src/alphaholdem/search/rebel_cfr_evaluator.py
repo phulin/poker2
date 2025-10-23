@@ -208,7 +208,9 @@ class RebelCFREvaluator:
         self.allowed_hands = torch.zeros(
             self.total_nodes, NUM_HANDS, device=self.device, dtype=torch.bool
         )
-        self.allowed_hands_prob = torch.zeros_like(self.allowed_hands)
+        self.allowed_hands_prob = torch.zeros(
+            self.total_nodes, NUM_HANDS, device=self.device, dtype=self.float_dtype
+        )
 
         # Feature encoder for belief computation
         self.feature_encoder = RebelFeatureEncoder(
@@ -468,6 +470,8 @@ class RebelCFREvaluator:
             target = self.beliefs
         if source is None:
             source = self.policy_probs
+        if reach_weights is None:
+            reach_weights = self.reach_weights
 
         prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
         prev_actor[N:] = self._fan_out(self.env.to_act)
@@ -479,6 +483,8 @@ class RebelCFREvaluator:
         self._normalize_beliefs(target)
 
         target.masked_fill_(~self.valid_mask[:, None, None], 0.0)
+
+        assert torch.allclose(target.sum(dim=2), self.valid_mask[:, None].float())
 
     def _propagate_level_beliefs(self, depth: int):
         """Propagate beliefs from all nodes at a given level to all nodes at the next level."""
@@ -553,7 +559,11 @@ class RebelCFREvaluator:
             self._block_beliefs()
             self._normalize_beliefs()
 
+        self.reach_weights = self._calculate_reach_weights(self.policy_probs)
+        self._block_beliefs(self.reach_weights)
+
         self.policy_probs_avg[:] = self.policy_probs
+        self.reach_weights_avg[:] = self.reach_weights
         self.beliefs_avg[:] = self.beliefs
 
     @profile
@@ -978,7 +988,6 @@ class RebelCFREvaluator:
                         training_mode=training_mode,
                     )
                     next_pbs_idx += sample_now.numel()
-                    self.profiler_step()  # Profile after leaf sampling
 
             regrets = self.compute_instantaneous_regrets(self.values)
             if self.linear_cfr:
