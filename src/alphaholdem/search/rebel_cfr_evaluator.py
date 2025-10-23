@@ -1251,8 +1251,8 @@ class RebelCFREvaluator:
         self.stats["action_mix"] = {
             "fold": actions[mask, 0].mean().item(),
             "call": actions[mask, 1].mean().item(),
-            "bet": actions[mask, 2 : B - 1].sum(dim=1).mean().item(),
-            "allin": actions[mask, 3].mean().item(),
+            "bet": actions[mask, 2:-1].sum(dim=1).mean().item(),
+            "allin": actions[mask, -1].mean().item(),
         }
 
     def _valid_nodes(
