@@ -89,6 +89,8 @@ class RebelCFREvaluator:
     allowed_hands: torch.Tensor
     policy_probs: torch.Tensor
     policy_probs_avg: torch.Tensor
+    reach_weights: torch.Tensor
+    reach_weights_avg: torch.Tensor
     cumulative_regrets: torch.Tensor
     values: torch.Tensor
     values_avg: torch.Tensor
@@ -196,6 +198,8 @@ class RebelCFREvaluator:
             dtype=self.float_dtype,
         )
         self.beliefs_avg = torch.zeros_like(self.beliefs)
+        self.reach_weights = torch.zeros_like(self.beliefs)
+        self.reach_weights_avg = torch.zeros_like(self.beliefs)
 
         self.legal_mask = None
 
@@ -300,6 +304,8 @@ class RebelCFREvaluator:
         self.values_avg.zero_()
         self.beliefs.zero_()
         self.beliefs[:N] = initial_beliefs
+        self.reach_weights.zero_()
+        self.reach_weights_avg.zero_()
         self.legal_mask = None
         self.hand_rank_data = None
 
