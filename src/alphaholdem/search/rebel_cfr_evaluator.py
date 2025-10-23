@@ -773,17 +773,16 @@ class RebelCFREvaluator:
             out=self.policy_probs[bottom:],
         )
 
+        self.reach_weights = self._calculate_reach_weights(self.policy_probs)
+        self._block_beliefs(self.reach_weights)
         self._propagate_all_beliefs(self.beliefs, self.policy_probs, self.reach_weights)
 
         self.update_average_policy(t)
+        self.reach_weights_avg = self._calculate_reach_weights(self.policy_probs_avg)
+        self._block_beliefs(self.reach_weights_avg)
         self._propagate_all_beliefs(
             self.beliefs_avg, self.policy_probs_avg, self.reach_weights_avg
         )
-
-        self.reach_weights = self._calculate_reach_weights(self.policy_probs)
-        self._block_beliefs(self.reach_weights)
-        self.reach_weights_avg = self._calculate_reach_weights(self.policy_probs_avg)
-        self._block_beliefs(self.reach_weights_avg)
 
     @profile
     def sample_leaf(
