@@ -344,13 +344,11 @@ class RebelCFREvaluator:
             )
 
             # New street -> mark as done. Don't want to deal w/ chance nodes.
-            self.leaf_mask[offset_next:offset_next_next] |= self.valid_mask[
-                offset_next:offset_next_next
-            ] & (
-                self.env.done[offset_next:offset_next_next]
-                | self.env.actions_this_round[offset_next:offset_next_next]
-                == 0
-            )
+            # actions_this_round is 0 after acting iff street advanced.
+            valid = self.valid_mask[offset_next:offset_next_next]
+            done = self.env.done[offset_next:offset_next_next]
+            no_actions = self.env.actions_this_round[offset_next:offset_next_next] == 0
+            self.leaf_mask[offset_next:offset_next_next] = valid & (done | no_actions)
 
             # Showdown and fold values get set in set_leaf_values.
             self.folded_mask[offset_next:offset_next_next] = (
