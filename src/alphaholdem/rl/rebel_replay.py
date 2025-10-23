@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
@@ -11,16 +11,20 @@ from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 @dataclass
 class RebelBatch:
     features: torch.Tensor
-    policy_targets: torch.Tensor
-    value_targets: torch.Tensor
     legal_masks: torch.Tensor
-    acting_players: torch.Tensor
+    policy_targets: Optional[torch.Tensor] = None
+    value_targets: Optional[torch.Tensor] = None
+    statistics: dict[str, torch.Tensor] = field(default_factory=dict)
 
     def __post_init__(self):
-        assert self.features.shape[0] == self.policy_targets.shape[0]
-        assert self.features.shape[0] == self.value_targets.shape[0]
+        assert self.value_targets is not None or self.policy_targets is not None
         assert self.features.shape[0] == self.legal_masks.shape[0]
-        assert self.features.shape[0] == self.acting_players.shape[0]
+        if self.policy_targets is not None:
+            assert self.features.shape[0] == self.policy_targets.shape[0]
+        if self.value_targets is not None:
+            assert self.features.shape[0] == self.value_targets.shape[0]
+        for key in self.statistics:
+            assert self.features.shape[0] == self.statistics[key].shape[0]
 
     def __len__(self) -> int:
         return self.features.shape[0]
@@ -28,19 +32,33 @@ class RebelBatch:
     def __getitem__(self, idx: torch.Tensor | slice | int) -> RebelBatch:
         return RebelBatch(
             features=self.features[idx],
-            policy_targets=self.policy_targets[idx],
-            value_targets=self.value_targets[idx],
+            policy_targets=(
+                self.policy_targets[idx] if self.policy_targets is not None else None
+            ),
+            value_targets=(
+                self.value_targets[idx] if self.value_targets is not None else None
+            ),
             legal_masks=self.legal_masks[idx],
-            acting_players=self.acting_players[idx],
+            statistics={key: self.statistics[key][idx] for key in self.statistics},
         )
 
     def to(self, device: torch.device) -> RebelBatch:
         return RebelBatch(
             features=self.features.to(device),
-            policy_targets=self.policy_targets.to(device),
-            value_targets=self.value_targets.to(device),
+            policy_targets=(
+                self.policy_targets.to(device)
+                if self.policy_targets is not None
+                else None
+            ),
+            value_targets=(
+                self.value_targets.to(device)
+                if self.value_targets is not None
+                else None
+            ),
             legal_masks=self.legal_masks.to(device),
-            acting_players=self.acting_players.to(device),
+            statistics={
+                key: self.statistics[key].to(device) for key in self.statistics
+            },
         )
 
 
@@ -54,6 +72,8 @@ class RebelReplayBuffer:
         num_actions: int,
         num_players: int,
         device: torch.device,
+        policy_targets: bool = True,
+        value_targets: bool = True,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         self.capacity = capacity
@@ -66,22 +86,29 @@ class RebelReplayBuffer:
         self.features = torch.zeros(
             self.capacity, self.feature_dim, dtype=dtype, device=device
         )
-        self.policy_targets = torch.zeros(
-            self.capacity, NUM_HANDS, self.num_actions, dtype=dtype, device=device
-        )
-        self.value_targets = torch.zeros(
-            self.capacity,
-            self.num_players,
-            NUM_HANDS,
-            dtype=dtype,
-            device=device,
-        )
+
+        if policy_targets:
+            self.policy_targets = torch.zeros(
+                self.capacity, NUM_HANDS, self.num_actions, dtype=dtype, device=device
+            )
+        else:
+            self.policy_targets = None
+
+        if value_targets:
+            self.value_targets = torch.zeros(
+                self.capacity,
+                self.num_players,
+                NUM_HANDS,
+                dtype=dtype,
+                device=device,
+            )
+        else:
+            self.value_targets = None
+
         self.legal_masks = torch.zeros(
             self.capacity, self.num_actions, dtype=torch.bool, device=device
         )
-        self.acting_players = torch.zeros(
-            self.capacity, dtype=torch.long, device=device
-        )
+        self.statistics = {}
 
         self.position = 0
         self.size = 0
@@ -99,22 +126,31 @@ class RebelReplayBuffer:
             batch = batch[-self.capacity :]
             batch_size = self.capacity
 
-        features = batch.features.to(self.device, dtype=self.dtype)
-        policy_targets = batch.policy_targets.to(self.device, dtype=self.dtype)
-        value_targets = batch.value_targets.to(self.device, dtype=self.dtype)
-        legal_masks = batch.legal_masks.to(self.device)
-        acting_players = batch.acting_players.to(self.device)
+        assert (self.policy_targets is None) == (batch.policy_targets is None)
+        assert (self.value_targets is None) == (batch.value_targets is None)
+
+        batch = batch.to(self.device)
 
         insert_start = self.position
         dest_indices = (
             torch.arange(batch_size, device=self.device) + insert_start
         ) % self.capacity
 
-        self.features[dest_indices] = features
-        self.policy_targets[dest_indices] = policy_targets
-        self.value_targets[dest_indices] = value_targets
-        self.legal_masks[dest_indices] = legal_masks
-        self.acting_players[dest_indices] = acting_players
+        self.features[dest_indices] = batch.features
+        if self.policy_targets is not None:
+            self.policy_targets[dest_indices] = batch.policy_targets
+        if self.value_targets is not None:
+            self.value_targets[dest_indices] = batch.value_targets
+        self.legal_masks[dest_indices] = batch.legal_masks
+        for key in batch.statistics:
+            if key not in self.statistics:
+                self.statistics[key] = torch.zeros(
+                    self.capacity,
+                    *batch.statistics[key].shape[1:],
+                    dtype=batch.statistics[key].dtype,
+                    device=self.device,
+                )
+            self.statistics[key][dest_indices] = batch.statistics[key]
 
         self.position = (insert_start + batch_size) % self.capacity
         self.size = min(self.size + batch_size, self.capacity)
@@ -130,10 +166,14 @@ class RebelReplayBuffer:
         )
         return RebelBatch(
             features=self.features[idxs],
-            policy_targets=self.policy_targets[idxs],
-            value_targets=self.value_targets[idxs],
+            policy_targets=(
+                self.policy_targets[idxs] if self.policy_targets is not None else None
+            ),
+            value_targets=(
+                self.value_targets[idxs] if self.value_targets is not None else None
+            ),
             legal_masks=self.legal_masks[idxs],
-            acting_players=self.acting_players[idxs],
+            statistics={key: self.statistics[key][idxs] for key in self.statistics},
         )
 
     def clear(self) -> None:

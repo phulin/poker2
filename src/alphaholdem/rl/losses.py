@@ -746,33 +746,21 @@ class RebelSupervisedLoss(nn.Module):
         Returns:
             Dict of scalar tensors for loss components and diagnostics.
         """
-        legal_masks = batch.legal_masks
-        if logits.dim() == 3 and legal_masks.dim() == 2:
-            legal_masks = legal_masks.unsqueeze(1)
 
+        legal_masks = batch.legal_masks[:, None, :]
         masked_logits = compute_masked_logits(logits, legal_masks)
         log_probs = F.log_softmax(masked_logits, dim=-1)
         probs = log_probs.exp()
 
-        if hand_values is None:
-            raise ValueError("RebelSupervisedLoss requires hand value predictions.")
-        if hand_values.shape != batch.value_targets.shape:
-            raise ValueError(
-                f"Hand value shape mismatch: predicted {hand_values.shape}, "
-                f"target {batch.value_targets.shape}"
-            )
+        if batch.policy_targets is None:
+            policy_loss = torch.zeros(1, device=logits.device)
+        else:
+            policy_loss = F.huber_loss(probs, batch.policy_targets, delta=1.0)
 
-        policy_targets = batch.policy_targets
-        if probs.dim() == 3 and policy_targets.dim() == 2:
-            policy_targets = policy_targets.unsqueeze(1)
-        if probs.shape != policy_targets.shape:
-            raise ValueError(
-                f"Policy shape mismatch: predicted {probs.shape}, "
-                f"target {policy_targets.shape}"
-            )
-
-        policy_loss = F.huber_loss(probs, policy_targets, delta=1.0)
-        value_loss = F.mse_loss(hand_values, batch.value_targets)
+        if batch.value_targets is None:
+            value_loss = torch.zeros(1, device=logits.device)
+        else:
+            value_loss = F.mse_loss(hand_values, batch.value_targets)
 
         total_loss = self.policy_weight * policy_loss + self.value_weight * value_loss
 

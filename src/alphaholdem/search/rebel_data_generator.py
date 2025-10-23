@@ -11,11 +11,13 @@ class RebelDataGenerator:
         self,
         env_proto: HUNLTensorEnv,
         evaluator: RebelCFREvaluator,
-        buffer: RebelReplayBuffer,
+        value_buffer: RebelReplayBuffer,
+        policy_buffer: RebelReplayBuffer,
     ):
         self.env_proto = env_proto
         self.evaluator = evaluator
-        self.buffer = buffer
+        self.value_buffer = value_buffer
+        self.policy_buffer = policy_buffer
         self.device = evaluator.device
         initial_pbs = self._new_pbs(evaluator.search_batch_size)
         self.current_pbs = initial_pbs
@@ -61,6 +63,7 @@ class RebelDataGenerator:
 
             self.current_pbs = self.evaluator.self_play_iteration()
 
-            batch = self.evaluator.sample_data()
-            self.buffer.add_batch(batch)
-            collected += len(batch)
+            value_batch, policy_batch = self.evaluator.sample_data()
+            self.value_buffer.add_batch(value_batch)
+            self.policy_buffer.add_batch(policy_batch)
+            collected += len(value_batch)

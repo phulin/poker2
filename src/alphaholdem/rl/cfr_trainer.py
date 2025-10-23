@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import torch
@@ -67,12 +66,23 @@ class RebelCFRTrainer:
             flop_showdown=cfg.env.flop_showdown,
         )
         self.env.reset()
-        self.buffer = RebelReplayBuffer(
+
+        self.value_buffer = RebelReplayBuffer(
             capacity=self.replay_capacity,
             feature_dim=cfg.model.input_dim,
             num_actions=self.num_actions,
             num_players=self.num_players,
             device=self.buffer_device,
+            policy_targets=False,
+        )
+        self.policy_buffer = RebelReplayBuffer(
+            capacity=self.replay_capacity,
+            feature_dim=cfg.model.input_dim,
+            num_actions=self.num_actions,
+            num_players=self.num_players,
+            device=self.buffer_device,
+            policy_targets=True,
+            value_targets=False,
         )
 
         # Model
@@ -120,7 +130,8 @@ class RebelCFRTrainer:
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,
             evaluator=self.cfr_evaluator,
-            buffer=self.buffer,
+            value_buffer=self.value_buffer,
+            policy_buffer=self.policy_buffer,
         )
 
         # Feature encoder for belief computation
@@ -139,22 +150,33 @@ class RebelCFRTrainer:
     @profile
     def _update_model(self) -> Optional[Dict[str, float]]:
         self.data_generator.generate_data()
-        batch = self.buffer.sample(self.batch_size, generator=self.buffer_rng).to(
-            self.device
-        )
+
+        # TODO: think about how to interleave these/ratio in a smarter way.
+        # Might need to use different sizes for the two buffers.
+        value_batch = self.value_buffer.sample(
+            self.batch_size, generator=self.buffer_rng
+        ).to(self.device)
+        policy_batch = self.policy_buffer.sample(
+            self.batch_size, generator=self.buffer_rng
+        ).to(self.device)
 
         self.model.train()
         self.optimizer.zero_grad()
-        output = self.model(batch.features)
-        if output.hand_values is None:
-            raise ValueError("ReBeL model must return per-hand values.")
-        loss_dict = self.loss_fn(
-            logits=output.policy_logits,
-            hand_values=output.hand_values,
-            batch=batch,
-        )
-        loss = loss_dict["total_loss"]
-        loss.backward()
+        value_loss, policy_loss = None, None
+        for batch in [value_batch, policy_batch]:
+            output = self.model(batch.features)
+            loss_dict = self.loss_fn(
+                logits=output.policy_logits,
+                hand_values=output.hand_values,
+                batch=batch,
+            )
+            loss = loss_dict["total_loss"]
+            if batch is value_batch:
+                value_loss = loss_dict["value_loss"]
+            else:
+                policy_loss = loss_dict["policy_loss"]
+                entropy_loss = loss_dict["entropy"]
+            loss.backward()
 
         grad_norm_unclipped = (
             sum(
@@ -165,17 +187,31 @@ class RebelCFRTrainer:
             ** 0.5
         )
 
+        preflop = value_batch.statistics["street"] == 0
+        flop = value_batch.statistics["street"] == 1
+        turn = value_batch.statistics["street"] == 2
+        river = value_batch.statistics["street"] == 3
+        showdown = value_batch.statistics["street"] == 4
+
         if self.grad_clip is not None and self.grad_clip > 0:
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
         self.optimizer.step()
 
         return {
             "loss": loss.item(),
-            "policy_loss": loss_dict["policy_loss"],
-            "value_loss": loss_dict["value_loss"],
-            "entropy_loss": loss_dict["entropy"],
-            "buffer_size": len(self.buffer),
+            "policy_loss": policy_loss,
+            "value_loss": value_loss,
+            "entropy_loss": entropy_loss,
+            "value_buffer_size": len(self.value_buffer),
+            "policy_buffer_size": len(self.policy_buffer),
             "grad_norm_unclipped": grad_norm_unclipped,
+            "value_batch_street": {
+                "preflop": preflop.float().mean().item(),
+                "flop": flop.float().mean().item(),
+                "turn": turn.float().mean().item(),
+                "river": river.float().mean().item(),
+                "showdown": showdown.float().mean().item(),
+            },
             **self.cfr_evaluator.stats,
         }
 

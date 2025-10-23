@@ -800,7 +800,9 @@ class RebelCFREvaluator:
         selected_hands = torch.zeros(M, dtype=torch.long, device=self.device)
         valid_indices = torch.where(self.valid_mask)[0]
         selected_hands[valid_indices] = torch.multinomial(
-            self.beliefs[valid_indices, self.env.to_act[valid_indices]], 1
+            self.beliefs[valid_indices, self.env.to_act[valid_indices]],
+            1,
+            generator=self.generator,
         ).squeeze(1)
 
         # start with root nodes and descend to leaves
@@ -993,21 +995,40 @@ class RebelCFREvaluator:
     def sample_data(self) -> RebelBatch:
         """Aggregate model targets from the current root batch for supervised learning."""
         N = self.search_batch_size
-        level_1_end = self.depth_offsets[2]
-        policy_targets = self._pull_back(self.policy_probs_avg[:level_1_end])
+        top = self.depth_offsets[-2]
+        policy_targets = self._pull_back(self.policy_probs_avg)
+        policy_targets = policy_targets.permute(0, 2, 1)
 
         # Nominally we'd need to divide by reach weights here, but since we're only
         # taking the first level of the tree, those weights would all be 1.
-        value_targets = self.values_avg[:N]
+        value_targets = self.values_avg
         if value_targets.abs().max() > 100:
             print("WARNING: Value targets are too large")
-        return RebelBatch(
-            features=self.feature_encoder.encode(self.env.to_act, self.beliefs_avg)[:N],
-            policy_targets=policy_targets.permute(0, 2, 1),
-            value_targets=value_targets,
-            legal_masks=self.env.legal_bins_mask()[:N],
-            acting_players=self.env.to_act[:N],
+
+        features = self.feature_encoder.encode(self.env.to_act, self.beliefs_avg)[:top]
+        legal_masks = self.env.legal_bins_mask()
+        statistics = {
+            "to_act": self.env.to_act,
+            "street": self.env.street,
+            "board": self.env.board_indices,
+            "pot": self.env.pot,
+        }
+
+        # Value batch gets root states only.
+        value_batch = RebelBatch(
+            features=features[:N],
+            value_targets=value_targets[:N],
+            legal_masks=legal_masks[:N],
+            statistics={key: statistics[key][:N] for key in statistics},
         )
+        # Policy batch gets all states.
+        policy_batch = RebelBatch(
+            features=features,
+            policy_targets=policy_targets,
+            legal_masks=legal_masks[:top],
+            statistics={key: statistics[key][:top] for key in statistics},
+        )
+        return value_batch, policy_batch
 
     @profile
     def _showdown_value(self, indices: torch.Tensor) -> torch.Tensor:
