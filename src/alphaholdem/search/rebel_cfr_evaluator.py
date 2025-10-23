@@ -87,6 +87,7 @@ class RebelCFREvaluator:
     valid_mask: torch.Tensor
     leaf_mask: torch.Tensor
     allowed_hands: torch.Tensor
+    allowed_hands_prob: torch.Tensor
     policy_probs: torch.Tensor
     policy_probs_avg: torch.Tensor
     reach_weights: torch.Tensor
@@ -207,6 +208,7 @@ class RebelCFREvaluator:
         self.allowed_hands = torch.zeros(
             self.total_nodes, NUM_HANDS, device=self.device, dtype=torch.bool
         )
+        self.allowed_hands_prob = torch.zeros_like(self.allowed_hands)
 
         # Feature encoder for belief computation
         self.feature_encoder = RebelFeatureEncoder(
@@ -378,6 +380,13 @@ class RebelCFREvaluator:
             self.env.board_onehot.any(dim=1).view(-1, 52).float()
             @ self.combo_onehot_float.T
         ) < 0.5
+        self.allowed_hands_prob[
+            :
+        ] = self.allowed_hands.float() / self.allowed_hands.sum(
+            dim=-1, keepdim=True
+        ).clamp(
+            min=1
+        )
 
         self.legal_mask = self.env.legal_bins_mask()
         valid_legal_masks = self.legal_mask[self.valid_mask & ~self.leaf_mask]
@@ -507,13 +516,10 @@ class RebelCFREvaluator:
         # If the action probability of getting to a node is 0, our
         # bayesian update will make the beliefs in that state all 0.
         # So we set them to uniform.
-        allowed_hands_prob = self.allowed_hands.float() / self.allowed_hands.sum(
-            dim=-1, keepdim=True
-        ).clamp(min=1)
         torch.where(
             denom > 1e-10,
             target / denom.clamp(min=1e-12),
-            allowed_hands_prob[:, None, :],
+            self.allowed_hands_prob[:, None, :],
             out=target,
         )
 
