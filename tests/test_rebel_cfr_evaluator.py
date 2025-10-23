@@ -759,23 +759,23 @@ def test_sample_data_returns_root_batch() -> None:
     )
     evaluator.values[roots] = 0.5
 
-    batch = evaluator.sample_data()
+    value_batch, policy_batch = evaluator.sample_data()
 
-    assert batch.features.shape == (
-        evaluator.search_batch_size,
+    assert policy_batch.features.shape == (
+        evaluator.depth_offsets[-2],
         evaluator.feature_encoder.feature_dim,
     )
-    assert batch.policy_targets.shape == (
-        evaluator.search_batch_size,
+    assert policy_batch.policy_targets.shape == (
+        evaluator.depth_offsets[-2],
         NUM_HANDS,
         evaluator.num_actions,
     )
-    assert batch.value_targets.shape == (
+    assert value_batch.value_targets.shape == (
         evaluator.search_batch_size,
         evaluator.num_players,
         NUM_HANDS,
     )
-    torch.testing.assert_close(batch.policy_targets, expected_policy)
+    torch.testing.assert_close(policy_batch.policy_targets, expected_policy)
 
 
 def setup_showdown_evaluator(
