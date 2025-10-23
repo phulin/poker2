@@ -93,7 +93,7 @@ class RebelCFRTrainer:
             num_hidden_layers=cfg.model.num_hidden_layers,
             detach_value_head=cfg.model.detach_value_head,
             num_players=self.num_players,
-        )
+        ).compile()
         cpu_rng = torch.Generator(device="cpu")
         if self.cfg.seed is not None:
             cpu_rng.manual_seed(self.cfg.seed)
