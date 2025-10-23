@@ -40,13 +40,13 @@ env:
   stack: 1000
   sb: 5
   bb: 10
-  bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]
+  bet_bins: [0.5, 1.5]
   flop_showdown: false
 
 search:
   enabled: true
-  depth: 2
-  iterations: 100
+  depth: 5
+  iterations: 150
   warm_start_iterations: 15
   branching: 4
   belief_samples: 16
