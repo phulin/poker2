@@ -20,7 +20,7 @@ wandb_run_id: null
 train:
   learning_rate: 3e-4
   batch_size: 1024
-  replay_buffer_batches: 40
+  replay_buffer_batches: 8
   value_coef: 1.0
   entropy_coef: 0.0
   grad_clip: 1.0

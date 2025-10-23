@@ -75,8 +75,9 @@ class RebelCFRTrainer:
             device=self.buffer_device,
             policy_targets=False,
         )
+        # Larger policy buffer since we store more samples there
         self.policy_buffer = RebelReplayBuffer(
-            capacity=self.replay_capacity,
+            capacity=self.replay_capacity * self.num_actions,
             feature_dim=cfg.model.input_dim,
             num_actions=self.num_actions,
             num_players=self.num_players,
