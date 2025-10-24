@@ -5,13 +5,14 @@ from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import Config
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.rl.losses import RebelSupervisedLoss
-from alphaholdem.rl.rebel_replay import RebelReplayBuffer
+from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 from alphaholdem.utils.profiling import profile
@@ -100,7 +101,8 @@ class RebelCFRTrainer:
             cpu_rng.manual_seed(self.cfg.seed)
         self.model.init_weights(cpu_rng)
         self.model.to(self.device)
-        self.model.compile()
+        if self.device.type == "cuda":
+            self.model.compile()
 
         # Optimizer & loss
         self.optimizer = torch.optim.AdamW(
@@ -149,6 +151,50 @@ class RebelCFRTrainer:
         entropy = -(norm * norm.log()).sum(dim=-1).mean()
         return float(entropy.item())
 
+    def _compute_metrics(
+        self,
+        value_batch: RebelBatch,
+        policy_batch: RebelBatch,
+        value_loss: float,
+        value_loss_all: torch.Tensor,
+        policy_loss: float,
+        entropy_loss: float,
+    ) -> Dict[str, float]:
+        grad_norm_clipped = torch.nn.utils.get_total_norm(
+            p.grad for p in self.model.parameters()
+        ).item()
+
+        preflop = value_batch.statistics["street"] == 0
+        flop = value_batch.statistics["street"] == 1
+        turn = value_batch.statistics["street"] == 2
+        river = value_batch.statistics["street"] == 3
+        showdown = value_batch.statistics["street"] == 4
+
+        return {
+            "loss": self.cfg.train.value_coef * value_loss + policy_loss,
+            "policy_loss": policy_loss,
+            "value_loss": value_loss,
+            "entropy_loss": entropy_loss,
+            "value_buffer_size": len(self.value_buffer),
+            "policy_buffer_size": len(self.policy_buffer),
+            "grad_norm_clipped": grad_norm_clipped,
+            "value_batch_street": {
+                "preflop": preflop.float().mean().item(),
+                "flop": flop.float().mean().item(),
+                "turn": turn.float().mean().item(),
+                "river": river.float().mean().item(),
+                "showdown": showdown.float().mean().item(),
+            },
+            "value_loss_street": {
+                "preflop": value_loss_all[preflop].mean().item(),
+                "flop": value_loss_all[flop].mean().item(),
+                "turn": value_loss_all[turn].mean().item(),
+                "river": value_loss_all[river].mean().item(),
+                "showdown": value_loss_all[showdown].mean().item(),
+            },
+            **self.cfr_evaluator.stats,
+        }
+
     @profile
     def _update_model(self) -> Optional[Dict[str, float]]:
         self.data_generator.generate_data()
@@ -164,6 +210,7 @@ class RebelCFRTrainer:
 
         self.model.train()
         self.optimizer.zero_grad()
+
         value_loss, policy_loss = None, None
         for batch in [value_batch, policy_batch]:
             output = self.model(batch.features)
@@ -175,47 +222,24 @@ class RebelCFRTrainer:
             loss = loss_dict["total_loss"]
             if batch is value_batch:
                 value_loss = loss_dict["value_loss"]
+                value_loss_all = loss_dict["value_loss_all"]
             else:
                 policy_loss = loss_dict["policy_loss"]
                 entropy_loss = loss_dict["entropy"]
             loss.backward()
 
-        grad_norm_unclipped = (
-            sum(
-                p.grad.norm(2) ** 2
-                for p in self.model.parameters()
-                if p.grad is not None
-            )
-            ** 0.5
-        )
-
-        preflop = value_batch.statistics["street"] == 0
-        flop = value_batch.statistics["street"] == 1
-        turn = value_batch.statistics["street"] == 2
-        river = value_batch.statistics["street"] == 3
-        showdown = value_batch.statistics["street"] == 4
-
         if self.grad_clip is not None and self.grad_clip > 0:
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
         self.optimizer.step()
 
-        return {
-            "loss": loss.item(),
-            "policy_loss": policy_loss,
-            "value_loss": value_loss,
-            "entropy_loss": entropy_loss,
-            "value_buffer_size": len(self.value_buffer),
-            "policy_buffer_size": len(self.policy_buffer),
-            "grad_norm_unclipped": grad_norm_unclipped,
-            "value_batch_street": {
-                "preflop": preflop.float().mean().item(),
-                "flop": flop.float().mean().item(),
-                "turn": turn.float().mean().item(),
-                "river": river.float().mean().item(),
-                "showdown": showdown.float().mean().item(),
-            },
-            **self.cfr_evaluator.stats,
-        }
+        return self._compute_metrics(
+            value_batch,
+            policy_batch,
+            value_loss,
+            value_loss_all,
+            policy_loss,
+            entropy_loss,
+        )
 
     def train_step(self, step: int) -> Dict[str, any]:
         step_public = step + 1

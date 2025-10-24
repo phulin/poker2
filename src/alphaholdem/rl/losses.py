@@ -758,8 +758,12 @@ class RebelSupervisedLoss(nn.Module):
 
         if batch.value_targets is None:
             value_loss = torch.zeros(1, device=logits.device)
+            value_loss_all = None
         else:
             value_loss = F.mse_loss(hand_values, batch.value_targets)
+            value_loss_all = F.mse_loss(
+                hand_values.detach(), batch.value_targets, reduction="none"
+            )
 
         total_loss = self.policy_weight * policy_loss + self.value_weight * value_loss
 
@@ -771,5 +775,6 @@ class RebelSupervisedLoss(nn.Module):
             "total_loss": total_loss,
             "policy_loss": policy_loss.item(),
             "value_loss": value_loss.item(),
+            "value_loss_all": value_loss_all,
             "entropy": entropy.item(),
         }
