@@ -888,12 +888,19 @@ class RebelCFREvaluator:
         prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
         prev_actor[N:] = self._fan_out(self.env.to_act)
 
+        reach_weights_prev = torch.ones_like(self.reach_weights)
+        reach_weights_prev[N:] = self._fan_out(self.reach_weights)
+        reach_weights_avg_prev = torch.ones_like(self.reach_weights_avg)
+        reach_weights_avg_prev[N:] = self._fan_out(self.reach_weights_avg)
+
         # In the root nodes, prev_actor is invalid, but that's OK because
         # reach_weights is the same (1.0) for all players there.
+        # Note we have to use the previous node's reach weights, since the policy probs
+        # really live on that node (and otherwise we're double-multiplying)
         prev_actor_indices = prev_actor[:, None, None].expand(-1, -1, NUM_HANDS)
-        reach_actor = torch.gather(self.reach_weights, 1, prev_actor_indices).squeeze(1)
+        reach_actor = torch.gather(reach_weights_prev, 1, prev_actor_indices).squeeze(1)
         reach_avg_actor = torch.gather(
-            self.reach_weights_avg, 1, prev_actor_indices
+            reach_weights_avg_prev, 1, prev_actor_indices
         ).squeeze(1)
 
         # Reach probability is proportional to belief, so we can use beliefs to mix
