@@ -871,6 +871,7 @@ class RebelCFREvaluator:
             sampled_nodes[active_mask] = (
                 offset_next + (active_nodes - offset) * B + actions
             )
+            # remove node from the active mask once it's a leaf
             active_mask = ~self.leaf_mask[sampled_nodes]
             depth += 1
 

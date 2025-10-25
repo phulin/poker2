@@ -254,10 +254,11 @@ class PreflopAnalyzer:
 
         suits = self.all_hands // 13
         ranks = self.all_hands % 13  # With new rank mapping: A=0, K=1, ..., 2=12
+        ranks_sorted = torch.sort(ranks, dim=1).values
         ranks_flat = torch.where(
             suits[:, 0] == suits[:, 1],
-            ranks[:, 0] * 13 + ranks[:, 1],
-            ranks[:, 1] * 13 + ranks[:, 0],
+            ranks_sorted[:, 0] * 13 + ranks_sorted[:, 1],
+            ranks_sorted[:, 1] * 13 + ranks_sorted[:, 0],
         )
         grid_counts.flatten().scatter_add_(0, ranks_flat, torch.ones_like(ranks_flat))
         grid_sums.flatten().scatter_add_(0, ranks_flat, values_1326)
@@ -655,7 +656,7 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             torch.tensor([0], dtype=torch.long, device=self.device),
             self.pbs.beliefs,
         )
-        self.cfr_evaluator.self_play_iteration()
+        self.cfr_evaluator.self_play_iteration(training_mode=False)
 
         # Get the root node policy (index 0) [NUM_HANDS, num_actions]
         actions_slice = slice(
