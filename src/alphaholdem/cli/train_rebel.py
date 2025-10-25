@@ -49,6 +49,26 @@ def _cleanup_old_checkpoints(checkpoint_dir: str, current_path: str) -> None:
         actual_current_path,  # Keep the current checkpoint (resolved path)
     }
 
+    # Also keep the checkpoint with the latest step number
+    if checkpoint_files:
+        # Extract step numbers and find the latest
+        latest_step = -1
+        latest_checkpoint = None
+        for file_path in checkpoint_files:
+            filename = os.path.basename(file_path)
+            # Extract step number from "rebel_step_XXX.pt"
+            if filename.startswith("rebel_step_") and filename.endswith(".pt"):
+                try:
+                    step_num = int(filename[11:-3])
+                    if step_num > latest_step:
+                        latest_step = step_num
+                        latest_checkpoint = file_path
+                except ValueError:
+                    continue
+
+        if latest_checkpoint:
+            files_to_keep.add(latest_checkpoint)
+
     # Remove old checkpoint files
     deleted_count = 0
     for file_path in checkpoint_files:

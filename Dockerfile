@@ -1,34 +1,27 @@
-# AlphaHoldem Training Dockerfile for vast.ai
-FROM pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel
+FROM nvidia/cuda:13.0.1-base-ubuntu24.04
 
 # Set working directory
 WORKDIR /workspace
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    wget \
-    curl \
-    vim \
-    htop \
-    && rm -rf /var/lib/apt/lists/*
-
 # Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt update && \
+        DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends \
+        curl ca-certificates build-essential cuda-minimal-build-13-0 && \
+        rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://astral.sh/uv/install.sh | sh
+RUN uv python install 3.13
 
 # Copy the project
-COPY . .
-
-# Install the package in development mode with all extras
-RUN pip install -e .[all]
-
-# Create directories for checkpoints and logs
-RUN mkdir -p /workspace/checkpoints /workspace/logs
+COPY src src
+COPY conf conf
+COPY pyproject.toml pyproject.toml
+ENV PATH="/root/.local/bin:$PATH"
+RUN uv sync
+RUN uv cache clean
 
 # Set environment variables
 ENV PYTHONPATH=/workspace
 ENV CUDA_VISIBLE_DEVICES=0
 
 # Default command (can be overridden)
-CMD ["python", "-m", "alphaholdem.cli.train_rebel", "--config-name", "config_rebel_cfr"]
+CMD ["uv", "run", "src/alphaholdem/cli/train_rebel.py"]

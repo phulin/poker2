@@ -128,7 +128,7 @@ class ModelConfig:
     n_layers: int = 2
     n_heads: int = 2
     dropout: float = 0.0
-    num_bet_bins: int = 8
+
     # ReBeL FFN parameters
     input_dim: int = 2660
     hidden_dim: int = 1536

@@ -24,7 +24,6 @@ train:
   value_coef: 1.0
   entropy_coef: 0.0
   grad_clip: 1.0
-  max_sequence_length: 32
 
 model:
   name: "rebel_ffn"
@@ -34,7 +33,7 @@ model:
   num_hidden_layers: 6
   value_head_type: "scalar"
   value_head_num_quantiles: 1
-  detach_value_head: true
+  detach_value_head: false
 
 env:
   stack: 1000
@@ -45,10 +44,9 @@ env:
 
 search:
   enabled: true
-  depth: 5
+  depth: 3
   iterations: 150
   warm_start_iterations: 15
-  branching: 4
   belief_samples: 16
   max_belief_enumeration: 0
   dcfr_alpha: 1.5
