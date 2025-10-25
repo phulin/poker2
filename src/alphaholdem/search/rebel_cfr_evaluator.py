@@ -7,6 +7,7 @@ from typing import Generator, Optional
 import torch
 import torch.nn.functional as F
 
+from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
     combo_to_onehot_tensor,
     hand_combos_tensor,
@@ -114,7 +115,7 @@ class RebelCFREvaluator:
         float_dtype: torch.dtype,
         generator: Optional[torch.Generator] = None,
         warm_start_iterations: int = T_WARM,
-        linear_cfr: bool = False,
+        cfr_type: CFRType = CFRType.linear,
         cfr_avg: bool = True,
         sample_epsilon: float = 0.25,
     ):
@@ -126,7 +127,7 @@ class RebelCFREvaluator:
         self.bet_bins = bet_bins
         self.cfr_iterations = cfr_iterations
         self.warm_start_iterations = warm_start_iterations
-        self.linear_cfr = linear_cfr
+        self.cfr_type = cfr_type
         self.cfr_avg = cfr_avg
         self.sample_epsilon = sample_epsilon
         self.device = device
@@ -905,7 +906,7 @@ class RebelCFREvaluator:
         ).squeeze(1)
 
         # Reach probability is proportional to belief, so we can use beliefs to mix
-        weight = 2 if self.linear_cfr else 1
+        weight = 2 if self.cfr_type == CFRType.linear else 1
         reach_actor *= weight
         reach_avg_actor *= t
         self.policy_probs_avg *= reach_avg_actor
@@ -935,7 +936,7 @@ class RebelCFREvaluator:
                 torch.arange(
                     sample_low, sample_high, dtype=torch.float32, device=self.device
                 )
-                if self.linear_cfr
+                if self.cfr_type == CFRType.linear
                 else torch.ones(sample_high - sample_low, device=self.device)
             )
             distribution /= distribution.sum()
@@ -999,7 +1000,7 @@ class RebelCFREvaluator:
                     next_pbs_idx += sample_now.numel()
 
             regrets = self.compute_instantaneous_regrets(self.values)
-            if self.linear_cfr:
+            if self.cfr_type == CFRType.linear:
                 # Alternate updates.
                 regrets.masked_fill_(
                     self.env.to_act[:, None] == t % self.num_players, 0.0
@@ -1015,7 +1016,7 @@ class RebelCFREvaluator:
 
             self.values_avg *= t
             self.values_avg += self.values
-            self.values_avg /= t + 2 if self.linear_cfr else t + 1
+            self.values_avg /= t + 2 if self.cfr_type == CFRType.linear else t + 1
 
         self.stats["mean_positive_regret"] = (
             self.cumulative_regrets.clamp(min=0).mean().item()

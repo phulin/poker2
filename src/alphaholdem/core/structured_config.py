@@ -34,6 +34,12 @@ class KLType(str, Enum):
     none = "none"
 
 
+class CFRType(str, Enum):
+    standard = "standard"
+    linear = "linear"
+    discounted = "discounted"
+
+
 @dataclass
 class TrainingConfig:
     learning_rate: float = 1e-4
@@ -175,7 +181,7 @@ class SearchConfig:
     dcfr_beta: float = 0.0
     dcfr_gamma: float = 2.0
     include_average_policy: bool = True
-    linear_cfr: bool = True
+    cfr_type: CFRType = CFRType.linear
     cfr_avg: bool = True
 
 
