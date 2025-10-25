@@ -12,7 +12,7 @@ authors = [
   { name = "Your Name", email = "your.email@example.com" },
 ]
 dependencies = [
-  "torch>=2.9.0",
+  "torch>=2.8.0",
   "pyyaml>=5.4.0",
   "wandb>=0.15.0",
   "hydra-core>=1.3.0",
