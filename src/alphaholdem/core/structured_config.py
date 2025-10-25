@@ -3,6 +3,7 @@ from enum import Enum
 from typing import List, Optional
 
 from hydra.core.config_store import ConfigStore
+from omegaconf import DictConfig, OmegaConf
 
 
 class ValueLossType(str, Enum):
@@ -78,7 +79,7 @@ class TrainingConfig:
     warmup_steps: int = 0  # Learning rate warmup steps
     weight_decay: float = 0.0  # Weight decay for regularization
 
-    use_kv_cache: bool = True
+    use_kv_cache: bool = False
 
     # Distributional critic configuration
     quantile_huber_kappa: float = 1.0
@@ -130,7 +131,7 @@ class ModelConfig:
     dropout: float = 0.0
 
     # ReBeL FFN parameters
-    input_dim: int = 2660
+    input_dim: int = 2661
     hidden_dim: int = 1536
     num_hidden_layers: int = 6
     detach_value_head: bool = True
@@ -220,12 +221,17 @@ class Config:
         # Derive action space size directly from bet bins so search/env/model stay aligned.
         self.model.num_actions = len(self.env.bet_bins) + 3
 
+    @classmethod
+    def from_dict_config(cls, dict_config: DictConfig) -> "Config":
+        container = OmegaConf.to_container(dict_config, resolve=True)
+        container["train"] = TrainingConfig(**(container.get("train", {})))
+        container["model"] = ModelConfig(**(container.get("model", {})))
+        container["env"] = EnvConfig(**(container.get("env", {})))
+        container["exploiter"] = ExploiterConfig(**(container.get("exploiter", {})))
+        container["search"] = SearchConfig(**(container.get("search", {})))
+        return cls(**container)
+
 
 # Register with Hydra
 cs = ConfigStore.instance()
 cs.store(name="config", node=Config)
-cs.store(group="train", name="default", node=TrainingConfig)
-cs.store(group="model", name="default", node=ModelConfig)
-cs.store(group="env", name="default", node=EnvConfig)
-cs.store(group="exploiter", name="default", node=ExploiterConfig)
-cs.store(group="search", name="default", node=SearchConfig)

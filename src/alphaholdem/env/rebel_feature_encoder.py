@@ -70,7 +70,7 @@ class RebelFeatureEncoder:
             agents: Tensor of agent ids (0 or 1), shape [B].
             beliefs: Optional tensor [B, 2, 1326] for beliefs (about p0 and p1).
         Returns:
-            Tensor [B, 2660] of float32 features.
+            Tensor [B, 2661] of float32 features.
         """
         M = agents.shape[0]
 

@@ -16,9 +16,9 @@ from dataclasses import asdict
 from typing import Any, Dict
 
 import hydra
+from omegaconf import DictConfig
 import torch
 import wandb
-from omegaconf import OmegaConf
 
 from alphaholdem.core.structured_config import (
     Config,
@@ -234,26 +234,8 @@ def train_rebel(cfg: Config) -> None:
 @hydra.main(
     version_base=None, config_path="../../../conf", config_name="config_rebel_cfr"
 )
-def main(cfg) -> None:
-    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-
-    train_config = TrainingConfig(**cfg_dict.get("train", {}))
-    model_config = ModelConfig(**cfg_dict.get("model", {}))
-    env_config = EnvConfig(**cfg_dict.get("env", {}))
-    search_config = SearchConfig(**cfg_dict.get("search", {}))
-
-    config = Config(
-        train=train_config,
-        model=model_config,
-        env=env_config,
-        search=search_config,
-        **{
-            k: v
-            for k, v in cfg_dict.items()
-            if k not in ["train", "model", "env", "search"]
-        },
-    )
-
+def main(dict_config: DictConfig) -> None:
+    config = Config.from_dict_config(dict_config)
     train_rebel(config)
 
 
