@@ -515,8 +515,9 @@ def test_compute_expected_values_matches_child_values(
         evaluator.values[2, 0],
         torch.full((NUM_HANDS,), expected_value_actor, dtype=env.float_dtype),
     )
+    opp_weight = reach_weights[2, 0] * (probs**2).sum()
     torch.testing.assert_close(
-        evaluator.values[2, 1],
+        evaluator.values[2, 1] / opp_weight,
         torch.full((NUM_HANDS,), expected_value_opp, dtype=env.float_dtype),
     )
 

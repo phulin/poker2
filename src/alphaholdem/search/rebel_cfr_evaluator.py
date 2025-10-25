@@ -680,7 +680,7 @@ class RebelCFREvaluator:
             # all we have to do is add the opponent values as they already include
             # opponent reach (so effectively includes policy probability).
             # The original ReBeL source code does this too.
-            values_weighted = self.values[offset_next:offset_next_next]
+            values_weighted = self.values[offset_next:offset_next_next].clone()
             values_weighted[dest_indices, former_actor] *= self.policy_probs[
                 offset_next:offset_next_next
             ]
