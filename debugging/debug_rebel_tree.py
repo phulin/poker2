@@ -474,11 +474,12 @@ def debug_rebel_tree(
     env4.step_bins(torch.tensor([bet_action], device=device))  # bet0.5
     env4.step_bins(torch.tensor([call_action], device=device))  # call
 
-    environments = [env1, env2, env3, env4]
+    # environments = [env1, env2, env3, env4]
+    environments = [env4]
     state_names = [
-        "Preflop",
-        "Flop (bet0.5-call)",
-        "Turn (bet0.5-call-check-bet0.5-call)",
+        # "Preflop",
+        # "Flop (bet0.5-call)",
+        # "Turn (bet0.5-call-check-bet0.5-call)",
         "River (bet0.5-call-check-bet0.5-call-check-bet0.5-call)",
     ]
 
