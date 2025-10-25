@@ -10,12 +10,9 @@ device: cuda
 checkpoint_dir: "checkpoints-rebel"
 checkpoint_interval: 50
 economize_checkpoints: true
-resume_from: null
 use_wandb: true
 wandb_project: "poker-rebel-cfr"
-wandb_name: null
 wandb_tags: ["rebel", "cfr"]
-wandb_run_id: null
 
 train:
   learning_rate: 3e-4
@@ -28,19 +25,15 @@ train:
 model:
   name: "rebel_ffn"
   input_dim: 2661
-  num_actions: -1
   hidden_dim: 1536
   num_hidden_layers: 6
-  value_head_type: "scalar"
-  value_head_num_quantiles: 1
   detach_value_head: false
 
 env:
   stack: 1000
   sb: 5
   bb: 10
-  bet_bins: [0.5, 1.5]
-  flop_showdown: false
+  bet_bins: [0.5, 1.0]
 
 search:
   enabled: true

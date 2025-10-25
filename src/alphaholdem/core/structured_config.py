@@ -112,8 +112,9 @@ class TrainingConfig:
 class ModelConfig:
     name: str = "siamese_convnet_v1"
     value_head_type: ValueHeadType = ValueHeadType.scalar
-    value_head_num_quantiles: int = 51
+    value_head_num_quantiles: int = -1
     use_gradient_checkpointing: bool = True
+    detach_value_head: bool = False
 
     # CNN-specific parameters (with defaults)
     cards_channels: int = 6
@@ -134,7 +135,6 @@ class ModelConfig:
     input_dim: int = 2661
     hidden_dim: int = 1536
     num_hidden_layers: int = 6
-    detach_value_head: bool = True
 
 
 @dataclass
