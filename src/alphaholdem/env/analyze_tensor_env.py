@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple, Union
 
 import torch
 
-from alphaholdem.env.card_utils import combo_lookup_tensor
+from alphaholdem.env.card_utils import combo_lookup_tensor, hand_combos_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
@@ -22,8 +22,7 @@ from alphaholdem.search.rebel_cfr_evaluator import (
     RebelCFREvaluator,
 )
 
-RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
-SUITS = ["s", "h", "d", "c"]
+GRID_RANKS = "AKQJT98765432"
 
 
 class DummyStateEncoder:
@@ -84,47 +83,6 @@ def create_state_encoder_for_model(
     else:
         # for testing.
         return DummyStateEncoder()
-
-
-def create_1326_hand_combinations() -> List[Tuple[str, str]]:
-    """Create all 1326 distinct preflop combinations (ordered hole cards, no overlap).
-
-    Returns pairs like ("As", "Kh"). Offsuit/suited and pairs fully enumerated.
-    Uses the same ordering as hand_combos_tensor() for consistency.
-    """
-    # Build full deck strings in canonical order (0-51)
-    # Cards are indexed as suit * 13 + rank, where suit=0,1,2,3 and rank=0,1,2,...,12
-    deck = []
-    for suit_idx in range(4):  # 0=spades, 1=hearts, 2=diamonds, 3=clubs
-        for rank_idx in range(13):  # 0=2, 1=3, ..., 12=A
-            suit = SUITS[suit_idx]
-            rank = RANKS[rank_idx]
-            deck.append(rank + suit)
-
-    hands: List[Tuple[str, str]] = []
-    for i in range(len(deck)):
-        for j in range(i + 1, len(deck)):
-            c1, c2 = deck[i], deck[j]
-            # Exclude same card obviously, and allow any suit/rank
-            hands.append((c1, c2))
-    return hands
-
-
-def _grid_coords_for_hand(card1: int, card2: int) -> Tuple[int, int]:
-    s1, s2 = card1 // 13, card2 // 13
-
-    # Grid is reversed, higher ranks first.
-    # With new rank mapping: A=0, K=1, ..., 2=12
-    # Grid shows A at top (position 0), so we use rank directly
-    i, j = card1 % 13, card2 % 13
-
-    # Suited if same suit and not pair → top-right triangle; else bottom-left
-    if s1 == s2:
-        # suited → place at (min(i,j), max(i,j)) where higher rank is column
-        return (min(i, j), max(i, j))
-    else:
-        # offsuit → place at (max(i,j), min(i,j))
-        return (max(i, j), min(i, j))
 
 
 class PreflopAnalyzer:
@@ -193,27 +151,8 @@ class PreflopAnalyzer:
             model, self.env, device, bet_bins
         )
 
-        # Cache the 1326 hand combinations
-        self.all_hands_str = create_1326_hand_combinations()
-
         # Set up the hands in the environment
-        self.all_hands = torch.tensor(
-            [
-                (_card_str_to_int(hand[0]), _card_str_to_int(hand[1]))
-                for hand in self.all_hands_str
-            ],
-            dtype=torch.long,
-            device=device,
-        )
-        # Align card ordering with the canonical 1326 ordering used by ReBeL.
-        combo_ids = self.combo_lookup[self.all_hands[:, 0], self.all_hands[:, 1]]
-        sort_order = torch.argsort(combo_ids)
-        self.all_hands = self.all_hands[sort_order]
-        if sort_order.device.type != "cpu":
-            sort_order_cpu = sort_order.cpu()
-        else:
-            sort_order_cpu = sort_order
-        self.all_hands_str = [self.all_hands_str[i] for i in sort_order_cpu.tolist()]
+        self.all_hands = hand_combos_tensor(device=device)
 
         if reset:
             self.reset(button)
@@ -583,25 +522,6 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             generator=rng,
         )
 
-        # Cache the 1326 hand combinations for grid conversion
-        self.all_hands_str = create_1326_hand_combinations()
-        self.all_hands = torch.tensor(
-            [
-                (_card_str_to_int(hand[0]), _card_str_to_int(hand[1]))
-                for hand in self.all_hands_str
-            ],
-            dtype=torch.long,
-            device=device,
-        )
-        combo_ids = self.combo_lookup[self.all_hands[:, 0], self.all_hands[:, 1]]
-        sort_order = torch.argsort(combo_ids)
-        self.all_hands = self.all_hands[sort_order]
-        if sort_order.device.type != "cpu":
-            sort_order_cpu = sort_order.cpu()
-        else:
-            sort_order_cpu = sort_order
-        self.all_hands_str = [self.all_hands_str[i] for i in sort_order_cpu.tolist()]
-
         # Reinitialize both the base and CFR environments now that CFR state is set up.
         self.reset(button)
 
@@ -714,39 +634,6 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         )
 
 
-def _card_str_to_int(card_str: str) -> int:
-    """Convert card string like 'As' to integer index.
-
-    Args:
-        card_str: Card string like 'As', 'Kh', 'Qd', 'Jc'
-
-    Returns:
-        Integer index (0-51) representing the card
-    """
-    rank_map = {
-        "A": 0,
-        "K": 1,
-        "Q": 2,
-        "J": 3,
-        "T": 4,
-        "9": 5,
-        "8": 6,
-        "7": 7,
-        "6": 8,
-        "5": 9,
-        "4": 10,
-        "3": 11,
-        "2": 12,
-    }
-    suit_map = {"s": 0, "h": 1, "d": 2, "c": 3}
-
-    rank = card_str[:-1]
-    suit = card_str[-1]
-
-    # Use suit-major indexing consistent with HUNLTensorEnv (card // 13 = suit, card % 13 = rank)
-    return suit_map[suit] * 13 + rank_map[rank]
-
-
 def _create_169_grid(values: torch.Tensor, value_type: str = "probability") -> str:
     """Create a standardized 13x13 grid for 169 preflop hands.
 
@@ -762,18 +649,18 @@ def _create_169_grid(values: torch.Tensor, value_type: str = "probability") -> s
     if value_type == "probability":
         # Convert to percentages and format as 2-digit strings, cap at 99
         formatted_values = []
-        for i in range(13):
+        for i in range(12, -1, -1):
             row = []
-            for j in range(13):
+            for j in range(12, -1, -1):
                 val = min(0.99, values[i, j].item())
                 row.append(f"{val * 100:3.0f}")
             formatted_values.append(row)
     elif value_type == "value":
         # Format value estimates (multiply by 1000 for readability, show 3 sig figs, max 4 chars)
         formatted_values = []
-        for i in range(13):
+        for i in range(12, -1, -1):
             row = []
-            for j in range(13):
+            for j in range(12, -1, -1):
                 val_scaled = values[i, j].item() * 1000
                 row.append(f"{val_scaled:5.0f}")
             formatted_values.append(row)
@@ -783,13 +670,13 @@ def _create_169_grid(values: torch.Tensor, value_type: str = "probability") -> s
     # Initialize grid
     grid = []
     if value_type == "probability":
-        grid.append("    " + "".join(f"{rank:>3}" for rank in RANKS))
+        grid.append("    " + "".join(f"{rank:>3}" for rank in GRID_RANKS))
         grid.append("   +" + "-" * 39)  # Separator line
     else:
-        grid.append("    " + "".join(f"{rank:>5}" for rank in RANKS))
+        grid.append("    " + "".join(f"{rank:>5}" for rank in GRID_RANKS))
         grid.append("   +" + "-" * 65)  # Separator line
 
     for i, row in enumerate(formatted_values):
-        grid.append(f"{RANKS[i]:>2} |" + "".join(row))
+        grid.append(f"{GRID_RANKS[i]:>2} |" + "".join(row))
 
     return "\n".join(grid)

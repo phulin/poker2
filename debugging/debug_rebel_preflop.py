@@ -35,6 +35,7 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from alphaholdem.core.structured_config import (
+    CFRType,
     Config,
     EnvConfig,
     ModelConfig,
@@ -105,7 +106,7 @@ def create_default_config() -> Config:
     config.search.dcfr_beta = 0.0
     config.search.dcfr_gamma = 2.0
     config.search.include_average_policy = True
-    config.search.linear_cfr = True
+    config.search.cfr_type = CFRType.linear
     config.search.cfr_avg = True
 
     return config

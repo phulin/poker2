@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-from alphaholdem.core.structured_config import Config
+from alphaholdem.core.structured_config import CFRType, Config
 from alphaholdem.env.card_utils import hand_combos_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp import RebelFFN
@@ -89,7 +89,7 @@ def create_default_config() -> Config:
     config.search.dcfr_beta = 0.0
     config.search.dcfr_gamma = 2.0
     config.search.include_average_policy = True
-    config.search.linear_cfr = True
+    config.search.cfr_type = CFRType.linear
     config.search.cfr_avg = True
 
     return config
@@ -521,7 +521,7 @@ def debug_rebel_tree(
             device=device,
             float_dtype=torch.float32,
             warm_start_iterations=config.search.warm_start_iterations,
-            linear_cfr=config.search.linear_cfr,
+            cfr_type=config.search.cfr_type,
             cfr_avg=config.search.cfr_avg,
         )
 

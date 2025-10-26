@@ -117,6 +117,10 @@ class RebelCFREvaluator:
         warm_start_iterations: int = T_WARM,
         cfr_type: CFRType = CFRType.linear,
         cfr_avg: bool = True,
+        dcfr_alpha: float = 1.5,
+        dcfr_beta: float = 0.0,
+        dcfr_gamma: float = 2.0,
+        dcfr_delay: int = 0,
         sample_epsilon: float = 0.25,
     ):
         assert cfr_iterations > warm_start_iterations
@@ -129,6 +133,10 @@ class RebelCFREvaluator:
         self.warm_start_iterations = warm_start_iterations
         self.cfr_type = cfr_type
         self.cfr_avg = cfr_avg
+        self.dcfr_alpha = dcfr_alpha
+        self.dcfr_beta = dcfr_beta
+        self.dcfr_gamma = dcfr_gamma
+        self.dcfr_delay = dcfr_delay
         self.sample_epsilon = sample_epsilon
         self.device = device
         self.float_dtype = float_dtype
@@ -287,6 +295,8 @@ class RebelCFREvaluator:
             )
         else:
             assert initial_beliefs.shape[0] == src_indices.shape[0]
+            assert initial_beliefs.shape[1] == self.num_players
+            assert initial_beliefs.shape[2] == NUM_HANDS
             initial_beliefs = initial_beliefs.to(
                 device=self.device, dtype=self.float_dtype
             )
@@ -885,6 +895,10 @@ class RebelCFREvaluator:
     def update_average_policy(self, t: int) -> None:
         """Update the average policy by mixing it with the current policy."""
 
+        if t <= self.dcfr_delay:
+            self.policy_probs_avg[:] = self.policy_probs
+            return
+
         M, N = self.total_nodes, self.search_batch_size
 
         prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
@@ -906,9 +920,9 @@ class RebelCFREvaluator:
         ).squeeze(1)
 
         # Reach probability is proportional to belief, so we can use beliefs to mix
-        weight = 2 if self.cfr_type == CFRType.linear else 1
+        weight = 2 if self.cfr_type != CFRType.standard else 1
         reach_actor *= weight
-        reach_avg_actor *= t
+        reach_avg_actor *= max(0, t - 1 - self.dcfr_delay)
         self.policy_probs_avg *= reach_avg_actor
         self.policy_probs_avg += self.policy_probs * reach_actor
         denom = reach_avg_actor + reach_actor
@@ -929,14 +943,17 @@ class RebelCFREvaluator:
         sample_count = min(leaf_indices.numel(), self.search_batch_size)
         sampled_leaf_indices = leaf_indices[:sample_count]
         if sample_count > 0:
-            sample_low = min(self.warm_start_iterations + 1, self.cfr_iterations)
-            sample_low = max(sample_low, 0)
-            sample_high = max(self.cfr_iterations + 1, sample_low + 1)
+            if self.cfr_type == CFRType.discounted:
+                sample_low = max(self.warm_start_iterations + 1, self.dcfr_delay + 1)
+                sample_low = min(sample_low, self.cfr_iterations)
+            else:
+                sample_low = min(self.warm_start_iterations + 1, self.cfr_iterations)
+            sample_high = max(self.cfr_iterations, sample_low)
             distribution = (
                 torch.arange(
                     sample_low, sample_high, dtype=torch.float32, device=self.device
                 )
-                if self.cfr_type == CFRType.linear
+                if self.cfr_type != CFRType.standard
                 else torch.ones(sample_high - sample_low, device=self.device)
             )
             distribution /= distribution.sum()
@@ -984,7 +1001,7 @@ class RebelCFREvaluator:
             )
             next_pbs_idx = 0
 
-        for t in range(self.warm_start_iterations + 1, self.cfr_iterations + 1):
+        for t in range(self.warm_start_iterations, self.cfr_iterations):
             self.profiler_step()  # Profile start of CFR iteration
 
             if sample_count > 0:
@@ -1005,6 +1022,11 @@ class RebelCFREvaluator:
                 regrets.masked_fill_(
                     self.env.to_act[:, None] == t % self.num_players, 0.0
                 )
+            elif self.cfr_type == CFRType.discounted:
+                factor = torch.where(
+                    regrets > 0, (t - 1) ** self.dcfr_alpha, (t - 1) ** self.dcfr_beta
+                )
+                self.cumulative_regrets *= factor / (factor + 1)
             self.cumulative_regrets += regrets
 
             old_policy_probs = self.policy_probs.clone()
@@ -1014,9 +1036,12 @@ class RebelCFREvaluator:
             self.set_leaf_values()
             self.compute_expected_values()
 
-            self.values_avg *= t
-            self.values_avg += self.values
-            self.values_avg /= t + 2 if self.cfr_type == CFRType.linear else t + 1
+            if t > self.dcfr_delay:
+                self.values_avg *= max(0, t - 1 - self.dcfr_delay)
+                self.values_avg += self.values
+                self.values_avg /= t + 1 if self.cfr_type != CFRType.standard else t
+            else:
+                self.values_avg[:] = self.values
 
         self.stats["mean_positive_regret"] = (
             self.cumulative_regrets.clamp(min=0).mean().item()
@@ -1232,13 +1257,15 @@ class RebelCFREvaluator:
         denom = (
             1.0 - Pc_last.gather(1, c1) - Pc_last.gather(1, c2) + b_opp_sorted
         ).clamp(min=1e-12)
-        assert ((denom > 1e-12) | ((win_mass < 1e-5) & (tie_mass < 1e-5))).all()
+        valid_denom = denom > 1e-12
+        assert ((valid_denom) | ((win_mass < 1e-5) & (tie_mass < 1e-5))).all()
 
         # Probabilities & EV (in sorted order)
-        win_prob = torch.where(denom > 1e-12, win_mass / denom, 0.0)
-        tie_prob = torch.where(denom > 1e-12, tie_mass / denom, 0.0)
+        win_prob = torch.where(valid_denom, win_mass / denom, 0.0)
+        tie_prob = torch.where(valid_denom, tie_mass / denom, 0.0)
+        loss_prob = torch.where(valid_denom, 1.0 - win_prob - tie_prob, 0.0)
 
-        EV_hand_sorted = win_prob + 0.5 * tie_prob
+        EV_hand_sorted = win_prob - loss_prob
 
         # Map per-hand EV back to original hand order
         EV_hand = torch.gather(EV_hand_sorted, 1, inv_sorted)  # (M,1326)
@@ -1258,12 +1285,12 @@ class RebelCFREvaluator:
 
         if (
             t
-            in torch.linspace(self.warm_start_iterations + 1, self.cfr_iterations, 5)
+            in torch.linspace(self.warm_start_iterations, self.cfr_iterations - 1, 5)
             .round()
             .int()
             .tolist()
         ):
-            self.stats[f"cfr_delta.{t}"] = (
+            self.stats[f"cfr_delta.{t + 1}"] = (
                 (self.policy_probs - old_policy_probs).abs().sum(dim=-1).mean().item()
             )
 

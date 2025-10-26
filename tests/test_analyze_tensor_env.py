@@ -8,7 +8,6 @@ import torch
 from alphaholdem.env.analyze_tensor_env import (
     PreflopAnalyzer,
     RebelPreflopAnalyzer,
-    _card_str_to_int,
     _grid_coords_for_hand,
     create_1326_hand_combinations,
 )
@@ -28,21 +27,86 @@ from alphaholdem.models.transformer.tokens import (
     get_card_token_id_offset,
 )
 
-RANKS: list[str] = [
-    "A",
-    "K",
-    "Q",
-    "J",
-    "T",
-    "9",
-    "8",
-    "7",
-    "6",
-    "5",
-    "4",
-    "3",
-    "2",
-]
+# NB the indices are REVERSED in the grid from our internal representation
+RANKS = "23456789TJQKA"
+SUITS = "shdc"
+GRID_RANKS = RANKS[::-1]
+
+
+def _card_str_to_int(card_str: str) -> int:
+    """Convert card string like 'As' to integer index.
+
+    Args:
+        card_str: Card string like 'As', 'Kh', 'Qd', 'Jc'
+
+    Returns:
+        Integer index (0-51) representing the card
+    """
+    assert len(card_str) == 2, f"Invalid card string: {card_str}"
+
+    rank_map = {
+        "2": 0,
+        "3": 1,
+        "4": 2,
+        "5": 3,
+        "6": 4,
+        "7": 5,
+        "8": 6,
+        "9": 7,
+        "T": 8,
+        "J": 9,
+        "Q": 10,
+        "K": 11,
+        "A": 12,
+    }
+    suit_map = {"s": 0, "h": 1, "d": 2, "c": 3}
+
+    rank = card_str[:-1]
+    suit = card_str[-1]
+
+    # Use suit-major indexing consistent with HUNLTensorEnv (card // 13 = suit, card % 13 = rank)
+    return suit_map[suit] * 13 + rank_map[rank]
+
+
+def create_1326_hand_combinations() -> list[tuple[str, str]]:
+    """Create all 1326 distinct preflop combinations (ordered hole cards, no overlap).
+
+    Returns pairs like ("As", "Kh"). Offsuit/suited and pairs fully enumerated.
+    Uses the same ordering as hand_combos_tensor() for consistency.
+    """
+    # Build full deck strings in canonical order (0-51)
+    # Cards are indexed as suit * 13 + rank, where suit=0,1,2,3 and rank=0,1,2,...,12
+    deck = []
+    for suit_idx in range(4):  # 0=spades, 1=hearts, 2=diamonds, 3=clubs
+        for rank_idx in range(13):  # 0=2, 1=3, ..., 12=A
+            suit = SUITS[suit_idx]
+            rank = RANKS[rank_idx]
+            deck.append(rank + suit)
+
+    hands: list[tuple[str, str]] = []
+    for i in range(len(deck)):
+        for j in range(i + 1, len(deck)):
+            c1, c2 = deck[i], deck[j]
+            # Exclude same card obviously, and allow any suit/rank
+            hands.append((c1, c2))
+    return hands
+
+
+def _grid_coords_for_hand(card1: int, card2: int) -> tuple[int, int]:
+    s1, s2 = card1 // 13, card2 // 13
+
+    # Grid is reversed, higher ranks first.
+    # With new rank mapping: A=0, K=1, ..., 2=12
+    # Grid shows A at top (position 0), so we use rank directly
+    i, j = card1 % 13, card2 % 13
+
+    # Suited if same suit and not pair → top-right triangle; else bottom-left
+    if s1 == s2:
+        # suited → place at (min(i,j), max(i,j)) where higher rank is column
+        return (min(i, j), max(i, j))
+    else:
+        # offsuit → place at (max(i,j), min(i,j))
+        return (max(i, j), min(i, j))
 
 
 def _expected_count_for_cell(i: int, j: int) -> int:
@@ -421,9 +485,9 @@ def test_dummy_model_range_grid_call_bin() -> None:
     call_probs = probs[:, 1]
     averaged = analyzer.convert_1326_to_169_tensor(call_probs)
 
-    a_idx = RANKS.index("A")
-    k_idx = RANKS.index("K")
-    q_idx = RANKS.index("Q")
+    a_idx = GRID_RANKS.index("A")
+    k_idx = GRID_RANKS.index("K")
+    q_idx = GRID_RANKS.index("Q")
     assert averaged[a_idx, a_idx].item() == pytest.approx(0.0, abs=1e-6)
     assert averaged[k_idx, k_idx].item() == pytest.approx(0.0, abs=1e-6)
     assert averaged[a_idx, k_idx].item() == pytest.approx(

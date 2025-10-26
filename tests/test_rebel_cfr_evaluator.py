@@ -205,9 +205,9 @@ def compute_reference_showdown_ev(
         hero_rank = hand_ranks[combo_idx]
         opp_ranks = hand_ranks
         win_prob = (opp_cond * (opp_ranks < hero_rank)).sum()
-        tie_prob = (opp_cond * (opp_ranks == hero_rank)).sum()
+        loss_prob = (opp_cond * (opp_ranks > hero_rank)).sum()
 
-        ev_per_hand[combo_idx] = potential * (win_prob + 0.5 * tie_prob)
+        ev_per_hand[combo_idx] = potential * (win_prob - loss_prob)
 
     return ev_per_hand
 
@@ -515,9 +515,8 @@ def test_compute_expected_values_matches_child_values(
         evaluator.values[2, 0],
         torch.full((NUM_HANDS,), expected_value_actor, dtype=env.float_dtype),
     )
-    opp_weight = reach_weights[2, 0] * (probs**2).sum()
     torch.testing.assert_close(
-        evaluator.values[2, 1] / opp_weight,
+        evaluator.values[2, 1],
         torch.full((NUM_HANDS,), expected_value_opp, dtype=env.float_dtype),
     )
 
@@ -795,7 +794,7 @@ def setup_showdown_evaluator(
 
     roots = torch.arange(evaluator.search_batch_size)
     if beliefs is None:
-        beliefs = torch.full((1, NUM_HANDS), 1.0 / NUM_HANDS)
+        beliefs = torch.full((1, 2, NUM_HANDS), 1.0 / NUM_HANDS)
     evaluator.initialize_search(env, roots, beliefs)
     evaluator.construct_subgame()
     evaluator.initialize_policy_and_beliefs()
@@ -804,9 +803,9 @@ def setup_showdown_evaluator(
         evaluator.env.stacks[idx, 0]
         + evaluator.env.pot[idx]
         - evaluator.env.starting_stack
-    )
+    ) / evaluator.env.scale
 
-    return evaluator, env, idx, potential
+    return evaluator, env, idx, potential.item()
 
 
 def test_showdown_value_uniform_beliefs_matches_reference() -> None:
@@ -818,53 +817,65 @@ def test_showdown_value_uniform_beliefs_matches_reference() -> None:
     expected = compute_reference_showdown_ev(
         evaluator.env.board_indices[0], opp_beliefs, potential
     )
-    expected /= evaluator.env.scale
 
     actual = evaluator._showdown_value(idx).squeeze(0)
-    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(actual, expected)
 
 
-def test_showdown_value_single_hand_belief_returns_potential() -> None:
+def test_showdown_value_top_delta_vs_uniform_wins() -> None:
+    # Give us a guaranteed win
     hero_combo = combo_index(card(8, 2), card(7, 2))  # Ten and Nine hearts
-    beliefs = torch.zeros(1, NUM_HANDS)
-    beliefs[0, hero_combo] = 1.0
+    beliefs = torch.zeros(1, 2, NUM_HANDS)
+    beliefs[0, 0, hero_combo] = 1.0
+    beliefs[0, 1] = 1.0 / (NUM_HANDS - 1)
+    beliefs[0, 1, hero_combo] = 0.0
     evaluator, _, idx, potential = setup_showdown_evaluator("Ad Kd Qd Jd 2s", beliefs)
 
     opp_beliefs = evaluator.beliefs[idx, 1].squeeze(0)
     expected = compute_reference_showdown_ev(
         evaluator.env.board_indices[0], opp_beliefs, potential
     )
-    expected = expected / evaluator.env.scale
+    assert expected[hero_combo] == pytest.approx(potential)
+
+
+def test_showdown_value_uniform_vs_top_delta_loses() -> None:
+    # Give opponent a guaranteed win
+    hero_hand = torch.tensor([card(8, 2), card(7, 2)])
+    hero_combo = combo_index(hero_hand[0], hero_hand[1])  # Td / 9d
+    beliefs = torch.zeros(1, 2, NUM_HANDS)
+    beliefs[0, 1, hero_combo] = 1.0
+    beliefs[0, 0] = 1.0 / (NUM_HANDS - 1)
+    beliefs[0, 0, hero_combo] = 0.0
+    evaluator, _, idx, potential = setup_showdown_evaluator("Ad Kd Qd Jd 2s", beliefs)
 
     actual = evaluator._showdown_value(idx).squeeze(0)
-    torch.testing.assert_close(actual, expected)
+    valid_hands_board_mask = mask_conflicting_combos(evaluator.env.board_indices[0])
+    valid_hands_hand_mask = mask_conflicting_combos(hero_hand)
+
+    # Valid hands: lost.
+    valid = actual[valid_hands_board_mask & valid_hands_hand_mask]
+    torch.testing.assert_close(valid, torch.full_like(valid, -potential))
+
+    # Invalid hands: no reward/penalty.
+    invalid = actual[~valid_hands_board_mask | ~valid_hands_hand_mask]
+    torch.testing.assert_close(invalid, torch.zeros_like(invalid))
 
 
-def test_showdown_value_all_ties_returns_half_potential() -> None:
-    evaluator, _, idx, potential = setup_showdown_evaluator("Ah Kh Qh Jh Th")
-
-    opp_beliefs = evaluator.beliefs[idx, 1].squeeze(0)
-    expected = compute_reference_showdown_ev(
-        evaluator.env.board_indices[0], opp_beliefs, potential
-    )
-    expected = expected / evaluator.env.scale
+def test_showdown_value_all_ties_returns_zero() -> None:
+    evaluator, _, idx, _ = setup_showdown_evaluator("Ah Kh Qh Jh Th")
     actual = evaluator._showdown_value(idx).squeeze(0)
-    board_mask = mask_conflicting_combos(evaluator.env.board_indices[0])
-    torch.testing.assert_close(
-        actual[~board_mask], torch.zeros_like(actual[~board_mask])
-    )
-    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual, torch.zeros_like(actual))
 
 
 def test_showdown_value_fail_when_opponent_range_invalid() -> None:
     board_tensor = make_board("Jh 8s 6c 4h 2d")[None, :]
-    beliefs = torch.zeros(1, NUM_HANDS)
+    beliefs = torch.zeros(1, 2, NUM_HANDS)
     board_mask = mask_conflicting_combos(board_tensor[0])
     conflicting_indices = torch.where(~board_mask)[0]
     assert conflicting_indices.numel() > 0
 
     beliefs[0].zero_()
-    beliefs[0, conflicting_indices[:10]] = 0.1
+    beliefs[0, :, conflicting_indices[:10]] = 0.1
 
     evaluator, _, idx, _ = setup_showdown_evaluator("Jh 8s 6c 4h 2d", beliefs)
 
@@ -896,10 +907,9 @@ def test_showdown_value_matches_reference_on_diverse_boards(
     expected = compute_reference_showdown_ev(
         evaluator.env.board_indices[0], opp_beliefs, potential
     )
-    expected = expected / evaluator.env.scale
     actual = evaluator._showdown_value(idx).squeeze(0)
 
-    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize(
@@ -917,20 +927,19 @@ def test_showdown_value_delta_beliefs_each_hand(hero_hand) -> None:
     board = "Ac Kd Qh Js 9c"
 
     # Create delta belief for opponent (setup_showdown_evaluator expects opponent beliefs)
-    opp_beliefs = torch.zeros(1, NUM_HANDS)
-    opp_beliefs[0, hero_hand] = 1.0
+    beliefs = torch.zeros(1, 2, NUM_HANDS)
+    beliefs[0, 1, hero_hand] = 1.0
 
-    evaluator, _, idx, potential = setup_showdown_evaluator(board, opp_beliefs)
+    evaluator, _, idx, potential = setup_showdown_evaluator(board, beliefs)
 
     # Get showdown values
     actual = evaluator._showdown_value(idx).squeeze(0)
 
     # Reference computation
-    opp_beliefs_ref = evaluator.beliefs[idx, 1].squeeze(0)
+    opp_beliefs = evaluator.beliefs[idx, 1].squeeze(0)
     expected = compute_reference_showdown_ev(
-        evaluator.env.board_indices[0], opp_beliefs_ref, potential
+        evaluator.env.board_indices[0], opp_beliefs, potential
     )
-    expected = expected / evaluator.env.scale
 
     # Check that only the opponent's hand has non-zero value in the reference
     board_mask = mask_conflicting_combos(evaluator.env.board_indices[0])
@@ -938,45 +947,7 @@ def test_showdown_value_delta_beliefs_each_hand(hero_hand) -> None:
     non_opp_mask[hero_hand] = False
 
     # The actual values should match the reference
-    torch.testing.assert_close(
-        actual[board_mask], expected[board_mask], rtol=1e-4, atol=1e-4
-    )
-
-
-def test_showdown_value_delta_vs_uniform_belief() -> None:
-    """Test that delta beliefs give different results than uniform beliefs."""
-    board = "Ac Kd Qh Js 9c"
-
-    # Test hand
-    test_hand = combo_index(card(12, 0), card(11, 1))  # AK suited
-
-    # Uniform beliefs
-    uniform_beliefs = torch.full((1, NUM_HANDS), 1.0 / NUM_HANDS)
-    evaluator_uniform, _, idx_uniform, potential = setup_showdown_evaluator(
-        board, uniform_beliefs
-    )
-    values_uniform = evaluator_uniform._showdown_value(idx_uniform).squeeze(0)
-
-    # Delta belief on test hand
-    delta_beliefs = torch.zeros(1, NUM_HANDS)
-    delta_beliefs[0, test_hand] = 1.0
-    evaluator_delta, _, idx_delta, potential = setup_showdown_evaluator(
-        board, delta_beliefs
-    )
-    values_delta = evaluator_delta._showdown_value(idx_delta).squeeze(0)
-
-    # The values should be different
-    board_mask = mask_conflicting_combos(evaluator_uniform.env.board_indices[0])
-    valid_mask = board_mask & (values_uniform.abs() > 1e-6)
-
-    # Check that at least some hands have different values
-    diff_mask = torch.abs(values_uniform - values_delta) > 1e-4
-    assert torch.any(
-        diff_mask & valid_mask
-    ), "Delta and uniform beliefs should give different values"
-
-    # The test hand should have different value under delta vs uniform
-    assert torch.abs(values_uniform[test_hand] - values_delta[test_hand]) > 1e-4
+    torch.testing.assert_close(actual[board_mask], expected[board_mask])
 
 
 def test_showdown_value_double_half_delta_beliefs() -> None:
@@ -1002,7 +973,6 @@ def test_showdown_value_double_half_delta_beliefs() -> None:
     expected = compute_reference_showdown_ev(
         evaluator.env.board_indices[0], opp_beliefs_ref, potential
     )
-    expected = expected / evaluator.env.scale
 
     # The actual values should match the reference
     board_mask = mask_conflicting_combos(evaluator.env.board_indices[0])
@@ -1056,10 +1026,7 @@ def test_showdown_value_edge_case_zero_opponent_beliefs() -> None:
 
     # Opponent beliefs should be uniform over valid hands
     torch.testing.assert_close(
-        opp_beliefs[board_mask],
-        torch.full_like(opp_beliefs[board_mask], uniform_prob),
-        rtol=1e-4,
-        atol=1e-4,
+        opp_beliefs[board_mask], torch.full_like(opp_beliefs[board_mask], uniform_prob)
     )
 
     # Should not crash and return valid values
