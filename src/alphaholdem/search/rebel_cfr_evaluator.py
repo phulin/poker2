@@ -899,6 +899,9 @@ class RebelCFREvaluator:
         if self.cfr_type == CFRType.discounted and t <= self.dcfr_delay:
             self.policy_probs_avg[:] = self.policy_probs
             return
+        elif t == 0:
+            self.policy_probs_avg[:] = self.policy_probs
+            return
 
         M, N = self.total_nodes, self.search_batch_size
 
@@ -1043,7 +1046,7 @@ class RebelCFREvaluator:
             if self.cfr_type == CFRType.discounted:
                 if t > self.dcfr_delay:
                     linear_weight = max(0, t - 1 - self.dcfr_delay)
-                    self.values_avg *= max(0, t - 1 - self.dcfr_delay)
+                    self.values_avg *= linear_weight
                     self.values_avg += 2 * self.values
                     self.values_avg /= linear_weight + 2
                 else:

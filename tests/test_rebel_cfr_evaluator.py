@@ -5,6 +5,7 @@ from typing import Callable
 import pytest
 import torch
 
+from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
     combo_blocking_tensor,
     combo_index,
@@ -13,6 +14,7 @@ from alphaholdem.env.card_utils import (
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
+from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.search.rebel_cfr_evaluator import (
     NUM_HANDS,
@@ -1055,7 +1057,7 @@ def test_showdown_value_edge_case_zero_opponent_beliefs() -> None:
     # Create beliefs where opponent has zero mass on all hands
     beliefs = torch.zeros(1, 2, NUM_HANDS)
 
-    evaluator, _, idx, potential = setup_showdown_evaluator(board, beliefs)
+    evaluator, _, idx, _ = setup_showdown_evaluator(board, beliefs)
 
     # The evaluator should have normalized opponent beliefs to uniform
     opp_beliefs = evaluator.beliefs[idx, 1].squeeze(0)
@@ -1090,3 +1092,135 @@ def test_self_play_iteration_returns_public_belief_state() -> None:
         next_pbs.beliefs.sum(dim=-1),
         torch.ones((2, evaluator.num_players), device=env.device),
     )
+
+
+def test_linear_cfr_policy_averaging() -> None:
+    """Test that discounted CFR policy averaging weights by max(0, t - delay)."""
+
+    device = torch.device("cpu")
+    float_dtype = torch.float32
+    bet_bins = [0.5, 1.5]
+
+    # Create a random model
+    model = MockModel()
+
+    # Create environment
+    env = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+    )
+    env.reset()
+
+    # Create evaluator with depth=0 for simplicity
+    evaluator = RebelCFREvaluator(
+        search_batch_size=1,
+        env_proto=env,
+        model=model,
+        bet_bins=bet_bins,
+        max_depth=0,  # depth 0 = just root node
+        cfr_iterations=20,
+        warm_start_iterations=0,
+        device=device,
+        float_dtype=float_dtype,
+        cfr_type=CFRType.linear,
+        cfr_avg=True,
+    )
+
+    # Initialize search
+    roots = torch.tensor([0], device=device)
+    evaluator.initialize_search(env, roots)
+    evaluator.construct_subgame()
+    evaluator.initialize_policy_and_beliefs()
+
+    # Generate random policy sequences (seeded)
+    torch.manual_seed(42)
+    all_policies = torch.rand(20, NUM_HANDS, device=device)
+
+    # Set reach weights to make the averaging work properly
+    evaluator.reach_weights.fill_(1.0)
+    evaluator.reach_weights_avg.fill_(1.0)
+
+    # Run iterations and track average policy
+    for t in range(20):
+        # Set the policy for this iteration
+        evaluator.policy_probs[evaluator.valid_mask] = all_policies[t]
+        evaluator.update_average_policy(t)
+
+        if t == 0:
+            assert torch.allclose(evaluator.policy_probs_avg, all_policies[t])
+        else:
+            weights = torch.arange(t + 1, dtype=torch.float32)
+            weights = weights.clamp(min=0)
+            weights /= weights.sum()
+            expected = (all_policies[: t + 1] * weights[:, None]).sum(dim=0)
+            assert torch.allclose(evaluator.policy_probs_avg, expected)
+
+
+def test_discounted_cfr_policy_averaging() -> None:
+    """Test that discounted CFR policy averaging weights by max(0, t - delay)."""
+
+    device = torch.device("cpu")
+    float_dtype = torch.float32
+    bet_bins = [0.5, 1.5]
+
+    # Create a random model
+    model = MockModel()
+
+    # Create environment
+    env = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+    )
+    env.reset()
+
+    # Create evaluator with depth=0 for simplicity
+    dcfr_delay = 10
+    evaluator = RebelCFREvaluator(
+        search_batch_size=1,
+        env_proto=env,
+        model=model,
+        bet_bins=bet_bins,
+        max_depth=0,  # depth 0 = just root node
+        cfr_iterations=20,
+        warm_start_iterations=0,
+        dcfr_delay=dcfr_delay,
+        device=device,
+        float_dtype=float_dtype,
+        cfr_type=CFRType.discounted,
+        cfr_avg=True,
+    )
+
+    # Initialize search
+    roots = torch.tensor([0], device=device)
+    evaluator.initialize_search(env, roots)
+    evaluator.construct_subgame()
+    evaluator.initialize_policy_and_beliefs()
+
+    # Generate random policy sequences (seeded)
+    torch.manual_seed(42)
+    all_policies = torch.rand(20, NUM_HANDS, device=device)
+
+    # Set reach weights to make the averaging work properly
+    evaluator.reach_weights.fill_(1.0)
+    evaluator.reach_weights_avg.fill_(1.0)
+
+    # Run iterations and track average policy
+    for t in range(20):
+        # Set the policy for this iteration
+        evaluator.policy_probs[evaluator.valid_mask] = all_policies[t]
+        evaluator.update_average_policy(t)
+
+        if t <= dcfr_delay:
+            assert torch.allclose(evaluator.policy_probs_avg, all_policies[t])
+        else:
+            weights = torch.arange(t + 1, dtype=torch.float32) - dcfr_delay
+            weights = weights.clamp(min=0)
+            weights /= weights.sum()
+            expected = (all_policies[: t + 1] * weights[:, None]).sum(dim=0)
+            assert torch.allclose(evaluator.policy_probs_avg, expected)
