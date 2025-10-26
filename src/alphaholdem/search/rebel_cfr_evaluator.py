@@ -455,6 +455,7 @@ class RebelCFREvaluator:
             ]
             reach_weights[offset_next:offset_next_next] = weights_dest
 
+        reach_weights.masked_fill_(~self.valid_mask[:, None, None], 0.0)
         return reach_weights
 
     def _initialize_with_copy(self, target: torch.Tensor | None = None) -> torch.Tensor:
@@ -895,7 +896,7 @@ class RebelCFREvaluator:
     def update_average_policy(self, t: int) -> None:
         """Update the average policy by mixing it with the current policy."""
 
-        if t <= self.dcfr_delay:
+        if self.cfr_type == CFRType.discounted and t <= self.dcfr_delay:
             self.policy_probs_avg[:] = self.policy_probs
             return
 
@@ -920,9 +921,12 @@ class RebelCFREvaluator:
         ).squeeze(1)
 
         # Reach probability is proportional to belief, so we can use beliefs to mix
+        if self.cfr_type == CFRType.discounted:
+            reach_avg_actor *= max(0, t - 1 - self.dcfr_delay)
+        else:
+            reach_avg_actor *= t - 1
         weight = 2 if self.cfr_type != CFRType.standard else 1
         reach_actor *= weight
-        reach_avg_actor *= max(0, t - 1 - self.dcfr_delay)
         self.policy_probs_avg *= reach_avg_actor
         self.policy_probs_avg += self.policy_probs * reach_actor
         denom = reach_avg_actor + reach_actor
@@ -1036,12 +1040,19 @@ class RebelCFREvaluator:
             self.set_leaf_values()
             self.compute_expected_values()
 
-            if t > self.dcfr_delay:
-                self.values_avg *= max(0, t - 1 - self.dcfr_delay)
-                self.values_avg += self.values
-                self.values_avg /= t + 1 if self.cfr_type != CFRType.standard else t
+            if self.cfr_type == CFRType.discounted:
+                if t > self.dcfr_delay:
+                    linear_weight = max(0, t - 1 - self.dcfr_delay)
+                    self.values_avg *= max(0, t - 1 - self.dcfr_delay)
+                    self.values_avg += 2 * self.values
+                    self.values_avg /= linear_weight + 2
+                else:
+                    self.values_avg[:] = self.values
             else:
-                self.values_avg[:] = self.values
+                weight = 2 if self.cfr_type != CFRType.standard else 1
+                self.values_avg *= t - 1
+                self.values_avg += weight * self.values
+                self.values_avg /= t - 1 + weight
 
         self.stats["mean_positive_regret"] = (
             self.cumulative_regrets.clamp(min=0).mean().item()
@@ -1290,9 +1301,22 @@ class RebelCFREvaluator:
             .int()
             .tolist()
         ):
-            self.stats[f"cfr_delta.{t + 1}"] = (
-                (self.policy_probs - old_policy_probs).abs().sum(dim=-1).mean().item()
+            diff = self._pull_back(self.policy_probs) - self._pull_back(
+                old_policy_probs
             )
+            # Can either player get to this node with a given hand?
+            reachable = (self.reach_weights > 0).any(dim=1)[: self.depth_offsets[-2]]
+            diff.masked_fill_(~reachable[:, None, :], 0.0)
+            reachable_hand_count = reachable.sum(dim=-1)
+            reachable_nodes = reachable_hand_count > 0
+
+            # Sum over action probabilities and hands - will divide by reachable hand count.
+            diff_sum_nodes = diff.abs().sum(dim=1).sum(dim=1)
+            node_delta = torch.where(
+                reachable_nodes, diff_sum_nodes / reachable_hand_count, 0.0
+            )
+            node_delta_mean = node_delta.sum() / reachable_nodes.sum()
+            self.stats[f"cfr_delta.{t + 1}"] = node_delta_mean.item()
 
     def _record_cfr_entropy(self) -> None:
         """Record the entropy of the policy."""

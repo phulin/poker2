@@ -84,7 +84,6 @@ def create_default_config() -> Config:
     config.search.warm_start_iterations = 15
     config.search.branching = 4
     config.search.belief_samples = 1
-    config.search.max_belief_enumeration = 0
     config.search.dcfr_alpha = 1.5
     config.search.dcfr_beta = 0.0
     config.search.dcfr_gamma = 2.0

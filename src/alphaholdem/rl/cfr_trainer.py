@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import Config
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
@@ -130,6 +128,10 @@ class RebelCFRTrainer:
             warm_start_iterations=self.cfg.search.warm_start_iterations,
             cfr_type=self.cfg.search.cfr_type,
             cfr_avg=self.cfg.search.cfr_avg,
+            dcfr_alpha=self.cfg.search.dcfr_alpha,
+            dcfr_beta=self.cfg.search.dcfr_beta,
+            dcfr_gamma=self.cfg.search.dcfr_gamma,
+            dcfr_delay=self.cfg.search.dcfr_delay,
         )
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,
@@ -159,7 +161,7 @@ class RebelCFRTrainer:
         value_loss_all: torch.Tensor,
         policy_loss: float,
         entropy_loss: float,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         grad_norm_clipped = torch.nn.utils.get_total_norm(
             p.grad for p in self.model.parameters()
         ).item()
@@ -196,7 +198,7 @@ class RebelCFRTrainer:
         }
 
     @profile
-    def _update_model(self) -> Optional[Dict[str, float]]:
+    def _update_model(self) -> dict[str, float]:
         self.data_generator.generate_data()
 
         # TODO: think about how to interleave these/ratio in a smarter way.
@@ -241,7 +243,7 @@ class RebelCFRTrainer:
             entropy_loss,
         )
 
-    def train_step(self, step: int) -> Dict[str, any]:
+    def train_step(self, step: int) -> dict[str, any]:
         step_public = step + 1
 
         update_info = self._update_model()
@@ -249,9 +251,9 @@ class RebelCFRTrainer:
 
         return update_info
 
-    def train(self, num_steps: Optional[int] = None) -> List[Dict[str, any]]:
+    def train(self, num_steps: int | None = None) -> list[dict[str, any]]:
         total_steps = num_steps or self.cfg.num_steps
-        history: List[Dict[str, any]] = []
+        history: list[dict[str, any]] = []
 
         for step in range(total_steps):
             update_info = self.train_step(step)
@@ -260,7 +262,7 @@ class RebelCFRTrainer:
         return history
 
     def save_checkpoint(
-        self, path: str, step: int, wandb_run_id: Optional[str] = None
+        self, path: str, step: int, wandb_run_id: str | None = None
     ) -> None:
         directory = os.path.dirname(path)
         if directory:

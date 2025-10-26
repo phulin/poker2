@@ -176,10 +176,10 @@ class SearchConfig:
     warm_start_iterations: int = 15
     branching: int = 4
     belief_samples: int = 16
-    max_belief_enumeration: int = 0  # 0 -> use belief_samples uniformly
     dcfr_alpha: float = 1.5
     dcfr_beta: float = 0.0
     dcfr_gamma: float = 2.0
+    dcfr_delay: int = 50
     include_average_policy: bool = True
     cfr_type: CFRType = CFRType.linear
     cfr_avg: bool = True
