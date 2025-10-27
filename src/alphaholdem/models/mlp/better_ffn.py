@@ -51,7 +51,7 @@ class BetterFFN(nn.Module, Model):
         self.num_players = num_players
 
         # Encoder for beliefs
-        self.street_embedding = nn.Embedding(4, hidden_dim)
+        self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
         self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)
         self.belief_encoder = nn.Sequential(
