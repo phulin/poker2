@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from alphaholdem.core.structured_config import Config
+from alphaholdem.env.aggression_analyzer import aggression_analyzer
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp import RebelFFN
@@ -180,6 +181,7 @@ class RebelCFRTrainer:
             "value_buffer_size": len(self.value_buffer),
             "policy_buffer_size": len(self.policy_buffer),
             "grad_norm_clipped": grad_norm_clipped,
+            "aggression_stats": aggression_analyzer.analyze_batch(policy_batch),
             "value_batch_street": {
                 "preflop": preflop.float().mean().item(),
                 "flop": flop.float().mean().item(),

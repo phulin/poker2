@@ -1078,12 +1078,13 @@ class RebelCFREvaluator:
             print("WARNING: Value targets are too large")
 
         features = self.feature_encoder.encode(self.env.to_act, self.beliefs_avg)[:top]
-        legal_masks = self.env.legal_bins_mask()
+        bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
         statistics = {
             "to_act": self.env.to_act,
             "street": self.env.street,
             "board": self.env.board_indices,
             "pot": self.env.pot,
+            "bet_amounts": bin_amounts,
         }
 
         # Value batch gets root states only.
