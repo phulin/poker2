@@ -150,6 +150,10 @@ class ModelConfig:
     hidden_dim: int = 1536
     num_hidden_layers: int = 6
 
+    # Better FFN parameters
+    range_hidden_dim: int = 128
+    ffn_dim: int = 1024
+
 
 @dataclass
 class EnvConfig:

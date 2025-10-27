@@ -36,7 +36,6 @@ class BetterFFN(nn.Module, Model):
 
     def __init__(
         self,
-        input_dim: int,
         num_actions: int,
         hidden_dim: int = 512,
         range_hidden_dim: int = 128,
@@ -45,7 +44,6 @@ class BetterFFN(nn.Module, Model):
         num_players: int = 2,
     ) -> None:
         super().__init__()
-        self.input_dim = input_dim
         self.num_actions = num_actions
         self.hidden_dim = hidden_dim
         self.num_hidden_layers = num_hidden_layers

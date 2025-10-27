@@ -63,9 +63,10 @@ class RebelCFRTrainer:
         # Model
         if cfg.model.name == ModelType.better_ffn:
             self.model = BetterFFN(
-                input_dim=cfg.model.input_dim,
                 num_actions=self.num_actions,
                 hidden_dim=cfg.model.hidden_dim,
+                range_hidden_dim=cfg.model.range_hidden_dim,
+                ffn_dim=cfg.model.ffn_dim,
                 num_hidden_layers=cfg.model.num_hidden_layers,
                 num_players=self.num_players,
             )
