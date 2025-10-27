@@ -6,9 +6,10 @@ Comprehensive line-by-line profiling of all key methods in RebelCFREvaluator.
 
 import torch
 
-from src.alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from src.alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
-from src.alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
+from alphaholdem.core.structured_config import ModelType
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
+from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
 
 
 # MockModel for testing
@@ -30,7 +31,7 @@ class MockModel:
         self.hand_values = hand_values
 
     def __call__(self, features):
-        batch_size = features.shape[0]
+        batch_size = len(features)
         if self.logits is not None:
             logits = (
                 self.logits.unsqueeze(0)
@@ -91,6 +92,7 @@ def comprehensive_profiling():
         search_batch_size=1,
         env_proto=env_proto,
         model=model,
+        model_type=ModelType.better_ffn,
         bet_bins=bet_bins,
         max_depth=2,
         cfr_iterations=50,
