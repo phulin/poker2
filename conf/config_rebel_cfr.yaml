@@ -7,11 +7,11 @@ num_steps: 10000
 use_tensor_env: true
 num_envs: 256
 device: cuda
-checkpoint_dir: "checkpoints-rebel"
+checkpoint_dir: checkpoints-rebel
 checkpoint_interval: 50
 economize_checkpoints: true
 use_wandb: true
-wandb_project: "poker-rebel-cfr"
+wandb_project: poker-rebel-cfr
 wandb_tags: ["rebel", "cfr"]
 
 train:
@@ -23,7 +23,7 @@ train:
   grad_clip: 1.0
 
 model:
-  name: "rebel_ffn"
+  name: RebelFFN
   input_dim: 2661
   hidden_dim: 1536
   num_hidden_layers: 6
@@ -38,13 +38,13 @@ env:
 search:
   enabled: true
   depth: 3
-  iterations: 150
+  iterations: 500
   warm_start_iterations: 15
   belief_samples: 16
   dcfr_alpha: 1.5
   dcfr_beta: 0.0
   dcfr_gamma: 2.0
-  dcfr_delay: 50
+  dcfr_delay: 100
   include_average_policy: true
   cfr_type: discounted
   cfr_avg: true
