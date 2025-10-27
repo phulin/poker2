@@ -24,7 +24,7 @@ def ffn_block(in_dim: int, hidden_dim: int, out_dim: int | None = None) -> nn.Mo
         out_dim = in_dim
     return nn.Sequential(
         nn.LayerNorm(in_dim),
-        nn.Linear(in_dim, hidden_dim),
+        nn.Linear(in_dim, hidden_dim, bias=False),
         nn.GELU(),
         nn.Linear(hidden_dim, out_dim),
     )
@@ -86,9 +86,11 @@ class BetterFFN(nn.Module, Model):
         """
 
         board = features.board
-        ranks = board % 13
-        suits = board // 13
-        board_features = self.rank_embedding(ranks) + self.suit_embedding(suits)
+        ranks = torch.where(board > 0, board % 13, -1)
+        suits = torch.where(board > 0, board // 13, -1)
+        ranks_embedded = torch.where(ranks > 0, self.rank_embedding(ranks), 0.0)
+        suits_embedded = torch.where(suits > 0, self.suit_embedding(suits), 0.0)
+        board_features = ranks_embedded + suits_embedded
 
         street_features = self.street_embedding(features.street)
         context_features = self.context_encoder(features.context)
@@ -97,14 +99,14 @@ class BetterFFN(nn.Module, Model):
         )
 
         # TODO: some kind of positional encoding for board features?
-        features = (
+        flat_features = (
             board_features.sum(dim=1)
             + street_features
             + context_features
             + belief_features
         )
 
-        x = self.trunk(features)
+        x = self.trunk(flat_features)
         x = self.post_norm(x)
 
         policy_logits = self.policy_head(x).view(-1, NUM_HANDS, self.num_actions)
@@ -136,7 +138,7 @@ class BetterFFN(nn.Module, Model):
         No-op for quantile value heads.
         """
 
-        last_linear = self.value_head
+        last_linear = self.hand_value_head[-1]
         last_linear.weight.data.mul_(weight_scale)
         if last_linear.bias is not None:
             last_linear.bias.data.mul_(weight_scale).add_(bias_adjustment)

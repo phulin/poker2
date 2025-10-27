@@ -14,6 +14,7 @@ from alphaholdem.env.card_utils import (
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
+from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.search.rebel_cfr_evaluator import (
@@ -75,10 +76,10 @@ class MockModel:
         else:
             self.hand_values = torch.zeros(1, num_players, NUM_HANDS)
 
-    def __call__(self, features: torch.Tensor) -> ModelOutput:
-        batch = features.shape[0]
-        device = features.device
-        dtype = features.dtype
+    def __call__(self, features: MLPFeatures) -> ModelOutput:
+        batch = len(features)
+        device = features.context.device
+        dtype = features.context.dtype
 
         # Handle logits
         if self.custom_logits_fn:
@@ -434,7 +435,7 @@ def test_initialize_beliefs_updates_child_nodes(
 
     # Create a model that returns the expected policy probabilities
     def custom_logits_fn(features):
-        batch_size = features.shape[0]
+        batch_size = len(features)
         logits = torch.zeros(
             batch_size,
             NUM_HANDS,
@@ -552,7 +553,7 @@ def test_set_leaf_values_only_updates_marked_nodes() -> None:
 
     # Mock the model to return the expected hand values
     def custom_hand_values_fn(features):
-        batch_size = features.shape[0]
+        batch_size = len(features)
         model_hand_values = torch.zeros(
             batch_size,
             evaluator.num_players,
@@ -760,10 +761,7 @@ def test_sample_data_returns_root_batch() -> None:
 
     value_batch, policy_batch = evaluator.sample_data()
 
-    assert policy_batch.features.shape == (
-        evaluator.depth_offsets[-2],
-        evaluator.feature_encoder.feature_dim,
-    )
+    assert len(policy_batch.features) == evaluator.depth_offsets[-2]
     assert policy_batch.policy_targets.shape == (
         evaluator.depth_offsets[-2],
         NUM_HANDS,

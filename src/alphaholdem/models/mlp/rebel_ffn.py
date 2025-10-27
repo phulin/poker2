@@ -88,7 +88,7 @@ class RebelFFN(nn.Module, Model):
         """
         board_features = torch.where(features.board > 0, features.board / 51.0, -1.0)
         features_tensor = torch.cat(
-            [features.context, board_features, features.beliefs],
+            [features.context[:, :4], board_features, features.beliefs],
             dim=-1,
         )
 

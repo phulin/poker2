@@ -6,6 +6,7 @@ import torch
 
 from alphaholdem.core.structured_config import Config, ValueHeadType
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.model_output import ModelOutput
@@ -34,20 +35,24 @@ def test_rebel_feature_encoder_shapes():
     env = make_env(2)
     encoder = RebelFeatureEncoder(env, device=env.device, dtype=torch.float32)
     idxs = torch.tensor([0, 1], device=env.device)
-    for _ in (0, 1):
-        beliefs = torch.full(
-            (2, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
-        )
-        mlp_features = encoder.encode(beliefs)
-        features = mlp_features[idxs]
-        # Combine all features for verification
-        board_features = torch.where(features.board > 0, features.board / 51.0, -1.0)
-        features_tensor = torch.cat(
-            [features.context, board_features, features.beliefs], dim=-1
-        )
-    assert features_tensor.shape == (2, encoder.feature_dim)
-    hero = features_tensor[:, 9 : 9 + encoder.belief_dim]
-    opp = features_tensor[:, 9 + encoder.belief_dim :]
+    beliefs = torch.full(
+        (2, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
+    )
+    mlp_features = encoder.encode(beliefs)
+    features = mlp_features[idxs]
+
+    # Verify features structure
+    assert features.context.shape == (
+        2,
+        4,
+    )  # to_act, position, pot_fraction, has_bet_flag
+    assert features.street.shape == (2,)  # street indices
+    assert features.board.shape == (2, 5)  # board indices
+    assert features.beliefs.shape == (2, 2 * NUM_HANDS)  # beliefs
+
+    # Verify beliefs sum to 1.0
+    hero = features.beliefs[:, :NUM_HANDS]
+    opp = features.beliefs[:, NUM_HANDS:]
     torch.testing.assert_close(hero.sum(dim=1), torch.ones(2, device=env.device))
     torch.testing.assert_close(opp.sum(dim=1), torch.ones(2, device=env.device))
 
@@ -60,12 +65,18 @@ def test_rebel_replay_buffer_roundtrip():
         num_players=2,
         device=torch.device("cpu"),
     )
-    features = torch.randn(4, 10)
+    # Create MLPFeatures for the test
+    mlp_features = MLPFeatures(
+        context=torch.randn(4, 4),
+        street=torch.zeros(4, dtype=torch.long),
+        board=torch.zeros(4, 5),
+        beliefs=torch.randn(4, 2 * NUM_HANDS),
+    )
     policy_targets = torch.softmax(torch.randn(4, NUM_HANDS, 5), dim=-1)
     value_targets = torch.randn(4, 2, NUM_HANDS)
     legal_masks = torch.ones(4, 5, dtype=torch.bool)
     batch = RebelBatch(
-        features=features,
+        features=mlp_features,
         policy_targets=policy_targets,
         value_targets=value_targets,
         legal_masks=legal_masks,
@@ -73,7 +84,7 @@ def test_rebel_replay_buffer_roundtrip():
     buffer.add_batch(batch)
     assert len(buffer) == 4
     sample = buffer.sample(2)
-    assert sample.features.shape == (2, 10)
+    assert sample.features.context.shape == (2, 4)
     assert sample.policy_targets.shape == (2, NUM_HANDS, 5)
     assert sample.value_targets.shape == (2, 2, NUM_HANDS)
     assert sample.legal_masks.shape == (2, 5)
@@ -83,14 +94,19 @@ def test_rebel_supervised_loss_finite():
     loss_fn = RebelSupervisedLoss()
     batch_size, num_actions = 3, 5
     logits = torch.randn(batch_size, NUM_HANDS, num_actions, requires_grad=True)
-    hand_values = torch.randn(batch_size, 2, NUM_HANDS, requires_grad=True)
     policy_targets = torch.softmax(
         torch.randn(batch_size, NUM_HANDS, num_actions), dim=-1
     )
     legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
     values = torch.randn(batch_size, 2, NUM_HANDS)
+    mlp_features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.zeros(batch_size, 5),
+        beliefs=torch.randn(batch_size, 2 * NUM_HANDS),
+    )
     batch = RebelBatch(
-        features=torch.randn(batch_size, RebelFeatureEncoder.feature_dim),
+        features=mlp_features,
         policy_targets=policy_targets,
         value_targets=values,
         legal_masks=legal_masks,
