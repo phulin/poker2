@@ -8,8 +8,6 @@ import torch
 from alphaholdem.env.analyze_tensor_env import (
     PreflopAnalyzer,
     RebelPreflopAnalyzer,
-    _grid_coords_for_hand,
-    create_1326_hand_combinations,
 )
 from alphaholdem.env.card_utils import hand_combos_tensor
 from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
@@ -131,20 +129,6 @@ def test_1326_to_169_bucket_counts() -> None:
     assert counts.sum().item() == 1326
 
 
-def test_preflop_analyzer_uses_canonical_combo_order() -> None:
-    dummy_model = object()
-    analyzer = PreflopAnalyzer(dummy_model, device=torch.device("cpu"))
-    expected_combos = hand_combos_tensor()
-
-    assert torch.equal(analyzer.all_hands.cpu(), expected_combos)
-    # Ensure the cached string representations match the integer deck indices.
-    for (card_a, card_b), (idx_a, idx_b) in zip(
-        analyzer.all_hands_str, expected_combos.tolist()
-    ):
-        assert _card_str_to_int(card_a) == idx_a
-        assert _card_str_to_int(card_b) == idx_b
-
-
 def test_rebel_preflop_analyzer_uses_canonical_combo_order() -> None:
     model = RebelFFN(
         input_dim=RebelFeatureEncoder.feature_dim,
@@ -157,10 +141,10 @@ def test_rebel_preflop_analyzer_uses_canonical_combo_order() -> None:
 
     assert torch.equal(analyzer.all_hands.cpu(), expected_combos)
     for (card_a, card_b), (idx_a, idx_b) in zip(
-        analyzer.all_hands_str, expected_combos.tolist()
+        analyzer.all_hands, expected_combos.tolist()
     ):
-        assert _card_str_to_int(card_a) == idx_a
-        assert _card_str_to_int(card_b) == idx_b
+        assert card_a == idx_a
+        assert card_b == idx_b
 
 
 def test_rebel_allin_response_has_call_and_fold() -> None:

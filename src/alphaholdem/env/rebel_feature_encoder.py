@@ -66,7 +66,6 @@ class RebelFeatureEncoder:
         Build ReBeL flat features for a batch of env indices and agent ids.
 
         Args:
-            idxs: Tensor of environment indices, shape [B].
             agents: Tensor of agent ids (0 or 1), shape [B].
             beliefs: Optional tensor [B, 2, 1326] for beliefs (about p0 and p1).
         Returns:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from alphaholdem.env import rules
+from alphaholdem.env.card_utils import combo_lookup_tensor
 
 # Helper to make card by rank/suit (r: 0..12 for 2..A, s: 0..3)
 
@@ -533,7 +534,7 @@ def test_rank_hands_orders_strong_hands():
         dtype=torch.long,
     )
     ranks, _ = rules.rank_hands(board)
-    lookup = rules.combo_lookup_tensor()
+    lookup = combo_lookup_tensor()
 
     def combo_idx(a: int, b: int) -> int:
         x, y = sorted((a, b))
@@ -576,7 +577,7 @@ def test_rank_hands_orders_weak_hands():
         dtype=torch.long,
     )
     ranks, _ = rules.rank_hands(board)
-    lookup = rules.combo_lookup_tensor()
+    lookup = combo_lookup_tensor()
 
     def combo_idx(a: int, b: int) -> int:
         x, y = sorted((a, b))

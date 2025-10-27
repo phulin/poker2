@@ -146,13 +146,11 @@ class DummyEvaluator:
         self.sample_calls += 1
         count = self.search_batch_size
         indices = torch.arange(count, dtype=torch.long)
-        acting_players = torch.arange(count, dtype=torch.long) % self.num_players
         return RebelBatch(
             features=self.feature_matrix[indices],
             policy_targets=self.policy_probs_avg[:count],
             value_targets=self.values[:count],
             legal_masks=self.env.legal_bins_mask()[indices],
-            acting_players=acting_players,
         )
 
 
@@ -228,7 +226,10 @@ def test_rebel_data_generator_terminates_when_no_next_pbs(monkeypatch, env_proto
 
     buffer = DummyBuffer()
     generator = RebelDataGenerator(
-        env_proto=env_proto, evaluator=evaluator, buffer=buffer
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
     )
 
     generator.generate_data()
@@ -255,7 +256,10 @@ def test_rebel_data_generator_multiple_iterations(monkeypatch, env_proto):
 
     buffer = DummyBuffer()
     generator = RebelDataGenerator(
-        env_proto=env_proto, evaluator=evaluator, buffer=buffer
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
     )
 
     generator.generate_data()

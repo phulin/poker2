@@ -923,7 +923,6 @@ class RebelCFREvaluator:
             reach_weights_avg_prev, 1, prev_actor_indices
         ).squeeze(1)
 
-        # Reach probability is proportional to belief, so we can use beliefs to mix
         if self.cfr_type == CFRType.discounted:
             reach_avg_actor *= max(0, t - 1 - self.dcfr_delay)
         else:
