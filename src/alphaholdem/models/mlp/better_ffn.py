@@ -84,11 +84,9 @@ class BetterFFN(nn.Module, Model):
             ModelOutput with policy logits and value predictions.
         """
 
-        board = torch.where(
-            features.board > 0, features.board, torch.full_like(features.board, 52)
-        )
-        ranks = board % 13
-        suits = board // 13
+        board = features.board
+        ranks = torch.where(board >= 0, board % 13, torch.full_like(board, 13))
+        suits = torch.where(board >= 0, board // 13, torch.full_like(board, 4))
         board_features = self.rank_embedding(ranks) + self.suit_embedding(suits)
 
         street_features = self.street_embedding(features.street)
