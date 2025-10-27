@@ -20,13 +20,7 @@ from omegaconf import DictConfig
 import torch
 import wandb
 
-from alphaholdem.core.structured_config import (
-    Config,
-    EnvConfig,
-    ModelConfig,
-    SearchConfig,
-    TrainingConfig,
-)
+from alphaholdem.core.structured_config import Config
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.utils.training_utils import print_preflop_range_grid
 
@@ -133,7 +127,7 @@ def train_rebel(cfg: Config) -> None:
     device = _device_from_config(cfg)
     print(f"Using device: {device}")
 
-    torch.set_float32_matmul_precision("high")
+    # torch.set_float32_matmul_precision("high")
 
     torch.manual_seed(cfg.seed)
 

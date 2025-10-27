@@ -52,8 +52,8 @@ class BetterFFN(nn.Module, Model):
 
         # Encoder for beliefs
         self.street_embedding = nn.Embedding(4, hidden_dim)
-        self.rank_embedding = nn.Embedding(13, hidden_dim)
-        self.suit_embedding = nn.Embedding(4, hidden_dim)
+        self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
+        self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)
         self.belief_encoder = nn.Sequential(
             nn.Linear(num_players * NUM_HANDS, num_players * range_hidden_dim),
             nn.GELU(),
@@ -85,12 +85,12 @@ class BetterFFN(nn.Module, Model):
             ModelOutput with policy logits and value predictions.
         """
 
-        board = features.board
-        ranks = torch.where(board > 0, board % 13, -1)
-        suits = torch.where(board > 0, board // 13, -1)
-        ranks_embedded = torch.where(ranks > 0, self.rank_embedding(ranks), 0.0)
-        suits_embedded = torch.where(suits > 0, self.suit_embedding(suits), 0.0)
-        board_features = ranks_embedded + suits_embedded
+        board = torch.where(
+            features.board > 0, features.board, torch.full_like(features.board, 52)
+        )
+        ranks = board % 13
+        suits = board // 13
+        board_features = self.rank_embedding(ranks) + self.suit_embedding(suits)
 
         street_features = self.street_embedding(features.street)
         context_features = self.context_encoder(features.context)

@@ -6,6 +6,7 @@ import torch
 
 from alphaholdem.core.structured_config import Config, ValueHeadType
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
@@ -60,16 +61,16 @@ def test_rebel_feature_encoder_shapes():
 def test_rebel_replay_buffer_roundtrip():
     buffer = RebelReplayBuffer(
         capacity=16,
-        feature_dim=10,
         num_actions=5,
         num_players=2,
+        num_context_features=4,
         device=torch.device("cpu"),
     )
     # Create MLPFeatures for the test
     mlp_features = MLPFeatures(
         context=torch.randn(4, 4),
         street=torch.zeros(4, dtype=torch.long),
-        board=torch.zeros(4, 5),
+        board=torch.zeros(4, 5, dtype=torch.long),
         beliefs=torch.randn(4, 2 * NUM_HANDS),
     )
     policy_targets = torch.softmax(torch.randn(4, NUM_HANDS, 5), dim=-1)
@@ -136,7 +137,7 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.env.flop_showdown = False
     cfg.model.name = "rebel_ffn"
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
-    cfg.model.input_dim = RebelFeatureEncoder.feature_dim
+    cfg.model.input_dim = context_length(2) + 5 + 2 * NUM_HANDS
     cfg.model.hidden_dim = 64
     cfg.model.num_hidden_layers = 2
     cfg.model.value_head_type = ValueHeadType.scalar
