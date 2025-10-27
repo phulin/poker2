@@ -23,7 +23,7 @@ train:
   grad_clip: 1.0
 
 model:
-  name: RebelFFN
+  name: BetterFFN
   input_dim: 2661
   hidden_dim: 1536
   num_hidden_layers: 6

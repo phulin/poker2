@@ -22,6 +22,13 @@ class ValueHeadType(str, Enum):
     quantile = "quantile"
 
 
+class ModelType(str, Enum):
+    siamese_convnet_v1 = "SiameseConvnetV1"
+    poker_transformer_v1 = "PokerTransformerV1"
+    rebel_ffn = "RebelFFN"
+    better_ffn = "BetterFFN"
+
+
 class PPOClipping(str, Enum):
     none = "none"
     single = "single"
@@ -116,7 +123,8 @@ class TrainingConfig:
 
 @dataclass
 class ModelConfig:
-    name: str = "siamese_convnet_v1"
+    name: ModelType = ModelType.siamese_convnet_v1
+    compile: bool = True
     value_head_type: ValueHeadType = ValueHeadType.scalar
     value_head_num_quantiles: int = -1
     use_gradient_checkpointing: bool = True

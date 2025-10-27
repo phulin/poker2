@@ -7,7 +7,7 @@ from typing import Generator, Optional
 import torch
 import torch.nn.functional as F
 
-from alphaholdem.core.structured_config import CFRType
+from alphaholdem.core.structured_config import CFRType, ModelType
 from alphaholdem.env.card_utils import (
     combo_to_onehot_tensor,
     hand_combos_tensor,
@@ -101,7 +101,7 @@ class RebelCFREvaluator:
     beliefs: torch.Tensor
     beliefs_avg: torch.Tensor
     legal_mask: Optional[torch.Tensor]
-    feature_encoder: BetterFeatureEncoder
+    feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder
     hand_rank_data: Optional[HandRankData]
     stats: dict[str, float]
 
@@ -109,7 +109,8 @@ class RebelCFREvaluator:
         self,
         search_batch_size: int,
         env_proto: HUNLTensorEnv,
-        model: BetterFFN,
+        model: RebelFFN | BetterFFN,
+        model_type: ModelType,
         bet_bins: list[float],
         max_depth: int,
         cfr_iterations: int,
@@ -224,11 +225,20 @@ class RebelCFREvaluator:
         )
 
         # Feature encoder for belief computation
-        self.feature_encoder = BetterFeatureEncoder(
-            env=self.env,
-            device=device,
-            dtype=float_dtype,
-        )
+        if model_type == ModelType.better_ffn:
+            self.feature_encoder = BetterFeatureEncoder(
+                env=self.env,
+                device=self.device,
+                dtype=self.float_dtype,
+            )
+        elif model_type == ModelType.rebel_ffn:
+            self.feature_encoder = RebelFeatureEncoder(
+                env=self.env,
+                device=self.device,
+                dtype=self.float_dtype,
+            )
+        else:
+            raise ValueError(f"Invalid model type: {model_type}")
 
         self.hand_rank_data = None
         self.stats = {}

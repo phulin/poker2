@@ -5,7 +5,7 @@ import os
 import torch
 import torch.nn as nn
 
-from alphaholdem.core.structured_config import Config
+from alphaholdem.core.structured_config import Config, ModelType
 from alphaholdem.env.aggression_analyzer import aggression_analyzer
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.better_features import context_length
@@ -81,20 +81,30 @@ class RebelCFRTrainer:
         )
 
         # Model
-        self.model = BetterFFN(
-            input_dim=cfg.model.input_dim,
-            num_actions=self.num_actions,
-            hidden_dim=cfg.model.hidden_dim,
-            num_hidden_layers=cfg.model.num_hidden_layers,
-            # detach_value_head=cfg.model.detach_value_head,
-            num_players=self.num_players,
-        )
+        if cfg.model.name == ModelType.better_ffn:
+            self.model = BetterFFN(
+                input_dim=cfg.model.input_dim,
+                num_actions=self.num_actions,
+                hidden_dim=cfg.model.hidden_dim,
+                num_hidden_layers=cfg.model.num_hidden_layers,
+                num_players=self.num_players,
+            )
+        elif cfg.model.name == ModelType.rebel_ffn:
+            self.model = BetterFFN(
+                input_dim=cfg.model.input_dim,
+                num_actions=self.num_actions,
+                hidden_dim=cfg.model.hidden_dim,
+                num_hidden_layers=cfg.model.num_hidden_layers,
+                detach_value_head=cfg.model.detach_value_head,
+                num_players=self.num_players,
+            )
+
         cpu_rng = torch.Generator(device="cpu")
         if self.cfg.seed is not None:
             cpu_rng.manual_seed(self.cfg.seed)
         self.model.init_weights(cpu_rng)
         self.model.to(self.device)
-        if self.device.type == "cuda":
+        if self.device.type == "cuda" and cfg.model.compile:
             self.model.compile()
 
         # Optimizer & loss
@@ -114,6 +124,7 @@ class RebelCFRTrainer:
             search_batch_size=self.cfg.num_envs,
             env_proto=self.env,
             model=self.model,
+            model_type=cfg.model.name,
             bet_bins=self.bet_bins,
             max_depth=max(1, self.cfg.search.depth),
             cfr_iterations=max(T_WARM + 1, self.cfg.search.iterations),
