@@ -8,7 +8,8 @@ import torch.nn as nn
 from alphaholdem.core.structured_config import Config
 from alphaholdem.env.aggression_analyzer import aggression_analyzer
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
+from alphaholdem.models.mlp.better_features import context_length
+from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
@@ -37,7 +38,7 @@ class RebelCFRTrainer:
             self.buffer_rng.manual_seed(int(cfg.seed))
         self.num_actions = len(self.bet_bins) + 3
         self.num_players = 2
-        self.belief_dim = RebelFeatureEncoder.belief_dim
+
         if cfg.model.num_actions != self.num_actions:
             print(
                 f"[RebelCFRTrainer] Overriding model.num_actions "
@@ -45,14 +46,6 @@ class RebelCFRTrainer:
                 f"to match bet bin configuration."
             )
             cfg.model.num_actions = self.num_actions
-        expected_input_dim = RebelFeatureEncoder.feature_dim
-        if cfg.model.input_dim != expected_input_dim:
-            print(
-                f"[RebelCFRTrainer] Overriding model.input_dim "
-                f"({cfg.model.input_dim}) -> {expected_input_dim} "
-                f"to match feature encoder output."
-            )
-            cfg.model.input_dim = expected_input_dim
 
         # Environment used to provide root states for CFR search
         self.env = HUNLTensorEnv(
@@ -69,30 +62,31 @@ class RebelCFRTrainer:
 
         self.value_buffer = RebelReplayBuffer(
             capacity=self.replay_capacity,
-            feature_dim=cfg.model.input_dim,
             num_actions=self.num_actions,
             num_players=self.num_players,
+            # TODO: configurable
+            num_context_features=context_length(self.num_players),
             device=self.buffer_device,
             policy_targets=False,
         )
         # Larger policy buffer since we store more samples there
         self.policy_buffer = RebelReplayBuffer(
             capacity=self.replay_capacity * self.num_actions,
-            feature_dim=cfg.model.input_dim,
             num_actions=self.num_actions,
             num_players=self.num_players,
+            num_context_features=context_length(self.num_players),
             device=self.buffer_device,
             policy_targets=True,
             value_targets=False,
         )
 
         # Model
-        self.model = RebelFFN(
+        self.model = BetterFFN(
             input_dim=cfg.model.input_dim,
             num_actions=self.num_actions,
             hidden_dim=cfg.model.hidden_dim,
             num_hidden_layers=cfg.model.num_hidden_layers,
-            detach_value_head=cfg.model.detach_value_head,
+            # detach_value_head=cfg.model.detach_value_head,
             num_players=self.num_players,
         )
         cpu_rng = torch.Generator(device="cpu")
@@ -139,13 +133,6 @@ class RebelCFRTrainer:
             evaluator=self.cfr_evaluator,
             value_buffer=self.value_buffer,
             policy_buffer=self.policy_buffer,
-        )
-
-        # Feature encoder for belief computation
-        self.feature_encoder = RebelFeatureEncoder(
-            env=self.env,
-            device=self.device,
-            dtype=self.float_dtype,
         )
 
     def _compute_entropy(self, probs: torch.Tensor) -> float:
@@ -260,25 +247,60 @@ class RebelCFRTrainer:
         return history
 
     def save_checkpoint(
-        self, path: str, step: int, wandb_run_id: str | None = None
+        self,
+        path: str,
+        step: int,
+        wandb_run_id: str | None = None,
+        save_optimizer: bool = True,
+        save_dtype: torch.dtype | None = None,
     ) -> None:
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)
+
+        # Convert model state to bfloat16 if requested
+        model_state = self.model.state_dict()
+        if save_dtype is not None:
+            model_state = {
+                k: v.to(save_dtype) if v.dtype.is_floating_point else v
+                for k, v in model_state.items()
+            }
+
         state = {
-            "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "rng": self.rng.get_state(),
+            "model": model_state,
             "step": step,
+            "save_dtype": str(save_dtype) if save_dtype is not None else None,
             # Store wandb run ID for resumption
             "wandb_run_id": wandb_run_id,
         }
+
+        # Only save optimizer and RNG state if requested
+        if save_optimizer:
+            state["optimizer"] = self.optimizer.state_dict()
+            state["rng"] = self.rng.get_state()
+
         torch.save(state, path)
 
     def load_checkpoint(self, path: str) -> int:
         ckpt = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(ckpt["model"])
-        self.optimizer.load_state_dict(ckpt["optimizer"])
-        self.cfg.wandb_run_id = ckpt["wandb_run_id"]
-        # self.rng.set_state(ckpt["rng"].to(self.device))
+
+        # Convert model state back to host dtype if it was saved in bfloat16
+        save_dtype_str = ckpt.get("save_dtype")
+        model_state = ckpt["model"]
+        if save_dtype_str is not None and save_dtype_str != str(self.float_dtype):
+            # Convert back to float32 for host dtype
+            model_state = {
+                k: v.to(self.float_dtype) if v.dtype.is_floating_point else v
+                for k, v in model_state.items()
+            }
+
+        self.model.load_state_dict(model_state)
+
+        # Only load optimizer if it exists in checkpoint
+        if "optimizer" in ckpt:
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+
+        self.cfg.wandb_run_id = ckpt.get("wandb_run_id")
+        # if "rng" in ckpt:
+        #     self.rng.set_state(ckpt["rng"].to(self.device))
         return int(ckpt["step"])

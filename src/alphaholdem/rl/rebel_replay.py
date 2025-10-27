@@ -5,12 +5,13 @@ from typing import Optional
 
 import torch
 
+from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 
 
 @dataclass
 class RebelBatch:
-    features: torch.Tensor
+    features: MLPFeatures
     legal_masks: torch.Tensor
     policy_targets: Optional[torch.Tensor] = None
     value_targets: Optional[torch.Tensor] = None
@@ -18,16 +19,18 @@ class RebelBatch:
 
     def __post_init__(self):
         assert self.value_targets is not None or self.policy_targets is not None
-        assert self.features.shape[0] == self.legal_masks.shape[0]
+        # Get shape from MLPFeatures
+        batch_size = len(self.features)
+        assert batch_size == self.legal_masks.shape[0]
         if self.policy_targets is not None:
-            assert self.features.shape[0] == self.policy_targets.shape[0]
+            assert batch_size == self.policy_targets.shape[0]
         if self.value_targets is not None:
-            assert self.features.shape[0] == self.value_targets.shape[0]
+            assert batch_size == self.value_targets.shape[0]
         for key in self.statistics:
-            assert self.features.shape[0] == self.statistics[key].shape[0]
+            assert batch_size == self.statistics[key].shape[0]
 
     def __len__(self) -> int:
-        return self.features.shape[0]
+        return len(self.features)
 
     def __getitem__(self, idx: torch.Tensor | slice | int) -> RebelBatch:
         return RebelBatch(
@@ -68,23 +71,29 @@ class RebelReplayBuffer:
     def __init__(
         self,
         capacity: int,
-        feature_dim: int,
         num_actions: int,
         num_players: int,
+        num_context_features: int,
         device: torch.device,
         policy_targets: bool = True,
         value_targets: bool = True,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         self.capacity = capacity
-        self.feature_dim = feature_dim
         self.num_actions = num_actions
         self.num_players = num_players
         self.device = device
         self.dtype = dtype
 
-        self.features = torch.zeros(
-            self.capacity, self.feature_dim, dtype=dtype, device=device
+        self.features = MLPFeatures(
+            context=torch.zeros(
+                self.capacity, num_context_features, dtype=dtype, device=device
+            ),
+            street=torch.zeros(self.capacity, dtype=torch.long, device=device),
+            board=torch.zeros(self.capacity, 5, dtype=torch.long, device=device),
+            beliefs=torch.zeros(
+                self.capacity, 2 * NUM_HANDS, dtype=dtype, device=device
+            ),
         )
 
         if policy_targets:

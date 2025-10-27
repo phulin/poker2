@@ -203,13 +203,21 @@ def train_rebel(cfg: Config) -> None:
                     cfg.checkpoint_dir, f"rebel_step_{step + 1}.pt"
                 )
                 wandb_run_id = run.id if run else None
+                # Save compressed checkpoint without optimizer state
                 trainer.save_checkpoint(
-                    ckpt_path, metrics["step"], wandb_run_id=wandb_run_id
+                    ckpt_path,
+                    metrics["step"],
+                    wandb_run_id=wandb_run_id,
+                    save_optimizer=False,
+                    save_dtype=torch.bfloat16,
                 )
+                # Save latest checkpoint with full state
                 trainer.save_checkpoint(
                     os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"),
                     metrics["step"],
                     wandb_run_id=wandb_run_id,
+                    save_optimizer=True,
+                    save_dtype=None,  # Keep host dtype
                 )
 
                 # Clean up old checkpoints if economize_checkpoints is enabled
@@ -220,7 +228,9 @@ def train_rebel(cfg: Config) -> None:
                 print_preflop_range_grid(trainer, metrics["step"], rebel=True)
 
         final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
-        trainer.save_checkpoint(final_path, cfg.num_steps)
+        trainer.save_checkpoint(
+            final_path, cfg.num_steps, save_optimizer=True, save_dtype=None
+        )
         total_elapsed = time.time() - training_start
         print(
             f"Training complete in {total_elapsed/3600:.2f} hours. "

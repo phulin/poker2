@@ -3,6 +3,7 @@ This is a python project. The main entry points are src/alphaholdem/cli/{train_r
 
 ## Virtual environment
 * Before running any Python commands, source the venv with `source venv/bin/activate`.
+* Run python commands with `python`. Don't use `chmod +x`.
 
 ## General instructions
 * We try to keep our patches minimal, writing the smallest amount of code that successfully achieves our goals.

@@ -13,7 +13,9 @@ from alphaholdem.env.card_utils import (
     hand_combos_tensor,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
+from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
+from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS, RebelFFN
 from alphaholdem.rl.rebel_replay import RebelBatch
@@ -70,7 +72,7 @@ class RebelCFREvaluator:
     """ReBeL CFR Evaluator implementing the precise SELFPLAY algorithm."""
 
     search_batch_size: int
-    model: RebelFFN
+    model: BetterFFN
     max_depth: int
     bet_bins: list[float]
     cfr_iterations: int
@@ -99,7 +101,7 @@ class RebelCFREvaluator:
     beliefs: torch.Tensor
     beliefs_avg: torch.Tensor
     legal_mask: Optional[torch.Tensor]
-    feature_encoder: RebelFeatureEncoder
+    feature_encoder: BetterFeatureEncoder
     hand_rank_data: Optional[HandRankData]
     stats: dict[str, float]
 
@@ -107,7 +109,7 @@ class RebelCFREvaluator:
         self,
         search_batch_size: int,
         env_proto: HUNLTensorEnv,
-        model: RebelFFN,
+        model: BetterFFN,
         bet_bins: list[float],
         max_depth: int,
         cfr_iterations: int,
@@ -222,7 +224,7 @@ class RebelCFREvaluator:
         )
 
         # Feature encoder for belief computation
-        self.feature_encoder = RebelFeatureEncoder(
+        self.feature_encoder = BetterFeatureEncoder(
             env=self.env,
             device=device,
             dtype=float_dtype,
@@ -411,10 +413,7 @@ class RebelCFREvaluator:
     @torch.no_grad()
     @profile
     def _get_model_policy_probs(self, indices: torch.Tensor) -> torch.Tensor:
-        features = self.feature_encoder.encode(
-            self.env.to_act,
-            self.beliefs,
-        )
+        features = self.feature_encoder.encode(self.beliefs)
         model_output = self.model(features[indices])
         logits = model_output.policy_logits
         legal_masks = self.legal_mask[indices]
@@ -636,7 +635,6 @@ class RebelCFREvaluator:
         model_mask = self.leaf_mask & ~self.env.done
 
         features = self.feature_encoder.encode(
-            self.env.to_act,
             self.beliefs_avg if self.cfr_avg else self.beliefs,
         )
         model_output = self.model(features[model_mask])
@@ -1077,7 +1075,7 @@ class RebelCFREvaluator:
         if value_targets.abs().max() > 100:
             print("WARNING: Value targets are too large")
 
-        features = self.feature_encoder.encode(self.env.to_act, self.beliefs_avg)[:top]
+        features = self.feature_encoder.encode(self.beliefs_avg)[:top]
         bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
         statistics = {
             "to_act": self.env.to_act,

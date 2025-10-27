@@ -6,7 +6,7 @@ import torch
 
 from alphaholdem.core.structured_config import Config, ValueHeadType
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
+from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
@@ -34,15 +34,20 @@ def test_rebel_feature_encoder_shapes():
     env = make_env(2)
     encoder = RebelFeatureEncoder(env, device=env.device, dtype=torch.float32)
     idxs = torch.tensor([0, 1], device=env.device)
-    for player in (0, 1):
-        agents = torch.full((2,), player, dtype=torch.long, device=env.device)
+    for _ in (0, 1):
         beliefs = torch.full(
             (2, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
         )
-        features = encoder.encode(agents, beliefs)[idxs]
-    assert features.shape == (2, encoder.feature_dim)
-    hero = features[:, 9 : 9 + encoder.belief_dim]
-    opp = features[:, 9 + encoder.belief_dim :]
+        mlp_features = encoder.encode(beliefs)
+        features = mlp_features[idxs]
+        # Combine all features for verification
+        board_features = torch.where(features.board > 0, features.board / 51.0, -1.0)
+        features_tensor = torch.cat(
+            [features.context, board_features, features.beliefs], dim=-1
+        )
+    assert features_tensor.shape == (2, encoder.feature_dim)
+    hero = features_tensor[:, 9 : 9 + encoder.belief_dim]
+    opp = features_tensor[:, 9 + encoder.belief_dim :]
     torch.testing.assert_close(hero.sum(dim=1), torch.ones(2, device=env.device))
     torch.testing.assert_close(opp.sum(dim=1), torch.ones(2, device=env.device))
 

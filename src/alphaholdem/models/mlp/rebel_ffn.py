@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from alphaholdem.core.interfaces import Model
+from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput
 
 NUM_HANDS = 1326
@@ -75,29 +76,37 @@ class RebelFFN(nn.Module, Model):
         self.policy_head = nn.Linear(hidden_dim, num_actions * NUM_HANDS)
         self.hand_value_head = nn.Linear(hidden_dim, num_players * NUM_HANDS)
 
-    def forward(self, features: torch.Tensor, *_: Any, **__: Any) -> ModelOutput:
+    def forward(self, features: MLPFeatures | torch.Tensor) -> ModelOutput:
         """
         Forward pass over flat feature vectors.
 
         Args:
-            features: Tensor of shape [batch, input_dim]
+            features: MLPFeatures with flat tensor or Tensor of shape [batch, input_dim]
 
         Returns:
             ModelOutput with policy logits and value predictions.
         """
-        if features.dim() != 2 or features.size(-1) != self.input_dim:
+        board_features = torch.where(features.board > 0, features.board / 51.0, -1.0)
+        features_tensor = torch.cat(
+            [features.context, board_features, features.beliefs],
+            dim=-1,
+        )
+
+        if features_tensor.dim() != 2 or features_tensor.size(-1) != self.input_dim:
             raise ValueError(
-                f"Expected input [batch, {self.input_dim}], got {tuple(features.shape)}"
+                f"Expected input [batch, {self.input_dim}], got {tuple(features_tensor.shape)}"
             )
 
-        x = self.trunk(features)
+        x = self.trunk(features_tensor)
         x = self.post_norm(x)
 
         policy_logits = self.policy_head(x).reshape(-1, NUM_HANDS, self.num_actions)
 
         hand_value_input = x.detach() if self.detach_value_head else x
         hand_values = self.hand_value_head(hand_value_input)
-        hand_values = hand_values.view(features.shape[0], self.num_players, NUM_HANDS)
+        hand_values = hand_values.view(
+            features_tensor.shape[0], self.num_players, NUM_HANDS
+        )
         value = hand_values.mean(dim=-1)
 
         return ModelOutput(

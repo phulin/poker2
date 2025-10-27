@@ -9,6 +9,7 @@ from alphaholdem.env.card_utils import (
     hand_combos_tensor,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 from alphaholdem.utils.profiling import profile
 
@@ -38,13 +39,6 @@ class RebelFeatureEncoder:
         pot = self.env.pot.to(torch.float32)
         return (pot / denom).clamp_(0.0, 10.0)
 
-    def _board_features(self) -> torch.Tensor:
-        board = self.env.board_indices  # [B, 5]
-        board = board.to(torch.float32)
-        board /= 51.0
-        board.masked_fill_(board < 0, -1.0)
-        return board
-
     def _has_bet_flag(self) -> torch.Tensor:
         """Return [B] float flag: 1.0 if a bet/raise has occurred this round, else 0.0.
 
@@ -59,29 +53,34 @@ class RebelFeatureEncoder:
     @profile
     def encode(
         self,
-        agents: torch.Tensor,
         beliefs: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> MLPFeatures:
         """
-        Build ReBeL flat features for a batch of env indices and agent ids.
+        Build ReBeL flat features for all envs.
 
         Args:
             agents: Tensor of agent ids (0 or 1), shape [B].
-            beliefs: Optional tensor [B, 2, 1326] for beliefs (about p0 and p1).
+            beliefs: Tensor [B, 2, 1326] for beliefs (about p0 and p1).
         Returns:
-            Tensor [B, 2661] of float32 features.
+            MLPFeatures with structured fields:
+            - context: agent, to_act, pot_fraction, has_bet_flag (indices 0,1,2,8)
+            - board: board features (indices 3:8)
+            - beliefs: beliefs (indices 9:)
+            - street: unused (empty)
         """
-        M = agents.shape[0]
+        M = beliefs.shape[0]
+        num_players = beliefs.shape[1]
 
-        features = torch.zeros(
-            M, self.feature_dim, device=self.device, dtype=self.dtype
+        # Context features: to_act, position, pot_fraction, has_bet_flag
+        context_features = torch.zeros(M, 4, device=self.device, dtype=self.dtype)
+        context_features[:, 0] = self.env.to_act.to(self.dtype)
+        context_features[:, 1] = (self.env.to_act - self.env.button) % num_players
+        context_features[:, 2] = self._pot_fraction()
+        context_features[:, 3] = self._has_bet_flag()
+
+        return MLPFeatures(
+            context=context_features,
+            street=self.env.street,
+            board=self.env.board_indices,
+            beliefs=beliefs.view(-1, 2 * NUM_HANDS),
         )
-
-        features[:, 0] = agents.to(self.dtype)
-        features[:, 1] = self.env.to_act.to(self.dtype)
-        features[:, 2] = self._pot_fraction()
-        features[:, 3:8] = self._board_features()
-        features[:, 8] = self._has_bet_flag()
-
-        features[:, 9:] = beliefs.reshape(-1, 2 * NUM_HANDS)
-        return features
