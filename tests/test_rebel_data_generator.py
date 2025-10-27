@@ -146,12 +146,13 @@ class DummyEvaluator:
         self.sample_calls += 1
         count = self.search_batch_size
         indices = torch.arange(count, dtype=torch.long)
-        return RebelBatch(
+        result = RebelBatch(
             features=self.feature_matrix[indices],
             policy_targets=self.policy_probs_avg[:count],
             value_targets=self.values[:count],
             legal_masks=self.env.legal_bins_mask()[indices],
         )
+        return result, result
 
 
 def fake_from_proto(proto: SimpleNamespace, num_envs: int | None = None) -> DummyEnv:
@@ -176,7 +177,10 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
 
     buffer = DummyBuffer()
     generator = RebelDataGenerator(
-        env_proto=env_proto, evaluator=evaluator, buffer=buffer
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
     )
 
     # generate_data() now returns None and adds data to buffer

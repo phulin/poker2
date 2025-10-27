@@ -216,11 +216,7 @@ class RebelCFRTrainer:
         value_loss, policy_loss = None, None
         for batch in [value_batch, policy_batch]:
             output = self.model(batch.features)
-            loss_dict = self.loss_fn(
-                logits=output.policy_logits,
-                hand_values=output.hand_values,
-                batch=batch,
-            )
+            loss_dict = self.loss_fn(output, batch)
             loss = loss_dict["total_loss"]
             if batch is value_batch:
                 value_loss = loss_dict["value_loss"]

@@ -502,36 +502,29 @@ def test_compute_expected_values_matches_child_values(
     probs = probs / probs.sum()
     probs_all = probs[None, :, None].expand(evaluator.total_nodes, -1, 1)
     bottom = evaluator.depth_offsets[1]
+    # fixed policy probs for every node.
     evaluator.policy_probs[bottom:] = evaluator._push_down(probs_all)
 
     child_values = torch.arange(1, num_actions + 1, dtype=env.float_dtype)
-    child_values_all = child_values[None, :, None, None].expand(
-        evaluator.total_nodes, -1, 1, 1
-    )
+    child_values_all = child_values[None, :, None].expand(evaluator.total_nodes, -1, 1)
     values_temp = evaluator._push_down(child_values_all)
-    values_bottom = torch.zeros_like(values_temp)
-    values_bottom[evaluator.leaf_mask[bottom:]] = values_temp[
-        evaluator.leaf_mask[bottom:]
-    ]
+    # fixed expected values for all the leaf nodes.
+    values_bottom = torch.where(evaluator.leaf_mask[bottom:, None], values_temp, 0.0)
 
+    # counterfactual value = EV * opponent reach
     reach_weights = evaluator._calculate_reach_weights(evaluator.policy_probs)
     evaluator.values[:] = 0.0
-    evaluator.values[bottom:, 0] = values_bottom[:, 0] * reach_weights[bottom:, 1]
-    evaluator.values[bottom:, 1] = -values_bottom[:, 0] * reach_weights[bottom:, 0]
+    evaluator.values[bottom:, 0] = values_bottom * reach_weights[bottom:, 1]
+    evaluator.values[bottom:, 1] = -values_bottom * reach_weights[bottom:, 0]
 
     evaluator.compute_expected_values()
 
-    expected_value_actor = (probs * child_values).sum()
-    expected_value_opp = -child_values.sum()
+    # actor is player 1 at node 2.
+    expected_value_actor = (probs[:, None] * evaluator.values[17:25, 1]).sum(dim=0)
+    expected_value_opp = evaluator.values[17:25, 0].sum(dim=0)
 
-    torch.testing.assert_close(
-        evaluator.values[2, 0],
-        torch.full((NUM_HANDS,), expected_value_actor, dtype=env.float_dtype),
-    )
-    torch.testing.assert_close(
-        evaluator.values[2, 1],
-        torch.full((NUM_HANDS,), expected_value_opp, dtype=env.float_dtype),
-    )
+    torch.testing.assert_close(evaluator.values[2, 0], expected_value_opp)
+    torch.testing.assert_close(evaluator.values[2, 1], expected_value_actor)
 
 
 def test_set_leaf_values_only_updates_marked_nodes() -> None:

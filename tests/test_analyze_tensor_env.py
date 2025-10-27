@@ -11,7 +11,7 @@ from alphaholdem.env.analyze_tensor_env import (
 )
 from alphaholdem.env.card_utils import hand_combos_tensor
 from alphaholdem.env.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
+from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS, RebelFFN
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.structured_embedding_data import (
@@ -31,71 +31,11 @@ SUITS = "shdc"
 GRID_RANKS = RANKS[::-1]
 
 
-def _card_str_to_int(card_str: str) -> int:
-    """Convert card string like 'As' to integer index.
-
-    Args:
-        card_str: Card string like 'As', 'Kh', 'Qd', 'Jc'
-
-    Returns:
-        Integer index (0-51) representing the card
-    """
-    assert len(card_str) == 2, f"Invalid card string: {card_str}"
-
-    rank_map = {
-        "2": 0,
-        "3": 1,
-        "4": 2,
-        "5": 3,
-        "6": 4,
-        "7": 5,
-        "8": 6,
-        "9": 7,
-        "T": 8,
-        "J": 9,
-        "Q": 10,
-        "K": 11,
-        "A": 12,
-    }
-    suit_map = {"s": 0, "h": 1, "d": 2, "c": 3}
-
-    rank = card_str[:-1]
-    suit = card_str[-1]
-
-    # Use suit-major indexing consistent with HUNLTensorEnv (card // 13 = suit, card % 13 = rank)
-    return suit_map[suit] * 13 + rank_map[rank]
-
-
-def create_1326_hand_combinations() -> list[tuple[str, str]]:
-    """Create all 1326 distinct preflop combinations (ordered hole cards, no overlap).
-
-    Returns pairs like ("As", "Kh"). Offsuit/suited and pairs fully enumerated.
-    Uses the same ordering as hand_combos_tensor() for consistency.
-    """
-    # Build full deck strings in canonical order (0-51)
-    # Cards are indexed as suit * 13 + rank, where suit=0,1,2,3 and rank=0,1,2,...,12
-    deck = []
-    for suit_idx in range(4):  # 0=spades, 1=hearts, 2=diamonds, 3=clubs
-        for rank_idx in range(13):  # 0=2, 1=3, ..., 12=A
-            suit = SUITS[suit_idx]
-            rank = RANKS[rank_idx]
-            deck.append(rank + suit)
-
-    hands: list[tuple[str, str]] = []
-    for i in range(len(deck)):
-        for j in range(i + 1, len(deck)):
-            c1, c2 = deck[i], deck[j]
-            # Exclude same card obviously, and allow any suit/rank
-            hands.append((c1, c2))
-    return hands
-
-
 def _grid_coords_for_hand(card1: int, card2: int) -> tuple[int, int]:
     s1, s2 = card1 // 13, card2 // 13
 
-    # Grid is reversed, higher ranks first.
-    # With new rank mapping: A=0, K=1, ..., 2=12
-    # Grid shows A at top (position 0), so we use rank directly
+    # Grid is stored internally in [rank, rank] position.
+    # We reverse it later (on output) so AA is at top right.
     i, j = card1 % 13, card2 % 13
 
     # Suited if same suit and not pair → top-right triangle; else bottom-left
@@ -107,26 +47,33 @@ def _grid_coords_for_hand(card1: int, card2: int) -> tuple[int, int]:
         return (max(i, j), min(i, j))
 
 
-def _expected_count_for_cell(i: int, j: int) -> int:
-    if i == j:
-        return 6
-    if i < j:
-        return 4
-    return 12
-
-
 def test_1326_to_169_bucket_counts() -> None:
-    combos = create_1326_hand_combinations()
+    expected_counts = torch.tensor(
+        [
+            [6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4],
+            [12, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4],
+            [12, 12, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4],
+            [12, 12, 12, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4],
+            [12, 12, 12, 12, 6, 4, 4, 4, 4, 4, 4, 4, 4],
+            [12, 12, 12, 12, 12, 6, 4, 4, 4, 4, 4, 4, 4],
+            [12, 12, 12, 12, 12, 12, 6, 4, 4, 4, 4, 4, 4],
+            [12, 12, 12, 12, 12, 12, 12, 6, 4, 4, 4, 4, 4],
+            [12, 12, 12, 12, 12, 12, 12, 12, 6, 4, 4, 4, 4],
+            [12, 12, 12, 12, 12, 12, 12, 12, 12, 6, 4, 4, 4],
+            [12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 6, 4, 4],
+            [12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 6, 4],
+            [12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 6],
+        ],
+        dtype=torch.int32,
+    )
+    combos = hand_combos_tensor()
     counts = torch.zeros((13, 13), dtype=torch.int32)
-    for c1, c2 in combos:
-        i, j = _grid_coords_for_hand(_card_str_to_int(c1), _card_str_to_int(c2))
+    for c1, c2 in combos.tolist():
+        i, j = _grid_coords_for_hand(c1, c2)
         counts[i, j] += 1
 
-    for i in range(13):
-        for j in range(13):
-            assert counts[i, j].item() == _expected_count_for_cell(i, j)
-
     assert counts.sum().item() == 1326
+    torch.testing.assert_close(counts, expected_counts)
 
 
 def test_rebel_preflop_analyzer_uses_canonical_combo_order() -> None:
@@ -162,11 +109,8 @@ def test_rebel_allin_response_has_call_and_fold() -> None:
     # Only fold/call should be available for reachable combos.
     reachable = probs.sum(dim=1) > 1e-6
     assert reachable.any()
-    assert torch.allclose(
-        probs[reachable, 2:],
-        torch.zeros_like(probs[reachable, 2:]),
-        atol=1e-6,
-        rtol=0.0,
+    torch.testing.assert_close(
+        probs[reachable, 2:], torch.zeros_like(probs[reachable, 2:])
     )
     # There must be both folding and calling hands among reachable combos.
     assert torch.any(probs[reachable, 0] > 0.5)
@@ -216,7 +160,7 @@ def _grid_strs_to_ints(table: list[list[str]]) -> list[list[int]]:
 
 def test_preflop_range_grid_allin_high():
     # num_bet_bins = 8 by default (5 presets + fold/check + all-in)
-    N = len(create_1326_hand_combinations())
+    N = 1326
     B = 8
     logits = torch.full((N, B), -10.0)
     # Make all-in (bin 7) extremely likely
@@ -238,7 +182,7 @@ def test_preflop_range_grid_allin_high():
 
 
 def test_preflop_betting_grid_prefers_bets():
-    N = len(create_1326_hand_combinations())
+    N = 1326
     B = 8
     logits = torch.full((N, B), -10.0)
     # Prefer betting bins 2..6 equally
@@ -270,7 +214,7 @@ def test_preflop_grids_reflect_probabilities_and_values():
 
     # Emphasize betting bin 3 for AA combos only.
     ranks = combos % 13
-    aa_mask = (ranks[:, 0] == 0) & (ranks[:, 1] == 0)
+    aa_mask = (ranks[:, 0] == 12) & (ranks[:, 1] == 12)
 
     # Make all other bins very unlikely for all combinations
     logits[:, :3] = -20.0  # fold, call, bet bins
@@ -395,14 +339,13 @@ def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
     ako = value_rows[1][0]
     twotwo = value_rows[12][12]
 
-    # With new rank mapping: A=0, K=1, ..., 2=12
     # Values are calculated as (rank1 + rank2 + suit1 * suit2) / 30.0
-    assert aa == 61  # AA pairs
-    assert kk == 128  # KK pairs
-    assert qq == 194  # QQ pairs
-    assert aks == 117  # AK suited
-    assert ako == 94  # AK offsuit
-    assert twotwo == 861  # 22 pairs
+    assert aa == 861  # AA pairs
+    assert kk == 794  # KK pairs
+    assert qq == 728  # QQ pairs
+    assert aks == 828  # AK suited
+    assert ako == 883  # AK offsuit
+    assert twotwo == 61  # 22 pairs
 
 
 class DummyModelFoldAAKKAKs(PokerTransformerV1):
@@ -475,8 +418,8 @@ def test_dummy_model_range_grid_call_bin() -> None:
     assert averaged[a_idx, a_idx].item() == pytest.approx(0.0, abs=1e-6)
     assert averaged[k_idx, k_idx].item() == pytest.approx(0.0, abs=1e-6)
     assert averaged[a_idx, k_idx].item() == pytest.approx(
-        0.6, abs=1e-6
-    )  # AK suited calls
+        0.0, abs=1e-6
+    )  # AK suited folds
     assert averaged[k_idx, a_idx].item() == pytest.approx(
         1.0, abs=1e-6
     )  # AK offsuit calls

@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import KLType, PPOClipping, ValueLossType
+from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.exponential_controller import ExponentialController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.rebel_replay import RebelBatch
@@ -724,6 +725,7 @@ class RebelSupervisedLoss(nn.Module):
         self,
         policy_weight: float = 1.0,
         value_weight: float = 1.0,
+        permutation_weight: float = 0.01,
         entropy_coef: float | None = None,
     ) -> None:
         super().__init__()
@@ -733,8 +735,7 @@ class RebelSupervisedLoss(nn.Module):
 
     def forward(
         self,
-        logits: torch.Tensor,
-        hand_values: torch.Tensor,
+        output: ModelOutput,
         batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
         """
@@ -745,6 +746,9 @@ class RebelSupervisedLoss(nn.Module):
         Returns:
             Dict of scalar tensors for loss components and diagnostics.
         """
+
+        logits = output.policy_logits
+        hand_values = output.hand_values
 
         legal_masks = batch.legal_masks[:, None, :]
         masked_logits = compute_masked_logits(logits, legal_masks)
@@ -771,10 +775,19 @@ class RebelSupervisedLoss(nn.Module):
         if self.entropy_coef is not None and self.entropy_coef != 0.0:
             total_loss -= self.entropy_coef * entropy
 
+        permutation_loss = torch.zeros(1, device=logits.device)
+        if output.encoded_with_permutation is not None:
+            permutation_loss = F.mse_loss(
+                output.encoded_with_permutation[:, 0],
+                output.encoded_with_permutation[:, 1],
+            )
+            total_loss += self.permutation_weight * permutation_loss
+
         return {
             "total_loss": total_loss,
             "policy_loss": policy_loss.item(),
             "value_loss": value_loss.item(),
             "value_loss_all": value_loss_all,
             "entropy": entropy.item(),
+            "permutation_loss": permutation_loss.item(),
         }

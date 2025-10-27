@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
 
 import torch
 
@@ -18,16 +17,19 @@ class ModelOutput:
     value: torch.Tensor
     """Value estimates of shape (batch_size,)"""
 
-    value_quantiles: Optional[torch.Tensor] = None
+    value_quantiles: torch.Tensor | None = None
     """Optional quantile value estimates of shape (batch_size, num_quantiles)"""
 
-    hand_values: Optional[torch.Tensor] = None
+    hand_values: torch.Tensor | None = None
     """Optional per-hand value estimates of shape (batch_size, num_players, num_combos)"""
 
-    kv_cache: Optional[Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = None
+    kv_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] | None = None
     """KV cache dictionary keyed by layer ID for incremental generation (transformer only)"""
 
-    def to_dict(self) -> Dict[str, torch.Tensor]:
+    encoded_with_permutation: torch.Tensor | None = None
+    """Encoded belief features with permutation applied (PBS-style only)"""
+
+    def to_dict(self) -> dict[str, torch.Tensor]:
         """Convert to dictionary format for backward compatibility."""
         result = {
             "policy_logits": self.policy_logits,
@@ -39,10 +41,12 @@ class ModelOutput:
             result["hand_values"] = self.hand_values
         if self.kv_cache is not None:
             result["kv_cache"] = self.kv_cache
+        if self.encoded_with_permutation is not None:
+            result["encoded_with_permutation"] = self.encoded_with_permutation
         return result
 
     @classmethod
-    def from_dict(cls, data: Dict[str, torch.Tensor]) -> ModelOutput:
+    def from_dict(cls, data: dict[str, torch.Tensor]) -> ModelOutput:
         """Create from dictionary format."""
         return cls(
             policy_logits=data["policy_logits"],
@@ -50,4 +54,5 @@ class ModelOutput:
             value_quantiles=data.get("value_quantiles"),
             hand_values=data.get("hand_values"),
             kv_cache=data.get("kv_cache"),
+            encoded_with_permutation=data.get("encoded_with_permutation"),
         )
