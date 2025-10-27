@@ -901,6 +901,7 @@ class RebelCFREvaluator:
         pbs.env.copy_state_from(self.env, sampled_nodes, dest_indices)
         pbs.beliefs[pbs_start_idx : pbs_start_idx + count] = self.beliefs[sampled_nodes]
 
+    @profile
     def update_average_policy(self, t: int) -> None:
         """Update the average policy by mixing it with the current policy."""
 

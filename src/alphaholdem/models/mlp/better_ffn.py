@@ -8,6 +8,7 @@ from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 from alphaholdem.models.model_output import ModelOutput
+from alphaholdem.utils.profiling import profile
 
 
 class ResidualBlock(nn.Module):
@@ -74,6 +75,7 @@ class BetterFFN(nn.Module, Model):
         self.policy_head = ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS)
         self.hand_value_head = ffn_block(hidden_dim, ffn_dim, num_players * NUM_HANDS)
 
+    @profile
     def forward(self, features: MLPFeatures) -> ModelOutput:
         """
         Forward pass over flat feature vectors.
