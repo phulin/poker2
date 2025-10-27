@@ -24,9 +24,8 @@ train:
 
 model:
   name: BetterFFN
-  input_dim: 2661
-  hidden_dim: 1536
-  num_hidden_layers: 6
+  hidden_dim: 512
+  num_hidden_layers: 4
   detach_value_head: false
 
 env:

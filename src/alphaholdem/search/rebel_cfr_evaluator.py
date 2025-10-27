@@ -110,7 +110,6 @@ class RebelCFREvaluator:
         search_batch_size: int,
         env_proto: HUNLTensorEnv,
         model: RebelFFN | BetterFFN,
-        model_type: ModelType,
         bet_bins: list[float],
         max_depth: int,
         cfr_iterations: int,
@@ -225,20 +224,18 @@ class RebelCFREvaluator:
         )
 
         # Feature encoder for belief computation
-        if model_type == ModelType.better_ffn:
+        if isinstance(self.model, BetterFFN):
             self.feature_encoder = BetterFeatureEncoder(
                 env=self.env,
                 device=self.device,
                 dtype=self.float_dtype,
             )
-        elif model_type == ModelType.rebel_ffn:
+        else:
             self.feature_encoder = RebelFeatureEncoder(
                 env=self.env,
                 device=self.device,
                 dtype=self.float_dtype,
             )
-        else:
-            raise ValueError(f"Invalid model type: {model_type}")
 
         self.hand_rank_data = None
         self.stats = {}

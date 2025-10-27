@@ -137,7 +137,7 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.env.flop_showdown = False
     cfg.model.name = "rebel_ffn"
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
-    cfg.model.input_dim = context_length(2) + 5 + 2 * NUM_HANDS
+    cfg.model.input_dim = 2661
     cfg.model.hidden_dim = 64
     cfg.model.num_hidden_layers = 2
     cfg.model.value_head_type = ValueHeadType.scalar

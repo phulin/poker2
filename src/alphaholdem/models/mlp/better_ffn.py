@@ -38,9 +38,9 @@ class BetterFFN(nn.Module, Model):
         self,
         input_dim: int,
         num_actions: int,
-        hidden_dim: int = 1024,
+        hidden_dim: int = 512,
         range_hidden_dim: int = 128,
-        ffn_dim: int = 2048,
+        ffn_dim: int = 1024,
         num_hidden_layers: int = 4,
         num_players: int = 2,
     ) -> None:
@@ -51,7 +51,6 @@ class BetterFFN(nn.Module, Model):
         self.num_hidden_layers = num_hidden_layers
         self.num_players = num_players
 
-        # Encoder for beliefs
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
         self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)

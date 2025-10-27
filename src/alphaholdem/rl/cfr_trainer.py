@@ -60,26 +60,6 @@ class RebelCFRTrainer:
         )
         self.env.reset()
 
-        self.value_buffer = RebelReplayBuffer(
-            capacity=self.replay_capacity,
-            num_actions=self.num_actions,
-            num_players=self.num_players,
-            # TODO: configurable
-            num_context_features=context_length(self.num_players),
-            device=self.buffer_device,
-            policy_targets=False,
-        )
-        # Larger policy buffer since we store more samples there
-        self.policy_buffer = RebelReplayBuffer(
-            capacity=self.replay_capacity * self.num_actions,
-            num_actions=self.num_actions,
-            num_players=self.num_players,
-            num_context_features=context_length(self.num_players),
-            device=self.buffer_device,
-            policy_targets=True,
-            value_targets=False,
-        )
-
         # Model
         if cfg.model.name == ModelType.better_ffn:
             self.model = BetterFFN(
@@ -89,8 +69,9 @@ class RebelCFRTrainer:
                 num_hidden_layers=cfg.model.num_hidden_layers,
                 num_players=self.num_players,
             )
-        elif cfg.model.name == ModelType.rebel_ffn:
-            self.model = BetterFFN(
+            num_context_features = context_length(self.num_players)
+        else:
+            self.model = RebelFFN(
                 input_dim=cfg.model.input_dim,
                 num_actions=self.num_actions,
                 hidden_dim=cfg.model.hidden_dim,
@@ -98,6 +79,7 @@ class RebelCFRTrainer:
                 detach_value_head=cfg.model.detach_value_head,
                 num_players=self.num_players,
             )
+            num_context_features = 4
 
         cpu_rng = torch.Generator(device="cpu")
         if self.cfg.seed is not None:
@@ -106,6 +88,26 @@ class RebelCFRTrainer:
         self.model.to(self.device)
         if self.device.type == "cuda" and cfg.model.compile:
             self.model.compile()
+
+        # Replay buffers
+        self.value_buffer = RebelReplayBuffer(
+            capacity=self.replay_capacity,
+            num_actions=self.num_actions,
+            num_players=self.num_players,
+            num_context_features=num_context_features,
+            device=self.buffer_device,
+            policy_targets=False,
+        )
+        # Larger policy buffer since we store more samples there
+        self.policy_buffer = RebelReplayBuffer(
+            capacity=self.replay_capacity * self.num_actions,
+            num_actions=self.num_actions,
+            num_players=self.num_players,
+            num_context_features=num_context_features,
+            device=self.buffer_device,
+            policy_targets=True,
+            value_targets=False,
+        )
 
         # Optimizer & loss
         self.optimizer = torch.optim.AdamW(
@@ -124,7 +126,6 @@ class RebelCFRTrainer:
             search_batch_size=self.cfg.num_envs,
             env_proto=self.env,
             model=self.model,
-            model_type=cfg.model.name,
             bet_bins=self.bet_bins,
             max_depth=max(1, self.cfg.search.depth),
             cfr_iterations=max(T_WARM + 1, self.cfg.search.iterations),

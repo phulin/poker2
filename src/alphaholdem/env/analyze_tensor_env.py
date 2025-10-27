@@ -39,14 +39,13 @@ class RebelStateEncoderWrapper:
         self.device = device
 
     def encode_tensor_states(self, player: int, idxs: torch.Tensor) -> torch.Tensor:
-        agents = torch.full_like(idxs, fill_value=player, dtype=torch.long)
         beliefs = torch.full(
             (idxs.numel(), 2, NUM_HANDS),
             fill_value=1.0 / NUM_HANDS,
             device=idxs.device,
             dtype=torch.float32,
         )
-        return self.encoder.encode(agents, beliefs=beliefs)[idxs]
+        return self.encoder.encode(beliefs)[idxs]
 
 
 def create_state_encoder_for_model(

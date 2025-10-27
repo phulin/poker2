@@ -92,7 +92,6 @@ def comprehensive_profiling():
         search_batch_size=1,
         env_proto=env_proto,
         model=model,
-        model_type=ModelType.better_ffn,
         bet_bins=bet_bins,
         max_depth=2,
         cfr_iterations=50,
