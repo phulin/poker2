@@ -73,20 +73,20 @@ class MLPFeatures:
         # Permute board cards
         # board is [batch_size, 5] with card indices or -1 for unflopped cards
         board_valid = self.board >= 0
-        if board_valid.any():
-            ranks = self.board % 13  # [batch_size, 5]
-            suits = self.board // 13  # [batch_size, 5]
 
-            # Apply suit permutation: for each card, look up its new suit
-            new_suits = torch.gather(
-                suit_permutations.unsqueeze(1).expand(-1, 5, -1),  # [batch_size, 5, 4]
-                dim=2,
-                index=suits.unsqueeze(2).to(torch.long),  # [batch_size, 5, 1]
-            ).squeeze(2)
+        ranks = (self.board % 13).clamp(0, 12)  # [batch_size, 5]
+        suits = (self.board // 13).clamp(0, 3)  # [batch_size, 5]
 
-            # Reconstruct card indices: only update valid cards
-            new_board = torch.where(board_valid, new_suits * 13 + ranks, self.board)
-            self.board[:] = new_board
+        # Apply suit permutation: for each card, look up its new suit
+        new_suits = torch.gather(
+            suit_permutations.unsqueeze(1).expand(-1, 5, -1),  # [batch_size, 5, 4]
+            dim=2,
+            index=suits.unsqueeze(2).to(torch.long),  # [batch_size, 5, 1]
+        ).squeeze(2)
+
+        # Reconstruct card indices: only update valid cards
+        new_board = torch.where(board_valid, new_suits * 13 + ranks, self.board)
+        self.board[:] = new_board
 
         # Permute beliefs
         # beliefs might be [batch_size, 1326] or [batch_size, 2 * NUM_HANDS]

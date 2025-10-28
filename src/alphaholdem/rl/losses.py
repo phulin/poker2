@@ -732,6 +732,7 @@ class RebelSupervisedLoss(nn.Module):
         self.policy_weight = policy_weight
         self.value_weight = value_weight
         self.entropy_coef = entropy_coef
+        self.permutation_weight = permutation_weight
 
     def forward(
         self,
