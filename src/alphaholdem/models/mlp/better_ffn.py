@@ -42,12 +42,14 @@ class BetterFFN(nn.Module, Model):
         ffn_dim: int = 1024,
         num_hidden_layers: int = 4,
         num_players: int = 2,
+        generator: torch.Generator | None = None,
     ) -> None:
         super().__init__()
         self.num_actions = num_actions
         self.hidden_dim = hidden_dim
         self.num_hidden_layers = num_hidden_layers
         self.num_players = num_players
+        self.generator = generator
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
@@ -84,6 +86,9 @@ class BetterFFN(nn.Module, Model):
             ModelOutput with policy logits and value predictions.
         """
 
+        permuted = features.clone()
+        permuted.permute_suits(self.generator)
+
         board = features.board
         ranks = torch.where(board >= 0, board % 13, torch.full_like(board, 13))
         suits = torch.where(board >= 0, board // 13, torch.full_like(board, 4))
@@ -93,6 +98,10 @@ class BetterFFN(nn.Module, Model):
         context_features = self.context_encoder(features.context)
         belief_features = self.belief_encoder(
             features.beliefs.view(-1, self.num_players * NUM_HANDS)
+        )
+
+        permuted_belief_features = self.belief_encoder(
+            permuted.beliefs.view(-1, self.num_players * NUM_HANDS)
         )
 
         # TODO: some kind of positional encoding for board features?
@@ -114,6 +123,9 @@ class BetterFFN(nn.Module, Model):
             policy_logits=policy_logits,
             value=value,
             hand_values=hand_values,
+            encoded_with_permutation=torch.stack(
+                [belief_features, permuted_belief_features], dim=1
+            ),
         )
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:

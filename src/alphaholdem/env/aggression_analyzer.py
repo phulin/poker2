@@ -9,72 +9,16 @@ from functools import lru_cache
 
 import torch
 
-from alphaholdem.env.card_utils import hand_combos_tensor, NUM_HANDS
+from alphaholdem.env.card_utils import (
+    HAND_EQUITY_ORDERING,
+    IDX_TO_RANK,
+    hand_combos_tensor,
+    NUM_HANDS,
+)
 from alphaholdem.rl.rebel_replay import RebelBatch
 
 
-# Rank mapping: A=12, K=11, Q=10, J=9, T=8, 9=7, 8=6, 7=5, 6=4, 5=3, 4=2, 3=1, 2=0
-RANK_TO_IDX = {
-    "A": 12,
-    "K": 11,
-    "Q": 10,
-    "J": 9,
-    "T": 8,
-    "9": 7,
-    "8": 6,
-    "7": 5,
-    "6": 4,
-    "5": 3,
-    "4": 2,
-    "3": 1,
-    "2": 0,
-}
-IDX_TO_RANK = {v: k for k, v in RANK_TO_IDX.items()}
-
-
-def parse_hand_name(hand_name: str) -> tuple[int, int]:
-    """Parse a poker hand name to get card indices.
-
-    Args:
-        hand_name: Like 'AA', 'AKs', 'KQo'
-                   - Pairs: 'AA' means pair of aces (any suits)
-                   - Suited: 'AKs' means AK suited
-                   - Offsuit: 'AKo' means AK offsuit
-
-    Returns:
-        Tuple of (card1, card2) card indices
-    """
-    if len(hand_name) == 2 and hand_name[0] == hand_name[1]:
-        # Pair - use first two suits (0, 1)
-        rank = RANK_TO_IDX[hand_name[0]]
-        return rank, rank + 13
-    elif len(hand_name) >= 3:
-        rank1 = RANK_TO_IDX[hand_name[0]]
-        rank2 = RANK_TO_IDX[hand_name[1]]
-        is_suited = hand_name[2] == "s"
-
-        # Suited hands use same suit, offsuit use different suits
-        if is_suited:
-            return rank1, rank2
-        else:
-            return rank1, rank2 + 13
-    else:
-        raise ValueError(f"Invalid hand name: {hand_name}")
-
-
 NUM_GROUPS = 5
-HAND_EQUITY_ORDERING = (
-    "AA,KK,QQ,JJ,AKs,AQs,TT,AKo,AJs,KQs,99,ATs,AQo,KJs,88,QJs,KTs,AJo,A9s,QTs,"
-    "77,KQo,JTs,A8s,K9s,ATo,A7s,A5s,66,KJo,A4s,Q9s,T9s,J9s,A6s,QJo,55,A3s,KTo,"
-    "K8s,A2s,K7s,T8s,98s,QTo,Q8s,87s,44,A9o,JTo,J8s,76s,K6s,97s,K5s,K4s,T7s,"
-    "Q7s,33,A8o,K9o,J7s,86s,65s,K3s,K2s,Q9o,Q6s,J9o,T9o,54s,22,Q5s,T8o,96s,75s,"
-    "64s,A7o,Q4s,J8o,T7o,98o,97o,K8o,K7o,Q8o,Q3s,J6s,J5s,J4s,T6o,T6s,86o,85o,"
-    "85s,76o,75o,74s,63s,53s,A6o,A5o,A4o,K6o,Q7o,Q2s,J7o,J6o,T5o,T5s,T4o,T3o,"
-    "T2o,96o,95o,95s,94o,93o,92o,87o,84o,83o,82o,74o,73o,72o,65o,64o,63o,62o,"
-    "53o,52o,42o,A3o,K5o,K4o,Q6o,Q5o,Q4o,Q3o,Q2o,J5o,J4o,J3o,J3s,J2o,T4s,T3s,"
-    "84s,54o,43o,43s,K3o,K2o,J2s,T2s,93s,92s,82s,73s,62s,52s,42s,32s,A2o,94s,"
-    "83s,72s,32o"
-).split(",")
 
 
 @lru_cache(maxsize=1)
