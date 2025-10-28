@@ -183,7 +183,7 @@ class RebelCFRTrainer:
             "grad_norm_clipped": grad_norm_clipped,
             "aggression_stats": aggression_analyzer.analyze_batch(policy_batch)[
                 "group_avg_bets"
-            ],
+            ].tolist(),
             "value_batch_street": {
                 "preflop": preflop.float().mean().item(),
                 "flop": flop.float().mean().item(),

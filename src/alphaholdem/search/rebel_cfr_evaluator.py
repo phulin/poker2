@@ -97,6 +97,7 @@ class RebelCFREvaluator:
     reach_weights: torch.Tensor
     reach_weights_avg: torch.Tensor
     cumulative_regrets: torch.Tensor
+    regret_weight_sums: torch.Tensor
     values: torch.Tensor
     values_avg: torch.Tensor
     beliefs: torch.Tensor
@@ -190,6 +191,8 @@ class RebelCFREvaluator:
         self.policy_probs_avg = torch.zeros_like(self.policy_probs)
         # Cumulative regret of taking this node vs the best at the parent node.
         self.cumulative_regrets = torch.zeros_like(self.policy_probs)
+        # Running per-infoset sums of positive regret mass over hands
+        self.regret_weight_sums = torch.zeros_like(self.policy_probs)
 
         # One value per node per player per hand
         self.values = torch.zeros(
@@ -325,6 +328,7 @@ class RebelCFREvaluator:
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
         self.cumulative_regrets.zero_()
+        self.regret_weight_sums.zero_()
         self.values.zero_()
         self.values_avg.zero_()
         self.beliefs.zero_()
@@ -403,6 +407,7 @@ class RebelCFREvaluator:
             self.env.board_onehot.any(dim=1).view(-1, 52).float()
             @ self.combo_onehot_float.T
         ) < 0.5
+        self.allowed_hands.masked_fill_(~self.valid_mask[:, None], 0.0)
         self.allowed_hands_prob[
             :
         ] = self.allowed_hands.float() / self.allowed_hands.sum(
@@ -632,6 +637,7 @@ class RebelCFREvaluator:
             values_achieved=values_br, values_expected=self.values
         )
         self.cumulative_regrets += self.warm_start_iterations * regrets
+        self.regret_weight_sums += self.warm_start_iterations
         self.update_policy(self.warm_start_iterations + 1)
 
     @torch.no_grad()
@@ -1040,6 +1046,8 @@ class RebelCFREvaluator:
                     regrets > 0, (t - 1) ** self.dcfr_alpha, (t - 1) ** self.dcfr_beta
                 )
                 self.cumulative_regrets *= factor / (factor + 1)
+                self.regret_weight_sums *= factor / (factor + 1)
+            self.regret_weight_sums += 1
             self.cumulative_regrets += regrets
 
             old_policy_probs = self.policy_probs.clone()
@@ -1063,11 +1071,9 @@ class RebelCFREvaluator:
                 self.values_avg += weight * self.values
                 self.values_avg /= t - 1 + weight
 
-        self.stats["mean_positive_regret"] = (
-            self.cumulative_regrets.clamp(min=0).mean().item()
-        )
         self._record_action_mix()
         self._record_cfr_entropy()
+        self._record_cumulative_regret()
 
         return next_pbs
 
@@ -1336,6 +1342,24 @@ class RebelCFREvaluator:
         probs = actions[mask]
         entropy = torch.where(probs > 1e-12, -(probs * probs.log()), 0.0)
         self.stats["cfr_entropy"] = entropy.sum(dim=1).mean().item()
+
+    def _record_cumulative_regret(self) -> None:
+        self.stats["mean_positive_regret"] = (
+            self.cumulative_regrets.clamp(min=0).mean().item()
+        )
+
+        N = self.search_batch_size
+
+        # Compute something like the theoretical exploitability bound.
+        regret_quotient = self.cumulative_regrets.clamp(min=0) / self.regret_weight_sums
+        regret_quotient_src = self._pull_back(regret_quotient)[:N]
+        # take max over actions.
+        regret_quotient_max = regret_quotient_src.max(dim=1).values
+        # sum over hands.
+        regret_quotient_sum = regret_quotient_max.sum(dim=1)
+        # take mean over parallelized envs.
+        regret_quotient_mean = regret_quotient_sum.sum() / self.valid_mask[:N].sum()
+        self.stats["mean_regret_bound"] = regret_quotient_mean.item()
 
     def _record_action_mix(self) -> None:
         """Record the action mix of the policy."""

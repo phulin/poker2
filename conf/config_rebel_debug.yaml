@@ -1,0 +1,19 @@
+defaults:
+  - config_rebel_cfr
+  - _self_
+
+num_steps: 100
+num_envs: 4
+
+device: mps
+checkpoint_dir: checkpoints-rebel-debug
+checkpoint_interval: 5
+use_wandb: false
+
+train:
+  batch_size: 11
+
+search:
+  iterations: 20
+  warm_start_iterations: 5
+  dcfr_delay: 10
