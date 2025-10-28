@@ -1100,19 +1100,20 @@ class RebelCFREvaluator:
             "bet_amounts": bin_amounts,
         }
 
-        # Value batch gets root states only.
+        # Value batch gets root states only. These should all be valid.
         value_batch = RebelBatch(
             features=features[:N],
             value_targets=value_targets[:N],
             legal_masks=legal_masks[:N],
             statistics={key: statistics[key][:N] for key in statistics},
         )
-        # Policy batch gets all states.
+        # Policy batch gets all valid, non-leaf states.
+        valid_top = self.valid_mask[:top] & ~self.leaf_mask[:top]
         policy_batch = RebelBatch(
-            features=features,
-            policy_targets=policy_targets,
-            legal_masks=legal_masks[:top],
-            statistics={key: statistics[key][:top] for key in statistics},
+            features=features[valid_top],
+            policy_targets=policy_targets[valid_top],
+            legal_masks=legal_masks[:top][valid_top],
+            statistics={key: statistics[key][:top][valid_top] for key in statistics},
         )
         return value_batch, policy_batch
 

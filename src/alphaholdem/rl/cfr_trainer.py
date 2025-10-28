@@ -201,17 +201,27 @@ class RebelCFRTrainer:
             **self.cfr_evaluator.stats,
         }
 
+    def _get_stratify_streets(self, step: int) -> list[float] | None:
+        for config in self.cfg.train.stratify_streets_until:
+            if step < config.threshold:
+                return config.probabilities
+        return None
+
     @profile
-    def _update_model(self) -> dict[str, float]:
+    def _update_model(self, step: int) -> dict[str, float]:
         self.data_generator.generate_data()
 
         # TODO: think about how to interleave these/ratio in a smarter way.
         # Might need to use different sizes for the two buffers.
         value_batch = self.value_buffer.sample(
-            self.batch_size, generator=self.buffer_rng
+            self.batch_size,
+            stratify_streets=self._get_stratify_streets(step),
+            generator=self.buffer_rng,
         ).to(self.device)
         policy_batch = self.policy_buffer.sample(
-            self.batch_size, generator=self.buffer_rng
+            self.batch_size,
+            stratify_streets=self._get_stratify_streets(step),
+            generator=self.buffer_rng,
         ).to(self.device)
 
         self.model.train()
@@ -246,7 +256,7 @@ class RebelCFRTrainer:
     def train_step(self, step: int) -> dict[str, any]:
         step_public = step + 1
 
-        update_info = self._update_model()
+        update_info = self._update_model(step)
         update_info["step"] = step_public
 
         return update_info

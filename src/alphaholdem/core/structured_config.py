@@ -48,6 +48,12 @@ class CFRType(str, Enum):
 
 
 @dataclass
+class StratifyConfig:
+    threshold: int
+    probabilities: list[float]
+
+
+@dataclass
 class TrainingConfig:
     learning_rate: float = 1e-4
     learning_rate_final: float = 1e-5
@@ -119,6 +125,9 @@ class TrainingConfig:
 
     # ReBeL/DCFR self-play exploration
     cfr_action_epsilon: float = 0.25  # Epsilon for action sampling during self-play
+
+    # Stratify streets until the given step with the given probabilities.
+    stratify_streets_until: list[StratifyConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -242,7 +251,12 @@ class Config:
     @classmethod
     def from_dict_config(cls, dict_config: DictConfig) -> "Config":
         container = OmegaConf.to_container(dict_config, resolve=True)
-        container["train"] = TrainingConfig(**(container.get("train", {})))
+        train_container = container.get("train", {})
+        train_container["stratify_streets_until"] = [
+            StratifyConfig(**config)
+            for config in train_container.get("stratify_streets_until", [])
+        ]
+        container["train"] = TrainingConfig(**train_container)
         container["model"] = ModelConfig(**(container.get("model", {})))
         container["env"] = EnvConfig(**(container.get("env", {})))
         container["exploiter"] = ExploiterConfig(**(container.get("exploiter", {})))

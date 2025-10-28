@@ -137,6 +137,8 @@ class RebelReplayBuffer:
 
         assert (self.policy_targets is None) == (batch.policy_targets is None)
         assert (self.value_targets is None) == (batch.value_targets is None)
+        # We should never train on showdown value.
+        assert (batch.features.street <= 3).all()
 
         batch = batch.to(self.device)
 
@@ -164,15 +166,35 @@ class RebelReplayBuffer:
         self.position = (insert_start + batch_size) % self.capacity
         self.size = min(self.size + batch_size, self.capacity)
 
-    def sample(self, batch_size: int, generator: Optional[torch.Generator] = None):
+    def sample(
+        self,
+        batch_size: int,
+        stratify_streets: list[float] | None = None,
+        generator: Optional[torch.Generator] = None,
+    ):
         """Uniformly sample a minibatch."""
         if self.size == 0:
             raise ValueError("RebelReplayBuffer is empty")
         if batch_size > self.size:
             batch_size = self.size
-        idxs = torch.randint(
-            0, self.size, (batch_size,), generator=generator, device=self.device
-        )
+
+        if stratify_streets is None:
+            idxs = torch.randint(
+                0, self.size, (batch_size,), generator=generator, device=self.device
+            )
+        else:
+            streets = self.features.street[: self.size]
+            stratify_tensor = torch.tensor(stratify_streets, device=self.device)
+            bins = torch.bincount(streets, minlength=4)
+            stratify_tensor[bins == 0] = 0.0
+            stratify_tensor /= stratify_tensor.sum()
+
+            probs = stratify_tensor / bins
+            all_probs = probs[streets]
+            idxs = torch.multinomial(
+                all_probs, batch_size, generator=generator, replacement=True
+            )
+
         return RebelBatch(
             features=self.features[idxs],
             policy_targets=(

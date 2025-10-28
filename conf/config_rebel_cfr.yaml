@@ -22,6 +22,14 @@ train:
   entropy_coef: 0.0
   grad_clip: 1.0
 
+  stratify_streets_until:
+    - threshold: 2000
+      probabilities: [0.05, 0.05, 0.15, 0.75]
+    - threshold: 4000
+      probabilities: [0.15, 0.15, 0.30, 0.40]
+    - threshold: 6000
+      probabilities: [0.25, 0.25, 0.25, 0.25]
+
 model:
   name: BetterFFN
   hidden_dim: 512
