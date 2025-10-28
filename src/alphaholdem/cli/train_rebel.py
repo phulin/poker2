@@ -16,9 +16,9 @@ from dataclasses import asdict
 from typing import Any, Dict
 
 import hydra
-from omegaconf import DictConfig
 import torch
 import wandb
+from omegaconf import DictConfig
 
 from alphaholdem.core.structured_config import Config
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer

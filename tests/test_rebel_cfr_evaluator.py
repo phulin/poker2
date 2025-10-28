@@ -15,7 +15,6 @@ from alphaholdem.env.card_utils import (
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.search.rebel_cfr_evaluator import (
     NUM_HANDS,

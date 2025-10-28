@@ -51,9 +51,10 @@ def train_rebel_modal(cfg: DictConfig):
     Args:
         config: Config object
     """
-    import torch
-    import sys
     import os
+    import sys
+
+    import torch
 
     # Add src to Python path
     sys.path.insert(0, "/src")

@@ -12,8 +12,8 @@ from alphaholdem.env.card_utils import (
     mask_conflicting_combos,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
+from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )

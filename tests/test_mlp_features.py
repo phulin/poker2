@@ -7,7 +7,6 @@ from alphaholdem.env.card_utils import (
     hand_combos_tensor,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 
 

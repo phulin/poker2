@@ -8,8 +8,6 @@ which components are taking up the most space.
 
 import argparse
 import os
-import sys
-from collections import defaultdict
 
 import torch
 

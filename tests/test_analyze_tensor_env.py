@@ -9,7 +9,7 @@ from alphaholdem.env.analyze_tensor_env import (
     PreflopAnalyzer,
     RebelPreflopAnalyzer,
 )
-from alphaholdem.env.card_utils import hand_combos_tensor, NUM_HANDS
+from alphaholdem.env.card_utils import hand_combos_tensor
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.model_output import ModelOutput

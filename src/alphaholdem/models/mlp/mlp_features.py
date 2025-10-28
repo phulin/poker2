@@ -1,10 +1,11 @@
-import torch
 from dataclasses import dataclass
 
+import torch
+
 from alphaholdem.env.card_utils import (
+    NUM_HANDS,
     combo_lookup_tensor,
     hand_combos_tensor,
-    NUM_HANDS,
 )
 
 

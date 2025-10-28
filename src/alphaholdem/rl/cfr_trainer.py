@@ -8,9 +8,9 @@ import torch.nn as nn
 from alphaholdem.core.structured_config import Config, ModelType
 from alphaholdem.env.aggression_analyzer import aggression_analyzer
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator

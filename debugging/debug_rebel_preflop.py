@@ -27,7 +27,7 @@ Usage:
 import argparse
 import os
 import sys
-from typing import Optional, List, Tuple
+from typing import List, Tuple
 
 import torch
 
@@ -42,13 +42,11 @@ from alphaholdem.core.structured_config import (
     SearchConfig,
     TrainingConfig,
 )
-from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
-from alphaholdem.utils.training_utils import print_preflop_range_grid
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.types import GameState, PlayerState
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.utils.model_utils import get_probs_and_values
-from alphaholdem.encoding.action_mapping import get_legal_mask
+from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
+from alphaholdem.utils.training_utils import print_preflop_range_grid
 
 
 def create_default_config() -> Config:

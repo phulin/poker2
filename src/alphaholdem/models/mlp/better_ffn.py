@@ -4,10 +4,10 @@ import torch
 import torch.nn as nn
 
 from alphaholdem.core.interfaces import Model
+from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput
-from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.utils.profiling import profile
 
 

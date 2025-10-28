@@ -16,7 +16,7 @@ from alphaholdem.core.structured_config import CFRType, Config
 from alphaholdem.env.card_utils import hand_combos_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp import RebelFFN
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator, NUM_HANDS
+from alphaholdem.search.rebel_cfr_evaluator import NUM_HANDS, RebelCFREvaluator
 
 
 def card_to_string(card_idx: int) -> str:

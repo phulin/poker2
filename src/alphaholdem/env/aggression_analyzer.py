@@ -12,11 +12,10 @@ import torch
 from alphaholdem.env.card_utils import (
     HAND_EQUITY_ORDERING,
     IDX_TO_RANK,
-    hand_combos_tensor,
     NUM_HANDS,
+    hand_combos_tensor,
 )
 from alphaholdem.rl.rebel_replay import RebelBatch
-
 
 NUM_GROUPS = 5
 

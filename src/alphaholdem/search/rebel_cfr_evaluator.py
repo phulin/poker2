@@ -7,17 +7,17 @@ from typing import Generator, Optional
 import torch
 import torch.nn.functional as F
 
-from alphaholdem.core.structured_config import CFRType, ModelType
+from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
+    NUM_HANDS,
     combo_to_onehot_tensor,
     hand_combos_tensor,
-    NUM_HANDS,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.utils.model_utils import compute_masked_logits
