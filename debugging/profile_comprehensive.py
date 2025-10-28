@@ -60,7 +60,15 @@ class MockModel:
 
 def comprehensive_profiling():
     """Run comprehensive profiling of all key CFR methods."""
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = (
+        torch.device("cuda")
+        if torch.cuda.is_available()
+        else (
+            torch.device("mps")
+            if torch.backends.mps.is_available()
+            else torch.device("cpu")
+        )
+    )
     float_dtype = torch.float32
 
     print(f"Using device: {device}")
@@ -68,7 +76,7 @@ def comprehensive_profiling():
 
     # Create environment
     env_proto = HUNLTensorEnv(
-        num_envs=1,
+        num_envs=5,
         starting_stack=1000,
         sb=5,
         bb=10,
@@ -81,19 +89,19 @@ def comprehensive_profiling():
     bet_bins = env_proto.default_bet_bins
     model = MockModel(
         logits=torch.zeros(len(bet_bins) + 3, dtype=float_dtype),
-        hand_values=torch.zeros(1, 2, NUM_HANDS, dtype=float_dtype),
+        hand_values=torch.zeros(5, 2, NUM_HANDS, dtype=float_dtype),
         device=device,
         dtype=float_dtype,
     )
 
     # Create evaluator
     evaluator = RebelCFREvaluator(
-        search_batch_size=1,
+        search_batch_size=5,
         env_proto=env_proto,
         model=model,
         bet_bins=bet_bins,
         max_depth=2,
-        cfr_iterations=50,
+        cfr_iterations=150,
         device=device,
         float_dtype=float_dtype,
     )

@@ -90,6 +90,7 @@ class RebelCFREvaluator:
     env: HUNLTensorEnv
     valid_mask: torch.Tensor
     leaf_mask: torch.Tensor
+    prev_actor: torch.Tensor
     allowed_hands: torch.Tensor
     allowed_hands_prob: torch.Tensor
     policy_probs: torch.Tensor
@@ -158,32 +159,26 @@ class RebelCFREvaluator:
             nodes_at_depth *= self.num_actions
         self.total_nodes = self.depth_offsets[-1]
 
+        N, M = self.search_batch_size, self.total_nodes
+
         # Subgame environment
         self.env = HUNLTensorEnv.from_proto(
             env_proto,
-            num_envs=self.total_nodes,
+            num_envs=M,
         )
-        self.valid_mask = torch.zeros(
-            self.total_nodes, dtype=torch.bool, device=self.device
-        )
+        self.valid_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
         # If finished, don't continue searching below this node.
         # Different from env.done, which is set when the node is terminal.
         # Should be a subset of valid_mask.
-        self.leaf_mask = torch.zeros(
-            self.total_nodes, dtype=torch.bool, device=self.device
-        )
+        self.leaf_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
 
         # Set in construct_subgame and not updated.
-        self.folded_mask = torch.zeros(
-            self.total_nodes, dtype=torch.bool, device=self.device
-        )
-        self.folded_rewards = torch.zeros(
-            self.total_nodes, dtype=self.float_dtype, device=self.device
-        )
+        self.folded_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
+        self.folded_rewards = torch.zeros(M, dtype=self.float_dtype, device=self.device)
 
         # Notionally, at its parent, what is the probability of acting to get to this node?
         self.policy_probs = torch.zeros(
-            self.total_nodes,
+            M,
             NUM_HANDS,
             device=self.device,
             dtype=self.float_dtype,
@@ -196,7 +191,7 @@ class RebelCFREvaluator:
 
         # One value per node per player per hand
         self.values = torch.zeros(
-            self.total_nodes,
+            M,
             self.num_players,
             NUM_HANDS,
             device=self.device,
@@ -207,7 +202,7 @@ class RebelCFREvaluator:
         # NB: beliefs[k, 0] is the belief ABOUT the acting player.
         # Not the belief OF the acting player.
         self.beliefs = torch.zeros(
-            self.total_nodes,
+            M,
             self.num_players,
             NUM_HANDS,
             device=self.device,
@@ -219,12 +214,18 @@ class RebelCFREvaluator:
 
         self.legal_mask = None
 
+        # Invalid for [0, N) because we don't know the previous actor.
+        self.prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
+
         self.combo_onehot_float = combo_to_onehot_tensor(device=self.device).float()
+        if self.device.type == "cuda":
+            self.combo_onehot_float = self.combo_onehot_float.to_sparse_csr()
+
         self.allowed_hands = torch.zeros(
-            self.total_nodes, NUM_HANDS, device=self.device, dtype=torch.bool
+            M, NUM_HANDS, device=self.device, dtype=torch.bool
         )
         self.allowed_hands_prob = torch.zeros(
-            self.total_nodes, NUM_HANDS, device=self.device, dtype=self.float_dtype
+            M, NUM_HANDS, device=self.device, dtype=self.float_dtype
         )
 
         # Feature encoder for belief computation
@@ -329,6 +330,9 @@ class RebelCFREvaluator:
         self.policy_probs_avg.zero_()
         self.cumulative_regrets.zero_()
         self.regret_weight_sums.zero_()
+        self.allowed_hands.zero_()
+        self.allowed_hands_prob.zero_()
+        self.prev_actor.zero_()
         self.values.zero_()
         self.values_avg.zero_()
         self.beliefs.zero_()
@@ -404,9 +408,9 @@ class RebelCFREvaluator:
         self.leaf_mask[leaf_start:leaf_end] = self.valid_mask[leaf_start:leaf_end]
 
         self.allowed_hands[:] = (
-            self.env.board_onehot.any(dim=1).view(-1, 52).float()
-            @ self.combo_onehot_float.T
-        ) < 0.5
+            self.combo_onehot_float
+            @ self.env.board_onehot.any(dim=1).view(-1, 52).float().T
+        ).T < 0.5
         self.allowed_hands.masked_fill_(~self.valid_mask[:, None], 0.0)
         self.allowed_hands_prob[
             :
@@ -415,6 +419,7 @@ class RebelCFREvaluator:
         ).clamp(
             min=1
         )
+        self.prev_actor[N:] = self._fan_out(self.env.to_act)
 
         self.legal_mask = self.env.legal_bins_mask()
         valid_legal_masks = self.legal_mask[self.valid_mask & ~self.leaf_mask]
@@ -448,10 +453,6 @@ class RebelCFREvaluator:
         reach_weights = torch.zeros(M, 2, NUM_HANDS, device=self.device)
         reach_weights[:N] = 1.0
 
-        # Invalid for [0, N) because we don't know the previous actor.
-        prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
-        prev_actor[N:] = self._fan_out(self.env.to_act)
-
         for depth in range(self.max_depth):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
@@ -461,7 +462,7 @@ class RebelCFREvaluator:
             weights_dest = self._fan_out(weights_src, sliced=True)
 
             indices = torch.arange(offset_next_next - offset_next, device=self.device)
-            prev_actor_dest = prev_actor[offset_next:offset_next_next]
+            prev_actor_dest = self.prev_actor[offset_next:offset_next_next]
             weights_dest[indices, prev_actor_dest] *= policy[
                 offset_next:offset_next_next
             ]
@@ -471,6 +472,7 @@ class RebelCFREvaluator:
         return reach_weights
 
     def _initialize_with_copy(self, target: torch.Tensor | None = None) -> torch.Tensor:
+        """Initialize the non-root nodes of the tree with a copy of the root nodes."""
         N, M = self.search_batch_size, self.total_nodes
         factor = M // N - 1
         target[N:] = (
@@ -488,17 +490,12 @@ class RebelCFREvaluator:
     ) -> torch.Tensor:
         """Propagate beliefs from all valid nodes to all valid nodes."""
 
-        N, M = self.search_batch_size, self.total_nodes
-
         if target is None:
             target = self.beliefs
         if source is None:
             source = self.policy_probs
         if reach_weights is None:
             reach_weights = self.reach_weights
-
-        prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
-        prev_actor[N:] = self._fan_out(self.env.to_act)
 
         self._initialize_with_copy(target)
         target *= reach_weights
@@ -518,16 +515,13 @@ class RebelCFREvaluator:
         offset_next = self.depth_offsets[depth + 1]
         offset_next_next = self.depth_offsets[depth + 2]
 
-        prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
-        prev_actor[N:] = self._fan_out(self.env.to_act)
-
         probs = self.policy_probs[offset_next:offset_next_next]
         self.beliefs[offset_next:offset_next_next] = self._fan_out(
             self.beliefs[offset:offset_next], sliced=True
         )
 
         indices = torch.arange(offset_next, offset_next_next, device=self.device)
-        self.beliefs[indices, prev_actor[offset_next:offset_next_next]] *= probs
+        self.beliefs[indices, self.prev_actor[offset_next:offset_next_next]] *= probs
 
     @profile
     def _block_beliefs(self, target: torch.Tensor | None = None) -> torch.Tensor:
@@ -693,7 +687,7 @@ class RebelCFREvaluator:
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
 
-            former_actor = self._fan_out(self.env.to_act[offset:offset_next])
+            former_actor = self.prev_actor[offset_next:offset_next_next]
             dest_indices = torch.arange(
                 offset_next_next - offset_next, device=self.device
             )
@@ -741,9 +735,6 @@ class RebelCFREvaluator:
 
         regrets = torch.zeros_like(self.policy_probs)
 
-        actor_dest = torch.zeros(M, dtype=torch.long, device=self.device)
-        actor_dest[bottom:] = self._fan_out(self.env.to_act)
-
         src_actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
         src_actor_indices_fanout = self._fan_out(self.env.to_act)[:, None, None].expand(
             -1, -1, NUM_HANDS
@@ -769,9 +760,10 @@ class RebelCFREvaluator:
         # => compatible = ~blocking = (1 - blocking)
         # => the below weight computation is equivalent to opp_beliefs @ compatible
         combo_onehot = self.combo_onehot_float
+        multiply = combo_onehot @ (combo_onehot.T @ src_opp_beliefs_fanout.T)
         weights = (
             src_opp_beliefs_fanout.sum(dim=-1, keepdim=True)
-            - src_opp_beliefs_fanout @ combo_onehot @ combo_onehot.T
+            - multiply.T
             + src_opp_beliefs_fanout
         )
         regrets[bottom:] = weights * advantages

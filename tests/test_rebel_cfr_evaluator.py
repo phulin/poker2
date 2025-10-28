@@ -24,13 +24,25 @@ from alphaholdem.search.rebel_cfr_evaluator import (
 from alphaholdem.utils.model_utils import compute_masked_logits
 
 
-def make_env(num_envs: int = 4) -> HUNLTensorEnv:
+def get_device() -> torch.device:
+    return (
+        torch.device("cuda")
+        if torch.cuda.is_available()
+        else (
+            torch.device("mps")
+            if torch.backends.mps.is_available()
+            else torch.device("cpu")
+        )
+    )
+
+
+def make_env(num_envs: int = 4, device: torch.device = None) -> HUNLTensorEnv:
     env = HUNLTensorEnv(
         num_envs=num_envs,
         starting_stack=1000,
         sb=5,
         bb=10,
-        device=torch.device("cpu"),
+        device=device,
         float_dtype=torch.float32,
         flop_showdown=False,
     )
@@ -120,12 +132,14 @@ def make_evaluator(
     max_depth: int = 2,
     bet_bins: list[float] | None = None,
     cfr_iterations: int = 4,
+    device: torch.device = torch.device("cpu"),
 ) -> tuple[RebelCFREvaluator, HUNLTensorEnv]:
-    env = make_env(batch_size)
+    env = make_env(batch_size, device=device)
     bet_bins = bet_bins or env.default_bet_bins
     model = MockModel(
         logits=torch.zeros(len(bet_bins) + 3, dtype=env.float_dtype),
         hand_values=torch.zeros(1, 2, NUM_HANDS, dtype=env.float_dtype),
+        device=device,
     )
     evaluator = RebelCFREvaluator(
         search_batch_size=batch_size,
@@ -685,7 +699,7 @@ def test_sample_leaf_handles_partial_masks() -> None:
 
 
 def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    evaluator, env = make_evaluator(batch_size=1, max_depth=2)
+    evaluator, env = make_evaluator(batch_size=1, max_depth=2, device=get_device())
     roots = torch.arange(evaluator.search_batch_size, device=env.device)
     evaluator.initialize_search(env, roots)
     evaluator.construct_subgame()
@@ -712,11 +726,17 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
     evaluator.valid_mask[child_indices] = True
     evaluator.leaf_mask[:] = True
     evaluator.leaf_mask[root_index] = False
+    evaluator.allowed_hands[root_index] = True
+    evaluator.allowed_hands_prob[root_index] = 1.0 / NUM_HANDS
+    evaluator.allowed_hands[child_indices] = True
+    evaluator.allowed_hands_prob[child_indices] = 1.0 / NUM_HANDS
 
     evaluator.env.to_act[root_index] = 0
     evaluator.env.to_act[child_indices] = 1
 
-    uniform = torch.full((NUM_HANDS,), 1.0 / NUM_HANDS, dtype=env.float_dtype)
+    uniform = torch.full(
+        (NUM_HANDS,), 1.0 / NUM_HANDS, dtype=env.float_dtype, device=env.device
+    )
     evaluator.beliefs[:] = uniform[None, None, :]
 
     evaluator.policy_probs[:] = 1.0 / num_actions
@@ -732,7 +752,7 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
     evaluator.update_policy(1)
 
     root_policy = evaluator.policy_probs[1 : num_actions + 1, 0]
-    expected = torch.zeros(num_actions, dtype=env.float_dtype)
+    expected = torch.zeros(num_actions, dtype=env.float_dtype, device=env.device)
     expected[0] = 1.0
     torch.testing.assert_close(root_policy, expected)
 

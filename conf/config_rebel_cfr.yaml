@@ -37,6 +37,7 @@ model:
   ffn_dim: 1024
   num_hidden_layers: 4
   detach_value_head: false
+  compile: true
 
 env:
   stack: 1000
