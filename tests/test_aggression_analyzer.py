@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.env.aggression_analyzer import AggressionAnalyzer
-from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.env.aggression_analyzer import (
+    AggressionAnalyzer,
     build_hand_to_group_mapping,
     hand_combos_tensor,
     IDX_TO_RANK,
 )
+from alphaholdem.env.card_utils import NUM_HANDS
 
 
 def test_aggression_analyzer_singleton() -> None:

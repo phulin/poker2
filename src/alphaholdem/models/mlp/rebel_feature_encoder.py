@@ -7,10 +7,10 @@ import torch
 from alphaholdem.env.card_utils import (
     combo_lookup_tensor,
     hand_combos_tensor,
+    NUM_HANDS,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 from alphaholdem.utils.profiling import profile
 
 

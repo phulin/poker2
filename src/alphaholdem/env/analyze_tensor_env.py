@@ -8,12 +8,16 @@ from typing import Dict, List, Tuple, Union
 
 import torch
 
-from alphaholdem.env.card_utils import combo_lookup_tensor, hand_combos_tensor
+from alphaholdem.env.card_utils import (
+    combo_lookup_tensor,
+    hand_combos_tensor,
+    NUM_HANDS,
+)
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
 from alphaholdem.models.cnn.state_encoder import CNNStateEncoder
-from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS, RebelFFN
+from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.search.rebel_cfr_evaluator import (

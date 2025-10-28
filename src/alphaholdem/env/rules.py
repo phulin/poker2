@@ -6,8 +6,7 @@ from typing import List
 
 import torch
 
-from alphaholdem.env.card_utils import hand_combos_tensor
-from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
+from alphaholdem.env.card_utils import hand_combos_tensor, NUM_HANDS
 
 # Card encoding: 0..51, rank = c % 13 (2..A), suit = c // 13 (0..3)
 

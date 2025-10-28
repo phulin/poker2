@@ -11,13 +11,14 @@ from alphaholdem.core.structured_config import CFRType, ModelType
 from alphaholdem.env.card_utils import (
     combo_to_onehot_tensor,
     hand_combos_tensor,
+    NUM_HANDS,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.env.rules import rank_hands
-from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS, RebelFFN
+from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.utils.model_utils import compute_masked_logits
 from alphaholdem.utils.profiling import profile

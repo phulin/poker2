@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
+from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.better_features import (
     PlayerContext,
     ScalarContext,
 )
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 
 
 class BetterFeatureEncoder:

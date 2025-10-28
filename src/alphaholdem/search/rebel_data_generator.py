@@ -1,7 +1,7 @@
 import torch
 
+from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 from alphaholdem.rl.rebel_replay import RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState, RebelCFREvaluator
 from alphaholdem.utils.profiling import profile

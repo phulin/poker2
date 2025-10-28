@@ -181,7 +181,9 @@ class RebelCFRTrainer:
             "value_buffer_size": len(self.value_buffer),
             "policy_buffer_size": len(self.policy_buffer),
             "grad_norm_clipped": grad_norm_clipped,
-            "aggression_stats": aggression_analyzer.analyze_batch(policy_batch),
+            "aggression_stats": aggression_analyzer.analyze_batch(policy_batch)[
+                "group_avg_bets"
+            ],
             "value_batch_street": {
                 "preflop": preflop.float().mean().item(),
                 "flop": flop.float().mean().item(),

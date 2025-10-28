@@ -4,6 +4,8 @@ from functools import lru_cache
 
 import torch
 
+NUM_HANDS = 1326
+
 
 @lru_cache(maxsize=1)
 def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:

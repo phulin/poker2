@@ -5,17 +5,14 @@ import tempfile
 import torch
 
 from alphaholdem.core.structured_config import Config, ValueHeadType
+from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
-from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
-from alphaholdem.search.rebel_data_generator import NUM_HANDS
 
 
 def make_env(num_envs: int = 4) -> HUNLTensorEnv:

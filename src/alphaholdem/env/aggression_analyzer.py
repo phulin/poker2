@@ -9,8 +9,7 @@ from functools import lru_cache
 
 import torch
 
-from alphaholdem.env.card_utils import hand_combos_tensor
-from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
+from alphaholdem.env.card_utils import hand_combos_tensor, NUM_HANDS
 from alphaholdem.rl.rebel_replay import RebelBatch
 
 
@@ -215,9 +214,7 @@ class AggressionAnalyzer:
 
             # Average bet amount per group
             group_avg_bets = torch.where(
-                group_counts > 0,
-                group_bet_sums / group_counts.float(),
-                torch.zeros(num_groups, device=bet_amounts.device),
+                group_counts > 0, group_bet_sums / group_counts.float(), 0.0
             )
 
             return {

@@ -5,8 +5,8 @@ from typing import Optional
 
 import torch
 
+from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.mlp.rebel_ffn import NUM_HANDS
 
 
 @dataclass
