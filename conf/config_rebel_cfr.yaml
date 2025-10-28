@@ -47,7 +47,7 @@ env:
 search:
   enabled: true
   depth: 3
-  iterations: 500
+  iterations: 250
   warm_start_iterations: 15
   belief_samples: 16
   dcfr_alpha: 1.5
