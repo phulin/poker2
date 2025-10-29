@@ -17,14 +17,15 @@ wandb_tags: ["rebel", "cfr"]
 train:
   learning_rate: 3e-4
   batch_size: 1024
-  replay_buffer_batches: 8
+  replay_buffer_batches: 16
+  value_reuse_goal: 8
   value_coef: 1.0
   entropy_coef: 0.0
   grad_clip: 1.0
 
   stratify_streets_until:
     - threshold: 2000
-      probabilities: [0.02, 0.02, 0.06, 0.90]
+      probabilities: [0.03, 0.03, 0.09, 0.85]
     - threshold: 4000
       probabilities: [0.05, 0.05, 0.15, 0.75]
     - threshold: 6000
@@ -50,13 +51,14 @@ env:
 search:
   enabled: true
   depth: 3
+
+  cfr_type: discounted
+  cfr_avg: true
+
   iterations: 100
   warm_start_iterations: 15
-  belief_samples: 16
+  dcfr_delay: 35
+
   dcfr_alpha: 1.5
   dcfr_beta: 0.0
   dcfr_gamma: 2.0
-  dcfr_delay: 50
-  include_average_policy: true
-  cfr_type: discounted
-  cfr_avg: true

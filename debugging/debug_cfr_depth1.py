@@ -23,7 +23,6 @@ Usage:
 import argparse
 import os
 import random
-from typing import List, Union
 
 import torch
 
@@ -61,7 +60,7 @@ def action_to_string(action_idx: int, bet_bins: list[float]) -> str:
 
 def load_model_from_checkpoint(
     checkpoint_path: str, config: Config, device: torch.device
-) -> Union[RebelFFN, BetterFFN]:
+) -> RebelFFN | BetterFFN:
     """Load a model from checkpoint using RebelCFRTrainer."""
     print(f"Loading model from {checkpoint_path}")
 
@@ -143,7 +142,7 @@ def create_river_state(
     bb_amount: int = 10,
     starting_stack: int = 1000,
     button: int = 0,
-    seed: int = 42,
+    seed: int | None = None,
 ) -> GameState:
     """Create a river GameState with reasonable betting history.
 
@@ -165,7 +164,9 @@ def create_river_state(
     """
     # Create a deck
     deck = list(range(52))
-    random.seed(seed)
+
+    if seed is not None:
+        random.seed(seed)
     random.shuffle(deck)
 
     # Deal board cards (5 cards for river)
@@ -272,7 +273,7 @@ def create_default_config() -> Config:
     config.search.dcfr_alpha = 1.5
     config.search.dcfr_beta = 0.0
     config.search.dcfr_gamma = 2.0
-    config.search.dcfr_delay = 0
+    config.search.dcfr_delay = 150
     config.search.include_average_policy = True
     config.search.cfr_type = CFRType.linear
     config.search.cfr_avg = True
@@ -345,7 +346,8 @@ def debug_cfr_depth1(
     checkpoint_path: str | None = None,
     cfr_type_str: str = "linear",
     river_mode: bool = False,
-    river_seed: int = 42,
+    river_seed: int | None = None,
+    iterations: int | None = None,
 ) -> None:
     """Main debugging function."""
     print("=== ReBeL CFR Depth-1 Debugger ===")
@@ -360,7 +362,7 @@ def debug_cfr_depth1(
         dcfr_delay = 0
     elif cfr_type_str == "discounted":
         cfr_type = CFRType.discounted
-        dcfr_delay = 50
+        dcfr_delay = 150
     else:
         raise ValueError(f"Unknown CFR type: {cfr_type_str}")
 
@@ -371,6 +373,12 @@ def debug_cfr_depth1(
     # Create configuration
     config = create_default_config()
     config.search.cfr_type = cfr_type
+    config.seed = random.randint(0, 1000000) if river_seed is None else river_seed
+    if iterations is not None:
+        # Ensure warm_start < iterations
+        config.search.iterations = iterations
+        if config.search.warm_start_iterations >= config.search.iterations:
+            config.search.warm_start_iterations = max(0, config.search.iterations - 1)
     device = torch.device(config.device)
 
     print(f"Using device: {device}")
@@ -556,6 +564,16 @@ def debug_cfr_depth1(
         evaluator.values_avg += new * evaluator.latest_values
         evaluator.values_avg /= old + new
 
+        # Compute and display exploitability after updating averages
+        exploit_stats = evaluator._compute_exploitability()
+        if exploit_stats.local_exploitability.numel() > 0:
+            total_expl = exploit_stats.local_exploitability.mean().item()
+            imp_p0 = exploit_stats.local_br_improvement[:, 0].mean().item()
+            imp_p1 = exploit_stats.local_br_improvement[:, 1].mean().item()
+            print(
+                f"Exploitability (avg best-response improv): total={total_expl:.6f} | P0={imp_p0:.6f}, P1={imp_p1:.6f}"
+            )
+
     print(f"\n{'='*80}")
     print("Debug Complete!")
     print(f"{'='*80}")
@@ -586,8 +604,14 @@ def main():
     parser.add_argument(
         "--river-seed",
         type=int,
-        default=42,
+        default=None,
         help="Random seed for river state deck shuffling (default: 42)",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=None,
+        help="Number of CFR iterations to run (overrides default)",
     )
 
     args = parser.parse_args()
@@ -597,6 +621,7 @@ def main():
         cfr_type_str=args.cfr_type,
         river_mode=args.river,
         river_seed=args.river_seed,
+        iterations=args.iterations,
     )
 
 

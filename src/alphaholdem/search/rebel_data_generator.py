@@ -36,25 +36,27 @@ class RebelDataGenerator:
         pbs.env.reset()
         return pbs
 
-    def _extend_pbs(self, pbs: PublicBeliefState) -> PublicBeliefState:
+    def _extend_pbs(
+        self, pbs: PublicBeliefState, desired_size: int
+    ) -> PublicBeliefState:
         current_size = pbs.env.N
         indices = torch.arange(current_size, device=self.device)
-        new_pbs = self._new_pbs(self.evaluator.search_batch_size)
+        new_pbs = self._new_pbs(desired_size)
         new_pbs.env.copy_state_from(pbs.env, indices, indices)
         new_pbs.beliefs[:current_size] = pbs.beliefs
         return new_pbs
 
     @profile
-    def generate_data(self) -> None:
-        batch_size = self.evaluator.search_batch_size
-        root_indices = torch.arange(batch_size, device=self.device)
+    def generate_data(self, value_sample_count: int) -> None:
+        N = self.evaluator.search_batch_size
+        root_indices = torch.arange(N, device=self.device)
         collected = 0
 
-        while collected < batch_size:
+        while collected < value_sample_count:
             if self.current_pbs is None:
-                self.current_pbs = self._new_pbs(batch_size)
-            elif self.current_pbs.env.N < batch_size:
-                self.current_pbs = self._extend_pbs(self.current_pbs)
+                self.current_pbs = self._new_pbs(N)
+            elif self.current_pbs.env.N < N:
+                self.current_pbs = self._extend_pbs(self.current_pbs, N)
 
             self.evaluator.initialize_search(
                 self.current_pbs.env,

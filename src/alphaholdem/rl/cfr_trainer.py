@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 
 import torch
@@ -30,7 +31,6 @@ class RebelCFRTrainer:
         self.bet_bins = cfg.env.bet_bins
         self.num_bet_bins = len(self.bet_bins) + 3
         self.batch_size = cfg.train.batch_size
-        self.replay_capacity = self.batch_size * max(1, cfg.train.replay_buffer_batches)
         self.buffer_device = torch.device("cpu")
         self.buffer_rng = torch.Generator(device=self.buffer_device)
         if cfg.seed is not None:
@@ -90,9 +90,18 @@ class RebelCFRTrainer:
         if self.device.type == "cuda" and cfg.model.compile:
             self.model.compile()
 
+        # data generation rate per training step
+        self.K_value = self.batch_size // self.cfg.train.value_reuse_goal
+        # approximate number of policy samples when collecting K_value value samples
+        self.K_policy = self.K_value * (self.num_actions // 2) ** self.cfg.search.depth
+
+        C_over_K = self.cfg.train.replay_buffer_batches
+        value_capacity = C_over_K * self.K_value
+        policy_capacity = C_over_K * self.K_policy
+
         # Replay buffers
         self.value_buffer = RebelReplayBuffer(
-            capacity=self.replay_capacity,
+            capacity=value_capacity,
             num_actions=self.num_actions,
             num_players=self.num_players,
             num_context_features=num_context_features,
@@ -101,7 +110,7 @@ class RebelCFRTrainer:
         )
         # Larger policy buffer since we store more samples there
         self.policy_buffer = RebelReplayBuffer(
-            capacity=self.replay_capacity * self.num_actions,
+            capacity=policy_capacity,
             num_actions=self.num_actions,
             num_players=self.num_players,
             num_context_features=num_context_features,
@@ -162,6 +171,7 @@ class RebelCFRTrainer:
         value_loss_all: torch.Tensor,
         policy_loss: float,
         entropy_loss: float,
+        permutation_loss: float,
     ) -> dict[str, float]:
         grad_norm_clipped = torch.nn.utils.get_total_norm(
             p.grad for p in self.model.parameters()
@@ -173,20 +183,39 @@ class RebelCFRTrainer:
         river = value_batch.statistics["street"] == 3
         showdown = value_batch.statistics["street"] == 4
 
+        def by_street(tensor: torch.Tensor) -> dict[str, float]:
+            result = {
+                "preflop": tensor[preflop].mean().item(),
+                "flop": tensor[flop].mean().item(),
+                "turn": tensor[turn].mean().item(),
+                "river": tensor[river].mean().item(),
+                "showdown": tensor[showdown].mean().item(),
+            }
+            return {k: v for k, v in result.items() if not math.isnan(v)}
+
         return {
             "loss": self.cfg.train.value_coef * value_loss + policy_loss,
             "policy_loss": policy_loss,
             "value_loss": value_loss,
             "entropy_loss": entropy_loss,
+            "permutation_loss": permutation_loss,
             "value_buffer_size": len(self.value_buffer),
             "policy_buffer_size": len(self.policy_buffer),
             "grad_norm_clipped": grad_norm_clipped,
             "local_exploitability": value_batch.statistics["local_exploitability"]
             .mean()
             .item(),
-            "aggression_stats": aggression_analyzer.analyze_batch(policy_batch)[
-                "group_avg_bets"
-            ].tolist(),
+            "local_exploitability_street": by_street(
+                value_batch.statistics["local_exploitability"]
+            ),
+            "aggression_stats": {
+                f"chunk_{i}": v
+                for i, v in enumerate(
+                    aggression_analyzer.analyze_batch(policy_batch)[
+                        "group_avg_bets"
+                    ].tolist()
+                )
+            },
             "value_batch_street": {
                 "preflop": preflop.float().mean().item(),
                 "flop": flop.float().mean().item(),
@@ -194,13 +223,7 @@ class RebelCFRTrainer:
                 "river": river.float().mean().item(),
                 "showdown": showdown.float().mean().item(),
             },
-            "value_loss_street": {
-                "preflop": value_loss_all[preflop].mean().item(),
-                "flop": value_loss_all[flop].mean().item(),
-                "turn": value_loss_all[turn].mean().item(),
-                "river": value_loss_all[river].mean().item(),
-                "showdown": value_loss_all[showdown].mean().item(),
-            },
+            "value_loss_street": by_street(value_loss_all),
             **self.cfr_evaluator.stats,
         }
 
@@ -212,7 +235,7 @@ class RebelCFRTrainer:
 
     @profile
     def _update_model(self, step: int) -> dict[str, float]:
-        self.data_generator.generate_data()
+        self.data_generator.generate_data(self.K_value)
 
         # TODO: think about how to interleave these/ratio in a smarter way.
         # Might need to use different sizes for the two buffers.
@@ -231,10 +254,12 @@ class RebelCFRTrainer:
         self.optimizer.zero_grad()
 
         value_loss, policy_loss = None, None
+        permutation_loss = 0.0
         for batch in [value_batch, policy_batch]:
             output = self.model(batch.features)
             loss_dict = self.loss_fn(output, batch)
             loss = loss_dict["total_loss"]
+            permutation_loss += loss_dict["permutation_loss"]
             if batch is value_batch:
                 value_loss = loss_dict["value_loss"]
                 value_loss_all = loss_dict["value_loss_all"]
@@ -254,6 +279,7 @@ class RebelCFRTrainer:
             value_loss_all,
             policy_loss,
             entropy_loss,
+            permutation_loss,
         )
 
     def train_step(self, step: int) -> dict[str, any]:

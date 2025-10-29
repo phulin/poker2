@@ -135,6 +135,15 @@ def train_rebel(cfg: Config) -> None:
 
     with run_cm as run:
         trainer = RebelCFRTrainer(cfg=cfg, device=device)
+        if isinstance(run, wandb.Run):
+            run.watch(trainer.model, log_freq=100)
+
+        print(
+            f"Initialized trainer. Value buffer capacity: {trainer.value_buffer.capacity}; policy buffer capacity: {trainer.policy_buffer.capacity}."
+        )
+        print(
+            f"Data generation rate: {trainer.K_value} value samples per training step."
+        )
 
         start_step = 0
         if cfg.resume_from and os.path.exists(cfg.resume_from):
@@ -190,7 +199,7 @@ def train_rebel(cfg: Config) -> None:
 
             if cfg.use_wandb:
                 metrics["step_time_s"] = step_elapsed
-                wandb.log(metrics, step=metrics["step"])
+                run.log(metrics, step=metrics["step"])
 
             if (step + 1) % cfg.checkpoint_interval == 0:
                 ckpt_path = os.path.join(

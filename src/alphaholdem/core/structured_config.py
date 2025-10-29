@@ -60,7 +60,15 @@ class TrainingConfig:
     lr_schedule: LrSchedule = LrSchedule.cosine
     batch_size: int = 1024
     episodes_per_step: int = 4
+
+    # how many batches of data do we want to store in the replay buffer?
+    # i.e. maximum age of a sample.
     replay_buffer_batches: int = 4
+
+    # how many times do we want to reuse the same policy/value data?
+    policy_reuse_goal: int = 4
+    value_reuse_goal: int = 8
+
     max_trajectory_length: int = 12  # Maximum steps per trajectory in replay buffer
     max_sequence_length: int = 50  # Maximum sequence length for transformer models
     gamma: float = 0.999
@@ -222,6 +230,7 @@ class Config:
     device: str = "cuda"
     use_tensor_env: bool = True
     num_envs: int = 512
+
     # Move opponent models back to CPU after inference to save GPU memory
     offload_opponent_models: bool = True
     use_wandb: bool = False
