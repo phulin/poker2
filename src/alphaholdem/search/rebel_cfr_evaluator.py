@@ -415,10 +415,18 @@ class RebelCFREvaluator:
         leaf_end = self.depth_offsets[self.max_depth + 1]
         self.leaf_mask[leaf_start:leaf_end] = self.valid_mask[leaf_start:leaf_end]
 
-        self.allowed_hands[:] = (
-            self.combo_onehot_float
-            @ self.env.board_onehot.any(dim=1).view(-1, 52).float().T
-        ).T < 0.5
+        if self.device.type == "cuda":
+            self.allowed_hands[:] = (
+                torch.sparse.mm(
+                    self.combo_onehot_float,
+                    self.env.board_onehot.any(dim=1).view(-1, 52).float().T,
+                )
+            ).T < 0.5
+        else:
+            self.allowed_hands[:] = (
+                self.combo_onehot_float
+                @ self.env.board_onehot.any(dim=1).view(-1, 52).float().T
+            ).T < 0.5
         self.allowed_hands.masked_fill_(~self.valid_mask[:, None], 0.0)
         self.allowed_hands_prob[
             :
@@ -768,7 +776,12 @@ class RebelCFREvaluator:
         # => compatible = ~blocking = (1 - blocking)
         # => the below weight computation is equivalent to opp_beliefs @ compatible
         combo_onehot = self.combo_onehot_float
-        multiply = combo_onehot @ (combo_onehot.T @ src_opp_beliefs_fanout.T)
+        if self.device.type == "cuda":
+            multiply = torch.sparse.mm(
+                combo_onehot, torch.sparse.mm(combo_onehot.T, src_opp_beliefs_fanout.T)
+            )
+        else:
+            multiply = combo_onehot @ (combo_onehot.T @ src_opp_beliefs_fanout.T)
         weights = (
             src_opp_beliefs_fanout.sum(dim=-1, keepdim=True)
             - multiply.T
