@@ -249,7 +249,7 @@ def test_initialize_search_sets_uniform_beliefs() -> None:
     assert not torch.any(evaluator.leaf_mask)
     assert torch.count_nonzero(evaluator.policy_probs) == 0
     assert torch.count_nonzero(evaluator.policy_probs_avg) == 0
-    assert torch.count_nonzero(evaluator.values) == 0
+    assert torch.count_nonzero(evaluator.latest_values) == 0
 
     root_beliefs = evaluator.beliefs[roots]
     torch.testing.assert_close(
@@ -510,7 +510,7 @@ def test_compute_expected_values_matches_child_values(
 
     evaluator.construct_subgame()
     evaluator.initialize_policy_and_beliefs()
-    evaluator.set_leaf_values()
+    evaluator.set_leaf_values(0)
 
     probs = torch.arange(1, num_actions + 1, dtype=env.float_dtype)
     probs = probs / probs.sum()
@@ -527,18 +527,20 @@ def test_compute_expected_values_matches_child_values(
 
     # counterfactual value = EV * opponent reach
     reach_weights = evaluator._calculate_reach_weights(evaluator.policy_probs)
-    evaluator.values[:] = 0.0
-    evaluator.values[bottom:, 0] = values_bottom * reach_weights[bottom:, 1]
-    evaluator.values[bottom:, 1] = -values_bottom * reach_weights[bottom:, 0]
+    evaluator.latest_values[:] = 0.0
+    evaluator.latest_values[bottom:, 0] = values_bottom * reach_weights[bottom:, 1]
+    evaluator.latest_values[bottom:, 1] = -values_bottom * reach_weights[bottom:, 0]
 
     evaluator.compute_expected_values()
 
     # actor is player 1 at node 2.
-    expected_value_actor = (probs[:, None] * evaluator.values[17:25, 1]).sum(dim=0)
-    expected_value_opp = evaluator.values[17:25, 0].sum(dim=0)
+    expected_value_actor = (probs[:, None] * evaluator.latest_values[17:25, 1]).sum(
+        dim=0
+    )
+    expected_value_opp = evaluator.latest_values[17:25, 0].sum(dim=0)
 
-    torch.testing.assert_close(evaluator.values[2, 0], expected_value_opp)
-    torch.testing.assert_close(evaluator.values[2, 1], expected_value_actor)
+    torch.testing.assert_close(evaluator.latest_values[2, 0], expected_value_opp)
+    torch.testing.assert_close(evaluator.latest_values[2, 1], expected_value_actor)
 
 
 def test_set_leaf_values_only_updates_marked_nodes() -> None:
@@ -553,7 +555,7 @@ def test_set_leaf_values_only_updates_marked_nodes() -> None:
     evaluator.leaf_mask.zero_()
     evaluator.leaf_mask[leaf_indices] = True
 
-    evaluator.values.zero_()
+    evaluator.latest_values.zero_()
 
     hand_values = torch.zeros(
         evaluator.total_nodes,
@@ -583,21 +585,21 @@ def test_set_leaf_values_only_updates_marked_nodes() -> None:
         dtype=env.float_dtype,
     )
 
-    evaluator.set_leaf_values()
+    evaluator.set_leaf_values(0)
 
-    torch.testing.assert_close(evaluator.values[2, 0], hand_values[2, 0])
+    torch.testing.assert_close(evaluator.latest_values[2, 0], hand_values[2, 0])
     torch.testing.assert_close(
-        evaluator.values[2, 1],
+        evaluator.latest_values[2, 1],
         hand_values[2, 1] * evaluator.reach_weights[2, 0],
     )
-    torch.testing.assert_close(evaluator.values[4, 0], hand_values[4, 0])
+    torch.testing.assert_close(evaluator.latest_values[4, 0], hand_values[4, 0])
     torch.testing.assert_close(
-        evaluator.values[4, 1],
+        evaluator.latest_values[4, 1],
         hand_values[4, 1] * evaluator.reach_weights[4, 0],
     )
     assert (
         torch.count_nonzero(
-            evaluator.values[~evaluator.env.done & ~evaluator.leaf_mask]
+            evaluator.latest_values[~evaluator.env.done & ~evaluator.leaf_mask]
         )
         == 0
     )
@@ -704,7 +706,7 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
     evaluator.initialize_search(env, roots)
     evaluator.construct_subgame()
     evaluator.initialize_policy_and_beliefs()
-    evaluator.set_leaf_values()
+    evaluator.set_leaf_values(0)
 
     num_actions = evaluator.num_actions
     legal_mask = torch.ones(
@@ -741,13 +743,13 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
 
     evaluator.policy_probs[:] = 1.0 / num_actions
 
-    evaluator.values[:] = 0.0
-    evaluator.values[1, 0] = 2.0  # Positive advantage for action 0
-    evaluator.values[2, 0] = -1.0  # Negative advantage for action 1
+    evaluator.latest_values[:] = 0.0
+    evaluator.latest_values[1, 0] = 2.0  # Positive advantage for action 0
+    evaluator.latest_values[2, 0] = -1.0  # Negative advantage for action 1
     evaluator.compute_expected_values()
 
     # Compute regrets first, then update policy
-    regrets = evaluator.compute_instantaneous_regrets(evaluator.values)
+    regrets = evaluator.compute_instantaneous_regrets(evaluator.latest_values)
     evaluator.cumulative_regrets += regrets
     evaluator.update_policy(1)
 
@@ -764,6 +766,7 @@ def test_sample_data_returns_root_batch() -> None:
         evaluator.depth_offsets[1], evaluator.depth_offsets[2], device=env.device
     )
     evaluator.initialize_search(env, roots)
+    evaluator.construct_subgame()
 
     uniform_policy = torch.full(
         (NUM_HANDS, evaluator.num_actions),
@@ -776,7 +779,7 @@ def test_sample_data_returns_root_batch() -> None:
     evaluator.policy_probs_avg[children] = expected_policy.permute(0, 2, 1).reshape(
         -1, NUM_HANDS
     )
-    evaluator.values[roots] = 0.5
+    evaluator.latest_values[roots] = 0.5
 
     value_batch, policy_batch = evaluator.sample_data()
 
@@ -1277,7 +1280,7 @@ def test_local_exploitability_depth_limited() -> None:
     base_root_value = 0.2 * 1.0 + 0.8 * 0.2
     values[0, 0].fill_(base_root_value)
     values[0, 1].fill_(-base_root_value)
-    evaluator.values.copy_(values)
+    evaluator.latest_values.copy_(values)
     evaluator.values_avg.copy_(values)
 
     evaluator.reach_weights.zero_()
@@ -1329,3 +1332,273 @@ def test_local_exploitability_depth_limited() -> None:
         value_batch.statistics["local_br_improvement"][0],
         torch.tensor([0.64, 0.0], dtype=dtype),
     )
+
+
+def test_local_exploitability_uses_correct_player_beliefs() -> None:
+    evaluator, _ = make_evaluator(batch_size=1, max_depth=1, cfr_iterations=2)
+    device = evaluator.device
+    dtype = evaluator.float_dtype
+    num_hands = NUM_HANDS
+    num_actions = evaluator.num_actions
+    total_nodes = evaluator.total_nodes
+
+    evaluator.valid_mask.zero_()
+    evaluator.valid_mask[0] = True
+    evaluator.valid_mask[1 : 1 + num_actions] = True
+
+    evaluator.leaf_mask.zero_()
+    evaluator.leaf_mask[1 : 1 + num_actions] = True
+
+    evaluator.env.to_act.zero_()
+    evaluator.env.to_act[0] = 1
+    evaluator.env.to_act[1 : 1 + num_actions] = 0
+
+    evaluator.legal_mask = torch.zeros(
+        total_nodes, num_actions, dtype=torch.bool, device=device
+    )
+    good_action = 1
+    bad_action = 2
+    evaluator.legal_mask[0, good_action] = True
+    evaluator.legal_mask[0, bad_action] = True
+
+    policy = torch.zeros(total_nodes, num_hands, device=device, dtype=dtype)
+    policy[1 + good_action].fill_(0.2)
+    policy[1 + bad_action].fill_(0.8)
+    evaluator.policy_probs.copy_(policy)
+    evaluator.policy_probs_avg.copy_(policy)
+
+    values = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
+    good_values = torch.zeros(num_hands, device=device, dtype=dtype)
+    bad_values = torch.zeros_like(good_values)
+    combo_a, combo_b = 0, 1
+    good_values[combo_a] = 1.5
+    good_values[combo_b] = 0.1
+    bad_values[combo_a] = -0.5
+    bad_values[combo_b] = 0.4
+
+    values[1 + good_action, 1] = good_values
+    values[1 + good_action, 0] = -good_values
+    values[1 + bad_action, 1] = bad_values
+    values[1 + bad_action, 0] = -bad_values
+
+    root_values_p1 = 0.2 * good_values + 0.8 * bad_values
+    values[0, 1] = root_values_p1
+    values[0, 0] = -root_values_p1
+    evaluator.latest_values.copy_(values)
+    evaluator.values_avg.copy_(values)
+
+    evaluator.reach_weights.zero_()
+    evaluator.reach_weights_avg.zero_()
+    evaluator.reach_weights[0].fill_(1.0)
+    evaluator.reach_weights[1 : 1 + num_actions].fill_(1.0)
+    evaluator.reach_weights_avg.copy_(evaluator.reach_weights)
+
+    beliefs = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
+    beliefs[0, 0, combo_b] = 1.0
+    beliefs[0, 1, combo_a] = 1.0
+    evaluator.beliefs.copy_(beliefs)
+    evaluator.beliefs_avg.copy_(beliefs)
+
+    evaluator.allowed_hands = torch.ones(
+        total_nodes, num_hands, dtype=torch.bool, device=device
+    )
+    evaluator.allowed_hands_prob = torch.full(
+        (total_nodes, num_hands),
+        1.0 / num_hands,
+        device=device,
+        dtype=dtype,
+    )
+
+    stats = evaluator._compute_exploitability()
+
+    expected_improvement = torch.tensor(1.6, device=device, dtype=dtype)
+    torch.testing.assert_close(
+        stats.local_br_improvement[0],
+        torch.tensor([0.0, expected_improvement.item()], device=device, dtype=dtype),
+    )
+    torch.testing.assert_close(
+        stats.local_exploitability[0],
+        expected_improvement,
+    )
+
+
+def test_local_exploitability_uses_policy_evaluation_for_baseline() -> None:
+    evaluator, _ = make_evaluator(batch_size=1, max_depth=1, cfr_iterations=2)
+    device = evaluator.device
+    dtype = evaluator.float_dtype
+    num_hands = NUM_HANDS
+    num_actions = evaluator.num_actions
+
+    evaluator.valid_mask.zero_()
+    evaluator.valid_mask[0] = True
+    evaluator.valid_mask[1 : 1 + num_actions] = True
+    evaluator.leaf_mask.zero_()
+    evaluator.leaf_mask[1 : 1 + num_actions] = True
+
+    evaluator.env.to_act.zero_()
+    evaluator.env.to_act[0] = 0
+    evaluator.env.to_act[1 : 1 + num_actions] = 1
+
+    evaluator.legal_mask = torch.ones(
+        evaluator.total_nodes, num_actions, dtype=torch.bool, device=device
+    )
+
+    policy = torch.zeros(evaluator.total_nodes, num_hands, device=device, dtype=dtype)
+    policy[1].fill_(0.75)
+    policy[2].fill_(0.25)
+    evaluator.policy_probs.copy_(policy)
+    evaluator.policy_probs_avg.copy_(policy)
+
+    values = torch.zeros(
+        evaluator.total_nodes, 2, num_hands, device=device, dtype=dtype
+    )
+    good = torch.full((num_hands,), 2.0, device=device, dtype=dtype)
+    bad = torch.full((num_hands,), -1.0, device=device, dtype=dtype)
+    values[1, 0] = good
+    values[1, 1] = -good
+    values[2, 0] = bad
+    values[2, 1] = -bad
+
+    # Intentionally set inconsistent cached root values; these should be ignored
+    # when re-evaluating the policy.
+    values[0, 0].fill_(10.0)
+    values[0, 1].fill_(-10.0)
+
+    evaluator.latest_values.copy_(values)
+    evaluator.values_avg.copy_(values)
+
+    evaluator.reach_weights.fill_(1.0)
+    evaluator.reach_weights_avg.fill_(1.0)
+
+    uniform = torch.full((num_hands,), 1.0 / num_hands, dtype=dtype, device=device)
+    evaluator.beliefs[:] = uniform
+    evaluator.beliefs_avg.copy_(evaluator.beliefs)
+    evaluator.allowed_hands[:] = True
+    evaluator.allowed_hands_prob.fill_(1.0 / num_hands)
+
+    stats = evaluator._compute_exploitability()
+
+    assert torch.all(stats.local_br_improvement >= -1e-6)
+    torch.testing.assert_close(
+        stats.local_exploitability[0],
+        torch.tensor(0.75, device=device, dtype=dtype),
+    )
+
+
+def test_set_leaf_values_cfr_avg_branches() -> None:
+    """Test all branches of the CFR-AVG modified formula in set_leaf_values."""
+    device = torch.device("cpu")
+    float_dtype = torch.float32
+    bet_bins = [0.5, 1.5]
+
+    def make_model(value: float) -> MockModel:
+        return MockModel(
+            hand_values=torch.full(
+                (1, 2, NUM_HANDS), value, device=device, dtype=float_dtype
+            ),
+            device=device,
+            dtype=float_dtype,
+        )
+
+    def setup_evaluator(
+        model: MockModel, cfr_type: CFRType, cfr_avg: bool
+    ) -> RebelCFREvaluator:
+        env = HUNLTensorEnv(num_envs=1, starting_stack=1000, sb=5, bb=10, device=device)
+        env.reset()
+        evaluator = RebelCFREvaluator(
+            search_batch_size=1,
+            env_proto=env,
+            model=model,
+            bet_bins=bet_bins,
+            max_depth=0,
+            cfr_iterations=10,
+            warm_start_iterations=0,
+            device=device,
+            float_dtype=float_dtype,
+            cfr_type=cfr_type,
+            cfr_avg=cfr_avg,
+        )
+        roots = torch.tensor([0], device=device)
+        evaluator.initialize_search(env, roots)
+        evaluator.construct_subgame()
+        evaluator.initialize_policy_and_beliefs()
+        leaf_idx = 0
+        evaluator.leaf_mask[leaf_idx] = True
+        evaluator.valid_mask[leaf_idx] = True
+        evaluator.env.done[leaf_idx] = False
+        evaluator.reach_weights[leaf_idx] = 1.0
+        evaluator.folded_mask[leaf_idx] = False
+        return evaluator
+
+    leaf_idx = 0
+
+    # Test Case 1: t <= 1 with cfr_avg=True (direct assignment)
+    for t in [0, 1]:
+        evaluator = setup_evaluator(make_model(1.0), CFRType.standard, cfr_avg=True)
+        evaluator.set_leaf_values(t)
+        expected = torch.full((2, NUM_HANDS), 1.0, device=device, dtype=float_dtype)
+        torch.testing.assert_close(
+            evaluator.latest_values[leaf_idx], expected, atol=1e-6, rtol=1e-6
+        )
+
+    # Test Case 2: cfr_avg=False with t > 1 (direct assignment)
+    evaluator = setup_evaluator(make_model(2.0), CFRType.standard, cfr_avg=False)
+    evaluator.last_model_values = torch.full(
+        (1, 2, NUM_HANDS), 100.0, device=device, dtype=float_dtype
+    )
+    evaluator.set_leaf_values(5)
+    expected = torch.full((2, NUM_HANDS), 2.0, device=device, dtype=float_dtype)
+    torch.testing.assert_close(
+        evaluator.latest_values[leaf_idx], expected, atol=1e-6, rtol=1e-6
+    )
+
+    # Test Case 3: last_model_values is None with t > 1 and cfr_avg=True (direct assignment)
+    evaluator = setup_evaluator(make_model(3.0), CFRType.standard, cfr_avg=True)
+    assert evaluator.last_model_values is None
+    evaluator.set_leaf_values(3)
+    expected = torch.full((2, NUM_HANDS), 3.0, device=device, dtype=float_dtype)
+    torch.testing.assert_close(
+        evaluator.latest_values[leaf_idx], expected, atol=1e-6, rtol=1e-6
+    )
+
+    # Test Cases 4-6: Formula branches with different CFR types
+    test_cases = [
+        (
+            CFRType.standard,
+            5.0,
+            4.0,
+            6,
+            lambda t, new, old: t * new - (t - 1) * old,
+        ),  # 6*5 - 5*4 = 10
+        (
+            CFRType.linear,
+            7.0,
+            6.0,
+            4,
+            lambda t, new, old: (t + 1) * new - (t - 1) * old,
+        ),  # 5*7 - 3*6 = 17
+        (
+            CFRType.discounted,
+            9.0,
+            8.0,
+            5,
+            lambda t, new, old: (t + 1) * new - (t - 1) * old,
+        ),  # 6*9 - 4*8 = 22
+    ]
+
+    for cfr_type, new_val, old_val, t_iter, formula in test_cases:
+        evaluator = setup_evaluator(make_model(new_val), cfr_type, cfr_avg=True)
+        evaluator.set_leaf_values(1)  # Initialize last_model_values
+        evaluator.last_model_values = torch.full(
+            (1, 2, NUM_HANDS), old_val, device=device, dtype=float_dtype
+        )
+        evaluator.set_leaf_values(t_iter)
+        expected = torch.full(
+            (2, NUM_HANDS),
+            formula(t_iter, new_val, old_val),
+            device=device,
+            dtype=float_dtype,
+        )
+        torch.testing.assert_close(
+            evaluator.latest_values[leaf_idx], expected, atol=1e-6, rtol=1e-6
+        )

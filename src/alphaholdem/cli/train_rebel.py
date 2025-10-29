@@ -173,9 +173,9 @@ def train_rebel(cfg: Config) -> None:
                 if metrics["value_loss"] is not None
                 else "N/A"
             )
-            entropy_str = (
-                f"{metrics['cfr_entropy']:.4f}"
-                if metrics["cfr_entropy"] is not None
+            exploitability_str = (
+                f"{metrics['local_exploitability']:.2f}"
+                if metrics["local_exploitability"] is not None
                 else "N/A"
             )
 
@@ -184,7 +184,7 @@ def train_rebel(cfg: Config) -> None:
                 f"loss={loss_str} "
                 f"policy={policy_str} "
                 f"value={value_str} "
-                f"cfr_entropy={entropy_str} "
+                f"exploit={exploitability_str} "
                 f"time={step_elapsed:.2f}s total={total_elapsed/60:.1f}m"
             )
 
@@ -192,7 +192,7 @@ def train_rebel(cfg: Config) -> None:
                 metrics["step_time_s"] = step_elapsed
                 wandb.log(metrics, step=metrics["step"])
 
-            if metrics["step"] % cfg.checkpoint_interval == 0:
+            if (step + 1) % cfg.checkpoint_interval == 0:
                 ckpt_path = os.path.join(
                     cfg.checkpoint_dir, f"rebel_step_{step + 1}.pt"
                 )
@@ -200,7 +200,7 @@ def train_rebel(cfg: Config) -> None:
                 # Save compressed checkpoint without optimizer state
                 trainer.save_checkpoint(
                     ckpt_path,
-                    metrics["step"],
+                    step,
                     wandb_run_id=wandb_run_id,
                     save_optimizer=False,
                     save_dtype=torch.bfloat16,
@@ -208,7 +208,7 @@ def train_rebel(cfg: Config) -> None:
                 # Save latest checkpoint with full state
                 trainer.save_checkpoint(
                     os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"),
-                    metrics["step"],
+                    step,
                     wandb_run_id=wandb_run_id,
                     save_optimizer=True,
                     save_dtype=None,  # Keep host dtype
@@ -219,7 +219,7 @@ def train_rebel(cfg: Config) -> None:
                     _cleanup_old_checkpoints(cfg.checkpoint_dir, ckpt_path)
 
                 print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
-                print_preflop_range_grid(trainer, metrics["step"], rebel=True)
+                print_preflop_range_grid(trainer, step + 1, rebel=True)
 
         final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
         trainer.save_checkpoint(

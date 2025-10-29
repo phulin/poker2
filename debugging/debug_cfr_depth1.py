@@ -512,9 +512,9 @@ def debug_cfr_depth1(
         if t < 16:
             evaluator.set_leaf_values()
             evaluator.compute_expected_values()
-            evaluator.values_avg[:] = evaluator.values
+            evaluator.values_avg[:] = evaluator.latest_values
 
-            regrets = evaluator.compute_instantaneous_regrets(evaluator.values)
+            regrets = evaluator.compute_instantaneous_regrets(evaluator.latest_values)
             if evaluator.cfr_type == CFRType.linear:
                 # Alternate updates
                 regrets.masked_fill_(
@@ -537,13 +537,13 @@ def debug_cfr_depth1(
             if evaluator.cfr_type == CFRType.discounted:
                 if t > evaluator.dcfr_delay:
                     evaluator.values_avg *= max(0, t - 1 - evaluator.dcfr_delay)
-                    evaluator.values_avg += evaluator.values
+                    evaluator.values_avg += evaluator.latest_values
                     evaluator.values_avg /= t + 1
                 else:
-                    evaluator.values_avg[:] = evaluator.values
+                    evaluator.values_avg[:] = evaluator.latest_values
             else:
                 evaluator.values_avg *= t
-                evaluator.values_avg += evaluator.values
+                evaluator.values_avg += evaluator.latest_values
                 evaluator.values_avg /= t + 1
             continue
 
@@ -551,9 +551,9 @@ def debug_cfr_depth1(
         # Run the iteration and capture state
         evaluator.set_leaf_values()
         evaluator.compute_expected_values()
-        evaluator.values_avg[:] = evaluator.values
+        evaluator.values_avg[:] = evaluator.latest_values
 
-        regrets = evaluator.compute_instantaneous_regrets(evaluator.values)
+        regrets = evaluator.compute_instantaneous_regrets(evaluator.latest_values)
         if evaluator.cfr_type == CFRType.linear:
             # Alternate updates
             regrets.masked_fill_(
@@ -585,13 +585,13 @@ def debug_cfr_depth1(
         if evaluator.cfr_type == CFRType.discounted:
             if t > evaluator.dcfr_delay:
                 evaluator.values_avg *= max(0, t - 1 - evaluator.dcfr_delay)
-                evaluator.values_avg += evaluator.values
+                evaluator.values_avg += evaluator.latest_values
                 evaluator.values_avg /= t + 1
             else:
-                evaluator.values_avg[:] = evaluator.values
+                evaluator.values_avg[:] = evaluator.latest_values
         else:
             evaluator.values_avg *= t
-            evaluator.values_avg += evaluator.values
+            evaluator.values_avg += evaluator.latest_values
             evaluator.values_avg /= t + 1
 
     print(f"\n{'='*80}")

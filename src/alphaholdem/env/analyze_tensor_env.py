@@ -595,7 +595,7 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
 
         # Get values from CFR
         root_values = (
-            self.cfr_evaluator.values[actions_slice, seat] * root_policy
+            self.cfr_evaluator.latest_values[actions_slice, seat] * root_policy
         ).sum(dim=0)
 
         # Denormalize values if PopArt normalizer is available
