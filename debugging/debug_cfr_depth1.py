@@ -265,7 +265,7 @@ def create_default_config() -> Config:
     config.search = SearchConfig()
     config.search.enabled = True
     config.search.depth = 1  # Depth-1 tree for debugging
-    config.search.iterations = 101  # Show up to iteration 25 (range goes to 26)
+    config.search.iterations = 201  # Show up to iteration 25 (range goes to 26)
     config.search.warm_start_iterations = 15  # Warm start 15 iterations
     config.search.branching = 4
     config.search.belief_samples = 1
@@ -314,8 +314,13 @@ def print_single_iteration_data(
 
         # Policy probs and regrets are stored on the child node itself
         # So we look at policy_probs[child_idx] and cumulative_regrets[child_idx]
-        policy_prob = evaluator.policy_probs[child_idx].mean().item()
-        policy_avg_prob = evaluator.policy_probs_avg[child_idx].mean().item()
+        allowed_hands = evaluator.allowed_hands[child_idx]
+        policy_probs = evaluator.policy_probs[child_idx].clone()
+        policy_probs.masked_fill_(~allowed_hands, 0.0)
+        policy_probs_avg = evaluator.policy_probs_avg[child_idx].clone()
+        policy_probs_avg.masked_fill_(~allowed_hands, 0.0)
+        policy_prob = policy_probs.sum().item() / allowed_hands.sum().item()
+        policy_avg_prob = policy_probs_avg.sum().item() / allowed_hands.sum().item()
         # Note: cumulative_regrets can be negative; policy uses clamped version (regret matching)
         regret = evaluator.cumulative_regrets[child_idx].mean().item()
         regret_max = evaluator.cumulative_regrets[child_idx].max().item()
@@ -499,63 +504,24 @@ def debug_cfr_depth1(
 
     # Run warm start
     print("\nRunning warm start iterations...")
-    evaluator.set_leaf_values()
+    evaluator.set_leaf_values(0)
     evaluator.compute_expected_values()
     evaluator.warm_start()
 
+    evaluator.set_leaf_values(0)
+    evaluator.compute_expected_values()
+    evaluator.values_avg[:] = evaluator.latest_values
+
     # Now run CFR iterations 16-25 and capture state
-    print(f"\nRunning CFR iterations 16-{config.search.iterations}...")
+    print(
+        f"\nRunning CFR iterations {config.search.warm_start_iterations}-{config.search.iterations}..."
+    )
 
     # Run iterations 15-25, but only print 16-25
     for t in range(config.search.warm_start_iterations, config.search.iterations):
-        # Skip iterations before 16 silently
-        if t < 16:
-            evaluator.set_leaf_values()
-            evaluator.compute_expected_values()
-            evaluator.values_avg[:] = evaluator.latest_values
-
-            regrets = evaluator.compute_instantaneous_regrets(evaluator.latest_values)
-            if evaluator.cfr_type == CFRType.linear:
-                # Alternate updates
-                regrets.masked_fill_(
-                    evaluator.env.to_act[:, None] == t % evaluator.num_players, 0.0
-                )
-            elif evaluator.cfr_type == CFRType.discounted:
-                factor = torch.where(
-                    regrets > 0,
-                    (t - 1) ** evaluator.dcfr_alpha,
-                    (t - 1) ** evaluator.dcfr_beta,
-                )
-                evaluator.cumulative_regrets *= factor / (factor + 1)
-
-            evaluator.cumulative_regrets += regrets
-            evaluator.update_policy(t)
-
-            evaluator.set_leaf_values()
-            evaluator.compute_expected_values()
-
-            if evaluator.cfr_type == CFRType.discounted:
-                if t > evaluator.dcfr_delay:
-                    evaluator.values_avg *= max(0, t - 1 - evaluator.dcfr_delay)
-                    evaluator.values_avg += evaluator.latest_values
-                    evaluator.values_avg /= t + 1
-                else:
-                    evaluator.values_avg[:] = evaluator.latest_values
-            else:
-                evaluator.values_avg *= t
-                evaluator.values_avg += evaluator.latest_values
-                evaluator.values_avg /= t + 1
-            continue
-
-        # For iterations 16-25, print the data
-        # Run the iteration and capture state
-        evaluator.set_leaf_values()
-        evaluator.compute_expected_values()
-        evaluator.values_avg[:] = evaluator.latest_values
-
-        regrets = evaluator.compute_instantaneous_regrets(evaluator.latest_values)
+        regrets = evaluator.compute_instantaneous_regrets(evaluator.values_avg)
         if evaluator.cfr_type == CFRType.linear:
-            # Alternate updates
+            # Alternate updates.
             regrets.masked_fill_(
                 evaluator.env.to_act[:, None] == t % evaluator.num_players, 0.0
             )
@@ -566,7 +532,8 @@ def debug_cfr_depth1(
                 (t - 1) ** evaluator.dcfr_beta,
             )
             evaluator.cumulative_regrets *= factor / (factor + 1)
-
+            evaluator.regret_weight_sums *= factor / (factor + 1)
+        evaluator.regret_weight_sums += 1
         evaluator.cumulative_regrets += regrets
 
         # Print AFTER regret accumulation but BEFORE policy update
@@ -577,22 +544,17 @@ def debug_cfr_depth1(
             num_actions=evaluator.num_actions,
         )
 
+        old_policy_probs = evaluator.policy_probs.clone()
         evaluator.update_policy(t)
+        evaluator._record_stats(t, old_policy_probs)
 
-        evaluator.set_leaf_values()
+        evaluator.set_leaf_values(t)
         evaluator.compute_expected_values()
 
-        if evaluator.cfr_type == CFRType.discounted:
-            if t > evaluator.dcfr_delay:
-                evaluator.values_avg *= max(0, t - 1 - evaluator.dcfr_delay)
-                evaluator.values_avg += evaluator.latest_values
-                evaluator.values_avg /= t + 1
-            else:
-                evaluator.values_avg[:] = evaluator.latest_values
-        else:
-            evaluator.values_avg *= t
-            evaluator.values_avg += evaluator.latest_values
-            evaluator.values_avg /= t + 1
+        old, new = evaluator._get_mixing_weights(t)
+        evaluator.values_avg *= old
+        evaluator.values_avg += new * evaluator.latest_values
+        evaluator.values_avg /= old + new
 
     print(f"\n{'='*80}")
     print("Debug Complete!")

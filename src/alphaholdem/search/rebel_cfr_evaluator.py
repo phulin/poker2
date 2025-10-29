@@ -971,12 +971,8 @@ class RebelCFREvaluator:
         self.policy_probs_avg *= reach_avg_actor
         self.policy_probs_avg += self.policy_probs * reach_actor
         denom = reach_avg_actor + reach_actor
-        torch.where(
-            denom > 1e-8,
-            self.policy_probs_avg / denom.clamp(min=1e-8),
-            torch.zeros_like(self.policy_probs_avg),
-            out=self.policy_probs_avg,
-        )
+        self.policy_probs_avg /= denom.clamp(min=1e-8)
+        self.policy_probs_avg.masked_fill_(denom < 1e-8, 0.0)
 
     def _get_sampling_schedule(self) -> torch.Tensor:
         leaf_indices = torch.where(self.leaf_mask & ~self.env.done)[0]
@@ -1579,17 +1575,25 @@ class RebelCFREvaluator:
         actions = self._pull_back(self.policy_probs_avg)
         mask = self.valid_mask & ~self.leaf_mask
         mask = mask[: actions.shape[0]]
+        allowed_hands = self.allowed_hands[: actions.shape[0]][mask]
+        # self.policy_probs_avg is already masked by allowed hands.
+        action_mix_by_node = actions[mask].sum(dim=2) / allowed_hands.sum(
+            dim=1, keepdim=True
+        )
         self.stats["action_mix"] = {
-            "fold": actions[mask, 0].mean().item(),
-            "call": actions[mask, 1].mean().item(),
-            "bet": actions[mask, 2:-1].sum(dim=1).mean().item(),
-            "allin": actions[mask, -1].mean().item(),
+            "fold": action_mix_by_node[:, 0].mean().item(),
+            "call": action_mix_by_node[:, 1].mean().item(),
+            "bet": action_mix_by_node[:, 2:-1].mean(dim=1).mean().item(),
+            "allin": action_mix_by_node[:, -1].mean().item(),
         }
 
     def _valid_nodes(
         self, bottom_up: bool = False
     ) -> Generator[tuple[int, torch.Tensor]]:
-        """Yield `(depth, indices)` pairs for nodes marked as valid."""
+        """Yield `(depth, indices)` pairs for nodes marked as valid.
+
+        torch.where is slow, so don't use this function in the inner CFR loop.
+        """
         for depth in (
             range(self.max_depth + 1)
             if not bottom_up
@@ -1600,38 +1604,6 @@ class RebelCFREvaluator:
 
             mask = self.valid_mask[offset:offset_next]
             yield depth, offset + torch.where(mask)[0]
-
-    def _valid_actions(
-        self, bottom_up: bool = False
-    ) -> Generator[tuple[int, int, torch.Tensor, torch.Tensor]]:
-        """Iterate over legal transitions, optionally in bottom-up order."""
-        N, M, B = self.search_batch_size, self.total_nodes, self.num_actions
-
-        for depth in (
-            range(self.max_depth)
-            if not bottom_up
-            else range(self.max_depth - 1, -1, -1)
-        ):
-            offset = self.depth_offsets[depth]
-            offset_next = self.depth_offsets[depth + 1]
-
-            for action in range(B):
-                current_legal_mask = (
-                    self.legal_mask[offset:offset_next, action]
-                    & self.valid_mask[offset:offset_next]
-                    & ~self.leaf_mask[offset:offset_next]
-                )
-                if not current_legal_mask.any():
-                    continue
-
-                current_legal_indices = torch.where(current_legal_mask)[0] + offset
-                next_legal_indices = (
-                    offset_next + (current_legal_indices - offset) * B + action
-                )
-                assert next_legal_indices.max().item() < M
-                assert self.valid_mask[next_legal_indices].all()
-
-                yield depth, action, current_legal_indices, next_legal_indices
 
     def _pull_back(self, data: torch.Tensor, sliced=False) -> torch.Tensor:
         """Pull back data to all parent nodes.

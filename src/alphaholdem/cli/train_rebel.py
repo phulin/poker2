@@ -174,7 +174,7 @@ def train_rebel(cfg: Config) -> None:
                 else "N/A"
             )
             exploitability_str = (
-                f"{metrics['local_exploitability']:.2f}"
+                f"{metrics['local_exploitability']:.4f}"
                 if metrics["local_exploitability"] is not None
                 else "N/A"
             )
