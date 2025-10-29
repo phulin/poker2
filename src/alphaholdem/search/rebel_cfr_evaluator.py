@@ -226,8 +226,8 @@ class RebelCFREvaluator:
         self.prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
 
         self.combo_onehot_float = combo_to_onehot_tensor(device=self.device).float()
-        if self.device.type == "cuda":
-            self.combo_onehot_float = self.combo_onehot_float.to_sparse_csr()
+        # if self.device.type == "cuda":
+        #     self.combo_onehot_float = self.combo_onehot_float.to_sparse_csr()
 
         self.allowed_hands = torch.zeros(
             M, NUM_HANDS, device=self.device, dtype=torch.bool
@@ -415,18 +415,10 @@ class RebelCFREvaluator:
         leaf_end = self.depth_offsets[self.max_depth + 1]
         self.leaf_mask[leaf_start:leaf_end] = self.valid_mask[leaf_start:leaf_end]
 
-        if self.device.type == "cuda":
-            self.allowed_hands[:] = (
-                torch.sparse.mm(
-                    self.combo_onehot_float,
-                    self.env.board_onehot.any(dim=1).view(-1, 52).float().T,
-                )
-            ).T < 0.5
-        else:
-            self.allowed_hands[:] = (
-                self.combo_onehot_float
-                @ self.env.board_onehot.any(dim=1).view(-1, 52).float().T
-            ).T < 0.5
+        self.allowed_hands[:] = (
+            self.combo_onehot_float
+            @ self.env.board_onehot.any(dim=1).view(-1, 52).float().T
+        ).T < 0.5
         self.allowed_hands.masked_fill_(~self.valid_mask[:, None], 0.0)
         self.allowed_hands_prob[
             :
@@ -776,12 +768,7 @@ class RebelCFREvaluator:
         # => compatible = ~blocking = (1 - blocking)
         # => the below weight computation is equivalent to opp_beliefs @ compatible
         combo_onehot = self.combo_onehot_float
-        if self.device.type == "cuda":
-            multiply = torch.sparse.mm(
-                combo_onehot, torch.sparse.mm(combo_onehot.T, src_opp_beliefs_fanout.T)
-            )
-        else:
-            multiply = combo_onehot @ (combo_onehot.T @ src_opp_beliefs_fanout.T)
+        multiply = combo_onehot @ (combo_onehot.T @ src_opp_beliefs_fanout.T)
         weights = (
             src_opp_beliefs_fanout.sum(dim=-1, keepdim=True)
             - multiply.T
