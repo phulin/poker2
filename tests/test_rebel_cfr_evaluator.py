@@ -1234,3 +1234,98 @@ def test_discounted_cfr_policy_averaging() -> None:
             weights /= weights.sum()
             expected = (all_policies[: t + 1] * weights[:, None]).sum(dim=0)
             assert torch.allclose(evaluator.policy_probs_avg, expected)
+
+
+def test_local_exploitability_depth_limited() -> None:
+    evaluator, _ = make_evaluator(batch_size=1, max_depth=1, cfr_iterations=2)
+    device = evaluator.device
+    dtype = evaluator.float_dtype
+    num_hands = NUM_HANDS
+    num_actions = evaluator.num_actions
+    total_nodes = evaluator.total_nodes
+
+    evaluator.valid_mask.zero_()
+    evaluator.valid_mask[0] = True
+    evaluator.valid_mask[1 : 1 + num_actions] = True
+
+    evaluator.leaf_mask.zero_()
+    evaluator.leaf_mask[1 : 1 + num_actions] = True
+
+    evaluator.env.to_act.zero_()
+    evaluator.env.to_act[0] = 0
+    evaluator.env.to_act[1 : 1 + num_actions] = 1
+
+    evaluator.legal_mask = torch.zeros(
+        total_nodes, num_actions, dtype=torch.bool, device=device
+    )
+    good_action = 1
+    bad_action = 2
+    evaluator.legal_mask[0, good_action] = True
+    evaluator.legal_mask[0, bad_action] = True
+
+    policy = torch.zeros(total_nodes, num_hands, device=device, dtype=dtype)
+    policy[1 + good_action].fill_(0.2)
+    policy[1 + bad_action].fill_(0.8)
+    evaluator.policy_probs.copy_(policy)
+    evaluator.policy_probs_avg.copy_(policy)
+
+    values = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
+    values[1 + good_action, 0].fill_(1.0)
+    values[1 + good_action, 1].fill_(-1.0)
+    values[1 + bad_action, 0].fill_(0.2)
+    values[1 + bad_action, 1].fill_(-0.2)
+    base_root_value = 0.2 * 1.0 + 0.8 * 0.2
+    values[0, 0].fill_(base_root_value)
+    values[0, 1].fill_(-base_root_value)
+    evaluator.values.copy_(values)
+    evaluator.values_avg.copy_(values)
+
+    evaluator.reach_weights.zero_()
+    evaluator.reach_weights_avg.zero_()
+    evaluator.reach_weights[0].fill_(1.0)
+    evaluator.reach_weights[1 : 1 + num_actions].fill_(1.0)
+    evaluator.reach_weights_avg.copy_(evaluator.reach_weights)
+
+    beliefs = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
+    uniform = torch.full((num_hands,), 1.0 / num_hands, device=device, dtype=dtype)
+    beliefs[0, 0] = uniform
+    beliefs[0, 1] = uniform
+    evaluator.beliefs.copy_(beliefs)
+    evaluator.beliefs_avg.copy_(beliefs)
+
+    evaluator.allowed_hands = torch.ones(
+        total_nodes, num_hands, dtype=torch.bool, device=device
+    )
+    evaluator.allowed_hands_prob = torch.full(
+        (total_nodes, num_hands),
+        1.0 / num_hands,
+        device=device,
+        dtype=dtype,
+    )
+
+    evaluator.stats.clear()
+    evaluator._compute_exploitability()
+
+    value_batch, policy_batch = evaluator.sample_data()
+    assert "local_exploitability" in value_batch.statistics
+    assert "local_br_policy" in value_batch.statistics
+    assert "local_br_values" in value_batch.statistics
+    assert "local_br_improvement" in value_batch.statistics
+    assert "local_exploitability" not in policy_batch.statistics
+
+    torch.testing.assert_close(
+        value_batch.statistics["local_exploitability"][0],
+        torch.tensor(0.64, dtype=dtype),
+    )
+    torch.testing.assert_close(
+        value_batch.statistics["local_br_policy"][0],
+        torch.tensor([base_root_value, -base_root_value], dtype=dtype),
+    )
+    torch.testing.assert_close(
+        value_batch.statistics["local_br_values"][0],
+        torch.tensor([1.0, -base_root_value], dtype=dtype),
+    )
+    torch.testing.assert_close(
+        value_batch.statistics["local_br_improvement"][0],
+        torch.tensor([0.64, 0.0], dtype=dtype),
+    )

@@ -69,6 +69,14 @@ class HandRankData:
     R_idx: torch.Tensor
 
 
+@dataclass
+class ExploitabilityStats:
+    local_exploitability: torch.Tensor
+    local_br_policy: torch.Tensor
+    local_br_values: torch.Tensor
+    local_br_improvement: torch.Tensor
+
+
 class RebelCFREvaluator:
     """ReBeL CFR Evaluator implementing the precise SELFPLAY algorithm."""
 
@@ -1092,20 +1100,41 @@ class RebelCFREvaluator:
             "bet_amounts": bin_amounts,
         }
 
+        exploit_stats = self._compute_exploitability()
+
         # Value batch gets root states only. These should all be valid.
+        value_statistics = {key: statistics[key][:N] for key in statistics}
+        if exploit_stats.local_exploitability.numel() > 0:
+            value_statistics["local_exploitability"] = (
+                exploit_stats.local_exploitability
+            )
+            value_statistics["local_br_policy"] = exploit_stats.local_br_policy
+            value_statistics["local_br_values"] = exploit_stats.local_br_values
+            value_statistics["local_br_improvement"] = (
+                exploit_stats.local_br_improvement
+            )
+            self.stats["local_exploitability"] = (
+                exploit_stats.local_exploitability.detach().cpu().tolist()
+            )
+        else:
+            self.stats.pop("local_exploitability", None)
+
+        # Policy batch gets all valid, non-leaf states.
+        valid_top = self.valid_mask[:top] & ~self.leaf_mask[:top]
+        policy_statistics = {
+            key: statistics[key][:top][valid_top] for key in statistics
+        }
         value_batch = RebelBatch(
             features=features[:N],
             value_targets=value_targets[:N],
             legal_masks=legal_masks[:N],
-            statistics={key: statistics[key][:N] for key in statistics},
+            statistics=value_statistics,
         )
-        # Policy batch gets all valid, non-leaf states.
-        valid_top = self.valid_mask[:top] & ~self.leaf_mask[:top]
         policy_batch = RebelBatch(
             features=features[valid_top],
             policy_targets=policy_targets[valid_top],
             legal_masks=legal_masks[:top][valid_top],
-            statistics={key: statistics[key][:top][valid_top] for key in statistics},
+            statistics=policy_statistics,
         )
         return value_batch, policy_batch
 
@@ -1353,6 +1382,135 @@ class RebelCFREvaluator:
         # take mean over parallelized envs.
         regret_quotient_mean = regret_quotient_sum.sum() / self.valid_mask[:N].sum()
         self.stats["mean_regret_bound"] = regret_quotient_mean.item()
+
+    def _best_response_values(
+        self,
+        policy: torch.Tensor,
+        base_values: torch.Tensor,
+        target_player: int,
+    ) -> torch.Tensor:
+        """Compute counterfactual values when `target_player` deviates optimally.
+
+        Mirrors the warm_start structure while allowing only `target_player`
+        to pick their best action; the opponent follows `policy`.
+        """
+
+        assert target_player in (0, 1)
+        values_br = torch.zeros_like(base_values)
+        values_br[self.leaf_mask] = base_values[self.leaf_mask]
+
+        B = self.num_actions
+        all_actions = torch.arange(B, device=self.device)[None, :]
+        min_value = torch.finfo(base_values.dtype).min
+
+        for depth, current_indices in self._valid_nodes(bottom_up=True):
+            if depth == self.max_depth:
+                continue
+
+            non_leaf = ~self.leaf_mask[current_indices]
+            current = current_indices[non_leaf]
+            if current.numel() == 0:
+                continue
+
+            offset = self.depth_offsets[depth]
+            offset_next = self.depth_offsets[depth + 1]
+            next_indices = offset_next + (current[:, None] - offset) * B + all_actions
+
+            legal = self.legal_mask[current]
+            actor = self.env.to_act[current]
+            target_mask = actor == target_player
+
+            flat_next = next_indices.reshape(-1)
+            next_values = values_br[flat_next].view(-1, B, self.num_players, NUM_HANDS)
+            next_policy = policy[flat_next].view(-1, B, NUM_HANDS)
+
+            next_values = next_values.clone()
+            next_policy = next_policy.clone()
+            next_values.masked_fill_(~legal[:, :, None, None], 0.0)
+            next_policy.masked_fill_(~legal[:, :, None], 0.0)
+
+            player_values = next_values[:, :, target_player, :].clone()
+            player_values.masked_fill_(~legal[:, :, None], min_value)
+            best_action = player_values.argmax(dim=1)
+            gather_idx = best_action.unsqueeze(1)
+
+            best_player = torch.gather(player_values, 1, gather_idx).squeeze(1)
+            opp_slice = next_values[:, :, 1 - target_player, :]
+            best_opp = torch.gather(opp_slice, 1, gather_idx).squeeze(1)
+
+            policy_sum = next_policy.sum(dim=1, keepdim=True).clamp_(min=1e-12)
+            norm_policy = next_policy / policy_sum
+            expected = (next_values * norm_policy[:, :, None, :]).sum(dim=1)
+
+            values_br[current] = expected
+            target_indices = current[target_mask]
+            values_br[target_indices, target_player] = best_player[target_mask]
+            values_br[target_indices, 1 - target_player] = best_opp[target_mask]
+
+        values_br.masked_fill_(~self.valid_mask[:, None, None], 0.0)
+        return values_br
+
+    def _compute_exploitability(self) -> ExploitabilityStats:
+        """Record depth-limited best-response exploitability estimate."""
+
+        policy = self.policy_probs_avg if self.cfr_avg else self.policy_probs
+        base_values = self.values_avg if self.cfr_avg else self.values
+        reach_weights = self.reach_weights_avg if self.cfr_avg else self.reach_weights
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+
+        br_values_p0 = self._best_response_values(policy, base_values, target_player=0)
+        br_values_p1 = self._best_response_values(policy, base_values, target_player=1)
+
+        N = self.search_batch_size
+        if N == 0:
+            empty = torch.empty(0, device=self.device, dtype=self.float_dtype)
+            empty2 = torch.empty(0, 2, device=self.device, dtype=self.float_dtype)
+            return ExploitabilityStats(
+                local_exploitability=empty,
+                local_br_policy=empty2,
+                local_br_values=empty2.clone(),
+                local_br_improvement=empty2.clone(),
+            )
+
+        def _cf_to_ev(values: torch.Tensor, opp_reach: torch.Tensor) -> torch.Tensor:
+            denom = opp_reach.clamp(min=1e-12)
+            return torch.where(opp_reach > 0, values / denom, 0.0)
+
+        base_root = base_values[:N]
+        br_root_p0 = br_values_p0[:N]
+        br_root_p1 = br_values_p1[:N]
+        reach_root = reach_weights[:N]
+
+        base_ev_p0 = _cf_to_ev(base_root[:, 0], reach_root[:, 1])
+        base_ev_p1 = _cf_to_ev(base_root[:, 1], reach_root[:, 0])
+        br_ev_p0 = _cf_to_ev(br_root_p0[:, 0], reach_root[:, 1])
+        br_ev_p1 = _cf_to_ev(br_root_p1[:, 1], reach_root[:, 0])
+
+        beliefs_root = beliefs[:N]
+        actor = self.env.to_act[:N]
+        actor_is0 = actor == 0
+        beliefs_p0 = torch.where(
+            actor_is0[:, None], beliefs_root[:, 0, :], beliefs_root[:, 1, :]
+        )
+        beliefs_p1 = torch.where(
+            actor_is0[:, None], beliefs_root[:, 1, :], beliefs_root[:, 0, :]
+        )
+
+        base_player0 = (base_ev_p0 * beliefs_p0).sum(dim=1)
+        base_player1 = (base_ev_p1 * beliefs_p1).sum(dim=1)
+        br_player0 = (br_ev_p0 * beliefs_p0).sum(dim=1)
+        br_player1 = (br_ev_p1 * beliefs_p1).sum(dim=1)
+
+        improvement_p0 = br_player0 - base_player0
+        improvement_p1 = br_player1 - base_player1
+        total_exploitability = improvement_p0 + improvement_p1
+
+        return ExploitabilityStats(
+            local_exploitability=total_exploitability,
+            local_br_policy=torch.stack([base_player0, base_player1], dim=1),
+            local_br_values=torch.stack([br_player0, br_player1], dim=1),
+            local_br_improvement=torch.stack([improvement_p0, improvement_p1], dim=1),
+        )
 
     def _record_action_mix(self) -> None:
         """Record the action mix of the policy."""
