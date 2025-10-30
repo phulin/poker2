@@ -91,9 +91,11 @@ class RebelCFRTrainer:
             self.model.compile()
 
         # data generation rate per training step
-        self.K_value = self.batch_size // self.cfg.train.value_reuse_goal
+        self.K_value = max(1, self.batch_size // self.cfg.train.value_reuse_goal)
         # approximate number of policy samples when collecting K_value value samples
-        self.K_policy = self.K_value * (self.num_actions // 2) ** self.cfg.search.depth
+        self.K_policy = max(
+            1, self.K_value * (self.num_actions // 2) ** self.cfg.search.depth
+        )
 
         C_over_K = self.cfg.train.replay_buffer_batches
         value_capacity = C_over_K * self.K_value

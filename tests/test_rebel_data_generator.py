@@ -184,7 +184,7 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
     )
 
     # generate_data() now returns None and adds data to buffer
-    generator.generate_data()
+    generator.generate_data(2)
 
     # Check that data was added to buffer
     assert len(buffer.batches) > 0
@@ -236,7 +236,7 @@ def test_rebel_data_generator_terminates_when_no_next_pbs(monkeypatch, env_proto
         policy_buffer=buffer,
     )
 
-    generator.generate_data()
+    generator.generate_data(2)
 
     # Should have initialized search and called self_play_iteration once
     assert len(evaluator.initialize_args) == 1
@@ -266,7 +266,7 @@ def test_rebel_data_generator_multiple_iterations(monkeypatch, env_proto):
         policy_buffer=buffer,
     )
 
-    generator.generate_data()
+    generator.generate_data(2)
 
     # Should have called self_play_iteration multiple times
     assert evaluator.self_play_calls >= 1
