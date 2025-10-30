@@ -986,14 +986,17 @@ class RebelCFREvaluator:
         if sample_count > 0:
             if self.cfr_type == CFRType.discounted:
                 sample_low = max(self.warm_start_iterations + 1, self.dcfr_delay + 1)
-                sample_low = min(sample_low, self.cfr_iterations)
+                sample_low = min(sample_low, self.cfr_iterations - 1)
             else:
-                sample_low = min(self.warm_start_iterations + 1, self.cfr_iterations)
+                sample_low = min(
+                    self.warm_start_iterations + 1, self.cfr_iterations - 1
+                )
             sample_high = max(self.cfr_iterations, sample_low)
             distribution = (
                 torch.arange(
                     sample_low, sample_high, dtype=torch.float32, device=self.device
                 )
+                + 1
                 if self.cfr_type != CFRType.standard
                 else torch.ones(sample_high - sample_low, device=self.device)
             )
@@ -1367,6 +1370,8 @@ class RebelCFREvaluator:
 
     def _record_cfr_entropy(self) -> None:
         """Record the entropy of the policy."""
+        if self.max_depth == 0:
+            return
         N = self.search_batch_size
         actions = self._pull_back(self.policy_probs_avg)[:N]
         mask = self.valid_mask[:N] & ~self.leaf_mask[:N]

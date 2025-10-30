@@ -273,7 +273,7 @@ def create_default_config() -> Config:
     config.search.dcfr_alpha = 1.5
     config.search.dcfr_beta = 0.0
     config.search.dcfr_gamma = 2.0
-    config.search.dcfr_delay = 150
+    config.search.dcfr_delay = 50
     config.search.include_average_policy = True
     config.search.cfr_type = CFRType.linear
     config.search.cfr_avg = True
@@ -362,7 +362,7 @@ def debug_cfr_depth1(
         dcfr_delay = 0
     elif cfr_type_str == "discounted":
         cfr_type = CFRType.discounted
-        dcfr_delay = 150
+        dcfr_delay = 70
     else:
         raise ValueError(f"Unknown CFR type: {cfr_type_str}")
 
