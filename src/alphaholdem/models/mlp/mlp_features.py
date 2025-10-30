@@ -90,43 +90,36 @@ class MLPFeatures:
         self.board[:] = new_board
 
         # Permute beliefs
-        # beliefs might be [batch_size, 1326] or [batch_size, 2 * NUM_HANDS]
-        if self.beliefs.numel() > 0:
-            # Get hand combos: [1326, 2] mapping hand index to two cards
-            hand_combos = hand_combos_tensor(device=device)
-            combo_lookup = combo_lookup_tensor(device=device)
+        # Get hand combos and lookup helpers.
+        hand_combos = hand_combos_tensor(device=device)  # [1326, 2]
+        combo_lookup = combo_lookup_tensor(device=device)  # [52, 52]
 
-            # Extract ranks and suits for all hands [1326, 2]
-            all_ranks = hand_combos % 13
-            all_suits = hand_combos // 13
+        # Extract ranks and suits for all hands [1326, 2] and expand across batch.
+        all_ranks = (hand_combos % 13).unsqueeze(0).expand(batch_size, -1, -1)
+        all_suits = (hand_combos // 13).unsqueeze(0).expand(batch_size, -1, -1)
 
-            # Use the first permutation for simplicity (all batches use same permutation)
-            suit_perm = suit_permutations[0]  # [4]
+        # Gather new suits per sample using that sample's permutation.
+        suit_perm_expanded = suit_permutations[:, None, :].expand(-1, NUM_HANDS, -1)
+        new_suits = torch.gather(suit_perm_expanded, 2, all_suits)
 
-            # Vectorized suit permutation: [1326, 2]
-            new_suits = suit_perm[all_suits]
+        # Reconstruct card indices per hand per sample.
+        new_cards = all_ranks + new_suits * 13
+        min_cards = torch.min(new_cards, dim=2).values
+        max_cards = torch.max(new_cards, dim=2).values
 
-            # Reconstruct card indices: [1326, 2]
-            new_cards = all_ranks + new_suits * 13
+        # Look up remapped hand indices for each sample.
+        remap = combo_lookup[min_cards, max_cards].to(torch.long)
 
-            # Get min and max cards for each hand
-            min_cards = torch.min(new_cards, dim=1).values  # [1326]
-            max_cards = torch.max(new_cards, dim=1).values  # [1326]
-
-            # Look up new hand indices using combo_lookup
-            # combo_lookup is [52, 52], we index it with min_cards and max_cards
-            # Note: we need to handle the indexing carefully
-            # combo_lookup[min, max] gives the hand index
-            remap = combo_lookup[min_cards, max_cards].to(torch.long)
-
-            # Remap beliefs based on shape
-            if self.beliefs.shape[1] == 1326:
-                # [batch_size, 1326] - remap directly
-                self.beliefs[:] = self.beliefs[:, remap]
-            elif self.beliefs.shape[1] == 2 * NUM_HANDS:
-                # [batch_size, 2 * NUM_HANDS] - remap each player's beliefs separately
-                p0_beliefs = self.beliefs[:, :NUM_HANDS]
-                p1_beliefs = self.beliefs[:, NUM_HANDS:]
-                p0_remapped = p0_beliefs[:, remap]
-                p1_remapped = p1_beliefs[:, remap]
-                self.beliefs[:] = torch.cat([p0_remapped, p1_remapped], dim=1)
+        # Remap beliefs based on shape.
+        if self.beliefs.shape[1] == NUM_HANDS:
+            self.beliefs[:] = torch.gather(self.beliefs, 1, remap)
+        elif self.beliefs.shape[1] == 2 * NUM_HANDS:
+            p0_beliefs = self.beliefs[:, :NUM_HANDS]
+            p1_beliefs = self.beliefs[:, NUM_HANDS:]
+            p0_remapped = torch.gather(p0_beliefs, 1, remap)
+            p1_remapped = torch.gather(p1_beliefs, 1, remap)
+            self.beliefs[:] = torch.cat([p0_remapped, p1_remapped], dim=1)
+        else:
+            raise ValueError(
+                f"Unexpected belief shape {tuple(self.beliefs.shape)}; expected [*, 1326] or [*, {2 * NUM_HANDS}]."
+            )
