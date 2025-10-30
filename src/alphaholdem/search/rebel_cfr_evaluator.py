@@ -1094,7 +1094,7 @@ class RebelCFREvaluator:
 
         return next_pbs
 
-    def sample_data(self) -> RebelBatch:
+    def training_data(self) -> RebelBatch:
         """Aggregate model targets from the current root batch for supervised learning."""
         N = self.search_batch_size
         top = self.depth_offsets[-2]
@@ -1142,6 +1142,8 @@ class RebelCFREvaluator:
             legal_masks=legal_masks[:N],
             statistics=value_statistics,
         )
+        root_nodes = (self.env.street[:N] == 0) & (self.env.actions_this_round[:N] == 0)
+        value_batch = value_batch[~root_nodes]
         policy_batch = RebelBatch(
             features=features[valid_top],
             policy_targets=policy_targets[valid_top],

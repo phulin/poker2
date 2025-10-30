@@ -13,6 +13,7 @@ from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.rl.losses import RebelSupervisedLoss
+from alphaholdem.rl.pbs_pool import PBSPool
 from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
@@ -159,6 +160,8 @@ class RebelCFRTrainer:
             policy_buffer=self.policy_buffer,
         )
 
+        self.pbs_pool = PBSPool(pool_size=3, generator=self.rng)
+
     def _compute_entropy(self, probs: torch.Tensor) -> float:
         eps = 1e-8
         norm = probs.clamp_min(eps)
@@ -301,6 +304,9 @@ class RebelCFRTrainer:
             history.append(update_info)
 
         return history
+
+    def evaluate_against_pool(self, min_games: int) -> dict[str, float]:
+        return self.pbs_pool.evaluate_model_against_pool(self.model, min_games)
 
     def save_checkpoint(
         self,

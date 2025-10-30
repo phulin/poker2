@@ -66,7 +66,7 @@ class RebelDataGenerator:
 
             self.current_pbs = self.evaluator.self_play_iteration()
 
-            value_batch, policy_batch = self.evaluator.sample_data()
-            self.value_buffer.add_batch(value_batch)
+            value_batch, policy_batch = self.evaluator.training_data()
             self.policy_buffer.add_batch(policy_batch)
+            self.value_buffer.add_batch(value_batch)
             collected += len(value_batch)

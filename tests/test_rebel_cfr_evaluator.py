@@ -781,7 +781,7 @@ def test_sample_data_returns_root_batch() -> None:
     )
     evaluator.latest_values[roots] = 0.5
 
-    value_batch, policy_batch = evaluator.sample_data()
+    value_batch, policy_batch = evaluator.training_data()
 
     assert len(policy_batch.features) == evaluator.depth_offsets[-2]
     assert policy_batch.policy_targets.shape == (
@@ -1309,7 +1309,7 @@ def test_local_exploitability_depth_limited() -> None:
     evaluator.stats.clear()
     evaluator._compute_exploitability()
 
-    value_batch, policy_batch = evaluator.sample_data()
+    value_batch, policy_batch = evaluator.training_data()
     assert "local_exploitability" in value_batch.statistics
     assert "local_br_policy" in value_batch.statistics
     assert "local_br_values" in value_batch.statistics

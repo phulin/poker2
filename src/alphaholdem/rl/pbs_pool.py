@@ -4,7 +4,6 @@ from typing import List, Optional, Callable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import CFRType, SearchConfig
 from alphaholdem.env.card_utils import NUM_HANDS
@@ -73,31 +72,30 @@ class PBSPool(OpponentPool):
             return self.snapshots.copy()
 
         # Sample with replacement, weighted by ELO rating
-        weights = [snapshot.elo for snapshot in self.snapshots]
-        total_weight = sum(weights)
+        weights = torch.tensor([snapshot.elo for snapshot in self.snapshots])
 
-        if total_weight == 0:
+        if weights.sum() == 0:
             # If all ELOs are 0, sample uniformly
-            import random
-
-            return random.sample(self.snapshots, min(k, len(self.snapshots)))
+            samples = torch.randint(
+                0, len(self.snapshots), (k,), generator=self.generator
+            )
+            return [self.snapshots[i] for i in samples.tolist()]
 
         # Normalize weights
-        normalized_weights = [w / total_weight for w in weights]
+        normalized_weights = weights / weights.sum()
 
-        # Sample with replacement
-        import random
-
-        sampled_indices = random.choices(
-            range(len(self.snapshots)), weights=normalized_weights, k=k
+        sampled_indices = torch.multinomial(
+            normalized_weights,
+            k,
+            replacement=len(self.snapshots) < k,
+            generator=self.generator,
         )
+        return [self.snapshots[i] for i in sampled_indices.tolist()]
 
-        return [self.snapshots[i] for i in sampled_indices]
-
-    def _evaluate_candidate_against_pool(
+    def evaluate_model_against_pool(
         self,
         candidate_model: BetterFFN | RebelFFN,
-        num_games_per_opponent: int = 100,
+        num_games_per_opponent: int = 50,
     ) -> float:
         """
         Evaluate a candidate model against all pool members using inline public-belief games.
@@ -189,7 +187,7 @@ class PBSPool(OpponentPool):
 
         # Evaluate against pool if requested and evaluation function is available
         if evaluate_against_pool and rating is None:
-            new_snapshot.elo = self._evaluate_candidate_against_pool(
+            new_snapshot.elo = self.evaluate_model_against_pool(
                 model, num_games_per_opponent
             )
 

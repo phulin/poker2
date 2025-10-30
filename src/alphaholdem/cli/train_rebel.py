@@ -122,6 +122,36 @@ def _init_wandb(cfg: Config, device: torch.device) -> Any:
         return nullcontext()
 
 
+def print_training_stats(
+    metrics: dict,
+    step: int,
+    total_steps: int,
+    step_elapsed: float,
+    total_elapsed: float,
+) -> None:
+    loss_str = f"{metrics['loss']:.4f}" if metrics["loss"] is not None else "N/A"
+    policy_str = (
+        f"{metrics['policy_loss']:.4f}" if metrics["policy_loss"] is not None else "N/A"
+    )
+    value_str = (
+        f"{metrics['value_loss']:.4f}" if metrics["value_loss"] is not None else "N/A"
+    )
+    exploitability_str = (
+        f"{metrics['local_exploitability']:.4f}"
+        if metrics["local_exploitability"] is not None
+        else "N/A"
+    )
+
+    print(
+        f"[Step {step:05d}/{total_steps}] "
+        f"loss={loss_str} "
+        f"policy={policy_str} "
+        f"value={value_str} "
+        f"exploit={exploitability_str} "
+        f"time={step_elapsed:.2f}s total={total_elapsed/60:.1f}m"
+    )
+
+
 def train_rebel(cfg: Config) -> None:
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
     device = _device_from_config(cfg)
@@ -169,32 +199,8 @@ def train_rebel(cfg: Config) -> None:
             step_elapsed = time.time() - step_start
             total_elapsed = time.time() - training_start
 
-            loss_str = (
-                f"{metrics['loss']:.4f}" if metrics["loss"] is not None else "N/A"
-            )
-            policy_str = (
-                f"{metrics['policy_loss']:.4f}"
-                if metrics["policy_loss"] is not None
-                else "N/A"
-            )
-            value_str = (
-                f"{metrics['value_loss']:.4f}"
-                if metrics["value_loss"] is not None
-                else "N/A"
-            )
-            exploitability_str = (
-                f"{metrics['local_exploitability']:.4f}"
-                if metrics["local_exploitability"] is not None
-                else "N/A"
-            )
-
-            print(
-                f"[Step {metrics['step']:05d}] "
-                f"loss={loss_str} "
-                f"policy={policy_str} "
-                f"value={value_str} "
-                f"exploit={exploitability_str} "
-                f"time={step_elapsed:.2f}s total={total_elapsed/60:.1f}m"
+            print_training_stats(
+                metrics, step, cfg.num_steps, step_elapsed, total_elapsed
             )
 
             if cfg.use_wandb:
@@ -229,6 +235,10 @@ def train_rebel(cfg: Config) -> None:
 
                 print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
                 print_preflop_range_grid(trainer, step + 1, rebel=True)
+
+            if (step + 1) % cfg.eval_interval == 0:
+                eval_results = trainer.evaluate_against_pool(min_games=200)
+                print(f"Evaluation results: {eval_results}")
 
         final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
         trainer.save_checkpoint(
