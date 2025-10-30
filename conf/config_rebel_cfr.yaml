@@ -19,7 +19,7 @@ train:
   batch_size: 1024
   replay_buffer_batches: 16
   value_reuse_goal: 8
-  value_coef: 1.0
+  value_coef: 2.0
   entropy_coef: 0.0
   grad_clip: 1.0
 
@@ -30,15 +30,15 @@ train:
       probabilities: [0.05, 0.05, 0.15, 0.75]
     - threshold: 6000
       probabilities: [0.15, 0.15, 0.30, 0.40]
-    - threshold: 8000
+    - threshold: 10000
       probabilities: [0.25, 0.25, 0.25, 0.25]
 
 model:
   name: BetterFFN
-  hidden_dim: 512
+  hidden_dim: 1024
   range_hidden_dim: 128
   ffn_dim: 1024
-  num_hidden_layers: 4
+  num_hidden_layers: 6
   detach_value_head: false
   compile: true
 
@@ -55,9 +55,9 @@ search:
   cfr_type: discounted
   cfr_avg: true
 
-  iterations: 100
+  iterations: 150
   warm_start_iterations: 15
-  dcfr_delay: 35
+  dcfr_delay: 45
 
   dcfr_alpha: 1.5
   dcfr_beta: 0.0
