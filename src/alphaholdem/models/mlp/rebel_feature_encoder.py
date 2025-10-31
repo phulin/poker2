@@ -54,6 +54,7 @@ class RebelFeatureEncoder:
     def encode(
         self,
         beliefs: torch.Tensor,
+        pre_chance_node: bool = False,
     ) -> MLPFeatures:
         """
         Build ReBeL flat features for all envs.
@@ -81,6 +82,10 @@ class RebelFeatureEncoder:
         return MLPFeatures(
             context=context_features,
             street=self.env.street,
-            board=self.env.board_indices,
+            board=(
+                self.env.last_board_indices
+                if pre_chance_node
+                else self.env.board_indices
+            ),
             beliefs=beliefs.view(-1, 2 * NUM_HANDS),
         )

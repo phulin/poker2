@@ -674,6 +674,7 @@ class RebelCFREvaluator:
         # CFR-AVG: subgame rooted at PBS from average policy
         features = self.feature_encoder.encode(
             self.beliefs_avg if self.cfr_avg else self.beliefs,
+            pre_chance_node=True,
         )
         model_output = self.model(features[model_mask])
         if t <= 1 or not self.cfr_avg or self.last_model_values is None:
@@ -1109,7 +1110,9 @@ class RebelCFREvaluator:
         if value_targets.abs().max() > 100:
             print("WARNING: Value targets are too large")
 
-        features = self.feature_encoder.encode(self.beliefs_avg)[:top]
+        features = self.feature_encoder.encode(self.beliefs_avg, pre_chance_node=False)[
+            :top
+        ]
         bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
         statistics = {
             "to_act": self.env.to_act,

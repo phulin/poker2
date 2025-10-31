@@ -46,6 +46,7 @@ class HUNLTensorEnv:
     board_onehot: torch.Tensor
     hole_onehot: torch.Tensor
     board_indices: torch.Tensor
+    last_board_indices: torch.Tensor
     hole_indices: torch.Tensor
     done: torch.Tensor
     winner: torch.Tensor
@@ -119,6 +120,7 @@ class HUNLTensorEnv:
         self.board_indices = torch.full(
             (self.N, 5), -1, dtype=torch.long, device=self.device
         )  # -1 means no card
+        self.last_board_indices = self.board_indices.clone()
         self.hole_indices = torch.full(
             (self.N, 2, 2), -1, dtype=torch.long, device=self.device
         )  # -1 means no card
@@ -261,6 +263,7 @@ class HUNLTensorEnv:
         self.board_onehot[ids, :, :, :] = False
         self.hole_onehot[ids, :, :, :, :] = False
         self.board_indices[ids, :] = -1
+        self.last_board_indices[ids, :] = -1
         self.hole_indices[ids, :, :] = -1
 
         # Set hole_onehot for specified environments using cached one-hot matrices
@@ -472,6 +475,7 @@ class HUNLTensorEnv:
         self.board_onehot[dest_select] = src_env.board_onehot[src_select]
         self.hole_onehot[dest_select] = src_env.hole_onehot[src_select]
         self.board_indices[dest_select] = src_env.board_indices[src_select]
+        self.last_board_indices[dest_select] = src_env.last_board_indices[src_select]
         self.hole_indices[dest_select] = src_env.hole_indices[src_select]
 
         # Done/winner
@@ -691,6 +695,9 @@ class HUNLTensorEnv:
         self.to_act[acting] = 1 - self.to_act[acting]
         self.actions_this_round[acting] += 1
         self.acted_since_reset[acting] = True
+
+        # Save previous board (if we later want to look back)
+        self.last_board_indices[acting, :] = self.board_indices[acting, :]
 
         # Round closure: equal committed (or 1 player all-in) and both acted
         equal_committed = self.committed[:, 0] == self.committed[:, 1]

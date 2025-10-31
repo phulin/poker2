@@ -29,6 +29,7 @@ class BetterFeatureEncoder:
     def encode(
         self,
         beliefs: torch.Tensor,
+        pre_chance_node: bool = False,
     ) -> MLPFeatures:
         """
         Build Better PBS features for a batch of env indices and agent ids.
@@ -71,9 +72,25 @@ class BetterFeatureEncoder:
         player_context[:, PlayerContext.COMMITTED.value] = committed
         player_context[:, PlayerContext.SPR.value] = stacks / pot[:, None]
 
+        street = (
+            self.env.street
+            if not pre_chance_node
+            else torch.where(
+                (self.env.street > 0)
+                & (self.env.street < 4)
+                & (self.env.actions_this_round == 0),
+                self.env.street - 1,
+                self.env.street,
+            )
+        )
+
         return MLPFeatures(
             context=torch.cat([scalar_context, player_context.view(N, -1)], dim=-1),
-            street=self.env.street,
-            board=self.env.board_indices,
+            street=street,
+            board=(
+                self.env.last_board_indices
+                if pre_chance_node
+                else self.env.board_indices
+            ),
             beliefs=beliefs.view(-1, 2 * NUM_HANDS) * 2 - 1,
         )
