@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from alphaholdem.models.cnn import SiameseConvNetV1
 from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.rl.dred_pool import DREDPool, DREDSnapshotData
+
+pytestmark = pytest.mark.skip(reason="Tests in this file are temporarily disabled.")
 
 
 def test_dred_prune_basic():

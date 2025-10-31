@@ -4,9 +4,11 @@ from alphaholdem.env.card_utils import (
     HAND_EQUITY_ORDERING,
     IDX_TO_RANK,
     NUM_HANDS,
+    combo_lookup_tensor,
     hand_combos_tensor,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 
 
@@ -127,3 +129,90 @@ def test_permute_suits():
             torch.testing.assert_close(
                 orig_player_beliefs_combo, permuted_player_beliefs_combo
             )
+
+
+def _expected_remap(suit_permutation: torch.Tensor) -> torch.Tensor:
+    device = suit_permutation.device
+    hand_combos = hand_combos_tensor(device=device)
+    combo_lookup = combo_lookup_tensor(device=device)
+
+    all_ranks = (hand_combos % 13).unsqueeze(0)
+    all_suits = (hand_combos // 13).unsqueeze(0)
+
+    suit_perm_expanded = suit_permutation[:, None, :].expand(-1, NUM_HANDS, -1)
+    new_suits = torch.gather(suit_perm_expanded, 2, all_suits)
+
+    new_cards = all_ranks + new_suits * 13
+    min_cards = torch.min(new_cards, dim=2).values
+    max_cards = torch.max(new_cards, dim=2).values
+
+    remap = combo_lookup[min_cards, max_cards].to(torch.long)
+    return torch.argsort(remap, dim=1)
+
+
+def test_permute_suits_permuted_board_and_beliefs():
+    device = torch.device("cpu")
+    batch_size = 1
+
+    context = torch.zeros((batch_size, 1), device=device)
+    street = torch.zeros((batch_size, 1), device=device)
+    board = torch.tensor([[0, 13, 26, 39, -1]], device=device)
+    board_clone = board.clone()
+
+    beliefs = torch.arange(NUM_HANDS, dtype=torch.float32, device=device).unsqueeze(0)
+    beliefs_clone = beliefs.clone()
+
+    generator = torch.Generator(device=device)
+    generator.manual_seed(123)
+    state = generator.get_state()
+    suit_permutation = torch.argsort(
+        torch.rand((batch_size, 4), generator=generator), dim=-1
+    )
+    generator.set_state(state)
+
+    features = MLPFeatures(
+        context=context.clone(),
+        street=street.clone(),
+        board=board.clone(),
+        beliefs=beliefs.clone(),
+    )
+    features.permute_suits(generator=generator)
+
+    board_valid = board_clone >= 0
+    ranks = (board_clone % 13).clamp(0, 12)
+    suits = (board_clone // 13).clamp(0, 3)
+    expected_suits = torch.gather(
+        suit_permutation.unsqueeze(1).expand(-1, 5, -1),
+        dim=2,
+        index=suits.unsqueeze(2).to(torch.long),
+    ).squeeze(2)
+    expected_board = torch.where(board_valid, expected_suits * 13 + ranks, board_clone)
+    assert torch.equal(features.board, expected_board)
+
+    inverse_remap = _expected_remap(suit_permutation)
+    expected_beliefs = torch.gather(beliefs_clone, 1, inverse_remap)
+    torch.testing.assert_close(features.beliefs, expected_beliefs)
+
+    # Two-player belief tensor path.
+    beliefs_two = torch.arange(
+        2 * NUM_HANDS, dtype=torch.float32, device=device
+    ).unsqueeze(0)
+    generator_two = torch.Generator(device=device)
+    generator_two.set_state(state)
+    features_two = MLPFeatures(
+        context=context.clone(),
+        street=street.clone(),
+        board=board.clone(),
+        beliefs=beliefs_two.clone(),
+    )
+    features_two.permute_suits(generator=generator_two)
+    assert torch.equal(features_two.board, expected_board)
+
+    expected_two = torch.cat(
+        [
+            torch.gather(beliefs_two[:, :NUM_HANDS], 1, inverse_remap),
+            torch.gather(beliefs_two[:, NUM_HANDS:], 1, inverse_remap),
+        ],
+        dim=1,
+    )
+    torch.testing.assert_close(features_two.beliefs, expected_two)

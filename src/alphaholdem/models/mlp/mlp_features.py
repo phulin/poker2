@@ -109,15 +109,16 @@ class MLPFeatures:
 
         # Look up remapped hand indices for each sample.
         remap = combo_lookup[min_cards, max_cards].to(torch.long)
+        inverse_remap = torch.argsort(remap, dim=1)
 
         # Remap beliefs based on shape.
         if self.beliefs.shape[1] == NUM_HANDS:
-            self.beliefs[:] = torch.gather(self.beliefs, 1, remap)
+            self.beliefs[:] = torch.gather(self.beliefs, 1, inverse_remap)
         elif self.beliefs.shape[1] == 2 * NUM_HANDS:
             p0_beliefs = self.beliefs[:, :NUM_HANDS]
             p1_beliefs = self.beliefs[:, NUM_HANDS:]
-            p0_remapped = torch.gather(p0_beliefs, 1, remap)
-            p1_remapped = torch.gather(p1_beliefs, 1, remap)
+            p0_remapped = torch.gather(p0_beliefs, 1, inverse_remap)
+            p1_remapped = torch.gather(p1_beliefs, 1, inverse_remap)
             self.beliefs[:] = torch.cat([p0_remapped, p1_remapped], dim=1)
         else:
             raise ValueError(
