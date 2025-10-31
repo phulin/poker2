@@ -17,3 +17,6 @@ This is a python project. The main entry points are src/alphaholdem/cli/{train_r
 ## Tests
 * When writing tests, try to make the test short and clear, and share relevant code between tests. The user should be able to read the test and quickly understand exactly what behavior the test is verifying.
 * Use `torch.testing.assertclose` as your assertion where you can. Don't adjust the rtol/atol.
+
+# ExecPlans
+* When writing complex features or significant refactors, use an ExecPlan (as described in .agent/PLANS.md) from design to implementation.

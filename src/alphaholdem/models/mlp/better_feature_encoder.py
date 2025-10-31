@@ -76,9 +76,7 @@ class BetterFeatureEncoder:
             self.env.street
             if not pre_chance_node
             else torch.where(
-                (self.env.street > 0)
-                & (self.env.street < 4)
-                & (self.env.actions_this_round == 0),
+                (self.env.street > 0) & (self.env.actions_this_round == 0),
                 self.env.street - 1,
                 self.env.street,
             )
