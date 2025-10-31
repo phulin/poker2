@@ -7,6 +7,7 @@ import torch
 
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
@@ -142,17 +143,39 @@ class DummyEvaluator:
         )
         return PublicBeliefState(env=env, beliefs=beliefs)
 
-    def sample_data(self) -> RebelBatch:
-        self.sample_calls += 1
+    def training_data(self):
+        """Return training data as tuple (value_batch, policy_batch)."""
+
         count = self.search_batch_size
         indices = torch.arange(count, dtype=torch.long)
-        result = RebelBatch(
-            features=self.feature_matrix[indices],
-            policy_targets=self.policy_probs_avg[:count],
+        device = self.device
+
+        # Create MLPFeatures from feature_matrix
+        # Assuming feature_matrix is just context for simplicity
+        # In real code, features would be properly encoded MLPFeatures
+        mlp_features = MLPFeatures(
+            context=self.feature_matrix[indices],
+            street=torch.zeros(count, dtype=torch.long, device=device),
+            board=torch.full((count, 5), -1, dtype=torch.long, device=device),
+            beliefs=torch.full(
+                (count, 2 * NUM_HANDS),
+                1.0 / NUM_HANDS,
+                dtype=torch.float32,
+                device=device,
+            ),
+        )
+
+        value_batch = RebelBatch(
+            features=mlp_features,
             value_targets=self.values[:count],
             legal_masks=self.env.legal_bins_mask()[indices],
         )
-        return result, result
+        policy_batch = RebelBatch(
+            features=mlp_features,
+            policy_targets=self.policy_probs_avg[:count],
+            legal_masks=self.env.legal_bins_mask()[indices],
+        )
+        return value_batch, policy_batch
 
 
 def fake_from_proto(proto: SimpleNamespace, num_envs: int | None = None) -> DummyEnv:
@@ -187,22 +210,27 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
     generator.generate_data(2)
 
     # Check that data was added to buffer
-    assert len(buffer.batches) > 0
-    batch = buffer.batches[0]
-    assert isinstance(batch, RebelBatch)
+    assert len(buffer.batches) >= 2
+    # Policy batch is added first, value batch second
+    policy_batch = buffer.batches[0]
+    value_batch = buffer.batches[1]
+    assert isinstance(policy_batch, RebelBatch)
+    assert isinstance(value_batch, RebelBatch)
 
     torch.testing.assert_close(
-        batch.features, evaluator.feature_matrix[: evaluator.search_batch_size]
+        value_batch.features.context,
+        evaluator.feature_matrix[: evaluator.search_batch_size],
     )
     assert torch.equal(
-        batch.legal_masks,
+        value_batch.legal_masks,
         evaluator.env.legal_bins_mask()[: evaluator.search_batch_size],
     )
     torch.testing.assert_close(
-        batch.value_targets, evaluator.values[: evaluator.search_batch_size]
+        value_batch.value_targets, evaluator.values[: evaluator.search_batch_size]
     )
     torch.testing.assert_close(
-        batch.policy_targets, evaluator.policy_probs_avg[: evaluator.search_batch_size]
+        policy_batch.policy_targets,
+        evaluator.policy_probs_avg[: evaluator.search_batch_size],
     )
 
     # Check that evaluator was called correctly
@@ -212,7 +240,6 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
         torch.arange(evaluator.search_batch_size),
     )
     assert evaluator.self_play_calls >= 1
-    assert evaluator.sample_calls >= 1
 
 
 def test_rebel_data_generator_terminates_when_no_next_pbs(monkeypatch, env_proto):
@@ -241,8 +268,6 @@ def test_rebel_data_generator_terminates_when_no_next_pbs(monkeypatch, env_proto
     # Should have initialized search and called self_play_iteration once
     assert len(evaluator.initialize_args) == 1
     assert evaluator.self_play_calls == 1
-    # Should have sampled data at least once
-    assert evaluator.sample_calls >= 1
     # Should have added data to buffer
     assert len(buffer.batches) > 0
 
@@ -270,7 +295,5 @@ def test_rebel_data_generator_multiple_iterations(monkeypatch, env_proto):
 
     # Should have called self_play_iteration multiple times
     assert evaluator.self_play_calls >= 1
-    # Should have sampled data multiple times
-    assert evaluator.sample_calls >= 1
     # Should have added multiple batches to buffer
     assert len(buffer.batches) >= 1

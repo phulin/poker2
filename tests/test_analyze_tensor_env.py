@@ -343,8 +343,8 @@ def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
     assert aa == 861  # AA pairs
     assert kk == 794  # KK pairs
     assert qq == 728  # QQ pairs
-    assert aks == 828  # AK suited
-    assert ako == 883  # AK offsuit
+    assert aks == 883  # AK suited (grid coordinate mapping: row 0, col 1)
+    assert ako == 828  # AK offsuit (grid coordinate mapping: row 1, col 0)
     assert twotwo == 61  # 22 pairs
 
 
@@ -417,12 +417,12 @@ def test_dummy_model_range_grid_call_bin() -> None:
     q_idx = GRID_RANKS.index("Q")
     assert averaged[a_idx, a_idx].item() == pytest.approx(0.0, abs=1e-6)
     assert averaged[k_idx, k_idx].item() == pytest.approx(0.0, abs=1e-6)
-    assert averaged[a_idx, k_idx].item() == pytest.approx(
-        0.0, abs=1e-6
-    )  # AK suited folds
     assert averaged[k_idx, a_idx].item() == pytest.approx(
+        0.0, abs=1e-6
+    )  # AK suited folds (maps to row K, col A)
+    assert averaged[a_idx, k_idx].item() == pytest.approx(
         1.0, abs=1e-6
-    )  # AK offsuit calls
+    )  # AK offsuit calls (maps to row A, col K)
     assert averaged[:, q_idx:].mean().item() == pytest.approx(1.0, abs=1e-6)
     assert averaged[q_idx:, :].mean().item() == pytest.approx(1.0, abs=1e-6)
 

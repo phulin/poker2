@@ -178,11 +178,11 @@ def train_rebel(cfg: Config) -> None:
         start_step = 0
         if cfg.resume_from and os.path.exists(cfg.resume_from):
             print(f"Resuming from checkpoint: {cfg.resume_from}")
-            start_step = trainer.load_checkpoint(cfg.resume_from)
-            print(f"Resumed at global step {start_step + 1}")
+            start_step = trainer.load_checkpoint(cfg.resume_from) + 1
+            print(f"Resumed at global step {start_step}")
 
         print(
-            f"Starting ReBeL CFR training for {cfg.num_steps - start_step - 1} steps "
+            f"Starting ReBeL CFR training for {cfg.num_steps - start_step} steps "
             f"(total target: {cfg.num_steps})"
         )
         if cfg.use_wandb:

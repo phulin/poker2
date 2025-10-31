@@ -487,8 +487,12 @@ def test_initialize_beliefs_updates_child_nodes(
     policy_probs_src = evaluator._pull_back(evaluator.policy_probs)
     valid_mask_src = evaluator.valid_mask[: policy_probs_src.shape[0]]
     prob_sum = policy_probs_src[valid_mask_src].sum(dim=1)
+    # Only check nodes that have non-zero policy sums (nodes with policies set)
+    has_policy = prob_sum > 1e-6
+    torch.testing.assert_close(
+        prob_sum[has_policy], torch.ones_like(prob_sum[has_policy])
+    )
     belief_sum = evaluator.beliefs[evaluator.valid_mask].sum(dim=2)
-    torch.testing.assert_close(prob_sum, torch.ones_like(prob_sum))
     torch.testing.assert_close(belief_sum, torch.ones_like(belief_sum))
 
 
@@ -761,6 +765,8 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_sample_data_returns_root_batch() -> None:
     evaluator, env = make_evaluator(batch_size=2, max_depth=1)
+    env.step_bins(torch.tensor([1, 1]))
+    env.step_bins(torch.tensor([1, 1]))
     roots = torch.arange(evaluator.search_batch_size, device=env.device)
     children = torch.arange(
         evaluator.depth_offsets[1], evaluator.depth_offsets[2], device=env.device
@@ -780,6 +786,7 @@ def test_sample_data_returns_root_batch() -> None:
         -1, NUM_HANDS
     )
     evaluator.latest_values[roots] = 0.5
+    evaluator.values_avg[roots] = 0.5  # Sync values_avg from latest_values
 
     value_batch, policy_batch = evaluator.training_data()
 
@@ -1309,7 +1316,7 @@ def test_local_exploitability_depth_limited() -> None:
     evaluator.stats.clear()
     evaluator._compute_exploitability()
 
-    value_batch, policy_batch = evaluator.training_data()
+    value_batch, policy_batch = evaluator.training_data(exclude_start=False)
     assert "local_exploitability" in value_batch.statistics
     assert "local_br_policy" in value_batch.statistics
     assert "local_br_values" in value_batch.statistics

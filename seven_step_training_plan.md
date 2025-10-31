@@ -15,7 +15,7 @@ We will rely on the fact that every tree built by `RebelCFREvaluator.construct_s
 This effort augments value-training data so that, for every start-of-street example we already collect, we also record the matching end-of-street example that immediately precedes the chance event. Concretely:
 
 1. Trace how `RebelCFREvaluator.training_data` surfaces start-of-street samples and map each to the public state that existed right before the next board card was revealed, keeping the evaluator’s belief tensor in a pre-chance form.
-2. When `RebelDataGenerator.generate_data` obtains a value batch, derive the corresponding end-of-street features and value targets (including chance expectations such as enumerating river cards or sampling flops) and append them to the replay buffer alongside the original samples.
+2. When `RebelCFREvaluator.training_data` assembles the value batch, derive the corresponding end-of-street features and value targets (including chance expectations such as enumerating river cards or exploiting flop suit symmetry) and return them alongside the existing start-of-street samples.
 3. Provide supporting utilities, configuration hooks, and tests so a novice can verify the augmentation end-to-end.
 
 Out of scope: architectural changes to tree construction, new CFR algorithms, or rewriting the trainer loop.
@@ -30,7 +30,9 @@ Document `_fan_out_deep` within the file, including its assumptions (tree arity 
 
 ### 2. Track Pre-Chance Beliefs Across Evaluator Transitions
 
-Conceptually reimagine `PublicBeliefState` to hold the beliefs that existed immediately before the chance event. This should not necessitate any changes to the next_pbs code, and the beliefs will get re-blocked to equal the post-chance beliefs in `initialize_policy_and_beliefs`. Add a new `pre_chance_root_beliefs` to `RebelCFREvaluator` to track what the original root beliefs were.
+Extend `PublicBeliefState` to carry both `post_chance_beliefs` (the current field, unchanged) and a new `pre_chance_beliefs` tensor that stores the ranges immediately before the chance event. When `sample_leaf` constructs `next_pbs`, populate both tensors by copying the pre-chance beliefs from the parent evaluator alongside the post-chance beliefs already used today.
+
+During `initialize_search`, seed `self.beliefs` with `pbs.pre_chance_beliefs` so the entire evaluator operates on pre-chance data. Store the post-chance view in a new attribute such as `self.root_post_chance_beliefs` for the handful of places that still need it (e.g., start-of-street targets). Add comments clarifying the lifecycle: `pre_chance_beliefs` flow down the tree, while `post_chance_beliefs` are held only for reporting and training output.
 
 ### 3. Derive End-of-Street Value Targets
 
@@ -39,20 +41,20 @@ Implement utilities inside `RebelCFREvaluator` (or a dedicated helper module) th
 For each street transition, spell out how to average over hidden chance outcomes:
 
 * River: enumerate the 48 legal river cards for every start-of-river node, use the value network to estimate the post-chance value, weight by uniform probability, and produce the end-of-turn value target.
-* Turn: enumerate the 49 turn cards consistent with the flop. Use value network to evaluate the resulting start-of-turn values, then average them to obtain end-of-flop targets.
-* Flop: implement a Monte Carlo sampler parameterised by `cfg.search.preflop_samples` that draws legal flop runouts, evaluates the resulting start-of-turn values, and averages them to obtain end-of-preflop targets. Document seeding and reuse of `torch.Generator` for reproducibility.
+* Turn: enumerate the 45 legal turn cards consistent with the flop (52 cards minus 3 flop cards minus 4 hole cards). Use the value network to evaluate the resulting start-of-river values, then average them to obtain end-of-flop targets.
+* Flop: enumerate canonical flops using suit symmetry. For each canonical flop, evaluate once, remap via suit permutations to cover its orbit, and weight by the number of raw flops represented. This yields the exact end-of-preflop expectation without Monte Carlo variance.
 
 Emit assertions that the resulting tensors share the same shape as the original value targets so downstream code can rely on them without branching.
 
-### 4. Augment Value Batches During Data Generation
+### 4. Return Augmented Value Batches From `training_data`
 
-Inside `src/alphaholdem/search/rebel_data_generator.py::generate_data`, after retrieving `(value_batch, policy_batch)`, call a new helper such as `augment_with_end_of_street(value_batch)` that returns a second `RebelBatch` containing the computed end-of-street features and value targets. Append both batches sequentially to `value_buffer` so each start-of-street sample now has a partner representing the previous street.
+Extend `RebelCFREvaluator.training_data` so it returns both the existing `value_batch` (start-of-street samples) and a second batch containing the derived end-of-street examples. Internally, call the utilities from step 3 to build the additional features, value targets, and statistics. Update callers—primarily `RebelDataGenerator.generate_data`—to accept the new tuple `(value_batch, end_batch, policy_batch)` and push both value batches into the replay buffer.
 
-Ensure the augmentation preserves statistics (pot size, actor to act, etc.) by copying or recomputing them for the pre-chance view. If certain statistics are undefined before the chance event, document how they should be filled (for example, reuse `pot` but zero out fields like `bet_amounts`).
+Ensure the statistics in the augmented batch (pot size, actor to act, etc.) match the pre-chance view by copying or recomputing them before the chance event. If certain statistics are undefined before the chance event, document how to fill them (for example, reuse `pot` but zero out `bet_amounts`).
 
 Write a regression test (for example `tests/search/test_rebel_data_generator.py::test_end_of_street_augmentation`) that constructs a tiny evaluator, runs one data-generation step, and asserts that the value buffer receives twice as many entries while the new entries correspond to the expected streets.
 
-Update any trainer logging or metric computations that assume value batches only contain start-of-street samples so that aggregated statistics remain meaningful.
+Update any trainer logging or metric computations that assume value batches only contain start-of-street samples so aggregated statistics remain meaningful.
 
 ### 5. Validation Steps
 
@@ -89,13 +91,13 @@ Expect to see identical counts for start-of-street and end-of-street entries at 
 - [ ] `_fan_out_deep` implemented and documented
 - [ ] Pre-chance belief handoff across evaluators wired up
 - [ ] End-of-street value derivation utilities implemented
-- [ ] Data generator augments value batches and tests cover it
+- [ ] `training_data` returns paired value batches and tests cover it
 - [ ] Validation script implemented and documented
 - [ ] Tests and integration checks passing
 
 ## Risks and Mitigations
 
-Monte Carlo sampling for preflop-to-flop transitions could introduce variance. Mitigate by using deterministic seeds from `torch.Generator` objects, exposing a configuration to increase sample counts during debugging, and logging the observed standard error in the validation script. Enumerating turn or river cards may be expensive for large batches; mitigate by vectorising the helper with existing tensors and caching reusable card masks.
+Enumerating canonical flops and full turn/river runouts may be expensive for large batches. Mitigate by caching canonical representatives, precomputing their multiplicities, vectorising evaluations, and short-circuiting when the evaluator depth is insufficient to reach a given street. Confirm via profiling that the helpers add acceptable overhead; if not, fall back to a configurable bounded sample count with clear warnings.
 
 ## Rollback Strategy
 
@@ -106,3 +108,4 @@ The changes are localized. If issues arise, revert the commits touching `RebelCF
 2024-05-30: Adopted the assumption that all nodes in an evaluator tree share the root street, allowing `allowed_hands` to be computed once per tree. This keeps the evaluator architecture unchanged while enabling access to pre-chance beliefs for the new training stages.
 2024-05-31: Narrowed the scope to augment existing value batches with end-of-street counterparts generated during data collection, leaving evaluator node annotations and feature encoders unchanged.
 2024-05-31: Chose to pass `pre_chance_beliefs` alongside standard beliefs in `PublicBeliefState` so each evaluator root retains the end-of-previous-street ranges needed for augmentation.
+2024-05-31: Chose to integrate flop suit symmetry by enumerating canonical flops instead of Monte Carlo sampling, eliminating variance while keeping computation tractable.

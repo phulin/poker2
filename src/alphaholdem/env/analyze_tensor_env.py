@@ -524,6 +524,7 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             float_dtype=torch.float32,
             generator=rng,
         )
+        self.current_index = 1  # Root node is at index 0, so current_index = 1 for root_index = current_index - 1
 
         # Reinitialize both the base and CFR environments now that CFR state is set up.
         self.reset(button)
