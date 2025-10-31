@@ -57,7 +57,7 @@ search:
 
   iterations: 150
   warm_start_iterations: 15
-  dcfr_delay: 45
+  dcfr_delay: 40
 
   dcfr_alpha: 1.5
   dcfr_beta: 0.0

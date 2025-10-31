@@ -85,7 +85,7 @@ class RebelFFN(nn.Module, Model):
         Returns:
             ModelOutput with policy logits and value predictions.
         """
-        board_features = torch.where(features.board > 0, features.board / 51.0, -1.0)
+        board_features = torch.where(features.board >= 0, features.board / 51.0, -1.0)
         features_tensor = torch.cat(
             [features.context[:, :4], board_features, features.beliefs],
             dim=-1,
@@ -133,7 +133,7 @@ class RebelFFN(nn.Module, Model):
         No-op for quantile value heads.
         """
 
-        last_linear = self.value_head
+        last_linear = self.hand_value_head
         last_linear.weight.data.mul_(weight_scale)
         if last_linear.bias is not None:
             last_linear.bias.data.mul_(weight_scale).add_(bias_adjustment)

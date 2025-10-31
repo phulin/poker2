@@ -41,9 +41,11 @@ from alphaholdem.core.structured_config import (
     ModelConfig,
     SearchConfig,
     TrainingConfig,
+    ModelType,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.types import GameState, PlayerState
+from alphaholdem.env.card_utils import combo_lookup_tensor
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.utils.training_utils import print_preflop_range_grid
@@ -128,7 +130,7 @@ def load_rebel_checkpoint_and_trainer(
 
     print(f"Using device: {device_obj}")
 
-    # Create config
+    # Create base config
     config = create_default_config()
     config.device = device_obj.type
 
@@ -145,10 +147,62 @@ def load_rebel_checkpoint_and_trainer(
     if wandb_run_id:
         print(f"Wandb run ID: {wandb_run_id}")
 
-    # Create trainer
+    # Infer model type and action space from checkpoint
+    model_state = checkpoint["model"]
+    # Detect BetterFFN by presence of trunk/post_norm keys
+    is_better_ffn = "street_embedding.weight" in model_state
+    # Infer num_actions from policy head out dim (out_dim = num_actions * 1326)
+    policy_w = None
+    policy_keys_try = (
+        ["policy_head.3.weight", "policy_head.weight"]
+        if is_better_ffn
+        else ["policy_head.weight", "policy_head.3.weight"]
+    )
+    for kname in policy_keys_try:
+        if kname in model_state:
+            policy_w = model_state[kname]
+            break
+    if policy_w is None:
+        # Fallback: search any key that ends with 'policy_head.weight' or '.3.weight'
+        for kname, tensor in model_state.items():
+            if kname.endswith("policy_head.weight") or kname.endswith(
+                "policy_head.3.weight"
+            ):
+                policy_w = tensor
+                break
+    if policy_w is None:
+        raise RuntimeError("Checkpoint missing policy head weight (unsupported format)")
+    out_dim = policy_w.shape[0]
+    num_actions = out_dim // 1326
+    # Align env bet bins with checkpoint
+    k = max(0, int(num_actions) - 3)
+    if k <= 0:
+        k = 2
+    config.env.bet_bins = [0.5 * (i + 1) for i in range(k)]
+    # Set model type and hyperparams to match checkpoint where possible
+    if is_better_ffn:
+        config.model.name = ModelType.better_ffn
+        # Hidden dim from post_norm
+        if "post_norm.weight" in model_state:
+            config.model.hidden_dim = int(model_state["post_norm.weight"].shape[0])
+        # Infer number of trunk layers from trunk.N.* keys
+        trunk_layers: set[int] = set()
+        for kname in model_state.keys():
+            parts = kname.split(".")
+            if len(parts) >= 2 and parts[0] == "trunk" and parts[1].isdigit():
+                trunk_layers.add(int(parts[1]))
+        if trunk_layers:
+            config.model.num_hidden_layers = max(trunk_layers) + 1
+        # Reasonable defaults for range_hidden_dim/ffn_dim if not inferable
+        config.model.range_hidden_dim = max(64, min(256, config.model.hidden_dim // 4))
+        config.model.ffn_dim = max(256, config.model.hidden_dim * 2)
+    else:
+        config.model.name = ModelType.rebel_ffn
+
+    # Create trainer after aligning config
     trainer = RebelCFRTrainer(cfg=config, device=device_obj)
 
-    # Load the checkpoint
+    # Load the checkpoint state
     loaded_step = trainer.load_checkpoint(checkpoint_path)
 
     print(f"✅ ReBeL checkpoint loaded successfully")
@@ -307,30 +361,40 @@ def analyze_river_state(
         # Set to_act to current player
         temp_env.to_act[0] = player
 
-        # Encode features for this player
-        features = feature_encoder.encode(
-            agents=torch.tensor([player], device=trainer.device), beliefs=beliefs
-        )
+        # Encode features for this PBS
+        features = feature_encoder.encode(beliefs=beliefs)
 
-        # Get legal mask - create a simple legal mask for river analysis
+        # Get legal mask - simple mask for river analysis
         legal_mask = torch.zeros(
             1, trainer.num_actions, dtype=torch.float32, device=trainer.device
         )
         legal_mask[0, 0] = 1.0  # Fold (if facing bet)
         legal_mask[0, 1] = 1.0  # Check/Call
-        legal_mask[0, 2] = 1.0  # Bet 0.5x
-        legal_mask[0, 3] = 1.0  # Bet 1.5x
-        legal_mask[0, 4] = 1.0  # All-in
+        # Allow bet bins and all-in (assume 2 bet bins)
+        for a in range(2, trainer.num_actions):
+            legal_mask[0, a] = 1.0
 
         # Get model predictions
         with torch.no_grad():
             outputs = trainer.model(features)
 
-            # For ReBeL models, we need to extract the right hand combination
-            # For simplicity, we'll use the first hand combination (index 0)
-            # In a real implementation, you'd need to map the actual hole cards to combo index
-            logits = outputs.policy_logits[0, 0, :]  # [num_actions]
-            values = outputs.hand_values[0, player, 0]  # scalar value
+            # Map provided hole cards to combo index for the current player
+            combo_lookup = combo_lookup_tensor(device=trainer.device)
+            if player == 0:
+                c1, c2 = (
+                    temp_env.hole_indices[0, 0, 0].item(),
+                    temp_env.hole_indices[0, 0, 1].item(),
+                )
+            else:
+                c1, c2 = (
+                    temp_env.hole_indices[0, 1, 0].item(),
+                    temp_env.hole_indices[0, 1, 1].item(),
+                )
+            combo_idx = int(combo_lookup[min(c1, c2), max(c1, c2)].item())
+
+            # Extract logits and values for that combo
+            logits = outputs.policy_logits[0, combo_idx, :]  # [num_actions]
+            values = outputs.hand_values[0, player, combo_idx]  # scalar value
 
             # Apply legal mask
             masked_logits = torch.where(legal_mask[0] == 0, -1e9, logits)

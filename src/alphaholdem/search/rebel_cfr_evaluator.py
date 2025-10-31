@@ -591,6 +591,8 @@ class RebelCFREvaluator:
             self._block_beliefs()
             self._normalize_beliefs()
 
+        self.policy_probs.masked_fill_(~self.valid_mask[:, None], 0.0)
+
         self.reach_weights = self._calculate_reach_weights(self.policy_probs)
         self._block_beliefs(self.reach_weights)
 

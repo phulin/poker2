@@ -260,6 +260,10 @@ class Config:
     @classmethod
     def from_dict_config(cls, dict_config: DictConfig) -> "Config":
         container = OmegaConf.to_container(dict_config, resolve=True)
+        return cls.from_dict(container)
+
+    @classmethod
+    def from_dict(cls, container: dict[str, any]) -> "Config":
         train_container = container.get("train", {})
         train_container["stratify_streets_until"] = [
             StratifyConfig(**config)

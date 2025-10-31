@@ -199,8 +199,8 @@ class PreflopAnalyzer:
         ranks_sorted = torch.sort(ranks, dim=1).values
         ranks_flat = torch.where(
             suits[:, 0] == suits[:, 1],
-            ranks_sorted[:, 0] * 13 + ranks_sorted[:, 1],
             ranks_sorted[:, 1] * 13 + ranks_sorted[:, 0],
+            ranks_sorted[:, 0] * 13 + ranks_sorted[:, 1],
         )
         grid_counts.flatten().scatter_add_(0, ranks_flat, torch.ones_like(ranks_flat))
         grid_sums.flatten().scatter_add_(0, ranks_flat, values_1326)
@@ -555,9 +555,6 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             copy_deck=True,
         )
 
-        self.current_index = 1
-        self.current_depth = 1
-
     def get_probabilities_from_cfr(
         self, seat: int
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -583,8 +580,8 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
 
         # Get the root node policy (index 0) [NUM_HANDS, num_actions]
         actions_slice = slice(
-            self.current_index,
-            self.current_index + self.cfr_evaluator.num_actions,
+            1,
+            1 + self.cfr_evaluator.num_actions,
         )
         root_policy = self.cfr_evaluator.policy_probs_avg[actions_slice]
         root_policy /= root_policy.sum(dim=0, keepdim=True).clamp_min(1e-12)
@@ -593,10 +590,8 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         legal_masks = self.cfr_evaluator.valid_mask[actions_slice]
         legal_masks = legal_masks[None, :].expand(NUM_HANDS, -1)
 
-        # Get values from CFR
-        root_values = (
-            self.cfr_evaluator.latest_values[actions_slice, seat] * root_policy
-        ).sum(dim=0)
+        # Get values from CFR (already aggregated at the root)
+        root_values = self.cfr_evaluator.values_avg[0, seat].clone()
 
         # Denormalize values if PopArt normalizer is available
         if self.popart_normalizer is not None:

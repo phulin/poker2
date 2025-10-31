@@ -74,12 +74,12 @@ def print_preflop_range_grid(
 
     Args:
         trainer: SelfPlayTrainer instance
-        step: Current training step
+        step: Current training step (0-indexed)
         seat: Seat position (0 for button, 1 for other)
         title: Optional custom title for the grid
     """
     if title is None:
-        title = f"Preflop Range Grid (Step {step})"
+        title = f"Preflop Range Grid (Step {step + 1})"
 
     if rebel:
         analyzer = RebelPreflopAnalyzer(
@@ -138,13 +138,13 @@ def print_preflop_range_grid(
     )
 
     # Print value estimates grid
-    print("--- Preflop Value Estimates (Step {}) ---".format(step))
+    print("--- Preflop Value Estimates (Step {}) ---".format(step + 1))
     print("Small blind (first) - value estimates (×1000)")
 
     print(value_grid)
     print()
 
-    print("--- Preflop Suited vs Offsuit (Step {}) ---".format(step))
+    print("--- Preflop Suited vs Offsuit (Step {}) ---".format(step + 1))
     print(
         f"Fold:   Suited {100 * suited_vs_offsuit[0][0]:3.0f}%, Offsuit {100 * suited_vs_offsuit[0][1]:3.0f}%"
     )
@@ -162,7 +162,7 @@ def print_preflop_range_grid(
     print()
 
     # Also print BB response (facing SB all-in), matching debug_tensor_env
-    print("--- BB Response vs SB All-in (Step {}) ---".format(step))
+    print("--- BB Response vs SB All-in (Step {}) ---".format(step + 1))
 
     grids = analyzer.get_preflop_grids_allin_response()
     bb_fold_grid = grids["ranges"][0].splitlines()
@@ -194,7 +194,7 @@ def print_training_stats(
 
     Args:
         stats: Dictionary containing training statistics
-        step: Current step number
+        step: Current step number (0-indexed)
         total_steps: Total number of steps
         step_time: Time for current step
         total_time: Total time elapsed
@@ -312,10 +312,10 @@ def print_checkpoint_info(checkpoint_path: str, step: int, is_best: bool = False
 
     Args:
         checkpoint_path: Path to checkpoint file
-        step: Step number
+        step: Step number (0-indexed)
         is_best: Whether this is the best model so far
     """
     if is_best:
-        print(f"New best model saved with ELO: {step}")
+        print(f"New best model saved with ELO: {step + 1}")
     else:
         print(f"Checkpoint saved to {checkpoint_path}")
