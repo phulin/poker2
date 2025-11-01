@@ -49,7 +49,7 @@ def profile_training_loop(cfg: Config):
         print("Falling back to CPU profiling...")
         activities = [ProfilerActivity.CPU]
     else:
-        activities = [ProfilerActivity.CUDA]
+        activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
 
     # Use profiler with profile_memory, stack traces, and FLOPS for detailed analysis
     with profile(
