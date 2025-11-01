@@ -37,6 +37,12 @@ class MockModel:
             hand_values=hand_values,
         )
 
+    def eval(self) -> None:
+        pass
+
+    def train(self) -> None:
+        pass
+
 
 class TestChanceNodeHelper:
     """Test suite for ChanceNodeHelper."""
@@ -177,10 +183,9 @@ class TestChanceNodeHelper:
             beliefs=torch.zeros(0, NUM_HANDS, device=device),
         )
         pre_chance_beliefs = torch.zeros(0, 1, NUM_HANDS, device=device)
-        reach_weights = torch.zeros(0, 2, NUM_HANDS, device=device)
 
         result = helper.flop_chance_values(
-            empty_indices, root_features, pre_chance_beliefs, reach_weights
+            empty_indices, root_features, pre_chance_beliefs
         )
 
         assert result.shape == (0, 2, NUM_HANDS)
@@ -202,10 +207,9 @@ class TestChanceNodeHelper:
         pre_chance_beliefs = (
             torch.ones(B, 1, NUM_HANDS, device=device, dtype=dtype) / NUM_HANDS
         )
-        reach_weights = torch.ones(B, 2, NUM_HANDS, device=device, dtype=dtype) / 2
 
         result = helper.flop_chance_values(
-            root_indices, root_features, pre_chance_beliefs, reach_weights
+            root_indices, root_features, pre_chance_beliefs
         )
 
         assert result.shape == (B, 2, NUM_HANDS)
@@ -223,11 +227,10 @@ class TestChanceNodeHelper:
             beliefs=torch.zeros(0, NUM_HANDS, device=device),
         )
         pre_chance_beliefs = torch.zeros(0, 1, NUM_HANDS, device=device)
-        reach_weights = torch.zeros(0, 2, NUM_HANDS, device=device)
         board_pre = torch.full((0, 3), -1, dtype=torch.long, device=device)
 
         result = helper.single_card_chance_values(
-            empty_indices, root_features, pre_chance_beliefs, reach_weights, board_pre
+            empty_indices, root_features, pre_chance_beliefs, board_pre
         )
 
         assert result.shape == (0, 2, NUM_HANDS)
@@ -249,24 +252,15 @@ class TestChanceNodeHelper:
         pre_chance_beliefs = (
             torch.ones(B, 1, NUM_HANDS, device=device, dtype=dtype) / NUM_HANDS
         )
-        reach_weights = torch.ones(B, 2, NUM_HANDS, device=device, dtype=dtype) / 2
         board_pre = torch.full((B, 3), -1, dtype=torch.long, device=device)
 
         result = helper.single_card_chance_values(
-            root_indices, root_features, pre_chance_beliefs, reach_weights, board_pre
+            root_indices, root_features, pre_chance_beliefs, board_pre
         )
 
         assert result.shape == (B, 2, NUM_HANDS)
         assert result.device.type == device.type
         assert result.dtype == dtype
-
-    def test_combo_onehot_bool_property(self, helper: ChanceNodeHelper):
-        """Test combo_onehot_bool property."""
-        combo_onehot = helper.combo_onehot_bool
-
-        assert combo_onehot.shape == (NUM_HANDS, 52)
-        assert combo_onehot.dtype == torch.bool
-        assert combo_onehot.device.type == helper.device.type
 
     def test_cache_consistency(self, helper: ChanceNodeHelper):
         """Test that all cache components are consistent."""
@@ -325,16 +319,6 @@ class TestChanceNodeHelper:
         assert count_sum == helper.total_flop_count
         assert count_sum == 22100
 
-    def test_update_model(self, helper: ChanceNodeHelper):
-        """Test update_model method."""
-        old_model = helper.model
-        new_model = MockModel(helper.device, helper.float_dtype)
-
-        helper.update_model(new_model)
-
-        assert helper.model is new_model
-        assert helper.model is not old_model
-
     def test_flop_chance_values_device_handling(self, helper: ChanceNodeHelper):
         """Test flop_chance_values handles device correctly."""
         device = helper.device
@@ -348,10 +332,9 @@ class TestChanceNodeHelper:
             beliefs=torch.zeros(B, NUM_HANDS, device=device),
         )
         pre_chance_beliefs = torch.ones(B, 1, NUM_HANDS, device=device) / NUM_HANDS
-        reach_weights = torch.ones(B, 2, NUM_HANDS, device=device) / 2
 
         result = helper.flop_chance_values(
-            root_indices, root_features, pre_chance_beliefs, reach_weights
+            root_indices, root_features, pre_chance_beliefs
         )
 
         assert result.device.type == device.type
@@ -369,11 +352,10 @@ class TestChanceNodeHelper:
             beliefs=torch.zeros(B, NUM_HANDS, device=device),
         )
         pre_chance_beliefs = torch.ones(B, 1, NUM_HANDS, device=device) / NUM_HANDS
-        reach_weights = torch.ones(B, 2, NUM_HANDS, device=device) / 2
         board_pre = torch.full((B, 3), -1, dtype=torch.long, device=device)
 
         result = helper.single_card_chance_values(
-            root_indices, root_features, pre_chance_beliefs, reach_weights, board_pre
+            root_indices, root_features, pre_chance_beliefs, board_pre
         )
 
         assert result.device.type == device.type

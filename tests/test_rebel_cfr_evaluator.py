@@ -10,6 +10,7 @@ from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
     combo_blocking_tensor,
     combo_index,
+    combo_to_onehot_tensor,
     hand_combos_tensor,
     mask_conflicting_combos,
 )
@@ -125,6 +126,12 @@ class MockModel:
             value=torch.zeros(batch, device=device, dtype=dtype),
             hand_values=hand_values,
         )
+
+    def eval(self) -> None:
+        pass
+
+    def train(self) -> None:
+        pass
 
 
 def make_evaluator(
@@ -913,7 +920,7 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
     )
     _, pre_value_batch, _ = evaluator.training_data(exclude_start=False)
 
-    combo_onehot = evaluator.combo_onehot_bool
+    combo_onehot = combo_to_onehot_tensor()
     manual_expected = torch.zeros_like(pre_value_batch.value_targets)
 
     board_turn = env_proto.board_indices[0].clone()

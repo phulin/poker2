@@ -87,7 +87,7 @@ class BetterFFN(nn.Module, Model):
         """
 
         permuted = features.clone()
-        permuted.permute_suits(self.generator)
+        permuted.permute_suits(generator=self.generator)
 
         board = features.board
         ranks = torch.where(board >= 0, board % 13, torch.full_like(board, 13))

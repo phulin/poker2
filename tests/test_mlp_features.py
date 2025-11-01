@@ -80,7 +80,7 @@ def test_permute_suits():
     )
 
     # Apply suit permutation
-    features.permute_suits(generator)
+    features.permute_suits(generator=generator)
 
     # Verify beliefs still sum to 1.0 (values are just reordered)
     torch.testing.assert_close(
