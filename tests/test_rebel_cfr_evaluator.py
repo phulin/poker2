@@ -1281,7 +1281,7 @@ def test_linear_cfr_policy_averaging() -> None:
     bet_bins = [0.5, 1.5]
 
     # Create a random model
-    model = MockModel()
+    model = MockModel(num_actions=5)
 
     # Create environment
     env = HUNLTensorEnv(
@@ -1290,6 +1290,8 @@ def test_linear_cfr_policy_averaging() -> None:
         sb=5,
         bb=10,
         device=device,
+        default_bet_bins=bet_bins,
+        float_dtype=float_dtype,
     )
     env.reset()
 
@@ -1299,7 +1301,7 @@ def test_linear_cfr_policy_averaging() -> None:
         env_proto=env,
         model=model,
         bet_bins=bet_bins,
-        max_depth=0,  # depth 0 = just root node
+        max_depth=1,
         cfr_iterations=20,
         warm_start_iterations=0,
         device=device,
@@ -1326,16 +1328,21 @@ def test_linear_cfr_policy_averaging() -> None:
     for t in range(20):
         # Set the policy for this iteration
         evaluator.policy_probs[evaluator.valid_mask] = all_policies[t]
+        evaluator.policy_probs[0] = 0.0
         evaluator.update_average_policy(t)
 
         if t == 0:
-            assert torch.allclose(evaluator.policy_probs_avg, all_policies[t])
+            assert torch.allclose(
+                evaluator.policy_probs_avg[evaluator.valid_mask][1:], all_policies[t]
+            )
         else:
             weights = torch.arange(t + 1, dtype=torch.float32)
             weights = weights.clamp(min=0)
             weights /= weights.sum()
             expected = (all_policies[: t + 1] * weights[:, None]).sum(dim=0)
-            assert torch.allclose(evaluator.policy_probs_avg, expected)
+            assert torch.allclose(
+                evaluator.policy_probs_avg[evaluator.valid_mask][1:], expected
+            )
 
 
 def test_discounted_cfr_policy_averaging() -> None:
@@ -1346,7 +1353,7 @@ def test_discounted_cfr_policy_averaging() -> None:
     bet_bins = [0.5, 1.5]
 
     # Create a random model
-    model = MockModel()
+    model = MockModel(num_actions=5)
 
     # Create environment
     env = HUNLTensorEnv(
@@ -1355,6 +1362,8 @@ def test_discounted_cfr_policy_averaging() -> None:
         sb=5,
         bb=10,
         device=device,
+        default_bet_bins=bet_bins,
+        float_dtype=float_dtype,
     )
     env.reset()
 
@@ -1365,7 +1374,7 @@ def test_discounted_cfr_policy_averaging() -> None:
         env_proto=env,
         model=model,
         bet_bins=bet_bins,
-        max_depth=0,  # depth 0 = just root node
+        max_depth=1,
         cfr_iterations=20,
         warm_start_iterations=0,
         dcfr_delay=dcfr_delay,
@@ -1393,16 +1402,21 @@ def test_discounted_cfr_policy_averaging() -> None:
     for t in range(20):
         # Set the policy for this iteration
         evaluator.policy_probs[evaluator.valid_mask] = all_policies[t]
+        evaluator.policy_probs[0] = 0.0
         evaluator.update_average_policy(t)
 
         if t <= dcfr_delay:
-            assert torch.allclose(evaluator.policy_probs_avg, all_policies[t])
+            assert torch.allclose(
+                evaluator.policy_probs_avg[evaluator.valid_mask][1:], all_policies[t]
+            )
         else:
             weights = torch.arange(t + 1, dtype=torch.float32) - dcfr_delay
             weights = weights.clamp(min=0)
             weights /= weights.sum()
             expected = (all_policies[: t + 1] * weights[:, None]).sum(dim=0)
-            assert torch.allclose(evaluator.policy_probs_avg, expected)
+            assert torch.allclose(
+                evaluator.policy_probs_avg[evaluator.valid_mask][1:], expected
+            )
 
 
 def test_flop_blocking_over_iterations() -> None:

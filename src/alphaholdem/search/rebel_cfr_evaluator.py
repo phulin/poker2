@@ -510,6 +510,7 @@ class RebelCFREvaluator:
             reach_weights[offset_next:offset_next_next] = weights_dest
 
         reach_weights.masked_fill_(~self.valid_mask[:, None, None], 0.0)
+        self._block_beliefs(reach_weights)
         return reach_weights
 
     def _initialize_with_copy(self, target: torch.Tensor | None = None) -> torch.Tensor:
@@ -541,10 +542,10 @@ class RebelCFREvaluator:
         self._initialize_with_copy(target)
         target *= reach_weights
 
-        self._block_beliefs(target)
+        # Precondition: reach_weights should be board-blocked, so the multiplication
+        # will block target as well. All that's left is normalizing.
+        # Reach-weights is also 0
         self._normalize_beliefs(target)
-
-        target.masked_fill_(~self.valid_mask[:, None, None], 0.0)
 
         # assert torch.allclose(target.sum(dim=2), self.valid_mask[:, None].float())
 
@@ -588,6 +589,10 @@ class RebelCFREvaluator:
             out=target,
         )
 
+        # That step will have made invalid nodes' beliefs uniform.
+        # Which is not what we want.
+        target.masked_fill_(~self.valid_mask[:, None, None], 0.0)
+
     @torch.no_grad()
     @profile
     def initialize_policy_and_beliefs(self) -> None:
@@ -621,7 +626,6 @@ class RebelCFREvaluator:
         self.policy_probs.masked_fill_(~self.valid_mask[:, None], 0.0)
 
         self.reach_weights = self._calculate_reach_weights(self.policy_probs)
-        self._block_beliefs(self.reach_weights)
 
         self.policy_probs_avg[:] = self.policy_probs
         self.reach_weights_avg[:] = self.reach_weights
@@ -868,8 +872,6 @@ class RebelCFREvaluator:
 
         with record_function("calculate_reach_weights"):
             self.reach_weights = self._calculate_reach_weights(self.policy_probs)
-        with record_function("block_beliefs"):
-            self._block_beliefs(self.reach_weights)
         with record_function("propagate_all_beliefs"):
             self._propagate_all_beliefs(
                 self.beliefs, self.policy_probs, self.reach_weights
@@ -881,8 +883,6 @@ class RebelCFREvaluator:
             self.reach_weights_avg = self._calculate_reach_weights(
                 self.policy_probs_avg
             )
-        with record_function("block_beliefs_avg"):
-            self._block_beliefs(self.reach_weights_avg)
         with record_function("propagate_all_beliefs_avg"):
             self._propagate_all_beliefs(
                 self.beliefs_avg, self.policy_probs_avg, self.reach_weights_avg
@@ -986,34 +986,31 @@ class RebelCFREvaluator:
             self.policy_probs_avg[:] = self.policy_probs
             return
 
-        M, N = self.total_nodes, self.search_batch_size
+        N = self.search_batch_size
+        top = self.depth_offsets[-2]
 
-        prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
-        prev_actor[N:] = self._fan_out(self.env.to_act)
+        policy_probs_src = self._pull_back(self.policy_probs)
+        policy_probs_avg_src = self._pull_back(self.policy_probs_avg)
 
-        reach_weights_prev = torch.ones_like(self.reach_weights)
-        reach_weights_prev[N:] = self._fan_out(self.reach_weights)
-        reach_weights_avg_prev = torch.ones_like(self.reach_weights_avg)
-        reach_weights_avg_prev[N:] = self._fan_out(self.reach_weights_avg)
-
-        # In the root nodes, prev_actor is invalid, but that's OK because
-        # reach_weights is the same (1.0) for all players there.
-        # Note we have to use the previous node's reach weights, since the policy probs
-        # really live on that node (and otherwise we're double-multiplying)
-        prev_actor_indices = prev_actor[:, None, None].expand(-1, -1, NUM_HANDS)
-        reach_actor = torch.gather(reach_weights_prev, 1, prev_actor_indices).squeeze(1)
+        actor_indices = self.env.to_act[:top, None, None, None].expand(
+            -1, self.num_actions, -1, NUM_HANDS
+        )
+        reach_actor = torch.gather(
+            self.reach_weights[:top, None], 1, actor_indices
+        ).squeeze(2)
         reach_avg_actor = torch.gather(
-            reach_weights_avg_prev, 1, prev_actor_indices
-        ).squeeze(1)
+            self.reach_weights_avg[:top, None], 1, actor_indices
+        ).squeeze(2)
 
         old, new = self._get_mixing_weights(t)
         reach_avg_actor *= old
         reach_actor *= new
-        self.policy_probs_avg *= reach_avg_actor
-        self.policy_probs_avg += self.policy_probs * reach_actor
+        policy_probs_avg_src *= reach_avg_actor
+        policy_probs_avg_src += policy_probs_src * reach_actor
         denom = reach_avg_actor + reach_actor
-        self.policy_probs_avg /= denom.clamp(min=1e-8)
-        self.policy_probs_avg.masked_fill_(denom < 1e-8, 0.0)
+        policy_probs_avg_src /= denom.clamp(min=1e-8)
+        policy_probs_avg_src.masked_fill_(denom < 1e-8, 0.0)
+        self.policy_probs_avg[N:] = self._push_down(policy_probs_avg_src)
 
     def _get_sampling_schedule(self) -> torch.Tensor:
         leaf_indices = torch.where(self.leaf_mask & ~self.env.done)[0]
