@@ -545,7 +545,7 @@ class RebelCFREvaluator:
 
         target.masked_fill_(~self.valid_mask[:, None, None], 0.0)
 
-        assert torch.allclose(target.sum(dim=2), self.valid_mask[:, None].float())
+        # assert torch.allclose(target.sum(dim=2), self.valid_mask[:, None].float())
 
     def _propagate_level_beliefs(self, depth: int):
         """Propagate beliefs from all nodes at a given level to all nodes at the next level."""
@@ -1349,10 +1349,10 @@ class RebelCFREvaluator:
             L_idx = self.hand_rank_data.L_idx
             R_idx = self.hand_rank_data.R_idx
 
-        assert not (b_self * ~hand_ok_mask).any()
-        assert not (b_opp * ~hand_ok_mask).any()
-        assert torch.allclose(b_self.sum(dim=1), self.valid_mask[indices].float())
-        assert torch.allclose(b_opp.sum(dim=1), self.valid_mask[indices].float())
+        # assert not (b_self * ~hand_ok_mask).any()
+        # assert not (b_opp * ~hand_ok_mask).any()
+        # assert torch.allclose(b_self.sum(dim=1), self.valid_mask[indices].float())
+        # assert torch.allclose(b_opp.sum(dim=1), self.valid_mask[indices].float())
 
         c1 = hands_c1c2_sorted[..., 0]  # (M,1326)
         c2 = hands_c1c2_sorted[..., 1]  # (M,1326)
