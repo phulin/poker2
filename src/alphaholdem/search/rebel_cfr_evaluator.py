@@ -992,15 +992,9 @@ class RebelCFREvaluator:
         policy_probs_src = self._pull_back(self.policy_probs)
         policy_probs_avg_src = self._pull_back(self.policy_probs_avg)
 
-        actor_indices = self.env.to_act[:top, None, None, None].expand(
-            -1, self.num_actions, -1, NUM_HANDS
-        )
-        reach_actor = torch.gather(
-            self.reach_weights[:top, None], 1, actor_indices
-        ).squeeze(2)
-        reach_avg_actor = torch.gather(
-            self.reach_weights_avg[:top, None], 1, actor_indices
-        ).squeeze(2)
+        actor_indices = self.env.to_act[:top, None, None].expand(-1, -1, NUM_HANDS)
+        reach_actor = self.reach_weights[:top].gather(1, actor_indices)
+        reach_avg_actor = self.reach_weights_avg[:top].gather(1, actor_indices)
 
         old, new = self._get_mixing_weights(t)
         reach_avg_actor *= old

@@ -1845,15 +1845,15 @@ def test_set_leaf_values_cfr_avg_branches() -> None:
             7.0,
             6.0,
             4,
-            lambda t, new, old: (t + 1) * new - (t - 1) * old,
-        ),  # 5*7 - 3*6 = 17
+            lambda t, new, old: ((t + 1) * new - (t - 1) * old) / 2,
+        ),  # (5*7 - 3*6) / 2 = 8.5
         (
             CFRType.discounted,
             9.0,
             8.0,
             5,
-            lambda t, new, old: (t + 1) * new - (t - 1) * old,
-        ),  # 6*9 - 4*8 = 22
+            lambda t, new, old: ((t + 1) * new - (t - 1) * old) / 2,
+        ),  # (6*9 - 4*8) / 2 = 11
     ]
 
     for cfr_type, new_val, old_val, t_iter, formula in test_cases:
