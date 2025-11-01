@@ -36,9 +36,11 @@ class HUNLTensorEnv:
     button: torch.Tensor
     street: torch.Tensor
     to_act: torch.Tensor
+    last_to_act: torch.Tensor
     pot: torch.Tensor
     min_raise: torch.Tensor
     actions_this_round: torch.Tensor
+    actions_last_round: torch.Tensor
     stacks: torch.Tensor
     committed: torch.Tensor
     has_folded: torch.Tensor
@@ -94,11 +96,13 @@ class HUNLTensorEnv:
         self.button = torch.zeros(self.N, dtype=torch.long, device=self.device)
         self.street = torch.zeros(self.N, dtype=torch.long, device=self.device)  # 0..4
         self.to_act = torch.zeros(self.N, dtype=torch.long, device=self.device)
+        self.last_to_act = torch.zeros(self.N, dtype=torch.long, device=self.device)
         self.pot = torch.zeros(self.N, dtype=torch.long, device=self.device)
         self.min_raise = torch.zeros(self.N, dtype=torch.long, device=self.device)
         self.actions_this_round = torch.zeros(
             self.N, dtype=torch.long, device=self.device
         )
+        self.actions_last_round = torch.zeros_like(self.actions_this_round)
         self.acted_since_reset = torch.zeros(
             self.N, dtype=torch.bool, device=self.device
         )
@@ -250,9 +254,11 @@ class HUNLTensorEnv:
         self.button[ids] = button
         self.street[ids] = 0  # preflop
         self.to_act[ids] = p_sb
+        self.last_to_act[ids] = p_sb
         self.pot[ids] = self.sb + self.bb
         self.min_raise[ids] = self.bb
         self.actions_this_round[ids] = 0
+        self.actions_last_round[ids] = 0
         self.acted_since_reset[ids] = False
         self.has_folded[ids, :] = False
         self.is_allin[ids, :] = False
@@ -459,9 +465,11 @@ class HUNLTensorEnv:
         self.button[dest_select] = src_env.button[src_select]
         self.street[dest_select] = src_env.street[src_select]
         self.to_act[dest_select] = src_env.to_act[src_select]
+        self.last_to_act[dest_select] = src_env.last_to_act[src_select]
         self.pot[dest_select] = src_env.pot[src_select]
         self.min_raise[dest_select] = src_env.min_raise[src_select]
         self.actions_this_round[dest_select] = src_env.actions_this_round[src_select]
+        self.actions_last_round[dest_select] = src_env.actions_last_round[src_select]
         self.acted_since_reset[dest_select] = src_env.acted_since_reset[src_select]
 
         # 2-player tensors
@@ -692,6 +700,7 @@ class HUNLTensorEnv:
             after_betting_committed = self.committed[:DEBUG_STEP_TABLE_ENVS].clone()
 
         # Advance to next actor (simple alternation)
+        self.last_to_act[acting] = self.to_act[acting]
         self.to_act[acting] = 1 - self.to_act[acting]
         self.actions_this_round[acting] += 1
         self.acted_since_reset[acting] = True
@@ -723,6 +732,9 @@ class HUNLTensorEnv:
 
             # Reset committed
             self.committed[round_closed_idx, :] = 0
+            self.actions_last_round[round_closed_idx] = self.actions_this_round[
+                round_closed_idx
+            ]
             self.actions_this_round[round_closed_idx] = 0
             self.to_act[round_closed_idx] = 1 - self.button[round_closed_idx]
             self.min_raise[round_closed_idx] = (

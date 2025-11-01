@@ -48,19 +48,24 @@ class BetterFeatureEncoder:
             device=self.device,
             dtype=self.dtype,
         )
-        scalar_context[:, ScalarContext.ACTOR.value] = self.env.to_act
-        scalar_context[:, ScalarContext.POSITION.value] = (
-            self.env.to_act - self.env.button
-        ) % num_players
-        scalar_context[:, ScalarContext.ACTIONS_ROUND.value] = (
-            self.env.actions_this_round
+
+        actor = self.env.last_to_act if pre_chance_node else self.env.to_act
+        actions_round = (
+            self.env.actions_last_round
+            if pre_chance_node
+            else self.env.actions_this_round
         )
+        scalar_context[:, ScalarContext.ACTOR.value] = actor
+        scalar_context[:, ScalarContext.POSITION.value] = (
+            actor - self.env.button
+        ) % num_players
+        scalar_context[:, ScalarContext.ACTIONS_ROUND.value] = actions_round
         scalar_context[:, ScalarContext.POT.value] = self.env.pot
         scalar_context[:, ScalarContext.MIN_RAISE.value] = self.env.min_raise
 
-        stacks = self.env.stacks
-        committed = self.env.committed
-        pot = self.env.pot
+        stacks = self.env.stacks.to(self.dtype)
+        committed = self.env.committed.to(self.dtype)
+        pot = self.env.pot.to(self.dtype)
         player_context = torch.zeros(
             N,
             PlayerContext.NUM_PLAYER_CONTEXT.value,
