@@ -713,8 +713,8 @@ class RebelCFREvaluator:
         else:
             old, new = self._get_mixing_weights(t)
             self.latest_values[model_mask] = (
-                old + new
-            ) * model_output.hand_values - old * self.last_model_values
+                (old + new) * model_output.hand_values - old * self.last_model_values
+            ) / new
         self.last_model_values = model_output.hand_values
 
         # Translate EVs from model to opponent-reach-weighted CFVs for CFR.
