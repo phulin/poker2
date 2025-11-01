@@ -4,6 +4,7 @@ from typing import Callable
 
 import pytest
 import torch
+import torch.nn as nn
 
 from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
@@ -788,7 +789,7 @@ def test_sample_data_returns_root_batch() -> None:
     evaluator.latest_values[roots] = 0.5
     evaluator.values_avg[roots] = 0.5  # Sync values_avg from latest_values
 
-    value_batch, policy_batch = evaluator.training_data()
+    value_batch, pre_value_batch, policy_batch = evaluator.training_data()
 
     assert len(policy_batch.features) == evaluator.depth_offsets[-2]
     assert policy_batch.policy_targets.shape == (
@@ -801,7 +802,149 @@ def test_sample_data_returns_root_batch() -> None:
         evaluator.num_players,
         NUM_HANDS,
     )
+    assert pre_value_batch.value_targets.shape == (
+        evaluator.search_batch_size,
+        evaluator.num_players,
+        NUM_HANDS,
+    )
     torch.testing.assert_close(policy_batch.policy_targets, expected_policy)
+
+
+@pytest.mark.parametrize(
+    "board",
+    [
+        [8, 39, 20, 28, -1],
+        [8, 39, 20, -1, -1],
+    ],
+)
+def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -> None:
+    bet_bins = [0.5, 1.0]
+    env_proto = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=bet_bins,
+        device=torch.device("cpu"),
+        float_dtype=torch.float32,
+        flop_showdown=False,
+    )
+    env_proto.reset()
+
+    class RandomModel(nn.Module):
+        def forward(self, features: MLPFeatures):
+            board = features.board.to(torch.long)
+            seeds = (
+                board.clamp(min=0)
+                * torch.tensor([1, 31, 997, 17, 53], device=board.device)
+            ).sum(dim=1)
+            hand_values = torch.empty((features.context.shape[0], 2, NUM_HANDS))
+            for i in range(features.context.shape[0]):
+                torch.manual_seed(seeds[i])
+                hand_values[i] = torch.rand((2, NUM_HANDS))
+
+            class Output:
+                def __init__(self, hv: torch.Tensor):
+                    self.hand_values = hv
+
+            return Output(hand_values)
+
+    model = RandomModel()
+    evaluator = RebelCFREvaluator(
+        search_batch_size=1,
+        env_proto=env_proto,
+        model=model,  # type: ignore[arg-type]
+        bet_bins=bet_bins,
+        max_depth=1,
+        cfr_iterations=1,
+        float_dtype=torch.float32,
+        device=torch.device("cpu"),
+        warm_start_iterations=0,
+        cfr_type=CFRType.linear,
+        cfr_avg=True,
+    )
+
+    roots = torch.zeros(1, dtype=torch.long)
+    env_proto.reset()
+
+    # Force specific turn boards.
+    pre_chance_board = torch.tensor(board, dtype=torch.long)
+    pre_chance_street = (pre_chance_board >= 0).sum() - 2
+    env_proto.board_indices[0] = pre_chance_board
+    env_proto.last_board_indices[0] = pre_chance_board
+    env_proto.street[0] = pre_chance_street + 1
+    env_proto.actions_this_round[0] = 0
+
+    # Pre-chance beliefs random.
+    torch.manual_seed(1234)
+    pre_beliefs = torch.rand(1, 2, NUM_HANDS)
+    pre_beliefs /= pre_beliefs.sum(dim=-1, keepdim=True)
+
+    evaluator.initialize_search(env_proto, roots, pre_chance_beliefs=pre_beliefs)
+    evaluator.latest_values[:] = torch.rand_like(evaluator.latest_values)
+    evaluator.values_avg[:] = evaluator.latest_values
+    evaluator.reach_weights[:1] = 1.0
+    evaluator.reach_weights_avg[:1] = 1.0
+    if evaluator.legal_mask is None:
+        evaluator.legal_mask = torch.ones(
+            evaluator.total_nodes,
+            evaluator.num_actions,
+            dtype=torch.bool,
+        )
+
+    start_features = evaluator.feature_encoder.encode(
+        evaluator.beliefs_avg, pre_chance_node=False
+    )
+    _, pre_value_batch, _ = evaluator.training_data(exclude_start=False)
+
+    combo_onehot = evaluator.combo_onehot_bool
+    manual_expected = torch.zeros_like(pre_value_batch.value_targets)
+
+    board_turn = env_proto.board_indices[0].clone()
+    used_cards = board_turn[board_turn >= 0]
+    available = [c for c in range(52) if c not in used_cards.tolist()]
+
+    sum_values = torch.zeros(2, NUM_HANDS)
+    pre_belief = pre_beliefs[0]
+    context = start_features.context[:1]
+    street_tensor = start_features.street[:1]
+
+    torch.manual_seed(1234)
+    for card in available:
+        board_river = board_turn.clone()
+        empty_pos = (board_river == -1).nonzero(as_tuple=False)[0]
+        board_river[empty_pos] = card
+
+        allowed = ~combo_onehot[:, board_river].any(dim=1)
+        post_belief = pre_belief.clone()
+        post_belief[..., ~allowed] = 0.0
+        post_belief /= post_belief.sum(dim=-1, keepdim=True)
+
+        env_card = HUNLTensorEnv.from_proto(env_proto, num_envs=1)
+        env_card.reset()
+        env_card.copy_state_from(
+            env_proto,
+            torch.tensor([0], dtype=torch.long),
+            torch.tensor([0], dtype=torch.long),
+        )
+        env_card.board_indices[0] = board_river
+        env_card.street[0] = pre_chance_street + 1
+        env_card.actions_this_round[0] = 0
+        env_card.last_board_indices[0] = board_turn
+
+        belief_feature = (post_belief.reshape(1, -1) * 2) - 1
+        features = MLPFeatures(
+            context=context,
+            street=street_tensor,
+            board=board_river.unsqueeze(0),
+            beliefs=belief_feature,
+        )
+        hand_values = model(features).hand_values.squeeze(0)
+        sum_values += hand_values
+
+    manual_expected[0] = sum_values / len(available)
+
+    torch.testing.assert_close(pre_value_batch.value_targets[:1], manual_expected[:1])
 
 
 def setup_showdown_evaluator(
@@ -1316,7 +1459,9 @@ def test_local_exploitability_depth_limited() -> None:
     evaluator.stats.clear()
     evaluator._compute_exploitability()
 
-    value_batch, policy_batch = evaluator.training_data(exclude_start=False)
+    value_batch, pre_value_batch, policy_batch = evaluator.training_data(
+        exclude_start=False
+    )
     assert "local_exploitability" in value_batch.statistics
     assert "local_br_policy" in value_batch.statistics
     assert "local_br_values" in value_batch.statistics

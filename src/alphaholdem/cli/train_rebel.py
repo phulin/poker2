@@ -157,7 +157,8 @@ def train_rebel(cfg: Config) -> None:
     device = _device_from_config(cfg)
     print(f"Using device: {device}")
 
-    torch.set_float32_matmul_precision("high")
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
 
     torch.manual_seed(cfg.seed)
 

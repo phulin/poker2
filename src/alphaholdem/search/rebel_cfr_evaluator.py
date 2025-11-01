@@ -17,9 +17,11 @@ from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.rebel_replay import RebelBatch
+from alphaholdem.search.chance_node_helper import ChanceNodeHelper
 from alphaholdem.utils.model_utils import compute_masked_logits
 from alphaholdem.utils.profiling import profile
 
@@ -28,10 +30,17 @@ T_WARM = 15
 
 @dataclass
 class PublicBeliefState:
-    """Public belief state for both players."""
+    """Public belief state for both players.
+
+    Attributes:
+        env: Vectorised poker environment standing at a public state.
+        beliefs: Post-chance beliefs (after the most recent chance event).
+        pre_chance_beliefs: Beliefs immediately before the most recent chance event.
+    """
 
     env: HUNLTensorEnv
     beliefs: torch.Tensor  # [batch_size, num_players, NUM_HANDS]
+    pre_chance_beliefs: torch.Tensor  # same shape as beliefs
 
     @classmethod
     def from_proto(
@@ -39,21 +48,28 @@ class PublicBeliefState:
         env_proto: HUNLTensorEnv,
         beliefs: torch.Tensor,
         num_envs: Optional[int] = None,
+        pre_chance_beliefs: Optional[torch.Tensor] = None,
     ) -> PublicBeliefState:
         """Create a new belief state with an environment cloned from `env_proto`.
 
         Args:
             env_proto: Template environment whose configuration should be reused.
-            beliefs: Initial belief tensor shaped `[batch, players, NUM_HANDS]`.
+            beliefs: Post-chance belief tensor shaped `[batch, players, NUM_HANDS]`.
             num_envs: Optional override for the number of vectorised environments.
+            pre_chance_beliefs: Optional tensor of the same shape giving pre-chance
+                beliefs. Defaults to a clone of `beliefs` if not provided.
         """
+        if pre_chance_beliefs is None:
+            pre_chance_beliefs = beliefs.clone()
         return PublicBeliefState(
             env=HUNLTensorEnv.from_proto(env_proto, num_envs=num_envs),
             beliefs=beliefs,
+            pre_chance_beliefs=pre_chance_beliefs,
         )
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         assert self.beliefs.shape[0] == self.env.N
+        assert self.pre_chance_beliefs.shape == self.beliefs.shape
 
 
 @dataclass
@@ -224,15 +240,31 @@ class RebelCFREvaluator:
         self.beliefs_avg = torch.zeros_like(self.beliefs)
         self.reach_weights = torch.zeros_like(self.beliefs)
         self.reach_weights_avg = torch.zeros_like(self.beliefs)
+        self.root_post_chance_beliefs = torch.zeros(
+            self.search_batch_size,
+            self.num_players,
+            NUM_HANDS,
+            device=self.device,
+            dtype=self.float_dtype,
+        )
+        self.root_pre_chance_beliefs = torch.zeros_like(self.root_post_chance_beliefs)
 
         self.legal_mask = None
 
         # Invalid for [0, N) because we don't know the previous actor.
         self.prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
+        self.root_index = torch.zeros(M, dtype=torch.long, device=self.device)
 
         self.combo_onehot_float = combo_to_onehot_tensor(device=self.device).float()
         # if self.device.type == "cuda":
         #     self.combo_onehot_float = self.combo_onehot_float.to_sparse_csr()
+        self.chance_helper = ChanceNodeHelper(
+            device=self.device,
+            float_dtype=self.float_dtype,
+            num_players=self.num_players,
+            model=self.model,
+        )
+        self.combo_onehot_bool = self.chance_helper.combo_onehot_bool
 
         self.allowed_hands = torch.zeros(
             M, NUM_HANDS, device=self.device, dtype=torch.bool
@@ -303,6 +335,7 @@ class RebelCFREvaluator:
         src_env: HUNLTensorEnv,
         src_indices: torch.Tensor,
         initial_beliefs: torch.Tensor | None = None,
+        pre_chance_beliefs: torch.Tensor | None = None,
     ) -> None:
         """Copy root states into the search tree and reset per-node buffers.
 
@@ -310,6 +343,9 @@ class RebelCFREvaluator:
             src_env: Batched environment that holds the source root public states.
             src_indices: Row indices inside `src_env` to copy into the tree roots.
             initial_beliefs: Optional belief tensor aligned with `src_indices`.
+            pre_chance_beliefs: Optional tensor of beliefs immediately before the
+                latest chance event, aligned with `src_indices`. Defaults to
+                `initial_beliefs` when omitted.
         """
         assert src_indices.shape[0] == self.search_batch_size
         assert src_indices.min().item() >= 0
@@ -329,6 +365,13 @@ class RebelCFREvaluator:
             )
 
         N = self.search_batch_size
+        if pre_chance_beliefs is None:
+            pre_chance_beliefs = initial_beliefs
+        else:
+            assert pre_chance_beliefs.shape == initial_beliefs.shape
+            pre_chance_beliefs = pre_chance_beliefs.to(
+                device=self.device, dtype=self.float_dtype
+            )
 
         dest_indices = torch.arange(N, device=self.device)
         self.env.reset()
@@ -352,10 +395,14 @@ class RebelCFREvaluator:
         self.values_avg.zero_()
         self.beliefs.zero_()
         self.beliefs[:N] = initial_beliefs
+        self.root_post_chance_beliefs[:N] = initial_beliefs
+        self.root_pre_chance_beliefs[:N] = pre_chance_beliefs
         self.reach_weights.zero_()
         self.reach_weights_avg.zero_()
         self.legal_mask = None
         self.hand_rank_data = None
+        self.root_index.zero_()
+        self.root_index[:N] = torch.arange(N, device=self.device, dtype=torch.long)
 
     @profile
     def construct_subgame(self) -> None:
@@ -387,6 +434,9 @@ class RebelCFREvaluator:
                 self.env.copy_state_from(
                     self.env, current_legal_indices, new_legal_indices
                 )
+                self.root_index[new_legal_indices] = self.root_index[
+                    current_legal_indices
+                ]
                 self.valid_mask[new_legal_indices] = True
 
                 action_bins[new_legal_indices] = action
@@ -936,6 +986,10 @@ class RebelCFREvaluator:
         )
         pbs.env.copy_state_from(self.env, sampled_nodes, dest_indices)
         pbs.beliefs[pbs_start_idx : pbs_start_idx + count] = self.beliefs[sampled_nodes]
+        root_ids = self.root_index[sampled_nodes]
+        pbs.pre_chance_beliefs[pbs_start_idx : pbs_start_idx + count] = (
+            self.root_pre_chance_beliefs[root_ids]
+        )
 
     @profile
     def update_average_policy(self, t: int) -> None:
@@ -1040,12 +1094,14 @@ class RebelCFREvaluator:
         sample_count = t_sample.numel()
         next_pbs = None
         if sample_count > 0:
+            beliefs_template = torch.zeros(
+                sample_count, self.num_players, NUM_HANDS, device=self.device
+            )
             next_pbs = PublicBeliefState.from_proto(
                 env_proto=self.env,
-                beliefs=torch.zeros(
-                    sample_count, self.num_players, NUM_HANDS, device=self.device
-                ),
+                beliefs=beliefs_template,
                 num_envs=sample_count,
+                pre_chance_beliefs=torch.zeros_like(beliefs_template),
             )
             next_pbs_idx = 0
 
@@ -1097,8 +1153,16 @@ class RebelCFREvaluator:
 
         return next_pbs
 
-    def training_data(self, exclude_start=True) -> RebelBatch:
-        """Aggregate model targets from the current root batch for supervised learning."""
+    @profile
+    def training_data(
+        self, exclude_start: bool = True
+    ) -> tuple[RebelBatch, RebelBatch, RebelBatch]:
+        """Aggregate model targets for supervised learning.
+
+        Returns:
+            Tuple of (start_of_street_value_batch, end_of_previous_street_value_batch,
+            policy_batch).
+        """
         N = self.search_batch_size
         top = self.depth_offsets[-2]
         policy_targets = self._pull_back(self.policy_probs_avg)
@@ -1126,15 +1190,10 @@ class RebelCFREvaluator:
 
         # Value batch gets root states only. These should all be valid.
         value_statistics = {key: statistics[key][:N] for key in statistics}
-        if exploit_stats.local_exploitability.numel() > 0:
-            value_statistics["local_exploitability"] = (
-                exploit_stats.local_exploitability
-            )
-            value_statistics["local_br_policy"] = exploit_stats.local_br_policy
-            value_statistics["local_br_values"] = exploit_stats.local_br_values
-            value_statistics["local_br_improvement"] = (
-                exploit_stats.local_br_improvement
-            )
+        value_statistics["local_exploitability"] = exploit_stats.local_exploitability
+        value_statistics["local_br_policy"] = exploit_stats.local_br_policy
+        value_statistics["local_br_values"] = exploit_stats.local_br_values
+        value_statistics["local_br_improvement"] = exploit_stats.local_br_improvement
 
         # Policy batch gets all valid, non-leaf states.
         valid_top = self.valid_mask[:top] & ~self.leaf_mask[:top]
@@ -1147,10 +1206,11 @@ class RebelCFREvaluator:
             legal_masks=legal_masks[:N],
             statistics=value_statistics,
         )
+
+        street_root = self.env.street[:N]
+        actions_root = self.env.actions_this_round[:N]
+        root_nodes = (street_root == 0) & (actions_root == 0)
         if exclude_start:
-            root_nodes = (self.env.street[:N] == 0) & (
-                self.env.actions_this_round[:N] == 0
-            )
             value_batch = value_batch[~root_nodes]
         policy_batch = RebelBatch(
             features=features[valid_top],
@@ -1158,7 +1218,60 @@ class RebelCFREvaluator:
             legal_masks=legal_masks[:top][valid_top],
             statistics=policy_statistics,
         )
-        return value_batch, policy_batch
+        # Prepare end-of-street value batch using pre-chance beliefs.
+        pre_features_all = self.feature_encoder.encode(
+            self.beliefs, pre_chance_node=True
+        )
+        # Clone root slice and override belief encoding with pre-chance beliefs.
+        pre_features_root = pre_features_all[:N].clone()
+        pre_beliefs = self.root_pre_chance_beliefs[:N].reshape(N, -1)
+        pre_features_root.beliefs = pre_beliefs * 2 - 1
+
+        value_targets_pre = value_targets[:N].clone()
+        value_statistics_pre = {key: statistics[key][:N].clone() for key in statistics}
+        value_statistics_pre["board"] = self.env.last_board_indices[:N].clone()
+        prev_street = torch.where(
+            (street_root > 0) & (street_root < 4) & (actions_root == 0),
+            street_root - 1,
+            street_root,
+        )
+        value_statistics_pre["street"] = prev_street
+
+        start_mask = actions_root == 0
+
+        turn_river_mask = start_mask & ((street_root == 2) | (street_root == 3))
+        if turn_river_mask.any():
+            expected_turn_river = self.chance_helper.single_card_chance_values(
+                torch.where(turn_river_mask)[0],
+                features[:N],
+                self.root_pre_chance_beliefs,
+                self.reach_weights,
+                self.env.last_board_indices,
+            )
+            value_targets_pre[turn_river_mask] = expected_turn_river
+
+        flop_mask = start_mask & (street_root == 1)
+        if flop_mask.any():
+            # The helper assumes suit symmetry, which is enforced by the encoder’s
+            # suit-symmetry loss (alphaholdem/rl/losses.py).
+            expected_flop = self.chance_helper.flop_chance_values(
+                torch.where(flop_mask)[0],
+                features[:N],
+                self.root_pre_chance_beliefs,
+                self.reach_weights,
+            )
+            value_targets_pre[flop_mask] = expected_flop
+
+        pre_value_batch = RebelBatch(
+            features=pre_features_root,
+            value_targets=value_targets_pre,
+            legal_masks=legal_masks[:N],
+            statistics=value_statistics_pre,
+        )
+        if exclude_start:
+            pre_value_batch = pre_value_batch[~root_nodes]
+
+        return value_batch, pre_value_batch, policy_batch
 
     @profile
     def _showdown_value(self, indices: torch.Tensor) -> torch.Tensor:

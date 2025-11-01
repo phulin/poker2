@@ -126,6 +126,7 @@ class DummyEvaluator:
         env: DummyEnv,
         indices: torch.Tensor,
         initial_beliefs: torch.Tensor,
+        pre_chance_beliefs: torch.Tensor | None = None,
     ) -> None:
         self.last_initialized_env = env
         self.initialize_args.append(indices.clone())
@@ -141,7 +142,11 @@ class DummyEvaluator:
             1.0 / NUM_HANDS,
             dtype=torch.float32,
         )
-        return PublicBeliefState(env=env, beliefs=beliefs)
+        return PublicBeliefState(
+            env=env,
+            beliefs=beliefs,
+            pre_chance_beliefs=beliefs.clone(),
+        )
 
     def training_data(self):
         """Return training data as tuple (value_batch, policy_batch)."""
@@ -175,7 +180,7 @@ class DummyEvaluator:
             policy_targets=self.policy_probs_avg[:count],
             legal_masks=self.env.legal_bins_mask()[indices],
         )
-        return value_batch, policy_batch
+        return value_batch, value_batch, policy_batch
 
 
 def fake_from_proto(proto: SimpleNamespace, num_envs: int | None = None) -> DummyEnv:
@@ -210,23 +215,28 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
     generator.generate_data(2)
 
     # Check that data was added to buffer
-    assert len(buffer.batches) >= 2
-    # Policy batch is added first, value batch second
+    assert len(buffer.batches) >= 3
+    # Policy batch is added first, followed by start- and end-of-street value batches
     policy_batch = buffer.batches[0]
-    value_batch = buffer.batches[1]
+    value_batch_start = buffer.batches[1]
+    value_batch_end = buffer.batches[2]
     assert isinstance(policy_batch, RebelBatch)
-    assert isinstance(value_batch, RebelBatch)
+    assert isinstance(value_batch_start, RebelBatch)
+    assert isinstance(value_batch_end, RebelBatch)
 
     torch.testing.assert_close(
-        value_batch.features.context,
+        value_batch_start.features.context,
         evaluator.feature_matrix[: evaluator.search_batch_size],
     )
     assert torch.equal(
-        value_batch.legal_masks,
+        value_batch_start.legal_masks,
         evaluator.env.legal_bins_mask()[: evaluator.search_batch_size],
     )
     torch.testing.assert_close(
-        value_batch.value_targets, evaluator.values[: evaluator.search_batch_size]
+        value_batch_start.value_targets, evaluator.values[: evaluator.search_batch_size]
+    )
+    torch.testing.assert_close(
+        value_batch_end.value_targets, evaluator.values[: evaluator.search_batch_size]
     )
     torch.testing.assert_close(
         policy_batch.policy_targets,

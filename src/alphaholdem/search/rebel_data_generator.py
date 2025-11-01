@@ -24,14 +24,16 @@ class RebelDataGenerator:
         self.current_pbs = initial_pbs
 
     def _new_pbs(self, target_batch_size: int) -> PublicBeliefState:
+        beliefs = torch.full(
+            (target_batch_size, self.evaluator.num_players, NUM_HANDS),
+            1.0 / NUM_HANDS,
+            device=self.device,
+        )
         pbs = PublicBeliefState.from_proto(
             env_proto=self.env_proto,
-            beliefs=torch.full(
-                (target_batch_size, self.evaluator.num_players, NUM_HANDS),
-                1.0 / NUM_HANDS,
-                device=self.device,
-            ),
+            beliefs=beliefs,
             num_envs=target_batch_size,
+            pre_chance_beliefs=beliefs.clone(),
         )
         pbs.env.reset()
         return pbs
@@ -44,6 +46,7 @@ class RebelDataGenerator:
         new_pbs = self._new_pbs(desired_size)
         new_pbs.env.copy_state_from(pbs.env, indices, indices)
         new_pbs.beliefs[:current_size] = pbs.beliefs
+        new_pbs.pre_chance_beliefs[:current_size] = pbs.pre_chance_beliefs
         return new_pbs
 
     @profile
@@ -62,11 +65,15 @@ class RebelDataGenerator:
                 self.current_pbs.env,
                 root_indices,
                 self.current_pbs.beliefs,
+                pre_chance_beliefs=self.current_pbs.pre_chance_beliefs,
             )
 
             self.current_pbs = self.evaluator.self_play_iteration()
 
-            value_batch, policy_batch = self.evaluator.training_data()
+            value_batch, augmented_value_batch, policy_batch = (
+                self.evaluator.training_data()
+            )
             self.policy_buffer.add_batch(policy_batch)
             self.value_buffer.add_batch(value_batch)
+            self.value_buffer.add_batch(augmented_value_batch)
             collected += len(value_batch)

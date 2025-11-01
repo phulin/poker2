@@ -56,7 +56,11 @@ class MLPFeatures:
             beliefs=self.beliefs.clone(),
         )
 
-    def permute_suits(self, generator: torch.Generator | None = None) -> None:
+    def permute_suits(
+        self,
+        suit_permutations: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
+    ) -> None:
         """Permute the suits of board cards and beliefs.
 
         Args:
@@ -66,10 +70,11 @@ class MLPFeatures:
         device = self.context.device
 
         # Generate suit permutations: [batch_size, 4]
-        rands = torch.rand((batch_size, 4), device=device, generator=generator)
-        suit_permutations = torch.argsort(rands, dim=-1).to(
-            torch.long
-        )  # [batch_size, 4]
+        if suit_permutations is None:
+            rands = torch.rand((batch_size, 4), device=device, generator=generator)
+            suit_permutations = torch.argsort(rands, dim=-1).to(
+                torch.long
+            )  # [batch_size, 4]
 
         # Permute board cards
         # board is [batch_size, 5] with card indices or -1 for unflopped cards

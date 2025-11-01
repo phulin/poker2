@@ -15,14 +15,14 @@ We will rely on the fact that every tree built by `RebelCFREvaluator.construct_s
 This effort augments value-training data so that, for every start-of-street example we already collect, we also record the matching end-of-street example that immediately precedes the chance event. Concretely:
 
 1. Trace how `RebelCFREvaluator.training_data` surfaces start-of-street samples and map each to the public state that existed right before the next board card was revealed, keeping the evaluator’s belief tensor in a pre-chance form.
-2. When `RebelCFREvaluator.training_data` assembles the value batch, derive the corresponding end-of-street features and value targets (including chance expectations such as enumerating river cards or exploiting flop suit symmetry) and return them alongside the existing start-of-street samples.
+2. When `RebelCFREvaluator.training_data` assembles the value batch, derive the corresponding end-of-street features and value targets (including chance expectations such as enumerating river cards or exploiting flop suit symmetry enforced by the encoder’s suit-symmetry loss) and return them alongside the existing start-of-street samples.
 3. Provide supporting utilities, configuration hooks, and tests so a novice can verify the augmentation end-to-end.
 
 Out of scope: architectural changes to tree construction, new CFR algorithms, or rewriting the trainer loop.
 
 ## Implementation Strategy
 
-### 1. Preserve Pre-Chance Beliefs Throughout the Tree
+### 1. Capture Root-Level Pre-Chance Metadata
 
 Ensure `RebelCFREvaluator` keeps `self.beliefs` in the pre-chance format across the entire tree without introducing a separate post-chance tensor. In `construct_subgame`, compute `allowed_hands` only for the root batch and distribute it to every node using a new helper `_fan_out_deep`, which takes a root-level tensor and repeats it to match the total node count regardless of depth. Replace existing `_fan_out` usages that previously fanned level-by-level so the masking logic stays consistent with the single-street assumption explained in the Context section.
 
@@ -30,9 +30,7 @@ Document `_fan_out_deep` within the file, including its assumptions (tree arity 
 
 ### 2. Track Pre-Chance Beliefs Across Evaluator Transitions
 
-Extend `PublicBeliefState` to carry both `post_chance_beliefs` (the current field, unchanged) and a new `pre_chance_beliefs` tensor that stores the ranges immediately before the chance event. When `sample_leaf` constructs `next_pbs`, populate both tensors by copying the pre-chance beliefs from the parent evaluator alongside the post-chance beliefs already used today.
-
-During `initialize_search`, seed `self.beliefs` with `pbs.pre_chance_beliefs` so the entire evaluator operates on pre-chance data. Store the post-chance view in a new attribute such as `self.root_post_chance_beliefs` for the handful of places that still need it (e.g., start-of-street targets). Add comments clarifying the lifecycle: `pre_chance_beliefs` flow down the tree, while `post_chance_beliefs` are held only for reporting and training output.
+Extend `PublicBeliefState` to carry both `beliefs` (post-chance, unchanged semantics) and `pre_chance_beliefs`. When `sample_leaf` materialises the next batch of roots, copy both tensors: reuse `self.beliefs` for the post-chance view and gather `self.root_pre_chance_beliefs` via `self.root_index` for the pre-chance view. During `initialize_search`, accept an optional `pre_chance_beliefs` argument and store it in `self.root_pre_chance_beliefs` so it persists through the following search iteration while leaving `self.beliefs` untouched.
 
 ### 3. Derive End-of-Street Value Targets
 
@@ -41,8 +39,8 @@ Implement utilities inside `RebelCFREvaluator` (or a dedicated helper module) th
 For each street transition, spell out how to average over hidden chance outcomes:
 
 * River: enumerate the 48 legal river cards for every start-of-river node, use the value network to estimate the post-chance value, weight by uniform probability, and produce the end-of-turn value target.
-* Turn: enumerate the 45 legal turn cards consistent with the flop (52 cards minus 3 flop cards minus 4 hole cards). Use the value network to evaluate the resulting start-of-river values, then average them to obtain end-of-flop targets.
-* Flop: enumerate canonical flops using suit symmetry. For each canonical flop, evaluate once, remap via suit permutations to cover its orbit, and weight by the number of raw flops represented. This yields the exact end-of-preflop expectation without Monte Carlo variance.
+* Turn: enumerate the 47 legal turn cards consistent with the flop (52 cards minus 3 flop cards). Use the value network to evaluate the resulting start-of-river values, then average them to obtain end-of-flop targets.
+* Flop: enumerate canonical flops and evaluate each once, weighting by the number of raw flops in its orbit. Because the encoder is trained with the suit-symmetry loss (`alphaholdem/rl/losses.py`), the model respects suit permutations and no explicit hand remapping is required. This yields the exact end-of-preflop expectation without Monte Carlo variance.
 
 Emit assertions that the resulting tensors share the same shape as the original value targets so downstream code can rely on them without branching.
 
@@ -88,10 +86,10 @@ Expect to see identical counts for start-of-street and end-of-street entries at 
 ## Progress
 
 - [x] ExecPlan authored
-- [ ] `_fan_out_deep` implemented and documented
-- [ ] Pre-chance belief handoff across evaluators wired up
-- [ ] End-of-street value derivation utilities implemented
-- [ ] `training_data` returns paired value batches and tests cover it
+- [x] Root-level bookkeeping (indices, pre/post beliefs) propagated through tree
+- [x] Pre-chance belief handoff across evaluators wired up
+- [x] End-of-street value derivation utilities implemented
+- [x] `training_data` returns paired value batches and tests cover it
 - [ ] Validation script implemented and documented
 - [ ] Tests and integration checks passing
 
