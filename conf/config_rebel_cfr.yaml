@@ -21,6 +21,7 @@ train:
   value_reuse_goal: 8
   value_coef: 2.0
   entropy_coef: 0.0
+  permutation_coef: 1.0
   grad_clip: 1.0
 
   stratify_streets_until:

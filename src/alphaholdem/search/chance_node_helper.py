@@ -23,6 +23,18 @@ class ChanceNodeHelper:
 
     _hand_permutation_cache: dict[tuple[int, int, int, int], torch.Tensor] = {}
 
+    device: torch.device
+    float_dtype: torch.dtype
+    num_players: int
+    model: Any
+    combo_onehot_float: torch.Tensor
+    board_to_flop_id: torch.Tensor
+    board_to_canonical: torch.Tensor
+    flop_id_to_canonical: torch.Tensor
+    flop_id_to_allowed_mask: torch.Tensor
+    flop_id_to_count: torch.Tensor
+    total_flop_count: int
+
     def __init__(
         self,
         device: torch.device,
@@ -35,27 +47,9 @@ class ChanceNodeHelper:
         self.num_players = num_players
         self.model = model
         self.combo_onehot_float = combo_to_onehot_tensor(device=device).float()
+
         # Initialize cache as instance variables
-        self.board_to_flop_id: torch.Tensor | None = None
-        self.board_to_canonical: torch.Tensor | None = None
-        self.flop_id_to_canonical: torch.Tensor | None = None
-        self.flop_id_to_allowed_mask: torch.Tensor | None = None
-        self.flop_id_to_count: torch.Tensor | None = None
-        self.total_flop_count: int = 0
-        self._ensure_canonical_flops()
-
-    @property
-    def combo_onehot_bool(self) -> torch.Tensor:
-        """Return [1326, 52] bool tensor of one-hot encoded combos."""
-        return combo_to_onehot_tensor(device=self.device)
-
-    def update_model(self, model: Any) -> None:
-        """Allow the evaluator to refresh the model reference if it changes."""
-        self.model = model
-
-    def _ensure_canonical_flops(self) -> None:
-        if self.board_to_flop_id is None:
-            self._build_canonical_flops_cache()
+        self._build_canonical_flops_cache()
 
     def _build_canonical_flops_cache(self) -> None:
         # Use vectorized approach to build canonical flop mapping
@@ -226,7 +220,6 @@ class ChanceNodeHelper:
         root_indices: torch.Tensor,
         root_features: MLPFeatures,
         pre_chance_beliefs: torch.Tensor,
-        reach_weights: torch.Tensor,
     ) -> torch.Tensor:
         """Expected CFVs over three-card flop chance using canonical flops."""
 
@@ -244,7 +237,6 @@ class ChanceNodeHelper:
         B = root_indices.numel()
 
         pre_beliefs = pre_chance_beliefs[root_indices].to(dtype=dtype)
-        reach = reach_weights[root_indices].flip(dims=[1]).to(dtype=dtype)
         context_root = root_features.context[root_indices].clone()
         street_root = root_features.street[root_indices].clone()
 
@@ -263,6 +255,7 @@ class ChanceNodeHelper:
         )  # [B, 2, NUM_HANDS]
 
         chunk_size = self.FLOP_CHUNK_SIZE
+        model.eval()
         for start in range(0, num_flops, chunk_size):
             end = min(start + chunk_size, num_flops)
             chunk_len = end - start
@@ -312,11 +305,8 @@ class ChanceNodeHelper:
             hand_values = model(synthetic_features).hand_values.to(dtype=dtype)
             hand_values = hand_values.view(B, chunk_len, self.num_players, NUM_HANDS)
 
-            reach_expand = reach.unsqueeze(1)
-            cfv = hand_values * reach_expand
-
             weight = counts_chunk.view(1, chunk_len, 1, 1).to(dtype)
-            values_sum += (cfv * weight).sum(dim=1)
+            values_sum += (hand_values * weight).sum(dim=1)
 
         expected = values_sum / self.total_flop_count
         return expected
@@ -327,7 +317,6 @@ class ChanceNodeHelper:
         root_indices: torch.Tensor,
         root_features: MLPFeatures,
         pre_chance_beliefs: torch.Tensor,
-        reach_weights: torch.Tensor,
         board_pre: torch.Tensor,
     ) -> torch.Tensor:
         """Compute expected CFVs over a single-card chance node (turn or river)."""
@@ -346,7 +335,6 @@ class ChanceNodeHelper:
         B = root_indices.numel()
 
         pre_beliefs = pre_chance_beliefs[root_indices].to(dtype=dtype)
-        reach = reach_weights[root_indices].flip(dims=[1]).to(dtype=dtype)
         board_prev = board_pre[root_indices].clone()
         context_root = root_features.context[root_indices].clone()
         street_root = root_features.street[root_indices].clone()
@@ -421,21 +409,17 @@ class ChanceNodeHelper:
         )
 
         model = self.model
-        prev_training = getattr(model, "training", None)
-        if prev_training is not None:
-            model.eval()
-        hand_values = model(synthetic_features).hand_values.to(dtype=dtype)
-        if prev_training:
-            model.train()
+        model.eval()
 
-        reach_samples = reach[root_lookup]
-        cfv_samples = hand_values * reach_samples
+        # Note: Notionally these are EVs from the model, not CFVs.
+        # But reach-weight only changes evenly across the chance node, so we ignore it.
+        hand_values = model(synthetic_features).hand_values.to(dtype=dtype)
 
         values_sum = torch.zeros(
             B, self.num_players, NUM_HANDS, device=device, dtype=dtype
         )
         counts = torch.zeros(B, device=device, dtype=dtype)
-        values_sum.index_add_(0, root_lookup, cfv_samples)
+        values_sum.index_add_(0, root_lookup, hand_values)
         counts.index_add_(
             0, root_lookup, torch.ones(num_samples, device=device, dtype=dtype)
         )

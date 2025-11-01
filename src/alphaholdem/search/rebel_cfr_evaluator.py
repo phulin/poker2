@@ -256,7 +256,6 @@ class RebelCFREvaluator:
             num_players=self.num_players,
             model=self.model,
         )
-        self.combo_onehot_bool = self.chance_helper.combo_onehot_bool
 
         self.allowed_hands = torch.zeros(
             M, NUM_HANDS, device=self.device, dtype=torch.bool
@@ -599,6 +598,7 @@ class RebelCFREvaluator:
         """Push public beliefs down the tree using the freshly initialised policy."""
         self.policy_probs.zero_()
 
+        self.model.eval()
         for depth in range(self.max_depth):
             # Beliefs and policy probs already filled in on current level.
             offset = self.depth_offsets[depth]
@@ -707,6 +707,7 @@ class RebelCFREvaluator:
             self.beliefs_avg if self.cfr_avg else self.beliefs,
             pre_chance_node=True,
         )
+        self.model.eval()
         model_output = self.model(features[model_mask])
         if t <= 1 or not self.cfr_avg or self.last_model_values is None:
             self.latest_values[model_mask] = model_output.hand_values
@@ -1223,7 +1224,6 @@ class RebelCFREvaluator:
                 torch.where(turn_river_mask)[0],
                 features[:N],
                 self.root_pre_chance_beliefs,
-                self.reach_weights,
                 self.env.last_board_indices,
             )
             value_targets_pre[turn_river_mask] = expected_turn_river
@@ -1236,7 +1236,6 @@ class RebelCFREvaluator:
                 torch.where(flop_mask)[0],
                 features[:N],
                 self.root_pre_chance_beliefs,
-                self.reach_weights,
             )
             value_targets_pre[flop_mask] = expected_flop
 

@@ -83,6 +83,7 @@ class TrainingConfig:
     entropy_coef: float = 0.01
     entropy_coef_final: float = 0.002
     entropy_decay_portion: float = 0.6  # Portion of training for linear entropy decay
+    permutation_coef: float = 0.01
     grad_clip: float = 1.0
     value_loss_type: ValueLossType = ValueLossType.huber
     huber_delta: float = 1.0
