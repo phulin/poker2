@@ -221,6 +221,10 @@ class RebelCFRTrainer:
                     ].tolist()
                 )
             },
+            "value_batch_mean_street": value_batch.statistics["street"]
+            .float()
+            .mean()
+            .item(),
             "value_batch_street": {
                 "preflop": preflop.float().mean().item(),
                 "flop": flop.float().mean().item(),

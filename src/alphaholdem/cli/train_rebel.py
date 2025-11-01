@@ -141,6 +141,11 @@ def print_training_stats(
         if metrics["local_exploitability"] is not None
         else "N/A"
     )
+    street_str = (
+        f"{metrics['value_batch_mean_street']:.4f}"
+        if metrics["value_batch_mean_street"] is not None
+        else "N/A"
+    )
 
     print(
         f"[Step {step:05d}/{total_steps}] "
@@ -148,6 +153,7 @@ def print_training_stats(
         f"policy={policy_str} "
         f"value={value_str} "
         f"exploit={exploitability_str} "
+        f"street={street_str} "
         f"time={step_elapsed:.2f}s total={total_elapsed/60:.1f}m"
     )
 
