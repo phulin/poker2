@@ -497,6 +497,21 @@ def test_initialize_beliefs_updates_child_nodes(
     torch.testing.assert_close(belief_sum, torch.ones_like(belief_sum))
 
 
+def test_fan_out_deep_repeats_root_beliefs() -> None:
+    evaluator, _ = make_evaluator(batch_size=2, max_depth=1)
+    root_data = torch.arange(
+        evaluator.search_batch_size * 3,
+        device=evaluator.device,
+        dtype=evaluator.float_dtype,
+    ).view(evaluator.search_batch_size, 3)
+
+    broadcast = evaluator._fan_out_deep(root_data)
+
+    copies = evaluator.total_nodes // evaluator.search_batch_size
+    expected = root_data[:, None, :].expand(-1, copies, -1).reshape(-1, 3)
+    torch.testing.assert_close(broadcast, expected)
+
+
 def test_compute_expected_values_matches_child_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -682,6 +697,7 @@ def test_sample_leaf_copies_selected_nodes(monkeypatch: pytest.MonkeyPatch) -> N
     torch.testing.assert_close(pbs.beliefs[0], evaluator.beliefs[expected_index])
     assert pbs.env.to_act[0] == evaluator.env.to_act[expected_index]
     assert pbs.env.pot[0] == evaluator.env.pot[expected_index]
+    assert not hasattr(pbs, "pre_chance_beliefs")
 
 
 def test_sample_leaf_handles_partial_masks() -> None:
@@ -880,7 +896,7 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
     pre_beliefs = torch.rand(1, 2, NUM_HANDS)
     pre_beliefs /= pre_beliefs.sum(dim=-1, keepdim=True)
 
-    evaluator.initialize_search(env_proto, roots, pre_chance_beliefs=pre_beliefs)
+    evaluator.initialize_search(env_proto, roots, pre_beliefs)
     evaluator.latest_values[:] = torch.rand_like(evaluator.latest_values)
     evaluator.values_avg[:] = evaluator.latest_values
     evaluator.reach_weights[:1] = 1.0
@@ -1387,6 +1403,94 @@ def test_discounted_cfr_policy_averaging() -> None:
             weights /= weights.sum()
             expected = (all_policies[: t + 1] * weights[:, None]).sum(dim=0)
             assert torch.allclose(evaluator.policy_probs_avg, expected)
+
+
+def test_flop_blocking_over_iterations() -> None:
+    """Preflop nodes remain unblocked; flop nodes block board cards while pre-chance stays intact."""
+
+    device = torch.device("cpu")
+    uniform = torch.full((1, 2, NUM_HANDS), 1.0 / NUM_HANDS, device=device)
+
+    bet_bins = [1.0]
+    env = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=bet_bins,
+        device=device,
+        float_dtype=torch.float32,
+        flop_showdown=False,
+    )
+    env.reset()
+    model = MockModel(
+        logits=torch.zeros(len(bet_bins) + 3, dtype=env.float_dtype),
+        hand_values=torch.zeros(1, 2, NUM_HANDS, dtype=env.float_dtype),
+        num_actions=len(bet_bins) + 3,
+        device=device,
+        dtype=env.float_dtype,
+    )
+    evaluator = RebelCFREvaluator(
+        search_batch_size=1,
+        env_proto=env,
+        model=model,  # type: ignore[arg-type]
+        bet_bins=bet_bins,
+        max_depth=2,
+        cfr_iterations=4,
+        device=device,
+        float_dtype=env.float_dtype,
+        warm_start_iterations=0,
+    )
+    roots = torch.arange(evaluator.search_batch_size, device=device)
+    evaluator.initialize_search(env, roots, uniform)
+    evaluator.construct_subgame()
+    evaluator.initialize_policy_and_beliefs()
+
+    preflop_valid = torch.where(evaluator.valid_mask)[0]
+    assert evaluator.allowed_hands[preflop_valid].all()
+
+    num_actions = evaluator.num_actions
+    first_call = evaluator.depth_offsets[1] + 1
+    second_call = evaluator.depth_offsets[2] + 1 * num_actions + 1
+    assert evaluator.valid_mask[first_call]
+    assert evaluator.valid_mask[second_call]
+    assert evaluator.env.street[second_call] == 1
+
+    flop_pbs = PublicBeliefState.from_proto(
+        env_proto=evaluator.env,
+        beliefs=torch.zeros_like(uniform),
+        num_envs=1,
+    )
+    flop_pbs.env.copy_state_from(
+        evaluator.env,
+        torch.tensor([second_call], device=device),
+        torch.tensor([0], device=device),
+    )
+    flop_pbs.beliefs[0] = evaluator.beliefs[second_call]
+
+    evaluator.initialize_search(
+        flop_pbs.env,
+        torch.tensor([0], device=device),
+        flop_pbs.beliefs,
+    )
+    evaluator.root_pre_chance_beliefs[:1] = evaluator.root_pre_chance_beliefs[:1]
+    evaluator.construct_subgame()
+    evaluator.initialize_policy_and_beliefs()
+
+    flop_valid = torch.where(evaluator.valid_mask)[0]
+    board = evaluator.env.board_indices[flop_valid[0]]
+    expected_mask = mask_conflicting_combos(board, device=device)
+
+    for idx in flop_valid:
+        assert torch.equal(evaluator.allowed_hands[idx], expected_mask)
+        for player in range(evaluator.num_players):
+            assert torch.all(evaluator.beliefs[idx, player, expected_mask] > 0)
+            assert torch.all(evaluator.beliefs[idx, player, ~expected_mask] == 0)
+
+    torch.testing.assert_close(
+        evaluator.root_pre_chance_beliefs[0],
+        uniform[0],
+    )
 
 
 def test_local_exploitability_depth_limited() -> None:

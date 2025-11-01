@@ -126,7 +126,6 @@ class DummyEvaluator:
         env: DummyEnv,
         indices: torch.Tensor,
         initial_beliefs: torch.Tensor,
-        pre_chance_beliefs: torch.Tensor | None = None,
     ) -> None:
         self.last_initialized_env = env
         self.initialize_args.append(indices.clone())
@@ -145,7 +144,6 @@ class DummyEvaluator:
         return PublicBeliefState(
             env=env,
             beliefs=beliefs,
-            pre_chance_beliefs=beliefs.clone(),
         )
 
     def training_data(self):

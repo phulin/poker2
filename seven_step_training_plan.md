@@ -22,15 +22,13 @@ Out of scope: architectural changes to tree construction, new CFR algorithms, or
 
 ## Implementation Strategy
 
-### 1. Capture Root-Level Pre-Chance Metadata
+### 1. Track Root Pre-Chance Beliefs Inside The Evaluator
 
-Ensure `RebelCFREvaluator` keeps `self.beliefs` in the pre-chance format across the entire tree without introducing a separate post-chance tensor. In `construct_subgame`, compute `allowed_hands` only for the root batch and distribute it to every node using a new helper `_fan_out_deep`, which takes a root-level tensor and repeats it to match the total node count regardless of depth. Replace existing `_fan_out` usages that previously fanned level-by-level so the masking logic stays consistent with the single-street assumption explained in the Context section.
+Keep `self.beliefs` / `self.beliefs_avg` as the post-chance ranges used for CFR, but add a dedicated `root_pre_chance_beliefs` buffer that persists the end-of-street ranges supplied by the caller. Introduce `_fan_out_deep` to broadcast root-aligned masks (e.g., `allowed_hands`, uniform fallbacks, reach initialisation) across every node in the tree while leaving the stored pre-chance snapshot untouched so it can be reused during data augmentation.
 
-Document `_fan_out_deep` within the file, including its assumptions (tree arity equals number of actions, consistent depth offsets) so future contributors can reason about it without re-reading the entire search implementation.
+### 2. Keep PBS Lightweight
 
-### 2. Track Pre-Chance Beliefs Across Evaluator Transitions
-
-Extend `PublicBeliefState` to carry both `beliefs` (post-chance, unchanged semantics) and `pre_chance_beliefs`. When `sample_leaf` materialises the next batch of roots, copy both tensors: reuse `self.beliefs` for the post-chance view and gather `self.root_pre_chance_beliefs` via `self.root_index` for the pre-chance view. During `initialize_search`, accept an optional `pre_chance_beliefs` argument and store it in `self.root_pre_chance_beliefs` so it persists through the following search iteration while leaving `self.beliefs` untouched.
+Leave `PublicBeliefState` with a single `beliefs` tensor; when PBS instances represent street-end nodes those beliefs are already pre-chance and can be fed straight back into the evaluator. Update `initialize_search`, `self_play_iteration`, `sample_leaf`, and the replay/data-generator plumbing to populate the evaluator’s `root_pre_chance_beliefs` directly instead of expanding the PBS payload.
 
 ### 3. Derive End-of-Street Value Targets
 
@@ -105,5 +103,5 @@ The changes are localized. If issues arise, revert the commits touching `RebelCF
 
 2024-05-30: Adopted the assumption that all nodes in an evaluator tree share the root street, allowing `allowed_hands` to be computed once per tree. This keeps the evaluator architecture unchanged while enabling access to pre-chance beliefs for the new training stages.
 2024-05-31: Narrowed the scope to augment existing value batches with end-of-street counterparts generated during data collection, leaving evaluator node annotations and feature encoders unchanged.
-2024-05-31: Chose to pass `pre_chance_beliefs` alongside standard beliefs in `PublicBeliefState` so each evaluator root retains the end-of-previous-street ranges needed for augmentation.
+2024-06-01: Kept PBS payloads minimal while storing a dedicated `root_pre_chance_beliefs` snapshot inside the evaluator for chance-node augmentation.
 2024-05-31: Chose to integrate flop suit symmetry by enumerating canonical flops instead of Monte Carlo sampling, eliminating variance while keeping computation tractable.
