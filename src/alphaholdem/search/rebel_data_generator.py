@@ -1,4 +1,5 @@
 import torch
+from torch.profiler import record_function
 
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
@@ -67,9 +68,10 @@ class RebelDataGenerator:
 
             self.current_pbs = self.evaluator.self_play_iteration()
 
-            value_batch, augmented_value_batch, policy_batch = (
-                self.evaluator.training_data()
-            )
+            with record_function("training_data"):
+                value_batch, augmented_value_batch, policy_batch = (
+                    self.evaluator.training_data()
+                )
             self.policy_buffer.add_batch(policy_batch)
             self.value_buffer.add_batch(value_batch)
             self.value_buffer.add_batch(augmented_value_batch)
