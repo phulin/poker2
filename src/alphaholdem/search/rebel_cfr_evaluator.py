@@ -6,6 +6,7 @@ from typing import Generator, Optional
 
 import torch
 import torch.nn.functional as F
+from torch.profiler import record_function
 
 from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
@@ -865,16 +866,27 @@ class RebelCFREvaluator:
             out=self.policy_probs[bottom:],
         )
 
-        self.reach_weights = self._calculate_reach_weights(self.policy_probs)
-        self._block_beliefs(self.reach_weights)
-        self._propagate_all_beliefs(self.beliefs, self.policy_probs, self.reach_weights)
+        with record_function("calculate_reach_weights"):
+            self.reach_weights = self._calculate_reach_weights(self.policy_probs)
+        with record_function("block_beliefs"):
+            self._block_beliefs(self.reach_weights)
+        with record_function("propagate_all_beliefs"):
+            self._propagate_all_beliefs(
+                self.beliefs, self.policy_probs, self.reach_weights
+            )
 
-        self.update_average_policy(t)
-        self.reach_weights_avg = self._calculate_reach_weights(self.policy_probs_avg)
-        self._block_beliefs(self.reach_weights_avg)
-        self._propagate_all_beliefs(
-            self.beliefs_avg, self.policy_probs_avg, self.reach_weights_avg
-        )
+        with record_function("update_average_policy"):
+            self.update_average_policy(t)
+        with record_function("calculate_reach_weights_avg"):
+            self.reach_weights_avg = self._calculate_reach_weights(
+                self.policy_probs_avg
+            )
+        with record_function("block_beliefs_avg"):
+            self._block_beliefs(self.reach_weights_avg)
+        with record_function("propagate_all_beliefs_avg"):
+            self._propagate_all_beliefs(
+                self.beliefs_avg, self.policy_probs_avg, self.reach_weights_avg
+            )
 
     @profile
     def sample_leaf(
@@ -1091,7 +1103,8 @@ class RebelCFREvaluator:
                     )
                     next_pbs_idx += sample_now.numel()
 
-            regrets = self.compute_instantaneous_regrets(self.values_avg)
+            with record_function("compute_instantaneous_regrets"):
+                regrets = self.compute_instantaneous_regrets(self.values_avg)
             if self.cfr_type == CFRType.linear:
                 # Alternate updates.
                 regrets.masked_fill_(
@@ -1107,11 +1120,14 @@ class RebelCFREvaluator:
             self.cumulative_regrets += regrets
 
             old_policy_probs = self.policy_probs.clone()
-            self.update_policy(t)
+            with record_function("update_policy"):
+                self.update_policy(t)
             self._record_stats(t, old_policy_probs)
 
-            self.set_leaf_values(t)
-            self.compute_expected_values()
+            with record_function("set_leaf_values"):
+                self.set_leaf_values(t)
+            with record_function("compute_expected_values"):
+                self.compute_expected_values()
 
             old, new = self._get_mixing_weights(t)
             self.values_avg *= old
