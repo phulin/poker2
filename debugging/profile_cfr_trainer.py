@@ -58,6 +58,7 @@ def profile_training_loop(cfg: Config):
         profile_memory=True,
         with_stack=True,
         with_flops=True,
+        experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
     ) as prof:
         # Run a few training steps with profiling
         num_profile_steps = cfg.num_steps
