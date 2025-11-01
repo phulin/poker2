@@ -210,23 +210,31 @@ def profile_training_loop(cfg: Config):
     print(f"\nChrome trace exported to: {trace_file}")
     print("Open this file in chrome://tracing or use Perfetto to visualize")
 
-    # Export stack traces
-    stack_file = output_dir / f"profile_cfr_trainer_stacks_{timestamp}.txt"
+    # Export raw stack traces using export_stacks
+    stacks_file = output_dir / f"profile_cfr_trainer_stacks_{timestamp}.txt"
+    try:
+        prof.export_stacks(str(stacks_file))
+        print(f"Raw stack traces exported to: {stacks_file}")
+    except Exception as e:
+        print(f"Could not export raw stack traces: {e}")
+
+    # Export formatted stack trace table
+    stack_table_file = output_dir / f"profile_cfr_trainer_stack_table_{timestamp}.txt"
     try:
         stack_averages = prof.key_averages(group_by_stack_n=10)
         stack_sort_key = (
             "self_cuda_time_total" if device.type == "cuda" else "self_cpu_time_total"
         )
-        with open(stack_file, "w") as f:
+        with open(stack_table_file, "w") as f:
             f.write(
                 stack_averages.table(
                     sort_by=stack_sort_key,
                     row_limit=100,
                 )
             )
-        print(f"Stack traces exported to: {stack_file}")
+        print(f"Stack trace table exported to: {stack_table_file}")
     except Exception as e:
-        print(f"Could not export stack traces: {e}")
+        print(f"Could not export stack trace table: {e}")
 
     # Export detailed table sorted by different metrics (use summary for speed)
     print("\nExporting detailed tables...")
