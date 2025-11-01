@@ -348,6 +348,8 @@ def debug_cfr_depth1(
     river_mode: bool = False,
     river_seed: int | None = None,
     iterations: int | None = None,
+    no_cfr_avg: bool = False,
+    dcfr_delay: int | None = None,
 ) -> None:
     """Main debugging function."""
     print("=== ReBeL CFR Depth-1 Debugger ===")
@@ -359,10 +361,12 @@ def debug_cfr_depth1(
     # Determine CFR type
     if cfr_type_str == "linear":
         cfr_type = CFRType.linear
-        dcfr_delay = 0
+        if dcfr_delay is None:
+            dcfr_delay = 0
     elif cfr_type_str == "discounted":
         cfr_type = CFRType.discounted
-        dcfr_delay = 70
+        if dcfr_delay is None:
+            dcfr_delay = 70
     else:
         raise ValueError(f"Unknown CFR type: {cfr_type_str}")
 
@@ -373,6 +377,7 @@ def debug_cfr_depth1(
     # Create configuration
     config = create_default_config()
     config.search.cfr_type = cfr_type
+    config.search.cfr_avg = not no_cfr_avg
     config.seed = random.randint(0, 1000000) if river_seed is None else river_seed
     if iterations is not None:
         # Ensure warm_start < iterations
@@ -491,7 +496,7 @@ def debug_cfr_depth1(
         float_dtype=torch.float32,
         warm_start_iterations=config.search.warm_start_iterations,
         cfr_type=cfr_type,
-        cfr_avg=True,
+        cfr_avg=config.search.cfr_avg,
         dcfr_delay=dcfr_delay,
     )
 
@@ -556,7 +561,8 @@ def debug_cfr_depth1(
         evaluator.update_policy(t)
         evaluator._record_stats(t, old_policy_probs)
 
-        evaluator.set_leaf_values(t)
+        if t < 500 or t % 1 == 0:
+            evaluator.set_leaf_values(t)
         evaluator.compute_expected_values()
 
         old, new = evaluator._get_mixing_weights(t)
@@ -613,6 +619,17 @@ def main():
         default=None,
         help="Number of CFR iterations to run (overrides default)",
     )
+    parser.add_argument(
+        "--no-cfr-avg",
+        action="store_true",
+        help="Disable CFR-AVG (use current policy instead of average policy)",
+    )
+    parser.add_argument(
+        "--dcfr-delay",
+        type=int,
+        default=None,
+        help="DCFR delay parameter (default: 0 for linear, 70 for discounted)",
+    )
 
     args = parser.parse_args()
 
@@ -622,6 +639,8 @@ def main():
         river_mode=args.river,
         river_seed=args.river_seed,
         iterations=args.iterations,
+        no_cfr_avg=args.no_cfr_avg,
+        dcfr_delay=args.dcfr_delay,
     )
 
 
