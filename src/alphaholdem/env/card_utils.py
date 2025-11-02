@@ -55,6 +55,7 @@ def parse_hand_name(hand_name: str) -> tuple[int, int]:
 
 
 @lru_cache(maxsize=1)
+@torch.compiler.assume_constant_result
 def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 2] tensor of sorted hole-card index pairs."""
     combos = []
@@ -68,6 +69,7 @@ def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
 
 
 @lru_cache(maxsize=1)
+@torch.compiler.assume_constant_result
 def combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [52, 52] long tensor mapping unordered card pairs to combo indices."""
     lookup = torch.full((52, 52), -1, dtype=torch.long)
