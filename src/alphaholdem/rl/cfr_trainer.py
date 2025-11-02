@@ -241,10 +241,33 @@ class RebelCFRTrainer:
         }
 
     def _get_stratify_streets(self, step: int) -> list[float] | None:
-        for config in self.cfg.train.stratify_streets:
-            if step < config.threshold:
-                return config.probabilities
-        return None
+        configs = self.cfg.train.stratify_streets
+
+        # Flat until the first threshold
+        if step < configs[0].threshold:
+            return configs[0].probabilities
+
+        # Find the two thresholds that bracket the current step
+        for i in range(len(configs) - 1):
+            if configs[i].threshold <= step < configs[i + 1].threshold:
+                # Linear interpolation between thresholds
+                lower_threshold = configs[i].threshold
+                upper_threshold = configs[i + 1].threshold
+                lower_probs = configs[i].probabilities
+                upper_probs = configs[i + 1].probabilities
+
+                # Compute interpolation weight (0 at lower, 1 at upper)
+                alpha = (step - lower_threshold) / (upper_threshold - lower_threshold)
+
+                # Linearly interpolate each probability
+                interpolated = [
+                    lower * (1 - alpha) + upper * alpha
+                    for lower, upper in zip(lower_probs, upper_probs)
+                ]
+                return interpolated
+
+        # Step >= last threshold, return last config's probabilities
+        return configs[-1].probabilities
 
     @profile
     def _update_model(self, step: int) -> dict[str, float]:
