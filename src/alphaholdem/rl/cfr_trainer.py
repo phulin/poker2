@@ -183,13 +183,19 @@ class RebelCFRTrainer:
             p.grad for p in self.model.parameters()
         ).item()
 
-        preflop = value_batch.statistics["street"] == 0
-        flop = value_batch.statistics["street"] == 1
-        turn = value_batch.statistics["street"] == 2
-        river = value_batch.statistics["street"] == 3
-        showdown = value_batch.statistics["street"] == 4
+        value_preflop = value_batch.features.street == 0
+        value_flop = value_batch.features.street == 1
+        value_turn = value_batch.features.street == 2
+        value_river = value_batch.features.street == 3
+        value_showdown = value_batch.features.street == 4
 
-        def by_street(tensor: torch.Tensor) -> dict[str, float]:
+        def by_street(tensor: torch.Tensor, batch=value_batch) -> dict[str, float]:
+            preflop = batch.features.street == 0
+            flop = batch.features.street == 1
+            turn = batch.features.street == 2
+            river = batch.features.street == 3
+            showdown = batch.features.street == 4
+
             result = {
                 "preflop": tensor[preflop].mean().item(),
                 "flop": tensor[flop].mean().item(),
@@ -222,21 +228,18 @@ class RebelCFRTrainer:
                     ].tolist()
                 )
             },
-            "value_batch_mean_street": value_batch.statistics["street"]
-            .float()
+            "value_batch_mean_street": value_batch.features.street.float()
             .mean()
             .item(),
             "value_batch_street": {
-                "preflop": preflop.float().mean().item(),
-                "flop": flop.float().mean().item(),
-                "turn": turn.float().mean().item(),
-                "river": river.float().mean().item(),
-                "showdown": showdown.float().mean().item(),
+                "preflop": value_preflop.float().mean().item(),
+                "flop": value_flop.float().mean().item(),
+                "turn": value_turn.float().mean().item(),
+                "river": value_river.float().mean().item(),
+                "showdown": value_showdown.float().mean().item(),
             },
             "value_loss_street": by_street(value_loss_all),
-            "policy_loss_street": (
-                by_street(policy_loss_all) if policy_loss_all is not None else {}
-            ),
+            "policy_loss_street": by_street(policy_loss_all, policy_batch),
             **self.cfr_evaluator.stats,
         }
 
