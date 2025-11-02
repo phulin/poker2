@@ -1254,11 +1254,11 @@ class RebelCFREvaluator:
 
         transition_mask = turn_river_mask | flop_mask
         pre_value_batch = RebelBatch(
-            features=pre_features_root[transition_mask],
-            value_targets=value_targets_pre[transition_mask],
-            legal_masks=legal_masks[:N][transition_mask],
-            statistics=value_statistics_pre[transition_mask],
-        )
+            features=pre_features_root,
+            value_targets=value_targets_pre,
+            legal_masks=legal_masks[:N],
+            statistics=value_statistics_pre,
+        )[transition_mask]
 
         return value_batch, pre_value_batch, policy_batch
 
