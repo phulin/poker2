@@ -155,11 +155,13 @@ def test_permute_suits_permuted_board_and_beliefs():
     batch_size = 1
 
     context = torch.zeros((batch_size, 1), device=device)
-    street = torch.zeros((batch_size, 1), device=device)
+    street = torch.zeros(batch_size, device=device, dtype=torch.long)
     board = torch.tensor([[0, 13, 26, 39, -1]], device=device)
     board_clone = board.clone()
 
-    beliefs = torch.arange(NUM_HANDS, dtype=torch.float32, device=device).unsqueeze(0)
+    # Beliefs must be (batch_size, 2 * NUM_HANDS)
+    beliefs_raw = torch.rand(1, 2 * NUM_HANDS, dtype=torch.float32, device=device)
+    beliefs = beliefs_raw / beliefs_raw.sum(dim=1, keepdim=True)  # Normalize
     beliefs_clone = beliefs.clone()
 
     generator = torch.Generator(device=device)
@@ -191,7 +193,12 @@ def test_permute_suits_permuted_board_and_beliefs():
     assert torch.equal(features.board, expected_board)
 
     inverse_remap = _expected_remap(suit_permutation)
-    expected_beliefs = torch.gather(beliefs_clone, 1, inverse_remap)
+    # Split beliefs into two players, permute each, then concatenate
+    p0_beliefs = beliefs_clone[:, :NUM_HANDS]
+    p1_beliefs = beliefs_clone[:, NUM_HANDS:]
+    expected_p0 = torch.gather(p0_beliefs, 1, inverse_remap)
+    expected_p1 = torch.gather(p1_beliefs, 1, inverse_remap)
+    expected_beliefs = torch.cat([expected_p0, expected_p1], dim=1)
     torch.testing.assert_close(features.beliefs, expected_beliefs)
 
     # Two-player belief tensor path.

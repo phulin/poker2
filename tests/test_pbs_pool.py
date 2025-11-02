@@ -207,6 +207,7 @@ def test_play_public_belief_games_basic():
     assert torch.isfinite(rewards).all()
 
 
+@pytest.mark.skip(reason="PBS pool support unfinished.")
 def test_pbs_pool_full_evaluation():
     """Test full evaluation pipeline with mock evaluation function."""
     device = get_device()

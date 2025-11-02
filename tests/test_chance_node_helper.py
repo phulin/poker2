@@ -180,10 +180,10 @@ class TestChanceNodeHelper:
             context=torch.zeros(0, 1, device=device),
             street=torch.zeros(0, device=device, dtype=torch.long),
             to_act=torch.zeros(0, device=device, dtype=torch.long),
-            board=torch.zeros(0, 3, device=device, dtype=torch.long),
-            beliefs=torch.zeros(0, NUM_HANDS, device=device),
+            board=torch.zeros(0, 5, device=device, dtype=torch.long),
+            beliefs=torch.zeros(0, 2 * NUM_HANDS, device=device),
         )
-        pre_chance_beliefs = torch.zeros(0, 1, NUM_HANDS, device=device)
+        pre_chance_beliefs = torch.zeros(0, 2, NUM_HANDS, device=device)
 
         result = helper.flop_chance_values(
             empty_indices, root_features, pre_chance_beliefs
@@ -203,11 +203,17 @@ class TestChanceNodeHelper:
             context=torch.zeros(B, 1, device=device),
             street=torch.zeros(B, device=device, dtype=torch.long),
             to_act=torch.zeros(B, device=device, dtype=torch.long),
-            board=torch.zeros(B, 3, device=device, dtype=torch.long),
-            beliefs=torch.zeros(B, NUM_HANDS, device=device),
+            board=torch.cat(
+                [
+                    torch.zeros(B, 3, device=device, dtype=torch.long),
+                    torch.full((B, 2), -1, device=device, dtype=torch.long),
+                ],
+                dim=1,
+            ),
+            beliefs=torch.zeros(B, 2 * NUM_HANDS, device=device),
         )
         pre_chance_beliefs = (
-            torch.ones(B, 1, NUM_HANDS, device=device, dtype=dtype) / NUM_HANDS
+            torch.ones(B, 2, NUM_HANDS, device=device, dtype=dtype) / NUM_HANDS
         )
 
         result = helper.flop_chance_values(
@@ -226,11 +232,11 @@ class TestChanceNodeHelper:
             context=torch.zeros(0, 1, device=device),
             street=torch.zeros(0, device=device, dtype=torch.long),
             to_act=torch.zeros(0, device=device, dtype=torch.long),
-            board=torch.zeros(0, 3, device=device, dtype=torch.long),
-            beliefs=torch.zeros(0, NUM_HANDS, device=device),
+            board=torch.zeros(0, 5, device=device, dtype=torch.long),
+            beliefs=torch.zeros(0, 2 * NUM_HANDS, device=device),
         )
-        pre_chance_beliefs = torch.zeros(0, 1, NUM_HANDS, device=device)
-        board_pre = torch.full((0, 3), -1, dtype=torch.long, device=device)
+        pre_chance_beliefs = torch.zeros(0, 2, NUM_HANDS, device=device)
+        board_pre = torch.full((0, 5), -1, dtype=torch.long, device=device)
 
         result = helper.single_card_chance_values(
             empty_indices, root_features, pre_chance_beliefs, board_pre
@@ -250,13 +256,19 @@ class TestChanceNodeHelper:
             context=torch.zeros(B, 1, device=device),
             street=torch.zeros(B, device=device, dtype=torch.long),
             to_act=torch.zeros(B, device=device, dtype=torch.long),
-            board=torch.zeros(B, 3, device=device, dtype=torch.long),
-            beliefs=torch.zeros(B, NUM_HANDS, device=device),
+            board=torch.cat(
+                [
+                    torch.zeros(B, 3, device=device, dtype=torch.long),
+                    torch.full((B, 2), -1, device=device, dtype=torch.long),
+                ],
+                dim=1,
+            ),
+            beliefs=torch.zeros(B, 2 * NUM_HANDS, device=device),
         )
         pre_chance_beliefs = (
-            torch.ones(B, 1, NUM_HANDS, device=device, dtype=dtype) / NUM_HANDS
+            torch.ones(B, 2, NUM_HANDS, device=device, dtype=dtype) / NUM_HANDS
         )
-        board_pre = torch.full((B, 3), -1, dtype=torch.long, device=device)
+        board_pre = torch.full((B, 5), -1, dtype=torch.long, device=device)
 
         result = helper.single_card_chance_values(
             root_indices, root_features, pre_chance_beliefs, board_pre
@@ -333,10 +345,16 @@ class TestChanceNodeHelper:
             context=torch.zeros(B, 1, device=device),
             street=torch.zeros(B, device=device, dtype=torch.long),
             to_act=torch.zeros(B, device=device, dtype=torch.long),
-            board=torch.zeros(B, 3, device=device, dtype=torch.long),
-            beliefs=torch.zeros(B, NUM_HANDS, device=device),
+            board=torch.cat(
+                [
+                    torch.zeros(B, 3, device=device, dtype=torch.long),
+                    torch.full((B, 2), -1, device=device, dtype=torch.long),
+                ],
+                dim=1,
+            ),
+            beliefs=torch.zeros(B, 2 * NUM_HANDS, device=device),
         )
-        pre_chance_beliefs = torch.ones(B, 1, NUM_HANDS, device=device) / NUM_HANDS
+        pre_chance_beliefs = torch.ones(B, 2, NUM_HANDS, device=device) / NUM_HANDS
 
         result = helper.flop_chance_values(
             root_indices, root_features, pre_chance_beliefs
@@ -354,11 +372,17 @@ class TestChanceNodeHelper:
             context=torch.zeros(B, 1, device=device),
             street=torch.zeros(B, device=device, dtype=torch.long),
             to_act=torch.zeros(B, device=device, dtype=torch.long),
-            board=torch.zeros(B, 3, device=device, dtype=torch.long),
-            beliefs=torch.zeros(B, NUM_HANDS, device=device),
+            board=torch.cat(
+                [
+                    torch.zeros(B, 3, device=device, dtype=torch.long),
+                    torch.full((B, 2), -1, device=device, dtype=torch.long),
+                ],
+                dim=1,
+            ),
+            beliefs=torch.zeros(B, 2 * NUM_HANDS, device=device),
         )
-        pre_chance_beliefs = torch.ones(B, 1, NUM_HANDS, device=device) / NUM_HANDS
-        board_pre = torch.full((B, 3), -1, dtype=torch.long, device=device)
+        pre_chance_beliefs = torch.ones(B, 2, NUM_HANDS, device=device) / NUM_HANDS
+        board_pre = torch.full((B, 5), -1, dtype=torch.long, device=device)
 
         result = helper.single_card_chance_values(
             root_indices, root_features, pre_chance_beliefs, board_pre

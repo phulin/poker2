@@ -2,7 +2,7 @@ import math
 
 import torch
 
-from alphaholdem.core.structured_config import Config, ValueHeadType
+from alphaholdem.core.structured_config import Config, ValueHeadType, StratifyConfig
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
@@ -96,12 +96,15 @@ def test_rebel_supervised_loss_finite():
     )
     legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
     values = torch.randn(batch_size, 2, NUM_HANDS)
+    # Beliefs must be normalized probabilities
+    beliefs_raw = torch.rand(batch_size, 2 * NUM_HANDS)
+    beliefs = beliefs_raw / beliefs_raw.sum(dim=1, keepdim=True)
     mlp_features = MLPFeatures(
         context=torch.randn(batch_size, 4),
         street=torch.zeros(batch_size, dtype=torch.long),
         to_act=torch.zeros(batch_size, dtype=torch.long),
         board=torch.zeros(batch_size, 5),
-        beliefs=torch.randn(batch_size, 2 * NUM_HANDS),
+        beliefs=beliefs,
     )
     batch = RebelBatch(
         features=mlp_features,
@@ -145,6 +148,9 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.search.warm_start_iterations = 0
     cfg.search.dcfr_plus_delay = 0
     cfg.search.branching = 4
+    cfg.train.stratify_streets = [
+        StratifyConfig(threshold=0, probabilities=[0.25, 0.25, 0.25, 0.25])
+    ]
 
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
     metrics = trainer.train(num_steps=1)

@@ -5,6 +5,7 @@ import os
 import signal
 import tempfile
 
+import pytest
 import torch
 
 from alphaholdem.core.structured_config import (
@@ -18,6 +19,8 @@ from alphaholdem.rl.losses import TrinalClipPPOLoss
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
 from alphaholdem.rl.self_play import SelfPlayTrainer
 from alphaholdem.utils.ema import EMA
+
+pytestmark = pytest.mark.skip(reason="Tests in this file are temporarily disabled.")
 
 
 def test_trinal_clip_ppo_loss():

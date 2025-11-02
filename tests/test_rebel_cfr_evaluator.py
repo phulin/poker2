@@ -1378,6 +1378,7 @@ def test_discounted_cfr_policy_averaging() -> None:
     env.reset()
 
     # Create evaluator with depth=0 for simplicity
+    # Note: discounted_plus uses delay-based weights, not discounted
     dcfr_delay = 10
     evaluator = RebelCFREvaluator(
         search_batch_size=1,
@@ -1390,7 +1391,7 @@ def test_discounted_cfr_policy_averaging() -> None:
         dcfr_delay=dcfr_delay,
         device=device,
         float_dtype=float_dtype,
-        cfr_type=CFRType.discounted,
+        cfr_type=CFRType.discounted_plus,
         cfr_avg=True,
     )
 
@@ -1862,8 +1863,11 @@ def test_set_leaf_values_cfr_avg_branches() -> None:
             9.0,
             8.0,
             5,
-            lambda t, new, old: ((t + 1) * new - (t - 1) * old) / 2,
-        ),  # (6*9 - 4*8) / 2 = 11
+            lambda t, new_val, old_val: (
+                ((t - 1) ** 2 + t**2) * new_val - (t - 1) ** 2 * old_val
+            )
+            / (t**2),
+        ),
     ]
 
     for cfr_type, new_val, old_val, t_iter, formula in test_cases:
