@@ -462,7 +462,7 @@ class RebelCFREvaluator:
         self.allowed_hands &= self.valid_mask[:, None]
 
         self.allowed_hands_prob[:] = self._fan_out_deep(root_allowed_prob)
-        self.allowed_hands_prob.masked_fill_(~self.valid_mask[:, None], 0.0)
+        self.allowed_hands_prob.masked_fill_((~self.valid_mask)[:, None], 0.0)
         self.prev_actor[N:] = self._fan_out(self.env.to_act)
 
         self.legal_mask = self.env.legal_bins_mask()
@@ -518,7 +518,7 @@ class RebelCFREvaluator:
                 include_self=True,
             )
 
-        target.masked_fill_(~self.valid_mask[:, None, None], 0.0)
+        target.masked_fill_((~self.valid_mask)[:, None, None], 0.0)
         self._block_beliefs(target)
         return target
 
@@ -579,7 +579,7 @@ class RebelCFREvaluator:
         """Block beliefs based on the board."""
         if target is None:
             target = self.beliefs
-        target.masked_fill_(~self.allowed_hands[:, None, :], 0.0)
+        target.masked_fill_((~self.allowed_hands)[:, None, :], 0.0)
 
     @profile
     def _normalize_beliefs(self, target: torch.Tensor | None = None) -> torch.Tensor:
@@ -600,7 +600,7 @@ class RebelCFREvaluator:
 
         # That step will have made invalid nodes' beliefs uniform.
         # Which is not what we want.
-        target.masked_fill_(~self.valid_mask[:, None, None], 0.0)
+        target.masked_fill_((~self.valid_mask)[:, None, None], 0.0)
 
     @torch.no_grad()
     @profile
@@ -633,7 +633,7 @@ class RebelCFREvaluator:
             self._block_beliefs()
             self._normalize_beliefs()
 
-        self.policy_probs.masked_fill_(~self.valid_mask[:, None], 0.0)
+        self.policy_probs.masked_fill_((~self.valid_mask)[:, None], 0.0)
 
         self._calculate_reach_weights(self.reach_weights, self.policy_probs)
 
@@ -666,9 +666,9 @@ class RebelCFREvaluator:
             legal_mask = self.legal_mask[current_indices]
             # [n, B, 1326]
             next_actor_values = values_br[next_indices, actor[:, None]]
-            next_actor_values.masked_fill_(~legal_mask[:, :, None], min_value)
+            next_actor_values.masked_fill_((~legal_mask)[:, :, None], min_value)
             next_opp_values = values_br[next_indices, opp[:, None]]
-            next_opp_values.masked_fill_(~legal_mask[:, :, None], 0.0)
+            next_opp_values.masked_fill_((~legal_mask)[:, :, None], 0.0)
 
             # Best-response per hand (mask illegal actions to -inf)
             best_actions = next_actor_values.argmax(dim=1)  # [n, 1326]
@@ -699,8 +699,11 @@ class RebelCFREvaluator:
         elif self.cfr_type == CFRType.linear:
             return t - 1, 2
         elif self.cfr_type == CFRType.discounted:
+            return (t - 1) ** self.dcfr_gamma, t**self.dcfr_gamma
+        elif self.cfr_type == CFRType.discounted_plus:
             if t > self.dcfr_delay:
-                return max(0, t - 1 - self.dcfr_delay), 2
+                t_delay = t - self.dcfr_delay
+                return t_delay - 1, 2
             else:
                 return 0, 1
 
@@ -760,7 +763,7 @@ class RebelCFREvaluator:
     def compute_expected_values(self) -> torch.Tensor:
         """Back up leaf hand values to their ancestors under the current policy."""
 
-        self.latest_values.masked_fill_(~self.leaf_mask[:, None, None], 0.0)
+        self.latest_values.masked_fill_((~self.leaf_mask)[:, None, None], 0.0)
         # First iteration: leaf values already populated; back propagate expectations
         for depth in range(self.max_depth - 1, -1, -1):
             self.profiler_step()  # Profile each depth iteration
@@ -792,7 +795,7 @@ class RebelCFREvaluator:
                 out=self.latest_values[offset:offset_next],
             )
             self.latest_values[offset:offset_next].masked_fill_(
-                ~self.valid_mask[offset:offset_next, None, None], 0.0
+                (~self.valid_mask)[offset:offset_next, None, None], 0.0
             )
 
     @profile
@@ -1019,7 +1022,7 @@ class RebelCFREvaluator:
         sample_count = min(leaf_indices.numel(), self.search_batch_size)
         sampled_leaf_indices = leaf_indices[:sample_count]
         if sample_count > 0:
-            if self.cfr_type == CFRType.discounted:
+            if self.cfr_type == CFRType.discounted_plus:
                 sample_low = max(self.warm_start_iterations + 1, self.dcfr_delay + 1)
                 sample_low = min(sample_low, self.cfr_iterations - 1)
             else:
@@ -1068,71 +1071,77 @@ class RebelCFREvaluator:
         self.compute_expected_values()
         self.values_avg[:] = self.latest_values
 
-        t_sample, sampled_leaf_indices = self._get_sampling_schedule()
-        sample_count = t_sample.numel()
-        next_pbs = None
-        if sample_count > 0:
+        self.t_sample, self.sampled_leaf_indices = self._get_sampling_schedule()
+        self.sample_count = self.t_sample.numel()
+        self.next_pbs = None
+        if self.sample_count > 0:
             beliefs_template = torch.zeros(
-                sample_count, self.num_players, NUM_HANDS, device=self.device
+                self.sample_count, self.num_players, NUM_HANDS, device=self.device
             )
-            next_pbs = PublicBeliefState.from_proto(
+            self.next_pbs = PublicBeliefState.from_proto(
                 env_proto=self.env,
                 beliefs=beliefs_template,
-                num_envs=sample_count,
+                num_envs=self.sample_count,
             )
-            next_pbs_idx = 0
+            self.next_pbs_idx = 0
 
         for t in range(self.warm_start_iterations, self.cfr_iterations):
             self.profiler_step()  # Profile start of CFR iteration
-
-            if sample_count > 0:
-                # If t == t_sample, sample leaf PBS
-                sample_now = torch.where(t_sample == t)[0]
-                if sample_now.numel() > 0:
-                    self.sample_leaf(
-                        sampled_leaf_indices[sample_now],
-                        next_pbs,
-                        next_pbs_idx,
-                        training_mode=training_mode,
-                    )
-                    next_pbs_idx += sample_now.numel()
-
-            with record_function("compute_instantaneous_regrets"):
-                regrets = self.compute_instantaneous_regrets(self.values_avg)
-            if self.cfr_type == CFRType.linear:
-                # Alternate updates.
-                regrets.masked_fill_(
-                    self.env.to_act[:, None] == t % self.num_players, 0.0
-                )
-            elif self.cfr_type == CFRType.discounted:
-                factor = torch.where(
-                    regrets > 0, (t - 1) ** self.dcfr_alpha, (t - 1) ** self.dcfr_beta
-                )
-                self.cumulative_regrets *= factor / (factor + 1)
-                self.regret_weight_sums *= factor / (factor + 1)
-            self.regret_weight_sums += 1
-            self.cumulative_regrets += regrets
-
-            old_policy_probs = self.policy_probs.clone()
-            with record_function("update_policy"):
-                self.update_policy(t)
-            self._record_stats(t, old_policy_probs)
-
-            with record_function("set_leaf_values"):
-                self.set_leaf_values(t)
-            with record_function("compute_expected_values"):
-                self.compute_expected_values()
-
-            old, new = self._get_mixing_weights(t)
-            self.values_avg *= old
-            self.values_avg += new * self.latest_values
-            self.values_avg /= old + new
+            self.cfr_iteration(t, training_mode=training_mode)
 
         self._record_action_mix()
         self._record_cfr_entropy()
         self._record_cumulative_regret()
 
-        return next_pbs
+        return self.next_pbs
+
+    def cfr_iteration(self, t: int, training_mode: bool = True) -> None:
+        if self.sample_count > 0:
+            # If t == t_sample, sample leaf PBS
+            sample_now = torch.where(self.t_sample == t)[0]
+            if sample_now.numel() > 0:
+                self.sample_leaf(
+                    self.sampled_leaf_indices[sample_now],
+                    self.next_pbs,
+                    self.next_pbs_idx,
+                    training_mode=training_mode,
+                )
+                self.next_pbs_idx += sample_now.numel()
+
+        regrets = self.compute_instantaneous_regrets(self.latest_values)
+
+        if self.cfr_type == CFRType.linear:  # Alternate updates.
+            regrets.masked_fill_(self.env.to_act[:, None] == t % self.num_players, 0.0)
+        elif (
+            self.cfr_type == CFRType.discounted
+            or self.cfr_type == CFRType.discounted_plus
+        ):
+            numerator = torch.where(
+                self.cumulative_regrets > 0, t**self.dcfr_alpha, t**self.dcfr_beta
+            )
+            denominator = torch.where(
+                self.cumulative_regrets > 0,
+                (t + 1) ** self.dcfr_alpha,
+                (t + 1) ** self.dcfr_beta,
+            )
+            self.cumulative_regrets *= numerator
+            self.cumulative_regrets /= denominator
+            self.regret_weight_sums *= numerator
+            self.regret_weight_sums /= denominator
+        self.regret_weight_sums += 1
+        self.cumulative_regrets += regrets
+
+        old_policy_probs = self.policy_probs.clone()
+        self.update_policy(t)
+        self._record_stats(t, old_policy_probs)
+
+        self.set_leaf_values(t)
+        self.compute_expected_values()
+
+        old, new = self._get_mixing_weights(t)
+        self.values_avg *= old
+        self.values_avg += new * self.latest_values
+        self.values_avg /= old + new
 
     @profile
     def training_data(

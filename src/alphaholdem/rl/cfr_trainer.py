@@ -151,7 +151,7 @@ class RebelCFRTrainer:
             dcfr_alpha=self.cfg.search.dcfr_alpha,
             dcfr_beta=self.cfg.search.dcfr_beta,
             dcfr_gamma=self.cfg.search.dcfr_gamma,
-            dcfr_delay=self.cfg.search.dcfr_delay,
+            dcfr_delay=self.cfg.search.dcfr_plus_delay,
         )
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,

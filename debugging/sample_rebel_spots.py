@@ -530,7 +530,7 @@ def main() -> None:
         dcfr_alpha=cfg.search.dcfr_alpha,
         dcfr_beta=cfg.search.dcfr_beta,
         dcfr_gamma=cfg.search.dcfr_gamma,
-        dcfr_delay=cfg.search.dcfr_delay,
+        dcfr_delay=cfg.search.dcfr_plus_delay,
     )
 
     def run_one(label: str):

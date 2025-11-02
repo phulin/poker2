@@ -141,7 +141,7 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.search.depth = 0
     cfg.search.iterations = 1
     cfg.search.warm_start_iterations = 0
-    cfg.search.dcfr_delay = 0
+    cfg.search.dcfr_plus_delay = 0
     cfg.search.branching = 4
 
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))

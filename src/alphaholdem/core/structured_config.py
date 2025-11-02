@@ -45,6 +45,7 @@ class CFRType(str, Enum):
     standard = "standard"
     linear = "linear"
     discounted = "discounted"
+    discounted_plus = "discounted_plus"
 
 
 @dataclass
@@ -209,7 +210,7 @@ class SearchConfig:
     dcfr_alpha: float = 1.5
     dcfr_beta: float = 0.0
     dcfr_gamma: float = 2.0
-    dcfr_delay: int = 50
+    dcfr_plus_delay: int = 50
     include_average_policy: bool = True
     cfr_type: CFRType = CFRType.linear
     cfr_avg: bool = True

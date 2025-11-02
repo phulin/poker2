@@ -273,7 +273,7 @@ def create_default_config() -> Config:
     config.search.dcfr_alpha = 1.5
     config.search.dcfr_beta = 0.0
     config.search.dcfr_gamma = 2.0
-    config.search.dcfr_delay = 50
+    config.search.dcfr_plus_delay = 50
     config.search.include_average_policy = True
     config.search.cfr_type = CFRType.linear
     config.search.cfr_avg = True
@@ -361,10 +361,12 @@ def debug_cfr_depth1(
     # Determine CFR type
     if cfr_type_str == "linear":
         cfr_type = CFRType.linear
-        if dcfr_delay is None:
-            dcfr_delay = 0
+        dcfr_delay = 0
     elif cfr_type_str == "discounted":
         cfr_type = CFRType.discounted
+        dcfr_delay = 0
+    elif cfr_type_str == "discounted_plus":
+        cfr_type = CFRType.discounted_plus
         if dcfr_delay is None:
             dcfr_delay = 70
     else:
@@ -530,45 +532,18 @@ def debug_cfr_depth1(
         f"\nRunning CFR iterations {config.search.warm_start_iterations}-{config.search.iterations}..."
     )
 
+    evaluator.sample_count = 0
+
     # Run iterations 15-25, but only print 16-25
     for t in range(config.search.warm_start_iterations, config.search.iterations):
-        regrets = evaluator.compute_instantaneous_regrets(evaluator.values_avg)
-        if evaluator.cfr_type == CFRType.linear:
-            # Alternate updates.
-            regrets.masked_fill_(
-                evaluator.env.to_act[:, None] == t % evaluator.num_players, 0.0
-            )
-        elif evaluator.cfr_type == CFRType.discounted:
-            factor = torch.where(
-                regrets > 0,
-                (t - 1) ** evaluator.dcfr_alpha,
-                (t - 1) ** evaluator.dcfr_beta,
-            )
-            evaluator.cumulative_regrets *= factor / (factor + 1)
-            evaluator.regret_weight_sums *= factor / (factor + 1)
-        evaluator.regret_weight_sums += 1
-        evaluator.cumulative_regrets += regrets
+        evaluator.cfr_iteration(t, training_mode=False)
 
-        # Print AFTER regret accumulation but BEFORE policy update
         print_single_iteration_data(
             evaluator=evaluator,
             iteration=t,
             bet_bins=config.env.bet_bins,
             num_actions=evaluator.num_actions,
         )
-
-        old_policy_probs = evaluator.policy_probs.clone()
-        evaluator.update_policy(t)
-        evaluator._record_stats(t, old_policy_probs)
-
-        if t < 500 or t % 1 == 0:
-            evaluator.set_leaf_values(t)
-        evaluator.compute_expected_values()
-
-        old, new = evaluator._get_mixing_weights(t)
-        evaluator.values_avg *= old
-        evaluator.values_avg += new * evaluator.latest_values
-        evaluator.values_avg /= old + new
 
         # Compute and display exploitability after updating averages
         exploit_stats = evaluator._compute_exploitability()
@@ -598,9 +573,9 @@ def main():
     parser.add_argument(
         "--cfr-type",
         type=str,
-        default="discounted",
-        choices=["linear", "discounted"],
-        help="CFR type to use (default: linear)",
+        default="discounted_plus",
+        choices=["linear", "discounted", "discounted_plus"],
+        help="CFR type to use (default: discounted_plus)",
     )
     parser.add_argument(
         "--river",
