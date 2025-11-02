@@ -470,7 +470,9 @@ class RebelCFREvaluator:
         has_legal = valid_legal_masks.any(dim=-1)
         assert has_legal.all(), "Every valid node must have at least one legal action."
 
-        self.stats["evaluator_street"] = self.env.street.float().mean().item()
+        self.stats["evaluator_street"] = (
+            self.env.street[self.valid_mask].float().mean().item()
+        )
 
     @torch.no_grad()
     @profile
