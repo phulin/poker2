@@ -54,9 +54,17 @@ def parse_hand_name(hand_name: str) -> tuple[int, int]:
         raise ValueError(f"Invalid hand name: {hand_name}")
 
 
-@torch.compiler.assume_constant_result
-@lru_cache(maxsize=1)
+_cached_hand_combos_tensor = None
+
+
 def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
+    global _cached_hand_combos_tensor
+    if _cached_hand_combos_tensor is None:
+        _cached_hand_combos_tensor = _hand_combos_tensor(device)
+    return _cached_hand_combos_tensor
+
+
+def _hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 2] tensor of sorted hole-card index pairs."""
     combos = []
     for c1 in range(52):
@@ -68,9 +76,17 @@ def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
     return tensor
 
 
-@torch.compiler.assume_constant_result
-@lru_cache(maxsize=1)
+_cached_combo_lookup_tensor = None
+
+
 def combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
+    global _cached_combo_lookup_tensor
+    if _cached_combo_lookup_tensor is None:
+        _cached_combo_lookup_tensor = _combo_lookup_tensor(device)
+    return _cached_combo_lookup_tensor
+
+
+def _combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [52, 52] long tensor mapping unordered card pairs to combo indices."""
     lookup = torch.full((52, 52), -1, dtype=torch.long)
     combos = hand_combos_tensor()
