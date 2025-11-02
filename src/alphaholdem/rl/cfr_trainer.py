@@ -228,9 +228,6 @@ class RebelCFRTrainer:
                     ].tolist()
                 )
             },
-            "value_batch_mean_street": value_batch.features.street.float()
-            .mean()
-            .item(),
             "value_batch_street": {
                 "preflop": value_preflop.float().mean().item(),
                 "flop": value_flop.float().mean().item(),
@@ -292,8 +289,8 @@ class RebelCFRTrainer:
         self.model.train()
         self.optimizer.zero_grad()
 
-        value_loss, policy_loss = None, None
-        policy_loss_all = None
+        value_loss, policy_loss, entropy_loss = None, None, None
+        value_loss_all, policy_loss_all = None
         permutation_loss = 0.0
         for batch in [value_batch, policy_batch]:
             output = self.model(batch.features)
