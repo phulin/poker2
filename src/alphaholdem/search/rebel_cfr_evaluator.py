@@ -1171,6 +1171,7 @@ class RebelCFREvaluator:
         statistics = {
             "to_act": self.env.to_act,
             "street": self.env.street,
+            "stage": 2 * self.env.street,
             "board": self.env.board_indices,
             "pot": self.env.pot,
             "bet_amounts": bin_amounts,
@@ -1226,6 +1227,7 @@ class RebelCFREvaluator:
             street_root,
         )
         value_statistics_pre["street"] = prev_street
+        value_statistics_pre["stage"] = 2 * prev_street + 1
 
         start_mask = actions_root == 0
 
@@ -1250,14 +1252,13 @@ class RebelCFREvaluator:
             )
             value_targets_pre[flop_mask] = expected_flop
 
+        transition_mask = turn_river_mask | flop_mask
         pre_value_batch = RebelBatch(
-            features=pre_features_root,
-            value_targets=value_targets_pre,
-            legal_masks=legal_masks[:N],
-            statistics=value_statistics_pre,
+            features=pre_features_root[transition_mask],
+            value_targets=value_targets_pre[transition_mask],
+            legal_masks=legal_masks[:N][transition_mask],
+            statistics=value_statistics_pre[transition_mask],
         )
-        if exclude_start:
-            pre_value_batch = pre_value_batch[~root_nodes]
 
         return value_batch, pre_value_batch, policy_batch
 
