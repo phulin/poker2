@@ -82,6 +82,7 @@ class RebelFeatureEncoder:
         return MLPFeatures(
             context=context_features,
             street=self.env.street,
+            to_act=self.env.to_act,
             board=(
                 self.env.last_board_indices
                 if pre_chance_node

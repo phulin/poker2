@@ -65,6 +65,7 @@ def test_rebel_replay_buffer_roundtrip():
     mlp_features = MLPFeatures(
         context=torch.randn(4, 4),
         street=torch.zeros(4, dtype=torch.long),
+        to_act=torch.zeros(4, dtype=torch.long),
         board=torch.zeros(4, 5, dtype=torch.long),
         beliefs=torch.randn(4, 2 * NUM_HANDS),
     )
@@ -98,6 +99,7 @@ def test_rebel_supervised_loss_finite():
     mlp_features = MLPFeatures(
         context=torch.randn(batch_size, 4),
         street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
         board=torch.zeros(batch_size, 5),
         beliefs=torch.randn(batch_size, 2 * NUM_HANDS),
     )

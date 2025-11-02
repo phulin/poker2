@@ -173,6 +173,7 @@ def test_permute_suits_permuted_board_and_beliefs():
     features = MLPFeatures(
         context=context.clone(),
         street=street.clone(),
+        to_act=torch.zeros(1, device=device, dtype=torch.long),
         board=board.clone(),
         beliefs=beliefs.clone(),
     )
@@ -202,6 +203,7 @@ def test_permute_suits_permuted_board_and_beliefs():
     features_two = MLPFeatures(
         context=context.clone(),
         street=street.clone(),
+        to_act=torch.zeros(1, device=device, dtype=torch.long),
         board=board.clone(),
         beliefs=beliefs_two.clone(),
     )

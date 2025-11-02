@@ -21,8 +21,6 @@ class ChanceNodeHelper:
 
     FLOP_CHUNK_SIZE = 128
 
-    _hand_permutation_cache: dict[tuple[int, int, int, int], torch.Tensor] = {}
-
     device: torch.device
     float_dtype: torch.dtype
     num_players: int
@@ -237,8 +235,9 @@ class ChanceNodeHelper:
         B = root_indices.numel()
 
         pre_beliefs = pre_chance_beliefs[root_indices].to(dtype=dtype)
-        context_root = root_features.context[root_indices].clone()
-        street_root = root_features.street[root_indices].clone()
+        context_root = root_features.context[root_indices]
+        street_root = root_features.street[root_indices]
+        to_act_root = root_features.to_act[root_indices]
 
         values_sum = torch.zeros(
             B, self.num_players, NUM_HANDS, device=device, dtype=dtype
@@ -246,9 +245,6 @@ class ChanceNodeHelper:
 
         model = self.model
         num_flops = self.flop_id_to_canonical.shape[0]
-        canonical_boards_all = self.flop_id_to_canonical.to(device)
-        orbit_counts_all = self.flop_id_to_count.to(device)
-        allowed_mask_all = self.flop_id_to_allowed_mask.to(device)
 
         pre_beliefs_broadcast = pre_beliefs.expand(
             B, self.num_players, NUM_HANDS
@@ -260,9 +256,17 @@ class ChanceNodeHelper:
             end = min(start + chunk_size, num_flops)
             chunk_len = end - start
 
-            canonical_chunk = canonical_boards_all[start:end]
-            counts_chunk = orbit_counts_all[start:end]
-            allowed_chunk = allowed_mask_all[start:end]
+            canonical_chunk = self.flop_id_to_canonical[start:end]
+            counts_chunk = self.flop_id_to_count[start:end]
+            allowed_chunk = self.flop_id_to_allowed_mask[start:end]
+
+            canonical_chunk_5 = torch.cat(
+                [
+                    canonical_chunk,
+                    torch.full((chunk_len, 2), -1, device=device, dtype=torch.long),
+                ],
+                dim=1,
+            )
 
             allowed_broadcast = (
                 allowed_chunk.unsqueeze(0)
@@ -284,9 +288,9 @@ class ChanceNodeHelper:
                 sums > 1e-12, post_beliefs / sums.clamp(min=1e-12), uniform
             )
 
-            belief_features = normalized_beliefs.reshape(B * chunk_len, -1) * 2 - 1
+            belief_features = normalized_beliefs.reshape(B * chunk_len, -1)
             board_samples_flat = (
-                canonical_chunk.unsqueeze(0).expand(B, -1, -1).reshape(-1, 3)
+                canonical_chunk_5.unsqueeze(0).expand(B, -1, -1).reshape(-1, 5)
             )
 
             context_expand = (
@@ -295,10 +299,12 @@ class ChanceNodeHelper:
                 .reshape(-1, context_root.shape[1])
             )
             street_expand = street_root.unsqueeze(1).expand(-1, chunk_len).reshape(-1)
+            to_act_expand = to_act_root.unsqueeze(1).expand(-1, chunk_len).reshape(-1)
 
             synthetic_features = MLPFeatures(
                 context=context_expand,
                 street=street_expand,
+                to_act=to_act_expand,
                 board=board_samples_flat,
                 beliefs=belief_features,
             )
@@ -338,6 +344,7 @@ class ChanceNodeHelper:
         board_prev = board_pre[root_indices].clone()
         context_root = root_features.context[root_indices].clone()
         street_root = root_features.street[root_indices].clone()
+        to_act_root = root_features.to_act[root_indices].clone()
 
         available_mask = torch.ones(B, 52, dtype=torch.bool, device=device)
         for slot in range(board_prev.shape[1]):
@@ -399,11 +406,13 @@ class ChanceNodeHelper:
 
         context_samples = context_root[root_lookup]
         street_samples = street_root[root_lookup]
-        belief_features = post_beliefs.reshape(num_samples, -1) * 2 - 1
+        to_act_samples = to_act_root[root_lookup]
+        belief_features = post_beliefs.reshape(num_samples, -1)
 
         synthetic_features = MLPFeatures(
             context=context_samples,
             street=street_samples,
+            to_act=to_act_samples,
             board=board_samples,
             beliefs=belief_features,
         )

@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import KLType, PPOClipping, ValueLossType
+from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.exponential_controller import ExponentialController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
@@ -756,22 +757,42 @@ class RebelSupervisedLoss(nn.Module):
         log_probs = F.log_softmax(masked_logits, dim=-1)
         probs = log_probs.exp()
 
+        opp = 1 - batch.features.to_act
+        player_beliefs = batch.features.beliefs.view(-1, 2, NUM_HANDS)
+        opponent_beliefs = player_beliefs.gather(
+            1, opp[:, None, None].expand(-1, 1, NUM_HANDS)
+        ).squeeze(1)
+        weights = opponent_beliefs * 1326
+        assert (weights.sum(dim=1) > 1e-8).all()
+
         if batch.policy_targets is None:
             policy_loss = torch.zeros(1, device=logits.device)
             policy_loss_all = None
         else:
-            policy_loss = F.huber_loss(probs, batch.policy_targets, delta=1.0)
+            policy_weights = (weights**2)[:, :, None].expand(*probs.shape)
+            policy_loss = F.huber_loss(
+                probs, batch.policy_targets, weight=policy_weights
+            )
             policy_loss_all = F.huber_loss(
-                probs.detach(), batch.policy_targets, delta=1.0, reduction="none"
+                probs.detach(),
+                batch.policy_targets,
+                reduction="none",
+                weight=policy_weights,
             )
 
         if batch.value_targets is None:
             value_loss = torch.zeros(1, device=logits.device)
             value_loss_all = None
         else:
-            value_loss = F.mse_loss(hand_values, batch.value_targets)
+            value_weights = (weights**2)[:, None, :].expand(*hand_values.shape)
+            value_loss = F.mse_loss(
+                hand_values, batch.value_targets, weight=value_weights
+            )
             value_loss_all = F.mse_loss(
-                hand_values.detach(), batch.value_targets, reduction="none"
+                hand_values.detach(),
+                batch.value_targets,
+                reduction="none",
+                weight=value_weights,
             )
 
         total_loss = self.policy_weight * policy_loss + self.value_weight * value_loss

@@ -74,7 +74,6 @@ class BetterFFN(nn.Module, Model):
         for _ in range(num_hidden_layers):
             layers.append(ResidualBlock(ffn_block(hidden_dim, ffn_dim), alpha))
         self.trunk = nn.Sequential(*layers)
-        self.post_norm = nn.LayerNorm(hidden_dim)
 
         # Heads
         self.policy_head = ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS)
@@ -110,16 +109,16 @@ class BetterFFN(nn.Module, Model):
             permuted.beliefs.view(-1, self.num_players * NUM_HANDS)
         )
 
-        # TODO: some kind of positional encoding for board features?
         flat_features = (
             board_features.sum(dim=1)
             + street_features
             + context_features
             + belief_features
         )
+        assert flat_features.isfinite().all()
 
         x = self.trunk(flat_features)
-        x = self.post_norm(x)
+        assert x.isfinite().all()
 
         policy_logits = self.policy_head(x).view(-1, NUM_HANDS, self.num_actions)
         hand_values = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)

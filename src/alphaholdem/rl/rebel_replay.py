@@ -90,6 +90,7 @@ class RebelReplayBuffer:
                 self.capacity, num_context_features, dtype=dtype, device=device
             ),
             street=torch.zeros(self.capacity, dtype=torch.long, device=device),
+            to_act=torch.zeros(self.capacity, dtype=torch.long, device=device),
             board=torch.zeros(self.capacity, 5, dtype=torch.long, device=device),
             beliefs=torch.zeros(
                 self.capacity, 2 * NUM_HANDS, dtype=dtype, device=device

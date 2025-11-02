@@ -91,10 +91,11 @@ class BetterFeatureEncoder:
         return MLPFeatures(
             context=torch.cat([scalar_context, player_context.view(N, -1)], dim=-1),
             street=street,
+            to_act=self.env.to_act,
             board=(
                 self.env.last_board_indices
                 if pre_chance_node
                 else self.env.board_indices
             ),
-            beliefs=beliefs.view(-1, 2 * NUM_HANDS) * 2 - 1,
+            beliefs=beliefs.view(-1, 2 * NUM_HANDS),
         )

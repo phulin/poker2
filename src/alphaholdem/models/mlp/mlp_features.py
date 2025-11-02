@@ -15,8 +15,16 @@ class MLPFeatures:
 
     context: torch.Tensor
     street: torch.Tensor
+    to_act: torch.Tensor
     board: torch.Tensor
     beliefs: torch.Tensor
+
+    def __post_init__(self) -> None:
+        N = self.context.shape[0]
+        assert self.street.shape == (N,)
+        assert self.to_act.shape == (N,)
+        assert self.board.shape == (N, 5)
+        assert self.beliefs.shape == (N, 2 * NUM_HANDS)
 
     def __len__(self) -> int:
         """Get batch size."""
@@ -27,6 +35,7 @@ class MLPFeatures:
         return MLPFeatures(
             context=self.context[index],
             street=self.street[index],
+            to_act=self.to_act[index],
             board=self.board[index],
             beliefs=self.beliefs[index],
         )
@@ -37,6 +46,7 @@ class MLPFeatures:
         """Set features at index."""
         self.context[index] = value.context
         self.street[index] = value.street
+        self.to_act[index] = value.to_act
         self.board[index] = value.board
         self.beliefs[index] = value.beliefs
 
@@ -44,6 +54,7 @@ class MLPFeatures:
         return MLPFeatures(
             context=self.context.to(device),
             street=self.street.to(device),
+            to_act=self.to_act.to(device),
             board=self.board.to(device),
             beliefs=self.beliefs.to(device),
         )
@@ -52,6 +63,7 @@ class MLPFeatures:
         return MLPFeatures(
             context=self.context.clone(),
             street=self.street.clone(),
+            to_act=self.to_act.clone(),
             board=self.board.clone(),
             beliefs=self.beliefs.clone(),
         )
@@ -117,15 +129,8 @@ class MLPFeatures:
         inverse_remap = torch.argsort(remap, dim=1)
 
         # Remap beliefs based on shape.
-        if self.beliefs.shape[1] == NUM_HANDS:
-            self.beliefs[:] = torch.gather(self.beliefs, 1, inverse_remap)
-        elif self.beliefs.shape[1] == 2 * NUM_HANDS:
-            p0_beliefs = self.beliefs[:, :NUM_HANDS]
-            p1_beliefs = self.beliefs[:, NUM_HANDS:]
-            p0_remapped = torch.gather(p0_beliefs, 1, inverse_remap)
-            p1_remapped = torch.gather(p1_beliefs, 1, inverse_remap)
-            self.beliefs[:] = torch.cat([p0_remapped, p1_remapped], dim=1)
-        else:
-            raise ValueError(
-                f"Unexpected belief shape {tuple(self.beliefs.shape)}; expected [*, 1326] or [*, {2 * NUM_HANDS}]."
-            )
+        p0_beliefs = self.beliefs[:, :NUM_HANDS]
+        p1_beliefs = self.beliefs[:, NUM_HANDS:]
+        p0_remapped = torch.gather(p0_beliefs, 1, inverse_remap)
+        p1_remapped = torch.gather(p1_beliefs, 1, inverse_remap)
+        self.beliefs[:] = torch.cat([p0_remapped, p1_remapped], dim=1)

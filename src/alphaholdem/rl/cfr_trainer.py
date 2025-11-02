@@ -306,6 +306,10 @@ class RebelCFRTrainer:
                 entropy_loss = loss_dict["entropy"]
             loss.backward()
 
+        assert all(
+            p.grad.isfinite().all() for p in self.model.parameters()
+        ), "NaN/Inf in model gradients"
+
         if self.grad_clip is not None and self.grad_clip > 0:
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
         self.optimizer.step()

@@ -16,4 +16,4 @@ train:
 search:
   iterations: 20
   warm_start_iterations: 5
-  dcfr_delay: 10
+  dcfr_plus_delay: 10

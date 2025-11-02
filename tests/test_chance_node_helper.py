@@ -179,6 +179,7 @@ class TestChanceNodeHelper:
         root_features = MLPFeatures(
             context=torch.zeros(0, 1, device=device),
             street=torch.zeros(0, device=device, dtype=torch.long),
+            to_act=torch.zeros(0, device=device, dtype=torch.long),
             board=torch.zeros(0, 3, device=device, dtype=torch.long),
             beliefs=torch.zeros(0, NUM_HANDS, device=device),
         )
@@ -201,6 +202,7 @@ class TestChanceNodeHelper:
         root_features = MLPFeatures(
             context=torch.zeros(B, 1, device=device),
             street=torch.zeros(B, device=device, dtype=torch.long),
+            to_act=torch.zeros(B, device=device, dtype=torch.long),
             board=torch.zeros(B, 3, device=device, dtype=torch.long),
             beliefs=torch.zeros(B, NUM_HANDS, device=device),
         )
@@ -223,6 +225,7 @@ class TestChanceNodeHelper:
         root_features = MLPFeatures(
             context=torch.zeros(0, 1, device=device),
             street=torch.zeros(0, device=device, dtype=torch.long),
+            to_act=torch.zeros(0, device=device, dtype=torch.long),
             board=torch.zeros(0, 3, device=device, dtype=torch.long),
             beliefs=torch.zeros(0, NUM_HANDS, device=device),
         )
@@ -246,6 +249,7 @@ class TestChanceNodeHelper:
         root_features = MLPFeatures(
             context=torch.zeros(B, 1, device=device),
             street=torch.zeros(B, device=device, dtype=torch.long),
+            to_act=torch.zeros(B, device=device, dtype=torch.long),
             board=torch.zeros(B, 3, device=device, dtype=torch.long),
             beliefs=torch.zeros(B, NUM_HANDS, device=device),
         )
@@ -328,6 +332,7 @@ class TestChanceNodeHelper:
         root_features = MLPFeatures(
             context=torch.zeros(B, 1, device=device),
             street=torch.zeros(B, device=device, dtype=torch.long),
+            to_act=torch.zeros(B, device=device, dtype=torch.long),
             board=torch.zeros(B, 3, device=device, dtype=torch.long),
             beliefs=torch.zeros(B, NUM_HANDS, device=device),
         )
@@ -348,6 +353,7 @@ class TestChanceNodeHelper:
         root_features = MLPFeatures(
             context=torch.zeros(B, 1, device=device),
             street=torch.zeros(B, device=device, dtype=torch.long),
+            to_act=torch.zeros(B, device=device, dtype=torch.long),
             board=torch.zeros(B, 3, device=device, dtype=torch.long),
             beliefs=torch.zeros(B, NUM_HANDS, device=device),
         )

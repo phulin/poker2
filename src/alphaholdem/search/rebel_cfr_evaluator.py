@@ -90,7 +90,7 @@ class RebelCFREvaluator:
     """ReBeL CFR Evaluator implementing the precise SELFPLAY algorithm."""
 
     search_batch_size: int
-    model: BetterFFN
+    model: RebelFFN | BetterFFN
     max_depth: int
     bet_bins: list[float]
     cfr_iterations: int
@@ -1215,7 +1215,7 @@ class RebelCFREvaluator:
         # Clone root slice and override belief encoding with pre-chance beliefs.
         pre_features_root = pre_features_all[:N].clone()
         pre_beliefs = self.root_pre_chance_beliefs[:N].reshape(N, -1)
-        pre_features_root.beliefs = pre_beliefs * 2 - 1
+        pre_features_root.beliefs = pre_beliefs
 
         value_targets_pre = value_targets[:N].clone()
         value_statistics_pre = {key: statistics[key][:N].clone() for key in statistics}

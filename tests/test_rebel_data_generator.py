@@ -159,6 +159,7 @@ class DummyEvaluator:
         mlp_features = MLPFeatures(
             context=self.feature_matrix[indices],
             street=torch.zeros(count, dtype=torch.long, device=device),
+            to_act=torch.zeros(count, dtype=torch.long, device=device),
             board=torch.full((count, 5), -1, dtype=torch.long, device=device),
             beliefs=torch.full(
                 (count, 2 * NUM_HANDS),

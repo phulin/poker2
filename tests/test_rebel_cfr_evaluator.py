@@ -932,6 +932,7 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
     pre_belief = pre_beliefs[0]
     context = start_features.context[:1]
     street_tensor = start_features.street[:1]
+    to_act_tensor = start_features.to_act[:1]
 
     torch.manual_seed(1234)
     for card in available:
@@ -960,6 +961,7 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
         features = MLPFeatures(
             context=context,
             street=street_tensor,
+            to_act=to_act_tensor,
             board=board_river.unsqueeze(0),
             beliefs=belief_feature,
         )
