@@ -58,6 +58,7 @@ _cached_hand_combos_tensor = None
 _cached_hand_combos_tensor_device = None
 
 
+@torch.compiler.assume_constant_result
 def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
     global _cached_hand_combos_tensor, _cached_hand_combos_tensor_device
     device = device or torch.device("cpu")
@@ -70,6 +71,7 @@ def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
     return _cached_hand_combos_tensor
 
 
+@torch.compiler.assume_constant_result
 def _hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 2] tensor of sorted hole-card index pairs."""
     combos = []
