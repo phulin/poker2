@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Self
 
 import torch
 
@@ -72,11 +73,14 @@ class MLPFeatures:
         self,
         suit_permutations: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
-    ) -> None:
+    ) -> Self:
         """Permute the suits of board cards and beliefs.
 
         Args:
             generator: Random generator for reproducibility.
+
+        Returns:
+            Self with permuted suits.
         """
         batch_size = self.__len__()
         device = self.context.device
@@ -134,3 +138,5 @@ class MLPFeatures:
         p0_remapped = torch.gather(p0_beliefs, 1, inverse_remap)
         p1_remapped = torch.gather(p1_beliefs, 1, inverse_remap)
         self.beliefs[:] = torch.cat([p0_remapped, p1_remapped], dim=1)
+
+        return self

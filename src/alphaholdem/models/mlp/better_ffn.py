@@ -102,12 +102,11 @@ class BetterFFN(nn.Module, Model):
             features.beliefs.view(-1, self.num_players * NUM_HANDS)
         )
 
+        permuted_belief_features = None
         if permuted is not None:
             permuted_belief_features = self.belief_encoder(
                 permuted.beliefs.view(-1, self.num_players * NUM_HANDS)
             )
-        else:
-            permuted_belief_features = belief_features
 
         flat_features = (
             board_features.sum(dim=1)
@@ -124,14 +123,16 @@ class BetterFFN(nn.Module, Model):
         hand_values = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
         value = hand_values.mean(dim=-1)
 
-        return ModelOutput(
+        result = ModelOutput(
             policy_logits=policy_logits,
             value=value,
             hand_values=hand_values,
-            encoded_with_permutation=torch.stack(
-                [belief_features, permuted_belief_features], dim=1
-            ),
         )
+        if permuted_belief_features is not None:
+            result.encoded_with_permutation = torch.stack(
+                [belief_features, permuted_belief_features], dim=1
+            )
+        return result
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
         """Initialize parameters following Xavier/LayerNorm defaults."""
