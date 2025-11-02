@@ -49,15 +49,16 @@ class BetterFeatureEncoder:
             dtype=self.dtype,
         )
 
-        actor = self.env.last_to_act if pre_chance_node else self.env.to_act
         actions_round = (
             self.env.actions_last_round
             if pre_chance_node
             else self.env.actions_this_round
         )
-        scalar_context[:, ScalarContext.ACTOR.value] = actor
+        # Keep to_act for actor, as that's the player perspective the model should take,
+        # even in the pre-chance node context.
+        scalar_context[:, ScalarContext.ACTOR.value] = self.env.to_act
         scalar_context[:, ScalarContext.POSITION.value] = (
-            actor - self.env.button
+            self.env.to_act - self.env.button
         ) % num_players
         scalar_context[:, ScalarContext.ACTIONS_ROUND.value] = actions_round
         scalar_context[:, ScalarContext.POT.value] = self.env.pot

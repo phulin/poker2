@@ -376,7 +376,9 @@ class RebelCFREvaluator:
         self.beliefs[:N] = initial_beliefs
         self.root_pre_chance_beliefs[:] = initial_beliefs
         self.reach_weights.zero_()
+        self.reach_weights[:N] = 1.0
         self.reach_weights_avg.zero_()
+        self.reach_weights_avg[:N] = 1.0
         self.legal_mask = None
         self.hand_rank_data = None
         self.root_index.zero_()
@@ -479,7 +481,9 @@ class RebelCFREvaluator:
         return F.softmax(masked_logits, dim=-1)
 
     @profile
-    def _calculate_reach_weights(self, policy: torch.Tensor) -> torch.Tensor:
+    def _calculate_reach_weights(
+        self, target: torch.Tensor, policy: torch.Tensor
+    ) -> None:
         """Calculate self reach weights for each node.
 
         Note we don't need to consider the chance nodes because we stop on street.
@@ -490,27 +494,33 @@ class RebelCFREvaluator:
 
         N, M = self.search_batch_size, self.total_nodes
 
-        reach_weights = torch.zeros(M, 2, NUM_HANDS, device=self.device)
-        reach_weights[:N] = 1.0
-
         for depth in range(self.max_depth):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
 
-            weights_src = reach_weights[offset:offset_next]
-            weights_dest = self._fan_out(weights_src, sliced=True)
+            weights_src = target[offset:offset_next]
+            target_dest = target[offset_next:offset_next_next]
+            target_dest[:] = torch.repeat_interleave(
+                weights_src, self.num_actions, dim=0
+            )
 
-            indices = torch.arange(offset_next_next - offset_next, device=self.device)
             prev_actor_dest = self.prev_actor[offset_next:offset_next_next]
-            weights_dest[indices, prev_actor_dest] *= policy[
-                offset_next:offset_next_next
-            ]
-            reach_weights[offset_next:offset_next_next] = weights_dest
+            prev_actor_indices = prev_actor_dest[:, None, None].expand(
+                -1, -1, NUM_HANDS
+            )
+            policy_dest = policy[offset_next:offset_next_next]
+            target_dest.scatter_reduce_(
+                dim=1,
+                index=prev_actor_indices,
+                src=policy_dest[:, None],
+                reduce="prod",
+                include_self=True,
+            )
 
-        reach_weights.masked_fill_(~self.valid_mask[:, None, None], 0.0)
-        self._block_beliefs(reach_weights)
-        return reach_weights
+        target.masked_fill_(~self.valid_mask[:, None, None], 0.0)
+        self._block_beliefs(target)
+        return target
 
     def _initialize_with_copy(self, target: torch.Tensor | None = None) -> torch.Tensor:
         """Initialize the non-root nodes of the tree with a copy of the root nodes."""
@@ -625,7 +635,7 @@ class RebelCFREvaluator:
 
         self.policy_probs.masked_fill_(~self.valid_mask[:, None], 0.0)
 
-        self.reach_weights = self._calculate_reach_weights(self.policy_probs)
+        self._calculate_reach_weights(self.reach_weights, self.policy_probs)
 
         self.policy_probs_avg[:] = self.policy_probs
         self.reach_weights_avg[:] = self.reach_weights
@@ -863,16 +873,10 @@ class RebelCFREvaluator:
 
         updated_src = self._pull_back(updated, sliced=True)
         updated_src /= updated_src.sum(dim=1, keepdim=True).clamp(min=1e-8)
-        updated_dest = self._push_down(updated_src)
-        torch.where(
-            self.valid_mask[bottom:, None],
-            updated_dest,
-            self.policy_probs[bottom:],
-            out=self.policy_probs[bottom:],
-        )
+        self.policy_probs[bottom:] = self._push_down(updated_src)
 
         with record_function("calculate_reach_weights"):
-            self.reach_weights = self._calculate_reach_weights(self.policy_probs)
+            self._calculate_reach_weights(self.reach_weights, self.policy_probs)
         with record_function("propagate_all_beliefs"):
             self._propagate_all_beliefs(
                 self.beliefs, self.policy_probs, self.reach_weights
@@ -881,9 +885,7 @@ class RebelCFREvaluator:
         with record_function("update_average_policy"):
             self.update_average_policy(t)
         with record_function("calculate_reach_weights_avg"):
-            self.reach_weights_avg = self._calculate_reach_weights(
-                self.policy_probs_avg
-            )
+            self._calculate_reach_weights(self.reach_weights_avg, self.policy_probs_avg)
         with record_function("propagate_all_beliefs_avg"):
             self._propagate_all_beliefs(
                 self.beliefs_avg, self.policy_probs_avg, self.reach_weights_avg

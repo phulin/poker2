@@ -24,7 +24,7 @@ train:
   permutation_coef: 1.0
   grad_clip: 1.0
 
-  stratify_streets_until:
+  stratify_streets:
     - threshold: 2000
       probabilities: [0.03, 0.03, 0.09, 0.85]
     - threshold: 4000

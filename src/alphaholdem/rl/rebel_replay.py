@@ -191,9 +191,8 @@ class RebelReplayBuffer:
 
             probs = stratify_tensor / bins
             all_probs = probs[streets]
-            idxs = torch.multinomial(
-                all_probs, batch_size, generator=generator, replacement=True
-            )
+            # sample without replacement
+            idxs = torch.multinomial(all_probs, batch_size, generator=generator)
 
         return RebelBatch(
             features=self.features[idxs],

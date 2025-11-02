@@ -553,7 +553,8 @@ def test_compute_expected_values_matches_child_values(
     values_bottom = torch.where(evaluator.leaf_mask[bottom:, None], values_temp, 0.0)
 
     # counterfactual value = EV * opponent reach
-    reach_weights = evaluator._calculate_reach_weights(evaluator.policy_probs)
+    reach_weights = torch.zeros_like(evaluator.reach_weights)
+    evaluator._calculate_reach_weights(reach_weights, evaluator.policy_probs)
     evaluator.latest_values[:] = 0.0
     evaluator.latest_values[bottom:, 0] = values_bottom * reach_weights[bottom:, 1]
     evaluator.latest_values[bottom:, 1] = -values_bottom * reach_weights[bottom:, 0]

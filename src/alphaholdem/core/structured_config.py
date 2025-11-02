@@ -136,7 +136,7 @@ class TrainingConfig:
     cfr_action_epsilon: float = 0.25  # Epsilon for action sampling during self-play
 
     # Stratify streets until the given step with the given probabilities.
-    stratify_streets_until: list[StratifyConfig] = field(default_factory=list)
+    stratify_streets: list[StratifyConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -266,9 +266,9 @@ class Config:
     @classmethod
     def from_dict(cls, container: dict[str, any]) -> "Config":
         train_container = container.get("train", {})
-        train_container["stratify_streets_until"] = [
+        train_container["stratify_streets"] = [
             StratifyConfig(**config)
-            for config in train_container.get("stratify_streets_until", [])
+            for config in train_container.get("stratify_streets", [])
         ]
         container["train"] = TrainingConfig(**train_container)
         container["model"] = ModelConfig(**(container.get("model", {})))
