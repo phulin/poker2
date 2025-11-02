@@ -175,6 +175,7 @@ class RebelCFRTrainer:
         value_loss: float,
         value_loss_all: torch.Tensor,
         policy_loss: float,
+        policy_loss_all: torch.Tensor | None,
         entropy_loss: float,
         permutation_loss: float,
     ) -> dict[str, float]:
@@ -233,6 +234,9 @@ class RebelCFRTrainer:
                 "showdown": showdown.float().mean().item(),
             },
             "value_loss_street": by_street(value_loss_all),
+            "policy_loss_street": (
+                by_street(policy_loss_all) if policy_loss_all is not None else {}
+            ),
             **self.cfr_evaluator.stats,
         }
 
@@ -263,6 +267,7 @@ class RebelCFRTrainer:
         self.optimizer.zero_grad()
 
         value_loss, policy_loss = None, None
+        policy_loss_all = None
         permutation_loss = 0.0
         for batch in [value_batch, policy_batch]:
             output = self.model(batch.features)
@@ -274,6 +279,7 @@ class RebelCFRTrainer:
                 value_loss_all = loss_dict["value_loss_all"]
             else:
                 policy_loss = loss_dict["policy_loss"]
+                policy_loss_all = loss_dict["policy_loss_all"]
                 entropy_loss = loss_dict["entropy"]
             loss.backward()
 
@@ -287,6 +293,7 @@ class RebelCFRTrainer:
             value_loss,
             value_loss_all,
             policy_loss,
+            policy_loss_all,
             entropy_loss,
             permutation_loss,
         )

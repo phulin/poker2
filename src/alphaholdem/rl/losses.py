@@ -758,8 +758,12 @@ class RebelSupervisedLoss(nn.Module):
 
         if batch.policy_targets is None:
             policy_loss = torch.zeros(1, device=logits.device)
+            policy_loss_all = None
         else:
             policy_loss = F.huber_loss(probs, batch.policy_targets, delta=1.0)
+            policy_loss_all = F.huber_loss(
+                probs.detach(), batch.policy_targets, delta=1.0, reduction="none"
+            )
 
         if batch.value_targets is None:
             value_loss = torch.zeros(1, device=logits.device)
@@ -787,6 +791,7 @@ class RebelSupervisedLoss(nn.Module):
         return {
             "total_loss": total_loss,
             "policy_loss": policy_loss.item(),
+            "policy_loss_all": policy_loss_all,
             "value_loss": value_loss.item(),
             "value_loss_all": value_loss_all,
             "entropy": entropy.item(),
