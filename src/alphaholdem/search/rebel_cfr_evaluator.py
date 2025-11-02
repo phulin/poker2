@@ -878,21 +878,14 @@ class RebelCFREvaluator:
         updated_src /= updated_src.sum(dim=1, keepdim=True).clamp(min=1e-8)
         self.policy_probs[bottom:] = self._push_down(updated_src)
 
-        with record_function("calculate_reach_weights"):
-            self._calculate_reach_weights(self.reach_weights, self.policy_probs)
-        with record_function("propagate_all_beliefs"):
-            self._propagate_all_beliefs(
-                self.beliefs, self.policy_probs, self.reach_weights
-            )
+        self._calculate_reach_weights(self.reach_weights, self.policy_probs)
+        self._propagate_all_beliefs(self.beliefs, self.policy_probs, self.reach_weights)
 
-        with record_function("update_average_policy"):
-            self.update_average_policy(t)
-        with record_function("calculate_reach_weights_avg"):
-            self._calculate_reach_weights(self.reach_weights_avg, self.policy_probs_avg)
-        with record_function("propagate_all_beliefs_avg"):
-            self._propagate_all_beliefs(
-                self.beliefs_avg, self.policy_probs_avg, self.reach_weights_avg
-            )
+        self.update_average_policy(t)
+        self._calculate_reach_weights(self.reach_weights_avg, self.policy_probs_avg)
+        self._propagate_all_beliefs(
+            self.beliefs_avg, self.policy_probs_avg, self.reach_weights_avg
+        )
 
     @profile
     def sample_leaf(
@@ -1005,11 +998,14 @@ class RebelCFREvaluator:
         old, new = self._get_mixing_weights(t)
         reach_avg_actor *= old
         reach_actor *= new
+        unweighted = (old * policy_probs_src + new * policy_probs_avg_src) / (old + new)
         policy_probs_avg_src *= reach_avg_actor
         policy_probs_avg_src += policy_probs_src * reach_actor
         denom = reach_avg_actor + reach_actor
-        policy_probs_avg_src /= denom.clamp(min=1e-8)
-        policy_probs_avg_src.masked_fill_(denom < 1e-8, 0.0)
+        policy_probs_avg_src /= denom.clamp(min=1e-12)
+        torch.where(
+            denom < 1e-12, unweighted, policy_probs_avg_src, out=policy_probs_avg_src
+        )
         self.policy_probs_avg[N:] = self._push_down(policy_probs_avg_src)
 
     def _get_sampling_schedule(self) -> torch.Tensor:
