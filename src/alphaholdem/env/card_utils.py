@@ -55,12 +55,17 @@ def parse_hand_name(hand_name: str) -> tuple[int, int]:
 
 
 _cached_hand_combos_tensor = None
+_cached_hand_combos_tensor_device = None
 
 
 def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
     global _cached_hand_combos_tensor
-    if _cached_hand_combos_tensor is None:
+    if (
+        _cached_hand_combos_tensor is None
+        or _cached_hand_combos_tensor_device.type != device.type
+    ):
         _cached_hand_combos_tensor = _hand_combos_tensor(device)
+        _cached_hand_combos_tensor_device = device
     return _cached_hand_combos_tensor
 
 
@@ -77,12 +82,17 @@ def _hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
 
 
 _cached_combo_lookup_tensor = None
+_cached_combo_lookup_tensor_device = None
 
 
 def combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
     global _cached_combo_lookup_tensor
-    if _cached_combo_lookup_tensor is None:
+    if (
+        _cached_combo_lookup_tensor is None
+        or _cached_combo_lookup_tensor_device.type != device.type
+    ):
         _cached_combo_lookup_tensor = _combo_lookup_tensor(device)
+        _cached_combo_lookup_tensor_device = device
     return _cached_combo_lookup_tensor
 
 
