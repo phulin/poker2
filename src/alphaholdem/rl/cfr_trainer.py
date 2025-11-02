@@ -295,7 +295,8 @@ class RebelCFRTrainer:
         permutation_loss = 0.0
         for batch in [value_batch, policy_batch]:
             output = self.model(
-                batch.features, permuted=batch.features.clone().permute_suits(self.rng)
+                batch.features,
+                permuted=batch.features.clone().permute_suits(generator=self.rng),
             )
             loss_dict = self.loss_fn(output, batch)
             loss = loss_dict["total_loss"]
