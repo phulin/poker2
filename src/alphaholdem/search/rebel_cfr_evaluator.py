@@ -998,7 +998,7 @@ class RebelCFREvaluator:
         old, new = self._get_mixing_weights(t)
         reach_avg_actor *= old
         reach_actor *= new
-        unweighted = (old * policy_probs_src + new * policy_probs_avg_src) / (old + new)
+        unweighted = (old * policy_probs_avg_src + new * policy_probs_src) / (old + new)
         policy_probs_avg_src *= reach_avg_actor
         policy_probs_avg_src += policy_probs_src * reach_actor
         denom = reach_avg_actor + reach_actor
