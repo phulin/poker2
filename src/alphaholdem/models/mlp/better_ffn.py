@@ -1,4 +1,6 @@
 from __future__ import annotations
+from collections import OrderedDict
+import math
 
 import torch
 import torch.nn as nn
@@ -12,22 +14,27 @@ from alphaholdem.utils.profiling import profile
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, inner: nn.Module) -> None:
+    def __init__(self, inner: nn.Module, alpha: float) -> None:
         super().__init__()
         self.inner = inner
+        self.alpha = alpha
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.inner(x) + x
+        return self.alpha * self.inner(x) + x
 
 
 def ffn_block(in_dim: int, hidden_dim: int, out_dim: int | None = None) -> nn.Module:
     if out_dim is None:
         out_dim = in_dim
     return nn.Sequential(
-        nn.LayerNorm(in_dim),
-        nn.Linear(in_dim, hidden_dim, bias=False),
-        nn.GELU(),
-        nn.Linear(hidden_dim, out_dim),
+        OrderedDict(
+            [
+                ("norm", nn.LayerNorm(in_dim)),
+                ("linear_in", nn.Linear(in_dim, hidden_dim, bias=False)),
+                ("gelu", nn.GELU()),
+                ("linear_out", nn.Linear(hidden_dim, out_dim)),
+            ]
+        )
     )
 
 
@@ -54,19 +61,18 @@ class BetterFFN(nn.Module, Model):
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
         self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)
-        self.belief_encoder = nn.Sequential(
-            nn.Linear(num_players * NUM_HANDS, num_players * range_hidden_dim),
-            nn.GELU(),
-            nn.Linear(num_players * range_hidden_dim, hidden_dim),
+        self.belief_encoder = ffn_block(
+            num_players * NUM_HANDS, num_players * range_hidden_dim, hidden_dim
         )
         self.context_encoder = ffn_block(
             context_length(num_players), hidden_dim, hidden_dim
         )
 
         # Build trunk
+        alpha = 1 / math.sqrt(num_hidden_layers)
         layers: list[nn.Module] = []
         for _ in range(num_hidden_layers):
-            layers.append(ResidualBlock(ffn_block(hidden_dim, ffn_dim)))
+            layers.append(ResidualBlock(ffn_block(hidden_dim, ffn_dim), alpha))
         self.trunk = nn.Sequential(*layers)
         self.post_norm = nn.LayerNorm(hidden_dim)
 
