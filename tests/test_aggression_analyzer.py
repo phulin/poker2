@@ -12,14 +12,6 @@ from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.rl.rebel_replay import RebelBatch
 
 
-def test_aggression_analyzer_singleton() -> None:
-    """Test that AggressionAnalyzer is a singleton."""
-    analyzer1 = AggressionAnalyzer()
-    analyzer2 = AggressionAnalyzer()
-
-    assert analyzer1 is analyzer2
-
-
 def test_aggression_analyzer_no_policy() -> None:
     """Test analyzer with a batch that has no policy targets."""
     analyzer = AggressionAnalyzer()

@@ -60,9 +60,10 @@ _cached_hand_combos_tensor_device = None
 
 def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
     global _cached_hand_combos_tensor, _cached_hand_combos_tensor_device
+    device = device or torch.device("cpu")
     if (
         _cached_hand_combos_tensor is None
-        or _cached_hand_combos_tensor_device.type != device.type
+        or _cached_hand_combos_tensor_device != device
     ):
         _cached_hand_combos_tensor = _hand_combos_tensor(device)
         _cached_hand_combos_tensor_device = device
@@ -87,9 +88,10 @@ _cached_combo_lookup_tensor_device = None
 
 def combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
     global _cached_combo_lookup_tensor, _cached_combo_lookup_tensor_device
+    device = device or torch.device("cpu")
     if (
         _cached_combo_lookup_tensor is None
-        or _cached_combo_lookup_tensor_device.type != device.type
+        or _cached_combo_lookup_tensor_device != device
     ):
         _cached_combo_lookup_tensor = _combo_lookup_tensor(device)
         _cached_combo_lookup_tensor_device = device
@@ -99,7 +101,7 @@ def combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
 def _combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [52, 52] long tensor mapping unordered card pairs to combo indices."""
     lookup = torch.full((52, 52), -1, dtype=torch.long)
-    combos = hand_combos_tensor()
+    combos = hand_combos_tensor(device=device)
     for idx, (c1, c2) in enumerate(combos.tolist()):
         lookup[c1, c2] = idx
         lookup[c2, c1] = idx

@@ -21,13 +21,13 @@ NUM_GROUPS = 5
 
 
 @lru_cache(maxsize=1)
-def build_hand_to_group_mapping() -> torch.Tensor:
+def build_hand_to_group_mapping(device: torch.device | None = None) -> torch.Tensor:
     """Build a [1326] tensor mapping each combo index to its equity group (0-4).
 
     Returns:
         Tensor of shape [1326] with group assignments
     """
-    combos = hand_combos_tensor()
+    combos = hand_combos_tensor(device=device)
 
     # Build a reverse lookup: hand name -> list of combo indices (pre-compute once)
     hand_name_to_combos: dict[str, list[int]] = {}
@@ -63,24 +63,8 @@ def build_hand_to_group_mapping() -> torch.Tensor:
 class AggressionAnalyzer:
     """Singleton class for analyzing aggression metrics by hand equity groups."""
 
-    _instance = None
-    _group_mapping = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
-    def __init__(self):
-        if AggressionAnalyzer._group_mapping is None:
-            AggressionAnalyzer._group_mapping = build_hand_to_group_mapping()
-
-    @classmethod
-    def instance(cls) -> "AggressionAnalyzer":
-        if cls._instance is None:
-            cls._instance = AggressionAnalyzer()
-        return cls._instance
+    def __init__(self, device: torch.device | None = None):
+        self._group_mapping = build_hand_to_group_mapping(device=device)
 
     def analyze_batch(self, batch: RebelBatch) -> dict[str, torch.Tensor]:
         """Analyze a batch and return average bet amounts by hand equity group.
@@ -101,7 +85,7 @@ class AggressionAnalyzer:
         bet_amounts = batch.statistics["bet_amounts"]  # [N, num_bins]
 
         # Get the group chunks (tuple of 5 tensors)
-        chunk_tuples = AggressionAnalyzer._group_mapping
+        chunk_tuples = self._group_mapping
 
         # Build a mapping from combo_idx to group_idx
         group_mapping = torch.zeros(
@@ -178,6 +162,3 @@ class AggressionAnalyzer:
             "overall_avg": total_bet_amount.mean().item(),
             "overall_std": total_bet_amount.std().item(),
         }
-
-
-aggression_analyzer = AggressionAnalyzer()

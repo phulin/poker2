@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from alphaholdem.core.structured_config import Config, ModelType
-from alphaholdem.env.aggression_analyzer import aggression_analyzer
+from alphaholdem.env.aggression_analyzer import AggressionAnalyzer
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.models.mlp.better_features import context_length
@@ -160,6 +160,7 @@ class RebelCFRTrainer:
             policy_buffer=self.policy_buffer,
         )
 
+        self.aggression_analyzer = AggressionAnalyzer(device=self.device)
         self.pbs_pool = PBSPool(pool_size=3, generator=self.rng)
 
     def _compute_entropy(self, probs: torch.Tensor) -> float:
@@ -223,7 +224,7 @@ class RebelCFRTrainer:
             "aggression_stats": {
                 f"chunk_{i}": v
                 for i, v in enumerate(
-                    aggression_analyzer.analyze_batch(policy_batch)[
+                    self.aggression_analyzer.analyze_batch(policy_batch)[
                         "group_avg_bets"
                     ].tolist()
                 )
