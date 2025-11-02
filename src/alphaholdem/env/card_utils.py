@@ -59,7 +59,7 @@ _cached_hand_combos_tensor_device = None
 
 
 def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
-    global _cached_hand_combos_tensor
+    global _cached_hand_combos_tensor, _cached_hand_combos_tensor_device
     if (
         _cached_hand_combos_tensor is None
         or _cached_hand_combos_tensor_device.type != device.type
@@ -86,7 +86,7 @@ _cached_combo_lookup_tensor_device = None
 
 
 def combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
-    global _cached_combo_lookup_tensor
+    global _cached_combo_lookup_tensor, _cached_combo_lookup_tensor_device
     if (
         _cached_combo_lookup_tensor is None
         or _cached_combo_lookup_tensor_device.type != device.type
