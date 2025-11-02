@@ -142,8 +142,8 @@ def print_training_stats(
         else "N/A"
     )
     street_str = (
-        f"{metrics['value_batch_mean_street']:.4f}"
-        if metrics["value_batch_mean_street"] is not None
+        f"{metrics['evaluator_street']:.4f}"
+        if metrics["evaluator_street"] is not None
         else "N/A"
     )
 
