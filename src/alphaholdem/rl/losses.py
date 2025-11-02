@@ -769,7 +769,7 @@ class RebelSupervisedLoss(nn.Module):
             policy_loss = torch.zeros(1, device=logits.device)
             policy_loss_all = None
         else:
-            policy_weights = (weights**2)[:, :, None].expand(*probs.shape)
+            policy_weights = weights[:, :, None].expand(*probs.shape)
             policy_loss = F.huber_loss(
                 probs, batch.policy_targets, weight=policy_weights
             )
@@ -784,7 +784,7 @@ class RebelSupervisedLoss(nn.Module):
             value_loss = torch.zeros(1, device=logits.device)
             value_loss_all = None
         else:
-            value_weights = (weights**2)[:, None, :].expand(*hand_values.shape)
+            value_weights = weights[:, None, :].expand(*hand_values.shape)
             value_loss = F.mse_loss(
                 hand_values, batch.value_targets, weight=value_weights
             )
