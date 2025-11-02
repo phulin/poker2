@@ -18,7 +18,7 @@ train:
   learning_rate: 3e-4
   batch_size: 1024
   replay_buffer_batches: 32
-  value_reuse_goal: 16
+  value_reuse_goal: 4
   value_coef: 2.0
   entropy_coef: 0.0
   permutation_coef: 1.0

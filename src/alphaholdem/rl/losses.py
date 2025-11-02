@@ -762,14 +762,14 @@ class RebelSupervisedLoss(nn.Module):
         opponent_beliefs = player_beliefs.gather(
             1, opp[:, None, None].expand(-1, 1, NUM_HANDS)
         ).squeeze(1)
-        weights = opponent_beliefs * 1326
-        assert (weights.sum(dim=1) > 1e-8).all()
 
         if batch.policy_targets is None:
             policy_loss = torch.zeros(1, device=logits.device)
             policy_loss_all = None
         else:
-            policy_weights = weights[:, :, None].expand(*probs.shape)
+            opponent_weights = opponent_beliefs * 1326
+            assert opponent_weights.sum() > 1e-8
+            policy_weights = opponent_weights[:, :, None].expand(*probs.shape)
             policy_loss = F.huber_loss(
                 probs, batch.policy_targets, weight=policy_weights
             )
@@ -784,15 +784,14 @@ class RebelSupervisedLoss(nn.Module):
             value_loss = torch.zeros(1, device=logits.device)
             value_loss_all = None
         else:
-            value_weights = weights[:, None, :].expand(*hand_values.shape)
-            value_loss = F.mse_loss(
-                hand_values, batch.value_targets, weight=value_weights
-            )
+            weights = player_beliefs.flip(dims=[1]) * 1326
+            assert weights.sum() > 1e-8
+            value_loss = F.mse_loss(hand_values, batch.value_targets, weight=weights)
             value_loss_all = F.mse_loss(
                 hand_values.detach(),
                 batch.value_targets,
                 reduction="none",
-                weight=value_weights,
+                weight=weights,
             )
 
         total_loss = self.policy_weight * policy_loss + self.value_weight * value_loss

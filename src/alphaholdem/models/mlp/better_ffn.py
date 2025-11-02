@@ -49,14 +49,12 @@ class BetterFFN(nn.Module, Model):
         ffn_dim: int = 1024,
         num_hidden_layers: int = 4,
         num_players: int = 2,
-        generator: torch.Generator | None = None,
     ) -> None:
         super().__init__()
         self.num_actions = num_actions
         self.hidden_dim = hidden_dim
         self.num_hidden_layers = num_hidden_layers
         self.num_players = num_players
-        self.generator = generator
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
@@ -80,7 +78,9 @@ class BetterFFN(nn.Module, Model):
         self.hand_value_head = ffn_block(hidden_dim, ffn_dim, num_players * NUM_HANDS)
 
     @profile
-    def forward(self, features: MLPFeatures) -> ModelOutput:
+    def forward(
+        self, features: MLPFeatures, permuted: MLPFeatures | None = None
+    ) -> ModelOutput:
         """
         Forward pass over flat feature vectors.
 
@@ -90,9 +90,6 @@ class BetterFFN(nn.Module, Model):
         Returns:
             ModelOutput with policy logits and value predictions.
         """
-
-        permuted = features.clone()
-        permuted.permute_suits(generator=self.generator)
 
         board = features.board
         ranks = torch.where(board >= 0, board % 13, torch.full_like(board, 13))
@@ -105,9 +102,12 @@ class BetterFFN(nn.Module, Model):
             features.beliefs.view(-1, self.num_players * NUM_HANDS)
         )
 
-        permuted_belief_features = self.belief_encoder(
-            permuted.beliefs.view(-1, self.num_players * NUM_HANDS)
-        )
+        if permuted is not None:
+            permuted_belief_features = self.belief_encoder(
+                permuted.beliefs.view(-1, self.num_players * NUM_HANDS)
+            )
+        else:
+            permuted_belief_features = belief_features
 
         flat_features = (
             board_features.sum(dim=1)

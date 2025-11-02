@@ -54,25 +54,8 @@ def parse_hand_name(hand_name: str) -> tuple[int, int]:
         raise ValueError(f"Invalid hand name: {hand_name}")
 
 
-_cached_hand_combos_tensor = None
-_cached_hand_combos_tensor_device = None
-
-
-@torch.compiler.assume_constant_result
+@lru_cache(maxsize=2)
 def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
-    global _cached_hand_combos_tensor, _cached_hand_combos_tensor_device
-    device = device or torch.device("cpu")
-    if (
-        _cached_hand_combos_tensor is None
-        or _cached_hand_combos_tensor_device != device
-    ):
-        _cached_hand_combos_tensor = _hand_combos_tensor(device)
-        _cached_hand_combos_tensor_device = device
-    return _cached_hand_combos_tensor
-
-
-@torch.compiler.assume_constant_result
-def _hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 2] tensor of sorted hole-card index pairs."""
     combos = []
     for c1 in range(52):
@@ -84,23 +67,8 @@ def _hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
     return tensor
 
 
-_cached_combo_lookup_tensor = None
-_cached_combo_lookup_tensor_device = None
-
-
+@lru_cache(maxsize=2)
 def combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
-    global _cached_combo_lookup_tensor, _cached_combo_lookup_tensor_device
-    device = device or torch.device("cpu")
-    if (
-        _cached_combo_lookup_tensor is None
-        or _cached_combo_lookup_tensor_device != device
-    ):
-        _cached_combo_lookup_tensor = _combo_lookup_tensor(device)
-        _cached_combo_lookup_tensor_device = device
-    return _cached_combo_lookup_tensor
-
-
-def _combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [52, 52] long tensor mapping unordered card pairs to combo indices."""
     lookup = torch.full((52, 52), -1, dtype=torch.long)
     combos = hand_combos_tensor(device=device)
@@ -142,7 +110,7 @@ def mask_conflicting_combos(
     return ~intersects
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=2)
 def combo_to_onehot_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 52] bool tensor of one-hot encoded combos."""
     combos = hand_combos_tensor(device=device)  # [1326, 2]
@@ -153,7 +121,7 @@ def combo_to_onehot_tensor(device: torch.device | None = None) -> torch.Tensor:
     return combo_onehot
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=2)
 def combo_to_range_grid(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 2] tensor of range grid index (suited/offsuit) for each combo."""
     combos = hand_combos_tensor(device=device)  # [1326, 2]
@@ -166,7 +134,7 @@ def combo_to_range_grid(device: torch.device | None = None) -> torch.Tensor:
     )
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=2)
 def combo_blocking_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 1326] tensor of blocked hands for each combo."""
     combo_onehot = combo_to_onehot_tensor(device=device).float()
