@@ -3,7 +3,7 @@
 defaults:
   - _self_
 
-num_steps: 10000
+num_steps: 4000
 use_tensor_env: true
 num_envs: 256
 device: cuda
@@ -25,13 +25,13 @@ train:
   grad_clip: 1.0
 
   stratify_streets:
-    - threshold: 2000
+    - threshold: 1000
       probabilities: [0.03, 0.03, 0.09, 0.85]
-    - threshold: 4000
+    - threshold: 2000
       probabilities: [0.05, 0.05, 0.15, 0.75]
-    - threshold: 6000
+    - threshold: 3000
       probabilities: [0.15, 0.15, 0.30, 0.40]
-    - threshold: 10000
+    - threshold: 4000
       probabilities: [0.25, 0.25, 0.25, 0.25]
 
 model:
