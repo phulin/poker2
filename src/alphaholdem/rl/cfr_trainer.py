@@ -290,7 +290,7 @@ class RebelCFRTrainer:
         self.optimizer.zero_grad()
 
         value_loss, policy_loss, entropy_loss = None, None, None
-        value_loss_all, policy_loss_all = None
+        value_loss_all, policy_loss_all = None, None
         permutation_loss = 0.0
         for batch in [value_batch, policy_batch]:
             output = self.model(batch.features)
