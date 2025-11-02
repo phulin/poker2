@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Self
 
 import torch
 
@@ -73,7 +72,7 @@ class MLPFeatures:
         self,
         suit_permutations: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
-    ) -> Self:
+    ) -> "MLPFeatures":
         """Permute the suits of board cards and beliefs.
 
         Args:
