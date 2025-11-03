@@ -120,6 +120,9 @@ class RebelReplayBuffer:
         )
         self.statistics = {}
 
+        # Number of times each buffer element has been sampled
+        self.sample_count = torch.zeros(self.capacity, dtype=torch.long, device=device)
+
         self.position = 0
         self.size = 0
 
@@ -154,6 +157,8 @@ class RebelReplayBuffer:
         if self.value_targets is not None:
             self.value_targets[dest_indices] = batch.value_targets
         self.legal_masks[dest_indices] = batch.legal_masks
+        # Reset sample count when overwriting entries
+        self.sample_count[dest_indices] = 0
         for key in batch.statistics:
             if key not in self.statistics:
                 self.statistics[key] = torch.zeros(
@@ -176,8 +181,7 @@ class RebelReplayBuffer:
         """Uniformly sample a minibatch."""
         if self.size == 0:
             raise ValueError("RebelReplayBuffer is empty")
-        if batch_size > self.size:
-            batch_size = self.size
+        assert batch_size <= self.size, "Can't take more samples than we have."
 
         if stratify_streets is None:
             idxs = torch.randint(
@@ -194,6 +198,9 @@ class RebelReplayBuffer:
             all_probs = probs[streets]
             # sample without replacement
             idxs = torch.multinomial(all_probs, batch_size, generator=generator)
+
+        # Increment sample counters for sampled indices
+        self.sample_count[idxs] += 1
 
         return RebelBatch(
             features=self.features[idxs],

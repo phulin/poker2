@@ -158,3 +158,8 @@ def test_rebel_cfr_trainer_single_step_cpu():
     assert metrics[0]["policy_loss"] is not None
     assert metrics[0]["loss"] is not None
     assert not math.isnan(metrics[0]["policy_loss"])
+    # New metrics: mean sample counts for both buffers
+    assert "value_buffer_mean_sample_count" in metrics[0]
+    assert "policy_buffer_mean_sample_count" in metrics[0]
+    assert isinstance(metrics[0]["value_buffer_mean_sample_count"], float)
+    assert isinstance(metrics[0]["policy_buffer_mean_sample_count"], float)

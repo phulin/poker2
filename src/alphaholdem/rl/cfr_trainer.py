@@ -8,7 +8,7 @@ import torch.nn as nn
 
 from alphaholdem.core.structured_config import Config, ModelType
 from alphaholdem.env.aggression_analyzer import AggressionAnalyzer
-from alphaholdem.env.card_utils import suit_permutations_tensor
+from alphaholdem.env.card_utils import NUM_HANDS, suit_permutations_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.models.mlp.better_features import context_length
@@ -51,7 +51,7 @@ class RebelCFRTrainer:
 
         # Environment used to provide root states for CFR search
         self.env = HUNLTensorEnv(
-            num_envs=self.batch_size,
+            num_envs=self.cfg.num_envs,
             starting_stack=cfg.env.stack,
             sb=cfg.env.sb,
             bb=cfg.env.bb,
@@ -98,7 +98,7 @@ class RebelCFRTrainer:
         self.K_value = max(1, self.batch_size // self.cfg.train.value_reuse_goal)
         # approximate number of policy samples when collecting K_value value samples
         self.K_policy = max(
-            1, self.K_value * (self.num_actions // 2) ** self.cfg.search.depth
+            1, round(self.K_value * (self.num_actions / 2) ** self.cfg.search.depth)
         )
 
         C_over_K = self.cfg.train.replay_buffer_batches
@@ -178,6 +178,7 @@ class RebelCFRTrainer:
         self,
         value_batch: RebelBatch,
         policy_batch: RebelBatch,
+        total_loss: float,
         value_loss: float,
         value_loss_all: torch.Tensor,
         policy_loss: float,
@@ -219,6 +220,22 @@ class RebelCFRTrainer:
             "permutation_loss": permutation_loss,
             "value_buffer_size": len(self.value_buffer),
             "policy_buffer_size": len(self.policy_buffer),
+            "value_buffer_mean_sample_count": (
+                self.value_buffer.sample_count[: len(self.value_buffer)]
+                .float()
+                .mean()
+                .item()
+                if len(self.value_buffer) > 0
+                else 0.0
+            ),
+            "policy_buffer_mean_sample_count": (
+                self.policy_buffer.sample_count[: len(self.policy_buffer)]
+                .float()
+                .mean()
+                .item()
+                if len(self.policy_buffer) > 0
+                else 0.0
+            ),
             "grad_norm_clipped": grad_norm_clipped,
             "local_exploitability": value_batch.statistics["local_exploitability"]
             .mean()
@@ -278,78 +295,108 @@ class RebelCFRTrainer:
     @profile
     def _update_model(self, step: int) -> dict[str, float]:
         self.data_generator.generate_data(self.K_value)
+        # Warmup: make sure we have enough samples.
+        while min(len(self.value_buffer), len(self.policy_buffer)) < self.batch_size:
+            self.data_generator.generate_data(self.K_value)
 
-        # TODO: think about how to interleave these/ratio in a smarter way.
-        # Might need to use different sizes for the two buffers.
-        value_batch = self.value_buffer.sample(
-            self.batch_size,
-            stratify_streets=self._get_stratify_streets(step),
-            generator=self.buffer_rng,
-        ).to(self.device)
-        policy_batch = self.policy_buffer.sample(
-            self.batch_size,
-            stratify_streets=self._get_stratify_streets(step),
-            generator=self.buffer_rng,
-        ).to(self.device)
-
-        self.model.train()
-        self.optimizer.zero_grad()
-
-        value_loss, policy_loss, entropy_loss = None, None, None
-        value_loss_all, policy_loss_all = None, None
-        permutation_loss = 0.0
-
-        value_output = self.model(value_batch.features)
-        # Sample B suit permutations.
-        suit_permutations_idxs = torch.randint(
-            0, 24, (len(value_batch),), generator=self.rng, device=self.device
+        episodes = self.cfg.train.episodes_per_step
+        value_step_loss_all = torch.empty(
+            self.batch_size * episodes, self.num_players, NUM_HANDS, device=self.device
         )
-        suit_permutations = suit_permutations_tensor(device=self.device)[
-            suit_permutations_idxs
-        ]
-        permuted = value_batch.features.clone()
-        permuted.permute_suits(suit_permutations)
-        # Run model on permuted inputs [model(permute(features))]
-        output_permuted = self.model(permuted)
-
-        loss_dict = self.loss_fn(
-            value_output,
-            value_batch,
-            output_permuted=output_permuted,
-            suit_permutation_idxs=suit_permutations_idxs,
+        policy_step_loss_all = torch.empty(
+            self.batch_size * episodes, NUM_HANDS, self.num_actions, device=self.device
         )
-        value_loss = loss_dict["value_loss"]
-        value_loss_all = loss_dict["value_loss_all"]
-        permutation_loss = loss_dict["permutation_loss"]
-        total_loss = loss_dict["total_loss"]
+        policy_step_loss, value_step_loss = 0.0, 0.0
+        entropy_step_loss, permutation_step_loss = 0.0, 0.0
+        total_step_loss = 0.0
+        for episode in range(episodes):
+            # TODO: think about how to interleave these/ratio in a smarter way.
+            # Might need to use different sizes for the two buffers.
+            value_batch = self.value_buffer.sample(
+                self.batch_size,
+                stratify_streets=self._get_stratify_streets(step),
+                generator=self.buffer_rng,
+            ).to(self.device)
+            policy_batch = self.policy_buffer.sample(
+                self.batch_size,
+                stratify_streets=self._get_stratify_streets(step),
+                generator=self.buffer_rng,
+            ).to(self.device)
 
-        policy_output = self.model(policy_batch.features)
-        loss_dict = self.loss_fn(policy_output, policy_batch)
-        policy_loss = loss_dict["policy_loss"]
-        policy_loss_all = loss_dict["policy_loss_all"]
-        entropy_loss = loss_dict["entropy"]
+            self.model.train()
+            self.optimizer.zero_grad()
 
-        total_loss += loss_dict["total_loss"]
-        total_loss.backward()
+            value_loss, policy_loss, entropy_loss = None, None, None
+            value_loss_all, policy_loss_all = None, None
+            permutation_loss = 0.0
 
-        assert all(
-            p.grad.isfinite().all() for p in self.model.parameters()
-        ), "NaN/Inf in model gradients"
+            value_output = self.model(value_batch.features)
+            # Sample B suit permutations.
+            suit_permutations_idxs = torch.randint(
+                0, 24, (len(value_batch),), generator=self.rng, device=self.device
+            )
+            suit_permutations = suit_permutations_tensor(device=self.device)[
+                suit_permutations_idxs
+            ]
+            permuted = value_batch.features.clone()
+            permuted.permute_suits(suit_permutations)
+            # Run model on permuted inputs [model(permute(features))]
+            output_permuted = self.model(permuted)
 
-        if self.grad_clip is not None and self.grad_clip > 0:
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-        self.optimizer.step()
+            loss_dict = self.loss_fn(
+                value_output,
+                value_batch,
+                output_permuted=output_permuted,
+                suit_permutation_idxs=suit_permutations_idxs,
+            )
+            value_loss = loss_dict["value_loss"]
+            value_loss_all = loss_dict["value_loss_all"]
+            value_step_loss_all[
+                episode * self.batch_size : (episode + 1) * self.batch_size
+            ] = value_loss_all
+            permutation_loss = loss_dict["permutation_loss"]
+            total_loss = loss_dict["total_loss"]
 
-        return self._compute_metrics(
+            policy_output = self.model(policy_batch.features)
+            loss_dict = self.loss_fn(policy_output, policy_batch)
+            policy_loss = loss_dict["policy_loss"]
+            policy_loss_all = loss_dict["policy_loss_all"]
+            policy_step_loss_all[
+                episode * self.batch_size : (episode + 1) * self.batch_size
+            ] = policy_loss_all
+            entropy_loss = loss_dict["entropy"]
+
+            total_loss += loss_dict["total_loss"]
+            total_loss.backward()
+
+            total_step_loss += total_loss.item()
+            policy_step_loss += policy_loss
+            value_step_loss += value_loss
+            entropy_step_loss += entropy_loss
+            permutation_step_loss += permutation_loss
+
+            assert all(
+                p.grad.isfinite().all() for p in self.model.parameters()
+            ), "NaN/Inf in model gradients"
+
+            if self.grad_clip is not None and self.grad_clip > 0:
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            self.optimizer.step()
+
+        # FIXME: Pass value_step_loss_all (and fix dimensions).
+        metrics = self._compute_metrics(
             value_batch,
             policy_batch,
-            value_loss,
+            total_step_loss / episodes,
+            value_step_loss / episodes,
             value_loss_all,
-            policy_loss,
+            policy_step_loss / episodes,
             policy_loss_all,
-            entropy_loss,
-            permutation_loss,
+            entropy_step_loss / episodes,
+            permutation_step_loss / episodes,
         )
+
+        return metrics
 
     def train_step(self, step: int) -> dict[str, any]:
         step_public = step + 1
