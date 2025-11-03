@@ -78,9 +78,7 @@ class BetterFFN(nn.Module, Model):
         self.hand_value_head = ffn_block(hidden_dim, ffn_dim, num_players * NUM_HANDS)
 
     @profile
-    def forward(
-        self, features: MLPFeatures, permuted: MLPFeatures | None = None
-    ) -> ModelOutput:
+    def forward(self, features: MLPFeatures) -> ModelOutput:
         """
         Forward pass over flat feature vectors.
 
@@ -102,37 +100,26 @@ class BetterFFN(nn.Module, Model):
             features.beliefs.view(-1, self.num_players * NUM_HANDS)
         )
 
-        permuted_belief_features = None
-        if permuted is not None:
-            permuted_belief_features = self.belief_encoder(
-                permuted.beliefs.view(-1, self.num_players * NUM_HANDS)
-            )
-
         flat_features = (
             board_features.sum(dim=1)
             + street_features
             + context_features
             + belief_features
         )
-        assert flat_features.isfinite().all()
+        # assert flat_features.isfinite().all()
 
         x = self.trunk(flat_features)
-        assert x.isfinite().all()
+        # assert x.isfinite().all()
 
         policy_logits = self.policy_head(x).view(-1, NUM_HANDS, self.num_actions)
         hand_values = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
         value = hand_values.mean(dim=-1)
 
-        result = ModelOutput(
+        return ModelOutput(
             policy_logits=policy_logits,
             value=value,
             hand_values=hand_values,
         )
-        if permuted_belief_features is not None:
-            result.encoded_with_permutation = torch.stack(
-                [belief_features, permuted_belief_features], dim=1
-            )
-        return result
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
         """Initialize parameters following Xavier/LayerNorm defaults."""

@@ -739,6 +739,7 @@ class RebelSupervisedLoss(nn.Module):
         self,
         output: ModelOutput,
         batch: RebelBatch,
+        output_permuted: ModelOutput | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Args:
@@ -781,17 +782,20 @@ class RebelSupervisedLoss(nn.Module):
             )
 
         if batch.value_targets is None:
+            value_weights = None
             value_loss = torch.zeros(1, device=logits.device)
             value_loss_all = None
         else:
-            weights = player_beliefs.flip(dims=[1]) * 1326
-            assert weights.sum() > 1e-8
-            value_loss = F.mse_loss(hand_values, batch.value_targets, weight=weights)
+            value_weights = player_beliefs.flip(dims=[1]) * 1326
+            assert value_weights.sum() > 1e-8
+            value_loss = F.mse_loss(
+                hand_values, batch.value_targets, weight=value_weights
+            )
             value_loss_all = F.mse_loss(
                 hand_values.detach(),
                 batch.value_targets,
                 reduction="none",
-                weight=weights,
+                weight=value_weights,
             )
 
         total_loss = self.policy_weight * policy_loss + self.value_weight * value_loss
@@ -800,13 +804,12 @@ class RebelSupervisedLoss(nn.Module):
         if self.entropy_coef is not None and self.entropy_coef != 0.0:
             total_loss -= self.entropy_coef * entropy
 
-        permutation_loss = torch.zeros(1, device=logits.device)
-        if output.encoded_with_permutation is not None:
-            permutation_loss = F.mse_loss(
-                output.encoded_with_permutation[:, 0],
-                output.encoded_with_permutation[:, 1],
+        if output_permuted is not None:
+            hand_values_permuted = output_permuted.hand_values
+            value_loss_permuted = F.mse_loss(
+                hand_values_permuted, hand_values, weight=value_weights
             )
-            total_loss += self.permutation_weight * permutation_loss
+            total_loss += self.permutation_weight * value_loss_permuted
 
         return {
             "total_loss": total_loss,
@@ -815,5 +818,4 @@ class RebelSupervisedLoss(nn.Module):
             "value_loss": value_loss.item(),
             "value_loss_all": value_loss_all,
             "entropy": entropy.item(),
-            "permutation_loss": permutation_loss.item(),
         }

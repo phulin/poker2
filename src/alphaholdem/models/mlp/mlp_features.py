@@ -138,4 +138,4 @@ class MLPFeatures:
         p1_remapped = torch.gather(p1_beliefs, 1, inverse_remap)
         self.beliefs[:] = torch.cat([p0_remapped, p1_remapped], dim=1)
 
-        return self
+        return suit_permutations

@@ -75,9 +75,7 @@ class RebelFFN(nn.Module, Model):
         self.policy_head = nn.Linear(hidden_dim, num_actions * NUM_HANDS)
         self.hand_value_head = nn.Linear(hidden_dim, num_players * NUM_HANDS)
 
-    def forward(
-        self, features: MLPFeatures, permuted: MLPFeatures | None = None
-    ) -> ModelOutput:
+    def forward(self, features: MLPFeatures) -> ModelOutput:
         """
         Forward pass over flat feature vectors.
 

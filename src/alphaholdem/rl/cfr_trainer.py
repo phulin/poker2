@@ -5,9 +5,14 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import Config, ModelType
 from alphaholdem.env.aggression_analyzer import AggressionAnalyzer
+from alphaholdem.env.card_utils import (
+    combo_suit_permutation_inverse_tensor,
+    suit_permutations_tensor,
+)
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.models.mlp.better_features import context_length
@@ -294,14 +299,43 @@ class RebelCFRTrainer:
         value_loss_all, policy_loss_all = None, None
         permutation_loss = 0.0
         for batch in [value_batch, policy_batch]:
-            output = self.model(
-                batch.features,
-                permuted=batch.features.clone().permute_suits(generator=self.rng),
-            )
+            output = self.model(batch.features)
             loss_dict = self.loss_fn(output, batch)
             loss = loss_dict["total_loss"]
-            permutation_loss += loss_dict["permutation_loss"]
+
             if batch is value_batch:
+                with torch.no_grad():
+                    permuted = batch.features.clone()
+
+                    # Sample B suit permutations.
+                    suit_permutations_idxs = torch.randint(
+                        0, 24, (len(batch),), generator=self.rng
+                    )
+                    suit_permutations = suit_permutations_tensor(device=self.device)[
+                        suit_permutations_idxs
+                    ]
+                    permuted.permute_suits(suit_permutations)
+                    # Run model on permuted inputs [model(permute(features))]
+                    output_permuted = self.model(permuted)
+
+                    # Reverse the permutation on the output hand values.
+                    combo_permutations_inverse = combo_suit_permutation_inverse_tensor(
+                        device=self.device
+                    )[suit_permutations_idxs]
+                    output_permuted.hand_values = torch.gather(
+                        output_permuted.hand_values,  # (B, 2, 1326)
+                        2,
+                        combo_permutations_inverse[:, None, :].expand(
+                            -1, self.num_players, -1
+                        ),  # (B, 2, 1326)
+                    )
+
+                # This loss confirms that model commutes with suit permutations.
+                permutation_loss = F.mse_loss(
+                    output.hand_values, output_permuted.hand_values
+                )
+                loss += self.cfg.train.permutation_coef * permutation_loss
+
                 value_loss = loss_dict["value_loss"]
                 value_loss_all = loss_dict["value_loss_all"]
             else:

@@ -6,18 +6,16 @@ import torch
 
 from alphaholdem.env.card_utils import (
     NUM_HANDS,
+    combo_suit_permutation_inverse_tensor,
+    combo_suit_permutation_tensor,
     combo_to_onehot_tensor,
+    suit_permutations_tensor,
 )
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 
 
 class ChanceNodeHelper:
-    """Utilities for enumerating chance nodes when generating value targets.
-
-    The helper assumes the value model is suit-symmetric. This constraint is
-    enforced by the suit-symmetry loss in `alphaholdem/rl/losses.py`, allowing
-    canonical-flop evaluation without explicitly remapping hand permutations.
-    """
+    """Utilities for enumerating chance nodes when generating value targets."""
 
     FLOP_CHUNK_SIZE = 128
 
@@ -45,6 +43,10 @@ class ChanceNodeHelper:
         self.num_players = num_players
         self.model = model
         self.combo_onehot_float = combo_to_onehot_tensor(device=device).float()
+        self.suit_permutations = suit_permutations_tensor(device=device)
+        self.num_permutations = self.suit_permutations.shape[0]
+        self.combo_perm = combo_suit_permutation_tensor(device=device)
+        self.combo_perm_inverse = combo_suit_permutation_inverse_tensor(device=device)
 
         # Initialize cache as instance variables
         self._build_canonical_flops_cache()
@@ -67,43 +69,11 @@ class ChanceNodeHelper:
         ranks_sorted, sort_idx = torch.sort(ranks, dim=1, descending=True)  # (22100, 3)
 
         # 4) All 24 permutations of 4 suits, as a (24, 4) tensor
-        perms = torch.tensor(
-            [
-                [0, 1, 2, 3],
-                [0, 1, 3, 2],
-                [0, 2, 1, 3],
-                [0, 2, 3, 1],
-                [0, 3, 1, 2],
-                [0, 3, 2, 1],
-                [1, 0, 2, 3],
-                [1, 0, 3, 2],
-                [1, 2, 0, 3],
-                [1, 2, 3, 0],
-                [1, 3, 0, 2],
-                [1, 3, 2, 0],
-                [2, 0, 1, 3],
-                [2, 0, 3, 1],
-                [2, 1, 0, 3],
-                [2, 1, 3, 0],
-                [2, 3, 0, 1],
-                [2, 3, 1, 0],
-                [3, 0, 1, 2],
-                [3, 0, 2, 1],
-                [3, 1, 0, 2],
-                [3, 1, 2, 0],
-                [3, 2, 0, 1],
-                [3, 2, 1, 0],
-            ],
-            device=device,
-            dtype=torch.long,
-        )  # (24, 4)
-
-        N = flops.size(0)  # 22100
+        perms = self.suit_permutations
+        num_perms = self.num_permutations
+        N = flops.size(0)
 
         # 5) Apply every suit permutation to every flop, all at once.
-        # suits: (N, 3) with values in 0..3
-        # perms: (24, 4)
-        # perms[:, suits] → (24, N, 3): for each perm, for each flop, map each suit index
         suits_perm = perms[:, suits]  # (24, N, 3)
 
         # 6) Re-order the permuted suits according to the rank-sort order we fixed in step 3
@@ -120,29 +90,29 @@ class ChanceNodeHelper:
 
         # Case 1: all three equal → sort all 3 suits
         if all_eq.any():
-            tmp = suits_perm_sorted[:, all_eq, :]  # (24, M, 3)
-            tmp, _ = torch.sort(tmp, dim=2)  # sort all 3
+            tmp = suits_perm_sorted[:, all_eq, :]
+            tmp, _ = torch.sort(tmp, dim=2)
             suits_perm_sorted[:, all_eq, :] = tmp
 
         # Case 2: first two equal → sort positions 0 and 1
         if first2_eq.any():
-            tmp = suits_perm_sorted[:, first2_eq, :]  # (24, M, 3)
-            first2, _ = torch.sort(tmp[:, :, :2], dim=2)  # sort the first 2
+            tmp = suits_perm_sorted[:, first2_eq, :]
+            first2, _ = torch.sort(tmp[:, :, :2], dim=2)
             tmp[:, :, :2] = first2
             suits_perm_sorted[:, first2_eq, :] = tmp
 
         # Case 3: last two equal → sort positions 1 and 2
         if last2_eq.any():
-            tmp = suits_perm_sorted[:, last2_eq, :]  # (24, M, 3)
-            last2, _ = torch.sort(tmp[:, :, 1:], dim=2)  # sort positions 1,2
+            tmp = suits_perm_sorted[:, last2_eq, :]
+            last2, _ = torch.sort(tmp[:, :, 1:], dim=2)
             tmp[:, :, 1:] = last2
             suits_perm_sorted[:, last2_eq, :] = tmp
 
         # 8) Make the ranks broadcast to (24, N, 3) so we can form "permuted cards"
-        ranks_sorted_b = ranks_sorted.unsqueeze(0).expand(24, -1, -1)  # (24, N, 3)
+        ranks_sorted_b = ranks_sorted.unsqueeze(0).expand(num_perms, -1, -1)
 
         # 9) Encode each card as suit*13 + rank → value in 0..51
-        card_codes = suits_perm_sorted * 13 + ranks_sorted_b  # (24, N, 3)
+        card_codes = suits_perm_sorted * 13 + ranks_sorted_b
 
         # 10) Turn each 3-card flop into a single scalar so we can pick the min over 24 perms
         # Use base-52 numbering: c0 * 52^2 + c1 * 52 + c2
@@ -150,10 +120,10 @@ class ChanceNodeHelper:
             card_codes[:, :, 0] * (52 * 52)
             + card_codes[:, :, 1] * 52
             + card_codes[:, :, 2]
-        )  # (24, N)
+        )
 
         # 11) Canonical representative = lexicographically smallest (i.e. smallest scalar) over 24 perms
-        canonical_scalar, _ = scalar_codes.min(dim=0)  # (N,)
+        canonical_scalar, perm_indices = scalar_codes.min(dim=0)
 
         # 12) Map each canonical scalar to a dense id 0..(num_flops-1)
         unique_vals, flop_to_canon = torch.unique(
@@ -205,12 +175,23 @@ class ChanceNodeHelper:
             conflict_matrix == 0
         ).T  # [num_flops, 1326] -> [num_flops, NUM_HANDS]
 
+        perm_offset = flop_to_canon * num_perms + perm_indices
+        perm_counts_flat = torch.bincount(
+            perm_offset,
+            minlength=num_flops * num_perms,
+        )
+        flop_id_perm_counts = perm_counts_flat.view(num_flops, num_perms)
+
         self.board_to_flop_id = board_to_flop_id_tensor
         self.board_to_canonical = board_to_canonical_tensor
         self.flop_id_to_canonical = canonical_cards
         self.flop_id_to_allowed_mask = flop_id_to_allowed_mask
         self.flop_id_to_count = flop_id_to_count
+        self.flop_id_perm_counts = flop_id_perm_counts
         self.total_flop_count = self.flop_id_to_count.sum().item()
+        self.all_flops = flops
+        self.flop_to_canon = flop_to_canon
+        self.flop_perm_index = perm_indices
 
     @torch.no_grad()
     def flop_chance_values(
@@ -311,8 +292,17 @@ class ChanceNodeHelper:
             hand_values = model(synthetic_features).hand_values.to(dtype=dtype)
             hand_values = hand_values.view(B, chunk_len, self.num_players, NUM_HANDS)
 
+            # We only want to run the model on the canonical flops, but we need the
+            # outputs for all 22,100 flops. If we assume the model commutes with suit
+            # permutations, we can equivalently apply the permutations to the outputs.
+            # NB that we enforce the commutativity with an auxiliary loss.
+            permuted_sum = torch.zeros_like(hand_values)
+            for perm_idx in range(self.num_permutations):
+                permuted_sum += hand_values.index_select(-1, self.combo_perm[perm_idx])
+            permuted_sum /= self.num_permutations
+
             weight = counts_chunk.view(1, chunk_len, 1, 1).to(dtype)
-            values_sum += (hand_values * weight).sum(dim=1)
+            values_sum += (permuted_sum * weight).sum(dim=1)
 
         expected = values_sum / self.total_flop_count
         return expected

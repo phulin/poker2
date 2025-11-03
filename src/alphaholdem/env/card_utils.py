@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from itertools import permutations
 
 import torch
 
@@ -139,3 +140,47 @@ def combo_blocking_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 1326] tensor of blocked hands for each combo."""
     combo_onehot = combo_to_onehot_tensor(device=device).float()
     return (combo_onehot @ combo_onehot.T) > 0.5
+
+
+@lru_cache(maxsize=2)
+def suit_permutations_tensor(device: torch.device | None = None) -> torch.Tensor:
+    """Return [24, 4] tensor enumerating all suit permutations."""
+    perms = torch.tensor(tuple(permutations(range(4))), dtype=torch.long)
+    if device is not None:
+        perms = perms.to(device)
+    return perms
+
+
+@lru_cache(maxsize=2)
+def combo_suit_permutation_tensor(device: torch.device | None = None) -> torch.Tensor:
+    """Return [24, 1326] tensor: hole-card index permutations for each suit permutation."""
+    combos = hand_combos_tensor(device=device)  # [1326, 2]
+    lookup = combo_lookup_tensor(device=device)  # [52, 52]
+
+    ranks = combos % 13  # [1326, 2]
+    suits = combos // 13  # [1326, 2]
+
+    suit_perms = suit_permutations_tensor(device=device)  # [24, 4]
+    permuted_suits = suit_perms[:, suits]  # [24, 1326, 2]
+    ranks_expand = ranks.unsqueeze(0).expand(permuted_suits.shape[0], -1, -1)
+    permuted_cards = permuted_suits * 13 + ranks_expand  # [24, 1326, 2]
+    permuted_cards_sorted = permuted_cards.sort(dim=2).values
+
+    permuted_indices = lookup[
+        permuted_cards_sorted[:, :, 0],
+        permuted_cards_sorted[:, :, 1],
+    ]
+
+    return permuted_indices
+
+
+@lru_cache(maxsize=2)
+def combo_suit_permutation_inverse_tensor(
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Return [24, 1326] tensor mapping canonical combos back to original ordering."""
+    permuted = combo_suit_permutation_tensor()
+    inverse = torch.argsort(permuted, dim=1)
+    if device is not None:
+        inverse = inverse.to(device)
+    return inverse

@@ -9,8 +9,11 @@ from alphaholdem.env.card_utils import (
     combo_lookup_tensor,
     combo_to_onehot_tensor,
     combo_to_range_grid,
+    combo_suit_permutation_tensor,
+    combo_suit_permutation_inverse_tensor,
     hand_combos_tensor,
     mask_conflicting_combos,
+    suit_permutations_tensor,
 )
 
 
@@ -203,6 +206,68 @@ class TestMaskConflictingCombos:
 
         # No combinations should be available
         assert torch.all(~mask)
+
+
+class TestSuitPermutationHelpers:
+    """Test suit permutation helper tensors."""
+
+    def test_suit_permutations_tensor_basic(self):
+        perms = suit_permutations_tensor()
+        assert perms.shape == (24, 4)
+        assert perms.dtype == torch.long
+
+        sorted_rows, _ = torch.sort(perms, dim=1)
+        expected = torch.arange(4, dtype=torch.long).expand_as(sorted_rows)
+        torch.testing.assert_close(sorted_rows, expected)
+
+        assert len({tuple(row.tolist()) for row in perms}) == 24
+
+    def test_combo_suit_permutation_tensor_properties(self):
+        combo_perms = combo_suit_permutation_tensor()
+        assert combo_perms.shape == (24, 1326)
+        assert combo_perms.dtype == torch.long
+
+        sorted_rows, _ = torch.sort(combo_perms, dim=1)
+        expected = torch.arange(1326, dtype=torch.long).expand_as(sorted_rows)
+        torch.testing.assert_close(sorted_rows, expected)
+
+    def test_combo_permutation_matches_expected_mapping(self):
+        perms = suit_permutations_tensor()
+        combo_perms = combo_suit_permutation_tensor()
+        combos = hand_combos_tensor()
+
+        target_perm = torch.tensor([1, 2, 3, 0], dtype=torch.long)
+        perm_index = torch.nonzero(
+            (perms == target_perm).all(dim=1), as_tuple=False
+        ).squeeze()
+        assert perm_index.numel() == 1
+        perm_index = int(perm_index.item())
+
+        combo_idx = combo_index(0, 5)
+        mapped_idx = int(combo_perms[perm_index, combo_idx].item())
+
+        original_cards = combos[combo_idx]
+        expected_suits = target_perm[original_cards // 13]
+        expected_cards = (expected_suits * 13) + (original_cards % 13)
+        expected_cards, _ = torch.sort(expected_cards)
+
+        actual_cards = combos[mapped_idx]
+        torch.testing.assert_close(actual_cards, expected_cards)
+
+    def test_combo_permutation_inverse_roundtrip(self):
+        combo_perms = combo_suit_permutation_tensor()
+        combo_perms_inv = combo_suit_permutation_inverse_tensor()
+        identity = torch.arange(1326, dtype=torch.long)
+
+        for idx in range(combo_perms.shape[0]):
+            torch.testing.assert_close(
+                combo_perms[idx][combo_perms_inv[idx]],
+                identity,
+            )
+            torch.testing.assert_close(
+                combo_perms_inv[idx][combo_perms[idx]],
+                identity,
+            )
 
 
 class TestComboToOnehotTensor:
