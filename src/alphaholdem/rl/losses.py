@@ -9,7 +9,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import KLType, PPOClipping, ValueLossType
-from alphaholdem.env.card_utils import NUM_HANDS
+from alphaholdem.env.card_utils import (
+    NUM_HANDS,
+    combo_suit_permutation_inverse_tensor,
+)
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.exponential_controller import ExponentialController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
@@ -728,24 +731,28 @@ class RebelSupervisedLoss(nn.Module):
         value_weight: float = 1.0,
         permutation_weight: float = 0.01,
         entropy_coef: float | None = None,
+        num_players: int = 2,
     ) -> None:
         super().__init__()
         self.policy_weight = policy_weight
         self.value_weight = value_weight
         self.entropy_coef = entropy_coef
         self.permutation_weight = permutation_weight
+        self.num_players = num_players
 
     def forward(
         self,
         output: ModelOutput,
         batch: RebelBatch,
         output_permuted: ModelOutput | None = None,
+        suit_permutation_idxs: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Args:
-            logits: [B, num_actions] or [B, num_hands, num_actions] raw policy logits.
-            hand_values: [B, num_players, num_combos] per-hand value predictions.
+            output: Model output with policy logits and hand values.
             batch: RebelBatch with policy/value targets.
+            output_permuted: Model output from permuted inputs (optional).
+            suit_permutation_idxs: Indices of suit permutations used (B,) (optional).
         Returns:
             Dict of scalar tensors for loss components and diagnostics.
         """
@@ -804,12 +811,22 @@ class RebelSupervisedLoss(nn.Module):
         if self.entropy_coef is not None and self.entropy_coef != 0.0:
             total_loss -= self.entropy_coef * entropy
 
-        if output_permuted is not None:
-            hand_values_permuted = output_permuted.hand_values
-            value_loss_permuted = F.mse_loss(
-                hand_values_permuted, hand_values, weight=value_weights
+        permutation_loss = torch.tensor(0.0, device=logits.device)
+        if output_permuted is not None and suit_permutation_idxs is not None:
+            # Reverse the permutation on the output hand values.
+            combo_permutations_inverse = combo_suit_permutation_inverse_tensor(
+                device=logits.device
+            )[suit_permutation_idxs]
+            hand_values_permuted_reversed = torch.gather(
+                output_permuted.hand_values,  # (B, 2, 1326)
+                2,
+                combo_permutations_inverse[:, None, :].expand(
+                    -1, self.num_players, -1
+                ),  # (B, 2, 1326)
             )
-            total_loss += self.permutation_weight * value_loss_permuted
+            # This loss confirms that model commutes with suit permutations.
+            permutation_loss = F.mse_loss(hand_values, hand_values_permuted_reversed)
+            total_loss += self.permutation_weight * permutation_loss
 
         return {
             "total_loss": total_loss,
@@ -818,4 +835,5 @@ class RebelSupervisedLoss(nn.Module):
             "value_loss": value_loss.item(),
             "value_loss_all": value_loss_all,
             "entropy": entropy.item(),
+            "permutation_loss": permutation_loss.item(),
         }
