@@ -201,20 +201,18 @@ class RebelCFRTrainer:
         def by_street(
             tensor: torch.Tensor, batch=value_batch, weights=value_weights
         ) -> dict[str, float]:
-            preflop = batch.features.street == 0
-            flop = batch.features.street == 1
-            turn = batch.features.street == 2
-            river = batch.features.street == 3
-            showdown = batch.features.street == 4
-
+            masks = {
+                "preflop": batch.features.street == 0,
+                "flop": batch.features.street == 1,
+                "turn": batch.features.street == 2,
+                "river": batch.features.street == 3,
+                "showdown": batch.features.street == 4,
+            }
             result = {
-                "preflop": (tensor[preflop] * weights[preflop]).sum()
-                / weights[preflop].sum(),
-                "flop": (tensor[flop] * weights[flop]).sum() / weights[flop].sum(),
-                "turn": (tensor[turn] * weights[turn]).sum() / weights[turn].sum(),
-                "river": (tensor[river] * weights[river]).sum() / weights[river].sum(),
-                "showdown": (tensor[showdown] * weights[showdown]).sum()
-                / weights[showdown].sum(),
+                k: (tensor[mask] * weights[mask]).sum()
+                / weights[mask].sum()
+                / tensor.shape[0]
+                for k, mask in masks.items()
             }
             return {k: v for k, v in result.items() if not math.isnan(v)}
 
