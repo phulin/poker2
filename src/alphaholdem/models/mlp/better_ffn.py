@@ -47,7 +47,9 @@ class BetterFFN(nn.Module, Model):
         hidden_dim: int = 512,
         range_hidden_dim: int = 128,
         ffn_dim: int = 1024,
-        num_hidden_layers: int = 4,
+        num_hidden_layers: int = 3,
+        num_policy_layers: int = 3,
+        num_value_layers: int = 3,
         num_players: int = 2,
     ) -> None:
         super().__init__()
@@ -67,15 +69,29 @@ class BetterFFN(nn.Module, Model):
         )
 
         # Build trunk
-        alpha = 1 / math.sqrt(num_hidden_layers)
-        layers: list[nn.Module] = []
-        for _ in range(num_hidden_layers):
-            layers.append(ResidualBlock(ffn_block(hidden_dim, ffn_dim), alpha))
+        alpha = 1 / math.sqrt(
+            num_hidden_layers + (num_policy_layers + num_value_layers) / 2
+        )
+        layers = [
+            ResidualBlock(ffn_block(hidden_dim, ffn_dim), alpha)
+            for _ in range(num_hidden_layers)
+        ]
         self.trunk = nn.Sequential(*layers)
 
         # Heads
-        self.policy_head = ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS)
-        self.hand_value_head = ffn_block(hidden_dim, ffn_dim, num_players * NUM_HANDS)
+        layers = [
+            ResidualBlock(ffn_block(hidden_dim, ffn_dim), alpha)
+            for _ in range(num_policy_layers - 1)
+        ]
+        layers.append(ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS))
+        self.policy_head = nn.Sequential(*layers)
+
+        layers = [
+            ResidualBlock(ffn_block(hidden_dim, ffn_dim), alpha)
+            for _ in range(num_value_layers - 1)
+        ]
+        layers.append(ffn_block(hidden_dim, ffn_dim, num_players * NUM_HANDS))
+        self.hand_value_head = nn.Sequential(*layers)
 
     @profile
     def forward(self, features: MLPFeatures) -> ModelOutput:

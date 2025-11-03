@@ -39,7 +39,9 @@ model:
   hidden_dim: 1024
   range_hidden_dim: 128
   ffn_dim: 1024
-  num_hidden_layers: 6
+  num_hidden_layers: 3
+  num_policy_layers: 3
+  num_value_layers: 3
   detach_value_head: false
   compile: true
 

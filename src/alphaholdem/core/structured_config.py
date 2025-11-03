@@ -167,7 +167,9 @@ class ModelConfig:
     # ReBeL FFN parameters
     input_dim: int = 2661
     hidden_dim: int = 1536
-    num_hidden_layers: int = 6
+    num_hidden_layers: int = 3
+    num_policy_layers: int = 3
+    num_value_layers: int = 3
 
     # Better FFN parameters
     range_hidden_dim: int = 128
