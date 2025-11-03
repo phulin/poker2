@@ -309,7 +309,7 @@ class RebelCFRTrainer:
 
                     # Sample B suit permutations.
                     suit_permutations_idxs = torch.randint(
-                        0, 24, (len(batch),), generator=self.rng
+                        0, 24, (len(batch),), generator=self.rng, device=self.device
                     )
                     suit_permutations = suit_permutations_tensor(device=self.device)[
                         suit_permutations_idxs

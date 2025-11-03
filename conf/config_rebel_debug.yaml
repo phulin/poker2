@@ -5,7 +5,7 @@ defaults:
 num_steps: 100
 num_envs: 4
 
-device: cpu
+device: mps
 checkpoint_dir: checkpoints-rebel-debug
 checkpoint_interval: 10
 use_wandb: false
