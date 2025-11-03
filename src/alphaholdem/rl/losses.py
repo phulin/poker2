@@ -774,6 +774,7 @@ class RebelSupervisedLoss(nn.Module):
         if batch.policy_targets is None:
             policy_loss = torch.zeros(1, device=logits.device)
             policy_loss_all = None
+            policy_weights = None
         else:
             opponent_weights = opponent_beliefs * 1326
             assert opponent_weights.sum() > 1e-8
@@ -792,6 +793,7 @@ class RebelSupervisedLoss(nn.Module):
             value_weights = None
             value_loss = torch.zeros(1, device=logits.device)
             value_loss_all = None
+            value_weights = None
         else:
             value_weights = player_beliefs.flip(dims=[1]) * 1326
             assert value_weights.sum() > 1e-8
@@ -832,8 +834,10 @@ class RebelSupervisedLoss(nn.Module):
             "total_loss": total_loss,
             "policy_loss": policy_loss.item(),
             "policy_loss_all": policy_loss_all,
+            "policy_weights": policy_weights,
             "value_loss": value_loss.item(),
             "value_loss_all": value_loss_all,
+            "value_weights": value_weights,
             "entropy": entropy.item(),
             "permutation_loss": permutation_loss.item(),
         }

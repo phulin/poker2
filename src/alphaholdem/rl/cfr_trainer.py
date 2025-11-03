@@ -181,8 +181,10 @@ class RebelCFRTrainer:
         total_loss: float,
         value_loss: float,
         value_loss_all: torch.Tensor,
+        value_weights: torch.Tensor,
         policy_loss: float,
-        policy_loss_all: torch.Tensor | None,
+        policy_loss_all: torch.Tensor,
+        policy_weights: torch.Tensor,
         entropy_loss: float,
         permutation_loss: float,
     ) -> dict[str, float]:
@@ -196,7 +198,9 @@ class RebelCFRTrainer:
         value_river = value_batch.features.street == 3
         value_showdown = value_batch.features.street == 4
 
-        def by_street(tensor: torch.Tensor, batch=value_batch) -> dict[str, float]:
+        def by_street(
+            tensor: torch.Tensor, batch=value_batch, weights=value_weights
+        ) -> dict[str, float]:
             preflop = batch.features.street == 0
             flop = batch.features.street == 1
             turn = batch.features.street == 2
@@ -204,16 +208,19 @@ class RebelCFRTrainer:
             showdown = batch.features.street == 4
 
             result = {
-                "preflop": tensor[preflop].mean().item(),
-                "flop": tensor[flop].mean().item(),
-                "turn": tensor[turn].mean().item(),
-                "river": tensor[river].mean().item(),
-                "showdown": tensor[showdown].mean().item(),
+                "preflop": (tensor[preflop] * weights[preflop]).sum()
+                / weights[preflop].sum(),
+                "flop": (tensor[flop] * weights[flop]).sum() / weights[flop].sum(),
+                "turn": (tensor[turn] * weights[turn]).sum() / weights[turn].sum(),
+                "river": (tensor[river] * weights[river]).sum() / weights[river].sum(),
+                "showdown": (tensor[showdown] * weights[showdown]).sum()
+                / weights[showdown].sum(),
             }
             return {k: v for k, v in result.items() if not math.isnan(v)}
 
+        exploitability = value_batch.statistics["local_exploitability"]
         return {
-            "loss": self.cfg.train.value_coef * value_loss + policy_loss,
+            "loss": total_loss,
             "policy_loss": policy_loss,
             "value_loss": value_loss,
             "entropy_loss": entropy_loss,
@@ -237,11 +244,10 @@ class RebelCFRTrainer:
                 else 0.0
             ),
             "grad_norm_clipped": grad_norm_clipped,
-            "local_exploitability": value_batch.statistics["local_exploitability"]
-            .mean()
-            .item(),
+            "local_exploitability": exploitability.mean().item(),
             "local_exploitability_street": by_street(
-                value_batch.statistics["local_exploitability"]
+                exploitability,
+                weights=torch.ones_like(exploitability),
             ),
             "aggression_stats": {
                 f"chunk_{i}": v
@@ -259,7 +265,9 @@ class RebelCFRTrainer:
                 "showdown": value_showdown.float().mean().item(),
             },
             "value_loss_street": by_street(value_loss_all),
-            "policy_loss_street": by_street(policy_loss_all, policy_batch),
+            "policy_loss_street": by_street(
+                policy_loss_all, batch=policy_batch, weights=policy_weights
+            ),
             **self.cfr_evaluator.stats,
         }
 
@@ -327,7 +335,7 @@ class RebelCFRTrainer:
             self.optimizer.zero_grad()
 
             value_loss, policy_loss, entropy_loss = None, None, None
-            value_loss_all, policy_loss_all = None, None
+            value_loss_episode, policy_loss_episode = None, None
             permutation_loss = 0.0
 
             value_output = self.model(value_batch.features)
@@ -350,20 +358,22 @@ class RebelCFRTrainer:
                 suit_permutation_idxs=suit_permutations_idxs,
             )
             value_loss = loss_dict["value_loss"]
-            value_loss_all = loss_dict["value_loss_all"]
+            value_loss_episode = loss_dict["value_loss_all"]
             value_step_loss_all[
                 episode * self.batch_size : (episode + 1) * self.batch_size
-            ] = value_loss_all
+            ] = value_loss_episode
+            value_weights = loss_dict["value_weights"]
             permutation_loss = loss_dict["permutation_loss"]
             total_loss = loss_dict["total_loss"]
 
             policy_output = self.model(policy_batch.features)
             loss_dict = self.loss_fn(policy_output, policy_batch)
             policy_loss = loss_dict["policy_loss"]
-            policy_loss_all = loss_dict["policy_loss_all"]
+            policy_loss_episode = loss_dict["policy_loss_all"]
             policy_step_loss_all[
                 episode * self.batch_size : (episode + 1) * self.batch_size
-            ] = policy_loss_all
+            ] = policy_loss_episode
+            policy_weights = loss_dict["policy_weights"]
             entropy_loss = loss_dict["entropy"]
 
             total_loss += loss_dict["total_loss"]
@@ -389,9 +399,11 @@ class RebelCFRTrainer:
             policy_batch,
             total_step_loss / episodes,
             value_step_loss / episodes,
-            value_loss_all,
+            value_loss_episode,
+            value_weights,
             policy_step_loss / episodes,
-            policy_loss_all,
+            policy_loss_episode,
+            policy_weights,
             entropy_step_loss / episodes,
             permutation_step_loss / episodes,
         )
