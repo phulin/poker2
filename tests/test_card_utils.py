@@ -4,6 +4,8 @@ import pytest
 import torch
 
 from alphaholdem.env.card_utils import (
+    NUM_HANDS,
+    calculate_unblocked_mass,
     combo_blocking_tensor,
     combo_index,
     combo_lookup_tensor,
@@ -462,6 +464,154 @@ class TestIntegration:
                 assert grid[i][0] == grid[i][1]
             else:
                 assert grid[i][0] > grid[i][1]
+
+
+class TestCalculateUnblockedMass:
+    """Test calculate_unblocked_mass function."""
+
+    def test_uniform_beliefs(self):
+        """Test calculate_unblocked_mass with uniform beliefs."""
+        device = torch.device("cpu")
+
+        # Uniform beliefs: all hands have equal probability
+        uniform_beliefs = torch.full(
+            (1, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+        )
+
+        # Compute unblocked mass
+        unblocked = calculate_unblocked_mass(uniform_beliefs)
+
+        # Hardcoded expected value: for uniform beliefs, all hands have the same unblocked mass
+        # This is approximately 0.9238311052322388 (depending on rounding)
+        expected_value = 0.9238311052322388
+        expected = torch.full_like(unblocked, expected_value)
+
+        torch.testing.assert_close(unblocked, expected, atol=1e-6, rtol=1e-6)
+
+        # For uniform beliefs, unblocked mass should be positive for all hands
+        assert (unblocked > 0).all()
+
+    def test_delta_beliefs(self):
+        """Test calculate_unblocked_mass with delta beliefs (single hand has all mass)."""
+        device = torch.device("cpu")
+
+        # Delta beliefs: one hand has all the mass
+        delta_beliefs = torch.zeros(1, NUM_HANDS, dtype=torch.float32)
+        target_hand = 100  # Pick an arbitrary hand
+        delta_beliefs[0, target_hand] = 1.0
+
+        # Compute actual result
+        unblocked = calculate_unblocked_mass(delta_beliefs)
+
+        # Hardcoded expectations:
+        # Target hand should have unblocked mass = 0.0 (blocks itself with 2 cards)
+        assert torch.allclose(
+            unblocked[0, target_hand], torch.tensor(0.0), atol=1e-6, rtol=1e-6
+        )
+
+        # For delta beliefs, hands that share cards with target_hand should have reduced unblocked mass
+        # Hands that don't share cards should have unblocked mass = 1.0
+        combo_onehot = combo_to_onehot_tensor(device=device).float()
+        blocking_matrix = (
+            combo_onehot @ combo_onehot.T
+        )  # [NUM_HANDS, NUM_HANDS], counts shared cards
+        shares_cards = blocking_matrix[:, target_hand] > 0.5  # [NUM_HANDS] bool
+
+        # Hands that don't share cards should have unblocked mass = 1.0
+        unblocked_not_shared = unblocked[0, ~shares_cards]
+        assert torch.allclose(
+            unblocked_not_shared,
+            torch.ones_like(unblocked_not_shared),
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+        # Hands that share cards (excluding target) should have unblocked mass < 1.0
+        shares_but_not_target = shares_cards.clone()
+        shares_but_not_target[target_hand] = False
+        if shares_but_not_target.any():
+            unblocked_shared = unblocked[0, shares_but_not_target]
+            assert (unblocked_shared < 1.0).all()
+
+    def test_double_half_delta(self):
+        """Test calculate_unblocked_mass with double-half-delta beliefs (two hands each have half mass)."""
+        device = torch.device("cpu")
+
+        # Double-half-delta: two hands each have 0.5 mass
+        double_half_delta = torch.zeros(1, NUM_HANDS, dtype=torch.float32)
+        hand1 = 50  # Pick two arbitrary hands
+        hand2 = 200
+        # Ensure they don't block each other (for a cleaner test)
+        combo_onehot = combo_to_onehot_tensor(device=device).float()
+        blocking_matrix = combo_onehot @ combo_onehot.T
+        while blocking_matrix[hand1, hand2] > 0.5:
+            hand2 = (hand2 + 1) % NUM_HANDS
+
+        double_half_delta[0, hand1] = 0.5
+        double_half_delta[0, hand2] = 0.5
+
+        # Compute actual result
+        unblocked = calculate_unblocked_mass(double_half_delta)
+
+        # Hardcoded expectations:
+        # Each hand blocks itself, so: unblocked = 1.0 - 1.0 + 0.5 = 0.5
+        assert torch.allclose(
+            unblocked[0, hand1], torch.tensor(0.5), atol=1e-6, rtol=1e-6
+        )
+        assert torch.allclose(
+            unblocked[0, hand2], torch.tensor(0.5), atol=1e-6, rtol=1e-6
+        )
+
+        # Hands that share cards with neither should have unblocked mass = 1.0
+        shares_hand1 = blocking_matrix[:, hand1] > 0.5  # [NUM_HANDS] bool
+        shares_hand2 = blocking_matrix[:, hand2] > 0.5  # [NUM_HANDS] bool
+        shares_neither = ~(shares_hand1 | shares_hand2)
+        assert torch.allclose(
+            unblocked[0, shares_neither],
+            torch.ones(shares_neither.sum()),
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+    def test_matches_compatibility_matrix(self):
+        """Test that the optimized version matches the 1326x1326 compatibility matrix version."""
+        device = torch.device("cpu")
+
+        # Test with various belief distributions
+        test_cases = [
+            # Uniform beliefs
+            torch.full((1, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32),
+            # Delta beliefs
+            torch.zeros(1, NUM_HANDS, dtype=torch.float32),
+            # Double-half-delta
+            torch.zeros(1, NUM_HANDS, dtype=torch.float32),
+        ]
+        test_cases[1][0, 100] = 1.0  # Delta at hand 100
+        test_cases[2][0, 50] = 0.5  # Double-half-delta
+        test_cases[2][0, 200] = 0.5
+
+        combo_onehot = combo_to_onehot_tensor(device=device).float()
+
+        # Build compatibility matrix: compatible = 1 - blocking + eye
+        # blocking = combo_onehot @ combo_onehot.T - eye
+        # compatible = 1 - (combo_onehot @ combo_onehot.T - eye) = 1 - combo_onehot @ combo_onehot.T + eye
+        blocking_matrix = combo_onehot @ combo_onehot.T  # [NUM_HANDS, NUM_HANDS]
+        eye = torch.eye(NUM_HANDS, device=device, dtype=torch.float32)
+        ones = torch.ones(NUM_HANDS, NUM_HANDS, device=device, dtype=torch.float32)
+        compatible_matrix = ones - blocking_matrix + eye  # [NUM_HANDS, NUM_HANDS]
+
+        for target in test_cases:
+            # Optimized version (current implementation)
+            unblocked_optimized = calculate_unblocked_mass(target)
+
+            # Compatibility matrix version
+            # unblocked[i] = sum_j(compatible[i,j] * target[j])
+            unblocked_matrix = (compatible_matrix @ target.T).T  # [1, NUM_HANDS]
+
+            # They should match exactly
+            torch.testing.assert_close(
+                unblocked_optimized, unblocked_matrix, atol=1e-6, rtol=1e-6
+            )
 
 
 if __name__ == "__main__":

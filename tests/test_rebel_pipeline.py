@@ -123,9 +123,11 @@ def test_rebel_supervised_loss_finite():
 def test_rebel_cfr_trainer_single_step_cpu():
     cfg = Config()
     cfg.num_steps = 1
-    cfg.train.batch_size = 4
+    cfg.num_envs = 2  # Reduced from default for faster execution
+    cfg.train.batch_size = 2  # Reduced from 4 for faster execution
     cfg.train.episodes_per_step = 1
     cfg.train.replay_buffer_batches = 1
+    cfg.train.value_reuse_goal = 2
     cfg.train.learning_rate = 3e-4
     cfg.train.value_coef = 1.0
     cfg.train.entropy_coef = 0.0
@@ -139,8 +141,8 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.model.name = "rebel_ffn"
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
     cfg.model.input_dim = 2661
-    cfg.model.hidden_dim = 64
-    cfg.model.num_hidden_layers = 2
+    cfg.model.hidden_dim = 32  # Reduced from 64 for faster execution
+    cfg.model.num_hidden_layers = 1  # Reduced from 2 for faster execution
     cfg.model.value_head_type = ValueHeadType.scalar
     cfg.model.detach_value_head = True
     cfg.search.enabled = True
@@ -148,7 +150,7 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.search.iterations = 1
     cfg.search.warm_start_iterations = 0
     cfg.search.dcfr_plus_delay = 0
-    cfg.search.branching = 4
+    cfg.search.branching = 2  # Reduced from 4 for faster execution
     cfg.train.stratify_streets = [
         StratifyConfig(threshold=0, probabilities=[0.25, 0.25, 0.25, 0.25])
     ]

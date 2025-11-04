@@ -11,6 +11,7 @@ from torch.profiler import record_function
 from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
     NUM_HANDS,
+    calculate_unblocked_mass,
     combo_to_onehot_tensor,
     hand_combos_tensor,
 )
@@ -533,22 +534,6 @@ class RebelCFREvaluator:
         self._block_beliefs(target)
         return target
 
-    def _calculate_unblocked_mass(self, target: torch.Tensor) -> torch.Tensor:
-        """Calculate unblocked mass for each hand (generally for getting opponent unblocked mass).
-        See DEVN paper for details. CFV = matchup * EV.
-
-        Note that blocking = combo_onehot @ combo_onehot.T - torch.eye(1326).
-        Optimization: compatible = ~blocking = 1 - blocking
-        = 1 - (combo_onehot @ combo_onehot.T) + torch.eye(1326)
-
-        Args:
-            target: [..., 1326] tensor of reach weights for each node.
-        """
-
-        combo_onehot = self.combo_onehot_float
-        multiply = combo_onehot @ (combo_onehot.T @ target.T)
-        return target.sum(dim=-1, keepdim=True) - multiply.T + target
-
     def _initialize_with_copy(self, target: torch.Tensor | None = None) -> torch.Tensor:
         """Initialize the non-root nodes of the tree with a copy of the root nodes."""
         N, M = self.search_batch_size, self.total_nodes
@@ -826,7 +811,7 @@ class RebelCFREvaluator:
         src_opp_beliefs = self.beliefs.gather(1, src_opp_indices).squeeze(1)
 
         # Weight advantages by our mass unblocked by the opponent hands.
-        src_weights = self._calculate_unblocked_mass(src_opp_beliefs)
+        src_weights = calculate_unblocked_mass(src_opp_beliefs)
         weights = self._fan_out(src_weights)
 
         # The value at a node is already the EV over all actions.

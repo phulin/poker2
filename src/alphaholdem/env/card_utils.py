@@ -184,3 +184,26 @@ def combo_suit_permutation_inverse_tensor(
     if device is not None:
         inverse = inverse.to(device)
     return inverse
+
+
+def calculate_unblocked_mass(
+    target: torch.Tensor,
+) -> torch.Tensor:
+    """Calculate unblocked mass for each hand (generally for getting opponent unblocked mass).
+    Used for finding matchup. See DEVN paper for details. CFV = matchup * EV.
+
+    Note that blocking = combo_onehot @ combo_onehot.T - torch.eye(1326).
+    Optimization: compatible = ~blocking = 1 - blocking
+    = 1 - (combo_onehot @ combo_onehot.T) + torch.eye(1326)
+
+    Args:
+        target: [..., 1326] tensor of reach weights for each node.
+        device: Device for the combo_onehot tensor. If None, inferred from target.
+
+    Returns:
+        [..., 1326] tensor of unblocked mass for each hand.
+    """
+    target_batched = target.view(-1, NUM_HANDS)
+    combo_onehot = combo_to_onehot_tensor(device=target.device).float()
+    multiply = combo_onehot @ (combo_onehot.T @ target_batched.T)
+    return target.sum(dim=-1, keepdim=True) - multiply.T.view_as(target) + target
