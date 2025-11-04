@@ -118,6 +118,7 @@ class RebelCFREvaluator:
     cumulative_regrets: torch.Tensor
     regret_weight_sums: torch.Tensor
     last_model_values: torch.Tensor | None
+    # NOTE: Latest values and values_avg are EVs, NOT CFVs.
     latest_values: torch.Tensor
     values_avg: torch.Tensor
     beliefs: torch.Tensor
@@ -434,7 +435,7 @@ class RebelCFREvaluator:
             no_actions = self.env.actions_this_round[offset_next:offset_next_next] == 0
             self.leaf_mask[offset_next:offset_next_next] = valid & (done | no_actions)
 
-            # Showdown and fold values get set in set_leaf_values.
+            # Showdown values get set in set_leaf_values. Fold values get set here.
             self.folded_mask[offset_next:offset_next_next] = (
                 self.valid_mask[offset_next:offset_next_next]
                 & (action_bins[offset_next:offset_next_next] == 0)
@@ -446,6 +447,12 @@ class RebelCFREvaluator:
                 0.0,
             )
 
+        torch.where(
+            self.folded_mask[:, None, None],
+            torch.stack([self.folded_rewards, -self.folded_rewards], dim=1)[:, :, None],
+            self.latest_values,
+            out=self.latest_values,
+        )
         self.values_avg[:] = self.latest_values
 
         leaf_start = self.depth_offsets[self.max_depth]
@@ -525,6 +532,22 @@ class RebelCFREvaluator:
         target.masked_fill_((~self.valid_mask)[:, None, None], 0.0)
         self._block_beliefs(target)
         return target
+
+    def _calculate_unblocked_mass(self, target: torch.Tensor) -> torch.Tensor:
+        """Calculate unblocked mass for each hand (generally for getting opponent unblocked mass).
+        See DEVN paper for details. CFV = matchup * EV.
+
+        Note that blocking = combo_onehot @ combo_onehot.T - torch.eye(1326).
+        Optimization: compatible = ~blocking = 1 - blocking
+        = 1 - (combo_onehot @ combo_onehot.T) + torch.eye(1326)
+
+        Args:
+            target: [..., 1326] tensor of reach weights for each node.
+        """
+
+        combo_onehot = self.combo_onehot_float
+        multiply = combo_onehot @ (combo_onehot.T @ target.T)
+        return target.sum(dim=-1, keepdim=True) - multiply.T + target
 
     def _initialize_with_copy(self, target: torch.Tensor | None = None) -> torch.Tensor:
         """Initialize the non-root nodes of the tree with a copy of the root nodes."""
@@ -735,33 +758,11 @@ class RebelCFREvaluator:
             ) / new
         self.last_model_values = model_output.hand_values
 
-        # Translate EVs from model to opponent-reach-weighted CFVs for CFR.
-        self.latest_values[model_mask] *= self.reach_weights[model_mask].flip(dims=[1])
-
-        # Translate stored folded rewards to CFR-weighted CFVs.
-        folded_reward = torch.stack(
-            [
-                self.folded_rewards[:, None] * self.reach_weights[:, 1],
-                -self.folded_rewards[:, None] * self.reach_weights[:, 0],
-            ],
-            dim=1,
-        )
-        torch.where(
-            self.folded_mask[:, None, None],
-            folded_reward,
-            self.latest_values,
-            out=self.latest_values,
-        )
-
         # Showdown values need to be updated based on beliefs.
         # The env has hands it uses for showdown, but those are fake.
         showdown_values = self._showdown_value(self.showdown_indices)
-        self.latest_values[self.showdown_indices, 0] = (
-            showdown_values * self.reach_weights[self.showdown_indices, 1]
-        )
-        self.latest_values[self.showdown_indices, 1] = (
-            -showdown_values * self.reach_weights[self.showdown_indices, 0]
-        )
+        self.latest_values[self.showdown_indices, 0] = showdown_values
+        self.latest_values[self.showdown_indices, 1] = -showdown_values
 
     @profile
     def compute_expected_values(self) -> torch.Tensor:
@@ -776,21 +777,11 @@ class RebelCFREvaluator:
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
 
-            former_actor = self.prev_actor[offset_next:offset_next_next]
-            dest_indices = torch.arange(
-                offset_next_next - offset_next, device=self.device
+            # Pull back values to the source nodes (NB we are storing EVs, not CFVs).
+            values_weighted = (
+                self.latest_values[offset_next:offset_next_next]
+                * self.policy_probs[offset_next:offset_next_next, None]
             )
-
-            # Pull back values to the source nodes.
-            # NB: we are strategically ignoring the effect of blockers here.
-            # It's a minor change, but it makes the computation much simpler:
-            # all we have to do is add the opponent values as they already include
-            # opponent reach (so effectively includes policy probability).
-            # The original ReBeL source code does this too.
-            values_weighted = self.latest_values[offset_next:offset_next_next].clone()
-            values_weighted[dest_indices, former_actor] *= self.policy_probs[
-                offset_next:offset_next_next
-            ]
             values_src = self._pull_back(values_weighted, sliced=True).sum(dim=1)
             torch.where(
                 self.leaf_mask[offset:offset_next, None, None],
@@ -833,7 +824,10 @@ class RebelCFREvaluator:
         # This represents the opponent's reach prob at the src node.
         # Then actor acts at the transition src -> dest node.
         src_opp_beliefs = self.beliefs.gather(1, src_opp_indices).squeeze(1)
-        src_opp_beliefs_fanout = self._fan_out(src_opp_beliefs)
+
+        # Weight advantages by our mass unblocked by the opponent hands.
+        src_weights = self._calculate_unblocked_mass(src_opp_beliefs)
+        weights = self._fan_out(src_weights)
 
         # The value at a node is already the EV over all actions.
         actor_values = values_expected.gather(1, src_actor_indices).squeeze(1)  # bottom
@@ -844,17 +838,6 @@ class RebelCFREvaluator:
 
         advantages = actor_values_achieved - actor_values_expected
 
-        # The goal here is to compute opp_range @ compatible (= opp_beliefs)
-        # blocking = combo_onehot_float @ combo_onehot_float.T - torch.eye(1326)
-        # => compatible = ~blocking = (1 - blocking)
-        # => the below weight computation is equivalent to opp_beliefs @ compatible
-        combo_onehot = self.combo_onehot_float
-        multiply = combo_onehot @ (combo_onehot.T @ src_opp_beliefs_fanout.T)
-        weights = (
-            src_opp_beliefs_fanout.sum(dim=-1, keepdim=True)
-            - multiply.T
-            + src_opp_beliefs_fanout
-        )
         regrets[bottom:] = weights * advantages
 
         regrets.masked_fill_(~self.valid_mask[:, None], 0.0)
@@ -1628,15 +1611,6 @@ class RebelCFREvaluator:
     def _compute_exploitability(self) -> ExploitabilityStats:
         """Record depth-limited best-response exploitability estimate."""
 
-        policy = self.policy_probs_avg
-        leaf_values = self.values_avg
-        reach_weights = self.reach_weights_avg if self.cfr_avg else self.reach_weights
-        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
-
-        base_values = self._policy_values(policy, leaf_values)
-        br_values_p0 = self._best_response_values(policy, base_values, target_player=0)
-        br_values_p1 = self._best_response_values(policy, base_values, target_player=1)
-
         N = self.search_batch_size
         if N == 0:
             empty = torch.empty(0, device=self.device, dtype=self.float_dtype)
@@ -1644,44 +1618,42 @@ class RebelCFREvaluator:
             return ExploitabilityStats(
                 local_exploitability=empty,
                 local_br_policy=empty2,
-                local_br_values=empty2.clone(),
-                local_br_improvement=empty2.clone(),
+                local_br_values=empty2,
+                local_br_improvement=empty2,
             )
 
-        def _cf_to_ev(values: torch.Tensor, opp_reach: torch.Tensor) -> torch.Tensor:
-            denom = opp_reach.clamp(min=1e-12)
-            return torch.where(opp_reach > 0, values / denom, 0.0)
+        policy = self.policy_probs_avg
+        leaf_values = self.values_avg
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+
+        base_values = self._policy_values(policy, leaf_values)
+        br_values_p0 = self._best_response_values(policy, base_values, target_player=0)
+        br_values_p1 = self._best_response_values(policy, base_values, target_player=1)
 
         base_root = base_values[:N]
         br_root_p0 = br_values_p0[:N]
         br_root_p1 = br_values_p1[:N]
-        reach_root = reach_weights[:N]
-
-        base_ev_p0 = _cf_to_ev(base_root[:, 0], reach_root[:, 1])
-        base_ev_p1 = _cf_to_ev(base_root[:, 1], reach_root[:, 0])
-        br_ev_p0 = _cf_to_ev(br_root_p0[:, 0], reach_root[:, 1])
-        br_ev_p1 = _cf_to_ev(br_root_p1[:, 1], reach_root[:, 0])
-
         beliefs_root = beliefs[:N]
-        # Weight each player's EV by their own root belief distribution. Mixing based on
-        # the acting seat caused best-response improvements to become negative.
+
         beliefs_p0 = beliefs_root[:, 0, :]
         beliefs_p1 = beliefs_root[:, 1, :]
 
-        base_player0 = (base_ev_p0 * beliefs_p0).sum(dim=1)
-        base_player1 = (base_ev_p1 * beliefs_p1).sum(dim=1)
-        br_player0 = (br_ev_p0 * beliefs_p0).sum(dim=1)
-        br_player1 = (br_ev_p1 * beliefs_p1).sum(dim=1)
+        base_player0 = (base_root[:, 0] * beliefs_p0).sum(dim=1)
+        base_player1 = (base_root[:, 1] * beliefs_p1).sum(dim=1)
+        base_players = torch.stack([base_player0, base_player1], dim=1)
 
-        improvement_p0 = br_player0 - base_player0
-        improvement_p1 = br_player1 - base_player1
-        total_exploitability = improvement_p0 + improvement_p1
+        br_player0 = (br_root_p0[:, 0] * beliefs_p0).sum(dim=1)
+        br_player1 = (br_root_p1[:, 1] * beliefs_p1).sum(dim=1)
+        br_players = torch.stack([br_player0, br_player1], dim=1)
+
+        improvements = br_players - base_players
+        total_exploitability = improvements.sum(dim=1)
 
         return ExploitabilityStats(
             local_exploitability=total_exploitability,
-            local_br_policy=torch.stack([base_player0, base_player1], dim=1),
-            local_br_values=torch.stack([br_player0, br_player1], dim=1),
-            local_br_improvement=torch.stack([improvement_p0, improvement_p1], dim=1),
+            local_br_policy=base_players,
+            local_br_values=br_players,
+            local_br_improvement=improvements,
         )
 
     def _record_action_mix(self) -> None:
@@ -1755,7 +1727,7 @@ class RebelCFREvaluator:
         return (
             data_sliced.expand(-1, self.num_actions, *data.shape[1:])
             .clone()
-            .view(-1, *data.shape[1:])
+            .reshape(-1, *data.shape[1:])
         )
 
     def _fan_out_deep(self, data: torch.Tensor) -> torch.Tensor:

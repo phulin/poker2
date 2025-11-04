@@ -124,6 +124,7 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg = Config()
     cfg.num_steps = 1
     cfg.train.batch_size = 4
+    cfg.train.episodes_per_step = 1
     cfg.train.replay_buffer_batches = 1
     cfg.train.learning_rate = 3e-4
     cfg.train.value_coef = 1.0
