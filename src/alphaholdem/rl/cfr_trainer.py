@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import math
 import os
 
@@ -454,7 +455,7 @@ class RebelCFRTrainer:
             "model": model_state,
             "step": step,
             "save_dtype": str(save_dtype) if save_dtype is not None else None,
-            "config": OmegaConf.to_container(self.cfg, resolve=True),
+            "config": asdict(self.cfg),
             # Store wandb run ID for resumption
             "wandb_run_id": wandb_run_id,
         }
