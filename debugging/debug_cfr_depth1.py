@@ -102,7 +102,7 @@ def load_model_from_checkpoint(
         return create_random_model(config, device)
 
     # Inspect checkpoint to determine model type and architecture
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model_state = checkpoint["model"]
 
     # Detect model type from checkpoint keys

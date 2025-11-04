@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
+import torch
 
 
 class ValueLossType(str, Enum):
@@ -46,6 +47,16 @@ class CFRType(str, Enum):
     linear = "linear"
     discounted = "discounted"
     discounted_plus = "discounted_plus"
+
+
+torch.serialization.add_safe_globals(ValueLossType)
+torch.serialization.add_safe_globals(LrSchedule)
+torch.serialization.add_safe_globals(ValueHeadType)
+torch.serialization.add_safe_globals(ModelType)
+torch.serialization.add_safe_globals(PPOClipping)
+torch.serialization.add_safe_globals(KLType)
+torch.serialization.add_safe_globals(CFRType)
+torch.serialization.add_safe_globals(PPOClipping)
 
 
 @dataclass

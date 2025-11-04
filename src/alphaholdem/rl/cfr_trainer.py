@@ -468,7 +468,7 @@ class RebelCFRTrainer:
         torch.save(state, path)
 
     def load_checkpoint(self, path: str) -> int:
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
 
         # Convert model state back to host dtype if it was saved in bfloat16
         save_dtype_str = ckpt.get("save_dtype")
