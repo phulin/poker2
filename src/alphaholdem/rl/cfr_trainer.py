@@ -196,9 +196,7 @@ class RebelCFRTrainer:
         value_river = value_batch.features.street == 3
         value_showdown = value_batch.features.street == 4
 
-        def by_street(
-            tensor: torch.Tensor, batch=value_batch, weights=None
-        ) -> dict[str, float]:
+        def by_street(tensor: torch.Tensor, batch=value_batch) -> dict[str, float]:
             masks = {
                 "preflop": batch.features.street == 0,
                 "flop": batch.features.street == 1,
@@ -206,14 +204,7 @@ class RebelCFRTrainer:
                 "river": batch.features.street == 3,
                 "showdown": batch.features.street == 4,
             }
-            if weights is not None:
-                result = {
-                    k: (tensor[mask] * weights[mask]).sum(dim=-1)
-                    / weights[mask].sum(dim=-1).mean().item()
-                    for k, mask in masks.items()
-                }
-            else:
-                result = {k: tensor[mask].mean().item() for k, mask in masks.items()}
+            result = {k: tensor[mask].mean().item() for k, mask in masks.items()}
             return {k: v for k, v in result.items() if not math.isnan(v)}
 
         exploitability = value_batch.statistics["local_exploitability"]
@@ -245,7 +236,6 @@ class RebelCFRTrainer:
             "local_exploitability": exploitability.mean().item(),
             "local_exploitability_street": by_street(
                 exploitability,
-                weights=torch.ones_like(exploitability),
             ),
             "aggression_stats": {
                 f"chunk_{i}": v
