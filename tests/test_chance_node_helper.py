@@ -73,6 +73,45 @@ class BeliefEchoModel:
         pass
 
 
+class BoardBasedModel:
+    """Model that returns hand values based on board card ranks only (commutes with permutations)."""
+
+    def __init__(self, device: torch.device, float_dtype: torch.dtype):
+        self.device = device
+        self.float_dtype = float_dtype
+
+    def __call__(self, features: MLPFeatures) -> ModelOutput:
+        batch_size = features.context.shape[0]
+        # Return hand values based on sum of board card ranks (not suits)
+        # This commutes with suit permutations because it only depends on ranks
+        board = features.board  # [B, 5]
+        valid_mask = board >= 0
+        ranks = (board % 13).float()  # Extract ranks (0-12)
+        ranks = torch.where(valid_mask, ranks, torch.zeros_like(ranks))
+        board_sum = ranks.sum(dim=1, keepdim=True)  # [B, 1]
+        hand_values = (
+            (board_sum % NUM_HANDS)
+            .unsqueeze(1)
+            .expand(-1, 2, NUM_HANDS)
+            .to(device=self.device, dtype=self.float_dtype)
+        )
+        policy_logits = torch.zeros(
+            batch_size, 3, device=self.device, dtype=self.float_dtype
+        )
+        value = torch.zeros(batch_size, device=self.device, dtype=self.float_dtype)
+        return ModelOutput(
+            policy_logits=policy_logits,
+            value=value,
+            hand_values=hand_values,
+        )
+
+    def eval(self) -> None:
+        pass
+
+    def train(self) -> None:
+        pass
+
+
 class TestChanceNodeHelper:
     """Test suite for ChanceNodeHelper."""
 
@@ -260,8 +299,8 @@ class TestChanceNodeHelper:
         assert result.dtype == dtype
 
     def test_flop_chance_values_matches_bruteforce(self, device: torch.device):
-        """Ensure permutation handling matches explicit enumeration."""
-        model = BeliefEchoModel(device, torch.float32)
+        """Evaluate model on all 22100 flops and check it matches flop_chance_values."""
+        model = BoardBasedModel(device, torch.float32)
         helper = ChanceNodeHelper(
             device=device,
             float_dtype=torch.float32,
@@ -293,58 +332,95 @@ class TestChanceNodeHelper:
             root_indices, root_features, pre_chance_beliefs
         )
 
-        num_perms = helper.num_permutations
-        num_flops = helper.flop_id_to_canonical.shape[0]
+        # Evaluate model on all 22100 flops
+        all_flops = helper.all_flops  # (22100, 3)
+        num_flops = all_flops.shape[0]
+        assert num_flops == 22100
 
-        beliefs_per_perm = [
-            pre_chance_beliefs.index_select(-1, helper.combo_perm_inverse[perm_idx])
-            for perm_idx in range(num_perms)
-        ]
-        perm_forward = [helper.combo_perm[perm_idx] for perm_idx in range(num_perms)]
+        pre_beliefs = pre_chance_beliefs[root_indices].to(dtype=helper.float_dtype)
+        context_root = root_features.context[root_indices]
+        street_root = root_features.street[root_indices]
+        to_act_root = root_features.to_act[root_indices]
 
-        values_sum = torch.zeros_like(result)
-        chunk_size = helper.FLOP_CHUNK_SIZE
+        values_sum = torch.zeros(
+            B, helper.num_players, NUM_HANDS, device=device, dtype=helper.float_dtype
+        )
 
+        model.eval()
+        chunk_size = 128
         for start in range(0, num_flops, chunk_size):
             end = min(start + chunk_size, num_flops)
+            chunk_len = end - start
 
-            allowed_chunk = helper.flop_id_to_allowed_mask[start:end]
-            perm_counts_chunk = helper.flop_id_perm_counts[start:end]
+            flop_chunk = all_flops[start:end]
+            board_chunk = torch.cat(
+                [
+                    flop_chunk,
+                    torch.full((chunk_len, 2), -1, device=device, dtype=torch.long),
+                ],
+                dim=1,
+            )
 
-            for perm_idx in range(num_perms):
-                counts = perm_counts_chunk[:, perm_idx]
-                if not torch.any(counts):
-                    continue
+            # Build allowed mask for each flop
+            board_onehot = torch.zeros(
+                chunk_len, 52, dtype=helper.float_dtype, device=device
+            )
+            board_onehot.scatter_(
+                1,
+                flop_chunk,
+                torch.ones(chunk_len, 3, dtype=helper.float_dtype, device=device),
+            )
+            conflict_matrix = helper.combo_onehot_float @ board_onehot.T
+            allowed_chunk = (conflict_matrix == 0).T
 
-                mask = counts > 0
-                counts_sel = counts[mask].to(torch.long)
-                k = counts_sel.numel()
+            allowed_broadcast = (
+                allowed_chunk.unsqueeze(0)
+                .unsqueeze(2)
+                .expand(B, chunk_len, helper.num_players, NUM_HANDS)
+            )
 
-                allowed_sel = allowed_chunk[mask]
+            post_beliefs = (
+                pre_beliefs.unsqueeze(1).expand(-1, chunk_len, -1, -1).clone()
+            )
+            post_beliefs[..., ~allowed_broadcast] = 0.0
 
-                beliefs_perm = beliefs_per_perm[perm_idx]
-                post_beliefs = beliefs_perm.unsqueeze(1).expand(-1, k, -1, -1).clone()
-                allowed_broadcast = (
-                    allowed_sel.unsqueeze(0)
-                    .unsqueeze(2)
-                    .expand(B, k, helper.num_players, NUM_HANDS)
-                )
-                post_beliefs[..., ~allowed_broadcast] = 0.0
+            sums = post_beliefs.sum(dim=-1, keepdim=True)
+            uniform = allowed_broadcast.to(helper.float_dtype)
+            uniform_sum = uniform.sum(dim=-1, keepdim=True).clamp(min=1.0)
+            uniform = uniform / uniform_sum
 
-                sums = post_beliefs.sum(dim=-1, keepdim=True)
-                uniform = allowed_broadcast.to(helper.float_dtype)
-                uniform_sum = uniform.sum(dim=-1, keepdim=True).clamp(min=1.0)
-                uniform = uniform / uniform_sum
+            normalized_beliefs = torch.where(
+                sums > 1e-12, post_beliefs / sums.clamp(min=1e-12), uniform
+            )
 
-                normalized = torch.where(
-                    sums > 1e-12, post_beliefs / sums.clamp(min=1e-12), uniform
-                )
+            belief_features = normalized_beliefs.reshape(B * chunk_len, -1)
+            board_samples_flat = (
+                board_chunk.unsqueeze(0).expand(B, -1, -1).reshape(-1, 5)
+            )
 
-                repeated = normalized.repeat_interleave(counts_sel, dim=1)
-                actual_values = repeated.index_select(-1, perm_forward[perm_idx])
-                values_sum += actual_values.sum(dim=1)
+            context_expand = (
+                context_root.unsqueeze(1)
+                .expand(-1, chunk_len, -1)
+                .reshape(-1, context_root.shape[1])
+            )
+            street_expand = street_root.unsqueeze(1).expand(-1, chunk_len).reshape(-1)
+            to_act_expand = to_act_root.unsqueeze(1).expand(-1, chunk_len).reshape(-1)
 
-        expected = values_sum / helper.total_flop_count
+            synthetic_features = MLPFeatures(
+                context=context_expand,
+                street=street_expand,
+                to_act=to_act_expand,
+                board=board_samples_flat,
+                beliefs=belief_features,
+            )
+            hand_values = model(synthetic_features).hand_values.to(
+                dtype=helper.float_dtype
+            )
+            hand_values = hand_values.view(B, chunk_len, helper.num_players, NUM_HANDS)
+
+            values_sum += hand_values.sum(dim=1)
+
+        expected = values_sum / num_flops
         torch.testing.assert_close(result, expected)
 
     def test_single_card_chance_values_empty_input(self, helper: ChanceNodeHelper):
