@@ -249,7 +249,7 @@ def train_rebel(cfg: Config) -> None:
 
         final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
         trainer.save_checkpoint(
-            final_path, cfg.num_steps, save_optimizer=True, save_dtype=None
+            final_path, cfg.num_steps, save_optimizer=False, save_dtype=None
         )
         total_elapsed = time.time() - training_start
         print(

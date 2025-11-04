@@ -233,6 +233,13 @@ class ChanceNodeHelper:
 
         chunk_size = self.FLOP_CHUNK_SIZE
         model.eval()
+
+        # Pre-compute permuted beliefs for all permutations
+        beliefs_per_perm = [
+            pre_beliefs_broadcast.index_select(-1, self.combo_perm_inverse[perm_idx])
+            for perm_idx in range(self.num_permutations)
+        ]
+
         for start in range(0, num_flops, chunk_size):
             end = min(start + chunk_size, num_flops)
             chunk_len = end - start
@@ -240,6 +247,7 @@ class ChanceNodeHelper:
             canonical_chunk = self.flop_id_to_canonical[start:end]
             counts_chunk = self.flop_id_to_count[start:end]
             allowed_chunk = self.flop_id_to_allowed_mask[start:end]
+            perm_counts_chunk = self.flop_id_perm_counts[start:end]
 
             canonical_chunk_5 = torch.cat(
                 [
@@ -249,60 +257,75 @@ class ChanceNodeHelper:
                 dim=1,
             )
 
-            allowed_broadcast = (
-                allowed_chunk.unsqueeze(0)
-                .unsqueeze(2)
-                .expand(B, chunk_len, self.num_players, NUM_HANDS)
-            )
-
-            post_beliefs = (
-                pre_beliefs_broadcast.unsqueeze(1).expand(-1, chunk_len, -1, -1).clone()
-            )
-            post_beliefs[..., ~allowed_broadcast] = 0.0
-
-            sums = post_beliefs.sum(dim=-1, keepdim=True)
-            uniform = allowed_broadcast.to(dtype)
-            uniform_sum = uniform.sum(dim=-1, keepdim=True).clamp(min=1.0)
-            uniform = uniform / uniform_sum
-
-            normalized_beliefs = torch.where(
-                sums > 1e-12, post_beliefs / sums.clamp(min=1e-12), uniform
-            )
-
-            belief_features = normalized_beliefs.reshape(B * chunk_len, -1)
-            board_samples_flat = (
-                canonical_chunk_5.unsqueeze(0).expand(B, -1, -1).reshape(-1, 5)
-            )
-
-            context_expand = (
-                context_root.unsqueeze(1)
-                .expand(-1, chunk_len, -1)
-                .reshape(-1, context_root.shape[1])
-            )
-            street_expand = street_root.unsqueeze(1).expand(-1, chunk_len).reshape(-1)
-            to_act_expand = to_act_root.unsqueeze(1).expand(-1, chunk_len).reshape(-1)
-
-            synthetic_features = MLPFeatures(
-                context=context_expand,
-                street=street_expand,
-                to_act=to_act_expand,
-                board=board_samples_flat,
-                beliefs=belief_features,
-            )
-            hand_values = model(synthetic_features).hand_values.to(dtype=dtype)
-            hand_values = hand_values.view(B, chunk_len, self.num_players, NUM_HANDS)
-
-            # We only want to run the model on the canonical flops, but we need the
-            # outputs for all 22,100 flops. If we assume the model commutes with suit
-            # permutations, we can equivalently apply the permutations to the outputs.
-            # NB that we enforce the commutativity with an auxiliary loss.
-            permuted_sum = torch.zeros_like(hand_values)
+            # Process each permutation separately to match brute force logic
+            # Accumulate contributions: for each permutation, we process flops with count > 0
             for perm_idx in range(self.num_permutations):
-                permuted_sum += hand_values.index_select(-1, self.combo_perm[perm_idx])
-            permuted_sum /= self.num_permutations
+                counts = perm_counts_chunk[:, perm_idx]
+                if not torch.any(counts):
+                    continue
 
-            weight = counts_chunk.view(1, chunk_len, 1, 1).to(dtype)
-            values_sum += (permuted_sum * weight).sum(dim=1)
+                mask = counts > 0
+                counts_sel = counts[mask].to(torch.long)
+                k = counts_sel.numel()
+
+                if k == 0:
+                    continue
+
+                allowed_sel = allowed_chunk[mask]
+                canonical_sel = canonical_chunk_5[mask]
+
+                beliefs_perm = beliefs_per_perm[perm_idx]
+                post_beliefs = beliefs_perm.unsqueeze(1).expand(-1, k, -1, -1).clone()
+                allowed_broadcast = (
+                    allowed_sel.unsqueeze(0)
+                    .unsqueeze(2)
+                    .expand(B, k, self.num_players, NUM_HANDS)
+                )
+                post_beliefs[..., ~allowed_broadcast] = 0.0
+
+                sums = post_beliefs.sum(dim=-1, keepdim=True)
+                uniform = allowed_broadcast.to(dtype)
+                uniform_sum = uniform.sum(dim=-1, keepdim=True).clamp(min=1.0)
+                uniform = uniform / uniform_sum
+
+                normalized = torch.where(
+                    sums > 1e-12, post_beliefs / sums.clamp(min=1e-12), uniform
+                )
+
+                belief_features = normalized.reshape(B * k, -1)
+                board_samples_flat = (
+                    canonical_sel.unsqueeze(0).expand(B, -1, -1).reshape(-1, 5)
+                )
+
+                context_expand = (
+                    context_root.unsqueeze(1)
+                    .expand(-1, k, -1)
+                    .reshape(-1, context_root.shape[1])
+                )
+                street_expand = street_root.unsqueeze(1).expand(-1, k).reshape(-1)
+                to_act_expand = to_act_root.unsqueeze(1).expand(-1, k).reshape(-1)
+
+                synthetic_features = MLPFeatures(
+                    context=context_expand,
+                    street=street_expand,
+                    to_act=to_act_expand,
+                    board=board_samples_flat,
+                    beliefs=belief_features,
+                )
+                hand_values_perm = model(synthetic_features).hand_values.to(dtype=dtype)
+                hand_values_perm = hand_values_perm.view(
+                    B, k, self.num_players, NUM_HANDS
+                )
+
+                # Apply forward permutation
+                actual_values = hand_values_perm.index_select(
+                    -1, self.combo_perm[perm_idx]
+                )
+
+                # Repeat based on counts (matching brute force)
+                repeated = actual_values.repeat_interleave(counts_sel, dim=1)
+                # Sum over repeated dimension (matching brute force line 345)
+                values_sum += repeated.sum(dim=1)
 
         expected = values_sum / self.total_flop_count
         return expected

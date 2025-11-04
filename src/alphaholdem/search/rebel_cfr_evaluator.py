@@ -109,6 +109,7 @@ class RebelCFREvaluator:
     valid_mask: torch.Tensor
     leaf_mask: torch.Tensor
     showdown_indices: torch.Tensor
+    showdown_actors: torch.Tensor
     prev_actor: torch.Tensor
     allowed_hands: torch.Tensor
     allowed_hands_prob: torch.Tensor
@@ -193,6 +194,7 @@ class RebelCFREvaluator:
         # Should be a subset of valid_mask.
         self.leaf_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
         self.showdown_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.showdown_actors = torch.empty(0, dtype=torch.long, device=self.device)
 
         # Set in construct_subgame and not updated.
         self.folded_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
@@ -362,6 +364,7 @@ class RebelCFREvaluator:
         self.leaf_mask.zero_()
         self.leaf_mask[:N] = self.env.done[:N]
         self.showdown_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.showdown_actors = torch.empty(0, dtype=torch.long, device=self.device)
         self.folded_mask.zero_()
         self.folded_rewards.zero_()
         self.policy_probs.zero_()
@@ -460,6 +463,7 @@ class RebelCFREvaluator:
         leaf_end = self.depth_offsets[self.max_depth + 1]
         self.leaf_mask[leaf_start:leaf_end] = self.valid_mask[leaf_start:leaf_end]
         self.showdown_indices = torch.where(self.env.street == 4)[0]
+        self.showdown_actors = self.env.to_act[self.showdown_indices]
 
         root_board_mask = self.env.board_onehot[:N].any(dim=1).reshape(N, -1).float()
         root_allowed = (self.combo_onehot_float @ root_board_mask.T).T < 0.5
@@ -753,7 +757,6 @@ class RebelCFREvaluator:
     def compute_expected_values(self) -> torch.Tensor:
         """Back up leaf hand values to their ancestors under the current policy."""
 
-        self.latest_values.masked_fill_((~self.leaf_mask)[:, None, None], 0.0)
         # First iteration: leaf values already populated; back propagate expectations
         for depth in range(self.max_depth - 1, -1, -1):
             self.profiler_step()  # Profile each depth iteration
@@ -763,15 +766,37 @@ class RebelCFREvaluator:
             offset_next_next = self.depth_offsets[depth + 2]
 
             # Pull back values to the source nodes (NB we are storing EVs, not CFVs).
-            values_weighted = (
-                self.latest_values[offset_next:offset_next_next]
-                * self.policy_probs[offset_next:offset_next_next, None]
+            # First, we have to marginalize over all private hands.
+            # Pull back policy: [K, B, 1326]
+            policy = self._pull_back(
+                self.policy_probs[offset_next:offset_next_next], sliced=True
             )
-            values_src = self._pull_back(values_weighted, sliced=True).sum(dim=1)
+            actor_indices = self.env.to_act[offset:offset_next]
+            actor_indices_expanded = actor_indices[:, None, None].expand(
+                -1, -1, NUM_HANDS
+            )
+            beliefs = self.beliefs[offset:offset_next]
+            actor_beliefs = beliefs.gather(1, actor_indices_expanded)  # [K, 1, 1326]
+            marginal_policy = policy * actor_beliefs  # [K, B, 1326]
+            policy_blocked = calculate_unblocked_mass(marginal_policy)
+            matchup_values = calculate_unblocked_mass(actor_beliefs)
+            opponent_conditioned_policy = torch.where(
+                matchup_values > 1e-12, policy_blocked / matchup_values, 0.0
+            )
+
+            indices = torch.arange(offset_next - offset, device=self.device)
+            child_values_src = self._pull_back(
+                self.latest_values[offset_next:offset_next_next], sliced=True
+            ).clone()  # [K, B, 2, 1326]
+            child_values_src[indices, :, actor_indices] *= policy
+            child_values_src[
+                indices, :, 1 - actor_indices
+            ] *= opponent_conditioned_policy
+
             torch.where(
                 self.leaf_mask[offset:offset_next, None, None],
                 self.latest_values[offset:offset_next],
-                values_src,
+                child_values_src.sum(dim=1),
                 out=self.latest_values[offset:offset_next],
             )
             self.latest_values[offset:offset_next].masked_fill_(
@@ -1098,6 +1123,8 @@ class RebelCFREvaluator:
             self.regret_weight_sums /= denominator
         self.regret_weight_sums += 1
         self.cumulative_regrets += regrets
+        # This is the CFR+ trick.
+        self.cumulative_regrets.clamp_(min=0)
 
         old_policy_probs = self.policy_probs.clone()
         self.update_policy(t)
@@ -1235,6 +1262,7 @@ class RebelCFREvaluator:
         """
         Exact river showdown EV using rank-CDF + blocker correction.
         Returns per-hand EV [N, 1326] (unsorted/original hand order) per env.
+        Result is from p0 perspective.
         """
 
         M = indices.numel()

@@ -20,23 +20,22 @@ Usage:
     python debug_cfr_depth1.py --river --checkpoint rebel_step_1250.pt
 """
 
-import argparse
 import os
 import random
 
 import torch
+from dataclasses import dataclass
+from typing import Optional
 
-from alphaholdem.core.structured_config import (
-    CFRType,
-    Config,
-    EnvConfig,
-    ModelConfig,
-    ModelType,
-    SearchConfig,
-    TrainingConfig,
-)
+import hydra
+from hydra.core.config_store import ConfigStore
+from omegaconf import DictConfig, OmegaConf
+from hydra.utils import to_absolute_path
+
+from alphaholdem.core.structured_config import Config, ModelType
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.types import GameState, PlayerState
+from alphaholdem.env import card_utils
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
@@ -58,6 +57,38 @@ def action_to_string(action_idx: int, bet_bins: list[float]) -> str:
         return f"ACTION_{action_idx}"
 
 
+# Fixed width for the Node column when printing depth-first (includes indentation)
+NODE_COL_WIDTH = 18
+
+
+def _card_index_to_str(card_idx: int) -> str:
+    ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"]
+    suits = ["♠", "♥", "♦", "♣"]
+    suit = card_idx // 13
+    rank = card_idx % 13
+    return f"{ranks[rank]}{suits[suit]}"
+
+
+def _parse_hole_cards_str(hole: str) -> tuple[int, int]:
+    """Parse hole string like 'AsTc' into two 0-51 card indices."""
+    s = hole.strip()
+    if len(s) != 4:
+        raise ValueError("Hole cards must be 4 chars like AsTc")
+    ranks = {
+        c: i
+        for i, c in enumerate(
+            ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"]
+        )
+    }
+    suits = {"s": 0, "h": 1, "d": 2, "c": 3}
+    r1, su1, r2, su2 = s[0], s[1].lower(), s[2], s[3].lower()
+    if r1 not in ranks or r2 not in ranks or su1 not in suits or su2 not in suits:
+        raise ValueError("Invalid hole card string; use format AsTc with suits shdc")
+    c1 = suits[su1] * 13 + ranks[r1]
+    c2 = suits[su2] * 13 + ranks[r2]
+    return c1, c2
+
+
 def load_model_from_checkpoint(
     checkpoint_path: str, config: Config, device: torch.device
 ) -> RebelFFN | BetterFFN:
@@ -71,7 +102,7 @@ def load_model_from_checkpoint(
         return create_random_model(config, device)
 
     # Inspect checkpoint to determine model type and architecture
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
     model_state = checkpoint["model"]
 
     # Detect model type from checkpoint keys
@@ -137,171 +168,73 @@ def create_random_model(config: Config, device: torch.device) -> RebelFFN:
     return model
 
 
-def create_river_state(
-    sb_amount: int = 5,
-    bb_amount: int = 10,
-    starting_stack: int = 1000,
-    button: int = 0,
-    seed: int | None = None,
-) -> GameState:
-    """Create a river GameState with reasonable betting history.
+def advance_to_river_with_history(
+    env: HUNLTensorEnv,
+    button: int = 1,
+) -> None:
+    """Reset env and step through a fixed action history to the river.
 
-    Betting history:
-    - Preflop: SB calls BB (pot=20)
-    - Flop: Both check (pot=20)
-    - Turn: SB checks, BB bets 2x pot (40), SB calls (pot=100)
-    - River: SB checks (current state, pot=100)
+    History:
+    - Preflop: SB completes (call)
+    - Flop: SB checks, BB checks
+    - Turn: SB checks, BB bets (turn_bet_multiplier * pot), SB calls
+    - River: SB checks → BB to act
 
     Args:
-        sb_amount: Small blind amount
-        bb_amount: Big blind amount
-        starting_stack: Starting stack for each player
-        button: Button position (0 or 1)
-        seed: Random seed for shuffling deck
-
-    Returns:
-        GameState at the beginning of the river
+        env: Environment to mutate in-place (expects N=1)
+        button: 0=SB is button, 1=BB is button. Use 1 so SB acts first on river.
+        turn_bet_multiplier: Multiplier of current pot for BB's turn bet.
     """
-    # Create a deck
-    deck = list(range(52))
+    assert env.N == 1, "This helper expects a single-env instance (N=1)"
 
-    if seed is not None:
-        random.seed(seed)
-    random.shuffle(deck)
+    # Reset with forced button so river actor is BB
+    env.reset(force_button=torch.tensor([button], device=env.device))
 
-    # Deal board cards (5 cards for river)
-    board = [deck.pop() for _ in range(5)]
+    # SB/button is p1 by default, BB is p0.
 
-    # Create player states with hole cards
-    sb_player = PlayerState(
-        stack=starting_stack - sb_amount - 40
-    )  # Lost blinds + call turn bet
-    sb_player.hole_cards = [deck.pop(), deck.pop()]
-    sb_player.committed = sb_amount + 40  # Posted blind + called turn bet
-    sb_player.stack_after_posting = sb_player.stack
+    # Preflop: SB raise 1.5x pot, BB call
+    bet_bin_index = min(3, len(env.default_bet_bins) + 2)
+    env.step_bins(
+        torch.full((env.N,), bet_bin_index, dtype=torch.long, device=env.device)
+    )
+    env.step_bins(torch.ones(env.N, dtype=torch.long, device=env.device))
 
-    bb_player = PlayerState(
-        stack=starting_stack - bb_amount - 40
-    )  # Lost blind + bet on turn
-    bb_player.hole_cards = [deck.pop(), deck.pop()]
-    bb_player.committed = bb_amount + 40  # Posted blind + bet on turn
-    bb_player.stack_after_posting = bb_player.stack
+    # Flop: check, check
+    env.step_bins(torch.ones(env.N, dtype=torch.long, device=env.device))
+    env.step_bins(torch.ones(env.N, dtype=torch.long, device=env.device))
 
-    # Create betting history
-    action_history = [
-        # Preflop
-        ("preflop", 0, "call", bb_amount - sb_amount, bb_amount - sb_amount, sb_amount),
-        # Flop
-        ("flop", 0, "check", 0, 0, bb_amount),
-        ("flop", 1, "check", 0, 0, bb_amount),
-        # Turn
-        ("turn", 0, "check", 0, 0, bb_amount),
-        ("turn", 1, "bet", 40, 40, bb_amount),  # BB bets 2x pot
-        ("turn", 0, "call", 40, 40, bb_amount + 40),
-        # River
-        ("river", 0, "check", 0, 0, bb_amount + 40),  # SB checks
-    ]
+    # Turn: SB check
+    env.step_bins(torch.ones(env.N, dtype=torch.long, device=env.device))
 
-    # Create game state
-    game_state = GameState(
-        button=button,
-        street="river",
-        deck=deck,
-        board=board,
-        pot=bb_amount
-        + sb_amount
-        + 40
-        + 40,  # Initial blinds (15) + turn betting (80) = 95
-        to_act=1,  # BB to act after SB checks
-        small_blind=sb_amount,
-        big_blind=bb_amount,
-        min_raise=bb_amount,
-        last_aggressive_amount=40,  # Last bet was 40 on turn
-        players=(sb_player, bb_player),
-        terminal=False,
-        winner=None,
-        action_history=action_history,
+    # Turn: BB bet 1.5x pot
+    env.step_bins(
+        torch.full((env.N,), bet_bin_index, dtype=torch.long, device=env.device)
     )
 
-    return game_state
-
-
-def create_default_config() -> Config:
-    """Create a default configuration for debugging."""
-    config = Config()
-    config.num_envs = 1
-    config.device = "cuda" if torch.cuda.is_available() else "cpu"
-    config.seed = 42
-
-    # Training config
-    config.train = TrainingConfig()
-    config.train.learning_rate = 3e-4
-    config.train.batch_size = 1024
-    config.train.replay_buffer_batches = 8
-    config.train.value_coef = 1.0
-    config.train.entropy_coef = 0.0
-    config.train.grad_clip = 1.0
-    config.train.max_sequence_length = 32
-
-    # Model config
-    config.model = ModelConfig()
-    config.model.name = ModelType.rebel_ffn
-    config.model.input_dim = 2661
-    config.model.hidden_dim = 1536
-    config.model.num_hidden_layers = 6
-    config.model.value_head_type = "scalar"
-    config.model.value_head_num_quantiles = 1
-    config.model.detach_value_head = True
-    config.model.compile = False
-
-    # Environment config
-    config.env = EnvConfig()
-    config.env.stack = 1000
-    config.env.sb = 5
-    config.env.bb = 10
-    config.env.bet_bins = [0.5, 1.5]
-    config.env.flop_showdown = False
-
-    # Search config
-    config.search = SearchConfig()
-    config.search.enabled = True
-    config.search.depth = 1  # Depth-1 tree for debugging
-    config.search.iterations = 201  # Show up to iteration 25 (range goes to 26)
-    config.search.warm_start_iterations = 15  # Warm start 15 iterations
-    config.search.branching = 4
-    config.search.belief_samples = 1
-    config.search.dcfr_alpha = 1.5
-    config.search.dcfr_beta = 0.0
-    config.search.dcfr_gamma = 2.0
-    config.search.dcfr_plus_delay = 50
-    config.search.include_average_policy = True
-    config.search.cfr_type = CFRType.linear
-    config.search.cfr_avg = True
-
-    return config
+    # Turn: SB call
+    env.step_bins(torch.ones(env.N, dtype=torch.long, device=env.device))
 
 
 def print_single_iteration_data(
     evaluator: RebelCFREvaluator,
     iteration: int,
     bet_bins: list[float],
-    num_actions: int,
+    selected_hand_idx: Optional[int] = None,
 ) -> None:
     """Print data for a single CFR iteration."""
     print(f"\n{'='*80}")
-    print(f"Iteration {iteration}")
+    print(f"Iteration {iteration + 1}")
     print(f"{'='*80}")
 
-    # Get root node (depth 0)
-    root_idx = evaluator.depth_offsets[0]
-
     # Get depth 1 nodes
+    root_idx = 0
     depth1_offset = evaluator.depth_offsets[1]
     depth1_end = evaluator.depth_offsets[2]
+    actor = evaluator.env.to_act[root_idx].item()
 
     print(f"\nChild Nodes (depth 1):")
     print(
-        f"{'Node':>6} | {'Action':>10} | {'Policy':>7} | {'PolicyAvg':>7} | {'Regret [min, max]':>24} | {'Value':>7} | {'BeliefSum':>9}"
+        f"{'Node':>6} | {'Action':>10} | {'Policy':>7} | {'PolicyAvg':>7} | {'Regret [min, max]':>24} | {'Value':>7}"
     )
     print("-" * 80)
 
@@ -315,41 +248,216 @@ def print_single_iteration_data(
 
         # Policy probs and regrets are stored on the child node itself
         # So we look at policy_probs[child_idx] and cumulative_regrets[child_idx]
-        allowed_hands = evaluator.allowed_hands[child_idx]
         policy_probs = evaluator.policy_probs[child_idx].clone()
-        policy_probs.masked_fill_(~allowed_hands, 0.0)
         policy_probs_avg = evaluator.policy_probs_avg[child_idx].clone()
-        policy_probs_avg.masked_fill_(~allowed_hands, 0.0)
-        policy_prob = policy_probs.sum().item() / allowed_hands.sum().item()
-        policy_avg_prob = policy_probs_avg.sum().item() / allowed_hands.sum().item()
-        # Note: cumulative_regrets can be negative; policy uses clamped version (regret matching)
-        regret = evaluator.cumulative_regrets[child_idx].mean().item()
-        regret_max = evaluator.cumulative_regrets[child_idx].max().item()
-        regret_min = evaluator.cumulative_regrets[child_idx].min().item()
 
-        # Get value at this node - average over both players and all hands
-        # values_avg has shape [M, 2, NUM_HANDS]
-        value = evaluator.values_avg[child_idx, :, :].mean().item()
+        if selected_hand_idx is not None:
+            # Specific hand stats only
+            policy_prob = float(policy_probs[selected_hand_idx].item())
+            policy_avg_prob = float(policy_probs_avg[selected_hand_idx].item())
+            regret_val = float(
+                evaluator.cumulative_regrets[child_idx][selected_hand_idx].item()
+            )
+            regret = regret_val
+            regret_min = regret_val
+            regret_max = regret_val
+            value = (
+                evaluator.values_avg[child_idx, actor, selected_hand_idx].mean().item()
+            )
+        else:
+            # Weighting: use current beliefs for current policy, avg beliefs for avg policy
+            # Use beliefs from parent (root) so all actions share the same weighting
+            beliefs_current = evaluator.beliefs[root_idx, :, :]  # [2, NUM_HANDS]
+            beliefs_avg = evaluator.beliefs_avg[root_idx, :, :]  # [2, NUM_HANDS]
+            weights_current = beliefs_current.sum(dim=0)  # [NUM_HANDS]
+            weights_avg = beliefs_avg.sum(dim=0)  # [NUM_HANDS]
 
-        # Get belief sum at this node - sum over both players and all hands
-        belief_sum = evaluator.beliefs_avg[child_idx, :, :].sum().item()
+            parent_allowed = evaluator.allowed_hands[root_idx]
+            child_allowed = evaluator.allowed_hands[child_idx]
+            allowed_hands = parent_allowed & child_allowed
+
+            policy_probs = policy_probs.masked_fill(~allowed_hands, 0.0)
+            policy_probs_avg = policy_probs_avg.masked_fill(~allowed_hands, 0.0)
+            weights_current = weights_current.masked_fill(~allowed_hands, 0.0)
+            weights_avg = weights_avg.masked_fill(~allowed_hands, 0.0)
+
+            weights_current_sum = float(weights_current.sum().item())
+            weights_avg_sum = float(weights_avg.sum().item())
+
+            policy_prob = (
+                (policy_probs * weights_current).sum().item() / weights_current_sum
+                if weights_current_sum > 0.0
+                else 0.0
+            )
+            policy_avg_prob = (
+                (policy_probs_avg * weights_avg).sum().item() / weights_avg_sum
+                if weights_avg_sum > 0.0
+                else 0.0
+            )
+            # Note: cumulative_regrets can be negative; policy uses clamped version (regret matching)
+            regret = evaluator.cumulative_regrets[child_idx].mean().item()
+            regret_max = evaluator.cumulative_regrets[child_idx].max().item()
+            regret_min = evaluator.cumulative_regrets[child_idx].min().item()
+
+            # Get value at this node - average over both players and all hands
+            # values_avg has shape [M, 2, NUM_HANDS]
+            value = evaluator.values_avg[child_idx, actor, :].mean().item()
 
         action_name = action_to_string(action_idx, bet_bins)
 
         print(
             f"{child_idx:>6} | {action_name:>10} | {policy_prob:7.4f} | {policy_avg_prob:7.4f} | "
-            f"{regret:7.2f} [{regret_min:7.2f}, {regret_max:7.2f}] | {value:7.4f} | {belief_sum:9.4f}"
+            f"{regret:7.2f} [{regret_min:7.2f}, {regret_max:7.2f}] | {value:7.4f}"
         )
 
 
+def _print_node_line(
+    evaluator: RebelCFREvaluator,
+    node_idx: int,
+    depth: int,
+    selected_hand_idx: Optional[int],
+    bet_bins: list[float],
+    action_idx: Optional[int],
+    show_specific_hand: bool,
+) -> None:
+    policy_probs = evaluator.policy_probs[node_idx].clone()
+    policy_probs_avg = evaluator.policy_probs_avg[node_idx].clone()
+    actor = evaluator.prev_actor[node_idx].item()
+    root_actor = evaluator.env.to_act[0].item()
+    actor_str = (
+        "-" if node_idx == 0 else f"*P{actor}" if actor == root_actor else f"P{actor}"
+    )
+
+    if selected_hand_idx is not None and show_specific_hand:
+        policy_prob = float(policy_probs[selected_hand_idx].item())
+        policy_avg_prob = float(policy_probs_avg[selected_hand_idx].item())
+        regret_val = float(
+            evaluator.cumulative_regrets[node_idx][selected_hand_idx].item()
+        )
+        regret = regret_val
+        regret_min = regret_val
+        regret_max = regret_val
+        value = evaluator.values_avg[node_idx, 0, selected_hand_idx].mean().item()
+    else:
+        if depth == 0:
+            parent_idx = node_idx
+        else:
+            offset_current = evaluator.depth_offsets[depth]
+            offset_parent = evaluator.depth_offsets[depth - 1]
+            parent_local_index = (node_idx - offset_current) // evaluator.num_actions
+            parent_idx = offset_parent + parent_local_index
+
+        beliefs_current = evaluator.beliefs[parent_idx, :, :]
+        beliefs_avg = evaluator.beliefs_avg[parent_idx, :, :]
+        weights_current = beliefs_current.sum(dim=0)
+        weights_avg = beliefs_avg.sum(dim=0)
+
+        parent_allowed = evaluator.allowed_hands[parent_idx]
+        child_allowed = evaluator.allowed_hands[node_idx]
+        allowed_hands = parent_allowed & child_allowed
+        policy_probs = policy_probs.masked_fill(~allowed_hands, 0.0)
+        policy_probs_avg = policy_probs_avg.masked_fill(~allowed_hands, 0.0)
+        weights_current = weights_current.masked_fill(~allowed_hands, 0.0)
+        weights_avg = weights_avg.masked_fill(~allowed_hands, 0.0)
+
+        weights_current_sum = float(weights_current.sum().item())
+        weights_avg_sum = float(weights_avg.sum().item())
+        policy_prob = (
+            (policy_probs * weights_current).sum().item() / weights_current_sum
+            if weights_current_sum > 0.0
+            else 0.0
+        )
+        policy_avg_prob = (
+            (policy_probs_avg * weights_avg).sum().item() / weights_avg_sum
+            if weights_avg_sum > 0.0
+            else 0.0
+        )
+        regret = evaluator.cumulative_regrets[node_idx].mean().item()
+        regret_max = evaluator.cumulative_regrets[node_idx].max().item()
+        regret_min = evaluator.cumulative_regrets[node_idx].min().item()
+        if selected_hand_idx is not None:
+            value = evaluator.values_avg[node_idx, 0, selected_hand_idx].item()
+        else:
+            value = evaluator.values_avg[node_idx, 0, :].mean().item()
+
+    indent = "  " * depth
+    # Derive action if not provided
+    if action_idx is None:
+        start = evaluator.depth_offsets[depth]
+        action_idx = (node_idx - start) % evaluator.num_actions
+    action_name = action_to_string(int(action_idx), bet_bins)
+    if node_idx == 0:
+        action_name = "ROOT"
+    node_label = f"{indent}{node_idx} {action_name}"
+    regret_minmax = f" [{regret_min:6.2f}, {regret_max:6.2f}]"
+    # if selected_hand_idx is not None:
+    #     regret_minmax = ""
+    print(
+        f"{node_label:<{NODE_COL_WIDTH}} | {actor_str:>5} | {policy_prob:7.4f} | {policy_avg_prob:7.4f} | "
+        f"{regret:7.2f}{regret_minmax} | {value:7.4f}"
+    )
+
+
+def print_nodes_depth_first(
+    evaluator: RebelCFREvaluator,
+    max_depth: int,
+    selected_hand_idx: Optional[int],
+    bet_bins: list[float],
+) -> None:
+    print(f"\nDepth-first Nodes (depth 0-{max_depth})")
+    regret_str = f"{'Regret [min, max]':>24}"
+
+    # if selected_hand_idx is not None:
+    #     regret_str = f"{'Regret':>7}"
+    print(
+        f"{'Node':<{NODE_COL_WIDTH}} | {'Actor':>5} | {'Policy':>7} | {'PolAvg':>7} | {regret_str} | {'P0 Value':>7}"
+    )
+    print("-" * 100)
+
+    B = evaluator.num_actions
+    root_actor = evaluator.env.to_act[0].item()
+
+    def dfs_at(node_idx: int, depth: int, came_action: Optional[int]) -> None:
+        if depth > max_depth:
+            return
+        if not evaluator.valid_mask[node_idx]:
+            return
+        prev_actor = evaluator.prev_actor[node_idx].item()
+        _print_node_line(
+            evaluator,
+            node_idx,
+            depth,
+            selected_hand_idx,
+            bet_bins,
+            came_action,
+            show_specific_hand=prev_actor == root_actor,
+        )
+        # compute children if next depth exists
+        if depth < max_depth:
+            offset = evaluator.depth_offsets[depth]
+            offset_next = evaluator.depth_offsets[depth + 1]
+            local_index = node_idx - offset
+            base_child = offset_next + local_index * B
+            for a in range(B):
+                child_idx = base_child + a
+                dfs_at(child_idx, depth + 1, a)
+
+    # Start from depth 1 valid nodes in DFS order
+    d0_start = evaluator.depth_offsets[0]
+    d0_end = evaluator.depth_offsets[1]
+    for n in range(d0_start, d0_end):
+        a1 = (n - d0_start) % B
+        dfs_at(n, 0, a1)
+
+
 def debug_cfr_depth1(
-    checkpoint_path: str | None = None,
-    cfr_type_str: str = "linear",
+    cfg: Config,
+    checkpoint_path: Optional[str] = None,
     river_mode: bool = False,
-    river_seed: int | None = None,
-    iterations: int | None = None,
-    no_cfr_avg: bool = False,
-    dcfr_delay: int | None = None,
+    river_seed: Optional[int] = None,
+    iterations: Optional[int] = None,
+    selected_hand_idx: Optional[int] = None,
+    selected_hole_str: Optional[str] = None,
 ) -> None:
     """Main debugging function."""
     print("=== ReBeL CFR Depth-1 Debugger ===")
@@ -358,131 +466,51 @@ def debug_cfr_depth1(
     else:
         print("Mode: PREFLOP")
 
-    # Determine CFR type
-    if cfr_type_str == "linear":
-        cfr_type = CFRType.linear
-        dcfr_delay = 0
-    elif cfr_type_str == "discounted":
-        cfr_type = CFRType.discounted
-        dcfr_delay = 0
-    elif cfr_type_str == "discounted_plus":
-        cfr_type = CFRType.discounted_plus
-        if dcfr_delay is None:
-            dcfr_delay = 70
-    else:
-        raise ValueError(f"Unknown CFR type: {cfr_type_str}")
-
-    print(f"CFR Type: {cfr_type_str}")
-    if cfr_type == CFRType.discounted:
-        print(f"DCFR Delay: {dcfr_delay}")
-
-    # Create configuration
-    config = create_default_config()
-    config.search.cfr_type = cfr_type
-    config.search.cfr_avg = not no_cfr_avg
-    config.seed = random.randint(0, 1000000) if river_seed is None else river_seed
+    # Create or use provided configuration
+    cfr_type = cfg.search.cfr_type
+    cfg.seed = random.randint(0, 1000000) if river_seed is None else river_seed
     if iterations is not None:
         # Ensure warm_start < iterations
-        config.search.iterations = iterations
-        if config.search.warm_start_iterations >= config.search.iterations:
-            config.search.warm_start_iterations = max(0, config.search.iterations - 1)
-    device = torch.device(config.device)
+        cfg.search.iterations = iterations
+        if cfg.search.warm_start_iterations >= cfg.search.iterations:
+            cfg.search.warm_start_iterations = max(0, cfg.search.iterations - 1)
+    device = torch.device(cfg.device)
 
     print(f"Using device: {device}")
-    print(f"Tree depth: {config.search.depth}")
-    print(f"Warm start iterations: {config.search.warm_start_iterations}")
-    print(f"Total iterations: {config.search.iterations}")
+    print(f"CFR Type: {str(cfr_type)}")
+    print(f"Tree depth: {cfg.search.depth}")
+    print(f"Warm start iterations: {cfg.search.warm_start_iterations}")
+    print(f"Total iterations: {cfg.search.iterations}")
 
     # Load or create model
     if checkpoint_path and os.path.exists(checkpoint_path):
-        model = load_model_from_checkpoint(checkpoint_path, config, device)
+        model = load_model_from_checkpoint(checkpoint_path, cfg, device)
     else:
-        model = create_random_model(config, device)
+        model = create_random_model(cfg, device)
 
     # Create environment
     env = HUNLTensorEnv(
         num_envs=1,
-        starting_stack=config.env.stack,
-        sb=config.env.sb,
-        bb=config.env.bb,
-        default_bet_bins=config.env.bet_bins,
+        starting_stack=cfg.env.stack,
+        sb=cfg.env.sb,
+        bb=cfg.env.bb,
+        default_bet_bins=cfg.env.bet_bins,
         device=device,
         float_dtype=torch.float32,
-        flop_showdown=config.env.flop_showdown,
+        flop_showdown=cfg.env.flop_showdown,
     )
 
     env.reset()
 
     if river_mode:
-        # Set up river state manually
-        river_state = create_river_state(
-            sb_amount=config.env.sb,
-            bb_amount=config.env.bb,
-            starting_stack=config.env.stack,
-            button=0,
-            seed=river_seed,
-        )
-
-        # Convert GameState to tensor format
-        # Deck order: board cards first, then hole cards
-        deck_cards = torch.tensor(
-            river_state.board
-            + river_state.players[0].hole_cards
-            + river_state.players[1].hole_cards,
-            device=device,
-            dtype=torch.long,
-        ).unsqueeze(
-            0
-        )  # Shape: [1, 9]
-
-        # Set up the environment tensors manually for river state
-        env_idx = 0
-        env.deck[env_idx, :9] = deck_cards[0]
-        env.deck_pos[env_idx] = 9  # All cards dealt
-
-        # Set hole cards
-        env.hole_indices[env_idx, 0, 0] = river_state.players[0].hole_cards[0]
-        env.hole_indices[env_idx, 0, 1] = river_state.players[0].hole_cards[1]
-        env.hole_indices[env_idx, 1, 0] = river_state.players[1].hole_cards[0]
-        env.hole_indices[env_idx, 1, 1] = river_state.players[1].hole_cards[1]
-
-        # Set board cards
-        for i, card in enumerate(river_state.board):
-            env.board_indices[env_idx, i] = card
-            # Set one-hot encoding for board
-            rank = card // 4
-            suit = card % 4
-            env.board_onehot[env_idx, i, suit, rank] = True
-
-        # Set one-hot encoding for hole cards
-        for player in range(2):
-            for card_idx, card in enumerate(river_state.players[player].hole_cards):
-                rank = card // 4
-                suit = card % 4
-                env.hole_onehot[env_idx, player, card_idx, suit, rank] = True
-
-        # Set street to river (street 3)
-        env.street[env_idx] = 3
-
-        # Set stacks and committed amounts
-        env.stacks[env_idx, 0] = river_state.players[0].stack
-        env.stacks[env_idx, 1] = river_state.players[1].stack
-        env.committed[env_idx, 0] = river_state.players[0].committed
-        env.committed[env_idx, 1] = river_state.players[1].committed
-
-        # Set other state
-        env.button[env_idx] = river_state.button
-        env.pot[env_idx] = river_state.pot
-        env.to_act[env_idx] = river_state.to_act
-        env.min_raise[env_idx] = river_state.min_raise
-        env.actions_this_round[env_idx] = 0
-
+        # Advance using environment dynamics from a clean reset
+        advance_to_river_with_history(env, button=1)
         print(f"\nStarting River CFR Tree Construction...")
-        print(f"Pot size: {river_state.pot}")
-        print(f"Board: {river_state.board}")
-        print(f"SB hole cards: {river_state.players[0].hole_cards}")
-        print(f"BB hole cards: {river_state.players[1].hole_cards}")
-        print(f"To act: {river_state.to_act}")
+        print(f"Pot size: {int(env.pot[0].item())}")
+        board_idxs = [i for i in env.board_indices[0].tolist() if i >= 0]
+        board_str = " ".join(_card_index_to_str(i) for i in board_idxs)
+        print(f"Board: {board_str}")
+        print(f"To act: {int(env.to_act[0].item())}")
     else:
         print("\nStarting Preflop CFR Tree Construction...")
 
@@ -491,15 +519,15 @@ def debug_cfr_depth1(
         search_batch_size=1,
         env_proto=env,
         model=model,
-        bet_bins=config.env.bet_bins,
-        max_depth=config.search.depth,
-        cfr_iterations=config.search.iterations,
+        bet_bins=cfg.env.bet_bins,
+        max_depth=cfg.search.depth,
+        cfr_iterations=cfg.search.iterations,
         device=device,
         float_dtype=torch.float32,
-        warm_start_iterations=config.search.warm_start_iterations,
+        warm_start_iterations=cfg.search.warm_start_iterations,
         cfr_type=cfr_type,
-        cfr_avg=config.search.cfr_avg,
-        dcfr_delay=dcfr_delay,
+        cfr_avg=cfg.search.cfr_avg,
+        dcfr_delay=cfg.search.dcfr_plus_delay,
     )
 
     # Initialize search
@@ -529,93 +557,112 @@ def debug_cfr_depth1(
 
     # Now run CFR iterations 16-25 and capture state
     print(
-        f"\nRunning CFR iterations {config.search.warm_start_iterations}-{config.search.iterations}..."
+        f"\nRunning CFR iterations {cfg.search.warm_start_iterations}-{cfg.search.iterations}..."
     )
 
     evaluator.sample_count = 0
 
     # Run iterations 15-25, but only print 16-25
-    for t in range(config.search.warm_start_iterations, config.search.iterations):
+    for t in range(cfg.search.warm_start_iterations, cfg.search.iterations):
         evaluator.cfr_iteration(t, training_mode=False)
 
-        print_single_iteration_data(
-            evaluator=evaluator,
-            iteration=t,
-            bet_bins=config.env.bet_bins,
-            num_actions=evaluator.num_actions,
-        )
-
-        # Compute and display exploitability after updating averages
-        exploit_stats = evaluator._compute_exploitability()
-        if exploit_stats.local_exploitability.numel() > 0:
-            total_expl = exploit_stats.local_exploitability.mean().item()
-            imp_p0 = exploit_stats.local_br_improvement[:, 0].mean().item()
-            imp_p1 = exploit_stats.local_br_improvement[:, 1].mean().item()
-            print(
-                f"Exploitability (avg best-response improv): total={total_expl:.6f} | P0={imp_p0:.6f}, P1={imp_p1:.6f}"
+        if (t + 1) % 10 == 0:
+            print_single_iteration_data(
+                evaluator=evaluator,
+                iteration=t,
+                bet_bins=cfg.env.bet_bins,
+                selected_hand_idx=selected_hand_idx,
             )
+
+            # Compute and display exploitability after updating averages
+            exploit_stats = evaluator._compute_exploitability()
+            if exploit_stats.local_exploitability.numel() > 0:
+                total_expl = exploit_stats.local_exploitability.mean().item()
+                imp_p0 = exploit_stats.local_br_improvement[:, 0].mean().item()
+                imp_p1 = exploit_stats.local_br_improvement[:, 1].mean().item()
+                print(
+                    f"Exploitability (avg best-response improv): total={total_expl:.6f} | P0={imp_p0:.6f}, P1={imp_p1:.6f}"
+                )
 
     print(f"\n{'='*80}")
     print("Debug Complete!")
     print(f"{'='*80}")
 
+    # Depth-first listing with indentation
+    max_depth_df = min(3, len(evaluator.depth_offsets) - 2)
+    if max_depth_df >= 1:
+        # Reprint state summary before DFS
+        board_idxs = [i for i in env.board_indices[0].tolist() if i >= 0]
+        board_str = " ".join(_card_index_to_str(i) for i in board_idxs)
+        print("\nState summary before DFS:")
+        print(f"Pot size: {int(env.pot[0].item())}")
+        print(f"Board: {board_str}")
+        if selected_hole_str:
+            print(f"Hole: {selected_hole_str}")
+        print_nodes_depth_first(
+            evaluator, max_depth_df, selected_hand_idx, bet_bins=cfg.env.bet_bins
+        )
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Debug ReBeL CFR depth-1 tree with regrets and policies"
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default=None,
-        help="Path to model checkpoint file (optional, uses random model if not provided)",
-    )
-    parser.add_argument(
-        "--cfr-type",
-        type=str,
-        default="discounted_plus",
-        choices=["linear", "discounted", "discounted_plus"],
-        help="CFR type to use (default: discounted_plus)",
-    )
-    parser.add_argument(
-        "--river",
-        action="store_true",
-        help="Start at river with betting history (default: preflop)",
-    )
-    parser.add_argument(
-        "--river-seed",
-        type=int,
-        default=None,
-        help="Random seed for river state deck shuffling (default: 42)",
-    )
-    parser.add_argument(
-        "--iterations",
-        type=int,
-        default=None,
-        help="Number of CFR iterations to run (overrides default)",
-    )
-    parser.add_argument(
-        "--no-cfr-avg",
-        action="store_true",
-        help="Disable CFR-AVG (use current policy instead of average policy)",
-    )
-    parser.add_argument(
-        "--dcfr-delay",
-        type=int,
-        default=None,
-        help="DCFR delay parameter (default: 0 for linear, 70 for discounted)",
+
+@dataclass
+class TopLevel:
+    checkpoint: Optional[str] = None
+    river: bool = False
+    river_seed: Optional[int] = None
+    iterations: Optional[int] = None
+    hole: Optional[str] = None
+
+
+cs = ConfigStore.instance()
+cs.store(group="", name="debug_cfr_depth1_schema", node=TopLevel)
+
+
+@hydra.main(version_base=None, config_path="../conf", config_name="config_rebel_cfr")
+def main(dict_config: DictConfig) -> None:
+    # Extract top-level script params and convert the rest into Config
+    checkpoint = dict_config.get("checkpoint")
+    river = bool(dict_config.get("river", False))
+    river_seed = dict_config.get("river_seed")
+    iterations = dict_config.get("iterations")
+    hole = dict_config.get("hole")
+
+    container: dict[str, any] = OmegaConf.to_container(dict_config, resolve=True)
+    # Remove our script-specific keys before constructing core Config
+    for k in [
+        "checkpoint",
+        "river",
+        "river_seed",
+        "iterations",
+        "hole",
+    ]:
+        if k in container:
+            container.pop(k)
+
+    cfg = Config.from_dict(container)
+    cfg.device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available() else "cpu"
     )
 
-    args = parser.parse_args()
+    # Resolve checkpoint path relative to original working directory
+    if isinstance(checkpoint, str) and checkpoint:
+        checkpoint = to_absolute_path(checkpoint)
+
+    # Derive selected hand index if hole provided
+    selected_hand_idx: Optional[int] = None
+    if hole:
+        c1, c2 = _parse_hole_cards_str(hole)
+        selected_hand_idx = int(card_utils.combo_index(c1, c2))
 
     debug_cfr_depth1(
-        checkpoint_path=args.checkpoint,
-        cfr_type_str=args.cfr_type,
-        river_mode=args.river,
-        river_seed=args.river_seed,
-        iterations=args.iterations,
-        no_cfr_avg=args.no_cfr_avg,
-        dcfr_delay=args.dcfr_delay,
+        cfg=cfg,
+        checkpoint_path=checkpoint,
+        river_mode=river,
+        river_seed=river_seed,
+        iterations=iterations,
+        selected_hand_idx=selected_hand_idx,
+        selected_hole_str=hole,
     )
 
 

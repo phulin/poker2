@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 
+from omegaconf import OmegaConf
 import torch
 import torch.nn as nn
 
@@ -453,6 +454,7 @@ class RebelCFRTrainer:
             "model": model_state,
             "step": step,
             "save_dtype": str(save_dtype) if save_dtype is not None else None,
+            "config": OmegaConf.to_container(self.cfg, resolve=True),
             # Store wandb run ID for resumption
             "wandb_run_id": wandb_run_id,
         }

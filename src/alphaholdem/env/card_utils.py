@@ -190,6 +190,7 @@ def calculate_unblocked_mass(
     target: torch.Tensor,
 ) -> torch.Tensor:
     """Calculate unblocked mass for each hand (generally for getting opponent unblocked mass).
+    Equivalent to multiplying by the compatibility matrix ~combo_blocking_tensor().
     Used for finding matchup. See DEVN paper for details. CFV = matchup * EV.
 
     Note that blocking = combo_onehot @ combo_onehot.T - torch.eye(1326).
