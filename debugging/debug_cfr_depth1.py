@@ -532,6 +532,8 @@ def debug_cfr_depth1(
         advance_to_street_with_history(env, street=street, button=1)
         print(f"\nStarting {street_upper} CFR Tree Construction...")
         print(f"Pot size: {int(env.pot[0].item())}")
+        print(f"Street: {env.street[0].item()}")
+        print(f"Actions this round: {env.actions_this_round[0].item()}")
         board_idxs = [i for i in env.board_indices[0].tolist() if i >= 0]
         if board_idxs:
             board_str = " ".join(_card_index_to_str(i) for i in board_idxs)
@@ -623,6 +625,8 @@ def debug_cfr_depth1(
             board_str = " ".join(_card_index_to_str(i) for i in board_idxs)
             print("\nState summary before DFS:")
             print(f"Pot size: {int(env.pot[0].item())}")
+            print(f"Street: {env.street[0].item()}")
+            print(f"Actions this round: {env.actions_this_round[0].item()}")
             print(f"Board: {board_str}")
             if selected_hole_str:
                 print(f"Hole: {selected_hole_str}")

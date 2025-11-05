@@ -438,8 +438,10 @@ class HUNLTensorEnv:
     ) -> None:
         """Vectorized copy of state rows from src_env[src_indices] to self[dst_indices]."""
         if isinstance(src_select, slice):
-            src_size = (src_select.stop - src_select.start) // src_select.step
-            dest_size = (dest_select.stop - dest_select.start) // dest_select.step
+            src_step = src_select.step if src_select.step is not None else 1
+            dest_step = dest_select.step if dest_select.step is not None else 1
+            src_size = (src_select.stop - src_select.start) // src_step
+            dest_size = (dest_select.stop - dest_select.start) // dest_step
             src_min, src_max = src_select.start, src_select.start + src_size
             dest_min, dest_max = dest_select.start, dest_select.start + dest_size
         else:

@@ -409,6 +409,10 @@ class RebelCFREvaluator(CFREvaluator):
                     & self.valid_mask[offset:offset_next]
                     & ~self.env.done[offset:offset_next]
                 )
+                if depth > 0:
+                    # On new street, stop at the first node.
+                    no_actions = self.env.actions_this_round[offset:offset_next] == 0
+                    current_legal_mask &= ~no_actions
                 current_legal_indices = torch.where(current_legal_mask)[0] + offset
                 if current_legal_indices.numel() == 0:
                     continue
