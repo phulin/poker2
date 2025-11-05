@@ -15,6 +15,7 @@ from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.pbs_pool import PBSPool
 from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
@@ -180,6 +181,8 @@ class RebelCFRTrainer:
         self,
         value_batch: RebelBatch,
         policy_batch: RebelBatch,
+        value_output: ModelOutput,
+        policy_output: ModelOutput,
         total_loss: float,
         value_loss: float,
         value_loss_all: torch.Tensor,
@@ -268,6 +271,7 @@ class RebelCFRTrainer:
             },
             "value_loss_street": by_street(value_loss_all),
             "policy_loss_street": by_street(policy_loss_all, batch=policy_batch),
+            "value_mean_std": value_output.value.std(dim=0).mean(),
             **self.cfr_evaluator.stats,
         }
 
@@ -397,6 +401,8 @@ class RebelCFRTrainer:
         metrics = self._compute_metrics(
             value_batch,
             policy_batch,
+            value_output,
+            policy_output,
             total_step_loss / episodes,
             value_step_loss / episodes,
             value_loss_episode,
