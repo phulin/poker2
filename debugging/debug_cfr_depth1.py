@@ -15,9 +15,11 @@ Usage:
     python debug_cfr_depth1.py --cfr-type linear
     python debug_cfr_depth1.py --cfr-type discounted --checkpoint checkpoints-rebel/rebel_final.pt
 
-    # River mode
-    python debug_cfr_depth1.py --river
-    python debug_cfr_depth1.py --river --checkpoint rebel_step_1250.pt
+    # Different streets
+    python debug_cfr_depth1.py --street=flop
+    python debug_cfr_depth1.py --street=turn
+    python debug_cfr_depth1.py --street=river
+    python debug_cfr_depth1.py --street=river --checkpoint rebel_step_1250.pt
 """
 
 import os
@@ -52,7 +54,7 @@ def action_to_string(action_idx: int, bet_bins: list[float]) -> str:
         return "ALLIN"
     elif action_idx >= 2 and action_idx < len(bet_bins) + 2:
         bet_size = bet_bins[action_idx - 2]
-        return f"BET{bet_size:.1f}x"
+        return f"B{bet_size:.1f}x"
     else:
         return f"ACTION_{action_idx}"
 
@@ -168,43 +170,54 @@ def create_random_model(config: Config, device: torch.device) -> RebelFFN:
     return model
 
 
-def advance_to_river_with_history(
+def advance_to_street_with_history(
     env: HUNLTensorEnv,
+    street: str,
     button: int = 1,
 ) -> None:
-    """Reset env and step through a fixed action history to the river.
+    """Reset env and step through a fixed action history to the specified street.
 
-    History:
-    - Preflop: SB completes (call)
+    History pattern:
+    - Preflop: SB raise 1.5x pot, BB call
     - Flop: SB checks, BB checks
-    - Turn: SB checks, BB bets (turn_bet_multiplier * pot), SB calls
+    - Turn: SB checks, BB bets 1.5x pot, SB calls
     - River: SB checks → BB to act
 
     Args:
         env: Environment to mutate in-place (expects N=1)
-        button: 0=SB is button, 1=BB is button. Use 1 so SB acts first on river.
-        turn_bet_multiplier: Multiplier of current pot for BB's turn bet.
+        street: Target street ("preflop", "flop", "turn", "river")
+        button: 0=SB is button, 1=BB is button. Use 1 so SB acts first postflop.
     """
     assert env.N == 1, "This helper expects a single-env instance (N=1)"
 
-    # Reset with forced button so river actor is BB
+    if street == "preflop":
+        env.reset(force_button=torch.tensor([button], device=env.device))
+        return
+
+    # Reset with forced button
     env.reset(force_button=torch.tensor([button], device=env.device))
 
-    # SB/button is p1 by default, BB is p0.
+    bet_bin_index = min(3, len(env.default_bet_bins) + 2)
+    call_action = torch.ones(env.N, dtype=torch.long, device=env.device)
 
     # Preflop: SB raise 1.5x pot, BB call
-    bet_bin_index = min(3, len(env.default_bet_bins) + 2)
     env.step_bins(
         torch.full((env.N,), bet_bin_index, dtype=torch.long, device=env.device)
     )
-    env.step_bins(torch.ones(env.N, dtype=torch.long, device=env.device))
+    env.step_bins(call_action)
+
+    if street == "flop":
+        return
 
     # Flop: check, check
-    env.step_bins(torch.ones(env.N, dtype=torch.long, device=env.device))
-    env.step_bins(torch.ones(env.N, dtype=torch.long, device=env.device))
+    env.step_bins(call_action)
+    env.step_bins(call_action)
+
+    if street == "turn":
+        return
 
     # Turn: SB check
-    env.step_bins(torch.ones(env.N, dtype=torch.long, device=env.device))
+    env.step_bins(call_action)
 
     # Turn: BB bet 1.5x pot
     env.step_bins(
@@ -212,7 +225,14 @@ def advance_to_river_with_history(
     )
 
     # Turn: SB call
-    env.step_bins(torch.ones(env.N, dtype=torch.long, device=env.device))
+    env.step_bins(call_action)
+
+    if street == "river":
+        return
+
+    raise ValueError(
+        f"Unknown street: {street}. Must be one of: preflop, flop, turn, river"
+    )
 
 
 def print_single_iteration_data(
@@ -453,22 +473,27 @@ def print_nodes_depth_first(
 def debug_cfr_depth1(
     cfg: Config,
     checkpoint_path: Optional[str] = None,
-    river_mode: bool = False,
-    river_seed: Optional[int] = None,
+    street: Optional[str] = None,
     iterations: Optional[int] = None,
     selected_hand_idx: Optional[int] = None,
     selected_hole_str: Optional[str] = None,
+    verbose: bool = False,
 ) -> None:
     """Main debugging function."""
     print("=== ReBeL CFR Depth-1 Debugger ===")
-    if river_mode:
-        print("Mode: RIVER")
-    else:
-        print("Mode: PREFLOP")
+    street = street or "preflop"
+    valid_streets = {"preflop", "flop", "turn", "river"}
+    if street not in valid_streets:
+        raise ValueError(
+            f"Invalid street: {street}. Must be one of: {', '.join(sorted(valid_streets))}"
+        )
+    street_upper = street.upper()
+    print(f"Mode: {street_upper}")
 
     # Create or use provided configuration
     cfr_type = cfg.search.cfr_type
-    cfg.seed = random.randint(0, 1000000) if river_seed is None else river_seed
+    if cfg.seed is None:
+        cfg.seed = random.randint(0, 1000000)
     if iterations is not None:
         # Ensure warm_start < iterations
         cfg.search.iterations = iterations
@@ -502,14 +527,15 @@ def debug_cfr_depth1(
 
     env.reset()
 
-    if river_mode:
+    if street != "preflop":
         # Advance using environment dynamics from a clean reset
-        advance_to_river_with_history(env, button=1)
-        print(f"\nStarting River CFR Tree Construction...")
+        advance_to_street_with_history(env, street=street, button=1)
+        print(f"\nStarting {street_upper} CFR Tree Construction...")
         print(f"Pot size: {int(env.pot[0].item())}")
         board_idxs = [i for i in env.board_indices[0].tolist() if i >= 0]
-        board_str = " ".join(_card_index_to_str(i) for i in board_idxs)
-        print(f"Board: {board_str}")
+        if board_idxs:
+            board_str = " ".join(_card_index_to_str(i) for i in board_idxs)
+            print(f"Board: {board_str}")
         print(f"To act: {int(env.to_act[0].item())}")
     else:
         print("\nStarting Preflop CFR Tree Construction...")
@@ -588,29 +614,30 @@ def debug_cfr_depth1(
     print("Debug Complete!")
     print(f"{'='*80}")
 
-    # Depth-first listing with indentation
-    max_depth_df = min(3, len(evaluator.depth_offsets) - 2)
-    if max_depth_df >= 1:
-        # Reprint state summary before DFS
-        board_idxs = [i for i in env.board_indices[0].tolist() if i >= 0]
-        board_str = " ".join(_card_index_to_str(i) for i in board_idxs)
-        print("\nState summary before DFS:")
-        print(f"Pot size: {int(env.pot[0].item())}")
-        print(f"Board: {board_str}")
-        if selected_hole_str:
-            print(f"Hole: {selected_hole_str}")
-        print_nodes_depth_first(
-            evaluator, max_depth_df, selected_hand_idx, bet_bins=cfg.env.bet_bins
-        )
+    # Depth-first listing with indentation (only if verbose)
+    if verbose:
+        max_depth_df = min(4, len(evaluator.depth_offsets) - 2)
+        if max_depth_df >= 1:
+            # Reprint state summary before DFS
+            board_idxs = [i for i in env.board_indices[0].tolist() if i >= 0]
+            board_str = " ".join(_card_index_to_str(i) for i in board_idxs)
+            print("\nState summary before DFS:")
+            print(f"Pot size: {int(env.pot[0].item())}")
+            print(f"Board: {board_str}")
+            if selected_hole_str:
+                print(f"Hole: {selected_hole_str}")
+            print_nodes_depth_first(
+                evaluator, max_depth_df, selected_hand_idx, bet_bins=cfg.env.bet_bins
+            )
 
 
 @dataclass
 class TopLevel:
     checkpoint: Optional[str] = None
-    river: bool = False
-    river_seed: Optional[int] = None
+    street: Optional[str] = None
     iterations: Optional[int] = None
     hole: Optional[str] = None
+    verbose: bool = False
 
 
 cs = ConfigStore.instance()
@@ -621,19 +648,19 @@ cs.store(group="", name="debug_cfr_depth1_schema", node=TopLevel)
 def main(dict_config: DictConfig) -> None:
     # Extract top-level script params and convert the rest into Config
     checkpoint = dict_config.get("checkpoint")
-    river = bool(dict_config.get("river", False))
-    river_seed = dict_config.get("river_seed")
+    street = dict_config.get("street")
     iterations = dict_config.get("iterations")
     hole = dict_config.get("hole")
+    verbose = bool(dict_config.get("verbose", False))
 
     container: dict[str, any] = OmegaConf.to_container(dict_config, resolve=True)
     # Remove our script-specific keys before constructing core Config
     for k in [
         "checkpoint",
-        "river",
-        "river_seed",
+        "street",
         "iterations",
         "hole",
+        "verbose",
     ]:
         if k in container:
             container.pop(k)
@@ -644,6 +671,7 @@ def main(dict_config: DictConfig) -> None:
         if torch.cuda.is_available()
         else "mps" if torch.backends.mps.is_available() else "cpu"
     )
+    cfg.num_envs = 1
 
     # Resolve checkpoint path relative to original working directory
     if isinstance(checkpoint, str) and checkpoint:
@@ -658,11 +686,11 @@ def main(dict_config: DictConfig) -> None:
     debug_cfr_depth1(
         cfg=cfg,
         checkpoint_path=checkpoint,
-        river_mode=river,
-        river_seed=river_seed,
+        street=street,
         iterations=iterations,
         selected_hand_idx=selected_hand_idx,
         selected_hole_str=hole,
+        verbose=verbose,
     )
 
 

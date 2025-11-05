@@ -7,7 +7,7 @@ This is a python project. The main entry points are src/alphaholdem/cli/{train_r
 
 ## General instructions
 * We try to keep our patches minimal, writing the smallest amount of code that successfully achieves our goals.
-* Avoid "defensive programming" - don't add excessive try/catch or checks on incoming data. Do, however, add internal consistency checks to data structures when appropriate.
+* Avoid "defensive programming" - don't add excessive try/catch or checks on incoming data. Do, however, add internal consistency checks to data structures when appropriate. In PYthon, don't use hasattr or getattr if you can statically determine that a data structure field exists.
 * All new functionality should come with a complete test.
 * After making a change, please make sure that it works either via passing the relevant tests or by a custom script that gives confidence that it works.
 * When writing a one-off debugging script, run it to make sure it works.
@@ -20,3 +20,6 @@ This is a python project. The main entry points are src/alphaholdem/cli/{train_r
 
 # ExecPlans
 * When writing complex features or significant refactors, use an ExecPlan (as described in .agent/PLANS.md) from design to implementation.
+
+# Python
+* Put all imports at the top of the file.
