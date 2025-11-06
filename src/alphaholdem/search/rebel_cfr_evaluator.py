@@ -1099,7 +1099,7 @@ class RebelCFREvaluator(CFREvaluator):
         regrets = self.compute_instantaneous_regrets(self.latest_values)
 
         if self.cfr_type == CFRType.linear:  # Alternate updates.
-            regrets.masked_fill_(self.env.to_act[:, None] == t % self.num_players, 0.0)
+            regrets.masked_fill_(self.prev_actor[:, None] == t % self.num_players, 0.0)
         elif (
             self.cfr_type == CFRType.discounted
             or self.cfr_type == CFRType.discounted_plus
@@ -1150,7 +1150,8 @@ class RebelCFREvaluator(CFREvaluator):
 
         # Nominally we'd need to divide by reach weights here, but since we're only
         # taking the first level of the tree, those weights would all be 1.
-        value_targets = self.values_avg[:N]
+        # Valid values will always be between -1.0 and 1.0, so we can clamp targets to that range.
+        value_targets = self.values_avg[:N].clamp(-1.0, 1.0)
         high = value_targets.abs().max(dim=-1).values > 10
         if high.any():
             print(f"WARNING: Value targets are too large ({high.sum().item()} hands)")

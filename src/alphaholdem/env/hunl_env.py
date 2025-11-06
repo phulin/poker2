@@ -442,7 +442,7 @@ class HUNLEnv:
         )
         raw_reward = s.players[perspective].stack + pot_share - self.starting_stack
         # Scale rewards by 100 big blinds to stabilize learning
-        scale = float(self.bb) * 100.0
+        scale = float(self.starting_stack)
         return float(raw_reward) / scale
 
     def _require_state(self) -> GameState:

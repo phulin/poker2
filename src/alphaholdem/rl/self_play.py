@@ -543,7 +543,7 @@ class SelfPlayTrainer:
             # Record transition (only for our player's actions)
             if current_player == 0:  # Our player
                 # Scale factor for reward/targets: 100 big blinds
-                scale = float(self.env.bb) * 100.0
+                scale = float(self.starting_stack)
 
                 transition = Transition(
                     observation=torch.cat(
@@ -1008,7 +1008,7 @@ class SelfPlayTrainer:
             # Store transitions for our actions
             if env_active_we_act.numel() > 0:
                 # Scale factor for reward/targets: 100 big blinds
-                scale = float(self.tensor_env.bb) * 100.0
+                scale = self.tensor_env.scale
 
                 # Compute delta bounds from our (p0/actor) perspective AFTER step
                 # For our acting envs, actor is player 0

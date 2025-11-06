@@ -78,7 +78,7 @@ class HUNLTensorEnv:
         self.bb = int(bb)
         self.default_bet_bins = default_bet_bins or DEFAULT_BET_BINS
         self.num_bet_bins = len(self.default_bet_bins) + 3
-        self.scale = float(self.bb) * 100.0
+        self.scale = float(self.starting_stack)
         self.debug_step_table = debug_step_table
         self.flop_showdown = flop_showdown
 
