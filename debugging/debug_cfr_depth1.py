@@ -38,6 +38,7 @@ from alphaholdem.core.structured_config import Config, ModelType
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.types import GameState, PlayerState
 from alphaholdem.env import card_utils
+from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
@@ -478,6 +479,7 @@ def debug_cfr_depth1(
     selected_hand_idx: Optional[int] = None,
     selected_hole_str: Optional[str] = None,
     verbose: bool = False,
+    random_beliefs: bool = False,
 ) -> None:
     """Main debugging function."""
     print("=== ReBeL CFR Depth-1 Debugger ===")
@@ -560,7 +562,18 @@ def debug_cfr_depth1(
 
     # Initialize search
     roots = torch.tensor([0], device=device)
-    evaluator.initialize_search(env, roots)
+    initial_beliefs = None
+    if random_beliefs:
+        # Generate random beliefs: sample from Dirichlet distribution for each player
+        # Shape: [1, 2, NUM_HANDS]
+        initial_beliefs = torch.zeros(
+            1, 2, NUM_HANDS, dtype=torch.float32, device=device
+        )
+        for p in range(2):
+            # Sample from Dirichlet(alpha=1) which is uniform over simplex
+            beliefs_p = torch.distributions.Dirichlet(torch.ones(NUM_HANDS)).sample()
+            initial_beliefs[0, p, :] = beliefs_p.to(device=device, dtype=torch.float32)
+    evaluator.initialize_search(env, roots, initial_beliefs=initial_beliefs)
 
     # We need to manually run CFR iterations and capture data at specific iterations
     # The evaluator's self_play_iteration() runs all iterations internally
@@ -642,6 +655,7 @@ class TopLevel:
     iterations: Optional[int] = None
     hole: Optional[str] = None
     verbose: bool = False
+    random_beliefs: bool = False
 
 
 cs = ConfigStore.instance()
@@ -656,6 +670,7 @@ def main(dict_config: DictConfig) -> None:
     iterations = dict_config.get("iterations")
     hole = dict_config.get("hole")
     verbose = bool(dict_config.get("verbose", False))
+    random_beliefs = bool(dict_config.get("random_beliefs", False))
 
     container: dict[str, any] = OmegaConf.to_container(dict_config, resolve=True)
     # Remove our script-specific keys before constructing core Config
@@ -665,6 +680,7 @@ def main(dict_config: DictConfig) -> None:
         "iterations",
         "hole",
         "verbose",
+        "random_beliefs",
     ]:
         if k in container:
             container.pop(k)
@@ -695,6 +711,7 @@ def main(dict_config: DictConfig) -> None:
         selected_hand_idx=selected_hand_idx,
         selected_hole_str=hole,
         verbose=verbose,
+        random_beliefs=random_beliefs,
     )
 
 
