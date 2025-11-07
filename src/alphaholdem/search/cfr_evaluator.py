@@ -39,23 +39,30 @@ class CFREvaluator(ABC):
         masked_logits = compute_masked_logits(logits, legal_masks[:, None, :])
         return F.softmax(masked_logits, dim=-1)
 
-    def _showdown_value(self, indices: torch.Tensor) -> torch.Tensor:
+    def _showdown_value(self, hero: int, indices: torch.Tensor) -> torch.Tensor:
         """
         Exact river showdown EV using rank-CDF + blocker correction.
         Returns per-hand EV [N, 1326] (unsorted/original hand order) per env.
-        Result is from p0 perspective.
+        Result is from hero perspective.
+
+        Args:
+            hero: Index of hero player (0 or 1).
+            indices: Indices of nodes to compute showdown values for.
+
+        Returns:
+            Per-hand EV [N, 1326] (unsorted/original hand order) per env.
         """
         M = indices.numel()
         device = self.device
         dtype = torch.float32  # or match belief dtype
+        villain = 1 - hero
 
         if M == 0:
             return torch.zeros(0, NUM_HANDS, device=device, dtype=dtype)
 
         # --- Beliefs & boards ---
         beliefs = self.beliefs[indices]  # (M,2,1326)
-        b_self = beliefs[:, 0, :].to(dtype)  # (M,1326)
-        b_opp = beliefs[:, 1, :].to(dtype)  # (M,1326)
+        b_opp = beliefs[:, villain, :].to(dtype)  # (M,1326)
         board = self.env.board_indices[indices].int()  # (M,5)
 
         # Sorted position k (0..1325) replicated across batch
@@ -157,7 +164,7 @@ class CFREvaluator(ABC):
         c2 = hands_c1c2_sorted[..., 1]  # (M,1326)
 
         # Sort opponent marginal by strength order
-        b_opp_sorted = torch.gather(b_opp, 1, sorted_indices)  # (M,1326)
+        b_opp_sorted = b_opp.gather(1, sorted_indices)  # (M,1326)
 
         # Hand->card incidence in sorted order with board columns zeroed
         H_sorted = torch.gather(H, 1, sorted_indices.unsqueeze(-1).expand(-1, -1, 52))
@@ -224,7 +231,7 @@ class CFREvaluator(ABC):
 
         # Range EV for the player
         potential = (
-            self.env.stacks[indices, 0]
+            self.env.stacks[indices, hero]
             + self.env.pot[indices]
             - self.env.starting_stack
         )

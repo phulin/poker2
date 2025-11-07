@@ -745,9 +745,10 @@ class RebelCFREvaluator(CFREvaluator):
 
         # Showdown values need to be updated based on beliefs.
         # The env has hands it uses for showdown, but those are fake.
-        showdown_values = self._showdown_value(self.showdown_indices)
-        self.latest_values[self.showdown_indices, 0] = showdown_values
-        self.latest_values[self.showdown_indices, 1] = -showdown_values
+        showdown_values_p0 = self._showdown_value(0, self.showdown_indices)
+        showdown_values_p1 = self._showdown_value(1, self.showdown_indices)
+        self.latest_values[self.showdown_indices, 0] = showdown_values_p0
+        self.latest_values[self.showdown_indices, 1] = showdown_values_p1
 
     @profile
     def compute_expected_values(self) -> torch.Tensor:

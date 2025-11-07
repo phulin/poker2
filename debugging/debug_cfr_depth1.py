@@ -20,6 +20,11 @@ Usage:
     python debug_cfr_depth1.py --street=turn
     python debug_cfr_depth1.py --street=river
     python debug_cfr_depth1.py --street=river --checkpoint rebel_step_1250.pt
+
+    # Force a particular board (3 cards for flop, 4 for turn, 5 for river)
+    python debug_cfr_depth1.py --street=flop --board=AsKhQd
+    python debug_cfr_depth1.py --street=turn --board=AsKhQd2c
+    python debug_cfr_depth1.py --street=river --board=AsKhQd2c3h
 """
 
 import os
@@ -90,6 +95,34 @@ def _parse_hole_cards_str(hole: str) -> tuple[int, int]:
     c1 = suits[su1] * 13 + ranks[r1]
     c2 = suits[su2] * 13 + ranks[r2]
     return c1, c2
+
+
+def _parse_board_str(board: str) -> list[int]:
+    """Parse board string like 'AsKhQd' (flop), 'AsKhQd2c' (turn), or 'AsKhQd2c3h' (river) into card indices."""
+    s = board.strip()
+    if len(s) % 2 != 0:
+        raise ValueError("Board string must have even length (each card is 2 chars)")
+    if len(s) < 6 or len(s) > 10:
+        raise ValueError("Board must have 3-5 cards (6-10 chars)")
+
+    ranks = {
+        c: i
+        for i, c in enumerate(
+            ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"]
+        )
+    }
+    suits = {"s": 0, "h": 1, "d": 2, "c": 3}
+
+    card_indices = []
+    for i in range(0, len(s), 2):
+        rank_char = s[i]
+        suit_char = s[i + 1].lower()
+        if rank_char not in ranks or suit_char not in suits:
+            raise ValueError(f"Invalid card at position {i}: {rank_char}{suit_char}")
+        card_idx = suits[suit_char] * 13 + ranks[rank_char]
+        card_indices.append(card_idx)
+
+    return card_indices
 
 
 def load_model_from_checkpoint(
@@ -175,6 +208,7 @@ def advance_to_street_with_history(
     env: HUNLTensorEnv,
     street: str,
     button: int = 1,
+    forced_board: Optional[list[int]] = None,
 ) -> None:
     """Reset env and step through a fixed action history to the specified street.
 
@@ -188,11 +222,15 @@ def advance_to_street_with_history(
         env: Environment to mutate in-place (expects N=1)
         street: Target street ("preflop", "flop", "turn", "river")
         button: 0=SB is button, 1=BB is button. Use 1 so SB acts first postflop.
+        forced_board: Optional list of card indices to force as board cards.
+                      Must match street: 3 cards for flop, 4 for turn, 5 for river.
     """
     assert env.N == 1, "This helper expects a single-env instance (N=1)"
 
     if street == "preflop":
         env.reset(force_button=torch.tensor([button], device=env.device))
+        if forced_board is not None:
+            raise ValueError("Cannot force board in preflop")
         return
 
     # Reset with forced button
@@ -208,6 +246,12 @@ def advance_to_street_with_history(
     env.step_bins(call_action)
 
     if street == "flop":
+        if forced_board is not None:
+            if len(forced_board) != 3:
+                raise ValueError(
+                    f"Flop requires 3 board cards, got {len(forced_board)}"
+                )
+            _force_board_cards(env, forced_board, street)
         return
 
     # Flop: check, check
@@ -215,6 +259,12 @@ def advance_to_street_with_history(
     env.step_bins(call_action)
 
     if street == "turn":
+        if forced_board is not None:
+            if len(forced_board) != 4:
+                raise ValueError(
+                    f"Turn requires 4 board cards, got {len(forced_board)}"
+                )
+            _force_board_cards(env, forced_board, street)
         return
 
     # Turn: SB check
@@ -229,11 +279,42 @@ def advance_to_street_with_history(
     env.step_bins(call_action)
 
     if street == "river":
+        if forced_board is not None:
+            if len(forced_board) != 5:
+                raise ValueError(
+                    f"River requires 5 board cards, got {len(forced_board)}"
+                )
+            _force_board_cards(env, forced_board, street)
         return
 
     raise ValueError(
         f"Unknown street: {street}. Must be one of: preflop, flop, turn, river"
     )
+
+
+def _force_board_cards(
+    env: HUNLTensorEnv, board_card_indices: list[int], street: str
+) -> None:
+    """Force board cards in the environment after advancing to a street.
+
+    Args:
+        env: Environment to mutate (expects N=1)
+        board_card_indices: List of card indices (0-51) to set as board cards
+        street: Current street ("flop", "turn", "river")
+    """
+    assert env.N == 1, "This helper expects a single-env instance (N=1)"
+
+    env_idx = 0
+    num_cards = len(board_card_indices)
+
+    # Set board_indices
+    for i in range(num_cards):
+        env.board_indices[env_idx, i] = board_card_indices[i]
+
+    # Set board_onehot using the cached one-hot encodings
+    for i in range(num_cards):
+        card_idx = board_card_indices[i]
+        env.board_onehot[env_idx, i] = env.card_onehot_cache[card_idx]
 
 
 def print_single_iteration_data(
@@ -345,6 +426,7 @@ def _print_node_line(
     policy_probs_avg = evaluator.policy_probs_avg[node_idx].clone()
     actor = evaluator.prev_actor[node_idx].item()
     root_actor = evaluator.env.to_act[0].item()
+    belief_weight: Optional[float] = None
     actor_str = (
         "-" if node_idx == 0 else f"*P{actor}" if actor == root_actor else f"P{actor}"
     )
@@ -411,11 +493,16 @@ def _print_node_line(
         action_name = "ROOT"
     node_label = f"{indent}{node_idx} {action_name}"
     regret_minmax = f" [{regret_min:6.2f}, {regret_max:6.2f}]"
-    # if selected_hand_idx is not None:
-    #     regret_minmax = ""
+    belief_str = ""
+    if selected_hand_idx is not None:
+        hero_player = root_actor
+        belief_weight = float(
+            evaluator.beliefs[node_idx, hero_player, selected_hand_idx].item()
+        )
+        belief_str = f"{belief_weight:7.4f}"
     print(
         f"{node_label:<{NODE_COL_WIDTH}} | {actor_str:>5} | {policy_prob:7.4f} | {policy_avg_prob:7.4f} | "
-        f"{regret:7.2f}{regret_minmax} | {value:7.4f}"
+        f"{regret:7.2f}{regret_minmax} | {belief_str:>7} | {value:7.4f}"
     )
 
 
@@ -427,11 +514,11 @@ def print_nodes_depth_first(
 ) -> None:
     print(f"\nDepth-first Nodes (depth 0-{max_depth})")
     regret_str = f"{'Regret [min, max]':>24}"
+    belief_header = "Belief" if selected_hand_idx is not None else ""
 
-    # if selected_hand_idx is not None:
-    #     regret_str = f"{'Regret':>7}"
     print(
-        f"{'Node':<{NODE_COL_WIDTH}} | {'Actor':>5} | {'Policy':>7} | {'PolAvg':>7} | {regret_str} | {'P0 Value':>7}"
+        f"{'Node':<{NODE_COL_WIDTH}} | {'Actor':>5} | {'Policy':>7} | {'PolAvg':>7} | {regret_str} | "
+        f"{belief_header:>7} | {'P0 Value':>7}"
     )
     print("-" * 100)
 
@@ -480,6 +567,7 @@ def debug_cfr_depth1(
     selected_hole_str: Optional[str] = None,
     verbose: bool = False,
     random_beliefs: bool = False,
+    forced_board: Optional[list[int]] = None,
 ) -> None:
     """Main debugging function."""
     print("=== ReBeL CFR Depth-1 Debugger ===")
@@ -531,7 +619,9 @@ def debug_cfr_depth1(
 
     if street != "preflop":
         # Advance using environment dynamics from a clean reset
-        advance_to_street_with_history(env, street=street, button=1)
+        advance_to_street_with_history(
+            env, street=street, button=1, forced_board=forced_board
+        )
         print(f"\nStarting {street_upper} CFR Tree Construction...")
         print(f"Pot size: {int(env.pot[0].item())}")
         print(f"Street: {env.street[0].item()}")
@@ -540,6 +630,8 @@ def debug_cfr_depth1(
         if board_idxs:
             board_str = " ".join(_card_index_to_str(i) for i in board_idxs)
             print(f"Board: {board_str}")
+            if forced_board is not None:
+                print(f"(Forced board)")
         print(f"To act: {int(env.to_act[0].item())}")
     else:
         print("\nStarting Preflop CFR Tree Construction...")
@@ -656,6 +748,7 @@ class TopLevel:
     hole: Optional[str] = None
     verbose: bool = False
     random_beliefs: bool = False
+    board: Optional[str] = None
 
 
 cs = ConfigStore.instance()
@@ -671,6 +764,7 @@ def main(dict_config: DictConfig) -> None:
     hole = dict_config.get("hole")
     verbose = bool(dict_config.get("verbose", False))
     random_beliefs = bool(dict_config.get("random_beliefs", False))
+    board = dict_config.get("board")
 
     container: dict[str, any] = OmegaConf.to_container(dict_config, resolve=True)
     # Remove our script-specific keys before constructing core Config
@@ -681,6 +775,7 @@ def main(dict_config: DictConfig) -> None:
         "hole",
         "verbose",
         "random_beliefs",
+        "board",
     ]:
         if k in container:
             container.pop(k)
@@ -703,6 +798,11 @@ def main(dict_config: DictConfig) -> None:
         c1, c2 = _parse_hole_cards_str(hole)
         selected_hand_idx = int(card_utils.combo_index(c1, c2))
 
+    # Parse board string if provided
+    forced_board: Optional[list[int]] = None
+    if board:
+        forced_board = _parse_board_str(board)
+
     debug_cfr_depth1(
         cfg=cfg,
         checkpoint_path=checkpoint,
@@ -712,6 +812,7 @@ def main(dict_config: DictConfig) -> None:
         selected_hole_str=hole,
         verbose=verbose,
         random_beliefs=random_beliefs,
+        forced_board=forced_board,
     )
 
 
