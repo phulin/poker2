@@ -112,9 +112,8 @@ class BetterFFN(nn.Module, Model):
 
         street_features = self.street_embedding(features.street)
         context_features = self.context_encoder(features.context)
-        belief_features = self.belief_encoder(
-            features.beliefs.view(-1, self.num_players * NUM_HANDS)
-        )
+        belief_features = self.belief_encoder(features.beliefs)
+        player_beliefs = features.beliefs.view(-1, self.num_players, NUM_HANDS)
 
         flat_features = (
             board_features.sum(dim=1)
@@ -129,6 +128,12 @@ class BetterFFN(nn.Module, Model):
 
         policy_logits = self.policy_head(x).view(-1, NUM_HANDS, self.num_actions)
         hand_values = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
+        hand_value_sums = (
+            (hand_values * player_beliefs)
+            .sum(dim=2, keepdim=True)
+            .mean(dim=1, keepdim=True)
+        )
+        hand_values -= hand_value_sums
         value = hand_values.mean(dim=-1)
 
         return ModelOutput(
