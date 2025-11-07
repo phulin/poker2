@@ -297,7 +297,7 @@ class RiverAnalyzer:
             root_idx,
             pbs.beliefs,
         )
-        self.cfr_evaluator.self_play_iteration(training_mode=False)
+        self.cfr_evaluator.evaluate_cfr(training_mode=False)
 
         # Get root policy
         actions_slice = slice(1, 1 + self.cfr_evaluator.num_actions)

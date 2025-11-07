@@ -477,7 +477,7 @@ class PBSPool(OpponentPool):
                 to_act = env.to_act[0].item()
                 current_eval = evaluator_a if to_act == 0 else evaluator_b
                 # Perform one CFR self-play iteration to choose and apply an action
-                current_eval.self_play_iteration(training_mode=False)
+                current_eval.evaluate_cfr(training_mode=False)
 
                 hand = torch.multinomial(
                     current_eval.beliefs[0, 0], num_samples=1, generator=generator

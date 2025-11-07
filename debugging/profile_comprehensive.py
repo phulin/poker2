@@ -123,7 +123,7 @@ def comprehensive_profiling():
         print(f"Running iteration {i+1}/10")
 
         # Run a complete self-play iteration (this will be profiled)
-        pbs = evaluator.self_play_iteration(training_mode=True)
+        pbs = evaluator.evaluate_cfr(training_mode=True)
         if pbs is not None:
             print(f"  Generated {pbs.beliefs.shape[0]} samples")
 

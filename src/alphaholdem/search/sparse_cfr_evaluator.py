@@ -243,23 +243,53 @@ class SparseCFREvaluator(CFREvaluator):
         for depth in range(len(self.depth_offsets) - 1):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
+            if depth + 2 >= len(self.depth_offsets):
+                # No children at this depth
+                break
             offset_next_next = self.depth_offsets[depth + 2]
             indices = torch.arange(offset, offset_next, device=self.device)
             probs = self._get_model_policy_probs(indices)
             self.policy_probs[offset:offset_next] = probs
 
-            child_probs = probs[self.child_mask[offset:offset_next]]
+            # Extract child probabilities: probs is [num_nodes, NUM_HANDS, num_actions]
+            # We need to get probabilities for each child action
+            # Get parent indices and actions for children
+            child_indices = torch.arange(
+                offset_next, offset_next_next, device=self.device
+            )
+            parent_indices_abs = self.parent_index[child_indices]
+            # Filter to only valid children with valid parents
+            valid_mask = (parent_indices_abs >= offset) & (
+                parent_indices_abs < offset_next
+            )
+            if not valid_mask.any():
+                continue
+            child_indices_valid = child_indices[valid_mask]
+            parent_indices = (
+                parent_indices_abs[valid_mask] - offset
+            )  # Relative to current depth
+            child_actions = self.action_from_parent[child_indices_valid]
+
+            # Gather probabilities: [num_children, NUM_HANDS]
+            child_probs = (
+                probs[parent_indices]
+                .gather(
+                    dim=2, index=child_actions[:, None, None].expand(-1, NUM_HANDS, 1)
+                )
+                .squeeze(2)
+            )
+
             child_beliefs = torch.repeat_interleave(
                 self.beliefs[offset:offset_next],
                 self.child_count[offset:offset_next],
                 dim=0,
                 output_size=offset_next_next - offset_next,
             )
-            indices = torch.arange(offset_next_next - offset_next, device=self.device)
+            # Only update beliefs for valid children
             child_beliefs[
-                indices, self.prev_actor[offset_next:offset_next_next]
+                valid_mask, self.prev_actor[child_indices_valid]
             ] *= child_probs
-            self.beliefs[offset_next:offset_next_next] = child_beliefs
+            self.beliefs[child_indices_valid] = child_beliefs[valid_mask]
 
     def warm_start(self) -> None:
         # Simple warm start: use model values and do a best-response pass

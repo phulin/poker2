@@ -112,6 +112,9 @@ class RebelCFREvaluator(CFREvaluator):
     showdown_indices: torch.Tensor
     showdown_actors: torch.Tensor
     prev_actor: torch.Tensor
+    folded_mask: torch.Tensor
+    folded_rewards: torch.Tensor
+    new_street_mask: torch.Tensor
     allowed_hands: torch.Tensor
     allowed_hands_prob: torch.Tensor
     policy_probs: torch.Tensor
@@ -200,6 +203,7 @@ class RebelCFREvaluator(CFREvaluator):
         # Set in construct_subgame and not updated.
         self.folded_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
         self.folded_rewards = torch.zeros(M, dtype=self.float_dtype, device=self.device)
+        self.new_street_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
 
         # Notionally, at its parent, what is the probability of acting to get to this node?
         self.policy_probs = torch.zeros(
@@ -250,7 +254,6 @@ class RebelCFREvaluator(CFREvaluator):
 
         # Invalid for [0, N) because we don't know the previous actor.
         self.prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
-        self.root_index = torch.zeros(M, dtype=torch.long, device=self.device)
 
         self.combo_onehot_float = combo_to_onehot_tensor(device=self.device).float()
         # if self.device.type == "cuda":
@@ -368,6 +371,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.showdown_actors = torch.empty(0, dtype=torch.long, device=self.device)
         self.folded_mask.zero_()
         self.folded_rewards.zero_()
+        self.new_street_mask.zero_()
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
         self.cumulative_regrets.zero_()
@@ -387,8 +391,6 @@ class RebelCFREvaluator(CFREvaluator):
         self.reach_weights_avg[:N] = 1.0
         self.legal_mask = None
         self.hand_rank_data = None
-        self.root_index.zero_()
-        self.root_index[:N] = torch.arange(N, device=self.device, dtype=torch.long)
 
     @profile
     def construct_subgame(self) -> None:
@@ -424,9 +426,6 @@ class RebelCFREvaluator(CFREvaluator):
                 self.env.copy_state_from(
                     self.env, current_legal_indices, new_legal_indices
                 )
-                self.root_index[new_legal_indices] = self.root_index[
-                    current_legal_indices
-                ]
                 self.valid_mask[new_legal_indices] = True
 
                 action_bins[new_legal_indices] = action
@@ -442,6 +441,7 @@ class RebelCFREvaluator(CFREvaluator):
             valid = self.valid_mask[offset_next:offset_next_next]
             done = self.env.done[offset_next:offset_next_next]
             no_actions = self.env.actions_this_round[offset_next:offset_next_next] == 0
+            self.new_street_mask[offset_next:offset_next_next] = no_actions
             self.leaf_mask[offset_next:offset_next_next] = valid & (done | no_actions)
 
             # Showdown values get set in set_leaf_values. Fold values get set here.
@@ -729,8 +729,9 @@ class RebelCFREvaluator(CFREvaluator):
         # CFR-AVG: subgame rooted at PBS from average policy
         features = self.feature_encoder.encode(
             self.beliefs_avg if self.cfr_avg else self.beliefs,
-            pre_chance_node=True,
+            pre_chance_node=self.new_street_mask,
         )
+
         self.model.eval()
         model_output = self.model(features[model_mask])
         if t <= 1 or not self.cfr_avg or self.last_model_values is None:
@@ -1039,10 +1040,8 @@ class RebelCFREvaluator(CFREvaluator):
         )
 
     @profile
-    def self_play_iteration(
-        self, training_mode: bool = True
-    ) -> Optional[PublicBeliefState]:
-        """Run one iteration through the CFR loop and produce leaf samples for replay."""
+    def evaluate_cfr(self, training_mode: bool = True) -> Optional[PublicBeliefState]:
+        """Run one instance of the CFR loop and produce leaf samples for replay."""
 
         self.stats.clear()
 

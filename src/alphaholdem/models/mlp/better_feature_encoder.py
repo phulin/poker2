@@ -29,7 +29,7 @@ class BetterFeatureEncoder:
     def encode(
         self,
         beliefs: torch.Tensor,
-        pre_chance_node: bool = False,
+        pre_chance_node: torch.Tensor | bool | None = None,
     ) -> MLPFeatures:
         """
         Build Better PBS features for a batch of env indices and agent ids.
@@ -49,10 +49,15 @@ class BetterFeatureEncoder:
             dtype=self.dtype,
         )
 
-        actions_round = (
-            self.env.actions_last_round
-            if pre_chance_node
-            else self.env.actions_this_round
+        if pre_chance_node is None:
+            pre_chance_node = torch.zeros(N, dtype=torch.bool, device=self.device)
+        elif isinstance(pre_chance_node, bool):
+            pre_chance_node = torch.full(
+                (N,), pre_chance_node, dtype=torch.bool, device=self.device
+            )
+
+        actions_round = torch.where(
+            pre_chance_node, self.env.actions_last_round, self.env.actions_this_round
         )
         # Keep to_act for actor, as that's the player perspective the model should take,
         # even in the pre-chance node context.
@@ -78,24 +83,20 @@ class BetterFeatureEncoder:
         player_context[:, PlayerContext.COMMITTED.value] = committed
         player_context[:, PlayerContext.SPR.value] = stacks / pot[:, None]
 
-        street = (
-            self.env.street
-            if not pre_chance_node
-            else torch.where(
-                (self.env.street > 0) & (self.env.actions_this_round == 0),
-                self.env.street - 1,
-                self.env.street,
-            )
+        street = torch.where(
+            pre_chance_node & (self.env.actions_this_round == 0),
+            torch.clamp(self.env.street - 1, min=0),
+            self.env.street,
         )
 
         return MLPFeatures(
             context=torch.cat([scalar_context, player_context.view(N, -1)], dim=-1),
             street=street,
             to_act=self.env.to_act,
-            board=(
-                self.env.last_board_indices
-                if pre_chance_node
-                else self.env.board_indices
+            board=torch.where(
+                pre_chance_node[:, None],
+                self.env.last_board_indices,
+                self.env.board_indices,
             ),
             beliefs=beliefs.view(-1, 2 * NUM_HANDS),
         )

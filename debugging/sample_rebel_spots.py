@@ -181,7 +181,7 @@ def advance_round_with_sampling(
         # Build evaluator for current root and compute policy
         root_indices = torch.tensor([0], dtype=torch.long, device=device)
         evaluator.initialize_search(env, root_indices)
-        evaluator.self_play_iteration(training_mode=False)
+        evaluator.evaluate_cfr(training_mode=False)
 
         # Pull root policy [actions, hands]
         root_policy = evaluator._pull_back(evaluator.policy_probs_avg)[0]
@@ -536,7 +536,7 @@ def main() -> None:
     def run_one(label: str):
         root_indices = torch.tensor([0], dtype=torch.long, device=device)
         evaluator.initialize_search(env_proto, root_indices)
-        evaluator.self_play_iteration(training_mode=False)
+        evaluator.evaluate_cfr(training_mode=False)
         print_tree_compact(evaluator)
         print_spot(evaluator, bet_bins, label, designated_combo_idx)
         # Determine hero hand index for full tree print (P0 designated or sample from P0 beliefs)

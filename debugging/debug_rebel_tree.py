@@ -530,7 +530,7 @@ def debug_rebel_tree(
 
         # Run CFR iterations
         print(f"Running {config.search.iterations} CFR iterations...")
-        evaluator.self_play_iteration()
+        evaluator.evaluate_cfr()
         print("CFR iterations completed.")
 
         # Get all valid nodes (optionally filter by reach)

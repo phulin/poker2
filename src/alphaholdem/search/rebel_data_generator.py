@@ -66,7 +66,7 @@ class RebelDataGenerator:
                 self.current_pbs.beliefs,
             )
 
-            self.current_pbs = self.evaluator.self_play_iteration()
+            self.current_pbs = self.evaluator.evaluate_cfr()
 
             value_batch, augmented_value_batch, policy_batch = (
                 self.evaluator.training_data()

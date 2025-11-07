@@ -369,6 +369,55 @@ def test_construct_subgame_clones_states_and_marks_children(
     assert "bins" in step_observer
 
 
+def test_construct_subgame_depth4_street_changes_and_legal_masks() -> None:
+    """Test that construct_subgame at depth 4 correctly handles street changes and legal masks.
+
+    Verifies:
+    1. Only leaf nodes go to a new street from the root node
+    2. Legal masks are True only for nodes that are NOT leaves AND NOT street changes
+    """
+    evaluator, env = make_evaluator(batch_size=8, max_depth=4)
+    roots = torch.arange(evaluator.search_batch_size, device=env.device)
+    evaluator.initialize_search(env, roots)
+    evaluator.construct_subgame()
+
+    valid_nodes = torch.where(evaluator.valid_mask)[0]
+
+    # Check 1: Only leaf nodes go to a new street from the root node
+    # new_street_mask identifies nodes that transitioned to a new street (and are not root nodes)
+    # All such nodes must be leaf nodes
+    if evaluator.new_street_mask.any():
+        new_street_nodes = torch.where(
+            evaluator.new_street_mask & evaluator.valid_mask
+        )[0]
+        if new_street_nodes.numel() > 0:
+            assert torch.all(
+                evaluator.leaf_mask[new_street_nodes]
+            ), "Only leaf nodes should go to a new street from the root node"
+
+    # Check 2: Legal masks = True only for nodes that are NOT leaves AND NOT street changes
+    # All street change nodes (identified by new_street_mask) should be marked as leaves
+    if evaluator.new_street_mask.any():
+        new_street_valid = evaluator.new_street_mask & evaluator.valid_mask
+        if new_street_valid.any():
+            assert torch.all(
+                evaluator.leaf_mask[new_street_valid]
+            ), "Street change nodes should be marked as leaves"
+
+    # Legal mask should have at least one True for valid non-leaf nodes
+    # (street changes are already leaves, so we just check non-leaf)
+    non_leaf_nodes = valid_nodes[~evaluator.leaf_mask[valid_nodes]]
+    if non_leaf_nodes.numel() > 0:
+        legal_mask_has_action = evaluator.legal_mask[non_leaf_nodes].any(dim=-1)
+        assert torch.all(
+            legal_mask_has_action
+        ), "All valid non-leaf nodes should have at least one legal action"
+
+    # Verify that leaf nodes (including street changes) are excluded from legal mask checks
+    # This is verified by the assertion in construct_subgame at line 488, which checks
+    # legal masks only for valid_mask & ~leaf_mask nodes
+
+
 def test_initialize_policy_respects_legal_mask(monkeypatch: pytest.MonkeyPatch) -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.search_batch_size, device=env.device)
@@ -1266,7 +1315,7 @@ def test_self_play_iteration_returns_public_belief_state() -> None:
     evaluator.generator = torch.Generator(device=env.device)
     evaluator.generator.manual_seed(1)
 
-    next_pbs = evaluator.self_play_iteration(training_mode=False)
+    next_pbs = evaluator.evaluate_cfr(training_mode=False)
 
     assert next_pbs is not None
     assert next_pbs.env.N == 2

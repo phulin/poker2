@@ -577,7 +577,7 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             torch.tensor([0], dtype=torch.long, device=self.device),
             self.pbs.beliefs,
         )
-        self.cfr_evaluator.self_play_iteration(training_mode=False)
+        self.cfr_evaluator.evaluate_cfr(training_mode=False)
 
         # Get the root node policy (index 0) [NUM_HANDS, num_actions]
         actions_slice = slice(
