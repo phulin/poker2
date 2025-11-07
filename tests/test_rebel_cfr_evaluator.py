@@ -16,6 +16,8 @@ from alphaholdem.env.card_utils import (
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
+from alphaholdem.models.mlp.better_features import ScalarContext
+from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.search.rebel_cfr_evaluator import (
@@ -2008,3 +2010,113 @@ def test_set_leaf_values_cfr_avg_branches() -> None:
         torch.testing.assert_close(
             evaluator.latest_values[leaf_idx], expected, atol=1e-6, rtol=1e-6
         )
+
+
+def test_pre_chance_features_share_root_context() -> None:
+    """Pre-chance nodes descended from the same root encode identical context."""
+
+    device = torch.device("cpu")
+    bet_bins = [0.5, 1.0]
+    env = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=bet_bins,
+        device=device,
+        float_dtype=torch.float32,
+    )
+    _advance_env_to_flop(env, button=1)
+
+    model = BetterFFN(
+        num_actions=len(bet_bins) + 3,
+        hidden_dim=32,
+        range_hidden_dim=32,
+        ffn_dim=64,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+    )
+    model.eval()
+
+    evaluator = RebelCFREvaluator(
+        search_batch_size=1,
+        env_proto=env,
+        model=model,
+        bet_bins=bet_bins,
+        max_depth=2,
+        cfr_iterations=2,
+        warm_start_iterations=0,
+        device=device,
+        float_dtype=torch.float32,
+    )
+
+    roots = torch.tensor([0], device=device)
+    evaluator.initialize_search(env, roots)
+    evaluator.construct_subgame()
+
+    pre_chance_mask = evaluator.new_street_mask & evaluator.valid_mask
+    assert pre_chance_mask.any(), "expected at least one start-of-street node"
+
+    features = evaluator.feature_encoder.encode(
+        evaluator.beliefs, pre_chance_node=pre_chance_mask
+    )
+    root_ids = _compute_root_ids(evaluator)
+    masked_indices = torch.where(pre_chance_mask)[0]
+    actions_idx = ScalarContext.ACTIONS_ROUND.value
+
+    for root_id in torch.unique(root_ids[masked_indices]):
+        node_indices = masked_indices[root_ids[masked_indices] == root_id]
+        reference = node_indices[0]
+
+        expected_street = features.street[reference]
+        expected_board = features.board[reference]
+        expected_actions = features.context[reference, actions_idx]
+
+        assert torch.all(features.street[node_indices] == expected_street)
+        assert torch.all(features.board[node_indices] == expected_board)
+        torch.testing.assert_close(
+            features.context[node_indices, actions_idx],
+            torch.full_like(
+                features.context[node_indices, actions_idx], expected_actions
+            ),
+        )
+
+
+def _advance_env_to_flop(env: HUNLTensorEnv, button: int = 1) -> None:
+    """Advance a tensor env from reset to a flop state with no flop actions taken."""
+
+    env.reset(force_button=torch.tensor([button], device=env.device))
+    bet_bin_index = min(3, len(env.default_bet_bins) + 2)
+    bet_action = torch.full(
+        (env.N,), bet_bin_index, dtype=torch.long, device=env.device
+    )
+    call_action = torch.ones(env.N, dtype=torch.long, device=env.device)
+
+    # SB open-raises and BB calls to close the preflop round.
+    env.step_bins(bet_action)
+    env.step_bins(call_action)
+
+
+def _compute_root_ids(evaluator: RebelCFREvaluator) -> torch.Tensor:
+    """Map every node in the constructed subgame back to its root index."""
+
+    root_ids = torch.full(
+        (evaluator.total_nodes,),
+        -1,
+        dtype=torch.long,
+        device=evaluator.device,
+    )
+
+    for depth in range(evaluator.max_depth + 1):
+        offset = evaluator.depth_offsets[depth]
+        offset_next = evaluator.depth_offsets[depth + 1]
+        per_root = evaluator.num_actions**depth
+        span = torch.arange(
+            offset_next - offset,
+            device=evaluator.device,
+            dtype=torch.long,
+        )
+        root_ids[offset:offset_next] = span // per_root
+
+    return root_ids

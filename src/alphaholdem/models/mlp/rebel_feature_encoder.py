@@ -54,7 +54,7 @@ class RebelFeatureEncoder:
     def encode(
         self,
         beliefs: torch.Tensor,
-        pre_chance_node: bool = False,
+        pre_chance_node: torch.Tensor | bool | None = None,
     ) -> MLPFeatures:
         """
         Build ReBeL flat features for all envs.
@@ -70,7 +70,22 @@ class RebelFeatureEncoder:
             - street: unused (empty)
         """
         M = beliefs.shape[0]
+        if pre_chance_node is None:
+            pre_chance_node = torch.zeros(M, dtype=torch.bool, device=self.device)
+        elif isinstance(pre_chance_node, bool):
+            pre_chance_node = torch.full(
+                (M,), pre_chance_node, dtype=torch.bool, device=self.device
+            )
+        else:
+            pre_chance_node = pre_chance_node.to(self.device)
+
         num_players = beliefs.shape[1]
+        street_reset = (
+            (self.env.street > 0) & (self.env.actions_this_round == 0) & pre_chance_node
+        )
+        street = torch.where(
+            street_reset, torch.clamp(self.env.street - 1, min=0), self.env.street
+        )
 
         # Context features: to_act, position, pot_fraction, has_bet_flag
         context_features = torch.zeros(M, 4, device=self.device, dtype=self.dtype)
@@ -81,12 +96,12 @@ class RebelFeatureEncoder:
 
         return MLPFeatures(
             context=context_features,
-            street=self.env.street,
+            street=street,
             to_act=self.env.to_act,
-            board=(
-                self.env.last_board_indices
-                if pre_chance_node
-                else self.env.board_indices
+            board=torch.where(
+                pre_chance_node[:, None],
+                self.env.last_board_indices,
+                self.env.board_indices,
             ),
             beliefs=beliefs.view(-1, 2 * NUM_HANDS),
         )
