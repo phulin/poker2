@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-from typing import List, Optional, Callable
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
 
 from alphaholdem.core.structured_config import CFRType, SearchConfig
-from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.utils.model_utils import compute_masked_logits
-from alphaholdem.rl.agent_snapshot import AgentSnapshot
-from alphaholdem.rl.opponent_pool import OpponentPool
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
+from alphaholdem.rl.agent_snapshot import AgentSnapshot
+from alphaholdem.rl.opponent_pool import OpponentPool
 from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
 from alphaholdem.utils.profiling import profile
 

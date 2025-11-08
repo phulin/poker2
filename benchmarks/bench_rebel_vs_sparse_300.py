@@ -10,13 +10,13 @@ from typing import Tuple
 import torch
 
 from alphaholdem.core.structured_config import (
+    CFRType,
     Config,
-    SearchConfig,
     EnvConfig,
     ModelConfig,
-    TrainingConfig,
-    CFRType,
     ModelType,
+    SearchConfig,
+    TrainingConfig,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN

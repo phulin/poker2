@@ -714,7 +714,6 @@ class SparseCFREvaluator(CFREvaluator):
         """Sample a leaf node for training (placeholder)."""
         # This would sample a leaf node based on reach probabilities
         # For now, just a placeholder
-        pass
 
     def cfr_iteration(self, t: int, training_mode: bool = True) -> None:
         """Run one CFR iteration."""

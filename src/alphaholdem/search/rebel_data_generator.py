@@ -1,5 +1,4 @@
 import torch
-from torch.profiler import record_function
 
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv

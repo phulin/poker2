@@ -31,7 +31,6 @@ from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.search.rebel_cfr_evaluator import (
     PublicBeliefState,
     RebelCFREvaluator,
-    T_WARM,
 )
 from alphaholdem.utils.training_utils import print_combined_tables
 
@@ -488,6 +487,7 @@ def main():
 
     # Load config
     from omegaconf import OmegaConf
+
     from alphaholdem.core.structured_config import (
         EnvConfig,
         ModelConfig,

@@ -17,10 +17,10 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+import hydra
 import torch
 from hydra.core.config_store import ConfigStore
 from hydra.utils import to_absolute_path
-import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from alphaholdem.core.structured_config import Config

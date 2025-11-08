@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import random
 from collections import Counter
 
 import pytest
-import random
 import torch
 
 from alphaholdem.env.card_utils import NUM_HANDS

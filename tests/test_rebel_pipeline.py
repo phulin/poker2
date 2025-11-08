@@ -2,7 +2,7 @@ import math
 
 import torch
 
-from alphaholdem.core.structured_config import Config, ValueHeadType, StratifyConfig
+from alphaholdem.core.structured_config import Config, StratifyConfig, ValueHeadType
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.mlp_features import MLPFeatures

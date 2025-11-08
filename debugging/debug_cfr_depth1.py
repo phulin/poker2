@@ -33,21 +33,19 @@ Usage:
 
 import os
 import random
-
-import torch
 from dataclasses import dataclass
 from typing import Optional
 
 import hydra
+import torch
 from hydra.core.config_store import ConfigStore
-from omegaconf import DictConfig, OmegaConf
 from hydra.utils import to_absolute_path
+from omegaconf import DictConfig, OmegaConf
 
 from alphaholdem.core.structured_config import Config, ModelType
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.env.types import GameState, PlayerState
 from alphaholdem.env import card_utils
 from alphaholdem.env.card_utils import NUM_HANDS
+from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer

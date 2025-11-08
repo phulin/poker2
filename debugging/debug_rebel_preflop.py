@@ -39,13 +39,13 @@ from alphaholdem.core.structured_config import (
     Config,
     EnvConfig,
     ModelConfig,
+    ModelType,
     SearchConfig,
     TrainingConfig,
-    ModelType,
 )
+from alphaholdem.env.card_utils import combo_lookup_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.types import GameState, PlayerState
-from alphaholdem.env.card_utils import combo_lookup_tensor
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.utils.training_utils import print_preflop_range_grid

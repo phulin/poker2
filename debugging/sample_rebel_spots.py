@@ -41,13 +41,9 @@ from alphaholdem.core.structured_config import (
 from alphaholdem.env.card_utils import hand_combos_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.models.mlp.better_features import (
-    context_length as better_context_length,
-)
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
-
 
 RANKS = {
     c: i

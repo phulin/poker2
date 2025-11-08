@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import torch
-
 from torch.testing import assert_close
 
 from alphaholdem.core.structured_config import (
+    CFRType,
     Config,
-    SearchConfig,
     EnvConfig,
     ModelConfig,
-    TrainingConfig,
-    CFRType,
     ModelType,
+    SearchConfig,
+    TrainingConfig,
 )
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv

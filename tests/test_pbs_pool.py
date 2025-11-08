@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from alphaholdem.core.structured_config import CFRType, SearchConfig
-from alphaholdem.env.card_utils import NUM_HANDS, combo_index, mask_conflicting_combos
+from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.pbs_pool import PBSPool
 from alphaholdem.search.rebel_cfr_evaluator import RebelFeatureEncoder

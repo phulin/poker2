@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 import math
 import os
+from dataclasses import asdict
 
-from omegaconf import OmegaConf
 import torch
 import torch.nn as nn
 

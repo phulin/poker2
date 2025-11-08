@@ -2,9 +2,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 
+import torch
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
-import torch
 
 
 class ValueLossType(str, Enum):

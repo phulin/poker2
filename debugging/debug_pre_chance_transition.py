@@ -27,9 +27,8 @@ from alphaholdem.env.card_utils import (
     hand_combos_tensor,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
+from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
