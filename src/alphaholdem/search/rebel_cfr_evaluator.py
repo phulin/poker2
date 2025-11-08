@@ -1429,7 +1429,9 @@ class RebelCFREvaluator(CFREvaluator):
         leaf_values = self.values_avg
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
-        base_values = torch.where(self.leaf_mask, leaf_values, 0.0).clamp(-1.0, 1.0)
+        base_values = torch.where(
+            self.leaf_mask[:, None, None], leaf_values, 0.0
+        ).clamp(-1.0, 1.0)
         self.compute_expected_values(policy=policy, values=base_values)
         br_values_p0 = self._best_response_values(policy, base_values, target_player=0)
         br_values_p1 = self._best_response_values(policy, base_values, target_player=1)
