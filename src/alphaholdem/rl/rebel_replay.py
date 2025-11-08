@@ -168,6 +168,7 @@ class RebelReplayBuffer:
                     device=self.device,
                 )
             self.statistics[key][dest_indices] = batch.statistics[key]
+        assert set(self.statistics.keys()) == set(batch.statistics.keys())
 
         self.position = (insert_start + batch_size) % self.capacity
         self.size = min(self.size + batch_size, self.capacity)

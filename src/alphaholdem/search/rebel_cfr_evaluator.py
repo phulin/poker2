@@ -1222,7 +1222,9 @@ class RebelCFREvaluator(CFREvaluator):
         pre_features_root.beliefs = pre_beliefs
 
         value_targets_pre = value_targets.clone()
-        value_statistics_pre = {key: statistics[key][:N].clone() for key in statistics}
+        value_statistics_pre = {
+            key: value_statistics[key].clone() for key in value_statistics
+        }
         value_statistics_pre["board"] = self.env.last_board_indices[:N].clone()
         prev_street = torch.where(
             (street_root > 0) & (street_root < 4) & (actions_root == 0),
@@ -1427,8 +1429,7 @@ class RebelCFREvaluator(CFREvaluator):
         leaf_values = self.values_avg
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
-        base_values = torch.zeros_like(leaf_values)
-        base_values[self.leaf_mask] = leaf_values[self.leaf_mask]
+        base_values = torch.where(self.leaf_mask, leaf_values, 0.0).clamp(-1.0, 1.0)
         self.compute_expected_values(policy=policy, values=base_values)
         br_values_p0 = self._best_response_values(policy, base_values, target_player=0)
         br_values_p1 = self._best_response_values(policy, base_values, target_player=1)
