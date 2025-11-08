@@ -157,8 +157,11 @@ class SparseCFREvaluator(CFREvaluator):
         while depth < self.max_depth:
             parent_env = env_levels[-1]
             legal_mask = parent_env.legal_bins_mask()
+            done_mask = parent_env.done
+            legal_mask = legal_mask & (~done_mask)[:, None]
             stop_mask = parent_env.actions_this_round == 0
-            legal_mask = legal_mask & (~stop_mask)[:, None]
+            if depth > 0:
+                legal_mask = legal_mask & (~stop_mask)[:, None]
             child_count = int(legal_mask.sum().item())
             if child_count == 0:
                 break
@@ -182,9 +185,13 @@ class SparseCFREvaluator(CFREvaluator):
                 count = int(legal_actions.numel())
                 if count == 0:
                     continue
-                src_slice = slice(i, i + 1)
-                dst_slice = slice(write_ptr, write_ptr + count)
-                env_next.copy_state_from(parent_env, src_slice, dst_slice)
+                src_indices = torch.full(
+                    (count,), i, dtype=torch.long, device=self.device
+                )
+                dst_indices = torch.arange(
+                    write_ptr, write_ptr + count, device=self.device
+                )
+                env_next.copy_state_from(parent_env, src_indices, dst_indices)
                 action_bins[write_ptr : write_ptr + count] = legal_actions
                 parent_indices_level[write_ptr : write_ptr + count] = parent_offset + i
                 action_indices_level[write_ptr : write_ptr + count] = legal_actions
@@ -312,14 +319,18 @@ class SparseCFREvaluator(CFREvaluator):
         self.self_reach[:num_roots] = 1.0
         self.self_reach_avg[:num_roots] = 1.0
 
-        board_mask = (
-            self.env.board_onehot.any(dim=1).reshape(self.total_nodes, -1).float()
+        board_mask_root = (
+            self.env.board_onehot[:num_roots].any(dim=1).reshape(num_roots, -1).float()
         )
-        allowed = (self.combo_onehot_float @ board_mask.T).T < 0.5
-        self.allowed_hands = allowed & self.valid_mask[:, None]
-        allowed_prob = self.allowed_hands.to(self.float_dtype)
-        denom = allowed_prob.sum(dim=1, keepdim=True).clamp(min=1.0)
-        self.allowed_hands_prob = allowed_prob / denom
+        root_allowed = (self.combo_onehot_float @ board_mask_root.T).T < 0.5
+        root_allowed_prob = root_allowed.float()
+        root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1.0)
+
+        self.allowed_hands = self._fan_out_deep(root_allowed)
+        self.allowed_hands &= self.valid_mask[:, None]
+
+        self.allowed_hands_prob = self._fan_out_deep(root_allowed_prob)
+        self.allowed_hands_prob.masked_fill_(~self.valid_mask[:, None], 0.0)
 
         if isinstance(self.model, BetterFFN):
             self.feature_encoder = BetterFeatureEncoder(
@@ -519,7 +530,7 @@ class SparseCFREvaluator(CFREvaluator):
             values = self.latest_values
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
-        for depth in range(len(self.depth_offsets) - 2, -1, -1):
+        for depth in range(len(self.depth_offsets) - 3, -1, -1):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
@@ -530,8 +541,20 @@ class SparseCFREvaluator(CFREvaluator):
             )
 
             level_beliefs = beliefs[offset:offset_next]
-            actor_beliefs = level_beliefs.gather(1, actor_indices_expanded)
-            beliefs_dest = self._fan_out(actor_beliefs, depth)
+            actor_beliefs = level_beliefs.gather(1, actor_indices_expanded).squeeze(1)
+
+            parent_indices = self.parent_index[offset_next:offset_next_next]
+            total_children = parent_indices.numel()
+            if total_children == 0:
+                continue
+            relative = parent_indices - offset
+            valid = (relative >= 0) & (relative < actor_beliefs.shape[0])
+            beliefs_dest = torch.zeros(
+                (total_children, NUM_HANDS),
+                dtype=self.float_dtype,
+                device=self.device,
+            )
+            beliefs_dest[valid] = actor_beliefs[relative[valid]]
 
             # All computation on the destination node.
             policy_dest = policy[offset_next:offset_next_next]
@@ -543,11 +566,11 @@ class SparseCFREvaluator(CFREvaluator):
             )
 
             indices = torch.arange(offset_next_next - offset_next, device=self.device)
-            prev_actor_indices = self._fan_out(self.env.to_act, depth)
+            prev_actor_indices = self.env.to_act[parent_indices]
             weighted_child_values = values[offset_next:offset_next_next].clone()
-            weighted_child_values[indices, :, prev_actor_indices] *= policy_dest
+            weighted_child_values[indices, prev_actor_indices, :] *= policy_dest
             weighted_child_values[
-                indices, :, 1 - prev_actor_indices
+                indices, 1 - prev_actor_indices, :
             ] *= opponent_conditioned_policy
 
             self._pull_back_sum(weighted_child_values, values, depth)
@@ -720,17 +743,22 @@ class SparseCFREvaluator(CFREvaluator):
                 old + new
             )
 
-    def evaluate_cfr(self, num_iterations: int = 100) -> None:
+    def evaluate_cfr(self, num_iterations: int | None = None) -> None:
         """Run CFR iterations to evaluate the subgame."""
-        # Initialize policy and beliefs
-        self.initialize_policy_and_beliefs()
+        total_iterations = num_iterations or self.cfr_iterations
+        if total_iterations <= 0:
+            return
 
-        # Warm start (optional)
-        if num_iterations > 15:
+        self.initialize_policy_and_beliefs()
+        self.set_leaf_values(0)
+        self.compute_expected_values()
+        self.values_avg[:] = self.latest_values
+
+        warm_iters = min(self.warm_start_iterations, max(0, total_iterations - 1))
+        if warm_iters > 0:
             self.warm_start()
 
-        # Run CFR iterations
-        for t in range(num_iterations):
+        for t in range(warm_iters, total_iterations):
             self.cfr_iteration(t, training_mode=False)
 
     def _best_response_values(
@@ -1039,15 +1067,47 @@ class SparseCFREvaluator(CFREvaluator):
             end = self.depth_offsets[level + 2]
 
         parent_indices = self.parent_index[start:end]
+        expected = end - start
+        if tensor.shape[0] == self.total_nodes:
+            slice_tensor = tensor[start:end]
+        elif tensor.shape[0] == expected:
+            slice_tensor = tensor
+        else:
+            raise ValueError(
+                f"Tensor length {tensor.shape[0]} does not match expected slice {expected}"
+            )
 
         # Sum values for the children from the appropriate slice of the input tensor.
         # policy_probs[parent_idx, action, ...] => prob[child_idx, ...]
         out.scatter_reduce_(
             dim=0,
             index=parent_indices[(...,) + (None,) * (tensor.dim() - 1)].expand(
-                -1, *tensor.shape[1:]
+                -1, *slice_tensor.shape[1:]
             ),
-            src=tensor[start:end],
+            src=slice_tensor,
             reduce="sum",
             include_self=False,
         )
+
+    def _fan_out_deep(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Fan out a root-aligned tensor across every node in the tree."""
+        output = torch.zeros(
+            (self.total_nodes, *tensor.shape[1:]),
+            dtype=tensor.dtype,
+            device=self.device,
+        )
+        output[: self.root_nodes] = tensor
+        for depth in range(len(self.depth_offsets) - 2):
+            child_start = self.depth_offsets[depth + 1]
+            child_end = self.depth_offsets[depth + 2]
+            if child_end <= child_start:
+                continue
+            parent_indices = self.parent_index[child_start:child_end]
+            valid = parent_indices >= 0
+            if valid.all():
+                output[child_start:child_end] = output[parent_indices]
+            else:
+                output_slice = output[child_start:child_end]
+                output_slice[valid] = output[parent_indices[valid]]
+                output_slice[~valid] = 0
+        return output

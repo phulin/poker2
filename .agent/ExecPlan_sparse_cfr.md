@@ -13,7 +13,7 @@ After this change, anyone can instantiate `SparseCFREvaluator` and expect it to 
 - [ ] (2025-11-08 18:32Z) Re-implement policy and belief propagation using `_fan_out`, `_push_down`, and `_pull_back_sum` (completed: added sparse equivalents of `_initialize_with_copy`, `_block_beliefs`, `_calculate_reach_weights`, rewrote `initialize_policy_and_beliefs`, `_propagate_all_beliefs`, and integrated them into `update_policy`/`compute_expected_values`; remaining: verify reach/averaging parity and port warm-start & sampling paths).
 - [ ] (2025-11-08 17:40Z) Align CFR loop pieces (`warm_start`, `set_leaf_values`, `compute_expected_values`, `compute_instantaneous_regrets`, `update_policy`, `update_average_policy`, `sample_leaf`) with Rebel implementation.
 - [x] (2025-11-08 19:05Z) Port replay extraction (`training_data`) to match Rebel batches (implemented `_pull_back`, `_best_response_values`, `_compute_exploitability`, and full replay batching using sparse helpers).
-- [ ] (2025-11-08 17:40Z) Add regression tests comparing sparse vs rebel outputs on deterministic seeds.
+- [x] (2025-11-09 12:05Z) Add regression tests comparing sparse vs rebel outputs on deterministic seeds (added CPU-only parity tests for tree structure and initial policy/beliefs, covering Sparse vs Rebel alignment).
 - [ ] (2025-11-08 17:40Z) Validate with pytest (targeted module) and document results in Outcomes section.
 
 ## Surprises & Discoveries
@@ -84,4 +84,3 @@ Populate this section with relevant command outputs or tensor diagnostics as wor
 Ensure `SparseCFREvaluator.initialize_subgame` maintains its public contract while populating tensors equivalent to Rebel’s (`valid_mask`, `leaf_mask`, `allowed_hands`, `prev_actor`, etc.). Implement helper methods mirroring Rebel’s signatures, including `_calculate_reach_weights`, `_normalize_beliefs`, `_block_beliefs`, `_propagate_all_beliefs`, `_propagate_level_beliefs`, and `_get_mixing_weights`. CFR iteration methods must accept the same parameters as Rebel’s counterparts, notably `set_leaf_values(self, t: int)` and `compute_expected_values(self, policy=None, values=None)`. `training_data` must return three `RebelBatch` instances aligned with `RebelCFREvaluator.training_data`.
 
 Revision history for this plan must be appended below with date and rationale whenever updates occur.
-

@@ -25,6 +25,10 @@ Usage:
     python debug_cfr_depth1.py --street=flop --board=AsKhQd
     python debug_cfr_depth1.py --street=turn --board=AsKhQd2c
     python debug_cfr_depth1.py --street=river --board=AsKhQd2c3h
+
+    # Use sparse CFR evaluator instead of ReBeL CFR evaluator
+    python debug_cfr_depth1.py --sparse=true
+    python debug_cfr_depth1.py --sparse=true --street=flop --checkpoint checkpoints-rebel/rebel_final.pt
 """
 
 import os
@@ -48,6 +52,7 @@ from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
+from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
 def action_to_string(action_idx: int, bet_bins: list[float]) -> str:
@@ -318,7 +323,7 @@ def _force_board_cards(
 
 
 def print_single_iteration_data(
-    evaluator: RebelCFREvaluator,
+    evaluator: RebelCFREvaluator | SparseCFREvaluator,
     iteration: int,
     bet_bins: list[float],
     selected_hand_idx: Optional[int] = None,
@@ -414,7 +419,7 @@ def print_single_iteration_data(
 
 
 def _print_node_line(
-    evaluator: RebelCFREvaluator,
+    evaluator: RebelCFREvaluator | SparseCFREvaluator,
     node_idx: int,
     depth: int,
     selected_hand_idx: Optional[int],
@@ -484,6 +489,7 @@ def _print_node_line(
             value = evaluator.values_avg[node_idx, 0, :].mean().item()
 
     indent = "  " * depth
+    leaf_str = "L" if evaluator.leaf_mask[node_idx].item() else " "
     # Derive action if not provided
     if action_idx is None:
         start = evaluator.depth_offsets[depth]
@@ -501,13 +507,13 @@ def _print_node_line(
         )
         belief_str = f"{belief_weight:7.4f}"
     print(
-        f"{node_label:<{NODE_COL_WIDTH}} | {actor_str:>5} | {policy_prob:7.4f} | {policy_avg_prob:7.4f} | "
+        f"{node_label:<{NODE_COL_WIDTH - 2}} {leaf_str} | {actor_str:>5} | {policy_prob:7.4f} | {policy_avg_prob:7.4f} | "
         f"{regret:7.2f}{regret_minmax} | {belief_str:>7} | {value:7.4f}"
     )
 
 
 def print_nodes_depth_first(
-    evaluator: RebelCFREvaluator,
+    evaluator: RebelCFREvaluator | SparseCFREvaluator,
     max_depth: int,
     selected_hand_idx: Optional[int],
     bet_bins: list[float],
@@ -568,9 +574,11 @@ def debug_cfr_depth1(
     verbose: bool = False,
     random_beliefs: bool = False,
     forced_board: Optional[list[int]] = None,
+    sparse: bool = False,
 ) -> None:
     """Main debugging function."""
-    print("=== ReBeL CFR Depth-1 Debugger ===")
+    evaluator_type = "Sparse CFR" if sparse else "ReBeL CFR"
+    print(f"=== {evaluator_type} Depth-1 Debugger ===")
     street = street or "preflop"
     valid_streets = {"preflop", "flop", "turn", "river"}
     if street not in valid_streets:
@@ -637,20 +645,27 @@ def debug_cfr_depth1(
         print("\nStarting Preflop CFR Tree Construction...")
 
     # Create evaluator
-    evaluator = RebelCFREvaluator(
-        search_batch_size=1,
-        env_proto=env,
-        model=model,
-        bet_bins=cfg.env.bet_bins,
-        max_depth=cfg.search.depth,
-        cfr_iterations=cfg.search.iterations,
-        device=device,
-        float_dtype=torch.float32,
-        warm_start_iterations=cfg.search.warm_start_iterations,
-        cfr_type=cfr_type,
-        cfr_avg=cfg.search.cfr_avg,
-        dcfr_delay=cfg.search.dcfr_plus_delay,
-    )
+    if sparse:
+        evaluator = SparseCFREvaluator(
+            model=model,
+            device=device,
+            cfg=cfg,
+        )
+    else:
+        evaluator = RebelCFREvaluator(
+            search_batch_size=1,
+            env_proto=env,
+            model=model,
+            bet_bins=cfg.env.bet_bins,
+            max_depth=cfg.search.depth,
+            cfr_iterations=cfg.search.iterations,
+            device=device,
+            float_dtype=torch.float32,
+            warm_start_iterations=cfg.search.warm_start_iterations,
+            cfr_type=cfr_type,
+            cfr_avg=cfg.search.cfr_avg,
+            dcfr_delay=cfg.search.dcfr_plus_delay,
+        )
 
     # Initialize search
     roots = torch.tensor([0], device=device)
@@ -665,18 +680,15 @@ def debug_cfr_depth1(
             # Sample from Dirichlet(alpha=1) which is uniform over simplex
             beliefs_p = torch.distributions.Dirichlet(torch.ones(NUM_HANDS)).sample()
             initial_beliefs[0, p, :] = beliefs_p.to(device=device, dtype=torch.float32)
-    evaluator.initialize_search(env, roots, initial_beliefs=initial_beliefs)
 
-    # We need to manually run CFR iterations and capture data at specific iterations
-    # The evaluator's self_play_iteration() runs all iterations internally
-    # So we need to hook into it to extract data at specific iterations
-
-    # We'll modify the evaluator to capture intermediate state
-    # Or run iterations manually by calling the internal methods
-
-    # Initialize subgame once
-    evaluator.construct_subgame()
-    evaluator.initialize_policy_and_beliefs()
+    if sparse:
+        evaluator.initialize_subgame(env, roots, initial_beliefs=initial_beliefs)
+        evaluator.initialize_policy_and_beliefs()
+    else:
+        evaluator.initialize_search(env, roots, initial_beliefs=initial_beliefs)
+        # Initialize subgame once
+        evaluator.construct_subgame()
+        evaluator.initialize_policy_and_beliefs()
 
     # Run warm start
     print("\nRunning warm start iterations...")
@@ -749,6 +761,7 @@ class TopLevel:
     verbose: bool = False
     random_beliefs: bool = False
     board: Optional[str] = None
+    sparse: bool = False
 
 
 cs = ConfigStore.instance()
@@ -765,6 +778,7 @@ def main(dict_config: DictConfig) -> None:
     verbose = bool(dict_config.get("verbose", False))
     random_beliefs = bool(dict_config.get("random_beliefs", False))
     board = dict_config.get("board")
+    sparse = bool(dict_config.get("sparse", False))
 
     container: dict[str, any] = OmegaConf.to_container(dict_config, resolve=True)
     # Remove our script-specific keys before constructing core Config
@@ -776,6 +790,7 @@ def main(dict_config: DictConfig) -> None:
         "verbose",
         "random_beliefs",
         "board",
+        "sparse",
     ]:
         if k in container:
             container.pop(k)
@@ -813,6 +828,7 @@ def main(dict_config: DictConfig) -> None:
         verbose=verbose,
         random_beliefs=random_beliefs,
         forced_board=forced_board,
+        sparse=sparse,
     )
 
 
