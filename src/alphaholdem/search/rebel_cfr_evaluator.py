@@ -5,27 +5,21 @@ from dataclasses import dataclass
 from typing import Generator, Optional
 
 import torch
-import torch.nn.functional as F
-from torch.profiler import record_function
 
 from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
     NUM_HANDS,
     calculate_unblocked_mass,
     combo_to_onehot_tensor,
-    hand_combos_tensor,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.rebel_replay import RebelBatch
 from alphaholdem.search.cfr_evaluator import CFREvaluator
 from alphaholdem.search.chance_node_helper import ChanceNodeHelper
-from alphaholdem.utils.model_utils import compute_masked_logits
 from alphaholdem.utils.profiling import profile
 
 T_WARM = 15
@@ -119,8 +113,8 @@ class RebelCFREvaluator(CFREvaluator):
     allowed_hands_prob: torch.Tensor
     policy_probs: torch.Tensor
     policy_probs_avg: torch.Tensor
-    reach_weights: torch.Tensor
-    reach_weights_avg: torch.Tensor
+    self_reach: torch.Tensor
+    self_reach_avg: torch.Tensor
     cumulative_regrets: torch.Tensor
     regret_weight_sums: torch.Tensor
     last_model_values: torch.Tensor | None
@@ -240,8 +234,8 @@ class RebelCFREvaluator(CFREvaluator):
             dtype=self.float_dtype,
         )
         self.beliefs_avg = torch.zeros_like(self.beliefs)
-        self.reach_weights = torch.zeros_like(self.beliefs)
-        self.reach_weights_avg = torch.zeros_like(self.beliefs)
+        self.self_reach = torch.zeros_like(self.beliefs)
+        self.self_reach_avg = torch.zeros_like(self.beliefs)
         self.root_pre_chance_beliefs = torch.zeros(
             self.search_batch_size,
             self.num_players,
@@ -385,10 +379,10 @@ class RebelCFREvaluator(CFREvaluator):
         self.beliefs.zero_()
         self.beliefs[:N] = initial_beliefs
         self.root_pre_chance_beliefs[:] = initial_beliefs
-        self.reach_weights.zero_()
-        self.reach_weights[:N] = 1.0
-        self.reach_weights_avg.zero_()
-        self.reach_weights_avg[:N] = 1.0
+        self.self_reach.zero_()
+        self.self_reach[:N] = 1.0
+        self.self_reach_avg.zero_()
+        self.self_reach_avg[:N] = 1.0
         self.legal_mask = None
         self.hand_rank_data = None
 
@@ -557,7 +551,7 @@ class RebelCFREvaluator(CFREvaluator):
         if source is None:
             source = self.policy_probs
         if reach_weights is None:
-            reach_weights = self.reach_weights
+            reach_weights = self.self_reach
 
         self._initialize_with_copy(target)
         target *= reach_weights
@@ -646,10 +640,10 @@ class RebelCFREvaluator(CFREvaluator):
 
         self.policy_probs.masked_fill_((~self.valid_mask)[:, None], 0.0)
 
-        self._calculate_reach_weights(self.reach_weights, self.policy_probs)
+        self._calculate_reach_weights(self.self_reach, self.policy_probs)
 
         self.policy_probs_avg[:] = self.policy_probs
-        self.reach_weights_avg[:] = self.reach_weights
+        self.self_reach_avg[:] = self.self_reach
         self.beliefs_avg[:] = self.beliefs
 
     @profile
@@ -751,8 +745,23 @@ class RebelCFREvaluator(CFREvaluator):
         self.latest_values[self.showdown_indices, 1] = showdown_values_p1
 
     @profile
-    def compute_expected_values(self) -> torch.Tensor:
-        """Back up leaf hand values to their ancestors under the current policy."""
+    def compute_expected_values(
+        self,
+        policy: torch.Tensor | None = None,
+        values: torch.Tensor | None = None,
+    ) -> None:
+        """Back up leaf hand values to their ancestors under the provided policy.
+
+        Args:
+            policy: [M, B, 1326] tensor of policy probabilities.
+            values: [M, 2, 1326] tensor of values, with leaf values already populated.
+        """
+
+        if policy is None:
+            policy = self.policy_probs
+        if values is None:
+            values = self.latest_values
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         # First iteration: leaf values already populated; back propagate expectations
         for depth in range(self.max_depth - 1, -1, -1):
@@ -765,16 +774,18 @@ class RebelCFREvaluator(CFREvaluator):
             # Pull back values to the source nodes (NB we are storing EVs, not CFVs).
             # First, we have to marginalize over all private hands.
             # Pull back policy: [K, B, 1326]
-            policy = self._pull_back(
-                self.policy_probs[offset_next:offset_next_next], sliced=True
+            policy_level = self._pull_back(
+                policy[offset_next:offset_next_next], sliced=True
             )
             actor_indices = self.env.to_act[offset:offset_next]
             actor_indices_expanded = actor_indices[:, None, None].expand(
                 -1, -1, NUM_HANDS
             )
-            beliefs = self.beliefs[offset:offset_next]
-            actor_beliefs = beliefs.gather(1, actor_indices_expanded)  # [K, 1, 1326]
-            marginal_policy = policy * actor_beliefs  # [K, B, 1326]
+            level_beliefs = beliefs[offset:offset_next]
+            actor_beliefs = level_beliefs.gather(
+                1, actor_indices_expanded
+            )  # [K, 1, 1326]
+            marginal_policy = policy_level * actor_beliefs  # [K, B, 1326]
             policy_blocked = calculate_unblocked_mass(marginal_policy)
             matchup_values = calculate_unblocked_mass(actor_beliefs)
             opponent_conditioned_policy = torch.where(
@@ -783,20 +794,20 @@ class RebelCFREvaluator(CFREvaluator):
 
             indices = torch.arange(offset_next - offset, device=self.device)
             child_values_src = self._pull_back(
-                self.latest_values[offset_next:offset_next_next], sliced=True
+                values[offset_next:offset_next_next], sliced=True
             ).clone()  # [K, B, 2, 1326]
-            child_values_src[indices, :, actor_indices] *= policy
+            child_values_src[indices, :, actor_indices] *= policy_level
             child_values_src[
                 indices, :, 1 - actor_indices
             ] *= opponent_conditioned_policy
 
             torch.where(
                 self.leaf_mask[offset:offset_next, None, None],
-                self.latest_values[offset:offset_next],
+                values[offset:offset_next],
                 child_values_src.sum(dim=1),
-                out=self.latest_values[offset:offset_next],
+                out=values[offset:offset_next],
             )
-            self.latest_values[offset:offset_next].masked_fill_(
+            values[offset:offset_next].masked_fill_(
                 (~self.valid_mask)[offset:offset_next, None, None], 0.0
             )
 
@@ -826,14 +837,14 @@ class RebelCFREvaluator(CFREvaluator):
         src_actor_indices_fanout = self._fan_out(self.env.to_act)[:, None, None].expand(
             -1, -1, NUM_HANDS
         )
-        src_opp_indices = (1 - self.env.to_act)[:, None, None].expand(-1, -1, NUM_HANDS)
 
         # This represents the opponent's reach prob at the src node.
         # Then actor acts at the transition src -> dest node.
-        src_opp_beliefs = self.beliefs.gather(1, src_opp_indices).squeeze(1)
+        # Unblocked mass translates opponent-hand space to hero-hand space.
+        opponent_global_reach = calculate_unblocked_mass(self.beliefs.flip(dims=[1]))
+        src_weights = opponent_global_reach.gather(1, src_actor_indices).squeeze(1)
 
         # Weight advantages by our mass unblocked by the opponent hands.
-        src_weights = calculate_unblocked_mass(src_opp_beliefs)
         weights = self._fan_out(src_weights)
 
         # The value at a node is already the EV over all actions.
@@ -872,13 +883,13 @@ class RebelCFREvaluator(CFREvaluator):
         updated_src /= updated_src.sum(dim=1, keepdim=True).clamp(min=1e-8)
         self.policy_probs[bottom:] = self._push_down(updated_src)
 
-        self._calculate_reach_weights(self.reach_weights, self.policy_probs)
-        self._propagate_all_beliefs(self.beliefs, self.policy_probs, self.reach_weights)
+        self._calculate_reach_weights(self.self_reach, self.policy_probs)
+        self._propagate_all_beliefs(self.beliefs, self.policy_probs, self.self_reach)
 
         self.update_average_policy(t)
-        self._calculate_reach_weights(self.reach_weights_avg, self.policy_probs_avg)
+        self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
         self._propagate_all_beliefs(
-            self.beliefs_avg, self.policy_probs_avg, self.reach_weights_avg
+            self.beliefs_avg, self.policy_probs_avg, self.self_reach_avg
         )
 
     @profile
@@ -986,8 +997,8 @@ class RebelCFREvaluator(CFREvaluator):
         policy_probs_avg_src = self._pull_back(self.policy_probs_avg)
 
         actor_indices = self.env.to_act[:top, None, None].expand(-1, -1, NUM_HANDS)
-        reach_actor = self.reach_weights[:top].gather(1, actor_indices)
-        reach_avg_actor = self.reach_weights_avg[:top].gather(1, actor_indices)
+        reach_actor = self.self_reach[:top].gather(1, actor_indices)
+        reach_avg_actor = self.self_reach_avg[:top].gather(1, actor_indices)
 
         old, new = self._get_mixing_weights(t)
         reach_avg_actor *= old
@@ -1268,7 +1279,7 @@ class RebelCFREvaluator(CFREvaluator):
                 old_policy_probs
             )
             # Can either player get to this node with a given hand?
-            reachable = (self.reach_weights > 0).any(dim=1)[: self.depth_offsets[-2]]
+            reachable = (self.self_reach > 0).any(dim=1)[: self.depth_offsets[-2]]
             diff.masked_fill_(~reachable[:, None, :], 0.0)
             reachable_hand_count = reachable.sum(dim=-1)
             reachable_nodes = reachable_hand_count > 0
@@ -1310,58 +1321,6 @@ class RebelCFREvaluator(CFREvaluator):
         regret_quotient_mean = regret_quotient_sum.sum() / self.valid_mask[:N].sum()
         self.stats["mean_regret_bound"] = regret_quotient_mean.item()
 
-    def _policy_values(
-        self,
-        policy: torch.Tensor,
-        leaf_values: torch.Tensor,
-    ) -> torch.Tensor:
-        """Evaluate `policy` without any deviations.
-
-        Returns per-node counterfactual values constructed from `leaf_values` via
-        bottom-up expectations using `policy`.
-        """
-
-        assert self.legal_mask is not None
-
-        values = torch.zeros_like(leaf_values)
-        values[self.leaf_mask] = leaf_values[self.leaf_mask]
-
-        B = self.num_actions
-        all_actions = torch.arange(B, device=self.device)[None, :]
-
-        for depth, current_indices in self._valid_nodes(bottom_up=True):
-            if depth == self.max_depth:
-                continue
-
-            non_leaf = ~self.leaf_mask[current_indices]
-            current = current_indices[non_leaf]
-            if current.numel() == 0:
-                continue
-
-            offset = self.depth_offsets[depth]
-            offset_next = self.depth_offsets[depth + 1]
-            next_indices = offset_next + (current[:, None] - offset) * B + all_actions
-
-            legal = self.legal_mask[current]
-
-            flat_next = next_indices.reshape(-1)
-            next_values = values[flat_next].view(-1, B, self.num_players, NUM_HANDS)
-            next_policy = policy[flat_next].view(-1, B, NUM_HANDS)
-
-            next_values = next_values.clone()
-            next_policy = next_policy.clone()
-            next_values.masked_fill_(~legal[:, :, None, None], 0.0)
-            next_policy.masked_fill_(~legal[:, :, None], 0.0)
-
-            policy_sum = next_policy.sum(dim=1, keepdim=True).clamp_(min=1e-12)
-            norm_policy = next_policy / policy_sum
-            expected = (next_values * norm_policy[:, :, None, :]).sum(dim=1)
-
-            values[current] = expected
-
-        values.masked_fill_(~self.valid_mask[:, None, None], 0.0)
-        return values
-
     def _best_response_values(
         self,
         policy: torch.Tensor,
@@ -1381,6 +1340,9 @@ class RebelCFREvaluator(CFREvaluator):
         B = self.num_actions
         all_actions = torch.arange(B, device=self.device)[None, :]
         min_value = torch.finfo(base_values.dtype).min
+
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+        num_players = self.num_players
 
         for depth, current_indices in self._valid_nodes(bottom_up=True):
             if depth == self.max_depth:
@@ -1408,6 +1370,17 @@ class RebelCFREvaluator(CFREvaluator):
             next_values.masked_fill_(~legal[:, :, None, None], 0.0)
             next_policy.masked_fill_(~legal[:, :, None], 0.0)
 
+            parent_beliefs = beliefs[current]
+            actor_indices = actor[:, None, None].expand(-1, -1, NUM_HANDS)
+            actor_beliefs = parent_beliefs.gather(1, actor_indices)
+            marginal_policy = next_policy * actor_beliefs
+            policy_blocked = calculate_unblocked_mass(marginal_policy)
+            matchup_mass = calculate_unblocked_mass(actor_beliefs)
+            opponent_policy = torch.where(
+                matchup_mass > 1e-12, policy_blocked / matchup_mass, 0.0
+            )
+
+            # Choose the best legal action for the deviating player on a per-hand basis.
             player_values = next_values[:, :, target_player, :].clone()
             player_values.masked_fill_(~legal[:, :, None], min_value)
             best_action = player_values.argmax(dim=1)
@@ -1417,10 +1390,17 @@ class RebelCFREvaluator(CFREvaluator):
             opp_slice = next_values[:, :, 1 - target_player, :]
             best_opp = torch.gather(opp_slice, 1, gather_idx).squeeze(1)
 
-            policy_sum = next_policy.sum(dim=1, keepdim=True).clamp_(min=1e-12)
-            norm_policy = next_policy / policy_sum
-            expected = (next_values * norm_policy[:, :, None, :]).sum(dim=1)
+            actor_onehot = torch.nn.functional.one_hot(
+                actor, num_classes=num_players
+            ).to(next_policy.dtype)
+            actor_onehot = actor_onehot[:, None, :, None]
+            policy_matrix = (
+                actor_onehot * next_policy[:, :, None, :]
+                + (1 - actor_onehot) * opponent_policy[:, :, None, :]
+            )
+            expected = (next_values * policy_matrix).sum(dim=1)
 
+            # Fill with average policy values, then overwrite targets who actually deviate.
             values_br[current] = expected
             target_indices = current[target_mask]
             values_br[target_indices, target_player] = best_player[target_mask]
@@ -1447,7 +1427,9 @@ class RebelCFREvaluator(CFREvaluator):
         leaf_values = self.values_avg
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
-        base_values = self._policy_values(policy, leaf_values)
+        base_values = torch.zeros_like(leaf_values)
+        base_values[self.leaf_mask] = leaf_values[self.leaf_mask]
+        self.compute_expected_values(policy=policy, values=base_values)
         br_values_p0 = self._best_response_values(policy, base_values, target_player=0)
         br_values_p1 = self._best_response_values(policy, base_values, target_player=1)
 
@@ -1468,7 +1450,7 @@ class RebelCFREvaluator(CFREvaluator):
         br_players = torch.stack([br_player0, br_player1], dim=1)
 
         improvements = br_players - base_players
-        total_exploitability = improvements.sum(dim=1)
+        total_exploitability = improvements.sum(dim=1) / 2
 
         return ExploitabilityStats(
             local_exploitability=total_exploitability,

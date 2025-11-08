@@ -175,6 +175,17 @@ def _get_child_nodes(evaluator: RebelCFREvaluator, env: HUNLTensorEnv) -> torch.
     )[0]
 
 
+def _copy_root_beliefs_to_children(evaluator: RebelCFREvaluator) -> None:
+    """Utility to mirror the root public beliefs onto depth-1 nodes for tests."""
+    num_actions = evaluator.num_actions
+    if num_actions <= 0 or evaluator.total_nodes <= 1:
+        return
+    root_beliefs = evaluator.beliefs[0].clone()
+    root_beliefs_avg = evaluator.beliefs_avg[0].clone()
+    evaluator.beliefs[1 : 1 + num_actions] = root_beliefs
+    evaluator.beliefs_avg[1 : 1 + num_actions] = root_beliefs_avg
+
+
 RANKS = "23456789TJQKA"
 SUITS = "shdc"
 
@@ -604,7 +615,7 @@ def test_compute_expected_values_matches_child_values(
     values_bottom = torch.where(evaluator.leaf_mask[bottom:, None], values_temp, 0.0)
 
     # counterfactual value = EV * opponent reach
-    reach_weights = torch.zeros_like(evaluator.reach_weights)
+    reach_weights = torch.zeros_like(evaluator.self_reach)
     evaluator._calculate_reach_weights(reach_weights, evaluator.policy_probs)
     evaluator.latest_values[:] = 0.0
     evaluator.latest_values[bottom:, 0] = values_bottom * reach_weights[bottom:, 1]
@@ -952,8 +963,8 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
     evaluator.initialize_search(env_proto, roots, pre_beliefs)
     evaluator.latest_values[:] = torch.rand_like(evaluator.latest_values)
     evaluator.values_avg[:] = evaluator.latest_values
-    evaluator.reach_weights[:1] = 1.0
-    evaluator.reach_weights_avg[:1] = 1.0
+    evaluator.self_reach[:1] = 1.0
+    evaluator.self_reach_avg[:1] = 1.0
     if evaluator.legal_mask is None:
         evaluator.legal_mask = torch.ones(
             evaluator.total_nodes,
@@ -1021,7 +1032,7 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
 def setup_showdown_evaluator(
     board: str | list[int],
     beliefs: torch.Tensor | None = None,
-) -> tuple[RebelCFREvaluator, HUNLTensorEnv, torch.Tensor]:
+) -> tuple[RebelCFREvaluator, HUNLTensorEnv, torch.Tensor, torch.Tensor]:
     """Common initialization for showdown_value tests."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=0)
     if isinstance(board, str):
@@ -1046,27 +1057,32 @@ def setup_showdown_evaluator(
     evaluator.construct_subgame()
     evaluator.initialize_policy_and_beliefs()
     idx = torch.tensor([0])
-    potential = (
-        evaluator.env.stacks[idx, 0]
-        + evaluator.env.pot[idx]
-        - evaluator.env.starting_stack
+    pot = evaluator.env.pot[idx].unsqueeze(-1)
+    potentials = (
+        evaluator.env.stacks[idx] + pot - evaluator.env.starting_stack
     ) / evaluator.env.scale
 
-    return evaluator, env, idx, potential.item()
+    return evaluator, env, idx, potentials.squeeze(0)
 
 
 def test_showdown_value_uniform_beliefs_matches_reference() -> None:
-    evaluator, _, idx, potential = setup_showdown_evaluator(
+    evaluator, _, idx, potentials = setup_showdown_evaluator(
         "Ac Qh 9d 7s 4h",
     )
 
-    opp_beliefs = evaluator.beliefs[idx, 1].squeeze(0)
-    expected = compute_reference_showdown_ev(
-        evaluator.env.board_indices[0], opp_beliefs, potential
+    opp_beliefs_p0 = evaluator.beliefs[idx, 1].squeeze(0)
+    expected_p0 = compute_reference_showdown_ev(
+        evaluator.env.board_indices[0], opp_beliefs_p0, float(potentials[0])
     )
+    actual_p0 = evaluator._showdown_value(0, idx).squeeze(0)
+    torch.testing.assert_close(actual_p0, expected_p0)
 
-    actual = evaluator._showdown_value(idx).squeeze(0)
-    torch.testing.assert_close(actual, expected)
+    opp_beliefs_p1 = evaluator.beliefs[idx, 0].squeeze(0)
+    expected_p1 = compute_reference_showdown_ev(
+        evaluator.env.board_indices[0], opp_beliefs_p1, float(potentials[1])
+    )
+    actual_p1 = evaluator._showdown_value(1, idx).squeeze(0)
+    torch.testing.assert_close(actual_p1, expected_p1)
 
 
 def test_showdown_value_top_delta_vs_uniform_wins() -> None:
@@ -1076,13 +1092,22 @@ def test_showdown_value_top_delta_vs_uniform_wins() -> None:
     beliefs[0, 0, hero_combo] = 1.0
     beliefs[0, 1] = 1.0 / (NUM_HANDS - 1)
     beliefs[0, 1, hero_combo] = 0.0
-    evaluator, _, idx, potential = setup_showdown_evaluator("Ad Kd Qd Jd 2s", beliefs)
+    evaluator, _, idx, potentials = setup_showdown_evaluator("Ad Kd Qd Jd 2s", beliefs)
 
     opp_beliefs = evaluator.beliefs[idx, 1].squeeze(0)
     expected = compute_reference_showdown_ev(
-        evaluator.env.board_indices[0], opp_beliefs, potential
+        evaluator.env.board_indices[0], opp_beliefs, float(potentials[0])
     )
-    assert expected[hero_combo] == pytest.approx(potential)
+    actual = evaluator._showdown_value(0, idx).squeeze(0)
+    torch.testing.assert_close(actual, expected)
+    assert actual[hero_combo] == pytest.approx(float(potentials[0]))
+
+    opp_beliefs_p1 = evaluator.beliefs[idx, 0].squeeze(0)
+    expected_p1 = compute_reference_showdown_ev(
+        evaluator.env.board_indices[0], opp_beliefs_p1, float(potentials[1])
+    )
+    actual_p1 = evaluator._showdown_value(1, idx).squeeze(0)
+    torch.testing.assert_close(actual_p1, expected_p1)
 
 
 def test_showdown_value_uniform_vs_top_delta_loses() -> None:
@@ -1093,25 +1118,34 @@ def test_showdown_value_uniform_vs_top_delta_loses() -> None:
     beliefs[0, 1, hero_combo] = 1.0
     beliefs[0, 0] = 1.0 / (NUM_HANDS - 1)
     beliefs[0, 0, hero_combo] = 0.0
-    evaluator, _, idx, potential = setup_showdown_evaluator("Ad Kd Qd Jd 2s", beliefs)
+    evaluator, _, idx, potentials = setup_showdown_evaluator("Ad Kd Qd Jd 2s", beliefs)
 
-    actual = evaluator._showdown_value(idx).squeeze(0)
+    actual = evaluator._showdown_value(0, idx).squeeze(0)
     valid_hands_board_mask = mask_conflicting_combos(evaluator.env.board_indices[0])
     valid_hands_hand_mask = mask_conflicting_combos(hero_hand)
 
     # Valid hands: lost.
     valid = actual[valid_hands_board_mask & valid_hands_hand_mask]
-    torch.testing.assert_close(valid, torch.full_like(valid, -potential))
+    torch.testing.assert_close(valid, torch.full_like(valid, -float(potentials[0])))
 
     # Invalid hands: no reward/penalty.
     invalid = actual[~valid_hands_board_mask | ~valid_hands_hand_mask]
     torch.testing.assert_close(invalid, torch.zeros_like(invalid))
 
+    opp_beliefs_p1 = evaluator.beliefs[idx, 0].squeeze(0)
+    expected_p1 = compute_reference_showdown_ev(
+        evaluator.env.board_indices[0], opp_beliefs_p1, float(potentials[1])
+    )
+    actual_p1 = evaluator._showdown_value(1, idx).squeeze(0)
+    torch.testing.assert_close(actual_p1, expected_p1)
+
 
 def test_showdown_value_all_ties_returns_zero() -> None:
     evaluator, _, idx, _ = setup_showdown_evaluator("Ah Kh Qh Jh Th")
-    actual = evaluator._showdown_value(idx).squeeze(0)
-    torch.testing.assert_close(actual, torch.zeros_like(actual))
+    actual_p0 = evaluator._showdown_value(0, idx).squeeze(0)
+    actual_p1 = evaluator._showdown_value(1, idx).squeeze(0)
+    torch.testing.assert_close(actual_p0, torch.zeros_like(actual_p0))
+    torch.testing.assert_close(actual_p1, torch.zeros_like(actual_p1))
 
 
 def test_showdown_value_fail_when_opponent_range_invalid() -> None:
@@ -1152,8 +1186,8 @@ def test_showdown_value_matches_reference_on_diverse_boards(
     opp_combo = combo_from_strs(*opp_hand)
     beliefs[0, 1, opp_combo] = 1.0
 
-    evaluator, _, idx, potential = setup_showdown_evaluator(board_str, beliefs)
-    actual = evaluator._showdown_value(idx).squeeze(0)
+    evaluator, _, idx, potentials = setup_showdown_evaluator(board_str, beliefs)
+    actual = evaluator._showdown_value(0, idx).squeeze(0)
 
     board_tensor = evaluator.env.board_indices[idx].int()
     ranks, _ = rank_hands(board_tensor)
@@ -1170,11 +1204,22 @@ def test_showdown_value_matches_reference_on_diverse_boards(
     assert better.numel() > 0
 
     better_vals = actual[better[: min(3, better.numel())]]
-    torch.testing.assert_close(better_vals, torch.full_like(better_vals, potential))
+    torch.testing.assert_close(
+        better_vals, torch.full_like(better_vals, float(potentials[0]))
+    )
 
     if worse.numel() > 0:
         worse_vals = actual[worse[: min(3, worse.numel())]]
-        torch.testing.assert_close(worse_vals, torch.full_like(worse_vals, -potential))
+        torch.testing.assert_close(
+            worse_vals, torch.full_like(worse_vals, -float(potentials[0]))
+        )
+
+    actual_p1 = evaluator._showdown_value(1, idx).squeeze(0)
+    opp_beliefs_p1 = evaluator.beliefs[idx, 0].squeeze(0)
+    expected_p1 = compute_reference_showdown_ev(
+        evaluator.env.board_indices[0], opp_beliefs_p1, float(potentials[1])
+    )
+    torch.testing.assert_close(actual_p1, expected_p1)
 
 
 @pytest.mark.parametrize(
@@ -1195,9 +1240,9 @@ def test_showdown_value_delta_beliefs_each_hand(hero_hand) -> None:
     beliefs = torch.zeros(1, 2, NUM_HANDS)
     beliefs[0, 1, hero_hand] = 1.0
 
-    evaluator, _, idx, potential = setup_showdown_evaluator(board, beliefs)
+    evaluator, _, idx, potentials = setup_showdown_evaluator(board, beliefs)
 
-    actual = evaluator._showdown_value(idx).squeeze(0)
+    actual = evaluator._showdown_value(0, idx).squeeze(0)
     board_tensor = evaluator.env.board_indices[idx].int()
     ranks, _ = rank_hands(board_tensor)
     ranks = ranks.squeeze(0)
@@ -1216,17 +1261,28 @@ def test_showdown_value_delta_beliefs_each_hand(hero_hand) -> None:
 
     if better.numel() > 0:
         better_vals = actual[better[: min(3, better.numel())]]
-        torch.testing.assert_close(better_vals, torch.full_like(better_vals, potential))
+        torch.testing.assert_close(
+            better_vals, torch.full_like(better_vals, float(potentials[0]))
+        )
 
     if worse.numel() > 0:
         worse_vals = actual[worse[: min(3, worse.numel())]]
-        torch.testing.assert_close(worse_vals, torch.full_like(worse_vals, -potential))
+        torch.testing.assert_close(
+            worse_vals, torch.full_like(worse_vals, -float(potentials[0]))
+        )
 
     if ties.numel() > 0:
         tie_vals = actual[ties[: min(3, ties.numel())]]
         torch.testing.assert_close(tie_vals, torch.zeros_like(tie_vals))
 
     torch.testing.assert_close(actual[hero_hand], torch.zeros_like(actual[hero_hand]))
+
+    actual_p1 = evaluator._showdown_value(1, idx).squeeze(0)
+    opp_beliefs_p1 = evaluator.beliefs[idx, 0].squeeze(0)
+    expected_p1 = compute_reference_showdown_ev(
+        evaluator.env.board_indices[0], opp_beliefs_p1, float(potentials[1])
+    )
+    torch.testing.assert_close(actual_p1, expected_p1)
 
 
 def test_showdown_value_double_half_delta_beliefs() -> None:
@@ -1241,20 +1297,27 @@ def test_showdown_value_double_half_delta_beliefs() -> None:
     beliefs[0, 1, hand1] = 0.5
     beliefs[0, 1, hand2] = 0.5
 
-    evaluator, _, idx, potential = setup_showdown_evaluator(board, beliefs)
-    actual = evaluator._showdown_value(idx).squeeze(0)
+    evaluator, _, idx, potentials = setup_showdown_evaluator(board, beliefs)
+    actual = evaluator._showdown_value(0, idx).squeeze(0)
 
     winner = combo_from_strs("Ts", "2h")  # Makes Broadway straight, beats both hands.
     splitter = combo_from_strs("Ks", "Qc")  # Beats QJ, loses to AK.
     loser = combo_from_strs("4s", "2d")  # High-card hand loses to both.
 
     torch.testing.assert_close(
-        actual[winner], torch.full_like(actual[winner], potential)
+        actual[winner], torch.full_like(actual[winner], float(potentials[0]))
     )
     torch.testing.assert_close(actual[splitter], torch.zeros_like(actual[splitter]))
     torch.testing.assert_close(
-        actual[loser], torch.full_like(actual[loser], -potential)
+        actual[loser], torch.full_like(actual[loser], -float(potentials[0]))
     )
+
+    actual_p1 = evaluator._showdown_value(1, idx).squeeze(0)
+    opp_beliefs_p1 = evaluator.beliefs[idx, 0].squeeze(0)
+    expected_p1 = compute_reference_showdown_ev(
+        evaluator.env.board_indices[0], opp_beliefs_p1, float(potentials[1])
+    )
+    torch.testing.assert_close(actual_p1, expected_p1)
 
 
 def test_showdown_value_belief_normalization() -> None:
@@ -1268,20 +1331,24 @@ def test_showdown_value_belief_normalization() -> None:
     beliefs_norm = torch.full((1, 2, NUM_HANDS), 1.0 / NUM_HANDS)
 
     # Test with unnormalized beliefs
-    evaluator_unnorm, _, idx_unnorm, potential = setup_showdown_evaluator(
+    evaluator_unnorm, _, idx_unnorm, potentials = setup_showdown_evaluator(
         board, beliefs_unnorm
     )
-    values_unnorm = evaluator_unnorm._showdown_value(idx_unnorm).squeeze(0)
+    values_unnorm = evaluator_unnorm._showdown_value(0, idx_unnorm).squeeze(0)
 
     # Test with normalized beliefs
-    evaluator_norm, _, idx_norm, potential = setup_showdown_evaluator(
+    evaluator_norm, _, idx_norm, potentials_norm = setup_showdown_evaluator(
         board, beliefs_norm
     )
-    values_norm = evaluator_norm._showdown_value(idx_norm).squeeze(0)
+    values_norm = evaluator_norm._showdown_value(0, idx_norm).squeeze(0)
 
     # Values should be identical (beliefs get normalized internally)
     board_mask = mask_conflicting_combos(evaluator_unnorm.env.board_indices[0])
     torch.testing.assert_close(values_unnorm[board_mask], values_norm[board_mask])
+
+    values_unnorm_p1 = evaluator_unnorm._showdown_value(1, idx_unnorm).squeeze(0)
+    values_norm_p1 = evaluator_norm._showdown_value(1, idx_norm).squeeze(0)
+    torch.testing.assert_close(values_unnorm_p1[board_mask], values_norm_p1[board_mask])
 
 
 def test_showdown_value_edge_case_zero_opponent_beliefs() -> None:
@@ -1304,8 +1371,10 @@ def test_showdown_value_edge_case_zero_opponent_beliefs() -> None:
     )
 
     # Should not crash and return valid values
-    actual = evaluator._showdown_value(idx).squeeze(0)
-    assert torch.all(torch.isfinite(actual[board_mask]))
+    actual_p0 = evaluator._showdown_value(0, idx).squeeze(0)
+    actual_p1 = evaluator._showdown_value(1, idx).squeeze(0)
+    assert torch.all(torch.isfinite(actual_p0[board_mask]))
+    assert torch.all(torch.isfinite(actual_p1[board_mask]))
 
 
 def test_self_play_iteration_returns_public_belief_state() -> None:
@@ -1376,8 +1445,8 @@ def test_linear_cfr_policy_averaging() -> None:
     all_policies = torch.rand(20, NUM_HANDS, device=device)
 
     # Set reach weights to make the averaging work properly
-    evaluator.reach_weights.fill_(1.0)
-    evaluator.reach_weights_avg.fill_(1.0)
+    evaluator.self_reach.fill_(1.0)
+    evaluator.self_reach_avg.fill_(1.0)
 
     # Run iterations and track average policy
     for t in range(20):
@@ -1451,8 +1520,8 @@ def test_discounted_cfr_policy_averaging() -> None:
     all_policies = torch.rand(20, NUM_HANDS, device=device)
 
     # Set reach weights to make the averaging work properly
-    evaluator.reach_weights.fill_(1.0)
-    evaluator.reach_weights_avg.fill_(1.0)
+    evaluator.self_reach.fill_(1.0)
+    evaluator.self_reach_avg.fill_(1.0)
 
     # Run iterations and track average policy
     for t in range(20):
@@ -1607,11 +1676,11 @@ def test_local_exploitability_depth_limited() -> None:
     evaluator.latest_values.copy_(values)
     evaluator.values_avg.copy_(values)
 
-    evaluator.reach_weights.zero_()
-    evaluator.reach_weights_avg.zero_()
-    evaluator.reach_weights[0].fill_(1.0)
-    evaluator.reach_weights[1 : 1 + num_actions].fill_(1.0)
-    evaluator.reach_weights_avg.copy_(evaluator.reach_weights)
+    evaluator.self_reach.zero_()
+    evaluator.self_reach_avg.zero_()
+    evaluator.self_reach[0].fill_(1.0)
+    evaluator.self_reach[1 : 1 + num_actions].fill_(1.0)
+    evaluator.self_reach_avg.copy_(evaluator.self_reach)
 
     beliefs = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
     uniform = torch.full((num_hands,), 1.0 / num_hands, device=device, dtype=dtype)
@@ -1619,6 +1688,7 @@ def test_local_exploitability_depth_limited() -> None:
     beliefs[0, 1] = uniform
     evaluator.beliefs.copy_(beliefs)
     evaluator.beliefs_avg.copy_(beliefs)
+    _copy_root_beliefs_to_children(evaluator)
 
     evaluator.allowed_hands = torch.ones(
         total_nodes, num_hands, dtype=torch.bool, device=device
@@ -1644,7 +1714,7 @@ def test_local_exploitability_depth_limited() -> None:
 
     torch.testing.assert_close(
         value_batch.statistics["local_exploitability"][0],
-        torch.tensor(0.64, dtype=dtype),
+        torch.tensor(0.32, dtype=dtype),
     )
     torch.testing.assert_close(
         value_batch.statistics["local_br_policy"][0],
@@ -1704,13 +1774,13 @@ def test_local_exploitability_not_scaled_by_opponent_reach() -> None:
     evaluator.latest_values.copy_(values)
     evaluator.values_avg.copy_(values)
 
-    evaluator.reach_weights.zero_()
-    evaluator.reach_weights_avg.zero_()
-    evaluator.reach_weights[0, 0].fill_(0.5)
-    evaluator.reach_weights[0, 1].fill_(0.1)
-    evaluator.reach_weights[1 : 1 + num_actions, 0].fill_(0.5)
-    evaluator.reach_weights[1 : 1 + num_actions, 1].fill_(0.1)
-    evaluator.reach_weights_avg.copy_(evaluator.reach_weights)
+    evaluator.self_reach.zero_()
+    evaluator.self_reach_avg.zero_()
+    evaluator.self_reach[0, 0].fill_(0.5)
+    evaluator.self_reach[0, 1].fill_(0.1)
+    evaluator.self_reach[1 : 1 + num_actions, 0].fill_(0.5)
+    evaluator.self_reach[1 : 1 + num_actions, 1].fill_(0.1)
+    evaluator.self_reach_avg.copy_(evaluator.self_reach)
 
     beliefs = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
     uniform = torch.full((num_hands,), 1.0 / num_hands, device=device, dtype=dtype)
@@ -1718,6 +1788,7 @@ def test_local_exploitability_not_scaled_by_opponent_reach() -> None:
     beliefs[0, 1] = uniform
     evaluator.beliefs.copy_(beliefs)
     evaluator.beliefs_avg.copy_(beliefs)
+    _copy_root_beliefs_to_children(evaluator)
 
     evaluator.allowed_hands = torch.ones(
         total_nodes, num_hands, dtype=torch.bool, device=device
@@ -1736,7 +1807,9 @@ def test_local_exploitability_not_scaled_by_opponent_reach() -> None:
         stats.local_br_improvement[0],
         torch.tensor([expected.item(), 0.0], device=device, dtype=dtype),
     )
-    torch.testing.assert_close(stats.local_exploitability[0], expected)
+    torch.testing.assert_close(
+        stats.local_exploitability[0], torch.tensor(0.32, device=device, dtype=dtype)
+    )
 
 
 def test_local_exploitability_uses_correct_player_beliefs() -> None:
@@ -1792,17 +1865,18 @@ def test_local_exploitability_uses_correct_player_beliefs() -> None:
     evaluator.latest_values.copy_(values)
     evaluator.values_avg.copy_(values)
 
-    evaluator.reach_weights.zero_()
-    evaluator.reach_weights_avg.zero_()
-    evaluator.reach_weights[0].fill_(1.0)
-    evaluator.reach_weights[1 : 1 + num_actions].fill_(1.0)
-    evaluator.reach_weights_avg.copy_(evaluator.reach_weights)
+    evaluator.self_reach.zero_()
+    evaluator.self_reach_avg.zero_()
+    evaluator.self_reach[0].fill_(1.0)
+    evaluator.self_reach[1 : 1 + num_actions].fill_(1.0)
+    evaluator.self_reach_avg.copy_(evaluator.self_reach)
 
     beliefs = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
     beliefs[0, 0, combo_b] = 1.0
     beliefs[0, 1, combo_a] = 1.0
     evaluator.beliefs.copy_(beliefs)
     evaluator.beliefs_avg.copy_(beliefs)
+    _copy_root_beliefs_to_children(evaluator)
 
     evaluator.allowed_hands = torch.ones(
         total_nodes, num_hands, dtype=torch.bool, device=device
@@ -1823,7 +1897,7 @@ def test_local_exploitability_uses_correct_player_beliefs() -> None:
     )
     torch.testing.assert_close(
         stats.local_exploitability[0],
-        expected_improvement,
+        expected_improvement / 2,
     )
 
 
@@ -1872,8 +1946,8 @@ def test_local_exploitability_uses_policy_evaluation_for_baseline() -> None:
     evaluator.latest_values.copy_(values)
     evaluator.values_avg.copy_(values)
 
-    evaluator.reach_weights.fill_(1.0)
-    evaluator.reach_weights_avg.fill_(1.0)
+    evaluator.self_reach.fill_(1.0)
+    evaluator.self_reach_avg.fill_(1.0)
 
     uniform = torch.full((num_hands,), 1.0 / num_hands, dtype=dtype, device=device)
     evaluator.beliefs[:] = uniform
@@ -1886,7 +1960,7 @@ def test_local_exploitability_uses_policy_evaluation_for_baseline() -> None:
     assert torch.all(stats.local_br_improvement >= -1e-6)
     torch.testing.assert_close(
         stats.local_exploitability[0],
-        torch.tensor(0.75, device=device, dtype=dtype),
+        torch.tensor(0.375, device=device, dtype=dtype),
     )
 
 
@@ -1931,7 +2005,7 @@ def test_set_leaf_values_cfr_avg_branches() -> None:
         evaluator.leaf_mask[leaf_idx] = True
         evaluator.valid_mask[leaf_idx] = True
         evaluator.env.done[leaf_idx] = False
-        evaluator.reach_weights[leaf_idx] = 1.0
+        evaluator.self_reach[leaf_idx] = 1.0
         evaluator.folded_mask[leaf_idx] = False
         return evaluator
 
