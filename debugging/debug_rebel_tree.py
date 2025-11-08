@@ -545,7 +545,7 @@ def debug_rebel_tree(
                     if filter_zero_reach:
                         # Check if this node has non-zero reach probability
                         # reach_weights has shape [M, 2, NUM_HANDS], sum across players and hands
-                        reach_weight = evaluator.reach_weights[node_idx].sum().item()
+                        reach_weight = evaluator.self_reach[node_idx].sum().item()
                         if reach_weight < 1e-6:  # Essentially zero reach
                             continue
                     valid_nodes.append((node_idx, depth))
