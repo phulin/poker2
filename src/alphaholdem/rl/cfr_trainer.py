@@ -311,7 +311,8 @@ class RebelCFRTrainer:
         while min(len(self.value_buffer), len(self.policy_buffer)) < self.batch_size:
             self.data_generator.generate_data(self.K_value)
 
-        episodes = self.cfg.train.episodes_per_step
+        value_fullness = len(self.value_buffer) / self.value_buffer.capacity
+        episodes = math.ceil(self.cfg.train.episodes_per_step * value_fullness)
         value_step_loss_all = torch.empty(
             self.batch_size * episodes, self.num_players, NUM_HANDS, device=self.device
         )
@@ -413,6 +414,7 @@ class RebelCFRTrainer:
             entropy_step_loss / episodes,
             permutation_step_loss / episodes,
         )
+        metrics["episodes"] = episodes
 
         return metrics
 

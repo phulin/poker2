@@ -22,7 +22,7 @@ train:
   value_reuse_goal: 4
   value_coef: 1.0
   entropy_coef: 0.0
-  permutation_coef: 1.0
+  permutation_coef: 0.01
   grad_clip: 1.0
 
   stratify_streets:
@@ -59,9 +59,9 @@ search:
   cfr_type: discounted_plus
   cfr_avg: true
 
-  iterations: 150
+  iterations: 300
   warm_start_iterations: 15
-  dcfr_plus_delay: 100
+  dcfr_plus_delay: 70
 
   dcfr_alpha: 1.5
   dcfr_beta: 0.0
