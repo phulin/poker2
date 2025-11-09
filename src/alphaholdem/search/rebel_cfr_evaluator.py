@@ -113,6 +113,7 @@ class RebelCFREvaluator(CFREvaluator):
     allowed_hands_prob: torch.Tensor
     policy_probs: torch.Tensor
     policy_probs_avg: torch.Tensor
+    policy_probs_sample: torch.Tensor
     self_reach: torch.Tensor
     self_reach_avg: torch.Tensor
     cumulative_regrets: torch.Tensor
@@ -207,6 +208,7 @@ class RebelCFREvaluator(CFREvaluator):
             dtype=self.float_dtype,
         )
         self.policy_probs_avg = torch.zeros_like(self.policy_probs)
+        self.policy_probs_sample = torch.zeros_like(self.policy_probs)
         # Cumulative regret of taking this node vs the best at the parent node.
         self.cumulative_regrets = torch.zeros_like(self.policy_probs)
         # Running per-infoset sums of positive regret mass over hands
@@ -368,6 +370,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.new_street_mask.zero_()
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
+        self.policy_probs_sample.zero_()
         self.cumulative_regrets.zero_()
         self.regret_weight_sums.zero_()
         self.allowed_hands.zero_()
@@ -385,6 +388,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.self_reach_avg[:N] = 1.0
         self.legal_mask = None
         self.hand_rank_data = None
+        self.stats.clear()
 
     @profile
     def construct_subgame(self) -> None:
@@ -523,16 +527,6 @@ class RebelCFREvaluator(CFREvaluator):
         self._block_beliefs(target)
         return target
 
-    def _initialize_with_copy(self, target: torch.Tensor | None = None) -> torch.Tensor:
-        """Initialize the non-root nodes of the tree with a copy of the root nodes."""
-        N, M = self.search_batch_size, self.total_nodes
-        factor = M // N - 1
-        target[N:] = (
-            target[:N, None]
-            .expand(-1, factor, -1, -1)
-            .reshape(-1, self.num_players, NUM_HANDS)
-        )
-
     @profile
     def _propagate_all_beliefs(
         self,
@@ -541,6 +535,7 @@ class RebelCFREvaluator(CFREvaluator):
         reach_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Propagate beliefs from all valid nodes to all valid nodes."""
+        N = self.search_batch_size
 
         if target is None:
             target = self.beliefs
@@ -549,19 +544,16 @@ class RebelCFREvaluator(CFREvaluator):
         if reach_weights is None:
             reach_weights = self.self_reach
 
-        self._initialize_with_copy(target)
-        target *= reach_weights
+        target[:] = self._fan_out_deep(target[:N]) * reach_weights
 
         # Precondition: reach_weights should be board-blocked, so the multiplication
         # will block target as well. All that's left is normalizing.
-        # Reach-weights is also 0
         self._normalize_beliefs(target)
 
         # assert torch.allclose(target.sum(dim=2), self.valid_mask[:, None].float())
 
     def _propagate_level_beliefs(self, depth: int):
         """Propagate beliefs from all nodes at a given level to all nodes at the next level."""
-        N, M = self.search_batch_size, self.total_nodes
 
         offset = self.depth_offsets[depth]
         offset_next = self.depth_offsets[depth + 1]
@@ -889,93 +881,6 @@ class RebelCFREvaluator(CFREvaluator):
         )
 
     @profile
-    def sample_leaf(
-        self,
-        root_indices: torch.Tensor,
-        pbs: PublicBeliefState,
-        pbs_start_idx: int,
-        training_mode: bool,
-    ) -> None:
-        """Roll out from `root_indices` and copy the reached leaves into `pbs`.
-
-        Args:
-            root_indices: Indices of root nodes to sample trajectories from.
-            pbs: Destination public belief state that will hold sampled leaves.
-            pbs_start_idx: Offset inside `pbs` to start writing sampled rows.
-            training_mode: Whether epsilon-greedy exploration is enabled.
-        """
-        M, B = self.total_nodes, self.num_actions
-        valid_leaf_mask = self.leaf_mask & ~self.env.done
-        count = root_indices.numel()
-        assert count > 0
-        assert count <= valid_leaf_mask.sum().item()
-
-        players = torch.randint(
-            0, 2, (count,), generator=self.generator, device=self.device
-        )
-        sample_epsilon = self.sample_epsilon if training_mode else 0.0
-        legal_masks = self.env.legal_bins_mask()
-        legal_counts = legal_masks.float().sum(dim=-1, keepdim=True)
-        uniform = torch.where(legal_masks, 1 / legal_counts, 0)
-
-        # select a hand for every valid node
-        selected_hands = torch.zeros(M, dtype=torch.long, device=self.device)
-        valid_indices = torch.where(self.valid_mask)[0]
-        selected_hands[valid_indices] = torch.multinomial(
-            self.beliefs[valid_indices, self.env.to_act[valid_indices]],
-            1,
-            generator=self.generator,
-        ).squeeze(1)
-
-        # start with root nodes and descend to leaves
-        sampled_nodes = root_indices.clone()
-
-        depth = 0
-        active_mask = ~self.leaf_mask[sampled_nodes]
-        policy_probs_by_src = self._pull_back(self.policy_probs)
-        while active_mask.any():
-            assert depth <= self.max_depth
-            active_nodes = sampled_nodes[active_mask]
-            active_count = active_nodes.numel()
-            assert self.valid_mask[active_nodes].all()
-
-            to_act = self.env.to_act[active_nodes]
-            player_mask = players[active_mask]
-            sample_uniformly = (
-                torch.rand(active_count, generator=self.generator, device=self.device)
-                < sample_epsilon
-            )
-            sample_uniformly &= to_act == player_mask
-
-            policy_probs_active = policy_probs_by_src[
-                active_nodes, :, selected_hands[active_nodes]
-            ]
-            actions = torch.multinomial(
-                torch.where(
-                    sample_uniformly.view(-1, 1),
-                    uniform[active_nodes],
-                    policy_probs_active,
-                ),
-                num_samples=1,
-                generator=self.generator,
-            ).squeeze(1)
-
-            offset_next = self.depth_offsets[depth + 1]
-            offset = self.depth_offsets[depth]
-            sampled_nodes[active_mask] = (
-                offset_next + (active_nodes - offset) * B + actions
-            )
-            # remove node from the active mask once it's a leaf
-            active_mask = ~self.leaf_mask[sampled_nodes]
-            depth += 1
-
-        dest_indices = torch.arange(
-            pbs_start_idx, pbs_start_idx + count, device=self.device
-        )
-        pbs.env.copy_state_from(self.env, sampled_nodes, dest_indices)
-        pbs.beliefs[pbs_start_idx : pbs_start_idx + count] = self.beliefs[sampled_nodes]
-
-    @profile
     def update_average_policy(self, t: int) -> None:
         """Update the average policy by mixing it with the current policy."""
 
@@ -1009,49 +914,132 @@ class RebelCFREvaluator(CFREvaluator):
         )
         self.policy_probs_avg[N:] = self._push_down(policy_probs_avg_src)
 
-    def _get_sampling_schedule(self) -> torch.Tensor:
-        leaf_indices = torch.where(self.leaf_mask & ~self.env.done)[0]
-        leaf_indices = leaf_indices[
-            torch.randperm(
-                leaf_indices.numel(), generator=self.generator, device=self.device
-            )
-        ]
-        sample_count = min(leaf_indices.numel(), self.search_batch_size)
-        sampled_leaf_indices = leaf_indices[:sample_count]
-        if sample_count > 0:
-            if self.cfr_type == CFRType.discounted_plus:
-                sample_low = max(self.warm_start_iterations + 1, self.dcfr_delay + 1)
-                sample_low = min(sample_low, self.cfr_iterations - 1)
-            else:
-                sample_low = min(
-                    self.warm_start_iterations + 1, self.cfr_iterations - 1
-                )
-            sample_high = max(self.cfr_iterations, sample_low)
-            distribution = (
-                torch.arange(
-                    sample_low, sample_high, dtype=torch.float32, device=self.device
-                )
-                + 1
-                if self.cfr_type != CFRType.standard
-                else torch.ones(sample_high - sample_low, device=self.device)
-            )
-            distribution /= distribution.sum()
-            t_sample = torch.multinomial(
-                distribution, sample_count, replacement=True, generator=self.generator
-            )
-            t_sample += sample_low
+    @profile
+    def sample_leaves(self, training_mode: bool) -> None:
+        """Sample leaves from `self.policy_probs_sample`."""
 
-            return t_sample, sampled_leaf_indices
+        N, B = self.search_batch_size, self.num_actions
+        top = self.depth_offsets[-2]
 
-        return torch.empty(0, dtype=torch.long, device=self.device), torch.empty(
-            0, dtype=torch.long, device=self.device
+        players = torch.randint(
+            0, 2, (N,), generator=self.generator, device=self.device
         )
+        sample_epsilon = self.sample_epsilon if training_mode else 0.0
+
+        # Don't sample nodes that are done. No point in continuing search from there.
+        done_src = self._pull_back(self.env.done)
+
+        # Calculate uniform sampling probabilities.
+        legal_masks = self.legal_mask.clone()
+        legal_masks[:top] &= ~done_src
+        legal_counts = legal_masks.float().sum(dim=-1, keepdim=True)
+        uniform = torch.where(legal_masks, 1 / legal_counts, 0)
+
+        # Calculate policy sampling probabilities, excluding done nodes.
+        policy_probs_by_src = self._pull_back(self.policy_probs_sample).clone()
+        policy_probs_by_src.masked_fill_(done_src[:, :, None], 0.0)
+        denom = policy_probs_by_src.sum(dim=1, keepdim=True)
+        policy_probs_by_src = torch.where(
+            denom >= 1e-12, policy_probs_by_src / denom, uniform[:top, :, None]
+        )
+
+        # If a node has no legal actions after filtering done nodes, it's a leaf.
+        effective_leaf_mask = self.leaf_mask | (legal_counts.squeeze(1) == 0)
+
+        # select a hand for every root node.
+        actor_beliefs = (
+            self.beliefs[:N]
+            .gather(1, self.env.to_act[:N, None, None].expand(-1, -1, NUM_HANDS))
+            .squeeze(1)
+        )
+        selected_hands = torch.multinomial(
+            actor_beliefs, 1, generator=self.generator
+        ).squeeze(1)
+
+        # start with root nodes and descend to leaves
+        sampled_nodes = torch.arange(N, device=self.device)
+
+        depth = 0
+        active_mask = ~effective_leaf_mask[sampled_nodes]
+        while active_mask.any():
+            assert depth <= self.max_depth
+            active_nodes = sampled_nodes[active_mask]
+            active_count = active_nodes.numel()
+            assert self.valid_mask[active_nodes].all()
+
+            to_act = self.env.to_act[active_nodes]
+            player_mask = players[active_mask]
+            sample_uniformly = (
+                torch.rand(active_count, generator=self.generator, device=self.device)
+                < sample_epsilon
+            )
+            sample_uniformly &= to_act == player_mask
+
+            policy_probs_active = policy_probs_by_src[
+                active_nodes, :, selected_hands[active_mask]
+            ]
+            actions = torch.multinomial(
+                torch.where(
+                    sample_uniformly[:, None],
+                    uniform[active_nodes],
+                    policy_probs_active,
+                ),
+                num_samples=1,
+                generator=self.generator,
+            ).squeeze(1)
+
+            offset_next = self.depth_offsets[depth + 1]
+            offset = self.depth_offsets[depth]
+            sampled_nodes[active_mask] = (
+                offset_next + (active_nodes - offset) * B + actions
+            )
+            # remove node from the active mask once it's a leaf
+            active_mask = ~effective_leaf_mask[sampled_nodes]
+            depth += 1
+
+        assert (~self.env.done[sampled_nodes]).all()
+
+        # Don't sample root nodes.
+        sampled_continue = sampled_nodes[sampled_nodes >= N]
+        pbs = PublicBeliefState.from_proto(
+            env_proto=self.env,
+            beliefs=self.beliefs[sampled_continue],
+            num_envs=sampled_continue.numel(),
+        )
+        pbs.env.copy_state_from(
+            self.env,
+            sampled_continue,
+            torch.arange(sampled_continue.numel(), device=self.device),
+        )
+        return pbs
+
+    def _get_sampling_schedule(self) -> torch.Tensor:
+        N = self.search_batch_size
+        if self.cfr_type == CFRType.discounted_plus:
+            sample_low = max(self.warm_start_iterations + 1, self.dcfr_delay + 1)
+            sample_low = min(sample_low, self.cfr_iterations - 1)
+        else:
+            sample_low = min(self.warm_start_iterations + 1, self.cfr_iterations - 1)
+        sample_high = max(self.cfr_iterations, sample_low)
+        distribution = (
+            torch.arange(
+                sample_low, sample_high, dtype=torch.float32, device=self.device
+            )
+            + 1
+            if self.cfr_type != CFRType.standard
+            else torch.ones(sample_high - sample_low, device=self.device)
+        )
+        distribution /= distribution.sum()
+        t_sample = torch.multinomial(
+            distribution, N, replacement=True, generator=self.generator
+        )
+        t_sample += sample_low
+
+        return self._fan_out_deep(t_sample)
 
     @profile
     def evaluate_cfr(self, training_mode: bool = True) -> Optional[PublicBeliefState]:
         """Run one instance of the CFR loop and produce leaf samples for replay."""
-
-        self.stats.clear()
 
         self.construct_subgame()
         self.initialize_policy_and_beliefs()
@@ -1066,42 +1054,24 @@ class RebelCFREvaluator(CFREvaluator):
         self.compute_expected_values()
         self.values_avg[:] = self.latest_values
 
-        self.t_sample, self.sampled_leaf_indices = self._get_sampling_schedule()
-        self.sample_count = self.t_sample.numel()
-        self.next_pbs = None
-        if self.sample_count > 0:
-            beliefs_template = torch.zeros(
-                self.sample_count, self.num_players, NUM_HANDS, device=self.device
-            )
-            self.next_pbs = PublicBeliefState.from_proto(
-                env_proto=self.env,
-                beliefs=beliefs_template,
-                num_envs=self.sample_count,
-            )
-            self.next_pbs_idx = 0
-
+        self.t_sample = self._get_sampling_schedule()
         for t in range(self.warm_start_iterations, self.cfr_iterations):
             self.profiler_step()  # Profile start of CFR iteration
-            self.cfr_iteration(t, training_mode=training_mode)
+            self.cfr_iteration(t)
 
         self._record_action_mix()
         self._record_cfr_entropy()
         self._record_cumulative_regret()
 
-        return self.next_pbs
+        return self.sample_leaves(training_mode)
 
-    def cfr_iteration(self, t: int, training_mode: bool = True) -> None:
-        if self.sample_count > 0:
-            # If t == t_sample, sample leaf PBS
-            sample_now = torch.where(self.t_sample == t)[0]
-            if sample_now.numel() > 0:
-                self.sample_leaf(
-                    self.sampled_leaf_indices[sample_now],
-                    self.next_pbs,
-                    self.next_pbs_idx,
-                    training_mode=training_mode,
-                )
-                self.next_pbs_idx += sample_now.numel()
+    def cfr_iteration(self, t: int) -> None:
+        torch.where(
+            (self.t_sample == t)[:, None],
+            self.policy_probs,
+            self.policy_probs_sample,
+            out=self.policy_probs_sample,
+        )
 
         regrets = self.compute_instantaneous_regrets(self.latest_values)
 
@@ -1541,11 +1511,18 @@ class RebelCFREvaluator(CFREvaluator):
             Tensor shaped [M, ...] with each root slice repeated for every node
             that descends from that root.
         """
-        assert data.shape[0] == self.search_batch_size
-        assert self.total_nodes % self.search_batch_size == 0
-        copies = self.total_nodes // self.search_batch_size
-        expanded = data[:, None].expand(-1, copies, *data.shape[1:])
-        return expanded.reshape(-1, *data.shape[1:]).clone()
+        output = torch.zeros(
+            self.total_nodes, *data.shape[1:], device=self.device, dtype=data.dtype
+        )
+        output[: self.search_batch_size] = data
+        for depth in range(self.max_depth):
+            offset = self.depth_offsets[depth]
+            offset_next = self.depth_offsets[depth + 1]
+            offset_next_next = self.depth_offsets[depth + 2]
+            output[offset_next:offset_next_next] = self._fan_out(
+                output[offset:offset_next], sliced=True
+            )
+        return output
 
     def _leaf_node_indices(self) -> torch.Tensor:
         """Return flattened indices for valid nodes marked as leaves."""

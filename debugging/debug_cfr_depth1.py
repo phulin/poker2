@@ -20,11 +20,13 @@ Usage:
     python debug_cfr_depth1.py --street=turn
     python debug_cfr_depth1.py --street=river
     python debug_cfr_depth1.py --street=river --checkpoint rebel_step_1250.pt
+    python debug_cfr_depth1.py --street=river_plus
 
-    # Force a particular board (3 cards for flop, 4 for turn, 5 for river)
+    # Force a particular board (3 cards for flop, 4 for turn, 5 for river/river_plus)
     python debug_cfr_depth1.py --street=flop --board=AsKhQd
     python debug_cfr_depth1.py --street=turn --board=AsKhQd2c
     python debug_cfr_depth1.py --street=river --board=AsKhQd2c3h
+    python debug_cfr_depth1.py --street=river_plus --board=AsKhQd2c3h
 
     # Use sparse CFR evaluator instead of ReBeL CFR evaluator
     python debug_cfr_depth1.py --sparse=true
@@ -220,13 +222,14 @@ def advance_to_street_with_history(
     - Flop: SB checks, BB checks
     - Turn: SB checks, BB bets 1.5x pot, SB calls
     - River: SB checks → BB to act
+    - River_plus: River + call + bet 0.5x + bet 0.5x → next player to act
 
     Args:
         env: Environment to mutate in-place (expects N=1)
-        street: Target street ("preflop", "flop", "turn", "river")
+        street: Target street ("preflop", "flop", "turn", "river", "river_plus")
         button: 0=SB is button, 1=BB is button. Use 1 so SB acts first postflop.
         forced_board: Optional list of card indices to force as board cards.
-                      Must match street: 3 cards for flop, 4 for turn, 5 for river.
+                      Must match street: 3 cards for flop, 4 for turn, 5 for river/river_plus.
     """
     assert env.N == 1, "This helper expects a single-env instance (N=1)"
 
@@ -290,8 +293,35 @@ def advance_to_street_with_history(
             _force_board_cards(env, forced_board, street)
         return
 
+    # River_plus: advance to river first, then execute call-bet0.5-bet0.5
+    if street == "river_plus":
+        if forced_board is not None:
+            if len(forced_board) != 5:
+                raise ValueError(
+                    f"River_plus requires 5 board cards, got {len(forced_board)}"
+                )
+            _force_board_cards(env, forced_board, "river")
+        # River: SB check (call action when no bet to call)
+        env.step_bins(call_action)
+        # Find bet bin index for 0.5x pot
+        bet_bins = env.default_bet_bins
+        if 0.5 not in bet_bins:
+            raise ValueError(
+                f"Bet bin 0.5x not found in bet_bins: {bet_bins}. Required for river_plus."
+            )
+        bet_05_index = bet_bins.index(0.5) + 2  # Bet bins start at index 2
+        # River: BB bet 0.5x pot
+        env.step_bins(
+            torch.full((env.N,), bet_05_index, dtype=torch.long, device=env.device)
+        )
+        # River: SB bet 0.5x pot (raise)
+        env.step_bins(
+            torch.full((env.N,), bet_05_index, dtype=torch.long, device=env.device)
+        )
+        return
+
     raise ValueError(
-        f"Unknown street: {street}. Must be one of: preflop, flop, turn, river"
+        f"Unknown street: {street}. Must be one of: preflop, flop, turn, river, river_plus"
     )
 
 
@@ -578,7 +608,7 @@ def debug_cfr_depth1(
     evaluator_type = "Sparse CFR" if sparse else "ReBeL CFR"
     print(f"=== {evaluator_type} Depth-1 Debugger ===")
     street = street or "preflop"
-    valid_streets = {"preflop", "flop", "turn", "river"}
+    valid_streets = {"preflop", "flop", "turn", "river", "river_plus"}
     if street not in valid_streets:
         raise ValueError(
             f"Invalid street: {street}. Must be one of: {', '.join(sorted(valid_streets))}"
@@ -815,6 +845,11 @@ def main(dict_config: DictConfig) -> None:
     forced_board: Optional[list[int]] = None
     if board:
         forced_board = _parse_board_str(board)
+        # River_plus also requires 5 board cards
+        if street == "river_plus" and len(forced_board) != 5:
+            raise ValueError(
+                f"River_plus requires 5 board cards, got {len(forced_board)}"
+            )
 
     debug_cfr_depth1(
         cfg=cfg,
