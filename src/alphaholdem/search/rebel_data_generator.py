@@ -22,6 +22,7 @@ class RebelDataGenerator:
         self.device = evaluator.device
         initial_pbs = self._new_pbs(evaluator.search_batch_size)
         self.current_pbs = initial_pbs
+        self.last_extra = 0
 
     def _new_pbs(self, target_batch_size: int) -> PublicBeliefState:
         beliefs = torch.full(
@@ -51,7 +52,7 @@ class RebelDataGenerator:
     def generate_data(self, value_sample_count: int) -> None:
         N = self.evaluator.search_batch_size
         root_indices = torch.arange(N, device=self.device)
-        collected = 0
+        collected = self.last_extra
 
         while collected < value_sample_count:
             if self.current_pbs is None:
@@ -74,3 +75,5 @@ class RebelDataGenerator:
             self.value_buffer.add_batch(value_batch)
             self.value_buffer.add_batch(augmented_value_batch)
             collected += len(value_batch)
+
+        self.last_extra = collected - value_sample_count
