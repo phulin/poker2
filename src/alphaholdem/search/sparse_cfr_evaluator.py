@@ -213,12 +213,16 @@ class SparseCFREvaluator(CFREvaluator):
         self.child_count = torch.zeros(
             self.total_nodes, dtype=torch.long, device=self.device
         )
-        children = torch.arange(self.root_nodes, self.total_nodes, device=self.device)
-        parents = self.parent_index[children]
-        valid_children = parents >= 0
-        ones = torch.ones_like(parents[valid_children])
-        self.child_count.scatter_add_(0, parents[valid_children], ones.to(torch.long))
-        self.child_offsets = torch.cumsum(self.child_count, dim=0)
+
+        bottom = self.depth_offsets[-2]
+        parents = self.parent_index[bottom:]
+        self.child_count.scatter_add_(
+            0, parents, torch.ones_like(parents, dtype=torch.long)
+        )
+        self.child_offsets = bottom + torch.cumsum(self.child_count, dim=0)
+
+        self.showdown_indices = torch.where(self.env.street == 4)[0]
+        self.showdown_actors = self.env.to_act[self.showdown_indices]
 
         self.prev_actor = torch.full(
             (self.total_nodes,), -1, dtype=torch.long, device=self.device
@@ -255,10 +259,14 @@ class SparseCFREvaluator(CFREvaluator):
             dtype=self.float_dtype,
             device=self.device,
         )
-        self.latest_values = torch.zeros_like(self.beliefs)
-        self.values_avg = torch.zeros_like(self.beliefs)
         self.self_reach = torch.zeros_like(self.beliefs)
         self.self_reach_avg = torch.zeros_like(self.beliefs)
+
+        self.latest_values = torch.zeros_like(self.beliefs)
+        folded_mask = (self.action_from_parent == 0) & self.env.done
+        self.latest_values[folded_mask, 0] = rewards_tensor[folded_mask][:, None]
+        self.latest_values[folded_mask, 1] = -rewards_tensor[folded_mask][:, None]
+        self.values_avg = self.latest_values.clone()
         self.last_model_values = None
 
         if initial_beliefs is None:
@@ -431,13 +439,6 @@ class SparseCFREvaluator(CFREvaluator):
     @profile
     def set_leaf_values(self, t: int) -> None:
         """Set leaf values from model or terminal states."""
-        # Set terminal values (fold/showdown)
-        terminal_mask = self.leaf_mask & self.env.done
-        if terminal_mask.any():
-            # For terminal nodes, compute rewards
-            # Note: This is simplified - in practice you'd compute actual terminal rewards
-            # Here we assume latest_values already has terminal values set
-            pass
 
         # Set model values for non-terminal leaves
         model_mask = self.leaf_mask & ~self.env.done
@@ -454,6 +455,12 @@ class SparseCFREvaluator(CFREvaluator):
                 (old + new) * model_output.hand_values - old * self.last_model_values
             ) / new
         self.last_model_values = model_output.hand_values
+
+        # Set showdown values
+        showdown_values_p0 = self._showdown_value(0, self.showdown_indices)
+        showdown_values_p1 = self._showdown_value(1, self.showdown_indices)
+        self.latest_values[self.showdown_indices, 0] = showdown_values_p0
+        self.latest_values[self.showdown_indices, 1] = showdown_values_p1
 
     def compute_expected_values(
         self,
@@ -683,17 +690,11 @@ class SparseCFREvaluator(CFREvaluator):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
             parents = torch.arange(offset, offset_next, device=self.device)
-            if parents.numel() == 0:
-                continue
 
             non_leaf = ~self.leaf_mask[parents]
             parents = parents[non_leaf]
-            if parents.numel() == 0:
-                continue
 
             legal = self.child_mask[parents]
-            if not legal.any():
-                continue
 
             actor = self.env.to_act[parents]
             target_mask = actor == target_player

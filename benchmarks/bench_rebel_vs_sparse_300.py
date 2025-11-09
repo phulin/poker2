@@ -214,7 +214,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    iterations = 300
+    iterations = 1000
     device_str = args.device
 
     if device_str == "mps" and not torch.backends.mps.is_available():

@@ -14,19 +14,17 @@ After this change, anyone can instantiate `SparseCFREvaluator` and expect it to 
 - [x] (2025-11-08 17:40Z) Align CFR loop pieces (`warm_start`, `set_leaf_values`, `compute_expected_values`, `compute_instantaneous_regrets`, `update_policy`, `update_average_policy`, `sample_leaf`) with Rebel implementation.
 - [x] (2025-11-08 19:05Z) Port replay extraction (`training_data`) to match Rebel batches (implemented `_pull_back`, `_best_response_values`, `_compute_exploitability`, and full replay batching using sparse helpers).
 - [x] (2025-11-09 12:05Z) Add regression tests comparing sparse vs rebel outputs on deterministic seeds (added CPU-only parity tests for tree structure and initial policy/beliefs, covering Sparse vs Rebel alignment).
+- [x] (2025-11-10 20:20Z) Backfill terminal bookkeeping and warm start (assign fold EVs during subgame init, record showdown indices/actors, add no-grad/eval guards, and port the best-response warm start + leaf value computation).
 - [ ] (2025-11-08 17:40Z) Validate with pytest (targeted module) and document results in Outcomes section.
-- [ ] (2025-11-10 19:45Z) Gap review re-opened policy/CFR parity (remaining gaps: fold/showdown bookkeeping, terminal value wiring + warm start, legal-weighted backups/regrets, and sampling/replay parity; see “Gap Review”).
+- [ ] (2025-11-10 19:45Z) Gap review re-opened policy/CFR parity (remaining gaps: legal-weighted backups/regrets and sampling/replay parity; see “Gap Review”).
 
 ## Surprises & Discoveries
 
-- (2025-11-10) Comparing `SparseCFREvaluator` to `RebelCFREvaluator` shows that, despite model calls being wired up, we still need to persist fold/showdown payoffs, finish the warm-start/leaf-value flow, ensure legal-weighted backups/regrets match ReBeL, and complete sampling/replay parity.
+- (2025-11-10) Comparing `SparseCFREvaluator` to `RebelCFREvaluator` shows that, even after wiring up terminal EVs and warm start, we still need legal-weighted backups/regrets plus sampling/replay parity to match ReBeL.
 
 ## Gap Review (2025-11-10)
 
-- **State bookkeeping still incomplete.** `SparseCFREvaluator.initialize_subgame` needs to capture showdown indices and immediate fold rewards during tree construction so that later passes can plug leaf payoffs without bespoke fold tracking (src/alphaholdem/search/sparse_cfr_evaluator.py:118-214). Rewards computed in the loop (`reward_levels`) are kept but never written back to nodes, so folds/showdowns retain zero EV.
-- **Policy initialisation mostly aligned.** `_get_model_policy_probs` lives in `CFREvaluator` and is already invoked from `initialize_policy_and_beliefs`; remaining work is to guard against redundant feature encoding when we propagate policies/beliefs level by level, but no major rewrites are required.
-- **Leaf handling, warm start, and model eval still partial.** `set_leaf_values` leaves terminal rewards unimplemented (lines 432-456) and always encodes `pre_chance_node=True`, ignoring `new_street_mask`. `warm_start` merely scales regrets by a constant (lines 419-428) instead of running the best-response sweep found in ReBeL (src/alphaholdem/search/rebel_cfr_evaluator.py:646-694).
-- **Backups and regret updates need legal weighting.** `compute_expected_values`/`compute_instantaneous_regrets` operate on the flattened tensors without `_pull_back` reshaping or per-action legal masking (lines 458-543). ReBeL’s versions condition on legality when aggregating child values (src/alphaholdem/search/rebel_cfr_evaluator.py:760-857); sparse needs equivalent weighting even though every node is considered valid.
+- **Backups and regret updates need legal weighting.** `compute_expected_values`/`compute_instantaneous_regrets` still operate on flattened tensors without `_pull_back` reshaping or per-action legal masking (src/alphaholdem/search/sparse_cfr_evaluator.py:458-543). ReBeL’s versions condition on legality when aggregating child values (src/alphaholdem/search/rebel_cfr_evaluator.py:760-857); sparse needs equivalent weighting even though every node is considered valid.
 - **Sampling/replay parity absent.** `sample_leaf` is still a placeholder (lines 600-607) and `training_data` collects all non-leaf nodes regardless of whether they correspond to real decisions (lines 799-862). Compared to ReBeL’s traversal (src/alphaholdem/search/rebel_cfr_evaluator.py:892-1214), there is no PBS sampling flow or showdown-aware statistics in the sparse evaluator.
 
 ## Decision Log
