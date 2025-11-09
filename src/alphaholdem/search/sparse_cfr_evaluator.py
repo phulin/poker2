@@ -214,7 +214,7 @@ class SparseCFREvaluator(CFREvaluator):
             self.total_nodes, dtype=torch.long, device=self.device
         )
 
-        bottom = self.depth_offsets[-2]
+        bottom = self.depth_offsets[1]
         parents = self.parent_index[bottom:]
         self.child_count.scatter_add_(
             0, parents, torch.ones_like(parents, dtype=torch.long)
