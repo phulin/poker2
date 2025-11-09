@@ -137,6 +137,28 @@ def test_n2_independence_and_mixed_actions():
         assert env.is_allin[1].any().item() is True
 
 
+def test_repeat_interleave_copies_rows():
+    env = _make_env(N=3, seed=321, device="cpu")
+    env.pot[:] = torch.tensor([10, 20, 30], dtype=torch.long, device=env.device)
+    env.stacks += torch.arange(3, device=env.device).view(-1, 1)
+
+    repeats = torch.tensor([2, 0, 1])  # CPU tensor on purpose
+    repeated = env.repeat_interleave(repeats, output_size=3)
+
+    assert repeated.N == 3
+    assert repeated.device == env.device
+
+    expected = torch.tensor([0, 0, 2], device=env.device)
+    torch.testing.assert_close(repeated.pot, env.pot[expected])
+    torch.testing.assert_close(repeated.stacks, env.stacks[expected])
+    torch.testing.assert_close(repeated.deck, env.deck[expected])
+    assert torch.equal(repeated.has_folded, env.has_folded[expected])
+
+    original_pot = env.pot[0].item()
+    repeated.pot[0] = torch.tensor(-999, dtype=torch.long, device=env.device)
+    assert env.pot[0].item() == original_pot
+
+
 def test_legal_mask_handles_all_in_states():
     """Ensure legal mask behaviour stays correct for all-in scenarios across envs."""
     device = torch.device("cpu")

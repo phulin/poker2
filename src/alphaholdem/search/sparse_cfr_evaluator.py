@@ -74,8 +74,6 @@ class SparseCFREvaluator(CFREvaluator):
 
         self.leaf_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.new_street_mask = torch.empty(0, dtype=torch.bool, device=self.device)
-        self.folded_mask = torch.empty(0, dtype=torch.bool, device=self.device)
-        self.folded_rewards = torch.empty(0, dtype=self.float_dtype, device=self.device)
 
         self.legal_mask = torch.empty(
             0, self.num_actions, dtype=torch.bool, device=self.device
@@ -154,52 +152,32 @@ class SparseCFREvaluator(CFREvaluator):
         self.depth_offsets = [0, num_roots]
         depth = 0
         while depth < self.max_depth:
+            parent_start, parent_end = self.depth_offsets[-2], self.depth_offsets[-1]
             parent_env = env_levels[-1]
             legal_mask = parent_env.legal_bins_mask()
             done_mask = parent_env.done
             legal_mask = legal_mask & (~done_mask)[:, None]
             stop_mask = parent_env.actions_this_round == 0
             if depth > 0:
-                legal_mask = legal_mask & (~stop_mask)[:, None]
-            child_count = int(legal_mask.sum().item())
+                legal_mask &= (~stop_mask)[:, None]
+            child_counts = legal_mask.sum(dim=-1)
+            action_bins = torch.where(legal_mask)[1]
+            child_count = action_bins.numel()
             if child_count == 0:
                 break
 
-            env_next = HUNLTensorEnv.from_proto(parent_env, num_envs=child_count)
-            action_bins = torch.full(
-                (child_count,), -1, dtype=torch.long, device=self.device
+            env_next = parent_env.repeat_interleave(
+                child_counts, output_size=child_count
             )
 
-            parent_offset = self.depth_offsets[-1] - parent_env.N
-            parent_indices_level = torch.empty(
-                child_count, dtype=torch.long, device=self.device
-            )
-            action_indices_level = torch.empty(
-                child_count, dtype=torch.long, device=self.device
-            )
-
-            write_ptr = 0
-            for i in range(parent_env.N):
-                legal_actions = torch.where(legal_mask[i])[0]
-                count = int(legal_actions.numel())
-                if count == 0:
-                    continue
-                src_indices = torch.full(
-                    (count,), i, dtype=torch.long, device=self.device
-                )
-                dst_indices = torch.arange(
-                    write_ptr, write_ptr + count, device=self.device
-                )
-                env_next.copy_state_from(parent_env, src_indices, dst_indices)
-                action_bins[write_ptr : write_ptr + count] = legal_actions
-                parent_indices_level[write_ptr : write_ptr + count] = parent_offset + i
-                action_indices_level[write_ptr : write_ptr + count] = legal_actions
-                write_ptr += count
+            parent_indices_level = torch.arange(
+                parent_start, parent_end, device=self.device
+            ).repeat_interleave(child_counts, output_size=child_count)
 
             rewards, _, _ = env_next.step_bins(action_bins)
             env_levels.append(env_next)
             parent_index_levels.append(parent_indices_level)
-            action_levels.append(action_indices_level)
+            action_levels.append(action_bins)
             reward_levels.append(rewards.to(self.float_dtype))
 
             depth += 1
@@ -231,13 +209,6 @@ class SparseCFREvaluator(CFREvaluator):
         self.new_street_mask = (self.env.actions_this_round == 0) & ~root_mask
         self.leaf_mask = self.env.done | self.new_street_mask
         self.child_mask = self.legal_mask & (~self.leaf_mask)[:, None]
-
-        non_root = ~root_mask
-        self.folded_mask = non_root & self.leaf_mask & (self.action_from_parent == 0)
-        self.folded_rewards = torch.zeros(
-            self.total_nodes, dtype=self.float_dtype, device=self.device
-        )
-        self.folded_rewards[self.folded_mask] = rewards_tensor[self.folded_mask]
 
         self.child_count = torch.zeros(
             self.total_nodes, dtype=torch.long, device=self.device
@@ -544,33 +515,31 @@ class SparseCFREvaluator(CFREvaluator):
         if values_expected is None:
             values_expected = values_achieved
 
+        bottom = self.depth_offsets[1]
+
         regrets = torch.zeros_like(self.policy_probs)
 
         if self.total_nodes <= self.root_nodes:
             return regrets
 
-        child_indices = torch.arange(
-            self.root_nodes, self.total_nodes, device=self.device
+        actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
+        parent_actor_values = values_expected.gather(1, actor_indices).squeeze(1)
+        parent_actor_values = self._fan_out(parent_actor_values)
+
+        prev_actor_indices = self.prev_actor[bottom:][:, None, None].expand(
+            -1, -1, NUM_HANDS
         )
-        parent_indices = self.parent_index[child_indices]
-        valid = parent_indices >= 0
-        if not valid.any():
-            return regrets
+        child_actor_values = (
+            values_achieved[bottom:].gather(1, prev_actor_indices).squeeze(1)
+        )
 
-        child_indices = child_indices[valid]
-        parent_indices = parent_indices[valid]
+        opponent_indices = (1 - self.env.to_act)[:, None, None].expand(
+            -1, -1, NUM_HANDS
+        )
+        opponent_beliefs = self.beliefs.gather(1, opponent_indices).squeeze(1)
+        weights = self._fan_out(calculate_unblocked_mass(opponent_beliefs))
 
-        actor = self.env.to_act[parent_indices]
-        opp = 1 - actor
-
-        parent_values_expected = values_expected[parent_indices, actor, :]
-        child_values_achieved = values_achieved[child_indices, actor, :]
-        advantages = child_values_achieved - parent_values_expected
-
-        opponent_beliefs = self.beliefs[parent_indices, opp, :]
-        weights = calculate_unblocked_mass(opponent_beliefs)
-
-        regrets[child_indices] = weights * advantages
+        regrets[bottom:] = weights * (child_actor_values - parent_actor_values)
 
         return regrets
 

@@ -518,6 +518,87 @@ class HUNLTensorEnv:
         # Snapshot source slices to avoid overlap aliasing during assignment
         self.copy_state_from(self, src_parents, dst_children, copy_deck=True)
 
+    def repeat_interleave(
+        self, repeats: torch.Tensor, output_size: int
+    ) -> "HUNLTensorEnv":
+        """Return a new env with each row repeated according to ``repeats``.
+
+        Args:
+            repeats: 1-D tensor of non-negative integers with ``len == N``.
+        """
+
+        dst_env = HUNLTensorEnv.from_proto(self, num_envs=output_size)
+        dst_env.button[:] = self.button.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.street[:] = self.street.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.to_act[:] = self.to_act.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.last_to_act[:] = self.last_to_act.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.pot[:] = self.pot.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.min_raise[:] = self.min_raise.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.actions_this_round[:] = self.actions_this_round.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.actions_last_round[:] = self.actions_last_round.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.acted_since_reset[:] = self.acted_since_reset.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.stacks[:] = self.stacks.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.committed[:] = self.committed.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.has_folded[:] = self.has_folded.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.is_allin[:] = self.is_allin.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.chips_placed[:] = self.chips_placed.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.board_onehot[:] = self.board_onehot.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.hole_onehot[:] = self.hole_onehot.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.board_indices[:] = self.board_indices.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.last_board_indices[:] = self.last_board_indices.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.hole_indices[:] = self.hole_indices.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.done[:] = self.done.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.winner[:] = self.winner.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.deck[:] = self.deck.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.deck_pos[:] = self.deck_pos.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        return dst_env
+
     def get_action_history(self) -> torch.Tensor:
         """Return action history planes tensor if allocated, else None."""
         # TODO: Make this work again.
