@@ -1178,7 +1178,8 @@ class RebelCFREvaluator(CFREvaluator):
             legal_masks=legal_masks[:top][valid_top],
             statistics=policy_statistics,
         )
-        # Prepare end-of-street value batch using pre-chance beliefs.
+
+        # Prepare end-of-previous-street value batch using pre-chance beliefs.
         pre_features_all = self.feature_encoder.encode(
             self.beliefs, pre_chance_node=True
         )

@@ -134,7 +134,7 @@ class BetterFFN(nn.Module, Model):
             .sum(dim=2, keepdim=True)
             .mean(dim=1, keepdim=True)
         )
-        hand_values -= hand_value_sums
+        # hand_values -= hand_value_sums
         value = hand_values.mean(dim=-1)
 
         return ModelOutput(

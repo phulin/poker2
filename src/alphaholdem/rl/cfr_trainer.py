@@ -202,6 +202,17 @@ class RebelCFRTrainer:
         value_river = value_batch.features.street == 3
         value_showdown = value_batch.features.street == 4
 
+        value_buffer_streets = self.value_buffer.features.street[
+            : len(self.value_buffer)
+        ]
+        value_buffer_streets_stats = {
+            "preflop": (value_buffer_streets == 0).sum().item()
+            / len(self.value_buffer),
+            "flop": (value_buffer_streets == 1).sum().item() / len(self.value_buffer),
+            "turn": (value_buffer_streets == 2).sum().item() / len(self.value_buffer),
+            "river": (value_buffer_streets == 3).sum().item() / len(self.value_buffer),
+        }
+
         def by_street(
             tensor: torch.Tensor, batch=value_batch, weights=None
         ) -> dict[str, float]:
@@ -229,6 +240,7 @@ class RebelCFRTrainer:
             "value_loss": value_loss,
             "entropy_loss": entropy_loss,
             "permutation_loss": permutation_loss,
+            "value_buffer": value_buffer_streets_stats,
             "value_buffer_size": len(self.value_buffer),
             "policy_buffer_size": len(self.policy_buffer),
             "value_buffer_mean_sample_count": (
@@ -239,6 +251,17 @@ class RebelCFRTrainer:
                 if len(self.value_buffer) > 0
                 else 0.0
             ),
+            "value_buffer_target_mean_abs": self.value_buffer.value_targets[
+                : len(self.value_buffer)
+            ]
+            .abs()
+            .mean()
+            .item(),
+            "value_buffer_target_std": self.value_buffer.value_targets[
+                : len(self.value_buffer)
+            ]
+            .std()
+            .item(),
             "policy_buffer_mean_sample_count": (
                 self.policy_buffer.sample_count[: len(self.policy_buffer)]
                 .float()

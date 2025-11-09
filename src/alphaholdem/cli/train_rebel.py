@@ -131,13 +131,13 @@ def print_training_stats(
 ) -> None:
     loss_str = f"{metrics['loss']:.4f}" if metrics["loss"] is not None else "N/A"
     policy_str = (
-        f"{metrics['policy_loss']:.4f}" if metrics["policy_loss"] is not None else "N/A"
+        f"{metrics['policy_loss']:.5f}" if metrics["policy_loss"] is not None else "N/A"
     )
     value_str = (
-        f"{metrics['value_loss']:.4f}" if metrics["value_loss"] is not None else "N/A"
+        f"{metrics['value_loss']:.5f}" if metrics["value_loss"] is not None else "N/A"
     )
     exploitability_str = (
-        f"{metrics['local_exploitability']:.4f}"
+        f"{metrics['local_exploitability']:.5f}"
         if metrics["local_exploitability"] is not None
         else "N/A"
     )

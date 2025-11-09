@@ -75,5 +75,6 @@ class RebelDataGenerator:
             self.value_buffer.add_batch(value_batch)
             self.value_buffer.add_batch(augmented_value_batch)
             collected += len(value_batch)
+            # print(f"Collected {len(value_batch)} samples")
 
         self.last_extra = collected - value_sample_count

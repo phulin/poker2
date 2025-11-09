@@ -71,7 +71,7 @@ def action_to_string(action_idx: int, bet_bins: list[float]) -> str:
 
 
 # Fixed width for the Node column when printing depth-first (includes indentation)
-NODE_COL_WIDTH = 18
+NODE_COL_WIDTH = 20
 
 
 def _card_index_to_str(card_idx: int) -> str:
@@ -733,11 +733,11 @@ def debug_cfr_depth1(
         f"\nRunning CFR iterations {cfg.search.warm_start_iterations}-{cfg.search.iterations}..."
     )
 
-    evaluator.sample_count = 0
+    evaluator.t_sample = evaluator._get_sampling_schedule()
 
     # Run iterations 15-25, but only print 16-25
     for t in range(cfg.search.warm_start_iterations, cfg.search.iterations):
-        evaluator.cfr_iteration(t, training_mode=False)
+        evaluator.cfr_iteration(t)
 
         if (t + 1) % 10 == 0:
             print_single_iteration_data(
