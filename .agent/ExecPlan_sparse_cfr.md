@@ -10,15 +10,24 @@ After this change, anyone can instantiate `SparseCFREvaluator` and expect it to 
 
 - [x] (2025-11-08 17:47Z) Document current Sparse vs Rebel state and confirm helper coverage (noted absence of `valid_mask`, `allowed_hands`, reach propagation helpers, and replay parity hooks).
 - [x] (2025-11-08 18:18Z) Bring tree construction, bookkeeping, and masks in `SparseCFREvaluator.initialize_subgame` in line with Rebel semantics (added sparse depth expansion, parent/action wiring, board-blocked hand masks, and reach scaffolding).
-- [ ] (2025-11-08 18:32Z) Re-implement policy and belief propagation using `_fan_out`, `_push_down`, and `_pull_back_sum` (completed: added sparse equivalents of `_initialize_with_copy`, `_block_beliefs`, `_calculate_reach_weights`, rewrote `initialize_policy_and_beliefs`, `_propagate_all_beliefs`, and integrated them into `update_policy`/`compute_expected_values`; remaining: verify reach/averaging parity and port warm-start & sampling paths).
-- [ ] (2025-11-08 17:40Z) Align CFR loop pieces (`warm_start`, `set_leaf_values`, `compute_expected_values`, `compute_instantaneous_regrets`, `update_policy`, `update_average_policy`, `sample_leaf`) with Rebel implementation.
+- [x] (2025-11-08 18:32Z) Re-implement policy and belief propagation using `_fan_out`, `_push_down`, and `_pull_back_sum` (completed: added sparse equivalents of `_initialize_with_copy`, `_block_beliefs`, `_calculate_reach_weights`, rewrote `initialize_policy_and_beliefs`, `_propagate_all_beliefs`, and integrated them into `update_policy`/`compute_expected_values`; remaining: verify reach/averaging parity and port warm-start & sampling paths).
+- [x] (2025-11-08 17:40Z) Align CFR loop pieces (`warm_start`, `set_leaf_values`, `compute_expected_values`, `compute_instantaneous_regrets`, `update_policy`, `update_average_policy`, `sample_leaf`) with Rebel implementation.
 - [x] (2025-11-08 19:05Z) Port replay extraction (`training_data`) to match Rebel batches (implemented `_pull_back`, `_best_response_values`, `_compute_exploitability`, and full replay batching using sparse helpers).
 - [x] (2025-11-09 12:05Z) Add regression tests comparing sparse vs rebel outputs on deterministic seeds (added CPU-only parity tests for tree structure and initial policy/beliefs, covering Sparse vs Rebel alignment).
 - [ ] (2025-11-08 17:40Z) Validate with pytest (targeted module) and document results in Outcomes section.
+- [ ] (2025-11-10 19:45Z) Gap review re-opened policy/CFR parity (remaining gaps: fold/showdown bookkeeping, terminal value wiring + warm start, legal-weighted backups/regrets, and sampling/replay parity; see “Gap Review”).
 
 ## Surprises & Discoveries
 
-- None yet.
+- (2025-11-10) Comparing `SparseCFREvaluator` to `RebelCFREvaluator` shows that, despite model calls being wired up, we still need to persist fold/showdown payoffs, finish the warm-start/leaf-value flow, ensure legal-weighted backups/regrets match ReBeL, and complete sampling/replay parity.
+
+## Gap Review (2025-11-10)
+
+- **State bookkeeping still incomplete.** `SparseCFREvaluator.initialize_subgame` needs to capture showdown indices and immediate fold rewards during tree construction so that later passes can plug leaf payoffs without bespoke fold tracking (src/alphaholdem/search/sparse_cfr_evaluator.py:118-214). Rewards computed in the loop (`reward_levels`) are kept but never written back to nodes, so folds/showdowns retain zero EV.
+- **Policy initialisation mostly aligned.** `_get_model_policy_probs` lives in `CFREvaluator` and is already invoked from `initialize_policy_and_beliefs`; remaining work is to guard against redundant feature encoding when we propagate policies/beliefs level by level, but no major rewrites are required.
+- **Leaf handling, warm start, and model eval still partial.** `set_leaf_values` leaves terminal rewards unimplemented (lines 432-456) and always encodes `pre_chance_node=True`, ignoring `new_street_mask`. `warm_start` merely scales regrets by a constant (lines 419-428) instead of running the best-response sweep found in ReBeL (src/alphaholdem/search/rebel_cfr_evaluator.py:646-694).
+- **Backups and regret updates need legal weighting.** `compute_expected_values`/`compute_instantaneous_regrets` operate on the flattened tensors without `_pull_back` reshaping or per-action legal masking (lines 458-543). ReBeL’s versions condition on legality when aggregating child values (src/alphaholdem/search/rebel_cfr_evaluator.py:760-857); sparse needs equivalent weighting even though every node is considered valid.
+- **Sampling/replay parity absent.** `sample_leaf` is still a placeholder (lines 600-607) and `training_data` collects all non-leaf nodes regardless of whether they correspond to real decisions (lines 799-862). Compared to ReBeL’s traversal (src/alphaholdem/search/rebel_cfr_evaluator.py:892-1214), there is no PBS sampling flow or showdown-aware statistics in the sparse evaluator.
 
 ## Decision Log
 
@@ -32,7 +41,7 @@ After this change, anyone can instantiate `SparseCFREvaluator` and expect it to 
 
 ## Context and Orientation
 
-`SparseCFREvaluator` in `src/alphaholdem/search/sparse_cfr_evaluator.py` is intended to store the game tree sparsely (each node has a parent pointer and action label). At the moment its public methods are skeletal, with placeholder belief propagation and missing replay extraction. `RebelCFREvaluator` in `src/alphaholdem/search/rebel_cfr_evaluator.py` is the authoritative implementation of the CFR search loop, using dense arrays indexed by depth offsets. The sparse evaluator already defines helpers `_fan_out`, `_push_down`, and `_pull_back_sum` analogous to Rebel’s reshaping routines; these must be used consistently to keep sparse storage efficient.
+`SparseCFREvaluator` in `src/alphaholdem/search/sparse_cfr_evaluator.py` is intended to store the game tree sparsely (each node has a parent pointer and action label). `RebelCFREvaluator` in `src/alphaholdem/search/rebel_cfr_evaluator.py` is the authoritative implementation of the CFR search loop, using dense arrays indexed by depth offsets. The sparse evaluator already defines helpers `_fan_out`, `_push_down`, and `_pull_back_sum` analogous to Rebel’s reshaping routines; these must be used consistently to keep sparse storage efficient.
 
 Key modules:
 
@@ -45,27 +54,32 @@ We must ensure the sparse evaluator reproduces features such as warm-start regre
 
 ## Plan of Work
 
-First, reconcile tree construction by ensuring `initialize_subgame` creates the same node set and masks (`valid_mask`, `leaf_mask`, `new_street_mask`), allowed-hand tensors, and previous-actor bookkeeping as `RebelCFREvaluator`, while respecting sparsity via parent/action arrays. Compute `allowed_hands` and `allowed_hands_prob` by fanning out from the root beliefs.
+First, finish state bookkeeping inside `initialize_subgame`: retain immediate fold rewards per node, track which nodes correspond to showdowns, and keep `new_street_mask` so later passes know when to query the pre-chance model.
 
-Next, bring policy and belief propagation in line: implement `_calculate_reach_weights`, `_normalize_beliefs`, `_block_beliefs`, `_propagate_level_beliefs`, `_propagate_all_beliefs`, and update `initialize_policy_and_beliefs` plus `_update_beliefs_from_policy`. Use `_push_down` to map parent policy slices to children and `_pull_back_sum` to accumulate reach weights.
+Then, port the remaining CFR loop pieces—`set_leaf_values`, `warm_start`, `compute_expected_values`, `compute_instantaneous_regrets`, `update_policy`, `update_average_policy`, and `sample_leaf`—so they mirror Rebel’s semantics (terminal payoffs, CFR+ clamping, opponent-weighted regrets), while leaning on the assumption that every sparse node is valid and only gating on legality/leaf masks.
 
-Align the CFR iteration by porting Rebel’s logic for `warm_start`, `set_leaf_values`, `compute_expected_values`, `compute_instantaneous_regrets`, `update_policy`, `update_average_policy`, and `sample_leaf`, adapting indexing to sparse helpers. Preserve CFR+ behaviour (clamping, regret weighting) and ensure tensors remain destination-aligned.
-
-Implement statistics and replay batching by mirroring Rebel’s `training_data`, `ExploitabilityStats`, and related helpers, adjusting computations to sparse storage while avoiding redundant materialisation.
-
-Finally, add tests under `tests/search/test_sparse_cfr_evaluator.py` that construct deterministic subgames, run both evaluators for a small number of iterations, and assert closeness of key tensors (policy, values, regrets). Include comparisons of `RebelBatch` outputs to ensure replay parity.
+Finally, align the replay/sampling surface area by finishing `_compute_exploitability`, `training_data`, and PBS sampling so they reuse showdown metadata, reweight chance nodes correctly, and emit the same `RebelBatch` statistics as the dense evaluator, then extend parity tests and document a broader testing strategy.
 
 ## Concrete Steps
 
 1. Activate the virtual environment from the repository root `/Users/phulin/Documents/Projects/poker2` with `source venv/bin/activate`.
 2. Audit `SparseCFREvaluator` to catalogue methods needing parity updates and confirm helper coverage.
-3. Modify `initialize_subgame` to build masks and tensors mirroring Rebel’s layout, using `_fan_out`, `_push_down`, and `_pull_back_sum`.
-4. Implement helper routines for belief and reach propagation, updating `initialize_policy_and_beliefs` and `_update_beliefs_from_policy`.
-5. Port CFR-loop components (`warm_start`, `set_leaf_values`, `compute_expected_values`, `compute_instantaneous_regrets`, `update_policy`, `update_average_policy`, `sample_leaf`) to match Rebel semantics.
-6. Implement `training_data` and supporting statistics helpers so sparse evaluator produces the same replay tuples.
-7. Create new tests under `tests/search/test_sparse_cfr_evaluator.py` that compare sparse vs rebel evaluators on deterministic seeds.
-8. Run `pytest tests/search/test_sparse_cfr_evaluator.py` to validate parity, then extend to full `pytest` as needed.
+3. Flesh out `initialize_subgame` / tree construction with the missing bookkeeping (showdown indices, fold reward assignment, `new_street_mask`) and confirm `allowed_hands(_prob)` are propagated correctly to every node.
+4. Verify `_get_model_policy_probs` + belief-propagation helpers by walking through `initialize_policy_and_beliefs`, ensuring we don’t re-encode features unnecessarily and that legal masks/allowed hands stay honoured.
+5. Port the CFR loop: finalize `set_leaf_values` (fold/showdown payouts + model heads via `new_street_mask`), copy Rebel’s warm-start best-response sweep, and rewrite `compute_expected_values`/`compute_instantaneous_regrets`/`update_policy`/`update_average_policy` to use `_pull_back` plus leaf/legality gating (no `valid_mask` assumptions needed).
+6. Finish `sample_leaf`, `_compute_exploitability`, and `training_data` so PBS sampling, exploit stats, and replay batches use showdown metadata and legality checks, matching Rebel’s statistics/signatures.
+7. Extend/refresh parity tests under `tests/search/test_sparse_cfr_evaluator.py` to cover policy init, CFR iteration, sampling, and replay outputs, and document the broader test matrix below.
+8. Run `pytest tests/search/test_sparse_cfr_evaluator.py` (and broader suites if needed) to document parity before concluding.
 9. Update this plan’s Progress, Decision Log, Surprises, and Outcomes sections as milestones complete.
+
+## Testing Strategy
+
+1. **Parity checks (existing):** Continue running deterministic sparse vs. rebel comparisons on small search trees to ensure tree construction, initial policy/belief tensors, and CFR iteration outputs (`policy_probs`, `latest_values`, `cumulative_regrets`) match within tolerance.
+2. **Leaf payout regression:** Create fixtures that force fold-only branches and pure showdowns; assert `initialize_subgame` seeds fold rewards correctly and `set_leaf_values` injects showdown EVs via `_showdown_value`.
+3. **Belief/reach propagation:** Add tests that initialise asymmetric belief distributions, run `initialize_policy_and_beliefs`, and verify that reach weights and `beliefs`/`beliefs_avg` remain normalised and blocked according to `allowed_hands`.
+4. **Warm-start behaviour:** Run a single warm-start iteration on a toy tree and compare sparse vs. rebel cumulative regrets/self-reach tensors to ensure the best-response sweep matches.
+5. **Sampling path:** Exercise `sample_leaf` with deterministic RNG seeds, verifying the sampled PBS states/actions align with reach probabilities and that epsilon-greedy exploration respects `sample_epsilon`.
+6. **Replay batches:** Compare sparse/rebel outputs of `training_data` (value, pre-value, policy batches) for identical trees, checking features, masks, and exploitability statistics match.
 
 ## Validation and Acceptance
 
@@ -81,6 +95,6 @@ Populate this section with relevant command outputs or tensor diagnostics as wor
 
 ## Interfaces and Dependencies
 
-Ensure `SparseCFREvaluator.initialize_subgame` maintains its public contract while populating tensors equivalent to Rebel’s (`valid_mask`, `leaf_mask`, `allowed_hands`, `prev_actor`, etc.). Implement helper methods mirroring Rebel’s signatures, including `_calculate_reach_weights`, `_normalize_beliefs`, `_block_beliefs`, `_propagate_all_beliefs`, `_propagate_level_beliefs`, and `_get_mixing_weights`. CFR iteration methods must accept the same parameters as Rebel’s counterparts, notably `set_leaf_values(self, t: int)` and `compute_expected_values(self, policy=None, values=None)`. `training_data` must return three `RebelBatch` instances aligned with `RebelCFREvaluator.training_data`.
+Ensure `SparseCFREvaluator.initialize_subgame` maintains its public contract while populating tensors equivalent to Rebel’s (`leaf_mask`, `allowed_hands`, `prev_actor`, showdown metadata, etc.). Implement helper methods mirroring Rebel’s signatures, including `_calculate_reach_weights`, `_normalize_beliefs`, `_block_beliefs`, `_propagate_all_beliefs`, `_propagate_level_beliefs`, and `_get_mixing_weights`. CFR iteration methods must accept the same parameters as Rebel’s counterparts, notably `set_leaf_values(self, t: int)` and `compute_expected_values(self, policy=None, values=None)`. `training_data` must return three `RebelBatch` instances aligned with `RebelCFREvaluator.training_data`.
 
 Revision history for this plan must be appended below with date and rationale whenever updates occur.
