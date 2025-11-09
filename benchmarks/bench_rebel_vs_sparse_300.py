@@ -4,6 +4,7 @@ Benchmark comparing RebelCFREvaluator vs SparseCFREvaluator
 with 300 CFR iterations.
 """
 
+import argparse
 import time
 from typing import Tuple
 
@@ -19,7 +20,7 @@ from alphaholdem.core.structured_config import (
     TrainingConfig,
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
+from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
 from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
 
@@ -35,14 +36,16 @@ def synchronize_device_if_needed(device: torch.device) -> None:
         torch.cuda.synchronize()
 
 
-def create_mock_model(cfg: Config, device: torch.device) -> RebelFFN:
+def create_mock_model(cfg: Config, device: torch.device) -> BetterFFN:
     """Create a simple mock model for benchmarking."""
-    model = RebelFFN(
-        input_dim=cfg.model.input_dim,
+    model = BetterFFN(
         num_actions=cfg.model.num_actions,
         hidden_dim=cfg.model.hidden_dim,
+        range_hidden_dim=cfg.model.range_hidden_dim,
+        ffn_dim=cfg.model.ffn_dim,
         num_hidden_layers=cfg.model.num_hidden_layers,
-        detach_value_head=cfg.model.detach_value_head,
+        num_policy_layers=cfg.model.num_policy_layers,
+        num_value_layers=cfg.model.num_value_layers,
         num_players=2,
     )
     cpu_rng = torch.Generator(device="cpu")
@@ -63,12 +66,14 @@ def create_config(iterations: int = 300) -> Config:
     cfg.train.batch_size = 1024
 
     cfg.model = ModelConfig()
-    cfg.model.name = ModelType.rebel_ffn
-    cfg.model.input_dim = 2661
+    cfg.model.name = ModelType.better_ffn
     cfg.model.hidden_dim = 512
+    cfg.model.range_hidden_dim = 128
+    cfg.model.ffn_dim = 1024
     cfg.model.num_hidden_layers = 3
+    cfg.model.num_policy_layers = 3
+    cfg.model.num_value_layers = 3
     cfg.model.value_head_type = "scalar"
-    cfg.model.detach_value_head = True
 
     cfg.env = EnvConfig()
     cfg.env.stack = 1000
@@ -114,7 +119,7 @@ def setup_environment(
 
 def benchmark_rebel_cfr(
     cfg: Config,
-    model: RebelFFN,
+    model: BetterFFN,
     env: HUNLTensorEnv,
     root_indices: torch.Tensor,
     iterations: int,
@@ -166,7 +171,7 @@ def benchmark_rebel_cfr(
 
 def benchmark_sparse_cfr(
     cfg: Config,
-    model: RebelFFN,
+    model: BetterFFN,
     env: HUNLTensorEnv,
     root_indices: torch.Tensor,
     iterations: int,
@@ -197,8 +202,20 @@ def benchmark_sparse_cfr(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Benchmark RebelCFREvaluator vs SparseCFREvaluator"
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        choices=["cpu", "cuda", "mps"],
+        help="Compute device to use (default: cpu)",
+    )
+    args = parser.parse_args()
+
     iterations = 300
-    device_str = "mps"
+    device_str = args.device
 
     if device_str == "mps" and not torch.backends.mps.is_available():
         print("MPS not available; falling back to CPU.")
@@ -222,17 +239,6 @@ def main() -> None:
     # Setup environment
     env, root_indices = setup_environment(cfg, device)
 
-    # Benchmark RebelCFREvaluator
-    print("\nInitializing and running RebelCFREvaluator...")
-    rebel_time, rebel_nodes = benchmark_rebel_cfr(
-        cfg, model, env, root_indices, iterations, device
-    )
-    print(f"RebelCFREvaluator:")
-    print(f"  Total time: {rebel_time:.4f} s")
-    print(f"  Total nodes: {rebel_nodes:,}")
-    print(f"  Time per iteration: {rebel_time / iterations:.6f} s")
-    print(f"  Nodes per second: {rebel_nodes / rebel_time:.2f}")
-
     # Benchmark SparseCFREvaluator
     print("\nInitializing and running SparseCFREvaluator...")
     sparse_time, sparse_nodes = benchmark_sparse_cfr(
@@ -243,6 +249,17 @@ def main() -> None:
     print(f"  Total nodes: {sparse_nodes:,}")
     print(f"  Time per iteration: {sparse_time / iterations:.6f} s")
     print(f"  Nodes per second: {sparse_nodes / sparse_time:.2f}")
+
+    # Benchmark RebelCFREvaluator
+    print("\nInitializing and running RebelCFREvaluator...")
+    rebel_time, rebel_nodes = benchmark_rebel_cfr(
+        cfg, model, env, root_indices, iterations, device
+    )
+    print(f"RebelCFREvaluator:")
+    print(f"  Total time: {rebel_time:.4f} s")
+    print(f"  Total nodes: {rebel_nodes:,}")
+    print(f"  Time per iteration: {rebel_time / iterations:.6f} s")
+    print(f"  Nodes per second: {rebel_nodes / rebel_time:.2f}")
 
     # Compare
     speedup = rebel_time / sparse_time if sparse_time > 0 else float("inf")

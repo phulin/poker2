@@ -497,8 +497,6 @@ class RebelCFREvaluator(CFREvaluator):
             reach_weights: [M, 2] tensor of reach weights for each node.
         """
 
-        N, M = self.search_batch_size, self.total_nodes
-
         for depth in range(self.max_depth):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
@@ -506,9 +504,7 @@ class RebelCFREvaluator(CFREvaluator):
 
             weights_src = target[offset:offset_next]
             target_dest = target[offset_next:offset_next_next]
-            target_dest[:] = torch.repeat_interleave(
-                weights_src, self.num_actions, dim=0
-            )
+            target_dest[:] = self._fan_out(weights_src, sliced=True)
 
             prev_actor_dest = self.prev_actor[offset_next:offset_next_next]
             prev_actor_indices = prev_actor_dest[:, None, None].expand(

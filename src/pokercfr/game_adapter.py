@@ -144,11 +144,11 @@ class HUNLGameTreeAdapter:
     def restore(self, state: dict[str, torch.Tensor]) -> None:
         for name in self._state_tensors:
             tensor = getattr(self.env, name)
-            tensor.copy_(state[name])
+            tensor[:] = state[name]
         if "rng_state" in state:
             self.env.rng.set_state(state["rng_state"])
         if "last_rewards" in state:
-            self._last_rewards.copy_(state["last_rewards"])
+            self._last_rewards[:] = state["last_rewards"]
         self._cached_amounts = None
         self._cached_mask = None
 

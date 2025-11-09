@@ -1662,8 +1662,8 @@ def test_local_exploitability_depth_limited() -> None:
     policy = torch.zeros(total_nodes, num_hands, device=device, dtype=dtype)
     policy[1 + good_action].fill_(0.2)
     policy[1 + bad_action].fill_(0.8)
-    evaluator.policy_probs.copy_(policy)
-    evaluator.policy_probs_avg.copy_(policy)
+    evaluator.policy_probs[:] = policy
+    evaluator.policy_probs_avg[:] = policy
 
     values = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
     values[1 + good_action, 0].fill_(1.0)
@@ -1673,21 +1673,21 @@ def test_local_exploitability_depth_limited() -> None:
     base_root_value = 0.2 * 1.0 + 0.8 * 0.2
     values[0, 0].fill_(base_root_value)
     values[0, 1].fill_(-base_root_value)
-    evaluator.latest_values.copy_(values)
-    evaluator.values_avg.copy_(values)
+    evaluator.latest_values[:] = values
+    evaluator.values_avg[:] = values
 
     evaluator.self_reach.zero_()
     evaluator.self_reach_avg.zero_()
     evaluator.self_reach[0].fill_(1.0)
     evaluator.self_reach[1 : 1 + num_actions].fill_(1.0)
-    evaluator.self_reach_avg.copy_(evaluator.self_reach)
+    evaluator.self_reach_avg[:] = evaluator.self_reach
 
     beliefs = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
     uniform = torch.full((num_hands,), 1.0 / num_hands, device=device, dtype=dtype)
     beliefs[0, 0] = uniform
     beliefs[0, 1] = uniform
-    evaluator.beliefs.copy_(beliefs)
-    evaluator.beliefs_avg.copy_(beliefs)
+    evaluator.beliefs[:] = beliefs
+    evaluator.beliefs_avg[:] = beliefs
     _copy_root_beliefs_to_children(evaluator)
 
     evaluator.allowed_hands = torch.ones(
@@ -1760,8 +1760,8 @@ def test_local_exploitability_not_scaled_by_opponent_reach() -> None:
     policy = torch.zeros(total_nodes, num_hands, device=device, dtype=dtype)
     policy[1 + good_action].fill_(0.2)
     policy[1 + bad_action].fill_(0.8)
-    evaluator.policy_probs.copy_(policy)
-    evaluator.policy_probs_avg.copy_(policy)
+    evaluator.policy_probs[:] = policy
+    evaluator.policy_probs_avg[:] = policy
 
     values = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
     values[1 + good_action, 0].fill_(1.0)
@@ -1771,8 +1771,8 @@ def test_local_exploitability_not_scaled_by_opponent_reach() -> None:
     base_root_value = 0.2 * 1.0 + 0.8 * 0.2
     values[0, 0].fill_(base_root_value)
     values[0, 1].fill_(-base_root_value)
-    evaluator.latest_values.copy_(values)
-    evaluator.values_avg.copy_(values)
+    evaluator.latest_values[:] = values
+    evaluator.values_avg[:] = values
 
     evaluator.self_reach.zero_()
     evaluator.self_reach_avg.zero_()
@@ -1780,14 +1780,14 @@ def test_local_exploitability_not_scaled_by_opponent_reach() -> None:
     evaluator.self_reach[0, 1].fill_(0.1)
     evaluator.self_reach[1 : 1 + num_actions, 0].fill_(0.5)
     evaluator.self_reach[1 : 1 + num_actions, 1].fill_(0.1)
-    evaluator.self_reach_avg.copy_(evaluator.self_reach)
+    evaluator.self_reach_avg[:] = evaluator.self_reach
 
     beliefs = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
     uniform = torch.full((num_hands,), 1.0 / num_hands, device=device, dtype=dtype)
     beliefs[0, 0] = uniform
     beliefs[0, 1] = uniform
-    evaluator.beliefs.copy_(beliefs)
-    evaluator.beliefs_avg.copy_(beliefs)
+    evaluator.beliefs[:] = beliefs
+    evaluator.beliefs_avg[:] = beliefs
     _copy_root_beliefs_to_children(evaluator)
 
     evaluator.allowed_hands = torch.ones(
@@ -1842,8 +1842,8 @@ def test_local_exploitability_uses_correct_player_beliefs() -> None:
     policy = torch.zeros(total_nodes, num_hands, device=device, dtype=dtype)
     policy[1 + good_action].fill_(0.2)
     policy[1 + bad_action].fill_(0.8)
-    evaluator.policy_probs.copy_(policy)
-    evaluator.policy_probs_avg.copy_(policy)
+    evaluator.policy_probs[:] = policy
+    evaluator.policy_probs_avg[:] = policy
 
     values = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
     good_values = torch.zeros(num_hands, device=device, dtype=dtype)
@@ -1862,20 +1862,20 @@ def test_local_exploitability_uses_correct_player_beliefs() -> None:
     root_values_p1 = 0.2 * good_values + 0.8 * bad_values
     values[0, 1] = root_values_p1
     values[0, 0] = -root_values_p1
-    evaluator.latest_values.copy_(values)
-    evaluator.values_avg.copy_(values)
+    evaluator.latest_values[:] = values
+    evaluator.values_avg[:] = values
 
     evaluator.self_reach.zero_()
     evaluator.self_reach_avg.zero_()
     evaluator.self_reach[0].fill_(1.0)
     evaluator.self_reach[1 : 1 + num_actions].fill_(1.0)
-    evaluator.self_reach_avg.copy_(evaluator.self_reach)
+    evaluator.self_reach_avg[:] = evaluator.self_reach
 
     beliefs = torch.zeros(total_nodes, 2, num_hands, device=device, dtype=dtype)
     beliefs[0, 0, combo_b] = 1.0
     beliefs[0, 1, combo_a] = 1.0
-    evaluator.beliefs.copy_(beliefs)
-    evaluator.beliefs_avg.copy_(beliefs)
+    evaluator.beliefs[:] = beliefs
+    evaluator.beliefs_avg[:] = beliefs
     _copy_root_beliefs_to_children(evaluator)
 
     evaluator.allowed_hands = torch.ones(
@@ -1925,8 +1925,8 @@ def test_local_exploitability_uses_policy_evaluation_for_baseline() -> None:
     policy = torch.zeros(evaluator.total_nodes, num_hands, device=device, dtype=dtype)
     policy[1].fill_(0.75)
     policy[2].fill_(0.25)
-    evaluator.policy_probs.copy_(policy)
-    evaluator.policy_probs_avg.copy_(policy)
+    evaluator.policy_probs[:] = policy
+    evaluator.policy_probs_avg[:] = policy
 
     values = torch.zeros(
         evaluator.total_nodes, 2, num_hands, device=device, dtype=dtype
@@ -1943,15 +1943,15 @@ def test_local_exploitability_uses_policy_evaluation_for_baseline() -> None:
     values[0, 0].fill_(10.0)
     values[0, 1].fill_(-10.0)
 
-    evaluator.latest_values.copy_(values)
-    evaluator.values_avg.copy_(values)
+    evaluator.latest_values[:] = values
+    evaluator.values_avg[:] = values
 
     evaluator.self_reach.fill_(1.0)
     evaluator.self_reach_avg.fill_(1.0)
 
     uniform = torch.full((num_hands,), 1.0 / num_hands, dtype=dtype, device=device)
     evaluator.beliefs[:] = uniform
-    evaluator.beliefs_avg.copy_(evaluator.beliefs)
+    evaluator.beliefs_avg[:] = evaluator.beliefs
     evaluator.allowed_hands[:] = True
     evaluator.allowed_hands_prob.fill_(1.0 / num_hands)
 

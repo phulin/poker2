@@ -15,6 +15,9 @@ from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.rebel_replay import RebelBatch
+from alphaholdem.search.cfr_evaluator import CFREvaluator
+from alphaholdem.search.chance_node_helper import ChanceNodeHelper
+from alphaholdem.utils.profiling import profile
 
 
 @dataclass
@@ -23,10 +26,6 @@ class ExploitabilityStats:
     local_br_policy: torch.Tensor
     local_br_values: torch.Tensor
     local_br_improvement: torch.Tensor
-
-
-from alphaholdem.search.cfr_evaluator import CFREvaluator
-from alphaholdem.search.chance_node_helper import ChanceNodeHelper
 
 
 class SparseCFREvaluator(CFREvaluator):
@@ -73,7 +72,6 @@ class SparseCFREvaluator(CFREvaluator):
         self.depth_offsets = [0]
         self.env: Optional[HUNLTensorEnv] = None
 
-        self.valid_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.leaf_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.new_street_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.folded_mask = torch.empty(0, dtype=torch.bool, device=self.device)
@@ -127,6 +125,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.next_pbs = None
         self.next_pbs_idx = 0
 
+    @profile
     def initialize_subgame(
         self,
         src_env: HUNLTensorEnv,
@@ -225,9 +224,6 @@ class SparseCFREvaluator(CFREvaluator):
         self.action_from_parent = torch.cat(action_levels)
         rewards_tensor = torch.cat(reward_levels)
 
-        self.valid_mask = torch.ones(
-            self.total_nodes, dtype=torch.bool, device=self.device
-        )
         self.legal_mask = self.env.legal_bins_mask()
 
         root_mask = torch.zeros(self.total_nodes, dtype=torch.bool, device=self.device)
@@ -246,32 +242,19 @@ class SparseCFREvaluator(CFREvaluator):
         self.child_count = torch.zeros(
             self.total_nodes, dtype=torch.long, device=self.device
         )
-        if self.total_nodes > self.root_nodes:
-            children = torch.arange(
-                self.root_nodes, self.total_nodes, device=self.device
-            )
-            parents = self.parent_index[children]
-            valid_children = parents >= 0
-            if valid_children.any():
-                ones = torch.ones_like(parents[valid_children])
-                self.child_count.scatter_add_(
-                    0, parents[valid_children], ones.to(torch.long)
-                )
+        children = torch.arange(self.root_nodes, self.total_nodes, device=self.device)
+        parents = self.parent_index[children]
+        valid_children = parents >= 0
+        ones = torch.ones_like(parents[valid_children])
+        self.child_count.scatter_add_(0, parents[valid_children], ones.to(torch.long))
         self.child_offsets = torch.cumsum(self.child_count, dim=0)
 
         self.prev_actor = torch.full(
             (self.total_nodes,), -1, dtype=torch.long, device=self.device
         )
-        if self.total_nodes > self.root_nodes:
-            child_indices = torch.arange(
-                self.root_nodes, self.total_nodes, device=self.device
-            )
-            parent_indices = self.parent_index[child_indices]
-            valid = parent_indices >= 0
-            if valid.any():
-                self.prev_actor[child_indices[valid]] = self.env.to_act[
-                    parent_indices[valid]
-                ]
+        self.prev_actor[self.root_nodes :] = self.env.to_act[
+            self.parent_index[self.root_nodes :]
+        ]
 
         self.policy_probs = torch.zeros(
             self.total_nodes, NUM_HANDS, dtype=self.float_dtype, device=self.device
@@ -279,6 +262,12 @@ class SparseCFREvaluator(CFREvaluator):
         self.policy_probs_avg = torch.zeros_like(self.policy_probs)
         self.cumulative_regrets = torch.zeros_like(self.policy_probs)
         self.regret_weight_sums = torch.zeros_like(self.policy_probs)
+
+        child_count_dest = self._fan_out(self.child_count)
+        self.uniform_policy = torch.zeros_like(self.policy_probs)
+        self.uniform_policy[self.root_nodes :] = (1.0 / child_count_dest)[
+            :, None
+        ].expand(-1, NUM_HANDS)
 
         self.beliefs = torch.zeros(
             self.total_nodes,
@@ -327,10 +316,7 @@ class SparseCFREvaluator(CFREvaluator):
         root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1.0)
 
         self.allowed_hands = self._fan_out_deep(root_allowed)
-        self.allowed_hands &= self.valid_mask[:, None]
-
         self.allowed_hands_prob = self._fan_out_deep(root_allowed_prob)
-        self.allowed_hands_prob.masked_fill_(~self.valid_mask[:, None], 0.0)
 
         if isinstance(self.model, BetterFFN):
             self.feature_encoder = BetterFeatureEncoder(
@@ -341,47 +327,11 @@ class SparseCFREvaluator(CFREvaluator):
                 env=self.env, device=self.device, dtype=self.float_dtype
             )
 
-    def _level_range(self, depth: int) -> tuple[int, int]:
-        return self.depth_offsets[depth], self.depth_offsets[depth + 1]
-
-    def _child_lookup(
-        self, depth: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if depth + 2 >= len(self.depth_offsets):
-            return (
-                torch.empty(0, dtype=torch.long, device=self.device),
-                torch.empty(0, dtype=torch.long, device=self.device),
-                torch.empty(0, dtype=torch.long, device=self.device),
-            )
-        parent_start, parent_end = self._level_range(depth)
-        child_start = self.depth_offsets[depth + 1]
-        child_end = self.depth_offsets[depth + 2]
-        child_indices = torch.arange(child_start, child_end, device=self.device)
-        if child_indices.numel() == 0:
-            return (
-                torch.empty(0, dtype=torch.long, device=self.device),
-                torch.empty(0, dtype=torch.long, device=self.device),
-                torch.empty(0, dtype=torch.long, device=self.device),
-            )
-        parent_indices = self.parent_index[child_indices]
-        mask = (parent_indices >= parent_start) & (parent_indices < parent_end)
-        if not mask.any():
-            return (
-                torch.empty(0, dtype=torch.long, device=self.device),
-                torch.empty(0, dtype=torch.long, device=self.device),
-                torch.empty(0, dtype=torch.long, device=self.device),
-            )
-        child_indices = child_indices[mask]
-        parent_indices = parent_indices[mask]
-        actions = self.action_from_parent[child_indices]
-        return child_indices, parent_indices, actions
-
     def _initialize_with_copy(self, target: torch.Tensor) -> None:
-        for depth in range(len(self.depth_offsets) - 2):
-            child_indices, parent_indices, _ = self._child_lookup(depth)
-            if child_indices.numel() == 0:
-                continue
-            target[child_indices] = target[parent_indices]
+        for depth in range(self.max_depth):
+            offset_next = self.depth_offsets[depth + 1]
+            offset_next_next = self.depth_offsets[depth + 2]
+            target[offset_next:offset_next_next] = self._fan_out(target, depth)
 
     def _block_beliefs(self, target: torch.Tensor) -> None:
         if target.numel() == 0:
@@ -399,27 +349,33 @@ class SparseCFREvaluator(CFREvaluator):
             uniform,
             out=target,
         )
-        target.masked_fill_(~self.valid_mask[:, None, None], 0.0)
 
     def _calculate_reach_weights(
         self, target: torch.Tensor, policy: torch.Tensor
-    ) -> torch.Tensor:
-        target.zero_()
-        if self.root_nodes > 0:
-            target[: self.root_nodes] = 1.0
-        for depth in range(len(self.depth_offsets) - 2):
-            child_indices, parent_indices, _ = self._child_lookup(depth)
-            if child_indices.numel() == 0:
-                continue
-            parent_weights = target[parent_indices]
-            child_weights = parent_weights.clone()
-            actor = self.prev_actor[child_indices]
-            row_idx = torch.arange(child_indices.numel(), device=self.device)
-            child_weights[row_idx, actor, :] *= policy[child_indices]
-            target[child_indices] = child_weights
-        target.masked_fill_(~self.valid_mask[:, None, None], 0.0)
+    ) -> None:
+        target[: self.root_nodes] = 1.0
+
+        for depth in range(self.max_depth):
+            offset_next = self.depth_offsets[depth + 1]
+            offset_next_next = self.depth_offsets[depth + 2]
+
+            target_dest = target[offset_next:offset_next_next]
+            target_dest[:] = self._fan_out(target, depth)
+
+            prev_actor_dest = self.prev_actor[offset_next:offset_next_next]
+            prev_actor_indices = prev_actor_dest[:, None, None].expand(
+                -1, -1, NUM_HANDS
+            )
+            policy_dest = policy[offset_next:offset_next_next]
+            target_dest.scatter_reduce_(
+                dim=1,
+                index=prev_actor_indices,
+                src=policy_dest[:, None],
+                reduce="prod",
+                include_self=True,
+            )
+
         self._block_beliefs(target)
-        return target
 
     def _propagate_all_beliefs(
         self, target: torch.Tensor, reach_weights: torch.Tensor
@@ -448,37 +404,46 @@ class SparseCFREvaluator(CFREvaluator):
 
     def initialize_policy_and_beliefs(self) -> None:
         self.policy_probs.zero_()
-        self.model.eval()
+        policy_probs_src = torch.empty(
+            self.depth_offsets[-2], self.num_actions, NUM_HANDS, device=self.device
+        )
+
         for depth in range(len(self.depth_offsets) - 2):
-            parent_start, parent_end = self._level_range(depth)
-            parent_indices = torch.arange(parent_start, parent_end, device=self.device)
-            if parent_indices.numel() == 0:
-                continue
+            # Initialize policy at each level based on beliefs, then propagate beliefs to the next level.
+            offset = self.depth_offsets[depth]
+            offset_next = self.depth_offsets[depth + 1]
+            offset_next_next = self.depth_offsets[depth + 2]
 
-            logits = self._get_model_policy_probs(parent_indices)  # [P, NUM_HANDS, A]
-            child_indices, parent_abs, actions = self._child_lookup(depth)
-            if child_indices.numel() == 0:
-                continue
+            policy_probs_src[offset:offset_next] = self._get_model_policy_probs(
+                torch.arange(offset, offset_next, device=self.device)
+            ).permute(
+                0, 2, 1
+            )  # [P, B, NUM_HANDS]
+            self.policy_probs[offset_next:offset_next_next] = self._push_down(
+                policy_probs_src, depth
+            )
 
-            parent_rel = parent_abs - parent_start
-            parent_probs = logits[parent_rel, :, actions]
-            self.policy_probs[child_indices] = parent_probs
-
-            parent_beliefs = self.beliefs[parent_abs].clone()
-            actor = self.prev_actor[child_indices]
-            row_idx = torch.arange(child_indices.numel(), device=self.device)
-            parent_beliefs[row_idx, actor, :] *= parent_probs
-            self.beliefs[child_indices] = parent_beliefs
+            prev_actor_dest = self.prev_actor[offset_next:offset_next_next]
+            prev_actor_indices = prev_actor_dest[:, None, None].expand(
+                -1, -1, NUM_HANDS
+            )
+            policy_dest = self.policy_probs[offset_next:offset_next_next]
+            self.beliefs.scatter_reduce_(
+                dim=1,
+                index=prev_actor_indices,
+                src=policy_dest[:, None],
+                reduce="prod",
+                include_self=True,
+            )
 
         self._block_beliefs(self.beliefs)
         self._normalize_beliefs(self.beliefs)
-        self.policy_probs.masked_fill_(~self.valid_mask[:, None], 0.0)
 
         self._calculate_reach_weights(self.self_reach, self.policy_probs)
 
-        self.policy_probs_avg.copy_(self.policy_probs)
-        self.self_reach_avg.copy_(self.self_reach)
-        self.beliefs_avg.copy_(self.beliefs)
+        self.policy_probs_avg[:] = self.policy_probs
+        self.self_reach_avg[:] = self.self_reach
+        self.beliefs_avg[:] = self.beliefs
 
     def warm_start(self) -> None:
         # Simple warm start: use model values and do a best-response pass
@@ -492,6 +457,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.update_policy(16)
 
     @torch.no_grad()
+    @profile
     def set_leaf_values(self, t: int) -> None:
         """Set leaf values from model or terminal states."""
         # Set terminal values (fold/showdown)
@@ -504,16 +470,16 @@ class SparseCFREvaluator(CFREvaluator):
 
         # Set model values for non-terminal leaves
         model_mask = self.leaf_mask & ~self.env.done
+        model_indices = torch.where(model_mask)[0]
         features = self.feature_encoder.encode(self.beliefs, pre_chance_node=True)
-        self.model.eval()
-        model_output = self.model(features[model_mask])
+        model_output = self.model(features[model_indices])
 
         if t <= 1 or self.last_model_values is None:
-            self.latest_values[model_mask] = model_output.hand_values
+            self.latest_values[model_indices] = model_output.hand_values
         else:
             # Mix with previous values (CFR-AVG style)
             old, new = t - 1, t
-            self.latest_values[model_mask] = (
+            self.latest_values[model_indices] = (
                 (old + new) * model_output.hand_values - old * self.last_model_values
             ) / new
         self.last_model_values = model_output.hand_values
@@ -530,6 +496,25 @@ class SparseCFREvaluator(CFREvaluator):
             values = self.latest_values
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
+        bottom, top = self.depth_offsets[1], self.depth_offsets[-2]
+        actor_indices = self.env.to_act[:top]
+        actor_indices_expanded = actor_indices[:top, None, None].expand(
+            -1, -1, NUM_HANDS
+        )
+        actor_beliefs = beliefs[:top].gather(1, actor_indices_expanded).squeeze(1)
+        beliefs_dest = self._fan_out(actor_beliefs)
+        marginal_policy = beliefs_dest * policy[bottom:]
+
+        policy_blocked = calculate_unblocked_mass(marginal_policy)
+        matchup_values = calculate_unblocked_mass(beliefs_dest)
+        opponent_conditioned_policy = torch.zeros_like(policy)
+        torch.where(
+            matchup_values > 1e-12,
+            policy_blocked / matchup_values,
+            torch.zeros_like(policy_blocked),
+            out=opponent_conditioned_policy[bottom:],
+        )
+
         for depth in range(len(self.depth_offsets) - 3, -1, -1):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
@@ -540,38 +525,15 @@ class SparseCFREvaluator(CFREvaluator):
                 -1, -1, NUM_HANDS
             )
 
-            level_beliefs = beliefs[offset:offset_next]
-            actor_beliefs = level_beliefs.gather(1, actor_indices_expanded).squeeze(1)
-
-            parent_indices = self.parent_index[offset_next:offset_next_next]
-            total_children = parent_indices.numel()
-            if total_children == 0:
-                continue
-            relative = parent_indices - offset
-            valid = (relative >= 0) & (relative < actor_beliefs.shape[0])
-            beliefs_dest = torch.zeros(
-                (total_children, NUM_HANDS),
-                dtype=self.float_dtype,
-                device=self.device,
-            )
-            beliefs_dest[valid] = actor_beliefs[relative[valid]]
-
-            # All computation on the destination node.
-            policy_dest = policy[offset_next:offset_next_next]
-            marginal_policy = beliefs_dest * policy_dest
-            policy_blocked = calculate_unblocked_mass(marginal_policy)
-            matchup_values = calculate_unblocked_mass(beliefs_dest)
-            opponent_conditioned_policy = torch.where(
-                matchup_values > 1e-12, policy_blocked / matchup_values, 0.0
-            )
-
             indices = torch.arange(offset_next_next - offset_next, device=self.device)
-            prev_actor_indices = self.env.to_act[parent_indices]
+            prev_actor_indices = self.prev_actor[offset_next:offset_next_next]
             weighted_child_values = values[offset_next:offset_next_next].clone()
-            weighted_child_values[indices, prev_actor_indices, :] *= policy_dest
+            weighted_child_values[indices, prev_actor_indices, :] *= policy[
+                offset_next:offset_next_next
+            ]
             weighted_child_values[
                 indices, 1 - prev_actor_indices, :
-            ] *= opponent_conditioned_policy
+            ] *= opponent_conditioned_policy[offset_next:offset_next_next]
 
             self._pull_back_sum(weighted_child_values, values, depth)
 
@@ -609,46 +571,30 @@ class SparseCFREvaluator(CFREvaluator):
         weights = calculate_unblocked_mass(opponent_beliefs)
 
         regrets[child_indices] = weights * advantages
-        regrets.masked_fill_(~self.valid_mask[:, None], 0.0)
 
         return regrets
 
+    @profile
     def update_policy(self, t: int) -> None:
         """Update policy using regret matching."""
         positive_regrets = self.cumulative_regrets.clamp(min=0.0)
-        new_policy = torch.zeros_like(self.policy_probs)
+        regret_sum = torch.zeros_like(self.policy_probs)
 
         for depth in range(len(self.depth_offsets) - 2):
-            parent_start, parent_end = self._level_range(depth)
-            child_indices, parent_indices, _ = self._child_lookup(depth)
-            if child_indices.numel() == 0:
-                continue
+            offset = self.depth_offsets[depth]
+            offset_next = self.depth_offsets[depth + 1]
+            offset_next_next = self.depth_offsets[depth + 2]
 
-            parent_rel = parent_indices - parent_start
-            parent_count = parent_end - parent_start
+            self._pull_back_sum(positive_regrets, regret_sum, depth)
+            denom = self._fan_out(regret_sum, depth)
 
-            regret_sum = torch.zeros(
-                (parent_count, NUM_HANDS),
-                dtype=self.float_dtype,
-                device=self.device,
-            )
-            regret_sum.index_add_(0, parent_rel, positive_regrets[child_indices])
-
-            denom = regret_sum[parent_rel]
-            legal_count = (
-                self.child_count[parent_indices].clamp(min=1).to(self.float_dtype)
-            )
-            uniform = (1.0 / legal_count).unsqueeze(-1).expand(-1, NUM_HANDS)
-
-            new_policy[child_indices] = torch.where(
+            torch.where(
                 denom > 1e-8,
-                positive_regrets[child_indices] / denom.clamp(min=1e-8),
-                uniform,
+                positive_regrets[offset_next:offset_next_next] / denom.clamp(min=1e-8),
+                self.uniform_policy[offset_next:offset_next_next],
+                out=self.policy_probs[offset_next:offset_next_next],
             )
-
-        self.policy_probs.zero_()
-        self.policy_probs.copy_(new_policy)
-        self.policy_probs.masked_fill_(~self.valid_mask[:, None], 0.0)
+            regret_sum[offset:offset_next] += positive_regrets[offset:offset_next]
 
         self._calculate_reach_weights(self.self_reach, self.policy_probs)
         self._propagate_all_beliefs(self.beliefs, self.self_reach)
@@ -657,64 +603,53 @@ class SparseCFREvaluator(CFREvaluator):
         self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
         self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
 
-    def _update_beliefs_from_policy(self) -> None:
-        self._calculate_reach_weights(self.self_reach, self.policy_probs)
-        self._propagate_all_beliefs(self.beliefs, self.self_reach)
-
     def update_average_policy(self, t: int) -> None:
         if self.cfr_type == CFRType.discounted and t <= self.dcfr_delay:
-            self.policy_probs_avg.copy_(self.policy_probs)
+            self.policy_probs_avg[:] = self.policy_probs
             return
         if t == 0:
-            self.policy_probs_avg.copy_(self.policy_probs)
+            self.policy_probs_avg[:] = self.policy_probs
             return
 
-        if self.total_nodes <= self.root_nodes:
-            return
+        N = self.root_nodes
 
         old, new = self._get_mixing_weights(t)
 
-        child_indices = torch.arange(
-            self.root_nodes, self.total_nodes, device=self.device
+        actor_indices = self._fan_out(self.env.to_act)[:, None, None].expand(
+            -1, -1, NUM_HANDS
         )
-        parent_indices = self.parent_index[child_indices]
-        valid = parent_indices >= 0
-        if not valid.any():
-            return
+        reach_actor = self.self_reach[N:].gather(1, actor_indices).squeeze(1)
+        reach_avg_actor = self.self_reach_avg[N:].gather(1, actor_indices).squeeze(1)
 
-        child_indices = child_indices[valid]
-        parent_indices = parent_indices[valid]
-        actor = self.env.to_act[parent_indices]
+        reach_avg_actor *= old
+        reach_actor *= new
 
-        reach_avg = self.self_reach_avg[parent_indices, actor, :]
-        reach_cur = self.self_reach[parent_indices, actor, :]
-
-        old_weights = old * reach_avg
-        new_weights = new * reach_cur
+        reach_actor_dest = self._fan_out(reach_actor)
+        reach_avg_actor_dest = self._fan_out(reach_avg_actor)
 
         numerator = (
-            old_weights * self.policy_probs_avg[child_indices]
-            + new_weights * self.policy_probs[child_indices]
+            reach_avg_actor_dest * self.policy_probs_avg[N:]
+            + reach_actor_dest * self.policy_probs[N:]
         )
-        denom = old_weights + new_weights
-        unweighted = (
-            old * self.policy_probs_avg[child_indices]
-            + new * self.policy_probs[child_indices]
-        ) / (old + new)
+        denom = reach_avg_actor_dest + reach_actor_dest
+        unweighted = (old * self.policy_probs_avg[N:] + new * self.policy_probs[N:]) / (
+            old + new
+        )
 
-        self.policy_probs_avg[child_indices] = torch.where(
+        torch.where(
             denom > 1e-12,
             numerator / denom.clamp(min=1e-12),
             unweighted,
+            out=self.policy_probs_avg[N:],
         )
-        self.policy_probs_avg[: self.root_nodes] = 0.0
-        self.policy_probs_avg.masked_fill_(~self.valid_mask[:, None], 0.0)
+        self.policy_probs_avg[:N] = 0.0
 
     def sample_leaf(self, t: int) -> None:
         """Sample a leaf node for training (placeholder)."""
         # This would sample a leaf node based on reach probabilities
         # For now, just a placeholder
 
+    @profile
     def cfr_iteration(self, t: int, training_mode: bool = True) -> None:
         """Run one CFR iteration."""
         # Compute regrets
@@ -748,6 +683,8 @@ class SparseCFREvaluator(CFREvaluator):
         if total_iterations <= 0:
             return
 
+        self.model.eval()
+
         self.initialize_policy_and_beliefs()
         self.set_leaf_values(0)
         self.compute_expected_values()
@@ -774,8 +711,9 @@ class SparseCFREvaluator(CFREvaluator):
         min_value = torch.finfo(base_values.dtype).min
 
         for depth in range(len(self.depth_offsets) - 2, -1, -1):
-            parent_start, parent_end = self._level_range(depth)
-            parents = torch.arange(parent_start, parent_end, device=self.device)
+            offset = self.depth_offsets[depth]
+            offset_next = self.depth_offsets[depth + 1]
+            parents = torch.arange(offset, offset_next, device=self.device)
             if parents.numel() == 0:
                 continue
 
@@ -838,7 +776,6 @@ class SparseCFREvaluator(CFREvaluator):
                 values_br[target_indices, target_player] = best_player[target_mask]
                 values_br[target_indices, 1 - target_player] = best_opp[target_mask]
 
-        values_br.masked_fill_(~self.valid_mask[:, None, None], 0.0)
         return values_br
 
     def _compute_exploitability(self) -> ExploitabilityStats:
@@ -930,7 +867,7 @@ class SparseCFREvaluator(CFREvaluator):
         value_statistics["local_br_values"] = exploit_stats.local_br_values
         value_statistics["local_br_improvement"] = exploit_stats.local_br_improvement
 
-        valid_top = self.valid_mask[:top] & ~self.leaf_mask[:top]
+        valid_top = ~self.leaf_mask[:top]
         policy_statistics = {
             key: statistics[key][:top][valid_top] for key in statistics
         }
@@ -1017,9 +954,13 @@ class SparseCFREvaluator(CFREvaluator):
             end = self.depth_offsets[level + 1]
             next = self.depth_offsets[level + 2]
             size = next - end
-        return tensor[start:end].repeat_interleave(
-            self.child_count[start:end], dim=0, output_size=size
-        )
+
+        repeats = self.child_count[start:end]
+        # Have to clone to work around PyTorch bug on MPS.
+        if self.device.type == "mps":
+            repeats = repeats.clone()
+
+        return tensor[start:end].repeat_interleave(repeats, dim=0, output_size=size)
 
     def _push_down(
         self, tensor: torch.Tensor, level: int | None = None

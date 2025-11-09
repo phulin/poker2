@@ -591,7 +591,7 @@ def test_sparse_rebel_initial_policy_and_beliefs_alignment() -> None:
     policy_rebel = rebel._pull_back(rebel.policy_probs)
     top_sparse = sparse.depth_offsets[-2]
     top_rebel = rebel.depth_offsets[-2]
-    mask_sparse = sparse.valid_mask[:top_sparse] & ~sparse.leaf_mask[:top_sparse]
+    mask_sparse = ~sparse.leaf_mask[:top_sparse]
     mask_rebel = rebel.valid_mask[:top_rebel] & ~rebel.leaf_mask[:top_rebel]
     assert_close(
         policy_sparse[:top_sparse][mask_sparse].permute(0, 2, 1),
