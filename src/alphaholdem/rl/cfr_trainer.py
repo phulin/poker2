@@ -299,6 +299,8 @@ class RebelCFRTrainer:
 
     def _get_stratify_streets(self, step: int) -> list[float] | None:
         configs = self.cfg.train.stratify_streets
+        if not configs:
+            return None
 
         # Flat until the first threshold
         if step < configs[0].threshold:
