@@ -410,7 +410,7 @@ class ChanceNodeHelper:
         model = self.model
         model.eval()
 
-        # Note: Notionally these are EVs from the model, not CFVs.
+        # Note: Technically these are EVs from the model, not CFVs.
         # But reach-weight only changes evenly across the chance node, so we ignore it.
         hand_values = model(synthetic_features).hand_values.to(dtype=dtype)
 

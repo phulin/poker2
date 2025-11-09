@@ -6,18 +6,14 @@ Debug script to run data generation loop and show statistics about value targets
 from __future__ import annotations
 
 import os
-import sys
 
 import hydra
 import torch
-from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
-
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from alphaholdem.core.structured_config import Config, ModelType
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
+from alphaholdem.rl.rebel_replay import RebelBatch
 
 
 def load_trainer_from_checkpoint(
@@ -66,7 +62,7 @@ def load_trainer_from_checkpoint(
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config_rebel_cfr")
 def main(dict_config: DictConfig) -> None:
-    checkpoint_path = "checkpoints-rebel/rebel_120_150.pt"
+    checkpoint_path = "checkpoints-rebel/rebel_124_250.pt"
     num_samples = 50
 
     print(f"Loading checkpoint: {checkpoint_path}")
@@ -158,6 +154,88 @@ def main(dict_config: DictConfig) -> None:
     print(f"Overall mean |value|: {overall_mean_abs:.6f}")
     print(f"Min value: {value_targets.min().item():.6f}")
     print(f"Max value: {value_targets.max().item():.6f}")
+
+    # Compute value loss on the whole replay buffer
+    print("\n" + "=" * 80)
+    print("Value Loss on Whole Replay Buffer")
+    print("=" * 80)
+
+    # Create a batch from the entire value buffer
+    full_batch = RebelBatch(
+        features=value_buffer.features[:num_samples_actual],
+        value_targets=value_buffer.value_targets[:num_samples_actual],
+        legal_masks=value_buffer.legal_masks[:num_samples_actual],
+        statistics={
+            key: value_buffer.statistics[key][:num_samples_actual]
+            for key in value_buffer.statistics
+        },
+    )
+
+    # Move to device
+    full_batch = full_batch.to(device)
+
+    # Run model in eval mode
+    trainer.model.eval()
+    with torch.no_grad():
+        model_output = trainer.model(full_batch.features)
+        loss_dict = trainer.loss_fn(model_output, full_batch)
+
+    value_loss = loss_dict["value_loss"]
+    value_loss_all = loss_dict[
+        "value_loss_all"
+    ]  # (num_samples, num_players, NUM_HANDS)
+    value_weights = loss_dict["value_weights"]  # (num_samples, num_players, NUM_HANDS)
+
+    print(f"Overall value loss: {value_loss:.6f}")
+    print(f"Value loss shape: {value_loss_all.shape}")
+
+    # Compute value loss by stage
+    # Stage mapping: 0=start preflop, 1=end preflop, 2=start flop, 3=end flop,
+    #                4=start turn, 5=end turn, 6=start river, 7=end river
+    stage_names = {
+        0: "start preflop",
+        1: "end preflop",
+        2: "start flop",
+        3: "end flop",
+        4: "start turn",
+        5: "end turn",
+        6: "start river",
+        7: "end river",
+    }
+
+    # Get stage from statistics
+    if "stage" in full_batch.statistics:
+        stages = full_batch.statistics["stage"]
+    else:
+        # Fallback: compute stage from street if not available
+        streets = full_batch.features.street
+        stages = 2 * streets  # Assume all are start-of-street
+
+    print("\nValue Loss by Stage:")
+    for stage_idx in range(8):
+        mask = stages == stage_idx
+        num_stage_samples = mask.sum().item()
+
+        if num_stage_samples == 0:
+            stage_name = stage_names.get(stage_idx, f"stage {stage_idx}")
+            print(f"  Stage {stage_idx} ({stage_name}): No samples")
+            continue
+
+        stage_loss = value_loss_all[mask]  # (num_stage_samples, num_players, NUM_HANDS)
+        stage_weights = value_weights[
+            mask
+        ]  # (num_stage_samples, num_players, NUM_HANDS)
+
+        # Weighted mean loss for this stage
+        weighted_loss = (stage_loss * stage_weights).sum() / stage_weights.sum()
+        unweighted_loss = stage_loss.mean()
+
+        stage_name = stage_names.get(stage_idx, f"stage {stage_idx}")
+        print(f"  Stage {stage_idx} ({stage_name}): {num_stage_samples} samples")
+        print(f"    Weighted mean loss: {weighted_loss.item():.6f}")
+        print(f"    Unweighted mean loss: {unweighted_loss.item():.6f}")
+        print(f"    Min loss: {stage_loss.min().item():.6f}")
+        print(f"    Max loss: {stage_loss.max().item():.6f}")
 
 
 if __name__ == "__main__":
