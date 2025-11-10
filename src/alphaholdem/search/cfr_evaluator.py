@@ -27,6 +27,7 @@ class CFREvaluator(ABC):
     env: HUNLTensorEnv
     feature_encoder: object
     beliefs: torch.Tensor
+    beliefs_avg: torch.Tensor
     legal_mask: torch.Tensor | None
 
     @torch.no_grad()
@@ -61,7 +62,9 @@ class CFREvaluator(ABC):
             return torch.zeros(0, NUM_HANDS, device=device, dtype=dtype)
 
         # --- Beliefs & boards ---
-        beliefs = self.beliefs[indices]  # (M,2,1326)
+        beliefs = (self.beliefs_avg if self.cfr_avg else self.beliefs)[
+            indices
+        ]  # (M,2,1326)
         b_opp = beliefs[:, villain, :].to(dtype)  # (M,1326)
         board = self.env.board_indices[indices].int()  # (M,5)
 

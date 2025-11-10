@@ -62,7 +62,7 @@ def load_trainer_from_checkpoint(
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config_rebel_cfr")
 def main(dict_config: DictConfig) -> None:
-    checkpoint_path = "checkpoints-rebel/rebel_124_250.pt"
+    checkpoint_path = "checkpoints-rebel/rebel_129_150.pt"
     num_samples = 50
 
     print(f"Loading checkpoint: {checkpoint_path}")
