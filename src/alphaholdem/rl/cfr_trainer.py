@@ -216,14 +216,16 @@ class RebelCFRTrainer:
         }
 
         def by_street(
-            tensor: torch.Tensor, batch=value_batch, weights=None
+            tensor: torch.Tensor, batch=value_batch, street=None, weights=None
         ) -> dict[str, float]:
+            if street is None:
+                street = batch.features.street
             masks = {
-                "preflop": batch.features.street == 0,
-                "flop": batch.features.street == 1,
-                "turn": batch.features.street == 2,
-                "river": batch.features.street == 3,
-                "showdown": batch.features.street == 4,
+                "preflop": street == 0,
+                "flop": street == 1,
+                "turn": street == 2,
+                "river": street == 3,
+                "showdown": street == 4,
             }
             if weights is not None:
                 result = {
@@ -259,15 +261,22 @@ class RebelCFRTrainer:
             .abs()
             .mean()
             .item(),
+            "value_buffer_target_mean_abs_street": by_street(
+                self.value_buffer.value_targets[: len(self.value_buffer)]
+                .abs()
+                .mean(dim=2)
+                .mean(dim=1),
+                street=self.value_buffer.features.street[: len(self.value_buffer)],
+            ),
             "value_buffer_target_std": self.value_buffer.value_targets[
                 : len(self.value_buffer)
             ]
             .std()
             .item(),
-            "buffer_value_target_mean_abs": value_batch.value_targets.abs()
+            "batch_value_target_mean_abs": value_batch.value_targets.abs()
             .mean()
             .item(),
-            "buffer_value_target_std": value_batch.value_targets.std().item(),
+            "batch_value_target_std": value_batch.value_targets.std().item(),
             "policy_buffer_mean_sample_count": (
                 self.policy_buffer.sample_count[: len(self.policy_buffer)]
                 .float()
@@ -307,6 +316,12 @@ class RebelCFRTrainer:
         if fresh_value_batch is not None:
             metrics["fresh_value_target_mean_abs"] = (
                 fresh_value_batch.value_targets.abs().mean().item()
+            )
+            metrics.update(
+                by_street(
+                    fresh_value_batch.value_targets.abs().mean(dim=2).mean(dim=1),
+                    batch=fresh_value_batch,
+                )
             )
             metrics["fresh_value_target_std"] = (
                 fresh_value_batch.value_targets.std().item()
