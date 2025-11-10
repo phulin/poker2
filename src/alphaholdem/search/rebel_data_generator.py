@@ -2,7 +2,7 @@ import torch
 
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.rl.rebel_replay import RebelReplayBuffer
+from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState, RebelCFREvaluator
 from alphaholdem.utils.profiling import profile
 
@@ -49,10 +49,13 @@ class RebelDataGenerator:
         return new_pbs
 
     @profile
-    def generate_data(self, value_sample_count: int) -> None:
+    def generate_data(self, value_sample_count: int) -> tuple[RebelBatch, RebelBatch]:
         N = self.evaluator.search_batch_size
         root_indices = torch.arange(N, device=self.device)
         collected = self.last_extra
+
+        value_batches = []
+        policy_batches = []
 
         while collected < value_sample_count:
             if self.current_pbs is None:
@@ -74,7 +77,16 @@ class RebelDataGenerator:
             self.policy_buffer.add_batch(policy_batch)
             self.value_buffer.add_batch(value_batch)
             self.value_buffer.add_batch(augmented_value_batch)
+
+            policy_batches.append(policy_batch)
+            value_batches.append(value_batch)
+            value_batches.append(augmented_value_batch)
+
             collected += len(value_batch)
-            # print(f"Collected {len(value_batch)} samples")
 
         self.last_extra = collected - value_sample_count
+
+        fresh_value_batch = RebelBatch.cat(value_batches) if value_batches else None
+        fresh_policy_batch = RebelBatch.cat(policy_batches) if policy_batches else None
+
+        return fresh_value_batch, fresh_policy_batch

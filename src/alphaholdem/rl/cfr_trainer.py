@@ -191,9 +191,11 @@ class RebelCFRTrainer:
         policy_weights: torch.Tensor,
         entropy_loss: float,
         permutation_loss: float,
+        fresh_value_loss: float | None = None,
+        fresh_value_batch: RebelBatch | None = None,
     ) -> dict[str, float]:
         grad_norm_clipped = torch.nn.utils.get_total_norm(
-            p.grad for p in self.model.parameters()
+            p.grad for p in self.model.parameters() if p.grad is not None
         ).item()
 
         value_preflop = value_batch.features.street == 0
@@ -234,7 +236,7 @@ class RebelCFRTrainer:
             return {k: v for k, v in result.items() if not math.isnan(v)}
 
         exploitability = value_batch.statistics["local_exploitability"]
-        return {
+        metrics = {
             "loss": total_loss,
             "policy_loss": policy_loss,
             "value_loss": value_loss,
@@ -262,6 +264,10 @@ class RebelCFRTrainer:
             ]
             .std()
             .item(),
+            "buffer_value_target_mean_abs": value_batch.value_targets.abs()
+            .mean()
+            .item(),
+            "buffer_value_target_std": value_batch.value_targets.std().item(),
             "policy_buffer_mean_sample_count": (
                 self.policy_buffer.sample_count[: len(self.policy_buffer)]
                 .float()
@@ -296,6 +302,16 @@ class RebelCFRTrainer:
             "value_mean_std": value_output.value.std(dim=0).mean(),
             **self.cfr_evaluator.stats,
         }
+        if fresh_value_loss is not None:
+            metrics["fresh_value_loss"] = fresh_value_loss
+        if fresh_value_batch is not None:
+            metrics["fresh_value_target_mean_abs"] = (
+                fresh_value_batch.value_targets.abs().mean().item()
+            )
+            metrics["fresh_value_target_std"] = (
+                fresh_value_batch.value_targets.std().item()
+            )
+        return metrics
 
     def _get_stratify_streets(self, step: int) -> list[float] | None:
         configs = self.cfg.train.stratify_streets
@@ -330,7 +346,9 @@ class RebelCFRTrainer:
 
     @profile
     def _update_model(self, step: int) -> dict[str, float]:
-        self.data_generator.generate_data(self.K_value)
+        fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
+            self.K_value
+        )
         # Warmup: make sure we have enough samples.
         while min(len(self.value_buffer), len(self.policy_buffer)) < self.batch_size:
             self.data_generator.generate_data(self.K_value)
@@ -422,7 +440,16 @@ class RebelCFRTrainer:
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.optimizer.step()
 
-        # FIXME: Pass value_step_loss_all (and fix dimensions).
+        # After the loop, calculate loss on fresh data
+        fresh_value_loss = None
+        if fresh_value_batch:
+            with torch.no_grad():
+                self.model.eval()
+                fresh_value_batch = fresh_value_batch.to(self.device)
+                fresh_model_output = self.model(fresh_value_batch.features)
+                fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)
+                fresh_value_loss = fresh_loss_dict["value_loss"]
+
         metrics = self._compute_metrics(
             value_batch,
             policy_batch,
@@ -437,6 +464,8 @@ class RebelCFRTrainer:
             policy_weights,
             entropy_step_loss / episodes,
             permutation_step_loss / episodes,
+            fresh_value_loss=fresh_value_loss,
+            fresh_value_batch=fresh_value_batch,
         )
         metrics["episodes"] = episodes
 
