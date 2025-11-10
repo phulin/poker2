@@ -56,6 +56,7 @@ class BetterFFN(nn.Module, Model):
         super().__init__()
         self.num_actions = num_actions
         self.hidden_dim = hidden_dim
+        self.ffn_dim = ffn_dim
         self.num_hidden_layers = num_hidden_layers
         self.num_players = num_players
 
@@ -134,7 +135,7 @@ class BetterFFN(nn.Module, Model):
             .sum(dim=2, keepdim=True)
             .mean(dim=1, keepdim=True)
         )
-        # hand_values -= hand_value_sums
+        hand_values -= hand_value_sums
         value = hand_values.mean(dim=-1)
 
         return ModelOutput(
@@ -153,6 +154,19 @@ class BetterFFN(nn.Module, Model):
             elif isinstance(module, nn.LayerNorm):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
+
+        for sequential in [self.trunk, self.policy_head, self.hand_value_head]:
+            for block in sequential.modules():
+                if not isinstance(block, ResidualBlock):
+                    continue
+                nn.init.orthogonal_(
+                    block.inner.get_submodule("linear_in").weight,
+                    1.532 * math.sqrt(self.ffn_dim / self.hidden_dim),
+                    generator=rng,
+                )
+
+        # Guess hand values are around stddev 0.1.
+        self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
 
     @torch.no_grad()
     def adjust_scale(self, weight_scale: float, bias_adjustment: float) -> None:
