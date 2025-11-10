@@ -317,11 +317,9 @@ class RebelCFRTrainer:
             metrics["fresh_value_target_mean_abs"] = (
                 fresh_value_batch.value_targets.abs().mean().item()
             )
-            metrics.update(
-                by_street(
-                    fresh_value_batch.value_targets.abs().mean(dim=2).mean(dim=1),
-                    batch=fresh_value_batch,
-                )
+            metrics["fresh_value_target_mean_abs_street"] = by_street(
+                fresh_value_batch.value_targets.abs().mean(dim=2).mean(dim=1),
+                batch=fresh_value_batch,
             )
             metrics["fresh_value_target_std"] = (
                 fresh_value_batch.value_targets.std().item()
