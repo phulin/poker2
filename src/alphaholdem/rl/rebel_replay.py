@@ -64,6 +64,47 @@ class RebelBatch:
             },
         )
 
+    @classmethod
+    def cat(cls, batches: list[RebelBatch]) -> RebelBatch | None:
+        """Concatenate a list of RebelBatch objects."""
+        if not batches:
+            return None
+
+        # Filter out None batches if any
+        batches = [b for b in batches if b is not None and len(b) > 0]
+        if not batches:
+            return None
+
+        features = MLPFeatures.cat([b.features for b in batches])
+        legal_masks = torch.cat([b.legal_masks for b in batches], dim=0)
+
+        policy_targets = None
+        if batches[0].policy_targets is not None:
+            policy_targets = torch.cat(
+                [b.policy_targets for b in batches if b.policy_targets is not None],
+                dim=0,
+            )
+
+        value_targets = None
+        if batches[0].value_targets is not None:
+            value_targets = torch.cat(
+                [b.value_targets for b in batches if b.value_targets is not None],
+                dim=0,
+            )
+
+        statistics = {}
+        if batches[0].statistics:
+            for key in batches[0].statistics:
+                statistics[key] = torch.cat([b.statistics[key] for b in batches], dim=0)
+
+        return cls(
+            features=features,
+            legal_masks=legal_masks,
+            policy_targets=policy_targets,
+            value_targets=value_targets,
+            statistics=statistics,
+        )
+
 
 class RebelReplayBuffer:
     """Ring buffer storing ReBeL-style training examples."""

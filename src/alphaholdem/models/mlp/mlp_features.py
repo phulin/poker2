@@ -68,6 +68,20 @@ class MLPFeatures:
             beliefs=self.beliefs.clone(),
         )
 
+    @classmethod
+    def cat(cls, features_list: list["MLPFeatures"]) -> "MLPFeatures":
+        """Concatenate a list of MLPFeatures objects."""
+        if not features_list:
+            raise ValueError("Cannot concatenate an empty list of features.")
+
+        return cls(
+            context=torch.cat([f.context for f in features_list], dim=0),
+            street=torch.cat([f.street for f in features_list], dim=0),
+            to_act=torch.cat([f.to_act for f in features_list], dim=0),
+            board=torch.cat([f.board for f in features_list], dim=0),
+            beliefs=torch.cat([f.beliefs for f in features_list], dim=0),
+        )
+
     def permute_suits(
         self,
         suit_permutations: torch.Tensor | None = None,
