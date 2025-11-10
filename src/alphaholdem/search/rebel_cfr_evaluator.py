@@ -818,6 +818,7 @@ class RebelCFREvaluator(CFREvaluator):
 
         M = self.total_nodes
         bottom = self.depth_offsets[1]
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         regrets = torch.zeros_like(self.policy_probs)
 
@@ -829,7 +830,7 @@ class RebelCFREvaluator(CFREvaluator):
         # This represents the opponent's reach prob at the src node.
         # Then actor acts at the transition src -> dest node.
         # Unblocked mass translates opponent-hand space to hero-hand space.
-        opponent_global_reach = calculate_unblocked_mass(self.beliefs.flip(dims=[1]))
+        opponent_global_reach = calculate_unblocked_mass(beliefs.flip(dims=[1]))
         src_weights = opponent_global_reach.gather(1, src_actor_indices).squeeze(1)
 
         # Weight advantages by our mass unblocked by the opponent hands.
