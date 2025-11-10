@@ -369,9 +369,9 @@ def print_single_iteration_data(
 
     print(f"\nChild Nodes (depth 1):")
     print(
-        f"{'Node':>6} | {'Action':>10} | {'Policy':>7} | {'PolicyAvg':>7} | {'Regret [min, max]':>24} | {'Value':>7}"
+        f"{'Node':>6} | {'Action':>10} | {'Policy':>7} | {'PolicyAvg':>7} | {'Regret [min, max]':>24} | {'Value':>7} | {'ValLatest':>9} | {'ValAvgPol':>9}"
     )
-    print("-" * 80)
+    print("-" * 100)
 
     for child_idx in range(depth1_offset, depth1_end):
         if not evaluator.valid_mask[child_idx]:
@@ -399,6 +399,12 @@ def print_single_iteration_data(
             value = (
                 evaluator.values_avg[child_idx, actor, selected_hand_idx].mean().item()
             )
+            value_latest = (
+                evaluator.latest_values[child_idx, actor, selected_hand_idx]
+                .mean()
+                .item()
+            )
+            value_avg_policy = value
         else:
             # Weighting: use current beliefs for current policy, avg beliefs for avg policy
             # Use beliefs from parent (root) so all actions share the same weighting
@@ -437,12 +443,28 @@ def print_single_iteration_data(
             # Get value at this node - average over both players and all hands
             # values_avg has shape [M, 2, NUM_HANDS]
             value = evaluator.values_avg[child_idx, actor, :].mean().item()
+            value_latest = evaluator.latest_values[child_idx, actor, :].mean().item()
+
+            # Root-actor value weighted by average policy
+            actor_beliefs_avg = evaluator.beliefs_avg[root_idx, actor, :].clone()
+            actor_beliefs_avg = actor_beliefs_avg.masked_fill(~allowed_hands, 0.0)
+            policy_probs_avg_masked = evaluator.policy_probs_avg[child_idx].masked_fill(
+                ~allowed_hands, 0.0
+            )
+            policy_weight = actor_beliefs_avg * policy_probs_avg_masked
+            weight_sum = float(policy_weight.sum().item())
+            if weight_sum > 0.0:
+                value_avg_policy = (
+                    evaluator.values_avg[child_idx, actor, :] * policy_weight
+                ).sum().item() / weight_sum
+            else:
+                value_avg_policy = 0.0
 
         action_name = action_to_string(action_idx, bet_bins)
 
         print(
             f"{child_idx:>6} | {action_name:>10} | {policy_prob:7.4f} | {policy_avg_prob:7.4f} | "
-            f"{regret:7.2f} [{regret_min:7.2f}, {regret_max:7.2f}] | {value:7.4f}"
+            f"{regret:7.2f} [{regret_min:7.2f}, {regret_max:7.2f}] | {value:7.4f} | {value_latest:9.4f} | {value_avg_policy:9.4f}"
         )
 
 
@@ -473,7 +495,15 @@ def _print_node_line(
         regret = regret_val
         regret_min = regret_val
         regret_max = regret_val
-        value = evaluator.values_avg[node_idx, 0, selected_hand_idx].mean().item()
+        value = (
+            evaluator.values_avg[node_idx, root_actor, selected_hand_idx].mean().item()
+        )
+        value_latest = (
+            evaluator.latest_values[node_idx, root_actor, selected_hand_idx]
+            .mean()
+            .item()
+        )
+        value_avg_policy = value
     else:
         if depth == 0:
             parent_idx = node_idx
@@ -512,9 +542,35 @@ def _print_node_line(
         regret_max = evaluator.cumulative_regrets[node_idx].max().item()
         regret_min = evaluator.cumulative_regrets[node_idx].min().item()
         if selected_hand_idx is not None:
-            value = evaluator.values_avg[node_idx, 0, selected_hand_idx].item()
+            value = evaluator.values_avg[node_idx, root_actor, selected_hand_idx].item()
+            value_latest = evaluator.latest_values[
+                node_idx, root_actor, selected_hand_idx
+            ].item()
+            value_avg_policy = value
         else:
-            value = evaluator.values_avg[node_idx, 0, :].mean().item()
+            beliefs_actor_avg = evaluator.beliefs_avg[parent_idx, root_actor, :].clone()
+            value = (
+                (evaluator.values_avg[node_idx, root_actor, :] * beliefs_actor_avg)
+                .sum()
+                .item()
+            )
+            value_latest = (
+                (evaluator.latest_values[node_idx, root_actor, :] * beliefs_actor_avg)
+                .sum()
+                .item()
+            )
+            beliefs_actor_avg = beliefs_actor_avg.masked_fill(~allowed_hands, 0.0)
+            policy_weight = evaluator.policy_probs_avg[node_idx].masked_fill(
+                ~allowed_hands, 0.0
+            )
+            policy_weight = policy_weight * beliefs_actor_avg
+            weight_sum = float(policy_weight.sum().item())
+            if weight_sum > 0.0:
+                value_avg_policy = (
+                    evaluator.values_avg[node_idx, root_actor, :] * policy_weight
+                ).sum().item() / weight_sum
+            else:
+                value_avg_policy = 0.0
 
     indent = "  " * depth
     leaf_str = "L" if evaluator.leaf_mask[node_idx].item() else " "
@@ -536,7 +592,7 @@ def _print_node_line(
         belief_str = f"{belief_weight:7.4f}"
     print(
         f"{node_label:<{NODE_COL_WIDTH - 2}} {leaf_str} | {actor_str:>5} | {policy_prob:7.4f} | {policy_avg_prob:7.4f} | "
-        f"{regret:7.2f}{regret_minmax} | {belief_str:>7} | {value:7.4f}"
+        f"{regret:7.2f}{regret_minmax} | {belief_str:>7} | {value:7.4f} | {value_latest:9.4f} | {value_avg_policy:9.4f}"
     )
 
 
@@ -550,14 +606,14 @@ def print_nodes_depth_first(
     regret_str = f"{'Regret [min, max]':>24}"
     belief_header = "Belief" if selected_hand_idx is not None else ""
 
-    print(
-        f"{'Node':<{NODE_COL_WIDTH}} | {'Actor':>5} | {'Policy':>7} | {'PolAvg':>7} | {regret_str} | "
-        f"{belief_header:>7} | {'P0 Value':>7}"
-    )
-    print("-" * 100)
-
     B = evaluator.num_actions
     root_actor = evaluator.env.to_act[0].item()
+
+    print(
+        f"{'Node':<{NODE_COL_WIDTH}} | {'Actor':>5} | {'Policy':>7} | {'PolAvg':>7} | {regret_str} | "
+        f"{belief_header:>7} | {f'P{root_actor} Value':>7} | {f'ValLatest':>9} | {f'ValAvgPol':>9}"
+    )
+    print("-" * 110)
 
     def dfs_at(node_idx: int, depth: int, came_action: Optional[int]) -> None:
         if depth > max_depth:

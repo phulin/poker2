@@ -198,12 +198,6 @@ class RebelCFRTrainer:
             p.grad for p in self.model.parameters() if p.grad is not None
         ).item()
 
-        value_preflop = value_batch.features.street == 0
-        value_flop = value_batch.features.street == 1
-        value_turn = value_batch.features.street == 2
-        value_river = value_batch.features.street == 3
-        value_showdown = value_batch.features.street == 4
-
         value_buffer_streets = self.value_buffer.features.street[
             : len(self.value_buffer)
         ]
@@ -255,24 +249,30 @@ class RebelCFRTrainer:
                 if len(self.value_buffer) > 0
                 else 0.0
             ),
-            "value_buffer_target_mean_abs": self.value_buffer.value_targets[
-                : len(self.value_buffer)
-            ]
+            "value_buffer_target_mean_abs": (
+                (
+                    self.value_buffer.value_targets[: len(self.value_buffer)]
+                    * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
+                        -1, 2, NUM_HANDS
+                    )
+                )
+            )
             .abs()
+            .sum(dim=2)
             .mean()
             .item(),
             "value_buffer_target_mean_abs_street": by_street(
-                self.value_buffer.value_targets[: len(self.value_buffer)]
+                (
+                    self.value_buffer.value_targets[: len(self.value_buffer)]
+                    * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
+                        -1, 2, NUM_HANDS
+                    )
+                )
                 .abs()
-                .mean(dim=2)
+                .sum(dim=2)
                 .mean(dim=1),
                 street=self.value_buffer.features.street[: len(self.value_buffer)],
             ),
-            "value_buffer_target_std": self.value_buffer.value_targets[
-                : len(self.value_buffer)
-            ]
-            .std()
-            .item(),
             "batch_value_target_mean_abs": value_batch.value_targets.abs()
             .mean()
             .item(),
@@ -299,13 +299,7 @@ class RebelCFRTrainer:
                     ].tolist()
                 )
             },
-            "value_batch_street": {
-                "preflop": value_preflop.float().mean().item(),
-                "flop": value_flop.float().mean().item(),
-                "turn": value_turn.float().mean().item(),
-                "river": value_river.float().mean().item(),
-                "showdown": value_showdown.float().mean().item(),
-            },
+            "value_batch_street": by_street(torch.ones_like(value_batch.value_targets)),
             "value_loss_street": by_street(value_loss_all),
             "policy_loss_street": by_street(policy_loss_all, batch=policy_batch),
             "value_mean_std": value_output.value.std(dim=0).mean(),
@@ -314,15 +308,29 @@ class RebelCFRTrainer:
         if fresh_value_loss is not None:
             metrics["fresh_value_loss"] = fresh_value_loss
         if fresh_value_batch is not None:
-            metrics["fresh_value_target_mean_abs"] = (
-                fresh_value_batch.value_targets.abs().mean().item()
-            )
-            metrics["fresh_value_target_mean_abs_street"] = by_street(
-                fresh_value_batch.value_targets.abs().mean(dim=2).mean(dim=1),
+            metrics["fresh_value_batch_street"] = by_street(
+                torch.ones_like(fresh_value_batch.value_targets),
                 batch=fresh_value_batch,
             )
-            metrics["fresh_value_target_std"] = (
-                fresh_value_batch.value_targets.std().item()
+            metrics["fresh_value_target_mean_abs"] = (
+                (
+                    fresh_value_batch.value_targets
+                    * fresh_value_batch.features.beliefs.view(-1, 2, NUM_HANDS)
+                )
+                .abs()
+                .sum(dim=2)
+                .mean()
+                .item()
+            )
+            metrics["fresh_value_target_mean_abs_street"] = by_street(
+                (
+                    fresh_value_batch.value_targets
+                    * fresh_value_batch.features.beliefs.view(-1, 2, NUM_HANDS)
+                )
+                .abs()
+                .sum(dim=2)
+                .mean(dim=1),
+                batch=fresh_value_batch,
             )
         return metrics
 
