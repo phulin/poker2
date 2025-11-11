@@ -10,7 +10,8 @@ from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.rl.losses import RebelSupervisedLoss
-from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
+from alphaholdem.rl.rebel_batch import RebelBatch
+from alphaholdem.rl.rebel_replay import RebelReplayBuffer
 
 
 def make_env(num_envs: int = 4) -> HUNLTensorEnv:

@@ -17,7 +17,7 @@ from alphaholdem.env.card_utils import (
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.exponential_controller import ExponentialController
 from alphaholdem.rl.popart_normalizer import PopArtNormalizer
-from alphaholdem.rl.rebel_replay import RebelBatch
+from alphaholdem.rl.rebel_batch import RebelBatch
 from alphaholdem.rl.vectorized_replay import BatchSample
 from alphaholdem.search.cfr_manager import CFRManager
 from alphaholdem.utils.ema import EMA

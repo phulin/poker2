@@ -15,7 +15,7 @@ from alphaholdem.env.card_utils import (
     NUM_HANDS,
     hand_combos_tensor,
 )
-from alphaholdem.rl.rebel_replay import RebelBatch
+from alphaholdem.rl.rebel_batch import RebelBatch
 
 NUM_GROUPS = 5
 

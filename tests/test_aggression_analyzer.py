@@ -9,7 +9,7 @@ from alphaholdem.env.aggression_analyzer import (
     hand_combos_tensor,
 )
 from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.rl.rebel_replay import RebelBatch
+from alphaholdem.rl.rebel_batch import RebelBatch
 
 
 def test_aggression_analyzer_no_policy() -> None:

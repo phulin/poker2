@@ -14,7 +14,7 @@ from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
-from alphaholdem.rl.rebel_replay import RebelBatch
+from alphaholdem.rl.rebel_batch import RebelBatch
 from alphaholdem.search.cfr_evaluator import CFREvaluator
 from alphaholdem.search.chance_node_helper import ChanceNodeHelper
 from alphaholdem.utils.profiling import profile

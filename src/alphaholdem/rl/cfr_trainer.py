@@ -17,7 +17,8 @@ from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.pbs_pool import PBSPool
-from alphaholdem.rl.rebel_replay import RebelBatch, RebelReplayBuffer
+from alphaholdem.rl.rebel_batch import RebelBatch
+from alphaholdem.rl.rebel_replay import RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 from alphaholdem.utils.profiling import profile
