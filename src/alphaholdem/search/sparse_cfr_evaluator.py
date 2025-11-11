@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import CFRType, Config
 from alphaholdem.env.card_utils import (
@@ -15,17 +16,10 @@ from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.rebel_batch import RebelBatch
-from alphaholdem.search.cfr_evaluator import CFREvaluator
+from alphaholdem.search.cfr_evaluator import CFREvaluator, ExploitabilityStats
 from alphaholdem.search.chance_node_helper import ChanceNodeHelper
+from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState
 from alphaholdem.utils.profiling import profile
-
-
-@dataclass
-class ExploitabilityStats:
-    local_exploitability: torch.Tensor
-    local_br_policy: torch.Tensor
-    local_br_values: torch.Tensor
-    local_br_improvement: torch.Tensor
 
 
 class SparseCFREvaluator(CFREvaluator):
@@ -262,6 +256,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.self_reach = torch.zeros_like(self.beliefs)
         self.self_reach_avg = torch.zeros_like(self.beliefs)
 
+        # Showdown and leaf values are set in set_leaf_values, as they vary by beliefs.
         self.latest_values = torch.zeros_like(self.beliefs)
         folded_mask = (self.action_from_parent == 0) & self.env.done
         self.latest_values[folded_mask, 0] = rewards_tensor[folded_mask][:, None]
@@ -305,12 +300,6 @@ class SparseCFREvaluator(CFREvaluator):
             self.feature_encoder = RebelFeatureEncoder(
                 env=self.env, device=self.device, dtype=self.float_dtype
             )
-
-    def _initialize_with_copy(self, target: torch.Tensor) -> None:
-        for depth in range(self.max_depth):
-            offset_next = self.depth_offsets[depth + 1]
-            offset_next_next = self.depth_offsets[depth + 2]
-            target[offset_next:offset_next_next] = self._fan_out(target, depth)
 
     def _block_beliefs(self, target: torch.Tensor) -> None:
         if target.numel() == 0:
@@ -357,29 +346,37 @@ class SparseCFREvaluator(CFREvaluator):
         self._block_beliefs(target)
 
     def _propagate_all_beliefs(
-        self, target: torch.Tensor, reach_weights: torch.Tensor
+        self,
+        target: torch.Tensor | None = None,
+        reach_weights: torch.Tensor | None = None,
     ) -> None:
-        self._initialize_with_copy(target)
-        target *= reach_weights
-        self._block_beliefs(target)
+        """Propagate beliefs from all valid nodes to all valid nodes."""
+        N = self.root_nodes
+
+        if target is None:
+            target = self.beliefs
+        if reach_weights is None:
+            reach_weights = self.self_reach
+
+        target[:] = self._fan_out_deep(target[:N]) * reach_weights
+
+        # Precondition: reach_weights should be board-blocked, so the multiplication
+        # will block target as well. All that's left is normalizing.
         self._normalize_beliefs(target)
 
-    def _get_mixing_weights(self, t: int) -> tuple[float, float]:
-        if self.cfr_type == CFRType.standard:
-            return float(t - 1), 1.0
-        if self.cfr_type == CFRType.linear:
-            return float(t - 1), 2.0
-        if self.cfr_type == CFRType.discounted:
-            return (
-                float((t - 1) ** self.dcfr_gamma),
-                float(t**self.dcfr_gamma),
-            )
-        if self.cfr_type == CFRType.discounted_plus:
-            if t > self.dcfr_delay:
-                t_delay = t - self.dcfr_delay
-                return float(t_delay - 1), 2.0
-            return 0.0, 1.0
-        return float(t - 1), 1.0
+        # assert torch.allclose(target.sum(dim=2), 1.0)
+
+    def _propagate_level_beliefs(self, depth: int):
+        """Propagate beliefs from all nodes at a given level to all nodes at the next level."""
+
+        offset_next = self.depth_offsets[depth + 1]
+        offset_next_next = self.depth_offsets[depth + 2]
+
+        probs = self.policy_probs[offset_next:offset_next_next]
+        self.beliefs[offset_next:offset_next_next] = self._fan_out(self.beliefs, depth)
+
+        indices = torch.arange(offset_next, offset_next_next, device=self.device)
+        self.beliefs[indices, self.prev_actor[offset_next:offset_next_next]] *= probs
 
     def initialize_policy_and_beliefs(self) -> None:
         self.policy_probs.zero_()
@@ -427,13 +424,20 @@ class SparseCFREvaluator(CFREvaluator):
     def warm_start(self) -> None:
         # Simple warm start: use model values and do a best-response pass
         self.set_leaf_values(0)
-        self.compute_expected_values()
+        self.compute_expected_values(self.policy_probs, self.latest_values)
 
-        # Compute regrets and accumulate
-        regrets = self.compute_instantaneous_regrets(self.latest_values)
-        self.cumulative_regrets += 15 * regrets  # Scale by warm start iterations
-        self.regret_weight_sums += 15
-        self.update_policy(16)
+        # [M, ]
+        values_br = self._best_response_values(self.policy_probs, self.latest_values)
+
+        assert values_br.isfinite().all()
+
+        # heuristic: scale regrets by the number of warm start iterations
+        regrets = self.compute_instantaneous_regrets(
+            values_achieved=values_br, values_expected=self.latest_values
+        )
+        self.cumulative_regrets += self.warm_start_iterations * regrets
+        self.regret_weight_sums += self.warm_start_iterations
+        self.update_policy(self.warm_start_iterations)
 
     @torch.no_grad()
     @profile
@@ -442,15 +446,19 @@ class SparseCFREvaluator(CFREvaluator):
 
         # Set model values for non-terminal leaves
         model_mask = self.leaf_mask & ~self.env.done
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+
         model_indices = torch.where(model_mask)[0]
-        features = self.feature_encoder.encode(self.beliefs, pre_chance_node=True)
+        features = self.feature_encoder.encode(
+            beliefs, pre_chance_node=self.new_street_mask
+        )
         model_output = self.model(features[model_indices])
 
-        if t <= 1 or self.last_model_values is None:
+        if not self.cfr_avg or t <= 1 or self.last_model_values is None:
             self.latest_values[model_indices] = model_output.hand_values
         else:
             # Mix with previous values (CFR-AVG style)
-            old, new = t - 1, t
+            old, new = self._get_mixing_weights(t)
             self.latest_values[model_indices] = (
                 (old + new) * model_output.hand_values - old * self.last_model_values
             ) / new
@@ -518,35 +526,47 @@ class SparseCFREvaluator(CFREvaluator):
     def compute_instantaneous_regrets(
         self, values_achieved: torch.Tensor, values_expected: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """Compute instantaneous regrets for each action at each node."""
+        """Compute instantaneous regrets for each action at each node.
+
+        Args:
+            values_achieved: [M, 2, 1326] tensor of values for each node.
+            values_expected: [M, 2, 1326] tensor of expected values for each node, or none to use values_achieved.
+
+        Returns:
+            regrets: [M, 1326] tensor of regrets for taking the action to get to the node.
+        """
         if values_expected is None:
             values_expected = values_achieved
 
         bottom = self.depth_offsets[1]
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         regrets = torch.zeros_like(self.policy_probs)
 
-        if self.total_nodes <= self.root_nodes:
-            return regrets
-
-        actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
-        parent_actor_values = values_expected.gather(1, actor_indices).squeeze(1)
-        parent_actor_values = self._fan_out(parent_actor_values)
-
-        prev_actor_indices = self.prev_actor[bottom:][:, None, None].expand(
+        src_actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
+        prev_actor_indices = self.prev_actor[bottom:, None, None].expand(
             -1, -1, NUM_HANDS
         )
-        child_actor_values = (
+
+        # This represents the opponent's reach prob at the src node.
+        # Then actor acts at the transition src -> dest node.
+        # Unblocked mass translates opponent-hand space to hero-hand space.
+        opponent_global_reach = calculate_unblocked_mass(beliefs.flip(dims=[1]))
+        src_weights = opponent_global_reach.gather(1, src_actor_indices).squeeze(1)
+
+        # Weight advantages by our mass unblocked by the opponent hands.
+        weights = self._fan_out(src_weights)
+
+        # The value at a node is already the EV over all actions.
+        actor_values = values_expected.gather(1, src_actor_indices).squeeze(1)  # bottom
+        actor_values_expected = self._fan_out(actor_values)
+        actor_values_achieved = (
             values_achieved[bottom:].gather(1, prev_actor_indices).squeeze(1)
         )
 
-        opponent_indices = (1 - self.env.to_act)[:, None, None].expand(
-            -1, -1, NUM_HANDS
-        )
-        opponent_beliefs = self.beliefs.gather(1, opponent_indices).squeeze(1)
-        weights = self._fan_out(calculate_unblocked_mass(opponent_beliefs))
+        advantages = actor_values_achieved - actor_values_expected
 
-        regrets[bottom:] = weights * (child_actor_values - parent_actor_values)
+        regrets[bottom:] = weights * advantages
 
         return regrets
 
@@ -620,10 +640,100 @@ class SparseCFREvaluator(CFREvaluator):
         )
         self.policy_probs_avg[:N] = 0.0
 
-    def sample_leaf(self, t: int) -> None:
-        """Sample a leaf node for training (placeholder)."""
-        # This would sample a leaf node based on reach probabilities
-        # For now, just a placeholder
+    def sample_leaves(self, training_mode: bool) -> None:
+        """Sample leaves from `self.policy_probs_sample`."""
+
+        N, B = self.root_nodes, self.num_actions
+        top = self.depth_offsets[-2]
+
+        players = torch.randint(
+            0, 2, (N,), generator=self.generator, device=self.device
+        )
+        sample_epsilon = self.sample_epsilon if training_mode else 0.0
+
+        # Don't sample nodes that are done. No point in continuing search from there.
+        done_src = self._pull_back(self.env.done)
+
+        # Calculate uniform sampling probabilities.
+        legal_masks = self.legal_mask.clone()
+        legal_masks[:top] &= ~done_src
+        legal_counts = legal_masks.float().sum(dim=-1, keepdim=True)
+        uniform = torch.where(legal_masks, 1 / legal_counts, 0)
+
+        # Calculate policy sampling probabilities, excluding done nodes.
+        policy_probs_by_src = self._pull_back(self.policy_probs_sample).clone()
+        policy_probs_by_src.masked_fill_(done_src[:, :, None], 0.0)
+        denom = policy_probs_by_src.sum(dim=1, keepdim=True)
+        policy_probs_by_src = torch.where(
+            denom >= 1e-12, policy_probs_by_src / denom, uniform[:top, :, None]
+        )
+
+        # If a node has no legal actions after filtering done nodes, it's a leaf.
+        effective_leaf_mask = self.leaf_mask | (legal_counts.squeeze(1) == 0)
+
+        # select a hand for every root node.
+        actor_beliefs = (
+            self.beliefs[:N]
+            .gather(1, self.env.to_act[:N, None, None].expand(-1, -1, NUM_HANDS))
+            .squeeze(1)
+        )
+        selected_hands = torch.multinomial(
+            actor_beliefs, 1, generator=self.generator
+        ).squeeze(1)
+
+        # start with root nodes and descend to leaves
+        sampled_nodes = torch.arange(N, device=self.device)
+
+        depth = 0
+        active_mask = ~effective_leaf_mask[sampled_nodes]
+        while active_mask.any():
+            assert depth <= self.max_depth
+            active_nodes = sampled_nodes[active_mask]
+            active_count = active_nodes.numel()
+
+            to_act = self.env.to_act[active_nodes]
+            player_mask = players[active_mask]
+            sample_uniformly = (
+                torch.rand(active_count, generator=self.generator, device=self.device)
+                < sample_epsilon
+            )
+            sample_uniformly &= to_act == player_mask
+
+            policy_probs_active = policy_probs_by_src[
+                active_nodes, :, selected_hands[active_mask]
+            ]
+            actions = torch.multinomial(
+                torch.where(
+                    sample_uniformly[:, None],
+                    uniform[active_nodes],
+                    policy_probs_active,
+                ),
+                num_samples=1,
+                generator=self.generator,
+            ).squeeze(1)
+
+            child_offsets = self.child_offsets[active_nodes]
+            sampled_nodes[active_mask] = child_offsets + actions
+
+            # remove node from the active mask once it's a leaf
+            active_mask = ~effective_leaf_mask[sampled_nodes]
+            depth += 1
+
+        assert (~self.env.done[sampled_nodes]).all()
+
+        # Don't sample root nodes.
+        sampled_continue = sampled_nodes[sampled_nodes >= N]
+        pbs = PublicBeliefState.from_proto(
+            env_proto=self.env,
+            beliefs=self.beliefs[sampled_continue],
+            num_envs=sampled_continue.numel(),
+        )
+        pbs.env.copy_state_from(
+            self.env,
+            sampled_continue,
+            torch.arange(sampled_continue.numel(), device=self.device),
+        )
+        return pbs
 
     @profile
     def cfr_iteration(self, t: int, training_mode: bool = True) -> None:
@@ -670,81 +780,124 @@ class SparseCFREvaluator(CFREvaluator):
         if warm_iters > 0:
             self.warm_start()
 
+        self.t_sample = self._get_sampling_schedule()
         for t in range(warm_iters, total_iterations):
-            self.cfr_iteration(t, training_mode=False)
+            self.cfr_iteration(t)
+
+        return self.sample_leaves(training_mode=False)
 
     def _best_response_values(
         self,
         policy: torch.Tensor,
         base_values: torch.Tensor,
-        target_player: int,
+        deviating_player: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert target_player in (0, 1)
-        values_br = torch.zeros_like(base_values)
-        values_br[self.leaf_mask] = base_values[self.leaf_mask]
+        N, B = self.root_nodes, self.num_actions
+        if deviating_player is None:
+            deviating_player = self._fan_out_deep(self.env.to_act[:N])
+
+        values_br = torch.where(self.leaf_mask[:, None, None], base_values, 0.0)
 
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
         min_value = torch.finfo(base_values.dtype).min
 
-        for depth in range(len(self.depth_offsets) - 2, -1, -1):
+        policy_src_all = self._pull_back(policy)
+
+        actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
+        actor_beliefs = beliefs.gather(1, actor_indices).squeeze(1)
+
+        marginal_policy = policy_src_all * actor_beliefs[:, None, :]
+        policy_blocked = calculate_unblocked_mass(marginal_policy)
+        matchup_mass = calculate_unblocked_mass(actor_beliefs)
+        opponent_conditioned_policy = torch.where(
+            matchup_mass[:, None, :] > 1e-12,
+            policy_blocked / matchup_mass[:, None, :],
+            0.0,
+        )
+
+        for depth in range(self.max_depth - 1, -1, -1):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
-            parents = torch.arange(offset, offset_next, device=self.device)
 
-            non_leaf = ~self.leaf_mask[parents]
-            parents = parents[non_leaf]
+            indices = torch.arange(offset_next - offset, device=self.device)
+            actor = self.env.to_act[offset:offset_next]
+            deviator = deviating_player[offset:offset_next]
+            illegal = ~self.legal_mask[offset:offset_next]
 
-            legal = self.child_mask[parents]
+            values_src = self._pull_back(values_br, depth)  # [K, B, 2, 1326]
+            policy_src = policy_src_all[offset:offset_next]
+            opponent_policy = opponent_conditioned_policy[offset:offset_next]
 
-            actor = self.env.to_act[parents]
-            target_mask = actor == target_player
+            actor_indices = actor[:, None, None, None].expand(-1, B, 1, NUM_HANDS)
+            opp_indices = (1 - actor)[:, None, None, None].expand(-1, B, 1, NUM_HANDS)
+            # Both [K, B, 1326]
+            actor_values_src = values_src.gather(2, actor_indices).squeeze(2)
+            opp_values_src = values_src.gather(2, opp_indices).squeeze(2)
 
-            next_values = self._pull_back(values_br)[parents]  # [n, B, players, hands]
-            next_policy = self._pull_back(policy)[parents]  # [n, B, hands]
+            actor_values_for_best = actor_values_src.masked_fill(
+                illegal[:, :, None], min_value
+            )
+            best_action = actor_values_for_best.argmax(dim=1)  # [K, 1326]
+            # [K, 1326]
+            best_actor_values = actor_values_src.gather(
+                1, best_action[:, None, :]
+            ).squeeze(1)
 
-            next_values = next_values.clone()
-            next_policy = next_policy.clone()
+            # Public belief over deviator hands at s (not action-dependent)
+            deviator_beliefs = actor_beliefs[offset:offset_next]
 
-            next_values.masked_fill_(~legal[:, :, None, None], 0.0)
-            next_policy.masked_fill_(~legal[:, :, None], 0.0)
+            # 1) Histogram the deviator belief by the BR-chosen action a*(h_i)
+            #    mass_by_action[a, h_i] = b_i(h_i|s) if a*(h_i)==a else 0
+            mass_by_action = torch.zeros(
+                deviator_beliefs.size(0),
+                B,
+                deviator_beliefs.size(1),
+                dtype=deviator_beliefs.dtype,
+                device=self.device,
+            )  # [n_dev, A, H_dev]
+            # Partition belief by best action.
+            mass_by_action.scatter_add_(
+                1, best_action[:, None, :], deviator_beliefs[:, None, :]
+            )
 
-            parent_beliefs = beliefs[parents]
-            actor_indices = actor[:, None, None]
-            actor_beliefs = parent_beliefs.gather(1, actor_indices).squeeze(1)
-
-            marginal_policy = next_policy * actor_beliefs[:, None, :]
-            policy_blocked = calculate_unblocked_mass(marginal_policy)
-            matchup_mass = calculate_unblocked_mass(actor_beliefs)
-            opponent_policy = torch.where(
-                matchup_mass[:, None, :] > 1e-12,
-                policy_blocked / matchup_mass[:, None, :],
+            # 2) Blocker-project that mass to opponent hands and normalize per h_-i
+            mass_blocked = calculate_unblocked_mass(mass_by_action)  # [M, B, 1326]
+            dev_match = calculate_unblocked_mass(deviator_beliefs)[
+                :, None, :
+            ]  # [M, 1, 1326]
+            P_dev = torch.where(
+                dev_match > 1e-12,
+                mass_blocked / dev_match,  # P_dev(a | s, h_-i)
                 0.0,
+            )  # [M, B, 1326]
+
+            # 3) Expectation of opponent continuation values under P_dev
+            v_opp_exp = (P_dev * opp_values_src).sum(dim=1)  # [M, 1326]
+
+            # Actor: deviating player gets best value, otherwise average value.
+            actor_values = torch.where(
+                (deviator == actor)[:, None],
+                best_actor_values,  # case 1
+                (actor_values_src * policy_src).sum(dim=1),  # case 3
+            )
+            # Non-actor: deviating player gets average value.
+            # Non-deviating player gets value assuming deviating player plays best action.
+            opp_values = torch.where(
+                (deviator == actor)[:, None],
+                v_opp_exp,  # case 2
+                (opp_values_src * opponent_policy).sum(dim=1),  # case 4
             )
 
-            player_values = next_values[:, :, target_player, :].clone()
-            player_values.masked_fill_(~legal[:, :, None], min_value)
-            best_action = player_values.argmax(dim=1)
-            gather_idx = best_action.unsqueeze(1)
+            values_br[indices + offset, actor] = actor_values
+            values_br[indices + offset, 1 - actor] = opp_values
 
-            best_player = torch.gather(player_values, 1, gather_idx).squeeze(1)
-            opp_slice = next_values[:, :, 1 - target_player, :]
-            best_opp = torch.gather(opp_slice, 1, gather_idx).squeeze(1)
-
-            actor_onehot = torch.nn.functional.one_hot(
-                actor, num_classes=self.num_players
-            ).to(next_policy.dtype)
-            actor_onehot = actor_onehot[:, None, :, None]
-            policy_matrix = (
-                actor_onehot * next_policy[:, :, None, :]
-                + (1 - actor_onehot) * opponent_policy[:, :, None, :]
+            # Re-add leaf values (which were just overwritten).
+            torch.where(
+                self.leaf_mask[offset:offset_next, None, None],
+                base_values[offset:offset_next],
+                values_br[offset:offset_next],
+                out=values_br[offset:offset_next],
             )
-            expected = (next_values * policy_matrix).sum(dim=1)
-
-            values_br[parents] = expected
-            if target_mask.any():
-                target_indices = parents[target_mask]
-                values_br[target_indices, target_player] = best_player[target_mask]
-                values_br[target_indices, 1 - target_player] = best_opp[target_mask]
 
         return values_br
 
@@ -755,46 +908,26 @@ class SparseCFREvaluator(CFREvaluator):
             empty2 = torch.empty(0, 2, device=self.device, dtype=self.float_dtype)
             return ExploitabilityStats(
                 local_exploitability=empty,
-                local_br_policy=empty2,
-                local_br_values=empty2,
-                local_br_improvement=empty2,
+                local_best_response_values=empty2,
             )
 
-        policy = self.policy_probs_avg
-        leaf_values = self.values_avg
-        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+        policy = self.policy_probs_avg if self.cfr_avg else self.policy_probs
+        leaf_values = self.values_avg if self.cfr_avg else self.latest_values
 
-        base_values = torch.where(
-            self.leaf_mask[:, None, None], leaf_values, 0.0
-        ).clamp(-1.0, 1.0)
+        base_values = torch.where(self.leaf_mask[:, None, None], leaf_values, 0.0)
         self.compute_expected_values(policy=policy, values=base_values)
-        br_values_p0 = self._best_response_values(policy, base_values, target_player=0)
-        br_values_p1 = self._best_response_values(policy, base_values, target_player=1)
+        br_values = self._best_response_values(policy, leaf_values)
 
-        base_root = base_values[:N]
-        br_root_p0 = br_values_p0[:N]
-        br_root_p1 = br_values_p1[:N]
-        beliefs_root = beliefs[:N]
+        root_indices = torch.arange(N, device=self.device)
+        root_actor = self.env.to_act[:N]
 
-        beliefs_p0 = beliefs_root[:, 0, :]
-        beliefs_p1 = beliefs_root[:, 1, :]
+        base_root = base_values[root_indices, root_actor]
+        br_root = br_values[root_indices, root_actor]
 
-        base_player0 = (base_root[:, 0] * beliefs_p0).sum(dim=1)
-        base_player1 = (base_root[:, 1] * beliefs_p1).sum(dim=1)
-        base_players = torch.stack([base_player0, base_player1], dim=1)
-
-        br_player0 = (br_root_p0[:, 0] * beliefs_p0).sum(dim=1)
-        br_player1 = (br_root_p1[:, 1] * beliefs_p1).sum(dim=1)
-        br_players = torch.stack([br_player0, br_player1], dim=1)
-
-        improvements = br_players - base_players
-        total_exploitability = improvements.sum(dim=1) / 2
+        improvements = br_root - base_root
 
         return ExploitabilityStats(
-            local_exploitability=total_exploitability,
-            local_br_policy=base_players,
-            local_br_values=br_players,
-            local_br_improvement=improvements,
+            local_exploitability=improvements, local_best_response_values=br_root
         )
 
     def training_data(
@@ -833,9 +966,9 @@ class SparseCFREvaluator(CFREvaluator):
 
         value_statistics = {key: statistics[key][:N] for key in statistics}
         value_statistics["local_exploitability"] = exploit_stats.local_exploitability
-        value_statistics["local_br_policy"] = exploit_stats.local_br_policy
-        value_statistics["local_br_values"] = exploit_stats.local_br_values
-        value_statistics["local_br_improvement"] = exploit_stats.local_br_improvement
+        value_statistics["local_best_response_values"] = (
+            exploit_stats.local_best_response_values
+        )
 
         valid_top = ~self.leaf_mask[:top]
         policy_statistics = {
@@ -1007,17 +1140,9 @@ class SparseCFREvaluator(CFREvaluator):
             device=self.device,
         )
         output[: self.root_nodes] = tensor
-        for depth in range(len(self.depth_offsets) - 2):
-            child_start = self.depth_offsets[depth + 1]
-            child_end = self.depth_offsets[depth + 2]
-            if child_end <= child_start:
-                continue
-            parent_indices = self.parent_index[child_start:child_end]
-            valid = parent_indices >= 0
-            if valid.all():
-                output[child_start:child_end] = output[parent_indices]
-            else:
-                output_slice = output[child_start:child_end]
-                output_slice[valid] = output[parent_indices[valid]]
-                output_slice[~valid] = 0
+        for depth in range(self.max_depth):
+            offset_next = self.depth_offsets[depth + 1]
+            offset_next_next = self.depth_offsets[depth + 2]
+            output[offset_next:offset_next_next] = self._fan_out(output, depth)
+
         return output

@@ -21,7 +21,7 @@ class RebelDataGenerator:
         self.value_buffer = value_buffer
         self.policy_buffer = policy_buffer
         self.device = evaluator.device
-        initial_pbs = self._new_pbs(evaluator.search_batch_size)
+        initial_pbs = self._new_pbs(evaluator.root_nodes)
         self.current_pbs = initial_pbs
         self.last_extra = 0
 
@@ -51,7 +51,7 @@ class RebelDataGenerator:
 
     @profile
     def generate_data(self, value_sample_count: int) -> tuple[RebelBatch, RebelBatch]:
-        N = self.evaluator.search_batch_size
+        N = self.evaluator.root_nodes
         root_indices = torch.arange(N, device=self.device)
         collected = self.last_extra
 

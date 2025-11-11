@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 
+from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
     NUM_HANDS,
     combo_to_onehot_tensor,
@@ -14,9 +16,17 @@ from alphaholdem.env.card_utils import (
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
+from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.utils.model_utils import compute_masked_logits
+
+
+@dataclass
+class ExploitabilityStats:
+    local_exploitability: torch.Tensor
+    local_best_response_values: torch.Tensor
 
 
 class CFREvaluator(ABC):
@@ -25,10 +35,32 @@ class CFREvaluator(ABC):
     model: RebelFFN | BetterFFN
     device: torch.device
     env: HUNLTensorEnv
-    feature_encoder: object
+    feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder
+    cfr_type: CFRType
+    root_nodes: int
+    total_nodes: int
     beliefs: torch.Tensor
     beliefs_avg: torch.Tensor
     legal_mask: torch.Tensor | None
+
+    def _fan_out_deep(self, data: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError("Subclasses must implement _fan_out_deep.")
+
+    def _get_mixing_weights(self, t: int) -> torch.Tensor:
+        """Get the mixing weights for the current iteration."""
+
+        if self.cfr_type == CFRType.standard:
+            return t - 1, 1
+        elif self.cfr_type == CFRType.linear:
+            return t - 1, 2
+        elif self.cfr_type == CFRType.discounted:
+            return (t - 1) ** self.dcfr_gamma, t**self.dcfr_gamma
+        elif self.cfr_type == CFRType.discounted_plus:
+            if t > self.dcfr_delay:
+                t_delay = t - self.dcfr_delay
+                return t_delay - 1, 2
+            else:
+                return 0, 1
 
     @torch.no_grad()
     def _get_model_policy_probs(self, indices: torch.Tensor) -> torch.Tensor:
@@ -240,3 +272,27 @@ class CFREvaluator(ABC):
         )
 
         return EV_hand * potential[:, None] / self.env.scale
+
+    def _get_sampling_schedule(self) -> torch.Tensor:
+        N = self.root_nodes
+        if self.cfr_type == CFRType.discounted_plus:
+            sample_low = max(self.warm_start_iterations + 1, self.dcfr_delay + 1)
+            sample_low = min(sample_low, self.cfr_iterations - 1)
+        else:
+            sample_low = min(self.warm_start_iterations + 1, self.cfr_iterations - 1)
+        sample_high = max(self.cfr_iterations, sample_low)
+        distribution = (
+            torch.arange(
+                sample_low, sample_high, dtype=torch.float32, device=self.device
+            )
+            + 1
+            if self.cfr_type != CFRType.standard
+            else torch.ones(sample_high - sample_low, device=self.device)
+        )
+        distribution /= distribution.sum()
+        t_sample = torch.multinomial(
+            distribution, N, replacement=True, generator=self.generator
+        )
+        t_sample += sample_low
+
+        return self._fan_out_deep(t_sample)

@@ -107,7 +107,7 @@ def comprehensive_profiling():
     )
 
     # Initialize search
-    roots = torch.arange(evaluator.search_batch_size)
+    roots = torch.arange(evaluator.root_nodes)
     evaluator.initialize_search(env_proto, roots)
 
     print("Profiling realistic CFR workflow...")

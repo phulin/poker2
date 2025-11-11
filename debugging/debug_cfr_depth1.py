@@ -807,10 +807,8 @@ def debug_cfr_depth1(
             exploit_stats = evaluator._compute_exploitability()
             if exploit_stats.local_exploitability.numel() > 0:
                 total_expl = exploit_stats.local_exploitability.mean().item()
-                imp_p0 = exploit_stats.local_br_improvement[:, 0].mean().item()
-                imp_p1 = exploit_stats.local_br_improvement[:, 1].mean().item()
                 print(
-                    f"Exploitability (avg best-response improv): total={total_expl:.6f} | P0={imp_p0:.6f}, P1={imp_p1:.6f}"
+                    f"Exploitability (avg best-response improv): total={total_expl:.6f}"
                 )
 
     print(f"\n{'='*80}")

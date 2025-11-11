@@ -226,7 +226,7 @@ def print_spot(
 ) -> None:
     """Extract and print info for the single root state currently in the evaluator."""
     # Root info
-    N = evaluator.search_batch_size
+    N = evaluator.root_nodes
     assert N == 1, "This printer assumes a single root (N=1)."
 
     # Pull root policy per-hand [N, actions, hands]
