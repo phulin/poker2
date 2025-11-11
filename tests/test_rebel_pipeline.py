@@ -3,7 +3,11 @@ import math
 import torch
 
 from alphaholdem.core.structured_config import Config, StratifyConfig, ValueHeadType
-from alphaholdem.env.card_utils import NUM_HANDS
+from alphaholdem.env.card_utils import (
+    NUM_HANDS,
+    combo_suit_permutation_inverse_tensor,
+    suit_permutations_tensor,
+)
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
@@ -167,3 +171,102 @@ def test_rebel_cfr_trainer_single_step_cpu():
     assert "policy_buffer_mean_sample_count" in metrics[0]
     assert isinstance(metrics[0]["value_buffer_mean_sample_count"], float)
     assert isinstance(metrics[0]["policy_buffer_mean_sample_count"], float)
+
+
+def test_permutation_loss_echo_model():
+    """
+    Test that permutation loss is 0 for an "echo" model that outputs
+    hand values = beliefs * torch.arange(1326).
+
+    This verifies that the permutation loss logic correctly handles
+    the case where the model commutes with suit permutations.
+
+    The echo model outputs: hand_values[b, p, i] = beliefs[b, p, i] * i
+    For the model to commute with permutations, when we permute the input beliefs,
+    the permuted output should be: hand_values_permuted[b, p, j] = beliefs_permuted[b, p, j] * original_combo_index_for_j
+    where original_combo_index_for_j is obtained via combo_suit_permutation_inverse_tensor.
+    """
+    device = torch.device("cpu")
+    batch_size = 4
+    num_actions = 5
+
+    # Create an "echo" model: hand_values = beliefs * torch.arange(1326)
+    combo_indices = torch.arange(NUM_HANDS, device=device, dtype=torch.float32)
+
+    # Create features with beliefs = normalized torch.arange(1326)
+    beliefs_flat = combo_indices.unsqueeze(0).expand(batch_size, -1).repeat(1, 2)
+    beliefs_p0 = beliefs_flat[:, :NUM_HANDS]
+    beliefs_p1 = beliefs_flat[:, NUM_HANDS:]
+    beliefs_p0 = beliefs_p0 / beliefs_p0.sum(dim=1, keepdim=True)
+    beliefs_p1 = beliefs_p1 / beliefs_p1.sum(dim=1, keepdim=True)
+    beliefs = torch.cat([beliefs_p0, beliefs_p1], dim=1)
+
+    features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.zeros(batch_size, 5, dtype=torch.long),
+        beliefs=beliefs,
+    )
+
+    # Create "echo" model output: hand_values = beliefs * combo_indices
+    beliefs_reshaped = beliefs.view(batch_size, 2, NUM_HANDS)
+    hand_values = beliefs_reshaped * combo_indices.unsqueeze(0).unsqueeze(0)
+    policy_logits = torch.randn(batch_size, NUM_HANDS, num_actions)
+    value = hand_values.mean(dim=-1).mean(dim=-1)
+
+    output = ModelOutput(
+        policy_logits=policy_logits,
+        value=value,
+        hand_values=hand_values,
+    )
+
+    # Permute the features
+    suit_permutations_idxs = torch.randint(0, 24, (batch_size,), device=device)
+    suit_permutations = suit_permutations_tensor(device=device)[suit_permutations_idxs]
+    features_permuted = features.clone()
+    features_permuted.permute_suits(suit_permutations)
+
+    # For the echo model to commute, permuted output should use original combo indices
+    beliefs_permuted_reshaped = features_permuted.beliefs.view(batch_size, 2, NUM_HANDS)
+    combo_permutations_inverse = combo_suit_permutation_inverse_tensor(device=device)[
+        suit_permutations_idxs
+    ]  # (batch_size, 1326)
+    # combo_permutations_inverse[b, j] = original combo index that maps to permuted combo j
+
+    # Echo model output for permuted features: use original combo indices
+    hand_values_permuted = (
+        beliefs_permuted_reshaped
+        * combo_permutations_inverse.unsqueeze(1).expand(-1, 2, -1)
+    )
+
+    output_permuted = ModelOutput(
+        policy_logits=policy_logits,
+        value=hand_values_permuted.mean(dim=-1).mean(dim=-1),
+        hand_values=hand_values_permuted,
+    )
+
+    # Create batch and compute loss
+    # Need to provide dummy targets (not used in permutation loss computation)
+    legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
+    dummy_value_targets = torch.zeros(batch_size, 2, NUM_HANDS)
+    batch = RebelBatch(
+        features=features,
+        policy_targets=None,
+        value_targets=dummy_value_targets,
+        legal_masks=legal_masks,
+    )
+
+    loss_fn = RebelSupervisedLoss(permutation_weight=1.0)
+    loss_dict = loss_fn(
+        output,
+        batch,
+        output_permuted=output_permuted,
+        suit_permutation_idxs=suit_permutations_idxs,
+    )
+
+    # The permutation loss should be 0 (or very close to 0)
+    permutation_loss = loss_dict["permutation_loss"]
+    assert (
+        permutation_loss < 1e-6
+    ), f"Permutation loss should be ~0, got {permutation_loss}"

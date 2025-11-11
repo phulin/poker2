@@ -12,7 +12,7 @@ from alphaholdem.core.structured_config import KLType, PPOClipping, ValueLossTyp
 from alphaholdem.env.card_utils import (
     NUM_HANDS,
     calculate_unblocked_mass,
-    combo_suit_permutation_inverse_tensor,
+    combo_suit_permutation_tensor,
 )
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.exponential_controller import ExponentialController
@@ -814,13 +814,17 @@ class RebelSupervisedLoss(nn.Module):
         permutation_loss = torch.tensor(0.0, device=logits.device)
         if output_permuted is not None and suit_permutation_idxs is not None:
             # Reverse the permutation on the output hand values.
-            combo_permutations_inverse = combo_suit_permutation_inverse_tensor(
-                device=logits.device
-            )[suit_permutation_idxs]
+            # combo_suit_permutation_tensor[perm_idx, i] = permuted combo index for original combo i
+            # To rearrange hand_values_permuted to original order:
+            # hand_values_reversed[b, p, i] = hand_values_permuted[b, p, remap[b, i]]
+            # where remap[b, i] is the permuted combo index for original combo i
+            combo_permutations = combo_suit_permutation_tensor(device=logits.device)[
+                suit_permutation_idxs
+            ]  # (B, 1326)
             hand_values_permuted_reversed = torch.gather(
                 output_permuted.hand_values,  # (B, 2, 1326)
                 2,
-                combo_permutations_inverse[:, None, :].expand(
+                combo_permutations[:, None, :].expand(
                     -1, self.num_players, -1
                 ),  # (B, 2, 1326)
             )
