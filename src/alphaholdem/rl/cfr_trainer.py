@@ -199,16 +199,9 @@ class RebelCFRTrainer:
             p.grad for p in self.model.parameters() if p.grad is not None
         ).item()
 
-        value_buffer_streets = self.value_buffer.features.street[
-            : len(self.value_buffer)
-        ]
-        value_buffer_streets_stats = {
-            "preflop": (value_buffer_streets == 0).sum().item()
-            / len(self.value_buffer),
-            "flop": (value_buffer_streets == 1).sum().item() / len(self.value_buffer),
-            "turn": (value_buffer_streets == 2).sum().item() / len(self.value_buffer),
-            "river": (value_buffer_streets == 3).sum().item() / len(self.value_buffer),
-        }
+        value_buffer_streets_stats = street_count(
+            self.value_buffer.features.street[: len(self.value_buffer)]
+        )
 
         def by_street(
             tensor: torch.Tensor, batch=value_batch, street=None, weights=None
@@ -231,6 +224,9 @@ class RebelCFRTrainer:
             else:
                 result = {k: tensor[mask].mean().item() for k, mask in masks.items()}
             return {k: v for k, v in result.items() if not math.isnan(v)}
+
+        def street_count(street: torch.Tensor) -> dict[str, float]:
+            return {k: (street == k).sum().item() for k in range(4)}
 
         exploitability = value_batch.statistics["local_exploitability"]
         metrics = {
@@ -300,7 +296,7 @@ class RebelCFRTrainer:
                     ].tolist()
                 )
             },
-            "value_batch_street": by_street(torch.ones_like(value_batch.value_targets)),
+            "value_batch_street": street_count(value_batch.features.street),
             "value_loss_street": by_street(value_loss_all),
             "policy_loss_street": by_street(policy_loss_all, batch=policy_batch),
             "value_mean_std": value_output.value.std(dim=0).mean(),
@@ -309,9 +305,8 @@ class RebelCFRTrainer:
         if fresh_value_loss is not None:
             metrics["fresh_value_loss"] = fresh_value_loss
         if fresh_value_batch is not None:
-            metrics["fresh_value_batch_street"] = by_street(
-                torch.ones_like(fresh_value_batch.value_targets),
-                batch=fresh_value_batch,
+            metrics["fresh_value_batch_street"] = street_count(
+                fresh_value_batch.features.street
             )
             metrics["fresh_value_target_mean_abs"] = (
                 (
