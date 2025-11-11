@@ -1525,7 +1525,3 @@ class RebelCFREvaluator(CFREvaluator):
                 output[offset:offset_next], sliced=True
             )
         return output
-
-    def _leaf_node_indices(self) -> torch.Tensor:
-        """Return flattened indices for valid nodes marked as leaves."""
-        return torch.where(self.leaf_mask)[0]
