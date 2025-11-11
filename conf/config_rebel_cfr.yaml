@@ -17,12 +17,12 @@ wandb_tags: ["rebel", "cfr"]
 train:
   learning_rate: 3e-4
   batch_size: 1024
-  episodes_per_step: 10
+  episodes_per_step: 30
   replay_buffer_batches: 32
   value_reuse_goal: 4
   value_coef: 1.0
   entropy_coef: 0.0
-  permutation_coef: 0.01
+  permutation_coef: 0.1
   grad_clip: 1.0
 
   stratify_streets:
@@ -59,9 +59,9 @@ search:
   cfr_type: discounted_plus
   cfr_avg: true
 
-  iterations: 300
+  iterations: 150
   warm_start_iterations: 15
-  dcfr_plus_delay: 70
+  dcfr_plus_delay: 40
 
   dcfr_alpha: 1.5
   dcfr_beta: 0.0
