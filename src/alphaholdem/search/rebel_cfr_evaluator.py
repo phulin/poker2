@@ -1150,7 +1150,7 @@ class RebelCFREvaluator(CFREvaluator):
         exploit_stats = self._compute_exploitability()
 
         # Value batch gets root states only. These should all be valid.
-        value_statistics = {key: statistics[key][:N] for key in statistics}
+        value_statistics = {key: statistics[key][:N].clone() for key in statistics}
         value_statistics["local_exploitability"] = exploit_stats.local_exploitability
         value_statistics["local_br_policy"] = exploit_stats.local_br_policy
         value_statistics["local_br_values"] = exploit_stats.local_br_values

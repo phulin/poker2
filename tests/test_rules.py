@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 
 from alphaholdem.env import rules
-from alphaholdem.env.card_utils import combo_lookup_tensor
+from alphaholdem.env.card_utils import NUM_HANDS, combo_lookup_tensor
 
 # Helper to make card by rank/suit (r: 0..12 for 2..A, s: 0..3)
 
@@ -605,6 +605,23 @@ def test_rank_hands_orders_weak_hands():
         assert (
             ranks[0, idx1] > ranks[0, idx2]
         ), f"{name1} should be stronger than {name2}"
+
+
+def test_rank_hands_distinguishes_batched_rivers():
+    """rank_hands should produce varied ranks when evaluating multiple boards."""
+    board = torch.tensor(
+        [
+            [C(1, 1), C(6, 2), C(9, 1), C(10, 0), C(8, 0)],
+            [C(5, 0), C(5, 1), C(8, 2), C(11, 0), C(9, 0)],
+            [C(6, 0), C(6, 3), C(7, 3), C(0, 1), C(12, 0)],
+        ],
+        dtype=torch.long,
+    )
+    ranks, _ = rules.rank_hands(board)
+    assert ranks.shape == (3, NUM_HANDS)
+    for row in ranks:
+        # Prior to the bug fix every entry in `row` was identical.
+        assert torch.unique(row).numel() > 1
 
 
 # Performance tests removed due to tensor size issues in create_comparison_vector

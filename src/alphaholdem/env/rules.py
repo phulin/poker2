@@ -64,7 +64,7 @@ def unfold_conv1d_ones(input_tensor: torch.Tensor, kernel_size: int) -> torch.Te
 
 
 def rank_hands(board: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Rank all 1326 hands on a [N, 1326] batch of boards.
+    """Rank all 1326 hands on each board of a [N, 1326] batch of boards.
 
     Args:
         board: [N, 5] - batch of board card indices
@@ -84,16 +84,22 @@ def rank_hands(board: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     combo_to_suits, combo_to_ranks = cards_to_onehot_indices(combo_to_hand)
 
     # Construct a tensor of zeros, to be filled with ones for each card in each hand plus the board
-    hand_vectors = torch.zeros(N, NUM_HANDS, 4, 13, device=device)
+    hand_vectors = torch.zeros(N, NUM_HANDS, 4, 13, dtype=torch.int, device=device)
     # For each hand, set the relevant entries (hand holecards) to 1
     for card_idx in range(2):
         hand_vectors[
             :, all_combos, combo_to_suits[:, card_idx], combo_to_ranks[:, card_idx]
         ] = 1
 
-    # For each board, set the relevant entries (board cards) in all hand vectors to 1
+    # For each board, set the relevant entries (board cards) in all hand vectors to 1.
+    # Advanced indexing with multiple batch dimensions breaks down for batched boards,
+    # so build an explicit board one-hot tensor and merge it with each combo.
     board_suits, board_ranks = cards_to_onehot_indices(board)
-    hand_vectors[:, :, board_suits, board_ranks] = 1
+    board_onehot = torch.zeros(N, 4, 13, device=device, dtype=hand_vectors.dtype)
+    row_idx = torch.arange(N, device=device).unsqueeze(1).expand_as(board)
+    board_onehot[row_idx, board_suits, board_ranks] = 1
+    # Broadcast across all hand combos.
+    hand_vectors |= board_onehot.unsqueeze(1)
 
     # Compute the 26-field (4 bits per field) comparison vector for every hand+board in the batch
     comparison_vectors = create_comparison_vector(hand_vectors)
