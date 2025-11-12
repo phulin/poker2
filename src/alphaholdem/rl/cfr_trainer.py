@@ -199,10 +199,6 @@ class RebelCFRTrainer:
             p.grad for p in self.model.parameters() if p.grad is not None
         ).item()
 
-        value_buffer_streets_stats = street_count(
-            self.value_buffer.features.street[: len(self.value_buffer)]
-        )
-
         def by_street(
             tensor: torch.Tensor, batch=value_batch, street=None, weights=None
         ) -> dict[str, float]:
@@ -227,6 +223,10 @@ class RebelCFRTrainer:
 
         def street_count(street: torch.Tensor) -> dict[str, float]:
             return {k: (street == k).sum().item() for k in range(4)}
+
+        value_buffer_streets_stats = street_count(
+            self.value_buffer.features.street[: len(self.value_buffer)]
+        )
 
         exploitability = value_batch.statistics["local_exploitability"]
         metrics = {

@@ -1674,7 +1674,7 @@ def test_local_exploitability_depth_limited() -> None:
 
     torch.testing.assert_close(
         value_batch.statistics["local_exploitability"][0],
-        torch.tensor(0.32, dtype=dtype),
+        torch.tensor(0.64, dtype=dtype),
     )
     torch.testing.assert_close(
         value_batch.statistics["local_br_values"][0],
@@ -1754,9 +1754,8 @@ def test_local_exploitability_not_scaled_by_opponent_reach() -> None:
 
     stats = evaluator._compute_exploitability()
 
-    expected = torch.tensor(0.64, device=device, dtype=dtype)
     torch.testing.assert_close(
-        stats.local_exploitability[0], torch.tensor(0.32, device=device, dtype=dtype)
+        stats.local_exploitability[0], torch.tensor(0.64, device=device, dtype=dtype)
     )
 
 
@@ -1841,7 +1840,7 @@ def test_local_exploitability_uses_correct_player_beliefs() -> None:
     expected_improvement = torch.tensor(1.6, device=device, dtype=dtype)
     torch.testing.assert_close(
         stats.local_exploitability[0],
-        expected_improvement / 2,
+        expected_improvement,
     )
 
 
@@ -1903,7 +1902,7 @@ def test_local_exploitability_uses_policy_evaluation_for_baseline() -> None:
 
     torch.testing.assert_close(
         stats.local_exploitability[0],
-        torch.tensor(0.375, device=device, dtype=dtype),
+        torch.tensor(0.75, device=device, dtype=dtype),
     )
 
 
@@ -2432,8 +2431,8 @@ def test_best_response_values() -> None:
     # Set up policy
     policy = evaluator.policy_probs_avg
 
-    # Compute best response for player 0
-    br_values_p0 = evaluator._best_response_values(policy, base_values, target_player=0)
+    # Compute best response (deviating_player defaults to None, using env.to_act)
+    br_values_p0 = evaluator._best_response_values(policy, base_values)
 
     # Best response values should be at least as good as base values
     # (for the deviating player)

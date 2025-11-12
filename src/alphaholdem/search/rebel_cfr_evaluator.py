@@ -629,7 +629,15 @@ class RebelCFREvaluator(CFREvaluator):
         self.compute_expected_values(self.policy_probs, self.latest_values)
 
         # [M, ]
-        values_br = self._best_response_values(self.policy_probs, self.latest_values)
+        values_br_p0 = self._best_response_values(
+            self.policy_probs, self.latest_values, torch.zeros_like(self.env.to_act)
+        )
+        values_br_p1 = self._best_response_values(
+            self.policy_probs, self.latest_values, torch.ones_like(self.env.to_act)
+        )
+        values_br = torch.where(
+            self.env.to_act[:, None, None] == 0, values_br_p0, values_br_p1
+        )
 
         assert values_br.isfinite().all()
 
@@ -664,6 +672,7 @@ class RebelCFREvaluator(CFREvaluator):
             self.latest_values[model_indices] = (
                 (old + new) * model_output.hand_values - old * self.last_model_values
             ) / new
+            # TODO: fix zero-sum drift
         self.last_model_values = model_output.hand_values
 
         # Set showdown values
@@ -1336,13 +1345,34 @@ class RebelCFREvaluator(CFREvaluator):
         root_indices = torch.arange(N, device=self.device)
         root_actor = self.env.to_act[:N]
 
-        base_root = base_values[root_indices, root_actor]
-        br_root = br_values[root_indices, root_actor]
+        base_root = base_values[root_indices, root_actor]  # (N, NUM_HANDS)
+        br_root = br_values[root_indices, root_actor]  # (N, NUM_HANDS)
 
-        improvements = br_root - base_root
+        # Aggregate over hands using beliefs
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+        root_beliefs_actor = beliefs[root_indices, root_actor]  # (N, NUM_HANDS)
+
+        # Weight improvements by beliefs
+        improvements_per_hand = br_root - base_root  # (N, NUM_HANDS)
+        improvements = (improvements_per_hand * root_beliefs_actor).sum(dim=-1)  # (N,)
+
+        # Aggregate best response values for both players
+        # For the acting player: use best response value
+        # For the opponent: use base value
+        root_opponent = 1 - root_actor
+        br_values_actor = (br_root * root_beliefs_actor).sum(dim=-1)  # (N,)
+        base_root_opponent = base_values[root_indices, root_opponent]  # (N, NUM_HANDS)
+        root_beliefs_opponent = beliefs[root_indices, root_opponent]  # (N, NUM_HANDS)
+        base_values_opponent = (base_root_opponent * root_beliefs_opponent).sum(
+            dim=-1
+        )  # (N,)
+
+        br_values_agg = torch.stack(
+            [br_values_actor, base_values_opponent], dim=-1
+        )  # (N, 2)
 
         return ExploitabilityStats(
-            local_exploitability=improvements, local_best_response_values=br_root
+            local_exploitability=improvements, local_best_response_values=br_values_agg
         )
 
     def _record_action_mix(self) -> None:

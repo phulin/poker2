@@ -159,6 +159,7 @@ class BetterFFN(nn.Module, Model):
             for block in sequential.modules():
                 if not isinstance(block, ResidualBlock):
                     continue
+                # 1.532 is the gain for GELU nonlinearity.
                 nn.init.orthogonal_(
                     block.inner.get_submodule("linear_in").weight,
                     1.532 * math.sqrt(self.ffn_dim / self.hidden_dim),
