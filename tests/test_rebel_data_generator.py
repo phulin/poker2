@@ -9,7 +9,7 @@ from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.rl.rebel_batch import RebelBatch
-from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState
+from alphaholdem.search.cfr_evaluator import PublicBeliefState
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 
 

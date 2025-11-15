@@ -4,7 +4,7 @@ from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.rl.rebel_batch import RebelBatch
 from alphaholdem.rl.rebel_replay import RebelReplayBuffer
-from alphaholdem.search.rebel_cfr_evaluator import PublicBeliefState, RebelCFREvaluator
+from alphaholdem.search.cfr_evaluator import CFREvaluator, PublicBeliefState
 from alphaholdem.utils.profiling import profile
 
 
@@ -12,7 +12,7 @@ class RebelDataGenerator:
     def __init__(
         self,
         env_proto: HUNLTensorEnv,
-        evaluator: RebelCFREvaluator,
+        evaluator: CFREvaluator,
         value_buffer: RebelReplayBuffer,
         policy_buffer: RebelReplayBuffer,
     ):

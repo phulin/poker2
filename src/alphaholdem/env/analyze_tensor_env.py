@@ -20,9 +20,9 @@ from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
+from alphaholdem.search.cfr_evaluator import PublicBeliefState
 from alphaholdem.search.rebel_cfr_evaluator import (
     T_WARM,
-    PublicBeliefState,
     RebelCFREvaluator,
 )
 

@@ -292,6 +292,14 @@ def test_initialize_subgame() -> None:
     assert evaluator.depth_offsets[0] == 0
     assert evaluator.depth_offsets[1] == evaluator.root_nodes
 
+    # Verify root nodes have self_reach initialized to 1.0
+    root_self_reach = evaluator.self_reach[: evaluator.root_nodes]
+    torch.testing.assert_close(
+        root_self_reach,
+        torch.ones_like(root_self_reach),
+        msg="Root nodes should have self_reach initialized to 1.0",
+    )
+
     # Check tensor shapes
     assert evaluator.beliefs.shape == (evaluator.total_nodes, 2, NUM_HANDS)
     assert evaluator.policy_probs.shape == (

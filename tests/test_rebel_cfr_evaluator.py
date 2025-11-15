@@ -20,9 +20,9 @@ from alphaholdem.models.mlp.better_features import ScalarContext
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput
+from alphaholdem.search.cfr_evaluator import PublicBeliefState
 from alphaholdem.search.rebel_cfr_evaluator import (
     NUM_HANDS,
-    PublicBeliefState,
     RebelCFREvaluator,
 )
 from alphaholdem.utils.model_utils import compute_masked_logits
@@ -266,6 +266,14 @@ def test_initialize_subgame_sets_uniform_beliefs() -> None:
     evaluator.initialize_subgame(env, roots)
 
     assert torch.all(evaluator.valid_mask[roots])
+
+    # Verify root nodes have self_reach initialized to 1.0
+    root_self_reach = evaluator.self_reach[roots]
+    torch.testing.assert_close(
+        root_self_reach,
+        torch.ones_like(root_self_reach),
+        msg="Root nodes should have self_reach initialized to 1.0",
+    )
 
     root_beliefs = evaluator.beliefs[roots]
     torch.testing.assert_close(
@@ -610,8 +618,20 @@ def test_compute_expected_values_matches_child_values(
     values_bottom = torch.where(evaluator.leaf_mask[bottom:, None], values_temp, 0.0)
 
     # counterfactual value = EV * opponent reach
-    reach_weights = torch.zeros_like(evaluator.self_reach)
+    # Root nodes should already be initialized to 1.0 by initialize_subgame
+    reach_weights = evaluator.self_reach.clone()
+    torch.testing.assert_close(
+        reach_weights[: evaluator.root_nodes],
+        torch.ones_like(reach_weights[: evaluator.root_nodes]),
+        msg="Root nodes should start at 1.0 from initialize_subgame",
+    )
     evaluator._calculate_reach_weights(reach_weights, evaluator.policy_probs)
+    # Verify root nodes remain at 1.0 (never updated by _calculate_reach_weights)
+    torch.testing.assert_close(
+        reach_weights[: evaluator.root_nodes],
+        torch.ones_like(reach_weights[: evaluator.root_nodes]),
+        msg="Root nodes should remain at 1.0 after _calculate_reach_weights",
+    )
     evaluator.latest_values[:] = 0.0
     evaluator.latest_values[bottom:, 0] = values_bottom * reach_weights[bottom:, 1]
     evaluator.latest_values[bottom:, 1] = -values_bottom * reach_weights[bottom:, 0]
@@ -1649,7 +1669,6 @@ def test_local_exploitability_depth_limited() -> None:
         exclude_start=False
     )
     assert "local_exploitability" in value_batch.statistics
-    assert "local_br_values" in value_batch.statistics
     assert "local_exploitability" not in policy_batch.statistics
 
     torch.testing.assert_close(
@@ -1657,7 +1676,7 @@ def test_local_exploitability_depth_limited() -> None:
         torch.tensor(0.64, dtype=dtype),
     )
     torch.testing.assert_close(
-        value_batch.statistics["local_br_values"][0],
+        value_batch.statistics["local_best_response_values"][0],
         torch.tensor([1.0, -base_root_value], dtype=dtype),
     )
 
@@ -2128,16 +2147,26 @@ def test_calculate_reach_weights() -> None:
     evaluator.policy_probs.zero_()
     evaluator.policy_probs[1 : 1 + num_actions, :] = 1.0 / num_actions
 
-    # Calculate reach weights (root should already be set to 1.0)
-    reach_weights = torch.zeros_like(evaluator.self_reach)
-    reach_weights[0] = 1.0  # Set root reach to 1.0
+    # Calculate reach weights (root nodes should already be 1.0 from initialize_subgame)
+    reach_weights = evaluator.self_reach.clone()
+    # Verify root nodes start at 1.0
+    torch.testing.assert_close(
+        reach_weights[: evaluator.root_nodes],
+        torch.ones_like(reach_weights[: evaluator.root_nodes]),
+    )
+
     evaluator._calculate_reach_weights(reach_weights, evaluator.policy_probs)
 
-    # Root should still have reach 1.0 for both players
-    torch.testing.assert_close(reach_weights[0], torch.ones_like(reach_weights[0]))
+    # Root should still have reach 1.0 for both players (never updated by _calculate_reach_weights)
+    torch.testing.assert_close(
+        reach_weights[: evaluator.root_nodes],
+        torch.ones_like(reach_weights[: evaluator.root_nodes]),
+    )
 
     # Child nodes should have reach based on policy
-    child_nodes = torch.arange(1, 1 + num_actions, device=env.device)
+    child_nodes = torch.arange(
+        evaluator.root_nodes, evaluator.root_nodes + num_actions, device=env.device
+    )
     child_reach = reach_weights[child_nodes]
     # Reach should be non-zero for valid nodes
     assert torch.all(child_reach[evaluator.valid_mask[child_nodes]] >= 0)
@@ -2476,19 +2505,19 @@ def test_pull_back() -> None:
         top - bottom, NUM_HANDS, device=env.device, dtype=env.float_dtype
     )
 
-    # Pull back with sliced=True (data already excludes root nodes)
-    pulled = evaluator._pull_back(child_data, sliced=True)
+    # Pull back with level=0 (method now expects full tensor and slices internally)
+    full_data = torch.zeros(
+        evaluator.total_nodes, NUM_HANDS, device=env.device, dtype=env.float_dtype
+    )
+    full_data[bottom:top] = child_data
+    pulled = evaluator._pull_back(full_data, level=0)
 
     # Should have shape [num_parents, num_actions, NUM_HANDS]
     num_parents = evaluator.root_nodes
     assert pulled.shape == (num_parents, num_actions, NUM_HANDS)
 
-    # Test without sliced (data includes root nodes)
-    full_data = torch.zeros(
-        evaluator.total_nodes, NUM_HANDS, device=env.device, dtype=env.float_dtype
-    )
-    full_data[bottom:top] = child_data
-    pulled_full = evaluator._pull_back(full_data, sliced=False)
+    # Test without level (data includes root nodes, use all levels)
+    pulled_full = evaluator._pull_back(full_data, level=None)
     assert pulled_full.shape == (num_parents, num_actions, NUM_HANDS)
 
 
@@ -2525,7 +2554,7 @@ def test_fan_out() -> None:
     parent_data = torch.randn(top, 3, device=env.device, dtype=env.float_dtype)
 
     # Fan out
-    fanned = evaluator._fan_out(parent_data, sliced=False)
+    fanned = evaluator._fan_out(parent_data, level=None)
 
     # Should have shape [num_children, 3]
     num_children = evaluator.total_nodes - evaluator.root_nodes
@@ -2539,7 +2568,10 @@ def test_fan_out() -> None:
         for j in range(child_start, child_end):
             torch.testing.assert_close(fanned[j], parent_val)
 
-    # Test with sliced=True
-    sliced_data = torch.randn(1, 3, device=env.device, dtype=env.float_dtype)
-    fanned_sliced = evaluator._fan_out(sliced_data, sliced=True)
+    # Test with level=0 (method now expects full tensor and slices internally)
+    full_data_for_level = torch.zeros(
+        evaluator.total_nodes, 3, device=env.device, dtype=env.float_dtype
+    )
+    full_data_for_level[:top] = parent_data
+    fanned_sliced = evaluator._fan_out(full_data_for_level, level=0)
     assert fanned_sliced.shape == (num_actions, 3)
