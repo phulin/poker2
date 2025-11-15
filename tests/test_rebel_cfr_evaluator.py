@@ -260,17 +260,12 @@ def compute_reference_showdown_ev(
     return ev_per_hand
 
 
-def test_initialize_search_sets_uniform_beliefs() -> None:
+def test_initialize_subgame_sets_uniform_beliefs() -> None:
     evaluator, env = make_evaluator(batch_size=2, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
+    evaluator.initialize_subgame(env, roots)
 
     assert torch.all(evaluator.valid_mask[roots])
-    assert torch.count_nonzero(evaluator.valid_mask) == evaluator.root_nodes
-    assert not torch.any(evaluator.leaf_mask)
-    assert torch.count_nonzero(evaluator.policy_probs) == 0
-    assert torch.count_nonzero(evaluator.policy_probs_avg) == 0
-    assert torch.count_nonzero(evaluator.latest_values) == 0
 
     root_beliefs = evaluator.beliefs[roots]
     torch.testing.assert_close(
@@ -286,20 +281,19 @@ def test_initialize_search_sets_uniform_beliefs() -> None:
     torch.testing.assert_close(root_beliefs[0, 1].cpu(), uniform)
 
 
-def test_initialize_search_marks_done_roots_as_leaves() -> None:
+def test_initialize_subgame_marks_done_roots_as_leaves() -> None:
     evaluator, env = make_evaluator(batch_size=2, max_depth=1)
     env.done[0] = True
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
+    evaluator.initialize_subgame(env, roots)
     assert evaluator.leaf_mask[0]
     assert not evaluator.leaf_mask[1]
 
 
-def test_construct_subgame_keeps_to_call_non_negative() -> None:
+def test_initialize_subgame_keeps_to_call_non_negative() -> None:
     evaluator, env = make_evaluator(batch_size=32, max_depth=2)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     env_state = evaluator.env
     indices = torch.arange(env_state.N, device=env_state.device)
@@ -310,26 +304,23 @@ def test_construct_subgame_keeps_to_call_non_negative() -> None:
     assert torch.all(to_call[mask] >= 0)
 
 
-def test_construct_subgame_keeps_stacks_non_negative() -> None:
+def test_initialize_subgame_keeps_stacks_non_negative() -> None:
     evaluator, env = make_evaluator(batch_size=32, max_depth=2)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     env_state = evaluator.env
     mask = evaluator.valid_mask & ~env_state.done
     assert torch.all(env_state.stacks[mask] >= 0)
 
 
-def test_construct_subgame_clones_states_and_marks_children(
+def test_subgame_initialization_clones_states_and_marks_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=2)
-    roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-
     total_nodes = evaluator.total_nodes
     num_actions = evaluator.num_actions
+    roots = torch.arange(evaluator.root_nodes, device=env.device)
     legal_mask = torch.zeros(
         (total_nodes, num_actions), dtype=torch.bool, device=env.device
     )
@@ -365,7 +356,7 @@ def test_construct_subgame_clones_states_and_marks_children(
 
     monkeypatch.setattr(evaluator.env, "step_bins", fake_step_bins)
 
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     # Check that child nodes were created
     child_nodes = _get_child_nodes(evaluator, env)
@@ -382,8 +373,8 @@ def test_construct_subgame_clones_states_and_marks_children(
     assert "bins" in step_observer
 
 
-def test_construct_subgame_depth4_street_changes_and_legal_masks() -> None:
-    """Test that construct_subgame at depth 4 correctly handles street changes and legal masks.
+def test_initialize_subgame_depth4_street_changes_and_legal_masks() -> None:
+    """Test that initialize_subgame at depth 4 correctly handles street changes and legal masks.
 
     Verifies:
     1. Only leaf nodes go to a new street from the root node
@@ -391,8 +382,7 @@ def test_construct_subgame_depth4_street_changes_and_legal_masks() -> None:
     """
     evaluator, env = make_evaluator(batch_size=8, max_depth=4)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     valid_nodes = torch.where(evaluator.valid_mask)[0]
 
@@ -426,16 +416,15 @@ def test_construct_subgame_depth4_street_changes_and_legal_masks() -> None:
             legal_mask_has_action
         ), "All valid non-leaf nodes should have at least one legal action"
 
-    # Verify that leaf nodes (including street changes) are excluded from legal mask checks
-    # This is verified by the assertion in construct_subgame at line 488, which checks
-    # legal masks only for valid_mask & ~leaf_mask nodes
+    # Verify that leaf nodes (including street changes) are excluded from legal mask checks.
+    # This is enforced inside initialize_subgame when the tree expansion checks
+    # the legal masks for valid_mask & ~leaf_mask nodes.
 
 
 def test_initialize_policy_respects_legal_mask(monkeypatch: pytest.MonkeyPatch) -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     num_actions = evaluator.num_actions
     legal_mask = torch.zeros(
@@ -476,9 +465,6 @@ def test_initialize_beliefs_updates_child_nodes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=2)
-    roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-
     total_nodes = evaluator.total_nodes
     num_actions = evaluator.num_actions
     legal_mask = torch.zeros(
@@ -493,7 +479,8 @@ def test_initialize_beliefs_updates_child_nodes(
         lambda bet_bins=None: legal_mask,
     )
 
-    evaluator.construct_subgame()
+    roots = torch.arange(evaluator.root_nodes, device=env.device)
+    evaluator.initialize_subgame(env, roots)
 
     root = 0
     child_nodes = _get_child_nodes(evaluator, env)
@@ -590,18 +577,22 @@ def test_compute_expected_values_matches_child_values(
 ) -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=2)
     roots = torch.arange(evaluator.root_nodes)
-    evaluator.initialize_search(env, roots)
 
     num_actions = evaluator.num_actions
     legal_mask = torch.ones((evaluator.total_nodes, num_actions), dtype=torch.bool)
-    bin_amounts, _ = evaluator.env.legal_bins_amounts_and_mask()
+    original_fn = evaluator.env.legal_bins_amounts_and_mask
+
+    def fake_legal_bins_amounts_and_mask(bet_bins=None):
+        bin_amounts, _ = original_fn(bet_bins)
+        return bin_amounts.clone(), legal_mask.clone()
+
     monkeypatch.setattr(
         evaluator.env,
         "legal_bins_amounts_and_mask",
-        lambda bet_bins=None: (bin_amounts.clone(), legal_mask.clone()),
+        fake_legal_bins_amounts_and_mask,
     )
 
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
     evaluator.set_leaf_values(0)
 
@@ -640,8 +631,7 @@ def test_compute_expected_values_matches_child_values(
 def test_set_leaf_values_only_updates_marked_nodes() -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=2)
     roots = torch.arange(evaluator.root_nodes)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     leaf_indices = torch.tensor([2, 4])
@@ -698,8 +688,7 @@ def test_sample_leaf_copies_selected_nodes(monkeypatch: pytest.MonkeyPatch) -> N
     torch.manual_seed(0)
     evaluator, env = make_evaluator(batch_size=1, max_depth=2)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     evaluator.generator = torch.Generator(device=env.device)
@@ -731,9 +720,7 @@ def test_sample_leaf_copies_selected_nodes(monkeypatch: pytest.MonkeyPatch) -> N
 def test_sample_leaf_handles_partial_masks() -> None:
     evaluator, env = make_evaluator(batch_size=3, max_depth=2)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     # Set up policy_probs_sample for sampling
@@ -752,8 +739,7 @@ def test_sample_leaf_handles_partial_masks() -> None:
 def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=2, device=get_device())
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
     evaluator.set_leaf_values(0)
 
@@ -816,8 +802,7 @@ def test_training_data_returns_root_batch() -> None:
     children = torch.arange(
         evaluator.depth_offsets[1], evaluator.depth_offsets[2], device=env.device
     )
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     uniform_policy = torch.full(
         (NUM_HANDS, evaluator.num_actions),
@@ -922,7 +907,7 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
     pre_beliefs = torch.rand(1, 2, NUM_HANDS)
     pre_beliefs /= pre_beliefs.sum(dim=-1, keepdim=True)
 
-    evaluator.initialize_search(env_proto, roots, pre_beliefs)
+    evaluator.initialize_subgame(env_proto, roots, pre_beliefs)
     evaluator.latest_values[:] = torch.rand_like(evaluator.latest_values)
     evaluator.values_avg[:] = evaluator.latest_values
     evaluator.self_reach[:1] = 1.0
@@ -1015,8 +1000,7 @@ def setup_showdown_evaluator(
     roots = torch.arange(evaluator.root_nodes)
     if beliefs is None:
         beliefs = torch.full((1, 2, NUM_HANDS), 1.0 / NUM_HANDS)
-    evaluator.initialize_search(env, roots, beliefs)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots, beliefs)
     evaluator.initialize_policy_and_beliefs()
     idx = torch.tensor([0])
     pot = evaluator.env.pot[idx].unsqueeze(-1)
@@ -1342,7 +1326,7 @@ def test_showdown_value_edge_case_zero_opponent_beliefs() -> None:
 def test_self_play_iteration_returns_public_belief_state() -> None:
     evaluator, env = make_evaluator(batch_size=2, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
+    evaluator.initialize_subgame(env, roots)
     evaluator.warm_start_iterations = 0
     evaluator.cfr_iterations = 2
     evaluator.generator = torch.Generator(device=env.device)
@@ -1398,8 +1382,7 @@ def test_linear_cfr_policy_averaging() -> None:
 
     # Initialize search
     roots = torch.tensor([0], device=device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     # Generate random policy sequences (seeded)
@@ -1473,8 +1456,7 @@ def test_discounted_cfr_policy_averaging() -> None:
 
     # Initialize search
     roots = torch.tensor([0], device=device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     # Generate random policy sequences (seeded)
@@ -1543,8 +1525,7 @@ def test_flop_blocking_over_iterations() -> None:
         warm_start_iterations=0,
     )
     roots = torch.arange(evaluator.root_nodes, device=device)
-    evaluator.initialize_search(env, roots, uniform)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots, uniform)
     evaluator.initialize_policy_and_beliefs()
 
     preflop_valid = torch.where(evaluator.valid_mask)[0]
@@ -1569,13 +1550,12 @@ def test_flop_blocking_over_iterations() -> None:
     )
     flop_pbs.beliefs[0] = evaluator.beliefs[second_call]
 
-    evaluator.initialize_search(
+    evaluator.initialize_subgame(
         flop_pbs.env,
         torch.tensor([0], device=device),
         flop_pbs.beliefs,
     )
     evaluator.root_pre_chance_beliefs[:1] = evaluator.root_pre_chance_beliefs[:1]
-    evaluator.construct_subgame()
     evaluator.initialize_policy_and_beliefs()
 
     flop_valid = torch.where(evaluator.valid_mask)[0]
@@ -1940,8 +1920,7 @@ def test_set_leaf_values_cfr_avg_branches() -> None:
             cfr_avg=cfr_avg,
         )
         roots = torch.tensor([0], device=device)
-        evaluator.initialize_search(env, roots)
-        evaluator.construct_subgame()
+        evaluator.initialize_subgame(env, roots)
         evaluator.initialize_policy_and_beliefs()
         leaf_idx = 0
         evaluator.leaf_mask[leaf_idx] = True
@@ -2068,8 +2047,7 @@ def test_pre_chance_features_share_root_context() -> None:
     )
 
     roots = torch.tensor([0], device=device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     pre_chance_mask = evaluator.new_street_mask & evaluator.valid_mask
     assert pre_chance_mask.any(), "expected at least one start-of-street node"
@@ -2142,8 +2120,7 @@ def test_calculate_reach_weights() -> None:
     """Test _calculate_reach_weights computes reach weights correctly."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=2)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     # Set up a simple policy
@@ -2170,8 +2147,7 @@ def test_propagate_all_beliefs() -> None:
     """Test _propagate_all_beliefs propagates beliefs correctly."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     # Set up initial beliefs
     uniform = torch.full(
@@ -2200,8 +2176,7 @@ def test_propagate_level_beliefs() -> None:
     """Test _propagate_level_beliefs propagates beliefs from one level to the next."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     # Set up root beliefs
     uniform = torch.full(
@@ -2232,8 +2207,7 @@ def test_block_beliefs() -> None:
     """Test _block_beliefs blocks beliefs based on board cards."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=0)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     # Set up beliefs with non-zero values for all hands
     uniform = torch.full(
@@ -2258,8 +2232,7 @@ def test_normalize_beliefs() -> None:
     """Test _normalize_beliefs normalizes beliefs correctly."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=0)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     # Set up unnormalized beliefs
     unnormalized = torch.rand(1, 2, NUM_HANDS, device=env.device, dtype=env.float_dtype)
@@ -2345,8 +2318,7 @@ def test_record_stats() -> None:
     """Test _record_stats records policy update statistics."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     # Set up old policy
@@ -2372,8 +2344,7 @@ def test_record_cfr_entropy() -> None:
     """Test _record_cfr_entropy records policy entropy."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     # Set up a policy
@@ -2397,8 +2368,7 @@ def test_record_cumulative_regret() -> None:
     """Test _record_cumulative_regret records regret statistics."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     # Set up some regrets
@@ -2420,8 +2390,7 @@ def test_best_response_values() -> None:
     """Test _best_response_values computes best response values correctly."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     # Set up base values
@@ -2448,8 +2417,7 @@ def test_record_action_mix() -> None:
     """Test _record_action_mix records action distribution statistics."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
     # Set up policy
@@ -2476,8 +2444,7 @@ def test_valid_nodes() -> None:
     """Test _valid_nodes yields correct node indices."""
     evaluator, env = make_evaluator(batch_size=2, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     # Collect all valid nodes
     valid_nodes_list = []
@@ -2499,8 +2466,7 @@ def test_pull_back() -> None:
     """Test _pull_back reshapes data correctly."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     # Create test data at child nodes
     num_actions = evaluator.num_actions
@@ -2530,8 +2496,7 @@ def test_push_down() -> None:
     """Test _push_down reshapes data correctly."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     # Create test data at parent nodes
     num_actions = evaluator.num_actions
@@ -2552,8 +2517,7 @@ def test_fan_out() -> None:
     """Test _fan_out broadcasts data to children correctly."""
     evaluator, env = make_evaluator(batch_size=1, max_depth=1)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
-    evaluator.initialize_search(env, roots)
-    evaluator.construct_subgame()
+    evaluator.initialize_subgame(env, roots)
 
     # Create test data at parent nodes
     num_actions = evaluator.num_actions

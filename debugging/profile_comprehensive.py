@@ -108,7 +108,7 @@ def comprehensive_profiling():
 
     # Initialize search
     roots = torch.arange(evaluator.root_nodes)
-    evaluator.initialize_search(env_proto, roots)
+    evaluator.initialize_subgame(env_proto, roots)
 
     print("Profiling realistic CFR workflow...")
 
@@ -116,7 +116,7 @@ def comprehensive_profiling():
     print("\n=== Profiling initialize_search + self_play_iteration ===")
 
     # Initialize search (this will be profiled)
-    evaluator.initialize_search(env_proto, roots)
+    evaluator.initialize_subgame(env_proto, roots)
 
     # Run the realistic workflow multiple times
     for i in range(10):

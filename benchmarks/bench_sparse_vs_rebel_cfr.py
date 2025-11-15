@@ -150,7 +150,7 @@ def benchmark_rebel_cfr(
     )
 
     # Initialize search
-    evaluator.initialize_search(env, root_indices)
+    evaluator.initialize_subgame(env, root_indices)
 
     # Warmup
     evaluator.evaluate_cfr(training_mode=False)

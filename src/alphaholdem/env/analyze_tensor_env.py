@@ -572,7 +572,7 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         ), "RebelPreflopAnalyzer must initialize CFR evaluator."
 
         # Run CFR search to compute policies
-        self.cfr_evaluator.initialize_search(
+        self.cfr_evaluator.initialize_subgame(
             self.pbs.env,
             torch.tensor([0], dtype=torch.long, device=self.device),
             self.pbs.beliefs,

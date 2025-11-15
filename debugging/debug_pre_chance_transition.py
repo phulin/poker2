@@ -304,7 +304,7 @@ def debug_transition(cfg: Config, args: ScriptArgs) -> None:
 
     roots = torch.tensor([0], device=device)
     initial_beliefs = torch.full((1, 2, NUM_HANDS), 1.0 / NUM_HANDS, device=device)
-    evaluator.initialize_search(env, roots, initial_beliefs)
+    evaluator.initialize_subgame(env, roots, initial_beliefs)
 
     features_pre = evaluator.feature_encoder.encode(
         evaluator.beliefs, pre_chance_node=True

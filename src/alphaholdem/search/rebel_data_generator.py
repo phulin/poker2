@@ -64,7 +64,7 @@ class RebelDataGenerator:
             elif self.current_pbs.env.N < N:
                 self.current_pbs = self._extend_pbs(self.current_pbs, N)
 
-            self.evaluator.initialize_search(
+            self.evaluator.initialize_subgame(
                 self.current_pbs.env,
                 root_indices,
                 self.current_pbs.beliefs,

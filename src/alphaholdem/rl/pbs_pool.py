@@ -462,8 +462,8 @@ class PBSPool(OpponentPool):
 
             # Initialize evaluators with root state
             roots = torch.tensor([0], device=device)
-            evaluator_a.initialize_search(env, roots)
-            evaluator_b.initialize_search(env, roots)
+            evaluator_a.initialize_subgame(env, roots)
+            evaluator_b.initialize_subgame(env, roots)
 
             # Play until terminal using full CFR at each decision
             max_iterations = 40
@@ -491,8 +491,8 @@ class PBSPool(OpponentPool):
                 env_rewards, _, _ = env.step_bins(
                     torch.full((1,), action, device=device, dtype=torch.long)
                 )
-                evaluator_a.initialize_search(env, roots)
-                evaluator_b.initialize_search(env, roots)
+                evaluator_a.initialize_subgame(env, roots)
+                evaluator_b.initialize_subgame(env, roots)
 
             assert env.done[0].item(), "Environment should be done"
 

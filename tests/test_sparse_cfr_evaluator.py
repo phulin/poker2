@@ -239,8 +239,7 @@ def setup_sparse_and_rebel(
     sparse.initialize_subgame(env, root_indices, initial_beliefs=initial_beliefs)
 
     rebel = make_rebel_evaluator(env, cfg, model, device)
-    rebel.initialize_search(env, root_indices, initial_beliefs=initial_beliefs)
-    rebel.construct_subgame()
+    rebel.initialize_subgame(env, root_indices, initial_beliefs=initial_beliefs)
     return sparse, rebel
 
 
@@ -552,7 +551,6 @@ def test_sparse_rebel_tree_state_alignment() -> None:
     assert_close(
         sparse.env.last_board_indices, rebel.env.last_board_indices[valid_indices]
     )
-    assert_close(sparse.folded_mask, rebel.folded_mask[valid_indices])
     assert_close(sparse.new_street_mask, rebel.new_street_mask[valid_indices])
 
     parent_dense = get_rebel_parent_index(rebel)

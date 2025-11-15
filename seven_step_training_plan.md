@@ -8,7 +8,7 @@ Stakeholders want supervised training data that describes seven public-belief st
 
 ReBeL-style Counterfactual Regret Minimization (CFR) uses `RebelCFREvaluator` to expand a poker search tree where every node represents a post-chance state on a single street. A "street" is the number of public board cards revealed: preflop (0 cards), flop (3 cards), turn (4 cards), river (5 cards). A Public Belief State (PBS) records the environment (`HUNLTensorEnv`) and the belief tensor shaped `[batch, players, 1326]`, where 1326 is the number of distinct two-card combinations in a 52-card deck. The feature encoders already support a `pre_chance_node=True` flag that yields the public information just before the latest chance event.
 
-We will rely on the fact that every tree built by `RebelCFREvaluator.construct_subgame` remains on the same street as the root nodes. When we transition to the next street in `sample_leaf`, the resulting PBS becomes the root of a new evaluator, and the constructor recomputes masks for that street. That allows us to use the existing tensors to reconstruct the end-of-street state without modifying core evaluator structures.
+We will rely on the fact that every tree built during `RebelCFREvaluator.initialize_subgame` remains on the same street as the root nodes. When we transition to the next street in `sample_leaf`, the resulting PBS becomes the root of a new evaluator, and the constructor recomputes masks for that street. That allows us to use the existing tensors to reconstruct the end-of-street state without modifying core evaluator structures.
 
 ## Functional Scope
 
@@ -28,7 +28,7 @@ Keep `self.beliefs` / `self.beliefs_avg` as the post-chance ranges used for CFR,
 
 ### 2. Keep PBS Lightweight
 
-Leave `PublicBeliefState` with a single `beliefs` tensor; when PBS instances represent street-end nodes those beliefs are already pre-chance and can be fed straight back into the evaluator. Update `initialize_search`, `self_play_iteration`, `sample_leaf`, and the replay/data-generator plumbing to populate the evaluator’s `root_pre_chance_beliefs` directly instead of expanding the PBS payload.
+Leave `PublicBeliefState` with a single `beliefs` tensor; when PBS instances represent street-end nodes those beliefs are already pre-chance and can be fed straight back into the evaluator. Update `initialize_subgame`, `self_play_iteration`, `sample_leaf`, and the replay/data-generator plumbing to populate the evaluator’s `root_pre_chance_beliefs` directly instead of expanding the PBS payload.
 
 ### 3. Derive End-of-Street Value Targets
 
