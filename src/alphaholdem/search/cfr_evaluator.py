@@ -1013,10 +1013,7 @@ class CFREvaluator(ABC):
 
         if self.cfr_type == CFRType.linear:  # Alternate updates.
             regrets.masked_fill_(self.prev_actor[:, None] == t % self.num_players, 0.0)
-        elif (
-            self.cfr_type == CFRType.discounted
-            or self.cfr_type == CFRType.discounted_plus
-        ):
+        elif self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]:
             numerator = torch.where(
                 self.cumulative_regrets > 0, t**self.dcfr_alpha, t**self.dcfr_beta
             )

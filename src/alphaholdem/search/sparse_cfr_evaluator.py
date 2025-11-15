@@ -498,9 +498,9 @@ class SparseCFREvaluator(CFREvaluator):
         parent_indices = self.parent_index[start:end]
         expected = end - start
         if tensor.shape[0] == self.total_nodes:
-            slice_tensor = tensor[start:end]
+            sliced_tensor = tensor[start:end]
         elif tensor.shape[0] == expected:
-            slice_tensor = tensor
+            sliced_tensor = tensor
         else:
             raise ValueError(
                 f"Tensor length {tensor.shape[0]} does not match expected slice {expected}"
@@ -511,9 +511,9 @@ class SparseCFREvaluator(CFREvaluator):
         out.scatter_reduce_(
             dim=0,
             index=parent_indices[(...,) + (None,) * (tensor.dim() - 1)].expand(
-                -1, *slice_tensor.shape[1:]
+                -1, *sliced_tensor.shape[1:]
             ),
-            src=slice_tensor,
+            src=sliced_tensor,
             reduce="sum",
             include_self=True,
         )

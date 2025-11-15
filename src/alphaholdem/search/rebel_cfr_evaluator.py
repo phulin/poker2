@@ -575,7 +575,26 @@ class RebelCFREvaluator(CFREvaluator):
 
         For dense CFR: do pull-back then sum over actions.
         """
-        pulled = self._pull_back(tensor, level=level)
+
+        if level is None:
+            start = self.depth_offsets[1]
+            end = self.total_nodes
+        else:
+            start = self.depth_offsets[level + 1]
+            end = self.depth_offsets[level + 2]
+        expected = end - start
+
+        if tensor.shape[0] == self.total_nodes:
+            sliced_tensor = tensor[start:end]
+        elif tensor.shape[0] == expected:
+            sliced_tensor = tensor
+        else:
+            raise ValueError(
+                f"Tensor length {tensor.shape[0]} does not match expected slice {expected}"
+            )
+
+        pulled = sliced_tensor.view(-1, self.num_actions, *tensor.shape[1:])
+
         # Sum over actions (dim=1) and write to output
         if level is None:
             top = self.depth_offsets[-2]
