@@ -20,6 +20,7 @@ from alphaholdem.rl.pbs_pool import PBSPool
 from alphaholdem.rl.rebel_batch import RebelBatch
 from alphaholdem.rl.rebel_replay import RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator
+from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 from alphaholdem.utils.profiling import profile
 
@@ -145,24 +146,31 @@ class RebelCFRTrainer:
         )
         self.grad_clip = cfg.train.grad_clip
 
-        self.cfr_evaluator = RebelCFREvaluator(
-            search_batch_size=self.cfg.num_envs,
-            env_proto=self.env,
-            model=self.model,
-            bet_bins=self.bet_bins,
-            max_depth=max(1, self.cfg.search.depth),
-            cfr_iterations=max(T_WARM + 1, self.cfg.search.iterations),
-            device=self.device,
-            float_dtype=self.float_dtype,
-            generator=self.rng,
-            warm_start_iterations=self.cfg.search.warm_start_iterations,
-            cfr_type=self.cfg.search.cfr_type,
-            cfr_avg=self.cfg.search.cfr_avg,
-            dcfr_alpha=self.cfg.search.dcfr_alpha,
-            dcfr_beta=self.cfg.search.dcfr_beta,
-            dcfr_gamma=self.cfg.search.dcfr_gamma,
-            dcfr_delay=self.cfg.search.dcfr_plus_delay,
-        )
+        if cfg.search.sparse:
+            self.cfr_evaluator = SparseCFREvaluator(
+                model=self.model,
+                device=self.device,
+                cfg=cfg,
+            )
+        else:
+            self.cfr_evaluator = RebelCFREvaluator(
+                search_batch_size=self.cfg.num_envs,
+                env_proto=self.env,
+                model=self.model,
+                bet_bins=self.bet_bins,
+                max_depth=max(1, self.cfg.search.depth),
+                cfr_iterations=max(T_WARM + 1, self.cfg.search.iterations),
+                device=self.device,
+                float_dtype=self.float_dtype,
+                generator=self.rng,
+                warm_start_iterations=self.cfg.search.warm_start_iterations,
+                cfr_type=self.cfg.search.cfr_type,
+                cfr_avg=self.cfg.search.cfr_avg,
+                dcfr_alpha=self.cfg.search.dcfr_alpha,
+                dcfr_beta=self.cfg.search.dcfr_beta,
+                dcfr_gamma=self.cfg.search.dcfr_gamma,
+                dcfr_delay=self.cfg.search.dcfr_plus_delay,
+            )
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,
             evaluator=self.cfr_evaluator,

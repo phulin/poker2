@@ -61,7 +61,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.profiler_output_dir = None
 
         self.total_nodes = 0
-        self.root_nodes = 0
+        self.root_nodes = cfg.num_envs
         self.depth_offsets = [0]
         self.env: Optional[HUNLTensorEnv] = None
 

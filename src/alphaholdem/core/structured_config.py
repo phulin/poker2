@@ -227,6 +227,7 @@ class SearchConfig:
     include_average_policy: bool = True
     cfr_type: CFRType = CFRType.linear
     cfr_avg: bool = True
+    sparse: bool = False
 
 
 @dataclass
