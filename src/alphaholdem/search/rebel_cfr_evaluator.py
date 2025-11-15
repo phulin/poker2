@@ -636,7 +636,7 @@ class RebelCFREvaluator(CFREvaluator):
             self.policy_probs, self.latest_values, torch.ones_like(self.env.to_act)
         )
         values_br = torch.where(
-            self.env.to_act[:, None, None] == 0, values_br_p0, values_br_p1
+            self.prev_actor[:, None, None] == 0, values_br_p0, values_br_p1
         )
 
         assert values_br.isfinite().all()
@@ -829,7 +829,10 @@ class RebelCFREvaluator(CFREvaluator):
     def update_average_policy(self, t: int) -> None:
         """Update the average policy by mixing it with the current policy."""
 
-        if self.cfr_type == CFRType.discounted and t <= self.dcfr_delay:
+        if (
+            self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
+            and t <= self.dcfr_delay
+        ):
             self.policy_probs_avg[:] = self.policy_probs
             return
         elif t == 0:
@@ -984,6 +987,8 @@ class RebelCFREvaluator(CFREvaluator):
         return self.sample_leaves(training_mode)
 
     def cfr_iteration(self, t: int) -> None:
+        """Run one CFR iteration."""
+
         torch.where(
             (self.t_sample == t)[:, None],
             self.policy_probs,

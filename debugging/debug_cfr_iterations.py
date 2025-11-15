@@ -74,6 +74,20 @@ def action_to_string(action_idx: int, bet_bins: list[float]) -> str:
 NODE_COL_WIDTH = 20
 
 
+def _resolve_sparse_action_idx(
+    evaluator: RebelCFREvaluator | SparseCFREvaluator,
+    node_idx: int,
+    fallback: int,
+) -> int:
+    if isinstance(evaluator, SparseCFREvaluator):
+        action_tensor = evaluator.action_from_parent
+        if node_idx < action_tensor.shape[0]:
+            action_idx = int(action_tensor[node_idx].item())
+            if action_idx >= 0:
+                return action_idx
+    return fallback
+
+
 def _card_index_to_str(card_idx: int) -> str:
     ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"]
     suits = ["♠", "♥", "♦", "♣"]
@@ -374,12 +388,14 @@ def print_single_iteration_data(
     print("-" * 100)
 
     for child_idx in range(depth1_offset, depth1_end):
-        if not evaluator.valid_mask[child_idx]:
+        if hasattr(evaluator, "valid_mask") and not evaluator.valid_mask[child_idx]:
             continue
 
         # Determine which action was taken to reach this node
         # For depth 1: child_idx = depth1_offset + action
-        action_idx = child_idx - depth1_offset
+        action_idx = _resolve_sparse_action_idx(
+            evaluator, child_idx, child_idx - depth1_offset
+        )
 
         # Policy probs and regrets are stored on the child node itself
         # So we look at policy_probs[child_idx] and cumulative_regrets[child_idx]
@@ -486,6 +502,14 @@ def _print_node_line(
         "-" if node_idx == 0 else f"*P{actor}" if actor == root_actor else f"P{actor}"
     )
 
+    fallback_action = action_idx
+    if fallback_action is None:
+        offset_current = evaluator.depth_offsets[depth]
+        fallback_action = (node_idx - offset_current) % evaluator.num_actions
+    resolved_action = _resolve_sparse_action_idx(
+        evaluator, node_idx, fallback_action if fallback_action is not None else -1
+    )
+
     if selected_hand_idx is not None and show_specific_hand:
         policy_prob = float(policy_probs[selected_hand_idx].item())
         policy_avg_prob = float(policy_probs_avg[selected_hand_idx].item())
@@ -575,10 +599,7 @@ def _print_node_line(
     indent = "  " * depth
     leaf_str = "L" if evaluator.leaf_mask[node_idx].item() else " "
     # Derive action if not provided
-    if action_idx is None:
-        start = evaluator.depth_offsets[depth]
-        action_idx = (node_idx - start) % evaluator.num_actions
-    action_name = action_to_string(int(action_idx), bet_bins)
+    action_name = action_to_string(int(resolved_action), bet_bins)
     if node_idx == 0:
         action_name = "ROOT"
     node_label = f"{indent}{node_idx} {action_name}"
@@ -632,20 +653,34 @@ def print_nodes_depth_first(
         )
         # compute children if next depth exists
         if depth < max_depth:
-            offset = evaluator.depth_offsets[depth]
-            offset_next = evaluator.depth_offsets[depth + 1]
-            local_index = node_idx - offset
-            base_child = offset_next + local_index * B
-            for a in range(B):
-                child_idx = base_child + a
-                dfs_at(child_idx, depth + 1, a)
+            if isinstance(evaluator, SparseCFREvaluator):
+                child_count = int(evaluator.child_count[node_idx].item())
+                if child_count == 0:
+                    return
+                child_offset = int(evaluator.child_offsets[node_idx].item())
+                start = child_offset - child_count
+                child_range = range(start, child_offset)
+            else:
+                offset = evaluator.depth_offsets[depth]
+                offset_next = evaluator.depth_offsets[depth + 1]
+                local_index = node_idx - offset
+                base_child = offset_next + local_index * B
+                child_range = range(base_child, base_child + B)
+
+            for idx, child_idx in enumerate(child_range):
+                fallback_action = idx
+                if not isinstance(evaluator, SparseCFREvaluator):
+                    fallback_action = idx
+                action_id = _resolve_sparse_action_idx(
+                    evaluator, child_idx, fallback_action
+                )
+                dfs_at(child_idx, depth + 1, action_id)
 
     # Start from depth 1 valid nodes in DFS order
     d0_start = evaluator.depth_offsets[0]
     d0_end = evaluator.depth_offsets[1]
     for n in range(d0_start, d0_end):
-        a1 = (n - d0_start) % B
-        dfs_at(n, 0, a1)
+        dfs_at(n, 0, None)
 
 
 def debug_cfr_depth1(
