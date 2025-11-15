@@ -661,8 +661,8 @@ def print_nodes_depth_first(
                 if child_count == 0:
                     return
                 child_offset = int(evaluator.child_offsets[node_idx].item())
-                start = child_offset - child_count
-                child_range = range(start, child_offset)
+                start = child_offset
+                child_range = range(start, start + child_count)
             else:
                 offset = evaluator.depth_offsets[depth]
                 offset_next = evaluator.depth_offsets[depth + 1]

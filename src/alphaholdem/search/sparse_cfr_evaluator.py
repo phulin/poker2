@@ -208,6 +208,7 @@ class SparseCFREvaluator(CFREvaluator):
         root_mask[:num_roots] = True
         self.new_street_mask = (self.env.actions_this_round == 0) & ~root_mask
         self.leaf_mask = self.env.done | self.new_street_mask
+        self.leaf_mask[self.depth_offsets[-2] : self.depth_offsets[-1]] = True
         self.child_mask = self.legal_mask & (~self.leaf_mask)[:, None]
 
         self.child_count = torch.zeros(
@@ -219,7 +220,9 @@ class SparseCFREvaluator(CFREvaluator):
         self.child_count.scatter_add_(
             0, parents, torch.ones_like(parents, dtype=torch.long)
         )
-        self.child_offsets = bottom + torch.cumsum(self.child_count, dim=0)
+        self.child_offsets = (
+            bottom + torch.cumsum(self.child_count, dim=0) - self.child_count
+        )
 
         self.showdown_indices = torch.where(self.env.street == 4)[0]
         self.showdown_actors = self.env.to_act[self.showdown_indices]
@@ -341,10 +344,10 @@ class SparseCFREvaluator(CFREvaluator):
         done_src = self._pull_back(self.env.done)
 
         # Calculate uniform sampling probabilities.
-        legal_masks = self.legal_mask.clone()
-        legal_masks[:top] &= ~done_src
-        legal_counts = legal_masks.float().sum(dim=-1, keepdim=True)
-        uniform = torch.where(legal_masks, 1 / legal_counts, 0)
+        sampling_masks = self.legal_mask.clone()
+        sampling_masks[:top] &= ~done_src
+        legal_counts = sampling_masks.float().sum(dim=-1, keepdim=True)
+        uniform = torch.where(sampling_masks, 1 / legal_counts, 0)
 
         # Calculate policy sampling probabilities, excluding done nodes.
         policy_probs_by_src = self._pull_back(self.policy_probs_sample).clone()
@@ -353,6 +356,8 @@ class SparseCFREvaluator(CFREvaluator):
         policy_probs_by_src = torch.where(
             denom >= 1e-12, policy_probs_by_src / denom, uniform[:top, :, None]
         )
+
+        child_action_index = self.legal_mask.int().cumsum(dim=1) - self.legal_mask.int()
 
         # If a node has no legal actions after filtering done nodes, it's a leaf.
         effective_leaf_mask = self.leaf_mask | (legal_counts.squeeze(1) == 0)
@@ -399,7 +404,8 @@ class SparseCFREvaluator(CFREvaluator):
             ).squeeze(1)
 
             child_offsets = self.child_offsets[active_nodes]
-            sampled_nodes[active_mask] = child_offsets + actions
+            child_actions = child_action_index[active_nodes, actions]
+            sampled_nodes[active_mask] = child_offsets + child_actions
 
             # remove node from the active mask once it's a leaf
             active_mask = ~effective_leaf_mask[sampled_nodes]
