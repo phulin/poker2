@@ -193,13 +193,14 @@ def benchmark_sparse_cfr(
     evaluator.initialize_subgame(env, root_indices)
 
     # Warmup
-    evaluator.evaluate_cfr(num_iterations=iterations)
+    evaluator.cfr_iterations = iterations
+    evaluator.evaluate_cfr(training_mode=False)
 
     synchronize_device_if_needed(device)
 
     # Actual benchmark
     start = time.perf_counter()
-    evaluator.evaluate_cfr(num_iterations=iterations)
+    evaluator.evaluate_cfr(training_mode=False)
     synchronize_device_if_needed(device)
     end = time.perf_counter()
 

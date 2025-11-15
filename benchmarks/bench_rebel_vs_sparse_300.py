@@ -189,9 +189,10 @@ def benchmark_sparse_cfr(
 
     synchronize_device_if_needed(device)
 
-    # Run 300 iterations
+    # Run requested iterations
+    evaluator.cfr_iterations = iterations
     start = time.perf_counter()
-    evaluator.evaluate_cfr(num_iterations=iterations)
+    evaluator.evaluate_cfr(training_mode=False)
     synchronize_device_if_needed(device)
     end = time.perf_counter()
 

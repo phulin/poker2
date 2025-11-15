@@ -402,7 +402,8 @@ def test_cfr_iteration() -> None:
     evaluator.set_leaf_values(0)
 
     # Run one CFR iteration
-    evaluator.cfr_iteration(t=0, training_mode=False)
+    evaluator.t_sample = evaluator._get_sampling_schedule()
+    evaluator.cfr_iteration(t=0)
 
     # Check that cumulative regrets are updated
     assert evaluator.cumulative_regrets.shape == (
@@ -425,7 +426,16 @@ def test_evaluate_cfr_basic() -> None:
     evaluator.initialize_subgame(env, root_indices)
 
     # Run a few CFR iterations
-    evaluator.evaluate_cfr(num_iterations=3)
+    evaluator.cfr_iterations = 3
+    evaluator.warm_start_iterations = min(
+        evaluator.warm_start_iterations, max(1, evaluator.cfr_iterations - 1)
+    )
+
+    def _noop_sample_leaves(training_mode: bool) -> None:
+        return None
+
+    evaluator.sample_leaves = _noop_sample_leaves  # type: ignore[assignment]
+    evaluator.evaluate_cfr()
 
     # Check that averages are updated
     assert evaluator.policy_probs_avg.shape == (
