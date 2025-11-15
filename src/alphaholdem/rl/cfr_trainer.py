@@ -23,6 +23,8 @@ from alphaholdem.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 from alphaholdem.utils.profiling import profile
 
+STREETS = ["preflop", "flop", "turn", "river", "showdown"]
+
 
 class RebelCFRTrainer:
     """Trainer that couples DCFR search with a ReBeL-style FFN."""
@@ -204,13 +206,7 @@ class RebelCFRTrainer:
         ) -> dict[str, float]:
             if street is None:
                 street = batch.features.street
-            masks = {
-                "preflop": street == 0,
-                "flop": street == 1,
-                "turn": street == 2,
-                "river": street == 3,
-                "showdown": street == 4,
-            }
+            masks = {street_name: street == i for i, street_name in enumerate(STREETS)}
             if weights is not None:
                 result = {
                     k: (tensor[mask] * weights[mask]).sum(dim=-1)
@@ -222,7 +218,10 @@ class RebelCFRTrainer:
             return {k: v for k, v in result.items() if not math.isnan(v)}
 
         def street_count(street: torch.Tensor) -> dict[str, float]:
-            return {k: (street == k).sum().item() for k in range(4)}
+            return {
+                street_name: (street == i).sum().item()
+                for i, street_name in enumerate(STREETS)
+            }
 
         value_buffer_streets_stats = street_count(
             self.value_buffer.features.street[: len(self.value_buffer)]
