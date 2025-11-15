@@ -54,7 +54,7 @@ env:
 
 search:
   enabled: true
-  depth: 10
+  depth: 3
   sparse: true
 
   cfr_type: discounted_plus

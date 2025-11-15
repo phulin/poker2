@@ -598,11 +598,11 @@ class RebelCFREvaluator(CFREvaluator):
         # Sum over actions (dim=1) and write to output
         if level is None:
             top = self.depth_offsets[-2]
-            out[:top] = pulled.sum(dim=1)
+            out[:top] += pulled.sum(dim=1)
         else:
             offset = self.depth_offsets[level]
             offset_next = self.depth_offsets[level + 1]
-            out[offset:offset_next] = pulled.sum(dim=1)
+            out[offset:offset_next] += pulled.sum(dim=1)
 
     def _push_down(self, data: torch.Tensor, level: int | None = None) -> torch.Tensor:
         """Push down data to all child nodes.

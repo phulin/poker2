@@ -12,29 +12,25 @@ This script creates a depth-1 CFR tree and displays:
 
 Usage:
     # Preflop mode (default)
-    python debug_cfr_depth1.py --cfr-type linear
-    python debug_cfr_depth1.py --cfr-type discounted --checkpoint checkpoints-rebel/rebel_final.pt
+    python debug_cfr_iterations.py --cfr-type linear
+    python debug_cfr_iterations.py --cfr-type discounted --checkpoint checkpoints-rebel/rebel_final.pt
 
     # Different streets
-    python debug_cfr_depth1.py --street=flop
-    python debug_cfr_depth1.py --street=turn
-    python debug_cfr_depth1.py --street=river
-    python debug_cfr_depth1.py --street=river --checkpoint rebel_step_1250.pt
-    python debug_cfr_depth1.py --street=river_plus
+    python debug_cfr_iterations.py --street=flop
+    python debug_cfr_iterations.py --street=turn
+    python debug_cfr_iterations.py --street=river
+    python debug_cfr_iterations.py --street=river --checkpoint rebel_step_1250.pt
+    python debug_cfr_iterations.py --street=river_plus
 
     # Force a particular board (3 cards for flop, 4 for turn, 5 for river/river_plus)
-    python debug_cfr_depth1.py --street=flop --board=AsKhQd
-    python debug_cfr_depth1.py --street=turn --board=AsKhQd2c
-    python debug_cfr_depth1.py --street=river --board=AsKhQd2c3h
-    python debug_cfr_depth1.py --street=river_plus --board=AsKhQd2c3h
+    python debug_cfr_iterations.py --street=flop --board=AsKhQd
+    python debug_cfr_iterations.py --street=turn --board=AsKhQd2c
+    python debug_cfr_iterations.py --street=river --board=AsKhQd2c3h
+    python debug_cfr_iterations.py --street=river_plus --board=AsKhQd2c3h
 
     # Use sparse CFR evaluator instead of ReBeL CFR evaluator
-    python debug_cfr_depth1.py --sparse=true
-    python debug_cfr_depth1.py --sparse=true --street=flop --checkpoint checkpoints-rebel/rebel_final.pt
-
-    # Use old ReBeL CFR evaluator instead of new one
-    python debug_cfr_depth1.py --old-evaluator=true
-    python debug_cfr_depth1.py --old-evaluator=true --street=river --checkpoint checkpoints-rebel/rebel_final.pt
+    python debug_cfr_iterations.py --sparse=true
+    python debug_cfr_iterations.py --sparse=true --street=flop --checkpoint checkpoints-rebel/rebel_final.pt
 """
 
 import os
@@ -883,7 +879,7 @@ def debug_cfr_depth1(
 
     # Depth-first listing with indentation (only if verbose)
     if verbose:
-        max_depth_df = min(4, len(evaluator.depth_offsets) - 2)
+        max_depth_df = len(evaluator.depth_offsets) - 2
         if max_depth_df >= 1:
             # Reprint state summary before DFS
             board_idxs = [i for i in env.board_indices[0].tolist() if i >= 0]
@@ -927,7 +923,9 @@ def main(dict_config: DictConfig) -> None:
     verbose = bool(dict_config.get("verbose", False))
     random_beliefs = bool(dict_config.get("random_beliefs", False))
     board = dict_config.get("board")
-    sparse = bool(dict_config.get("sparse", False))
+    # Check if sparse was explicitly provided at top level
+    sparse_explicit = "sparse" in dict_config
+    sparse = bool(dict_config.get("sparse", False)) if sparse_explicit else None
     old_evaluator = bool(dict_config.get("old_evaluator", False))
 
     container: dict[str, any] = OmegaConf.to_container(dict_config, resolve=True)
@@ -953,6 +951,10 @@ def main(dict_config: DictConfig) -> None:
         else "mps" if torch.backends.mps.is_available() else "cpu"
     )
     cfg.num_envs = 1
+
+    # Use cfg.search.sparse if sparse wasn't explicitly provided at top level
+    if sparse is None:
+        sparse = cfg.search.sparse
 
     # Resolve checkpoint path relative to original working directory
     if isinstance(checkpoint, str) and checkpoint:
