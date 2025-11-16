@@ -174,15 +174,17 @@ def benchmark_sparse_cfr(
     model: RebelFFN,
     env: HUNLTensorEnv,
     root_indices: torch.Tensor,
-    depth: int,  # Not used - sparse builds tree naturally
+    depth: int,
     iterations: int,
     device: torch.device,
 ) -> Tuple[float, int]:
     """Benchmark SparseCFREvaluator.
 
     Note: Sparse evaluator builds tree dynamically based on legal actions,
-    not limited by depth parameter (which is only used for comparison label).
+    but is still limited by cfg.search.depth (max_depth).
     """
+    # Set depth in config to match the requested depth for fair comparison
+    cfg.search.depth = depth
     evaluator = SparseCFREvaluator(
         model=model,
         device=device,
@@ -258,7 +260,7 @@ def run_benchmark(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Benchmark SparseCFREvaluator vs RebelCFREvaluator on MPS"
+        description="Benchmark SparseCFREvaluator vs RebelCFREvaluator"
     )
     parser.add_argument(
         "--device",
