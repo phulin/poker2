@@ -252,7 +252,7 @@ class CFREvaluator(ABC):
         Note: Root nodes should already be initialized to 1.0 in initialize_subgame
         and are never updated by this method.
         """
-        for depth in range(self.max_depth):
+        for depth in range(self.tree_depth):
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
 
@@ -550,7 +550,7 @@ class CFREvaluator(ABC):
             0.0,
         )
 
-        for depth in range(self.max_depth - 1, -1, -1):
+        for depth in range(self.tree_depth - 1, -1, -1):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
 
@@ -698,7 +698,7 @@ class CFREvaluator(ABC):
         self.model.eval()
 
         # Use defensive loop bounds: len(depth_offsets) - 2 ensures we don't go out of bounds
-        max_depth = len(self.depth_offsets) - 2
+        max_depth = self.tree_depth
         if max_depth == 0:
             # No depth to process, just block and normalize beliefs
             self._block_beliefs()
@@ -839,7 +839,7 @@ class CFREvaluator(ABC):
             out=opponent_conditioned_policy[bottom:],
         )
 
-        for depth in range(len(self.depth_offsets) - 3, -1, -1):
+        for depth in range(self.tree_depth - 1, -1, -1):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
@@ -964,13 +964,12 @@ class CFREvaluator(ABC):
 
         old, new = self._get_mixing_weights(t)
 
-        # Get actor indices at destination nodes (non-root nodes)
-        # _fan_out(self.env.to_act) expands to_act from source to destination nodes
-        actor_indices = self._fan_out(self.env.to_act)[:, None, None].expand(
-            -1, -1, NUM_HANDS
-        )
-        reach_actor = self.self_reach[N:].gather(1, actor_indices).squeeze(1)
-        reach_avg_actor = self.self_reach_avg[N:].gather(1, actor_indices).squeeze(1)
+        # Get actor indices at source nodes (nodes that have children)
+        # _fan_out expects tensors aligned with source nodes (0 to depth_offsets[-2])
+        top = self.depth_offsets[-2]
+        actor_indices = self.env.to_act[:top, None, None].expand(-1, -1, NUM_HANDS)
+        reach_actor = self.self_reach[:top].gather(1, actor_indices).squeeze(1)
+        reach_avg_actor = self.self_reach_avg[:top].gather(1, actor_indices).squeeze(1)
 
         reach_avg_actor *= old
         reach_actor *= new

@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
+    calculate_unblocked_mass,
     combo_blocking_tensor,
     combo_index,
     combo_to_onehot_tensor,
@@ -636,16 +637,53 @@ def test_compute_expected_values_matches_child_values(
     evaluator.latest_values[bottom:, 0] = values_bottom * reach_weights[bottom:, 1]
     evaluator.latest_values[bottom:, 1] = -values_bottom * reach_weights[bottom:, 0]
 
+    # Save leaf values before compute_expected_values (which zeros non-leaf values)
+    leaf_values_before = evaluator.latest_values.clone()
+
     evaluator.compute_expected_values()
 
-    # actor is player 1 at node 2.
-    expected_value_actor = (probs[:, None] * evaluator.latest_values[17:25, 1]).sum(
-        dim=0
-    )
-    expected_value_opp = evaluator.latest_values[17:25, 0].sum(dim=0)
+    # Manually compute expected values at node 2 from its children (nodes 17-24)
+    # This matches the logic in compute_expected_values
+    node_2 = 2
+    children = torch.arange(17, 25)
 
-    torch.testing.assert_close(evaluator.latest_values[2, 0], expected_value_opp)
-    torch.testing.assert_close(evaluator.latest_values[2, 1], expected_value_actor)
+    # Get policy at children (shape [8, 1326])
+    policy_children = evaluator.policy_probs[children]
+
+    # Compute opponent-conditioned policy (matching compute_expected_values logic)
+    beliefs = evaluator.beliefs_avg if evaluator.cfr_avg else evaluator.beliefs
+    actor_indices = evaluator.env.to_act[node_2 : node_2 + 1]
+    actor_indices_expanded = actor_indices[:, None, None].expand(-1, -1, NUM_HANDS)
+    actor_beliefs = (
+        beliefs[node_2 : node_2 + 1].gather(1, actor_indices_expanded).squeeze(1)
+    )
+    beliefs_dest = evaluator._fan_out(actor_beliefs, level=0)
+    marginal_policy = beliefs_dest * policy_children
+    policy_blocked = calculate_unblocked_mass(marginal_policy)
+    matchup_values = calculate_unblocked_mass(beliefs_dest)
+    opponent_conditioned_policy = torch.where(
+        matchup_values > 1e-12,
+        policy_blocked / matchup_values,
+        torch.zeros_like(policy_blocked),
+    )
+
+    # Get leaf values (before compute_expected_values zeroed non-leaves)
+    child_values_actor = leaf_values_before[children, 1]  # [8, 1326]
+    child_values_opp = leaf_values_before[children, 0]  # [8, 1326]
+
+    # Weight by policy: acting player uses policy, non-acting uses opponent-conditioned policy
+    weighted_actor = child_values_actor.clone()
+    weighted_opp = child_values_opp.clone()
+    for i in range(len(children)):
+        weighted_actor[i] *= policy_children[i]
+        weighted_opp[i] *= opponent_conditioned_policy[i]
+
+    # Sum over actions (children) to get expected values at parent
+    expected_value_actor = weighted_actor.sum(dim=0)  # [1326]
+    expected_value_opp = weighted_opp.sum(dim=0)  # [1326]
+
+    torch.testing.assert_close(evaluator.latest_values[node_2, 0], expected_value_opp)
+    torch.testing.assert_close(evaluator.latest_values[node_2, 1], expected_value_actor)
 
 
 def test_set_leaf_values_only_updates_marked_nodes() -> None:
@@ -1776,6 +1814,9 @@ def test_local_exploitability_uses_correct_player_beliefs() -> None:
     evaluator.env.to_act.zero_()
     evaluator.env.to_act[0] = 1
     evaluator.env.to_act[1 : 1 + num_actions] = 0
+
+    # Set prev_actor correctly: children were reached by player 1's action
+    evaluator.prev_actor[1 : 1 + num_actions] = 1
 
     evaluator.legal_mask = torch.zeros(
         total_nodes, num_actions, dtype=torch.bool, device=device

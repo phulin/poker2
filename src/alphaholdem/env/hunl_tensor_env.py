@@ -66,7 +66,7 @@ class HUNLTensorEnv:
         debug_step_table: bool = False,
         flop_showdown: bool = False,
     ) -> None:
-        assert num_envs > 0
+        assert num_envs >= 0
         self.device = device or torch.device(
             "mps" if torch.backends.mps.is_available() else "cpu"
         )
@@ -153,8 +153,10 @@ class HUNLTensorEnv:
     def from_proto(
         cls, proto: HUNLTensorEnv, num_envs: Optional[int] = None
     ) -> HUNLTensorEnv:
+        if num_envs is None:
+            num_envs = proto.N
         return HUNLTensorEnv(
-            num_envs=num_envs or proto.N,
+            num_envs=num_envs,
             starting_stack=proto.starting_stack,
             sb=proto.sb,
             bb=proto.bb,

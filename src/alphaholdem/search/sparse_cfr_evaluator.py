@@ -61,6 +61,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.profiler_output_dir = None
 
         self.total_nodes = 0
+        self.tree_depth = 0
         self.root_nodes = cfg.num_envs
         self.depth_offsets = [0]
         self.env: Optional[HUNLTensorEnv] = None
@@ -178,6 +179,7 @@ class SparseCFREvaluator(CFREvaluator):
             depth += 1
             self.depth_offsets.append(self.depth_offsets[-1] + env_next.N)
 
+        self.tree_depth = max(0, len(self.depth_offsets) - 2)
         self.total_nodes = self.depth_offsets[-1]
         self.root_nodes = num_roots
         self.top_nodes = (
@@ -185,6 +187,7 @@ class SparseCFREvaluator(CFREvaluator):
         )
 
         # Initialize valid_mask as all ones (all nodes are valid in sparse structure)
+        # This should not be used anywhere outside of tests.
         self.valid_mask = torch.ones(
             self.total_nodes, dtype=torch.bool, device=self.device
         )
@@ -311,6 +314,8 @@ class SparseCFREvaluator(CFREvaluator):
             self.feature_encoder = RebelFeatureEncoder(
                 env=self.env, device=self.device, dtype=self.float_dtype
             )
+
+        self.stats["evaluator_street"] = self.env.street.float().mean().item()
 
     def _mask_invalid(self, tensor: torch.Tensor) -> None:
         """Mask invalid nodes in the tensor. Noop for sparse evaluator (all nodes are valid)."""
@@ -532,7 +537,7 @@ class SparseCFREvaluator(CFREvaluator):
             device=self.device,
         )
         output[: self.root_nodes] = tensor
-        for depth in range(self.max_depth):
+        for depth in range(self.tree_depth):
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
             output[offset_next:offset_next_next] = self._fan_out(output, depth)

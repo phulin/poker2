@@ -107,6 +107,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.root_nodes = search_batch_size
         self.model = model
         self.max_depth = max_depth
+        self.tree_depth = max_depth
         self.bet_bins = bet_bins
         self.cfr_iterations = cfr_iterations
         self.warm_start_iterations = max(0, warm_start_iterations)
