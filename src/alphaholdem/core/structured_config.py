@@ -185,6 +185,7 @@ class ModelConfig:
     # Better FFN parameters
     range_hidden_dim: int = 128
     ffn_dim: int = 1024
+    shared_trunk: bool = True
 
 
 @dataclass

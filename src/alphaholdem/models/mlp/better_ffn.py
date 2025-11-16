@@ -52,6 +52,7 @@ class BetterFFN(nn.Module, Model):
         num_policy_layers: int = 3,
         num_value_layers: int = 3,
         num_players: int = 2,
+        shared_trunk: bool = True,
     ) -> None:
         super().__init__()
         self.num_actions = num_actions
@@ -59,6 +60,7 @@ class BetterFFN(nn.Module, Model):
         self.ffn_dim = ffn_dim
         self.num_hidden_layers = num_hidden_layers
         self.num_players = num_players
+        self.shared_trunk = shared_trunk
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
@@ -71,9 +73,8 @@ class BetterFFN(nn.Module, Model):
         )
 
         # Build trunk
-        alpha = 1 / math.sqrt(
-            num_hidden_layers + (num_policy_layers + num_value_layers) / 2
-        )
+        # Default alpha is always based on hidden + value layers
+        alpha = 1 / math.sqrt(num_hidden_layers + num_value_layers)
         layers = [
             ResidualBlock(ffn_block(hidden_dim, ffn_dim), alpha)
             for _ in range(num_hidden_layers)
@@ -81,8 +82,11 @@ class BetterFFN(nn.Module, Model):
         self.trunk = nn.Sequential(*layers)
 
         # Heads
+        # If shared_trunk is False, use separate alpha for policy_head based on num_policy_layers
+        policy_alpha = alpha if shared_trunk else 1 / math.sqrt(num_policy_layers)
+
         layers = [
-            ResidualBlock(ffn_block(hidden_dim, ffn_dim), alpha)
+            ResidualBlock(ffn_block(hidden_dim, ffn_dim), policy_alpha)
             for _ in range(num_policy_layers - 1)
         ]
         layers.append(ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS))
@@ -128,7 +132,11 @@ class BetterFFN(nn.Module, Model):
         x = self.trunk(flat_features)
         # assert x.isfinite().all()
 
-        policy_logits = self.policy_head(x).view(-1, NUM_HANDS, self.num_actions)
+        policy_input = x if self.shared_trunk else flat_features.detach()
+
+        policy_logits = self.policy_head(policy_input).view(
+            -1, NUM_HANDS, self.num_actions
+        )
         hand_values = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
         hand_value_sums = (
             (hand_values * player_beliefs)
