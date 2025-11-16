@@ -319,8 +319,9 @@ class PreflopAnalyzer:
     def calculate_suited_vs_offsuit(self, probs: torch.Tensor) -> torch.Tensor:
         """Calculate the suited vs offsuit probability for the given action for each hand."""
         values_169 = self.convert_1326_to_169_tensor(probs)
-        suited_rows, suited_cols = torch.triu_indices(13, 13, offset=1)
-        offsuit_rows, offsuit_cols = torch.tril_indices(13, 13, offset=-1)
+        # since 13x13 is "reversed" from how we print, upper/lower are reversed too.
+        suited_rows, suited_cols = torch.tril_indices(13, 13, offset=1)
+        offsuit_rows, offsuit_cols = torch.triu_indices(13, 13, offset=-1)
         suited_probs = values_169[suited_rows, suited_cols].mean()
         offsuit_probs = values_169[offsuit_rows, offsuit_cols].mean()
         return torch.stack([suited_probs, offsuit_probs], dim=0)
