@@ -224,7 +224,7 @@ def profile_cfr_iteration(cfg: Config) -> None:
         with_flops=True,
         experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
     ) as prof:
-        # Run a few CFR iterations with profiling
+        # Run CFR iterations with profiling
         warm_start_iterations = evaluator.warm_start_iterations
         available_iterations = cfg.search.iterations - warm_start_iterations
         if available_iterations <= 0:
@@ -233,7 +233,7 @@ def profile_cfr_iteration(cfg: Config) -> None:
             )
             return
 
-        num_profile_iterations = min(5, available_iterations)
+        num_profile_iterations = available_iterations
         print(f"\nProfiling {num_profile_iterations} CFR iterations...")
 
         for t in range(
@@ -314,10 +314,10 @@ def main(dict_config: DictConfig) -> None:
     # Override some defaults for profiling
     config.use_wandb = False  # Disable wandb for profiling
 
-    # Default to fewer iterations for profiling if not specified
-    if config.search.iterations > 20:
+    # Warn if iterations is very high (profiling can be slow)
+    if config.search.iterations > 50:
         print(
-            f"Warning: search.iterations={config.search.iterations} is high for profiling. Consider using search.iterations=5-10"
+            f"Warning: search.iterations={config.search.iterations} is high for profiling. This may take a while."
         )
 
     print("Configuration:")
