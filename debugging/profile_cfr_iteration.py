@@ -225,6 +225,7 @@ def profile_cfr_iteration(cfg: Config) -> None:
         experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
     ) as prof:
         # Run a few CFR iterations with profiling
+        warm_start_iterations = evaluator.warm_start_iterations
         available_iterations = cfg.search.iterations - warm_start_iterations
         if available_iterations <= 0:
             print(
