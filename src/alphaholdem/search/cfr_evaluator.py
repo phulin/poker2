@@ -104,6 +104,7 @@ class CFREvaluator(ABC):
     policy_probs: torch.Tensor
     policy_probs_avg: torch.Tensor
     policy_probs_sample: torch.Tensor
+    uniform_policy: torch.Tensor
     cumulative_regrets: torch.Tensor
     regret_weight_sums: torch.Tensor
     latest_values: torch.Tensor
@@ -922,16 +923,7 @@ class CFREvaluator(ABC):
         denom = self._fan_out(regret_sum)
 
         # Get uniform policy fallback (1.0 / num_actions per node)
-        if hasattr(self, "uniform_policy"):
-            uniform_fallback = self.uniform_policy[bottom:]
-        else:
-            # Compute uniform policy on the fly: 1.0 / num_actions for each node
-            uniform_fallback = torch.full(
-                (self.total_nodes - bottom, NUM_HANDS),
-                1.0 / self.num_actions,
-                dtype=self.float_dtype,
-                device=self.device,
-            )
+        uniform_fallback = self.uniform_policy[bottom:]
 
         torch.where(
             denom > 1e-8,

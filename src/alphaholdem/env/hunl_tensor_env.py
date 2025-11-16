@@ -365,6 +365,9 @@ class HUNLTensorEnv:
         mask[me_allin, :] = False
         mask[me_allin, 1] = True  # only call is legal when we are all-in
 
+        # If done, no actions are legal.
+        mask &= (~self.done)[:, None]
+
         return amounts, mask
 
     def legal_bins_mask(self, bet_bins: Optional[list[float]] = None) -> torch.Tensor:

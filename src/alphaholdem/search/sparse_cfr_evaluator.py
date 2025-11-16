@@ -151,8 +151,6 @@ class SparseCFREvaluator(CFREvaluator):
             parent_start, parent_end = self.depth_offsets[-2], self.depth_offsets[-1]
             parent_env = env_levels[-1]
             legal_mask = parent_env.legal_bins_mask()
-            done_mask = parent_env.done
-            legal_mask = legal_mask & (~done_mask)[:, None]
             stop_mask = parent_env.actions_this_round == 0
             if depth > 0:
                 legal_mask &= (~stop_mask)[:, None]

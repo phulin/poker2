@@ -163,6 +163,7 @@ class RebelCFREvaluator(CFREvaluator):
         )
         self.policy_probs_avg = torch.zeros_like(self.policy_probs)
         self.policy_probs_sample = torch.zeros_like(self.policy_probs)
+        self.uniform_policy = torch.zeros_like(self.policy_probs)
         # Cumulative regret of taking this node vs the best at the parent node.
         self.cumulative_regrets = torch.zeros_like(self.policy_probs)
         # Running per-infoset sums of positive regret mass over hands
@@ -291,6 +292,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
         self.policy_probs_sample.zero_()
+        self.uniform_policy.zero_()
         self.cumulative_regrets.zero_()
         self.regret_weight_sums.zero_()
         self.allowed_hands.zero_()
@@ -301,6 +303,8 @@ class RebelCFREvaluator(CFREvaluator):
         self.values_avg.zero_()
         self.beliefs.zero_()
         self.beliefs[:N] = initial_beliefs
+        self.beliefs_avg.zero_()
+        self.beliefs_avg[:N] = initial_beliefs
         self.root_pre_chance_beliefs[:] = initial_beliefs
         self.self_reach.zero_()
         self.self_reach[:N] = 1.0
@@ -405,6 +409,14 @@ class RebelCFREvaluator(CFREvaluator):
         valid_legal_masks = self.legal_mask[self.valid_mask & ~self.leaf_mask]
         has_legal = valid_legal_masks.any(dim=-1)
         assert has_legal.all(), "Every valid node must have at least one legal action."
+
+        # Compute uniform_policy based on legal_counts (number of siblings)
+        legal_counts = self.legal_mask.float().sum(dim=-1, keepdim=True)
+        legal_counts_dest = self._fan_out(legal_counts)
+        self.uniform_policy[:N].zero_()
+        self.uniform_policy[N:] = torch.where(
+            legal_counts_dest > 0, 1.0 / legal_counts_dest, 0.0
+        )
 
         self.stats["evaluator_street"] = (
             self.env.street[self.valid_mask].float().mean().item()
