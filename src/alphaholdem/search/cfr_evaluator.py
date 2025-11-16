@@ -776,6 +776,37 @@ class CFREvaluator(ABC):
         self.regret_weight_sums += self.warm_start_iterations
         self.update_policy(self.warm_start_iterations)
 
+    def _maybe_enforce_zero_sum(
+        self, hand_values: torch.Tensor, player_beliefs: torch.Tensor
+    ) -> None:
+        """
+        Enforce zero-sum constraint on hand values by subtracting the weighted average.
+
+        Args:
+            hand_values: Tensor of shape (batch, num_players, NUM_HANDS)
+            player_beliefs: Tensor of shape (batch, num_players, NUM_HANDS)
+        """
+        if self.model.enforce_zero_sum:
+            hand_value_sums = (
+                (hand_values * player_beliefs)
+                .sum(dim=2, keepdim=True)
+                .mean(dim=1, keepdim=True)
+            )
+            hand_values -= hand_value_sums
+
+    def update_average_values(self, t: int) -> None:
+        """
+        Update average values with weighted average and enforce zero-sum constraint.
+
+        Args:
+            t: Current iteration number
+        """
+        old, new = self._get_mixing_weights(t)
+        self.values_avg *= old
+        self.values_avg += new * self.latest_values
+        self.values_avg /= old + new
+        self._maybe_enforce_zero_sum(self.values_avg, self.beliefs_avg)
+
     @torch.no_grad()
     def set_leaf_values(self, t: int) -> None:
         """Set leaf values from model or terminal states."""
@@ -795,10 +826,12 @@ class CFREvaluator(ABC):
         else:
             # Mix with previous values (CFR-AVG style)
             old, new = self._get_mixing_weights(t)
-            self.latest_values[model_indices] = (
-                (old + new) * model_output.hand_values - old * self.last_model_values
-            ) / new
-            # TODO: fix zero-sum drift
+            unmixed = (
+                old + new
+            ) * model_output.hand_values - old * self.last_model_values
+            unmixed /= new
+            self._maybe_enforce_zero_sum(unmixed, beliefs[model_indices])
+            self.latest_values[model_indices] = unmixed
         self.last_model_values = model_output.hand_values
 
         # Set showdown values
@@ -1035,10 +1068,7 @@ class CFREvaluator(ABC):
         self.compute_expected_values()
 
         # Update average values
-        old, new = self._get_mixing_weights(t)
-        self.values_avg *= old
-        self.values_avg += new * self.latest_values
-        self.values_avg /= old + new
+        self.update_average_values(t)
 
     @profile
     def training_data(

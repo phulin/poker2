@@ -80,6 +80,7 @@ class RebelCFRTrainer:
                 num_value_layers=cfg.model.num_value_layers,
                 num_players=self.num_players,
                 shared_trunk=cfg.model.shared_trunk,
+                enforce_zero_sum=cfg.model.enforce_zero_sum,
             )
             num_context_features = context_length(self.num_players)
         else:

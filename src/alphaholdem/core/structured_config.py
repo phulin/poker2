@@ -186,6 +186,7 @@ class ModelConfig:
     range_hidden_dim: int = 128
     ffn_dim: int = 1024
     shared_trunk: bool = True
+    enforce_zero_sum: bool = True
 
 
 @dataclass

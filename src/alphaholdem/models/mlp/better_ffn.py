@@ -53,6 +53,7 @@ class BetterFFN(nn.Module, Model):
         num_value_layers: int = 3,
         num_players: int = 2,
         shared_trunk: bool = True,
+        enforce_zero_sum: bool = True,
     ) -> None:
         super().__init__()
         self.num_actions = num_actions
@@ -61,6 +62,7 @@ class BetterFFN(nn.Module, Model):
         self.num_hidden_layers = num_hidden_layers
         self.num_players = num_players
         self.shared_trunk = shared_trunk
+        self.enforce_zero_sum = enforce_zero_sum
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
@@ -138,12 +140,13 @@ class BetterFFN(nn.Module, Model):
             -1, NUM_HANDS, self.num_actions
         )
         hand_values = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
-        hand_value_sums = (
-            (hand_values * player_beliefs)
-            .sum(dim=2, keepdim=True)
-            .mean(dim=1, keepdim=True)
-        )
-        hand_values -= hand_value_sums
+        if self.enforce_zero_sum:
+            hand_value_sums = (
+                (hand_values * player_beliefs)
+                .sum(dim=2, keepdim=True)
+                .mean(dim=1, keepdim=True)
+            )
+            hand_values -= hand_value_sums
         value = hand_values.mean(dim=-1)
 
         return ModelOutput(
