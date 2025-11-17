@@ -343,9 +343,9 @@ class CFREvaluator(ABC):
             return torch.zeros(0, NUM_HANDS, device=device, dtype=dtype)
 
         # --- Beliefs & boards ---
-        beliefs = (self.beliefs_avg if self.cfr_avg else self.beliefs)[
-            indices
-        ]  # (M,2,1326)
+        # Showdown value always uses the normal beliefs, not the average beliefs.
+        # We store it in latest_values which always corresponds to non-average beliefs.
+        beliefs = self.beliefs[indices]  # (M,2,1326)
         b_opp = beliefs[:, villain, :].to(dtype)  # (M,1326)
         board = self.env.board_indices[indices].int()  # (M,5)
 
@@ -525,6 +525,7 @@ class CFREvaluator(ABC):
     def _best_response_values(
         self,
         policy: torch.Tensor,
+        beliefs: torch.Tensor,
         base_values: torch.Tensor,
         deviating_player: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -536,7 +537,6 @@ class CFREvaluator(ABC):
 
         values_br = torch.where(self.leaf_mask[:, None, None], base_values, 0.0)
 
-        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
         min_value = torch.finfo(base_values.dtype).min
 
         policy_src_all = self._pull_back(policy)
@@ -650,11 +650,12 @@ class CFREvaluator(ABC):
             )
 
         policy = self.policy_probs_avg if self.cfr_avg else self.policy_probs
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
         leaf_values = self.values_avg if self.cfr_avg else self.latest_values
 
         base_values = torch.where(self.leaf_mask[:, None, None], leaf_values, 0.0)
         self.compute_expected_values(policy=policy, values=base_values)
-        br_values = self._best_response_values(policy, leaf_values)
+        br_values = self._best_response_values(policy, beliefs, leaf_values)
 
         root_indices = torch.arange(N, device=self.device)
         root_actor = self.env.to_act[:N]
@@ -663,7 +664,6 @@ class CFREvaluator(ABC):
         br_root = br_values[root_indices, root_actor]  # (N, NUM_HANDS)
 
         # Aggregate over hands using beliefs
-        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
         root_beliefs_actor = beliefs[root_indices, root_actor]  # (N, NUM_HANDS)
 
         # Weight improvements by beliefs
@@ -759,10 +759,16 @@ class CFREvaluator(ABC):
 
         # [M, ]
         values_br_p0 = self._best_response_values(
-            self.policy_probs, self.latest_values, torch.zeros_like(self.env.to_act)
+            self.policy_probs,
+            self.beliefs,
+            self.latest_values,
+            torch.zeros_like(self.env.to_act),
         )
         values_br_p1 = self._best_response_values(
-            self.policy_probs, self.latest_values, torch.ones_like(self.env.to_act)
+            self.policy_probs,
+            self.beliefs,
+            self.latest_values,
+            torch.ones_like(self.env.to_act),
         )
         values_br = torch.where(
             self.prev_actor[:, None, None] == 0, values_br_p0, values_br_p1
@@ -779,7 +785,10 @@ class CFREvaluator(ABC):
         self.update_policy(self.warm_start_iterations)
 
     def _maybe_enforce_zero_sum(
-        self, hand_values: torch.Tensor, player_beliefs: torch.Tensor
+        self,
+        hand_values: torch.Tensor,
+        player_beliefs: torch.Tensor,
+        ignore_mask: torch.Tensor | None = None,
     ) -> None:
         """
         Enforce zero-sum constraint on hand values by subtracting the weighted average.
@@ -794,6 +803,8 @@ class CFREvaluator(ABC):
                 .sum(dim=2, keepdim=True)
                 .mean(dim=1, keepdim=True)
             )
+            if ignore_mask is not None:
+                hand_value_sums.masked_fill_(ignore_mask[:, None, None], 0.0)
             hand_values -= hand_value_sums
 
     def update_average_values(self, t: int) -> None:
@@ -807,7 +818,9 @@ class CFREvaluator(ABC):
         self.values_avg *= old
         self.values_avg += new * self.latest_values
         self.values_avg /= old + new
-        self._maybe_enforce_zero_sum(self.values_avg, self.beliefs_avg)
+        self._maybe_enforce_zero_sum(
+            self.values_avg, self.beliefs_avg, ignore_mask=self.env.done
+        )
 
     @torch.no_grad()
     def set_leaf_values(self, t: int) -> None:
@@ -823,6 +836,12 @@ class CFREvaluator(ABC):
         )
         model_output = self.model(features[model_indices])
 
+        # Set showdown values
+        showdown_values_p0 = self._showdown_value(0, self.showdown_indices)
+        showdown_values_p1 = self._showdown_value(1, self.showdown_indices)
+        self.latest_values[self.showdown_indices, 0] = showdown_values_p0
+        self.latest_values[self.showdown_indices, 1] = showdown_values_p1
+
         if not self.cfr_avg or t <= 1 or self.last_model_values is None:
             self.latest_values[model_indices] = model_output.hand_values
         else:
@@ -832,15 +851,11 @@ class CFREvaluator(ABC):
                 old + new
             ) * model_output.hand_values - old * self.last_model_values
             unmixed /= new
-            self._maybe_enforce_zero_sum(unmixed, beliefs[model_indices])
             self.latest_values[model_indices] = unmixed
+            self._maybe_enforce_zero_sum(
+                self.latest_values, self.beliefs, ignore_mask=self.env.done
+            )
         self.last_model_values = model_output.hand_values
-
-        # Set showdown values
-        showdown_values_p0 = self._showdown_value(0, self.showdown_indices)
-        showdown_values_p1 = self._showdown_value(1, self.showdown_indices)
-        self.latest_values[self.showdown_indices, 0] = showdown_values_p0
-        self.latest_values[self.showdown_indices, 1] = showdown_values_p1
 
     def compute_expected_values(
         self,

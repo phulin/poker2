@@ -513,10 +513,8 @@ def test_child_mask() -> None:
     # Child mask should match legal mask for non-leaf nodes
     for i in range(min(evaluator.total_nodes, 100)):  # Check first 100 nodes
         if not evaluator.leaf_mask[i]:
-            # Legal mask should be available
-            if evaluator.legal_mask is not None:
-                # Child mask should be subset of legal mask
-                assert (evaluator.child_mask[i] <= evaluator.legal_mask[i]).all()
+            # Child mask should be subset of legal mask
+            assert (evaluator.child_mask[i] <= evaluator.legal_mask[i]).all()
 
 
 def test_tree_structure_consistency() -> None:
