@@ -75,6 +75,7 @@ class MockModel:
         self.dtype = dtype
         self.custom_logits_fn = custom_logits_fn
         self.custom_hand_values_fn = custom_hand_values_fn
+        self.enforce_zero_sum = False
 
         # Set up default logits
         if logits is not None:
@@ -420,7 +421,7 @@ def test_initialize_subgame_depth4_street_changes_and_legal_masks() -> None:
     # (street changes are already leaves, so we just check non-leaf)
     non_leaf_nodes = valid_nodes[~evaluator.leaf_mask[valid_nodes]]
     if non_leaf_nodes.numel() > 0:
-        legal_mask_has_action = evaluator.legal_mask[non_leaf_nodes].any(dim=-1)
+        legal_mask_has_action = evaluator.child_mask[non_leaf_nodes].any(dim=-1)
         assert torch.all(
             legal_mask_has_action
         ), "All valid non-leaf nodes should have at least one legal action"
@@ -454,6 +455,7 @@ def test_initialize_policy_respects_legal_mask(monkeypatch: pytest.MonkeyPatch) 
 
     # Initialize legal_masks before calling initialize_policy_and_beliefs
     evaluator.legal_mask = evaluator.env.legal_bins_mask()
+    evaluator.child_mask = evaluator.env.legal_bins_mask()
 
     logits = torch.arange(float(num_actions), dtype=env.float_dtype)
     evaluator.model = MockModel(logits=logits)  # type: ignore[assignment]
@@ -536,7 +538,7 @@ def test_initialize_beliefs_updates_child_nodes(
     )
 
     # Initialize legal_masks before calling initialize_policy_and_beliefs
-    evaluator.legal_mask = evaluator.env.legal_bins_mask()
+    evaluator.child_mask = evaluator.env.legal_bins_mask()
 
     evaluator.initialize_policy_and_beliefs()
 
@@ -757,7 +759,7 @@ def test_sample_leaf_copies_selected_nodes(monkeypatch: pytest.MonkeyPatch) -> N
     evaluator.policy_probs_sample[:] = evaluator.policy_probs
 
     # Initialize legal_mask in evaluator
-    evaluator.legal_mask = evaluator.env.legal_bins_mask()
+    evaluator.child_mask = evaluator.env.legal_bins_mask()
 
     pbs = evaluator.sample_leaves(training_mode=False)
 
@@ -970,8 +972,8 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
     evaluator.values_avg[:] = evaluator.latest_values
     evaluator.self_reach[:1] = 1.0
     evaluator.self_reach_avg[:1] = 1.0
-    if evaluator.legal_mask is None:
-        evaluator.legal_mask = torch.ones(
+    if evaluator.child_mask is None:
+        evaluator.child_mask = torch.ones(
             evaluator.total_nodes,
             evaluator.num_actions,
             dtype=torch.bool,
@@ -1650,14 +1652,15 @@ def test_local_exploitability_depth_limited() -> None:
     evaluator.env.to_act.zero_()
     evaluator.env.to_act[0] = 0
     evaluator.env.to_act[1 : 1 + num_actions] = 1
+    evaluator.prev_actor[1 : 1 + num_actions] = 0
 
-    evaluator.legal_mask = torch.zeros(
+    evaluator.child_mask = torch.zeros(
         total_nodes, num_actions, dtype=torch.bool, device=device
     )
     good_action = 1
     bad_action = 2
-    evaluator.legal_mask[0, good_action] = True
-    evaluator.legal_mask[0, bad_action] = True
+    evaluator.child_mask[0, good_action] = True
+    evaluator.child_mask[0, bad_action] = True
 
     policy = torch.zeros(total_nodes, num_hands, device=device, dtype=dtype)
     policy[1 + good_action].fill_(0.2)
@@ -1737,14 +1740,15 @@ def test_local_exploitability_not_scaled_by_opponent_reach() -> None:
     evaluator.env.to_act.zero_()
     evaluator.env.to_act[0] = 0
     evaluator.env.to_act[1 : 1 + num_actions] = 1
+    evaluator.prev_actor[1 : 1 + num_actions] = 0
 
-    evaluator.legal_mask = torch.zeros(
+    evaluator.child_mask = torch.zeros(
         total_nodes, num_actions, dtype=torch.bool, device=device
     )
     good_action = 1
     bad_action = 2
-    evaluator.legal_mask[0, good_action] = True
-    evaluator.legal_mask[0, bad_action] = True
+    evaluator.child_mask[0, good_action] = True
+    evaluator.child_mask[0, bad_action] = True
 
     policy = torch.zeros(total_nodes, num_hands, device=device, dtype=dtype)
     policy[1 + good_action].fill_(0.2)
@@ -1814,17 +1818,15 @@ def test_local_exploitability_uses_correct_player_beliefs() -> None:
     evaluator.env.to_act.zero_()
     evaluator.env.to_act[0] = 1
     evaluator.env.to_act[1 : 1 + num_actions] = 0
-
-    # Set prev_actor correctly: children were reached by player 1's action
     evaluator.prev_actor[1 : 1 + num_actions] = 1
 
-    evaluator.legal_mask = torch.zeros(
+    evaluator.child_mask = torch.zeros(
         total_nodes, num_actions, dtype=torch.bool, device=device
     )
     good_action = 1
     bad_action = 2
-    evaluator.legal_mask[0, good_action] = True
-    evaluator.legal_mask[0, bad_action] = True
+    evaluator.child_mask[0, good_action] = True
+    evaluator.child_mask[0, bad_action] = True
 
     policy = torch.zeros(total_nodes, num_hands, device=device, dtype=dtype)
     policy[1 + good_action].fill_(0.2)
@@ -1900,8 +1902,9 @@ def test_local_exploitability_uses_policy_evaluation_for_baseline() -> None:
     evaluator.env.to_act.zero_()
     evaluator.env.to_act[0] = 0
     evaluator.env.to_act[1 : 1 + num_actions] = 1
+    evaluator.prev_actor[1 : 1 + num_actions] = 0
 
-    evaluator.legal_mask = torch.ones(
+    evaluator.child_mask = torch.ones(
         evaluator.total_nodes, num_actions, dtype=torch.bool, device=device
     )
 
@@ -1954,6 +1957,7 @@ def test_set_leaf_values_cfr_avg_branches() -> None:
 
     def make_model(value: float) -> MockModel:
         return MockModel(
+            num_actions=len(bet_bins) + 3,
             hand_values=torch.full(
                 (1, 2, NUM_HANDS), value, device=device, dtype=float_dtype
             ),
@@ -1964,7 +1968,14 @@ def test_set_leaf_values_cfr_avg_branches() -> None:
     def setup_evaluator(
         model: MockModel, cfr_type: CFRType, cfr_avg: bool
     ) -> RebelCFREvaluator:
-        env = HUNLTensorEnv(num_envs=1, starting_stack=1000, sb=5, bb=10, device=device)
+        env = HUNLTensorEnv(
+            num_envs=1,
+            starting_stack=1000,
+            sb=5,
+            bb=10,
+            default_bet_bins=bet_bins,
+            device=device,
+        )
         env.reset()
         evaluator = RebelCFREvaluator(
             search_batch_size=1,

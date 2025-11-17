@@ -53,6 +53,7 @@ class MockModel:
         self.num_actions = num_actions
         self.device = device
         self.dtype = dtype
+        self.enforce_zero_sum = True
 
     def __call__(self, features: MLPFeatures) -> ModelOutput:
         batch = len(features)
@@ -579,7 +580,7 @@ def test_sparse_rebel_tree_state_alignment() -> None:
     rebel_parent_index = parent_sparse[valid_indices].to(sparse.parent_index.device)
     assert_close(sparse.parent_index, rebel_parent_index)
 
-    rebel_child_mask = (rebel.legal_mask & (~rebel.leaf_mask)[:, None])[valid_indices]
+    rebel_child_mask = (rebel.child_mask & (~rebel.leaf_mask)[:, None])[valid_indices]
     non_leaf_sparse = ~sparse.leaf_mask
     non_leaf_rebel = ~rebel.leaf_mask[valid_indices]
     compare_mask = non_leaf_sparse & non_leaf_rebel

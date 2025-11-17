@@ -77,7 +77,7 @@ class RebelCFREvaluator(CFREvaluator):
     values_avg: torch.Tensor
     beliefs: torch.Tensor
     beliefs_avg: torch.Tensor
-    legal_mask: torch.Tensor | None
+    child_mask: torch.Tensor
     feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder
     hand_rank_data: HandRankData | None
     stats: dict[str, float]
@@ -146,6 +146,11 @@ class RebelCFREvaluator(CFREvaluator):
         # Different from env.done, which is set when the node is terminal.
         # Should be a subset of valid_mask.
         self.leaf_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
+        self.legal_mask = torch.zeros(
+            M, self.num_actions, dtype=torch.bool, device=self.device
+        )
+        self.child_mask = torch.zeros_like(self.legal_mask)
+        self.child_count = torch.zeros(M, dtype=torch.long, device=self.device)
         self.showdown_indices = torch.empty(0, dtype=torch.long, device=self.device)
         self.showdown_actors = torch.empty(0, dtype=torch.long, device=self.device)
 
@@ -200,8 +205,6 @@ class RebelCFREvaluator(CFREvaluator):
             device=self.device,
             dtype=self.float_dtype,
         )
-
-        self.legal_mask = None
 
         # Invalid for [0, N) because we don't know the previous actor.
         self.prev_actor = torch.zeros(M, dtype=torch.long, device=self.device)
@@ -284,6 +287,9 @@ class RebelCFREvaluator(CFREvaluator):
         self.valid_mask[:N] = True
         self.leaf_mask.zero_()
         self.leaf_mask[:N] = self.env.done[:N]
+        self.legal_mask.zero_()
+        self.child_mask.zero_()
+        self.child_count.zero_()
         self.showdown_indices = torch.empty(0, dtype=torch.long, device=self.device)
         self.showdown_actors = torch.empty(0, dtype=torch.long, device=self.device)
         self.folded_mask.zero_()
@@ -310,7 +316,6 @@ class RebelCFREvaluator(CFREvaluator):
         self.self_reach[:N] = 1.0
         self.self_reach_avg.zero_()
         self.self_reach_avg[:N] = 1.0
-        self.legal_mask = None
         self.hand_rank_data = None
         self.stats.clear()
         self._construct_subgame()
@@ -387,9 +392,21 @@ class RebelCFREvaluator(CFREvaluator):
         )
         self.values_avg[:] = self.latest_values
 
-        leaf_start = self.depth_offsets[self.max_depth]
-        leaf_end = self.depth_offsets[self.max_depth + 1]
-        self.leaf_mask[leaf_start:leaf_end] = self.valid_mask[leaf_start:leaf_end]
+        top = self.depth_offsets[-2]
+        self.leaf_mask[top:] = self.valid_mask[top:]
+        self.legal_mask = self.env.legal_bins_mask()
+        self.child_mask[:top] = self._pull_back(self.valid_mask)
+        self.child_count = self.child_mask.sum(dim=-1)
+        valid_child_masks = self.child_mask[self.valid_mask & ~self.leaf_mask]
+        has_legal = valid_child_masks.any(dim=-1)
+        assert has_legal.all(), "Every valid node must have at least one legal action."
+        legal_valid_nonleaf = (
+            self.legal_mask & self.valid_mask[:, None] & ~self.leaf_mask[:, None]
+        )
+        assert (self.child_mask == legal_valid_nonleaf).all()
+        assert (self.child_count[self.leaf_mask | ~self.valid_mask] == 0).all()
+        assert (self.child_count[~self.leaf_mask & self.valid_mask] > 0).all()
+
         self.showdown_indices = torch.where(self.env.street == 4)[0]
         self.showdown_actors = self.env.to_act[self.showdown_indices]
 
@@ -405,17 +422,12 @@ class RebelCFREvaluator(CFREvaluator):
         self.allowed_hands_prob.masked_fill_((~self.valid_mask)[:, None], 0.0)
         self.prev_actor[N:] = self._fan_out(self.env.to_act)
 
-        self.legal_mask = self.env.legal_bins_mask()
-        valid_legal_masks = self.legal_mask[self.valid_mask & ~self.leaf_mask]
-        has_legal = valid_legal_masks.any(dim=-1)
-        assert has_legal.all(), "Every valid node must have at least one legal action."
-
         # Compute uniform_policy based on legal_counts (number of siblings)
-        legal_counts = self.legal_mask.float().sum(dim=-1, keepdim=True)
-        legal_counts_dest = self._fan_out(legal_counts)
+        child_count = self.child_mask.float().sum(dim=-1, keepdim=True)
+        child_count_dest = self._fan_out(child_count)
         self.uniform_policy[:N].zero_()
         self.uniform_policy[N:] = torch.where(
-            legal_counts_dest > 0, 1.0 / legal_counts_dest, 0.0
+            child_count_dest > 0, 1.0 / child_count_dest, 0.0
         )
 
         self.stats["evaluator_street"] = (
@@ -458,24 +470,27 @@ class RebelCFREvaluator(CFREvaluator):
         sample_epsilon = self.sample_epsilon if training_mode else 0.0
 
         # Don't sample nodes that are done. No point in continuing search from there.
+        # This means we need a separate valid child mask for sampling.
         done_src = self._pull_back(self.env.done)
+        sampling_masks = self.child_mask.clone()
+        sampling_masks[:top] &= ~done_src
+        sampling_counts = sampling_masks.float().sum(dim=-1, keepdim=True)
 
-        # Calculate uniform sampling probabilities.
-        legal_masks = self.legal_mask.clone()
-        legal_masks[:top] &= ~done_src
-        legal_counts = legal_masks.float().sum(dim=-1, keepdim=True)
-        uniform = torch.where(legal_masks, 1 / legal_counts, 0)
+        # Calculate uniform sampling probabilities as backup.
+        uniform = torch.where(sampling_masks, 1 / sampling_counts, 0)
 
         # Calculate policy sampling probabilities, excluding done nodes.
         policy_probs_by_src = self._pull_back(self.policy_probs_sample).clone()
         policy_probs_by_src.masked_fill_(done_src[:, :, None], 0.0)
         denom = policy_probs_by_src.sum(dim=1, keepdim=True)
         policy_probs_by_src = torch.where(
-            denom >= 1e-12, policy_probs_by_src / denom, uniform[:top, :, None]
+            denom >= 1e-12,
+            policy_probs_by_src / denom,
+            uniform[:top, :, None],
         )
 
         # If a node has no legal actions after filtering done nodes, it's a leaf.
-        effective_leaf_mask = self.leaf_mask | (legal_counts.squeeze(1) == 0)
+        effective_leaf_mask = self.leaf_mask | (sampling_counts.squeeze(1) == 0)
 
         # select a hand for every root node.
         actor_beliefs = (
@@ -528,6 +543,7 @@ class RebelCFREvaluator(CFREvaluator):
             active_mask = ~effective_leaf_mask[sampled_nodes]
             depth += 1
 
+        assert effective_leaf_mask[sampled_nodes].all()
         assert (~self.env.done[sampled_nodes]).all()
 
         # Don't sample root nodes.

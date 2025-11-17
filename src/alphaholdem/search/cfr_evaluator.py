@@ -81,7 +81,7 @@ class CFREvaluator(ABC):
     total_nodes: int
     beliefs: torch.Tensor
     beliefs_avg: torch.Tensor
-    legal_mask: torch.Tensor | None
+    legal_mask: torch.Tensor
     # Common fields shared by both evaluators
     float_dtype: torch.dtype
     num_players: int
@@ -98,6 +98,8 @@ class CFREvaluator(ABC):
     generator: torch.Generator | None
     valid_mask: torch.Tensor
     leaf_mask: torch.Tensor
+    child_mask: torch.Tensor
+    child_count: torch.Tensor
     new_street_mask: torch.Tensor
     allowed_hands: torch.Tensor
     allowed_hands_prob: torch.Tensor
@@ -558,7 +560,7 @@ class CFREvaluator(ABC):
             indices = torch.arange(offset_next - offset, device=self.device)
             actor = self.env.to_act[offset:offset_next]
             deviator = deviating_player[offset:offset_next]
-            illegal = ~self.legal_mask[offset:offset_next]
+            invalid_children = ~self.child_mask[offset:offset_next]
 
             values_src = self._pull_back(values_br, level=depth)  # [K, B, 2, 1326]
             policy_src = policy_src_all[offset:offset_next]
@@ -571,7 +573,7 @@ class CFREvaluator(ABC):
             opp_values_src = values_src.gather(2, opp_indices).squeeze(2)
 
             actor_values_for_best = actor_values_src.masked_fill(
-                illegal[:, :, None], min_value
+                invalid_children[:, :, None], min_value
             )
             best_action = actor_values_for_best.argmax(dim=1)  # [K, 1326]
             # [K, 1326]

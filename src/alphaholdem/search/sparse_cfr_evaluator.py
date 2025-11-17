@@ -209,18 +209,14 @@ class SparseCFREvaluator(CFREvaluator):
         root_mask[:num_roots] = True
         self.new_street_mask = (self.env.actions_this_round == 0) & ~root_mask
         self.leaf_mask = self.env.done | self.new_street_mask
-        self.leaf_mask[self.depth_offsets[-2] : self.depth_offsets[-1]] = True
+        self.leaf_mask[self.depth_offsets[-2] :] = True
         self.child_mask = self.legal_mask & (~self.leaf_mask)[:, None]
-
-        self.child_count = torch.zeros(
-            self.total_nodes, dtype=torch.long, device=self.device
-        )
+        self.child_count = self.child_mask.sum(dim=-1)
+        assert self.total_nodes == self.root_nodes + self.child_count.sum()
+        assert (self.child_count[self.leaf_mask] == 0).all()
+        assert (self.child_count[~self.leaf_mask] > 0).all()
 
         bottom = self.depth_offsets[1]
-        parents = self.parent_index[bottom:]
-        self.child_count.scatter_add_(
-            0, parents, torch.ones_like(parents, dtype=torch.long)
-        )
         self.child_offsets = (
             bottom + torch.cumsum(self.child_count, dim=0) - self.child_count
         )
@@ -344,26 +340,30 @@ class SparseCFREvaluator(CFREvaluator):
         sample_epsilon = self.sample_epsilon if training_mode else 0.0
 
         # Don't sample nodes that are done. No point in continuing search from there.
+        # This means we need a separate valid child mask for sampling.
         done_src = self._pull_back(self.env.done)
-
-        # Calculate uniform sampling probabilities.
-        sampling_masks = self.legal_mask.clone()
+        sampling_masks = self.child_mask.clone()
         sampling_masks[:top] &= ~done_src
-        legal_counts = sampling_masks.float().sum(dim=-1, keepdim=True)
-        uniform = torch.where(sampling_masks, 1 / legal_counts, 0)
+        sampling_counts = sampling_masks.float().sum(dim=-1, keepdim=True)
+
+        # Calculate uniform sampling probabilities as backup.
+        uniform = torch.where(sampling_masks, 1 / sampling_counts, 0)
 
         # Calculate policy sampling probabilities, excluding done nodes.
         policy_probs_by_src = self._pull_back(self.policy_probs_sample).clone()
         policy_probs_by_src.masked_fill_(done_src[:, :, None], 0.0)
         denom = policy_probs_by_src.sum(dim=1, keepdim=True)
         policy_probs_by_src = torch.where(
-            denom >= 1e-12, policy_probs_by_src / denom, uniform[:top, :, None]
+            denom >= 1e-12,
+            policy_probs_by_src / denom,
+            uniform[:top, :, None],
         )
 
-        child_action_index = self.legal_mask.int().cumsum(dim=1) - self.legal_mask.int()
+        # For deriving action index, we still need to use the base child mask.
+        child_action_index = self.child_mask.int().cumsum(dim=1) - self.child_mask.int()
 
         # If a node has no legal actions after filtering done nodes, it's a leaf.
-        effective_leaf_mask = self.leaf_mask | (legal_counts.squeeze(1) == 0)
+        effective_leaf_mask = self.leaf_mask | (sampling_counts.squeeze(1) == 0)
 
         # select a hand for every root node.
         actor_beliefs = (
@@ -414,6 +414,7 @@ class SparseCFREvaluator(CFREvaluator):
             active_mask = ~effective_leaf_mask[sampled_nodes]
             depth += 1
 
+        assert effective_leaf_mask[sampled_nodes].all()
         assert (~self.env.done[sampled_nodes]).all()
 
         # Don't sample root nodes.
