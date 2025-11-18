@@ -237,7 +237,6 @@ class RebelCFRTrainer:
             self.value_buffer.features.street[: len(self.value_buffer)]
         )
 
-        exploitability = value_batch.statistics["local_exploitability"]
         metrics = {
             "loss": total_loss,
             "policy_loss": policy_loss,
@@ -292,11 +291,6 @@ class RebelCFRTrainer:
                 else 0.0
             ),
             "grad_norm_clipped": grad_norm_clipped,
-            "local_exploitability": exploitability.mean().item(),
-            "local_exploitability_street": by_street(
-                exploitability,
-                weights=torch.ones_like(exploitability),
-            ),
             "aggression_stats": {
                 f"chunk_{i}": v
                 for i, v in enumerate(

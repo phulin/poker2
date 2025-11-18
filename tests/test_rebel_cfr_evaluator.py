@@ -2465,6 +2465,8 @@ def test_record_cumulative_regret() -> None:
     assert "mean_positive_regret" in evaluator.stats
     assert "mean_regret_bound" in evaluator.stats
     assert evaluator.stats["mean_positive_regret"] >= 0
+    # Exploitability should be recorded as a generation-time statistic
+    assert "local_exploitability" in evaluator.stats
 
 
 def test_best_response_values() -> None:

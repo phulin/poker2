@@ -26,6 +26,8 @@ from alphaholdem.rl.rebel_batch import RebelBatch
 from alphaholdem.utils.model_utils import compute_masked_logits
 from alphaholdem.utils.profiling import profile
 
+STREETS = ["preflop", "flop", "turn", "river"]
+
 
 @dataclass
 class ExploitabilityStats:
@@ -87,6 +89,7 @@ class CFREvaluator(ABC):
     num_players: int
     num_actions: int
     max_depth: int
+    tree_depth: int
     cfr_iterations: int
     warm_start_iterations: int
     cfr_avg: bool
@@ -652,6 +655,7 @@ class CFREvaluator(ABC):
         policy = self.policy_probs_avg if self.cfr_avg else self.policy_probs
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
         leaf_values = self.values_avg if self.cfr_avg else self.latest_values
+        leaf_values = leaf_values.clamp(-1.0, 1.0)
 
         base_values = torch.where(self.leaf_mask[:, None, None], leaf_values, 0.0)
         self.compute_expected_values(policy=policy, values=base_values)
@@ -701,8 +705,7 @@ class CFREvaluator(ABC):
         self.model.eval()
 
         # Use defensive loop bounds: len(depth_offsets) - 2 ensures we don't go out of bounds
-        max_depth = self.tree_depth
-        if max_depth == 0:
+        if self.tree_depth == 0:
             # No depth to process, just block and normalize beliefs
             self._block_beliefs()
             self._normalize_beliefs()
@@ -719,7 +722,7 @@ class CFREvaluator(ABC):
             top, self.num_actions, NUM_HANDS, device=self.device, dtype=self.float_dtype
         )
 
-        for depth in range(max_depth):
+        for depth in range(self.tree_depth):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
@@ -1217,6 +1220,8 @@ class CFREvaluator(ABC):
 
         self.initialize_policy_and_beliefs()
 
+        self._record_initial_exploitability()
+
         if self.warm_start_iterations > 0:
             self.warm_start()
 
@@ -1318,6 +1323,23 @@ class CFREvaluator(ABC):
         entropy = torch.where(probs > 1e-12, -(probs * probs.log()), 0.0)
         self.stats["cfr_entropy"] = entropy.sum(dim=1).mean().item()
 
+    def _record_initial_exploitability(self) -> None:
+        """Record the initial exploitability."""
+        N = self.root_nodes
+        root_streets = self.env.street[:N]
+        exploit_stats = self._compute_exploitability()
+        self.stats["local_exploitability_init"] = (
+            exploit_stats.local_exploitability.mean().item()
+        )
+        self.stats["local_exploitability_init_street"] = {
+            street_name: (
+                exploit_stats.local_exploitability[root_streets == i].mean().item()
+                if (root_streets == i).any()
+                else 0.0
+            )
+            for i, street_name in enumerate(STREETS)
+        }
+
     def _record_cumulative_regret(self) -> None:
         self.stats["mean_positive_regret"] = (
             self.cumulative_regrets.clamp(min=0).mean().item()
@@ -1335,6 +1357,27 @@ class CFREvaluator(ABC):
         # take mean over parallelized envs.
         regret_quotient_mean = regret_quotient_sum.sum() / self.valid_mask[:N].sum()
         self.stats["mean_regret_bound"] = regret_quotient_mean.item()
+
+        # Compute and record exploitability as a generation-time statistic
+        exploit_stats = self._compute_exploitability()
+        self.stats["local_exploitability"] = (
+            exploit_stats.local_exploitability.mean().item()
+        )
+
+        # Record exploitability by street
+        root_streets = self.env.street[:N]  # (N,)
+        self.stats["local_exploitability_street"] = {
+            street_name: exploit_stats.local_exploitability[root_streets == i]
+            .mean()
+            .item()
+            for i, street_name in enumerate(STREETS)
+        }
+        self.stats["local_exploitability_max"] = (
+            exploit_stats.local_exploitability.max().item()
+        )
+        self.stats["local_exploitability_min"] = (
+            exploit_stats.local_exploitability.min().item()
+        )
 
     def _record_action_mix(self) -> None:
         """Record the action mix of the policy."""
