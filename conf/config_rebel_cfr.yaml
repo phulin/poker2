@@ -40,13 +40,14 @@ model:
   hidden_dim: 1024
   range_hidden_dim: 256
   ffn_dim: 1024
+
+  shared_trunk: false
   num_hidden_layers: 3
-  num_policy_layers: 3
   num_value_layers: 3
+  num_policy_layers: 4
+  
   detach_value_head: false
   compile: true
-
-  shared_trunk: true
   enforce_zero_sum: true
 
 env:
