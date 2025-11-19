@@ -813,21 +813,6 @@ class CFREvaluator(ABC):
                 hand_value_sums.masked_fill_(ignore_mask[:, None, None], 0.0)
             hand_values -= hand_value_sums
 
-    def update_average_values(self, t: int) -> None:
-        """
-        Update average values with weighted average and enforce zero-sum constraint.
-
-        Args:
-            t: Current iteration number
-        """
-        old, new = self._get_mixing_weights(t)
-        self.values_avg *= old
-        self.values_avg += new * self.latest_values
-        self.values_avg /= old + new
-        self._maybe_enforce_zero_sum(
-            self.values_avg, self.beliefs_avg, ignore_mask=self.env.done
-        )
-
     @torch.no_grad()
     def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
         """Set leaf values from model or terminal states."""
@@ -1048,6 +1033,32 @@ class CFREvaluator(ABC):
         # Root nodes don't have policies (they're decision nodes, not action nodes)
         self.policy_probs_avg[:N] = 0.0
 
+    def update_average_values(self, t: int) -> None:
+        """
+        Update average values with weighted average and enforce zero-sum constraint.
+
+        Args:
+            t: Current iteration number
+        """
+
+        old, new = self._get_mixing_weights(t)
+        self.values_avg *= old
+        self.values_avg += new * self.latest_values
+        self.values_avg /= old + new
+        self._maybe_enforce_zero_sum(
+            self.values_avg, self.beliefs_avg, ignore_mask=self.env.done
+        )
+
+    def update_average_values_final(self) -> None:
+        """
+        Update average values with final policy values.
+        """
+        self.set_leaf_values(0, beliefs=self.beliefs_avg)
+        self.compute_expected_values(
+            self.policy_probs_avg, self.beliefs_avg, self.latest_values
+        )
+        self.values_avg[:] = self.latest_values
+
     @profile
     def cfr_iteration(self, t: int) -> None:
         """Run one CFR iteration."""
@@ -1095,7 +1106,8 @@ class CFREvaluator(ABC):
         self.compute_expected_values()
 
         # Update average values
-        self.update_average_values(t)
+        if not self.use_final_policy_values:
+            self.update_average_values(t)
 
     @profile
     def training_data(
@@ -1108,15 +1120,7 @@ class CFREvaluator(ABC):
         policy_targets = self._pull_back(self.policy_probs_avg)
         policy_targets = policy_targets[:top].permute(0, 2, 1)
 
-        if self.use_final_policy_values:
-            # Set leaf values to those resulting from beliefs_avg.
-            self.set_leaf_values(0, beliefs=self.beliefs_avg)
-            self.compute_expected_values(
-                self.policy_probs_avg, self.beliefs_avg, self.latest_values
-            )
-            value_targets = self.latest_values[:N].clamp(-1.0, 1.0)
-        else:
-            value_targets = self.values_avg[:N].clamp(-1.0, 1.0)
+        value_targets = self.values_avg[:N].clamp(-1.0, 1.0)
 
         high = value_targets.abs().max(dim=-1).values > 10
         if high.any():
@@ -1245,6 +1249,9 @@ class CFREvaluator(ABC):
         for t in range(self.warm_start_iterations, self.cfr_iterations):
             self.profiler_step()  # Profile start of CFR iteration
             self.cfr_iteration(t)
+
+        if self.use_final_policy_values:
+            self.update_average_values_final()
 
         # Record statistics
         self._record_action_mix()
