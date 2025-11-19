@@ -552,7 +552,7 @@ class CFREvaluator(ABC):
         policy_blocked = calculate_unblocked_mass(marginal_policy)
         matchup_mass = calculate_unblocked_mass(actor_beliefs)
         opponent_conditioned_policy = torch.where(
-            matchup_mass[:, None, :] > 1e-12,
+            matchup_mass[:, None, :] > 1e-6,
             policy_blocked / matchup_mass[:, None, :],
             0.0,
         )

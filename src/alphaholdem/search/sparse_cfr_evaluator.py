@@ -222,6 +222,7 @@ class SparseCFREvaluator(CFREvaluator):
         assert self.total_nodes == self.root_nodes + self.child_count.sum()
         assert (self.child_count[self.leaf_mask] == 0).all()
         assert (self.child_count[~self.leaf_mask] > 0).all()
+        assert (~self.leaf_mask[: self.root_nodes]).all()
 
         bottom = self.depth_offsets[1]
         self.child_offsets = (
