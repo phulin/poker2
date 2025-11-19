@@ -607,7 +607,7 @@ class CFREvaluator(ABC):
                 :, None, :
             ]  # [M, 1, 1326]
             P_dev = torch.where(
-                dev_match > 1e-12,
+                dev_match > 1e-6,
                 mass_blocked / dev_match,  # P_dev(a | s, h_-i)
                 0.0,
             )  # [M, B, 1326]
@@ -652,10 +652,9 @@ class CFREvaluator(ABC):
                 local_best_response_values=empty2,
             )
 
-        policy = self.policy_probs_avg if self.cfr_avg else self.policy_probs
-        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
-        leaf_values = self.values_avg if self.cfr_avg else self.latest_values
-        leaf_values = leaf_values.clamp(-1.0, 1.0)
+        policy = self.policy_probs_avg
+        beliefs = self.beliefs_avg
+        leaf_values = self.values_avg.clamp(-1.0, 1.0)
 
         base_values = torch.where(self.leaf_mask[:, None, None], leaf_values, 0.0)
         self.compute_expected_values(policy=policy, values=base_values)
@@ -760,6 +759,8 @@ class CFREvaluator(ABC):
         self.set_leaf_values(0)
         self.compute_expected_values(self.policy_probs, self.latest_values)
 
+        self._record_initial_exploitability()
+
         # [M, ]
         values_br_p0 = self._best_response_values(
             self.policy_probs,
@@ -773,6 +774,7 @@ class CFREvaluator(ABC):
             self.latest_values,
             torch.ones_like(self.env.to_act),
         )
+        # NB: Invalid on root nodes, but we don't use them for regret/policy calculation.
         values_br = torch.where(
             self.prev_actor[:, None, None] == 0, values_br_p0, values_br_p1
         )
@@ -1076,7 +1078,8 @@ class CFREvaluator(ABC):
         self.cumulative_regrets += regrets
 
         # CFR+ trick: clamp regrets to non-negative
-        self.cumulative_regrets.clamp_(min=0)
+        if self.cfr_type == CFRType.discounted_plus:
+            self.cumulative_regrets.clamp_(min=0)
 
         # Update policy
         old_policy_probs = self.policy_probs.clone()
@@ -1220,8 +1223,6 @@ class CFREvaluator(ABC):
 
         self.initialize_policy_and_beliefs()
 
-        self._record_initial_exploitability()
-
         if self.warm_start_iterations > 0:
             self.warm_start()
 
@@ -1334,10 +1335,9 @@ class CFREvaluator(ABC):
         self.stats["local_exploitability_init_street"] = {
             street_name: (
                 exploit_stats.local_exploitability[root_streets == i].mean().item()
-                if (root_streets == i).any()
-                else 0.0
             )
             for i, street_name in enumerate(STREETS)
+            if (root_streets == i).any()
         }
 
     def _record_cumulative_regret(self) -> None:
@@ -1371,6 +1371,7 @@ class CFREvaluator(ABC):
             .mean()
             .item()
             for i, street_name in enumerate(STREETS)
+            if (root_streets == i).any()
         }
         self.stats["local_exploitability_max"] = (
             exploit_stats.local_exploitability.max().item()

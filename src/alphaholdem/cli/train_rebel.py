@@ -241,7 +241,7 @@ def train_rebel(cfg: Config) -> None:
                     _cleanup_old_checkpoints(cfg.checkpoint_dir, ckpt_path)
 
                 print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
-                print_preflop_range_grid(trainer, step + 1, rebel=True)
+                print_preflop_range_grid(trainer, step, rebel=True)
 
             if (step + 1) % cfg.eval_interval == 0:
                 eval_results = trainer.evaluate_against_pool(min_games=200)

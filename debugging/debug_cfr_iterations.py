@@ -52,9 +52,6 @@ from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
-from alphaholdem.search.rebel_cfr_evaluator_old import (
-    RebelCFREvaluator as RebelCFREvaluatorOld,
-)
 from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
@@ -78,7 +75,7 @@ NODE_COL_WIDTH = 20
 
 
 def _resolve_sparse_action_idx(
-    evaluator: RebelCFREvaluator | RebelCFREvaluatorOld | SparseCFREvaluator,
+    evaluator: RebelCFREvaluator | SparseCFREvaluator,
     node_idx: int,
     fallback: int,
 ) -> int:
@@ -194,7 +191,7 @@ def load_model_from_checkpoint(
     # Load checkpoint using trainer's method
     loaded_step = trainer.load_checkpoint(checkpoint_path)
 
-    print(f"Model loaded successfully (step: {loaded_step})")
+    print(f"Model loaded successfully (step: {loaded_step + 1})")
 
     # Extract and return the model
     model = trainer.model
@@ -368,7 +365,7 @@ def _force_board_cards(
 
 
 def print_single_iteration_data(
-    evaluator: RebelCFREvaluator | RebelCFREvaluatorOld | SparseCFREvaluator,
+    evaluator: RebelCFREvaluator | SparseCFREvaluator,
     iteration: int,
     bet_bins: list[float],
     selected_hand_idx: Optional[int] = None,
@@ -488,7 +485,7 @@ def print_single_iteration_data(
 
 
 def _print_node_line(
-    evaluator: RebelCFREvaluator | RebelCFREvaluatorOld | SparseCFREvaluator,
+    evaluator: RebelCFREvaluator | SparseCFREvaluator,
     node_idx: int,
     depth: int,
     selected_hand_idx: Optional[int],
@@ -621,7 +618,7 @@ def _print_node_line(
 
 
 def print_nodes_depth_first(
-    evaluator: RebelCFREvaluator | RebelCFREvaluatorOld | SparseCFREvaluator,
+    evaluator: RebelCFREvaluator | SparseCFREvaluator,
     max_depth: int,
     selected_hand_idx: Optional[int],
     bet_bins: list[float],
@@ -686,7 +683,7 @@ def print_nodes_depth_first(
         dfs_at(n, 0, None)
 
 
-def debug_cfr_depth1(
+def debug_cfr_iterations(
     cfg: Config,
     checkpoint_path: Optional[str] = None,
     street: Optional[str] = None,
@@ -697,18 +694,11 @@ def debug_cfr_depth1(
     random_beliefs: bool = False,
     forced_board: Optional[list[int]] = None,
     sparse: bool = False,
-    old_evaluator: bool = False,
 ) -> None:
     """Main debugging function."""
-    if sparse and old_evaluator:
-        raise ValueError(
-            "Cannot use both --sparse and --old-evaluator options together"
-        )
 
     if sparse:
         evaluator_type = "Sparse CFR"
-    elif old_evaluator:
-        evaluator_type = "ReBeL CFR (Old)"
     else:
         evaluator_type = "ReBeL CFR"
     print(f"=== {evaluator_type} Depth-1 Debugger ===")
@@ -784,21 +774,6 @@ def debug_cfr_depth1(
             device=device,
             cfg=cfg,
         )
-    elif old_evaluator:
-        evaluator = RebelCFREvaluatorOld(
-            search_batch_size=1,
-            env_proto=env,
-            model=model,
-            bet_bins=cfg.env.bet_bins,
-            max_depth=cfg.search.depth,
-            cfr_iterations=cfg.search.iterations,
-            device=device,
-            float_dtype=torch.float32,
-            warm_start_iterations=cfg.search.warm_start_iterations,
-            cfr_type=cfr_type,
-            cfr_avg=cfg.search.cfr_avg,
-            dcfr_delay=cfg.search.dcfr_plus_delay,
-        )
     else:
         evaluator = RebelCFREvaluator(
             search_batch_size=1,
@@ -829,12 +804,8 @@ def debug_cfr_depth1(
             beliefs_p = torch.distributions.Dirichlet(torch.ones(NUM_HANDS)).sample()
             initial_beliefs[0, p, :] = beliefs_p.to(device=device, dtype=torch.float32)
 
-    if sparse:
-        evaluator.initialize_subgame(env, roots, initial_beliefs=initial_beliefs)
-        evaluator.initialize_policy_and_beliefs()
-    else:
-        evaluator.initialize_subgame(env, roots, initial_beliefs=initial_beliefs)
-        evaluator.initialize_policy_and_beliefs()
+    evaluator.initialize_subgame(env, roots, initial_beliefs=initial_beliefs)
+    evaluator.initialize_policy_and_beliefs()
 
     # Run warm start
     print("\nRunning warm start iterations...")
@@ -906,7 +877,6 @@ class TopLevel:
     random_beliefs: bool = False
     board: Optional[str] = None
     sparse: bool = False
-    old_evaluator: bool = False
 
 
 cs = ConfigStore.instance()
@@ -926,7 +896,6 @@ def main(dict_config: DictConfig) -> None:
     # Check if sparse was explicitly provided at top level
     sparse_explicit = "sparse" in dict_config
     sparse = bool(dict_config.get("sparse", False)) if sparse_explicit else None
-    old_evaluator = bool(dict_config.get("old_evaluator", False))
 
     container: dict[str, any] = OmegaConf.to_container(dict_config, resolve=True)
     # Remove our script-specific keys before constructing core Config
@@ -939,7 +908,6 @@ def main(dict_config: DictConfig) -> None:
         "random_beliefs",
         "board",
         "sparse",
-        "old_evaluator",
     ]:
         if k in container:
             container.pop(k)
@@ -976,7 +944,7 @@ def main(dict_config: DictConfig) -> None:
                 f"River_plus requires 5 board cards, got {len(forced_board)}"
             )
 
-    debug_cfr_depth1(
+    debug_cfr_iterations(
         cfg=cfg,
         checkpoint_path=checkpoint,
         street=street,
@@ -987,7 +955,6 @@ def main(dict_config: DictConfig) -> None:
         random_beliefs=random_beliefs,
         forced_board=forced_board,
         sparse=sparse,
-        old_evaluator=old_evaluator,
     )
 
 
