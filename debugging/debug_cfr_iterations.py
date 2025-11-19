@@ -831,6 +831,7 @@ def debug_cfr_iterations(
             )
 
             # Compute and display exploitability after updating averages
+            evaluator.update_average_values_final()
             exploit_stats = evaluator._compute_exploitability()
             if exploit_stats.local_exploitability.numel() > 0:
                 total_expl = exploit_stats.local_exploitability.mean().item()

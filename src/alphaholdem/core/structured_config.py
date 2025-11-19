@@ -113,11 +113,10 @@ class TrainingConfig:
     beta_decrease_factor: float = 0.5
 
     # Transformer-specific training parameters
-    auxiliary_loss_coef: float = (
-        0.0  # Coefficient for auxiliary losses (e.g., hand range prediction)
-    )
+    # Coefficient for auxiliary losses (e.g., hand range prediction)
+    auxiliary_loss_coef: float = 0.0
     warmup_steps: int = 0  # Learning rate warmup steps
-    weight_decay: float = 0.0  # Weight decay for regularization
+    weight_decay: float = 0.01  # Weight decay for regularization
 
     use_kv_cache: bool = False
 
