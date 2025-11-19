@@ -230,6 +230,7 @@ class SearchConfig:
     cfr_type: CFRType = CFRType.linear
     cfr_avg: bool = True
     sparse: bool = False
+    value_targets_from_final_policy: bool = False
 
 
 @dataclass

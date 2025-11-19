@@ -101,6 +101,7 @@ class RebelCFREvaluator(CFREvaluator):
         dcfr_gamma: float = 2.0,
         dcfr_delay: int = 0,
         sample_epsilon: float = 0.25,
+        value_targets_from_final_policy: bool = False,
     ):
         assert warm_start_iterations < cfr_iterations
 
@@ -121,6 +122,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.device = device
         self.float_dtype = float_dtype
         self.generator = generator
+        self.use_final_policy_values = value_targets_from_final_policy
 
         self.num_players = 2
         self.num_actions = len(bet_bins) + 3

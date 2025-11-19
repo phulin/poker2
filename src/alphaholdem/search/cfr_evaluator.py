@@ -98,6 +98,7 @@ class CFREvaluator(ABC):
     dcfr_gamma: float
     dcfr_delay: int
     sample_epsilon: float
+    use_final_policy_values: bool
     generator: torch.Generator | None
     valid_mask: torch.Tensor
     leaf_mask: torch.Tensor
@@ -657,7 +658,7 @@ class CFREvaluator(ABC):
         leaf_values = self.values_avg.clamp(-1.0, 1.0)
 
         base_values = torch.where(self.leaf_mask[:, None, None], leaf_values, 0.0)
-        self.compute_expected_values(policy=policy, values=base_values)
+        self.compute_expected_values(policy=policy, beliefs=beliefs, values=base_values)
         br_values = self._best_response_values(policy, beliefs, leaf_values)
 
         root_indices = torch.arange(N, device=self.device)
@@ -828,12 +829,13 @@ class CFREvaluator(ABC):
         )
 
     @torch.no_grad()
-    def set_leaf_values(self, t: int) -> None:
+    def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
         """Set leaf values from model or terminal states."""
 
         # Set model values for non-terminal leaves
         model_mask = self.leaf_mask & ~self.env.done
-        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+        if beliefs is None:
+            beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         model_indices = torch.where(model_mask)[0]
         features = self.feature_encoder.encode(
@@ -865,14 +867,16 @@ class CFREvaluator(ABC):
     def compute_expected_values(
         self,
         policy: torch.Tensor | None = None,
+        beliefs: torch.Tensor | None = None,
         values: torch.Tensor | None = None,
     ) -> None:
         """Back up values from leaves to root under the provided policy."""
         if policy is None:
             policy = self.policy_probs
+        if beliefs is None:
+            beliefs = self.beliefs
         if values is None:
             values = self.latest_values
-        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         values.masked_fill_((~self.leaf_mask)[:, None, None], 0.0)
 
@@ -1104,13 +1108,19 @@ class CFREvaluator(ABC):
         policy_targets = self._pull_back(self.policy_probs_avg)
         policy_targets = policy_targets[:top].permute(0, 2, 1)
 
-        value_targets = self.values_avg[:N].clamp(-1.0, 1.0)
-        if value_targets.numel() > 0:
-            high = value_targets.abs().max(dim=-1).values > 10
-            if high.any():
-                print(
-                    f"WARNING: Value targets are too large ({high.sum().item()} hands)"
-                )
+        if self.use_final_policy_values:
+            # Set leaf values to those resulting from beliefs_avg.
+            self.set_leaf_values(0, beliefs=self.beliefs_avg)
+            self.compute_expected_values(
+                self.policy_probs_avg, self.beliefs_avg, self.latest_values
+            )
+            value_targets = self.latest_values[:N].clamp(-1.0, 1.0)
+        else:
+            value_targets = self.values_avg[:N].clamp(-1.0, 1.0)
+
+        high = value_targets.abs().max(dim=-1).values > 10
+        if high.any():
+            print(f"WARNING: Value targets are too large ({high.sum().item()} hands)")
 
         features = self.feature_encoder.encode(self.beliefs_avg, pre_chance_node=False)[
             :top

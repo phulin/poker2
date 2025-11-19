@@ -60,6 +60,7 @@ search:
   enabled: true
   depth: 5
   sparse: true
+  value_targets_from_final_policy: true
 
   cfr_type: discounted_plus
   cfr_avg: true

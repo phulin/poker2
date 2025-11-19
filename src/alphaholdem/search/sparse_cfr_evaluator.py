@@ -18,7 +18,11 @@ from alphaholdem.utils.profiling import profile
 
 class SparseCFREvaluator(CFREvaluator):
     def __init__(
-        self, model: RebelFFN | BetterFFN, device: torch.device, cfg: Config
+        self,
+        model: RebelFFN | BetterFFN,
+        device: torch.device,
+        cfg: Config,
+        generator: torch.Generator | None = None,
     ) -> None:
         self.model = model
         self.device = device
@@ -42,10 +46,13 @@ class SparseCFREvaluator(CFREvaluator):
         self.dcfr_alpha = search_cfg.dcfr_alpha
         self.dcfr_beta = search_cfg.dcfr_beta
         self.dcfr_gamma = search_cfg.dcfr_gamma
-        self.dcfr_delay = getattr(search_cfg, "dcfr_plus_delay", 0)
+        self.dcfr_delay = search_cfg.dcfr_plus_delay
         self.sample_epsilon = getattr(train_cfg, "cfr_action_epsilon", 0.0)
+        self.use_final_policy_values = search_cfg.value_targets_from_final_policy
 
-        self.generator = torch.Generator(device=self.device)
+        self.generator = generator or torch.Generator(device=self.device).manual_seed(
+            cfg.seed
+        )
         self.combo_onehot_float = combo_to_onehot_tensor(device=self.device).float()
         self.chance_helper = ChanceNodeHelper(
             device=self.device,

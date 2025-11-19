@@ -34,7 +34,6 @@ Usage:
 """
 
 import os
-import random
 from dataclasses import dataclass
 from typing import Optional
 
@@ -687,17 +686,15 @@ def debug_cfr_iterations(
     cfg: Config,
     checkpoint_path: Optional[str] = None,
     street: Optional[str] = None,
-    iterations: Optional[int] = None,
     selected_hand_idx: Optional[int] = None,
     selected_hole_str: Optional[str] = None,
     verbose: bool = False,
     random_beliefs: bool = False,
     forced_board: Optional[list[int]] = None,
-    sparse: bool = False,
 ) -> None:
     """Main debugging function."""
 
-    if sparse:
+    if cfg.search.sparse:
         evaluator_type = "Sparse CFR"
     else:
         evaluator_type = "ReBeL CFR"
@@ -713,14 +710,8 @@ def debug_cfr_iterations(
 
     # Create or use provided configuration
     cfr_type = cfg.search.cfr_type
-    if cfg.seed is None:
-        cfg.seed = random.randint(0, 1000000)
-    if iterations is not None:
-        # Ensure warm_start < iterations
-        cfg.search.iterations = iterations
-        if cfg.search.warm_start_iterations >= cfg.search.iterations:
-            cfg.search.warm_start_iterations = max(0, cfg.search.iterations - 1)
     device = torch.device(cfg.device)
+    generator = torch.Generator(device=device).manual_seed(cfg.seed)
 
     print(f"Using device: {device}")
     print(f"CFR Type: {str(cfr_type)}")
@@ -744,6 +735,7 @@ def debug_cfr_iterations(
         device=device,
         float_dtype=torch.float32,
         flop_showdown=cfg.env.flop_showdown,
+        rng=generator,
     )
 
     env.reset()
@@ -768,17 +760,19 @@ def debug_cfr_iterations(
         print("\nStarting Preflop CFR Tree Construction...")
 
     # Create evaluator
-    if sparse:
+    if cfg.search.sparse:
         evaluator = SparseCFREvaluator(
             model=model,
             device=device,
             cfg=cfg,
+            generator=generator,
         )
     else:
         evaluator = RebelCFREvaluator(
             search_batch_size=1,
             env_proto=env,
             model=model,
+            generator=generator,
             bet_bins=cfg.env.bet_bins,
             max_depth=cfg.search.depth,
             cfr_iterations=cfg.search.iterations,
@@ -876,7 +870,6 @@ class TopLevel:
     verbose: bool = False
     random_beliefs: bool = False
     board: Optional[str] = None
-    sparse: bool = False
 
 
 cs = ConfigStore.instance()
@@ -888,26 +881,20 @@ def main(dict_config: DictConfig) -> None:
     # Extract top-level script params and convert the rest into Config
     checkpoint = dict_config.get("checkpoint")
     street = dict_config.get("street")
-    iterations = dict_config.get("iterations")
     hole = dict_config.get("hole")
     verbose = bool(dict_config.get("verbose", False))
     random_beliefs = bool(dict_config.get("random_beliefs", False))
     board = dict_config.get("board")
-    # Check if sparse was explicitly provided at top level
-    sparse_explicit = "sparse" in dict_config
-    sparse = bool(dict_config.get("sparse", False)) if sparse_explicit else None
 
     container: dict[str, any] = OmegaConf.to_container(dict_config, resolve=True)
     # Remove our script-specific keys before constructing core Config
     for k in [
         "checkpoint",
         "street",
-        "iterations",
         "hole",
         "verbose",
         "random_beliefs",
         "board",
-        "sparse",
     ]:
         if k in container:
             container.pop(k)
@@ -919,10 +906,6 @@ def main(dict_config: DictConfig) -> None:
         else "mps" if torch.backends.mps.is_available() else "cpu"
     )
     cfg.num_envs = 1
-
-    # Use cfg.search.sparse if sparse wasn't explicitly provided at top level
-    if sparse is None:
-        sparse = cfg.search.sparse
 
     # Resolve checkpoint path relative to original working directory
     if isinstance(checkpoint, str) and checkpoint:
@@ -948,13 +931,11 @@ def main(dict_config: DictConfig) -> None:
         cfg=cfg,
         checkpoint_path=checkpoint,
         street=street,
-        iterations=iterations,
         selected_hand_idx=selected_hand_idx,
         selected_hole_str=hole,
         verbose=verbose,
         random_beliefs=random_beliefs,
         forced_board=forced_board,
-        sparse=sparse,
     )
 
 

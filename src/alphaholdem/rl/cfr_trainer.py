@@ -153,6 +153,7 @@ class RebelCFRTrainer:
                 model=self.model,
                 device=self.device,
                 cfg=cfg,
+                generator=self.rng,
             )
         else:
             self.cfr_evaluator = RebelCFREvaluator(
@@ -172,6 +173,7 @@ class RebelCFRTrainer:
                 dcfr_beta=self.cfg.search.dcfr_beta,
                 dcfr_gamma=self.cfg.search.dcfr_gamma,
                 dcfr_delay=self.cfg.search.dcfr_plus_delay,
+                value_targets_from_final_policy=self.cfg.search.value_targets_from_final_policy,
             )
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,

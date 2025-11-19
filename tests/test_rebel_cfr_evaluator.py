@@ -897,6 +897,26 @@ def test_training_data_returns_root_batch() -> None:
     torch.testing.assert_close(policy_batch.policy_targets, expected_policy)
 
 
+def test_training_data_can_use_final_policy_values() -> None:
+    evaluator, env = make_evaluator(batch_size=2, max_depth=1)
+    env.step_bins(torch.tensor([1, 1]))
+    env.step_bins(torch.tensor([1, 1]))
+    roots = torch.arange(evaluator.root_nodes, device=env.device)
+    evaluator.initialize_subgame(env, roots)
+
+    final_values = torch.full_like(
+        evaluator.latest_values[: evaluator.root_nodes], 0.25
+    )
+    avg_values = torch.full_like(final_values, -0.75)
+    evaluator.latest_values[: evaluator.root_nodes] = final_values
+    evaluator.values_avg[: evaluator.root_nodes] = avg_values
+
+    evaluator.use_final_policy_values = True
+    value_batch, _, _ = evaluator.training_data(exclude_start=False)
+
+    torch.testing.assert_close(value_batch.value_targets, final_values)
+
+
 @pytest.mark.parametrize(
     "board",
     [
