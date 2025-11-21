@@ -847,7 +847,7 @@ class CFREvaluator(ABC):
             self._maybe_enforce_zero_sum(
                 self.latest_values, self.beliefs, ignore_mask=self.env.done
             )
-        self.last_model_values = model_output.hand_values
+        self.last_model_values = model_output.hand_values.clone()
 
     def compute_expected_values(
         self,
