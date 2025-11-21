@@ -7,7 +7,7 @@ from dataclasses import asdict
 import torch
 import torch.nn as nn
 
-from alphaholdem.core.structured_config import Config, ModelType
+from alphaholdem.core.structured_config import Config, LrSchedule, ModelType
 from alphaholdem.env.aggression_analyzer import AggressionAnalyzer
 from alphaholdem.env.card_utils import NUM_HANDS, suit_permutations_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
@@ -184,6 +184,43 @@ class RebelCFRTrainer:
 
         self.aggression_analyzer = AggressionAnalyzer(device=self.device)
         self.pbs_pool = PBSPool(pool_size=3, generator=self.rng)
+
+        # Store initial iteration count for scheduling
+        self.initial_iterations = self.cfr_evaluator.cfr_iterations
+
+    def _apply_schedules(self, step: int) -> None:
+        """Apply learning rate and iteration count schedules."""
+        total_steps = max(1, self.cfg.num_steps)
+        t = min(1.0, max(0.0, step / float(total_steps)))
+
+        # Learning rate schedule
+        lr_start = float(self.cfg.train.learning_rate)
+        lr_final = float(self.cfg.train.learning_rate_final)
+        if self.cfg.train.lr_schedule == LrSchedule.cosine and lr_final != lr_start:
+            lr_now = lr_final + 0.5 * (lr_start - lr_final) * (
+                1.0 + math.cos(math.pi * t)
+            )
+        elif self.cfg.train.lr_schedule == LrSchedule.linear and lr_final != lr_start:
+            lr_now = lr_start + (lr_final - lr_start) * t
+        else:
+            lr_now = lr_start
+
+        # Update optimizer learning rate
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr_now
+
+        # Iteration count schedule (linear interpolation)
+        if self.cfg.search.iterations_final is not None:
+            iterations_start = self.initial_iterations
+            iterations_final = self.cfg.search.iterations_final
+            iterations_now = int(
+                round(iterations_start + (iterations_final - iterations_start) * t)
+            )
+            # Ensure iterations is at least warm_start_iterations + 1
+            iterations_now = max(
+                self.cfg.search.warm_start_iterations + 1, iterations_now
+            )
+            self.cfr_evaluator.cfr_iterations = iterations_now
 
     def _compute_entropy(self, probs: torch.Tensor) -> float:
         eps = 1e-8
@@ -538,8 +575,13 @@ class RebelCFRTrainer:
     def train_step(self, step: int) -> dict[str, any]:
         step_public = step + 1
 
+        # Apply schedules before training step
+        self._apply_schedules(step)
+
         update_info = self._update_model(step)
         update_info["step"] = step_public
+        update_info["learning_rate"] = self.optimizer.param_groups[0]["lr"]
+        update_info["cfr_iterations"] = self.cfr_evaluator.cfr_iterations
 
         return update_info
 

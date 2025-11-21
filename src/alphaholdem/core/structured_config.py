@@ -218,6 +218,9 @@ class SearchConfig:
     enabled: bool = False
     depth: int = 2
     iterations: int = 100
+    iterations_final: int | None = (
+        None  # If set, linearly interpolate from iterations to iterations_final
+    )
     warm_start_iterations: int = 15
     branching: int = 4
     belief_samples: int = 16
