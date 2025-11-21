@@ -191,6 +191,10 @@ class SparseCFREvaluator(CFREvaluator):
             self.depth_offsets[-2] if len(self.depth_offsets) > 1 else num_roots
         )
 
+        self.stats["evaluator_total_nodes"] = float(self.total_nodes)
+        self.stats["evaluator_root_nodes"] = float(self.root_nodes)
+        self.stats["evaluator_tree_depth"] = float(self.tree_depth)
+
         # Initialize valid_mask as all ones (all nodes are valid in sparse structure)
         # This should not be used anywhere outside of tests.
         self.valid_mask = torch.ones(

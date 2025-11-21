@@ -435,6 +435,9 @@ class RebelCFREvaluator(CFREvaluator):
         self.stats["evaluator_street"] = (
             self.env.street[self.valid_mask].float().mean().item()
         )
+        self.stats["evaluator_total_nodes"] = float(self.total_nodes)
+        self.stats["evaluator_root_nodes"] = float(self.root_nodes)
+        self.stats["evaluator_tree_depth"] = float(self.tree_depth)
 
     @profile
     def _mask_invalid(self, tensor: torch.Tensor) -> None:
