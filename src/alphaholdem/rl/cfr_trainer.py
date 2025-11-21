@@ -410,7 +410,7 @@ class RebelCFRTrainer:
         if fresh_value_batch:
             local_exploitability = fresh_value_batch.statistics["local_exploitability"]
             local_exploitability_max = local_exploitability.abs().max().item()
-            if local_exploitability_max > 100:
+            if local_exploitability_max > 2:
                 step_public = step + 1
                 os.makedirs(self.cfg.checkpoint_dir, exist_ok=True)
                 ckpt_path = os.path.join(
