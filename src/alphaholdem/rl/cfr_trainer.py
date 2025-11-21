@@ -366,11 +366,41 @@ class RebelCFRTrainer:
         # Step >= last threshold, return last config's probabilities
         return configs[-1].probabilities
 
+    def _save_if_high_exploitability(
+        self, fresh_value_batch: RebelBatch, step: int
+    ) -> None:
+        # Check if local exploitability max is above threshold and save checkpoint
+        if fresh_value_batch:
+            local_exploitability = fresh_value_batch.statistics["local_exploitability"]
+            local_exploitability_max = local_exploitability.abs().max().item()
+            if local_exploitability_max > 1000:
+                step_public = step + 1
+                os.makedirs(self.cfg.checkpoint_dir, exist_ok=True)
+                ckpt_path = os.path.join(
+                    self.cfg.checkpoint_dir,
+                    f"rebel_exploitability_high_step_{step_public}.pt",
+                )
+                self.save_checkpoint(
+                    ckpt_path,
+                    step,
+                    wandb_run_id=self.cfg.wandb_run_id,
+                    save_optimizer=True,
+                    save_dtype=None,
+                    batch=fresh_value_batch,
+                )
+                print(
+                    f"Checkpoint saved due to high exploitability (max={local_exploitability_max:.2f}) "
+                    f"at step {step_public} -> {ckpt_path}"
+                )
+
     @profile
     def _update_model(self, step: int) -> dict[str, float]:
         fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
             self.K_value
         )
+
+        self._save_if_high_exploitability(fresh_value_batch, step)
+
         # Warmup: make sure we have enough samples.
         while min(len(self.value_buffer), len(self.policy_buffer)) < self.batch_size:
             self.data_generator.generate_data(self.K_value)
@@ -386,6 +416,7 @@ class RebelCFRTrainer:
         policy_step_loss, value_step_loss = 0.0, 0.0
         entropy_step_loss, permutation_step_loss = 0.0, 0.0
         total_step_loss = 0.0
+        total_update_norm = 0.0
         for episode in range(episodes):
             # TODO: think about how to interleave these/ratio in a smarter way.
             # Might need to use different sizes for the two batches.
@@ -460,7 +491,17 @@ class RebelCFRTrainer:
 
             if self.grad_clip is not None and self.grad_clip > 0:
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+            # Store parameters before optimizer step to compute update norm
+            params_before = [p.clone() for p in self.model.parameters()]
             self.optimizer.step()
+
+            # Compute parameter update norm using torch utility
+            updates = (
+                p_after - p_before
+                for p_before, p_after in zip(params_before, self.model.parameters())
+            )
+            total_update_norm += torch.nn.utils.get_total_norm(updates).item()
 
         # After the loop, calculate loss on fresh data
         fresh_value_loss = None
@@ -490,6 +531,7 @@ class RebelCFRTrainer:
             fresh_value_batch=fresh_value_batch,
         )
         metrics["episodes"] = episodes
+        metrics["param_update_norm"] = total_update_norm / episodes
 
         return metrics
 
@@ -521,6 +563,7 @@ class RebelCFRTrainer:
         wandb_run_id: str | None = None,
         save_optimizer: bool = True,
         save_dtype: torch.dtype | None = None,
+        batch: RebelBatch | None = None,
     ) -> None:
         directory = os.path.dirname(path)
         if directory:
@@ -547,6 +590,11 @@ class RebelCFRTrainer:
         if save_optimizer:
             state["optimizer"] = self.optimizer.state_dict()
             state["rng"] = self.rng.get_state()
+
+        # Save batch if provided (move to CPU for storage)
+        if batch is not None:
+            batch_cpu = batch.to(torch.device("cpu"))
+            state["batch"] = batch_cpu
 
         torch.save(state, path)
 
