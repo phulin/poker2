@@ -459,7 +459,7 @@ def run_benchmark_compile(
     # Setup evaluators for benchmarking
     evaluator_current, _, _ = setup_evaluator(cfg, model, device, num_envs)
     evaluators_compiled = {}
-    for mode in ["default", "reduce-overhead", "max-autotune"]:
+    for mode in ["default", "reduce-overhead"]:
         eval_compiled, _, _ = setup_evaluator(cfg, model, device, num_envs)
         eval_compiled.beliefs.copy_(evaluator_current.beliefs)
         eval_compiled.beliefs_avg.copy_(evaluator_current.beliefs_avg)
@@ -472,7 +472,7 @@ def run_benchmark_compile(
     try:
         # Run both approaches once to verify they produce the same results
         evaluator_test1, _, _ = setup_evaluator(cfg, model, device, num_envs)
-        for mode in ["default", "reduce-overhead", "max-autotune"]:
+        for mode in ["default", "reduce-overhead"]:
             evaluator_test2, _, _ = setup_evaluator(cfg, model, device, num_envs)
             evaluator_test2.beliefs.copy_(evaluator_test1.beliefs)
             evaluator_test2.beliefs_avg.copy_(evaluator_test1.beliefs_avg)
@@ -522,7 +522,7 @@ def run_benchmark_compile(
 
     # Benchmark each compilation mode
     results = {}
-    for mode in ["default", "reduce-overhead", "max-autotune"]:
+    for mode in ["default", "reduce-overhead"]:
         print(f"\nBenchmarking compiled approach (mode: {mode})...")
         evaluator_compiled = evaluators_compiled[mode]
 
@@ -568,7 +568,7 @@ def run_benchmark_compile(
     )
     print()
 
-    for mode in ["default", "reduce-overhead", "max-autotune"]:
+    for mode in ["default", "reduce-overhead"]:
         r = results[mode]
         print(f"  {mode:20s}:")
         print(
