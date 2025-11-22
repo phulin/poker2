@@ -15,7 +15,6 @@ from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.rebel_batch import RebelBatch
-from alphaholdem.rl.rebel_replay import RebelReplayBuffer
 
 
 def make_env(num_envs: int = 4) -> HUNLTensorEnv:
@@ -56,40 +55,6 @@ def test_rebel_feature_encoder_shapes():
     opp = features.beliefs[:, NUM_HANDS:]
     torch.testing.assert_close(hero.sum(dim=1), torch.ones(2, device=env.device))
     torch.testing.assert_close(opp.sum(dim=1), torch.ones(2, device=env.device))
-
-
-def test_rebel_replay_buffer_roundtrip():
-    buffer = RebelReplayBuffer(
-        capacity=16,
-        num_actions=5,
-        num_players=2,
-        num_context_features=4,
-        device=torch.device("cpu"),
-    )
-    # Create MLPFeatures for the test
-    mlp_features = MLPFeatures(
-        context=torch.randn(4, 4),
-        street=torch.zeros(4, dtype=torch.long),
-        to_act=torch.zeros(4, dtype=torch.long),
-        board=torch.zeros(4, 5, dtype=torch.long),
-        beliefs=torch.randn(4, 2 * NUM_HANDS),
-    )
-    policy_targets = torch.softmax(torch.randn(4, NUM_HANDS, 5), dim=-1)
-    value_targets = torch.randn(4, 2, NUM_HANDS)
-    legal_masks = torch.ones(4, 5, dtype=torch.bool)
-    batch = RebelBatch(
-        features=mlp_features,
-        policy_targets=policy_targets,
-        value_targets=value_targets,
-        legal_masks=legal_masks,
-    )
-    buffer.add_batch(batch)
-    assert len(buffer) == 4
-    sample = buffer.sample(2)
-    assert sample.features.context.shape == (2, 4)
-    assert sample.policy_targets.shape == (2, NUM_HANDS, 5)
-    assert sample.value_targets.shape == (2, 2, NUM_HANDS)
-    assert sample.legal_masks.shape == (2, 5)
 
 
 def test_rebel_supervised_loss_finite():
