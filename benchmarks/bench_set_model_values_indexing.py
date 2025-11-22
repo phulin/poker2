@@ -479,13 +479,17 @@ def _set_leaf_values_wrapper(
 
     # Set showdown values - use compiled version if provided
     if compiled_showdown_value is not None:
-        showdown_values_p0 = compiled_showdown_value(evaluator, 0)
-        showdown_values_p1 = compiled_showdown_value(evaluator, 1)
+        evaluator.latest_values[evaluator.showdown_indices, 0] = (
+            compiled_showdown_value(evaluator, 0)
+        )
+        evaluator.latest_values[evaluator.showdown_indices, 1] = (
+            compiled_showdown_value(evaluator, 1)
+        )
     else:
         showdown_values_p0 = evaluator._showdown_value(0)
         showdown_values_p1 = evaluator._showdown_value(1)
-    evaluator.latest_values[evaluator.showdown_indices, 0] = showdown_values_p0
-    evaluator.latest_values[evaluator.showdown_indices, 1] = showdown_values_p1
+        evaluator.latest_values[evaluator.showdown_indices, 0] = showdown_values_p0
+        evaluator.latest_values[evaluator.showdown_indices, 1] = showdown_values_p1
 
 
 @torch.no_grad()
@@ -579,13 +583,11 @@ def run_benchmark_compile(
             new_vals, last_vals = compiled_set_model(evaluator_test3, t)
             evaluator_test3.latest_values = new_vals.clone()
             evaluator_test3.last_model_values = last_vals.clone()
-            showdown_values_p0 = compiled_showdown(evaluator_test3, 0)
-            showdown_values_p1 = compiled_showdown(evaluator_test3, 1)
             evaluator_test3.latest_values[evaluator_test3.showdown_indices, 0] = (
-                showdown_values_p0
+                compiled_showdown(evaluator_test3, 0)
             )
             evaluator_test3.latest_values[evaluator_test3.showdown_indices, 1] = (
-                showdown_values_p1
+                compiled_showdown(evaluator_test3, 1)
             )
             result3 = evaluator_test3.latest_values.clone()
 
@@ -692,13 +694,11 @@ def run_benchmark_compile(
             new_vals, last_vals = compiled_set_model(evaluator_compiled, t)
             evaluator_compiled.latest_values = new_vals.clone()
             evaluator_compiled.last_model_values = last_vals.clone()
-            showdown_values_p0 = compiled_showdown(evaluator_compiled, 0)
-            showdown_values_p1 = compiled_showdown(evaluator_compiled, 1)
             evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 0] = (
-                showdown_values_p0
+                compiled_showdown(evaluator_compiled, 0)
             )
             evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 1] = (
-                showdown_values_p1
+                compiled_showdown(evaluator_compiled, 1)
             )
         synchronize_device_if_needed(device)
         compilation_time = time.perf_counter() - start
@@ -710,13 +710,11 @@ def run_benchmark_compile(
             new_vals, last_vals = compiled_set_model(evaluator_compiled, t)
             evaluator_compiled.latest_values = new_vals.clone()
             evaluator_compiled.last_model_values = last_vals.clone()
-            showdown_values_p0 = compiled_showdown(evaluator_compiled, 0)
-            showdown_values_p1 = compiled_showdown(evaluator_compiled, 1)
             evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 0] = (
-                showdown_values_p0
+                compiled_showdown(evaluator_compiled, 0)
             )
             evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 1] = (
-                showdown_values_p1
+                compiled_showdown(evaluator_compiled, 1)
             )
         synchronize_device_if_needed(device)
         execution_time = time.perf_counter() - start

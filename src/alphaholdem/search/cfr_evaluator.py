@@ -239,6 +239,27 @@ class CFREvaluator(ABC):
             out=target,
         )
 
+    def _compute_model_indices(self) -> torch.Tensor:
+        """Compute model indices from leaf mask, padded to a multiple of num_envs.
+
+        Returns:
+            Tensor of indices where model evaluation is needed, padded to a multiple
+            of num_envs by repeating the last item.
+        """
+        model_mask = self.leaf_mask & ~self.env.done
+        model_indices = torch.where(model_mask)[0]
+        # Pad model_indices to length a multiple of num_envs by repeating the last item
+        num_envs = self.root_nodes
+        current_len = model_indices.numel()
+        if current_len > 0:
+            remainder = current_len % num_envs
+            if remainder != 0:
+                padding_size = num_envs - remainder
+                last_item = model_indices[-1:]
+                padding = last_item.repeat(padding_size)
+                model_indices = torch.cat([model_indices, padding])
+        return model_indices
+
     def _get_mixing_weights(self, t: int) -> torch.Tensor:
         """Get the mixing weights for the current iteration."""
 

@@ -221,8 +221,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.new_street_mask = (self.env.actions_this_round == 0) & ~root_mask
         self.leaf_mask = self.env.done | self.new_street_mask
         self.leaf_mask[self.depth_offsets[-2] :] = True
-        model_mask = self.leaf_mask & ~self.env.done
-        self.model_indices = torch.where(model_mask)[0]
+        self.model_indices = self._compute_model_indices()
         self.child_mask = self.legal_mask & (~self.leaf_mask)[:, None]
         self.child_count = self.child_mask.sum(dim=-1)
         assert self.total_nodes == self.root_nodes + self.child_count.sum()
