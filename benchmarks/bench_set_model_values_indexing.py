@@ -278,13 +278,13 @@ def verify_correctness(
     # Run both approaches
     t = 2  # Use t > 1 to test the mixing path
     new_values1, last_model_values1 = _set_model_values_current(evaluator1, t)
-    evaluator1.latest_values = new_values1
+    evaluator1.latest_values = new_values1.clone()
     evaluator1.last_model_values = last_model_values1.clone()
 
     new_values2, last_model_values2 = _set_model_values_alternative(
         evaluator2, t, temp_encoder=temp_encoder, indexed_env=indexed_env
     )
-    evaluator2.latest_values = new_values2
+    evaluator2.latest_values = new_values2.clone()
     evaluator2.last_model_values = last_model_values2.clone()
 
     # Compare results
@@ -317,7 +317,7 @@ def benchmark_approach(
     # Warmup
     for _ in range(3):
         new_vals, last_vals = approach_fn(evaluator, t, **kwargs)
-        evaluator.latest_values = new_vals
+        evaluator.latest_values = new_vals.clone()
         evaluator.last_model_values = last_vals.clone()
 
     synchronize_device_if_needed(device)
@@ -326,7 +326,7 @@ def benchmark_approach(
     start = time.perf_counter()
     for _ in range(repeats):
         new_vals, last_vals = approach_fn(evaluator, t, **kwargs)
-        evaluator.latest_values = new_vals
+        evaluator.latest_values = new_vals.clone()
         evaluator.last_model_values = last_vals.clone()
     synchronize_device_if_needed(device)
     end = time.perf_counter()
@@ -486,11 +486,11 @@ def run_benchmark_compile(
             compiled_fn = torch.compile(_set_model_values_current, mode=mode)
 
             new_vals1, last_vals1 = _set_model_values_current(evaluator_test1, t)
-            evaluator_test1.latest_values = new_vals1
+            evaluator_test1.latest_values = new_vals1.clone()
             evaluator_test1.last_model_values = last_vals1.clone()
 
             new_vals2, last_vals2 = compiled_fn(evaluator_test2, t)
-            evaluator_test2.latest_values = new_vals2
+            evaluator_test2.latest_values = new_vals2.clone()
             evaluator_test2.last_model_values = last_vals2.clone()
 
             assert_close(
@@ -515,7 +515,7 @@ def run_benchmark_compile(
     start = time.perf_counter()
     for _ in range(repeats):
         new_vals, last_vals = _set_model_values_current(evaluator_current, t)
-        evaluator_current.latest_values = new_vals
+        evaluator_current.latest_values = new_vals.clone()
         evaluator_current.last_model_values = last_vals.clone()
     synchronize_device_if_needed(device)
     time_current = time.perf_counter() - start
@@ -532,7 +532,7 @@ def run_benchmark_compile(
         # Warmup to trigger compilation
         for _ in range(3):
             new_vals, last_vals = compiled_fn(evaluator_compiled, t)
-            evaluator_compiled.latest_values = new_vals
+            evaluator_compiled.latest_values = new_vals.clone()
             evaluator_compiled.last_model_values = last_vals.clone()
         synchronize_device_if_needed(device)
         compilation_time = time.perf_counter() - start
@@ -542,7 +542,7 @@ def run_benchmark_compile(
         start = time.perf_counter()
         for _ in range(repeats):
             new_vals, last_vals = compiled_fn(evaluator_compiled, t)
-            evaluator_compiled.latest_values = new_vals
+            evaluator_compiled.latest_values = new_vals.clone()
             evaluator_compiled.last_model_values = last_vals.clone()
         synchronize_device_if_needed(device)
         execution_time = time.perf_counter() - start
