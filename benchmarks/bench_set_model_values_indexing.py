@@ -148,22 +148,34 @@ def _set_model_values_current(
     model_output = evaluator.model(features[evaluator.model_indices])
 
     if not evaluator.cfr_avg or t <= 1 or evaluator.last_model_values is None:
-        evaluator.latest_values[evaluator.model_indices] = model_output.hand_values
+        # Use torch.index_copy for out-of-place operation (torch.compile compatible)
+        new_values = torch.index_copy(
+            evaluator.latest_values,
+            0,
+            evaluator.model_indices,
+            model_output.hand_values,
+        )
+        evaluator.latest_values = new_values
     else:
         old, new = evaluator._get_mixing_weights(t)
         unmixed = (
             old + new
         ) * model_output.hand_values - old * evaluator.last_model_values
         unmixed /= new
-        evaluator.latest_values[evaluator.model_indices] = unmixed
-        # Only enforce zero-sum if the model supports it
-        if getattr(evaluator.model, "enforce_zero_sum", False):
-            evaluator._maybe_enforce_zero_sum(
-                evaluator.latest_values,
-                evaluator.beliefs,
-                ignore_mask=evaluator.env.done,
-            )
-    evaluator.last_model_values = model_output.hand_values
+        # Use torch.index_copy for out-of-place operation (torch.compile compatible)
+        new_values = torch.index_copy(
+            evaluator.latest_values,
+            0,
+            evaluator.model_indices,
+            unmixed,
+        )
+        evaluator._maybe_enforce_zero_sum(
+            new_values,
+            evaluator.beliefs,
+            ignore_mask=evaluator.env.done,
+        )
+        evaluator.latest_values = new_values
+    evaluator.last_model_values = model_output.hand_values.clone()
 
 
 @torch.no_grad()
@@ -190,22 +202,35 @@ def _set_model_values_alternative(
     model_output = evaluator.model(features)
 
     if not evaluator.cfr_avg or t <= 1 or evaluator.last_model_values is None:
-        evaluator.latest_values[evaluator.model_indices] = model_output.hand_values
+        # Use torch.index_copy for out-of-place operation (torch.compile compatible)
+        new_values = torch.index_copy(
+            evaluator.latest_values,
+            0,
+            evaluator.model_indices,
+            model_output.hand_values,
+        )
+        evaluator.latest_values = new_values
     else:
         old, new = evaluator._get_mixing_weights(t)
         unmixed = (
             old + new
         ) * model_output.hand_values - old * evaluator.last_model_values
         unmixed /= new
-        evaluator.latest_values[evaluator.model_indices] = unmixed
+        # Use torch.index_copy for out-of-place operation (torch.compile compatible)
+        new_values = torch.index_copy(
+            evaluator.latest_values,
+            0,
+            evaluator.model_indices,
+            unmixed,
+        )
         # Only enforce zero-sum if the model supports it
-        if getattr(evaluator.model, "enforce_zero_sum", False):
-            evaluator._maybe_enforce_zero_sum(
-                evaluator.latest_values,
-                evaluator.beliefs,
-                ignore_mask=evaluator.env.done,
-            )
-    evaluator.last_model_values = model_output.hand_values
+        evaluator._maybe_enforce_zero_sum(
+            new_values,
+            evaluator.beliefs,
+            ignore_mask=evaluator.env.done,
+        )
+        evaluator.latest_values = new_values
+    evaluator.last_model_values = model_output.hand_values.clone()
 
 
 @torch.no_grad()
