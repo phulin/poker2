@@ -146,6 +146,8 @@ def _set_model_values_current(
         beliefs, pre_chance_node=evaluator.new_street_mask
     )
     model_output = evaluator.model(features[evaluator.model_indices])
+    # Clone immediately to prevent CUDA graph overwrite issues
+    hand_values = model_output.hand_values.clone()
 
     if not evaluator.cfr_avg or t <= 1 or evaluator.last_model_values is None:
         # Use torch.index_copy for out-of-place operation (torch.compile compatible)
@@ -153,14 +155,12 @@ def _set_model_values_current(
             evaluator.latest_values,
             0,
             evaluator.model_indices,
-            model_output.hand_values,
+            hand_values,
         )
         evaluator.latest_values = new_values
     else:
         old, new = evaluator._get_mixing_weights(t)
-        unmixed = (
-            old + new
-        ) * model_output.hand_values - old * evaluator.last_model_values
+        unmixed = (old + new) * hand_values - old * evaluator.last_model_values
         unmixed /= new
         # Use torch.index_copy for out-of-place operation (torch.compile compatible)
         new_values = torch.index_copy(
@@ -174,7 +174,7 @@ def _set_model_values_current(
             evaluator.beliefs,
             ignore_mask=evaluator.env.done,
         )
-    evaluator.last_model_values = model_output.hand_values.clone()
+    evaluator.last_model_values = hand_values
 
 
 @torch.no_grad()
@@ -199,6 +199,8 @@ def _set_model_values_alternative(
         indexed_beliefs, pre_chance_node=indexed_new_street_mask
     )
     model_output = evaluator.model(features)
+    # Clone immediately to prevent CUDA graph overwrite issues
+    hand_values = model_output.hand_values.clone()
 
     if not evaluator.cfr_avg or t <= 1 or evaluator.last_model_values is None:
         # Use torch.index_copy for out-of-place operation (torch.compile compatible)
@@ -206,14 +208,12 @@ def _set_model_values_alternative(
             evaluator.latest_values,
             0,
             evaluator.model_indices,
-            model_output.hand_values,
+            hand_values,
         )
         evaluator.latest_values = new_values
     else:
         old, new = evaluator._get_mixing_weights(t)
-        unmixed = (
-            old + new
-        ) * model_output.hand_values - old * evaluator.last_model_values
+        unmixed = (old + new) * hand_values - old * evaluator.last_model_values
         unmixed /= new
         # Use torch.index_copy for out-of-place operation (torch.compile compatible)
         new_values = torch.index_copy(
@@ -227,7 +227,7 @@ def _set_model_values_alternative(
             evaluator.beliefs,
             ignore_mask=evaluator.env.done,
         )
-    evaluator.last_model_values = model_output.hand_values.clone()
+    evaluator.last_model_values = hand_values
 
 
 @torch.no_grad()
