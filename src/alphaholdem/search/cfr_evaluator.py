@@ -20,6 +20,7 @@ from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.rebel_batch import RebelBatch
@@ -848,16 +849,12 @@ class CFREvaluator(ABC):
         else:
             return hand_values
 
-    @torch.compile
-    def _set_model_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
+    @torch.compile(dynamic=True)
+    def _set_model_values(
+        self, t: int, beliefs: torch.Tensor, features: MLPFeatures
+    ) -> None:
         # Set model values for non-terminal leaves
-        if beliefs is None:
-            beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
-
-        features = self.feature_encoder.encode(
-            beliefs, pre_chance_node=self.new_street_mask
-        )
-        model_output = self.model(features[self.model_indices])
+        model_output = self.model(features)
 
         if not self.cfr_avg or t <= 1 or self.last_model_values is None:
             new_values = torch.index_copy(
@@ -873,22 +870,28 @@ class CFREvaluator(ABC):
                 old + new
             ) * model_output.hand_values - old * self.last_model_values
             unmixed /= new
+            unmixed = self._maybe_enforce_zero_sum(unmixed, beliefs)
             new_values = torch.index_copy(
                 self.latest_values,
                 0,
                 self.model_indices,
                 unmixed,
             )
-            new_values = self._maybe_enforce_zero_sum(
-                new_values, self.beliefs, ignore_mask=self.env.done
-            )
         return new_values, model_output.hand_values
 
     @torch.no_grad()
     def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
         """Set leaf values from model or terminal states."""
+        if beliefs is None:
+            beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
-        new_values, last_model_values = self._set_model_values(t, beliefs)
+        features = self.feature_encoder.encode(
+            beliefs, pre_chance_node=self.new_street_mask
+        )
+
+        new_values, last_model_values = self._set_model_values(
+            t, self.beliefs[self.model_indices], features[self.model_indices]
+        )
         self.latest_values = new_values.clone()
         self.last_model_values = last_model_values.clone()
 
