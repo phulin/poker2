@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Callable
 
 import pytest
@@ -21,7 +22,7 @@ from alphaholdem.models.mlp.better_features import ScalarContext
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput
-from alphaholdem.search.cfr_evaluator import PublicBeliefState
+from alphaholdem.search.cfr_evaluator import CFREvaluator, PublicBeliefState
 from alphaholdem.search.rebel_cfr_evaluator import (
     NUM_HANDS,
     RebelCFREvaluator,
@@ -136,6 +137,61 @@ class MockModel:
 
     def train(self) -> None:
         pass
+
+
+def test_get_model_policy_probs_skips_no_legal_nodes() -> None:
+    device = torch.device("cpu")
+    legal_mask = torch.tensor(
+        [[True, False, False], [False, False, False], [True, True, False]],
+        device=device,
+    )
+    num_actions = legal_mask.shape[1]
+    beliefs = torch.zeros(legal_mask.shape[0], NUM_HANDS, 1, device=device)
+
+    class IdentityEncoder:
+        def encode(self, data: torch.Tensor) -> torch.Tensor:
+            return data
+
+    class CountingModel(nn.Module):
+        def __init__(self, expected_batch: int, actions: int) -> None:
+            super().__init__()
+            self.expected_batch = expected_batch
+            self.actions = actions
+            self.enforce_zero_sum = False
+
+        def forward(self, features: torch.Tensor) -> ModelOutput:  # type: ignore[override]
+            assert features.shape[0] == self.expected_batch
+            batch = features.shape[0]
+            logits = torch.zeros(batch, NUM_HANDS, self.actions, device=features.device)
+            return ModelOutput(
+                policy_logits=logits,
+                value=torch.zeros(batch, device=features.device),
+                hand_values=torch.zeros(batch, 2, NUM_HANDS, device=features.device),
+            )
+
+    evaluator = SimpleNamespace(
+        model=CountingModel(expected_batch=legal_mask.shape[0], actions=num_actions),
+        feature_encoder=IdentityEncoder(),
+        legal_mask=legal_mask,
+        beliefs=beliefs,
+        float_dtype=torch.float32,
+        device=device,
+        num_actions=num_actions,
+    )
+
+    indices = torch.arange(legal_mask.shape[0], device=device)
+    probs = CFREvaluator._get_model_policy_probs(evaluator, indices)
+
+    assert probs.shape == (legal_mask.shape[0], NUM_HANDS, num_actions)
+    torch.testing.assert_close(
+        probs[1], torch.zeros(NUM_HANDS, num_actions, device=device)
+    )
+    torch.testing.assert_close(
+        probs[0].sum(dim=-1), torch.ones(NUM_HANDS, device=device)
+    )
+    torch.testing.assert_close(
+        probs[2].sum(dim=-1), torch.ones(NUM_HANDS, device=device)
+    )
 
 
 def make_evaluator(
