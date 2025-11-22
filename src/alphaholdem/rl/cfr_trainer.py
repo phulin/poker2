@@ -454,18 +454,15 @@ class RebelCFRTrainer:
         entropy_step_loss, permutation_step_loss = 0.0, 0.0
         total_step_loss = 0.0
         total_update_norm = 0.0
+        stratify = self._get_stratify_streets(step)
         for episode in range(episodes):
             # TODO: think about how to interleave these/ratio in a smarter way.
             # Might need to use different sizes for the two batches.
             value_batch = self.value_buffer.sample(
-                self.batch_size,
-                stratify_streets=self._get_stratify_streets(step),
-                generator=self.buffer_rng,
+                self.batch_size, stratify_streets=stratify
             ).to(self.device)
             policy_batch = self.policy_buffer.sample(
-                self.batch_size,
-                stratify_streets=self._get_stratify_streets(step),
-                generator=self.buffer_rng,
+                self.batch_size, stratify_streets=stratify
             ).to(self.device)
 
             self.model.train()
