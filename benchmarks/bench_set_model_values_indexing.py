@@ -698,6 +698,7 @@ def main() -> None:
     # Create config and model
     cfg = create_config()
     model = create_mock_model(cfg, device)
+    model.compile()
 
     # Run benchmarks for each depth
     for depth in depths:
