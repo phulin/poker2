@@ -36,6 +36,19 @@ class ExploitabilityStats:
 
 
 @dataclass
+class HandRankData:
+    sorted_indices: torch.Tensor
+    inv_sorted: torch.Tensor
+    H: torch.Tensor
+    card_ok: torch.Tensor
+    hand_ok_mask: torch.Tensor
+    hand_ok_mask_sorted: torch.Tensor
+    hands_c1c2_sorted: torch.Tensor
+    L_idx: torch.Tensor
+    R_idx: torch.Tensor
+
+
+@dataclass
 class PublicBeliefState:
     """Public belief state for both players.
 
@@ -331,7 +344,85 @@ class CFREvaluator(ABC):
 
         return self._fan_out_deep(t_sample)
 
-    def _showdown_value(self, hero: int, indices: torch.Tensor) -> torch.Tensor:
+    def _init_hand_rank_data(self) -> None:
+        device = self.device
+        indices = self.showdown_indices
+        M = indices.numel()
+        board = self.env.board_indices[indices].int()  # (M,5)
+
+        # Sorted position k (0..1325) replicated across batch
+        k = torch.arange(NUM_HANDS, device=device).expand(
+            indices.numel(), -1
+        )  # (M,1326)
+
+        # --- Ranks & sorted order per env (river deterministic strength) ---
+        # hand_ranks: (M,1326) any integer/monotone rank key s.t. equal => tie
+        # sorted_indices: argsort by (rank, tiebreak) ascending (weaker -> stronger)
+        hand_ranks, sorted_indices = rank_hands(board)  # both (M,1326)
+
+        # Ranks in sorted order
+        ranks_sorted = torch.gather(hand_ranks, 1, sorted_indices)  # (M,1326)
+        assert torch.all(
+            ranks_sorted[:, 1:] >= ranks_sorted[:, :-1]
+        ), "rank_hands order is descending; flip or fix rank_hands"
+
+        # --- Tie groups: start flags, group ids, [L,R] spans per sorted position ---
+        is_start = torch.ones_like(ranks_sorted, dtype=torch.bool)  # (M,1326)
+        is_start[:, 1:] = ranks_sorted[:, 1:] != ranks_sorted[:, :-1]
+        group_id = is_start.cumsum(dim=1, dtype=torch.int) - 1  # (M,1326), 0..G-1
+
+        # For each group id, store first/last index in sorted order
+        starts = torch.full((M, NUM_HANDS), NUM_HANDS, dtype=torch.int, device=device)
+        ends = torch.full((M, NUM_HANDS), -1, dtype=torch.int, device=device)
+        starts.scatter_reduce_(1, group_id, k.int(), reduce="amin", include_self=True)
+        ends.scatter_reduce_(1, group_id, k.int(), reduce="amax", include_self=True)
+
+        # L,R per sorted position
+        L = torch.gather(starts, 1, group_id)  # (M,1326)
+        R = torch.gather(ends, 1, group_id)  # (M,1326)
+        L_idx = L
+        R_idx = (R + 1).clamp(max=NUM_HANDS)
+        assert (L <= R).all(), "L must be <= R"
+        assert torch.all(
+            torch.gather(ranks_sorted, 1, L) == torch.gather(ranks_sorted, 1, R)
+        ), "L/R must have same rank"
+
+        # Inverse permutation (sorted->original) for mapping EV back
+        inv_sorted = torch.argsort(sorted_indices, dim=1)  # (M,1326)
+
+        # --- Hand/card incidence & board masking ---
+        combo_to_onehot = combo_to_onehot_tensor(device=device)  # (1326,52)
+        hands_c1c2 = hand_combos_tensor(device=device)  # (1326,2)
+
+        # Per-env mask for cards not on the board: True = usable card
+        card_ok = torch.ones((M, 52), dtype=torch.bool, device=device)
+        card_ok.scatter_(1, board, False)  # False for board cards
+
+        # Hand usable mask (unsorted): hand must use only ok cards
+        H = combo_to_onehot.unsqueeze(0).expand(M, -1, -1)  # (M,1326,52)
+        hand_ok_mask = self.allowed_hands[indices]
+        hand_ok_mask_sorted = torch.gather(hand_ok_mask, 1, sorted_indices)
+
+        # Cards (c1,c2) of each *sorted* hand per env
+        hands_c1c2_sorted = torch.gather(
+            hands_c1c2.unsqueeze(0).expand(M, -1, -1),  # (M,1326,2)
+            1,
+            sorted_indices.unsqueeze(-1).expand(-1, -1, 2),
+        )  # (M,1326,2)
+
+        self.hand_rank_data = HandRankData(
+            sorted_indices=sorted_indices,
+            inv_sorted=inv_sorted,
+            H=H,
+            card_ok=card_ok,
+            hand_ok_mask=hand_ok_mask,
+            hand_ok_mask_sorted=hand_ok_mask_sorted,
+            hands_c1c2_sorted=hands_c1c2_sorted,
+            L_idx=L_idx,
+            R_idx=R_idx,
+        )
+
+    def _showdown_value(self, hero: int) -> torch.Tensor:
         """
         Exact river showdown EV using rank-CDF + blocker correction.
         Returns per-hand EV [N, 1326] (unsorted/original hand order) per env.
@@ -344,6 +435,7 @@ class CFREvaluator(ABC):
         Returns:
             Per-hand EV [N, 1326] (unsorted/original hand order) per env.
         """
+        indices = self.showdown_indices
         M = indices.numel()
         device = self.device
         dtype = torch.float32  # or match belief dtype
@@ -357,102 +449,15 @@ class CFREvaluator(ABC):
         # We store it in latest_values which always corresponds to non-average beliefs.
         beliefs = self.beliefs[indices]  # (M,2,1326)
         b_opp = beliefs[:, villain, :].to(dtype)  # (M,1326)
-        board = self.env.board_indices[indices].int()  # (M,5)
 
-        # Sorted position k (0..1325) replicated across batch
-        k = torch.arange(NUM_HANDS, device=device).expand(M, -1)  # (M,1326)
-
-        # Check if hand_rank_data exists (for caching)
-        if hasattr(self, "hand_rank_data") and self.hand_rank_data is not None:
-            sorted_indices = self.hand_rank_data.sorted_indices
-            inv_sorted = self.hand_rank_data.inv_sorted
-            H = self.hand_rank_data.H
-            card_ok = self.hand_rank_data.card_ok
-            hand_ok_mask = self.hand_rank_data.hand_ok_mask
-            hand_ok_mask_sorted = self.hand_rank_data.hand_ok_mask_sorted
-            hands_c1c2_sorted = self.hand_rank_data.hands_c1c2_sorted
-            L_idx = self.hand_rank_data.L_idx
-            R_idx = self.hand_rank_data.R_idx
-        else:
-            # --- Ranks & sorted order per env (river deterministic strength) ---
-            # hand_ranks: (M,1326) any integer/monotone rank key s.t. equal => tie
-            # sorted_indices: argsort by (rank, tiebreak) ascending (weaker -> stronger)
-            hand_ranks, sorted_indices = rank_hands(board)  # both (M,1326)
-
-            # Ranks in sorted order
-            ranks_sorted = torch.gather(hand_ranks, 1, sorted_indices)  # (M,1326)
-            assert torch.all(
-                ranks_sorted[:, 1:] >= ranks_sorted[:, :-1]
-            ), "rank_hands order is descending; flip or fix rank_hands"
-
-            # --- Tie groups: start flags, group ids, [L,R] spans per sorted position ---
-            is_start = torch.ones_like(ranks_sorted, dtype=torch.bool)  # (M,1326)
-            is_start[:, 1:] = ranks_sorted[:, 1:] != ranks_sorted[:, :-1]
-            group_id = is_start.cumsum(dim=1, dtype=torch.int) - 1  # (M,1326), 0..G-1
-
-            # For each group id, store first/last index in sorted order
-            starts = torch.full(
-                (M, NUM_HANDS), NUM_HANDS, dtype=torch.int, device=device
-            )
-            ends = torch.full((M, NUM_HANDS), -1, dtype=torch.int, device=device)
-            starts.scatter_reduce_(
-                1, group_id, k.int(), reduce="amin", include_self=True
-            )
-            ends.scatter_reduce_(1, group_id, k.int(), reduce="amax", include_self=True)
-
-            # L,R per sorted position
-            L = torch.gather(starts, 1, group_id)  # (M,1326)
-            R = torch.gather(ends, 1, group_id)  # (M,1326)
-            L_idx = L
-            R_idx = (R + 1).clamp(max=NUM_HANDS)
-            assert (L <= R).all(), "L must be <= R"
-            assert torch.all(
-                torch.gather(ranks_sorted, 1, L) == torch.gather(ranks_sorted, 1, R)
-            ), "L/R must have same rank"
-
-            # Inverse permutation (sorted->original) for mapping EV back
-            inv_sorted = torch.argsort(sorted_indices, dim=1)  # (M,1326)
-
-            # --- Hand/card incidence & board masking ---
-            combo_to_onehot = combo_to_onehot_tensor(device=device)  # (1326,52)
-            hands_c1c2 = hand_combos_tensor(device=device)  # (1326,2)
-
-            # Per-env mask for cards not on the board: True = usable card
-            card_ok = torch.ones((M, 52), dtype=torch.bool, device=device)
-            card_ok.scatter_(1, board, False)  # False for board cards
-
-            # Hand usable mask (unsorted): hand must use only ok cards
-            H = combo_to_onehot.unsqueeze(0).expand(M, -1, -1)  # (M,1326,52)
-            if hasattr(self, "allowed_hands"):
-                hand_ok_mask = self.allowed_hands[indices]
-            else:
-                # Default: all hands are allowed
-                hand_ok_mask = torch.ones(M, NUM_HANDS, dtype=torch.bool, device=device)
-            hand_ok_mask_sorted = torch.gather(hand_ok_mask, 1, sorted_indices)
-
-            # Cards (c1,c2) of each *sorted* hand per env
-            hands_c1c2_sorted = torch.gather(
-                hands_c1c2.unsqueeze(0).expand(M, -1, -1),  # (M,1326,2)
-                1,
-                sorted_indices.unsqueeze(-1).expand(-1, -1, 2),
-            )  # (M,1326,2)
-
-            # Cache hand_rank_data if the class supports it
-            if hasattr(self, "hand_rank_data"):
-                # Import HandRankData from rebel_cfr_evaluator if needed
-                from alphaholdem.search.rebel_cfr_evaluator import HandRankData
-
-                self.hand_rank_data = HandRankData(
-                    sorted_indices=sorted_indices,
-                    inv_sorted=inv_sorted,
-                    H=H,
-                    card_ok=card_ok,
-                    hand_ok_mask=hand_ok_mask,
-                    hand_ok_mask_sorted=hand_ok_mask_sorted,
-                    hands_c1c2_sorted=hands_c1c2_sorted,
-                    L_idx=L_idx,
-                    R_idx=R_idx,
-                )
+        sorted_indices = self.hand_rank_data.sorted_indices
+        inv_sorted = self.hand_rank_data.inv_sorted
+        H = self.hand_rank_data.H
+        card_ok = self.hand_rank_data.card_ok
+        hand_ok_mask = self.hand_rank_data.hand_ok_mask
+        hands_c1c2_sorted = self.hand_rank_data.hands_c1c2_sorted
+        L_idx = self.hand_rank_data.L_idx
+        R_idx = self.hand_rank_data.R_idx
 
         c1 = hands_c1c2_sorted[..., 0]  # (M,1326)
         c2 = hands_c1c2_sorted[..., 1]  # (M,1326)
@@ -853,8 +858,8 @@ class CFREvaluator(ABC):
         self._set_model_values(t, beliefs)
 
         # Set showdown values
-        showdown_values_p0 = self._showdown_value(0, self.showdown_indices)
-        showdown_values_p1 = self._showdown_value(1, self.showdown_indices)
+        showdown_values_p0 = self._showdown_value(0)
+        showdown_values_p1 = self._showdown_value(1)
         self.latest_values[self.showdown_indices, 0] = showdown_values_p0
         self.latest_values[self.showdown_indices, 1] = showdown_values_p1
 

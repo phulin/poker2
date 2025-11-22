@@ -15,24 +15,15 @@ from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
-from alphaholdem.search.cfr_evaluator import CFREvaluator, PublicBeliefState
+from alphaholdem.search.cfr_evaluator import (
+    CFREvaluator,
+    HandRankData,
+    PublicBeliefState,
+)
 from alphaholdem.search.chance_node_helper import ChanceNodeHelper
 from alphaholdem.utils.profiling import profile
 
 T_WARM = 15
-
-
-@dataclass
-class HandRankData:
-    sorted_indices: torch.Tensor
-    inv_sorted: torch.Tensor
-    H: torch.Tensor
-    card_ok: torch.Tensor
-    hand_ok_mask: torch.Tensor
-    hand_ok_mask_sorted: torch.Tensor
-    hands_c1c2_sorted: torch.Tensor
-    L_idx: torch.Tensor
-    R_idx: torch.Tensor
 
 
 class RebelCFREvaluator(CFREvaluator):
@@ -434,6 +425,7 @@ class RebelCFREvaluator(CFREvaluator):
             child_count_dest > 0, 1.0 / child_count_dest, 0.0
         )
 
+        self._init_hand_rank_data()
         self.stats["evaluator_street"] = (
             self.env.street[self.valid_mask].float().mean().item()
         )

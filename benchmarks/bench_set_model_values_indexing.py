@@ -289,14 +289,25 @@ def verify_correctness(
 
     # Compare results
     try:
+        # Synchronize CUDA operations before comparison
+        synchronize_device_if_needed(device)
+
+        # Use relaxed tolerances for CUDA due to floating point precision differences
+        rtol = 1e-4 if device.type == "cuda" else 1e-5
+        atol = 1e-5 if device.type == "cuda" else 1e-6
+
         assert_close(
             evaluator1.latest_values,
             evaluator2.latest_values,
+            rtol=rtol,
+            atol=atol,
             msg="latest_values should match",
         )
         assert_close(
             evaluator1.last_model_values,
             evaluator2.last_model_values,
+            rtol=rtol,
+            atol=atol,
             msg="last_model_values should match",
         )
         print("✓ Correctness check passed: both approaches produce identical results")
@@ -493,14 +504,25 @@ def run_benchmark_compile(
             evaluator_test2.latest_values = new_vals2.clone()
             evaluator_test2.last_model_values = last_vals2.clone()
 
+            # Synchronize CUDA operations before comparison
+            synchronize_device_if_needed(device)
+
+            # Use relaxed tolerances for CUDA due to floating point precision differences
+            rtol = 1e-4 if device.type == "cuda" else 1e-5
+            atol = 1e-5 if device.type == "cuda" else 1e-6
+
             assert_close(
                 evaluator_test1.latest_values,
                 evaluator_test2.latest_values,
+                rtol=rtol,
+                atol=atol,
                 msg=f"latest_values should match for mode {mode}",
             )
             assert_close(
                 evaluator_test1.last_model_values,
                 evaluator_test2.last_model_values,
+                rtol=rtol,
+                atol=atol,
                 msg=f"last_model_values should match for mode {mode}",
             )
         print(

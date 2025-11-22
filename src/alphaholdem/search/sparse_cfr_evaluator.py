@@ -1,8 +1,4 @@
-from dataclasses import dataclass
-from typing import Optional
-
 import torch
-import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import Config
 from alphaholdem.env.card_utils import NUM_HANDS, combo_to_onehot_tensor
@@ -11,7 +7,11 @@ from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
-from alphaholdem.search.cfr_evaluator import CFREvaluator, PublicBeliefState
+from alphaholdem.search.cfr_evaluator import (
+    CFREvaluator,
+    HandRankData,
+    PublicBeliefState,
+)
 from alphaholdem.search.chance_node_helper import ChanceNodeHelper
 from alphaholdem.utils.profiling import profile
 
@@ -61,6 +61,7 @@ class SparseCFREvaluator(CFREvaluator):
             model=self.model,
         )
         self.stats: dict[str, float] = {}
+        self.hand_rank_data: HandRankData | None = None
 
         # PyTorch profiler setup
         self.profiler_enabled = False
@@ -71,7 +72,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.tree_depth = 0
         self.root_nodes = cfg.num_envs
         self.depth_offsets = [0]
-        self.env: Optional[HUNLTensorEnv] = None
+        self.env: HUNLTensorEnv | None = None
 
         self.leaf_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.new_street_mask = torch.empty(0, dtype=torch.bool, device=self.device)
@@ -107,7 +108,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.values_avg = torch.empty_like(self.latest_values)
         self.self_reach = torch.empty_like(self.beliefs)
         self.self_reach_avg = torch.empty_like(self.beliefs)
-        self.last_model_values: Optional[torch.Tensor] = None
+        self.last_model_values: torch.Tensor | None = None
 
         self.policy_probs = torch.empty(
             0, NUM_HANDS, dtype=self.float_dtype, device=self.device
@@ -117,14 +118,12 @@ class SparseCFREvaluator(CFREvaluator):
         self.cumulative_regrets = torch.empty_like(self.policy_probs)
         self.regret_weight_sums = torch.empty_like(self.policy_probs)
 
-        self.feature_encoder: Optional[RebelFeatureEncoder | BetterFeatureEncoder] = (
-            None
-        )
+        self.feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder | None = None
 
         self.sampled_leaf_indices = torch.empty(0, dtype=torch.long, device=self.device)
         self.t_sample = torch.empty(0, dtype=torch.long, device=self.device)
         self.sample_count = 0
-        self.next_pbs = None
+        self.next_pbs: PublicBeliefState | None = None
         self.next_pbs_idx = 0
 
     @profile
@@ -324,6 +323,7 @@ class SparseCFREvaluator(CFREvaluator):
                 env=self.env, device=self.device, dtype=self.float_dtype
             )
 
+        self._init_hand_rank_data()
         self.stats["evaluator_street"] = self.env.street.float().mean().item()
 
     def _mask_invalid(self, tensor: torch.Tensor) -> None:
