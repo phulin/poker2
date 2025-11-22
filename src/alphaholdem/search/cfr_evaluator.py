@@ -449,7 +449,7 @@ class CFREvaluator(ABC):
         )
 
     @torch.compile
-    def _showdown_value(self, hero: int) -> torch.Tensor:
+    def _showdown_value(self, beliefs: torch.Tensor, hero: int) -> torch.Tensor:
         """
         Exact river showdown EV using rank-CDF + blocker correction.
         Returns per-hand EV [N, 1326] (unsorted/original hand order) per env.
@@ -474,7 +474,6 @@ class CFREvaluator(ABC):
         # --- Beliefs & boards ---
         # Showdown value always uses the normal beliefs, not the average beliefs.
         # We store it in latest_values which always corresponds to non-average beliefs.
-        beliefs = self.beliefs[indices]  # (M,2,1326)
         b_opp = beliefs[:, villain, :].to(dtype)  # (M,1326)
 
         sorted_indices = self.hand_rank_data.sorted_indices
@@ -896,8 +895,9 @@ class CFREvaluator(ABC):
         self.last_model_values = last_model_values.clone()
 
         # Set showdown values
-        showdown_values_p0 = self._showdown_value(0)
-        showdown_values_p1 = self._showdown_value(1)
+        showdown_beliefs = beliefs[self.showdown_indices]
+        showdown_values_p0 = self._showdown_value(showdown_beliefs, 0)
+        showdown_values_p1 = self._showdown_value(showdown_beliefs, 1)
         self.latest_values[self.showdown_indices, 0] = showdown_values_p0
         self.latest_values[self.showdown_indices, 1] = showdown_values_p1
 
