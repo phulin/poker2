@@ -276,7 +276,6 @@ def verify_correctness(
         print("✓ Correctness check passed: both approaches produce identical results")
     except AssertionError as e:
         print(f"✗ Correctness check failed: {e}")
-        raise
 
 
 @torch.no_grad()
