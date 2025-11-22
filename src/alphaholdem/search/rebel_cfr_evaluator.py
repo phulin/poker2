@@ -397,6 +397,8 @@ class RebelCFREvaluator(CFREvaluator):
         top = self.depth_offsets[-2]
         self.leaf_mask[top:] = self.valid_mask[top:]
         self.legal_mask = self.env.legal_bins_mask()
+        model_mask = self.leaf_mask & ~self.env.done
+        self.model_indices = torch.where(model_mask)[0]
         self.child_mask[:top] = self._pull_back(self.valid_mask)
         self.child_count = self.child_mask.sum(dim=-1)
         valid_child_masks = self.child_mask[self.valid_mask & ~self.leaf_mask]

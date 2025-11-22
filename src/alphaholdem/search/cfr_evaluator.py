@@ -105,6 +105,7 @@ class CFREvaluator(ABC):
     child_mask: torch.Tensor
     child_count: torch.Tensor
     new_street_mask: torch.Tensor
+    model_indices: torch.Tensor
     allowed_hands: torch.Tensor
     allowed_hands_prob: torch.Tensor
     policy_probs: torch.Tensor
@@ -818,29 +819,18 @@ class CFREvaluator(ABC):
                 hand_value_sums.masked_fill_(ignore_mask[:, None, None], 0.0)
             hand_values -= hand_value_sums
 
-    @torch.no_grad()
-    def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
-        """Set leaf values from model or terminal states."""
-
+    def _set_model_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
         # Set model values for non-terminal leaves
-        model_mask = self.leaf_mask & ~self.env.done
         if beliefs is None:
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
-        model_indices = torch.where(model_mask)[0]
         features = self.feature_encoder.encode(
             beliefs, pre_chance_node=self.new_street_mask
         )
-        model_output = self.model(features[model_indices])
-
-        # Set showdown values
-        showdown_values_p0 = self._showdown_value(0, self.showdown_indices)
-        showdown_values_p1 = self._showdown_value(1, self.showdown_indices)
-        self.latest_values[self.showdown_indices, 0] = showdown_values_p0
-        self.latest_values[self.showdown_indices, 1] = showdown_values_p1
+        model_output = self.model(features[self.model_indices])
 
         if not self.cfr_avg or t <= 1 or self.last_model_values is None:
-            self.latest_values[model_indices] = model_output.hand_values
+            self.latest_values[self.model_indices] = model_output.hand_values
         else:
             # Mix with previous values (CFR-AVG style)
             old, new = self._get_mixing_weights(t)
@@ -848,11 +838,23 @@ class CFREvaluator(ABC):
                 old + new
             ) * model_output.hand_values - old * self.last_model_values
             unmixed /= new
-            self.latest_values[model_indices] = unmixed
+            self.latest_values[self.model_indices] = unmixed
             self._maybe_enforce_zero_sum(
                 self.latest_values, self.beliefs, ignore_mask=self.env.done
             )
         self.last_model_values = model_output.hand_values
+
+    @torch.no_grad()
+    def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
+        """Set leaf values from model or terminal states."""
+
+        self._set_model_values(t, beliefs)
+
+        # Set showdown values
+        showdown_values_p0 = self._showdown_value(0, self.showdown_indices)
+        showdown_values_p1 = self._showdown_value(1, self.showdown_indices)
+        self.latest_values[self.showdown_indices, 0] = showdown_values_p0
+        self.latest_values[self.showdown_indices, 1] = showdown_values_p1
 
     def compute_expected_values(
         self,
