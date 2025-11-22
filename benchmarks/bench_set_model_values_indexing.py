@@ -471,7 +471,6 @@ def run_benchmark_compile(
         )
     except Exception as e:
         print(f"✗ Correctness check failed: {e}")
-        return
 
     # Benchmark current approach
     print("\nBenchmarking current approach (uncompiled)...")
