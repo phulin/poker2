@@ -249,7 +249,12 @@ class CFREvaluator(ABC):
         logits = model_output.policy_logits
         legal_masks = self.legal_mask[indices]
         masked_logits = compute_masked_logits(logits, legal_masks[:, None, :])
-        return F.softmax(masked_logits, dim=-1)
+        probs = F.softmax(masked_logits, dim=-1)
+        probs.masked_fill_(
+            (legal_masks.sum(dim=1) == 0)[:, None, None],
+            0.0,
+        )
+        return probs
 
     def _calculate_reach_weights(
         self, target: torch.Tensor, policy: torch.Tensor
