@@ -102,6 +102,18 @@ def create_config() -> Config:
     return cfg
 
 
+def step_env_to_beginning_of_turn(env: HUNLTensorEnv, num_checks: int = 6) -> None:
+    """Step the environment by checking num_checks times."""
+    # Get legal actions once
+    amounts, mask = env.legal_bins_amounts_and_mask(env.default_bet_bins)
+    # Action index 1 = check/call
+    action_indices = torch.full((env.N,), 1, dtype=torch.long, device=env.device)
+
+    # Just check num_checks times for each env
+    for _ in range(num_checks):
+        env.step_bins(action_indices, amounts, mask, env.default_bet_bins)
+
+
 def setup_evaluator(
     cfg: Config,
     model: BetterFFN,
@@ -120,6 +132,8 @@ def setup_evaluator(
         flop_showdown=cfg.env.flop_showdown,
     )
     env.reset()
+    # Step to beginning of turn by checking 6 times first
+    step_env_to_beginning_of_turn(env, num_checks=6)
     root_indices = torch.arange(num_envs, dtype=torch.long, device=device)
 
     evaluator = SparseCFREvaluator(
