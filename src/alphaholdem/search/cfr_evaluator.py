@@ -817,7 +817,7 @@ class CFREvaluator(ABC):
             )
             if ignore_mask is not None:
                 hand_value_sums.masked_fill_(ignore_mask[:, None, None], 0.0)
-            hand_values -= hand_value_sums
+            hand_values.sub_(hand_value_sums)
 
     def _set_model_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
         # Set model values for non-terminal leaves
