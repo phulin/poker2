@@ -465,6 +465,36 @@ def run_benchmark(
 
 
 @torch.no_grad()
+def _set_leaf_values_wrapper(
+    evaluator: SparseCFREvaluator,
+    t: int,
+    beliefs: torch.Tensor | None = None,
+    compiled_showdown_value=None,
+) -> None:
+    """Wrapper for set_leaf_values that can use compiled _showdown_value."""
+    # Call _set_model_values
+    new_vals, last_vals = _set_model_values_current(evaluator, t, beliefs)
+    evaluator.latest_values = new_vals
+    evaluator.last_model_values = last_vals
+
+    # Set showdown values - use compiled version if provided
+    if compiled_showdown_value is not None:
+        showdown_values_p0 = compiled_showdown_value(evaluator, 0)
+        showdown_values_p1 = compiled_showdown_value(evaluator, 1)
+    else:
+        showdown_values_p0 = evaluator._showdown_value(0)
+        showdown_values_p1 = evaluator._showdown_value(1)
+    evaluator.latest_values[evaluator.showdown_indices, 0] = showdown_values_p0
+    evaluator.latest_values[evaluator.showdown_indices, 1] = showdown_values_p1
+
+
+@torch.no_grad()
+def _showdown_value_wrapper(evaluator: SparseCFREvaluator, hero: int) -> torch.Tensor:
+    """Wrapper for _showdown_value that can be compiled."""
+    return evaluator._showdown_value(hero)
+
+
+@torch.no_grad()
 def run_benchmark_compile(
     device: torch.device,
     depth: int,
@@ -490,6 +520,14 @@ def run_benchmark_compile(
         eval_compiled.beliefs_avg.copy_(evaluator_current.beliefs_avg)
         evaluators_compiled[mode] = eval_compiled
 
+    # Setup evaluators for testing with compiled showdown_value
+    evaluators_compiled_with_showdown = {}
+    for mode in ["default", "reduce-overhead"]:
+        eval_compiled, _, _ = setup_evaluator(cfg, model, device, num_envs)
+        eval_compiled.beliefs.copy_(evaluator_current.beliefs)
+        eval_compiled.beliefs_avg.copy_(evaluator_current.beliefs_avg)
+        evaluators_compiled_with_showdown[mode] = eval_compiled
+
     t = 2  # Use t > 1 to test the mixing path
 
     # Verify correctness first
@@ -499,6 +537,7 @@ def run_benchmark_compile(
         evaluator_test1, _, _ = setup_evaluator(cfg, model, device, num_envs)
         for mode in ["default", "reduce-overhead"]:
             evaluator_test2, _, _ = setup_evaluator(cfg, model, device, num_envs)
+            evaluator_test3, _, _ = setup_evaluator(cfg, model, device, num_envs)
             evaluator_test2.beliefs.copy_(evaluator_test1.beliefs)
             evaluator_test2.beliefs_avg.copy_(evaluator_test1.beliefs_avg)
             evaluator_test2.last_model_values = (
@@ -506,17 +545,49 @@ def run_benchmark_compile(
                 if evaluator_test1.last_model_values is not None
                 else None
             )
+            evaluator_test3.beliefs.copy_(evaluator_test1.beliefs)
+            evaluator_test3.beliefs_avg.copy_(evaluator_test1.beliefs_avg)
+            evaluator_test3.last_model_values = (
+                evaluator_test1.last_model_values.clone()
+                if evaluator_test1.last_model_values is not None
+                else None
+            )
 
-            # Compile the function
-            compiled_fn = torch.compile(_set_model_values_current, mode=mode)
+            # Compile the functions
+            compiled_set_model = torch.compile(_set_model_values_current, mode=mode)
+            compiled_showdown = torch.compile(_showdown_value_wrapper, mode=mode)
 
-            new_vals1, last_vals1 = _set_model_values_current(evaluator_test1, t)
-            evaluator_test1.latest_values = new_vals1.clone()
-            evaluator_test1.last_model_values = last_vals1.clone()
+            # Test 1: uncompiled
+            _set_leaf_values_wrapper(evaluator_test1, t)
+            result1 = evaluator_test1.latest_values.clone()
 
-            new_vals2, last_vals2 = compiled_fn(evaluator_test2, t)
-            evaluator_test2.latest_values = new_vals2.clone()
-            evaluator_test2.last_model_values = last_vals2.clone()
+            # Test 2: compiled set_model_values, uncompiled showdown_value
+            new_vals, last_vals = compiled_set_model(evaluator_test2, t)
+            evaluator_test2.latest_values = new_vals.clone()
+            evaluator_test2.last_model_values = last_vals.clone()
+            showdown_values_p0 = evaluator_test2._showdown_value(0)
+            showdown_values_p1 = evaluator_test2._showdown_value(1)
+            evaluator_test2.latest_values[evaluator_test2.showdown_indices, 0] = (
+                showdown_values_p0
+            )
+            evaluator_test2.latest_values[evaluator_test2.showdown_indices, 1] = (
+                showdown_values_p1
+            )
+            result2 = evaluator_test2.latest_values.clone()
+
+            # Test 3: compiled set_model_values, compiled showdown_value
+            new_vals, last_vals = compiled_set_model(evaluator_test3, t)
+            evaluator_test3.latest_values = new_vals.clone()
+            evaluator_test3.last_model_values = last_vals.clone()
+            showdown_values_p0 = compiled_showdown(evaluator_test3, 0)
+            showdown_values_p1 = compiled_showdown(evaluator_test3, 1)
+            evaluator_test3.latest_values[evaluator_test3.showdown_indices, 0] = (
+                showdown_values_p0
+            )
+            evaluator_test3.latest_values[evaluator_test3.showdown_indices, 1] = (
+                showdown_values_p1
+            )
+            result3 = evaluator_test3.latest_values.clone()
 
             # Synchronize CUDA operations before comparison
             synchronize_device_if_needed(device)
@@ -526,18 +597,18 @@ def run_benchmark_compile(
             atol = 1e-5 if device.type == "cuda" else 1e-6
 
             assert_close(
-                evaluator_test1.latest_values,
-                evaluator_test2.latest_values,
+                result1,
+                result2,
                 rtol=rtol,
                 atol=atol,
-                msg=f"latest_values should match for mode {mode}",
+                msg=f"latest_values should match (uncompiled vs compiled set_model) for mode {mode}",
             )
             assert_close(
-                evaluator_test1.last_model_values,
-                evaluator_test2.last_model_values,
+                result1,
+                result3,
                 rtol=rtol,
                 atol=atol,
-                msg=f"last_model_values should match for mode {mode}",
+                msg=f"latest_values should match (uncompiled vs compiled both) for mode {mode}",
             )
         print(
             "✓ Correctness check passed: all compiled modes produce identical results"
@@ -545,31 +616,37 @@ def run_benchmark_compile(
     except Exception as e:
         print(f"✗ Correctness check failed: {e}")
 
-    # Benchmark current approach
+    # Benchmark current approach (uncompiled)
     print("\nBenchmarking current approach (uncompiled)...")
     synchronize_device_if_needed(device)
     start = time.perf_counter()
     for _ in range(repeats):
-        new_vals, last_vals = _set_model_values_current(evaluator_current, t)
-        evaluator_current.latest_values = new_vals.clone()
-        evaluator_current.last_model_values = last_vals.clone()
+        _set_leaf_values_wrapper(evaluator_current, t)
     synchronize_device_if_needed(device)
     time_current = time.perf_counter() - start
 
-    # Benchmark each compilation mode
-    results = {}
+    # Benchmark each compilation mode (set_model_values only)
+    results_set_model = {}
     for mode in ["default", "reduce-overhead"]:
-        print(f"\nBenchmarking compiled approach (mode: {mode})...")
+        print(f"\nBenchmarking compiled set_model_values only (mode: {mode})...")
         evaluator_compiled = evaluators_compiled[mode]
 
         synchronize_device_if_needed(device)
         start = time.perf_counter()
-        compiled_fn = torch.compile(_set_model_values_current, mode=mode)
+        compiled_set_model = torch.compile(_set_model_values_current, mode=mode)
         # Warmup to trigger compilation
         for _ in range(3):
-            new_vals, last_vals = compiled_fn(evaluator_compiled, t)
+            new_vals, last_vals = compiled_set_model(evaluator_compiled, t)
             evaluator_compiled.latest_values = new_vals.clone()
             evaluator_compiled.last_model_values = last_vals.clone()
+            showdown_values_p0 = evaluator_compiled._showdown_value(0)
+            showdown_values_p1 = evaluator_compiled._showdown_value(1)
+            evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 0] = (
+                showdown_values_p0
+            )
+            evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 1] = (
+                showdown_values_p1
+            )
         synchronize_device_if_needed(device)
         compilation_time = time.perf_counter() - start
 
@@ -577,14 +654,75 @@ def run_benchmark_compile(
         synchronize_device_if_needed(device)
         start = time.perf_counter()
         for _ in range(repeats):
-            new_vals, last_vals = compiled_fn(evaluator_compiled, t)
+            new_vals, last_vals = compiled_set_model(evaluator_compiled, t)
             evaluator_compiled.latest_values = new_vals.clone()
             evaluator_compiled.last_model_values = last_vals.clone()
+            showdown_values_p0 = evaluator_compiled._showdown_value(0)
+            showdown_values_p1 = evaluator_compiled._showdown_value(1)
+            evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 0] = (
+                showdown_values_p0
+            )
+            evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 1] = (
+                showdown_values_p1
+            )
         synchronize_device_if_needed(device)
         execution_time = time.perf_counter() - start
 
         time_compiled_total = compilation_time + execution_time
-        results[mode] = {
+        results_set_model[mode] = {
+            "compilation_time": compilation_time,
+            "execution_time": execution_time,
+            "total_time": time_compiled_total,
+        }
+
+    # Benchmark each compilation mode (set_model_values + compiled showdown_value)
+    results_both = {}
+    for mode in ["default", "reduce-overhead"]:
+        print(
+            f"\nBenchmarking compiled set_model_values + compiled showdown_value (mode: {mode})..."
+        )
+        evaluator_compiled = evaluators_compiled_with_showdown[mode]
+
+        synchronize_device_if_needed(device)
+        start = time.perf_counter()
+        compiled_set_model = torch.compile(_set_model_values_current, mode=mode)
+        compiled_showdown = torch.compile(_showdown_value_wrapper, mode=mode)
+        # Warmup to trigger compilation
+        for _ in range(3):
+            new_vals, last_vals = compiled_set_model(evaluator_compiled, t)
+            evaluator_compiled.latest_values = new_vals.clone()
+            evaluator_compiled.last_model_values = last_vals.clone()
+            showdown_values_p0 = compiled_showdown(evaluator_compiled, 0)
+            showdown_values_p1 = compiled_showdown(evaluator_compiled, 1)
+            evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 0] = (
+                showdown_values_p0
+            )
+            evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 1] = (
+                showdown_values_p1
+            )
+        synchronize_device_if_needed(device)
+        compilation_time = time.perf_counter() - start
+
+        # Actual benchmark with compiled functions
+        synchronize_device_if_needed(device)
+        start = time.perf_counter()
+        for _ in range(repeats):
+            new_vals, last_vals = compiled_set_model(evaluator_compiled, t)
+            evaluator_compiled.latest_values = new_vals.clone()
+            evaluator_compiled.last_model_values = last_vals.clone()
+            showdown_values_p0 = compiled_showdown(evaluator_compiled, 0)
+            showdown_values_p1 = compiled_showdown(evaluator_compiled, 1)
+            evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 0] = (
+                showdown_values_p0
+            )
+            evaluator_compiled.latest_values[evaluator_compiled.showdown_indices, 1] = (
+                showdown_values_p1
+            )
+        synchronize_device_if_needed(device)
+        execution_time = time.perf_counter() - start
+
+        time_compiled_total = compilation_time + execution_time
+        results_both[mode] = {
             "compilation_time": compilation_time,
             "execution_time": execution_time,
             "total_time": time_compiled_total,
@@ -604,8 +742,11 @@ def run_benchmark_compile(
     )
     print()
 
+    print("=" * 60)
+    print("Compiled set_model_values only (showdown_value uncompiled):")
+    print("=" * 60)
     for mode in ["default", "reduce-overhead"]:
-        r = results[mode]
+        r = results_set_model[mode]
         print(f"  {mode:20s}:")
         print(
             f"    Total:                 {r['total_time']:.6f} s total, {r['total_time'] / repeats:.6e} s/iter"
@@ -628,10 +769,38 @@ def run_benchmark_compile(
         )
         print()
 
-    # Compare modes
-    print("Mode comparison (execution time only):")
-    best_execution = min(results.items(), key=lambda x: x[1]["execution_time"])
-    worst_execution = max(results.items(), key=lambda x: x[1]["execution_time"])
+    print("=" * 60)
+    print("Compiled set_model_values + compiled showdown_value:")
+    print("=" * 60)
+    for mode in ["default", "reduce-overhead"]:
+        r = results_both[mode]
+        print(f"  {mode:20s}:")
+        print(
+            f"    Total:                 {r['total_time']:.6f} s total, {r['total_time'] / repeats:.6e} s/iter"
+        )
+        print(f"    Compilation time:     {r['compilation_time']:.6f} s")
+        print(
+            f"    Execution time:       {r['execution_time']:.6f} s total, {r['execution_time'] / repeats:.6e} s/iter"
+        )
+        speedup_total = time_current / r["total_time"] if r["total_time"] > 0 else 0
+        speedup_execution = (
+            time_current / r["execution_time"]
+            if r["execution_time"] > 0
+            else float("inf")
+        )
+        print(
+            f"    Speedup (total):       {speedup_total:.2f}x ({'Compiled' if speedup_total > 1 else 'Uncompiled'} is faster)"
+        )
+        print(
+            f"    Speedup (execution):   {speedup_execution:.2f}x ({'Compiled' if speedup_execution > 1 else 'Uncompiled'} is faster)"
+        )
+        print()
+
+    # Compare modes - set_model_values only
+    print("Mode comparison - set_model_values only (execution time):")
+    all_results_set_model = list(results_set_model.items())
+    best_execution = min(all_results_set_model, key=lambda x: x[1]["execution_time"])
+    worst_execution = max(all_results_set_model, key=lambda x: x[1]["execution_time"])
     print(
         f"  Fastest: {best_execution[0]} ({best_execution[1]['execution_time'] / repeats:.6e} s/iter)"
     )
@@ -642,6 +811,35 @@ def run_benchmark_compile(
         print(
             f"  Ratio:   {worst_execution[1]['execution_time'] / best_execution[1]['execution_time']:.2f}x"
         )
+    print()
+
+    # Compare modes - both compiled
+    print("Mode comparison - both compiled (execution time):")
+    all_results_both = list(results_both.items())
+    best_execution = min(all_results_both, key=lambda x: x[1]["execution_time"])
+    worst_execution = max(all_results_both, key=lambda x: x[1]["execution_time"])
+    print(
+        f"  Fastest: {best_execution[0]} ({best_execution[1]['execution_time'] / repeats:.6e} s/iter)"
+    )
+    print(
+        f"  Slowest: {worst_execution[0]} ({worst_execution[1]['execution_time'] / repeats:.6e} s/iter)"
+    )
+    if worst_execution[1]["execution_time"] > 0:
+        print(
+            f"  Ratio:   {worst_execution[1]['execution_time'] / best_execution[1]['execution_time']:.2f}x"
+        )
+    print()
+
+    # Compare impact of compiling showdown_value
+    print("Impact of compiling showdown_value (execution time):")
+    for mode in ["default", "reduce-overhead"]:
+        r_set_model = results_set_model[mode]
+        r_both = results_both[mode]
+        if r_set_model["execution_time"] > 0:
+            ratio = r_set_model["execution_time"] / r_both["execution_time"]
+            print(
+                f"  {mode:20s}: {ratio:.2f}x {'faster' if ratio > 1 else 'slower'} with compiled showdown_value"
+            )
 
 
 def main() -> None:
