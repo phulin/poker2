@@ -137,7 +137,7 @@ def _set_model_values_current(
     evaluator: SparseCFREvaluator,
     t: int,
     beliefs: torch.Tensor | None = None,
-) -> None:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Current approach: encode all features, then index with model_indices."""
     if beliefs is None:
         beliefs = evaluator.beliefs_avg if evaluator.cfr_avg else evaluator.beliefs
@@ -146,8 +146,7 @@ def _set_model_values_current(
         beliefs, pre_chance_node=evaluator.new_street_mask
     )
     model_output = evaluator.model(features[evaluator.model_indices])
-    # Clone immediately to prevent CUDA graph overwrite issues
-    hand_values = model_output.hand_values.clone()
+    hand_values = model_output.hand_values
 
     if not evaluator.cfr_avg or t <= 1 or evaluator.last_model_values is None:
         # Use torch.index_copy for out-of-place operation (torch.compile compatible)
@@ -157,7 +156,6 @@ def _set_model_values_current(
             evaluator.model_indices,
             hand_values,
         )
-        evaluator.latest_values = new_values
     else:
         old, new = evaluator._get_mixing_weights(t)
         unmixed = (old + new) * hand_values - old * evaluator.last_model_values
@@ -169,12 +167,12 @@ def _set_model_values_current(
             evaluator.model_indices,
             unmixed,
         )
-        evaluator.latest_values = evaluator._maybe_enforce_zero_sum(
+        new_values = evaluator._maybe_enforce_zero_sum(
             new_values,
             evaluator.beliefs,
             ignore_mask=evaluator.env.done,
         )
-    evaluator.last_model_values = hand_values
+    return new_values, hand_values
 
 
 @torch.no_grad()
@@ -184,7 +182,7 @@ def _set_model_values_alternative(
     beliefs: torch.Tensor | None = None,
     temp_encoder=None,
     indexed_env=None,
-) -> None:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Alternative approach: index beliefs/new_street_mask first, then encode only those."""
     if beliefs is None:
         beliefs = evaluator.beliefs_avg if evaluator.cfr_avg else evaluator.beliefs
@@ -199,8 +197,7 @@ def _set_model_values_alternative(
         indexed_beliefs, pre_chance_node=indexed_new_street_mask
     )
     model_output = evaluator.model(features)
-    # Clone immediately to prevent CUDA graph overwrite issues
-    hand_values = model_output.hand_values.clone()
+    hand_values = model_output.hand_values
 
     if not evaluator.cfr_avg or t <= 1 or evaluator.last_model_values is None:
         # Use torch.index_copy for out-of-place operation (torch.compile compatible)
@@ -210,7 +207,6 @@ def _set_model_values_alternative(
             evaluator.model_indices,
             hand_values,
         )
-        evaluator.latest_values = new_values
     else:
         old, new = evaluator._get_mixing_weights(t)
         unmixed = (old + new) * hand_values - old * evaluator.last_model_values
@@ -222,12 +218,12 @@ def _set_model_values_alternative(
             evaluator.model_indices,
             unmixed,
         )
-        evaluator.latest_values = evaluator._maybe_enforce_zero_sum(
+        new_values = evaluator._maybe_enforce_zero_sum(
             new_values,
             evaluator.beliefs,
             ignore_mask=evaluator.env.done,
         )
-    evaluator.last_model_values = hand_values
+    return new_values, hand_values
 
 
 @torch.no_grad()
@@ -281,10 +277,15 @@ def verify_correctness(
 
     # Run both approaches
     t = 2  # Use t > 1 to test the mixing path
-    _set_model_values_current(evaluator1, t)
-    _set_model_values_alternative(
+    new_values1, last_model_values1 = _set_model_values_current(evaluator1, t)
+    evaluator1.latest_values = new_values1
+    evaluator1.last_model_values = last_model_values1.clone()
+
+    new_values2, last_model_values2 = _set_model_values_alternative(
         evaluator2, t, temp_encoder=temp_encoder, indexed_env=indexed_env
     )
+    evaluator2.latest_values = new_values2
+    evaluator2.last_model_values = last_model_values2.clone()
 
     # Compare results
     try:
@@ -315,14 +316,18 @@ def benchmark_approach(
     """Benchmark a single approach."""
     # Warmup
     for _ in range(3):
-        approach_fn(evaluator, t, **kwargs)
+        new_vals, last_vals = approach_fn(evaluator, t, **kwargs)
+        evaluator.latest_values = new_vals
+        evaluator.last_model_values = last_vals.clone()
 
     synchronize_device_if_needed(device)
 
     # Actual benchmark
     start = time.perf_counter()
     for _ in range(repeats):
-        approach_fn(evaluator, t, **kwargs)
+        new_vals, last_vals = approach_fn(evaluator, t, **kwargs)
+        evaluator.latest_values = new_vals
+        evaluator.last_model_values = last_vals.clone()
     synchronize_device_if_needed(device)
     end = time.perf_counter()
 
@@ -480,8 +485,13 @@ def run_benchmark_compile(
             # Compile the function
             compiled_fn = torch.compile(_set_model_values_current, mode=mode)
 
-            _set_model_values_current(evaluator_test1, t)
-            compiled_fn(evaluator_test2, t)
+            new_vals1, last_vals1 = _set_model_values_current(evaluator_test1, t)
+            evaluator_test1.latest_values = new_vals1
+            evaluator_test1.last_model_values = last_vals1.clone()
+
+            new_vals2, last_vals2 = compiled_fn(evaluator_test2, t)
+            evaluator_test2.latest_values = new_vals2
+            evaluator_test2.last_model_values = last_vals2.clone()
 
             assert_close(
                 evaluator_test1.latest_values,
@@ -504,7 +514,9 @@ def run_benchmark_compile(
     synchronize_device_if_needed(device)
     start = time.perf_counter()
     for _ in range(repeats):
-        _set_model_values_current(evaluator_current, t)
+        new_vals, last_vals = _set_model_values_current(evaluator_current, t)
+        evaluator_current.latest_values = new_vals
+        evaluator_current.last_model_values = last_vals.clone()
     synchronize_device_if_needed(device)
     time_current = time.perf_counter() - start
 
@@ -519,7 +531,9 @@ def run_benchmark_compile(
         compiled_fn = torch.compile(_set_model_values_current, mode=mode)
         # Warmup to trigger compilation
         for _ in range(3):
-            compiled_fn(evaluator_compiled, t)
+            new_vals, last_vals = compiled_fn(evaluator_compiled, t)
+            evaluator_compiled.latest_values = new_vals
+            evaluator_compiled.last_model_values = last_vals.clone()
         synchronize_device_if_needed(device)
         compilation_time = time.perf_counter() - start
 
@@ -527,7 +541,9 @@ def run_benchmark_compile(
         synchronize_device_if_needed(device)
         start = time.perf_counter()
         for _ in range(repeats):
-            compiled_fn(evaluator_compiled, t)
+            new_vals, last_vals = compiled_fn(evaluator_compiled, t)
+            evaluator_compiled.latest_values = new_vals
+            evaluator_compiled.last_model_values = last_vals.clone()
         synchronize_device_if_needed(device)
         execution_time = time.perf_counter() - start
 
