@@ -132,6 +132,7 @@ def setup_evaluator(
     return evaluator, env, root_indices
 
 
+@torch.no_grad()
 def _set_model_values_current(
     evaluator: SparseCFREvaluator,
     t: int,
@@ -165,6 +166,7 @@ def _set_model_values_current(
     evaluator.last_model_values = model_output.hand_values
 
 
+@torch.no_grad()
 def _set_model_values_alternative(
     evaluator: SparseCFREvaluator,
     t: int,
@@ -206,6 +208,7 @@ def _set_model_values_alternative(
     evaluator.last_model_values = model_output.hand_values
 
 
+@torch.no_grad()
 def verify_correctness(
     cfg: Config,
     model: BetterFFN,
@@ -304,6 +307,7 @@ def benchmark_approach(
     return end - start
 
 
+@torch.no_grad()
 def run_benchmark(
     device: torch.device,
     depth: int,
@@ -408,6 +412,7 @@ def run_benchmark(
         print(f"  Speedup: N/A")
 
 
+@torch.no_grad()
 def run_benchmark_compile(
     device: torch.device,
     depth: int,
