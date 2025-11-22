@@ -1335,7 +1335,7 @@ class CFREvaluator(ABC):
                 reachable_nodes, diff_sum_nodes / reachable_hand_count, 0.0
             )
             node_delta_mean = node_delta.sum() / reachable_nodes.sum()
-            self.stats[f"cfr_delta.{t + 1}"] = node_delta_mean.item()
+            self.stats[f"cfr_delta.{percentile}"] = node_delta_mean.item()
 
     def _record_cfr_entropy(self) -> None:
         """Record the entropy of the policy."""
