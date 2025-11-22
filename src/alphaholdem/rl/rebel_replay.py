@@ -22,12 +22,16 @@ class RebelReplayBuffer:
         policy_targets: bool = True,
         value_targets: bool = True,
         dtype: torch.dtype = torch.float32,
+        decimate: float | None = None,
+        generator: Optional[torch.Generator] = None,
     ) -> None:
         self.capacity = capacity
         self.num_actions = num_actions
         self.num_players = num_players
         self.device = device
         self.dtype = dtype
+        self.decimate = decimate
+        self.generator = generator
 
         self.features = MLPFeatures(
             context=torch.zeros(
@@ -90,6 +94,17 @@ class RebelReplayBuffer:
 
         batch = batch.to(self.device)
 
+        # Decimate if buffer is full and decimate is set
+        if self.decimate is not None and self.size == self.capacity and batch_size > 0:
+            keep_count = max(1, int(self.decimate * batch_size))
+            if keep_count < batch_size:
+                # Randomly sample indices to keep
+                indices = torch.randperm(
+                    batch_size, device=self.device, generator=self.generator
+                )[:keep_count]
+                batch = batch[indices]
+                batch_size = keep_count
+
         insert_start = self.position
         dest_indices = (
             torch.arange(batch_size, device=self.device) + insert_start
@@ -121,7 +136,6 @@ class RebelReplayBuffer:
         self,
         batch_size: int,
         stratify_streets: list[float] | None = None,
-        generator: Optional[torch.Generator] = None,
     ):
         """Uniformly sample a minibatch."""
         if self.size == 0:
@@ -130,7 +144,11 @@ class RebelReplayBuffer:
 
         if stratify_streets is None:
             idxs = torch.randint(
-                0, self.size, (batch_size,), generator=generator, device=self.device
+                0,
+                self.size,
+                (batch_size,),
+                generator=self.generator,
+                device=self.device,
             )
         else:
             streets = self.features.street[: self.size]
@@ -142,7 +160,7 @@ class RebelReplayBuffer:
             probs = stratify_tensor / bins
             all_probs = probs[streets]
             # sample without replacement
-            idxs = torch.multinomial(all_probs, batch_size, generator=generator)
+            idxs = torch.multinomial(all_probs, batch_size, generator=self.generator)
 
         # Increment sample counters for sampled indices
         self.sample_count[idxs] += 1

@@ -105,32 +105,32 @@ class RebelCFRTrainer:
         # data generation rate per training step
         self.K_value = max(1, self.batch_size // self.cfg.train.value_reuse_goal)
         # approximate number of policy samples when collecting K_value value samples
-        self.K_policy = max(
-            1, round(self.K_value * (self.num_actions / 2) ** self.cfg.search.depth)
-        )
+        policy_factor = self.K_value * (self.num_actions / 2) ** self.cfg.search.depth
 
         C_over_K = self.cfg.train.replay_buffer_batches
-        value_capacity = C_over_K * self.K_value
-        policy_capacity = C_over_K * self.K_policy
+        capacity = C_over_K * self.K_value
 
         # Replay buffers
         self.value_buffer = RebelReplayBuffer(
-            capacity=value_capacity,
+            capacity=capacity,
             num_actions=self.num_actions,
             num_players=self.num_players,
             num_context_features=num_context_features,
             device=self.buffer_device,
             policy_targets=False,
+            generator=self.buffer_rng,
         )
         # Larger policy buffer since we store more samples there
         self.policy_buffer = RebelReplayBuffer(
-            capacity=policy_capacity,
+            capacity=capacity,
             num_actions=self.num_actions,
             num_players=self.num_players,
             num_context_features=num_context_features,
             device=self.buffer_device,
             policy_targets=True,
             value_targets=False,
+            decimate=1.0 / policy_factor,
+            generator=self.buffer_rng,
         )
 
         # Optimizer & loss
