@@ -142,7 +142,7 @@ class BetterFFN(nn.Module, Model):
         hand_values_raw = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
         if self.enforce_zero_sum:
             hand_value_sums = (
-                (hand_values * player_beliefs)
+                (hand_values_raw * player_beliefs)
                 .sum(dim=2, keepdim=True)
                 .mean(dim=1, keepdim=True)
             )
