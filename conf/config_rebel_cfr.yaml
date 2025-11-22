@@ -19,7 +19,7 @@ train:
   weight_decay: 0.01
   batch_size: 1024
   episodes_per_step: 5
-  replay_buffer_batches: 32
+  replay_buffer_batches: 1024
   value_reuse_goal: 4
   value_coef: 1.0
   entropy_coef: 0.0
