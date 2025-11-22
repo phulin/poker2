@@ -84,6 +84,20 @@ class PublicBeliefState:
         assert self.beliefs.shape[0] == self.env.N
 
 
+def padded_indices(mask: torch.Tensor, alignment: int) -> torch.Tensor:
+    """Compute indices from mask, padded to a multiple of alignment by repeating the last item."""
+    indices = torch.where(mask)[0]
+    current_len = indices.numel()
+    if current_len > 0:
+        remainder = current_len % alignment
+        if remainder != 0:
+            padding_size = alignment - remainder
+            last_item = indices[-1:]
+            padding = last_item.repeat(padding_size)
+            indices = torch.cat([indices, padding])
+    return indices
+
+
 class CFREvaluator(ABC):
     """Base class for CFR evaluators with shared methods."""
 
@@ -247,18 +261,7 @@ class CFREvaluator(ABC):
             of num_envs by repeating the last item.
         """
         model_mask = self.leaf_mask & ~self.env.done
-        model_indices = torch.where(model_mask)[0]
-        # Pad model_indices to length a multiple of num_envs by repeating the last item
-        num_envs = self.root_nodes
-        current_len = model_indices.numel()
-        if current_len > 0:
-            remainder = current_len % num_envs
-            if remainder != 0:
-                padding_size = num_envs - remainder
-                last_item = model_indices[-1:]
-                padding = last_item.repeat(padding_size)
-                model_indices = torch.cat([model_indices, padding])
-        return model_indices
+        return padded_indices(model_mask, self.root_nodes)
 
     def _get_mixing_weights(self, t: int) -> torch.Tensor:
         """Get the mixing weights for the current iteration."""
@@ -443,6 +446,7 @@ class CFREvaluator(ABC):
             R_idx=R_idx,
         )
 
+    @torch.compile
     def _showdown_value(self, hero: int) -> torch.Tensor:
         """
         Exact river showdown EV using rank-CDF + blocker correction.
@@ -847,6 +851,7 @@ class CFREvaluator(ABC):
         else:
             return hand_values
 
+    @torch.compile
     def _set_model_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
         # Set model values for non-terminal leaves
         if beliefs is None:
@@ -858,7 +863,12 @@ class CFREvaluator(ABC):
         model_output = self.model(features[self.model_indices])
 
         if not self.cfr_avg or t <= 1 or self.last_model_values is None:
-            self.latest_values[self.model_indices] = model_output.hand_values
+            new_values = torch.index_copy(
+                self.latest_values,
+                0,
+                self.model_indices,
+                model_output.hand_values,
+            )
         else:
             # Mix with previous values (CFR-AVG style)
             old, new = self._get_mixing_weights(t)
@@ -866,17 +876,24 @@ class CFREvaluator(ABC):
                 old + new
             ) * model_output.hand_values - old * self.last_model_values
             unmixed /= new
-            self.latest_values[self.model_indices] = unmixed
-            self.latest_values = self._maybe_enforce_zero_sum(
-                self.latest_values, self.beliefs, ignore_mask=self.env.done
+            new_values = torch.index_copy(
+                self.latest_values,
+                0,
+                self.model_indices,
+                unmixed,
             )
-        self.last_model_values = model_output.hand_values
+            new_values = self._maybe_enforce_zero_sum(
+                new_values, self.beliefs, ignore_mask=self.env.done
+            )
+        return new_values, model_output.hand_values
 
     @torch.no_grad()
     def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
         """Set leaf values from model or terminal states."""
 
-        self._set_model_values(t, beliefs)
+        new_values, last_model_values = self._set_model_values(t, beliefs)
+        self.latest_values = new_values.clone()
+        self.last_model_values = last_model_values.clone()
 
         # Set showdown values
         showdown_values_p0 = self._showdown_value(0)

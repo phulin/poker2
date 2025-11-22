@@ -19,6 +19,7 @@ from alphaholdem.search.cfr_evaluator import (
     CFREvaluator,
     HandRankData,
     PublicBeliefState,
+    padded_indices,
 )
 from alphaholdem.search.chance_node_helper import ChanceNodeHelper
 from alphaholdem.utils.profiling import profile
@@ -401,7 +402,8 @@ class RebelCFREvaluator(CFREvaluator):
         assert (self.child_count[self.leaf_mask | ~self.valid_mask] == 0).all()
         assert (self.child_count[~self.leaf_mask & self.valid_mask] > 0).all()
 
-        self.showdown_indices = torch.where(self.env.street == 4)[0]
+        showdown_padding = max(1, self.root_nodes // 2)
+        self.showdown_indices = padded_indices(self.env.street == 4, showdown_padding)
         self.showdown_actors = self.env.to_act[self.showdown_indices]
 
         root_board_mask = self.env.board_onehot[:N].any(dim=1).reshape(N, -1).float()
