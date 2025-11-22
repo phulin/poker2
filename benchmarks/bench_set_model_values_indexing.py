@@ -615,6 +615,12 @@ def main() -> None:
 
     device = torch.device(device_str)
 
+    # Enable TF32 for CUDA (Ampere and later GPUs)
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("TF32 enabled for CUDA operations")
+
     # Parse depths
     depths = [int(d.strip()) for d in args.depths.split(",")]
 
