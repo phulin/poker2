@@ -448,7 +448,13 @@ class CFREvaluator(ABC):
             R_idx=R_idx,
         )
 
-    @torch.compile
+    @torch.compile(dynamic=True)
+    def _showdown_value_both(self, beliefs: torch.Tensor) -> torch.Tensor:
+        """Compute showdown values for both players."""
+        showdown_values_p0 = self._showdown_value(beliefs, 0)
+        showdown_values_p1 = self._showdown_value(beliefs, 1)
+        return torch.stack([showdown_values_p0, showdown_values_p1], dim=1)
+
     def _showdown_value(self, beliefs: torch.Tensor, hero: int) -> torch.Tensor:
         """
         Exact river showdown EV using rank-CDF + blocker correction.
@@ -891,15 +897,14 @@ class CFREvaluator(ABC):
         new_values, last_model_values = self._set_model_values(
             t, self.beliefs[self.model_indices], features[self.model_indices]
         )
+        # this is necessary because of torch.compile.
         self.latest_values = new_values.clone()
         self.last_model_values = last_model_values.clone()
 
         # Set showdown values
         showdown_beliefs = beliefs[self.showdown_indices]
-        showdown_values_p0 = self._showdown_value(showdown_beliefs, 0)
-        showdown_values_p1 = self._showdown_value(showdown_beliefs, 1)
-        self.latest_values[self.showdown_indices, 0] = showdown_values_p0
-        self.latest_values[self.showdown_indices, 1] = showdown_values_p1
+        showdown_values = self._showdown_value_both(showdown_beliefs)
+        self.latest_values[self.showdown_indices] = showdown_values
 
     def compute_expected_values(
         self,
