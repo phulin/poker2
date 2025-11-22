@@ -166,6 +166,8 @@ def train_rebel(cfg: Config) -> None:
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
 
+    torch._dynamo.config.recompile_limit = 32
+
     torch.manual_seed(cfg.seed)
 
     run_cm = _init_wandb(cfg, device)

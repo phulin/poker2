@@ -147,6 +147,9 @@ class RebelCFREvaluator(CFREvaluator):
         self.child_count = torch.zeros(M, dtype=torch.long, device=self.device)
         self.showdown_indices = torch.empty(0, dtype=torch.long, device=self.device)
         self.showdown_actors = torch.empty(0, dtype=torch.long, device=self.device)
+        self.showdown_potential = torch.empty(
+            0, 2, dtype=self.float_dtype, device=self.device
+        )
 
         # Set during initialize_subgame and not updated.
         self.folded_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
@@ -286,6 +289,9 @@ class RebelCFREvaluator(CFREvaluator):
         self.child_count.zero_()
         self.showdown_indices = torch.empty(0, dtype=torch.long, device=self.device)
         self.showdown_actors = torch.empty(0, dtype=torch.long, device=self.device)
+        self.showdown_potential = torch.empty(
+            0, 2, dtype=self.float_dtype, device=self.device
+        )
         self.folded_mask.zero_()
         self.folded_rewards.zero_()
         self.new_street_mask.zero_()
@@ -405,6 +411,11 @@ class RebelCFREvaluator(CFREvaluator):
         showdown_padding = max(1, self.root_nodes // 2)
         self.showdown_indices = padded_indices(self.env.street == 4, showdown_padding)
         self.showdown_actors = self.env.to_act[self.showdown_indices]
+        self.showdown_potential = (
+            self.env.stacks[self.showdown_indices]
+            + self.env.pot[self.showdown_indices, None]
+            - self.env.starting_stack
+        )
 
         root_board_mask = self.env.board_onehot[:N].any(dim=1).reshape(N, -1).float()
         root_allowed = (self.combo_onehot_float @ root_board_mask.T).T < 0.5

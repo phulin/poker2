@@ -238,6 +238,12 @@ class SparseCFREvaluator(CFREvaluator):
         showdown_padding = max(1, self.root_nodes // 2)
         self.showdown_indices = padded_indices(self.env.street == 4, showdown_padding)
         self.showdown_actors = self.env.to_act[self.showdown_indices]
+        # Compute potential for both players: [M, 2]
+        self.showdown_potential = (
+            self.env.stacks[self.showdown_indices]
+            + self.env.pot[self.showdown_indices, None]
+            - self.env.starting_stack
+        )
 
         self.prev_actor = torch.full(
             (self.total_nodes,), -1, dtype=torch.long, device=self.device

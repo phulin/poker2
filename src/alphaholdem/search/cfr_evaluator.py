@@ -149,6 +149,7 @@ class CFREvaluator(ABC):
     last_model_values: torch.Tensor | None
     showdown_indices: torch.Tensor
     showdown_actors: torch.Tensor
+    showdown_potential: torch.Tensor
     prev_actor: torch.Tensor
     combo_onehot_float: torch.Tensor
     chance_helper: object  # ChanceNodeHelper - avoiding circular import
@@ -554,11 +555,7 @@ class CFREvaluator(ABC):
         EV_hand = EV_hand * hand_ok_mask.to(dtype)  # zero impossible hands
 
         # Range EV for the player
-        potential = (
-            self.env.stacks[indices, hero]
-            + self.env.pot[indices]
-            - self.env.starting_stack
-        )
+        potential = self.showdown_potential[:, hero]
 
         return EV_hand * potential[:, None] / self.env.scale
 
