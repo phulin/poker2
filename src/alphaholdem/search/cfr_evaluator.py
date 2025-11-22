@@ -1306,13 +1306,20 @@ class CFREvaluator(ABC):
     def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
         """Record statistics about the policy update."""
 
-        if (
-            t
-            in torch.linspace(self.warm_start_iterations, self.cfr_iterations - 1, 5)
+        # Compute the 5 percentile points (0, 25, 50, 75, 100)
+        percentile_ts = (
+            torch.linspace(self.warm_start_iterations, self.cfr_iterations - 1, 5)
             .round()
             .int()
             .tolist()
-        ):
+        )
+        percentiles = [0, 25, 50, 75, 100]
+
+        if t in percentile_ts:
+            # Find which percentile this t corresponds to
+            percentile_idx = percentile_ts.index(t)
+            percentile = percentiles[percentile_idx]
+
             diff = self._pull_back(self.policy_probs) - self._pull_back(
                 old_policy_probs
             )
