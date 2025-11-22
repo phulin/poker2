@@ -139,14 +139,16 @@ class BetterFFN(nn.Module, Model):
         policy_logits = self.policy_head(policy_input).view(
             -1, NUM_HANDS, self.num_actions
         )
-        hand_values = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
+        hand_values_raw = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
         if self.enforce_zero_sum:
             hand_value_sums = (
                 (hand_values * player_beliefs)
                 .sum(dim=2, keepdim=True)
                 .mean(dim=1, keepdim=True)
             )
-            hand_values.sub_(hand_value_sums)
+            hand_values = hand_values_raw - hand_value_sums
+        else:
+            hand_values = hand_values_raw
         value = hand_values.mean(dim=-1)
 
         return ModelOutput(

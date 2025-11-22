@@ -817,7 +817,9 @@ class CFREvaluator(ABC):
             )
             if ignore_mask is not None:
                 hand_value_sums.masked_fill_(ignore_mask[:, None, None], 0.0)
-            hand_values.sub_(hand_value_sums)
+            return hand_values - hand_value_sums
+        else:
+            return hand_values
 
     def _set_model_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
         # Set model values for non-terminal leaves
@@ -839,7 +841,7 @@ class CFREvaluator(ABC):
             ) * model_output.hand_values - old * self.last_model_values
             unmixed /= new
             self.latest_values[self.model_indices] = unmixed
-            self._maybe_enforce_zero_sum(
+            self.latest_values = self._maybe_enforce_zero_sum(
                 self.latest_values, self.beliefs, ignore_mask=self.env.done
             )
         self.last_model_values = model_output.hand_values

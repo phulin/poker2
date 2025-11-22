@@ -169,12 +169,11 @@ def _set_model_values_current(
             evaluator.model_indices,
             unmixed,
         )
-        evaluator._maybe_enforce_zero_sum(
+        evaluator.latest_values = evaluator._maybe_enforce_zero_sum(
             new_values,
             evaluator.beliefs,
             ignore_mask=evaluator.env.done,
         )
-        evaluator.latest_values = new_values
     evaluator.last_model_values = model_output.hand_values.clone()
 
 
@@ -223,13 +222,11 @@ def _set_model_values_alternative(
             evaluator.model_indices,
             unmixed,
         )
-        # Only enforce zero-sum if the model supports it
-        evaluator._maybe_enforce_zero_sum(
+        evaluator.latest_values = evaluator._maybe_enforce_zero_sum(
             new_values,
             evaluator.beliefs,
             ignore_mask=evaluator.env.done,
         )
-        evaluator.latest_values = new_values
     evaluator.last_model_values = model_output.hand_values.clone()
 
 
