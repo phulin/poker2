@@ -106,10 +106,11 @@ def setup_evaluator(
     cfg: Config,
     model: BetterFFN,
     device: torch.device,
+    num_envs: int = 1,
 ) -> Tuple[SparseCFREvaluator, HUNLTensorEnv, torch.Tensor]:
     """Set up evaluator and return it along with env and root indices."""
     env = HUNLTensorEnv(
-        num_envs=1,
+        num_envs=num_envs,
         starting_stack=cfg.env.stack,
         sb=cfg.env.sb,
         bb=cfg.env.bb,
@@ -119,7 +120,7 @@ def setup_evaluator(
         flop_showdown=cfg.env.flop_showdown,
     )
     env.reset()
-    root_indices = torch.tensor([0], dtype=torch.long, device=device)
+    root_indices = torch.arange(num_envs, dtype=torch.long, device=device)
 
     evaluator = SparseCFREvaluator(
         model=model,
@@ -209,13 +210,14 @@ def verify_correctness(
     cfg: Config,
     model: BetterFFN,
     device: torch.device,
+    num_envs: int = 1,
 ) -> None:
     """Verify that both approaches produce identical results."""
     print("Verifying correctness...")
 
     # Create two evaluators with identical state
-    evaluator1, env1, root_indices1 = setup_evaluator(cfg, model, device)
-    evaluator2, env2, root_indices2 = setup_evaluator(cfg, model, device)
+    evaluator1, env1, root_indices1 = setup_evaluator(cfg, model, device, num_envs)
+    evaluator2, env2, root_indices2 = setup_evaluator(cfg, model, device, num_envs)
 
     # Ensure they have the same state
     evaluator2.beliefs.copy_(evaluator1.beliefs)
@@ -309,6 +311,7 @@ def run_benchmark(
     repeats: int,
     cfg: Config,
     model: BetterFFN,
+    num_envs: int = 1,
 ) -> None:
     """Run benchmark for a specific depth."""
     print(f"\n{'='*60}")
@@ -320,14 +323,14 @@ def run_benchmark(
 
     # Verify correctness first
     try:
-        verify_correctness(cfg, model, device)
+        verify_correctness(cfg, model, device, num_envs)
     except Exception as e:
         print(f"Correctness check failed: {e}")
         return
 
     # Setup evaluators for benchmarking
-    evaluator_current, _, _ = setup_evaluator(cfg, model, device)
-    evaluator_alternative, _, _ = setup_evaluator(cfg, model, device)
+    evaluator_current, _, _ = setup_evaluator(cfg, model, device, num_envs)
+    evaluator_alternative, _, _ = setup_evaluator(cfg, model, device, num_envs)
 
     # Ensure same state
     evaluator_alternative.beliefs.copy_(evaluator_current.beliefs)
@@ -412,6 +415,7 @@ def run_benchmark_compile(
     repeats: int,
     cfg: Config,
     model: BetterFFN,
+    num_envs: int = 1,
 ) -> None:
     """Run benchmark comparing current vs compiled _set_model_values with different modes."""
     print(f"\n{'='*60}")
@@ -422,10 +426,10 @@ def run_benchmark_compile(
     cfg.search.depth = depth
 
     # Setup evaluators for benchmarking
-    evaluator_current, _, _ = setup_evaluator(cfg, model, device)
+    evaluator_current, _, _ = setup_evaluator(cfg, model, device, num_envs)
     evaluators_compiled = {}
     for mode in ["default", "reduce-overhead", "max-autotune"]:
-        eval_compiled, _, _ = setup_evaluator(cfg, model, device)
+        eval_compiled, _, _ = setup_evaluator(cfg, model, device, num_envs)
         eval_compiled.beliefs.copy_(evaluator_current.beliefs)
         eval_compiled.beliefs_avg.copy_(evaluator_current.beliefs_avg)
         evaluators_compiled[mode] = eval_compiled
@@ -436,9 +440,9 @@ def run_benchmark_compile(
     print("Verifying correctness...")
     try:
         # Run both approaches once to verify they produce the same results
-        evaluator_test1, _, _ = setup_evaluator(cfg, model, device)
+        evaluator_test1, _, _ = setup_evaluator(cfg, model, device, num_envs)
         for mode in ["default", "reduce-overhead", "max-autotune"]:
-            evaluator_test2, _, _ = setup_evaluator(cfg, model, device)
+            evaluator_test2, _, _ = setup_evaluator(cfg, model, device, num_envs)
             evaluator_test2.beliefs.copy_(evaluator_test1.beliefs)
             evaluator_test2.beliefs_avg.copy_(evaluator_test1.beliefs_avg)
             evaluator_test2.last_model_values = (
@@ -593,6 +597,12 @@ def main() -> None:
         choices=["indexing", "compile", "both"],
         help="Type of benchmark to run: indexing comparison, compile comparison, or both",
     )
+    parser.add_argument(
+        "--num-envs",
+        type=int,
+        default=1,
+        help="Number of environments to use",
+    )
     args = parser.parse_args()
 
     device_str = args.device
@@ -613,6 +623,7 @@ def main() -> None:
     print(f"Device: {device}")
     print(f"Repeats: {args.repeats}")
     print(f"Depths: {depths}")
+    print(f"Num envs: {args.num_envs}")
     print(f"{'='*60}")
 
     # Create config and model
@@ -622,9 +633,11 @@ def main() -> None:
     # Run benchmarks for each depth
     for depth in depths:
         if args.benchmark_type in ("indexing", "both"):
-            run_benchmark(device, depth, args.repeats, cfg, model)
+            run_benchmark(device, depth, args.repeats, cfg, model, args.num_envs)
         if args.benchmark_type in ("compile", "both"):
-            run_benchmark_compile(device, depth, args.repeats, cfg, model)
+            run_benchmark_compile(
+                device, depth, args.repeats, cfg, model, args.num_envs
+            )
 
     print(f"\n{'='*60}")
     print("Benchmark completed!")
