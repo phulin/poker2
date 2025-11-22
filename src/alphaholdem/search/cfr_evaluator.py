@@ -451,9 +451,10 @@ class CFREvaluator(ABC):
     @torch.compile(dynamic=True)
     def _showdown_value_both(self, beliefs: torch.Tensor) -> torch.Tensor:
         """Compute showdown values for both players."""
-        showdown_values_p0 = self._showdown_value(beliefs, 0)
-        showdown_values_p1 = self._showdown_value(beliefs, 1)
-        return torch.stack([showdown_values_p0, showdown_values_p1], dim=1)
+        result = torch.empty_like(beliefs)
+        result[:, 0] = self._showdown_value(beliefs, 0)
+        result[:, 1] = self._showdown_value(beliefs, 1)
+        return result
 
     def _showdown_value(self, beliefs: torch.Tensor, hero: int) -> torch.Tensor:
         """
