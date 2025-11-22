@@ -29,15 +29,15 @@ train:
   permutation_coef: 0.1
   grad_clip: 1.0
 
-  stratify_streets:
-    - threshold: 500
-      probabilities: [0.03, 0.03, 0.09, 0.85]
-    - threshold: 1500
-      probabilities: [0.05, 0.05, 0.15, 0.75]
-    - threshold: 2500
-      probabilities: [0.15, 0.15, 0.30, 0.40]
-    - threshold: 3500
-      probabilities: [0.25, 0.25, 0.25, 0.25]
+  stratify_streets: []
+    # - threshold: 500
+    #   probabilities: [0.03, 0.03, 0.09, 0.85]
+    # - threshold: 1500
+    #   probabilities: [0.05, 0.05, 0.15, 0.75]
+    # - threshold: 2500
+    #   probabilities: [0.15, 0.15, 0.30, 0.40]
+    # - threshold: 3500
+    #   probabilities: [0.25, 0.25, 0.25, 0.25]
 
 model:
   name: BetterFFN
