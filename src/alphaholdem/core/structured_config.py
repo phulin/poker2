@@ -78,8 +78,8 @@ class TrainingConfig:
     replay_buffer_batches: int = 4
 
     # how many times do we want to reuse the same policy/value data?
-    policy_reuse_goal: int = 4
     value_reuse_goal: int = 8
+    policy_capacity_factor: int = 10
 
     max_trajectory_length: int = 12  # Maximum steps per trajectory in replay buffer
     max_sequence_length: int = 50  # Maximum sequence length for transformer models

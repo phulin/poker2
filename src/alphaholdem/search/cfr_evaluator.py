@@ -250,7 +250,7 @@ class CFREvaluator(ABC):
         # For invalid nodes, allowed_hands_prob is 0, so they get 0 beliefs.
         torch.where(
             denom > 1e-10,
-            target / denom.clamp(min=1e-12),
+            target / denom.clamp(min=1e-10),
             self.allowed_hands_prob[:, None, :],
             out=target,
         )
