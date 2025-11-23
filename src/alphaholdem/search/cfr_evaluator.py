@@ -1088,6 +1088,16 @@ class CFREvaluator(ABC):
             unweighted,
             out=self.policy_probs_avg[N:],
         )
+
+        policy_sum = self._pull_back_sum(self.policy_probs_avg)
+        policy_denom = self._fan_out(policy_sum)
+        torch.where(
+            policy_denom > 1e-12,
+            self.policy_probs_avg[N:] / policy_denom.clamp(min=1e-12),
+            self.policy_probs_avg[N:],
+            out=self.policy_probs_avg[N:],
+        )
+
         # Root nodes don't have policies (they're decision nodes, not action nodes)
         self.policy_probs_avg[:N] = 0.0
 
