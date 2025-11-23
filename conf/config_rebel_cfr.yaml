@@ -3,7 +3,7 @@
 defaults:
   - _self_
 
-num_steps: 7000
+num_steps: 15000
 use_tensor_env: true
 num_envs: 192
 device: cuda
