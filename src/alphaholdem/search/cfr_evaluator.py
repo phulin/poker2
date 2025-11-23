@@ -1089,7 +1089,13 @@ class CFREvaluator(ABC):
             out=self.policy_probs_avg[N:],
         )
 
-        policy_sum = self._pull_back_sum(self.policy_probs_avg)
+        policy_sum = torch.zeros(
+            self.depth_offsets[-2],
+            NUM_HANDS,
+            device=self.device,
+            dtype=self.float_dtype,
+        )
+        self._pull_back_sum(self.policy_probs_avg, policy_sum)
         policy_denom = self._fan_out(policy_sum)
         torch.where(
             policy_denom > 1e-12,
