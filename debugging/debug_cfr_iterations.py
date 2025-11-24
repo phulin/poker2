@@ -901,11 +901,12 @@ def main(dict_config: DictConfig) -> None:
             container.pop(k)
 
     cfg = Config.from_dict(container)
-    cfg.device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available() else "cpu"
-    )
+    if not cfg.device:
+        cfg.device = (
+            "cuda"
+            if torch.cuda.is_available()
+            else "mps" if torch.backends.mps.is_available() else "cpu"
+        )
     cfg.num_envs = 1
 
     # Resolve checkpoint path relative to original working directory

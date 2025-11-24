@@ -406,40 +406,11 @@ class RebelCFRTrainer:
         # Step >= last threshold, return last config's probabilities
         return configs[-1].probabilities
 
-    def _save_if_high_exploitability(
-        self, fresh_value_batch: RebelBatch, step: int
-    ) -> None:
-        # Check if local exploitability max is above threshold and save checkpoint
-        if fresh_value_batch:
-            local_exploitability = fresh_value_batch.statistics["local_exploitability"]
-            local_exploitability_max = local_exploitability.abs().max().item()
-            if local_exploitability_max > 2:
-                step_public = step + 1
-                os.makedirs(self.cfg.checkpoint_dir, exist_ok=True)
-                ckpt_path = os.path.join(
-                    self.cfg.checkpoint_dir,
-                    f"rebel_exploitability_high_step_{step_public}.pt",
-                )
-                self.save_checkpoint(
-                    ckpt_path,
-                    step,
-                    wandb_run_id=self.cfg.wandb_run_id,
-                    save_optimizer=True,
-                    save_dtype=None,
-                    batch=fresh_value_batch,
-                )
-                print(
-                    f"Checkpoint saved due to high exploitability (max={local_exploitability_max:.2f}) "
-                    f"at step {step_public} -> {ckpt_path}"
-                )
-
     @profile
     def _update_model(self, step: int) -> dict[str, float]:
         fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
             self.K_value
         )
-
-        self._save_if_high_exploitability(fresh_value_batch, step)
 
         # Warmup: make sure we have enough samples.
         while min(len(self.value_buffer), len(self.policy_buffer)) < self.batch_size:

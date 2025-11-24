@@ -1196,9 +1196,7 @@ class CFREvaluator(ABC):
 
         value_targets = self.values_avg[:N].clamp(-1.0, 1.0)
 
-        high = value_targets.abs().max(dim=-1).values > 10
-        if high.any():
-            print(f"WARNING: Value targets are too large ({high.sum().item()} hands)")
+        value_targets = self.values_avg[:N].clamp(-1.0, 1.0)
 
         features = self.feature_encoder.encode(self.beliefs_avg, pre_chance_node=False)[
             :top
@@ -1477,6 +1475,66 @@ class CFREvaluator(ABC):
         self.stats["local_exploitability_min"] = (
             exploit_stats.local_exploitability.min().item()
         )
+
+        # Check for high exploitability and save game tree if needed
+        max_exploitability = exploit_stats.local_exploitability.max()
+        if max_exploitability > 10.0:
+            import time
+
+            timestamp = int(time.time())
+            high_exploit_roots = torch.where(exploit_stats.local_exploitability > 10.0)[
+                0
+            ]
+
+            for root_idx in high_exploit_roots.tolist():
+                # 1. Identify all nodes belonging to this root's tree
+                # Create a mask for just this root
+                root_mask = torch.zeros(N, dtype=torch.bool, device=self.device)
+                root_mask[root_idx] = True
+
+                # Fan out to find all children
+                tree_mask = self._fan_out_deep(root_mask)
+                # Include the root itself
+                tree_mask[:N] = root_mask
+
+                # Get indices of all nodes in this tree
+                tree_indices = torch.where(tree_mask)[0]
+
+                # 2. Create a sub-environment for this tree
+                # We need to map the global indices to local indices (0 to len(tree_indices)-1)
+                # However, HUNLTensorEnv expects a contiguous range or specific indices.
+                # Since we want to save the *state*, we can create a new env of the right size
+                # and copy the states.
+                sub_env = HUNLTensorEnv.from_proto(self.env, num_envs=len(tree_indices))
+                # We can use copy_state_from to copy from self.env[tree_indices] to sub_env[0..M]
+                sub_env.copy_state_from(
+                    self.env,
+                    tree_indices,
+                    torch.arange(len(tree_indices), device=self.device),
+                )
+
+                # 3. Collect relevant tensors sliced by tree_indices
+                saved_data = {
+                    "env_state": sub_env,  # This might be heavy, but it's the most robust way
+                    "tree_indices": tree_indices,
+                    "root_idx": root_idx,
+                    "exploitability": exploit_stats.local_exploitability[
+                        root_idx
+                    ].item(),
+                    "policy_probs": self.policy_probs[tree_indices].cpu(),
+                    "policy_probs_avg": self.policy_probs_avg[tree_indices].cpu(),
+                    "beliefs": self.beliefs[tree_indices].cpu(),
+                    "beliefs_avg": self.beliefs_avg[tree_indices].cpu(),
+                    "latest_values": self.latest_values[tree_indices].cpu(),
+                    "values_avg": self.values_avg[tree_indices].cpu(),
+                    "cumulative_regrets": self.cumulative_regrets[tree_indices].cpu(),
+                    "regret_weight_sums": self.regret_weight_sums[tree_indices].cpu(),
+                    "model_state_dict": self.model.state_dict(),  # No optimizer state as requested
+                }
+
+                filename = f"high_exploitability_root_{root_idx}_{timestamp}.pt"
+                print(f"Saving high exploitability game tree to {filename}")
+                torch.save(saved_data, filename)
 
     def _record_action_mix(self) -> None:
         """Record the action mix of the policy."""
