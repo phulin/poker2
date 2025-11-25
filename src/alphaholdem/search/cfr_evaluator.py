@@ -249,8 +249,8 @@ class CFREvaluator(ABC):
         # So we set them to uniform (allowed_hands_prob).
         # For invalid nodes, allowed_hands_prob is 0, so they get 0 beliefs.
         torch.where(
-            denom > 1e-10,
-            target / denom.clamp(min=1e-10),
+            denom > 1e-8,
+            target / denom.clamp(min=1e-8),
             self.allowed_hands_prob[:, None, :],
             out=target,
         )
@@ -546,8 +546,8 @@ class CFREvaluator(ABC):
         Pc_last = Pcards[:, -1, :]  # (M, 52) totals per card
         denom = (
             1.0 - Pc_last.gather(1, c1) - Pc_last.gather(1, c2) + b_opp_sorted
-        ).clamp(min=1e-12)
-        valid_denom = denom > 1e-12
+        ).clamp(min=1e-8)
+        valid_denom = denom > 1e-8
         assert ((valid_denom) | ((win_mass < 1e-5) & (tie_mass < 1e-5))).all()
 
         # Probabilities & EV (in sorted order)
@@ -592,7 +592,7 @@ class CFREvaluator(ABC):
         policy_blocked = calculate_unblocked_mass(marginal_policy)
         matchup_mass = calculate_unblocked_mass(actor_beliefs)
         opponent_conditioned_policy = torch.where(
-            matchup_mass[:, None, :] > 1e-6,
+            matchup_mass[:, None, :] > 1e-8,
             policy_blocked / matchup_mass[:, None, :],
             0.0,
         )
@@ -648,7 +648,7 @@ class CFREvaluator(ABC):
                 :, None, :
             ]  # [M, 1, 1326]
             P_dev = torch.where(
-                dev_match > 1e-6,
+                dev_match > 1e-8,
                 mass_blocked / dev_match,  # P_dev(a | s, h_-i)
                 0.0,
             )  # [M, B, 1326]
@@ -936,7 +936,7 @@ class CFREvaluator(ABC):
         matchup_values = calculate_unblocked_mass(beliefs_dest)
         opponent_conditioned_policy = torch.zeros_like(policy)
         torch.where(
-            matchup_values > 1e-12,
+            matchup_values > 1e-8,
             policy_blocked / matchup_values,
             torch.zeros_like(policy_blocked),
             out=opponent_conditioned_policy[bottom:],
@@ -1083,8 +1083,8 @@ class CFREvaluator(ABC):
         )
 
         torch.where(
-            denom > 1e-12,
-            numerator / denom.clamp(min=1e-12),
+            denom > 1e-8,
+            numerator / denom.clamp(min=1e-8),
             unweighted,
             out=self.policy_probs_avg[N:],
         )
@@ -1098,8 +1098,8 @@ class CFREvaluator(ABC):
         self._pull_back_sum(self.policy_probs_avg, policy_sum)
         policy_denom = self._fan_out(policy_sum)
         torch.where(
-            policy_denom > 1e-12,
-            self.policy_probs_avg[N:] / policy_denom.clamp(min=1e-12),
+            policy_denom > 1e-8,
+            self.policy_probs_avg[N:] / policy_denom.clamp(min=1e-8),
             self.policy_probs_avg[N:],
             out=self.policy_probs_avg[N:],
         )
@@ -1417,7 +1417,7 @@ class CFREvaluator(ABC):
         actions = self._pull_back(self.policy_probs_avg)[:N]
         mask = self.valid_mask[:N] & ~self.leaf_mask[:N]
         probs = actions[mask]
-        entropy = torch.where(probs > 1e-12, -(probs * probs.log()), 0.0)
+        entropy = torch.where(probs > 1e-8, -(probs * probs.log()), 0.0)
         self.stats["cfr_entropy"] = entropy.sum(dim=1).mean().item()
 
     def _record_initial_exploitability(self) -> None:
