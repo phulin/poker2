@@ -474,6 +474,143 @@ def test_showdown_prefix_sums(device: torch.device, batch_size: int = 64):
 
 
 # ============================================================================
+# Optimization 6: Safe division patterns
+# ============================================================================
+
+
+def baseline_safe_divide(
+    numerator: torch.Tensor,
+    denominator: torch.Tensor,
+    fallback: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Baseline: torch.where with condition (current pattern)."""
+    return torch.where(
+        denominator > eps,
+        numerator / denominator.clamp(min=eps),
+        fallback,
+    )
+
+
+def opt1_safe_divide(
+    numerator: torch.Tensor,
+    denominator: torch.Tensor,
+    fallback: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Option 1: Use clamp + where without redundant clamp."""
+    denom_clamped = denominator.clamp(min=eps)
+    return torch.where(
+        denominator > eps,
+        numerator / denom_clamped,
+        fallback,
+    )
+
+
+def opt2_safe_divide(
+    numerator: torch.Tensor,
+    denominator: torch.Tensor,
+    fallback: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Option 2: Divide by clamped, then fix up small values."""
+    result = numerator / denominator.clamp(min=eps)
+    return torch.where(denominator > eps, result, fallback)
+
+
+def opt3_safe_divide(
+    numerator: torch.Tensor,
+    denominator: torch.Tensor,
+    fallback: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Option 3: Masked operations (avoids division on invalid elements)."""
+    result = torch.empty_like(numerator)
+    mask = denominator > eps
+    result[mask] = numerator[mask] / denominator[mask]
+    result[~mask] = fallback[~mask]
+    return result
+
+
+def opt4_safe_divide(
+    numerator: torch.Tensor,
+    denominator: torch.Tensor,
+    fallback: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Option 4: Use reciprocal (sometimes faster than division)."""
+    safe_denom = torch.where(
+        denominator > eps, denominator, torch.ones_like(denominator)
+    )
+    reciprocal = 1.0 / safe_denom
+    result = numerator * reciprocal
+    return torch.where(denominator > eps, result, fallback)
+
+
+def test_safe_divide(
+    device: torch.device, batch_size: int = 512, num_hands: int = 1326
+):
+    """Test different safe division patterns."""
+    # Create test data with some zero/near-zero denominators
+    numerator = torch.rand(batch_size, 2, num_hands, device=device)
+    denominator = torch.rand(batch_size, 2, num_hands, device=device)
+    # Make ~20% of denominators very small
+    small_mask = torch.rand(batch_size, 2, num_hands, device=device) < 0.2
+    denominator[small_mask] = torch.rand(small_mask.sum().item(), device=device) * 1e-10
+
+    fallback = torch.ones(batch_size, 2, num_hands, device=device) * 0.5
+    eps = 1e-8
+
+    # Correctness tests
+    baseline_result = baseline_safe_divide(numerator, denominator, fallback, eps)
+
+    results = {}
+    functions = {
+        "baseline (where + clamp)": baseline_safe_divide,
+        "opt1 (clamp once)": opt1_safe_divide,
+        "opt2 (divide first)": opt2_safe_divide,
+        "opt3 (masked ops)": opt3_safe_divide,
+        "opt4 (reciprocal)": opt4_safe_divide,
+    }
+
+    print("\n6. Safe Division Pattern Comparison:")
+    print("=" * 100)
+
+    for name, func in functions.items():
+        result = func(numerator, denominator, fallback, eps)
+        max_diff = (baseline_result - result).abs().max().item()
+        passes = max_diff < 1e-6
+
+        bench_time = benchmark_function(func, numerator, denominator, fallback, eps)
+
+        status = "✓" if passes else "✗"
+        print(
+            f"  {status} {name:30s} | Time: {bench_time*1000:8.3f}ms | Max diff: {max_diff:.2e}"
+        )
+
+        results[name] = {"time": bench_time, "passes": passes, "max_diff": max_diff}
+
+    # Find best
+    best_name = min(
+        (k for k in results.keys() if k != "baseline (where + clamp)"),
+        key=lambda k: results[k]["time"],
+    )
+    speedup = results["baseline (where + clamp)"]["time"] / results[best_name]["time"]
+
+    print(f"\n  Best: {best_name} with {speedup:.2f}x speedup")
+    print()
+
+    return BenchmarkResult(
+        name="6. Safe division patterns",
+        baseline_time=results["baseline (where + clamp)"]["time"],
+        optimized_time=results[best_name]["time"],
+        speedup=speedup,
+        passes_correctness=results[best_name]["passes"],
+        max_diff=results[best_name]["max_diff"],
+    )
+
+
+# ============================================================================
 # Main benchmark runner
 # ============================================================================
 
@@ -494,6 +631,7 @@ def run_all_benchmarks(device: torch.device | None = None):
         test_fan_out,
         test_hand_blocking,
         test_showdown_prefix_sums,
+        test_safe_divide,
     ]
 
     results = []
