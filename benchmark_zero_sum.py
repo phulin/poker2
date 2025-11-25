@@ -14,6 +14,7 @@ def current_impl(hand_values, player_beliefs, ignore_mask=None):
     return hand_values - hand_value_sums
 
 
+@torch.compile
 def matmul_impl(hand_values, player_beliefs, ignore_mask=None):
     # hand_values: (B, P, H)
     # player_beliefs: (B, P, H)
