@@ -30,15 +30,22 @@ class BetterFeatureEncoder:
         self,
         beliefs: torch.Tensor,
         pre_chance_node: torch.Tensor | bool | None = None,
+        indices: torch.Tensor | None = None,
     ) -> MLPFeatures:
         """
         Build Better PBS features for a batch of env indices and agent ids.
 
         Args:
             beliefs: Tensor [B, 2, 1326] for beliefs (about p0 and p1).
+            pre_chance_node: Optional mask for pre-chance nodes.
+            indices: Optional indices to slice the environment and beliefs.
         Returns:
             MLPFeatures with structured data.
         """
+        if indices is not None:
+            beliefs = beliefs[indices]
+            if isinstance(pre_chance_node, torch.Tensor):
+                pre_chance_node = pre_chance_node[indices]
 
         N = beliefs.shape[0]
         num_players = beliefs.shape[1]
@@ -55,23 +62,34 @@ class BetterFeatureEncoder:
             pre_chance_node = torch.full(
                 (N,), pre_chance_node, dtype=torch.bool, device=self.device
             )
+        else:
+            pre_chance_node = pre_chance_node.to(self.device)
 
+        # Helper to get env tensor
+        def get_env_tensor(attr_name: str) -> torch.Tensor:
+            val = getattr(self.env, attr_name)
+            return val[indices] if indices is not None else val
+
+        actions_last_round = get_env_tensor("actions_last_round")
+        actions_this_round = get_env_tensor("actions_this_round")
         actions_round = torch.where(
-            pre_chance_node, self.env.actions_last_round, self.env.actions_this_round
+            pre_chance_node, actions_last_round, actions_this_round
         )
         # Keep to_act for actor, as that's the player perspective the model should take,
         # even in the pre-chance node context.
-        scalar_context[:, ScalarContext.ACTOR.value] = self.env.to_act
+        to_act = get_env_tensor("to_act")
+        scalar_context[:, ScalarContext.ACTOR.value] = to_act
         scalar_context[:, ScalarContext.POSITION.value] = (
-            self.env.to_act - self.env.button
+            to_act - get_env_tensor("button")
         ) % num_players
         scalar_context[:, ScalarContext.ACTIONS_ROUND.value] = actions_round
-        scalar_context[:, ScalarContext.POT.value] = self.env.pot
-        scalar_context[:, ScalarContext.MIN_RAISE.value] = self.env.min_raise
+        pot = get_env_tensor("pot")
+        scalar_context[:, ScalarContext.POT.value] = pot
+        scalar_context[:, ScalarContext.MIN_RAISE.value] = get_env_tensor("min_raise")
 
-        stacks = self.env.stacks.to(self.dtype)
-        committed = self.env.committed.to(self.dtype)
-        pot = self.env.pot.to(self.dtype)
+        stacks = get_env_tensor("stacks").to(self.dtype)
+        committed = get_env_tensor("committed").to(self.dtype)
+        pot = pot.to(self.dtype)
         player_context = torch.zeros(
             N,
             PlayerContext.NUM_PLAYER_CONTEXT.value,
@@ -83,20 +101,21 @@ class BetterFeatureEncoder:
         player_context[:, PlayerContext.COMMITTED.value] = committed
         player_context[:, PlayerContext.SPR.value] = stacks / pot[:, None]
 
+        street_tensor = get_env_tensor("street")
         street = torch.where(
-            pre_chance_node & (self.env.actions_this_round == 0),
-            torch.clamp(self.env.street - 1, min=0),
-            self.env.street,
+            pre_chance_node & (actions_this_round == 0),
+            torch.clamp(street_tensor - 1, min=0),
+            street_tensor,
         )
 
         return MLPFeatures(
             context=torch.cat([scalar_context, player_context.view(N, -1)], dim=-1),
             street=street,
-            to_act=self.env.to_act,
+            to_act=to_act,
             board=torch.where(
                 pre_chance_node[:, None],
-                self.env.last_board_indices,
-                self.env.board_indices,
+                get_env_tensor("last_board_indices"),
+                get_env_tensor("board_indices"),
             ),
             beliefs=beliefs.view(-1, 2 * NUM_HANDS),
         )

@@ -284,14 +284,14 @@ class CFREvaluator(ABC):
     @torch.no_grad()
     def _get_model_policy_probs(self, indices: torch.Tensor) -> torch.Tensor:
         """Get policy probabilities from model for given indices."""
-        features = self.feature_encoder.encode(self.beliefs)
-        model_output = self.model(features[indices])
+        features = self.feature_encoder.encode(self.beliefs, indices=indices)
+        model_output = self.model(features)
         logits = model_output.policy_logits
         legal_masks = self.legal_mask[indices]
         masked_logits = compute_masked_logits(logits, legal_masks[:, None, :])
         probs = F.softmax(masked_logits, dim=-1)
         probs.masked_fill_(
-            (legal_masks.sum(dim=1) == 0)[:, None, None],
+            (self.child_count[indices] == 0)[:, None, None],
             0.0,
         )
         return probs
@@ -644,9 +644,7 @@ class CFREvaluator(ABC):
 
             # 2) Blocker-project that mass to opponent hands and normalize per h_-i
             mass_blocked = calculate_unblocked_mass(mass_by_action)  # [M, B, 1326]
-            dev_match = calculate_unblocked_mass(deviator_beliefs)[
-                :, None, :
-            ]  # [M, 1, 1326]
+            dev_match = matchup_mass[offset:offset_next][:, None, :]  # [M, 1, 1326]
             P_dev = torch.where(
                 dev_match > 1e-8,
                 mass_blocked / dev_match,  # P_dev(a | s, h_-i)
@@ -1512,6 +1510,7 @@ class CFREvaluator(ABC):
                     tree_indices,
                     torch.arange(len(tree_indices), device=self.device),
                 )
+                sub_env.generator = None
 
                 # 3. Collect relevant tensors sliced by tree_indices
                 saved_data = {

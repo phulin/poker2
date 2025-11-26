@@ -55,13 +55,15 @@ class RebelFeatureEncoder:
         self,
         beliefs: torch.Tensor,
         pre_chance_node: torch.Tensor | bool | None = None,
+        indices: torch.Tensor | None = None,
     ) -> MLPFeatures:
         """
         Build ReBeL flat features for all envs.
 
         Args:
-            agents: Tensor of agent ids (0 or 1), shape [B].
             beliefs: Tensor [B, 2, 1326] for beliefs (about p0 and p1).
+            pre_chance_node: Optional mask for pre-chance nodes.
+            indices: Optional indices to slice the environment and beliefs.
         Returns:
             MLPFeatures with structured fields:
             - context: agent, to_act, pot_fraction, has_bet_flag (indices 0,1,2,8)
@@ -69,39 +71,55 @@ class RebelFeatureEncoder:
             - beliefs: beliefs (indices 9:)
             - street: unused (empty)
         """
+        if indices is not None:
+            beliefs = beliefs[indices]
+            if isinstance(pre_chance_node, torch.Tensor):
+                pre_chance_node = pre_chance_node[indices]
+
         M = beliefs.shape[0]
+        num_players = beliefs.shape[1]
+        context_features = torch.zeros(M, 4, device=self.device, dtype=self.dtype)
+
+        street = torch.zeros(M, device=self.device, dtype=self.dtype)
+
         if pre_chance_node is None:
             pre_chance_node = torch.zeros(M, dtype=torch.bool, device=self.device)
         elif isinstance(pre_chance_node, bool):
             pre_chance_node = torch.full(
                 (M,), pre_chance_node, dtype=torch.bool, device=self.device
             )
-        else:
+        else:  # pre_chance_node is a tensor
             pre_chance_node = pre_chance_node.to(self.device)
 
-        num_players = beliefs.shape[1]
-        street_reset = (
-            (self.env.street > 0) & (self.env.actions_this_round == 0) & pre_chance_node
-        )
-        street = torch.where(
-            street_reset, torch.clamp(self.env.street - 1, min=0), self.env.street
-        )
+        # Helper to get env tensor
+        def get_env_tensor(attr_name: str) -> torch.Tensor:
+            val = getattr(self.env, attr_name)
+            return val[indices] if indices is not None else val
 
-        # Context features: to_act, position, pot_fraction, has_bet_flag
-        context_features = torch.zeros(M, 4, device=self.device, dtype=self.dtype)
-        context_features[:, 0] = self.env.to_act.to(self.dtype)
-        context_features[:, 1] = (self.env.to_act - self.env.button) % num_players
-        context_features[:, 2] = self._pot_fraction()
-        context_features[:, 3] = self._has_bet_flag()
+        to_act = get_env_tensor("to_act")
+        context_features[:, 0] = to_act.to(self.dtype)
+        context_features[:, 1] = (to_act - get_env_tensor("button")) % num_players
+
+        # Inlined _pot_fraction
+        denom = float(self.env.starting_stack * 2)
+        pot = get_env_tensor("pot").to(torch.float32)
+        context_features[:, 2] = (pot / denom).clamp_(0.0, 10.0)
+
+        # Inlined _has_bet_flag
+        committed = get_env_tensor("committed")
+        unequal = committed[:, 0] != committed[:, 1]
+        actions_this_round = get_env_tensor("actions_this_round")
+        acted = actions_this_round > 0
+        context_features[:, 3] = (unequal & acted).to(torch.float32)
 
         return MLPFeatures(
             context=context_features,
             street=street,
-            to_act=self.env.to_act,
+            to_act=to_act,
             board=torch.where(
                 pre_chance_node[:, None],
-                self.env.last_board_indices,
-                self.env.board_indices,
+                get_env_tensor("last_board_indices"),
+                get_env_tensor("board_indices"),
             ),
             beliefs=beliefs.view(-1, 2 * NUM_HANDS),
         )

@@ -149,7 +149,11 @@ def test_get_model_policy_probs_skips_no_legal_nodes() -> None:
     beliefs = torch.zeros(legal_mask.shape[0], NUM_HANDS, 1, device=device)
 
     class IdentityEncoder:
-        def encode(self, data: torch.Tensor) -> torch.Tensor:
+        def encode(
+            self, data: torch.Tensor, indices: torch.Tensor | None = None
+        ) -> torch.Tensor:
+            if indices is not None:
+                return data[indices]
             return data
 
     class CountingModel(nn.Module):
