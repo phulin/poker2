@@ -1117,7 +1117,7 @@ class CFREvaluator(ABC):
         self.values_avg *= old
         self.values_avg += new * self.latest_values
         self.values_avg /= old + new
-        self._maybe_enforce_zero_sum(
+        self.values_avg[:] = self._maybe_enforce_zero_sum(
             self.values_avg, self.beliefs_avg, ignore_mask=self.env.done
         )
 
