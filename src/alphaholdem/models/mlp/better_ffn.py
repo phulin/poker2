@@ -7,7 +7,9 @@ import torch
 import torch.nn as nn
 
 from alphaholdem.core.interfaces import Model
+from alphaholdem.core.structured_config import NonlinearityType
 from alphaholdem.env.card_utils import NUM_HANDS
+from alphaholdem.models.activation_utils import get_activation
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput
@@ -24,7 +26,12 @@ class ResidualBlock(nn.Module):
         return self.alpha * self.inner(x) + x
 
 
-def ffn_block(in_dim: int, hidden_dim: int, out_dim: int | None = None) -> nn.Module:
+def ffn_block(
+    in_dim: int,
+    hidden_dim: int,
+    out_dim: int | None = None,
+    nonlinearity: NonlinearityType = NonlinearityType.gelu,
+) -> nn.Module:
     if out_dim is None:
         out_dim = in_dim
     return nn.Sequential(
@@ -32,7 +39,7 @@ def ffn_block(in_dim: int, hidden_dim: int, out_dim: int | None = None) -> nn.Mo
             [
                 ("norm", nn.LayerNorm(in_dim)),
                 ("linear_in", nn.Linear(in_dim, hidden_dim, bias=False)),
-                ("gelu", nn.GELU()),
+                ("activation", get_activation(nonlinearity)),
                 ("linear_out", nn.Linear(hidden_dim, out_dim)),
             ]
         )
@@ -54,6 +61,7 @@ class BetterFFN(nn.Module, Model):
         num_players: int = 2,
         shared_trunk: bool = True,
         enforce_zero_sum: bool = True,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
         super().__init__()
         self.num_actions = num_actions
@@ -68,17 +76,22 @@ class BetterFFN(nn.Module, Model):
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
         self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)
         self.belief_encoder = ffn_block(
-            num_players * NUM_HANDS, num_players * range_hidden_dim, hidden_dim
+            num_players * NUM_HANDS,
+            num_players * range_hidden_dim,
+            hidden_dim,
+            nonlinearity,
         )
         self.context_encoder = ffn_block(
-            context_length(num_players), hidden_dim, hidden_dim
+            context_length(num_players), hidden_dim, hidden_dim, nonlinearity
         )
 
         # Build trunk
         # Default alpha is always based on hidden + value layers
         alpha = 1 / math.sqrt(num_hidden_layers + num_value_layers)
         layers = [
-            ResidualBlock(ffn_block(hidden_dim, ffn_dim), alpha)
+            ResidualBlock(
+                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), alpha
+            )
             for _ in range(num_hidden_layers)
         ]
         self.trunk = nn.Sequential(*layers)
@@ -88,17 +101,25 @@ class BetterFFN(nn.Module, Model):
         policy_alpha = alpha if shared_trunk else 1 / math.sqrt(num_policy_layers)
 
         layers = [
-            ResidualBlock(ffn_block(hidden_dim, ffn_dim), policy_alpha)
+            ResidualBlock(
+                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), policy_alpha
+            )
             for _ in range(num_policy_layers - 1)
         ]
-        layers.append(ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS))
+        layers.append(
+            ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS, nonlinearity)
+        )
         self.policy_head = nn.Sequential(*layers)
 
         layers = [
-            ResidualBlock(ffn_block(hidden_dim, ffn_dim), alpha)
+            ResidualBlock(
+                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), alpha
+            )
             for _ in range(num_value_layers - 1)
         ]
-        layers.append(ffn_block(hidden_dim, ffn_dim, num_players * NUM_HANDS))
+        layers.append(
+            ffn_block(hidden_dim, ffn_dim, num_players * NUM_HANDS, nonlinearity)
+        )
         self.hand_value_head = nn.Sequential(*layers)
 
     @profile

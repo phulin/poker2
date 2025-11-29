@@ -10,7 +10,8 @@ import torch.nn as nn
 import torch.utils.checkpoint
 
 from alphaholdem.core.interfaces import Model
-from alphaholdem.core.structured_config import ValueHeadType
+from alphaholdem.core.structured_config import NonlinearityType, ValueHeadType
+from alphaholdem.models.activation_utils import get_activation
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.models.transformer.embeddings import PokerFusedEmbedding
 from alphaholdem.models.transformer.heads import (
@@ -30,7 +31,12 @@ class TransformerLayer(nn.Module):
     """Single transformer encoder block with RoPE attention (pre-LN)."""
 
     def __init__(
-        self, d_model: int, n_heads: int, dropout: float, residual_scale: float
+        self,
+        d_model: int,
+        n_heads: int,
+        dropout: float,
+        residual_scale: float,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
         super().__init__()
         self.attn = RotarySelfAttention(d_model, n_heads, dropout, residual_scale)
@@ -38,7 +44,7 @@ class TransformerLayer(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
             OrthogonalLinear(d_model, d_model * 4, gain=math.sqrt(2.0)),
-            nn.GELU(),
+            get_activation(nonlinearity),
             nn.Dropout(dropout),
             OrthogonalLinear(
                 d_model * 4,
@@ -86,6 +92,7 @@ class PokerTransformerV1(nn.Module, Model):
         use_gradient_checkpointing: bool,
         value_head_type: str = "scalar",
         value_head_num_quantiles: int = 1,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
         super().__init__()
 
@@ -110,7 +117,7 @@ class PokerTransformerV1(nn.Module, Model):
 
         self.input_ffn = nn.Sequential(
             OrthogonalLinear(d_model, d_model * 2, gain=math.sqrt(2.0)),
-            nn.GELU(),
+            get_activation(nonlinearity),
             nn.Dropout(dropout),
             OrthogonalLinear(d_model * 2, d_model, gain=1.0),
             # no normalization as TransformerLayer has pre-LN
@@ -119,7 +126,9 @@ class PokerTransformerV1(nn.Module, Model):
         residual_scale = 1.0 / math.sqrt(n_layers) if n_layers > 0 else 1.0
         self.layers = nn.ModuleList(
             [
-                TransformerLayer(d_model, n_heads, dropout, residual_scale)
+                TransformerLayer(
+                    d_model, n_heads, dropout, residual_scale, nonlinearity
+                )
                 for _ in range(n_layers)
             ]
         )
@@ -129,17 +138,17 @@ class PokerTransformerV1(nn.Module, Model):
 
         self.cls_mlp = nn.Sequential(
             OrthogonalLinear(d_model * 4, d_model, gain=math.sqrt(2.0)),
-            nn.GELU(),
+            get_activation(nonlinearity),
             nn.LayerNorm(d_model),
         )
 
-        self.policy_head = TransformerPolicyHead(d_model, num_bet_bins)
+        self.policy_head = TransformerPolicyHead(d_model, num_bet_bins, nonlinearity)
         if self.value_head_type == ValueHeadType.quantile:
             self.value_head = TransformerQuantileValueHead(
-                d_model, self.num_value_quantiles
+                d_model, self.num_value_quantiles, nonlinearity
             )
         else:
-            self.value_head = TransformerValueHead(d_model)
+            self.value_head = TransformerValueHead(d_model, nonlinearity)
             self.num_value_quantiles = 1
             self.value_head_type = "scalar"
 

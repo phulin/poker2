@@ -8,7 +8,8 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
 from alphaholdem.core.interfaces import Model
-from alphaholdem.core.structured_config import ValueHeadType
+from alphaholdem.core.structured_config import NonlinearityType, ValueHeadType
+from alphaholdem.models.activation_utils import get_activation
 from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from alphaholdem.models.model_output import ModelOutput
 
@@ -33,20 +34,25 @@ def _resize_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
 
 
 class CardsConvTrunk(nn.Module):
-    def __init__(self, in_channels: int, hidden: int = 256):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden: int = 256,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
+    ):
         super().__init__()
         # First conv projects to hidden if needed
         self.conv1 = nn.Conv2d(in_channels, hidden, kernel_size=(3, 1), padding=1)
         self.norm1 = nn.GroupNorm(16, hidden)
-        self.relu1 = nn.SiLU(inplace=True)
+        self.relu1 = get_activation(nonlinearity, inplace=True)
 
         self.conv2 = nn.Conv2d(hidden, hidden, kernel_size=(1, 3), padding=1)
         self.norm2 = nn.GroupNorm(16, hidden)
-        self.relu2 = nn.SiLU(inplace=True)
+        self.relu2 = get_activation(nonlinearity, inplace=True)
 
         self.conv3 = nn.Conv2d(hidden, hidden, kernel_size=2, padding=1)
         self.norm3 = nn.GroupNorm(16, hidden)
-        self.relu3 = nn.SiLU(inplace=True)
+        self.relu3 = get_activation(nonlinearity, inplace=True)
 
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
 
@@ -86,20 +92,25 @@ class CardsConvTrunk(nn.Module):
 
 
 class ActionsConvTrunk(nn.Module):
-    def __init__(self, in_channels: int, hidden: int = 256):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden: int = 256,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
+    ):
         super().__init__()
         # Simpler approach for actions - focus on local patterns
         self.conv1 = nn.Conv2d(in_channels, hidden, kernel_size=2, padding=0)
         self.norm1 = nn.GroupNorm(16, hidden)
-        self.relu1 = nn.SiLU(inplace=True)
+        self.relu1 = get_activation(nonlinearity, inplace=True)
 
         self.conv2 = nn.Conv2d(hidden, hidden, kernel_size=2, padding=0)
         self.norm2 = nn.GroupNorm(16, hidden)
-        self.relu2 = nn.SiLU(inplace=True)
+        self.relu2 = get_activation(nonlinearity, inplace=True)
 
         self.conv3 = nn.Conv2d(hidden, hidden, kernel_size=2, padding=0)
         self.norm3 = nn.GroupNorm(16, hidden)
-        self.relu3 = nn.SiLU(inplace=True)
+        self.relu3 = get_activation(nonlinearity, inplace=True)
 
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
 
@@ -148,6 +159,7 @@ class SiameseConvNetV1(nn.Module, Model):
         use_gradient_checkpointing: bool = True,
         value_head_type: str = "scalar",
         value_head_num_quantiles: int = 1,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ):
         super().__init__()
         self.use_gradient_checkpointing = use_gradient_checkpointing
@@ -158,8 +170,12 @@ class SiameseConvNetV1(nn.Module, Model):
             and self.num_value_quantiles <= 1
         ):
             self.num_value_quantiles = 2
-        self.cards_trunk = CardsConvTrunk(cards_channels, hidden=cards_hidden)
-        self.actions_trunk = ActionsConvTrunk(actions_channels, hidden=actions_hidden)
+        self.cards_trunk = CardsConvTrunk(
+            cards_channels, hidden=cards_hidden, nonlinearity=nonlinearity
+        )
+        self.actions_trunk = ActionsConvTrunk(
+            actions_channels, hidden=actions_hidden, nonlinearity=nonlinearity
+        )
         fusion_in = cards_hidden + actions_hidden
         # Build fusion MLP: accept single int or a sequence of hidden sizes
         hidden_sizes = (
@@ -171,7 +187,7 @@ class SiameseConvNetV1(nn.Module, Model):
         for i, h in enumerate(hidden_sizes):
             layers.append(nn.Linear(in_dim, h))
             layers.append(nn.LayerNorm(h))
-            layers.append(nn.SiLU(inplace=True))
+            layers.append(get_activation(nonlinearity, inplace=True))
             if i < len(hidden_sizes) - 1:
                 layers.append(nn.Dropout(0.1))
             in_dim = h
@@ -180,11 +196,11 @@ class SiameseConvNetV1(nn.Module, Model):
         self.policy_head = nn.Sequential(
             nn.Linear(in_dim, 512),  # Same size as value head
             nn.LayerNorm(512),
-            nn.SiLU(),
+            get_activation(nonlinearity),
             nn.Dropout(0.05),  # Very light dropout
             nn.Linear(512, 256),
             nn.LayerNorm(256),
-            nn.SiLU(),
+            get_activation(nonlinearity),
             nn.Linear(256, num_actions),
         )
         # Critic MLP head for more stable value learning
@@ -196,11 +212,11 @@ class SiameseConvNetV1(nn.Module, Model):
         self.value_head = nn.Sequential(
             nn.Linear(in_dim, 512),  # Larger hidden
             nn.LayerNorm(512),
-            nn.SiLU(),
+            get_activation(nonlinearity),
             nn.Dropout(0.05),  # Very light dropout
             nn.Linear(512, 256),
             nn.LayerNorm(256),
-            nn.SiLU(),
+            get_activation(nonlinearity),
             nn.Linear(256, value_output_dim),
         )
         if self.value_head_type != ValueHeadType.quantile:

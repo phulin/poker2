@@ -242,6 +242,7 @@ class SelfPlayTrainer:
                 use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
                 value_head_type=self.value_head_type,
                 value_head_num_quantiles=self.value_head_num_quantiles,
+                nonlinearity=self.cfg.model.nonlinearity,
             )
         else:
             self.model = SiameseConvNetV1(
@@ -254,6 +255,7 @@ class SelfPlayTrainer:
                 use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
                 value_head_type=self.value_head_type,
                 value_head_num_quantiles=self.value_head_num_quantiles,
+                nonlinearity=self.cfg.model.nonlinearity,
             )
 
         cpu_rng = torch.Generator(device=torch.device("cpu"))
@@ -2112,6 +2114,7 @@ class SelfPlayTrainer:
                         use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
                         value_head_type=self.value_head_type,
                         value_head_num_quantiles=self.value_head_num_quantiles,
+                        nonlinearity=self.cfg.model.nonlinearity,
                     )
                 else:
                     model = SiameseConvNetV1(
@@ -2124,6 +2127,7 @@ class SelfPlayTrainer:
                         use_gradient_checkpointing=self.cfg.model.use_gradient_checkpointing,
                         value_head_type=self.value_head_type,
                         value_head_num_quantiles=self.value_head_num_quantiles,
+                        nonlinearity=self.cfg.model.nonlinearity,
                     )
                 model_state_dict = snapshot_data["model_state_dict"]
                 if drop_prefixes:

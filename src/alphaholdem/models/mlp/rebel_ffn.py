@@ -7,7 +7,9 @@ import torch
 import torch.nn as nn
 
 from alphaholdem.core.interfaces import Model
+from alphaholdem.core.structured_config import NonlinearityType
 from alphaholdem.env.card_utils import NUM_HANDS
+from alphaholdem.models.activation_utils import get_activation
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput
 
@@ -27,13 +29,18 @@ class RebelFFNConfig:
 
 
 class _FFNBlock(nn.Module):
-    """Single feed-forward block with LayerNorm + GeLU."""
+    """Single feed-forward block with LayerNorm + activation."""
 
-    def __init__(self, in_dim: int, out_dim: int) -> None:
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
+    ) -> None:
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
         self.norm = nn.LayerNorm(out_dim)
-        self.act = nn.GELU()
+        self.act = get_activation(nonlinearity)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.linear(x)
@@ -53,6 +60,7 @@ class RebelFFN(nn.Module, Model):
         num_hidden_layers: int = 6,
         detach_value_head: bool = False,
         num_players: int = 2,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
@@ -66,7 +74,7 @@ class RebelFFN(nn.Module, Model):
         layers: list[nn.Module] = []
         in_dim = input_dim
         for _ in range(num_hidden_layers):
-            layers.append(_FFNBlock(in_dim, hidden_dim))
+            layers.append(_FFNBlock(in_dim, hidden_dim, nonlinearity))
             in_dim = hidden_dim
         self.trunk = nn.Sequential(*layers)
         self.post_norm = nn.LayerNorm(hidden_dim)

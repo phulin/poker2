@@ -49,6 +49,12 @@ class CFRType(str, Enum):
     discounted_plus = "discounted_plus"
 
 
+class NonlinearityType(str, Enum):
+    relu = "relu"
+    gelu = "gelu"
+    silu = "silu"
+
+
 torch.serialization.add_safe_globals(ValueLossType)
 torch.serialization.add_safe_globals(LrSchedule)
 torch.serialization.add_safe_globals(ValueHeadType)
@@ -56,6 +62,7 @@ torch.serialization.add_safe_globals(ModelType)
 torch.serialization.add_safe_globals(PPOClipping)
 torch.serialization.add_safe_globals(KLType)
 torch.serialization.add_safe_globals(CFRType)
+torch.serialization.add_safe_globals(NonlinearityType)
 torch.serialization.add_safe_globals(PPOClipping)
 
 
@@ -158,6 +165,7 @@ class ModelConfig:
     value_head_num_quantiles: int = -1
     use_gradient_checkpointing: bool = True
     detach_value_head: bool = False
+    nonlinearity: NonlinearityType = NonlinearityType.gelu
 
     # CNN-specific parameters (with defaults)
     cards_channels: int = 6

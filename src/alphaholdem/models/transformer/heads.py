@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from alphaholdem.core.structured_config import NonlinearityType
+from alphaholdem.models.activation_utils import get_activation
 from alphaholdem.models.transformer.orthogonal_linear import OrthogonalLinear
 
 
@@ -19,7 +21,12 @@ class TransformerPolicyHead(nn.Module):
     - Bet bin logits (fold, call, bet_0.5x, bet_1x, bet_1.5x, bet_2x, allin)
     """
 
-    def __init__(self, d_model: int, num_bet_bins: int):
+    def __init__(
+        self,
+        d_model: int,
+        num_bet_bins: int,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
+    ):
         super().__init__()
         self.d_model = d_model
         self.num_bet_bins = num_bet_bins
@@ -28,7 +35,7 @@ class TransformerPolicyHead(nn.Module):
         self.bet_bin_head = nn.Sequential(
             OrthogonalLinear(d_model, d_model // 2, gain=math.sqrt(2.0)),
             nn.LayerNorm(d_model // 2),
-            nn.GELU(),
+            get_activation(nonlinearity),
             OrthogonalLinear(d_model // 2, num_bet_bins, gain=0.01),
         )
 
@@ -50,7 +57,9 @@ class TransformerPolicyHead(nn.Module):
 class TransformerValueHead(nn.Module):
     """Value head for transformer model."""
 
-    def __init__(self, d_model: int):
+    def __init__(
+        self, d_model: int, nonlinearity: NonlinearityType = NonlinearityType.gelu
+    ):
         super().__init__()
         self.d_model = d_model
 
@@ -58,10 +67,10 @@ class TransformerValueHead(nn.Module):
         self.value_head = nn.Sequential(
             OrthogonalLinear(d_model, d_model // 2, gain=math.sqrt(2.0)),
             nn.LayerNorm(d_model // 2),
-            nn.GELU(),
+            get_activation(nonlinearity),
             OrthogonalLinear(d_model // 2, d_model // 4, gain=math.sqrt(2.0)),
             nn.LayerNorm(d_model // 4),
-            nn.GELU(),
+            get_activation(nonlinearity),
             OrthogonalLinear(d_model // 4, 1, gain=1.0),
         )
 
@@ -81,7 +90,12 @@ class TransformerValueHead(nn.Module):
 class TransformerQuantileValueHead(nn.Module):
     """Quantile value head that predicts a distribution over returns."""
 
-    def __init__(self, d_model: int, num_quantiles: int):
+    def __init__(
+        self,
+        d_model: int,
+        num_quantiles: int,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
+    ):
         super().__init__()
         if num_quantiles <= 0:
             raise ValueError("num_quantiles must be positive")
@@ -90,10 +104,10 @@ class TransformerQuantileValueHead(nn.Module):
         self.quantile_head = nn.Sequential(
             OrthogonalLinear(d_model, d_model // 2, gain=math.sqrt(2.0)),
             nn.LayerNorm(d_model // 2),
-            nn.GELU(),
+            get_activation(nonlinearity),
             OrthogonalLinear(d_model // 2, d_model // 4, gain=math.sqrt(2.0)),
             nn.LayerNorm(d_model // 4),
-            nn.GELU(),
+            get_activation(nonlinearity),
             OrthogonalLinear(d_model // 4, self.num_quantiles, gain=1.0),
         )
 
