@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from alphaholdem.core.structured_config import NonlinearityType
 from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.models.activation_utils import get_activation
+from alphaholdem.models.activation_utils import SwiGLU, get_activation
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput, TRMLatent
@@ -34,6 +34,15 @@ def ffn_block(
 ) -> nn.Module:
     if out_dim is None:
         out_dim = in_dim
+    if nonlinearity == NonlinearityType.swiglu:
+        return nn.Sequential(
+            OrderedDict(
+                [
+                    ("norm", nn.LayerNorm(in_dim)),
+                    ("swiglu", SwiGLU(in_dim, out_dim)),
+                ]
+            )
+        )
     return nn.Sequential(
         OrderedDict(
             [
@@ -93,21 +102,12 @@ class BetterTRM(nn.Module):
         # Build trunk
         # Fixed 2-layer for recursion
         layers = [
-            ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity) for _ in range(2)
-        ]
-        self.trunk = nn.Sequential(*layers)
-
-        # Heads
-        layers = [
             ResidualBlock(
                 ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), 1.0
             )
-            for _ in range(num_policy_layers - 1)
+            for _ in range(2)
         ]
-        layers.append(
-            ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS, nonlinearity)
-        )
-        self.policy_head = nn.Sequential(*layers)
+        self.trunk = nn.Sequential(*layers)
 
         layers = [
             ResidualBlock(

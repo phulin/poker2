@@ -54,6 +54,7 @@ class NonlinearityType(str, Enum):
     relu = "relu"
     gelu = "gelu"
     silu = "silu"
+    swiglu = "swiglu"
 
 
 torch.serialization.add_safe_globals(ValueLossType)
