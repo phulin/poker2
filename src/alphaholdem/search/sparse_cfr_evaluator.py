@@ -128,12 +128,12 @@ class SparseCFREvaluator(CFREvaluator):
         self.next_pbs_idx = 0
 
     @profile
-    def initialize_subgame(
+    def _construct_subgame(
         self,
         src_env: HUNLTensorEnv,
         src_indices: torch.Tensor,
-        initial_beliefs: torch.Tensor | None = None,
     ) -> None:
+        """Construct the sparse subgame tree structure."""
         assert src_indices.dim() == 1, "src_indices must be 1-D"
         num_roots = src_indices.shape[0]
         assert num_roots > 0, "must supply at least one root state"
@@ -191,10 +191,6 @@ class SparseCFREvaluator(CFREvaluator):
         self.top_nodes = (
             self.depth_offsets[-2] if len(self.depth_offsets) > 1 else num_roots
         )
-
-        self.stats["evaluator_total_nodes"] = float(self.total_nodes)
-        self.stats["evaluator_root_nodes"] = float(self.root_nodes)
-        self.stats["evaluator_tree_depth"] = float(self.tree_depth)
 
         # Initialize valid_mask as all ones (all nodes are valid in sparse structure)
         # This should not be used anywhere outside of tests.
@@ -293,34 +289,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.values_avg = self.latest_values.clone()
         self.last_model_values = None
 
-        if initial_beliefs is None:
-            initial_beliefs = torch.full(
-                (num_roots, self.num_players, NUM_HANDS),
-                1.0 / NUM_HANDS,
-                dtype=self.float_dtype,
-                device=self.device,
-            )
-        else:
-            initial_beliefs = initial_beliefs.to(
-                device=self.device, dtype=self.float_dtype
-            )
-
-        self.beliefs[:num_roots] = initial_beliefs
-        self.beliefs_avg[:num_roots] = initial_beliefs
-        self.root_pre_chance_beliefs[:] = initial_beliefs
-        self.self_reach[:num_roots] = 1.0
-        self.self_reach_avg[:num_roots] = 1.0
-
-        board_mask_root = (
-            self.env.board_onehot[:num_roots].any(dim=1).reshape(num_roots, -1).float()
-        )
-        root_allowed = (self.combo_onehot_float @ board_mask_root.T).T < 0.5
-        root_allowed_prob = root_allowed.float()
-        root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1.0)
-
-        self.allowed_hands = self._fan_out_deep(root_allowed)
-        self.allowed_hands_prob = self._fan_out_deep(root_allowed_prob)
-
+        # Set up feature encoder (sparse-specific, done after tree construction)
         if isinstance(self.model, BetterFFN):
             self.feature_encoder = BetterFeatureEncoder(
                 env=self.env, device=self.device, dtype=self.float_dtype
@@ -329,9 +298,6 @@ class SparseCFREvaluator(CFREvaluator):
             self.feature_encoder = RebelFeatureEncoder(
                 env=self.env, device=self.device, dtype=self.float_dtype
             )
-
-        self._init_hand_rank_data()
-        self.stats["evaluator_street"] = self.env.street.float().mean().item()
 
     def _mask_invalid(self, tensor: torch.Tensor) -> None:
         """Mask invalid nodes in the tensor. Noop for sparse evaluator (all nodes are valid)."""

@@ -261,22 +261,13 @@ class RebelCFREvaluator(CFREvaluator):
         """
         assert src_indices.shape[0] == self.root_nodes
         assert src_indices.min().item() >= 0
-        if initial_beliefs is None:
-            initial_beliefs = torch.full(
-                (self.root_nodes, self.num_players, NUM_HANDS),
-                1.0 / NUM_HANDS,
-                dtype=self.float_dtype,
-                device=self.device,
-            )
-        else:
+        if initial_beliefs is not None:
             assert initial_beliefs.shape[0] == src_indices.shape[0]
             assert initial_beliefs.shape[1] == self.num_players
             assert initial_beliefs.shape[2] == NUM_HANDS
-            initial_beliefs = initial_beliefs.to(
-                device=self.device, dtype=self.float_dtype
-            )
 
         N = self.root_nodes
+        # Reset and zero tensors before calling base class
         dest_indices = torch.arange(N, device=self.device)
         self.env.reset()
         self.env.copy_state_from(src_env, src_indices, dest_indices, copy_deck=True)
@@ -308,20 +299,25 @@ class RebelCFREvaluator(CFREvaluator):
         self.latest_values.zero_()
         self.values_avg.zero_()
         self.beliefs.zero_()
-        self.beliefs[:N] = initial_beliefs
         self.beliefs_avg.zero_()
-        self.beliefs_avg[:N] = initial_beliefs
-        self.root_pre_chance_beliefs[:] = initial_beliefs
         self.self_reach.zero_()
-        self.self_reach[:N] = 1.0
         self.self_reach_avg.zero_()
-        self.self_reach_avg[:N] = 1.0
         self.hand_rank_data = None
         self.stats.clear()
-        self._construct_subgame()
+
+        # Call base class to handle beliefs and common initialization
+        super().initialize_subgame(src_env, src_indices, initial_beliefs)
+
+        # Rebel-specific: mask allowed_hands with valid_mask
+        self.allowed_hands &= self.valid_mask[:, None]
+        self.allowed_hands_prob.masked_fill_((~self.valid_mask)[:, None], 0.0)
 
     @profile
-    def _construct_subgame(self) -> None:
+    def _construct_subgame(
+        self,
+        src_env: HUNLTensorEnv,
+        src_indices: torch.Tensor,
+    ) -> None:
         """Expand the tree by cloning legal successor states at each depth."""
         N, M, B = self.root_nodes, self.total_nodes, self.num_actions
 
@@ -417,16 +413,6 @@ class RebelCFREvaluator(CFREvaluator):
             - self.env.starting_stack
         )
 
-        root_board_mask = self.env.board_onehot[:N].any(dim=1).reshape(N, -1).float()
-        root_allowed = (self.combo_onehot_float @ root_board_mask.T).T < 0.5
-        root_allowed_prob = root_allowed.float()
-        root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1)
-
-        self.allowed_hands[:] = self._fan_out_deep(root_allowed)
-        self.allowed_hands &= self.valid_mask[:, None]
-
-        self.allowed_hands_prob[:] = self._fan_out_deep(root_allowed_prob)
-        self.allowed_hands_prob.masked_fill_((~self.valid_mask)[:, None], 0.0)
         self.prev_actor[N:] = self._fan_out(self.env.to_act)
 
         # Compute uniform_policy based on legal_counts (number of siblings)
@@ -436,14 +422,6 @@ class RebelCFREvaluator(CFREvaluator):
         self.uniform_policy[N:] = torch.where(
             child_count_dest > 0, 1.0 / child_count_dest, 0.0
         )
-
-        self._init_hand_rank_data()
-        self.stats["evaluator_street"] = (
-            self.env.street[self.valid_mask].float().mean().item()
-        )
-        self.stats["evaluator_total_nodes"] = float(self.total_nodes)
-        self.stats["evaluator_root_nodes"] = float(self.root_nodes)
-        self.stats["evaluator_tree_depth"] = float(self.tree_depth)
 
     @profile
     def _mask_invalid(self, tensor: torch.Tensor) -> None:

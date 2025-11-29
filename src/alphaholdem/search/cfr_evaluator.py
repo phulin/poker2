@@ -168,6 +168,25 @@ class CFREvaluator(ABC):
     def _fan_out_deep(self, data: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("Subclasses must implement _fan_out_deep.")
 
+    def _construct_subgame(
+        self,
+        src_env: HUNLTensorEnv,
+        src_indices: torch.Tensor,
+    ) -> None:
+        """Construct the subgame tree structure (subclass-specific implementation).
+
+        This method should:
+        - Copy root states from src_env to self.env
+        - Expand the tree by creating child nodes
+        - Set up depth_offsets, valid_mask, leaf_mask, etc.
+        - Initialize environment states for all nodes
+
+        Args:
+            src_env: Batched environment that holds the source root public states.
+            src_indices: Row indices inside `src_env` to copy into the tree roots.
+        """
+        raise NotImplementedError("Subclasses must implement _construct_subgame.")
+
     def initialize_subgame(
         self,
         src_env: HUNLTensorEnv,
@@ -181,7 +200,49 @@ class CFREvaluator(ABC):
             src_indices: Row indices inside `src_env` to copy into the tree roots.
             initial_beliefs: Optional belief tensor aligned with `src_indices`.
         """
-        raise NotImplementedError("Subclasses must implement initialize_subgame.")
+        N = self.root_nodes
+
+        # Construct the subgame tree first (subclass-specific, allocates tensors)
+        self._construct_subgame(src_env, src_indices)
+
+        # Handle initial beliefs
+        if initial_beliefs is None:
+            initial_beliefs = torch.full(
+                (N, self.num_players, NUM_HANDS),
+                1.0 / NUM_HANDS,
+                dtype=self.float_dtype,
+                device=self.device,
+            )
+        else:
+            initial_beliefs = initial_beliefs.to(
+                device=self.device, dtype=self.float_dtype
+            )
+
+        # Set initial beliefs
+        self.beliefs[:N] = initial_beliefs
+        self.beliefs_avg[:N] = initial_beliefs
+        self.root_pre_chance_beliefs[:] = initial_beliefs
+        self.self_reach[:N] = 1.0
+        self.self_reach_avg[:N] = 1.0
+
+        # Compute allowed hands from root board
+        board_mask_root = self.env.board_onehot[:N].any(dim=1).reshape(N, -1).float()
+        root_allowed = (self.combo_onehot_float @ board_mask_root.T).T < 0.5
+        root_allowed_prob = root_allowed.float()
+        root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1.0)
+
+        # Fan out allowed hands to all nodes
+        self.allowed_hands[:] = self._fan_out_deep(root_allowed)
+        self.allowed_hands_prob[:] = self._fan_out_deep(root_allowed_prob)
+
+        # Initialize hand rank data
+        self._init_hand_rank_data()
+
+        # Record statistics
+        self.stats["evaluator_street"] = self.env.street[:N].float().mean().item()
+        self.stats["evaluator_total_nodes"] = float(self.total_nodes)
+        self.stats["evaluator_root_nodes"] = float(self.root_nodes)
+        self.stats["evaluator_tree_depth"] = float(self.tree_depth)
 
     def sample_leaves(self, training_mode: bool) -> any:
         """Sample leaves from `self.policy_probs_sample`.
