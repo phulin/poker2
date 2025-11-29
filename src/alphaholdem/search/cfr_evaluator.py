@@ -20,9 +20,11 @@ from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.mlp.better_trm import BetterTRM
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
+from alphaholdem.models.model_output import TRMLatent
 from alphaholdem.rl.rebel_batch import RebelBatch
 from alphaholdem.utils.model_utils import compute_masked_logits
 from alphaholdem.utils.profiling import profile
@@ -102,11 +104,12 @@ def padded_indices(mask: torch.Tensor, alignment: int) -> torch.Tensor:
 class CFREvaluator(ABC):
     """Base class for CFR evaluators with shared methods."""
 
-    model: RebelFFN | BetterFFN
+    model: RebelFFN | BetterFFN | BetterTRM
     device: torch.device
     env: HUNLTensorEnv
     feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder
     cfr_type: CFRType
+    num_supervisions: int
     root_nodes: int
     total_nodes: int
     beliefs: torch.Tensor
@@ -147,6 +150,7 @@ class CFREvaluator(ABC):
     self_reach: torch.Tensor
     self_reach_avg: torch.Tensor
     root_pre_chance_beliefs: torch.Tensor
+    latent: TRMLatent | None
     last_model_values: torch.Tensor | None
     showdown_indices: torch.Tensor
     showdown_actors: torch.Tensor
@@ -186,63 +190,6 @@ class CFREvaluator(ABC):
             src_indices: Row indices inside `src_env` to copy into the tree roots.
         """
         raise NotImplementedError("Subclasses must implement _construct_subgame.")
-
-    def initialize_subgame(
-        self,
-        src_env: HUNLTensorEnv,
-        src_indices: torch.Tensor,
-        initial_beliefs: torch.Tensor | None = None,
-    ) -> None:
-        """Copy root states into the search tree, reset per-node buffers, and expand.
-
-        Args:
-            src_env: Batched environment that holds the source root public states.
-            src_indices: Row indices inside `src_env` to copy into the tree roots.
-            initial_beliefs: Optional belief tensor aligned with `src_indices`.
-        """
-        N = self.root_nodes
-
-        # Construct the subgame tree first (subclass-specific, allocates tensors)
-        self._construct_subgame(src_env, src_indices)
-
-        # Handle initial beliefs
-        if initial_beliefs is None:
-            initial_beliefs = torch.full(
-                (N, self.num_players, NUM_HANDS),
-                1.0 / NUM_HANDS,
-                dtype=self.float_dtype,
-                device=self.device,
-            )
-        else:
-            initial_beliefs = initial_beliefs.to(
-                device=self.device, dtype=self.float_dtype
-            )
-
-        # Set initial beliefs
-        self.beliefs[:N] = initial_beliefs
-        self.beliefs_avg[:N] = initial_beliefs
-        self.root_pre_chance_beliefs[:] = initial_beliefs
-        self.self_reach[:N] = 1.0
-        self.self_reach_avg[:N] = 1.0
-
-        # Compute allowed hands from root board
-        board_mask_root = self.env.board_onehot[:N].any(dim=1).reshape(N, -1).float()
-        root_allowed = (self.combo_onehot_float @ board_mask_root.T).T < 0.5
-        root_allowed_prob = root_allowed.float()
-        root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1.0)
-
-        # Fan out allowed hands to all nodes
-        self.allowed_hands[:] = self._fan_out_deep(root_allowed)
-        self.allowed_hands_prob[:] = self._fan_out_deep(root_allowed_prob)
-
-        # Initialize hand rank data
-        self._init_hand_rank_data()
-
-        # Record statistics
-        self.stats["evaluator_street"] = self.env.street[:N].float().mean().item()
-        self.stats["evaluator_total_nodes"] = float(self.total_nodes)
-        self.stats["evaluator_root_nodes"] = float(self.root_nodes)
-        self.stats["evaluator_tree_depth"] = float(self.tree_depth)
 
     def sample_leaves(self, training_mode: bool) -> any:
         """Sample leaves from `self.policy_probs_sample`.
@@ -350,7 +297,18 @@ class CFREvaluator(ABC):
     def _get_model_policy_probs(self, indices: torch.Tensor) -> torch.Tensor:
         """Get policy probabilities from model for given indices."""
         features = self.feature_encoder.encode(self.beliefs, indices=indices)
-        model_output = self.model(features)
+        if isinstance(self.model, BetterTRM):
+            latent = None
+            for _ in range(self.num_supervisions):
+                model_output = self.model(
+                    features,
+                    include_policy=True,
+                    latent=latent,
+                )
+                latent = model_output.latent
+        else:
+            model_output = self.model(features, include_policy=True)
+
         logits = model_output.policy_logits
         legal_masks = self.legal_mask[indices]
         masked_logits = compute_masked_logits(logits, legal_masks[:, None, :])
@@ -802,6 +760,67 @@ class CFREvaluator(ABC):
     # Core Logic Methods (in order called by cfr_iteration and evaluate_cfr)
     # ============================================================================
 
+    def initialize_subgame(
+        self,
+        src_env: HUNLTensorEnv,
+        src_indices: torch.Tensor,
+        initial_beliefs: torch.Tensor | None = None,
+    ) -> None:
+        """Copy root states into the search tree, reset per-node buffers, and expand.
+
+        Args:
+            src_env: Batched environment that holds the source root public states.
+            src_indices: Row indices inside `src_env` to copy into the tree roots.
+            initial_beliefs: Optional belief tensor aligned with `src_indices`.
+        """
+        N = self.root_nodes
+
+        # Construct the subgame tree first (subclass-specific, allocates tensors)
+        self._construct_subgame(src_env, src_indices)
+
+        # Handle initial beliefs
+        if initial_beliefs is None:
+            initial_beliefs = torch.full(
+                (N, self.num_players, NUM_HANDS),
+                1.0 / NUM_HANDS,
+                dtype=self.float_dtype,
+                device=self.device,
+            )
+        else:
+            initial_beliefs = initial_beliefs.to(
+                device=self.device, dtype=self.float_dtype
+            )
+
+        # Set initial beliefs
+        self.beliefs[:N] = initial_beliefs
+        self.beliefs_avg[:N] = initial_beliefs
+        self.root_pre_chance_beliefs[:] = initial_beliefs
+        self.self_reach[:N] = 1.0
+        self.self_reach_avg[:N] = 1.0
+
+        # latent always have shape [model_indices.numel(), model.hidden_dim]
+        self.model_indices = self._compute_model_indices()
+        self.latent = None
+
+        # Compute allowed hands from root board
+        board_mask_root = self.env.board_onehot[:N].any(dim=1).reshape(N, -1).float()
+        root_allowed = (self.combo_onehot_float @ board_mask_root.T).T < 0.5
+        root_allowed_prob = root_allowed.float()
+        root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1.0)
+
+        # Fan out allowed hands to all nodes
+        self.allowed_hands = self._fan_out_deep(root_allowed)
+        self.allowed_hands_prob = self._fan_out_deep(root_allowed_prob)
+
+        # Initialize hand rank data
+        self._init_hand_rank_data()
+
+        # Record statistics
+        self.stats["evaluator_street"] = self.env.street[:N].float().mean().item()
+        self.stats["evaluator_total_nodes"] = float(self.total_nodes)
+        self.stats["evaluator_root_nodes"] = float(self.root_nodes)
+        self.stats["evaluator_tree_depth"] = float(self.tree_depth)
+
     @torch.no_grad()
     @profile
     def initialize_policy_and_beliefs(self) -> None:
@@ -925,7 +944,16 @@ class CFREvaluator(ABC):
         self, t: int, beliefs: torch.Tensor, features: MLPFeatures
     ) -> None:
         # Set model values for non-terminal leaves
-        model_output = self.model(features)
+        if isinstance(self.model, BetterTRM):
+            # Note self.latent gets reinitialized for each subgame.
+            model_output = self.model(
+                features,
+                include_policy=False,
+                latent=self.latent,
+            )
+            self.latent = model_output.latent
+        else:
+            model_output = self.model(features, include_policy=False)
 
         if not self.cfr_avg or t <= 1 or self.last_model_values is None:
             new_values = torch.index_copy(

@@ -16,6 +16,8 @@ from alphaholdem.env.card_utils import (
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.cnn.siamese_convnet import SiameseConvNetV1
 from alphaholdem.models.cnn.state_encoder import CNNStateEncoder
+from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.mlp.better_trm import BetterTRM
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
@@ -81,7 +83,7 @@ def create_state_encoder_for_model(
     elif isinstance(model, SiameseConvNetV1):
         # For CNN models, create CNNStateEncoder with tensor_env and device
         return CNNStateEncoder(env, device)
-    elif isinstance(model, RebelFFN):
+    elif isinstance(model, (RebelFFN, BetterFFN, BetterTRM)):
         return RebelStateEncoderWrapper(env, device)
     else:
         # for testing.
@@ -252,7 +254,7 @@ class PreflopAnalyzer:
             # Get legal actions from tensor environment
             legal_masks = self.env.legal_bins_mask()  # [N, num_bet_bins]
 
-            if isinstance(self.model, RebelFFN):
+            if isinstance(self.model, (RebelFFN, BetterFFN, BetterTRM)):
                 hero_cards = self.env.hole_indices[env_indices, seat]
                 card_a = hero_cards[:, 0]
                 card_b = hero_cards[:, 1]

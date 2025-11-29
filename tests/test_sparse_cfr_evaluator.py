@@ -200,10 +200,10 @@ def make_rebel_evaluator(
         warm_start_iterations=cfg.search.warm_start_iterations,
         cfr_type=cfg.search.cfr_type,
         cfr_avg=cfg.search.cfr_avg,
+        sample_epsilon=cfg.search.sample_epsilon,
         dcfr_alpha=cfg.search.dcfr_alpha,
         dcfr_beta=cfg.search.dcfr_beta,
         dcfr_gamma=cfg.search.dcfr_gamma,
-        sample_epsilon=getattr(cfg.train, "cfr_action_epsilon", 0.0),
     )
 
 

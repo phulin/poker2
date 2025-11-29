@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 from collections import OrderedDict
 
@@ -11,7 +12,7 @@ from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.models.activation_utils import get_activation
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.model_output import ModelOutput
+from alphaholdem.models.model_output import ModelOutput, TRMLatent
 from alphaholdem.utils.profiling import profile
 
 
@@ -45,20 +46,21 @@ def ffn_block(
     )
 
 
-class BetterFFN(nn.Module):
-    """Better PBS feed-forward poker model."""
+class BetterTRM(nn.Module):
+    """Better PBS TRM poker model."""
 
     def __init__(
         self,
         num_actions: int,
         hidden_dim: int = 512,
-        range_hidden_dim: int = 128,
+        range_hidden_dim: int = 256,
         ffn_dim: int = 1024,
-        num_hidden_layers: int = 3,
-        num_policy_layers: int = 3,
-        num_value_layers: int = 3,
+        num_policy_layers: int = 1,
+        num_value_layers: int = 1,
         num_players: int = 2,
-        shared_trunk: bool = True,
+        num_recursions: int = 6,
+        num_iterations: int = 3,
+        shared_trunk: bool = False,
         enforce_zero_sum: bool = True,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
@@ -66,8 +68,9 @@ class BetterFFN(nn.Module):
         self.num_actions = num_actions
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim
-        self.num_hidden_layers = num_hidden_layers
         self.num_players = num_players
+        self.num_recursions = num_recursions  # Number of TRM recursions n
+        self.num_iterations = num_iterations  # Number of TRM iterations T
         self.shared_trunk = shared_trunk
         self.enforce_zero_sum = enforce_zero_sum
 
@@ -84,24 +87,20 @@ class BetterFFN(nn.Module):
             context_length(num_players), hidden_dim, hidden_dim, nonlinearity
         )
 
+        self.register_buffer("y_init", torch.empty(hidden_dim))
+        self.register_buffer("z_init", torch.empty(hidden_dim))
+
         # Build trunk
-        # Default alpha is always based on hidden + value layers
-        alpha = 1 / math.sqrt(num_hidden_layers + num_value_layers)
+        # Fixed 2-layer for recursion
         layers = [
-            ResidualBlock(
-                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), alpha
-            )
-            for _ in range(num_hidden_layers)
+            ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity) for _ in range(2)
         ]
         self.trunk = nn.Sequential(*layers)
 
         # Heads
-        # If shared_trunk is False, use separate alpha for policy_head based on num_policy_layers
-        policy_alpha = alpha if shared_trunk else 1 / math.sqrt(num_policy_layers)
-
         layers = [
             ResidualBlock(
-                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), policy_alpha
+                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), 1.0
             )
             for _ in range(num_policy_layers - 1)
         ]
@@ -112,7 +111,7 @@ class BetterFFN(nn.Module):
 
         layers = [
             ResidualBlock(
-                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), alpha
+                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), 1.0
             )
             for _ in range(num_value_layers - 1)
         ]
@@ -121,9 +120,20 @@ class BetterFFN(nn.Module):
         )
         self.hand_value_head = nn.Sequential(*layers)
 
+    def latent_recursion(
+        self, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor
+    ) -> torch.Tensor:
+        for _ in range(self.num_recursions):
+            z = self.trunk(x + y + z)
+        y = self.trunk(y + z)
+        return y, z
+
     @profile
     def forward(
-        self, features: MLPFeatures, include_policy: bool = True
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        latent: TRMLatent | None = None,
     ) -> ModelOutput:
         """
         Forward pass over flat feature vectors.
@@ -145,7 +155,7 @@ class BetterFFN(nn.Module):
         belief_features = self.belief_encoder(features.beliefs)
         player_beliefs = features.beliefs.view(-1, self.num_players, NUM_HANDS)
 
-        flat_features = (
+        x = (
             board_features.sum(dim=1)
             + street_features
             + context_features
@@ -153,18 +163,30 @@ class BetterFFN(nn.Module):
         )
         # assert flat_features.isfinite().all()
 
-        x = self.trunk(flat_features)
-        # assert x.isfinite().all()
-
-        policy_input = x if self.shared_trunk else flat_features.detach()
+        y = (
+            latent.y
+            if latent is not None
+            else self.y_init.clone()[None, :].expand(x.shape[0], -1)
+        )
+        z = (
+            latent.z
+            if latent is not None
+            else self.z_init.clone()[None, :].expand(x.shape[0], -1)
+        )
+        with torch.no_grad():
+            for j in range(self.num_iterations - 1):
+                y, z = self.latent_recursion(x, y, z)
+        y, z = self.latent_recursion(x, y, z)
 
         if include_policy:
+            policy_input = y if self.shared_trunk else y.detach()
             policy_logits = self.policy_head(policy_input).view(
                 -1, NUM_HANDS, self.num_actions
             )
         else:
             policy_logits = None
-        hand_values_raw = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
+
+        hand_values_raw = self.hand_value_head(y).view(-1, self.num_players, NUM_HANDS)
         if self.enforce_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
@@ -180,6 +202,7 @@ class BetterFFN(nn.Module):
             policy_logits=policy_logits,
             value=value,
             hand_values=hand_values,
+            latent=TRMLatent(y=y, z=z),
         )
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
@@ -203,6 +226,9 @@ class BetterFFN(nn.Module):
                     1.532 * math.sqrt(self.ffn_dim / self.hidden_dim),
                     generator=rng,
                 )
+
+        nn.init.normal_(self.y_init, generator=rng)
+        nn.init.normal_(self.z_init, generator=rng)
 
         # Guess hand values are around stddev 0.1.
         self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)

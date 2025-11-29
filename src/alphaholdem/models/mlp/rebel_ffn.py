@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
 
-from alphaholdem.core.interfaces import Model
 from alphaholdem.core.structured_config import NonlinearityType
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.models.activation_utils import get_activation
@@ -49,7 +47,7 @@ class _FFNBlock(nn.Module):
         return x
 
 
-class RebelFFN(nn.Module, Model):
+class RebelFFN(nn.Module):
     """ReBeL-inspired feed-forward poker model."""
 
     def __init__(
@@ -83,7 +81,9 @@ class RebelFFN(nn.Module, Model):
         self.policy_head = nn.Linear(hidden_dim, num_actions * NUM_HANDS)
         self.hand_value_head = nn.Linear(hidden_dim, num_players * NUM_HANDS)
 
-    def forward(self, features: MLPFeatures) -> ModelOutput:
+    def forward(
+        self, features: MLPFeatures, include_policy: bool = True
+    ) -> ModelOutput:
         """
         Forward pass over flat feature vectors.
 
@@ -107,7 +107,10 @@ class RebelFFN(nn.Module, Model):
         x = self.trunk(features_tensor)
         x = self.post_norm(x)
 
-        policy_logits = self.policy_head(x).reshape(-1, NUM_HANDS, self.num_actions)
+        if include_policy:
+            policy_logits = self.policy_head(x).reshape(-1, NUM_HANDS, self.num_actions)
+        else:
+            policy_logits = None
 
         hand_value_input = x.detach() if self.detach_value_head else x
         hand_values = self.hand_value_head(hand_value_input)
@@ -122,7 +125,7 @@ class RebelFFN(nn.Module, Model):
             hand_values=hand_values,
         )
 
-    def init_weights(self, rng: Optional[torch.Generator] = None) -> None:
+    def init_weights(self, rng: torch.Generator | None = None) -> None:
         """Initialize parameters following Xavier/LayerNorm defaults."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
@@ -146,7 +149,7 @@ class RebelFFN(nn.Module, Model):
         if last_linear.bias is not None:
             last_linear.bias.data.mul_(weight_scale).add_(bias_adjustment)
 
-    def get_model_info(self) -> Dict[str, Any]:
+    def get_model_info(self) -> dict[str, any]:
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return {

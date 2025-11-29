@@ -14,7 +14,9 @@ from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.models.model_output import ModelOutput
+from alphaholdem.models.mlp.better_trm import BetterTRM
+from alphaholdem.models.mlp.mlp_features import MLPFeatures
+from alphaholdem.models.model_output import ModelOutput, TRMLatent
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.pbs_pool import PBSPool
 from alphaholdem.rl.rebel_batch import RebelBatch
@@ -79,6 +81,22 @@ class RebelCFRTrainer:
                 num_policy_layers=cfg.model.num_policy_layers,
                 num_value_layers=cfg.model.num_value_layers,
                 num_players=self.num_players,
+                shared_trunk=cfg.model.shared_trunk,
+                enforce_zero_sum=cfg.model.enforce_zero_sum,
+                nonlinearity=cfg.model.nonlinearity,
+            )
+            num_context_features = context_length(self.num_players)
+        elif cfg.model.name == ModelType.better_trm:
+            self.model = BetterTRM(
+                num_actions=self.num_actions,
+                hidden_dim=cfg.model.hidden_dim,
+                range_hidden_dim=cfg.model.range_hidden_dim,
+                ffn_dim=cfg.model.ffn_dim,
+                num_policy_layers=cfg.model.num_policy_layers,
+                num_value_layers=cfg.model.num_value_layers,
+                num_players=self.num_players,
+                num_recursions=cfg.model.num_recursions,
+                num_iterations=cfg.model.num_iterations,
                 shared_trunk=cfg.model.shared_trunk,
                 enforce_zero_sum=cfg.model.enforce_zero_sum,
                 nonlinearity=cfg.model.nonlinearity,
@@ -171,6 +189,7 @@ class RebelCFRTrainer:
                 device=self.device,
                 float_dtype=self.float_dtype,
                 generator=self.rng,
+                num_supervisions=self.cfg.model.num_supervisions,
                 warm_start_iterations=self.cfg.search.warm_start_iterations,
                 cfr_type=self.cfg.search.cfr_type,
                 cfr_avg=self.cfg.search.cfr_avg,
@@ -235,19 +254,15 @@ class RebelCFRTrainer:
 
     def _compute_metrics(
         self,
+        episodes: int,
+        updates: int,
+        step_stats: dict[str, float],
         value_batch: RebelBatch,
         policy_batch: RebelBatch,
         value_output: ModelOutput,
         policy_output: ModelOutput,
-        total_loss: float,
-        value_loss: float,
         value_loss_all: torch.Tensor,
-        value_weights: torch.Tensor,
-        policy_loss: float,
         policy_loss_all: torch.Tensor,
-        policy_weights: torch.Tensor,
-        entropy_loss: float,
-        permutation_loss: float,
         fresh_value_loss: float | None = None,
         fresh_value_batch: RebelBatch | None = None,
     ) -> dict[str, float]:
@@ -282,11 +297,13 @@ class RebelCFRTrainer:
         )
 
         metrics = {
-            "loss": total_loss,
-            "policy_loss": policy_loss,
-            "value_loss": value_loss,
-            "entropy_loss": entropy_loss,
-            "permutation_loss": permutation_loss,
+            "episodes": episodes,
+            "loss": step_stats["total_loss"] / updates,
+            "policy_loss": step_stats["policy_loss"] / updates,
+            "value_loss": step_stats["value_loss"] / updates,
+            "entropy_loss": step_stats["entropy_loss"] / updates,
+            "permutation_loss": step_stats["permutation_loss"] / updates,
+            "param_update_norm": step_stats["update_norm"] / updates,
             "value_buffer": value_buffer_streets_stats,
             "value_buffer_size": len(self.value_buffer),
             "policy_buffer_size": len(self.policy_buffer),
@@ -408,6 +425,106 @@ class RebelCFRTrainer:
         # Step >= last threshold, return last config's probabilities
         return configs[-1].probabilities
 
+    def _supervise(
+        self,
+        update: int,
+        value_batch: RebelBatch,
+        policy_batch: RebelBatch,
+        permuted_features: MLPFeatures,
+        suit_permutations_idxs: torch.Tensor,
+        value_latent: TRMLatent | None,
+        policy_latent: TRMLatent | None,
+        permuted_latent: TRMLatent | None,
+        policy_step_loss_all: torch.Tensor,
+        value_step_loss_all: torch.Tensor,
+    ) -> dict[str, float]:
+        self.optimizer.zero_grad()
+
+        value_loss, policy_loss, entropy_loss = None, None, None
+        value_loss_update, policy_loss_update = None, None
+        permutation_loss = 0.0
+
+        if isinstance(self.model, BetterTRM):
+            value_output = self.model(
+                value_batch.features,
+                include_policy=False,
+                latent=value_latent,
+            )
+            # Run model on permuted inputs [model(permute(features))]
+            value_output_permuted = self.model(
+                permuted_features,
+                include_policy=False,
+                latent=permuted_latent,
+            )
+        else:
+            value_output = self.model(value_batch.features, include_policy=False)
+            value_output_permuted = self.model(permuted_features, include_policy=False)
+
+        loss_dict = self.loss_fn(
+            value_output,
+            value_batch,
+            output_permuted=value_output_permuted,
+            suit_permutation_idxs=suit_permutations_idxs,
+        )
+        value_loss = loss_dict["value_loss"]
+        value_loss_update = loss_dict["value_loss_all"]
+        value_step_loss_all[
+            update * self.batch_size : (update + 1) * self.batch_size
+        ] = value_loss_update
+        permutation_loss = loss_dict["permutation_loss"]
+        total_loss = loss_dict["total_loss"]
+
+        if isinstance(self.model, BetterTRM):
+            policy_output = self.model(
+                policy_batch.features, include_policy=True, latent=policy_latent
+            )
+        else:
+            policy_output = self.model(policy_batch.features, include_policy=True)
+        loss_dict = self.loss_fn(policy_output, policy_batch)
+        policy_loss = loss_dict["policy_loss"]
+        policy_loss_update = loss_dict["policy_loss_all"]
+        policy_step_loss_all[
+            update * self.batch_size : (update + 1) * self.batch_size
+        ] = policy_loss_update
+        entropy_loss = loss_dict["entropy"]
+        total_loss += loss_dict["total_loss"]
+
+        total_loss.backward()
+
+        assert all(
+            p.grad.isfinite().all()
+            for p in self.model.parameters()
+            if p.grad is not None
+        ), "NaN/Inf in model gradients"
+
+        if self.grad_clip is not None and self.grad_clip > 0:
+            nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+        # Store parameters before optimizer step to compute update norm
+        params_before = [p.clone() for p in self.model.parameters()]
+        self.optimizer.step()
+
+        # Compute parameter update norm using torch utility
+        updates = (
+            p_after - p_before
+            for p_before, p_after in zip(params_before, self.model.parameters())
+        )
+        update_norm = torch.nn.utils.get_total_norm(updates).item()
+
+        return (
+            {
+                "policy_loss": policy_loss,
+                "value_loss": value_loss,
+                "entropy_loss": entropy_loss,
+                "permutation_loss": permutation_loss,
+                "total_loss": total_loss.item(),
+                "update_norm": update_norm,
+            },
+            value_output,
+            value_output_permuted,
+            policy_output,
+        )
+
     @profile
     def _update_model(self, step: int) -> dict[str, float]:
         fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
@@ -420,18 +537,33 @@ class RebelCFRTrainer:
 
         value_fullness = len(self.value_buffer) / self.value_buffer.capacity
         episodes = math.ceil(self.cfg.train.episodes_per_step * value_fullness)
+        supervisions = (
+            self.cfg.model.num_supervisions if isinstance(self.model, BetterTRM) else 1
+        )
+        updates = episodes * supervisions
         value_step_loss_all = torch.empty(
-            self.batch_size * episodes, self.num_players, NUM_HANDS, device=self.device
+            self.batch_size * updates, self.num_players, NUM_HANDS, device=self.device
         )
         policy_step_loss_all = torch.empty(
-            self.batch_size * episodes, NUM_HANDS, self.num_actions, device=self.device
+            self.batch_size * updates, NUM_HANDS, self.num_actions, device=self.device
         )
-        policy_step_loss, value_step_loss = 0.0, 0.0
-        entropy_step_loss, permutation_step_loss = 0.0, 0.0
-        total_step_loss = 0.0
-        total_update_norm = 0.0
+        value_batch_all = []
+        policy_batch_all = []
+        value_output_all = []
+        policy_output_all = []
+        step_stats = {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+            "permutation_loss": 0.0,
+            "total_loss": 0.0,
+            "update_norm": 0.0,
+        }
         stratify = self._get_stratify_streets(step)
+
+        self.model.train()
         for episode in range(episodes):
+            value_latent, policy_latent, permuted_latent = None, None, None
             # TODO: think about how to interleave these/ratio in a smarter way.
             # Might need to use different sizes for the two batches.
             value_batch = self.value_buffer.sample(
@@ -441,14 +573,6 @@ class RebelCFRTrainer:
                 self.batch_size, stratify_streets=stratify
             ).to(self.device)
 
-            self.model.train()
-            self.optimizer.zero_grad()
-
-            value_loss, policy_loss, entropy_loss = None, None, None
-            value_loss_episode, policy_loss_episode = None, None
-            permutation_loss = 0.0
-
-            value_output = self.model(value_batch.features)
             # Sample B suit permutations.
             suit_permutations_idxs = torch.randint(
                 0, 24, (len(value_batch),), generator=self.rng, device=self.device
@@ -456,62 +580,38 @@ class RebelCFRTrainer:
             suit_permutations = suit_permutations_tensor(device=self.device)[
                 suit_permutations_idxs
             ]
-            permuted = value_batch.features.clone()
-            permuted.permute_suits(suit_permutations)
-            # Run model on permuted inputs [model(permute(features))]
-            output_permuted = self.model(permuted)
+            permuted_features = value_batch.features.clone()
+            permuted_features.permute_suits(suit_permutations, self.rng)
 
-            loss_dict = self.loss_fn(
-                value_output,
-                value_batch,
-                output_permuted=output_permuted,
-                suit_permutation_idxs=suit_permutations_idxs,
-            )
-            value_loss = loss_dict["value_loss"]
-            value_loss_episode = loss_dict["value_loss_all"]
-            value_step_loss_all[
-                episode * self.batch_size : (episode + 1) * self.batch_size
-            ] = value_loss_episode
-            value_weights = loss_dict["value_weights"]
-            permutation_loss = loss_dict["permutation_loss"]
-            total_loss = loss_dict["total_loss"]
+            for supervision in range(supervisions):
+                (
+                    episode_stats,
+                    value_output,
+                    value_output_permuted,
+                    policy_output,
+                ) = self._supervise(
+                    episode * supervisions + supervision,
+                    value_batch,
+                    policy_batch,
+                    permuted_features,
+                    suit_permutations_idxs,
+                    value_latent,
+                    policy_latent,
+                    permuted_latent,
+                    policy_step_loss_all,
+                    value_step_loss_all,
+                )
+                value_latent = value_output.latent
+                policy_latent = policy_output.latent
+                permuted_latent = value_output_permuted.latent
+                for k in step_stats:
+                    step_stats[k] += episode_stats[k]
 
-            policy_output = self.model(policy_batch.features)
-            loss_dict = self.loss_fn(policy_output, policy_batch)
-            policy_loss = loss_dict["policy_loss"]
-            policy_loss_episode = loss_dict["policy_loss_all"]
-            policy_step_loss_all[
-                episode * self.batch_size : (episode + 1) * self.batch_size
-            ] = policy_loss_episode
-            policy_weights = loss_dict["policy_weights"]
-            entropy_loss = loss_dict["entropy"]
-
-            total_loss += loss_dict["total_loss"]
-            total_loss.backward()
-
-            total_step_loss += total_loss.item()
-            policy_step_loss += policy_loss
-            value_step_loss += value_loss
-            entropy_step_loss += entropy_loss
-            permutation_step_loss += permutation_loss
-
-            assert all(
-                p.grad.isfinite().all() for p in self.model.parameters()
-            ), "NaN/Inf in model gradients"
-
-            if self.grad_clip is not None and self.grad_clip > 0:
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-
-            # Store parameters before optimizer step to compute update norm
-            params_before = [p.clone() for p in self.model.parameters()]
-            self.optimizer.step()
-
-            # Compute parameter update norm using torch utility
-            updates = (
-                p_after - p_before
-                for p_before, p_after in zip(params_before, self.model.parameters())
-            )
-            total_update_norm += torch.nn.utils.get_total_norm(updates).item()
+                # Append batches multiple times so that indices line up.
+                value_batch_all.append(value_batch)
+                policy_batch_all.append(policy_batch)
+                value_output_all.append(value_output)
+                policy_output_all.append(policy_output)
 
         # After the loop, calculate loss on fresh data
         fresh_value_loss = None
@@ -524,24 +624,18 @@ class RebelCFRTrainer:
                 fresh_value_loss = fresh_loss_dict["value_loss"]
 
         metrics = self._compute_metrics(
-            value_batch,
-            policy_batch,
-            value_output,
-            policy_output,
-            total_step_loss / episodes,
-            value_step_loss / episodes,
-            value_loss_episode,
-            value_weights,
-            policy_step_loss / episodes,
-            policy_loss_episode,
-            policy_weights,
-            entropy_step_loss / episodes,
-            permutation_step_loss / episodes,
+            episodes,
+            updates,
+            step_stats,
+            RebelBatch.cat(value_batch_all),
+            RebelBatch.cat(policy_batch_all),
+            ModelOutput.cat(value_output_all),
+            ModelOutput.cat(policy_output_all),
+            value_step_loss_all,
+            policy_step_loss_all,
             fresh_value_loss=fresh_value_loss,
             fresh_value_batch=fresh_value_batch,
         )
-        metrics["episodes"] = episodes
-        metrics["param_update_norm"] = total_update_norm / episodes
 
         return metrics
 

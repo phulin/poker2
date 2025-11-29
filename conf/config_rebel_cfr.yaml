@@ -55,6 +55,10 @@ model:
   compile: true
   enforce_zero_sum: true
 
+  num_recursions: 6
+  num_iterations: 3
+  num_supervisions: 16
+
 env:
   stack: 1000
   sb: 5

@@ -48,6 +48,7 @@ from alphaholdem.env import card_utils
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.mlp.better_trm import BetterTRM
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
@@ -145,7 +146,7 @@ def _parse_board_str(board: str) -> list[int]:
 
 def load_model_from_checkpoint(
     checkpoint_path: str, config: Config, device: torch.device
-) -> RebelFFN | BetterFFN:
+) -> RebelFFN | BetterFFN | BetterTRM:
     """Load a model from checkpoint using RebelCFRTrainer."""
     print(f"Loading model from {checkpoint_path}")
 

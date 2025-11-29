@@ -8,6 +8,7 @@ import torch.nn as nn
 from alphaholdem.core.structured_config import CFRType, SearchConfig
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.mlp.better_trm import BetterTRM
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.rl.agent_snapshot import AgentSnapshot
 from alphaholdem.rl.opponent_pool import OpponentPool
@@ -92,7 +93,7 @@ class PBSPool(OpponentPool):
 
     def evaluate_model_against_pool(
         self,
-        candidate_model: BetterFFN | RebelFFN,
+        candidate_model: RebelFFN | BetterFFN | BetterTRM,
         num_games_per_opponent: int = 50,
     ) -> float:
         """
@@ -147,7 +148,7 @@ class PBSPool(OpponentPool):
 
     def add_snapshot(
         self,
-        model: BetterFFN | RebelFFN,
+        model: RebelFFN | BetterFFN | BetterTRM,
         step: int,
         rating: Optional[float] = None,
         is_exploiter: bool = False,
@@ -390,7 +391,7 @@ class PBSPool(OpponentPool):
 
     @staticmethod
     def _play_public_belief_games(
-        model_a: BetterFFN | RebelFFN,
+        model_a: RebelFFN | BetterFFN | BetterTRM,
         model_b: nn.Module,
         num_games: int,
         bet_bins: List[float],
@@ -430,7 +431,9 @@ class PBSPool(OpponentPool):
         )
 
         # Create evaluators for both models
-        def create_evaluator(model: BetterFFN | RebelFFN) -> RebelCFREvaluator:
+        def create_evaluator(
+            model: RebelFFN | BetterFFN | BetterTRM,
+        ) -> RebelCFREvaluator:
             return RebelCFREvaluator(
                 search_batch_size=1,
                 env_proto=env_proto,

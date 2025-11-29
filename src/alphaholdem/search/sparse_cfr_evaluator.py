@@ -5,6 +5,7 @@ from alphaholdem.env.card_utils import NUM_HANDS, combo_to_onehot_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.mlp.better_trm import BetterTRM
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.search.cfr_evaluator import (
@@ -20,7 +21,7 @@ from alphaholdem.utils.profiling import profile
 class SparseCFREvaluator(CFREvaluator):
     def __init__(
         self,
-        model: RebelFFN | BetterFFN,
+        model: RebelFFN | BetterFFN | BetterTRM,
         device: torch.device,
         cfg: Config,
         generator: torch.Generator | None = None,
@@ -34,22 +35,23 @@ class SparseCFREvaluator(CFREvaluator):
         self.bet_bins = cfg.env.bet_bins
         self.num_actions = len(self.bet_bins) + 3
 
-        search_cfg = cfg.search
+        self.num_supervisions = cfg.model.num_supervisions
+
         train_cfg = cfg.train
 
-        self.max_depth = search_cfg.depth
-        self.cfr_iterations = search_cfg.iterations
+        self.max_depth = cfg.search.depth
+        self.cfr_iterations = cfg.search.iterations
         self.warm_start_iterations = max(
-            0, min(search_cfg.warm_start_iterations, max(1, self.cfr_iterations - 1))
+            0, min(cfg.search.warm_start_iterations, max(1, self.cfr_iterations - 1))
         )
-        self.cfr_type = search_cfg.cfr_type
-        self.cfr_avg = search_cfg.cfr_avg
-        self.dcfr_alpha = search_cfg.dcfr_alpha
-        self.dcfr_beta = search_cfg.dcfr_beta
-        self.dcfr_gamma = search_cfg.dcfr_gamma
-        self.dcfr_delay = search_cfg.dcfr_plus_delay
-        self.sample_epsilon = getattr(train_cfg, "cfr_action_epsilon", 0.0)
-        self.use_final_policy_values = search_cfg.value_targets_from_final_policy
+        self.cfr_type = cfg.search.cfr_type
+        self.cfr_avg = cfg.search.cfr_avg
+        self.dcfr_alpha = cfg.search.dcfr_alpha
+        self.dcfr_beta = cfg.search.dcfr_beta
+        self.dcfr_gamma = cfg.search.dcfr_gamma
+        self.dcfr_delay = cfg.search.dcfr_plus_delay
+        self.sample_epsilon = cfg.search.sample_epsilon
+        self.use_final_policy_values = cfg.search.value_targets_from_final_policy
 
         self.generator = generator or torch.Generator(device=self.device).manual_seed(
             cfg.seed
@@ -110,6 +112,9 @@ class SparseCFREvaluator(CFREvaluator):
         self.self_reach = torch.empty_like(self.beliefs)
         self.self_reach_avg = torch.empty_like(self.beliefs)
         self.last_model_values: torch.Tensor | None = None
+
+        self.latent_y = torch.empty(0, self.model.hidden_dim, device=self.device)
+        self.latent_z = torch.empty(0, self.model.hidden_dim, device=self.device)
 
         self.policy_probs = torch.empty(
             0, NUM_HANDS, dtype=self.float_dtype, device=self.device
@@ -290,7 +295,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.last_model_values = None
 
         # Set up feature encoder (sparse-specific, done after tree construction)
-        if isinstance(self.model, BetterFFN):
+        if isinstance(self.model, (BetterFFN, BetterTRM)):
             self.feature_encoder = BetterFeatureEncoder(
                 env=self.env, device=self.device, dtype=self.float_dtype
             )

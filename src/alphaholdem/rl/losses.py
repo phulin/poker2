@@ -760,11 +760,7 @@ class RebelSupervisedLoss(nn.Module):
 
         logits = output.policy_logits
         hand_values = output.hand_values
-
-        legal_masks = batch.legal_masks[:, None, :]
-        masked_logits = compute_masked_logits(logits, legal_masks)
-        log_probs = F.log_softmax(masked_logits, dim=-1)
-        probs = log_probs.exp()
+        device = logits.device if logits is not None else output.value.device
 
         opp = 1 - batch.features.to_act
         player_beliefs = batch.features.beliefs.view(-1, 2, NUM_HANDS)
@@ -774,10 +770,16 @@ class RebelSupervisedLoss(nn.Module):
         ).squeeze(1)
 
         if batch.policy_targets is None:
-            policy_loss = torch.zeros(1, device=logits.device)
+            policy_loss = torch.zeros(1, device=device)
             policy_loss_all = None
             policy_weights = None
+            entropy = torch.zeros(1, device=device)
         else:
+            legal_masks = batch.legal_masks[:, None, :]
+            masked_logits = compute_masked_logits(logits, legal_masks)
+            log_probs = F.log_softmax(masked_logits, dim=-1)
+            probs = log_probs.exp()
+
             policy_weights = opp_matchup[:, :, None].expand(*probs.shape)
             policy_loss = F.huber_loss(
                 probs, batch.policy_targets, weight=policy_weights
@@ -789,9 +791,11 @@ class RebelSupervisedLoss(nn.Module):
                 weight=policy_weights,
             )
 
+            entropy = -(probs * log_probs).sum(dim=-1).mean()
+
         if batch.value_targets is None:
             value_weights = None
-            value_loss = torch.zeros(1, device=logits.device)
+            value_loss = torch.zeros(1, device=device)
             value_loss_all = None
         else:
             value_weights = unblocked_mass.flip(dims=[1])
@@ -807,18 +811,17 @@ class RebelSupervisedLoss(nn.Module):
 
         total_loss = self.policy_weight * policy_loss + self.value_weight * value_loss
 
-        entropy = -(probs * log_probs).sum(dim=-1).mean()
         if self.entropy_coef is not None and self.entropy_coef != 0.0:
             total_loss -= self.entropy_coef * entropy
 
-        permutation_loss = torch.tensor(0.0, device=logits.device)
+        permutation_loss = torch.tensor(0.0, device=device)
         if output_permuted is not None and suit_permutation_idxs is not None:
             # Reverse the permutation on the output hand values.
             # combo_suit_permutation_tensor[perm_idx, i] = permuted combo index for original combo i
             # To rearrange hand_values_permuted to original order:
             # hand_values_reversed[b, p, i] = hand_values_permuted[b, p, remap[b, i]]
             # where remap[b, i] is the permuted combo index for original combo i
-            combo_permutations = combo_suit_permutation_tensor(device=logits.device)[
+            combo_permutations = combo_suit_permutation_tensor(device=device)[
                 suit_permutation_idxs
             ]  # (B, 1326)
             hand_values_permuted_reversed = torch.gather(

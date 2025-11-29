@@ -13,6 +13,7 @@ from alphaholdem.env.card_utils import (
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
+from alphaholdem.models.mlp.better_trm import BetterTRM
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.search.cfr_evaluator import (
@@ -31,7 +32,7 @@ class RebelCFREvaluator(CFREvaluator):
     """ReBeL CFR Evaluator implementing the precise SELFPLAY algorithm."""
 
     root_nodes: int
-    model: RebelFFN | BetterFFN
+    model: RebelFFN | BetterFFN | BetterTRM
     max_depth: int
     bet_bins: list[float]
     cfr_iterations: int
@@ -78,7 +79,7 @@ class RebelCFREvaluator(CFREvaluator):
         self,
         search_batch_size: int,
         env_proto: HUNLTensorEnv,
-        model: RebelFFN | BetterFFN,
+        model: RebelFFN | BetterFFN | BetterTRM,
         bet_bins: list[float],
         max_depth: int,
         cfr_iterations: int,
@@ -86,6 +87,7 @@ class RebelCFREvaluator(CFREvaluator):
         float_dtype: torch.dtype,
         generator: torch.Generator | None = None,
         warm_start_iterations: int = T_WARM,
+        num_supervisions: int = 1,
         cfr_type: CFRType = CFRType.linear,
         cfr_avg: bool = True,
         dcfr_alpha: float = 1.5,
@@ -104,6 +106,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.bet_bins = bet_bins
         self.cfr_iterations = cfr_iterations
         self.warm_start_iterations = max(0, warm_start_iterations)
+        self.num_supervisions = num_supervisions
         self.cfr_type = cfr_type
         self.cfr_avg = cfr_avg
         self.dcfr_alpha = dcfr_alpha
@@ -224,7 +227,7 @@ class RebelCFREvaluator(CFREvaluator):
         )
 
         # Feature encoder for belief computation
-        if isinstance(self.model, BetterFFN):
+        if isinstance(self.model, (BetterFFN, BetterTRM)):
             self.feature_encoder = BetterFeatureEncoder(
                 env=self.env,
                 device=self.device,
@@ -391,7 +394,6 @@ class RebelCFREvaluator(CFREvaluator):
         top = self.depth_offsets[-2]
         self.leaf_mask[top:] = self.valid_mask[top:]
         self.legal_mask = self.env.legal_bins_mask()
-        self.model_indices = self._compute_model_indices()
         self.child_mask[:top] = self._pull_back(self.valid_mask)
         self.child_count = self.child_mask.sum(dim=-1)
         valid_child_masks = self.child_mask[self.valid_mask & ~self.leaf_mask]

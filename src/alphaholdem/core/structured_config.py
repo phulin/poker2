@@ -28,6 +28,7 @@ class ModelType(str, Enum):
     poker_transformer_v1 = "PokerTransformerV1"
     rebel_ffn = "RebelFFN"
     better_ffn = "BetterFFN"
+    better_trm = "BetterTRM"
 
 
 class PPOClipping(str, Enum):
@@ -150,9 +151,6 @@ class TrainingConfig:
     lr_scaling_upper_threshold: float = 1.5  # Upper threshold multiplier
     lr_scaling_lower_threshold: float = 0.67  # Lower threshold multiplier
 
-    # ReBeL/DCFR self-play exploration
-    cfr_action_epsilon: float = 0.25  # Epsilon for action sampling during self-play
-
     # Stratify streets until the given step with the given probabilities.
     stratify_streets: list[StratifyConfig] = field(default_factory=list)
 
@@ -195,6 +193,11 @@ class ModelConfig:
     shared_trunk: bool = True
     enforce_zero_sum: bool = True
 
+    # Better TRM parameters
+    num_recursions: int = 6
+    num_iterations: int = 3
+    num_supervisions: int = 16
+
 
 @dataclass
 class EnvConfig:
@@ -232,6 +235,7 @@ class SearchConfig:
     warm_start_iterations: int = 15
     branching: int = 4
     belief_samples: int = 16
+    sample_epsilon: float = 0.25
     dcfr_alpha: float = 1.5
     dcfr_beta: float = 0.0
     dcfr_gamma: float = 2.0
