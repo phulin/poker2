@@ -128,8 +128,8 @@ class BetterTRM(nn.Module):
             context_length(num_players), hidden_dim, hidden_dim, nonlinearity
         )
 
-        self.register_buffer("y_init", torch.empty(hidden_dim))
-        self.register_buffer("z_init", torch.empty(hidden_dim))
+        self.register_buffer("y_init", torch.zeros(hidden_dim))
+        self.register_buffer("z_init", torch.zeros(hidden_dim))
 
         # Build trunk
         # Fixed 2-layer for recursion
@@ -139,6 +139,7 @@ class BetterTRM(nn.Module):
             )
             for _ in range(2)
         ]
+        layers.append(nn.LayerNorm(hidden_dim))
         self.trunk = nn.Sequential(*layers)
 
         layers = [
