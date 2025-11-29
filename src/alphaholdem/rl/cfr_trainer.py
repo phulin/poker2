@@ -601,9 +601,9 @@ class RebelCFRTrainer:
                     policy_step_loss_all,
                     value_step_loss_all,
                 )
-                value_latent = value_output.latent
-                policy_latent = policy_output.latent
-                permuted_latent = value_output_permuted.latent
+                value_latent = value_output.latent.detach()
+                policy_latent = policy_output.latent.detach()
+                permuted_latent = value_output_permuted.latent.detach()
                 for k in step_stats:
                     step_stats[k] += episode_stats[k]
 
