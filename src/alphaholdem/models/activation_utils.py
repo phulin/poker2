@@ -24,9 +24,7 @@ class SwiGLU(nn.Module):
         return self.silu(self.W(x)) * self.V(x)
 
 
-def get_activation(
-    nonlinearity: NonlinearityType, in_features: int, out_features: int
-) -> nn.Module:
+def get_activation(nonlinearity: NonlinearityType) -> nn.Module:
     """Get activation module from NonlinearityType.
 
     Args:

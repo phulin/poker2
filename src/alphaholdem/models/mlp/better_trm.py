@@ -16,6 +16,37 @@ from alphaholdem.models.model_output import ModelOutput, TRMLatent
 from alphaholdem.utils.profiling import profile
 
 
+def trunc_normal_(
+    tensor: torch.Tensor,
+    std: float = 1.0,
+    a: float = -2.0,
+    b: float = 2.0,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Truncated normal initializer with correct std (mirrors JAX implementation)."""
+    with torch.no_grad():
+        if std == 0:
+            return tensor.zero_()
+
+        sqrt2 = math.sqrt(2.0)
+        lower = math.erf(a / sqrt2)
+        upper = math.erf(b / sqrt2)
+        z = (upper - lower) / 2.0
+
+        c = (2.0 * math.pi) ** -0.5
+        pdf_u = c * math.exp(-0.5 * a * a)
+        pdf_l = c * math.exp(-0.5 * b * b)
+        comp_std = std / math.sqrt(
+            1.0 - (b * pdf_u - a * pdf_l) / z - ((pdf_u - pdf_l) / z) ** 2
+        )
+
+        tensor.uniform_(lower, upper, generator=generator)
+        tensor.erfinv_()
+        tensor.mul_(sqrt2 * comp_std)
+        tensor.clip_(a * comp_std, b * comp_std)
+    return tensor
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, inner: nn.Module, alpha: float) -> None:
         super().__init__()
@@ -82,6 +113,7 @@ class BetterTRM(nn.Module):
         self.num_iterations = num_iterations  # Number of TRM iterations T
         self.shared_trunk = shared_trunk
         self.enforce_zero_sum = enforce_zero_sum
+        self.nonlinearity = nonlinearity
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
@@ -227,19 +259,20 @@ class BetterTRM(nn.Module):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
-        for sequential in [self.trunk, self.policy_head, self.hand_value_head]:
-            for block in sequential.modules():
-                if not isinstance(block, ResidualBlock):
-                    continue
-                # 1.532 is the gain for GELU nonlinearity.
-                nn.init.orthogonal_(
-                    block.inner.get_submodule("linear_in").weight,
-                    1.532 * math.sqrt(self.ffn_dim / self.hidden_dim),
-                    generator=rng,
-                )
+        if self.nonlinearity == NonlinearityType.gelu:
+            for sequential in [self.trunk, self.policy_head, self.hand_value_head]:
+                for block in sequential.modules():
+                    if not isinstance(block, ResidualBlock):
+                        continue
+                    # 1.532 is the gain for GELU nonlinearity.
+                    nn.init.orthogonal_(
+                        block.inner.get_submodule("linear_in").weight,
+                        1.532 * math.sqrt(self.ffn_dim / self.hidden_dim),
+                        generator=rng,
+                    )
 
-        nn.init.normal_(self.y_init, generator=rng)
-        nn.init.normal_(self.z_init, generator=rng)
+        trunc_normal_(self.y_init, std=1.0, generator=rng)
+        trunc_normal_(self.z_init, std=1.0, generator=rng)
 
         # Guess hand values are around stddev 0.1.
         self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
