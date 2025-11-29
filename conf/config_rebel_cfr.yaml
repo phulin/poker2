@@ -72,7 +72,7 @@ search:
   value_targets_from_final_policy: true
 
   cfr_type: discounted_plus
-  cfr_avg: true
+  cfr_avg: false
 
   iterations: 150
   iterations_final: 500
