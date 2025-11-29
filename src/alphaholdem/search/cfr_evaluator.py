@@ -883,7 +883,20 @@ class CFREvaluator(ABC):
     def warm_start(self) -> None:
         """Simple warm start: use model values and do a best-response pass."""
         self.set_leaf_values(0)
-        self.compute_expected_values(self.policy_probs, self.latest_values)
+        if not self.latest_values.isfinite().all():
+            num_nonfinite = (~self.latest_values.isfinite()).sum().item()
+            raise ValueError(
+                f"Non-finite values in latest_values after set_leaf_values: "
+                f"{num_nonfinite} non-finite elements out of {self.latest_values.numel()}"
+            )
+
+        self.compute_expected_values()
+        if not self.latest_values.isfinite().all():
+            num_nonfinite = (~self.latest_values.isfinite()).sum().item()
+            raise ValueError(
+                f"Non-finite values in latest_values after compute_expected_values: "
+                f"{num_nonfinite} non-finite elements out of {self.latest_values.numel()}"
+            )
 
         self._record_initial_exploitability()
 

@@ -94,7 +94,13 @@ class MockModel:
         else:
             self.hand_values = torch.zeros(1, num_players, NUM_HANDS)
 
-    def __call__(self, features: MLPFeatures) -> ModelOutput:
+    def __call__(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = True,
+        latent: None | torch.Tensor = None,
+    ) -> ModelOutput:
         batch = len(features)
         device = features.context.device
         dtype = features.context.dtype
@@ -382,6 +388,51 @@ def test_initialize_subgame_keeps_stacks_non_negative() -> None:
     env_state = evaluator.env
     mask = evaluator.valid_mask & ~env_state.done
     assert torch.all(env_state.stacks[mask] >= 0)
+
+
+def test_warm_start_passes_beliefs_to_expected_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluator, env = make_evaluator(batch_size=2, max_depth=1)
+    roots = torch.arange(evaluator.root_nodes, device=env.device)
+    evaluator.initialize_subgame(env, roots)
+    evaluator.initialize_policy_and_beliefs()
+
+    calls: list[dict[str, bool]] = []
+    original_compute_expected = CFREvaluator.compute_expected_values
+
+    def spy_compute_expected_values(
+        self,
+        policy: torch.Tensor | None = None,
+        beliefs: torch.Tensor | None = None,
+        leaf_values: torch.Tensor | None = None,
+        values: torch.Tensor | None = None,
+    ) -> None:
+        calls.append(
+            {
+                "policy_is_policy_probs": policy is self.policy_probs,
+                "beliefs_is_beliefs": beliefs is self.beliefs,
+                "leaf_values_is_latest": leaf_values is self.latest_values,
+            }
+        )
+        return original_compute_expected(
+            self,
+            policy=policy,
+            beliefs=beliefs,
+            leaf_values=leaf_values,
+            values=values,
+        )
+
+    monkeypatch.setattr(
+        CFREvaluator, "compute_expected_values", spy_compute_expected_values
+    )
+
+    evaluator.warm_start()
+
+    assert any(call["policy_is_policy_probs"] for call in calls)
+    assert any(call["beliefs_is_beliefs"] for call in calls)
+    assert any(call["leaf_values_is_latest"] for call in calls)
+    assert evaluator.latest_values.isfinite().all()
 
 
 def test_subgame_initialization_clones_states_and_marks_children(

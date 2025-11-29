@@ -41,15 +41,15 @@ train:
     #   probabilities: [0.25, 0.25, 0.25, 0.25]
 
 model:
-  name: BetterFFN
+  name: BetterTRM
+  nonlinearity: swiglu
   hidden_dim: 1024
   range_hidden_dim: 256
   ffn_dim: 1024
 
   shared_trunk: false
-  num_hidden_layers: 3
-  num_value_layers: 3
-  num_policy_layers: 4
+  num_value_layers: 1
+  num_policy_layers: 1
   
   detach_value_head: false
   compile: true
