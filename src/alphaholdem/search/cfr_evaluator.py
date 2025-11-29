@@ -265,19 +265,23 @@ class CFREvaluator(ABC):
         model_mask = self.leaf_mask & ~self.env.done
         return padded_indices(model_mask, self.root_nodes)
 
-    def _get_mixing_weights(self, t: int) -> torch.Tensor:
-        """Get the mixing weights for the current iteration."""
+    def _get_mixing_weights(self, t: int) -> tuple[float, float]:
+        """Get the mixing weights for the current iteration (0-indexed).
 
+        For iteration t (0-indexed), returns (old, new) where:
+        - old: weight for the previous average policy
+        - new: weight for the current iteration's policy
+        """
         if self.cfr_type == CFRType.standard:
-            return t - 1, 1
+            return t, 1
         elif self.cfr_type == CFRType.linear:
-            return t - 1, 2
+            return t, 2
         elif self.cfr_type == CFRType.discounted:
-            return (t - 1) ** self.dcfr_gamma, t**self.dcfr_gamma
+            return t**self.dcfr_gamma, (t + 1) ** self.dcfr_gamma
         elif self.cfr_type == CFRType.discounted_plus:
             if t > self.dcfr_delay:
                 t_delay = t - self.dcfr_delay
-                return t_delay - 1, 2
+                return t_delay, 2
             else:
                 return 0, 1
 
@@ -349,10 +353,10 @@ class CFREvaluator(ABC):
     def _get_sampling_schedule(self) -> torch.Tensor:
         N = self.root_nodes
         if self.cfr_type == CFRType.discounted_plus:
-            sample_low = max(self.warm_start_iterations + 1, self.dcfr_delay + 1)
-            sample_low = min(sample_low, self.cfr_iterations - 1)
+            sample_low = max(self.warm_start_iterations, self.dcfr_delay)
         else:
-            sample_low = min(self.warm_start_iterations + 1, self.cfr_iterations - 1)
+            sample_low = self.warm_start_iterations
+        sample_low = min(sample_low, self.cfr_iterations)
         sample_high = max(self.cfr_iterations, sample_low)
         distribution = (
             torch.arange(
@@ -695,8 +699,10 @@ class CFREvaluator(ABC):
         beliefs = self.beliefs_avg
         leaf_values = self.values_avg.clamp(-1.0, 1.0)
 
-        base_values = torch.where(self.leaf_mask[:, None, None], leaf_values, 0.0)
-        self.compute_expected_values(policy=policy, beliefs=beliefs, values=base_values)
+        base_values = torch.zeros_like(leaf_values)
+        self.compute_expected_values(
+            policy=policy, beliefs=beliefs, leaf_values=leaf_values, values=base_values
+        )
         br_values = self._best_response_values(policy, beliefs, leaf_values)
 
         root_indices = torch.arange(N, device=self.device)
@@ -893,8 +899,10 @@ class CFREvaluator(ABC):
             beliefs, pre_chance_node=self.new_street_mask
         )
 
+        # Pass the same beliefs used for feature encoding to _set_model_values
+        # so that zero-sum enforcement is consistent with the model input
         new_values, last_model_values = self._set_model_values(
-            t, self.beliefs[self.model_indices], features[self.model_indices]
+            t, beliefs[self.model_indices], features[self.model_indices]
         )
         # this is necessary because of torch.compile.
         self.latest_values = new_values.clone()
@@ -909,6 +917,7 @@ class CFREvaluator(ABC):
         self,
         policy: torch.Tensor | None = None,
         beliefs: torch.Tensor | None = None,
+        leaf_values: torch.Tensor | None = None,
         values: torch.Tensor | None = None,
     ) -> None:
         """Back up values from leaves to root under the provided policy."""
@@ -916,10 +925,20 @@ class CFREvaluator(ABC):
             policy = self.policy_probs
         if beliefs is None:
             beliefs = self.beliefs
+        if leaf_values is None:
+            leaf_values = self.latest_values
         if values is None:
-            values = self.latest_values
+            values = leaf_values
 
-        values.masked_fill_((~self.leaf_mask)[:, None, None], 0.0)
+        if leaf_values is values:
+            values.masked_fill_((~self.leaf_mask)[:, None, None], 0.0)
+        else:
+            torch.where(
+                self.leaf_mask[:, None, None],
+                leaf_values,
+                torch.zeros_like(values),
+                out=values,
+            )
 
         bottom, top = self.depth_offsets[1], self.depth_offsets[-2]
         actor_indices = self.env.to_act[:top]
@@ -1125,11 +1144,19 @@ class CFREvaluator(ABC):
         """
         Update average values with final policy values.
         """
+        # Seed latest_values with the leaf values under beliefs_avg
         self.set_leaf_values(0, beliefs=self.beliefs_avg)
+        # Using latest_values as leaf values, compute EVs into values_avg
         self.compute_expected_values(
-            self.policy_probs_avg, self.beliefs_avg, self.latest_values
+            self.policy_probs_avg,
+            self.beliefs_avg,
+            self.latest_values,
+            self.values_avg,
         )
-        self.values_avg[:] = self.latest_values
+        # Possibly redundant: enforce zero-sum on values_avg
+        self.values_avg[:] = self._maybe_enforce_zero_sum(
+            self.values_avg, self.beliefs_avg, ignore_mask=self.env.done
+        )
 
     @profile
     def cfr_iteration(self, t: int) -> None:
@@ -1529,6 +1556,12 @@ class CFREvaluator(ABC):
                     "cumulative_regrets": self.cumulative_regrets[tree_indices].cpu(),
                     "regret_weight_sums": self.regret_weight_sums[tree_indices].cpu(),
                     "model_state_dict": self.model.state_dict(),  # No optimizer state as requested
+                    "leaf_mask": self.leaf_mask[tree_indices].cpu(),
+                    "new_street_mask": self.new_street_mask[tree_indices].cpu(),
+                    "depth_offsets": self.depth_offsets,
+                    "self_reach": self.self_reach[tree_indices].cpu(),
+                    "self_reach_avg": self.self_reach_avg[tree_indices].cpu(),
+                    "allowed_hands": self.allowed_hands[tree_indices].cpu(),
                 }
 
                 filename = f"high_exploitability_root_{root_idx}_{timestamp}.pt"

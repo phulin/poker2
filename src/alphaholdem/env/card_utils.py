@@ -207,4 +207,6 @@ def calculate_unblocked_mass(
     target_batched = target.view(-1, NUM_HANDS)
     combo_onehot = combo_to_onehot_tensor(device=target.device).float()
     multiply = combo_onehot @ (combo_onehot.T @ target_batched.T)
-    return target.sum(dim=-1, keepdim=True) - multiply.T.view_as(target) + target
+    result = target.sum(dim=-1, keepdim=True) - multiply.T.view_as(target) + target
+    # Make sure it's min-0 (sometimes get numerical precision issues)
+    return result.clamp(min=0.0)

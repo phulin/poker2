@@ -70,7 +70,7 @@ def action_to_string(action_idx: int, bet_bins: list[float]) -> str:
 
 
 # Fixed width for the Node column when printing depth-first (includes indentation)
-NODE_COL_WIDTH = 20
+NODE_COL_WIDTH = 22
 
 
 def _resolve_sparse_action_idx(
@@ -813,12 +813,13 @@ def debug_cfr_iterations(
 
     # Now run CFR iterations 16-25 and capture state
     print(
-        f"\nRunning CFR iterations {cfg.search.warm_start_iterations}-{cfg.search.iterations}..."
+        f"\nRunning CFR iterations {cfg.search.warm_start_iterations}-{cfg.search.iterations - 1}..."
     )
 
     evaluator.t_sample = evaluator._get_sampling_schedule()
 
-    # Run iterations 15-25, but only print 16-25
+    # CFR iterations are 0-indexed: warm_start simulates 0 through warm_start_iterations-1,
+    # so the CFR loop runs from warm_start_iterations to cfr_iterations-1
     for t in range(cfg.search.warm_start_iterations, cfg.search.iterations):
         evaluator.cfr_iteration(t)
 
