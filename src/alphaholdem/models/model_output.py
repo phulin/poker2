@@ -26,7 +26,7 @@ class TRMLatent:
 class ModelOutput:
     """Unified output from poker models (both CNN and transformer)."""
 
-    value: torch.Tensor
+    value: torch.Tensor | None = None
     """Value estimates of shape (batch_size,)"""
 
     policy_logits: torch.Tensor | None = None

@@ -299,10 +299,11 @@ class CFREvaluator(ABC):
         features = self.feature_encoder.encode(self.beliefs, indices=indices)
         if isinstance(self.model, BetterTRM):
             latent = None
-            for _ in range(self.num_supervisions):
+            for supervision in range(self.num_supervisions):
                 model_output = self.model(
                     features,
-                    include_policy=True,
+                    include_policy=supervision == self.num_supervisions - 1,
+                    include_value=False,
                     latent=latent,
                 )
                 latent = model_output.latent

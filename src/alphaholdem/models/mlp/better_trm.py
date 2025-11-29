@@ -176,6 +176,7 @@ class BetterTRM(nn.Module):
         self,
         features: MLPFeatures,
         include_policy: bool = True,
+        include_value: bool = True,
         latent: TRMLatent | None = None,
     ) -> ModelOutput:
         """
@@ -229,17 +230,23 @@ class BetterTRM(nn.Module):
         else:
             policy_logits = None
 
-        hand_values_raw = self.hand_value_head(y).view(-1, self.num_players, NUM_HANDS)
-        if self.enforce_zero_sum:
-            hand_value_sums = (
-                (hand_values_raw * player_beliefs)
-                .sum(dim=2, keepdim=True)
-                .mean(dim=1, keepdim=True)
+        if include_value:
+            hand_values_raw = self.hand_value_head(y).view(
+                -1, self.num_players, NUM_HANDS
             )
-            hand_values = hand_values_raw - hand_value_sums
+            if self.enforce_zero_sum:
+                hand_value_sums = (
+                    (hand_values_raw * player_beliefs)
+                    .sum(dim=2, keepdim=True)
+                    .mean(dim=1, keepdim=True)
+                )
+                hand_values = hand_values_raw - hand_value_sums
+            else:
+                hand_values = hand_values_raw
+            value = hand_values.mean(dim=-1)
         else:
-            hand_values = hand_values_raw
-        value = hand_values.mean(dim=-1)
+            hand_values = None
+            value = None
 
         return ModelOutput(
             policy_logits=policy_logits,
@@ -275,7 +282,10 @@ class BetterTRM(nn.Module):
         trunc_normal_(self.z_init, std=1.0, generator=rng)
 
         # Guess hand values are around stddev 0.1.
-        self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
+        if self.nonlinearity == NonlinearityType.swiglu:
+            self.hand_value_head[-1].get_submodule("swiglu").V.weight.data.mul_(0.1)
+        else:
+            self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
 
     @torch.no_grad()
     def adjust_scale(self, weight_scale: float, bias_adjustment: float) -> None:
