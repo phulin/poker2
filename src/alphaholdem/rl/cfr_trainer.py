@@ -355,9 +355,9 @@ class RebelCFRTrainer:
             "aggression_stats": {
                 f"chunk_{i}": v
                 for i, v in enumerate(
-                    self.aggression_analyzer.analyze_batch(policy_batch)[
-                        "group_avg_bets"
-                    ].tolist()
+                    self.aggression_analyzer.analyze_batch(
+                        policy_batch, max_batch_size=self.batch_size
+                    )["group_avg_bets"].tolist()
                 )
             },
             "value_batch_street": street_count(value_batch.features.street),
