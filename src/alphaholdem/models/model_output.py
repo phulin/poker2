@@ -14,6 +14,13 @@ class TRMLatent:
     y: torch.Tensor
     z: torch.Tensor
 
+    def detach(self) -> TRMLatent:
+        """Detach the latent variables."""
+        return TRMLatent(
+            y=self.y.detach(),
+            z=self.z.detach(),
+        )
+
 
 @dataclass
 class ModelOutput:
@@ -66,6 +73,30 @@ class ModelOutput:
             hand_values=data.get("hand_values"),
             kv_cache=data.get("kv_cache"),
             encoded_with_permutation=data.get("encoded_with_permutation"),
+        )
+
+    def __getitem__(self, index: torch.Tensor | slice | int) -> ModelOutput:
+        """Get item by index."""
+        return ModelOutput(
+            value=self.value[index],
+            policy_logits=(
+                self.policy_logits[index] if self.policy_logits is not None else None
+            ),
+            value_quantiles=(
+                self.value_quantiles[index]
+                if self.value_quantiles is not None
+                else None
+            ),
+            hand_values=(
+                self.hand_values[index] if self.hand_values is not None else None
+            ),
+            kv_cache=self.kv_cache[index] if self.kv_cache is not None else None,
+            encoded_with_permutation=(
+                self.encoded_with_permutation[index]
+                if self.encoded_with_permutation is not None
+                else None
+            ),
+            latent=self.latent[index] if self.latent is not None else None,
         )
 
     @classmethod

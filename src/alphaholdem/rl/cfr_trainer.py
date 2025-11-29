@@ -298,12 +298,13 @@ class RebelCFRTrainer:
 
         metrics = {
             "episodes": episodes,
-            "loss": step_stats["total_loss"] / updates,
-            "policy_loss": step_stats["policy_loss"] / updates,
-            "value_loss": step_stats["value_loss"] / updates,
-            "entropy_loss": step_stats["entropy_loss"] / updates,
-            "permutation_loss": step_stats["permutation_loss"] / updates,
-            "param_update_norm": step_stats["update_norm"] / updates,
+            "updates": updates,
+            "loss": step_stats["total_loss"] / episodes,
+            "policy_loss": step_stats["policy_loss"] / episodes,
+            "value_loss": step_stats["value_loss"] / episodes,
+            "entropy_loss": step_stats["entropy_loss"] / episodes,
+            "permutation_loss": step_stats["permutation_loss"] / episodes,
+            "param_update_norm": step_stats["update_norm"] / episodes,
             "value_buffer": value_buffer_streets_stats,
             "value_buffer_size": len(self.value_buffer),
             "policy_buffer_size": len(self.policy_buffer),
@@ -427,7 +428,6 @@ class RebelCFRTrainer:
 
     def _supervise(
         self,
-        update: int,
         value_batch: RebelBatch,
         policy_batch: RebelBatch,
         permuted_features: MLPFeatures,
@@ -435,9 +435,9 @@ class RebelCFRTrainer:
         value_latent: TRMLatent | None,
         policy_latent: TRMLatent | None,
         permuted_latent: TRMLatent | None,
-        policy_step_loss_all: torch.Tensor,
-        value_step_loss_all: torch.Tensor,
-    ) -> dict[str, float]:
+    ) -> tuple[
+        dict[str, float], TRMLatent, TRMLatent, TRMLatent, torch.Tensor, torch.Tensor
+    ]:
         self.optimizer.zero_grad()
 
         value_loss, policy_loss, entropy_loss = None, None, None
@@ -468,9 +468,6 @@ class RebelCFRTrainer:
         )
         value_loss = loss_dict["value_loss"]
         value_loss_update = loss_dict["value_loss_all"]
-        value_step_loss_all[
-            update * self.batch_size : (update + 1) * self.batch_size
-        ] = value_loss_update
         permutation_loss = loss_dict["permutation_loss"]
         total_loss = loss_dict["total_loss"]
 
@@ -483,9 +480,6 @@ class RebelCFRTrainer:
         loss_dict = self.loss_fn(policy_output, policy_batch)
         policy_loss = loss_dict["policy_loss"]
         policy_loss_update = loss_dict["policy_loss_all"]
-        policy_step_loss_all[
-            update * self.batch_size : (update + 1) * self.batch_size
-        ] = policy_loss_update
         entropy_loss = loss_dict["entropy"]
         total_loss += loss_dict["total_loss"]
 
@@ -523,6 +517,8 @@ class RebelCFRTrainer:
             value_output,
             value_output_permuted,
             policy_output,
+            value_loss_update,
+            policy_loss_update,
         )
 
     @profile
@@ -541,16 +537,12 @@ class RebelCFRTrainer:
             self.cfg.model.num_supervisions if isinstance(self.model, BetterTRM) else 1
         )
         updates = episodes * supervisions
-        value_step_loss_all = torch.empty(
-            self.batch_size * updates, self.num_players, NUM_HANDS, device=self.device
-        )
-        policy_step_loss_all = torch.empty(
-            self.batch_size * updates, NUM_HANDS, self.num_actions, device=self.device
-        )
         value_batch_all = []
         policy_batch_all = []
         value_output_all = []
         policy_output_all = []
+        value_loss_update_all = []
+        policy_loss_update_all = []
         step_stats = {
             "policy_loss": 0.0,
             "value_loss": 0.0,
@@ -583,14 +575,15 @@ class RebelCFRTrainer:
             permuted_features = value_batch.features.clone()
             permuted_features.permute_suits(suit_permutations, self.rng)
 
-            for supervision in range(supervisions):
+            for _ in range(supervisions):
                 (
                     episode_stats,
                     value_output,
                     value_output_permuted,
                     policy_output,
+                    value_loss_update,
+                    policy_loss_update,
                 ) = self._supervise(
-                    episode * supervisions + supervision,
                     value_batch,
                     policy_batch,
                     permuted_features,
@@ -598,20 +591,22 @@ class RebelCFRTrainer:
                     value_latent,
                     policy_latent,
                     permuted_latent,
-                    policy_step_loss_all,
-                    value_step_loss_all,
                 )
                 value_latent = value_output.latent.detach()
                 policy_latent = policy_output.latent.detach()
                 permuted_latent = value_output_permuted.latent.detach()
-                for k in step_stats:
-                    step_stats[k] += episode_stats[k]
 
-                # Append batches multiple times so that indices line up.
-                value_batch_all.append(value_batch)
-                policy_batch_all.append(policy_batch)
-                value_output_all.append(value_output)
-                policy_output_all.append(policy_output)
+            # Keep track of last supervision stats.
+            for k in step_stats:
+                step_stats[k] += episode_stats[k]
+
+            # Append last batch/output for metrics.
+            value_batch_all.append(value_batch)
+            policy_batch_all.append(policy_batch)
+            value_output_all.append(value_output)
+            policy_output_all.append(policy_output)
+            value_loss_update_all.append(value_loss_update)
+            policy_loss_update_all.append(policy_loss_update)
 
         # After the loop, calculate loss on fresh data
         fresh_value_loss = None
@@ -631,8 +626,8 @@ class RebelCFRTrainer:
             RebelBatch.cat(policy_batch_all),
             ModelOutput.cat(value_output_all),
             ModelOutput.cat(policy_output_all),
-            value_step_loss_all,
-            policy_step_loss_all,
+            torch.cat(value_loss_update_all),
+            torch.cat(policy_loss_update_all),
             fresh_value_loss=fresh_value_loss,
             fresh_value_batch=fresh_value_batch,
         )
