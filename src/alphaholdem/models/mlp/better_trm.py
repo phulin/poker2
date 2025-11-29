@@ -120,6 +120,17 @@ class BetterTRM(nn.Module):
         )
         self.hand_value_head = nn.Sequential(*layers)
 
+        layers = [
+            ResidualBlock(
+                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), 1.0
+            )
+            for _ in range(num_policy_layers - 1)
+        ]
+        layers.append(
+            ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS, nonlinearity)
+        )
+        self.policy_head = nn.Sequential(*layers)
+
     def latent_recursion(
         self, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor
     ) -> torch.Tensor:
