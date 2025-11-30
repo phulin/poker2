@@ -39,6 +39,8 @@ train:
     #   probabilities: [0.15, 0.15, 0.30, 0.40]
     # - threshold: 3500
     #   probabilities: [0.25, 0.25, 0.25, 0.25]
+  
+  model_ema: 0.999
 
 model:
   name: BetterTRM
