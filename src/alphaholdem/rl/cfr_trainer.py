@@ -743,6 +743,16 @@ class RebelCFRTrainer:
             state["optimizer"] = self.optimizer.state_dict()
             state["rng"] = self.rng.get_state()
 
+        # Save EMA state if enabled (only save model_avg, shadow weights can be reconstructed)
+        if self.model_avg is not None:
+            model_avg_state = self.model_avg.state_dict()
+            if save_dtype is not None:
+                model_avg_state = {
+                    k: v.to(save_dtype) if v.dtype.is_floating_point else v
+                    for k, v in model_avg_state.items()
+                }
+            state["model_avg"] = model_avg_state
+
         # Save batch if provided (move to CPU for storage)
         if batch is not None:
             batch_cpu = batch.to(torch.device("cpu"))
@@ -764,6 +774,22 @@ class RebelCFRTrainer:
             }
 
         self.model.load_state_dict(model_state)
+
+        # Load EMA state if it exists in checkpoint and EMA is enabled
+        if "model_avg" in ckpt and self.model_avg is not None:
+            # Convert model_avg state back to host dtype if needed
+            model_avg_state = ckpt["model_avg"]
+            if save_dtype_str is not None and save_dtype_str != str(self.float_dtype):
+                model_avg_state = {
+                    k: v.to(self.float_dtype) if v.dtype.is_floating_point else v
+                    for k, v in model_avg_state.items()
+                }
+            self.model_avg.load_state_dict(model_avg_state)
+            # Reconstruct ema_helper shadow weights from model_avg
+            self.ema_helper.register(self.model_avg)
+            # Update evaluator to use model_avg
+            self.cfr_evaluator.model = self.model_avg
+            self.cfr_evaluator.chance_helper.model = self.model_avg
 
         # Only load optimizer if it exists in checkpoint
         if "optimizer" in ckpt:
