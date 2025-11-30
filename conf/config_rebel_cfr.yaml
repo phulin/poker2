@@ -20,11 +20,11 @@ train:
   lr_schedule: cosine
 
   weight_decay: 0.01
-  batch_size: 1024
-  episodes_per_step: 50
-  replay_buffer_batches: 256
+  batch_size: 512
+  episodes_per_step: 10
+  replay_buffer_batches: 512
   value_reuse_goal: 4
-  policy_capacity_factor: 10
+  policy_capacity_factor: 20
   value_coef: 1.0
   entropy_coef: 0.0
   permutation_coef: 0.1
