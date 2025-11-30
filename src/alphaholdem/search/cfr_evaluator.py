@@ -1643,6 +1643,8 @@ class CFREvaluator(ABC):
                 sub_env.generator = None
 
                 # 3. Collect relevant tensors sliced by tree_indices
+                parent_index = getattr(self, "parent_index", None)
+                action_from_parent = getattr(self, "action_from_parent", None)
                 saved_data = {
                     "env_state": sub_env,  # This might be heavy, but it's the most robust way
                     "tree_indices": tree_indices,
@@ -1660,6 +1662,16 @@ class CFREvaluator(ABC):
                     "regret_weight_sums": self.regret_weight_sums[tree_indices].cpu(),
                     "model_state_dict": self.model.state_dict(),  # No optimizer state as requested
                     "leaf_mask": self.leaf_mask[tree_indices].cpu(),
+                    "parent_index": (
+                        parent_index[tree_indices].cpu()
+                        if parent_index is not None
+                        else None
+                    ),
+                    "action_from_parent": (
+                        action_from_parent[tree_indices].cpu()
+                        if action_from_parent is not None
+                        else None
+                    ),
                     "new_street_mask": self.new_street_mask[tree_indices].cpu(),
                     "depth_offsets": self.depth_offsets,
                     "self_reach": self.self_reach[tree_indices].cpu(),
