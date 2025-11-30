@@ -592,9 +592,21 @@ class RebelCFRTrainer:
                     policy_latent,
                     permuted_latent,
                 )
-                value_latent = value_output.latent.detach()
-                policy_latent = policy_output.latent.detach()
-                permuted_latent = value_output_permuted.latent.detach()
+                value_latent = (
+                    value_output.latent.detach()
+                    if value_output.latent is not None
+                    else None
+                )
+                policy_latent = (
+                    policy_output.latent.detach()
+                    if policy_output.latent is not None
+                    else None
+                )
+                permuted_latent = (
+                    value_output_permuted.latent.detach()
+                    if value_output_permuted.latent is not None
+                    else None
+                )
 
             # Keep track of last supervision stats.
             for k in step_stats:
@@ -614,7 +626,19 @@ class RebelCFRTrainer:
             with torch.no_grad():
                 self.model.eval()
                 fresh_value_batch = fresh_value_batch.to(self.device)
-                fresh_model_output = self.model(fresh_value_batch.features)
+                if isinstance(self.model, BetterTRM):
+                    fresh_value_latent = None
+                    for _ in range(self.num_supervisions):
+                        fresh_model_output = self.model(
+                            fresh_value_batch.features,
+                            include_policy=False,
+                            latent=fresh_value_latent,
+                        )
+                        fresh_value_latent = fresh_model_output.latent.detach()
+                else:
+                    fresh_model_output = self.model(
+                        fresh_value_batch.features, include_policy=False
+                    )
                 fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)
                 fresh_value_loss = fresh_loss_dict["value_loss"]
 
