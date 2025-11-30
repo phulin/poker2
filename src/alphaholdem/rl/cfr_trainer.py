@@ -628,7 +628,7 @@ class RebelCFRTrainer:
                 fresh_value_batch = fresh_value_batch.to(self.device)
                 if isinstance(self.model, BetterTRM):
                     fresh_value_latent = None
-                    for _ in range(self.num_supervisions):
+                    for _ in range(self.cfg.model.num_supervisions):
                         fresh_model_output = self.model(
                             fresh_value_batch.features,
                             include_policy=False,
