@@ -1658,31 +1658,29 @@ class CFREvaluator(ABC):
                     "exploitability": exploit_stats.local_exploitability[
                         root_idx
                     ].item(),
-                    "policy_probs": self.policy_probs[tree_indices].cpu(),
-                    "policy_probs_avg": self.policy_probs_avg[tree_indices].cpu(),
-                    "beliefs": self.beliefs[tree_indices].cpu(),
-                    "beliefs_avg": self.beliefs_avg[tree_indices].cpu(),
-                    "latest_values": self.latest_values[tree_indices].cpu(),
-                    "values_avg": self.values_avg[tree_indices].cpu(),
-                    "cumulative_regrets": self.cumulative_regrets[tree_indices].cpu(),
-                    "regret_weight_sums": self.regret_weight_sums[tree_indices].cpu(),
+                    "policy_probs": self.policy_probs.cpu(),
+                    "policy_probs_avg": self.policy_probs_avg.cpu(),
+                    "beliefs": self.beliefs.cpu(),
+                    "beliefs_avg": self.beliefs_avg.cpu(),
+                    "latest_values": self.latest_values.cpu(),
+                    "values_avg": self.values_avg.cpu(),
+                    "cumulative_regrets": self.cumulative_regrets.cpu(),
+                    "regret_weight_sums": self.regret_weight_sums.cpu(),
                     "model_state_dict": self.model.state_dict(),  # No optimizer state as requested
-                    "leaf_mask": self.leaf_mask[tree_indices].cpu(),
+                    "leaf_mask": self.leaf_mask.cpu(),
                     "parent_index": (
-                        parent_index[tree_indices].cpu()
-                        if parent_index is not None
-                        else None
+                        parent_index.cpu() if parent_index is not None else None
                     ),
                     "action_from_parent": (
-                        action_from_parent[tree_indices].cpu()
+                        action_from_parent.cpu()
                         if action_from_parent is not None
                         else None
                     ),
-                    "new_street_mask": self.new_street_mask[tree_indices].cpu(),
+                    "new_street_mask": self.new_street_mask.cpu(),
                     "depth_offsets": self.depth_offsets,
-                    "self_reach": self.self_reach[tree_indices].cpu(),
-                    "self_reach_avg": self.self_reach_avg[tree_indices].cpu(),
-                    "allowed_hands": self.allowed_hands[tree_indices].cpu(),
+                    "self_reach": self.self_reach.cpu(),
+                    "self_reach_avg": self.self_reach_avg.cpu(),
+                    "allowed_hands": self.allowed_hands.cpu(),
                 }
 
                 filename = f"high_exploitability_{wandb.run.id}_{timestamp}.pt"
