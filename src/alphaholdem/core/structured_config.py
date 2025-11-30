@@ -155,6 +155,10 @@ class TrainingConfig:
     # Stratify streets until the given step with the given probabilities.
     stratify_streets: list[StratifyConfig] = field(default_factory=list)
 
+    # Exponential Moving Average (EMA) for model weights
+    # If None, EMA is disabled. If float, it's the EMA decay rate (typically 0.999)
+    model_ema: float | None = None
+
 
 @dataclass
 class ModelConfig:

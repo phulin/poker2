@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import os
 from dataclasses import asdict
@@ -24,6 +25,7 @@ from alphaholdem.rl.rebel_replay import RebelReplayBuffer
 from alphaholdem.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
+from alphaholdem.utils.ema_helper import EMAHelper
 from alphaholdem.utils.profiling import profile
 
 STREETS = ["preflop", "flop", "turn", "river", "showdown"]
@@ -171,9 +173,22 @@ class RebelCFRTrainer:
         )
         self.grad_clip = cfg.train.grad_clip
 
+        # EMA setup
+        self.model_avg = None
+        self.ema_helper = None
+        if cfg.train.model_ema is not None:
+            self.ema_helper = EMAHelper(mu=cfg.train.model_ema)
+            self.ema_helper.register(self.model)
+            # Create model_avg as a copy that will be updated with EMA weights
+            self.model_avg = copy.deepcopy(self.model)
+            self.ema_helper.apply_to_module(self.model_avg)
+
+        # Use model_avg for evaluator if EMA is enabled, otherwise use model
+        eval_model = self.model_avg if self.model_avg is not None else self.model
+
         if cfg.search.sparse:
             self.cfr_evaluator = SparseCFREvaluator(
-                model=self.model,
+                model=eval_model,
                 device=self.device,
                 cfg=cfg,
                 generator=self.rng,
@@ -182,7 +197,7 @@ class RebelCFRTrainer:
             self.cfr_evaluator = RebelCFREvaluator(
                 search_batch_size=self.cfg.num_envs,
                 env_proto=self.env,
-                model=self.model,
+                model=eval_model,
                 bet_bins=self.bet_bins,
                 max_depth=max(1, self.cfg.search.depth),
                 cfr_iterations=max(T_WARM + 1, self.cfg.search.iterations),
@@ -498,6 +513,11 @@ class RebelCFRTrainer:
         params_before = [p.clone() for p in self.model.parameters()]
         self.optimizer.step()
 
+        # Update EMA if enabled
+        if self.ema_helper is not None:
+            self.ema_helper.update(self.model)
+            self.ema_helper.apply_to_module(self.model_avg)
+
         # Compute parameter update norm using torch utility
         updates = (
             p_after - p_before
@@ -624,19 +644,23 @@ class RebelCFRTrainer:
         fresh_value_loss = None
         if fresh_value_batch:
             with torch.no_grad():
-                self.model.eval()
+                # Use model_avg for eval if available, otherwise use model
+                eval_model = (
+                    self.model_avg if self.model_avg is not None else self.model
+                )
+                eval_model.eval()
                 fresh_value_batch = fresh_value_batch.to(self.device)
-                if isinstance(self.model, BetterTRM):
+                if isinstance(eval_model, BetterTRM):
                     fresh_value_latent = None
                     for _ in range(self.cfg.model.num_supervisions):
-                        fresh_model_output = self.model(
+                        fresh_model_output = eval_model(
                             fresh_value_batch.features,
                             include_policy=False,
                             latent=fresh_value_latent,
                         )
                         fresh_value_latent = fresh_model_output.latent.detach()
                 else:
-                    fresh_model_output = self.model(
+                    fresh_model_output = eval_model(
                         fresh_value_batch.features, include_policy=False
                     )
                 fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)

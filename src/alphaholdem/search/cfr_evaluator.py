@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+import wandb
 
 from alphaholdem.core.structured_config import CFRType
 from alphaholdem.env.card_utils import (
@@ -1061,6 +1062,11 @@ class CFREvaluator(ABC):
             torch.zeros_like(policy_blocked),
             out=opponent_conditioned_policy[bottom:],
         )
+        max_opp_cond = opponent_conditioned_policy.max()
+        if max_opp_cond.item() > 2.0:
+            print(
+                f"Warning: opponent_conditioned_policy max {max_opp_cond.item():.2e} exceeds 2.0 at iteration {self.cfr_iterations}"
+            )
 
         for depth in range(self.tree_depth - 1, -1, -1):
             offset = self.depth_offsets[depth]
@@ -1679,7 +1685,7 @@ class CFREvaluator(ABC):
                     "allowed_hands": self.allowed_hands[tree_indices].cpu(),
                 }
 
-                filename = f"high_exploitability_root_{root_idx}_{timestamp}.pt"
+                filename = f"high_exploitability_{wandb.run.id}_{timestamp}.pt"
                 print(f"Saving high exploitability game tree to {filename}")
                 torch.save(saved_data, filename)
 
