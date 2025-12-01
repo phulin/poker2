@@ -143,6 +143,13 @@ def combo_blocking_tensor(device: torch.device | None = None) -> torch.Tensor:
 
 
 @lru_cache(maxsize=2)
+def combo_compatible_tensor(device: torch.device | None = None) -> torch.Tensor:
+    """Return [1326, 1326] tensor of blocked hands for each combo."""
+    combo_onehot = combo_to_onehot_tensor(device=device).float()
+    return (combo_onehot @ combo_onehot.T) < 0.5
+
+
+@lru_cache(maxsize=2)
 def suit_permutations_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [24, 4] tensor enumerating all suit permutations."""
     perms = torch.tensor(tuple(permutations(range(4))), dtype=torch.long)
@@ -197,6 +204,9 @@ def calculate_unblocked_mass(
     Optimization: compatible = ~blocking = 1 - blocking
     = 1 - (combo_onehot @ combo_onehot.T) + torch.eye(1326)
 
+    BUT WE ARE NOT USING THIS OPTIMIZATION.
+    It's numerically unstable and gives incorrect results.
+
     Args:
         target: [..., 1326] tensor of reach weights for each node.
         device: Device for the combo_onehot tensor. If None, inferred from target.
@@ -205,8 +215,7 @@ def calculate_unblocked_mass(
         [..., 1326] tensor of unblocked mass for each hand.
     """
     target_batched = target.view(-1, NUM_HANDS)
-    combo_onehot = combo_to_onehot_tensor(device=target.device).float()
-    multiply = combo_onehot @ (combo_onehot.T @ target_batched.T)
-    result = target.sum(dim=-1, keepdim=True) - multiply.T.view_as(target) + target
+    compatible = combo_compatible_tensor(device=target.device).float()
+    multiply = target_batched @ compatible
     # Make sure it's min-0 (sometimes get numerical precision issues)
-    return result.clamp(min=0.0)
+    return multiply.view_as(target).clamp(min=0.0)
