@@ -382,8 +382,40 @@ class RebelCFRTrainer:
             "value_mean_std": value_output.value.std(dim=0).mean(),
             **self.cfr_evaluator.stats,
         }
-        if fresh_value_loss is not None:
-            metrics["fresh_value_loss"] = fresh_value_loss
+
+        # Calculate loss on fresh data
+        if fresh_value_batch:
+            with torch.no_grad():
+                self.model.eval()
+                fresh_value_batch = fresh_value_batch.to(self.device)
+                fresh_model_output = self.model.repeat(
+                    fresh_value_batch.features,
+                    count=self.cfg.model.num_supervisions,
+                    include_policy=False,
+                )
+                fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)
+                metrics["fresh_value_loss"] = fresh_loss_dict["value_loss"]
+
+                if self.model_avg is not None:
+                    self.model_avg.eval()
+                    fresh_model_avg_output = self.model_avg.repeat(
+                        fresh_value_batch.features,
+                        count=self.cfg.model.num_supervisions,
+                        include_policy=False,
+                    )
+                    metrics["fresh_value_loss_avg"] = self.loss_fn(
+                        fresh_model_avg_output, fresh_value_batch
+                    )["value_loss"]
+
+                    model_avg_output = self.model_avg.repeat(
+                        value_batch.features,
+                        count=self.cfg.model.num_supervisions,
+                        include_policy=False,
+                    )
+                    metrics["value_loss_avg"] = self.loss_fn(
+                        model_avg_output, value_batch
+                    )["value_loss"]
+
         if fresh_value_batch is not None:
             metrics["fresh_value_batch_street"] = street_count(
                 fresh_value_batch.features.street
@@ -640,29 +672,6 @@ class RebelCFRTrainer:
             value_loss_update_all.append(value_loss_update)
             policy_loss_update_all.append(policy_loss_update)
 
-        # After the loop, calculate loss on fresh data
-        fresh_value_loss = None
-        if fresh_value_batch:
-            with torch.no_grad():
-                # Use model_avg for eval if available, otherwise use model
-                self.model.eval()
-                fresh_value_batch = fresh_value_batch.to(self.device)
-                if isinstance(self.model, BetterTRM):
-                    fresh_value_latent = None
-                    for _ in range(self.cfg.model.num_supervisions):
-                        fresh_model_output = self.model(
-                            fresh_value_batch.features,
-                            include_policy=False,
-                            latent=fresh_value_latent,
-                        )
-                        fresh_value_latent = fresh_model_output.latent.detach()
-                else:
-                    fresh_model_output = self.model(
-                        fresh_value_batch.features, include_policy=False
-                    )
-                fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)
-                fresh_value_loss = fresh_loss_dict["value_loss"]
-
         metrics = self._compute_metrics(
             episodes,
             updates,
@@ -673,7 +682,6 @@ class RebelCFRTrainer:
             ModelOutput.cat(policy_output_all),
             torch.cat(value_loss_update_all),
             torch.cat(policy_loss_update_all),
-            fresh_value_loss=fresh_value_loss,
             fresh_value_batch=fresh_value_batch,
         )
 

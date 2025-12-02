@@ -161,3 +161,14 @@ class RebelFFN(nn.Module):
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
         }
+
+    def repeat(
+        self,
+        features: MLPFeatures,
+        count: int,
+        include_policy: bool = False,
+        include_value: bool = True,
+    ) -> ModelOutput:
+        return self(
+            features, include_policy=include_policy, include_value=include_value
+        )

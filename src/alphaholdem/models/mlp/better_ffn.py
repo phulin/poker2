@@ -219,3 +219,14 @@ class BetterFFN(nn.Module):
         last_linear.weight.data.mul_(weight_scale)
         if last_linear.bias is not None:
             last_linear.bias.data.mul_(weight_scale).add_(bias_adjustment)
+
+    def repeat(
+        self,
+        features: MLPFeatures,
+        count: int,
+        include_policy: bool = False,
+        include_value: bool = True,
+    ) -> ModelOutput:
+        return self(
+            features, include_policy=include_policy, include_value=include_value
+        )
