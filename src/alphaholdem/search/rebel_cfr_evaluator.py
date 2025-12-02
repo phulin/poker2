@@ -449,7 +449,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.beliefs[indices, self.prev_actor[offset_next:offset_next_next]] *= probs
 
     @profile
-    def sample_leaves(self, training_mode: bool) -> None:
+    def sample_leaves(self, training_mode: bool) -> PublicBeliefState:
         """Sample leaves from `self.policy_probs_sample`."""
 
         N, B = self.root_nodes, self.num_actions

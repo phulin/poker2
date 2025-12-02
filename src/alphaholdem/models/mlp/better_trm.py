@@ -166,7 +166,7 @@ class BetterTRM(nn.Module):
 
     def latent_recursion(
         self, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         for _ in range(self.num_recursions):
             z = self.trunk(x + y + z)
         y = self.trunk(y + z)

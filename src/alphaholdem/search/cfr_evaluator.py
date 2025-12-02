@@ -192,11 +192,11 @@ class CFREvaluator(ABC):
         """
         raise NotImplementedError("Subclasses must implement _construct_subgame.")
 
-    def sample_leaves(self, training_mode: bool) -> any:
+    def sample_leaves(self, training_mode: bool) -> PublicBeliefState:
         """Sample leaves from `self.policy_probs_sample`.
 
         Returns:
-            PublicBeliefState or None depending on subclass implementation.
+            PublicBeliefState containing the sampled leaves.
         """
         raise NotImplementedError("Subclasses must implement sample_leaves.")
 
@@ -1437,7 +1437,7 @@ class CFREvaluator(ABC):
         """Run CFR iterations to evaluate the subgame.
 
         Returns:
-            Result of sample_leaves (PublicBeliefState for sparse, Optional[PublicBeliefState] for rebel).
+            PublicBeliefState containing the sampled leaves.
         """
         self.model.eval()
 
