@@ -4,6 +4,7 @@ Debug utilities for HUNLTensorEnv.
 Contains functions for creating test environments and analyzing specific scenarios.
 """
 
+import copy
 from typing import Dict, List, Tuple, Union
 
 import torch
@@ -23,10 +24,12 @@ from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
 from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from alphaholdem.search.cfr_evaluator import PublicBeliefState
+from alphaholdem.core.structured_config import Config
 from alphaholdem.search.rebel_cfr_evaluator import (
     T_WARM,
     RebelCFREvaluator,
 )
+from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 GRID_RANKS = "AKQJT98765432"
 
@@ -443,42 +446,53 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
     def __init__(
         self,
         model: RebelFFN,
+        cfg: Config,
         button: int = 0,
-        starting_stack: int = 1000,
-        sb: int = 5,
-        bb: int = 10,
-        bet_bins: List[int] = None,
         device: torch.device = None,
         rng: torch.Generator = None,
-        flop_showdown: bool = False,
         popart_normalizer=None,
-        cfr_iterations: int = 100,
-        max_depth: int = 2,
     ):
         """Initialize the ReBeL analyzer with CFR search capabilities.
 
         Args:
             model: The trained RebelFFN model
+            cfg: Config object containing all configuration
             button: Which player is the button
-            starting_stack: Starting stack size
-            sb: Small blind amount
-            bb: Big blind amount
-            bet_bins: List of bet bin values
             device: Device to use
             rng: Random number generator
-            flop_showdown: Whether to showdown after flop
             popart_normalizer: Optional PopArt normalizer for denormalizing values
-            cfr_iterations: Number of CFR iterations to run
-            max_depth: Maximum search depth
         """
-        if bet_bins is None:
-            bet_bins = [0.5, 0.75, 1.0, 1.5, 2.0]
+        # Extract all values from cfg
+        bet_bins = cfg.env.bet_bins
+        starting_stack = cfg.env.stack
+        sb = cfg.env.sb
+        bb = cfg.env.bb
+        flop_showdown = getattr(cfg.env, "flop_showdown", False)
+        cfr_iterations = cfg.search.iterations
+        max_depth = cfg.search.depth
+        sparse = cfg.search.sparse
+        float_dtype = getattr(cfg, "float_dtype", torch.float32)
+        num_supervisions = cfg.model.num_supervisions
+        warm_start_iterations = getattr(cfg.search, "warm_start_iterations", T_WARM)
+        cfr_type = cfg.search.cfr_type
+        cfr_avg = cfg.search.cfr_avg
+        dcfr_alpha = cfg.search.dcfr_alpha
+        dcfr_beta = cfg.search.dcfr_beta
+        dcfr_gamma = cfg.search.dcfr_gamma
+        dcfr_delay = cfg.search.dcfr_plus_delay
+        value_targets_from_final_policy = getattr(
+            cfg.search, "value_targets_from_final_policy", False
+        )
 
         if device is None:
             device = torch.device("cpu")
 
         if rng is None:
             rng = torch.Generator(device=device)
+
+        # Normalize parameters to match trainer logic
+        max_depth = max(1, max_depth)
+        cfr_iterations = max(T_WARM + 1, cfr_iterations)
 
         if cfr_iterations <= T_WARM:
             raise ValueError(
@@ -516,17 +530,38 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             flop_showdown=flop_showdown,
         )
 
-        self.cfr_evaluator = RebelCFREvaluator(
-            search_batch_size=1,  # Single environment
-            env_proto=self.cfr_env,
-            model=self.model,
-            bet_bins=bet_bins,
-            max_depth=max_depth,
-            cfr_iterations=cfr_iterations,
-            device=device,
-            float_dtype=torch.float32,
-            generator=rng,
-        )
+        # Create evaluator matching trainer's logic
+        if sparse:
+            # Create a copy of cfg with num_envs=1 for sparse evaluator
+            cfg_copy = copy.deepcopy(cfg)
+            cfg_copy.num_envs = 1
+            self.cfr_evaluator = SparseCFREvaluator(
+                model=self.model,
+                device=device,
+                cfg=cfg_copy,
+                generator=rng,
+            )
+        else:
+            self.cfr_evaluator = RebelCFREvaluator(
+                search_batch_size=1,  # Single environment
+                env_proto=self.cfr_env,
+                model=self.model,
+                bet_bins=bet_bins,
+                max_depth=max_depth,
+                cfr_iterations=cfr_iterations,
+                device=device,
+                float_dtype=float_dtype,
+                generator=rng,
+                num_supervisions=num_supervisions,
+                warm_start_iterations=warm_start_iterations,
+                cfr_type=cfr_type,
+                cfr_avg=cfr_avg,
+                dcfr_alpha=dcfr_alpha,
+                dcfr_beta=dcfr_beta,
+                dcfr_gamma=dcfr_gamma,
+                dcfr_delay=dcfr_delay,
+                value_targets_from_final_policy=value_targets_from_final_policy,
+            )
         self.current_index = 1  # Root node is at index 0, so current_index = 1 for root_index = current_index - 1
 
         # Reinitialize both the base and CFR environments now that CFR state is set up.

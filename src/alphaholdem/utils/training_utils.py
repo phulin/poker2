@@ -82,19 +82,18 @@ def print_preflop_range_grid(
         title = f"Preflop Range Grid (Step {step + 1})"
 
     if rebel:
+        # Use model_avg if available, matching trainer logic
+        eval_model = getattr(trainer, "model_avg", None)
+        if eval_model is None:
+            eval_model = trainer.model
+
         analyzer = RebelPreflopAnalyzer(
-            trainer.model,
+            eval_model,
+            trainer.cfg,
             button=0,
-            starting_stack=trainer.cfg.env.stack,
-            sb=trainer.cfg.env.sb,
-            bb=trainer.cfg.env.bb,
-            bet_bins=trainer.cfg.env.bet_bins,
             device=trainer.device,
             rng=trainer.rng,
-            flop_showdown=getattr(trainer.cfg.env, "flop_showdown", False),
             popart_normalizer=getattr(trainer, "popart_normalizer", None),
-            cfr_iterations=trainer.cfg.search.iterations,
-            max_depth=trainer.cfg.search.depth,
         )
     else:
         analyzer = PreflopAnalyzer(

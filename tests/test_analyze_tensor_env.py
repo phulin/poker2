@@ -5,6 +5,12 @@ import re
 import pytest
 import torch
 
+from alphaholdem.core.structured_config import (
+    Config,
+    EnvConfig,
+    ModelConfig,
+    SearchConfig,
+)
 from alphaholdem.env.analyze_tensor_env import (
     PreflopAnalyzer,
     RebelPreflopAnalyzer,
@@ -83,7 +89,12 @@ def test_rebel_preflop_analyzer_uses_canonical_combo_order() -> None:
         hidden_dim=32,
         num_hidden_layers=1,
     )
-    analyzer = RebelPreflopAnalyzer(model, device=torch.device("cpu"))
+
+    cfg = Config()
+    cfg.env = EnvConfig()
+    cfg.model = ModelConfig()
+    cfg.search = SearchConfig()
+    analyzer = RebelPreflopAnalyzer(model, cfg=cfg, device=torch.device("cpu"))
     expected_combos = hand_combos_tensor()
 
     assert torch.equal(analyzer.all_hands.cpu(), expected_combos)
@@ -101,7 +112,12 @@ def test_rebel_allin_response_has_call_and_fold() -> None:
         hidden_dim=32,
         num_hidden_layers=1,
     )
-    analyzer = RebelPreflopAnalyzer(model, device=torch.device("cpu"))
+
+    cfg = Config()
+    cfg.env = EnvConfig()
+    cfg.model = ModelConfig()
+    cfg.search = SearchConfig()
+    analyzer = RebelPreflopAnalyzer(model, cfg=cfg, device=torch.device("cpu"))
     analyzer.reset(1)
     analyzer.step_sb_action("allin")
 
