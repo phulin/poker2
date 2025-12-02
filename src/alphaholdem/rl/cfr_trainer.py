@@ -645,22 +645,19 @@ class RebelCFRTrainer:
         if fresh_value_batch:
             with torch.no_grad():
                 # Use model_avg for eval if available, otherwise use model
-                eval_model = (
-                    self.model_avg if self.model_avg is not None else self.model
-                )
-                eval_model.eval()
+                self.model.eval()
                 fresh_value_batch = fresh_value_batch.to(self.device)
-                if isinstance(eval_model, BetterTRM):
+                if isinstance(self.model, BetterTRM):
                     fresh_value_latent = None
                     for _ in range(self.cfg.model.num_supervisions):
-                        fresh_model_output = eval_model(
+                        fresh_model_output = self.model(
                             fresh_value_batch.features,
                             include_policy=False,
                             latent=fresh_value_latent,
                         )
                         fresh_value_latent = fresh_model_output.latent.detach()
                 else:
-                    fresh_model_output = eval_model(
+                    fresh_model_output = self.model(
                         fresh_value_batch.features, include_policy=False
                     )
                 fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)
