@@ -253,7 +253,7 @@ class BetterTRM(nn.Module):
             policy_logits=policy_logits,
             value=value,
             hand_values=hand_values,
-            latent=TRMLatent(y=y, z=z),
+            latent=TRMLatent(y=y.detach(), z=z.detach()),
         )
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
