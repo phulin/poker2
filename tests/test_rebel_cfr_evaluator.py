@@ -2019,14 +2019,10 @@ def test_local_exploitability_uses_correct_player_beliefs() -> None:
     stats = evaluator._compute_exploitability()
 
     # With clamping: good_val=1.5→1.0, bad_val=-0.5→-0.5
-    # Baseline: 0.2*1.0 + 0.8*(-0.5) = -0.2
-    # Best response: max(1.0, -0.5) = 1.0
-    # Improvement: 1.0 - (-0.2) = 1.2
+    # Baseline (actor p1): 0.2*1.0 + 0.8*(-0.5) = -0.2
+    # Best response (actor p1): max(1.0, -0.5) = 1.0 → improvement 1.2
     expected_improvement = torch.tensor(1.2, device=device, dtype=dtype)
-    torch.testing.assert_close(
-        stats.local_exploitability[0],
-        expected_improvement,
-    )
+    torch.testing.assert_close(stats.local_exploitability[0], expected_improvement)
 
 
 def test_local_exploitability_uses_policy_evaluation_for_baseline() -> None:
@@ -2087,12 +2083,118 @@ def test_local_exploitability_uses_policy_evaluation_for_baseline() -> None:
     stats = evaluator._compute_exploitability()
 
     # With clamping: good=2.0→1.0, bad=-1.0→-1.0
-    # Baseline: 0.75*1.0 + 0.25*(-1.0) = 0.5
-    # Best response: max(1.0, -1.0) = 1.0
-    # Improvement: 1.0 - 0.5 = 0.5
+    # Actor baseline: 0.75*1.0 + 0.25*(-1.0) = 0.5; actor BR = 1.0 → +0.5
     torch.testing.assert_close(
         stats.local_exploitability[0],
         torch.tensor(0.5, device=device, dtype=dtype),
+    )
+
+
+def test_local_exploitability_includes_opponent_br() -> None:
+    evaluator, _ = make_evaluator(batch_size=1, max_depth=2, cfr_iterations=2)
+    device = evaluator.device
+    dtype = evaluator.float_dtype
+    num_hands = NUM_HANDS
+    num_actions = evaluator.num_actions
+    depth_offsets = evaluator.depth_offsets
+
+    root = 0
+    depth1_start = depth_offsets[1]
+    depth2_start = depth_offsets[2]
+    good_root_action, bad_root_action = 1, 2
+    good_response, bad_response = 0, 1
+
+    node_good = depth1_start + good_root_action
+    node_bad = depth1_start + bad_root_action
+    child_good_good = depth2_start + good_root_action * num_actions + good_response
+    child_good_bad = depth2_start + good_root_action * num_actions + bad_response
+    child_bad_good = depth2_start + bad_root_action * num_actions + good_response
+    child_bad_bad = depth2_start + bad_root_action * num_actions + bad_response
+
+    evaluator.valid_mask.zero_()
+    evaluator.valid_mask[[root, node_good, node_bad]] = True
+    evaluator.valid_mask[
+        [child_good_good, child_good_bad, child_bad_good, child_bad_bad]
+    ] = True
+
+    evaluator.leaf_mask.zero_()
+    evaluator.leaf_mask[
+        [child_good_good, child_good_bad, child_bad_good, child_bad_bad]
+    ] = True
+
+    evaluator.env.to_act.zero_()
+    evaluator.env.to_act[root] = 0
+    evaluator.env.to_act[[node_good, node_bad]] = 1
+    evaluator.prev_actor[node_good : node_bad + 1] = 0
+    evaluator.prev_actor[
+        [child_good_good, child_good_bad, child_bad_good, child_bad_bad]
+    ] = 1
+
+    evaluator.child_mask = torch.zeros(
+        evaluator.total_nodes, num_actions, dtype=torch.bool, device=device
+    )
+    evaluator.child_mask[root, good_root_action] = True
+    evaluator.child_mask[root, bad_root_action] = True
+    evaluator.child_mask[node_good, good_response] = True
+    evaluator.child_mask[node_good, bad_response] = True
+    evaluator.child_mask[node_bad, good_response] = True
+    evaluator.child_mask[node_bad, bad_response] = True
+    evaluator.child_count = evaluator.child_mask.sum(dim=1)
+
+    policy = torch.zeros(evaluator.total_nodes, num_hands, device=device, dtype=dtype)
+    policy[node_good].fill_(0.5)
+    policy[node_bad].fill_(0.5)
+    policy[child_good_good].fill_(0.25)
+    policy[child_good_bad].fill_(0.75)
+    policy[child_bad_good].fill_(0.5)
+    policy[child_bad_bad].fill_(0.5)
+    evaluator.policy_probs[:] = policy
+    evaluator.policy_probs_avg[:] = policy
+
+    values = torch.zeros(
+        evaluator.total_nodes, 2, num_hands, device=device, dtype=dtype
+    )
+    values[child_good_good, 0].fill_(0.6)
+    values[child_good_good, 1].fill_(-0.6)
+    values[child_good_bad, 0].fill_(-0.4)
+    values[child_good_bad, 1].fill_(0.4)
+    values[child_bad_good, 0].fill_(0.1)
+    values[child_bad_good, 1].fill_(-0.1)
+    values[child_bad_bad, 0].fill_(-0.1)
+    values[child_bad_bad, 1].fill_(0.1)
+
+    node_good_ev = 0.25 * 0.6 + 0.75 * (-0.4)
+    node_bad_ev = 0.5 * 0.1 + 0.5 * (-0.1)
+    root_ev = 0.5 * node_good_ev + 0.5 * node_bad_ev
+    values[root, 0].fill_(root_ev)
+    values[root, 1].fill_(-root_ev)
+
+    evaluator.latest_values[:] = values
+    evaluator.values_avg[:] = values
+
+    evaluator.self_reach.fill_(1.0)
+    evaluator.self_reach_avg.fill_(1.0)
+
+    uniform = torch.full(
+        (evaluator.total_nodes, 2, num_hands),
+        1.0 / num_hands,
+        device=device,
+        dtype=dtype,
+    )
+    evaluator.beliefs[:] = uniform
+    evaluator.beliefs_avg[:] = uniform
+    evaluator.allowed_hands[:] = True
+    evaluator.allowed_hands_prob.fill_(1.0 / num_hands)
+
+    stats = evaluator._compute_exploitability()
+
+    torch.testing.assert_close(
+        stats.local_exploitability[0],
+        torch.tensor(0.25, device=device, dtype=dtype),
+    )
+    torch.testing.assert_close(
+        stats.local_best_response_values[0],
+        torch.tensor([0.0, 0.25], device=device, dtype=dtype),
     )
 
 

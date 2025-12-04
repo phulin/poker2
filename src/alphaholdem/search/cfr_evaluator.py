@@ -724,35 +724,31 @@ class CFREvaluator(ABC):
         self.compute_expected_values(
             policy=policy, beliefs=beliefs, leaf_values=leaf_values, values=base_values
         )
-        br_values = self._best_response_values(policy, beliefs, leaf_values)
 
-        root_indices = torch.arange(N, device=self.device)
-        root_actor = self.env.to_act[:N]
+        improvements_by_player = []
+        br_values_by_player = []
+        for player in range(self.num_players):
+            deviator = torch.full(
+                (N,), player, device=self.device, dtype=self.env.to_act.dtype
+            )
+            br_values = self._best_response_values(
+                policy,
+                beliefs,
+                leaf_values,
+                deviating_player=self._fan_out_deep(deviator),
+            )
 
-        base_root = base_values[root_indices, root_actor]  # (N, NUM_HANDS)
-        br_root = br_values[root_indices, root_actor]  # (N, NUM_HANDS)
+            base_root = base_values[:N, player]  # (N, NUM_HANDS)
+            br_root = br_values[:N, player]  # (N, NUM_HANDS)
+            root_beliefs = beliefs[:N, player]  # (N, NUM_HANDS)
 
-        # Aggregate over hands using beliefs
-        root_beliefs_actor = beliefs[root_indices, root_actor]  # (N, NUM_HANDS)
+            improvements_by_player.append(
+                ((br_root - base_root) * root_beliefs).sum(dim=-1)
+            )
+            br_values_by_player.append((br_root * root_beliefs).sum(dim=-1))
 
-        # Weight improvements by beliefs
-        improvements_per_hand = br_root - base_root  # (N, NUM_HANDS)
-        improvements = (improvements_per_hand * root_beliefs_actor).sum(dim=-1)  # (N,)
-
-        # Aggregate best response values for both players
-        # For the acting player: use best response value
-        # For the opponent: use base value
-        root_opponent = 1 - root_actor
-        br_values_actor = (br_root * root_beliefs_actor).sum(dim=-1)  # (N,)
-        base_root_opponent = base_values[root_indices, root_opponent]  # (N, NUM_HANDS)
-        root_beliefs_opponent = beliefs[root_indices, root_opponent]  # (N, NUM_HANDS)
-        base_values_opponent = (base_root_opponent * root_beliefs_opponent).sum(
-            dim=-1
-        )  # (N,)
-
-        br_values_agg = torch.stack(
-            [br_values_actor, base_values_opponent], dim=-1
-        )  # (N, 2)
+        improvements = (improvements_by_player[0] + improvements_by_player[1]) / 2
+        br_values_agg = torch.stack(br_values_by_player, dim=-1)  # (N, 2)
 
         return ExploitabilityStats(
             local_exploitability=improvements, local_best_response_values=br_values_agg
