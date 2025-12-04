@@ -9,7 +9,9 @@ import torch.nn as nn
 
 from alphaholdem.core.structured_config import NonlinearityType
 from alphaholdem.env.card_utils import NUM_HANDS
+from alphaholdem.models.base_mlp_model import BaseMLPModel
 from alphaholdem.models.activation_utils import SwiGLU, get_activation
+from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput, TRMLatent
@@ -86,7 +88,7 @@ def ffn_block(
     )
 
 
-class BetterTRM(nn.Module):
+class BetterTRM(BaseMLPModel):
     """Better PBS TRM poker model."""
 
     def __init__(
@@ -95,6 +97,7 @@ class BetterTRM(nn.Module):
         hidden_dim: int = 512,
         range_hidden_dim: int = 256,
         ffn_dim: int = 1024,
+        num_hidden_layers: int = 2,
         num_policy_layers: int = 1,
         num_value_layers: int = 1,
         num_players: int = 2,
@@ -132,12 +135,11 @@ class BetterTRM(nn.Module):
         self.register_buffer("z_init", torch.zeros(hidden_dim))
 
         # Build trunk
-        # Fixed 2-layer for recursion
         layers = [
             ResidualBlock(
                 ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), 1.0
             )
-            for _ in range(2)
+            for _ in range(num_hidden_layers)
         ]
         layers.append(nn.LayerNorm(hidden_dim))
         self.trunk = nn.Sequential(*layers)
@@ -288,18 +290,13 @@ class BetterTRM(nn.Module):
         else:
             self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
 
-    @torch.no_grad()
-    def adjust_scale(self, weight_scale: float, bias_adjustment: float) -> None:
-        """
-        Apply PopArt scaling to the final value head.
-
-        No-op for quantile value heads.
-        """
-
-        last_linear = self.hand_value_head[-1]
-        last_linear.weight.data.mul_(weight_scale)
-        if last_linear.bias is not None:
-            last_linear.bias.data.mul_(weight_scale).add_(bias_adjustment)
+    def create_feature_encoder(
+        self,
+        env,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> BetterFeatureEncoder:
+        return BetterFeatureEncoder(env=env, device=device, dtype=dtype)
 
     def repeat(
         self,

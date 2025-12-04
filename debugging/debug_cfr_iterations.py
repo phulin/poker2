@@ -31,6 +31,9 @@ Usage:
     # Use sparse CFR evaluator instead of ReBeL CFR evaluator
     python debug_cfr_iterations.py --sparse=true
     python debug_cfr_iterations.py --sparse=true --street=flop --checkpoint checkpoints-rebel/rebel_final.pt
+
+    # Start from a uniform policy instead of the model policy head
+    python debug_cfr_iterations.py --uniform_policy_init=true
 """
 
 import os
@@ -43,7 +46,7 @@ from hydra.core.config_store import ConfigStore
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 
-from alphaholdem.core.structured_config import Config, ModelType
+from alphaholdem.core.structured_config import Config, ModelType, NonlinearityType
 from alphaholdem.env import card_utils
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
@@ -144,6 +147,104 @@ def _parse_board_str(board: str) -> list[int]:
     return card_indices
 
 
+def _apply_checkpoint_model_config(cfg: Config, checkpoint: dict) -> Config | None:
+    checkpoint_config = checkpoint.get("config")
+    if checkpoint_config is None:
+        return None
+
+    checkpoint_cfg = Config.from_dict(checkpoint_config)
+    cfg.model = checkpoint_cfg.model
+    cfg.env.bet_bins = checkpoint_cfg.env.bet_bins
+    cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+    return checkpoint_cfg
+
+
+def _infer_better_dimensions(
+    cfg: Config, model_state: dict[str, torch.Tensor], model_type: ModelType
+) -> None:
+    cfg.model.hidden_dim = model_state["street_embedding.weight"].shape[1]
+    if "belief_encoder.linear_in.weight" in model_state:
+        belief_hidden = model_state["belief_encoder.linear_in.weight"].shape[0]
+        cfg.model.range_hidden_dim = belief_hidden // 2
+    # Fallback when using SwiGLU encoders: keep existing range_hidden_dim.
+
+    if "trunk.0.inner.linear_in.weight" in model_state:
+        cfg.model.ffn_dim = model_state["trunk.0.inner.linear_in.weight"].shape[0]
+
+    trunk_layers = {
+        int(k.split(".")[1])
+        for k in model_state
+        if k.startswith("trunk.") and ".inner." in k and k.split(".")[1].isdigit()
+    }
+    if trunk_layers:
+        cfg.model.num_hidden_layers = max(trunk_layers) + 1
+
+    policy_layers = {
+        int(k.split(".")[1])
+        for k in model_state
+        if k.startswith("policy_head.") and k.split(".")[1].isdigit()
+    }
+    if policy_layers:
+        cfg.model.num_policy_layers = max(policy_layers) + 1
+
+    value_layers = {
+        int(k.split(".")[1])
+        for k in model_state
+        if k.startswith("hand_value_head.") and k.split(".")[1].isdigit()
+    }
+    if value_layers:
+        cfg.model.num_value_layers = max(value_layers) + 1
+
+    if model_type == ModelType.better_ffn:
+        trunk_layers = {
+            int(k.split(".")[1])
+            for k in model_state
+            if k.startswith("trunk.") and ".inner." in k and k.split(".")[1].isdigit()
+        }
+        if trunk_layers:
+            cfg.model.num_hidden_layers = max(trunk_layers) + 1
+
+    if any("swiglu" in k for k in model_state):
+        cfg.model.nonlinearity = NonlinearityType.swiglu
+
+
+from alphaholdem.models.base_mlp_model import BaseMLPModel
+
+
+class UniformPolicyWrapper(BaseMLPModel):
+    """Wrap a model to replace policy logits with uniform values."""
+
+    def __init__(self, base_model: torch.nn.Module):
+        super().__init__()
+        self.base_model = base_model
+
+    def forward(self, *args, **kwargs):
+        output = self.base_model(*args, **kwargs)
+        if output.policy_logits is not None:
+            output.policy_logits = torch.ones_like(output.policy_logits)
+        return output
+
+    def create_feature_encoder(self, *args, **kwargs):
+        return self.base_model.create_feature_encoder(*args, **kwargs)
+
+    def repeat(
+        self,
+        features,
+        count: int,
+        include_policy: bool = False,
+        include_value: bool = True,
+    ):
+        return self.base_model.repeat(
+            features, count, include_policy=include_policy, include_value=include_value
+        )
+
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.base_model, name)
+
+
 def load_model_from_checkpoint(
     checkpoint_path: str, config: Config, device: torch.device
 ) -> RebelFFN | BetterFFN | BetterTRM:
@@ -160,30 +261,31 @@ def load_model_from_checkpoint(
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model_state = checkpoint["model"]
 
-    # Detect model type from checkpoint keys
-    is_better_ffn = "street_embedding.weight" in model_state
-    if is_better_ffn:
-        print("Detected BetterFFN model in checkpoint")
-        config.model.name = ModelType.better_ffn
+    checkpoint_cfg = _apply_checkpoint_model_config(config, checkpoint)
+    if checkpoint_cfg is not None:
+        print(f"Using model config from checkpoint: {config.model.name}")
 
-        # Extract hidden dimension from checkpoint
-        if "post_norm.weight" in model_state:
-            hidden_dim = model_state["post_norm.weight"].shape[0]
-            print(f"Detected hidden_dim: {hidden_dim}")
-            config.model.hidden_dim = hidden_dim
-            config.model.range_hidden_dim = 128  # Default for BetterFFN
-            config.model.ffn_dim = hidden_dim * 2  # Common pattern
-
-        # Extract number of hidden layers from checkpoint
-        trunk_keys = [k for k in model_state.keys() if k.startswith("trunk.")]
-        if trunk_keys:
-            layer_indices = set([int(k.split(".")[1]) for k in trunk_keys])
-            num_hidden_layers = len(layer_indices)
-            print(f"Detected num_hidden_layers: {num_hidden_layers}")
-            config.model.num_hidden_layers = num_hidden_layers
+    # Re-detect model type and core params from the actual state_dict to avoid
+    # mismatches when user overrides conflict with the checkpoint config.
+    detected_type: ModelType
+    if "y_init" in model_state or "z_init" in model_state:
+        detected_type = ModelType.better_trm
+    elif "street_embedding.weight" in model_state:
+        detected_type = ModelType.better_ffn
     else:
-        print("Detected RebelFFN model in checkpoint")
-        config.model.name = ModelType.rebel_ffn
+        detected_type = ModelType.rebel_ffn
+    if config.model.name != detected_type:
+        print(f"Overriding model type to {detected_type} based on checkpoint state")
+        config.model.name = detected_type
+
+    has_swiglu = any("swiglu" in k for k in model_state)
+    config.model.nonlinearity = (
+        NonlinearityType.swiglu if has_swiglu else NonlinearityType.gelu
+    )
+
+    if detected_type in (ModelType.better_ffn, ModelType.better_trm):
+        _infer_better_dimensions(config, model_state, detected_type)
+    config.model.num_actions = len(config.env.bet_bins) + 3
 
     # Create trainer with the adjusted config
     trainer = RebelCFRTrainer(cfg=config, device=device)
@@ -691,6 +793,7 @@ def debug_cfr_iterations(
     selected_hole_str: Optional[str] = None,
     verbose: bool = False,
     random_beliefs: bool = False,
+    uniform_policy_init: bool = False,
     forced_board: Optional[list[int]] = None,
 ) -> None:
     """Main debugging function."""
@@ -725,6 +828,9 @@ def debug_cfr_iterations(
         model = load_model_from_checkpoint(checkpoint_path, cfg, device)
     else:
         model = create_random_model(cfg, device)
+    if uniform_policy_init:
+        print("Using uniform policy initialization")
+        model = UniformPolicyWrapper(model)
 
     # Create environment
     env = HUNLTensorEnv(
@@ -872,6 +978,7 @@ class TopLevel:
     hole: Optional[str] = None
     verbose: bool = False
     random_beliefs: bool = False
+    uniform_policy_init: bool = False
     board: Optional[str] = None
 
 
@@ -887,6 +994,7 @@ def main(dict_config: DictConfig) -> None:
     hole = dict_config.get("hole")
     verbose = bool(dict_config.get("verbose", False))
     random_beliefs = bool(dict_config.get("random_beliefs", False))
+    uniform_policy_init = bool(dict_config.get("uniform_policy_init", False))
     board = dict_config.get("board")
 
     container: dict[str, any] = OmegaConf.to_container(dict_config, resolve=True)
@@ -897,6 +1005,7 @@ def main(dict_config: DictConfig) -> None:
         "hole",
         "verbose",
         "random_beliefs",
+        "uniform_policy_init",
         "board",
     ]:
         if k in container:
@@ -939,6 +1048,7 @@ def main(dict_config: DictConfig) -> None:
         selected_hole_str=hole,
         verbose=verbose,
         random_beliefs=random_beliefs,
+        uniform_policy_init=uniform_policy_init,
         forced_board=forced_board,
     )
 

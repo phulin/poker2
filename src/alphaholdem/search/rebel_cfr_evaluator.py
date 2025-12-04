@@ -227,18 +227,9 @@ class RebelCFREvaluator(CFREvaluator):
         )
 
         # Feature encoder for belief computation
-        if isinstance(self.model, (BetterFFN, BetterTRM)):
-            self.feature_encoder = BetterFeatureEncoder(
-                env=self.env,
-                device=self.device,
-                dtype=self.float_dtype,
-            )
-        else:
-            self.feature_encoder = RebelFeatureEncoder(
-                env=self.env,
-                device=self.device,
-                dtype=self.float_dtype,
-            )
+        self.feature_encoder = self.model.create_feature_encoder(
+            env=self.env, device=self.device, dtype=self.float_dtype
+        )
 
         self.hand_rank_data = None
         self.stats = {}

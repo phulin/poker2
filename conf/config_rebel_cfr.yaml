@@ -49,7 +49,8 @@ model:
   range_hidden_dim: 256
   ffn_dim: 1024
 
-  shared_trunk: false
+  shared_trunk: true # DO NOT detach policy head from trunk
+  num_hidden_layers: 2
   num_value_layers: 1
   num_policy_layers: 1
   

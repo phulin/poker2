@@ -295,14 +295,9 @@ class SparseCFREvaluator(CFREvaluator):
         self.last_model_values = None
 
         # Set up feature encoder (sparse-specific, done after tree construction)
-        if isinstance(self.model, (BetterFFN, BetterTRM)):
-            self.feature_encoder = BetterFeatureEncoder(
-                env=self.env, device=self.device, dtype=self.float_dtype
-            )
-        else:
-            self.feature_encoder = RebelFeatureEncoder(
-                env=self.env, device=self.device, dtype=self.float_dtype
-            )
+        self.feature_encoder = self.model.create_feature_encoder(
+            env=self.env, device=self.device, dtype=self.float_dtype
+        )
 
     def _mask_invalid(self, tensor: torch.Tensor) -> None:
         """Mask invalid nodes in the tensor. Noop for sparse evaluator (all nodes are valid)."""

@@ -7,8 +7,10 @@ import torch.nn as nn
 
 from alphaholdem.core.structured_config import NonlinearityType
 from alphaholdem.env.card_utils import NUM_HANDS
+from alphaholdem.models.base_mlp_model import BaseMLPModel
 from alphaholdem.models.activation_utils import get_activation
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
+from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.model_output import ModelOutput
 
 
@@ -47,7 +49,7 @@ class _FFNBlock(nn.Module):
         return x
 
 
-class RebelFFN(nn.Module):
+class RebelFFN(BaseMLPModel):
     """ReBeL-inspired feed-forward poker model."""
 
     def __init__(
@@ -82,7 +84,11 @@ class RebelFFN(nn.Module):
         self.hand_value_head = nn.Linear(hidden_dim, num_players * NUM_HANDS)
 
     def forward(
-        self, features: MLPFeatures, include_policy: bool = True
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = True,
+        latent=None,
     ) -> ModelOutput:
         """
         Forward pass over flat feature vectors.
@@ -112,12 +118,15 @@ class RebelFFN(nn.Module):
         else:
             policy_logits = None
 
-        hand_value_input = x.detach() if self.detach_value_head else x
-        hand_values = self.hand_value_head(hand_value_input)
-        hand_values = hand_values.view(
-            features_tensor.shape[0], self.num_players, NUM_HANDS
-        )
-        value = hand_values.mean(dim=-1)
+        hand_values = None
+        value = None
+        if include_value:
+            hand_value_input = x.detach() if self.detach_value_head else x
+            hand_values = self.hand_value_head(hand_value_input)
+            hand_values = hand_values.view(
+                features_tensor.shape[0], self.num_players, NUM_HANDS
+            )
+            value = hand_values.mean(dim=-1)
 
         return ModelOutput(
             policy_logits=policy_logits,
@@ -136,18 +145,13 @@ class RebelFFN(nn.Module):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
-    @torch.no_grad()
-    def adjust_scale(self, weight_scale: float, bias_adjustment: float) -> None:
-        """
-        Apply PopArt scaling to the final value head.
-
-        No-op for quantile value heads.
-        """
-
-        last_linear = self.hand_value_head
-        last_linear.weight.data.mul_(weight_scale)
-        if last_linear.bias is not None:
-            last_linear.bias.data.mul_(weight_scale).add_(bias_adjustment)
+    def create_feature_encoder(
+        self,
+        env,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> RebelFeatureEncoder:
+        return RebelFeatureEncoder(env=env, device=device, dtype=dtype)
 
     def get_model_info(self) -> dict[str, any]:
         total_params = sum(p.numel() for p in self.parameters())

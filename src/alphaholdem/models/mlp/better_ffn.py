@@ -8,8 +8,10 @@ import torch.nn as nn
 
 from alphaholdem.core.structured_config import NonlinearityType
 from alphaholdem.env.card_utils import NUM_HANDS
+from alphaholdem.models.base_mlp_model import BaseMLPModel
 from alphaholdem.models.activation_utils import get_activation
 from alphaholdem.models.mlp.better_features import context_length
+from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput
 from alphaholdem.utils.profiling import profile
@@ -45,7 +47,7 @@ def ffn_block(
     )
 
 
-class BetterFFN(nn.Module):
+class BetterFFN(BaseMLPModel):
     """Better PBS feed-forward poker model."""
 
     def __init__(
@@ -123,7 +125,11 @@ class BetterFFN(nn.Module):
 
     @profile
     def forward(
-        self, features: MLPFeatures, include_policy: bool = True
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = True,
+        latent=None,
     ) -> ModelOutput:
         """
         Forward pass over flat feature vectors.
@@ -164,17 +170,22 @@ class BetterFFN(nn.Module):
             )
         else:
             policy_logits = None
-        hand_values_raw = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
-        if self.enforce_zero_sum:
-            hand_value_sums = (
-                (hand_values_raw * player_beliefs)
-                .sum(dim=2, keepdim=True)
-                .mean(dim=1, keepdim=True)
+        hand_values = None
+        value = None
+        if include_value:
+            hand_values_raw = self.hand_value_head(x).view(
+                -1, self.num_players, NUM_HANDS
             )
-            hand_values = hand_values_raw - hand_value_sums
-        else:
-            hand_values = hand_values_raw
-        value = hand_values.mean(dim=-1)
+            if self.enforce_zero_sum:
+                hand_value_sums = (
+                    (hand_values_raw * player_beliefs)
+                    .sum(dim=2, keepdim=True)
+                    .mean(dim=1, keepdim=True)
+                )
+                hand_values = hand_values_raw - hand_value_sums
+            else:
+                hand_values = hand_values_raw
+            value = hand_values.mean(dim=-1)
 
         return ModelOutput(
             policy_logits=policy_logits,
@@ -193,6 +204,14 @@ class BetterFFN(nn.Module):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
+    def create_feature_encoder(
+        self,
+        env,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> BetterFeatureEncoder:
+        return BetterFeatureEncoder(env=env, device=device, dtype=dtype)
+
         for sequential in [self.trunk, self.policy_head, self.hand_value_head]:
             for block in sequential.modules():
                 if not isinstance(block, ResidualBlock):
@@ -206,19 +225,6 @@ class BetterFFN(nn.Module):
 
         # Guess hand values are around stddev 0.1.
         self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
-
-    @torch.no_grad()
-    def adjust_scale(self, weight_scale: float, bias_adjustment: float) -> None:
-        """
-        Apply PopArt scaling to the final value head.
-
-        No-op for quantile value heads.
-        """
-
-        last_linear = self.hand_value_head[-1]
-        last_linear.weight.data.mul_(weight_scale)
-        if last_linear.bias is not None:
-            last_linear.bias.data.mul_(weight_scale).add_(bias_adjustment)
 
     def repeat(
         self,
