@@ -23,7 +23,7 @@ from hydra.core.config_store import ConfigStore
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 
-from alphaholdem.core.structured_config import Config
+from alphaholdem.core.structured_config import Config, ModelType, NonlinearityType
 from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
 from alphaholdem.utils.training_utils import print_preflop_range_grid
 
@@ -37,42 +37,132 @@ cs = ConfigStore.instance()
 cs.store(group="", name="toplevel_schema", node=TopLevel)
 
 
+def _apply_checkpoint_model_config(cfg: Config, checkpoint: dict) -> Config | None:
+    checkpoint_config = checkpoint.get("config")
+    if checkpoint_config is None:
+        return None
+
+    # Replace cfr_action_epsilon with sample_epsilon if present in checkpoint config
+    # Handle both train and search sections (old checkpoints may have it in either)
+    if isinstance(checkpoint_config, dict):
+        # Handle search section
+        if "search" in checkpoint_config and isinstance(
+            checkpoint_config["search"], dict
+        ):
+            if "cfr_action_epsilon" in checkpoint_config["search"]:
+                if "sample_epsilon" not in checkpoint_config["search"]:
+                    checkpoint_config["search"]["sample_epsilon"] = checkpoint_config[
+                        "search"
+                    ].pop("cfr_action_epsilon")
+                else:
+                    checkpoint_config["search"].pop("cfr_action_epsilon")
+
+        # Handle train section (in case it was mistakenly stored there)
+        if "train" in checkpoint_config and isinstance(
+            checkpoint_config["train"], dict
+        ):
+            if "cfr_action_epsilon" in checkpoint_config["train"]:
+                # Move it to search section if not already there
+                if "search" not in checkpoint_config:
+                    checkpoint_config["search"] = {}
+                if "sample_epsilon" not in checkpoint_config["search"]:
+                    checkpoint_config["search"]["sample_epsilon"] = checkpoint_config[
+                        "train"
+                    ].pop("cfr_action_epsilon")
+                else:
+                    checkpoint_config["train"].pop("cfr_action_epsilon")
+
+    checkpoint_cfg = Config.from_dict(checkpoint_config)
+    cfg.model = checkpoint_cfg.model
+    cfg.env.bet_bins = checkpoint_cfg.env.bet_bins
+    cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+    return checkpoint_cfg
+
+
+def _infer_better_dimensions(
+    cfg: Config, model_state: dict[str, torch.Tensor], model_type: ModelType
+) -> None:
+    cfg.model.hidden_dim = model_state["street_embedding.weight"].shape[1]
+    if "belief_encoder.linear_in.weight" in model_state:
+        belief_hidden = model_state["belief_encoder.linear_in.weight"].shape[0]
+        cfg.model.range_hidden_dim = belief_hidden // 2
+    # Fallback when using SwiGLU encoders: keep existing range_hidden_dim.
+
+    if "trunk.0.inner.linear_in.weight" in model_state:
+        cfg.model.ffn_dim = model_state["trunk.0.inner.linear_in.weight"].shape[0]
+
+    trunk_layers = {
+        int(k.split(".")[1])
+        for k in model_state
+        if k.startswith("trunk.") and ".inner." in k and k.split(".")[1].isdigit()
+    }
+    if trunk_layers:
+        cfg.model.num_hidden_layers = max(trunk_layers) + 1
+
+    policy_layers = {
+        int(k.split(".")[1])
+        for k in model_state
+        if k.startswith("policy_head.") and k.split(".")[1].isdigit()
+    }
+    if policy_layers:
+        cfg.model.num_policy_layers = max(policy_layers) + 1
+
+    value_layers = {
+        int(k.split(".")[1])
+        for k in model_state
+        if k.startswith("hand_value_head.") and k.split(".")[1].isdigit()
+    }
+    if value_layers:
+        cfg.model.num_value_layers = max(value_layers) + 1
+
+    if model_type == ModelType.better_ffn:
+        trunk_layers = {
+            int(k.split(".")[1])
+            for k in model_state
+            if k.startswith("trunk.") and ".inner." in k and k.split(".")[1].isdigit()
+        }
+        if trunk_layers:
+            cfg.model.num_hidden_layers = max(trunk_layers) + 1
+
+    if any("swiglu" in k for k in model_state):
+        cfg.model.nonlinearity = NonlinearityType.swiglu
+
+
 def load_trainer_from_checkpoint(
     checkpoint_path: str, cfg: Config, device: torch.device
 ) -> tuple[RebelCFRTrainer, int]:
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    # Inspect checkpoint for model type/shape hints
+    # Inspect checkpoint to determine model type and architecture
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model_state = checkpoint["model"]
 
-    # Detect BetterFFN via presence of embedding keys; otherwise assume RebelFFN
-    is_better_ffn = "street_embedding.weight" in model_state
+    checkpoint_cfg = _apply_checkpoint_model_config(cfg, checkpoint)
+    if checkpoint_cfg is not None:
+        print(f"Using model config from checkpoint: {cfg.model.name}")
 
-    # Infer action space (num_actions = out_dim / 1326) to align bet bins
-    policy_w = model_state.get("policy_head.weight")
-    if policy_w is not None:
-        out_dim = int(policy_w.shape[0])
-        num_actions = max(3, out_dim // 1326)
-        k = max(0, num_actions - 3)
-        if k > 0:
-            cfg.env.bet_bins = [0.5 * (i + 1) for i in range(k)]
+    # Re-detect model type and core params from the actual state_dict to avoid
+    # mismatches when user overrides conflict with the checkpoint config.
+    detected_type: ModelType
+    if "y_init" in model_state or "z_init" in model_state:
+        detected_type = ModelType.better_trm
+    elif "street_embedding.weight" in model_state:
+        detected_type = ModelType.better_ffn
+    else:
+        detected_type = ModelType.rebel_ffn
+    if cfg.model.name != detected_type:
+        print(f"Overriding model type to {detected_type} based on checkpoint state")
+        cfg.model.name = detected_type
 
-    # If BetterFFN, align hidden sizes and layers to avoid strict load errors
-    if is_better_ffn:
-        if "post_norm.weight" in model_state:
-            cfg.model.hidden_dim = int(model_state["post_norm.weight"].shape[0])
-            cfg.model.range_hidden_dim = 128
-            cfg.model.ffn_dim = int(cfg.model.hidden_dim * 2)
-        trunk_layers: set[int] = set()
-        for kname in model_state.keys():
-            if kname.startswith("trunk."):
-                parts = kname.split(".")
-                if len(parts) >= 2 and parts[1].isdigit():
-                    trunk_layers.add(int(parts[1]))
-        if trunk_layers:
-            cfg.model.num_hidden_layers = max(trunk_layers) + 1
+    has_swiglu = any("swiglu" in k for k in model_state)
+    cfg.model.nonlinearity = (
+        NonlinearityType.swiglu if has_swiglu else NonlinearityType.gelu
+    )
+
+    if detected_type in (ModelType.better_ffn, ModelType.better_trm):
+        _infer_better_dimensions(cfg, model_state, detected_type)
+    cfg.model.num_actions = len(cfg.env.bet_bins) + 3
 
     trainer = RebelCFRTrainer(cfg=cfg, device=device)
     loaded_step = trainer.load_checkpoint(checkpoint_path)
@@ -89,6 +179,16 @@ def main(dict_config: DictConfig) -> None:
     checkpoint = to_absolute_path(checkpoint)
     container = OmegaConf.to_container(dict_config, resolve=True)
     container.pop("checkpoint")
+
+    # Replace cfr_action_epsilon with sample_epsilon if present
+    if "search" in container and "cfr_action_epsilon" in container.get("search", {}):
+        if "sample_epsilon" not in container["search"]:
+            container["search"]["sample_epsilon"] = container["search"].pop(
+                "cfr_action_epsilon"
+            )
+        else:
+            container["search"].pop("cfr_action_epsilon")
+
     cfg = Config.from_dict(container)
 
     # Device selection

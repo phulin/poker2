@@ -53,8 +53,8 @@ class BetterFFN(BaseMLPModel):
     def __init__(
         self,
         num_actions: int,
-        hidden_dim: int = 512,
-        range_hidden_dim: int = 128,
+        hidden_dim: int = 1024,
+        range_hidden_dim: int = 256,
         ffn_dim: int = 1024,
         num_hidden_layers: int = 3,
         num_policy_layers: int = 3,

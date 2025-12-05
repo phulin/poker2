@@ -617,16 +617,42 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         )
         self.cfr_evaluator.evaluate_cfr(training_mode=False)
 
-        # Get the root node policy (index 0) [NUM_HANDS, num_actions]
-        actions_slice = slice(
-            1,
-            1 + self.cfr_evaluator.num_actions,
-        )
-        root_policy = self.cfr_evaluator.policy_probs_avg[actions_slice]
-        root_policy /= root_policy.sum(dim=0, keepdim=True).clamp_min(1e-12)
+        # Map the root's legal children back onto the full action space so we
+        # don't rely on dense tree layout (sparse evaluator may prune actions).
+        start = self.cfr_evaluator.depth_offsets[1]
+        end = self.cfr_evaluator.depth_offsets[2]
+        child_indices = torch.arange(start, end, device=self.device)
 
-        # Get legal actions
-        legal_masks = self.cfr_evaluator.valid_mask[actions_slice]
+        # action_from_parent only exists on SparseCFREvaluator; fall back to
+        # positional indexing for the dense evaluator.
+        if hasattr(self.cfr_evaluator, "action_from_parent"):
+            action_ids = self.cfr_evaluator.action_from_parent[child_indices]
+        else:
+            action_ids = child_indices - start
+
+        num_actions = self.cfr_evaluator.num_actions
+        policy_dtype = self.cfr_evaluator.policy_probs_avg.dtype
+        root_policy = torch.zeros(
+            num_actions, NUM_HANDS, device=self.device, dtype=policy_dtype
+        )
+        legal_masks = torch.zeros(num_actions, device=self.device, dtype=torch.bool)
+
+        for idx, action_id in zip(child_indices, action_ids):
+            action_id_int = int(action_id)
+            if action_id_int < 0 or action_id_int >= num_actions:
+                continue
+            root_policy[action_id_int] = self.cfr_evaluator.policy_probs_avg[idx]
+            if (
+                hasattr(self.cfr_evaluator, "valid_mask")
+                and self.cfr_evaluator.valid_mask.shape[0] > idx
+            ):
+                legal_masks[action_id_int] = bool(
+                    self.cfr_evaluator.valid_mask[idx].item()
+                )
+            else:
+                legal_masks[action_id_int] = True
+
+        root_policy /= root_policy.sum(dim=0, keepdim=True).clamp_min(1e-12)
         legal_masks = legal_masks[None, :].expand(NUM_HANDS, -1)
 
         # Get values from CFR (already aggregated at the root)

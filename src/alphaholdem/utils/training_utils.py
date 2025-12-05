@@ -66,8 +66,42 @@ def print_combined_tables(
     print()
 
 
+def _resolve_search_iterations(
+    trainer, iterations_override: Optional[int], step: int
+) -> int:
+    """Resolve which CFR iteration count to use for printing."""
+    if iterations_override is not None:
+        return int(iterations_override)
+    cfg = getattr(trainer, "cfg", None)
+    # Prefer the same interpolation schedule used in training when iterations_final
+    # is configured.
+    if (
+        cfg is not None
+        and getattr(cfg.search, "iterations_final", None) is not None
+        and hasattr(trainer, "initial_iterations")
+    ):
+        total_steps = max(1, int(getattr(cfg, "num_steps", 1)))
+        t = min(1.0, max(0.0, step / float(total_steps)))
+        iterations_start = int(trainer.initial_iterations)
+        iterations_final = int(cfg.search.iterations_final)
+        iterations_now = int(
+            round(iterations_start + (iterations_final - iterations_start) * t)
+        )
+        warm = getattr(cfg.search, "warm_start_iterations", 0)
+        iterations_now = max(warm + 1, iterations_now)
+        return iterations_now
+    cfr_iters = getattr(getattr(trainer, "cfr_evaluator", None), "cfr_iterations", None)
+    if cfr_iters is not None:
+        return int(cfr_iters)
+    return int(trainer.cfg.search.iterations)
+
+
 def print_preflop_range_grid(
-    trainer, step: int, title: Optional[str] = None, rebel=False
+    trainer,
+    step: int,
+    title: Optional[str] = None,
+    rebel: bool = False,
+    iterations: Optional[int] = None,
 ):
     """
     Print preflop range grids for the given trainer and step.
@@ -95,6 +129,12 @@ def print_preflop_range_grid(
             rng=trainer.rng,
             popart_normalizer=getattr(trainer, "popart_normalizer", None),
         )
+        # Keep analyzer iterations aligned with the trainer's current schedule.
+        resolved_iters = _resolve_search_iterations(trainer, iterations, step)
+        if getattr(analyzer, "cfr_evaluator", None) is not None:
+            analyzer.cfr_evaluator.cfr_iterations = max(
+                analyzer.cfr_evaluator.warm_start_iterations + 1, resolved_iters
+            )
     else:
         analyzer = PreflopAnalyzer(
             trainer.model,
