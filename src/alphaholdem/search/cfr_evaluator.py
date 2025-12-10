@@ -1058,11 +1058,6 @@ class CFREvaluator(ABC):
             torch.zeros_like(policy_blocked),
             out=opponent_conditioned_policy[bottom:],
         )
-        max_opp_cond = opponent_conditioned_policy.max()
-        if max_opp_cond.item() > 2.0:
-            print(
-                f"Warning: opponent_conditioned_policy max {max_opp_cond.item():.2e} exceeds 2.0 at iteration {self.cfr_iterations}"
-            )
 
         for depth in range(self.tree_depth - 1, -1, -1):
             offset = self.depth_offsets[depth]
