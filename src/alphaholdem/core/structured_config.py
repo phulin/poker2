@@ -50,6 +50,11 @@ class CFRType(str, Enum):
     discounted_plus = "discounted_plus"
 
 
+class WarmStartType(str, Enum):
+    model = "model"
+    model_br = "model_br"
+
+
 class NonlinearityType(str, Enum):
     relu = "relu"
     gelu = "gelu"
@@ -64,6 +69,7 @@ torch.serialization.add_safe_globals(ModelType)
 torch.serialization.add_safe_globals(PPOClipping)
 torch.serialization.add_safe_globals(KLType)
 torch.serialization.add_safe_globals(CFRType)
+torch.serialization.add_safe_globals(WarmStartType)
 torch.serialization.add_safe_globals(NonlinearityType)
 torch.serialization.add_safe_globals(PPOClipping)
 
@@ -238,6 +244,7 @@ class SearchConfig:
         None  # If set, linearly interpolate from iterations to iterations_final
     )
     warm_start_iterations: int = 15
+    warm_start_type: WarmStartType = WarmStartType.model_br
     branching: int = 4
     belief_samples: int = 16
     sample_epsilon: float = 0.25

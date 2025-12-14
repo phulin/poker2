@@ -5,7 +5,7 @@ from typing import Generator
 
 import torch
 
-from alphaholdem.core.structured_config import CFRType
+from alphaholdem.core.structured_config import CFRType, WarmStartType
 from alphaholdem.env.card_utils import (
     NUM_HANDS,
     combo_to_onehot_tensor,
@@ -37,6 +37,7 @@ class RebelCFREvaluator(CFREvaluator):
     bet_bins: list[float]
     cfr_iterations: int
     warm_start_iterations: int
+    warm_start_type: WarmStartType
     sample_epsilon: float
     device: torch.device
     float_dtype: torch.dtype
@@ -87,6 +88,7 @@ class RebelCFREvaluator(CFREvaluator):
         float_dtype: torch.dtype,
         generator: torch.Generator | None = None,
         warm_start_iterations: int = T_WARM,
+        warm_start_type: WarmStartType = WarmStartType.model_br,
         num_supervisions: int = 1,
         cfr_type: CFRType = CFRType.linear,
         cfr_avg: bool = True,
@@ -106,6 +108,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.bet_bins = bet_bins
         self.cfr_iterations = cfr_iterations
         self.warm_start_iterations = max(0, warm_start_iterations)
+        self.warm_start_type = warm_start_type
         self.num_supervisions = num_supervisions
         self.cfr_type = cfr_type
         self.cfr_avg = cfr_avg

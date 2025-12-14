@@ -207,6 +207,7 @@ class RebelCFRTrainer:
                 generator=self.rng,
                 num_supervisions=self.cfg.model.num_supervisions,
                 warm_start_iterations=self.cfg.search.warm_start_iterations,
+                warm_start_type=self.cfg.search.warm_start_type,
                 cfr_type=self.cfg.search.cfr_type,
                 cfr_avg=self.cfg.search.cfr_avg,
                 dcfr_alpha=self.cfg.search.dcfr_alpha,

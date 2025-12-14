@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 import wandb
 
-from alphaholdem.core.structured_config import CFRType
+from alphaholdem.core.structured_config import CFRType, WarmStartType
 from alphaholdem.env.card_utils import (
     NUM_HANDS,
     calculate_unblocked_mass,
@@ -124,6 +124,7 @@ class CFREvaluator(ABC):
     tree_depth: int
     cfr_iterations: int
     warm_start_iterations: int
+    warm_start_type: WarmStartType
     cfr_avg: bool
     dcfr_alpha: float
     dcfr_beta: float
@@ -896,6 +897,19 @@ class CFREvaluator(ABC):
             )
 
         self._record_initial_exploitability()
+
+        # If configured, seed regrets so regret matching replays the model policy.
+        if self.warm_start_type == WarmStartType.model:
+            bottom = self.depth_offsets[1]
+            weight = float(self.warm_start_iterations)
+            regrets = self.compute_instantaneous_regrets(self.latest_values)
+            weights = weight * regrets[bottom:].clamp(min=0.0).mean(dim=-1)
+            self.cumulative_regrets[bottom:] = (
+                self.policy_probs[bottom:] * weights[:, None]
+            )
+            self.regret_weight_sums[bottom:] = weights[:, None]
+            self.update_policy(self.warm_start_iterations)
+            return
 
         # [M, ]
         values_br_p0 = self._best_response_values(

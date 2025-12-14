@@ -44,6 +44,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.warm_start_iterations = max(
             0, min(cfg.search.warm_start_iterations, max(1, self.cfr_iterations - 1))
         )
+        self.warm_start_type = cfg.search.warm_start_type
         self.cfr_type = cfg.search.cfr_type
         self.cfr_avg = cfg.search.cfr_avg
         self.dcfr_alpha = cfg.search.dcfr_alpha
