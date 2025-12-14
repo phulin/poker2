@@ -250,11 +250,15 @@ class SearchConfig:
     belief_samples: int = 16
     sample_epsilon: float = 0.25
     dcfr_alpha: float = 1.5
+    dcfr_alpha_final: float | None = None
     dcfr_beta: float = 0.0
+    dcfr_beta_final: float | None = None
     dcfr_gamma: float = 2.0
+    dcfr_gamma_final: float | None = None
     dcfr_plus_delay: int = 50
     include_average_policy: bool = True
     cfr_type: CFRType = CFRType.linear
+    cfr_plus: bool = True
     cfr_avg: bool = True
     sparse: bool = False
     value_targets_from_final_policy: bool = False

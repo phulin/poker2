@@ -76,14 +76,18 @@ search:
 
   cfr_type: discounted_plus
   cfr_avg: false
+  cfr_plus: false
 
-  iterations: 150
+  iterations: 200
   iterations_final: 500
   warm_start_iterations: 15
-  warm_start_type: model_br
-  warm_start_multiplier: 1.0
+  warm_start_type: model
+  warm_start_multiplier: 10
   dcfr_plus_delay: 40
 
-  dcfr_alpha: 1.5
-  dcfr_beta: 0.0
-  dcfr_gamma: 2.0
+  dcfr_alpha: 2.0
+  dcfr_alpha_final: 4.0
+  dcfr_beta: -1.0
+  dcfr_beta_final: -1.5
+  dcfr_gamma: 5.0
+  dcfr_gamma_final: 0.0

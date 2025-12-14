@@ -127,9 +127,16 @@ class CFREvaluator(ABC):
     warm_start_type: WarmStartType
     warm_start_multiplier: float
     cfr_avg: bool
+    cfr_plus: bool
     dcfr_alpha: float
     dcfr_beta: float
     dcfr_gamma: float
+    dcfr_alpha_initial: float
+    dcfr_beta_initial: float
+    dcfr_gamma_initial: float
+    dcfr_alpha_final: float | None
+    dcfr_beta_final: float | None
+    dcfr_gamma_final: float | None
     dcfr_delay: int
     sample_epsilon: float
     use_final_policy_values: bool
@@ -1276,9 +1283,48 @@ class CFREvaluator(ABC):
             self.values_avg, self.beliefs_avg, ignore_mask=self.env.done
         )
 
+    def apply_schedules(self, t: int) -> None:
+        """Apply DCFR parameter schedules based on iteration count.
+
+        Args:
+            t: Current iteration number (0-indexed)
+        """
+        # Calculate progress through CFR iterations (excluding warm start)
+        total_iterations = max(1, self.cfr_iterations - self.warm_start_iterations)
+        iteration_progress = max(0, t - self.warm_start_iterations)
+        t_normalized = min(1.0, max(0.0, iteration_progress / float(total_iterations)))
+
+        # DCFR parameter schedules (linear interpolation)
+        if self.dcfr_alpha_final is not None:
+            self.dcfr_alpha = (
+                self.dcfr_alpha_initial
+                + (self.dcfr_alpha_final - self.dcfr_alpha_initial) * t_normalized
+            )
+        else:
+            self.dcfr_alpha = self.dcfr_alpha_initial
+
+        if self.dcfr_beta_final is not None:
+            self.dcfr_beta = (
+                self.dcfr_beta_initial
+                + (self.dcfr_beta_final - self.dcfr_beta_initial) * t_normalized
+            )
+        else:
+            self.dcfr_beta = self.dcfr_beta_initial
+
+        if self.dcfr_gamma_final is not None:
+            self.dcfr_gamma = (
+                self.dcfr_gamma_initial
+                + (self.dcfr_gamma_final - self.dcfr_gamma_initial) * t_normalized
+            )
+        else:
+            self.dcfr_gamma = self.dcfr_gamma_initial
+
     @profile
     def cfr_iteration(self, t: int) -> None:
         """Run one CFR iteration."""
+        # Apply schedules at the beginning of each iteration
+        self.apply_schedules(t)
+
         torch.where(
             (self.t_sample == t)[:, None],
             self.policy_probs,
@@ -1297,8 +1343,8 @@ class CFREvaluator(ABC):
             )
             denominator = torch.where(
                 self.cumulative_regrets > 0,
-                (t + 1) ** self.dcfr_alpha,
-                (t + 1) ** self.dcfr_beta,
+                t**self.dcfr_alpha + 1,
+                t**self.dcfr_beta + 1,
             )
             self.cumulative_regrets *= numerator
             self.cumulative_regrets /= denominator
@@ -1310,7 +1356,7 @@ class CFREvaluator(ABC):
         self.cumulative_regrets += regrets
 
         # CFR+ trick: clamp regrets to non-negative
-        if self.cfr_type == CFRType.discounted_plus:
+        if self.cfr_plus:
             self.cumulative_regrets.clamp_(min=0)
 
         # Update policy

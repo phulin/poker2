@@ -48,9 +48,16 @@ class SparseCFREvaluator(CFREvaluator):
         self.warm_start_multiplier = cfg.search.warm_start_multiplier
         self.cfr_type = cfg.search.cfr_type
         self.cfr_avg = cfg.search.cfr_avg
+        self.cfr_plus = cfg.search.cfr_plus
         self.dcfr_alpha = cfg.search.dcfr_alpha
         self.dcfr_beta = cfg.search.dcfr_beta
         self.dcfr_gamma = cfg.search.dcfr_gamma
+        self.dcfr_alpha_initial = cfg.search.dcfr_alpha
+        self.dcfr_beta_initial = cfg.search.dcfr_beta
+        self.dcfr_gamma_initial = cfg.search.dcfr_gamma
+        self.dcfr_alpha_final = cfg.search.dcfr_alpha_final
+        self.dcfr_beta_final = cfg.search.dcfr_beta_final
+        self.dcfr_gamma_final = cfg.search.dcfr_gamma_final
         self.dcfr_delay = cfg.search.dcfr_plus_delay
         self.sample_epsilon = cfg.search.sample_epsilon
         self.use_final_policy_values = cfg.search.value_targets_from_final_policy

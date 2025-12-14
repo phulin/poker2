@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Generator
 
 import torch
@@ -93,9 +92,13 @@ class RebelCFREvaluator(CFREvaluator):
         num_supervisions: int = 1,
         cfr_type: CFRType = CFRType.linear,
         cfr_avg: bool = True,
+        cfr_plus: bool = True,
         dcfr_alpha: float = 1.5,
         dcfr_beta: float = 0.0,
         dcfr_gamma: float = 2.0,
+        dcfr_alpha_final: float | None = None,
+        dcfr_beta_final: float | None = None,
+        dcfr_gamma_final: float | None = None,
         dcfr_delay: int = 0,
         sample_epsilon: float = 0.25,
         value_targets_from_final_policy: bool = False,
@@ -114,9 +117,16 @@ class RebelCFREvaluator(CFREvaluator):
         self.num_supervisions = num_supervisions
         self.cfr_type = cfr_type
         self.cfr_avg = cfr_avg
+        self.cfr_plus = cfr_plus
         self.dcfr_alpha = dcfr_alpha
         self.dcfr_beta = dcfr_beta
         self.dcfr_gamma = dcfr_gamma
+        self.dcfr_alpha_initial = dcfr_alpha
+        self.dcfr_beta_initial = dcfr_beta
+        self.dcfr_gamma_initial = dcfr_gamma
+        self.dcfr_alpha_final = dcfr_alpha_final
+        self.dcfr_beta_final = dcfr_beta_final
+        self.dcfr_gamma_final = dcfr_gamma_final
         self.dcfr_delay = dcfr_delay
         self.sample_epsilon = sample_epsilon
         self.device = device

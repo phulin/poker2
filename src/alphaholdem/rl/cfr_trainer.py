@@ -211,9 +211,13 @@ class RebelCFRTrainer:
                 warm_start_multiplier=self.cfg.search.warm_start_multiplier,
                 cfr_type=self.cfg.search.cfr_type,
                 cfr_avg=self.cfg.search.cfr_avg,
+                cfr_plus=self.cfg.search.cfr_plus,
                 dcfr_alpha=self.cfg.search.dcfr_alpha,
                 dcfr_beta=self.cfg.search.dcfr_beta,
                 dcfr_gamma=self.cfg.search.dcfr_gamma,
+                dcfr_alpha_final=self.cfg.search.dcfr_alpha_final,
+                dcfr_beta_final=self.cfg.search.dcfr_beta_final,
+                dcfr_gamma_final=self.cfg.search.dcfr_gamma_final,
                 dcfr_delay=self.cfg.search.dcfr_plus_delay,
                 value_targets_from_final_policy=self.cfg.search.value_targets_from_final_policy,
             )
@@ -226,9 +230,6 @@ class RebelCFRTrainer:
 
         self.aggression_analyzer = AggressionAnalyzer(device=self.device)
         self.pbs_pool = PBSPool(pool_size=3, generator=self.rng)
-
-        # Store initial iteration count for scheduling
-        self.initial_iterations = self.cfr_evaluator.cfr_iterations
 
     def _apply_schedules(self, step: int) -> None:
         """Apply learning rate and iteration count schedules."""
@@ -253,7 +254,7 @@ class RebelCFRTrainer:
 
         # Iteration count schedule (linear interpolation)
         if self.cfg.search.iterations_final is not None:
-            iterations_start = self.initial_iterations
+            iterations_start = self.cfg.search.iterations
             iterations_final = self.cfg.search.iterations_final
             iterations_now = int(
                 round(iterations_start + (iterations_final - iterations_start) * t)
