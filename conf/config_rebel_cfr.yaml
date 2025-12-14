@@ -81,6 +81,7 @@ search:
   iterations_final: 500
   warm_start_iterations: 15
   warm_start_type: model_br
+  warm_start_multiplier: 1.0
   dcfr_plus_delay: 40
 
   dcfr_alpha: 1.5

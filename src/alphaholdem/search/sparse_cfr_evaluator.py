@@ -1,6 +1,6 @@
 import torch
 
-from alphaholdem.core.structured_config import Config
+from alphaholdem.core.structured_config import Config, WarmStartType
 from alphaholdem.env.card_utils import NUM_HANDS, combo_to_onehot_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
@@ -45,6 +45,7 @@ class SparseCFREvaluator(CFREvaluator):
             0, min(cfg.search.warm_start_iterations, max(1, self.cfr_iterations - 1))
         )
         self.warm_start_type = cfg.search.warm_start_type
+        self.warm_start_multiplier = cfg.search.warm_start_multiplier
         self.cfr_type = cfg.search.cfr_type
         self.cfr_avg = cfg.search.cfr_avg
         self.dcfr_alpha = cfg.search.dcfr_alpha

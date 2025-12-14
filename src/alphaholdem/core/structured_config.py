@@ -245,6 +245,7 @@ class SearchConfig:
     )
     warm_start_iterations: int = 15
     warm_start_type: WarmStartType = WarmStartType.model_br
+    warm_start_multiplier: float = 1.0
     branching: int = 4
     belief_samples: int = 16
     sample_epsilon: float = 0.25

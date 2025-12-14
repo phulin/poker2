@@ -89,6 +89,7 @@ class RebelCFREvaluator(CFREvaluator):
         generator: torch.Generator | None = None,
         warm_start_iterations: int = T_WARM,
         warm_start_type: WarmStartType = WarmStartType.model_br,
+        warm_start_multiplier: float = 1.0,
         num_supervisions: int = 1,
         cfr_type: CFRType = CFRType.linear,
         cfr_avg: bool = True,
@@ -109,6 +110,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.cfr_iterations = cfr_iterations
         self.warm_start_iterations = max(0, warm_start_iterations)
         self.warm_start_type = warm_start_type
+        self.warm_start_multiplier = warm_start_multiplier
         self.num_supervisions = num_supervisions
         self.cfr_type = cfr_type
         self.cfr_avg = cfr_avg

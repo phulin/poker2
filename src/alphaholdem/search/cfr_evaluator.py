@@ -125,6 +125,7 @@ class CFREvaluator(ABC):
     cfr_iterations: int
     warm_start_iterations: int
     warm_start_type: WarmStartType
+    warm_start_multiplier: float
     cfr_avg: bool
     dcfr_alpha: float
     dcfr_beta: float
@@ -901,7 +902,9 @@ class CFREvaluator(ABC):
         # If configured, seed regrets so regret matching replays the model policy.
         if self.warm_start_type == WarmStartType.model:
             bottom = self.depth_offsets[1]
-            weight = float(self.warm_start_iterations)
+            weight = float(self.warm_start_iterations) * float(
+                self.warm_start_multiplier
+            )
             regrets = self.compute_instantaneous_regrets(self.latest_values)
             weights = weight * regrets[bottom:].clamp(min=0.0).mean(dim=-1)
             self.cumulative_regrets[bottom:] = (
@@ -935,8 +938,9 @@ class CFREvaluator(ABC):
         regrets = self.compute_instantaneous_regrets(
             values_achieved=values_br, values_expected=self.latest_values
         )
-        self.cumulative_regrets += self.warm_start_iterations * regrets
-        self.regret_weight_sums += self.warm_start_iterations
+        scale = float(self.warm_start_iterations) * float(self.warm_start_multiplier)
+        self.cumulative_regrets += scale * regrets
+        self.regret_weight_sums += scale
         self.update_policy(self.warm_start_iterations)
 
     def _maybe_enforce_zero_sum(
