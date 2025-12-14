@@ -22,7 +22,7 @@ train:
   weight_decay: 0.01
   batch_size: 512
   episodes_per_step: 10
-  replay_buffer_batches: 512
+  replay_buffer_batches: 64
   value_reuse_goal: 4
   policy_capacity_factor: 10
   value_coef: 1.0
