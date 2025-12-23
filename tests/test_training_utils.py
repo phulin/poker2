@@ -1,4 +1,7 @@
+import torch
+
 from alphaholdem.core.structured_config import Config
+from alphaholdem.utils import training_utils
 from alphaholdem.utils.training_utils import _resolve_search_iterations
 
 
@@ -51,3 +54,58 @@ def test_resolve_iterations_uses_interpolation_when_available():
     )
     assert interpolated >= cfg.search.warm_start_iterations + 1
     assert interpolated == 30
+
+
+def test_print_preflop_grid_uses_model_without_ema(monkeypatch, capsys):
+    cfg = Config()
+    trainer = type("TrainerStub", (), {})()
+    trainer.model = object()
+    trainer.model_avg = None
+    trainer.cfg = cfg
+    trainer.device = None
+    trainer.rng = None
+    trainer.num_bet_bins = 4
+
+    captured = {}
+
+    class _StubCfrEvaluator:
+        def __init__(self, warm_start_iterations: int):
+            self.warm_start_iterations = warm_start_iterations
+            self.cfr_iterations = warm_start_iterations + 1
+
+    class _StubAnalyzer:
+        def __init__(self, model, cfg, button, device, rng, popart_normalizer=None):
+            captured["model"] = model
+            captured["analyzer"] = self
+            self.cfr_evaluator = _StubCfrEvaluator(cfg.search.warm_start_iterations)
+
+        def get_preflop_grids(self):
+            ranges = ["fold\n", "call\n", "bet\n", "all-in\n"]
+            suited_vs_offsuit = torch.tensor(
+                [
+                    [0.1, 0.2],
+                    [0.3, 0.4],
+                    [0.5, 0.6],
+                    [0.7, 0.8],
+                ],
+                dtype=torch.float32,
+            )
+            return {
+                "ranges": ranges,
+                "betting": "bet\n",
+                "value": "values",
+                "suited_vs_offsuit": suited_vs_offsuit,
+            }
+
+        def get_preflop_grids_allin_response(self):
+            return {"ranges": ["fold\n", "call\n"], "value": "values"}
+
+    monkeypatch.setattr(training_utils, "RebelPreflopAnalyzer", _StubAnalyzer)
+
+    training_utils.print_preflop_range_grid(trainer, step=0, rebel=True)
+    captured_out = capsys.readouterr()
+    assert "Preflop Range Grid" in captured_out.out
+    assert captured["model"] is trainer.model
+    analyzer = captured["analyzer"]
+    # Warm start guard should not reduce the resolved iteration count
+    assert analyzer.cfr_evaluator.cfr_iterations >= cfg.search.iterations

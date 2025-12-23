@@ -123,7 +123,7 @@ class RebelCFRTrainer:
         self.model.init_weights(cpu_rng)
         self.model.to(self.device)
         if self.device.type == "cuda" and cfg.model.compile:
-            self.model.compile()
+            self.model.compile(dynamic=True)
 
         # data generation rate per training step
         self.K_value = max(1, self.batch_size // self.cfg.train.value_reuse_goal)

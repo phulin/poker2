@@ -117,7 +117,7 @@ def print_preflop_range_grid(
 
     if rebel:
         # Use model_avg if available, matching trainer logic
-        eval_model = getattr(trainer, "model_avg", trainer.model)
+        eval_model = getattr(trainer, "model_avg", None) or trainer.model
         analyzer = RebelPreflopAnalyzer(
             eval_model,
             trainer.cfg,
