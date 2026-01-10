@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
@@ -13,6 +14,13 @@ class TRMLatent:
 
     y: torch.Tensor
     z: torch.Tensor
+
+    def __getitem__(self, index: torch.Tensor | slice | int) -> TRMLatent:
+        """Get item by index."""
+        return TRMLatent(
+            y=self.y[index],
+            z=self.z[index],
+        )
 
     def detach(self) -> TRMLatent:
         """Detach the latent variables."""
@@ -47,38 +55,10 @@ class ModelOutput:
     latent: TRMLatent | None = None
     """Latent y tensor of shape (batch_size, hidden_dim)"""
 
-    def to_dict(self) -> dict[str, torch.Tensor]:
-        """Convert to dictionary format for backward compatibility."""
-        result = {
-            "policy_logits": self.policy_logits,
-            "value": self.value,
-        }
-        if self.value_quantiles is not None:
-            result["value_quantiles"] = self.value_quantiles
-        if self.hand_values is not None:
-            result["hand_values"] = self.hand_values
-        if self.kv_cache is not None:
-            result["kv_cache"] = self.kv_cache
-        if self.encoded_with_permutation is not None:
-            result["encoded_with_permutation"] = self.encoded_with_permutation
-        return result
-
-    @classmethod
-    def from_dict(cls, data: dict[str, torch.Tensor]) -> ModelOutput:
-        """Create from dictionary format."""
-        return cls(
-            policy_logits=data["policy_logits"],
-            value=data["value"],
-            value_quantiles=data.get("value_quantiles"),
-            hand_values=data.get("hand_values"),
-            kv_cache=data.get("kv_cache"),
-            encoded_with_permutation=data.get("encoded_with_permutation"),
-        )
-
     def __getitem__(self, index: torch.Tensor | slice | int) -> ModelOutput:
         """Get item by index."""
         return ModelOutput(
-            value=self.value[index],
+            value=self.value[index] if self.value is not None else None,
             policy_logits=(
                 self.policy_logits[index] if self.policy_logits is not None else None
             ),
@@ -90,7 +70,9 @@ class ModelOutput:
             hand_values=(
                 self.hand_values[index] if self.hand_values is not None else None
             ),
-            kv_cache=self.kv_cache[index] if self.kv_cache is not None else None,
+            kv_cache={k: (v[0][index], v[1][index]) for k, v in self.kv_cache.items()}
+            if self.kv_cache is not None
+            else None,
             encoded_with_permutation=(
                 self.encoded_with_permutation[index]
                 if self.encoded_with_permutation is not None
@@ -100,13 +82,16 @@ class ModelOutput:
         )
 
     @classmethod
-    def cat(cls, outputs: list[ModelOutput]) -> ModelOutput | None:
+    def cat(cls, outputs: list[ModelOutput]) -> ModelOutput:
         """Concatenate a list of ModelOutput objects."""
         if not outputs:
-            return None
+            raise ValueError("Cannot concatenate an empty list of outputs.")
+
+        if any(o.value is None for o in outputs):
+            raise ValueError("Value is None for some outputs.")
 
         # Concatenate required value tensor
-        value = torch.cat([o.value for o in outputs], dim=0)
+        value = torch.cat([cast(torch.Tensor, o.value) for o in outputs], dim=0)
 
         # Concatenate optional policy_logits
         policy_logits = None

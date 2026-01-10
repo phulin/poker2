@@ -19,6 +19,7 @@ from alphaholdem.env.card_utils import (
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
 from alphaholdem.models.mlp.better_features import ScalarContext
+from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput
@@ -77,6 +78,7 @@ class MockModel:
         self.custom_logits_fn = custom_logits_fn
         self.custom_hand_values_fn = custom_hand_values_fn
         self.enforce_zero_sum = False
+        self.hidden_dim = 1
 
         # Set up default logits
         if logits is not None:
@@ -144,6 +146,11 @@ class MockModel:
     def train(self) -> None:
         pass
 
+    def create_feature_encoder(
+        self, env: HUNLTensorEnv, device=None, dtype=None
+    ) -> RebelFeatureEncoder:
+        return RebelFeatureEncoder(env=env, device=device, dtype=dtype)
+
 
 def test_get_model_policy_probs_skips_no_legal_nodes() -> None:
     device = torch.device("cpu")
@@ -169,7 +176,9 @@ def test_get_model_policy_probs_skips_no_legal_nodes() -> None:
             self.actions = actions
             self.enforce_zero_sum = False
 
-        def forward(self, features: torch.Tensor) -> ModelOutput:  # type: ignore[override]
+        def forward(  # type: ignore[override]
+            self, features: torch.Tensor, include_policy: bool = True
+        ) -> ModelOutput:
             assert features.shape[0] == self.expected_batch
             batch = features.shape[0]
             logits = torch.zeros(batch, NUM_HANDS, self.actions, device=features.device)
@@ -187,6 +196,7 @@ def test_get_model_policy_probs_skips_no_legal_nodes() -> None:
         float_dtype=torch.float32,
         device=device,
         num_actions=num_actions,
+        child_count=legal_mask.sum(dim=-1),
     )
 
     indices = torch.arange(legal_mask.shape[0], device=device)
@@ -1051,10 +1061,10 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
 
     class RandomModel(nn.Module):
         def forward(self, features: MLPFeatures):
-            board = features.board.to(torch.long)
+            board_tensor = features.board.to(torch.long)
             seeds = (
-                board.clamp(min=0)
-                * torch.tensor([1, 31, 997, 17, 53], device=board.device)
+                board_tensor.clamp(min=0)
+                * torch.tensor([1, 31, 997, 17, 53], device=board_tensor.device)
             ).sum(dim=1)
             hand_values = torch.empty((features.context.shape[0], 2, NUM_HANDS))
             for i in range(features.context.shape[0]):
@@ -1066,6 +1076,11 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
                     self.hand_values = hv
 
             return Output(hand_values)
+
+        def create_feature_encoder(
+            self, env: HUNLTensorEnv, device=None, dtype=None
+        ) -> RebelFeatureEncoder:
+            return RebelFeatureEncoder(env=env, device=device, dtype=dtype)
 
     model = RandomModel()
     evaluator = RebelCFREvaluator(

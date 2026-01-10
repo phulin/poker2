@@ -3,7 +3,8 @@ from __future__ import annotations
 import copy
 import math
 import os
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -13,6 +14,7 @@ from alphaholdem.core.structured_config import Config, LrSchedule, ModelType
 from alphaholdem.env.aggression_analyzer import AggressionAnalyzer
 from alphaholdem.env.card_utils import NUM_HANDS, combo_suit_permutation_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.base_mlp_model import BaseMLPModel
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.better_ffn import BetterFFN
@@ -21,7 +23,8 @@ from alphaholdem.models.model_output import ModelOutput, TRMLatent
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.pbs_pool import PBSPool
 from alphaholdem.rl.rebel_batch import RebelBatch
-from alphaholdem.rl.rebel_replay import RebelReplayBuffer
+from alphaholdem.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
+from alphaholdem.search.cfr_evaluator import CFREvaluator
 from alphaholdem.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator
 from alphaholdem.search.rebel_data_generator import RebelDataGenerator
 from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
@@ -31,8 +34,16 @@ from alphaholdem.utils.profiling import profile
 STREETS = ["preflop", "flop", "turn", "river", "showdown"]
 
 
+@dataclass
+class EMAContext:
+    helper: EMAHelper
+    model: BaseMLPModel
+
+
 class RebelCFRTrainer:
     """Trainer that couples DCFR search with a ReBeL-style FFN."""
+
+    cfr_evaluator: CFREvaluator
 
     def __init__(self, cfg: Config, device: torch.device) -> None:
         self.cfg = cfg
@@ -114,6 +125,7 @@ class RebelCFRTrainer:
                 detach_value_head=cfg.model.detach_value_head,
                 num_players=self.num_players,
                 nonlinearity=cfg.model.nonlinearity,
+                enforce_zero_sum=cfg.model.enforce_zero_sum,
             )
             num_context_features = 4
 
@@ -137,24 +149,21 @@ class RebelCFRTrainer:
         policy_capacity = value_capacity * self.cfg.train.policy_capacity_factor
 
         # Replay buffers
-        self.value_buffer = RebelReplayBuffer(
+        self.value_buffer = RebelValueBuffer(
             capacity=value_capacity,
             num_actions=self.num_actions,
             num_players=self.num_players,
             num_context_features=num_context_features,
             device=self.buffer_device,
-            policy_targets=False,
             generator=self.buffer_rng,
         )
         # Larger policy buffer since we store more samples there
-        self.policy_buffer = RebelReplayBuffer(
+        self.policy_buffer = RebelPolicyBuffer(
             capacity=policy_capacity,
             num_actions=self.num_actions,
             num_players=self.num_players,
             num_context_features=num_context_features,
             device=self.buffer_device,
-            policy_targets=True,
-            value_targets=False,
             decimate=1.0 / policy_decimate,
             generator=self.buffer_rng,
         )
@@ -175,17 +184,18 @@ class RebelCFRTrainer:
         self.grad_clip = cfg.train.grad_clip
 
         # EMA setup
-        self.model_avg = None
-        self.ema_helper = None
+        self.ema_context = None
         if cfg.train.model_ema is not None:
-            self.ema_helper = EMAHelper(mu=cfg.train.model_ema)
-            self.ema_helper.register(self.model)
-            # Create model_avg as a copy that will be updated with EMA weights
-            self.model_avg = copy.deepcopy(self.model)
-            self.ema_helper.apply_to_module(self.model_avg)
+            self.ema_context = EMAContext(
+                helper=EMAHelper(mu=cfg.train.model_ema),
+                model=copy.deepcopy(self.model),
+            )
+            self.ema_context.helper.register(self.ema_context.model)
+            self.ema_context.helper.apply_to_module(self.ema_context.model)
 
-        # Use model_avg for evaluator if EMA is enabled, otherwise use model
-        eval_model = self.model_avg if self.model_avg is not None else self.model
+        eval_model = (
+            self.ema_context.model if self.ema_context is not None else self.model
+        )
 
         if cfg.search.sparse:
             self.cfr_evaluator = SparseCFREvaluator(
@@ -275,6 +285,11 @@ class RebelCFRTrainer:
         combo_permutations = combo_suit_permutation_tensor(device=self.device)[
             suit_permutation_idxs
         ]
+        if (
+            value_output.hand_values is None
+            or value_output_permuted.hand_values is None
+        ):
+            raise ValueError("hand_values is None")
         hand_values_permuted_reversed = torch.gather(
             value_output_permuted.hand_values,
             2,
@@ -301,7 +316,7 @@ class RebelCFRTrainer:
         policy_loss_all: torch.Tensor,
         fresh_value_loss: float | None = None,
         fresh_value_batch: RebelBatch | None = None,
-    ) -> dict[str, float]:
+    ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
         grad_norm_clipped = torch.nn.utils.get_total_norm(
             p.grad for p in self.model.parameters() if p.grad is not None
         ).item()
@@ -332,7 +347,7 @@ class RebelCFRTrainer:
             self.value_buffer.features.street[: len(self.value_buffer)]
         )
 
-        metrics = {
+        metrics: dict[str, int | float | torch.Tensor | dict[str, int | float]] = {
             "episodes": episodes,
             "updates": updates,
             "loss": step_stats["total_loss"] / episodes,
@@ -374,10 +389,6 @@ class RebelCFRTrainer:
                 .mean(dim=1),
                 street=self.value_buffer.features.street[: len(self.value_buffer)],
             ),
-            "batch_value_target_mean_abs": value_batch.value_targets.abs()
-            .mean()
-            .item(),
-            "batch_value_target_std": value_batch.value_targets.std().item(),
             "policy_buffer_mean_sample_count": (
                 self.policy_buffer.sample_count[: len(self.policy_buffer)]
                 .float()
@@ -398,9 +409,17 @@ class RebelCFRTrainer:
             "value_batch_street": street_count(value_batch.features.street),
             "value_loss_street": by_street(value_loss_all),
             "policy_loss_street": by_street(policy_loss_all, batch=policy_batch),
-            "value_mean_std": value_output.value.std(dim=0).mean(),
+            "value_mean_std": value_output.value.std(dim=0).mean()
+            if value_output.value is not None
+            else 0.0,
             **self.cfr_evaluator.stats,
         }
+
+        if value_batch.value_targets is not None:
+            metrics["batch_value_target_mean_abs"] = (
+                value_batch.value_targets.abs().mean().item()
+            )
+            metrics["batch_value_target_std"] = value_batch.value_targets.std().item()
 
         # Calculate loss on fresh data
         if fresh_value_batch:
@@ -415,9 +434,9 @@ class RebelCFRTrainer:
                 fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)
                 metrics["fresh_value_loss"] = fresh_loss_dict["value_loss"]
 
-                if self.model_avg is not None:
-                    self.model_avg.eval()
-                    fresh_model_avg_output = self.model_avg.repeat(
+                if self.ema_context is not None:
+                    self.ema_context.model.eval()
+                    fresh_model_avg_output = self.ema_context.model.repeat(
                         fresh_value_batch.features,
                         count=self.cfg.model.num_supervisions,
                         include_policy=False,
@@ -426,7 +445,7 @@ class RebelCFRTrainer:
                         fresh_model_avg_output, fresh_value_batch
                     )["value_loss"]
 
-                    model_avg_output = self.model_avg.repeat(
+                    model_avg_output = self.ema_context.model.repeat(
                         value_batch.features,
                         count=self.cfg.model.num_supervisions,
                         include_policy=False,
@@ -435,7 +454,10 @@ class RebelCFRTrainer:
                         model_avg_output, value_batch
                     )["value_loss"]
 
-        if fresh_value_batch is not None:
+        if (
+            fresh_value_batch is not None
+            and fresh_value_batch.value_targets is not None
+        ):
             metrics["fresh_value_batch_street"] = street_count(
                 fresh_value_batch.features.street
             )
@@ -502,7 +524,12 @@ class RebelCFRTrainer:
         policy_latent: TRMLatent | None,
         permuted_latent: TRMLatent | None,
     ) -> tuple[
-        dict[str, float], TRMLatent, TRMLatent, TRMLatent, torch.Tensor, torch.Tensor
+        dict[str, float],
+        ModelOutput,
+        ModelOutput,
+        ModelOutput,
+        torch.Tensor,
+        torch.Tensor,
     ]:
         self.optimizer.zero_grad()
 
@@ -569,9 +596,9 @@ class RebelCFRTrainer:
         self.optimizer.step()
 
         # Update EMA if enabled
-        if self.ema_helper is not None:
-            self.ema_helper.update(self.model)
-            self.ema_helper.apply_to_module(self.model_avg)
+        if self.ema_context is not None:
+            self.ema_context.helper.update(self.model)
+            self.ema_context.helper.apply_to_module(self.ema_context.model)
 
         # Compute parameter update norm using torch utility
         updates = (
@@ -597,7 +624,9 @@ class RebelCFRTrainer:
         )
 
     @profile
-    def _update_model(self, step: int) -> dict[str, float]:
+    def _update_model(
+        self, step: int
+    ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
         fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
             self.K_value
         )
@@ -705,7 +734,7 @@ class RebelCFRTrainer:
 
         return metrics
 
-    def train_step(self, step: int) -> dict[str, any]:
+    def train_step(self, step: int) -> dict[str, Any]:
         step_public = step + 1
 
         # Apply schedules before training step
@@ -718,9 +747,9 @@ class RebelCFRTrainer:
 
         return update_info
 
-    def train(self, num_steps: int | None = None) -> list[dict[str, any]]:
+    def train(self, num_steps: int | None = None) -> list[dict[str, Any]]:
         total_steps = num_steps or self.cfg.num_steps
-        history: list[dict[str, any]] = []
+        history: list[dict[str, Any]] = []
 
         for step in range(total_steps):
             update_info = self.train_step(step)
@@ -728,7 +757,7 @@ class RebelCFRTrainer:
 
         return history
 
-    def evaluate_against_pool(self, min_games: int) -> dict[str, float]:
+    def evaluate_against_pool(self, min_games: int) -> float:
         return self.pbs_pool.evaluate_model_against_pool(self.model, min_games)
 
     def save_checkpoint(
@@ -767,8 +796,8 @@ class RebelCFRTrainer:
             state["rng"] = self.rng.get_state()
 
         # Save EMA state if enabled (only save model_avg, shadow weights can be reconstructed)
-        if self.model_avg is not None:
-            model_avg_state = self.model_avg.state_dict()
+        if self.ema_context is not None:
+            model_avg_state = self.ema_context.model.state_dict()
             if save_dtype is not None:
                 model_avg_state = {
                     k: v.to(save_dtype) if v.dtype.is_floating_point else v
@@ -799,7 +828,7 @@ class RebelCFRTrainer:
         self.model.load_state_dict(model_state)
 
         # Load EMA state if it exists in checkpoint and EMA is enabled
-        if "model_avg" in ckpt and self.model_avg is not None:
+        if "model_avg" in ckpt and self.ema_context is not None:
             # Convert model_avg state back to host dtype if needed
             model_avg_state = ckpt["model_avg"]
             if save_dtype_str is not None and save_dtype_str != str(self.float_dtype):
@@ -807,12 +836,12 @@ class RebelCFRTrainer:
                     k: v.to(self.float_dtype) if v.dtype.is_floating_point else v
                     for k, v in model_avg_state.items()
                 }
-            self.model_avg.load_state_dict(model_avg_state)
+            self.ema_context.model.load_state_dict(model_avg_state)
             # Reconstruct ema_helper shadow weights from model_avg
-            self.ema_helper.register(self.model_avg)
+            self.ema_context.helper.register(self.ema_context.model)
             # Update evaluator to use model_avg
-            self.cfr_evaluator.model = self.model_avg
-            self.cfr_evaluator.chance_helper.model = self.model_avg
+            self.cfr_evaluator.model = self.ema_context.model
+            self.cfr_evaluator.chance_helper.model = self.ema_context.model
 
         # Only load optimizer if it exists in checkpoint
         if "optimizer" in ckpt:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch.nn as nn
 
 from alphaholdem.core.structured_config import NonlinearityType
@@ -24,21 +26,25 @@ class SwiGLU(nn.Module):
         return self.silu(self.W(x)) * self.V(x)
 
 
-def get_activation(nonlinearity: NonlinearityType) -> nn.Module:
+def get_activation(
+    nonlinearity: NonlinearityType, **activation_kwargs: Any
+) -> nn.Module:
     """Get activation module from NonlinearityType.
 
     Args:
         nonlinearity: The type of nonlinearity to use
-        inplace: Whether to use inplace operations (for ReLU/SiLU)
+        activation_kwargs: Extra kwargs forwarded to the activation (e.g. ``inplace``)
 
     Returns:
         Activation module
     """
     if nonlinearity == NonlinearityType.relu:
-        return nn.ReLU()
-    elif nonlinearity == NonlinearityType.gelu:
-        return nn.GELU()
-    elif nonlinearity == NonlinearityType.silu:
-        return nn.SiLU()
-    else:
-        raise ValueError(f"Unknown nonlinearity: {nonlinearity}")
+        return nn.ReLU(**activation_kwargs)
+    if nonlinearity == NonlinearityType.gelu:
+        activation_kwargs.pop("inplace", None)
+        return nn.GELU(**activation_kwargs)
+    if nonlinearity == NonlinearityType.silu:
+        return nn.SiLU(**activation_kwargs)
+    if nonlinearity == NonlinearityType.swiglu:
+        raise ValueError("SwiGLU requires in/out dimensions; construct explicitly.")
+    raise ValueError(f"Unknown nonlinearity: {nonlinearity}")

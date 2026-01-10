@@ -115,7 +115,7 @@ def mask_conflicting_combos(
 def combo_to_onehot_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 52] bool tensor of one-hot encoded combos."""
     combos = hand_combos_tensor(device=device)  # [1326, 2]
-    combo_onehot = torch.zeros(1326, 52, dtype=bool, device=device)
+    combo_onehot = torch.zeros(1326, 52, dtype=torch.bool, device=device)
     idx = torch.arange(1326, device=device)
     combo_onehot[idx, combos[:, 0]] = True
     combo_onehot[idx, combos[:, 1]] = True
@@ -215,7 +215,8 @@ def calculate_unblocked_mass(
         [..., 1326] tensor of unblocked mass for each hand.
     """
     target_batched = target.view(-1, NUM_HANDS)
-    compatible = combo_compatible_tensor(device=target.device).float()
-    multiply = target_batched @ compatible
+    # Use higher precision to avoid accumulation error when summing over 1326 combos
+    compatible = combo_compatible_tensor(device=target.device).double()
+    multiply = (target_batched.double() @ compatible).float()
     # Make sure it's min-0 (sometimes get numerical precision issues)
     return multiply.view_as(target).clamp(min=0.0)

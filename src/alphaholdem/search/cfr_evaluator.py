@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-import wandb
 
 from alphaholdem.core.structured_config import CFRType, WarmStartType
 from alphaholdem.env.card_utils import (
@@ -19,14 +18,14 @@ from alphaholdem.env.card_utils import (
 )
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.env.rules import rank_hands
+from alphaholdem.models.base_mlp_model import BaseMLPModel
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
-from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.better_trm import BetterTRM
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.models.model_output import TRMLatent
 from alphaholdem.rl.rebel_batch import RebelBatch
+from alphaholdem.search.chance_node_helper import ChanceNodeHelper
 from alphaholdem.utils.model_utils import compute_masked_logits
 from alphaholdem.utils.profiling import profile
 
@@ -105,7 +104,7 @@ def padded_indices(mask: torch.Tensor, alignment: int) -> torch.Tensor:
 class CFREvaluator(ABC):
     """Base class for CFR evaluators with shared methods."""
 
-    model: RebelFFN | BetterFFN | BetterTRM
+    model: BaseMLPModel
     device: torch.device
     env: HUNLTensorEnv
     feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder
@@ -167,7 +166,7 @@ class CFREvaluator(ABC):
     showdown_potential: torch.Tensor
     prev_actor: torch.Tensor
     combo_onehot_float: torch.Tensor
-    chance_helper: object  # ChanceNodeHelper - avoiding circular import
+    chance_helper: ChanceNodeHelper
     stats: dict[str, float]
     depth_offsets: list[int]
     # Profiler fields (optional, initialized by subclasses if needed)
@@ -383,11 +382,11 @@ class CFREvaluator(ABC):
     def _get_sampling_schedule(self) -> torch.Tensor:
         N = self.root_nodes
         if self.cfr_type == CFRType.discounted_plus:
-            sample_low = max(self.warm_start_iterations, self.dcfr_delay)
+            sample_low = max(self.warm_start_iterations, self.dcfr_delay) + 1
         else:
-            sample_low = self.warm_start_iterations
+            sample_low = self.warm_start_iterations + 1
         sample_low = min(sample_low, self.cfr_iterations)
-        sample_high = max(self.cfr_iterations, sample_low)
+        sample_high = max(self.cfr_iterations, sample_low + 1)
         distribution = (
             torch.arange(
                 sample_low, sample_high, dtype=torch.float32, device=self.device
@@ -756,7 +755,7 @@ class CFREvaluator(ABC):
             )
             br_values_by_player.append((br_root * root_beliefs).sum(dim=-1))
 
-        improvements = (improvements_by_player[0] + improvements_by_player[1]) / 2
+        improvements = improvements_by_player[0] + improvements_by_player[1]
         br_values_agg = torch.stack(br_values_by_player, dim=-1)  # (N, 2)
 
         return ExploitabilityStats(
@@ -896,7 +895,12 @@ class CFREvaluator(ABC):
                 f"{num_nonfinite} non-finite elements out of {self.latest_values.numel()}"
             )
 
-        self.compute_expected_values()
+        self.compute_expected_values(
+            policy=self.policy_probs,
+            beliefs=self.beliefs,
+            leaf_values=self.latest_values,
+            values=self.latest_values,
+        )
         if not self.latest_values.isfinite().all():
             num_nonfinite = (~self.latest_values.isfinite()).sum().item()
             raise ValueError(
@@ -975,10 +979,9 @@ class CFREvaluator(ABC):
         else:
             return hand_values
 
-    @torch.compile(dynamic=True)
-    def _set_model_values(
+    def _set_model_values_impl(
         self, t: int, beliefs: torch.Tensor, features: MLPFeatures
-    ) -> None:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Set model values for non-terminal leaves
         if isinstance(self.model, BetterTRM):
             # Note self.latent gets reinitialized for each subgame.
@@ -1100,9 +1103,9 @@ class CFREvaluator(ABC):
             weighted_child_values[indices, prev_actor_indices, :] *= policy[
                 offset_next:offset_next_next
             ]
-            weighted_child_values[
-                indices, 1 - prev_actor_indices, :
-            ] *= opponent_conditioned_policy[offset_next:offset_next_next]
+            weighted_child_values[indices, 1 - prev_actor_indices, :] *= (
+                opponent_conditioned_policy[offset_next:offset_next_next]
+            )
 
             self._pull_back_sum(weighted_child_values, values, level=depth)
 
@@ -1385,8 +1388,6 @@ class CFREvaluator(ABC):
 
         value_targets = self.values_avg[:N].clamp(-1.0, 1.0)
 
-        value_targets = self.values_avg[:N].clamp(-1.0, 1.0)
-
         features = self.feature_encoder.encode(self.beliefs_avg, pre_chance_node=False)[
             :top
         ]
@@ -1664,83 +1665,6 @@ class CFREvaluator(ABC):
         self.stats["local_exploitability_min"] = (
             exploit_stats.local_exploitability.min().item()
         )
-
-        # Check for high exploitability and save game tree if needed
-        max_exploitability = exploit_stats.local_exploitability.max()
-        if max_exploitability > 10.0:
-            import time
-
-            timestamp = int(time.time())
-            high_exploit_roots = torch.where(exploit_stats.local_exploitability > 10.0)[
-                0
-            ]
-
-            for root_idx in high_exploit_roots.tolist():
-                # 1. Identify all nodes belonging to this root's tree
-                # Create a mask for just this root
-                root_mask = torch.zeros(N, dtype=torch.bool, device=self.device)
-                root_mask[root_idx] = True
-
-                # Fan out to find all children
-                tree_mask = self._fan_out_deep(root_mask)
-                # Include the root itself
-                tree_mask[:N] = root_mask
-
-                # Get indices of all nodes in this tree
-                tree_indices = torch.where(tree_mask)[0]
-
-                # 2. Create a sub-environment for this tree
-                # We need to map the global indices to local indices (0 to len(tree_indices)-1)
-                # However, HUNLTensorEnv expects a contiguous range or specific indices.
-                # Since we want to save the *state*, we can create a new env of the right size
-                # and copy the states.
-                sub_env = HUNLTensorEnv.from_proto(self.env, num_envs=len(tree_indices))
-                # We can use copy_state_from to copy from self.env[tree_indices] to sub_env[0..M]
-                sub_env.copy_state_from(
-                    self.env,
-                    tree_indices,
-                    torch.arange(len(tree_indices), device=self.device),
-                )
-                sub_env.generator = None
-
-                # 3. Collect relevant tensors sliced by tree_indices
-                parent_index = getattr(self, "parent_index", None)
-                action_from_parent = getattr(self, "action_from_parent", None)
-                saved_data = {
-                    "env_state": sub_env,  # This might be heavy, but it's the most robust way
-                    "tree_indices": tree_indices,
-                    "root_idx": root_idx,
-                    "exploitability": exploit_stats.local_exploitability[
-                        root_idx
-                    ].item(),
-                    "policy_probs": self.policy_probs.cpu(),
-                    "policy_probs_avg": self.policy_probs_avg.cpu(),
-                    "beliefs": self.beliefs.cpu(),
-                    "beliefs_avg": self.beliefs_avg.cpu(),
-                    "latest_values": self.latest_values.cpu(),
-                    "values_avg": self.values_avg.cpu(),
-                    "cumulative_regrets": self.cumulative_regrets.cpu(),
-                    "regret_weight_sums": self.regret_weight_sums.cpu(),
-                    "model_state_dict": self.model.state_dict(),  # No optimizer state as requested
-                    "leaf_mask": self.leaf_mask.cpu(),
-                    "parent_index": (
-                        parent_index.cpu() if parent_index is not None else None
-                    ),
-                    "action_from_parent": (
-                        action_from_parent.cpu()
-                        if action_from_parent is not None
-                        else None
-                    ),
-                    "new_street_mask": self.new_street_mask.cpu(),
-                    "depth_offsets": self.depth_offsets,
-                    "self_reach": self.self_reach.cpu(),
-                    "self_reach_avg": self.self_reach_avg.cpu(),
-                    "allowed_hands": self.allowed_hands.cpu(),
-                }
-
-                filename = f"high_exploitability_{wandb.run.id}_{timestamp}.pt"
-                print(f"Saving high exploitability game tree to {filename}")
-                torch.save(saved_data, filename)
 
     def _record_action_mix(self) -> None:
         """Record the action mix of the policy."""

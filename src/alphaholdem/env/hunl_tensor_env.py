@@ -442,14 +442,16 @@ class HUNLTensorEnv:
         copy_deck: bool = True,
     ) -> None:
         """Vectorized copy of state rows from src_env[src_indices] to self[dst_indices]."""
-        if isinstance(src_select, slice):
+        if isinstance(src_select, slice) and isinstance(dest_select, slice):
             src_step = src_select.step if src_select.step is not None else 1
             dest_step = dest_select.step if dest_select.step is not None else 1
             src_size = (src_select.stop - src_select.start) // src_step
             dest_size = (dest_select.stop - dest_select.start) // dest_step
             src_min, src_max = src_select.start, src_select.start + src_size
             dest_min, dest_max = dest_select.start, dest_select.start + dest_size
-        else:
+        elif isinstance(src_select, torch.Tensor) and isinstance(
+            dest_select, torch.Tensor
+        ):
             if src_select.numel() == 0:
                 return
 
@@ -458,6 +460,8 @@ class HUNLTensorEnv:
             src_max = int(src_select.max().item())
             dest_min = int(dest_select.min().item())
             dest_max = int(dest_select.max().item())
+        else:
+            raise ValueError("Index types must match")
 
         assert src_size == dest_size
         # Disallow overlap when copying within the same env to avoid aliasing
@@ -642,7 +646,7 @@ class HUNLTensorEnv:
 
     def finish_and_assign_rewards(
         self, env_indices: torch.Tensor, winners: torch.Tensor
-    ) -> None:
+    ) -> torch.Tensor:
         """Assign winners to specified environments. Rewards are from p0's perspective."""
         self.winner[env_indices] = winners
         self.done[env_indices] = True
@@ -666,7 +670,7 @@ class HUNLTensorEnv:
         bin_amounts: Optional[torch.Tensor] = None,
         legal_masks: Optional[torch.Tensor] = None,
         bet_bins: Optional[list[float]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if bet_bins is None:
             bet_bins = self.default_bet_bins
         if bin_amounts is None or legal_masks is None:
@@ -700,7 +704,7 @@ class HUNLTensorEnv:
 
     def step(
         self, action_indices: torch.Tensor, bet_amounts: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Step all envs using discrete bet bin indices tensor [N]. -1 means no action.
         bin_indices: [N] bet bin indices
         bin_amounts: [N, B] concrete amounts for bins; -1 where not applicable

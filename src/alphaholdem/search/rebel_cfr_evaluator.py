@@ -5,16 +5,11 @@ from typing import Generator
 import torch
 
 from alphaholdem.core.structured_config import CFRType, WarmStartType
-from alphaholdem.env.card_utils import (
-    NUM_HANDS,
-    combo_to_onehot_tensor,
-)
+from alphaholdem.env.card_utils import NUM_HANDS, combo_to_onehot_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.base_mlp_model import BaseMLPModel
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
-from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.models.mlp.better_trm import BetterTRM
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.search.cfr_evaluator import (
     CFREvaluator,
     HandRankData,
@@ -31,7 +26,7 @@ class RebelCFREvaluator(CFREvaluator):
     """ReBeL CFR Evaluator implementing the precise SELFPLAY algorithm."""
 
     root_nodes: int
-    model: RebelFFN | BetterFFN | BetterTRM
+    model: BaseMLPModel
     max_depth: int
     bet_bins: list[float]
     cfr_iterations: int
@@ -79,7 +74,7 @@ class RebelCFREvaluator(CFREvaluator):
         self,
         search_batch_size: int,
         env_proto: HUNLTensorEnv,
-        model: RebelFFN | BetterFFN | BetterTRM,
+        model: BaseMLPModel,
         bet_bins: list[float],
         max_depth: int,
         cfr_iterations: int,
@@ -146,7 +141,7 @@ class RebelCFREvaluator(CFREvaluator):
             nodes_at_depth *= self.num_actions
         self.total_nodes = self.depth_offsets[-1]
 
-        N, M = self.root_nodes, self.total_nodes
+        M = self.total_nodes
 
         # Subgame environment
         self.env = HUNLTensorEnv.from_proto(
@@ -685,7 +680,6 @@ class RebelCFREvaluator(CFREvaluator):
         )
         output[: self.root_nodes] = data
         for depth in range(self.max_depth):
-            offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
             output[offset_next:offset_next_next] = self._fan_out(output, level=depth)

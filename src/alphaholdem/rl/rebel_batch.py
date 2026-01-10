@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 
@@ -69,8 +69,7 @@ class RebelBatch:
 
     def with_permuted_targets(
         self,
-        suit_permutations: torch.Tensor | None = None,
-        generator: torch.Generator | None = None,
+        suit_permutations: torch.Tensor,
         num_players: int = 2,
     ) -> tuple[RebelBatch, torch.Tensor]:
         """
@@ -82,9 +81,7 @@ class RebelBatch:
             num_players: Number of players used to reshape value targets.
         """
         permuted_features = self.features.clone()
-        suit_permutations = permuted_features.permute_suits(
-            suit_permutations, generator
-        )
+        permuted_features.permute_suits(suit_permutations)
 
         # Map permutations back to their enumeration index.
         all_perms = suit_permutations_tensor(device=suit_permutations.device)
@@ -128,30 +125,32 @@ class RebelBatch:
         )
 
     @classmethod
-    def cat(cls, batches: list[RebelBatch]) -> RebelBatch | None:
+    def cat(cls, batches: list[RebelBatch]) -> RebelBatch:
         """Concatenate a list of RebelBatch objects."""
         if not batches:
-            return None
+            raise ValueError("Cannot concatenate an empty list of batches.")
 
-        # Filter out None batches if any
-        batches = [b for b in batches if b is not None and len(b) > 0]
-        if not batches:
-            return None
+        if any(b is None for b in batches):
+            raise ValueError("Cannot concatenate a list of batches with None values.")
 
         features = MLPFeatures.cat([b.features for b in batches])
         legal_masks = torch.cat([b.legal_masks for b in batches], dim=0)
 
         policy_targets = None
         if batches[0].policy_targets is not None:
+            if any(b.policy_targets is None for b in batches):
+                raise ValueError("Policy targets must be all present or all absent.")
             policy_targets = torch.cat(
-                [b.policy_targets for b in batches if b.policy_targets is not None],
+                [cast(torch.Tensor, b.policy_targets) for b in batches],
                 dim=0,
             )
 
         value_targets = None
         if batches[0].value_targets is not None:
+            if any(b.value_targets is None for b in batches):
+                raise ValueError("Value targets must be all present or all absent.")
             value_targets = torch.cat(
-                [b.value_targets for b in batches if b.value_targets is not None],
+                [cast(torch.Tensor, b.value_targets) for b in batches],
                 dim=0,
             )
 

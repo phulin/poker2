@@ -45,8 +45,8 @@ class MLPFeatures:
     ) -> None:
         """Set features at index."""
         self.context[index] = value.context
-        self.street[index] = value.street
-        self.to_act[index] = value.to_act
+        self.street[index] = value.street.to(self.street.dtype)
+        self.to_act[index] = value.to_act.to(self.to_act.dtype)
         self.board[index] = value.board
         self.beliefs[index] = value.beliefs
 
@@ -86,14 +86,14 @@ class MLPFeatures:
         self,
         suit_permutations: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
-    ) -> "MLPFeatures":
+    ) -> torch.Tensor:
         """Permute the suits of board cards and beliefs.
 
         Args:
             generator: Random generator for reproducibility.
 
         Returns:
-            Self with permuted suits.
+            Suit permutation indices.
         """
         batch_size = self.__len__()
         device = self.context.device

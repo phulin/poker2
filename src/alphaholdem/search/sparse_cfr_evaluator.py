@@ -1,13 +1,11 @@
 import torch
 
-from alphaholdem.core.structured_config import Config, WarmStartType
+from alphaholdem.core.structured_config import Config
 from alphaholdem.env.card_utils import NUM_HANDS, combo_to_onehot_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.base_mlp_model import BaseMLPModel
 from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
-from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.models.mlp.better_trm import BetterTRM
 from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
 from alphaholdem.search.cfr_evaluator import (
     CFREvaluator,
     HandRankData,
@@ -21,7 +19,7 @@ from alphaholdem.utils.profiling import profile
 class SparseCFREvaluator(CFREvaluator):
     def __init__(
         self,
-        model: RebelFFN | BetterFFN | BetterTRM,
+        model: BaseMLPModel,
         device: torch.device,
         cfg: Config,
         generator: torch.Generator | None = None,
@@ -36,8 +34,6 @@ class SparseCFREvaluator(CFREvaluator):
         self.num_actions = len(self.bet_bins) + 3
 
         self.num_supervisions = cfg.model.num_supervisions
-
-        train_cfg = cfg.train
 
         self.max_depth = cfg.search.depth
         self.cfr_iterations = cfg.search.iterations
@@ -328,7 +324,7 @@ class SparseCFREvaluator(CFREvaluator):
     def sample_leaves(self, training_mode: bool) -> PublicBeliefState:
         """Sample leaves from `self.policy_probs_sample`."""
 
-        N, B = self.root_nodes, self.num_actions
+        N = self.root_nodes
         top = self.depth_offsets[-2]
 
         players = torch.randint(

@@ -82,6 +82,7 @@ class DummyEvaluator:
     ):
         self.device = torch.device("cpu")
         self.search_batch_size = search_batch_size
+        self.root_nodes = search_batch_size
         self.total_nodes = total_nodes
         self.num_players = num_players
         self.num_actions = num_actions
@@ -131,6 +132,11 @@ class DummyEvaluator:
         self.initialize_args.append(indices.clone())
         self.last_beliefs = initial_beliefs.clone()
 
+    def initialize_subgame(
+        self, env: DummyEnv, indices: torch.Tensor, initial_beliefs: torch.Tensor
+    ) -> None:
+        self.initialize_search(env, indices, initial_beliefs)
+
     def self_play_iteration(self) -> PublicBeliefState | None:
         self.self_play_calls += 1
         if self.self_play_return_none:
@@ -145,6 +151,9 @@ class DummyEvaluator:
             env=env,
             beliefs=beliefs,
         )
+
+    def evaluate_cfr(self):
+        return self.self_play_iteration()
 
     def training_data(self):
         """Return training data as tuple (value_batch, policy_batch)."""

@@ -50,7 +50,9 @@ class RebelDataGenerator:
         return new_pbs
 
     @profile
-    def generate_data(self, value_sample_count: int) -> tuple[RebelBatch, RebelBatch]:
+    def generate_data(
+        self, value_sample_count: int
+    ) -> tuple[RebelBatch | None, RebelBatch | None]:
         N = self.evaluator.root_nodes
         root_indices = torch.arange(N, device=self.device)
         collected = self.last_extra

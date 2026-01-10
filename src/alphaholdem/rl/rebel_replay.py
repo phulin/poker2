@@ -111,9 +111,9 @@ class RebelReplayBuffer:
         ) % self.capacity
 
         self.features[dest_indices] = batch.features
-        if self.policy_targets is not None:
+        if self.policy_targets is not None and batch.policy_targets is not None:
             self.policy_targets[dest_indices] = batch.policy_targets
-        if self.value_targets is not None:
+        if self.value_targets is not None and batch.value_targets is not None:
             self.value_targets[dest_indices] = batch.value_targets
         self.legal_masks[dest_indices] = batch.legal_masks
         # Reset sample count when overwriting entries
@@ -180,3 +180,61 @@ class RebelReplayBuffer:
     def clear(self) -> None:
         self.position = 0
         self.size = 0
+
+
+class RebelPolicyBuffer(RebelReplayBuffer):
+    value_targets: None
+    policy_targets: torch.Tensor
+
+    def __init__(
+        self,
+        capacity: int,
+        num_actions: int,
+        num_players: int,
+        num_context_features: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+        decimate: float | None = None,
+        generator: Optional[torch.Generator] = None,
+    ) -> None:
+        super().__init__(
+            capacity=capacity,
+            num_actions=num_actions,
+            num_players=num_players,
+            num_context_features=num_context_features,
+            device=device,
+            policy_targets=True,
+            value_targets=False,
+            dtype=dtype,
+            decimate=decimate,
+            generator=generator,
+        )
+
+
+class RebelValueBuffer(RebelReplayBuffer):
+    value_targets: torch.Tensor
+    policy_targets: None
+
+    def __init__(
+        self,
+        capacity: int,
+        num_actions: int,
+        num_players: int,
+        num_context_features: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+        decimate: float | None = None,
+        generator: Optional[torch.Generator] = None,
+    ) -> None:
+        super().__init__(
+            capacity=capacity,
+            num_actions=num_actions,
+            num_players=num_players,
+            num_context_features=num_context_features,
+            device=device,
+            policy_targets=False,
+            value_targets=True,
+            dtype=dtype,
+            decimate=decimate,
+            generator=generator,
+        )

@@ -1,4 +1,5 @@
 import copy
+
 import torch.nn as nn
 
 
@@ -21,7 +22,7 @@ class EMAHelper:
             module: PyTorch module whose parameters should be tracked.
         """
         if isinstance(module, nn.DataParallel):
-            module = module.module
+            module = module.module  # ty:ignore[invalid-assignment]
         for name, param in module.named_parameters():
             if param.requires_grad:
                 self.shadow[name] = param.data.clone()
@@ -33,7 +34,7 @@ class EMAHelper:
             module: PyTorch module to update EMA from.
         """
         if isinstance(module, nn.DataParallel):
-            module = module.module
+            module = module.module  # ty:ignore[invalid-assignment]
         for name, param in module.named_parameters():
             if param.requires_grad:
                 self.shadow[name].data = (
@@ -47,7 +48,7 @@ class EMAHelper:
             module: PyTorch module to apply EMA weights to.
         """
         if isinstance(module, nn.DataParallel):
-            module = module.module
+            module = module.module  # ty:ignore[invalid-assignment]
         for name, param in module.named_parameters():
             if param.requires_grad:
                 param.data.copy_(self.shadow[name].data)

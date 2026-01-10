@@ -61,6 +61,7 @@ class RebelFFN(BaseMLPModel):
         detach_value_head: bool = False,
         num_players: int = 2,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
+        enforce_zero_sum: bool = True,
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
@@ -69,6 +70,7 @@ class RebelFFN(BaseMLPModel):
         self.num_hidden_layers = num_hidden_layers
         self.detach_value_head = detach_value_head
         self.num_players = num_players
+        self.enforce_zero_sum = enforce_zero_sum
 
         # Build trunk
         layers: list[nn.Module] = []

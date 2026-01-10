@@ -60,7 +60,7 @@ def test_print_preflop_grid_uses_model_without_ema(monkeypatch, capsys):
     cfg = Config()
     trainer = type("TrainerStub", (), {})()
     trainer.model = object()
-    trainer.model_avg = None
+    trainer.ema_context = None
     trainer.cfg = cfg
     trainer.device = None
     trainer.rng = None

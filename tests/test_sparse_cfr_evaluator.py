@@ -54,8 +54,16 @@ class MockModel:
         self.device = device
         self.dtype = dtype
         self.enforce_zero_sum = True
+        self.hidden_dim = 1
 
-    def __call__(self, features: MLPFeatures) -> ModelOutput:
+    def create_feature_encoder(self, env, device=None, dtype=None):
+        from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+
+        return RebelFeatureEncoder(env=env, device=device, dtype=dtype)
+
+    def __call__(
+        self, features: MLPFeatures, include_policy: bool = True
+    ) -> ModelOutput:
         batch = len(features)
         device = features.context.device
         dtype = features.context.dtype
@@ -97,6 +105,7 @@ class DeterministicModel:
             -0.4, 0.4, steps=NUM_HANDS, device=device, dtype=dtype
         )
         self.base_values = torch.stack([hand_values, -hand_values], dim=0)
+        self.hidden_dim = 1
 
     def eval(self) -> None:
         pass
@@ -104,7 +113,14 @@ class DeterministicModel:
     def train(self) -> None:
         pass
 
-    def __call__(self, features: MLPFeatures) -> ModelOutput:
+    def create_feature_encoder(self, env, device=None, dtype=None):
+        from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+
+        return RebelFeatureEncoder(env=env, device=device, dtype=dtype)
+
+    def __call__(
+        self, features: MLPFeatures, include_policy: bool = True
+    ) -> ModelOutput:
         batch = len(features)
         logits = self.base_logits.expand(batch, NUM_HANDS, self.num_actions).clone()
         values = self.base_values.expand(batch, 2, NUM_HANDS).clone()
