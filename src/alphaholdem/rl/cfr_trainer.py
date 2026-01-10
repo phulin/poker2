@@ -7,16 +7,16 @@ from dataclasses import asdict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from alphaholdem.core.structured_config import Config, LrSchedule, ModelType
 from alphaholdem.env.aggression_analyzer import AggressionAnalyzer
-from alphaholdem.env.card_utils import NUM_HANDS, suit_permutations_tensor
+from alphaholdem.env.card_utils import NUM_HANDS, combo_suit_permutation_tensor
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 from alphaholdem.models.mlp import RebelFFN
 from alphaholdem.models.mlp.better_features import context_length
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.better_trm import BetterTRM
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
 from alphaholdem.models.model_output import ModelOutput, TRMLatent
 from alphaholdem.rl.losses import RebelSupervisedLoss
 from alphaholdem.rl.pbs_pool import PBSPool
@@ -265,6 +265,23 @@ class RebelCFRTrainer:
             )
             self.cfr_evaluator.cfr_iterations = iterations_now
 
+    def _compute_permutation_loss(
+        self,
+        value_output: ModelOutput,
+        value_output_permuted: ModelOutput,
+        suit_permutation_idxs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute suit permutation consistency loss."""
+        combo_permutations = combo_suit_permutation_tensor(device=self.device)[
+            suit_permutation_idxs
+        ]
+        hand_values_permuted_reversed = torch.gather(
+            value_output_permuted.hand_values,
+            2,
+            combo_permutations[:, None, :].expand(-1, self.num_players, -1),
+        )
+        return F.mse_loss(value_output.hand_values, hand_values_permuted_reversed)
+
     def _compute_entropy(self, probs: torch.Tensor) -> float:
         eps = 1e-8
         norm = probs.clamp_min(eps)
@@ -336,11 +353,9 @@ class RebelCFRTrainer:
                 else 0.0
             ),
             "value_buffer_target_mean_abs": (
-                (
-                    self.value_buffer.value_targets[: len(self.value_buffer)]
-                    * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
-                        -1, 2, NUM_HANDS
-                    )
+                self.value_buffer.value_targets[: len(self.value_buffer)]
+                * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
+                    -1, 2, NUM_HANDS
                 )
             )
             .abs()
@@ -481,7 +496,7 @@ class RebelCFRTrainer:
         self,
         value_batch: RebelBatch,
         policy_batch: RebelBatch,
-        permuted_features: MLPFeatures,
+        permuted_batch: RebelBatch,
         suit_permutations_idxs: torch.Tensor,
         value_latent: TRMLatent | None,
         policy_latent: TRMLatent | None,
@@ -496,31 +511,35 @@ class RebelCFRTrainer:
         permutation_loss = 0.0
 
         if isinstance(self.model, BetterTRM):
-            value_output = self.model(
+            value_output_orig = self.model(
                 value_batch.features,
                 include_policy=False,
                 latent=value_latent,
             )
             # Run model on permuted inputs [model(permute(features))]
             value_output_permuted = self.model(
-                permuted_features,
+                permuted_batch.features,
                 include_policy=False,
                 latent=permuted_latent,
             )
         else:
-            value_output = self.model(value_batch.features, include_policy=False)
-            value_output_permuted = self.model(permuted_features, include_policy=False)
+            value_output_orig = self.model(value_batch.features, include_policy=False)
+            value_output_permuted = self.model(
+                permuted_batch.features, include_policy=False
+            )
 
-        loss_dict = self.loss_fn(
-            value_output,
-            value_batch,
-            output_permuted=value_output_permuted,
-            suit_permutation_idxs=suit_permutations_idxs,
-        )
+        loss_dict = self.loss_fn(value_output_permuted, permuted_batch)
         value_loss = loss_dict["value_loss"]
         value_loss_update = loss_dict["value_loss_all"]
-        permutation_loss = loss_dict["permutation_loss"]
         total_loss = loss_dict["total_loss"]
+
+        permutation_loss_tensor = self._compute_permutation_loss(
+            value_output_orig, value_output_permuted, suit_permutations_idxs
+        )
+        permutation_loss = permutation_loss_tensor.item()
+        total_loss = (
+            total_loss + self.loss_fn.permutation_weight * permutation_loss_tensor
+        )
 
         if isinstance(self.model, BetterTRM):
             policy_output = self.model(
@@ -570,8 +589,8 @@ class RebelCFRTrainer:
                 "total_loss": total_loss.item(),
                 "update_norm": update_norm,
             },
-            value_output,
             value_output_permuted,
+            value_output_orig,
             policy_output,
             value_loss_update,
             policy_loss_update,
@@ -621,36 +640,31 @@ class RebelCFRTrainer:
                 self.batch_size, stratify_streets=stratify
             ).to(self.device)
 
-            # Sample B suit permutations.
-            suit_permutations_idxs = torch.randint(
-                0, 24, (len(value_batch),), generator=self.rng, device=self.device
+            # Sample suit permutations and apply to features/targets together.
+            permuted_batch, suit_permutations_idxs = value_batch.with_permuted_targets(
+                generator=self.rng, num_players=self.num_players
             )
-            suit_permutations = suit_permutations_tensor(device=self.device)[
-                suit_permutations_idxs
-            ]
-            permuted_features = value_batch.features.clone()
-            permuted_features.permute_suits(suit_permutations, self.rng)
 
             for _ in range(supervisions):
                 (
                     episode_stats,
-                    value_output,
-                    value_output_permuted,
+                    permuted_value_output,
+                    value_output_orig,
                     policy_output,
                     value_loss_update,
                     policy_loss_update,
                 ) = self._supervise(
                     value_batch,
                     policy_batch,
-                    permuted_features,
+                    permuted_batch,
                     suit_permutations_idxs,
                     value_latent,
                     policy_latent,
                     permuted_latent,
                 )
                 value_latent = (
-                    value_output.latent.detach()
-                    if value_output.latent is not None
+                    value_output_orig.latent.detach()
+                    if value_output_orig.latent is not None
                     else None
                 )
                 policy_latent = (
@@ -659,8 +673,8 @@ class RebelCFRTrainer:
                     else None
                 )
                 permuted_latent = (
-                    value_output_permuted.latent.detach()
-                    if value_output_permuted.latent is not None
+                    permuted_value_output.latent.detach()
+                    if permuted_value_output.latent is not None
                     else None
                 )
 
@@ -669,9 +683,9 @@ class RebelCFRTrainer:
                 step_stats[k] += episode_stats[k]
 
             # Append last batch/output for metrics.
-            value_batch_all.append(value_batch)
+            value_batch_all.append(permuted_batch)
             policy_batch_all.append(policy_batch)
-            value_output_all.append(value_output)
+            value_output_all.append(permuted_value_output)
             policy_output_all.append(policy_output)
             value_loss_update_all.append(value_loss_update)
             policy_loss_update_all.append(policy_loss_update)

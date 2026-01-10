@@ -50,6 +50,7 @@ from alphaholdem.core.structured_config import Config, ModelType, NonlinearityTy
 from alphaholdem.env import card_utils
 from alphaholdem.env.card_utils import NUM_HANDS
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from alphaholdem.models.base_mlp_model import BaseMLPModel
 from alphaholdem.models.mlp.better_ffn import BetterFFN
 from alphaholdem.models.mlp.better_trm import BetterTRM
 from alphaholdem.models.mlp.rebel_ffn import RebelFFN
@@ -206,9 +207,6 @@ def _infer_better_dimensions(
 
     if any("swiglu" in k for k in model_state):
         cfg.model.nonlinearity = NonlinearityType.swiglu
-
-
-from alphaholdem.models.base_mlp_model import BaseMLPModel
 
 
 class UniformPolicyWrapper(BaseMLPModel):
@@ -473,9 +471,9 @@ def print_single_iteration_data(
     selected_hand_idx: Optional[int] = None,
 ) -> None:
     """Print data for a single CFR iteration."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"Iteration {iteration + 1}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Get depth 1 nodes
     root_idx = 0
@@ -483,7 +481,7 @@ def print_single_iteration_data(
     depth1_end = evaluator.depth_offsets[2]
     actor = evaluator.env.to_act[root_idx].item()
 
-    print(f"\nChild Nodes (depth 1):")
+    print("\nChild Nodes (depth 1):")
     print(
         f"{'Node':>6} | {'Action':>10} | {'Policy':>7} | {'PolicyAvg':>7} | {'Regret [min, max]':>24} | {'Value':>7} | {'ValLatest':>9} | {'ValAvgPol':>9}"
     )
@@ -734,7 +732,7 @@ def print_nodes_depth_first(
 
     print(
         f"{'Node':<{NODE_COL_WIDTH}} | {'Actor':>5} | {'Policy':>7} | {'PolAvg':>7} | {regret_str} | "
-        f"{belief_header:>7} | {f'P{root_actor} Value':>7} | {f'ValLatest':>9} | {f'ValAvgPol':>9}"
+        f"{belief_header:>7} | {f'P{root_actor} Value':>7} | {'ValLatest':>9} | {'ValAvgPol':>9}"
     )
     print("-" * 110)
 
@@ -861,7 +859,7 @@ def debug_cfr_iterations(
             board_str = " ".join(_card_index_to_str(i) for i in board_idxs)
             print(f"Board: {board_str}")
             if forced_board is not None:
-                print(f"(Forced board)")
+                print("(Forced board)")
         print(f"To act: {int(env.to_act[0].item())}")
     else:
         print("\nStarting Preflop CFR Tree Construction...")
@@ -931,6 +929,10 @@ def debug_cfr_iterations(
         evaluator.cfr_iteration(t)
 
         if (t + 1) % 10 == 0:
+            # Compute and display exploitability after updating averages
+            evaluator.update_average_values_final()
+            exploit_stats = evaluator._compute_exploitability()
+
             print_single_iteration_data(
                 evaluator=evaluator,
                 iteration=t,
@@ -938,18 +940,15 @@ def debug_cfr_iterations(
                 selected_hand_idx=selected_hand_idx,
             )
 
-            # Compute and display exploitability after updating averages
-            evaluator.update_average_values_final()
-            exploit_stats = evaluator._compute_exploitability()
             if exploit_stats.local_exploitability.numel() > 0:
                 total_expl = exploit_stats.local_exploitability.mean().item()
                 print(
                     f"Exploitability (avg best-response improv): total={total_expl:.6f}"
                 )
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Debug Complete!")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Depth-first listing with indentation (only if verbose)
     if verbose:
@@ -1016,7 +1015,9 @@ def main(dict_config: DictConfig) -> None:
         cfg.device = (
             "cuda"
             if torch.cuda.is_available()
-            else "mps" if torch.backends.mps.is_available() else "cpu"
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
         )
     cfg.num_envs = 1
 

@@ -39,7 +39,7 @@ train:
     #   probabilities: [0.15, 0.15, 0.30, 0.40]
     # - threshold: 3500
     #   probabilities: [0.25, 0.25, 0.25, 0.25]
-  
+
   model_ema: 0.999
 
 model:
@@ -53,7 +53,7 @@ model:
   num_hidden_layers: 2
   num_value_layers: 1
   num_policy_layers: 1
-  
+
   detach_value_head: false
   compile: true
   enforce_zero_sum: true
@@ -83,11 +83,11 @@ search:
   warm_start_iterations: 15
   warm_start_type: model
   warm_start_multiplier: 10
-  dcfr_plus_delay: 40
+  dcfr_plus_delay: 80
 
   dcfr_alpha: 2.0
   dcfr_alpha_final: 4.0
   dcfr_beta: -1.0
-  dcfr_beta_final: -1.5
+  dcfr_beta_final: -2.0
   dcfr_gamma: 5.0
   dcfr_gamma_final: 0.0

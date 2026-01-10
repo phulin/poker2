@@ -5,6 +5,10 @@ from typing import Optional
 
 import torch
 
+from alphaholdem.env.card_utils import (
+    combo_suit_permutation_inverse_tensor,
+    suit_permutations_tensor,
+)
 from alphaholdem.models.mlp.mlp_features import MLPFeatures
 
 
@@ -61,6 +65,66 @@ class RebelBatch:
             statistics={
                 key: self.statistics[key].to(device) for key in self.statistics
             },
+        )
+
+    def with_permuted_targets(
+        self,
+        suit_permutations: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
+        num_players: int = 2,
+    ) -> tuple[RebelBatch, torch.Tensor]:
+        """
+        Return a batch with features and targets permuted by suit.
+
+        Args:
+            suit_permutations: Optional explicit suit permutations [B, 4].
+            generator: Optional RNG to match MLPFeatures.permute_suits API.
+            num_players: Number of players used to reshape value targets.
+        """
+        permuted_features = self.features.clone()
+        suit_permutations = permuted_features.permute_suits(
+            suit_permutations, generator
+        )
+
+        # Map permutations back to their enumeration index.
+        all_perms = suit_permutations_tensor(device=suit_permutations.device)
+        matches = (suit_permutations[:, None, :] == all_perms[None, :, :]).all(dim=2)
+        assert matches.any(
+            dim=1
+        ).all(), "Invalid suit permutation encountered in with_permuted_targets"
+        suit_permutation_idxs = matches.float().argmax(dim=1)
+
+        combo_permutations_inverse = combo_suit_permutation_inverse_tensor(
+            device=suit_permutation_idxs.device
+        )[suit_permutation_idxs]
+
+        value_targets = None
+        if self.value_targets is not None:
+            value_targets = torch.gather(
+                self.value_targets,
+                2,
+                combo_permutations_inverse[:, None, :].expand(-1, num_players, -1),
+            )
+
+        policy_targets = None
+        if self.policy_targets is not None:
+            policy_targets = torch.gather(
+                self.policy_targets,
+                1,
+                combo_permutations_inverse[:, :, None].expand(
+                    -1, -1, self.policy_targets.shape[2]
+                ),
+            )
+
+        return (
+            RebelBatch(
+                features=permuted_features,
+                policy_targets=policy_targets,
+                value_targets=value_targets,
+                legal_masks=self.legal_masks,
+                statistics=self.statistics,
+            ),
+            suit_permutation_idxs,
         )
 
     @classmethod
