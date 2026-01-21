@@ -13,6 +13,14 @@ This directory contains Hydra configuration files for AlphaHoldem training. Each
 - **Environments**: 512 (tensorized)
 - **K-Best Pool**: 10 opponents
 
+### `config_transformer.yaml` - Transformer PPO Configuration
+- **Purpose**: PokerTransformerV1 PPO training with tensorized envs
+- **Steps**: 2000
+- **Batch Size**: 512
+- **Device**: MPS (default)
+- **Environments**: 512 (tensorized)
+- **Opponent Pool**: DReD/K-Best with exploiter support
+
 ### `config_high_perf.yaml` - High-Performance Configuration
 - **Purpose**: Optimized for vast.ai GPUs (RTX 4090/4080)
 - **Steps**: 5000
@@ -34,6 +42,19 @@ This directory contains Hydra configuration files for AlphaHoldem training. Each
 - **Wandb**: Disabled
 - **Model**: Smaller architecture for speed
 
+### `config_rebel_cfr.yaml` - ReBeL CFR (TRM/MLP) Configuration
+- **Purpose**: ReBeL-style CFR training with search supervision
+- **Steps**: 15000
+- **Batch Size**: 512
+- **Device**: CUDA
+- **Environments**: 192 (tensorized)
+- **Search**: DCFR with warm-starting
+
+### `config_rebel_debug.yaml` - ReBeL CFR Debug Configuration
+- **Purpose**: Faster iteration/debugging for ReBeL training
+- **Device**: CUDA/CPU (override as needed)
+- **Checkpoint Dir**: `checkpoints-rebel-debug`
+
 ## Usage
 
 ### Basic Usage
@@ -41,11 +62,17 @@ This directory contains Hydra configuration files for AlphaHoldem training. Each
 # Use default configuration
 python alphaholdem/cli/train_kbest.py --config-name=config
 
+# Transformer PPO training
+python alphaholdem/cli/train_kbest.py --config-name=config_transformer
+
 # Use high-performance configuration
 python alphaholdem/cli/train_kbest.py --config-name=config_high_perf
 
 # Use fast configuration
 python alphaholdem/cli/train_kbest.py --config-name=config_fast
+
+# ReBeL CFR training
+python alphaholdem/cli/train_rebel.py --config-name=config_rebel_cfr
 ```
 
 ### Parameter Overrides
@@ -96,7 +123,7 @@ python alphaholdem/cli/train_kbest.py --config-name=config_custom
 ### Training Parameters (`train:` section)
 - `learning_rate`: Learning rate for optimizer
 - `batch_size`: Batch size for training
-- `num_epochs`: Number of epochs per training step
+- `episodes_per_step`: PPO epochs per step
 - `ppo_eps`: PPO clipping parameter
 - `ppo_delta1`: Trinal-clip PPO parameter
 - `gae_lambda`: GAE lambda parameter
@@ -107,18 +134,23 @@ python alphaholdem/cli/train_kbest.py --config-name=config_custom
 
 ### Model Parameters (`model:` section)
 - `name`: Model architecture name
-- `kwargs.cards_channels`: Number of card channels
-- `kwargs.actions_channels`: Number of action channels
-- `kwargs.fusion_hidden`: Hidden layer sizes
-- `kwargs.num_actions`: Number of possible actions
+- `cards_channels`: Number of card channels (CNN)
+- `actions_channels`: Number of action channels (CNN)
+- `fusion_hidden`: Hidden layer sizes (CNN)
+- `num_actions`: Number of possible actions
+- `max_sequence_length`: Sequence length (transformer)
 
 ### Environment Parameters (`env:` section)
 - `stack`: Starting stack size
 - `sb`: Small blind
 - `bb`: Big blind
 - `bet_bins`: Betting size multipliers
-- `card_encoder`: Card encoding configuration
-- `action_encoder`: Action encoding configuration
+
+### Search Parameters (`search:` section, ReBeL)
+- `enabled`: Toggle CFR search supervision
+- `depth`: Search depth
+- `iterations`: CFR iterations per step
+- `cfr_type`: CFR variant (standard/discounted/etc.)
 
 ### RL Parameters (top level)
 - `num_steps`: Total training steps
