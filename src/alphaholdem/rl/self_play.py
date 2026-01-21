@@ -1010,7 +1010,7 @@ class SelfPlayTrainer:
             # Store transitions for our actions
             if env_active_we_act.numel() > 0:
                 # Scale factor for reward/targets: 100 big blinds
-                scale = self.tensor_env.scale
+                scale = self.tensor_env.scale[env_active_we_act]
 
                 # Compute delta bounds from our (p0/actor) perspective AFTER step
                 # For our acting envs, actor is player 0
@@ -1044,7 +1044,7 @@ class SelfPlayTrainer:
                     .item()
                 )
                 self.last_action_mix["all_in"] += (
-                    ((our_action_indices == (self.num_bet_bins - 1))).sum().item()
+                    (our_action_indices == (self.num_bet_bins - 1)).sum().item()
                 )
 
                 # Add transitions immediately using vectorized operations
@@ -1127,7 +1127,7 @@ class SelfPlayTrainer:
 
                 if self.cfg.env.debug_step_table:
                     print(f"=> Batch steps collected: {batch_steps_collected}")
-                    print(f"=> Updating ELO from rewards", per_env_rewards)
+                    print("=> Updating ELO from rewards", per_env_rewards)
 
                 self._update_elo_from_rewards(
                     per_env_rewards,
@@ -1718,9 +1718,9 @@ class SelfPlayTrainer:
             self.policy_trunk_optimizer.param_groups[0]["lr"] = (
                 policy_lr_now * 0.1
             )  # cards_trunk
-            self.policy_trunk_optimizer.param_groups[1][
-                "lr"
-            ] = policy_lr_now  # policy/trunk
+            self.policy_trunk_optimizer.param_groups[1]["lr"] = (
+                policy_lr_now  # policy/trunk
+            )
         else:  # Transformer model
             self.policy_trunk_optimizer.param_groups[0]["lr"] = policy_lr_now
 

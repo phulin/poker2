@@ -597,7 +597,7 @@ class CFREvaluator(ABC):
         # Range EV for the player
         potential = self.showdown_potential[:, hero]
 
-        return EV_hand * potential[:, None] / self.env.scale
+        return EV_hand * potential[:, None] / self.env.scale[:, None]
 
     def _best_response_values(
         self,

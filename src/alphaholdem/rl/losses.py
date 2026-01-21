@@ -500,7 +500,9 @@ class KLPolicyPPOLoss(LossCalculator):
         penalty_kl = (
             torch.zeros_like(forward_kl)
             if self.kl_type == KLType.none
-            else forward_kl if self.kl_type == KLType.forward else reverse_kl
+            else forward_kl
+            if self.kl_type == KLType.forward
+            else reverse_kl
         )
 
         # --- Value loss

@@ -369,10 +369,10 @@ def run_benchmark(
     num_envs: int = 1,
 ) -> None:
     """Run benchmark for a specific depth."""
-    print(f"\n{'='*60}")
-    print(f"Benchmarking _set_model_values indexing approaches")
+    print(f"\n{'=' * 60}")
+    print("Benchmarking _set_model_values indexing approaches")
     print(f"Depth: {depth}, Repeats: {repeats}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     cfg.search.depth = depth
 
@@ -443,7 +443,7 @@ def run_benchmark(
     num_model_nodes = evaluator_current.model_indices.numel()
     total_nodes = evaluator_current.total_nodes
 
-    print(f"\nResults:")
+    print("\nResults:")
     print(f"  Total nodes: {total_nodes:,}")
     print(
         f"  Model nodes: {num_model_nodes:,} ({100 * num_model_nodes / total_nodes:.1f}%)"
@@ -461,7 +461,7 @@ def run_benchmark(
             f"  Speedup: {speedup:.2f}x ({'Alternative' if speedup > 1 else 'Current'} is faster)"
         )
     else:
-        print(f"  Speedup: N/A")
+        print("  Speedup: N/A")
 
 
 @torch.no_grad()
@@ -508,10 +508,10 @@ def run_benchmark_compile(
     num_envs: int = 1,
 ) -> None:
     """Run benchmark comparing current vs compiled _set_model_values with different modes."""
-    print(f"\n{'='*60}")
-    print(f"Benchmarking _set_model_values: Current vs Compiled (all modes)")
+    print(f"\n{'=' * 60}")
+    print("Benchmarking _set_model_values: Current vs Compiled (all modes)")
     print(f"Depth: {depth}, Repeats: {repeats}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     cfg.search.depth = depth
 
@@ -730,7 +730,7 @@ def run_benchmark_compile(
     num_model_nodes = evaluator_current.model_indices.numel()
     total_nodes = evaluator_current.total_nodes
 
-    print(f"\nResults:")
+    print("\nResults:")
     print(f"  Total nodes: {total_nodes:,}")
     print(
         f"  Model nodes: {num_model_nodes:,} ({100 * num_model_nodes / total_nodes:.1f}%)"
@@ -897,13 +897,13 @@ def main() -> None:
     # Parse depths
     depths = [int(d.strip()) for d in args.depths.split(",")]
 
-    print(f"\n{'='*60}")
-    print(f"_set_model_values Indexing Benchmark")
+    print(f"\n{'=' * 60}")
+    print("_set_model_values Indexing Benchmark")
     print(f"Device: {device}")
     print(f"Repeats: {args.repeats}")
     print(f"Depths: {depths}")
     print(f"Num envs: {args.num_envs}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Create config and model
     cfg = create_config()
@@ -919,9 +919,9 @@ def main() -> None:
                 device, depth, args.repeats, cfg, model, args.num_envs
             )
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Benchmark completed!")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":

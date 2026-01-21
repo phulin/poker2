@@ -5,7 +5,6 @@ Unit tests for legal action generation in HUNLEnv.
 Tests various poker situations to ensure legal actions are correctly generated.
 """
 
-
 from alphaholdem.env.hunl_env import HUNLEnv
 from alphaholdem.env.types import Action
 

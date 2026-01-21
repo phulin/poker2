@@ -229,13 +229,14 @@ class VectorizedReplayBuffer:
         # Row index mapping for (traj_row, step_idx): row = traj_row * T + step_idx.
         self.snapshot_env = HUNLTensorEnv(
             num_envs=capacity * self.max_trajectory_length,
-            starting_stack=cfg.env.stack,
+            mean_stack=cfg.env.stack,
             sb=cfg.env.sb,
             bb=cfg.env.bb,
             default_bet_bins=cfg.env.bet_bins,
             device=device,
             float_dtype=float_dtype,
             flop_showdown=cfg.env.flop_showdown,
+            randomize_stacks=getattr(cfg.env, "randomize_stacks", False),
         )
 
     def start_adding_trajectory_batches(
@@ -422,7 +423,7 @@ class VectorizedReplayBuffer:
             # Create temporary env to avoid in-place overlap issues
             temp_env = HUNLTensorEnv(
                 num_envs=k_valid * T,
-                starting_stack=self.snapshot_env.starting_stack,
+                mean_stack=self.snapshot_env.mean_stack,
                 sb=self.snapshot_env.sb,
                 bb=self.snapshot_env.bb,
                 default_bet_bins=self.snapshot_env.default_bet_bins,
@@ -430,6 +431,7 @@ class VectorizedReplayBuffer:
                 rng=self.snapshot_env.rng,
                 float_dtype=self.snapshot_env.float_dtype,
                 flop_showdown=self.snapshot_env.flop_showdown,
+                randomize_stacks=self.snapshot_env.randomize_stacks,
             )
             # (debug snapshot zeroing removed)
             temp_indices = torch.arange(k_valid * T, device=self.device)

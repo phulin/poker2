@@ -267,7 +267,9 @@ def debug_transition(cfg: Config, args: ScriptArgs) -> None:
     device = torch.device(
         "cuda"
         if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available() else "cpu"
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
     )
     cfg.device = str(device)
     cfg.num_envs = 1

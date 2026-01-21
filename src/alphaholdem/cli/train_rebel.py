@@ -154,7 +154,7 @@ def print_training_stats(
         f"value={value_str} "
         f"exploit={exploitability_str} "
         f"street={street_str} "
-        f"time={step_elapsed:.2f}s total={total_elapsed/60:.1f}m"
+        f"time={step_elapsed:.2f}s total={total_elapsed / 60:.1f}m"
     )
 
 
@@ -255,7 +255,7 @@ def train_rebel(cfg: Config) -> None:
         )
         total_elapsed = time.time() - training_start
         print(
-            f"Training complete in {total_elapsed/3600:.2f} hours. "
+            f"Training complete in {total_elapsed / 3600:.2f} hours. "
             f"Final checkpoint: {final_path}"
         )
         print_preflop_range_grid(

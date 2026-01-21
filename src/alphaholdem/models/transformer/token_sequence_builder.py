@@ -272,9 +272,9 @@ class TokenSequenceBuilder:
             ]
 
             # Reverse all CONTEXT bet_to_call values. Will be 0 for non-context tokens, so this is fine.
-            result.context_features[:, :, Context.BET_TO_CALL.value] = (
-                -result.context_features[:, :, Context.BET_TO_CALL.value]
-            )
+            result.context_features[
+                :, :, Context.BET_TO_CALL.value
+            ] = -result.context_features[:, :, Context.BET_TO_CALL.value]
 
             # Reverse all CONTEXT position values.
             rows, cols = torch.where(result.token_ids == Special.CONTEXT.value)

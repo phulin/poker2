@@ -220,9 +220,9 @@ def run_benchmark(
     model: RebelFFN,
 ) -> None:
     """Run benchmark for a specific depth."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Benchmarking Depth {depth}, {iterations} iterations")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     env, root_indices = setup_environment(cfg, device)
 
@@ -246,7 +246,7 @@ def run_benchmark(
 
     # Compare
     speedup = rebel_time / sparse_time if sparse_time > 0 else float("inf")
-    print(f"\nComparison:")
+    print("\nComparison:")
     print(
         f"  Speedup: {speedup:.2f}x ({'Sparse' if speedup > 1 else 'Rebel'} is faster)"
     )
@@ -255,7 +255,7 @@ def run_benchmark(
         if rebel_nodes > 0
         else "  Node ratio: N/A"
     )
-    print(f"  Note: Sparse builds tree naturally (may differ from Rebel's fixed depth)")
+    print("  Note: Sparse builds tree naturally (may differ from Rebel's fixed depth)")
 
 
 def main() -> None:
@@ -296,12 +296,12 @@ def main() -> None:
     # Parse depths
     depths = [int(d.strip()) for d in args.depths.split(",")]
 
-    print(f"\n{'='*60}")
-    print(f"CFR Evaluator Benchmark")
+    print(f"\n{'=' * 60}")
+    print("CFR Evaluator Benchmark")
     print(f"Device: {device}")
     print(f"Iterations: {args.iterations}")
     print(f"Depths: {depths}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Create config and model
     cfg = create_config()
@@ -311,9 +311,9 @@ def main() -> None:
     for depth in depths:
         run_benchmark(device, depth, args.iterations, cfg, model)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Benchmark completed!")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":

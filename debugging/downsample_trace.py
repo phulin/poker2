@@ -78,7 +78,7 @@ def downsample_trace(input_path: Path, output_path: Path, ratio: int, method: st
         print(
             f"Downsampling with ratio {ratio} (method=random): "
             f"selected random window [{start_pos}:{end_pos}] "
-            f"({downsampled_count} events, {100*downsampled_count/total_events:.1f}%)"
+            f"({downsampled_count} events, {100 * downsampled_count / total_events:.1f}%)"
         )
 
     elif method == "ratio":
@@ -89,7 +89,7 @@ def downsample_trace(input_path: Path, output_path: Path, ratio: int, method: st
         print(
             f"Downsampling with ratio {ratio} (method=ratio): "
             f"keeping every {ratio}th event "
-            f"({downsampled_count} events, {100*downsampled_count/total_events:.1f}%)"
+            f"({downsampled_count} events, {100 * downsampled_count / total_events:.1f}%)"
         )
 
     elif method == "slice":
@@ -104,7 +104,7 @@ def downsample_trace(input_path: Path, output_path: Path, ratio: int, method: st
         print(
             f"Downsampling with ratio {ratio} (method=slice): "
             f"taking first {window_size} events "
-            f"({downsampled_count} events, {100*downsampled_count/total_events:.1f}%)"
+            f"({downsampled_count} events, {100 * downsampled_count / total_events:.1f}%)"
         )
 
     else:

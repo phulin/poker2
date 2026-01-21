@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Optional, Tuple
 
 import torch
@@ -25,7 +26,8 @@ class HUNLTensorEnv:
 
     # Type signatures for fields
     N: int
-    starting_stack: int
+    mean_stack: int
+    randomize_stacks: bool
     sb: int
     bb: int
     device: torch.device
@@ -56,15 +58,17 @@ class HUNLTensorEnv:
     def __init__(
         self,
         num_envs: int,
-        starting_stack: int,
-        sb: int,
-        bb: int,
+        mean_stack: Optional[int] = None,
+        sb: int = 50,
+        bb: int = 100,
         default_bet_bins: Optional[list[float]] = None,
         device: Optional[torch.device] = None,
         rng: Optional[torch.Generator] = None,
         float_dtype: torch.dtype = torch.float32,
         debug_step_table: bool = False,
         flop_showdown: bool = False,
+        randomize_stacks: bool = False,
+        starting_stack: Optional[int] = None,
     ) -> None:
         assert num_envs >= 0
         self.device = device or torch.device(
@@ -73,14 +77,23 @@ class HUNLTensorEnv:
         self.float_dtype = float_dtype
         self.N = num_envs
         self.arange_n = torch.arange(self.N, device=self.device)
-        self.starting_stack = int(starting_stack)
+        if mean_stack is None:
+            if starting_stack is None:
+                raise ValueError(
+                    "mean_stack is required when starting_stack is not set"
+                )
+            mean_stack = starting_stack
+        elif starting_stack is not None and starting_stack != mean_stack:
+            raise ValueError("mean_stack and starting_stack must match when both set")
+
+        self.mean_stack = int(mean_stack)
         self.sb = int(sb)
         self.bb = int(bb)
         self.default_bet_bins = default_bet_bins or DEFAULT_BET_BINS
         self.num_bet_bins = len(self.default_bet_bins) + 3
-        self.scale = float(self.starting_stack)
         self.debug_step_table = debug_step_table
         self.flop_showdown = flop_showdown
+        self.randomize_stacks = randomize_stacks
 
         # Use provided RNG or create a new one
         if rng is not None:
@@ -111,6 +124,15 @@ class HUNLTensorEnv:
         self.committed = torch.zeros(self.N, 2, dtype=torch.long, device=self.device)
         self.has_folded = torch.zeros(self.N, 2, dtype=torch.bool, device=self.device)
         self.is_allin = torch.zeros(self.N, 2, dtype=torch.bool, device=self.device)
+        self.starting_stacks = torch.full(
+            (self.N, 2), self.mean_stack, dtype=torch.long, device=self.device
+        )
+        self.scale = torch.full(
+            (self.N,),
+            float(self.mean_stack),
+            dtype=self.float_dtype,
+            device=self.device,
+        )
 
         # Board and hole cards stored as one-hot [4,13] and as indices [0-51]
         # board_onehot: [N, 5, 4, 13], hole_onehot: [N, 2 players, 2 cards, 4, 13]
@@ -157,7 +179,7 @@ class HUNLTensorEnv:
             num_envs = proto.N
         return HUNLTensorEnv(
             num_envs=num_envs,
-            starting_stack=proto.starting_stack,
+            mean_stack=proto.mean_stack,
             sb=proto.sb,
             bb=proto.bb,
             default_bet_bins=proto.default_bet_bins,
@@ -166,9 +188,33 @@ class HUNLTensorEnv:
             float_dtype=proto.float_dtype,
             debug_step_table=proto.debug_step_table,
             flop_showdown=proto.flop_showdown,
+            randomize_stacks=proto.randomize_stacks,
         )
 
     # --- Reset -----------------------------------------------------------------
+
+    def _sample_starting_stacks(self, num_reset: int) -> torch.Tensor:
+        """Return per-player starting stacks for the environments being reset."""
+        if num_reset == 0:
+            return torch.zeros(0, 2, dtype=torch.long, device=self.device)
+
+        min_stack = math.ceil(0.1 * self.mean_stack)
+        total_chips = 2 * self.mean_stack
+        if min_stack * 2 > total_chips:
+            raise ValueError("mean_stack too small to satisfy minimum stack constraint")
+
+        if not self.randomize_stacks:
+            return torch.full(
+                (num_reset, 2), self.mean_stack, dtype=torch.long, device=self.device
+            )
+
+        # Allocate at least min_stack to both players, then randomize the remainder.
+        low = min_stack
+        high = total_chips - min_stack
+        rand = torch.rand(num_reset, generator=self.rng, device=self.device)
+        p0 = (low + torch.floor(rand * (high - low + 1))).long()
+        p1 = total_chips - p0
+        return torch.stack((p0, p1), dim=1)
 
     def reset(
         self,
@@ -244,12 +290,18 @@ class HUNLTensorEnv:
         _c1_1 = cards[:, 2]
         _c1_2 = cards[:, 3]
 
-        # Reset stacks and post blinds (vectorized)
+        # Sample and store starting stacks for the environments being reset
+        starting_stacks = self._sample_starting_stacks(num_reset)
+        self.starting_stacks[ids] = starting_stacks
+        self.scale[ids] = starting_stacks[:, 0].to(self.float_dtype)
+
+        # Reset stacks and post blinds (vectorized) using sampled stacks
         # For each env, subtract sb/bb from correct player
         # p_sb and p_bb are [num_reset] with values 0 or 1
-        self.stacks[ids, p_sb] = self.starting_stack - self.sb
+        env_rows = torch.arange(num_reset, device=self.device)
+        self.stacks[ids, p_sb] = starting_stacks[env_rows, p_sb] - self.sb
         self.committed[ids, p_sb] = self.sb
-        self.stacks[ids, p_bb] = self.starting_stack - self.bb
+        self.stacks[ids, p_bb] = starting_stacks[env_rows, p_bb] - self.bb
         self.committed[ids, p_bb] = self.bb
 
         # Write per-env scalars
@@ -489,6 +541,8 @@ class HUNLTensorEnv:
         self.has_folded[dest_select] = src_env.has_folded[src_select]
         self.is_allin[dest_select] = src_env.is_allin[src_select]
         self.chips_placed[dest_select] = src_env.chips_placed[src_select]
+        self.starting_stacks[dest_select] = src_env.starting_stacks[src_select]
+        self.scale[dest_select] = src_env.scale[src_select]
 
         # Card state
         self.board_onehot[dest_select] = src_env.board_onehot[src_select]
@@ -579,6 +633,12 @@ class HUNLTensorEnv:
         dst_env.chips_placed[:] = self.chips_placed.repeat_interleave(
             repeats, dim=0, output_size=output_size
         )
+        dst_env.starting_stacks[:] = self.starting_stacks.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.scale[:] = self.scale.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
         dst_env.board_onehot[:] = self.board_onehot.repeat_interleave(
             repeats, dim=0, output_size=output_size
         )
@@ -653,6 +713,7 @@ class HUNLTensorEnv:
 
         pot = self.pot[env_indices].to(self.float_dtype)
         my_stack = self.stacks[env_indices, 0].to(self.float_dtype)
+        p0_starting_stack = self.starting_stacks[env_indices, 0].to(self.float_dtype)
         # pot_share: full pot if winner == m, half if tie, else 0
         pot_share = torch.where(
             winners == 0,
@@ -660,7 +721,7 @@ class HUNLTensorEnv:
             torch.where(winners == 2, pot / 2.0, 0),
         )
 
-        return (my_stack + pot_share - float(self.starting_stack)) / self.scale
+        return (my_stack + pot_share - p0_starting_stack) / self.scale[env_indices]
 
     # --- Step ------------------------------------------------------------------
 
@@ -1128,7 +1189,7 @@ class HUNLTensorEnv:
         # Remove heavy debug asserts now that bug is fixed
         dst = HUNLTensorEnv(
             num_envs=k,
-            starting_stack=self.starting_stack,
+            mean_stack=self.mean_stack,
             sb=self.sb,
             bb=self.bb,
             default_bet_bins=self.default_bet_bins,
@@ -1137,6 +1198,7 @@ class HUNLTensorEnv:
             float_dtype=self.float_dtype,
             debug_step_table=self.debug_step_table,
             flop_showdown=self.flop_showdown,
+            randomize_stacks=self.randomize_stacks,
         )
         dst.copy_state_from(
             self, indices, torch.arange(k, device=self.device), copy_deck=True

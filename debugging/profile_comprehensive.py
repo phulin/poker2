@@ -3,7 +3,6 @@
 Comprehensive line-by-line profiling of all key methods in RebelCFREvaluator.
 """
 
-
 import torch
 
 from alphaholdem.env.card_utils import NUM_HANDS
@@ -120,7 +119,7 @@ def comprehensive_profiling():
 
     # Run the realistic workflow multiple times
     for i in range(10):
-        print(f"Running iteration {i+1}/10")
+        print(f"Running iteration {i + 1}/10")
 
         # Run a complete self-play iteration (this will be profiled)
         pbs = evaluator.evaluate_cfr(training_mode=True)

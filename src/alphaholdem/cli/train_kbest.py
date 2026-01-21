@@ -248,7 +248,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
             print("Using FLOP SHOWDOWN environment")
         if cfg.use_wandb:
             print(
-                f"📊 Wandb logging enabled - check https://wandb.ai for real-time plots!"
+                "📊 Wandb logging enabled - check https://wandb.ai for real-time plots!"
             )
             print(f"   Project: {cfg.wandb_project}")
             if cfg.wandb_name:
@@ -316,7 +316,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
                     cfg.checkpoint_dir, f"checkpoint_step_{step + 1}.pt"
                 )
                 trainer.save_checkpoint(checkpoint_path, step + 1)
-                checkpoint_path = os.path.join(cfg.checkpoint_dir, f"latest_model.pt")
+                checkpoint_path = os.path.join(cfg.checkpoint_dir, "latest_model.pt")
                 trainer.save_checkpoint(checkpoint_path, step + 1)
 
                 # Also save the best model if it has the highest ELO
@@ -335,11 +335,11 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
 
         # Final evaluation
         final_total_time = time.time() - training_start_time
-        print(f"\nFinal evaluation against opponent pool...")
+        print("\nFinal evaluation against opponent pool...")
         final_eval = trainer.evaluate_against_pool(min_games=100)
         print_evaluation_results(final_eval)
         print(
-            f"Total training time: {final_total_time:.1f}s ({final_total_time/3600:.2f} hours)"
+            f"Total training time: {final_total_time:.1f}s ({final_total_time / 3600:.2f} hours)"
         )
 
         # Save final checkpoint

@@ -53,7 +53,7 @@ def analyze_embedding_norms(trainer: SelfPlayTrainer) -> None:
     special_offset = get_special_token_id_offset()
     card_offset = get_card_token_id_offset()
 
-    print(f"Token offsets:")
+    print("Token offsets:")
     print(f"  Special tokens: {special_offset}")
     print(f"  Card tokens: {card_offset}")
     print(f"  Number of special tokens: {Special.NUM_SPECIAL.value}")
@@ -309,7 +309,7 @@ def test_suit_permutations(trainer: SelfPlayTrainer, device: torch.device) -> No
             print(
                 f"  Found trajectory with {trainer.replay_buffer.trajectory_lengths[longest_trajectory_idx]} transitions."
             )
-            print(f"  Created batch with 24 permuted suit variations.")
+            print("  Created batch with 24 permuted suit variations.")
 
             # Show the sequence of actions in the trajectory
             print("\nTrajectory Action Sequence:")
@@ -333,7 +333,7 @@ def test_suit_permutations(trainer: SelfPlayTrainer, device: torch.device) -> No
                     longest_trajectory_idx, transition_end - 1
                 ].item()
                 print(
-                    f"  Step {step+1}: Player {actor} on Street {street} -> Action {action}, Reward {reward:.4f}, Done {done}"
+                    f"  Step {step + 1}: Player {actor} on Street {street} -> Action {action}, Reward {reward:.4f}, Done {done}"
                 )
             print("-" * 60)
             print()
@@ -369,7 +369,7 @@ def test_suit_permutations(trainer: SelfPlayTrainer, device: torch.device) -> No
                 suit_idx = i % 4
 
                 print(
-                    f"Permutation {perm_idx+1}, Suit {suit_idx+1}: {[suit_names[s] for s in suit_permutations_list[perm_idx]]}"
+                    f"Permutation {perm_idx + 1}, Suit {suit_idx + 1}: {[suit_names[s] for s in suit_permutations_list[perm_idx]]}"
                 )
                 print(f"  Value: {value_preds[i].item():.4f}")
                 print(f"  Action probs: {action_probs[i].cpu()}")
@@ -396,12 +396,12 @@ def test_suit_permutations(trainer: SelfPlayTrainer, device: torch.device) -> No
             print(f"Maximum value difference: {max_value_diff:.6f}")
             if max_value_pair:
                 print(
-                    f"  Between permutations {max_value_pair[0]//4 + 1} and {max_value_pair[1]//4 + 1}"
+                    f"  Between permutations {max_value_pair[0] // 4 + 1} and {max_value_pair[1] // 4 + 1}"
                 )
             print(f"Maximum probability difference: {max_prob_diff:.6f}")
             if max_prob_pair:
                 print(
-                    f"  Between permutations {max_prob_pair[0]//4 + 1} and {max_prob_pair[1]//4 + 1}"
+                    f"  Between permutations {max_prob_pair[0] // 4 + 1} and {max_prob_pair[1] // 4 + 1}"
                 )
 
             if max_prob_diff < 1e-6:
@@ -597,7 +597,7 @@ def run_linear_probe_test(
     optimizer = torch.optim.AdamW(probe.parameters(), lr=learning_rate)
     criterion = nn.BCEWithLogitsLoss()
 
-    print("Training linear probe to predict:" "\n  • suited?" "\n  • gap ≤ 1?")
+    print("Training linear probe to predict:\n  • suited?\n  • gap ≤ 1?")
 
     for epoch in range(1, epochs + 1):
         probe.train()
@@ -677,12 +677,12 @@ def main():
     # Load config from checkpoint with CLI overrides
     config = load_config_from_checkpoint(args.checkpoint_path, cli_config)
 
-    print(f"Creating SelfPlayTrainer...")
+    print("Creating SelfPlayTrainer...")
 
     # Create trainer
     trainer = SelfPlayTrainer(config, device_obj)
 
-    print(f"Loading checkpoint into trainer...")
+    print("Loading checkpoint into trainer...")
 
     # Use the trainer's load_checkpoint method (strict=False by default)
     step, _ = trainer.load_checkpoint(args.checkpoint_path)
@@ -705,7 +705,7 @@ def main():
             is_transformer=trainer.is_transformer,
         )
 
-    print(f"✅ Checkpoint loaded successfully")
+    print("✅ Checkpoint loaded successfully")
     print(f"   Step: {step}")
     print(f"   ELO: {trainer.opponent_pool.current_elo:.1f}")
     print()

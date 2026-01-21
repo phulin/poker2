@@ -101,9 +101,9 @@ def bench_gather(
 
 def humanize(n: int) -> str:
     if n >= 1_000_000:
-        return f"{n/1_000_000:.2f}M"
+        return f"{n / 1_000_000:.2f}M"
     if n >= 1_000:
-        return f"{n/1_000:.2f}K"
+        return f"{n / 1_000:.2f}K"
     return str(n)
 
 
@@ -122,8 +122,8 @@ def run_once(
     print(
         f"[{which}] parents={humanize(num_parents)} children≈{humanize(num_children)} feat_dim={feat_dim}"
     )
-    print(f"  repeat_interleave: {t_repeat*1e3:.3f} ms")
-    print(f"  gather           : {t_gather*1e3:.3f} ms")
+    print(f"  repeat_interleave: {t_repeat * 1e3:.3f} ms")
+    print(f"  gather           : {t_gather * 1e3:.3f} ms")
     speedup = (t_repeat / t_gather) if t_gather > 0 else float("inf")
     print(f"  speedup (repeat/gather): {speedup:.2f}x")
     print()

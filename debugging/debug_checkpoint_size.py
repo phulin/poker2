@@ -18,9 +18,9 @@ def analyze_checkpoint(checkpoint_path: str, detailed: bool = False) -> None:
         print(f"Error: Checkpoint not found: {checkpoint_path}")
         return
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"Analyzing: {checkpoint_path}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Get file size
     file_size = os.path.getsize(checkpoint_path)
@@ -93,7 +93,7 @@ def analyze_checkpoint(checkpoint_path: str, detailed: bool = False) -> None:
     print(
         f"\n{'Component':<30} {'Size':<12} {'Shape/Type':<20} {'Dtype':<15} {'Device':<10}"
     )
-    print(f"{'-'*80}")
+    print(f"{'-' * 80}")
     for item in breakdown:
         component, size, shape_type, dtype, device = item
         print(
@@ -105,9 +105,9 @@ def analyze_checkpoint(checkpoint_path: str, detailed: bool = False) -> None:
 
     # Detailed analysis for model state dict if present
     if "model" in checkpoint and isinstance(checkpoint["model"], dict):
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Model State Dict Analysis")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         model_size = 0
         layer_sizes = []
@@ -126,15 +126,17 @@ def analyze_checkpoint(checkpoint_path: str, detailed: bool = False) -> None:
         print(f"Total model size: {model_size / (1024**2):.2f} MB")
 
         if detailed:
-            print(f"\nTop 20 largest layers:")
+            print("\nTop 20 largest layers:")
             for i, (name, size, shape, dtype) in enumerate(layer_sizes[:20]):
-                print(f"{i+1:2d}. {name:<40} {size:>8.2f} MB  {str(shape):<25} {dtype}")
+                print(
+                    f"{i + 1:2d}. {name:<40} {size:>8.2f} MB  {str(shape):<25} {dtype}"
+                )
 
     # Detailed analysis for optimizer state if present
     if "optimizer" in checkpoint and isinstance(checkpoint["optimizer"], dict):
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Optimizer State Analysis")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         optimizer_size = 0
         optimizer_components = []
@@ -165,13 +167,13 @@ def analyze_checkpoint(checkpoint_path: str, detailed: bool = False) -> None:
         print(f"Total optimizer size: {optimizer_size / (1024**2):.2f} MB")
 
         if detailed and optimizer_components:
-            print(f"\nOptimizer components:")
+            print("\nOptimizer components:")
             for name, size, num_items in optimizer_components[:10]:
                 print(f"  {name:<40} {size:>8.2f} MB  ({num_items} items)")
 
         # Analyze optimizer state dict in detail
         if detailed and "state" in checkpoint["optimizer"]:
-            print(f"\nAnalyzing optimizer state dict in detail...")
+            print("\nAnalyzing optimizer state dict in detail...")
             state_dict = checkpoint["optimizer"]["state"]
 
             # Map parameter indices to layer names
@@ -201,11 +203,11 @@ def analyze_checkpoint(checkpoint_path: str, detailed: bool = False) -> None:
 
             param_sizes.sort(key=lambda x: x[1], reverse=True)
 
-            print(f"\nTop parameter states in optimizer:")
+            print("\nTop parameter states in optimizer:")
             total_state_size = sum(size for _, size in param_sizes)
             print(f"Total state size: {total_state_size:.2f} MB")
             for i, (name, size) in enumerate(param_sizes[:15]):
-                print(f"  {i+1:2d}. {name:<60} {size:>8.2f} MB")
+                print(f"  {i + 1:2d}. {name:<60} {size:>8.2f} MB")
 
 
 def analyze_dict(d: dict, prefix: str = "") -> int:

@@ -413,7 +413,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.showdown_potential = (
             self.env.stacks[self.showdown_indices]
             + self.env.pot[self.showdown_indices, None]
-            - self.env.starting_stack
+            - self.env.starting_stacks[self.showdown_indices]
         )
 
         self.prev_actor[N:] = self._fan_out(self.env.to_act)

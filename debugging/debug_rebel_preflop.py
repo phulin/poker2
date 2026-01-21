@@ -205,7 +205,7 @@ def load_rebel_checkpoint_and_trainer(
     # Load the checkpoint state
     loaded_step = trainer.load_checkpoint(checkpoint_path)
 
-    print(f"✅ ReBeL checkpoint loaded successfully")
+    print("✅ ReBeL checkpoint loaded successfully")
     print(f"   Loaded step: {loaded_step}")
     print(
         f"   Model parameters: {sum(p.numel() for p in trainer.model.parameters()):,}"
@@ -433,9 +433,9 @@ def display_river_analysis(
 ) -> None:
     """Display river analysis results in a readable format."""
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("RIVER ANALYSIS")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Display board and hole cards
     board_str = " ".join(card_index_to_string(card) for card in board_cards)
@@ -459,7 +459,7 @@ def display_river_analysis(
     print("  Action Probabilities:")
     for i, (prob, action_name) in enumerate(zip(sb_probs, action_names)):
         if prob > 0.001:  # Only show actions with >0.1% probability
-            print(f"    {action_name}: {prob.item():.4f} ({prob.item()*100:.1f}%)")
+            print(f"    {action_name}: {prob.item():.4f} ({prob.item() * 100:.1f}%)")
     print()
 
     # Display BB analysis
@@ -468,7 +468,7 @@ def display_river_analysis(
     print("  Action Probabilities:")
     for i, (prob, action_name) in enumerate(zip(bb_probs, action_names)):
         if prob > 0.001:  # Only show actions with >0.1% probability
-            print(f"    {action_name}: {prob.item():.4f} ({prob.item()*100:.1f}%)")
+            print(f"    {action_name}: {prob.item():.4f} ({prob.item() * 100:.1f}%)")
     print()
 
     # Display best actions
@@ -604,9 +604,9 @@ def main():
                 )
 
             # Run river analysis
-            print(f"\n{'='*80}")
+            print(f"\n{'=' * 80}")
             print(f"ReBeL River Analysis (Step {display_step})")
-            print(f"{'='*80}")
+            print(f"{'=' * 80}")
 
             sb_probs, sb_values, bb_probs, bb_values = analyze_river_state(
                 trainer=trainer,
@@ -629,9 +629,9 @@ def main():
 
         else:
             # Run preflop analysis
-            print(f"\n{'='*80}")
+            print(f"\n{'=' * 80}")
             print(f"ReBeL Preflop Analyzer Probabilities (Step {display_step})")
-            print(f"{'='*80}")
+            print(f"{'=' * 80}")
 
             # Print preflop range grids using the same function as training
             print_preflop_range_grid(
@@ -641,9 +641,9 @@ def main():
                 rebel=True,
             )
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Analysis complete!")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
     except Exception as e:
         print(f"❌ Error: {e}")

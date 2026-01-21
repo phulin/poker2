@@ -144,9 +144,12 @@ class RotarySelfAttention(nn.Module):
         else:
             key_allow_mask = attention_mask  # [B, L_k == L_q]
 
-        assert key_allow_mask.shape == (
-            B,
-            L_k,
+        assert (
+            key_allow_mask.shape
+            == (
+                B,
+                L_k,
+            )
         ), f"key_allow_mask {key_allow_mask.shape} must match total key length L_k={L_k}"
 
         # Expand to [BH, L_q, L_k] (same key mask for every query position)

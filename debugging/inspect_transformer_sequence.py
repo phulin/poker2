@@ -196,7 +196,7 @@ def print_token_sequence_data(
     trajectory_lengths: torch.Tensor,
 ) -> None:
     """Print the TOKEN SEQUENCE DATA section for given indices."""
-    print(f"\n--- TOKEN SEQUENCE DATA ---")
+    print("\n--- TOKEN SEQUENCE DATA ---")
     for traj_idx in indices:
         token_pos = int(current_token_positions[traj_idx])
         if token_pos <= 0:
@@ -221,7 +221,7 @@ def print_token_sequence_data(
         print(f"  Transition token ends: {token_ends}")
 
         if len(token_ends) > 0:
-            print(f"  Token sequence with transition boundaries:")
+            print("  Token sequence with transition boundaries:")
             boundary_idx = 0
             line_parts = []
             current_transition = []
@@ -258,12 +258,12 @@ def print_token_sequence_data(
             print(
                 f"  Context tokens found at positions: {context_token_indices.tolist()}"
             )
-            print(f"  Context features table:")
+            print("  Context features table:")
             print(
                 f"    {'Pos':>3} {'POT':>4} {'STACK_P0':>8} {'STACK_P1':>8} {'COMM_P0':>7} {'COMM_P1':>7} {'POS':>3} {'ACT_ROUND':>9} {'MIN_RAISE':>9} {'BET_CALL':>8}"
             )
             print(
-                f"    {'-'*3} {'-'*4} {'-'*8} {'-'*8} {'-'*7} {'-'*7} {'-'*3} {'-'*9} {'-'*9} {'-'*8}"
+                f"    {'-' * 3} {'-' * 4} {'-' * 8} {'-' * 8} {'-' * 7} {'-' * 7} {'-' * 3} {'-' * 9} {'-' * 9} {'-' * 8}"
             )
             for j in context_token_indices:
                 ctx = context_features[j].tolist()
@@ -280,7 +280,7 @@ def print_token_sequence_data(
                     f"{ctx[Context.BET_TO_CALL.value]:>8}"
                 )
         else:
-            print(f"  No context tokens found in this trajectory")
+            print("  No context tokens found in this trajectory")
 
 
 def hook_model_forward(model, original_forward, trainer: SelfPlayTrainer | None = None):
@@ -379,7 +379,7 @@ def hook_replay_buffer_add_transitions(replay_buffer, original_add_transitions):
         # Show embedding data info if it's structured
         if hasattr(embedding_data, "lengths"):
             print(f"Token sequence lengths: {embedding_data.lengths.tolist()}")
-            print(f"Token sequence indices being updated:")
+            print("Token sequence indices being updated:")
             for i, traj_idx in enumerate(trajectory_indices):
                 length = int(embedding_data.lengths[i].item())
                 print(
@@ -482,7 +482,7 @@ def enable_permute_suit_trace(max_samples: int = 2) -> None:
 
 def print_sampling_debug_info(trainer: SelfPlayTrainer) -> None:
     """Print high-level sampling debug info for trajectories and token ends."""
-    print(f"\n--- SAMPLING DEBUG INFO ---")
+    print("\n--- SAMPLING DEBUG INFO ---")
     valid_indices = torch.where(trainer.replay_buffer.trajectory_lengths > 0)[0]
     print(f"Valid trajectory indices: {valid_indices.tolist()}")
     print(
@@ -495,7 +495,7 @@ def print_sampling_debug_info(trainer: SelfPlayTrainer) -> None:
 
 def print_replay_buffer_token_sequences(trainer: SelfPlayTrainer) -> None:
     """Print decoded token sequences for valid trajectories in the replay buffer."""
-    print(f"\n--- REPLAY BUFFER TOKEN SEQUENCES ---")
+    print("\n--- REPLAY BUFFER TOKEN SEQUENCES ---")
     valid_indices = torch.where(trainer.replay_buffer.trajectory_lengths > 0)[0]
     for _, traj_idx in enumerate(valid_indices):
         print(f"Trajectory {traj_idx}:")
@@ -565,14 +565,14 @@ def print_replay_buffer_summary(replay_buffer):
     print(f"Total steps: {replay_buffer.num_steps()}")
 
     print(
-        f"\nTrajectory lengths: {replay_buffer.trajectory_lengths[:replay_buffer.size].tolist()}"
+        f"\nTrajectory lengths: {replay_buffer.trajectory_lengths[: replay_buffer.size].tolist()}"
     )
     print(
-        f"Current step positions: {replay_buffer.current_transition_counts[:replay_buffer.size].tolist()}"
+        f"Current step positions: {replay_buffer.current_transition_counts[: replay_buffer.size].tolist()}"
     )
 
     if replay_buffer.size > 0:
-        print(f"\n--- TRANSITION DATA ---")
+        print("\n--- TRANSITION DATA ---")
         valid_indices = torch.where(replay_buffer.trajectory_lengths > 0)[0]
         if len(valid_indices) > 0:
             max_length = replay_buffer.trajectory_lengths[valid_indices].max()
@@ -625,14 +625,14 @@ def print_replay_buffer_summary(replay_buffer):
 
                 # Legal masks (only for first trajectory)
                 if i == 0:
-                    print(f"  Legal masks:")
+                    print("  Legal masks:")
                     legal_masks = replay_buffer.legal_masks[traj_idx, :length]
                     for step in range(length):
                         legal_actions = torch.where(legal_masks[step])[0].tolist()
                         print(f"    Step {step}: legal actions {legal_actions}")
 
                     # Log probabilities derived from stored logits for completeness
-                    print(f"  Log probabilities (from logits):")
+                    print("  Log probabilities (from logits):")
                     for step in range(length):
                         logits = replay_buffer.logits[traj_idx, step]
                         legal_mask = replay_buffer.legal_masks[traj_idx, step]
@@ -647,13 +647,13 @@ def print_replay_buffer_summary(replay_buffer):
                         print(f"    Step {step}: [{', '.join(formatted_probs)}]")
 
         if replay_buffer.is_transformer:
-            print(f"\n--- TRANSFORMER-SPECIFIC DATA ---")
+            print("\n--- TRANSFORMER-SPECIFIC DATA ---")
             print(
-                f"Token positions: {replay_buffer.current_token_positions[:replay_buffer.size].tolist()}"
+                f"Token positions: {replay_buffer.current_token_positions[: replay_buffer.size].tolist()}"
             )
 
             # Show transition token ends for first few trajectories
-            print(f"\nTransition token ends:")
+            print("\nTransition token ends:")
             for i in range(min(3, len(valid_indices))):
                 traj_idx = valid_indices[i]
                 length = replay_buffer.trajectory_lengths[traj_idx]

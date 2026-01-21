@@ -37,8 +37,8 @@ class BenchmarkResult:
         status = "✓" if self.passes_correctness else "✗"
         return (
             f"{status} {self.name:50s} | "
-            f"Baseline: {self.baseline_time*1000:8.3f}ms | "
-            f"Optimized: {self.optimized_time*1000:8.3f}ms | "
+            f"Baseline: {self.baseline_time * 1000:8.3f}ms | "
+            f"Optimized: {self.optimized_time * 1000:8.3f}ms | "
             f"Speedup: {self.speedup:5.2f}x | "
             f"Max diff: {self.max_diff:.2e}"
         )
@@ -585,7 +585,7 @@ def test_safe_divide(
 
         status = "✓" if passes else "✗"
         print(
-            f"  {status} {name:30s} | Time: {bench_time*1000:8.3f}ms | Max diff: {max_diff:.2e}"
+            f"  {status} {name:30s} | Time: {bench_time * 1000:8.3f}ms | Max diff: {max_diff:.2e}"
         )
 
         results[name] = {"time": bench_time, "passes": passes, "max_diff": max_diff}

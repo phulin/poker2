@@ -1211,8 +1211,8 @@ def setup_showdown_evaluator(
     idx = torch.tensor([0])
     pot = evaluator.env.pot[idx].unsqueeze(-1)
     potentials = (
-        evaluator.env.stacks[idx] + pot - evaluator.env.starting_stack
-    ) / evaluator.env.scale
+        evaluator.env.stacks[idx] + pot - evaluator.env.starting_stacks[idx]
+    ) / evaluator.env.scale[idx, None]
 
     return evaluator, env, idx, potentials.squeeze(0)
 

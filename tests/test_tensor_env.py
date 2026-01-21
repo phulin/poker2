@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 
 from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
@@ -7,12 +9,13 @@ from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
 
 def _make_env(
     N=1,
-    starting_stack=1000,
+    mean_stack=1000,
     sb=5,
     bb=10,
     default_bet_bins=None,
     device=None,
     seed=123,
+    randomize_stacks=False,
 ):
     # Create RNG
     if device is None:
@@ -23,12 +26,13 @@ def _make_env(
 
     env = HUNLTensorEnv(
         num_envs=N,
-        starting_stack=starting_stack,
+        mean_stack=mean_stack,
         sb=sb,
         bb=bb,
         default_bet_bins=default_bet_bins,
         device=device,
         rng=rng,
+        randomize_stacks=randomize_stacks,
     )
     env.reset()
     return env
@@ -93,6 +97,46 @@ def test_n1_allin_and_auto_runout_rewards():
     assert env.done.item() is True
     # Reward must be finite and scaled
     assert torch.isfinite(r).all()
+
+
+def test_randomize_stacks_on_reset():
+    mean_stack = 1000
+    env = _make_env(
+        N=4, mean_stack=mean_stack, sb=10, bb=20, randomize_stacks=True, seed=999
+    )
+    min_allowed = math.ceil(mean_stack * 0.1)
+    env_rows = torch.arange(env.N, device=env.device)
+    # Total chips preserved and minimum enforced
+    assert torch.all(env.starting_stacks.sum(dim=1) == mean_stack * 2)
+    assert torch.all(env.starting_stacks >= min_allowed)
+    # Scale uses p0 starting stack
+    torch.testing.assert_close(env.scale, env.starting_stacks[:, 0].to(env.float_dtype))
+    # Stacks after posting blinds are based on sampled stacks
+    torch.testing.assert_close(
+        env.stacks[env_rows, env.button],
+        env.starting_stacks[env_rows, env.button] - env.sb,
+    )
+    torch.testing.assert_close(
+        env.stacks[env_rows, 1 - env.button],
+        env.starting_stacks[env_rows, 1 - env.button] - env.bb,
+    )
+
+
+def test_rewards_scale_with_p0_starting_stack():
+    env = _make_env(N=1, mean_stack=500, sb=0, bb=0, randomize_stacks=True, seed=1234)
+    gain = 25
+    env.pot[0] = 0
+    env.stacks[0, 0] = env.starting_stacks[0, 0] + gain
+    env.stacks[0, 1] = env.starting_stacks[0, 1] - gain
+    reward = env.finish_and_assign_rewards(
+        torch.tensor([0], device=env.device), torch.tensor([0], device=env.device)
+    )
+    expected = torch.tensor(
+        [gain / float(env.starting_stacks[0, 0])],
+        dtype=env.float_dtype,
+        device=env.device,
+    )
+    torch.testing.assert_close(reward, expected)
 
 
 def test_n1_action_history_logging():
@@ -281,11 +325,11 @@ def test_blinds_correctly_entered_after_reset():
     """Test that blinds are correctly deducted from player stacks and added to pot after reset."""
     # Test with different blind sizes
     sb, bb = 25, 50
-    starting_stack = 1000
+    mean_stack = 1000
 
     env = HUNLTensorEnv(
         num_envs=3,
-        starting_stack=starting_stack,
+        mean_stack=mean_stack,
         sb=sb,
         bb=bb,
         default_bet_bins=[0.5, 1.0, 1.5],
@@ -313,8 +357,8 @@ def test_blinds_correctly_entered_after_reset():
         ), f"Env {i}: Expected BB player {bb_player} committed {bb}, got {env.committed[i, bb_player]}"
 
     # Check that stacks are reduced by the blinds
-    expected_stack_after_blinds = starting_stack - sb  # SB player
-    expected_stack_bb = starting_stack - bb  # BB player
+    expected_stack_after_blinds = mean_stack - sb  # SB player
+    expected_stack_bb = mean_stack - bb  # BB player
 
     # The button determines who is SB/BB, so we need to check based on button position
     for i in range(env.N):
@@ -332,7 +376,7 @@ def test_blinds_correctly_entered_after_reset():
     sb2, bb2 = 10, 20
     env2 = HUNLTensorEnv(
         num_envs=2,
-        starting_stack=2000,
+        mean_stack=2000,
         sb=sb2,
         bb=bb2,
         default_bet_bins=[0.5, 1.0],
@@ -382,7 +426,7 @@ def test_reward_assignment_perspective():
     # Scenario 1: Player 0 wins at showdown
     env1 = HUNLTensorEnv(
         num_envs=1,
-        starting_stack=1000,
+        mean_stack=1000,
         sb=25,
         bb=50,
         default_bet_bins=[0.5, 1.0],
@@ -415,7 +459,7 @@ def test_reward_assignment_perspective():
     # Scenario 2: Test with multiple environments to ensure consistency
     env2 = HUNLTensorEnv(
         num_envs=3,
-        starting_stack=2000,
+        mean_stack=2000,
         sb=50,
         bb=100,
         default_bet_bins=[0.5, 1.0],
@@ -459,7 +503,7 @@ def test_reward_assignment_perspective():
     # Test Player 0 fold (Player 0 loses)
     env3 = HUNLTensorEnv(
         num_envs=1,
-        starting_stack=1000,
+        mean_stack=1000,
         sb=25,
         bb=50,
         default_bet_bins=[0.5, 1.0],
@@ -484,7 +528,7 @@ def test_reward_assignment_perspective():
     # Test Player 1 fold (Player 0 wins)
     env4 = HUNLTensorEnv(
         num_envs=1,
-        starting_stack=1000,
+        mean_stack=1000,
         sb=25,
         bb=50,
         default_bet_bins=[0.5, 1.0],
@@ -517,7 +561,7 @@ def test_reward_calculation_consistency():
     # Create multiple environments and force them to showdown
     env = HUNLTensorEnv(
         num_envs=4,
-        starting_stack=1500,
+        mean_stack=1500,
         sb=30,
         bb=60,
         default_bet_bins=[0.5, 1.0, 1.5],
@@ -576,7 +620,7 @@ def test_reward_calculation_consistency():
 
 def test_fold_reward_assignment():
     """Test that fold rewards are assigned correctly based on the folding player's perspective."""
-    env = _make_env(N=2, starting_stack=1000, sb=25, bb=50, default_bet_bins=[0.5, 1.0])
+    env = _make_env(N=2, mean_stack=1000, sb=25, bb=50, default_bet_bins=[0.5, 1.0])
     env.reset(force_button=torch.tensor([0, 0], device=env.device))
 
     # Test 1: Player 0 folds in env 0 (should get negative reward)
@@ -619,7 +663,7 @@ def test_fold_reward_assignment():
 
 def _make_flop_showdown_env(
     N=1,
-    starting_stack=1000,
+    mean_stack=1000,
     sb=5,
     bb=10,
     default_bet_bins=None,
@@ -640,7 +684,7 @@ def _make_flop_showdown_env(
 
     env = HUNLTensorEnv(
         num_envs=N,
-        starting_stack=starting_stack,
+        mean_stack=mean_stack,
         sb=sb,
         bb=bb,
         default_bet_bins=bet_bins,
@@ -826,7 +870,7 @@ def test_flop_showdown_with_betting():
 def test_flop_showdown_edge_cases():
     """Test edge cases in flop_showdown mode."""
     # Test with very small stacks
-    env = _make_flop_showdown_env(N=1, starting_stack=100, sb=25, bb=50, seed=222)
+    env = _make_flop_showdown_env(N=1, mean_stack=100, sb=25, bb=50, seed=222)
 
     # Play through
     steps = 0
@@ -846,7 +890,7 @@ def test_flop_showdown_edge_cases():
     assert env.done.item(), f"Expected game to complete, got done={env.done.item()}"
 
     # Test with all-in scenarios
-    env2 = _make_flop_showdown_env(N=2, starting_stack=200, sb=50, bb=100, seed=333)
+    env2 = _make_flop_showdown_env(N=2, mean_stack=200, sb=50, bb=100, seed=333)
 
     # Force all-in scenarios
     steps = 0
@@ -873,7 +917,7 @@ def test_allin_legal_mask_logic():
     """Test the all-in legal mask logic for different scenarios."""
 
     # Test 1: When opponent is all-in, we can fold or call
-    env = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
     env.reset()
 
     # Manually set up scenario where player 1 is all-in
@@ -899,7 +943,7 @@ def test_allin_legal_mask_logic():
         ), f"Should not be able to bet/raise/all-in (bin {bin_idx}) when opponent all-in"
 
     # Test 2: When we are all-in, we can only call
-    env2 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env2 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
     env2.reset()
 
     # Manually set up scenario where player 0 is all-in
@@ -924,9 +968,7 @@ def test_allin_legal_mask_logic():
         ), f"Should not be able to bet/raise/all-in (bin {bin_idx}) when we are all-in"
 
     # Test 3: When both players are all-in, we can only call
-    env3 = _make_env(
-        N=1, starting_stack=200, sb=50, bb=100
-    )  # Small stacks to force all-in
+    env3 = _make_env(N=1, mean_stack=200, sb=50, bb=100)  # Small stacks to force all-in
     env3.reset()
 
     # Manually set up scenario where both players are all-in
@@ -959,7 +1001,7 @@ def test_allin_legal_mask_edge_cases():
     """Test edge cases for all-in legal mask logic."""
 
     # Test with multiple environments having different all-in states
-    env = _make_env(N=4, starting_stack=1000, sb=25, bb=50)
+    env = _make_env(N=4, mean_stack=1000, sb=25, bb=50)
     env.reset()
 
     # Manually set up different all-in scenarios
@@ -1040,7 +1082,7 @@ def test_allin_legal_mask_with_betting():
     """Test all-in legal mask logic with actual betting scenarios."""
 
     # Test scenario: SB goes all-in, BB can fold or call
-    env = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
     env.reset()
 
     # Make SB (player 0) go all-in
@@ -1061,7 +1103,7 @@ def test_allin_legal_mask_with_betting():
             ), f"BB should not be able to bet/raise/all-in (bin {bin_idx}) vs SB all-in"
 
     # Test scenario: BB goes all-in, SB can fold or call
-    env2 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env2 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
     env2.reset()
 
     # Make BB (player 1) go all-in
@@ -1091,7 +1133,7 @@ def test_allin_legal_mask_consistency():
     """Test that all-in legal mask logic is consistent across different scenarios."""
 
     # Test scenario 1: SB goes all-in first
-    env1 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env1 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
     env1.reset()
 
     # Make SB (player 0) go all-in
@@ -1111,7 +1153,7 @@ def test_allin_legal_mask_consistency():
             ), f"BB should not be able to bet/raise/all-in (bin {bin_idx}) vs SB all-in"
 
     # Test scenario 2: BB goes all-in first
-    env2 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env2 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
     env2.reset()
 
     # Make BB (player 1) go all-in
@@ -1137,7 +1179,7 @@ def test_allin_legal_mask_consistency():
                 ), f"SB should not be able to bet/raise/all-in (bin {bin_idx}) vs BB all-in"
 
     # Test scenario 3: Manual setup to test all-in player restrictions
-    env3 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env3 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
     env3.reset()
 
     # Manually set player 0 as all-in
@@ -1159,7 +1201,7 @@ def test_minimum_raise_rules():
     """Test minimum raise rules and raise sizing validation."""
 
     # Test 1: Basic minimum raise from big blind
-    env = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
     env.reset()
 
     # SB should be able to raise to at least BB + min raise (50 + 50 = 100)
@@ -1180,7 +1222,7 @@ def test_minimum_raise_rules():
             ), f"Additional amount {additional_amount} is less than minimum raise {min_raise}"
 
     # Test 2: Minimum raise after a bet
-    env2 = _make_env(N=1, starting_stack=1000, sb=25, bb=50)
+    env2 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
     env2.reset()
 
     # Make a bet first (half pot = 37.5, round to 38)
@@ -1205,7 +1247,7 @@ def test_minimum_raise_rules():
             ), f"Additional amount {additional_amount} is less than minimum raise {min_raise}"
 
     # Test 3: All-in as valid raise (even if less than minimum)
-    env3 = _make_env(N=1, starting_stack=100, sb=25, bb=50)  # Small stack
+    env3 = _make_env(N=1, mean_stack=100, sb=25, bb=50)  # Small stack
     env3.reset()
 
     # Make a bet that's larger than remaining stack
@@ -1220,7 +1262,7 @@ def test_minimum_raise_rules():
     ), "All-in should be legal even if less than minimum raise"
 
     # Test 4: Multiple environments with different raise scenarios
-    env4 = _make_env(N=3, starting_stack=1000, sb=25, bb=50)
+    env4 = _make_env(N=3, mean_stack=1000, sb=25, bb=50)
     env4.reset()
 
     # Set up different scenarios in each environment
@@ -1256,7 +1298,7 @@ def test_button_position_and_blind_posting():
     """Test button position and blind posting rules."""
 
     # Test 1: Button position assignment and blind posting
-    env = _make_env(N=4, starting_stack=1000, sb=25, bb=50)
+    env = _make_env(N=4, mean_stack=1000, sb=25, bb=50)
     env.reset()
 
     # Check that button positions are assigned correctly
@@ -1282,7 +1324,7 @@ def test_button_position_and_blind_posting():
         ), f"Env {i}: Pot should be {expected_pot}, got {env.pot[i]}"
 
     # Test 2: Button randomization on reset (not rotation)
-    env2 = _make_env(N=2, starting_stack=1000, sb=25, bb=50)
+    env2 = _make_env(N=2, mean_stack=1000, sb=25, bb=50)
     env2.reset()
 
     initial_button_0 = env2.button[0].item()
@@ -1310,7 +1352,7 @@ def test_button_position_and_blind_posting():
     assert env2.button[1].item() in [0, 1], "Button position should be 0 or 1"
 
     # Test 3: Blind posting with different stack sizes
-    env3 = _make_env(N=2, starting_stack=100, sb=25, bb=50)  # Small stacks
+    env3 = _make_env(N=2, mean_stack=100, sb=25, bb=50)  # Small stacks
     env3.reset()
 
     for i in range(2):
@@ -1318,8 +1360,8 @@ def test_button_position_and_blind_posting():
         bb_player = 1 - sb_player
 
         # Check that stacks are reduced by blind amounts
-        expected_sb_stack = env3.starting_stack - env3.sb
-        expected_bb_stack = env3.starting_stack - env3.bb
+        expected_sb_stack = env3.mean_stack - env3.sb
+        expected_bb_stack = env3.mean_stack - env3.bb
 
         assert (
             env3.stacks[i, sb_player] == expected_sb_stack
@@ -1329,7 +1371,7 @@ def test_button_position_and_blind_posting():
         ), f"Env {i}: BB stack should be {expected_bb_stack}"
 
     # Test 4: Action order based on button position
-    env4 = _make_env(N=3, starting_stack=1000, sb=25, bb=50)
+    env4 = _make_env(N=3, mean_stack=1000, sb=25, bb=50)
     env4.reset()
 
     for i in range(3):
@@ -1343,12 +1385,12 @@ def test_button_position_and_blind_posting():
         ), f"Env {i}: SB player {sb_player} should act first"
 
     # Test 5: Blind posting edge case - stack smaller than big blind
-    env5 = _make_env(N=1, starting_stack=30, sb=25, bb=50)  # Stack < BB
+    env5 = _make_env(N=1, mean_stack=30, sb=25, bb=50)  # Stack < BB
     env5.reset()
 
     # Player with insufficient chips will have negative stack (environment doesn't handle this edge case)
     bb_player = 1 - env5.button[0].item()
-    expected_bb_stack = env5.starting_stack - env5.bb  # 30 - 50 = -20
+    expected_bb_stack = env5.mean_stack - env5.bb  # 30 - 50 = -20
     assert (
         env5.stacks[0, bb_player] == expected_bb_stack
     ), f"BB player should have stack {expected_bb_stack}"
@@ -1357,7 +1399,7 @@ def test_button_position_and_blind_posting():
     ), f"BB player should have committed {env5.bb}"
 
     # Test 6: Multiple resets maintain button randomization
-    env6 = _make_env(N=2, starting_stack=1000, sb=25, bb=50)
+    env6 = _make_env(N=2, mean_stack=1000, sb=25, bb=50)
 
     button_positions = []
     for _ in range(5):  # Multiple resets
@@ -1375,7 +1417,7 @@ def test_deck_reset_forced_cards():
     print("Testing deck reset with 1024 environments...")
 
     # Create environment with 1024 environments
-    env = _make_env(N=1024, starting_stack=1000, sb=25, bb=50, seed=123)
+    env = _make_env(N=1024, mean_stack=1000, sb=25, bb=50, seed=123)
 
     # Reset to trigger deck shuffling
     forced_cards = torch.arange(1024 * 4, device=env.device).reshape(1024, 4) % 52

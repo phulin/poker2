@@ -61,7 +61,7 @@ class CFRManager:
         # Allocate internal env with same parameters as env_proto
         self.env = HUNLTensorEnv(
             num_envs=self.M,
-            starting_stack=env_proto.starting_stack,
+            mean_stack=env_proto.mean_stack,
             sb=env_proto.sb,
             bb=env_proto.bb,
             default_bet_bins=self.bet_bins,
@@ -70,6 +70,7 @@ class CFRManager:
             float_dtype=float_dtype,
             debug_step_table=False,
             flop_showdown=env_proto.flop_showdown,
+            randomize_stacks=env_proto.randomize_stacks,
         )
 
         self.use_rebel_features = use_rebel_features
@@ -517,7 +518,10 @@ class CFRManager:
             pot,
             torch.where(winners == 2, pot / 2.0, torch.zeros_like(pot)),
         )
-        return (my_stack + pot_share - float(self.env.starting_stack)) / self.env.scale
+        p0_starting_stack = self.env.starting_stacks[env_indices, 0].to(
+            self.float_dtype
+        )
+        return (my_stack + pot_share - p0_starting_stack) / self.env.scale[env_indices]
 
     def expand_and_step_all_branches(
         self, parents: torch.Tensor, depth: int
@@ -536,9 +540,12 @@ class CFRManager:
         child_masks = self.legal_mask_full(children)
         # Sanity: child_masks shape and bin dimension
         B = len(self.bet_bins) + 3
-        assert child_masks.shape == (
-            children.numel(),
-            B,
+        assert (
+            child_masks.shape
+            == (
+                children.numel(),
+                B,
+            )
         ), f"child_masks shape mismatch: got {tuple(child_masks.shape)}, expected ({children.numel()}, {B})"
         amounts, full_mask = self.env.legal_bins_amounts_and_mask(self.bet_bins)
         # Map collapsed->bin index
