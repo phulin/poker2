@@ -7,8 +7,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from alphaholdem.core.structured_config import CFRType
-from alphaholdem.env.card_utils import (
+from p2.core.structured_config import CFRType
+from p2.env.card_utils import (
     calculate_unblocked_mass,
     combo_blocking_tensor,
     combo_index,
@@ -16,19 +16,19 @@ from alphaholdem.env.card_utils import (
     hand_combos_tensor,
     mask_conflicting_combos,
 )
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.env.rules import rank_hands
-from alphaholdem.models.mlp.better_features import ScalarContext
-from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.model_output import ModelOutput
-from alphaholdem.search.cfr_evaluator import CFREvaluator, PublicBeliefState
-from alphaholdem.search.rebel_cfr_evaluator import (
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.rules import rank_hands
+from p2.models.mlp.better_features import ScalarContext
+from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+from p2.models.mlp.better_ffn import BetterFFN
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.models.model_output import ModelOutput
+from p2.search.cfr_evaluator import CFREvaluator, PublicBeliefState
+from p2.search.rebel_cfr_evaluator import (
     NUM_HANDS,
     RebelCFREvaluator,
 )
-from alphaholdem.utils.model_utils import compute_masked_logits
+from p2.utils.model_utils import compute_masked_logits
 
 
 def get_device() -> torch.device:

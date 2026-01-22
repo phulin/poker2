@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "alphaholdem"
+name = "p2"
 version = "0.1.0"
-description = "AlphaHoldem: Deep Reinforcement Learning for Texas Hold'em Poker"
+description = "P2: Deep Reinforcement Learning for HUNL Texas Hold'em"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
@@ -80,7 +80,7 @@ target-version = ["py311", "py312", "py313"]
 profile = "black"
 line_length = 88
 src_paths = ["src", "tests", "debugging"]
-known_first_party = ["alphaholdem"]
+known_first_party = ["p2"]
 
 [tool.pytest.ini_options]
 filterwarnings = [

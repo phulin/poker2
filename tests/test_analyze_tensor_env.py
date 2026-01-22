@@ -5,25 +5,25 @@ import re
 import pytest
 import torch
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     Config,
     EnvConfig,
     ModelConfig,
     SearchConfig,
 )
-from alphaholdem.env.analyze_tensor_env import (
+from p2.env.analyze_tensor_env import (
     PreflopAnalyzer,
     RebelPreflopAnalyzer,
 )
-from alphaholdem.env.card_utils import hand_combos_tensor
-from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
-from alphaholdem.models.model_output import ModelOutput
-from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
-from alphaholdem.models.transformer.structured_embedding_data import (
+from p2.env.card_utils import hand_combos_tensor
+from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+from p2.models.mlp.rebel_ffn import RebelFFN
+from p2.models.model_output import ModelOutput
+from p2.models.transformer.poker_transformer import PokerTransformerV1
+from p2.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.models.transformer.tokens import (
+from p2.models.transformer.tokens import (
     HOLE0_INDEX,
     HOLE1_INDEX,
     Context,
@@ -330,7 +330,7 @@ class DummyValueModel(torch.nn.Module):
 def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
     # Monkeypatch factory to use DummyStateEncoder so model sees hole indices
     monkeypatch.setattr(
-        "alphaholdem.env.analyze_tensor_env.create_state_encoder_for_model",
+        "p2.env.analyze_tensor_env.create_state_encoder_for_model",
         lambda model, env, device, num_bet_bins: DummyStateEncoder(env, device),
     )
 

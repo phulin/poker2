@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.env.types import GameState, PlayerState
-from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1
+from p2.env.types import GameState, PlayerState
+from p2.models.cnn import ActionsHUEncoderV1, CardsPlanesV1
 
 
 def make_state(street: str, board: list[int]) -> GameState:

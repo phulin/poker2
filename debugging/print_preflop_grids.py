@@ -23,9 +23,9 @@ from hydra.core.config_store import ConfigStore
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 
-from alphaholdem.core.structured_config import Config, ModelType, NonlinearityType
-from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
-from alphaholdem.utils.training_utils import print_preflop_range_grid
+from p2.core.structured_config import Config, ModelType, NonlinearityType
+from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.utils.training_utils import print_preflop_range_grid
 
 
 @dataclass

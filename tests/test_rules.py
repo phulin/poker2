@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.env import rules
-from alphaholdem.env.card_utils import NUM_HANDS, combo_lookup_tensor
+from p2.env import rules
+from p2.env.card_utils import NUM_HANDS, combo_lookup_tensor
 
 # Helper to make card by rank/suit (r: 0..12 for 2..A, s: 0..3)
 

@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from alphaholdem.models.cnn import SiameseConvNetV1
-from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
-from alphaholdem.rl.dred_pool import DREDPool, DREDSnapshotData
+from p2.models.cnn import SiameseConvNetV1
+from p2.models.cnn.cnn_embedding_data import CNNEmbeddingData
+from p2.rl.dred_pool import DREDPool, DREDSnapshotData
 
 pytestmark = pytest.mark.skip(reason="Tests in this file are temporarily disabled.")
 

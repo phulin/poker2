@@ -9,10 +9,10 @@ different data formats.
 import torch
 import torch.nn as nn
 
-from alphaholdem.models.transformer.structured_embedding_data import (
+from p2.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.utils.model_utils import (
+from p2.utils.model_utils import (
     compute_masked_logits,
     get_best_action,
     get_log_probs,

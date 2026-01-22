@@ -1,17 +1,17 @@
 import torch
 import torch.nn as nn
 
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.transformer.structured_embedding_data import (
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.models.transformer.tokens import (
+from p2.models.transformer.tokens import (
     Special,
     get_action_token_id_offset,
     get_card_token_id_offset,
 )
-from alphaholdem.search.cfr_manager import CFRManager, SearchConfig
-from alphaholdem.search.dcfr import run_dcfr
+from p2.search.cfr_manager import CFRManager, SearchConfig
+from p2.search.dcfr import run_dcfr
 
 
 class DummyModel(nn.Module):

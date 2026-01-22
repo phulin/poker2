@@ -1,8 +1,8 @@
 import torch
 
-from alphaholdem.rl.losses import CFRDistillationLoss, ValueLossType
-from alphaholdem.search.cfr_manager import CFRManager
-from alphaholdem.search.dcfr import (
+from p2.rl.losses import CFRDistillationLoss, ValueLossType
+from p2.search.cfr_manager import CFRManager
+from p2.search.dcfr import (
     collapse_legal_full_to_4,
     collapse_policy_full_to_4,
     run_dcfr,
@@ -148,7 +148,7 @@ def test_cfr_distillation_loss_computation():
 
 def test_cfr_distillation_loss():
     """Test CFRDistillationLoss with dummy data."""
-    from alphaholdem.rl.popart_normalizer import PopArtNormalizer
+    from p2.rl.popart_normalizer import PopArtNormalizer
 
     BATCH = 2
     BINS = 7

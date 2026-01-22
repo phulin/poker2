@@ -2,7 +2,7 @@ defaults:
   - config_transformer
   - _self_
 
-# AlphaHoldem Default Configuration
+# Default Configuration
 # CNN-specific overrides over transformer defaults
 
 # === TRAINING CONFIGURATION ===
@@ -44,7 +44,7 @@ model:
   fusion_hidden: [1024, 1024]
   num_actions: 8
   use_gradient_checkpointing: true
-  
+
 # === ENVIRONMENT CONFIGURATION ===
 # keep base env; no overrides here
 env: {}

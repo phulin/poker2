@@ -9,8 +9,8 @@ P2 is a fast, neural-network-driven solver for Heads-Up No-Limit Texas Hold'em (
 - Keep experiments reproducible via Hydra configs and checkpoint management.
 
 ## Main Training Entry Points
-- `src/alphaholdem/cli/train_kbest.py`: PPO self-play with K-Best/DReD opponent pools. Used for CNN and transformer models. Model returns a policy (no search) at any given game state.
-- `src/alphaholdem/cli/train_rebel.py`: ReBeL-style CFR training with search supervision. Used for MLP/TRM models. Uses search to the end of the street with neural value function approximation at the cutoff. Represents games as public belief states (2x1326 range vectors).
+- `src/p2/cli/train_kbest.py`: PPO self-play with K-Best/DReD opponent pools. Used for CNN and transformer models. Model returns a policy (no search) at any given game state.
+- `src/p2/cli/train_rebel.py`: ReBeL-style CFR training with search supervision. Used for MLP/TRM models. Uses search to the end of the street with neural value function approximation at the cutoff. Represents games as public belief states (2x1326 range vectors).
 
 ## Model Architectures (4 Families)
 1. **CNN (SiameseConvNetV1)**: Convolutional encoders over card/action tensors for fast self-play.
@@ -23,19 +23,19 @@ Hydra-based configuration lives in `conf/`, and `model.name` selects the archite
 ## Quickstart (Training)
 ```bash
 # PPO self-play (CNN or transformer, via Hydra configs)
-python src/alphaholdem/cli/train_kbest.py --config-name=config
-python src/alphaholdem/cli/train_kbest.py --config-name=config_transformer
+python src/p2/cli/train_kbest.py --config-name=config
+python src/p2/cli/train_kbest.py --config-name=config_transformer
 
 # ReBeL CFR training (MLP/TRM)
-python src/alphaholdem/cli/train_rebel.py --config-name=config_rebel_cfr
+python src/p2/cli/train_rebel.py --config-name=config_rebel_cfr
 ```
 
 ## Repository Structure
-- `src/alphaholdem/`: Core library (envs, models, RL trainers, CFR/search, CLI).
+- `src/p2/`: Core library (envs, models, RL trainers, CFR/search, CLI).
 - `conf/`: Hydra configs for training and model variants.
 - `scripts/`: Benchmarks, profiling, and conversion utilities.
 - `tests/`: Unit/integration tests.
 
 ## Additional Docs
-- `src/alphaholdem/K_BEST_README.md`: K-Best self-play design and usage.
+- `src/p2/K_BEST_README.md`: K-Best self-play design and usage.
 - `conf/README.md`: Config catalog and override examples.

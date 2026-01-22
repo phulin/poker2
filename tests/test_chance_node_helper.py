@@ -8,10 +8,10 @@ from collections import Counter
 import pytest
 import torch
 
-from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.model_output import ModelOutput
-from alphaholdem.search.chance_node_helper import ChanceNodeHelper
+from p2.env.card_utils import NUM_HANDS
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.models.model_output import ModelOutput
+from p2.search.chance_node_helper import ChanceNodeHelper
 
 
 class MockModel:

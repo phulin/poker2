@@ -7,20 +7,20 @@ if str(ROOT) not in sys.path:
 
 import torch
 
-from alphaholdem.core.structured_config import Config, ModelType, NonlinearityType
-from alphaholdem.core.structured_config import CFRType
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
-from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.models.mlp.better_trm import BetterTRM
-from alphaholdem.models.model_output import ModelOutput
-from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
+from p2.core.structured_config import Config, ModelType, NonlinearityType
+from p2.core.structured_config import CFRType
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
+from p2.models.mlp.better_ffn import BetterFFN
+from p2.models.mlp.better_trm import BetterTRM
+from p2.models.model_output import ModelOutput
+from p2.rl.cfr_trainer import RebelCFRTrainer
 from debugging.debug_cfr_iterations import (
     UniformPolicyWrapper,
     load_model_from_checkpoint,
 )
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
-from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
+from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
+from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
 def _make_cfg(bet_bins: list[float] | None = None) -> Config:

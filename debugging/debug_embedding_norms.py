@@ -17,13 +17,13 @@ import sys
 import torch
 import torch.nn as nn
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     Config,
 )
-from alphaholdem.models.transformer.structured_embedding_data import (
+from p2.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.models.transformer.tokens import (
+from p2.models.transformer.tokens import (
     CLS_INDEX,
     HOLE0_INDEX,
     HOLE1_INDEX,
@@ -31,10 +31,10 @@ from alphaholdem.models.transformer.tokens import (
     get_card_token_id_offset,
     get_special_token_id_offset,
 )
-from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.utils.config_loader import load_config_from_checkpoint
-from alphaholdem.utils.model_context import model_eval
-from alphaholdem.utils.model_utils import get_probs_and_values
+from p2.rl.self_play import SelfPlayTrainer
+from p2.utils.config_loader import load_config_from_checkpoint
+from p2.utils.model_context import model_eval
+from p2.utils.model_utils import get_probs_and_values
 
 RANKS = "23456789TJQKA"
 SUITS = "shdc"
@@ -178,11 +178,11 @@ def get_action_predictions(
     device: torch.device,
 ):
     """Get action predictions from the model for the current state."""
-    from alphaholdem.utils import model_eval
+    from p2.utils import model_eval
 
     with model_eval(trainer.model), torch.no_grad():
         # Convert to batch format - StructuredEmbeddingData needs to be batched
-        from alphaholdem.models.transformer.structured_embedding_data import (
+        from p2.models.transformer.structured_embedding_data import (
             StructuredEmbeddingData,
         )
 
@@ -692,7 +692,7 @@ def main():
         print(
             f"Recreating replay buffer (was on {trainer.replay_buffer.device}, need {device_obj})"
         )
-        from alphaholdem.rl.vectorized_replay import VectorizedReplayBuffer
+        from p2.rl.vectorized_replay import VectorizedReplayBuffer
 
         sequence_length = (
             trainer.state_encoder.sequence_length if trainer.is_transformer else -1

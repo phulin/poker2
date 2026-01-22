@@ -3,11 +3,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from alphaholdem.core.structured_config import CFRType, SearchConfig
-from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
-from alphaholdem.rl.pbs_pool import PBSPool
-from alphaholdem.search.rebel_cfr_evaluator import RebelFeatureEncoder
+from p2.core.structured_config import CFRType, SearchConfig
+from p2.env.card_utils import NUM_HANDS
+from p2.models.mlp.rebel_ffn import RebelFFN
+from p2.rl.pbs_pool import PBSPool
+from p2.search.rebel_cfr_evaluator import RebelFeatureEncoder
 
 
 def get_device() -> torch.device:

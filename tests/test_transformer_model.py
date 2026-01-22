@@ -2,17 +2,17 @@
 
 import torch
 
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.transformer.embeddings import (
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.transformer.embeddings import (
     PokerFusedEmbedding,
     combine_embeddings,
 )
-from alphaholdem.models.transformer.poker_transformer import PokerTransformerV1
-from alphaholdem.models.transformer.structured_embedding_data import (
+from p2.models.transformer.poker_transformer import PokerTransformerV1
+from p2.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
-from alphaholdem.models.transformer.tokens import (
+from p2.models.transformer.token_sequence_builder import TokenSequenceBuilder
+from p2.models.transformer.tokens import (
     Context,
     Special,
     get_action_token_id_offset,

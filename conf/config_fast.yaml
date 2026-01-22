@@ -2,7 +2,7 @@ defaults:
   - config_transformer
   - _self_
 
-# AlphaHoldem Fast Configuration
+# Fast Configuration
 # Fast configuration for testing and development
 
 # === TRAINING CONFIGURATION ===
@@ -54,7 +54,7 @@ model:
   actions_hidden: 128
   fusion_hidden: [512, 512]
   num_actions: 8
-  
+
 # === ENVIRONMENT CONFIGURATION ===
 # keep base env; no overrides here
 env: {}

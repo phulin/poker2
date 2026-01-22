@@ -1,6 +1,6 @@
 import torch
 
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.hunl_tensor_env import HUNLTensorEnv
 
 
 def test_legal_mask_bins_for_subset():

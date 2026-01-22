@@ -1,4 +1,4 @@
-# AlphaHoldem Transformer Configuration
+# Transformer Configuration
 # Configuration for transformer-based poker model
 
 # === TRAINING CONFIGURATION ===
@@ -59,7 +59,7 @@ train:
   max_trajectory_length: 9
   max_sequence_length: 47
   use_kv_cache: false
-  
+
   # PPO hyperparameters
   ppo_eps: 0.2
   ppo_delta1: 3.0
@@ -73,13 +73,13 @@ train:
   entropy_decay_portion: 0.6
   value_coef: 0.5
   grad_clip: 1.0
-  
+
   # Value loss configuration
   value_loss_type: "quantile"
   huber_delta: 0.5
   quantile_huber_kappa: 1.0
   return_clipping: false  # Enable return clipping in value loss
-  
+
   # Mixed precision configuration
   use_mixed_precision: true
   loss_scale: 128.0
@@ -89,10 +89,10 @@ train:
   value_head_learning_rate_final: 1e-5  # Final learning rate for value head
   policy_trunk_learning_rate: 3e-4  # Learning rate for policy head and trunk
   policy_trunk_learning_rate_final: 1e-5  # Final learning rate for policy head and trunk
-  
+
   # KL divergence configuration
   target_kl: 0.02  # Target KL divergence for adaptive controllers
-  
+
   # Learning rate scaling controller
   lr_scaling_init_value: 1.0  # Initial LR scaling factor
   lr_scaling_min_value: 3e-2  # Minimum LR scaling factor
@@ -101,7 +101,7 @@ train:
   lr_scaling_decrease_factor: 0.67  # Factor to decrease LR scaling
   lr_scaling_upper_threshold: 2.0  # Upper threshold multiplier
   lr_scaling_lower_threshold: 0.5  # Lower threshold multiplier
-  
+
   # Transformer-specific training parameters
   auxiliary_loss_coef: 0.1  # Coefficient for hand range auxiliary loss
   warmup_steps: 1000       # Learning rate warmup steps
@@ -118,20 +118,20 @@ model:
   n_heads: 2    # Reduced for better performance
   dropout: 0.0
   use_gradient_checkpointing: false  # Disabled for performance
-  
+
 # === ENVIRONMENT CONFIGURATION ===
 env:
   # Game configuration
   stack: 1000
   sb: 5
   bb: 10
-  
+
   # Betting configuration
   bet_bins: [0.5, 0.75, 1.0, 1.5, 2.0]
-  
+
   # Game flow configuration
   flop_showdown: false  # Skip turn/river, go directly to showdown after flop
-  
+
   # Debug configuration
   debug_step_table: false
 

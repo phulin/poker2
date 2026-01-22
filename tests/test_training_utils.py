@@ -1,8 +1,8 @@
 import torch
 
-from alphaholdem.core.structured_config import Config
-from alphaholdem.utils import training_utils
-from alphaholdem.utils.training_utils import _resolve_search_iterations
+from p2.core.structured_config import Config
+from p2.utils import training_utils
+from p2.utils.training_utils import _resolve_search_iterations
 
 
 class _TrainerStub:

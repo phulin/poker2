@@ -46,17 +46,17 @@ from hydra.core.config_store import ConfigStore
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 
-from alphaholdem.core.structured_config import Config, ModelType, NonlinearityType
-from alphaholdem.env import card_utils
-from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.base_mlp_model import BaseMLPModel
-from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.models.mlp.better_trm import BetterTRM
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
-from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
-from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
+from p2.core.structured_config import Config, ModelType, NonlinearityType
+from p2.env import card_utils
+from p2.env.card_utils import NUM_HANDS
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.base_mlp_model import BaseMLPModel
+from p2.models.mlp.better_ffn import BetterFFN
+from p2.models.mlp.better_trm import BetterTRM
+from p2.models.mlp.rebel_ffn import RebelFFN
+from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
+from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
 def action_to_string(action_idx: int, bet_bins: list[float]) -> str:

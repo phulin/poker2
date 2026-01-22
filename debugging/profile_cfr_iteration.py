@@ -23,11 +23,11 @@ import torch
 from omegaconf import DictConfig
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from alphaholdem.core.structured_config import CFRType, Config
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
-from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
+from p2.core.structured_config import CFRType, Config
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.rebel_ffn import RebelFFN
+from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
+from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
 def create_instrumented_cfr_iteration(original_method):

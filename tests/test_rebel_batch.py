@@ -1,12 +1,12 @@
 import torch
 
-from alphaholdem.env.card_utils import (
+from p2.env.card_utils import (
     NUM_HANDS,
     combo_suit_permutation_inverse_tensor,
     suit_permutations_tensor,
 )
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.rl.rebel_batch import RebelBatch
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.rl.rebel_batch import RebelBatch
 
 
 def test_with_permuted_targets_reorders_policy_and_value():

@@ -1,9 +1,9 @@
 import torch
 
-from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.rl.rebel_batch import RebelBatch
-from alphaholdem.rl.rebel_replay import RebelReplayBuffer
+from p2.env.card_utils import NUM_HANDS
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.rl.rebel_batch import RebelBatch
+from p2.rl.rebel_replay import RebelReplayBuffer
 
 
 def test_rebel_replay_buffer_roundtrip():

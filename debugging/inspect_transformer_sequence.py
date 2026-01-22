@@ -18,21 +18,21 @@ from typing import Iterable, List
 
 import torch
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     Config,
     EnvConfig,
     ModelConfig,
     TrainingConfig,
 )
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.transformer.tokens import (
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.transformer.tokens import (
     Context,
     Game,
     Special,
     get_action_token_id_offset,
     get_card_token_id_offset,
 )
-from alphaholdem.rl.self_play import SelfPlayTrainer
+from p2.rl.self_play import SelfPlayTrainer
 
 RANK_STR = "AKQJT98765432"[::-1]  # -> "23456789TJQKA"
 SUIT_STR = "shdc"
@@ -434,7 +434,7 @@ def enable_permute_suit_trace(max_samples: int = 2) -> None:
     """Monkey-patch StructuredEmbeddingData.permute_suits to show before/after dumps."""
 
     try:
-        from alphaholdem.models.transformer.structured_embedding_data import (
+        from p2.models.transformer.structured_embedding_data import (
             StructuredEmbeddingData,
         )
     except ImportError:

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.env.aggression_analyzer import (
+from p2.env.aggression_analyzer import (
     IDX_TO_RANK,
     AggressionAnalyzer,
     build_hand_to_group_mapping,
     hand_combos_tensor,
 )
-from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.rl.rebel_batch import RebelBatch
+from p2.env.card_utils import NUM_HANDS
+from p2.rl.rebel_batch import RebelBatch
 
 
 def test_aggression_analyzer_no_policy() -> None:

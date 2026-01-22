@@ -1,10 +1,10 @@
 import torch
 from torch.testing import assert_close
 
-from alphaholdem.core.structured_config import Config
-from alphaholdem.env.analyze_tensor_env import RebelPreflopAnalyzer
-from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
+from p2.core.structured_config import Config
+from p2.env.analyze_tensor_env import RebelPreflopAnalyzer
+from p2.env.card_utils import NUM_HANDS
+from p2.models.mlp.rebel_ffn import RebelFFN
 
 
 class _FakeCFREvaluator:

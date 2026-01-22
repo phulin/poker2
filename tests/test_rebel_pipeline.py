@@ -2,19 +2,19 @@ import math
 
 import torch
 
-from alphaholdem.core.structured_config import Config, StratifyConfig, ValueHeadType
-from alphaholdem.env.card_utils import (
+from p2.core.structured_config import Config, StratifyConfig, ValueHeadType
+from p2.env.card_utils import (
     NUM_HANDS,
     combo_suit_permutation_inverse_tensor,
     suit_permutations_tensor,
 )
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.models.model_output import ModelOutput
-from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
-from alphaholdem.rl.losses import RebelSupervisedLoss
-from alphaholdem.rl.rebel_batch import RebelBatch
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+from p2.models.model_output import ModelOutput
+from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.rl.losses import RebelSupervisedLoss
+from p2.rl.rebel_batch import RebelBatch
 
 
 def make_env(num_envs: int = 4) -> HUNLTensorEnv:

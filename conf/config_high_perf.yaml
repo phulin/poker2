@@ -2,7 +2,7 @@ defaults:
   - config_transformer
   - _self_
 
-# AlphaHoldem High-Performance Configuration
+# High-Performance Configuration
 # Optimized for vast.ai GPUs (RTX 4090/4080)
 
 # === TRAINING CONFIGURATION ===
@@ -51,7 +51,7 @@ model:
   actions_hidden: 192
   fusion_hidden: [2048, 2048]
   num_actions: 8
-  
+
 # === ENVIRONMENT CONFIGURATION ===
 # keep base env; no overrides here
 env: {}

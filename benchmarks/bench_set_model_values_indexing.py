@@ -12,7 +12,7 @@ from typing import Tuple
 import torch
 from torch.testing import assert_close
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     CFRType,
     Config,
     EnvConfig,
@@ -21,9 +21,9 @@ from alphaholdem.core.structured_config import (
     SearchConfig,
     TrainingConfig,
 )
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.better_ffn import BetterFFN
-from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.better_ffn import BetterFFN
+from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
 def synchronize_device_if_needed(device: torch.device) -> None:
@@ -264,8 +264,8 @@ def verify_correctness(
     )
 
     # Create temporary encoder and environment for alternative approach
-    from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
-    from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+    from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
+    from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 
     num_indexed = evaluator2.model_indices.numel()
     indexed_env = HUNLTensorEnv.from_proto(evaluator2.env, num_envs=num_indexed)
@@ -392,8 +392,8 @@ def run_benchmark(
     evaluator_alternative.beliefs_avg.copy_(evaluator_current.beliefs_avg)
 
     # Create temporary encoder and environment for alternative approach (once, outside the loop)
-    from alphaholdem.models.mlp.better_feature_encoder import BetterFeatureEncoder
-    from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+    from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
+    from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 
     num_indexed = evaluator_alternative.model_indices.numel()
     indexed_env = HUNLTensorEnv.from_proto(

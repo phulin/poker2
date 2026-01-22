@@ -1,15 +1,15 @@
 import torch
 
-from alphaholdem.env.card_utils import (
+from p2.env.card_utils import (
     HAND_EQUITY_ORDERING,
     IDX_TO_RANK,
     NUM_HANDS,
     combo_lookup_tensor,
     hand_combos_tensor,
 )
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 
 
 def make_env(num_envs: int = 4) -> HUNLTensorEnv:

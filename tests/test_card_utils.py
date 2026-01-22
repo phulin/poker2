@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from alphaholdem.env.card_utils import (
+from p2.env.card_utils import (
     NUM_HANDS,
     calculate_unblocked_mass,
     combo_blocking_tensor,

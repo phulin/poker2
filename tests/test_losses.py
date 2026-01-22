@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.models.transformer.structured_embedding_data import (
+from p2.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.rl.losses import TrinalClipPPOLoss
-from alphaholdem.rl.popart_normalizer import PopArtNormalizer
-from alphaholdem.rl.vectorized_replay import BatchSample
-from alphaholdem.utils.ema import EMA
+from p2.rl.losses import TrinalClipPPOLoss
+from p2.rl.popart_normalizer import PopArtNormalizer
+from p2.rl.vectorized_replay import BatchSample
+from p2.utils.ema import EMA
 
 
 class TestPopArtNormalizer:

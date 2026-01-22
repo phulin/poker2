@@ -9,7 +9,7 @@ import torch
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from alphaholdem.env.card_utils import combo_to_onehot_tensor
+from p2.env.card_utils import combo_to_onehot_tensor
 
 
 def synchronize_device_if_needed(device: torch.device) -> None:

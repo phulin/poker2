@@ -5,9 +5,9 @@ Comprehensive line-by-line profiling of all key methods in RebelCFREvaluator.
 
 import torch
 
-from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
+from p2.env.card_utils import NUM_HANDS
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
 
 
 # MockModel for testing

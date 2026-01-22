@@ -2,7 +2,7 @@ defaults:
   - config_transformer
   - _self_
 
-# AlphaHoldem Transformer High-Performance Configuration
+# Transformer High-Performance Configuration
 # Configuration for transformer-based poker model with larger capacity
 
 # === TRAINING CONFIGURATION ===
@@ -47,7 +47,7 @@ model:
   n_layers: 4
   n_heads: 2
   use_gradient_checkpointing: true
-  
+
 # === ENVIRONMENT CONFIGURATION ===
 # keep base env; no overrides here
 env: {}

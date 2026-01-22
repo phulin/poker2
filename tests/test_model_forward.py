@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.encoding.action_mapping import bin_to_action, get_legal_mask
-from alphaholdem.env.hunl_env import HUNLEnv
-from alphaholdem.env.types import GameState, PlayerState
-from alphaholdem.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
-from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
-from alphaholdem.models.policy import CategoricalPolicyV1
+from p2.encoding.action_mapping import bin_to_action, get_legal_mask
+from p2.env.hunl_env import HUNLEnv
+from p2.env.types import GameState, PlayerState
+from p2.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
+from p2.models.cnn.cnn_embedding_data import CNNEmbeddingData
+from p2.models.policy import CategoricalPolicyV1
 
 
 def make_state(street: str, board: list[int]) -> GameState:

@@ -9,14 +9,14 @@ import sys
 import pytest
 import torch
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     Config,
     EnvConfig,
     ModelConfig,
     TrainingConfig,
 )
-from alphaholdem.models.cnn.cnn_embedding_data import CNNEmbeddingData
-from alphaholdem.rl.self_play import SelfPlayTrainer
+from p2.models.cnn.cnn_embedding_data import CNNEmbeddingData
+from p2.rl.self_play import SelfPlayTrainer
 
 # Add the project root to the path for imports
 sys.path.insert(0, os.path.abspath("."))

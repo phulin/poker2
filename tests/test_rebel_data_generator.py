@@ -5,12 +5,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.rl.rebel_batch import RebelBatch
-from alphaholdem.search.cfr_evaluator import PublicBeliefState
-from alphaholdem.search.rebel_data_generator import RebelDataGenerator
+from p2.env.card_utils import NUM_HANDS
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.rl.rebel_batch import RebelBatch
+from p2.search.cfr_evaluator import PublicBeliefState
+from p2.search.rebel_data_generator import RebelDataGenerator
 
 
 class DummyEnv:

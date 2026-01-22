@@ -7,9 +7,9 @@ from typing import List
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from alphaholdem.encoding.action_mapping import bin_to_action
-from alphaholdem.env.hunl_env import HUNLEnv
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from p2.encoding.action_mapping import bin_to_action
+from p2.env.hunl_env import HUNLEnv
+from p2.env.hunl_tensor_env import HUNLTensorEnv
 
 
 def pick_bin_tensor(mask: torch.Tensor) -> torch.Tensor:

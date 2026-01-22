@@ -8,17 +8,17 @@ import tempfile
 import pytest
 import torch
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     Config,
     EnvConfig,
     ModelConfig,
     TrainingConfig,
     ValueLossType,
 )
-from alphaholdem.rl.losses import TrinalClipPPOLoss
-from alphaholdem.rl.popart_normalizer import PopArtNormalizer
-from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.utils.ema import EMA
+from p2.rl.losses import TrinalClipPPOLoss
+from p2.rl.popart_normalizer import PopArtNormalizer
+from p2.rl.self_play import SelfPlayTrainer
+from p2.utils.ema import EMA
 
 pytestmark = pytest.mark.skip(reason="Tests in this file are temporarily disabled.")
 
@@ -37,10 +37,10 @@ def test_trinal_clip_ppo_loss():
     legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
 
     # Create BatchSample object
-    from alphaholdem.models.transformer.structured_embedding_data import (
+    from p2.models.transformer.structured_embedding_data import (
         StructuredEmbeddingData,
     )
-    from alphaholdem.rl.vectorized_replay import BatchSample
+    from p2.rl.vectorized_replay import BatchSample
 
     # Create dummy embedding data
     embedding_data = StructuredEmbeddingData(

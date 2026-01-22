@@ -34,7 +34,7 @@ import torch
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     CFRType,
     Config,
     EnvConfig,
@@ -43,12 +43,12 @@ from alphaholdem.core.structured_config import (
     SearchConfig,
     TrainingConfig,
 )
-from alphaholdem.env.card_utils import combo_lookup_tensor
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.env.types import GameState, PlayerState
-from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
-from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
-from alphaholdem.utils.training_utils import print_preflop_range_grid
+from p2.env.card_utils import combo_lookup_tensor
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.types import GameState, PlayerState
+from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.utils.training_utils import print_preflop_range_grid
 
 
 def create_default_config() -> Config:

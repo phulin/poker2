@@ -11,9 +11,9 @@ import hydra
 import torch
 from omegaconf import DictConfig
 
-from alphaholdem.core.structured_config import Config, ModelType
-from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
-from alphaholdem.rl.rebel_batch import RebelBatch
+from p2.core.structured_config import Config, ModelType
+from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.rl.rebel_batch import RebelBatch
 
 
 def load_trainer_from_checkpoint(

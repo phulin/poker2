@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.testing import assert_close
 
-from alphaholdem.utils.ema_helper import EMAHelper
+from p2.utils.ema_helper import EMAHelper
 
 
 class SimpleModel(nn.Module):

@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     Config,
     EnvConfig,
     ModelConfig,
     TrainingConfig,
 )
-from alphaholdem.models.cnn import SiameseConvNetV1
-from alphaholdem.models.policy import CategoricalPolicyV1
-from alphaholdem.rl.self_play import SelfPlayTrainer
+from p2.models.cnn import SiameseConvNetV1
+from p2.models.policy import CategoricalPolicyV1
+from p2.rl.self_play import SelfPlayTrainer
 
 
 def test_trainer_builds_components_from_config():

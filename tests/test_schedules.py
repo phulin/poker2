@@ -1,9 +1,9 @@
 import math
 
-from alphaholdem.core.structured_config import LrSchedule
-from alphaholdem.rl.exponential_controller import ExponentialController
-from alphaholdem.rl.self_play import SelfPlayTrainer
-from alphaholdem.utils.ema import EMA
+from p2.core.structured_config import LrSchedule
+from p2.rl.exponential_controller import ExponentialController
+from p2.rl.self_play import SelfPlayTrainer
+from p2.utils.ema import EMA
 
 
 class _Cfg:

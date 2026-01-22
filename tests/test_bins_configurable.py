@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     Config,
     EnvConfig,
     ModelConfig,
     TrainingConfig,
 )
-from alphaholdem.encoding.action_mapping import (
+from p2.encoding.action_mapping import (
     _action_to_bin_idx,
     _bin_to_target_action,
 )
-from alphaholdem.env.hunl_env import HUNLEnv
+from p2.env.hunl_env import HUNLEnv
 
 
 def test_variable_bins_mapping_roundtrip(tmp_path):

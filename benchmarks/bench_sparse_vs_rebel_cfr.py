@@ -10,7 +10,7 @@ from typing import Tuple
 
 import torch
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     CFRType,
     Config,
     EnvConfig,
@@ -19,10 +19,10 @@ from alphaholdem.core.structured_config import (
     SearchConfig,
     TrainingConfig,
 )
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
-from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.rebel_ffn import RebelFFN
+from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
+from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
 def synchronize_device_if_needed(device: torch.device) -> None:

@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.hunl_tensor_env import HUNLTensorEnv
 
 
 def _make_env(

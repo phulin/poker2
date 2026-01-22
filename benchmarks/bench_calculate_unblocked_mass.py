@@ -4,7 +4,7 @@ from typing import Tuple
 
 import torch
 
-from alphaholdem.env.card_utils import (
+from p2.env.card_utils import (
     NUM_HANDS,
     combo_to_onehot_tensor,
     calculate_unblocked_mass,

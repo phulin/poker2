@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from alphaholdem.models.cnn import SiameseConvNetV1
-from alphaholdem.rl.k_best_pool import KBestOpponentPool
+from p2.models.cnn import SiameseConvNetV1
+from p2.rl.k_best_pool import KBestOpponentPool
 
 
 def test_kbest_add_and_sample():

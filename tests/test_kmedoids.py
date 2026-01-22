@@ -6,7 +6,7 @@ import time
 import pytest
 import torch
 
-from alphaholdem.rl.kmedoids import SimpleKMedoids, kmedoids_pytorch
+from p2.rl.kmedoids import SimpleKMedoids, kmedoids_pytorch
 
 
 class TestSimpleKMedoids:

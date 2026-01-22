@@ -24,4 +24,4 @@ ENV PYTHONPATH=/workspace
 ENV CUDA_VISIBLE_DEVICES=0
 
 # Default command (can be overridden)
-CMD ["uv", "run", "src/alphaholdem/cli/train_rebel.py"]
+CMD ["uv", "run", "src/p2/cli/train_rebel.py"]

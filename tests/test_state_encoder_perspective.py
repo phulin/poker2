@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import torch
 
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.cnn.state_encoder import CNNStateEncoder
-from alphaholdem.models.transformer.token_sequence_builder import TokenSequenceBuilder
-from alphaholdem.models.transformer.tokens import get_action_token_id_offset
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.cnn.state_encoder import CNNStateEncoder
+from p2.models.transformer.token_sequence_builder import TokenSequenceBuilder
+from p2.models.transformer.tokens import get_action_token_id_offset
 
 
 def test_cnn_state_encoder_perspective_behavior():

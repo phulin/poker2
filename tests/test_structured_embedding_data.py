@@ -2,10 +2,10 @@
 
 import torch
 
-from alphaholdem.models.transformer.structured_embedding_data import (
+from p2.models.transformer.structured_embedding_data import (
     StructuredEmbeddingData,
 )
-from alphaholdem.models.transformer.tokens import get_card_token_id_offset
+from p2.models.transformer.tokens import get_card_token_id_offset
 
 
 class TestStructuredEmbeddingData:

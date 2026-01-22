@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from alphaholdem.env.hunl_env import HUNLEnv
-from alphaholdem.env.types import Action
+from p2.env.hunl_env import HUNLEnv
+from p2.env.types import Action
 
 
 def test_check_check_closes_round_and_advances_street():

@@ -1,6 +1,6 @@
-# AlphaHoldem Configuration Files
+# P2 Configuration Files
 
-This directory contains Hydra configuration files for AlphaHoldem training. Each file is a complete, self-contained configuration that can be used independently.
+This directory contains Hydra configuration files for P2 training. Each file is a complete, self-contained configuration that can be used independently.
 
 ## Available Configurations
 
@@ -60,25 +60,25 @@ This directory contains Hydra configuration files for AlphaHoldem training. Each
 ### Basic Usage
 ```bash
 # Use default configuration
-python alphaholdem/cli/train_kbest.py --config-name=config
+python src/p2/cli/train_kbest.py --config-name=config
 
 # Transformer PPO training
-python alphaholdem/cli/train_kbest.py --config-name=config_transformer
+python src/p2/cli/train_kbest.py --config-name=config_transformer
 
 # Use high-performance configuration
-python alphaholdem/cli/train_kbest.py --config-name=config_high_perf
+python src/p2/cli/train_kbest.py --config-name=config_high_perf
 
 # Use fast configuration
-python alphaholdem/cli/train_kbest.py --config-name=config_fast
+python src/p2/cli/train_kbest.py --config-name=config_fast
 
 # ReBeL CFR training
-python alphaholdem/cli/train_rebel.py --config-name=config_rebel_cfr
+python src/p2/cli/train_rebel.py --config-name=config_rebel_cfr
 ```
 
 ### Parameter Overrides
 ```bash
 # Override specific parameters
-python alphaholdem/cli/train_kbest.py \
+python src/p2/cli/train_kbest.py \
     --config-name=config_high_perf \
     num_steps=1000 \
     train.batch_size=1536 \
@@ -87,7 +87,7 @@ python alphaholdem/cli/train_kbest.py \
 
 ### Resume Training
 ```bash
-python alphaholdem/cli/train_kbest.py \
+python src/p2/cli/train_kbest.py \
     --config-name=config_high_perf \
     resume_from=checkpoints/checkpoint_step_1000.pt
 ```
@@ -115,7 +115,7 @@ Example:
 ```bash
 cp config.yaml config_custom.yaml
 # Edit config_custom.yaml
-python alphaholdem/cli/train_kbest.py --config-name=config_custom
+python src/p2/cli/train_kbest.py --config-name=config_custom
 ```
 
 ## Parameter Reference

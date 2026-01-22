@@ -19,19 +19,19 @@ from hydra.core.config_store import ConfigStore
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 
-from alphaholdem.core.structured_config import Config
-from alphaholdem.env.aggression_analyzer import build_hand_to_group_mapping
-from alphaholdem.env.card_utils import (
+from p2.core.structured_config import Config
+from p2.env.aggression_analyzer import build_hand_to_group_mapping
+from p2.env.card_utils import (
     IDX_TO_RANK,
     NUM_HANDS,
     hand_combos_tensor,
 )
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.mlp.rebel_ffn import RebelFFN
-from alphaholdem.models.model_output import ModelOutput
-from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.models.mlp.rebel_ffn import RebelFFN
+from p2.models.model_output import ModelOutput
+from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
 
 
 def advance_to_street_with_history(

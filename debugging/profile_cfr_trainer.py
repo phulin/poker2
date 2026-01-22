@@ -20,8 +20,8 @@ import torch
 from omegaconf import DictConfig
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from alphaholdem.core.structured_config import Config
-from alphaholdem.rl.cfr_trainer import RebelCFRTrainer
+from p2.core.structured_config import Config
+from p2.rl.cfr_trainer import RebelCFRTrainer
 
 
 def profile_training_loop(cfg: Config):

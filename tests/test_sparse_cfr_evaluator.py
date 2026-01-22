@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch.testing import assert_close
 
-from alphaholdem.core.structured_config import (
+from p2.core.structured_config import (
     CFRType,
     Config,
     EnvConfig,
@@ -12,12 +12,12 @@ from alphaholdem.core.structured_config import (
     SearchConfig,
     TrainingConfig,
 )
-from alphaholdem.env.card_utils import NUM_HANDS
-from alphaholdem.env.hunl_tensor_env import HUNLTensorEnv
-from alphaholdem.models.mlp.mlp_features import MLPFeatures
-from alphaholdem.models.model_output import ModelOutput
-from alphaholdem.search.rebel_cfr_evaluator import RebelCFREvaluator
-from alphaholdem.search.sparse_cfr_evaluator import SparseCFREvaluator
+from p2.env.card_utils import NUM_HANDS
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.models.model_output import ModelOutput
+from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
+from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
 def get_device() -> torch.device:
@@ -57,7 +57,7 @@ class MockModel:
         self.hidden_dim = 1
 
     def create_feature_encoder(self, env, device=None, dtype=None):
-        from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+        from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 
         return RebelFeatureEncoder(env=env, device=device, dtype=dtype)
 
@@ -114,7 +114,7 @@ class DeterministicModel:
         pass
 
     def create_feature_encoder(self, env, device=None, dtype=None):
-        from alphaholdem.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
+        from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 
         return RebelFeatureEncoder(env=env, device=device, dtype=dtype)
 

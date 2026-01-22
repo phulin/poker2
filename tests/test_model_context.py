@@ -8,7 +8,7 @@ change model modes (train/eval) and restore the original state.
 import torch
 import torch.nn as nn
 
-from alphaholdem.utils.model_context import model_eval, model_train
+from p2.utils.model_context import model_eval, model_train
 
 
 class SimpleModel(nn.Module):
