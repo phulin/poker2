@@ -66,6 +66,11 @@ def compare_7_batches_triton(a_batch: torch.Tensor, b_batch: torch.Tensor) -> to
 if triton is not None:
 
     @triton.jit
+    def _to_i32(value):
+        return (value + tl.full((), 0, tl.int32)).to(tl.int32)
+
+
+    @triton.jit
     def _pack_fields(
         f0,
         f1,
@@ -75,12 +80,12 @@ if triton is not None:
         f5,
     ):
         return (
-            (f0.to(tl.int32) << 20)
-            | (f1.to(tl.int32) << 16)
-            | (f2.to(tl.int32) << 12)
-            | (f3.to(tl.int32) << 8)
-            | (f4.to(tl.int32) << 4)
-            | f5.to(tl.int32)
+            (_to_i32(f0) << 20)
+            | (_to_i32(f1) << 16)
+            | (_to_i32(f2) << 12)
+            | (_to_i32(f3) << 8)
+            | (_to_i32(f4) << 4)
+            | _to_i32(f5)
         )
 
 
@@ -168,63 +173,24 @@ if triton is not None:
         straight_low = tl.full((), 0, tl.int32)
         for low in range(10):
             if low == 0:
-                hit = (
-                    rank_presence[12]
-                    & rank_presence[0]
-                    & rank_presence[1]
-                    & rank_presence[2]
-                    & rank_presence[3]
-                )
+                straight_window = (ranks == 12) | (ranks < 4)
             else:
-                hit = (
-                    rank_presence[low]
-                    & rank_presence[low + 1]
-                    & rank_presence[low + 2]
-                    & rank_presence[low + 3]
-                    & rank_presence[low + 4]
-                )
+                straight_window = (ranks >= low - 1) & (ranks <= low + 3)
+            hit = tl.sum(tl.where(straight_window & rank_presence, 1, 0), axis=0) == 5
             straight_low = tl.where((straight_found == 0) & hit, low, straight_low)
             straight_found = straight_found | hit.to(tl.int32)
 
         sf_found = tl.full((), 0, tl.int32)
         sf_high = tl.full((), 0, tl.int32)
         for low in range(10):
-            hit0 = (
-                (suit0[12] > 0) & (suit0[0] > 0) & (suit0[1] > 0) & (suit0[2] > 0) & (suit0[3] > 0)
-                if low == 0
-                else (suit0[low] > 0)
-                & (suit0[low + 1] > 0)
-                & (suit0[low + 2] > 0)
-                & (suit0[low + 3] > 0)
-                & (suit0[low + 4] > 0)
-            )
-            hit1 = (
-                (suit1[12] > 0) & (suit1[0] > 0) & (suit1[1] > 0) & (suit1[2] > 0) & (suit1[3] > 0)
-                if low == 0
-                else (suit1[low] > 0)
-                & (suit1[low + 1] > 0)
-                & (suit1[low + 2] > 0)
-                & (suit1[low + 3] > 0)
-                & (suit1[low + 4] > 0)
-            )
-            hit2 = (
-                (suit2[12] > 0) & (suit2[0] > 0) & (suit2[1] > 0) & (suit2[2] > 0) & (suit2[3] > 0)
-                if low == 0
-                else (suit2[low] > 0)
-                & (suit2[low + 1] > 0)
-                & (suit2[low + 2] > 0)
-                & (suit2[low + 3] > 0)
-                & (suit2[low + 4] > 0)
-            )
-            hit3 = (
-                (suit3[12] > 0) & (suit3[0] > 0) & (suit3[1] > 0) & (suit3[2] > 0) & (suit3[3] > 0)
-                if low == 0
-                else (suit3[low] > 0)
-                & (suit3[low + 1] > 0)
-                & (suit3[low + 2] > 0)
-                & (suit3[low + 3] > 0)
-                & (suit3[low + 4] > 0)
-            )
+            if low == 0:
+                sf_window = (ranks == 12) | (ranks < 4)
+            else:
+                sf_window = (ranks >= low - 1) & (ranks <= low + 3)
+            hit0 = tl.sum(tl.where(sf_window & (suit0 > 0), 1, 0), axis=0) == 5
+            hit1 = tl.sum(tl.where(sf_window & (suit1 > 0), 1, 0), axis=0) == 5
+            hit2 = tl.sum(tl.where(sf_window & (suit2 > 0), 1, 0), axis=0) == 5
+            hit3 = tl.sum(tl.where(sf_window & (suit3 > 0), 1, 0), axis=0) == 5
             hit = hit0 | hit1 | hit2 | hit3
             sf_high = tl.where(hit, low, sf_high)
             sf_found = sf_found | hit.to(tl.int32)

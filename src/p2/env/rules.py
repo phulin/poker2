@@ -226,9 +226,9 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     top_suit_cards = ab_batch.gather(2, flush_suit_expanded.unsqueeze(2)).squeeze(
         2
     )  # [N, P, 13]
-    top_suit_ranks = top_suit_cards.int().argsort(dim=2, descending=True)[
-        :, :, :5
-    ]  # [N, P, 5]
+    rank_values = torch.arange(13, device=device, dtype=dtype).view(1, 1, 13)
+    top_suit_rank_scores = torch.where(top_suit_cards > 0, rank_values, -1)
+    top_suit_ranks = torch.topk(top_suit_rank_scores, k=5, dim=2).values  # [N, P, 5]
     result[:, :, HandType.FLUSH.value, 0].masked_fill_(flush_mask, HandType.FLUSH.value)
     result[:, :, HandType.FLUSH.value, 1:6] = torch.where(
         flush_mask[:, :, None],
