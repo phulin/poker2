@@ -596,8 +596,9 @@ class CFREvaluator(ABC):
 
         # Range EV for the player
         potential = self.showdown_potential[:, hero]
+        scale = self.env.scale[indices]
 
-        return EV_hand * potential[:, None] / self.env.scale[:, None]
+        return EV_hand * potential[:, None] / scale[:, None]
 
     def _best_response_values(
         self,
@@ -779,10 +780,9 @@ class CFREvaluator(ABC):
             src_indices: Row indices inside `src_env` to copy into the tree roots.
             initial_beliefs: Optional belief tensor aligned with `src_indices`.
         """
-        N = self.root_nodes
-
         # Construct the subgame tree first (subclass-specific, allocates tensors)
         self._construct_subgame(src_env, src_indices)
+        N = self.root_nodes
 
         # Handle initial beliefs
         if initial_beliefs is None:
@@ -1016,6 +1016,11 @@ class CFREvaluator(ABC):
                 unmixed,
             )
         return new_values, model_output.hand_values
+
+    def _set_model_values(
+        self, t: int, beliefs: torch.Tensor, features: MLPFeatures
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._set_model_values_impl(t, beliefs, features)
 
     @torch.no_grad()
     def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
