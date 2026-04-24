@@ -12,7 +12,11 @@ import torch.nn.functional as F
 
 from p2.core.structured_config import Config, LrSchedule, ModelType
 from p2.env.aggression_analyzer import AggressionAnalyzer
-from p2.env.card_utils import NUM_HANDS, combo_suit_permutation_tensor
+from p2.env.card_utils import (
+    NUM_HANDS,
+    combo_suit_permutation_tensor,
+    suit_permutations_tensor,
+)
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.mlp import RebelFFN
@@ -670,8 +674,18 @@ class RebelCFRTrainer:
             ).to(self.device)
 
             # Sample suit permutations and apply to features/targets together.
+            suit_permutations_idxs = torch.randint(
+                0,
+                24,
+                (len(value_batch),),
+                generator=self.rng,
+                device=self.device,
+            )
+            suit_permutations = suit_permutations_tensor(device=self.device)[
+                suit_permutations_idxs
+            ]
             permuted_batch, suit_permutations_idxs = value_batch.with_permuted_targets(
-                generator=self.rng, num_players=self.num_players
+                suit_permutations=suit_permutations, num_players=self.num_players
             )
 
             for _ in range(supervisions):
