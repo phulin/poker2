@@ -2383,6 +2383,8 @@ class GraphedCFRIteration:
             ev.cfr_iteration(t_capture + i)
 
         ev._record_stats = self._stub_record_stats
+        prev_skip_stats = getattr(ev, "_skip_record_stats", False)
+        ev._skip_record_stats = True
         try:
             # Fill scalars once before capture; inside capture we skip the
             # Python-side update so no host→device fills get baked in.
@@ -2406,6 +2408,7 @@ class GraphedCFRIteration:
                 ev._skip_t_scalars_update = prev_skip
         finally:
             ev._record_stats = self._orig_record_stats
+            ev._skip_record_stats = prev_skip_stats
 
         self._graph = graph
         self._captured_t = t_capture

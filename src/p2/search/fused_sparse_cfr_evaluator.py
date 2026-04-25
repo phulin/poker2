@@ -102,6 +102,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # Pre-allocated buffer used by set_leaf_values to keep
         # self.last_model_values pinned across calls (no rebinding → graph-safe).
         self._last_model_values_buf: torch.Tensor | None = None
+        # When True, cfr_iteration skips the full policy_probs.clone() kept for
+        # _record_stats. Set by GraphedCFRIteration when stats are stubbed out.
+        self._skip_record_stats: bool = False
 
     def _ensure_fused_attrs(self) -> None:
         """Populate optional fused-only attributes if the object was constructed
@@ -115,6 +118,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._last_model_values_buf = None
         if not hasattr(self, "_fused_positive_regrets_buf"):
             self._fused_positive_regrets_buf = None
+        if not hasattr(self, "_skip_record_stats"):
+            self._skip_record_stats = False
 
     def _get_root_index(self) -> torch.Tensor:
         cached = getattr(self, "_root_index", None)
@@ -421,8 +426,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             model_output = self.model(features, include_policy=False)
 
         if not self.cfr_avg or t <= 1 or self.last_model_values is None:
-            new_values = torch.index_copy(
-                self.latest_values, 0, self.model_indices, model_output.hand_values
+            self.latest_values.index_copy_(
+                0, self.model_indices, model_output.hand_values
             )
         else:
             unmixed = torch.empty_like(model_output.hand_values)
@@ -435,16 +440,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 out=unmixed,
                 enforce_zero_sum=bool(self.model.enforce_zero_sum),
             )
-            new_values = torch.index_copy(
-                self.latest_values, 0, self.model_indices, unmixed
-            )
-        return new_values, model_output.hand_values
+            self.latest_values.index_copy_(0, self.model_indices, unmixed)
+        return self.latest_values, model_output.hand_values
 
     @torch.no_grad()
     def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
-        """Graph-safe override: keep ``self.latest_values`` and
-        ``self.last_model_values`` pinned to the same storage across calls so
-        CUDA graph capture doesn't see tensor re-bindings.
+        """Graph-safe override: ``_set_model_values_impl`` writes into
+        ``self.latest_values`` in-place, so we skip the ``.copy_()`` round-trip
+        the parent class needs. ``self.last_model_values`` is pinned to a
+        persistent buffer for the same reason.
         """
         if beliefs is None:
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
@@ -452,11 +456,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         features = self.feature_encoder.encode(
             beliefs, pre_chance_node=self.new_street_mask
         )
-        new_values, last_model_values = self._set_model_values(
+        _, last_model_values = self._set_model_values(
             t, beliefs[self.model_indices], features[self.model_indices]
         )
-        # In-place copy into pinned storage instead of rebinding attributes.
-        self.latest_values.copy_(new_values)
         if self._last_model_values_buf is None or (
             self._last_model_values_buf.shape != last_model_values.shape
         ):
@@ -516,9 +518,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 cfr_plus=self.cfr_plus,
             )
 
-        old_policy_probs = self.policy_probs.clone()
-        self.update_policy(t)
-        self._record_stats(t, old_policy_probs)
+        if self._skip_record_stats:
+            self.update_policy(t)
+        else:
+            old_policy_probs = self.policy_probs.clone()
+            self.update_policy(t)
+            self._record_stats(t, old_policy_probs)
 
         self.set_leaf_values(t)
         self.compute_expected_values()
