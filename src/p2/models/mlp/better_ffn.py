@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from p2.core.structured_config import NonlinearityType
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
 from p2.models.activation_utils import get_activation, SwiGLU
 from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
@@ -86,8 +86,14 @@ class BetterFFN(BaseMLPModel):
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
         self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)
-        self.belief_encoder = ffn_block(
-            num_players * NUM_HANDS,
+        # Hand-aware belief encoder: project per-player belief vectors through a
+        # hand embedding tied to the rank/suit embeddings, then fuse across
+        # players. Gives each "hand axis" learned card structure for free
+        # instead of treating beliefs as an unstructured 1326-dim vector.
+        combos = hand_combos_tensor()  # [NUM_HANDS, 2]
+        self.register_buffer("hand_combos", combos, persistent=False)
+        self.belief_proj = ffn_block(
+            num_players * hidden_dim,
             num_players * range_hidden_dim,
             hidden_dim,
             nonlinearity,
@@ -133,6 +139,14 @@ class BetterFFN(BaseMLPModel):
         )
         self.hand_value_head = nn.Sequential(*layers)
 
+    def _hand_embedding(self) -> torch.Tensor:
+        """Per-hand embedding tied to rank/suit embeddings — shape [NUM_HANDS, hidden_dim]."""
+        cards = self.hand_combos  # [NUM_HANDS, 2]
+        ranks = cards % 13
+        suits = cards // 13
+        card_emb = self.rank_embedding(ranks) + self.suit_embedding(suits)
+        return card_emb.sum(dim=1)
+
     @profile
     def forward(
         self,
@@ -158,8 +172,10 @@ class BetterFFN(BaseMLPModel):
 
         street_features = self.street_embedding(features.street)
         context_features = self.context_encoder(features.context)
-        belief_features = self.belief_encoder(features.beliefs)
         player_beliefs = features.beliefs.view(-1, self.num_players, NUM_HANDS)
+        hand_emb = self._hand_embedding()  # [NUM_HANDS, hidden_dim]
+        per_player_belief = player_beliefs @ hand_emb  # [B, P, H]
+        belief_features = self.belief_proj(per_player_belief.flatten(1))
 
         flat_features = (
             board_features.sum(dim=1)
