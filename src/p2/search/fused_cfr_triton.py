@@ -1901,6 +1901,7 @@ if triton is not None:
     def _fused_reach_weights_kernel(
         reach_ptr,              # [total, 2, H] in/out
         policy_ptr,             # [total, H]
+        allowed_mask_ptr,       # [total, H] bool
         parent_index_ptr,       # [total]
         prev_actor_ptr,         # [total]
         start,
@@ -1923,6 +1924,10 @@ if triton is not None:
         # loads, plus a single policy load reused for whichever player is hero
         # (the other player just copies parent reach unchanged).
         pol = tl.load(policy_ptr + c * H + offs, mask=mask, other=0.0)
+        # Fused block: zero out hands that are invalid at child c (board may
+        # have changed across a chance node), eliminating the post-hoc
+        # _block_beliefs masked_fill_.
+        al = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(tl.int1)
 
         v0 = tl.load(reach_ptr + (parent * 2 + 0) * H + offs, mask=mask, other=0.0)
         v1 = tl.load(reach_ptr + (parent * 2 + 1) * H + offs, mask=mask, other=0.0)
@@ -1930,6 +1935,8 @@ if triton is not None:
             v0 = v0 * pol
         else:
             v1 = v1 * pol
+        v0 = tl.where(al, v0, 0.0)
+        v1 = tl.where(al, v1, 0.0)
         tl.store(reach_ptr + (c * 2 + 0) * H + offs, v0, mask=mask)
         tl.store(reach_ptr + (c * 2 + 1) * H + offs, v1, mask=mask)
 
@@ -1937,6 +1944,7 @@ if triton is not None:
 def fused_reach_weights_depth_(
     reach: torch.Tensor,             # [total, 2, H] in/out
     policy: torch.Tensor,            # [total, H]
+    allowed_mask: torch.Tensor,      # [total, H] bool
     parent_index: torch.Tensor,      # [total]
     prev_actor: torch.Tensor,        # [total]
     start: int,
@@ -1958,6 +1966,7 @@ def fused_reach_weights_depth_(
     assert policy.is_contiguous() and policy.dim() == 2
     total, two, h = reach.shape
     assert policy.shape == (total, h)
+    assert allowed_mask.shape == (total, h) and allowed_mask.is_contiguous()
     assert parent_index.shape == (total,) and prev_actor.shape == (total,)
     n = end - start
     if n <= 0:
@@ -1966,6 +1975,7 @@ def fused_reach_weights_depth_(
     _fused_reach_weights_kernel[grid](
         reach,
         policy,
+        allowed_mask,
         parent_index,
         prev_actor,
         start,

@@ -154,22 +154,22 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self, target: torch.Tensor, policy: torch.Tensor
     ) -> None:
         # Fused per-depth propagation: reach[c, p, h] = reach[parent, p, h] *
-        # (policy[c, h] if p == prev_actor[c] else 1.0).
+        # (policy[c, h] if p == prev_actor[c] else 1.0), zeroed where the
+        # child's allowed_hands mask is False (board changes across chance
+        # nodes). The block step is folded into the kernel; no post-hoc
+        # _block_beliefs call needed.
         for depth in range(self.tree_depth):
             start = self.depth_offsets[depth + 1]
             end = self.depth_offsets[depth + 2]
             fused_reach_weights_depth_(
                 reach=target,
                 policy=policy,
+                allowed_mask=self.allowed_hands,
                 parent_index=self.parent_index,
                 prev_actor=self.prev_actor,
                 start=start,
                 end=end,
             )
-        # Reach weights are blocked but not normalized; normalization happens
-        # in _propagate_all_beliefs on the resulting beliefs, not the reach.
-        self._mask_invalid(target)
-        super()._block_beliefs(target)
 
     def _propagate_all_beliefs(
         self,
@@ -259,7 +259,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             values = leaf_values
 
         if leaf_values is values:
-            values.masked_fill_((~self.leaf_mask)[:, None, None], 0.0)
+            # Skip the (~leaf_mask) zero: every non-leaf row is overwritten by
+            # the parent_sum sweep below (count == 0 iff leaf, so non-leaf
+            # parents always have children to reduce). Leaf rows are preserved
+            # by parent_sum's `if count == 0: return` early-out.
+            pass
         else:
             torch.where(
                 self.leaf_mask[:, None, None],

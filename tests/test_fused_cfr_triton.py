@@ -828,8 +828,11 @@ def test_fused_reach_weights_depth_matches_pytorch() -> None:
     prev_actor = torch.randint(0, 2, (total,), device=device, dtype=torch.long)
     prev_actor[:4] = -1
 
+    allowed_mask = torch.rand(total, h, device=device) > 0.2
+
     # Reference: for each child c in [4, 10) and player p:
-    # reach[c, p, h] = reach[parent, p, h] * (policy[c] if p==prev_actor[c] else 1)
+    # reach[c, p, h] = reach[parent, p, h] *
+    #     (policy[c] if p==prev_actor[c] else 1) * allowed_mask[c]
     ref = reach.clone()
     for c in range(4, 10):
         parent = int(parent_index[c].item())
@@ -840,11 +843,15 @@ def test_fused_reach_weights_depth_matches_pytorch() -> None:
                 ref[c, player] = base * policy[c]
             else:
                 ref[c, player] = base
+            ref[c, player] = torch.where(
+                allowed_mask[c], ref[c, player], torch.zeros_like(ref[c, player])
+            )
 
     out = reach.clone().contiguous()
     fused_reach_weights_depth_(
         reach=out,
         policy=policy.contiguous(),
+        allowed_mask=allowed_mask.contiguous(),
         parent_index=parent_index.contiguous(),
         prev_actor=prev_actor.contiguous(),
         start=4,
