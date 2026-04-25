@@ -535,7 +535,14 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             # Create a copy of cfg with num_envs=1 for sparse evaluator
             cfg_copy = copy.deepcopy(cfg)
             cfg_copy.num_envs = 1
-            self.cfr_evaluator = SparseCFREvaluator(
+            evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
+            if cfg.search.sparse_fused:
+                from p2.search.fused_sparse_cfr_evaluator import (
+                    FusedSparseCFREvaluator,
+                )
+
+                evaluator_cls = FusedSparseCFREvaluator
+            self.cfr_evaluator = evaluator_cls(
                 model=self.model,
                 device=device,
                 cfg=cfg_copy,

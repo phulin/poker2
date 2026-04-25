@@ -261,6 +261,7 @@ class SearchConfig:
     cfr_plus: bool = True
     cfr_avg: bool = True
     sparse: bool = False
+    sparse_fused: bool = False
     value_targets_from_final_policy: bool = False
 
 

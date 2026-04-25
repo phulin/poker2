@@ -8,10 +8,10 @@ import torch.nn as nn
 
 from p2.core.structured_config import NonlinearityType
 from p2.env.card_utils import NUM_HANDS
+from p2.models.activation_utils import get_activation, SwiGLU
 from p2.models.base_mlp_model import BaseMLPModel
-from p2.models.activation_utils import get_activation
-from p2.models.mlp.better_features import context_length
 from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
+from p2.models.mlp.better_features import context_length
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
 from p2.utils.profiling import profile
@@ -35,16 +35,26 @@ def ffn_block(
 ) -> nn.Module:
     if out_dim is None:
         out_dim = in_dim
-    return nn.Sequential(
-        OrderedDict(
-            [
-                ("norm", nn.LayerNorm(in_dim)),
-                ("linear_in", nn.Linear(in_dim, hidden_dim, bias=False)),
-                ("activation", get_activation(nonlinearity)),
-                ("linear_out", nn.Linear(hidden_dim, out_dim)),
-            ]
+    if nonlinearity == NonlinearityType.swiglu:
+        return nn.Sequential(
+            OrderedDict(
+                [
+                    ("norm", nn.LayerNorm(in_dim)),
+                    ("swiglu", SwiGLU(in_dim, out_dim)),
+                ]
+            )
         )
-    )
+    else:
+        return nn.Sequential(
+            OrderedDict(
+                [
+                    ("norm", nn.LayerNorm(in_dim)),
+                    ("linear_in", nn.Linear(in_dim, hidden_dim, bias=False)),
+                    ("activation", get_activation(nonlinearity)),
+                    ("linear_out", nn.Linear(hidden_dim, out_dim)),
+                ]
+            )
+        )
 
 
 class BetterFFN(BaseMLPModel):

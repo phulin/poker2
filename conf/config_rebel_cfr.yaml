@@ -43,16 +43,16 @@ train:
   model_ema: 0.999
 
 model:
-  name: BetterTRM
+  name: BetterFFN
   nonlinearity: swiglu
   hidden_dim: 1024
   range_hidden_dim: 256
   ffn_dim: 1024
 
   shared_trunk: true # DO NOT detach policy head from trunk
-  num_hidden_layers: 2
-  num_value_layers: 1
-  num_policy_layers: 1
+  num_hidden_layers: 4
+  num_value_layers: 2
+  num_policy_layers: 2
 
   detach_value_head: false
   compile: true
@@ -72,6 +72,7 @@ search:
   enabled: true
   depth: 5
   sparse: true
+  sparse_fused: true
   value_targets_from_final_policy: true
 
   cfr_type: discounted_plus
