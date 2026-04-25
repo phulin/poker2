@@ -1810,30 +1810,26 @@ if triton is not None:
         if count == 0:
             return
 
-        row_offs = tl.arange(0, MAX_CHILDREN)
         col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
-        row_mask = row_offs < count
         col_mask = col_offs < H
-        mask_2d = row_mask[:, None] & col_mask[None, :]
 
-        # values[first+i, player, col]
-        v_ptrs = (
-            values_ptr
-            + ((first + row_offs) * 2 + player)[:, None] * H
-            + col_offs[None, :]
-        )
-        v_tile = tl.load(v_ptrs, mask=mask_2d, other=0.0)
-
-        prev_actor = tl.load(prev_actor_ptr + first + row_offs, mask=row_mask, other=0)
-        is_hero = prev_actor == player  # [MC]
-
-        ph_ptrs = policy_hero_ptr + (first + row_offs)[:, None] * H + col_offs[None, :]
-        po_ptrs = policy_opp_ptr + (first + row_offs)[:, None] * H + col_offs[None, :]
-        ph = tl.load(ph_ptrs, mask=mask_2d, other=0.0)
-        po = tl.load(po_ptrs, mask=mask_2d, other=0.0)
-        pol = tl.where(is_hero[:, None], ph, po)
-
-        acc = tl.sum(v_tile * pol, axis=0)  # [BH]
+        # Per-child accumulation. Loading the full [MAX_CHILDREN, BLOCK_H] tile
+        # at once spills heavily to local memory (ncu: stack 3072 B, 96.9% of
+        # local stores uncoalesced). Looping keeps live state at one [BLOCK_H]
+        # accumulator, fits in registers, and skips children past `count`.
+        acc = tl.zeros([BLOCK_H], dtype=tl.float32)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                pa = tl.load(prev_actor_ptr + child)
+                pol_ptr = tl.where(pa == player, policy_hero_ptr, policy_opp_ptr)
+                pol = tl.load(pol_ptr + child * H + col_offs, mask=col_mask, other=0.0)
+                v = tl.load(
+                    values_ptr + (child * 2 + player) * H + col_offs,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                acc += v * pol
 
         out_ptrs = values_ptr + ((parent_base + p) * 2 + player) * H + col_offs
         tl.store(out_ptrs, acc, mask=col_mask)
