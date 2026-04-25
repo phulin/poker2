@@ -118,7 +118,7 @@ class BetterFFN(BaseMLPModel):
             for _ in range(num_policy_layers - 1)
         ]
         layers.append(
-            ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS, nonlinearity)
+            ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS, NonlinearityType.gelu)
         )
         self.policy_head = nn.Sequential(*layers)
 
@@ -129,7 +129,7 @@ class BetterFFN(BaseMLPModel):
             for _ in range(num_value_layers - 1)
         ]
         layers.append(
-            ffn_block(hidden_dim, ffn_dim, num_players * NUM_HANDS, nonlinearity)
+            ffn_block(hidden_dim, ffn_dim, num_players * NUM_HANDS, NonlinearityType.gelu)
         )
         self.hand_value_head = nn.Sequential(*layers)
 
@@ -237,11 +237,7 @@ class BetterFFN(BaseMLPModel):
                     )
 
         # Guess hand values are around stddev 0.1.
-        last_block = self.hand_value_head[-1]
-        out_name = "swiglu" if "swiglu" in dict(last_block.named_children()) else "linear_out"
-        out_module = last_block.get_submodule(out_name)
-        out_weight = out_module.down.weight if out_name == "swiglu" else out_module.weight
-        out_weight.data.mul_(0.1)
+        self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
 
     def create_feature_encoder(
         self,
