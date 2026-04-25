@@ -1,4 +1,4 @@
-import copy
+from contextlib import contextmanager
 
 import torch.nn as nn
 
@@ -53,18 +53,26 @@ class EMAHelper:
             if param.requires_grad:
                 param.data.copy_(self.shadow[name].data)
 
-    def create_ema_copy(self, module: nn.Module) -> nn.Module:
-        """Create a deep copy of the module with EMA weights applied.
+    @contextmanager
+    def swapped(self, module: nn.Module):
+        """Temporarily bind shadow weights into ``module`` without copying.
 
-        Args:
-            module: PyTorch module to copy.
-
-        Returns:
-            Deep copy of the module with EMA weights applied.
+        Why: lets one compiled module run with EMA weights — Dynamo treats
+        params as graph inputs, so rebinding ``.data`` does not recompile.
+        How to apply: wrap calls into the live model with ``with helper.swapped(model):``.
         """
-        module_copy = copy.deepcopy(module)
-        self.apply_to_module(module_copy)
-        return module_copy
+        if isinstance(module, nn.DataParallel):
+            module = module.module  # ty:ignore[invalid-assignment]
+        saved: list[tuple[nn.Parameter, object]] = []
+        try:
+            for name, param in module.named_parameters():
+                if name in self.shadow:
+                    saved.append((param, param.data))
+                    param.data = self.shadow[name]
+            yield module
+        finally:
+            for param, data in saved:
+                param.data = data
 
     def state_dict(self) -> dict:
         """Get the state dict of shadow weights.

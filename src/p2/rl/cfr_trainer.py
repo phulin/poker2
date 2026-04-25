@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import copy
 import math
 import os
-from dataclasses import asdict, dataclass
+from contextlib import nullcontext
+from dataclasses import asdict
 from typing import Any
 
 import torch
@@ -18,7 +18,6 @@ from p2.env.card_utils import (
     suit_permutations_tensor,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
-from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.mlp import RebelFFN
 from p2.models.mlp.better_features import context_length
 from p2.models.mlp.better_ffn import BetterFFN
@@ -36,12 +35,6 @@ from p2.utils.ema_helper import EMAHelper
 from p2.utils.profiling import profile
 
 STREETS = ["preflop", "flop", "turn", "river", "showdown"]
-
-
-@dataclass
-class EMAContext:
-    helper: EMAHelper
-    model: BaseMLPModel
 
 
 class RebelCFRTrainer:
@@ -187,21 +180,16 @@ class RebelCFRTrainer:
         )
         self.grad_clip = cfg.train.grad_clip
 
-        # EMA setup
-        self.ema_context = None
+        # EMA setup. Shadow weights live in EMAHelper; at search/eval time we
+        # rebind self.model's parameter .data to the shadow tensors via a
+        # context manager. This keeps a single compiled module — no second
+        # torch.compile pass and no duplicated parameter memory.
+        self.ema_helper: EMAHelper | None = None
         if cfg.train.model_ema is not None:
-            self.ema_context = EMAContext(
-                helper=EMAHelper(mu=cfg.train.model_ema),
-                model=copy.deepcopy(self.model),
-            )
-            self.ema_context.helper.register(self.ema_context.model)
-            self.ema_context.helper.apply_to_module(self.ema_context.model)
-            if self.device.type == "cuda" and cfg.model.compile:
-                self.ema_context.model.compile(dynamic=True)
+            self.ema_helper = EMAHelper(mu=cfg.train.model_ema)
+            self.ema_helper.register(self.model)
 
-        eval_model = (
-            self.ema_context.model if self.ema_context is not None else self.model
-        )
+        eval_model = self.model
 
         if cfg.search.sparse:
             evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
@@ -253,6 +241,12 @@ class RebelCFRTrainer:
 
         self.aggression_analyzer = AggressionAnalyzer(device=self.device)
         self.pbs_pool = PBSPool(pool_size=3, generator=self.rng)
+
+    def _eval_swap(self):
+        """Bind EMA shadow weights into self.model for the duration of the block."""
+        if self.ema_helper is None:
+            return nullcontext()
+        return self.ema_helper.swapped(self.model)
 
     def _apply_schedules(self, step: int) -> None:
         """Apply learning rate and iteration count schedules."""
@@ -447,25 +441,26 @@ class RebelCFRTrainer:
                 fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)
                 metrics["fresh_value_loss"] = fresh_loss_dict["value_loss"]
 
-                if self.ema_context is not None:
-                    self.ema_context.model.eval()
-                    fresh_model_avg_output = self.ema_context.model.repeat(
-                        fresh_value_batch.features,
-                        count=self.cfg.model.num_supervisions,
-                        include_policy=False,
-                    )
-                    metrics["fresh_value_loss_avg"] = self.loss_fn(
-                        fresh_model_avg_output, fresh_value_batch
-                    )["value_loss"]
+                if self.ema_helper is not None:
+                    with self._eval_swap():
+                        self.model.eval()
+                        fresh_model_avg_output = self.model.repeat(
+                            fresh_value_batch.features,
+                            count=self.cfg.model.num_supervisions,
+                            include_policy=False,
+                        )
+                        metrics["fresh_value_loss_avg"] = self.loss_fn(
+                            fresh_model_avg_output, fresh_value_batch
+                        )["value_loss"]
 
-                    model_avg_output = self.ema_context.model.repeat(
-                        value_batch.features,
-                        count=self.cfg.model.num_supervisions,
-                        include_policy=False,
-                    )
-                    metrics["value_loss_avg"] = self.loss_fn(
-                        model_avg_output, value_batch
-                    )["value_loss"]
+                        model_avg_output = self.model.repeat(
+                            value_batch.features,
+                            count=self.cfg.model.num_supervisions,
+                            include_policy=False,
+                        )
+                        metrics["value_loss_avg"] = self.loss_fn(
+                            model_avg_output, value_batch
+                        )["value_loss"]
 
         if (
             fresh_value_batch is not None
@@ -608,10 +603,10 @@ class RebelCFRTrainer:
         params_before = [p.clone() for p in self.model.parameters()]
         self.optimizer.step()
 
-        # Update EMA if enabled
-        if self.ema_context is not None:
-            self.ema_context.helper.update(self.model)
-            self.ema_context.helper.apply_to_module(self.ema_context.model)
+        # Update EMA if enabled. Shadow weights are the source of truth and
+        # are bound into self.model on demand via _eval_swap().
+        if self.ema_helper is not None:
+            self.ema_helper.update(self.model)
 
         # Compute parameter update norm using torch utility
         updates = (
@@ -640,13 +635,16 @@ class RebelCFRTrainer:
     def _update_model(
         self, step: int
     ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
-        fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
-            self.K_value
-        )
+        with self._eval_swap():
+            fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
+                self.K_value
+            )
 
-        # Warmup: make sure we have enough samples.
-        while min(len(self.value_buffer), len(self.policy_buffer)) < self.batch_size:
-            self.data_generator.generate_data(self.K_value)
+            # Warmup: make sure we have enough samples.
+            while (
+                min(len(self.value_buffer), len(self.policy_buffer)) < self.batch_size
+            ):
+                self.data_generator.generate_data(self.K_value)
 
         value_fullness = len(self.value_buffer) / self.value_buffer.capacity
         episodes = math.ceil(self.cfg.train.episodes_per_step * value_fullness)
@@ -818,9 +816,9 @@ class RebelCFRTrainer:
             state["optimizer"] = self.optimizer.state_dict()
             state["rng"] = self.rng.get_state()
 
-        # Save EMA state if enabled (only save model_avg, shadow weights can be reconstructed)
-        if self.ema_context is not None:
-            model_avg_state = self.ema_context.model.state_dict()
+        # Save EMA shadow weights if enabled.
+        if self.ema_helper is not None:
+            model_avg_state = dict(self.ema_helper.shadow)
             if save_dtype is not None:
                 model_avg_state = {
                     k: v.to(save_dtype) if v.dtype.is_floating_point else v
@@ -850,21 +848,22 @@ class RebelCFRTrainer:
 
         self.model.load_state_dict(model_state)
 
-        # Load EMA state if it exists in checkpoint and EMA is enabled
-        if "model_avg" in ckpt and self.ema_context is not None:
-            # Convert model_avg state back to host dtype if needed
+        # Load EMA state if it exists in checkpoint and EMA is enabled.
+        if "model_avg" in ckpt and self.ema_helper is not None:
             model_avg_state = ckpt["model_avg"]
             if save_dtype_str is not None and save_dtype_str != str(self.float_dtype):
                 model_avg_state = {
                     k: v.to(self.float_dtype) if v.dtype.is_floating_point else v
                     for k, v in model_avg_state.items()
                 }
-            self.ema_context.model.load_state_dict(model_avg_state)
-            # Reconstruct ema_helper shadow weights from model_avg
-            self.ema_context.helper.register(self.ema_context.model)
-            # Update evaluator to use model_avg
-            self.cfr_evaluator.model = self.ema_context.model
-            self.cfr_evaluator.chance_helper.model = self.ema_context.model
+            # Older checkpoints saved a full state_dict (params + buffers); keep
+            # only the trainable-param keys that EMAHelper tracks.
+            shadow_keys = set(self.ema_helper.shadow.keys())
+            self.ema_helper.shadow = {
+                k: v.to(self.ema_helper.shadow[k].dtype).clone()
+                for k, v in model_avg_state.items()
+                if k in shadow_keys
+            }
 
         # Only load optimizer if it exists in checkpoint
         if "optimizer" in ckpt:

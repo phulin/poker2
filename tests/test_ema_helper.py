@@ -172,34 +172,24 @@ class TestEMAHelper:
             if param.requires_grad:
                 assert_close(param.data, ema.shadow[name], rtol=1e-5, atol=1e-6)
 
-    def test_create_ema_copy(self):
-        """Test creating a copy of module with EMA weights."""
+    def test_swapped_context(self):
+        """Test that swapped() temporarily binds shadow weights and restores."""
         model = SimpleModel()
         ema = EMAHelper(mu=0.9)
 
         ema.register(model)
-
-        # Modify shadow weights
         for name in ema.shadow:
             ema.shadow[name].data += 5.0
 
-        # Create EMA copy
-        model_avg = ema.create_ema_copy(model)
+        original = {n: p.data.clone() for n, p in model.named_parameters()}
 
-        # Check that model_avg has EMA weights
-        for name, param in model_avg.named_parameters():
-            if param.requires_grad:
-                assert_close(param.data, ema.shadow[name], rtol=1e-5, atol=1e-6)
+        with ema.swapped(model):
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    assert param.data.data_ptr() == ema.shadow[name].data_ptr()
 
-        # Check that original model is unchanged
         for name, param in model.named_parameters():
-            if param.requires_grad:
-                assert not torch.allclose(
-                    param.data, ema.shadow[name], rtol=1e-5, atol=1e-6
-                )
-
-        # Check that model_avg is a different object
-        assert model_avg is not model
+            assert_close(param.data, original[name], rtol=1e-5, atol=1e-6)
 
     def test_state_dict(self):
         """Test getting state dict."""
