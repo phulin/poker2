@@ -1911,24 +1911,27 @@ if triton is not None:
         c = tl.program_id(0) + start
         if c >= end:
             return
-        player = tl.program_id(1)
-        hb = tl.program_id(2)
+        hb = tl.program_id(1)
 
         parent = tl.load(parent_index_ptr + c)
         prev_actor = tl.load(prev_actor_ptr + c)
-        is_hero = player == prev_actor
 
         offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
         mask = offs < H
 
-        parent_row = reach_ptr + (parent * 2 + player) * H
-        dst_row = reach_ptr + (c * 2 + player) * H
+        # Process both players in one program: shared parent_index/prev_actor
+        # loads, plus a single policy load reused for whichever player is hero
+        # (the other player just copies parent reach unchanged).
+        pol = tl.load(policy_ptr + c * H + offs, mask=mask, other=0.0)
 
-        v = tl.load(parent_row + offs, mask=mask, other=0.0)
-        if is_hero:
-            pol = tl.load(policy_ptr + c * H + offs, mask=mask, other=0.0)
-            v = v * pol
-        tl.store(dst_row + offs, v, mask=mask)
+        v0 = tl.load(reach_ptr + (parent * 2 + 0) * H + offs, mask=mask, other=0.0)
+        v1 = tl.load(reach_ptr + (parent * 2 + 1) * H + offs, mask=mask, other=0.0)
+        if prev_actor == 0:
+            v0 = v0 * pol
+        else:
+            v1 = v1 * pol
+        tl.store(reach_ptr + (c * 2 + 0) * H + offs, v0, mask=mask)
+        tl.store(reach_ptr + (c * 2 + 1) * H + offs, v1, mask=mask)
 
 
 def fused_reach_weights_depth_(
@@ -1959,7 +1962,7 @@ def fused_reach_weights_depth_(
     n = end - start
     if n <= 0:
         return
-    grid = (n, 2, triton.cdiv(h, block_h))
+    grid = (n, triton.cdiv(h, block_h))
     _fused_reach_weights_kernel[grid](
         reach,
         policy,
