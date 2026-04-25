@@ -1940,6 +1940,162 @@ class TScalars:
 
 
 # ---------------------------------------------------------------------------
+# Kernel 15: UNUSED showdown EV kernel (attempted — reverted).
+#
+# Tried a Triton rewrite of CFREvaluator._showdown_value to skip the
+# [M, H, 52] per_card_mass cumsum. The approach computes 8 prefix-sum
+# accumulators per (env m, sorted position k) by scanning all H sorted
+# positions once, trading the [M, H, 52] memory pass for an O(M·H²) compute
+# pattern.
+#
+# At the reference mixed-street shape (M=3264, H=1326, 52 cards), that
+# reformulation is algorithmically unfavorable: H² ≈ 1.76M beats H·52 ≈ 69k
+# per env by 25×, and in practice the tiled Triton version came in at
+# 20–60× slower than the torch.compile'd PyTorch baseline (which already
+# fuses the cumsum tightly with hardware-accelerated scan). Kept here for
+# reference; disconnected from the evaluator.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _showdown_ev_kernel(
+        b_opp_sorted_ptr,      # [M, H] fp32
+        c1_sorted_ptr,         # [M, H] int32
+        c2_sorted_ptr,         # [M, H] int32
+        L_idx_ptr,             # [M, H] int32
+        R_idx_ptr,             # [M, H] int32
+        ev_sorted_out_ptr,     # [M, H] fp32 — OUT
+        H,
+        EPS,
+        BLOCK_K: tl.constexpr,
+        BLOCK_J: tl.constexpr,
+    ):
+        """Tiled [BLOCK_K × BLOCK_J] showdown-EV kernel.
+
+        Grid: (M, ceil(H / BLOCK_K)). Each program owns BLOCK_K contiguous
+        hero sorted-positions and scans all H villain positions in BLOCK_J
+        tiles, accumulating eight per-hero-hand prefix sums that replace the
+        [M, H, 52] ``per_card_mass``/``Pcards`` intermediate.
+
+        card_ok masking is not needed: ``_block_beliefs`` already zeros
+        b_opp on board-conflicting combos, so they contribute nothing.
+        """
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+
+        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask_k = k_offs < H
+
+        row_b = b_opp_sorted_ptr + m * H
+        row_c1 = c1_sorted_ptr + m * H
+        row_c2 = c2_sorted_ptr + m * H
+        row_L = L_idx_ptr + m * H
+        row_R = R_idx_ptr + m * H
+
+        c1_hero = tl.load(row_c1 + k_offs, mask=mask_k, other=-1).to(tl.int32)
+        c2_hero = tl.load(row_c2 + k_offs, mask=mask_k, other=-1).to(tl.int32)
+        L = tl.load(row_L + k_offs, mask=mask_k, other=0).to(tl.int32)
+        R = tl.load(row_R + k_offs, mask=mask_k, other=0).to(tl.int32)
+        b_k = tl.load(row_b + k_offs, mask=mask_k, other=0.0)
+
+        P_L = tl.zeros([BLOCK_K], dtype=tl.float32)
+        P_R = tl.zeros([BLOCK_K], dtype=tl.float32)
+        Pc_L_c1 = tl.zeros([BLOCK_K], dtype=tl.float32)
+        Pc_L_c2 = tl.zeros([BLOCK_K], dtype=tl.float32)
+        Pc_R_c1 = tl.zeros([BLOCK_K], dtype=tl.float32)
+        Pc_R_c2 = tl.zeros([BLOCK_K], dtype=tl.float32)
+        Pc_last_c1 = tl.zeros([BLOCK_K], dtype=tl.float32)
+        Pc_last_c2 = tl.zeros([BLOCK_K], dtype=tl.float32)
+
+        for j_start in tl.range(0, H, BLOCK_J):
+            j_offs = j_start + tl.arange(0, BLOCK_J)
+            mask_j = j_offs < H
+            b_j = tl.load(row_b + j_offs, mask=mask_j, other=0.0)      # [BJ]
+            cj1 = tl.load(row_c1 + j_offs, mask=mask_j, other=-1).to(tl.int32)
+            cj2 = tl.load(row_c2 + j_offs, mask=mask_j, other=-1).to(tl.int32)
+
+            # [BLOCK_K, BLOCK_J] masks
+            j_bc = j_offs[None, :]   # [1, BJ]
+            in_before_L = j_bc < L[:, None]                              # [BK, BJ]
+            in_before_R = j_bc < R[:, None]
+            has_c1 = (cj1[None, :] == c1_hero[:, None]) | (cj2[None, :] == c1_hero[:, None])
+            has_c2 = (cj1[None, :] == c2_hero[:, None]) | (cj2[None, :] == c2_hero[:, None])
+            b_bc = tl.where(mask_j[None, :], b_j[None, :], 0.0).broadcast_to((BLOCK_K, BLOCK_J))
+
+            P_L += tl.sum(tl.where(in_before_L, b_bc, 0.0), axis=1)
+            P_R += tl.sum(tl.where(in_before_R, b_bc, 0.0), axis=1)
+            Pc_L_c1 += tl.sum(tl.where(in_before_L & has_c1, b_bc, 0.0), axis=1)
+            Pc_L_c2 += tl.sum(tl.where(in_before_L & has_c2, b_bc, 0.0), axis=1)
+            Pc_R_c1 += tl.sum(tl.where(in_before_R & has_c1, b_bc, 0.0), axis=1)
+            Pc_R_c2 += tl.sum(tl.where(in_before_R & has_c2, b_bc, 0.0), axis=1)
+            Pc_last_c1 += tl.sum(tl.where(has_c1, b_bc, 0.0), axis=1)
+            Pc_last_c2 += tl.sum(tl.where(has_c2, b_bc, 0.0), axis=1)
+
+        win_mass = P_L - Pc_L_c1 - Pc_L_c2
+        seg_sum = P_R - P_L
+        seg_c1 = Pc_R_c1 - Pc_L_c1
+        seg_c2 = Pc_R_c2 - Pc_L_c2
+        tie_mass = seg_sum - seg_c1 - seg_c2 + b_k
+
+        denom = 1.0 - Pc_last_c1 - Pc_last_c2 + b_k
+        use_div = denom > EPS
+        denom_safe = tl.maximum(denom, EPS)
+        win_prob = tl.where(use_div, win_mass / denom_safe, 0.0)
+        tie_prob = tl.where(use_div, tie_mass / denom_safe, 0.0)
+        loss_prob = tl.where(use_div, 1.0 - win_prob - tie_prob, 0.0)
+        ev = win_prob - loss_prob
+        tl.store(ev_sorted_out_ptr + m * H + k_offs, ev, mask=mask_k)
+
+
+def showdown_ev_triton(
+    b_opp_sorted: torch.Tensor,       # [M, H] fp32
+    c1_sorted: torch.Tensor,          # [M, H] int
+    c2_sorted: torch.Tensor,          # [M, H] int
+    L_idx: torch.Tensor,              # [M, H] int
+    R_idx: torch.Tensor,              # [M, H] int
+    eps: float = 1e-8,
+    block_k: int = 32,
+    block_j: int = 128,
+) -> torch.Tensor:
+    """Compute ``EV_hand_sorted`` [M, H] directly from sorted-order inputs.
+
+    Replaces the PyTorch ``_showdown_value`` pipeline (per_card_mass cumsum +
+    Pcards gathers + divide) with one Triton kernel. Caller remains
+    responsible for: permuting EV back via ``inv_sorted``; multiplying by
+    ``hand_ok_mask``; and scaling by ``potential / scale``.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert b_opp_sorted.is_contiguous() and b_opp_sorted.dim() == 2
+    M, H = b_opp_sorted.shape
+    assert c1_sorted.shape == (M, H) and c2_sorted.shape == (M, H)
+    assert L_idx.shape == (M, H) and R_idx.shape == (M, H)
+    c1_i32 = c1_sorted.to(torch.int32).contiguous()
+    c2_i32 = c2_sorted.to(torch.int32).contiguous()
+    L_i32 = L_idx.to(torch.int32).contiguous()
+    R_i32 = R_idx.to(torch.int32).contiguous()
+    out = torch.empty(M, H, device=b_opp_sorted.device, dtype=torch.float32)
+
+    grid = (M, triton.cdiv(H, block_k))
+    _showdown_ev_kernel[grid](
+        b_opp_sorted.contiguous(),
+        c1_i32,
+        c2_i32,
+        L_i32,
+        R_i32,
+        out,
+        H,
+        eps,
+        BLOCK_K=block_k,
+        BLOCK_J=block_j,
+        num_warps=4,
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # CUDA graph capture of a full cfr_iteration.
 # ---------------------------------------------------------------------------
 
