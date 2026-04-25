@@ -74,10 +74,10 @@ if triton is not None:
         cumul_ptr,
         weight_ptr,
         pos_out_ptr,
-        t_alpha_num,
-        t_beta_num,
-        t_alpha_den,
-        t_beta_den,
+        t_alpha_num_ptr,
+        t_beta_num_ptr,
+        t_alpha_den_ptr,
+        t_beta_den_ptr,
         N,
         APPLY_DCFR: tl.constexpr,
         CFR_PLUS: tl.constexpr,
@@ -93,6 +93,10 @@ if triton is not None:
         w = tl.load(weight_ptr + offs, mask=mask, other=0.0)
 
         if APPLY_DCFR:
+            t_alpha_num = tl.load(t_alpha_num_ptr)
+            t_beta_num = tl.load(t_beta_num_ptr)
+            t_alpha_den = tl.load(t_alpha_den_ptr)
+            t_beta_den = tl.load(t_beta_den_ptr)
             positive = c > 0.0
             num = tl.where(positive, t_alpha_num, t_beta_num)
             den = tl.where(positive, t_alpha_den, t_beta_den)
@@ -164,23 +168,54 @@ def fused_dcfr_update_(
 
     apply_dcfr = cfr_type in (CFRType.discounted, CFRType.discounted_plus)
     if apply_dcfr:
-        t_alpha_num = float(t**dcfr_alpha)
-        t_beta_num = float(t**dcfr_beta)
-        t_alpha_den = t_alpha_num + 1.0
-        t_beta_den = t_beta_num + 1.0
+        t_alpha_num_v = float(t**dcfr_alpha)
+        t_beta_num_v = float(t**dcfr_beta)
+        t_alpha_den_v = t_alpha_num_v + 1.0
+        t_beta_den_v = t_beta_num_v + 1.0
     else:
-        t_alpha_num = t_beta_num = t_alpha_den = t_beta_den = 1.0
+        t_alpha_num_v = t_beta_num_v = t_alpha_den_v = t_beta_den_v = 1.0
 
+    dev = cumulative_regrets.device
+    dt = cumulative_regrets.dtype
+    t_alpha_num = torch.tensor(t_alpha_num_v, dtype=dt, device=dev)
+    t_beta_num = torch.tensor(t_beta_num_v, dtype=dt, device=dev)
+    t_alpha_den = torch.tensor(t_alpha_den_v, dtype=dt, device=dev)
+    t_beta_den = torch.tensor(t_beta_den_v, dtype=dt, device=dev)
+
+    fused_dcfr_update_with_tensors_(
+        cumulative_regrets=cumulative_regrets,
+        regret_weight_sums=regret_weight_sums,
+        regrets=regrets,
+        t_alpha_num=t_alpha_num,
+        t_beta_num=t_beta_num,
+        t_alpha_den=t_alpha_den,
+        t_beta_den=t_beta_den,
+        apply_dcfr=apply_dcfr,
+        cfr_plus=cfr_plus,
+        positive_regrets_out=positive_regrets_out,
+        block_size=block_size,
+    )
+
+
+def fused_dcfr_update_with_tensors_(
+    cumulative_regrets: torch.Tensor,
+    regret_weight_sums: torch.Tensor,
+    regrets: torch.Tensor,
+    t_alpha_num: torch.Tensor,
+    t_beta_num: torch.Tensor,
+    t_alpha_den: torch.Tensor,
+    t_beta_den: torch.Tensor,
+    apply_dcfr: bool,
+    cfr_plus: bool,
+    positive_regrets_out: torch.Tensor | None = None,
+    block_size: int = 1024,
+) -> None:
+    """Graph-capturable DCFR update: scalars come from pre-filled 0-D tensors."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
     n = cumulative_regrets.numel()
     write_pos = positive_regrets_out is not None
-    if write_pos:
-        assert positive_regrets_out.is_contiguous()
-        assert positive_regrets_out.shape == cumulative_regrets.shape
-        pos_ptr = positive_regrets_out
-    else:
-        # Kernel requires a valid pointer even if unused; reuse cumul (not read).
-        pos_ptr = cumulative_regrets
-
+    pos_ptr = positive_regrets_out if write_pos else cumulative_regrets
     grid = (triton.cdiv(n, block_size),)
     _fused_dcfr_update_kernel[grid](
         regrets,
@@ -453,9 +488,9 @@ if triton is not None:
     def _fused_update_average_values_kernel(
         values_avg_ptr,     # [N, 2, H] in/out
         latest_ptr,         # [N, 2, H]
-        old_scalar,
-        new_scalar,
-        inv_total,          # 1 / (old + new)
+        old_scalar_ptr,
+        new_scalar_ptr,
+        inv_total_ptr,      # 1 / (old + new)
         n_elements,
         BLOCK: tl.constexpr,
     ):
@@ -464,6 +499,9 @@ if triton is not None:
         mask = offs < n_elements
         a = tl.load(values_avg_ptr + offs, mask=mask, other=0.0)
         v = tl.load(latest_ptr + offs, mask=mask, other=0.0)
+        old_scalar = tl.load(old_scalar_ptr)
+        new_scalar = tl.load(new_scalar_ptr)
+        inv_total = tl.load(inv_total_ptr)
         out = (a * old_scalar + v * new_scalar) * inv_total
         tl.store(values_avg_ptr + offs, out, mask=mask)
 
@@ -487,14 +525,34 @@ def fused_update_average_values_(
     assert values_avg.shape == latest_values.shape
     total = float(old) + float(new)
     assert total != 0.0
-    inv_total = 1.0 / total
+    dev = values_avg.device
+    dt = values_avg.dtype
+    old_t = torch.tensor(float(old), dtype=dt, device=dev)
+    new_t = torch.tensor(float(new), dtype=dt, device=dev)
+    inv_t = torch.tensor(1.0 / total, dtype=dt, device=dev)
+    fused_update_average_values_with_tensors_(
+        values_avg, latest_values, old_t, new_t, inv_t, block_size=block_size
+    )
+
+
+def fused_update_average_values_with_tensors_(
+    values_avg: torch.Tensor,
+    latest_values: torch.Tensor,
+    old: torch.Tensor,
+    new: torch.Tensor,
+    inv_total: torch.Tensor,
+    block_size: int = 1024,
+) -> None:
+    """Graph-capturable version: scalars come from pre-filled 0-D tensors."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
     n = values_avg.numel()
     grid = (triton.cdiv(n, block_size),)
     _fused_update_average_values_kernel[grid](
         values_avg,
         latest_values,
-        float(old),
-        float(new),
+        old,
+        new,
         inv_total,
         n,
         BLOCK=block_size,
@@ -512,8 +570,8 @@ if triton is not None:
     @triton.jit
     def _fused_regret_tail_kernel(
         values_achieved_ptr,     # [total, 2, H]
-        actor_values_ptr,        # [top, H]     (pre-fan_out source)
-        weights_ptr,             # [total-bottom, H]
+        actor_values_ptr,        # [top, H]     (parent-aligned)
+        src_weights_ptr,         # [top, H]     (parent-aligned — was post-fan_out)
         parent_index_ptr,        # [total] — parent_index[c] gives parent row in [0, top)
         prev_actor_ptr,          # [total] — 0 or 1
         regrets_ptr,             # [total, H] output (only rows [bottom, total) written)
@@ -528,10 +586,10 @@ if triton is not None:
         parent = tl.load(parent_index_ptr + c)
         prev_actor = tl.load(prev_actor_ptr + c)
 
-        # Row base pointers.
+        # Row base pointers — weights now gathered from parent, same as expected.
         exp_row = actor_values_ptr + parent * H
+        w_row = src_weights_ptr + parent * H
         ach_row = values_achieved_ptr + (c * 2 + prev_actor) * H
-        w_row = weights_ptr + (c - bottom) * H
         out_row = regrets_ptr + c * H
 
         for start in tl.range(0, H, BLOCK_H):
@@ -546,8 +604,8 @@ if triton is not None:
 def fused_regret_tail_(
     regrets: torch.Tensor,              # [total, H] — in/out (only [bottom:] written)
     values_achieved: torch.Tensor,      # [total, 2, H]
-    actor_values: torch.Tensor,         # [top, H]
-    weights: torch.Tensor,              # [total-bottom, H]
+    actor_values: torch.Tensor,         # [top, H] — parent-aligned
+    src_weights: torch.Tensor,          # [top, H] — parent-aligned (was post-fan_out)
     parent_index: torch.Tensor,         # [total] int64
     prev_actor: torch.Tensor,           # [total] int64
     bottom: int,
@@ -557,14 +615,16 @@ def fused_regret_tail_(
 
     For each child row ``c in [bottom, total)`` and hand ``h``::
 
-        regrets[c, h] = weights[c - bottom, h] * (
+        regrets[c, h] = src_weights[parent_index[c], h] * (
             values_achieved[c, prev_actor[c], h]
             - actor_values[parent_index[c], h]
         )
 
-    Replaces the PyTorch sequence ``fan_out(actor_values) + gather +
-    subtract + multiply + assign`` (5 kernels + 2 intermediates) with one
-    kernel and zero intermediate allocations.
+    Replaces the sequence ``fan_out(actor_values) + fan_out(src_weights) +
+    gather + subtract + multiply + assign`` (6 kernels + 3 intermediates)
+    with one kernel. ``src_weights`` is now parent-aligned — the fan-out is
+    performed via the in-kernel ``parent_index`` gather, eliminating the
+    ``[num_children, H]`` weights buffer.
     """
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
@@ -572,13 +632,13 @@ def fused_regret_tail_(
     assert values_achieved.is_contiguous() and values_achieved.dim() == 3
     assert values_achieved.shape[1] == 2
     assert actor_values.is_contiguous() and actor_values.dim() == 2
-    assert weights.is_contiguous() and weights.dim() == 2
+    assert src_weights.is_contiguous() and src_weights.dim() == 2
+    assert actor_values.shape == src_weights.shape
     assert parent_index.is_contiguous() and parent_index.dim() == 1
     assert prev_actor.is_contiguous() and prev_actor.dim() == 1
 
     total, h = regrets.shape
     assert values_achieved.shape == (total, 2, h)
-    assert weights.shape == (total - bottom, h)
     assert parent_index.shape == (total,)
     assert prev_actor.shape == (total,)
 
@@ -586,7 +646,7 @@ def fused_regret_tail_(
     _fused_regret_tail_kernel[grid](
         values_achieved,
         actor_values,
-        weights,
+        src_weights,
         parent_index,
         prev_actor,
         regrets,
@@ -613,9 +673,9 @@ if triton is not None:
         policy_probs_avg_ptr,   # [total, H] in/out
         to_act_ptr,             # [total] int64
         parent_index_ptr,       # [total] int64
-        old_scalar,
-        new_scalar,
-        total_weight,           # old + new
+        old_scalar_ptr,
+        new_scalar_ptr,
+        total_weight_ptr,       # old + new
         bottom,                 # first child row to update
         total,
         H,
@@ -627,6 +687,10 @@ if triton is not None:
             return
         parent = tl.load(parent_index_ptr + c)
         actor = tl.load(to_act_ptr + parent)
+
+        old_scalar = tl.load(old_scalar_ptr)
+        new_scalar = tl.load(new_scalar_ptr)
+        total_weight = tl.load(total_weight_ptr)
 
         reach_row = self_reach_ptr + (parent * 2 + actor) * H
         reach_avg_row = self_reach_avg_ptr + (parent * 2 + actor) * H
@@ -692,7 +756,36 @@ def fused_average_policy_mix_(
     assert parent_index.shape == (total,)
     total_weight = float(old) + float(new)
     assert total_weight != 0.0
+    dev = policy_probs_avg.device
+    dt = policy_probs_avg.dtype
+    old_t = torch.tensor(float(old), dtype=dt, device=dev)
+    new_t = torch.tensor(float(new), dtype=dt, device=dev)
+    tot_t = torch.tensor(total_weight, dtype=dt, device=dev)
+    fused_average_policy_mix_with_tensors_(
+        policy_probs_avg, policy_probs, self_reach, self_reach_avg,
+        to_act, parent_index, old_t, new_t, tot_t,
+        bottom=bottom, eps=eps, block_h=block_h,
+    )
 
+
+def fused_average_policy_mix_with_tensors_(
+    policy_probs_avg: torch.Tensor,
+    policy_probs: torch.Tensor,
+    self_reach: torch.Tensor,
+    self_reach_avg: torch.Tensor,
+    to_act: torch.Tensor,
+    parent_index: torch.Tensor,
+    old: torch.Tensor,
+    new: torch.Tensor,
+    total_weight: torch.Tensor,
+    bottom: int,
+    eps: float = 1e-5,
+    block_h: int = 512,
+) -> None:
+    """Graph-capturable version: scalars come from pre-filled 0-D tensors."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    total, h = policy_probs_avg.shape
     grid = (total - bottom,)
     _fused_average_policy_mix_kernel[grid](
         self_reach,
@@ -701,8 +794,8 @@ def fused_average_policy_mix_(
         policy_probs_avg,
         to_act,
         parent_index,
-        float(old),
-        float(new),
+        old,
+        new,
         total_weight,
         bottom,
         total,
@@ -761,6 +854,11 @@ if triton is not None:
 # Per-device cache of (card_a, card_b) int32 tensors (the [H,2] combo→card LUT).
 _combo_cards_cache: dict[torch.device, tuple[torch.Tensor, torch.Tensor]] = {}
 
+# Per-device cache of the [1326, 53] card-projection tensor. Column 0 is all
+# ones (yielding S = sum via matmul) and columns 1-52 are card-membership
+# indicators (yielding cardsum[c] for c in [0, 52) via matmul).
+_card_projection_cache: dict[torch.device, torch.Tensor] = {}
+
 
 def _get_combo_cards(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     key = device
@@ -774,6 +872,131 @@ def _get_combo_cards(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     card_b = combos[:, 1].to(torch.int32).contiguous()
     _combo_cards_cache[key] = (card_a, card_b)
     return card_a, card_b
+
+
+def _get_card_projection(device: torch.device) -> torch.Tensor:
+    """Return the cached [1326, 53] projection tensor (fp32). Column 0 = ones,
+    columns 1..52 = membership indicators for card (col - 1) across combos.
+
+    ``(target @ P)[b, 0]`` = ``sum_h target[b, h]`` = S.
+    ``(target @ P)[b, 1 + c]`` = ``sum_h target[b, h] * [combo h contains card c]``
+    = cardsum[b, c].
+    """
+    cached = _card_projection_cache.get(device)
+    if cached is not None:
+        return cached
+    from p2.env.card_utils import hand_combos_tensor
+
+    combos = hand_combos_tensor(device=device)  # [1326, 2]
+    P = torch.zeros(_UNBLOCKED_NUM_HANDS, 1 + _UNBLOCKED_NUM_CARDS, device=device)
+    P[:, 0] = 1.0
+    idx = torch.arange(_UNBLOCKED_NUM_HANDS, device=device)
+    P[idx, 1 + combos[:, 0]] = 1.0
+    P[idx, 1 + combos[:, 1]] = 1.0
+    _card_projection_cache[device] = P.contiguous()
+    return _card_projection_cache[device]
+
+
+def _preprocess_unblocked_stats(
+    target: torch.Tensor,  # [B, H] contiguous
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return (S[B], cardsum[B, NUM_CARDS]) for use with the finalize kernel.
+
+    Implemented as a single ``target @ P`` matmul (P: [H, 53]) that produces
+    ``[B, 53]`` = ``(S, cardsum)`` stacked. ~3× faster than the previous
+    ``sum + 2× scatter_add_`` sequence because (a) it's one kernel instead of
+    three, and (b) native matmul uses hardware matrix multiply-accumulate
+    (tensor cores at fp16, well-tuned fp32 path otherwise) instead of atomic
+    scatter adds.
+    """
+    assert target.is_contiguous() and target.dim() == 2
+    assert target.shape[1] == _UNBLOCKED_NUM_HANDS
+    P = _get_card_projection(target.device).to(target.dtype)
+    stacked = target @ P  # [B, 53]
+    s = stacked[:, 0].contiguous()
+    cardsum = stacked[:, 1:].contiguous()
+    return s, cardsum
+
+
+class ParentBeliefUnblockedStats:
+    """Caches S + cardsum at parent shape for both player slices of beliefs.
+
+    Construct once per CFR iteration from ``beliefs[:top]`` and reuse in both
+    ``compute_instantaneous_regrets`` (opponent slice) and
+    ``compute_expected_values`` (actor slice). Eliminates redundant
+    ``sum + scatter_add`` preprocessing work when both call sites operate on
+    the same beliefs tensor.
+    """
+
+    def __init__(self, beliefs_parents: torch.Tensor) -> None:
+        # beliefs_parents: [top, 2, H]
+        assert beliefs_parents.dim() == 3 and beliefs_parents.shape[1] == 2
+        top, p, h = beliefs_parents.shape
+        self.top = top
+        self.beliefs_parents = beliefs_parents
+        flat = beliefs_parents.reshape(top * 2, h).contiguous()
+        s_flat, cs_flat = _preprocess_unblocked_stats(flat)
+        # Reshape back to [top, 2, ...] for slicing by player.
+        self._S = s_flat.view(top, 2)
+        self._cardsum = cs_flat.view(top, 2, _UNBLOCKED_NUM_CARDS)
+
+    def slice_for_player(
+        self, player_per_node: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return (target, S, cardsum) all aligned on ``player_per_node``.
+
+        ``player_per_node[p] in {0, 1}`` selects which of the two slices to
+        pick for each parent. Typically ``to_act[:top]`` (actor slice) or
+        ``1 - to_act[:top]`` (opponent slice).
+        """
+        row_idx = torch.arange(self.top, device=self.beliefs_parents.device)
+        target = self.beliefs_parents[row_idx, player_per_node, :].contiguous()
+        s = self._S[row_idx, player_per_node].contiguous()
+        cardsum = self._cardsum[row_idx, player_per_node, :].contiguous()
+        return target, s, cardsum
+
+
+def unblocked_mass_opp_at_parents_triton(
+    beliefs: torch.Tensor,   # [total, 2, H]
+    to_act: torch.Tensor,    # [total] int64
+    top: int,
+    cached_stats: ParentBeliefUnblockedStats | None = None,
+) -> torch.Tensor:
+    """Compute ``unblocked_mass(beliefs[:top, 1 - to_act[:top], :])``, returning
+    a ``[top, H]`` tensor of opponent-reach unblocked mass at each parent node.
+
+    Replaces the sequence::
+
+        opponent_global_reach = calculate_unblocked_mass(beliefs.flip(dims=[1]))
+        src_weights = opponent_global_reach.gather(1, to_act).squeeze(1)
+
+    which processes the full ``[total, 2, H]`` tensor. Here we only touch
+    ``[top, H]`` — 2 × total / top ≈ 13× less input at production scale, so
+    ~5× less memory traffic for this unblocked-mass call.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    total, p, h = beliefs.shape
+    assert p == 2 and h == _UNBLOCKED_NUM_HANDS
+
+    opp_idx = (1 - to_act[:top]).to(torch.int64)
+    if cached_stats is not None:
+        target, s, cardsum = cached_stats.slice_for_player(opp_idx)
+    else:
+        row_idx = torch.arange(top, device=beliefs.device)
+        target = beliefs[:top][row_idx, opp_idx, :].contiguous()
+        s, cardsum = _preprocess_unblocked_stats(target)
+
+    card_a, card_b = _get_combo_cards(target.device)
+    out = torch.empty_like(target)
+    _unblocked_mass_finalize_kernel[(top,)](
+        target, cardsum, s, card_a, card_b, out,
+        _UNBLOCKED_NUM_HANDS,
+        NUM_CARDS=_UNBLOCKED_NUM_CARDS,
+        BLOCK_H=2048,
+        num_warps=4,
+    )
+    return out
 
 
 def unblocked_mass_triton(target: torch.Tensor) -> torch.Tensor:
@@ -807,15 +1030,7 @@ def unblocked_mass_triton(target: torch.Tensor) -> torch.Tensor:
     # Accumulate in fp32 — matches downstream consumers; fp64 path removed as
     # the O(N) formula has no catastrophic cancellation risk for realistic reach.
     card_a, card_b = _get_combo_cards(flat.device)
-    s = flat.sum(dim=-1)  # [B]
-    cardsum = torch.zeros(
-        b, _UNBLOCKED_NUM_CARDS, device=flat.device, dtype=flat.dtype
-    )
-    # scatter_add with int64 indices expected.
-    card_a_long = card_a.to(torch.int64)[None, :].expand(b, -1)
-    card_b_long = card_b.to(torch.int64)[None, :].expand(b, -1)
-    cardsum.scatter_add_(1, card_a_long, flat)
-    cardsum.scatter_add_(1, card_b_long, flat)
+    s, cardsum = _preprocess_unblocked_stats(flat)
 
     out = torch.empty_like(flat)
     # BLOCK_H must cover H; next power of two above 1326 is 2048.
@@ -1083,6 +1298,53 @@ def fused_sibling_sum(
 if triton is not None:
 
     @triton.jit
+    def _unblocked_mass_ratio_indirect_kernel(
+        numer_target_ptr,     # [num_children, H] marginal_policy
+        denom_target_ptr,     # [top, H] actor_beliefs (parent-aligned)
+        numer_cardsum_ptr,    # [num_children, 52]
+        denom_cardsum_ptr,    # [top, 52]
+        numer_S_ptr,          # [num_children]
+        denom_S_ptr,          # [top]
+        parent_index_ptr,     # [num_children] — child c → parent in [0, top)
+        card_a_ptr,
+        card_b_ptr,
+        out_ptr,              # [num_children, H]
+        H,
+        NUM_CARDS: tl.constexpr,
+        EPS,
+        BLOCK_H: tl.constexpr,
+    ):
+        c = tl.program_id(0)
+        parent = tl.load(parent_index_ptr + c)
+
+        Sn = tl.load(numer_S_ptr + c)
+        Sd = tl.load(denom_S_ptr + parent)
+
+        n_row = numer_target_ptr + c * H
+        d_row = denom_target_ptr + parent * H
+        ncs_row = numer_cardsum_ptr + c * NUM_CARDS
+        dcs_row = denom_cardsum_ptr + parent * NUM_CARDS
+        out_row = out_ptr + c * H
+
+        offs = tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        nt = tl.load(n_row + offs, mask=mask, other=0.0)
+        dt = tl.load(d_row + offs, mask=mask, other=0.0)
+        ca = tl.load(card_a_ptr + offs, mask=mask, other=0)
+        cb = tl.load(card_b_ptr + offs, mask=mask, other=0)
+
+        ncsa = tl.load(ncs_row + ca, mask=mask, other=0.0)
+        ncsb = tl.load(ncs_row + cb, mask=mask, other=0.0)
+        dcsa = tl.load(dcs_row + ca, mask=mask, other=0.0)
+        dcsb = tl.load(dcs_row + cb, mask=mask, other=0.0)
+
+        numer = tl.maximum(Sn - ncsa - ncsb + nt, 0.0)
+        denom = tl.maximum(Sd - dcsa - dcsb + dt, 0.0)
+        ratio = tl.where(denom > EPS, numer / denom, 0.0)
+        tl.store(out_row + offs, ratio, mask=mask)
+
+    @triton.jit
     def _unblocked_mass_ratio_kernel(
         numer_target_ptr,     # [B, H] marginal_policy
         denom_target_ptr,     # [B, H] beliefs_dest
@@ -1124,6 +1386,66 @@ if triton is not None:
         denom = tl.maximum(Sd - dcsa - dcsb + dt, 0.0)
         ratio = tl.where(denom > EPS, numer / denom, 0.0)
         tl.store(out_row + offs, ratio, mask=mask)
+
+
+def unblocked_mass_ratio_indirect_triton(
+    numer_target: torch.Tensor,   # [num_children, H] marginal_policy
+    denom_target: torch.Tensor,   # [top, H] actor_beliefs (parent-aligned)
+    parent_index: torch.Tensor,   # [num_children] int64 — child → parent idx
+    eps: float = 1e-5,
+    denom_stats: tuple[torch.Tensor, torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """Like ``unblocked_mass_ratio_triton`` but the denominator's target lives
+    at parent-aligned shape ``[top, H]``. Each child's denom is gathered inside
+    the kernel via ``parent_index``.
+
+    Savings vs the direct version:
+      - denom-side scatter_add processes ``top`` rows instead of
+        ``num_children`` (~5× less at production scale).
+      - denom ``cardsum`` buffer is 5× smaller → better L2 cache behavior in
+        the kernel.
+
+    Returns ``[num_children, H]``.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert numer_target.is_contiguous() and numer_target.dim() == 2
+    assert denom_target.is_contiguous() and denom_target.dim() == 2
+    assert parent_index.is_contiguous() and parent_index.dim() == 1
+
+    num_children, h = numer_target.shape
+    top = denom_target.shape[0]
+    assert denom_target.shape == (top, h)
+    assert parent_index.shape == (num_children,)
+    assert h == _UNBLOCKED_NUM_HANDS
+
+    card_a, card_b = _get_combo_cards(numer_target.device)
+    Sn, ncs = _preprocess_unblocked_stats(numer_target)
+    if denom_stats is not None:
+        Sd, dcs = denom_stats
+        assert Sd.shape == (top,) and dcs.shape == (top, _UNBLOCKED_NUM_CARDS)
+    else:
+        Sd, dcs = _preprocess_unblocked_stats(denom_target)
+
+    out = torch.empty_like(numer_target)
+    _unblocked_mass_ratio_indirect_kernel[(num_children,)](
+        numer_target,
+        denom_target,
+        ncs.contiguous(),
+        dcs.contiguous(),
+        Sn.contiguous(),
+        Sd.contiguous(),
+        parent_index,
+        card_a,
+        card_b,
+        out,
+        h,
+        NUM_CARDS=_UNBLOCKED_NUM_CARDS,
+        EPS=eps,
+        BLOCK_H=2048,
+        num_warps=4,
+    )
+    return out
 
 
 def unblocked_mass_ratio_triton(
@@ -1184,8 +1506,8 @@ if triton is not None:
         hand_values_ptr,        # [M, ...]
         last_model_values_ptr,  # [M, ...]
         out_ptr,                # [M, ...]
-        old_plus_new_over_new,  # (old + new) / new
-        old_over_new,           # old / new
+        old_plus_new_over_new_ptr,  # (old + new) / new
+        old_over_new_ptr,           # old / new
         n_elements,
         BLOCK: tl.constexpr,
     ):
@@ -1194,6 +1516,8 @@ if triton is not None:
         mask = offs < n_elements
         h = tl.load(hand_values_ptr + offs, mask=mask, other=0.0)
         l = tl.load(last_model_values_ptr + offs, mask=mask, other=0.0)
+        old_plus_new_over_new = tl.load(old_plus_new_over_new_ptr)
+        old_over_new = tl.load(old_over_new_ptr)
         out = old_plus_new_over_new * h - old_over_new * l
         tl.store(out_ptr + offs, out, mask=mask)
 
@@ -1214,20 +1538,405 @@ def fused_model_values_mix(
     assert hand_values.is_contiguous() and last_model_values.is_contiguous()
     assert hand_values.shape == last_model_values.shape
     assert new != 0.0
+    dev = hand_values.device
+    dt = hand_values.dtype
+    onon_t = torch.tensor(float((old + new) / new), dtype=dt, device=dev)
+    oon_t = torch.tensor(float(old / new), dtype=dt, device=dev)
     out = torch.empty_like(hand_values)
+    fused_model_values_mix_with_tensors(hand_values, last_model_values, onon_t, oon_t, out, block_size=block_size)
+    return out
+
+
+def fused_model_values_mix_with_tensors(
+    hand_values: torch.Tensor,
+    last_model_values: torch.Tensor,
+    old_plus_new_over_new: torch.Tensor,
+    old_over_new: torch.Tensor,
+    out: torch.Tensor,
+    block_size: int = 1024,
+) -> None:
+    """Graph-capturable version: scalars come from pre-filled 0-D tensors."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
     n = hand_values.numel()
     grid = (triton.cdiv(n, block_size),)
     _fused_model_values_mix_kernel[grid](
         hand_values,
         last_model_values,
         out,
-        float((old + new) / new),
-        float(old / new),
+        old_plus_new_over_new,
+        old_over_new,
         n,
         BLOCK=block_size,
         num_warps=4,
     )
-    return out
+
+
+# ---------------------------------------------------------------------------
+# Kernel 12: fused weighted parent-sum for compute_expected_values depth loop.
+#   Combines fused_weight_child_values + _pull_back_sum into a single
+#   parent-aligned reduction.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_weighted_parent_sum_kernel(
+        values_ptr,          # [total, 2, H] in/out
+        prev_actor_ptr,      # [total]
+        policy_hero_ptr,     # [total, H]
+        policy_opp_ptr,      # [total, H]
+        child_offsets_ptr,   # [num_parents] — absolute first-child row
+        child_count_ptr,     # [num_parents]
+        parent_base,         # absolute row of first parent in this depth slice
+        H,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        player = tl.program_id(1)
+        hb = tl.program_id(2)
+
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        # Leaf "parents" (at intermediate depths in the sparse tree) have no
+        # children; their values were set by set_leaf_values and must not be
+        # overwritten. Original path used scatter_reduce(include_self=True),
+        # which was a no-op for leaves.
+        if count == 0:
+            return
+
+        row_offs = tl.arange(0, MAX_CHILDREN)
+        col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        row_mask = row_offs < count
+        col_mask = col_offs < H
+        mask_2d = row_mask[:, None] & col_mask[None, :]
+
+        # values[first+i, player, col]
+        v_ptrs = (
+            values_ptr
+            + ((first + row_offs) * 2 + player)[:, None] * H
+            + col_offs[None, :]
+        )
+        v_tile = tl.load(v_ptrs, mask=mask_2d, other=0.0)
+
+        prev_actor = tl.load(prev_actor_ptr + first + row_offs, mask=row_mask, other=0)
+        is_hero = prev_actor == player  # [MC]
+
+        ph_ptrs = policy_hero_ptr + (first + row_offs)[:, None] * H + col_offs[None, :]
+        po_ptrs = policy_opp_ptr + (first + row_offs)[:, None] * H + col_offs[None, :]
+        ph = tl.load(ph_ptrs, mask=mask_2d, other=0.0)
+        po = tl.load(po_ptrs, mask=mask_2d, other=0.0)
+        pol = tl.where(is_hero[:, None], ph, po)
+
+        acc = tl.sum(v_tile * pol, axis=0)  # [BH]
+
+        out_ptrs = values_ptr + ((parent_base + p) * 2 + player) * H + col_offs
+        tl.store(out_ptrs, acc, mask=col_mask)
+
+
+def fused_weighted_parent_sum(
+    values: torch.Tensor,            # [total, 2, H] in/out
+    prev_actor: torch.Tensor,        # [total]
+    policy_hero: torch.Tensor,       # [total, H]
+    policy_opp: torch.Tensor,        # [total, H]
+    child_offsets: torch.Tensor,     # [num_parents] — absolute child row
+    child_count: torch.Tensor,       # [num_parents]
+    parent_base: int,
+    max_children: int = 8,
+    block_h: int = 2048,
+) -> None:
+    """Fuses ``fused_weight_child_values`` + ``_pull_back_sum`` for one depth.
+
+    For each parent ``p`` in ``[parent_base, parent_base + num_parents)`` and
+    ``player`` in ``{0, 1}``::
+
+        values[parent_base + p, player, h] = sum_{i=0..count[p]-1}
+            values[first[p] + i, player, h] *
+            (policy_hero[first[p] + i, h] if player == prev_actor[first[p]+i]
+             else policy_opp[first[p]+i, h])
+
+    Parent rows must be pre-zeroed by the caller (they are — non-leaf rows are
+    ``masked_fill(~leaf_mask, 0)`` at the top of ``compute_expected_values``).
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 3 and values.shape[1] == 2
+    assert policy_hero.is_contiguous() and policy_opp.is_contiguous()
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    total, two, h = values.shape
+    assert policy_hero.shape == (total, h) and policy_opp.shape == (total, h)
+    assert prev_actor.shape == (total,)
+
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    num_parents = child_offsets.shape[0]
+
+    grid = (num_parents, 2, triton.cdiv(h, block_h))
+    _fused_weighted_parent_sum_kernel[grid](
+        values,
+        prev_actor,
+        policy_hero,
+        policy_opp,
+        child_offsets,
+        child_count,
+        parent_base,
+        h,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Kernel 13: fused reach-weights per-depth propagation.
+#   Replaces _fan_out + scatter_reduce(prod) from _calculate_reach_weights.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_reach_weights_kernel(
+        reach_ptr,              # [total, 2, H] in/out
+        policy_ptr,             # [total, H]
+        parent_index_ptr,       # [total]
+        prev_actor_ptr,         # [total]
+        start,
+        end,
+        H,
+        BLOCK_H: tl.constexpr,
+    ):
+        c = tl.program_id(0) + start
+        if c >= end:
+            return
+        player = tl.program_id(1)
+        hb = tl.program_id(2)
+
+        parent = tl.load(parent_index_ptr + c)
+        prev_actor = tl.load(prev_actor_ptr + c)
+        is_hero = player == prev_actor
+
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        parent_row = reach_ptr + (parent * 2 + player) * H
+        dst_row = reach_ptr + (c * 2 + player) * H
+
+        v = tl.load(parent_row + offs, mask=mask, other=0.0)
+        if is_hero:
+            pol = tl.load(policy_ptr + c * H + offs, mask=mask, other=0.0)
+            v = v * pol
+        tl.store(dst_row + offs, v, mask=mask)
+
+
+def fused_reach_weights_depth_(
+    reach: torch.Tensor,             # [total, 2, H] in/out
+    policy: torch.Tensor,            # [total, H]
+    parent_index: torch.Tensor,      # [total]
+    prev_actor: torch.Tensor,        # [total]
+    start: int,
+    end: int,
+    block_h: int = 2048,
+) -> None:
+    """For each child row ``c in [start, end)`` and player ``p``::
+
+        reach[c, p, h] = reach[parent_index[c], p, h] *
+                        (policy[c, h] if p == prev_actor[c] else 1.0)
+
+    Replaces the per-depth ``fan_out + scatter_reduce(prod)`` pair in
+    ``_calculate_reach_weights``. Caller must invoke per depth in top-down
+    order (children depend on freshly-computed parents).
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert reach.is_contiguous() and reach.dim() == 3 and reach.shape[1] == 2
+    assert policy.is_contiguous() and policy.dim() == 2
+    total, two, h = reach.shape
+    assert policy.shape == (total, h)
+    assert parent_index.shape == (total,) and prev_actor.shape == (total,)
+    n = end - start
+    if n <= 0:
+        return
+    grid = (n, 2, triton.cdiv(h, block_h))
+    _fused_reach_weights_kernel[grid](
+        reach,
+        policy,
+        parent_index,
+        prev_actor,
+        start,
+        end,
+        h,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Kernel 14: fan_out_deep * reach_weights + block + normalize in one kernel.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_deep_beliefs_kernel(
+        root_beliefs_ptr,       # [N, 2, H]
+        reach_ptr,              # [total, 2, H]
+        allowed_mask_ptr,       # [total, H] bool
+        allowed_prob_ptr,       # [total, H]
+        root_index_ptr,         # [total]
+        out_ptr,                # [total, 2, H]
+        H,
+        EPS,
+        BLOCK_H: tl.constexpr,
+    ):
+        i = tl.program_id(0)
+        p = tl.program_id(1)
+
+        root_idx = tl.load(root_index_ptr + i)
+        root_row = root_beliefs_ptr + (root_idx * 2 + p) * H
+        reach_row = reach_ptr + (i * 2 + p) * H
+        out_row = out_ptr + (i * 2 + p) * H
+        mask_row = allowed_mask_ptr + i * H
+        prob_row = allowed_prob_ptr + i * H
+
+        offs = tl.arange(0, BLOCK_H)
+        total = tl.zeros((), dtype=tl.float32)
+        for stt in tl.range(0, H, BLOCK_H):
+            off = stt + offs
+            m = off < H
+            rb = tl.load(root_row + off, mask=m, other=0.0)
+            rw = tl.load(reach_row + off, mask=m, other=0.0)
+            al = tl.load(mask_row + off, mask=m, other=0).to(tl.int1)
+            v = tl.where(al, rb * rw, 0.0)
+            tl.store(out_row + off, v, mask=m)
+            total += tl.sum(tl.where(m, v, 0.0))
+
+        use_div = total > EPS
+        for stt in tl.range(0, H, BLOCK_H):
+            off = stt + offs
+            m = off < H
+            if use_div:
+                v = tl.load(out_row + off, mask=m, other=0.0) / total
+            else:
+                v = tl.load(prob_row + off, mask=m, other=0.0)
+            tl.store(out_row + off, v, mask=m)
+
+
+def fused_deep_beliefs_(
+    out: torch.Tensor,               # [total, 2, H] in/out (root rows overwritten too)
+    root_beliefs: torch.Tensor,      # [N, 2, H]
+    reach_weights: torch.Tensor,     # [total, 2, H]
+    allowed_mask: torch.Tensor,      # [total, H] bool
+    allowed_prob: torch.Tensor,      # [total, H]
+    root_index: torch.Tensor,        # [total] int64
+    eps: float = 1e-5,
+    block_h: int = 2048,
+) -> None:
+    """Fuses ``_fan_out_deep(root_beliefs) * reach_weights`` + block +
+    normalize into one kernel. Replaces ``_propagate_all_beliefs``.
+
+    For each node ``i`` and player ``p``::
+
+        v = root_beliefs[root_index[i], p, :] * reach_weights[i, p, :]
+        v = where(allowed_mask[i], v, 0)
+        s = v.sum()
+        out[i, p, :] = where(s > eps, v / s, allowed_prob[i])
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert out.is_contiguous() and out.dim() == 3 and out.shape[1] == 2
+    assert root_beliefs.is_contiguous() and root_beliefs.dim() == 3
+    assert reach_weights.is_contiguous() and reach_weights.shape == out.shape
+    total, two, h = out.shape
+    n = root_beliefs.shape[0]
+    assert root_beliefs.shape == (n, 2, h)
+    assert allowed_mask.shape == (total, h) and allowed_prob.shape == (total, h)
+    assert allowed_mask.is_contiguous() and allowed_prob.is_contiguous()
+    assert root_index.shape == (total,) and root_index.is_contiguous()
+
+    grid = (total, 2)
+    _fused_deep_beliefs_kernel[grid](
+        root_beliefs,
+        reach_weights,
+        allowed_mask,
+        allowed_prob,
+        root_index,
+        out,
+        h,
+        eps,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+# ---------------------------------------------------------------------------
+# TScalars: device-side t-derived scalars for graph-capturable iteration.
+# ---------------------------------------------------------------------------
+
+
+class TScalars:
+    """Container of pre-allocated 0-D device tensors for t-derived scalars.
+
+    Populate via ``.update(t, ...)`` BEFORE entering a captured region. During
+    graph capture, the kernels read these tensors via pointers, so replay
+    picks up whatever value ``.update`` last wrote — no host→device copies
+    baked into the graph.
+    """
+
+    def __init__(self, device: torch.device, dtype: torch.dtype = torch.float32) -> None:
+        def _z():
+            return torch.zeros((), dtype=dtype, device=device)
+
+        self.device = device
+        self.dtype = dtype
+        # DCFR rescale scalars (all fp)
+        self.t_alpha_num = _z()
+        self.t_beta_num = _z()
+        self.t_alpha_den = _z()
+        self.t_beta_den = _z()
+        # Policy/value averaging mix (old, new, old+new, 1/(old+new))
+        self.mix_old = _z()
+        self.mix_new = _z()
+        self.mix_total = _z()
+        self.mix_inv_total = _z()
+        # Model-values mix (for _set_model_values_impl): (old+new)/new and old/new
+        self.mix_onon = _z()  # (old + new) / new
+        self.mix_oon = _z()   # old / new
+        # t as int64 device scalar (for t_sample == t comparisons)
+        self.t_tensor = torch.zeros((), dtype=torch.long, device=device)
+
+    def update(
+        self,
+        t: int,
+        dcfr_alpha: float,
+        dcfr_beta: float,
+        mix_old: float,
+        mix_new: float,
+    ) -> None:
+        """Write t-derived scalars into the device tensors.
+
+        Always a host→device copy via ``.fill_(python_float)`` — call OUTSIDE
+        any captured region (before ``graph.replay()``).
+        """
+        t_alpha_num = float(t ** dcfr_alpha)
+        t_beta_num = float(t ** dcfr_beta)
+        self.t_alpha_num.fill_(t_alpha_num)
+        self.t_beta_num.fill_(t_beta_num)
+        self.t_alpha_den.fill_(t_alpha_num + 1.0)
+        self.t_beta_den.fill_(t_beta_num + 1.0)
+        total = float(mix_old) + float(mix_new)
+        self.mix_old.fill_(float(mix_old))
+        self.mix_new.fill_(float(mix_new))
+        self.mix_total.fill_(total)
+        self.mix_inv_total.fill_(1.0 / total if total != 0.0 else 1.0)
+        if float(mix_new) != 0.0:
+            self.mix_onon.fill_(total / float(mix_new))
+            self.mix_oon.fill_(float(mix_old) / float(mix_new))
+        self.t_tensor.fill_(int(t))
 
 
 # ---------------------------------------------------------------------------
@@ -1273,18 +1982,27 @@ class _EvaluatorStateSnapshot:
 
 
 class GraphedCFRIteration:
-    """Captures one ``evaluator.cfr_iteration(t_capture)`` into a CUDA graph.
+    """Captures ``evaluator.cfr_iteration`` into a CUDA graph, replayable for
+    any ``t`` that falls in the same Python-branch regime as ``t_capture``.
 
     Usage::
 
         runner = GraphedCFRIteration(evaluator)
         runner.capture(t_capture=warm_start)   # records the graph
-        runner.replay()                        # re-runs iteration t_capture
+        runner.replay(t=warm_start + 1)        # runs iteration t=warm_start+1
+        runner.replay(t=warm_start + 2)        # ...and so on
 
-    On replay, all kernel launch parameters are baked in (including the Python
-    ``t`` used for DCFR scalars and mixing weights). This is intended for
-    launch-overhead measurement and single-iteration correctness comparison,
-    not production iteration.
+    On replay, host-side Python schedules are re-applied and the evaluator's
+    ``TScalars`` device tensors are refreshed *outside* the captured region,
+    so the kernels (which read scalars via pointers) pick up the new ``t``.
+
+    Constraints on ``t`` values used for replay:
+      - Must follow the same Python-level branches as ``t_capture`` (e.g.,
+        both ``t > dcfr_delay`` / both ``t > 1`` so ``last_model_values`` is
+        populated). Typical practice: warm up past early-t branches, then
+        capture and reuse for the remaining iterations.
+      - Tree structure (depth_offsets, child_offsets, ...) is baked in at
+        capture time. Don't re-construct subgames after capture.
     """
 
     def __init__(self, evaluator) -> None:
@@ -1293,48 +2011,61 @@ class GraphedCFRIteration:
         self.evaluator = evaluator
         self._graph: torch.cuda.CUDAGraph | None = None
         self._captured_t: int | None = None
-        # We disable _record_stats during capture (has .item()).
         self._orig_record_stats = evaluator._record_stats
 
     def _stub_record_stats(self, t, old_policy_probs):  # noqa: ARG002
         return
 
     def capture(self, t_capture: int, num_warmup: int = 2) -> None:
-        """Warm-up a few real iterations, then capture one into a CUDA graph.
-
-        Warm-up is required so that cuDNN / cuBLAS workspaces and any lazy
-        allocations stabilize before capture.
-        """
+        """Warm-up a few real iterations, then capture one into a CUDA graph."""
         ev = self.evaluator
+        if not hasattr(ev, "_t_scalars"):
+            raise ValueError(
+                "Evaluator must be a FusedSparseCFREvaluator (or have a "
+                "._t_scalars TScalars holder) for graph capture."
+            )
 
-        # Warm up with real iterations so allocations stabilize.
         for i in range(num_warmup):
             ev.cfr_iteration(t_capture + i)
 
-        # Disable the stat-recording .item() sync during capture.
         ev._record_stats = self._stub_record_stats
         try:
-            # Separate stream (required by torch.cuda.graph).
-            s = torch.cuda.Stream()
-            s.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(s):
-                # One more warm-up on the capture stream.
-                ev.cfr_iteration(t_capture)
-            torch.cuda.current_stream().wait_stream(s)
-            torch.cuda.synchronize()
+            # Fill scalars once before capture; inside capture we skip the
+            # Python-side update so no host→device fills get baked in.
+            ev.prepare_replay(t_capture)
 
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=s):
-                ev.cfr_iteration(t_capture)
+            prev_skip = ev._skip_t_scalars_update
+            ev._skip_t_scalars_update = True
+            try:
+                s = torch.cuda.Stream()
+                s.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(s):
+                    # One warm-up on the capture stream (scalars pre-filled).
+                    ev.cfr_iteration(t_capture)
+                torch.cuda.current_stream().wait_stream(s)
+                torch.cuda.synchronize()
+
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=s):
+                    ev.cfr_iteration(t_capture)
+            finally:
+                ev._skip_t_scalars_update = prev_skip
         finally:
             ev._record_stats = self._orig_record_stats
 
         self._graph = graph
         self._captured_t = t_capture
 
-    def replay(self) -> None:
+    def replay(self, t: int | None = None) -> None:
+        """Replay the captured iteration. If ``t`` is given, refresh host-side
+        schedules + TScalars (outside the graph) so the kernels compute with
+        that ``t`` — otherwise replay reuses whatever scalars are already in
+        the device tensors.
+        """
         if self._graph is None:
             raise RuntimeError("capture() must be called before replay().")
+        if t is not None:
+            self.evaluator.prepare_replay(t)
         self._graph.replay()
 
     @property

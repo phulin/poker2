@@ -93,6 +93,61 @@ def compare_7_cards_single_batch_triton(cards_batch: torch.Tensor) -> torch.Tens
     return out
 
 
+def rank_7_cards_single_batch_triton(cards_batch: torch.Tensor) -> torch.Tensor:
+    """Score each 7-card hand in ``cards_batch`` (shape ``[N, 7]``) and return
+    an int32 ``[N]`` tensor of packed rank integers (higher = stronger).
+    Uses the same scoring path as the comparator kernel.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    if cards_batch.dim() != 2 or cards_batch.shape[1] != 7:
+        raise ValueError(f"Expected [N, 7] input, got {tuple(cards_batch.shape)}")
+    if cards_batch.device.type != "cuda":
+        raise ValueError("Triton hand evaluator requires a CUDA tensor.")
+    cards_i16 = cards_batch.contiguous().to(torch.int16)
+    out = torch.empty((cards_i16.shape[0],), device=cards_i16.device, dtype=torch.int32)
+    grid = (cards_i16.shape[0],)
+    _rank_7_cards_single_batch_kernel[grid](
+        cards_i16,
+        out,
+        CARD_LANES=CARD_LANES,
+        RANK_LANES=RANK_LANES,
+        num_warps=1,
+    )
+    return out
+
+
+def rank_hands_triton(board: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Triton-accelerated drop-in for ``p2.env.rules.rank_hands``.
+
+    Args:
+      board: [M, 5] int tensor of board card indices (0..51).
+
+    Returns:
+      hand_ranks:     [M, 1326] int32 — packed rank integer per (env, combo).
+      sorted_indices: [M, 1326] int64 — argsort by (hand_ranks) ascending
+                      (weaker → stronger), stable; matches ``rank_hands``.
+    """
+    from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
+
+    if board.dim() != 2 or board.shape[1] != 5:
+        raise ValueError(f"board must be [M, 5], got {tuple(board.shape)}")
+    device = board.device
+    M = board.shape[0]
+    combos = hand_combos_tensor(device=device)  # [1326, 2] long
+
+    # Build [M, 1326, 7] by concatenating hole cards with broadcast board.
+    holes = combos[None, :, :].expand(M, NUM_HANDS, 2)  # [M, 1326, 2]
+    boards_b = board[:, None, :].expand(M, NUM_HANDS, 5)  # [M, 1326, 5]
+    cards = torch.cat([holes, boards_b], dim=-1).to(torch.int16)  # [M, 1326, 7]
+    cards_flat = cards.reshape(-1, 7).contiguous()
+
+    scores_flat = rank_7_cards_single_batch_triton(cards_flat)  # [M*1326]
+    hand_ranks = scores_flat.view(M, NUM_HANDS)
+    sorted_indices = torch.argsort(hand_ranks, dim=1, stable=True)
+    return hand_ranks, sorted_indices
+
+
 if triton is not None:
 
     @triton.jit
@@ -557,3 +612,21 @@ if triton is not None:
 
         result = tl.where(score0 > score1, 1, tl.where(score0 < score1, -1, 0))
         tl.store(out_ptr + pid, result)
+
+
+    @triton.jit
+    def _rank_7_cards_single_batch_kernel(
+        cards_batch_ptr,     # [N, 7] int16 — 7 cards per hand
+        out_ptr,             # [N] int32 — packed rank score
+        CARD_LANES: tl.constexpr,
+        RANK_LANES: tl.constexpr,
+    ):
+        """One program per hand: computes the packed rank integer via the
+        existing ``_evaluate_cards_player`` path. Identical scoring semantics
+        to the comparator kernel — just outputs the raw score so callers can
+        rank / sort instead of pairwise-comparing.
+        """
+        pid = tl.program_id(0)
+        base_ptr = cards_batch_ptr + pid * 7
+        score = _evaluate_cards_player(base_ptr, CARD_LANES, RANK_LANES)
+        tl.store(out_ptr + pid, score)

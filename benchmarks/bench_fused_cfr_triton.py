@@ -125,17 +125,7 @@ def bench_dcfr_kernel(total_nodes: int = 10_000, num_hands: int = 1326) -> None:
 def bench_graphed_iteration(cfg: Config) -> None:
     device = torch.device(cfg.device)
 
-    env = HUNLTensorEnv(
-        num_envs=cfg.num_envs,
-        starting_stack=cfg.env.stack,
-        sb=cfg.env.sb,
-        bb=cfg.env.bb,
-        default_bet_bins=cfg.env.bet_bins,
-        device=device,
-        float_dtype=torch.float32,
-        flop_showdown=cfg.env.flop_showdown,
-    )
-    env.reset()
+    env = _build_mixed_street_env(cfg, device)
     root_indices = torch.arange(cfg.num_envs, dtype=torch.long, device=device)
 
     torch.manual_seed(cfg.seed)
@@ -151,7 +141,9 @@ def bench_graphed_iteration(cfg: Config) -> None:
     model.init_weights(cpu_rng)
     model.to(device).eval()
 
-    evaluator = SparseCFREvaluator(model=model, device=device, cfg=cfg)
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    evaluator = FusedSparseCFREvaluator(model=model, device=device, cfg=cfg)
     evaluator.initialize_subgame(env, root_indices)
     evaluator.initialize_policy_and_beliefs()
     evaluator.set_leaf_values(0)
@@ -171,17 +163,21 @@ def bench_graphed_iteration(cfg: Config) -> None:
     orig_stats = evaluator._record_stats
     evaluator._record_stats = lambda t, old: None
 
+    replay_counter = {"t": T}
+
     def baseline() -> None:
-        evaluator.cfr_iteration(T)
+        evaluator.cfr_iteration(replay_counter["t"])
+        replay_counter["t"] += 1
 
     try:
         t_baseline = _cuda_timed(baseline, n_iters=25, n_warmup=3)
 
         runner = GraphedCFRIteration(evaluator)
-        runner.capture(t_capture=T, num_warmup=2)
+        runner.capture(t_capture=replay_counter["t"], num_warmup=2)
 
         def replay() -> None:
-            runner.replay()
+            runner.replay(t=replay_counter["t"])
+            replay_counter["t"] += 1
 
         t_graphed = _cuda_timed(replay, n_iters=25, n_warmup=3)
     finally:
@@ -355,13 +351,39 @@ def bench_unblocked_mass(b: int = 400_000) -> None:
     print(f"  Speedup              : {t_base / t_fused:.2f}x")
 
 
-def bench_fused_evaluator(cfg: Config) -> None:
-    """End-to-end: SparseCFREvaluator vs FusedSparseCFREvaluator."""
-    device = torch.device(cfg.device)
+def _build_mixed_street_env(cfg: Config, device: torch.device) -> HUNLTensorEnv:
+    """Construct one HUNLTensorEnv of cfg.num_envs roots split evenly across
+    preflop / flop / turn / river.
 
-    def _build(klass):
-        env = HUNLTensorEnv(
-            num_envs=cfg.num_envs,
+    Each quarter of the root indices is advanced to its target street by
+    stepping a dedicated sub-env through check/call action bins (bin=1) until
+    the target ``street`` value is reached, then the sub-env's state is copied
+    into the final combined env via ``copy_state_from``. This gives the sparse
+    subgame a realistic mix of street depths so ``_showdown_value_both`` and
+    ``new_street_mask`` paths actually get exercised, not left empty as they
+    are with a pure-preflop root.
+    """
+    N = cfg.num_envs
+    assert N % 4 == 0, f"num_envs={N} must be divisible by 4 for mixed-street bench"
+    quarter = N // 4
+
+    full = HUNLTensorEnv(
+        num_envs=N,
+        starting_stack=cfg.env.stack,
+        sb=cfg.env.sb,
+        bb=cfg.env.bb,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+        float_dtype=torch.float32,
+        flop_showdown=cfg.env.flop_showdown,
+    )
+    full.reset()
+
+    # Target streets for the four quarters: preflop (0), flop (1), turn (2), river (3).
+    targets = [0, 1, 2, 3]
+    for q_idx, target_street in enumerate(targets):
+        sub = HUNLTensorEnv(
+            num_envs=quarter,
             starting_stack=cfg.env.stack,
             sb=cfg.env.sb,
             bb=cfg.env.bb,
@@ -370,7 +392,34 @@ def bench_fused_evaluator(cfg: Config) -> None:
             float_dtype=torch.float32,
             flop_showdown=cfg.env.flop_showdown,
         )
-        env.reset()
+        sub.reset()
+        # Advance by stepping check/call (bin=1) until all sub-envs reach target.
+        # Each betting round closes after two actions (SB-checkcall, BB-check).
+        safety_cap = 4 * (target_street + 1) + 2
+        steps = 0
+        while int(sub.street.min().item()) < target_street and steps < safety_cap:
+            bins = torch.ones(quarter, dtype=torch.long, device=device)
+            # Fold any env that finished the hand early (shouldn't happen on
+            # pure check/call paths, but be safe).
+            bins[sub.done] = -1
+            sub.step_bins(bins)
+            steps += 1
+        assert int(sub.street.min().item()) >= target_street, (
+            f"Failed to advance quarter {q_idx} to street {target_street} "
+            f"(reached min={int(sub.street.min().item())} after {steps} steps)"
+        )
+        src_idx = torch.arange(quarter, dtype=torch.long, device=device)
+        dst_idx = src_idx + q_idx * quarter
+        full.copy_state_from(sub, src_idx, dst_idx)
+    return full
+
+
+def bench_fused_evaluator(cfg: Config) -> None:
+    """End-to-end: SparseCFREvaluator vs FusedSparseCFREvaluator."""
+    device = torch.device(cfg.device)
+
+    def _build(klass):
+        env = _build_mixed_street_env(cfg, device)
         root_indices = torch.arange(cfg.num_envs, dtype=torch.long, device=device)
 
         torch.manual_seed(cfg.seed)
@@ -412,8 +461,8 @@ def bench_fused_evaluator(cfg: Config) -> None:
     def run_fused() -> None:
         ev_fused.cfr_iteration(T)
 
-    t_base = _cuda_timed(run_base, n_iters=25, n_warmup=3)
-    t_fused = _cuda_timed(run_fused, n_iters=25, n_warmup=3)
+    t_base = _cuda_timed(run_base, n_iters=100, n_warmup=20)
+    t_fused = _cuda_timed(run_fused, n_iters=100, n_warmup=20)
 
     print("\n=== SparseCFREvaluator vs FusedSparseCFREvaluator (full iter) ===")
     print(f"  num_envs={cfg.num_envs}, depth={cfg.search.depth}")

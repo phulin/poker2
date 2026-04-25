@@ -264,30 +264,83 @@ def test_fused_regret_tail_matches_pytorch() -> None:
 
     values_achieved = torch.randn(total, 2, h, device=device)
     actor_values = torch.randn(top, h, device=device)
-    weights = torch.randn(total - bottom, h, device=device)
+    src_weights = torch.randn(top, h, device=device)
     # Children's parent_index points into [0, top).
     parent_index = torch.randint(0, top, (total,), device=device, dtype=torch.long)
     prev_actor = torch.randint(0, 2, (total,), device=device, dtype=torch.long)
 
-    # Reference via explicit PyTorch sequence.
+    # Reference via explicit PyTorch sequence with parent_index gather for weights.
     ref = torch.zeros(total, h, device=device)
-    # fan_out: expected_expanded[c, h] = actor_values[parent_index[c], h]
-    expanded = actor_values[parent_index[bottom:]]
+    expected = actor_values[parent_index[bottom:]]
+    weights = src_weights[parent_index[bottom:]]
     idx = torch.arange(total - bottom, device=device)
     achieved = values_achieved[bottom:][idx, prev_actor[bottom:], :]
-    ref[bottom:] = weights * (achieved - expanded)
+    ref[bottom:] = weights * (achieved - expected)
 
     out = torch.zeros(total, h, device=device).contiguous()
     fused_regret_tail_(
         regrets=out,
         values_achieved=values_achieved.contiguous(),
         actor_values=actor_values.contiguous(),
-        weights=weights.contiguous(),
+        src_weights=src_weights.contiguous(),
         parent_index=parent_index.contiguous(),
         prev_actor=prev_actor.contiguous(),
         bottom=bottom,
     )
     torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_unblocked_mass_ratio_indirect_matches_baseline() -> None:
+    pytest.importorskip("triton")
+    from p2.env.card_utils import calculate_unblocked_mass
+    from p2.search.fused_cfr_triton import unblocked_mass_ratio_indirect_triton
+
+    device = torch.device("cuda")
+    torch.manual_seed(53)
+    top = 50
+    num_children = 250
+    h = 1326
+
+    actor_beliefs = torch.rand(top, h, device=device)
+    parent_index = torch.randint(0, top, (num_children,), device=device, dtype=torch.long)
+    policy = torch.rand(num_children, h, device=device)
+    marginal_policy = actor_beliefs[parent_index] * policy
+
+    # Reference: full pipeline using the dense GEMM baseline.
+    beliefs_dest = actor_beliefs[parent_index]  # [num_children, H]
+    n = calculate_unblocked_mass(marginal_policy)
+    d = calculate_unblocked_mass(beliefs_dest)
+    ref = torch.where(d > 1e-5, n / d.clamp(min=1e-20), torch.zeros_like(d))
+
+    out = unblocked_mass_ratio_indirect_triton(
+        numer_target=marginal_policy.contiguous(),
+        denom_target=actor_beliefs.contiguous(),
+        parent_index=parent_index.contiguous(),
+    )
+    torch.testing.assert_close(out, ref, rtol=1e-3, atol=1e-4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_unblocked_mass_opp_at_parents_matches_full_pipeline() -> None:
+    pytest.importorskip("triton")
+    from p2.env.card_utils import calculate_unblocked_mass
+    from p2.search.fused_cfr_triton import unblocked_mass_opp_at_parents_triton
+
+    device = torch.device("cuda")
+    torch.manual_seed(47)
+    total, h = 100, 1326
+    top = 40
+    beliefs = torch.rand(total, 2, h, device=device)
+    to_act = torch.randint(0, 2, (total,), device=device, dtype=torch.long)
+
+    # Reference: the original pipeline.
+    opp = calculate_unblocked_mass(beliefs.flip(dims=[1]))
+    src_actor = to_act[:, None, None].expand(-1, -1, h)
+    ref = opp.gather(1, src_actor).squeeze(1)[:top]
+
+    out = unblocked_mass_opp_at_parents_triton(beliefs, to_act, top)
+    torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -576,27 +629,22 @@ def test_fused_sparse_evaluator_matches_baseline_across_iterations() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.xfail(
-    reason=(
-        "cfr_iteration re-binds self.latest_values / self.last_model_values "
-        "via `self.latest_values = new_values.clone()` (cfr_evaluator.py:1041). "
-        "Under CUDA-graph capture, those assignments create pool-allocated "
-        "buffers whose addresses are fixed at capture time, but the evaluator's "
-        "Python references get re-bound on each call — so replay writes into "
-        "memory that the evaluator's state snapshot no longer tracks. A "
-        "bit-match replay requires refactoring cfr_iteration to only mutate "
-        "tensors in place, never rebind attributes."
-    ),
-    strict=False,
-)
 def test_graphed_cfr_iteration_matches_uncaptured() -> None:
+    """FusedSparseCFREvaluator.set_leaf_values pins latest_values storage
+    across calls (no rebinding), so the graph's captured kernels continue to
+    write into self.latest_values on replay.
+    """
     pytest.importorskip("triton")
     from p2.search.fused_cfr_triton import (
         GraphedCFRIteration,
         _EvaluatorStateSnapshot,
     )
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
     ev = _build_evaluator(num_envs=4, depth=3)
+    # Swap to fused (pinned storage; device-scalar TScalars).
+    ev.__class__ = FusedSparseCFREvaluator
+    ev._ensure_fused_attrs()
 
     # Prime with a couple of iterations so we're past any t<=1 branches.
     for t in range(1, 4):
@@ -641,3 +689,208 @@ def test_graphed_cfr_iteration_matches_uncaptured() -> None:
     diffs = baseline.max_abs_diff(replayed)
     worst = max(diffs.values())
     assert worst < 1e-4, f"Graph replay diverged from baseline: {diffs}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_graphed_cfr_iteration_replays_across_t() -> None:
+    """Capture once at t_capture, then replay for several different t values
+    and check each replay matches a fresh uncaptured run at that t.
+    """
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import (
+        GraphedCFRIteration,
+        _EvaluatorStateSnapshot,
+    )
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    # Two independent evaluators: one for uncaptured baseline, one for graph.
+    ev_base = _build_evaluator(num_envs=4, depth=3)
+    ev_base.__class__ = FusedSparseCFREvaluator
+    ev_base._ensure_fused_attrs()
+    ev_graph = _build_evaluator(num_envs=4, depth=3)
+    ev_graph.__class__ = FusedSparseCFREvaluator
+    ev_graph._ensure_fused_attrs()
+
+    # Mirror init state.
+    for name in [
+        "policy_probs", "policy_probs_avg", "policy_probs_sample",
+        "cumulative_regrets", "regret_weight_sums",
+        "self_reach", "self_reach_avg", "beliefs", "beliefs_avg",
+        "latest_values", "values_avg",
+    ]:
+        getattr(ev_graph, name).copy_(getattr(ev_base, name))
+
+    # Prime both past early-t branches so subsequent iters share Python branch.
+    for t in range(1, 4):
+        ev_base.cfr_iteration(t)
+        ev_graph.cfr_iteration(t)
+    torch.cuda.synchronize()
+
+    # Stub _record_stats on both so comparison isn't polluted by .item() paths.
+    ev_base._record_stats = lambda t, old: None
+    ev_graph._record_stats = lambda t, old: None
+
+    # Capture one iteration at t=4; we'll replay for t=5, 6, 7.
+    runner = GraphedCFRIteration(ev_graph)
+    runner.capture(t_capture=4, num_warmup=0)
+    # Capture consumed one iteration at t=4, so both are now post-t=4.
+    # Step baseline forward once (uncaptured) to match.
+    ev_base.cfr_iteration(4)
+    torch.cuda.synchronize()
+
+    for replay_t in [5, 6, 7]:
+        ev_base.cfr_iteration(replay_t)
+        runner.replay(t=replay_t)
+        torch.cuda.synchronize()
+        a = _EvaluatorStateSnapshot.from_evaluator(ev_base)
+        b = _EvaluatorStateSnapshot.from_evaluator(ev_graph)
+        diffs = a.max_abs_diff(b)
+        worst = max(diffs.values())
+        assert worst < 1e-2, (
+            f"t={replay_t}: replay diverges from baseline: {diffs}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Kernel 12-14 correctness tests: weighted parent-sum, reach weights, deep beliefs.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_weighted_parent_sum_matches_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import fused_weighted_parent_sum
+
+    device = torch.device("cuda")
+    torch.manual_seed(71)
+
+    # Tiny tree with variable child counts.
+    child_counts = torch.tensor([3, 1, 4, 2], device=device, dtype=torch.long)
+    parent_base = 5
+    num_parents = child_counts.numel()
+    num_children = int(child_counts.sum().item())
+    total = parent_base + num_parents + num_children
+    h = 1326
+
+    child_offsets = (
+        parent_base + num_parents + torch.cumsum(child_counts, dim=0) - child_counts
+    )
+    values = torch.randn(total, 2, h, device=device)
+    # Pre-zero parent rows — kernel overwrites them.
+    values[parent_base : parent_base + num_parents] = 0.0
+    prev_actor = torch.randint(0, 2, (total,), device=device, dtype=torch.long)
+    policy_hero = torch.rand(total, h, device=device)
+    policy_opp = torch.rand(total, h, device=device)
+
+    # Reference: loop over parents, sum weighted children.
+    ref = values.clone()
+    for p_rel in range(num_parents):
+        first = int(child_offsets[p_rel].item())
+        count = int(child_counts[p_rel].item())
+        for player in range(2):
+            acc = torch.zeros(h, device=device)
+            for i in range(count):
+                c = first + i
+                pa = int(prev_actor[c].item())
+                pol = policy_hero[c] if player == pa else policy_opp[c]
+                acc = acc + values[c, player] * pol
+            ref[parent_base + p_rel, player] = acc
+
+    out = values.clone().contiguous()
+    fused_weighted_parent_sum(
+        values=out,
+        prev_actor=prev_actor.contiguous(),
+        policy_hero=policy_hero.contiguous(),
+        policy_opp=policy_opp.contiguous(),
+        child_offsets=child_offsets.contiguous(),
+        child_count=child_counts.contiguous(),
+        parent_base=parent_base,
+        max_children=8,
+    )
+    torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_reach_weights_depth_matches_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import fused_reach_weights_depth_
+
+    device = torch.device("cuda")
+    torch.manual_seed(73)
+
+    # Simulate two depths of a tree: root rows [0, 4), depth-1 rows [4, 10).
+    total, h = 10, 1326
+    reach = torch.rand(total, 2, h, device=device)
+    reach[:4] = 1.0  # root reach = 1
+    policy = torch.rand(total, h, device=device)
+    parent_index = torch.full((total,), -1, dtype=torch.long, device=device)
+    parent_index[4:10] = torch.randint(0, 4, (6,), device=device, dtype=torch.long)
+    prev_actor = torch.randint(0, 2, (total,), device=device, dtype=torch.long)
+    prev_actor[:4] = -1
+
+    # Reference: for each child c in [4, 10) and player p:
+    # reach[c, p, h] = reach[parent, p, h] * (policy[c] if p==prev_actor[c] else 1)
+    ref = reach.clone()
+    for c in range(4, 10):
+        parent = int(parent_index[c].item())
+        pa = int(prev_actor[c].item())
+        for player in range(2):
+            base = ref[parent, player]
+            if player == pa:
+                ref[c, player] = base * policy[c]
+            else:
+                ref[c, player] = base
+
+    out = reach.clone().contiguous()
+    fused_reach_weights_depth_(
+        reach=out,
+        policy=policy.contiguous(),
+        parent_index=parent_index.contiguous(),
+        prev_actor=prev_actor.contiguous(),
+        start=4,
+        end=10,
+    )
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_deep_beliefs_matches_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import fused_deep_beliefs_
+
+    device = torch.device("cuda")
+    torch.manual_seed(79)
+
+    n, total, h = 3, 20, 1326
+    root_beliefs = torch.rand(n, 2, h, device=device)
+    reach = torch.rand(total, 2, h, device=device)
+    root_index = torch.cat(
+        [
+            torch.arange(n, device=device, dtype=torch.long),
+            torch.randint(0, n, (total - n,), device=device, dtype=torch.long),
+        ]
+    )
+    allowed_mask = torch.rand(total, h, device=device) > 0.3
+    # Force some rows to be fully blocked to exercise fallback.
+    allowed_mask[5:7] = False
+    allowed_prob = torch.rand(total, h, device=device)
+    allowed_prob *= allowed_mask.float()
+    allowed_prob /= allowed_prob.sum(-1, keepdim=True).clamp(min=1e-8)
+
+    # Reference: replicate fan_out_deep * reach + block + normalize.
+    fanned = root_beliefs[root_index]  # [total, 2, h]
+    ref = fanned * reach
+    ref.masked_fill_((~allowed_mask)[:, None, :], 0.0)
+    denom = ref.sum(dim=-1, keepdim=True)
+    ref = torch.where(denom > 1e-5, ref / denom, allowed_prob[:, None, :])
+
+    out = torch.zeros_like(ref).contiguous()
+    fused_deep_beliefs_(
+        out=out,
+        root_beliefs=root_beliefs.contiguous(),
+        reach_weights=reach.contiguous(),
+        allowed_mask=allowed_mask.contiguous(),
+        allowed_prob=allowed_prob.contiguous(),
+        root_index=root_index.contiguous(),
+    )
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)

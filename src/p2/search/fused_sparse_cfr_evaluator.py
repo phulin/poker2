@@ -24,19 +24,32 @@ import torch
 
 from p2.core.structured_config import CFRType
 from p2.env.card_utils import NUM_HANDS
+from p2.env import rules as _rules
+from p2.env.rules_triton import rank_hands_triton, triton_is_available as _rules_triton_ok
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_,
+    fused_average_policy_mix_with_tensors_,
     fused_block_and_normalize_beliefs_,
     fused_dcfr_update_,
+    fused_dcfr_update_with_tensors_,
+    fused_deep_beliefs_,
     fused_divide_by_parent_sum_,
     fused_model_values_mix,
+    fused_model_values_mix_with_tensors,
     fused_parent_sum,
+    fused_reach_weights_depth_,
     fused_regret_matching_divide_,
     fused_regret_tail_,
     fused_sibling_sum,
     fused_update_average_values_,
+    fused_update_average_values_with_tensors_,
     fused_weight_child_values,
+    fused_weighted_parent_sum,
     triton_is_available,
+    ParentBeliefUnblockedStats,
+    TScalars,
+    unblocked_mass_opp_at_parents_triton,
+    unblocked_mass_ratio_indirect_triton,
     unblocked_mass_ratio_triton,
     unblocked_mass_triton,
 )
@@ -53,7 +66,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     not listed in the module docstring.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, compile_model: bool = True, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         if self.device.type != "cuda":
             raise ValueError("FusedSparseCFREvaluator requires a CUDA device.")
@@ -61,9 +74,85 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             raise RuntimeError(
                 "Triton is not installed; FusedSparseCFREvaluator is unavailable."
             )
+        # Inductor-fused GEMM epilogues for the MLP forward pass. dynamic=True
+        # keeps a single compiled graph as batch shape (model_indices count)
+        # varies across iterations. If compile fails for any reason (unsupported
+        # model, torch version), fall back to eager.
+        # Swap in the Triton hand ranker for subgame-setup's rank_hands call.
+        # _init_hand_rank_data uses the module-level binding; replacing it
+        # module-wide is the least invasive way to retarget the call without
+        # duplicating the surrounding ~80 lines of gather/scatter logic.
+        # (Only valid-hand relative order is used downstream; blocked combos
+        # are zeroed by allowed_hands before any rank-dependent cumsum.)
+        if _rules_triton_ok():
+            import p2.search.cfr_evaluator as _ce
+            if _ce.rank_hands is not rank_hands_triton:
+                _ce.rank_hands = rank_hands_triton
+
+        self._compiled_smv_impl = None
+        if compile_model and self.model is not None:
+            # TF32 is safe for this evaluator's loss surface (the NN is used
+            # only to produce leaf value estimates; DCFR regret accumulation
+            # does the precision-sensitive work in fp32).
+            torch.set_float32_matmul_precision("high")
+            try:
+                self.model = torch.compile(self.model, dynamic=True)
+            except Exception:
+                pass
         # Cache a buffer reused across update_policy calls to avoid reallocating
         # the fan-out denom every iteration.
         self._fused_positive_regrets_buf: torch.Tensor | None = None
+        # Per-iteration unblocked-mass stats cache (set inside cfr_iteration,
+        # consumed by compute_instantaneous_regrets + compute_expected_values).
+        self._cached_parent_unblocked: ParentBeliefUnblockedStats | None = None
+        # Lazy cache of root_index[i] = root ancestor row for node i.
+        self._root_index: torch.Tensor | None = None
+        self._root_index_total: int = -1
+        # Device-side t-derived scalars (filled per-iteration; read by kernels
+        # via pointer → full CFR iteration is CUDA-graph capturable).
+        self._t_scalars = TScalars(self.device, dtype=self.float_dtype)
+        # When True, cfr_iteration assumes TScalars was filled externally.
+        # Set by GraphedCFRIteration during capture / before replay.
+        self._skip_t_scalars_update: bool = False
+        # Pre-allocated buffer used by _set_model_values_impl to keep
+        # self.last_model_values pinned across calls (no rebinding → graph-safe).
+        self._last_model_values_buf: torch.Tensor | None = None
+
+    def _ensure_fused_attrs(self) -> None:
+        """Populate optional fused-only attributes if the object was constructed
+        via ``__class__``-swap (which bypasses ``__init__``). No-op otherwise.
+        """
+        if not hasattr(self, "_t_scalars"):
+            self._t_scalars = TScalars(self.device, dtype=self.float_dtype)
+        if not hasattr(self, "_skip_t_scalars_update"):
+            self._skip_t_scalars_update = False
+        if not hasattr(self, "_last_model_values_buf"):
+            self._last_model_values_buf = None
+        if not hasattr(self, "_fused_positive_regrets_buf"):
+            self._fused_positive_regrets_buf = None
+        if not hasattr(self, "_cached_parent_unblocked"):
+            self._cached_parent_unblocked = None
+        if not hasattr(self, "_compiled_smv_impl"):
+            self._compiled_smv_impl = None
+
+    def _get_root_index(self) -> torch.Tensor:
+        # Tolerate __class__-swap construction (tests re-bind class without
+        # calling __init__, so these attrs may be missing).
+        self._ensure_fused_attrs()
+        cached = getattr(self, "_root_index", None)
+        cached_total = getattr(self, "_root_index_total", -1)
+        if cached is not None and cached_total == self.total_nodes:
+            return cached
+        ri = torch.empty(self.total_nodes, dtype=torch.long, device=self.device)
+        N = self.root_nodes
+        ri[:N] = torch.arange(N, device=self.device)
+        for d in range(self.tree_depth):
+            start = self.depth_offsets[d + 1]
+            end = self.depth_offsets[d + 2]
+            ri[start:end] = ri[self.parent_index[start:end]]
+        self._root_index = ri
+        self._root_index_total = self.total_nodes
+        return ri
 
     # ------------------------------------------------------------------
     # Beliefs: fused block + normalize.
@@ -92,33 +181,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def _calculate_reach_weights(
         self, target: torch.Tensor, policy: torch.Tensor
     ) -> None:
-        # Replicates parent exactly except the final block+normalize is fused.
+        # Fused per-depth propagation: reach[c, p, h] = reach[parent, p, h] *
+        # (policy[c, h] if p == prev_actor[c] else 1.0).
         for depth in range(self.tree_depth):
-            offset_next = self.depth_offsets[depth + 1]
-            offset_next_next = self.depth_offsets[depth + 2]
-
-            target_dest = target[offset_next:offset_next_next]
-            target_dest[:] = self._fan_out(target, level=depth)
-
-            prev_actor_dest = self.prev_actor[offset_next:offset_next_next]
-            prev_actor_indices = prev_actor_dest[:, None, None].expand(
-                -1, -1, NUM_HANDS
+            start = self.depth_offsets[depth + 1]
+            end = self.depth_offsets[depth + 2]
+            fused_reach_weights_depth_(
+                reach=target,
+                policy=policy,
+                parent_index=self.parent_index,
+                prev_actor=self.prev_actor,
+                start=start,
+                end=end,
             )
-            policy_dest = policy[offset_next:offset_next_next]
-            target_dest.scatter_reduce_(
-                dim=1,
-                index=prev_actor_indices,
-                src=policy_dest[:, None],
-                reduce="prod",
-                include_self=True,
-            )
-
-        # Parent does: _mask_invalid (noop for sparse) + _block_beliefs (mask).
-        # Then the caller typically calls _propagate_all_beliefs which does
-        # fan_out_deep * reach_weights + normalize. Reach weights themselves
-        # get blocked here but NOT normalized; the normalization happens inside
-        # _propagate_all_beliefs on the resulting beliefs tensor, not on the
-        # reach weights. So we keep the parent's block step and skip normalize.
+        # Reach weights are blocked but not normalized (normalization happens
+        # in _propagate_all_beliefs on the resulting beliefs, not the reach).
         self._mask_invalid(target)
         super()._block_beliefs(target)
 
@@ -133,10 +210,19 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if reach_weights is None:
             reach_weights = self.self_reach
 
-        target[:] = self._fan_out_deep(target[:N]) * reach_weights
-        # Parent calls _normalize_beliefs; our override routes to fused kernel.
-        fused_block_and_normalize_beliefs_(
-            target, self.allowed_hands, self.allowed_hands_prob
+        # Single kernel: gather root beliefs via root_index, multiply by reach,
+        # mask with allowed_hands, row-normalize (fallback to allowed_prob).
+        # Clone: the kernel writes back to target[:N] too (mask + normalize),
+        # but non-root programs read root_beliefs[root_index[i]] — must be a
+        # separate buffer from `out` to avoid a cross-program read/write race.
+        root_beliefs = target[:N].clone()
+        fused_deep_beliefs_(
+            out=target,
+            root_beliefs=root_beliefs,
+            reach_weights=reach_weights,
+            allowed_mask=self.allowed_hands,
+            allowed_prob=self.allowed_hands_prob,
+            root_index=self._get_root_index(),
         )
 
     # ------------------------------------------------------------------
@@ -217,37 +303,35 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             -1, -1, NUM_HANDS
         )
         actor_beliefs = beliefs[:top].gather(1, actor_indices_expanded).squeeze(1)
-        beliefs_dest = self._fan_out(actor_beliefs)
-        marginal_policy = beliefs_dest * policy[bottom:]
+        # Skip materializing beliefs_dest as a separate tensor — fan-out is done
+        # inline via index_select, and the denom side of the ratio kernel
+        # gathers from actor_beliefs via parent_index instead.
+        marginal_policy = (
+            actor_beliefs.index_select(0, self.parent_index[bottom:]) * policy[bottom:]
+        )
 
-        # One Triton kernel produces where(unblocked(beliefs_dest) > eps,
-        # unblocked(marginal_policy) / unblocked(beliefs_dest), 0).
         opponent_conditioned_policy = torch.zeros_like(policy)
-        opponent_conditioned_policy[bottom:] = unblocked_mass_ratio_triton(
-            marginal_policy.contiguous(), beliefs_dest.contiguous()
+        opponent_conditioned_policy[bottom:] = unblocked_mass_ratio_indirect_triton(
+            numer_target=marginal_policy.contiguous(),
+            denom_target=actor_beliefs.contiguous(),
+            parent_index=self.parent_index[bottom:].contiguous(),
         )
 
         for depth in range(self.tree_depth - 1, -1, -1):
-            offset_next = self.depth_offsets[depth + 1]
-            offset_next_next = self.depth_offsets[depth + 2]
-
-            prev_actor_indices = self.prev_actor[offset_next:offset_next_next]
-            src_values = values[offset_next:offset_next_next].contiguous()
-            policy_hero = policy[offset_next:offset_next_next].contiguous()
-            policy_opp = opponent_conditioned_policy[
-                offset_next:offset_next_next
-            ].contiguous()
-
-            weighted_child_values = torch.empty_like(src_values)
-            fused_weight_child_values(
-                values_src=src_values,
-                prev_actor=prev_actor_indices.contiguous(),
-                policy_hero=policy_hero,
-                policy_opp=policy_opp,
-                out=weighted_child_values,
+            parent_base = self.depth_offsets[depth]
+            parent_end = self.depth_offsets[depth + 1]
+            # Fused weight + parent-sum: replaces fused_weight_child_values +
+            # _pull_back_sum (scatter_reduce) with one parent-aligned reduce.
+            fused_weighted_parent_sum(
+                values=values,
+                prev_actor=self.prev_actor,
+                policy_hero=policy,
+                policy_opp=opponent_conditioned_policy,
+                child_offsets=self.child_offsets[parent_base:parent_end].contiguous(),
+                child_count=self.child_count[parent_base:parent_end].contiguous(),
+                parent_base=parent_base,
+                max_children=self.num_actions,
             )
-
-            self._pull_back_sum(weighted_child_values, values, level=depth)
 
     # ------------------------------------------------------------------
     # Instantaneous regrets: fused fan_out + gather + sub + mul tail.
@@ -262,22 +346,29 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             values_expected = values_achieved
 
         bottom = self.depth_offsets[1]
+        top = self.depth_offsets[-2]
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         regrets = torch.zeros_like(self.policy_probs)
 
-        src_actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
+        # Compute opponent-reach unblocked mass ONLY at parent rows [0, top),
+        # not at all [total, 2] rows. Saves ~13× memory traffic for this
+        # unblocked-mass call.
+        src_weights = unblocked_mass_opp_at_parents_triton(
+            beliefs, self.env.to_act, top
+        )  # [top, H]
 
-        opponent_global_reach = calculate_unblocked_mass(beliefs.flip(dims=[1]))
-        src_weights = opponent_global_reach.gather(1, src_actor_indices).squeeze(1)
-        weights = self._fan_out(src_weights)
-        actor_values = values_expected.gather(1, src_actor_indices).squeeze(1)
+        # actor_values is parent-aligned and gathered lazily per-child inside
+        # fused_regret_tail_; only compute it at parent rows too.
+        # actor_values[p, h] = values_expected[p, to_act[p], h]
+        row_idx = torch.arange(top, device=self.device)
+        actor_values = values_expected[:top][row_idx, self.env.to_act[:top], :]
 
         fused_regret_tail_(
             regrets=regrets,
             values_achieved=values_achieved.contiguous(),
             actor_values=actor_values.contiguous(),
-            weights=weights.contiguous(),
+            src_weights=src_weights.contiguous(),
             parent_index=self.parent_index.contiguous(),
             prev_actor=self.prev_actor.contiguous(),
             bottom=bottom,
@@ -304,17 +395,17 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             return
 
         N = self.root_nodes
-        old, new = self._get_mixing_weights(t)
 
-        fused_average_policy_mix_(
+        fused_average_policy_mix_with_tensors_(
             policy_probs_avg=self.policy_probs_avg,
             policy_probs=self.policy_probs,
             self_reach=self.self_reach,
             self_reach_avg=self.self_reach_avg,
             to_act=self.env.to_act.contiguous(),
             parent_index=self.parent_index.contiguous(),
-            old=float(old),
-            new=float(new),
+            old=self._t_scalars.mix_old,
+            new=self._t_scalars.mix_new,
+            total_weight=self._t_scalars.mix_total,
             bottom=N,
         )
 
@@ -343,9 +434,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     # ------------------------------------------------------------------
 
     def update_average_values(self, t: int) -> None:
-        old, new = self._get_mixing_weights(t)
-        fused_update_average_values_(
-            self.values_avg, self.latest_values, float(old), float(new)
+        fused_update_average_values_with_tensors_(
+            self.values_avg,
+            self.latest_values,
+            self._t_scalars.mix_old,
+            self._t_scalars.mix_new,
+            self._t_scalars.mix_inv_total,
         )
         self.values_avg[:] = self._maybe_enforce_zero_sum(
             self.values_avg, self.beliefs_avg, ignore_mask=self.env.done
@@ -369,12 +463,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 self.latest_values, 0, self.model_indices, model_output.hand_values
             )
         else:
-            old, new = self._get_mixing_weights(t)
-            unmixed = fused_model_values_mix(
+            unmixed = torch.empty_like(model_output.hand_values)
+            fused_model_values_mix_with_tensors(
                 model_output.hand_values.contiguous(),
                 self.last_model_values.contiguous(),
-                float(old),
-                float(new),
+                self._t_scalars.mix_onon,
+                self._t_scalars.mix_oon,
+                unmixed,
             )
             unmixed = self._maybe_enforce_zero_sum(unmixed, beliefs)
             new_values = torch.index_copy(
@@ -382,15 +477,56 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             )
         return new_values, model_output.hand_values
 
+    @torch.no_grad()
+    def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
+        """Graph-safe override: keep ``self.latest_values`` and
+        ``self.last_model_values`` pinned to the same storage across calls so
+        CUDA graph capture doesn't see tensor re-bindings.
+        """
+        if beliefs is None:
+            beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+
+        features = self.feature_encoder.encode(
+            beliefs, pre_chance_node=self.new_street_mask
+        )
+        new_values, last_model_values = self._set_model_values(
+            t, beliefs[self.model_indices], features[self.model_indices]
+        )
+        # In-place copy into pinned storage instead of rebinding attributes.
+        self.latest_values.copy_(new_values)
+        if self._last_model_values_buf is None or (
+            self._last_model_values_buf.shape != last_model_values.shape
+        ):
+            self._last_model_values_buf = torch.empty_like(last_model_values)
+        self._last_model_values_buf.copy_(last_model_values)
+        self.last_model_values = self._last_model_values_buf
+
+        showdown_beliefs = beliefs[self.showdown_indices]
+        showdown_values = self._showdown_value_both(showdown_beliefs)
+        self.latest_values[self.showdown_indices] = showdown_values
+
     # ------------------------------------------------------------------
     # CFR iteration: fused DCFR update.
     # ------------------------------------------------------------------
 
     def cfr_iteration(self, t: int) -> None:
-        self.apply_schedules(t)
+        self._ensure_fused_attrs()
+        # Fill device-side scalars for DCFR rescale + mixing weights.
+        # Skipped when GraphedCFRIteration has already pre-filled them for
+        # this replay, so the graph doesn't re-capture host→device fills.
+        if not self._skip_t_scalars_update:
+            self.apply_schedules(t)
+            mix_old, mix_new = self._get_mixing_weights(t)
+            self._t_scalars.update(
+                t=t,
+                dcfr_alpha=self.dcfr_alpha,
+                dcfr_beta=self.dcfr_beta,
+                mix_old=float(mix_old),
+                mix_new=float(mix_new),
+            )
 
         torch.where(
-            (self.t_sample == t)[:, None],
+            (self.t_sample == self._t_scalars.t_tensor)[:, None],
             self.policy_probs,
             self.policy_probs_sample,
             out=self.policy_probs_sample,
@@ -404,14 +540,16 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self.regret_weight_sums += 1
             self.cumulative_regrets += regrets
         else:
-            fused_dcfr_update_(
+            apply_dcfr = self.cfr_type in (CFRType.discounted, CFRType.discounted_plus)
+            fused_dcfr_update_with_tensors_(
                 cumulative_regrets=self.cumulative_regrets,
                 regret_weight_sums=self.regret_weight_sums,
                 regrets=regrets,
-                t=t,
-                cfr_type=self.cfr_type,
-                dcfr_alpha=self.dcfr_alpha,
-                dcfr_beta=self.dcfr_beta,
+                t_alpha_num=self._t_scalars.t_alpha_num,
+                t_beta_num=self._t_scalars.t_beta_num,
+                t_alpha_den=self._t_scalars.t_alpha_den,
+                t_beta_den=self._t_scalars.t_beta_den,
+                apply_dcfr=apply_dcfr,
                 cfr_plus=self.cfr_plus,
             )
 
@@ -424,3 +562,20 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         if not self.use_final_policy_values:
             self.update_average_values(t)
+
+    def prepare_replay(self, t: int) -> None:
+        """Host-side prep for a CUDA-graph replay at iteration ``t``.
+
+        Updates Python schedules + TScalars device tensors OUTSIDE any captured
+        region. Call this immediately before ``graph.replay()`` to run the
+        captured iteration with a different ``t``.
+        """
+        self.apply_schedules(t)
+        mix_old, mix_new = self._get_mixing_weights(t)
+        self._t_scalars.update(
+            t=t,
+            dcfr_alpha=self.dcfr_alpha,
+            dcfr_beta=self.dcfr_beta,
+            mix_old=float(mix_old),
+            mix_new=float(mix_new),
+        )
