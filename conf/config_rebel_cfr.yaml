@@ -81,12 +81,16 @@ search:
 
   iterations: 200
   iterations_final: 500
-  warm_start_iterations: 15
+  # warm_start_iterations and dcfr_plus_delay are derived from the
+  # current cfr_iterations each step (iterations/20 and iterations*0.4
+  # respectively); these static values are starting points that the
+  # trainer overwrites — see _apply_schedules in cfr_trainer.py.
+  warm_start_iterations: 10
   warm_start_type: model
   warm_start_multiplier: 10
   dcfr_plus_delay: 80
 
-  dcfr_alpha: 2.0
+  dcfr_alpha: 3.0
   dcfr_alpha_final: 4.0
   dcfr_beta: -1.0
   dcfr_beta_final: -2.0

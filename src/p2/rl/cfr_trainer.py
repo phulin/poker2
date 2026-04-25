@@ -276,11 +276,19 @@ class RebelCFRTrainer:
             iterations_now = int(
                 round(iterations_start + (iterations_final - iterations_start) * t)
             )
-            # Ensure iterations is at least warm_start_iterations + 1
-            iterations_now = max(
-                self.cfg.search.warm_start_iterations + 1, iterations_now
-            )
-            self.cfr_evaluator.cfr_iterations = iterations_now
+        else:
+            iterations_now = self.cfg.search.iterations
+
+        # Derived schedules: warm_start_iterations and dcfr_plus_delay
+        # scale with the current iteration budget. Tuned values:
+        #   warm_start_iterations ≈ iterations / 20
+        #   dcfr_plus_delay       ≈ iterations * 0.4
+        warm_now = max(1, iterations_now // 20)
+        delay_now = int(round(iterations_now * 0.4))
+        iterations_now = max(warm_now + 1, iterations_now)
+        self.cfr_evaluator.cfr_iterations = iterations_now
+        self.cfr_evaluator.warm_start_iterations = warm_now
+        self.cfr_evaluator.dcfr_delay = delay_now
 
     def _compute_permutation_loss(
         self,
