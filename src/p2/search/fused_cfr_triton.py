@@ -2002,27 +2002,22 @@ if triton is not None:
         mask_row = allowed_mask_ptr + i * H
         prob_row = allowed_prob_ptr + i * H
 
-        offs = tl.arange(0, BLOCK_H)
-        total = tl.zeros((), dtype=tl.float32)
-        for stt in tl.range(0, H, BLOCK_H):
-            off = stt + offs
-            m = off < H
-            rb = tl.load(root_row + off, mask=m, other=0.0)
-            rw = tl.load(reach_row + off, mask=m, other=0.0)
-            al = tl.load(mask_row + off, mask=m, other=0).to(tl.int1)
-            v = tl.where(al, rb * rw, 0.0)
-            tl.store(out_row + off, v, mask=m)
-            total += tl.sum(tl.where(m, v, 0.0))
-
-        use_div = total > EPS
-        for stt in tl.range(0, H, BLOCK_H):
-            off = stt + offs
-            m = off < H
-            if use_div:
-                v = tl.load(out_row + off, mask=m, other=0.0) / total
-            else:
-                v = tl.load(prob_row + off, mask=m, other=0.0)
-            tl.store(out_row + off, v, mask=m)
+        # Single-tile path: H (=1326) fits in BLOCK_H (=2048). Keep `v`
+        # register-resident across the sum + normalize so we don't spill the
+        # intermediate to global memory and re-read it (was ~33% of this
+        # kernel's DRAM traffic).
+        off = tl.arange(0, BLOCK_H)
+        m = off < H
+        rb = tl.load(root_row + off, mask=m, other=0.0)
+        rw = tl.load(reach_row + off, mask=m, other=0.0)
+        al = tl.load(mask_row + off, mask=m, other=0).to(tl.int1)
+        v = tl.where(al, rb * rw, 0.0)
+        total = tl.sum(v)
+        if total > EPS:
+            out_v = v / total
+        else:
+            out_v = tl.load(prob_row + off, mask=m, other=0.0)
+        tl.store(out_row + off, out_v, mask=m)
 
 
 def fused_deep_beliefs_(
@@ -2056,6 +2051,7 @@ def fused_deep_beliefs_(
     assert allowed_mask.shape == (total, h) and allowed_prob.shape == (total, h)
     assert allowed_mask.is_contiguous() and allowed_prob.is_contiguous()
     assert root_index.shape == (total,) and root_index.is_contiguous()
+    assert h <= block_h, f"deep_beliefs assumes H ({h}) <= BLOCK_H ({block_h})"
 
     grid = (total, 2)
     _fused_deep_beliefs_kernel[grid](
