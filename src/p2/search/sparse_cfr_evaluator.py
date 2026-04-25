@@ -67,6 +67,7 @@ class SparseCFREvaluator(CFREvaluator):
             float_dtype=self.float_dtype,
             num_players=self.num_players,
             model=self.model,
+            generator=self.generator,
         )
         self.stats: dict[str, float] = {}
         self.hand_rank_data: HandRankData | None = None

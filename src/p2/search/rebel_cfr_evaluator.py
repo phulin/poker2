@@ -227,6 +227,7 @@ class RebelCFREvaluator(CFREvaluator):
             float_dtype=self.float_dtype,
             num_players=self.num_players,
             model=self.model,
+            generator=self.generator,
         )
 
         self.allowed_hands = torch.zeros(
