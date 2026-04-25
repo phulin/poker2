@@ -33,15 +33,15 @@ from p2.env.card_utils import NUM_HANDS
 from p2.env.rules_triton import rank_hands_triton, triton_is_available as _rules_triton_ok
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_with_tensors_,
+    fused_avg_values_zero_sum_,
     fused_block_and_normalize_beliefs_,
     fused_dcfr_update_with_tensors_,
     fused_deep_beliefs_,
     fused_divide_by_parent_sum_,
-    fused_model_values_mix_with_tensors,
+    fused_model_values_mix_zero_sum,
     fused_parent_sum,
     fused_reach_weights_depth_,
     fused_regret_tail_,
-    fused_update_average_values_with_tensors_,
     fused_weighted_parent_sum,
     triton_is_available,
     TScalars,
@@ -396,15 +396,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     # ------------------------------------------------------------------
 
     def update_average_values(self, t: int) -> None:
-        fused_update_average_values_with_tensors_(
-            self.values_avg,
-            self.latest_values,
-            self._t_scalars.mix_old,
-            self._t_scalars.mix_new,
-            self._t_scalars.mix_inv_total,
-        )
-        self.values_avg[:] = self._maybe_enforce_zero_sum(
-            self.values_avg, self.beliefs_avg, ignore_mask=self.env.done
+        fused_avg_values_zero_sum_(
+            values_avg=self.values_avg,
+            latest_values=self.latest_values,
+            beliefs=self.beliefs_avg,
+            old=self._t_scalars.mix_old,
+            new=self._t_scalars.mix_new,
+            inv_total=self._t_scalars.mix_inv_total,
+            enforce_zero_sum=bool(self.model.enforce_zero_sum),
+            ignore_mask=self.env.done,
         )
 
     # ------------------------------------------------------------------
@@ -426,14 +426,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             )
         else:
             unmixed = torch.empty_like(model_output.hand_values)
-            fused_model_values_mix_with_tensors(
-                model_output.hand_values.contiguous(),
-                self.last_model_values.contiguous(),
-                self._t_scalars.mix_onon,
-                self._t_scalars.mix_oon,
-                unmixed,
+            fused_model_values_mix_zero_sum(
+                hand_values=model_output.hand_values.contiguous(),
+                last_model_values=self.last_model_values.contiguous(),
+                beliefs=beliefs.contiguous(),
+                old_plus_new_over_new=self._t_scalars.mix_onon,
+                old_over_new=self._t_scalars.mix_oon,
+                out=unmixed,
+                enforce_zero_sum=bool(self.model.enforce_zero_sum),
             )
-            unmixed = self._maybe_enforce_zero_sum(unmixed, beliefs)
             new_values = torch.index_copy(
                 self.latest_values, 0, self.model_indices, unmixed
             )

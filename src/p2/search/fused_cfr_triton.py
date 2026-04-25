@@ -561,6 +561,114 @@ def fused_update_average_values_with_tensors_(
 
 
 # ---------------------------------------------------------------------------
+# Kernel 5b: update_average_values mixing + zero-sum subtract fused.
+#   Replaces fused_update_average_values_with_tensors_ + _maybe_enforce_zero_sum.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_avg_values_zs_kernel(
+        values_avg_ptr,    # [N, 2, H] in/out
+        latest_ptr,        # [N, 2, H]
+        beliefs_ptr,       # [N, 2, H]
+        ignore_mask_ptr,   # [N] bool (only read if HAS_IGNORE)
+        old_ptr,           # 0-D
+        new_ptr,           # 0-D
+        inv_total_ptr,     # 0-D
+        N, H,
+        HAS_IGNORE: tl.constexpr,
+        ENFORCE_ZS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        n = tl.program_id(0)
+        if n >= N:
+            return
+        old = tl.load(old_ptr)
+        new = tl.load(new_ptr)
+        inv_total = tl.load(inv_total_ptr)
+
+        offs = tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        a0_ptr = values_avg_ptr + (n * 2 + 0) * H + offs
+        a1_ptr = values_avg_ptr + (n * 2 + 1) * H + offs
+        l0_ptr = latest_ptr + (n * 2 + 0) * H + offs
+        l1_ptr = latest_ptr + (n * 2 + 1) * H + offs
+
+        a0 = tl.load(a0_ptr, mask=mask, other=0.0)
+        a1 = tl.load(a1_ptr, mask=mask, other=0.0)
+        l0 = tl.load(l0_ptr, mask=mask, other=0.0)
+        l1 = tl.load(l1_ptr, mask=mask, other=0.0)
+        v0 = (a0 * old + l0 * new) * inv_total
+        v1 = (a1 * old + l1 * new) * inv_total
+
+        s = tl.zeros((), dtype=tl.float32)
+        if ENFORCE_ZS:
+            b0 = tl.load(beliefs_ptr + (n * 2 + 0) * H + offs, mask=mask, other=0.0)
+            b1 = tl.load(beliefs_ptr + (n * 2 + 1) * H + offs, mask=mask, other=0.0)
+            s = 0.5 * (
+                tl.sum(tl.where(mask, v0 * b0, 0.0))
+                + tl.sum(tl.where(mask, v1 * b1, 0.0))
+            )
+            if HAS_IGNORE:
+                ig = tl.load(ignore_mask_ptr + n).to(tl.int1)
+                s = tl.where(ig, 0.0, s)
+
+        tl.store(a0_ptr, v0 - s, mask=mask)
+        tl.store(a1_ptr, v1 - s, mask=mask)
+
+
+def fused_avg_values_zero_sum_(
+    values_avg: torch.Tensor,        # [N, 2, H] in/out
+    latest_values: torch.Tensor,     # [N, 2, H]
+    beliefs: torch.Tensor,           # [N, 2, H]
+    old: torch.Tensor,               # 0-D
+    new: torch.Tensor,               # 0-D
+    inv_total: torch.Tensor,         # 0-D
+    enforce_zero_sum: bool,
+    ignore_mask: torch.Tensor | None = None,  # [N] bool
+    block_h: int = 2048,
+) -> None:
+    """In-place: mix values_avg with latest_values, then (optionally) subtract
+    per-row 0.5 * sum_p sum_h(v_p * b_p) to enforce zero-sum.
+
+    Replaces ``fused_update_average_values_with_tensors_`` followed by
+    ``_maybe_enforce_zero_sum`` in ``FusedSparseCFREvaluator.update_average_values``.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values_avg.is_contiguous() and latest_values.is_contiguous()
+    assert beliefs.is_contiguous()
+    assert values_avg.shape == latest_values.shape == beliefs.shape
+    assert values_avg.dim() == 3 and values_avg.shape[1] == 2
+    n_rows, _, h = values_avg.shape
+    assert h <= block_h, f"BLOCK_H={block_h} must cover H={h}"
+    if ignore_mask is not None:
+        assert ignore_mask.is_contiguous() and ignore_mask.shape == (n_rows,)
+        ignore_ptr = ignore_mask
+    else:
+        # Triton requires a real tensor pointer; never read when HAS_IGNORE=False.
+        ignore_ptr = values_avg
+    grid = (n_rows,)
+    _fused_avg_values_zs_kernel[grid](
+        values_avg,
+        latest_values,
+        beliefs,
+        ignore_ptr,
+        old,
+        new,
+        inv_total,
+        n_rows, h,
+        HAS_IGNORE=ignore_mask is not None,
+        ENFORCE_ZS=enforce_zero_sum,
+        BLOCK_H=block_h,
+        num_warps=8,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Kernel 6: compute_instantaneous_regrets tail (fan_out + gather + sub + mul).
 # ---------------------------------------------------------------------------
 
@@ -1569,6 +1677,101 @@ def fused_model_values_mix_with_tensors(
         n,
         BLOCK=block_size,
         num_warps=4,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Kernel 11b: model-values CFR-AVG mixing + zero-sum subtract fused.
+#   Replaces fused_model_values_mix_with_tensors + _maybe_enforce_zero_sum.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_model_values_mix_zs_kernel(
+        h_ptr,        # [M, 2, H] hand_values
+        l_ptr,        # [M, 2, H] last_model_values
+        b_ptr,        # [M, 2, H] beliefs
+        out_ptr,      # [M, 2, H]
+        onon_ptr,     # 0-D (old + new) / new
+        oon_ptr,      # 0-D old / new
+        M, H,
+        ENFORCE_ZS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        if m >= M:
+            return
+        onon = tl.load(onon_ptr)
+        oon = tl.load(oon_ptr)
+
+        offs = tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        h0_p = h_ptr + (m * 2 + 0) * H + offs
+        h1_p = h_ptr + (m * 2 + 1) * H + offs
+        l0_p = l_ptr + (m * 2 + 0) * H + offs
+        l1_p = l_ptr + (m * 2 + 1) * H + offs
+        o0_p = out_ptr + (m * 2 + 0) * H + offs
+        o1_p = out_ptr + (m * 2 + 1) * H + offs
+
+        h0 = tl.load(h0_p, mask=mask, other=0.0)
+        h1 = tl.load(h1_p, mask=mask, other=0.0)
+        l0 = tl.load(l0_p, mask=mask, other=0.0)
+        l1 = tl.load(l1_p, mask=mask, other=0.0)
+        u0 = h0 * onon - l0 * oon
+        u1 = h1 * onon - l1 * oon
+
+        s = tl.zeros((), dtype=tl.float32)
+        if ENFORCE_ZS:
+            b0 = tl.load(b_ptr + (m * 2 + 0) * H + offs, mask=mask, other=0.0)
+            b1 = tl.load(b_ptr + (m * 2 + 1) * H + offs, mask=mask, other=0.0)
+            s = 0.5 * (
+                tl.sum(tl.where(mask, u0 * b0, 0.0))
+                + tl.sum(tl.where(mask, u1 * b1, 0.0))
+            )
+
+        tl.store(o0_p, u0 - s, mask=mask)
+        tl.store(o1_p, u1 - s, mask=mask)
+
+
+def fused_model_values_mix_zero_sum(
+    hand_values: torch.Tensor,             # [M, 2, H]
+    last_model_values: torch.Tensor,       # [M, 2, H]
+    beliefs: torch.Tensor,                 # [M, 2, H]
+    old_plus_new_over_new: torch.Tensor,   # 0-D
+    old_over_new: torch.Tensor,            # 0-D
+    out: torch.Tensor,                     # [M, 2, H]
+    enforce_zero_sum: bool,
+    block_h: int = 2048,
+) -> None:
+    """Compute ``((old+new)*h - old*l) / new`` and (optionally) subtract the
+    per-row zero-sum mean ``0.5 * sum_p sum_h(out_p * b_p)`` in one kernel.
+
+    Replaces ``fused_model_values_mix_with_tensors`` followed by
+    ``_maybe_enforce_zero_sum`` in ``FusedSparseCFREvaluator._set_model_values_impl``.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert hand_values.is_contiguous() and last_model_values.is_contiguous()
+    assert beliefs.is_contiguous() and out.is_contiguous()
+    assert hand_values.shape == last_model_values.shape == beliefs.shape == out.shape
+    assert hand_values.dim() == 3 and hand_values.shape[1] == 2
+    m, _, h = hand_values.shape
+    assert h <= block_h, f"BLOCK_H={block_h} must cover H={h}"
+    grid = (m,)
+    _fused_model_values_mix_zs_kernel[grid](
+        hand_values,
+        last_model_values,
+        beliefs,
+        out,
+        old_plus_new_over_new,
+        old_over_new,
+        m, h,
+        ENFORCE_ZS=enforce_zero_sum,
+        BLOCK_H=block_h,
+        num_warps=8,
     )
 
 
