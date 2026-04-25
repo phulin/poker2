@@ -196,13 +196,22 @@ class RebelCFRTrainer:
             )
             self.ema_context.helper.register(self.ema_context.model)
             self.ema_context.helper.apply_to_module(self.ema_context.model)
+            if self.device.type == "cuda" and cfg.model.compile:
+                self.ema_context.model.compile(dynamic=True)
 
         eval_model = (
             self.ema_context.model if self.ema_context is not None else self.model
         )
 
         if cfg.search.sparse:
-            self.cfr_evaluator = SparseCFREvaluator(
+            evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
+            if cfg.search.sparse_fused:
+                from p2.search.fused_sparse_cfr_evaluator import (
+                    FusedSparseCFREvaluator,
+                )
+
+                evaluator_cls = FusedSparseCFREvaluator
+            self.cfr_evaluator = evaluator_cls(
                 model=eval_model,
                 device=self.device,
                 cfg=cfg,
