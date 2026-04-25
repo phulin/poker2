@@ -72,7 +72,7 @@ def ffn_block(
             OrderedDict(
                 [
                     ("norm", nn.LayerNorm(in_dim)),
-                    ("swiglu", SwiGLU(in_dim, out_dim)),
+                    ("swiglu", SwiGLU(in_dim, hidden_dim, out_dim)),
                 ]
             )
         )

@@ -40,7 +40,7 @@ def ffn_block(
             OrderedDict(
                 [
                     ("norm", nn.LayerNorm(in_dim)),
-                    ("swiglu", SwiGLU(in_dim, out_dim)),
+                    ("swiglu", SwiGLU(in_dim, hidden_dim, out_dim)),
                 ]
             )
         )
@@ -214,6 +214,35 @@ class BetterFFN(BaseMLPModel):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
+        expansion_gain = math.sqrt(self.ffn_dim / self.hidden_dim)
+        for sequential in [self.trunk, self.policy_head, self.hand_value_head]:
+            for block in sequential.modules():
+                if not isinstance(block, ResidualBlock):
+                    continue
+                inner = block.inner
+                if "swiglu" in dict(inner.named_children()):
+                    swiglu = inner.get_submodule("swiglu")
+                    nn.init.orthogonal_(
+                        swiglu.gate.weight, expansion_gain, generator=rng
+                    )
+                    nn.init.orthogonal_(
+                        swiglu.up.weight, expansion_gain, generator=rng
+                    )
+                else:
+                    # 1.532 is the gain for GELU nonlinearity.
+                    nn.init.orthogonal_(
+                        inner.get_submodule("linear_in").weight,
+                        1.532 * expansion_gain,
+                        generator=rng,
+                    )
+
+        # Guess hand values are around stddev 0.1.
+        last_block = self.hand_value_head[-1]
+        out_name = "swiglu" if "swiglu" in dict(last_block.named_children()) else "linear_out"
+        out_module = last_block.get_submodule(out_name)
+        out_weight = out_module.down.weight if out_name == "swiglu" else out_module.weight
+        out_weight.data.mul_(0.1)
+
     def create_feature_encoder(
         self,
         env,
@@ -221,20 +250,6 @@ class BetterFFN(BaseMLPModel):
         dtype: torch.dtype | None = None,
     ) -> BetterFeatureEncoder:
         return BetterFeatureEncoder(env=env, device=device, dtype=dtype)
-
-        for sequential in [self.trunk, self.policy_head, self.hand_value_head]:
-            for block in sequential.modules():
-                if not isinstance(block, ResidualBlock):
-                    continue
-                # 1.532 is the gain for GELU nonlinearity.
-                nn.init.orthogonal_(
-                    block.inner.get_submodule("linear_in").weight,
-                    1.532 * math.sqrt(self.ffn_dim / self.hidden_dim),
-                    generator=rng,
-                )
-
-        # Guess hand values are around stddev 0.1.
-        self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
 
     def repeat(
         self,
