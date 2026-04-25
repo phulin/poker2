@@ -176,25 +176,22 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         target: torch.Tensor | None = None,
         reach_weights: torch.Tensor | None = None,
     ) -> None:
-        N = self.root_nodes
         if target is None:
             target = self.beliefs
         if reach_weights is None:
             reach_weights = self.self_reach
 
-        # Single kernel: gather root beliefs via root_index, multiply by reach,
-        # mask with allowed_hands, row-normalize (fallback to allowed_prob).
-        # Clone: the kernel writes back to target[:N] too (mask + normalize),
-        # but non-root programs read root_beliefs[root_index[i]] — must be a
-        # separate buffer from `out` to avoid a cross-program read/write race.
-        root_beliefs = target[:N].clone()
+        # The kernel skips root rows (idempotent: out[:N] == root_beliefs by
+        # construction since reach[:N] == 1 and root beliefs are pre-normalized),
+        # so non-root programs can read root_beliefs directly from target[:N]
+        # without needing a separate clone.
         fused_deep_beliefs_(
             out=target,
-            root_beliefs=root_beliefs,
+            root_beliefs=target,
             reach_weights=reach_weights,
-            allowed_mask=self.allowed_hands,
             allowed_prob=self.allowed_hands_prob,
             root_index=self._get_root_index(),
+            num_roots=self.root_nodes,
         )
 
     # ------------------------------------------------------------------

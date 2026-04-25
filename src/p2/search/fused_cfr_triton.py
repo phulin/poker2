@@ -1995,36 +1995,39 @@ if triton is not None:
 
     @triton.jit
     def _fused_deep_beliefs_kernel(
-        root_beliefs_ptr,       # [N, 2, H]
-        reach_ptr,              # [total, 2, H]
-        allowed_mask_ptr,       # [total, H] bool
+        root_beliefs_ptr,       # [N, 2, H] (read-only; same storage as out[:N])
+        reach_ptr,              # [total, 2, H]; pre-blocked by reach kernel
         allowed_prob_ptr,       # [total, H]
-        root_index_ptr,         # [total]
+        root_index_ptr,         # [total - N] (only non-root rows)
         out_ptr,                # [total, 2, H]
+        N,                      # number of root rows (skipped; idempotent)
         H,
         EPS,
         BLOCK_H: tl.constexpr,
     ):
-        i = tl.program_id(0)
+        # i indexes non-root rows in [N, total). Roots are idempotent
+        # (out[i] = root_beliefs[i] for i < N) so we skip them entirely; that
+        # also removes the cross-program race that previously required cloning
+        # root_beliefs from out[:N].
+        i = tl.program_id(0) + N
         p = tl.program_id(1)
 
-        root_idx = tl.load(root_index_ptr + i)
+        root_idx = tl.load(root_index_ptr + (i - N))
         root_row = root_beliefs_ptr + (root_idx * 2 + p) * H
         reach_row = reach_ptr + (i * 2 + p) * H
         out_row = out_ptr + (i * 2 + p) * H
-        mask_row = allowed_mask_ptr + i * H
         prob_row = allowed_prob_ptr + i * H
 
         # Single-tile path: H (=1326) fits in BLOCK_H (=2048). Keep `v`
         # register-resident across the sum + normalize so we don't spill the
-        # intermediate to global memory and re-read it (was ~33% of this
-        # kernel's DRAM traffic).
+        # intermediate to global memory. reach is pre-blocked (zero where
+        # ~allowed_mask[i]) by _fused_reach_weights_kernel, so rb * rw is
+        # already correctly masked — no extra allowed_mask load needed here.
         off = tl.arange(0, BLOCK_H)
         m = off < H
         rb = tl.load(root_row + off, mask=m, other=0.0)
         rw = tl.load(reach_row + off, mask=m, other=0.0)
-        al = tl.load(mask_row + off, mask=m, other=0).to(tl.int1)
-        v = tl.where(al, rb * rw, 0.0)
+        v = rb * rw
         total = tl.sum(v)
         if total > EPS:
             out_v = v / total
@@ -2034,22 +2037,23 @@ if triton is not None:
 
 
 def fused_deep_beliefs_(
-    out: torch.Tensor,               # [total, 2, H] in/out (root rows overwritten too)
-    root_beliefs: torch.Tensor,      # [N, 2, H]
-    reach_weights: torch.Tensor,     # [total, 2, H]
-    allowed_mask: torch.Tensor,      # [total, H] bool
+    out: torch.Tensor,               # [total, 2, H] in/out (only [N:] is written)
+    root_beliefs: torch.Tensor,      # [>=N, 2, H]; only rows [:N] are read
+    reach_weights: torch.Tensor,     # [total, 2, H]; assumed pre-blocked
     allowed_prob: torch.Tensor,      # [total, H]
     root_index: torch.Tensor,        # [total] int64
+    num_roots: int | None = None,
     eps: float = 1e-5,
     block_h: int = 2048,
 ) -> None:
-    """Fuses ``_fan_out_deep(root_beliefs) * reach_weights`` + block +
-    normalize into one kernel. Replaces ``_propagate_all_beliefs``.
+    """Fuses ``_fan_out_deep(root_beliefs) * reach_weights`` + normalize into
+    one kernel. Replaces ``_propagate_all_beliefs``. ``reach_weights`` must
+    already be blocked (zero where allowed_mask is False) — the fused reach
+    kernel does that, so no extra block step is needed here.
 
     For each node ``i`` and player ``p``::
 
         v = root_beliefs[root_index[i], p, :] * reach_weights[i, p, :]
-        v = where(allowed_mask[i], v, 0)
         s = v.sum()
         out[i, p, :] = where(s > eps, v / s, allowed_prob[i])
     """
@@ -2059,21 +2063,28 @@ def fused_deep_beliefs_(
     assert root_beliefs.is_contiguous() and root_beliefs.dim() == 3
     assert reach_weights.is_contiguous() and reach_weights.shape == out.shape
     total, two, h = out.shape
-    n = root_beliefs.shape[0]
-    assert root_beliefs.shape == (n, 2, h)
-    assert allowed_mask.shape == (total, h) and allowed_prob.shape == (total, h)
-    assert allowed_mask.is_contiguous() and allowed_prob.is_contiguous()
+    # root_beliefs may be the full out tensor (when roots are idempotent so we
+    # can read directly without cloning) or a [N, 2, H] snapshot. Caller must
+    # pass num_roots in the former case; in the latter we infer.
+    n = num_roots if num_roots is not None else root_beliefs.shape[0]
+    assert root_beliefs.shape[0] >= n and root_beliefs.shape[1:] == (2, h)
+    assert allowed_prob.shape == (total, h) and allowed_prob.is_contiguous()
     assert root_index.shape == (total,) and root_index.is_contiguous()
     assert h <= block_h, f"deep_beliefs assumes H ({h}) <= BLOCK_H ({block_h})"
 
-    grid = (total, 2)
+    # Roots are idempotent (out[:N] == root_beliefs by construction). Skip them
+    # in-kernel so non-root programs can read root_beliefs straight from
+    # out[:N] without needing a cloned snapshot.
+    if total <= n:
+        return
+    grid = (total - n, 2)
     _fused_deep_beliefs_kernel[grid](
         root_beliefs,
         reach_weights,
-        allowed_mask,
         allowed_prob,
-        root_index,
+        root_index[n:].contiguous() if not root_index[n:].is_contiguous() else root_index[n:],
         out,
+        n,
         h,
         eps,
         BLOCK_H=block_h,

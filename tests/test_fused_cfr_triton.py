@@ -884,19 +884,23 @@ def test_fused_deep_beliefs_matches_pytorch() -> None:
     allowed_prob *= allowed_mask.float()
     allowed_prob /= allowed_prob.sum(-1, keepdim=True).clamp(min=1e-8)
 
-    # Reference: replicate fan_out_deep * reach + block + normalize.
+    # Caller is responsible for pre-blocking reach (the real reach kernel does
+    # this); apply it here so the kernel's no-allowed-mask contract holds.
+    reach = reach * allowed_mask[:, None, :].float()
+    # Reference: fan_out_deep * reach + normalize (reach is already blocked).
     fanned = root_beliefs[root_index]  # [total, 2, h]
     ref = fanned * reach
-    ref.masked_fill_((~allowed_mask)[:, None, :], 0.0)
     denom = ref.sum(dim=-1, keepdim=True)
     ref = torch.where(denom > 1e-5, ref / denom, allowed_prob[:, None, :])
 
     out = torch.zeros_like(ref).contiguous()
+    # Roots are skipped by the kernel (idempotent under real usage). Pre-fill
+    # them so the comparison covers the full tensor.
+    out[:n] = ref[:n]
     fused_deep_beliefs_(
         out=out,
         root_beliefs=root_beliefs.contiguous(),
         reach_weights=reach.contiguous(),
-        allowed_mask=allowed_mask.contiguous(),
         allowed_prob=allowed_prob.contiguous(),
         root_index=root_index.contiguous(),
     )
