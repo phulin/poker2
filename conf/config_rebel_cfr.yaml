@@ -5,7 +5,7 @@ defaults:
 
 num_steps: 15000
 use_tensor_env: true
-num_envs: 192
+num_envs: 512
 device: cuda
 checkpoint_dir: checkpoints-rebel
 checkpoint_interval: 50
@@ -20,9 +20,9 @@ train:
   lr_schedule: cosine
 
   weight_decay: 0.01
-  batch_size: 512
+  batch_size: 2048
   episodes_per_step: 10
-  replay_buffer_batches: 64
+  replay_buffer_batches: 16
   value_reuse_goal: 4
   policy_capacity_factor: 10
   value_coef: 1.0
@@ -40,7 +40,7 @@ train:
     # - threshold: 3500
     #   probabilities: [0.25, 0.25, 0.25, 0.25]
 
-  model_ema: 0.999
+  model_ema: null
 
 model:
   name: BetterFFN
@@ -96,3 +96,13 @@ search:
   dcfr_beta_final: -2.0
   dcfr_gamma: 5.0
   dcfr_gamma_final: 0.0
+
+trueskill:
+  enabled: true
+  snapshot_frac: 0.01
+  game_budget_frac: 0.03
+  actions_per_game: 16
+  recency_tau_frac: 0.25
+  min_games_per_opponent: 1
+  max_games_per_opponent: 64
+  snapshot_dtype: bfloat16

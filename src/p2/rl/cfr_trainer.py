@@ -26,6 +26,7 @@ from p2.models.model_output import ModelOutput, TRMLatent
 from p2.rl.losses import RebelSupervisedLoss
 from p2.rl.pbs_pool import PBSPool
 from p2.rl.rebel_batch import RebelBatch
+from p2.rl.trueskill_tracker import TrueSkillTracker
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
 from p2.search.cfr_evaluator import CFREvaluator
 from p2.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator
@@ -241,6 +242,84 @@ class RebelCFRTrainer:
 
         self.aggression_analyzer = AggressionAnalyzer(device=self.device)
         self.pbs_pool = PBSPool(pool_size=3, generator=self.rng)
+
+        # TrueSkill tracker. Reuses the live ``self.model`` as the candidate-side
+        # compiled instance and creates a second compiled instance for the
+        # opponent. Both sides bind weights via .data rebinding (no recompile).
+        self.trueskill_tracker: TrueSkillTracker | None = None
+        if cfg.trueskill.enabled:
+            opponent_model = self._make_eval_twin()
+            self.trueskill_tracker = TrueSkillTracker(
+                cfg=cfg,
+                candidate_model=self.model,
+                opponent_model=opponent_model,
+                device=self.device,
+                generator=self.rng,
+            )
+
+    def _make_eval_twin(self) -> nn.Module:
+        """Create a second compiled model instance with the same architecture
+        as ``self.model``, used as the opponent side for TrueSkill matchups."""
+        cfg = self.cfg
+        if cfg.model.name == ModelType.better_ffn:
+            twin: nn.Module = BetterFFN(
+                num_actions=self.num_actions,
+                hidden_dim=cfg.model.hidden_dim,
+                range_hidden_dim=cfg.model.range_hidden_dim,
+                ffn_dim=cfg.model.ffn_dim,
+                num_hidden_layers=cfg.model.num_hidden_layers,
+                num_policy_layers=cfg.model.num_policy_layers,
+                num_value_layers=cfg.model.num_value_layers,
+                num_players=self.num_players,
+                shared_trunk=cfg.model.shared_trunk,
+                enforce_zero_sum=cfg.model.enforce_zero_sum,
+                nonlinearity=cfg.model.nonlinearity,
+            )
+        elif cfg.model.name == ModelType.better_trm:
+            twin = BetterTRM(
+                num_actions=self.num_actions,
+                hidden_dim=cfg.model.hidden_dim,
+                range_hidden_dim=cfg.model.range_hidden_dim,
+                ffn_dim=cfg.model.ffn_dim,
+                num_hidden_layers=cfg.model.num_hidden_layers,
+                num_policy_layers=cfg.model.num_policy_layers,
+                num_value_layers=cfg.model.num_value_layers,
+                num_players=self.num_players,
+                num_recursions=cfg.model.num_recursions,
+                num_iterations=cfg.model.num_iterations,
+                shared_trunk=cfg.model.shared_trunk,
+                enforce_zero_sum=cfg.model.enforce_zero_sum,
+                nonlinearity=cfg.model.nonlinearity,
+            )
+        else:
+            twin = RebelFFN(
+                input_dim=cfg.model.input_dim,
+                num_actions=self.num_actions,
+                hidden_dim=cfg.model.hidden_dim,
+                num_hidden_layers=cfg.model.num_hidden_layers,
+                detach_value_head=cfg.model.detach_value_head,
+                num_players=self.num_players,
+                nonlinearity=cfg.model.nonlinearity,
+                enforce_zero_sum=cfg.model.enforce_zero_sum,
+            )
+        twin.to(self.device)
+        twin.eval()
+        for p in twin.parameters():
+            p.requires_grad = False
+        if self.device.type == "cuda" and cfg.model.compile:
+            twin.compile(dynamic=True)
+        return twin
+
+    def trueskill_snapshot_weights(self) -> dict[str, torch.Tensor]:
+        """Return the weights to snapshot for TrueSkill. Prefers EMA shadow
+        weights so we evaluate the same averaged model we eval against PBS."""
+        if self.ema_helper is not None:
+            return {k: v for k, v in self.ema_helper.shadow.items()}
+        return {
+            name: param.data
+            for name, param in self.model.named_parameters()
+            if param.requires_grad
+        }
 
     def _eval_swap(self):
         """Bind EMA shadow weights into self.model for the duration of the block."""

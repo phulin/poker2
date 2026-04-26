@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from p2.core.structured_config import CFRType, SearchConfig
+from p2.env.card_utils import NUM_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.better_ffn import BetterFFN
 from p2.models.mlp.better_trm import BetterTRM
@@ -463,23 +464,40 @@ class PBSPool(OpponentPool):
             button = game_idx % 2
             env.button[0] = button
 
-            # Initialize evaluators with root state
+            # Initialize evaluators at the root with uniform beliefs (default).
             roots = torch.tensor([0], device=device)
             evaluator_a.initialize_subgame(env, roots)
             evaluator_b.initialize_subgame(env, roots)
 
-            # Play until terminal using full CFR at each decision
+            # Play until terminal using full CFR at each decision.
             max_iterations = 40
             iteration = 0
+            # Per-evaluator post-action root beliefs in (acting-at-new-root,
+            # other) order — i.e. exactly the layout initialize_subgame wants
+            # as initial_beliefs. Initially None (use defaults).
+            next_init_a: torch.Tensor | None = None
+            next_init_b: torch.Tensor | None = None
             while not env.done[0].item() and iteration < max_iterations:
                 iteration += 1
 
-                # Get current evaluator based on to_act
+                # If we have post-action beliefs from the previous turn, use
+                # them as the new root beliefs.
+                if next_init_a is not None:
+                    evaluator_a.initialize_subgame(env, roots, initial_beliefs=next_init_a)
+                    evaluator_b.initialize_subgame(env, roots, initial_beliefs=next_init_b)
+                    next_init_a = None
+                    next_init_b = None
+
+                # Both evaluators run CFR so each has its own propagated
+                # beliefs at every child of the root.
+                evaluator_a.evaluate_cfr(training_mode=False)
+                evaluator_b.evaluate_cfr(training_mode=False)
+
                 to_act = env.to_act[0].item()
                 current_eval = evaluator_a if to_act == 0 else evaluator_b
-                # Perform one CFR self-play iteration to choose and apply an action
-                current_eval.evaluate_cfr(training_mode=False)
 
+                # Sample acting player's actual hand from current_eval's belief
+                # about that player (slot 0 of beliefs[root] = acting player).
                 hand = torch.multinomial(
                     current_eval.beliefs[0, 0], num_samples=1, generator=generator
                 ).item()
@@ -490,29 +508,46 @@ class PBSPool(OpponentPool):
                     probs, num_samples=1, generator=generator
                 ).item()
 
-                # Keep both evaluators in sync with the new root
+                # The CFR tree's child at index 1+action already holds the
+                # post-action beliefs for this evaluator (acting/other slots
+                # are correct for the new actor). Snapshot them before we
+                # re-init the tree on the next loop iteration.
+                next_init_a = evaluator_a.beliefs[1 + action : 2 + action].clone()
+                next_init_b = evaluator_b.beliefs[1 + action : 2 + action].clone()
+
                 env_rewards, _, _ = env.step_bins(
                     torch.full((1,), action, device=device, dtype=torch.long)
                 )
-                evaluator_a.initialize_subgame(env, roots)
-                evaluator_b.initialize_subgame(env, roots)
 
             assert env.done[0].item(), "Environment should be done"
 
-            # Terminal state: compute reward
-            # Check if fold or showdown
-            if env.street[0].item() == 4:  # Showdown
-                # Compute expected payoff by averaging each evaluator's showdown EV
-                # Each evaluator computes EV from its own beliefs/perspective
-                idx = torch.tensor([0], device=device)
-                ev_a = evaluator_a._showdown_value(idx)  # tensor scalar
-                ev_b = evaluator_b._showdown_value(idx)
-                payoff = 0.5 * (float(ev_a.item()) + float(ev_b.item()))
+            if env.street[0].item() == 4:
+                # Showdown: two-prior averaged EV from p0's perspective using
+                # each evaluator's post-action child beliefs (which already
+                # carry the propagated posteriors). Reorder (acting, other)
+                # at the terminal child to absolute (p0, p1).
+                # to_act here refers to who *would* have acted next at the
+                # post-action node — i.e., the player who did NOT just act.
+                # Map: child slot 0 = post-action acting = (1 - last_actor)
+                #      child slot 1 = post-action other  = last_actor
+                last_actor = to_act
+                def _to_abs(child_belief):
+                    bel = torch.empty_like(child_belief[0])  # [2, 1326]
+                    bel[1 - last_actor] = child_belief[0, 0]
+                    bel[last_actor] = child_belief[0, 1]
+                    return bel.unsqueeze(0)  # [1, 2, 1326]
 
-                # Reward is from player 0's perspective
-                rewards[game_idx] = payoff
+                bel_a = _to_abs(next_init_a)
+                bel_b = _to_abs(next_init_b)
+                sv_a = evaluator_a._showdown_value(bel_a, 0)  # [1, 1326]
+                sv_b = evaluator_b._showdown_value(bel_b, 0)
+                payoff_a = (bel_a[0, 0] * sv_a[0]).sum()
+                payoff_b = (bel_b[0, 0] * sv_b[0]).sum()
+                rewards[game_idx] = 0.5 * (
+                    float(payoff_a.item()) + float(payoff_b.item())
+                )
             else:
-                # Fold: deterministic payoff
+                # Fold is deterministic from the env state.
                 rewards[game_idx] = env_rewards[0].item()
 
         return rewards

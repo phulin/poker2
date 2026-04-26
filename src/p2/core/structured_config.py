@@ -266,6 +266,32 @@ class SearchConfig:
 
 
 @dataclass
+class TrueSkillConfig:
+    enabled: bool = False
+    # How often to snapshot and evaluate, as a fraction of total training run.
+    snapshot_frac: float = 0.01
+    # Target evaluation cost as a fraction of total training compute, expressed
+    # in "actions". Total scheduled training actions are estimated as
+    # num_steps * num_envs * actions_per_game (a game = ~16 actions).
+    game_budget_frac: float = 0.03
+    actions_per_game: int = 16
+    # Recency weighting: weight of opponent i (1 = oldest) in the sampling
+    # distribution is exp(-(N - i) / recency_tau_frac * N), where N = number
+    # of stored snapshots. Larger -> more uniform; smaller -> more recent-heavy.
+    recency_tau_frac: float = 0.25
+    # Minimum and maximum games to play against any single opponent per eval.
+    min_games_per_opponent: int = 1
+    max_games_per_opponent: int = 64
+    # TrueSkill priors.
+    initial_mu: float = 25.0
+    initial_sigma: float = 25.0 / 3.0
+    beta: float = 25.0 / 6.0
+    tau: float = 25.0 / 300.0
+    # Snapshots are kept in CPU RAM as bfloat16 shadow weights.
+    snapshot_dtype: str = "bfloat16"
+
+
+@dataclass
 class Config:
     # Training parameters
     num_steps: int = 2000
@@ -301,6 +327,7 @@ class Config:
     env: EnvConfig = field(default_factory=EnvConfig)
     exploiter: ExploiterConfig = field(default_factory=ExploiterConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    trueskill: TrueSkillConfig = field(default_factory=TrueSkillConfig)
 
     def __post_init__(self):
         if self.wandb_tags is None:
@@ -325,6 +352,7 @@ class Config:
         container["env"] = EnvConfig(**(container.get("env", {})))
         container["exploiter"] = ExploiterConfig(**(container.get("exploiter", {})))
         container["search"] = SearchConfig(**(container.get("search", {})))
+        container["trueskill"] = TrueSkillConfig(**(container.get("trueskill", {})))
         return cls(**container)
 
 

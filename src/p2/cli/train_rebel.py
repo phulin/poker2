@@ -249,6 +249,17 @@ def train_rebel(cfg: Config) -> None:
                 eval_results = trainer.evaluate_against_pool(min_games=200)
                 print(f"Evaluation results: {eval_results}")
 
+            if (
+                trainer.trueskill_tracker is not None
+                and trainer.trueskill_tracker.should_snapshot(step + 1)
+            ):
+                weights = trainer.trueskill_snapshot_weights()
+                trainer.trueskill_tracker.snapshot_and_evaluate(
+                    step=step + 1,
+                    candidate_weights=weights,
+                    wandb_run=run if cfg.use_wandb else None,
+                )
+
         final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
         trainer.save_checkpoint(
             final_path, cfg.num_steps, save_optimizer=False, save_dtype=None
