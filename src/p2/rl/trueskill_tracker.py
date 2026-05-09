@@ -21,8 +21,10 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from p2.core.structured_config import CFRType, Config, SearchConfig
-from p2.rl.pbs_pool import PBSPool
+from p2.core.structured_config import Config
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.rl.pbs_games import play_public_belief_games
+from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
 
 
 _DTYPE_MAP = {
@@ -78,6 +80,7 @@ class TrueSkillTracker:
         opponent_model: nn.Module,
         device: torch.device,
         generator: torch.Generator,
+        trainer_evaluator,
     ):
         self.cfg = cfg
         self.ts_cfg = cfg.trueskill
@@ -85,8 +88,28 @@ class TrueSkillTracker:
         self.opponent_model = opponent_model
         self.device = device
         self.generator = generator
+        self.trainer_evaluator = trainer_evaluator
         self.snapshots: List[TSSnapshot] = []
         self.snapshot_dtype = _DTYPE_MAP[self.ts_cfg.snapshot_dtype]
+
+        # Build a single-env prototype that matches the training env config.
+        self.env_proto = HUNLTensorEnv(
+            num_envs=1,
+            starting_stack=cfg.env.stack,
+            sb=cfg.env.sb,
+            bb=cfg.env.bb,
+            default_bet_bins=cfg.env.bet_bins,
+            device=device,
+            float_dtype=torch.float32,
+            flop_showdown=cfg.env.flop_showdown,
+        )
+
+        # Build matchup evaluators that mirror the trainer's data-generator
+        # config — same depth, same CFR variant, same DCFR params, same
+        # warm-start. We sync the live-scheduled (iterations, warm_start,
+        # dcfr_delay) values just before each eval round.
+        self.evaluator_a = self._build_eval(candidate_model)
+        self.evaluator_b = self._build_eval(opponent_model)
 
         total_steps = max(1, cfg.num_steps)
         # Snapshot every snapshot_frac of the run, but at least every step.
@@ -113,6 +136,70 @@ class TrueSkillTracker:
             f"steps; ~{n_snapshots} snapshots planned; "
             f"games_per_eval={self.games_per_eval}"
         )
+
+    # ------------------------------------------------------------- evaluators
+
+    def _build_eval(self, model: nn.Module):
+        """Build a CFR evaluator that mirrors the trainer's class + config."""
+        cfg = self.cfg
+        if cfg.search.sparse:
+            if cfg.search.sparse_fused:
+                from p2.search.fused_sparse_cfr_evaluator import (
+                    FusedSparseCFREvaluator,
+                )
+                ev = FusedSparseCFREvaluator(
+                    model=model,
+                    device=self.device,
+                    cfg=cfg,
+                    generator=self.generator,
+                )
+            else:
+                from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+                ev = SparseCFREvaluator(
+                    model=model,
+                    device=self.device,
+                    cfg=cfg,
+                    generator=self.generator,
+                )
+        else:
+            from p2.search.rebel_cfr_evaluator import T_WARM
+            ev = RebelCFREvaluator(
+                search_batch_size=1,
+                env_proto=self.env_proto,
+                model=model,
+                bet_bins=cfg.env.bet_bins,
+                max_depth=max(1, cfg.search.depth),
+                cfr_iterations=max(T_WARM + 1, cfg.search.iterations),
+                device=self.device,
+                float_dtype=torch.float32,
+                generator=self.generator,
+                num_supervisions=cfg.model.num_supervisions,
+                warm_start_iterations=cfg.search.warm_start_iterations,
+                warm_start_type=cfg.search.warm_start_type,
+                warm_start_multiplier=cfg.search.warm_start_multiplier,
+                cfr_type=cfg.search.cfr_type,
+                cfr_avg=cfg.search.cfr_avg,
+                cfr_plus=cfg.search.cfr_plus,
+                dcfr_alpha=cfg.search.dcfr_alpha,
+                dcfr_beta=cfg.search.dcfr_beta,
+                dcfr_gamma=cfg.search.dcfr_gamma,
+                dcfr_alpha_final=cfg.search.dcfr_alpha_final,
+                dcfr_beta_final=cfg.search.dcfr_beta_final,
+                dcfr_gamma_final=cfg.search.dcfr_gamma_final,
+                dcfr_delay=cfg.search.dcfr_plus_delay,
+                value_targets_from_final_policy=cfg.search.value_targets_from_final_policy,
+            )
+        return ev
+
+    def _sync_live_schedule(self):
+        """Copy the trainer evaluator's live-scheduled iteration counts onto
+        our matchup evaluators so they search at the same fidelity the
+        trainer is currently using."""
+        for ev in (self.evaluator_a, self.evaluator_b):
+            ev.cfr_iterations = self.trainer_evaluator.cfr_iterations
+            ev.warm_start_iterations = self.trainer_evaluator.warm_start_iterations
+            if hasattr(self.trainer_evaluator, "dcfr_delay"):
+                ev.dcfr_delay = self.trainer_evaluator.dcfr_delay
 
     # ------------------------------------------------------------------ utils
 
@@ -234,14 +321,8 @@ class TrueSkillTracker:
         opponents = list(self.snapshots)  # ordered oldest -> newest
         allocations = self._allocate_games(len(opponents), self.games_per_eval)
 
-        # Search config for eval games (cheap / fast).
-        search_cfg = SearchConfig()
-        search_cfg.depth = 1
-        search_cfg.iterations = 1
-        search_cfg.warm_start_iterations = 0
-        search_cfg.cfr_type = CFRType.linear
-        search_cfg.cfr_avg = True
-        bet_bins = list(self.cfg.env.bet_bins)
+        # Use the same search fidelity the trainer is currently running with.
+        self._sync_live_schedule()
 
         total_games_played = 0
         total_reward = 0.0
@@ -252,14 +333,13 @@ class TrueSkillTracker:
                 if n_games <= 0:
                     continue
                 with _bind_weights(self.opponent_model, opp.weights):
-                    rewards = PBSPool._play_public_belief_games(
-                        self.candidate_model,
-                        self.opponent_model,
+                    rewards = play_public_belief_games(
+                        self.evaluator_a,
+                        self.evaluator_b,
+                        self.env_proto,
                         n_games,
-                        bet_bins,
                         self.generator,
                         self.device,
-                        search_cfg,
                     )
 
                 # Per-game TrueSkill updates from candidate (=p0) perspective.

@@ -255,6 +255,7 @@ class RebelCFRTrainer:
                 opponent_model=opponent_model,
                 device=self.device,
                 generator=self.rng,
+                trainer_evaluator=self.cfr_evaluator,
             )
 
     def _make_eval_twin(self) -> nn.Module:
