@@ -245,10 +245,6 @@ def train_rebel(cfg: Config) -> None:
                 print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
                 print_preflop_range_grid(trainer, step, rebel=True)
 
-            if (step + 1) % cfg.eval_interval == 0:
-                eval_results = trainer.evaluate_against_pool(min_games=200)
-                print(f"Evaluation results: {eval_results}")
-
             if (
                 trainer.trueskill_tracker is not None
                 and trainer.trueskill_tracker.should_snapshot(step + 1)

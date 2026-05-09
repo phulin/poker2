@@ -24,7 +24,6 @@ from p2.models.mlp.better_ffn import BetterFFN
 from p2.models.mlp.better_trm import BetterTRM
 from p2.models.model_output import ModelOutput, TRMLatent
 from p2.rl.losses import RebelSupervisedLoss
-from p2.rl.pbs_pool import PBSPool
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.trueskill_tracker import TrueSkillTracker
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
@@ -241,7 +240,6 @@ class RebelCFRTrainer:
         )
 
         self.aggression_analyzer = AggressionAnalyzer(device=self.device)
-        self.pbs_pool = PBSPool(pool_size=3, generator=self.rng)
 
         # TrueSkill tracker. Reuses the live ``self.model`` as the candidate-side
         # compiled instance and creates a second compiled instance for the
@@ -865,9 +863,6 @@ class RebelCFRTrainer:
             history.append(update_info)
 
         return history
-
-    def evaluate_against_pool(self, min_games: int) -> float:
-        return self.pbs_pool.evaluate_model_against_pool(self.model, min_games)
 
     def save_checkpoint(
         self,
