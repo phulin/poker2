@@ -48,7 +48,37 @@ from p2.search.fused_cfr_triton import (
     unblocked_mass_opp_at_parents_triton,
     unblocked_mass_ratio_indirect_triton,
 )
+from p2.models.mlp.mlp_features import MLPFeatures
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+
+
+# Inductor folds the 7 separate aten::index ops in `set_leaf_values` (one per
+# MLPFeatures field at model_indices, plus beliefs at model_indices, plus
+# beliefs at showdown_indices) into a single graph. The structural win is
+# that model_indices and showdown_indices are read once and reused across
+# tensors instead of producing 6 redundant index gathers. dynamic=True keeps
+# a single artifact across runs with different model_indices /
+# showdown_indices sizes — both vary per CFR root configuration.
+@torch.compile(dynamic=True)
+def _set_leaf_gather(
+    beliefs: torch.Tensor,
+    feat_context: torch.Tensor,
+    feat_street: torch.Tensor,
+    feat_to_act: torch.Tensor,
+    feat_board: torch.Tensor,
+    feat_beliefs: torch.Tensor,
+    model_indices: torch.Tensor,
+    showdown_indices: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    return (
+        beliefs[model_indices],
+        feat_context[model_indices],
+        feat_street[model_indices],
+        feat_to_act[model_indices],
+        feat_board[model_indices],
+        feat_beliefs[model_indices],
+        beliefs[showdown_indices],
+    )
 
 
 class FusedSparseCFREvaluator(SparseCFREvaluator):
@@ -454,8 +484,36 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         features = self.feature_encoder.encode(
             beliefs, pre_chance_node=self.new_street_mask
         )
+        # Fused gather: 7 aten::index calls collapse into one Inductor graph
+        # so model_indices / showdown_indices are loaded once each and reused
+        # across the indexed tensors, instead of being re-issued per field.
+        (
+            beliefs_at_model,
+            ctx,
+            street,
+            to_act,
+            board,
+            feat_beliefs,
+            showdown_beliefs,
+        ) = _set_leaf_gather(
+            beliefs,
+            features.context,
+            features.street,
+            features.to_act,
+            features.board,
+            features.beliefs,
+            self.model_indices,
+            self.showdown_indices,
+        )
+        features_at_model = MLPFeatures(
+            context=ctx,
+            street=street,
+            to_act=to_act,
+            board=board,
+            beliefs=feat_beliefs,
+        )
         _, last_model_values = self._set_model_values(
-            t, beliefs[self.model_indices], features[self.model_indices]
+            t, beliefs_at_model, features_at_model
         )
         if self._last_model_values_buf is None or (
             self._last_model_values_buf.shape != last_model_values.shape
@@ -464,7 +522,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._last_model_values_buf.copy_(last_model_values)
         self.last_model_values = self._last_model_values_buf
 
-        showdown_beliefs = beliefs[self.showdown_indices]
         showdown_values = self._showdown_value_both(showdown_beliefs)
         self.latest_values[self.showdown_indices] = showdown_values
 
