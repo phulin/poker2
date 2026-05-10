@@ -2170,162 +2170,6 @@ class TScalars:
 
 
 # ---------------------------------------------------------------------------
-# Kernel 15: UNUSED showdown EV kernel (attempted — reverted).
-#
-# Tried a Triton rewrite of CFREvaluator._showdown_value to skip the
-# [M, H, 52] per_card_mass cumsum. The approach computes 8 prefix-sum
-# accumulators per (env m, sorted position k) by scanning all H sorted
-# positions once, trading the [M, H, 52] memory pass for an O(M·H²) compute
-# pattern.
-#
-# At the reference mixed-street shape (M=3264, H=1326, 52 cards), that
-# reformulation is algorithmically unfavorable: H² ≈ 1.76M beats H·52 ≈ 69k
-# per env by 25×, and in practice the tiled Triton version came in at
-# 20–60× slower than the torch.compile'd PyTorch baseline (which already
-# fuses the cumsum tightly with hardware-accelerated scan). Kept here for
-# reference; disconnected from the evaluator.
-# ---------------------------------------------------------------------------
-
-
-if triton is not None:
-
-    @triton.jit
-    def _showdown_ev_kernel(
-        b_opp_sorted_ptr,      # [M, H] fp32
-        c1_sorted_ptr,         # [M, H] int32
-        c2_sorted_ptr,         # [M, H] int32
-        L_idx_ptr,             # [M, H] int32
-        R_idx_ptr,             # [M, H] int32
-        ev_sorted_out_ptr,     # [M, H] fp32 — OUT
-        H,
-        EPS,
-        BLOCK_K: tl.constexpr,
-        BLOCK_J: tl.constexpr,
-    ):
-        """Tiled [BLOCK_K × BLOCK_J] showdown-EV kernel.
-
-        Grid: (M, ceil(H / BLOCK_K)). Each program owns BLOCK_K contiguous
-        hero sorted-positions and scans all H villain positions in BLOCK_J
-        tiles, accumulating eight per-hero-hand prefix sums that replace the
-        [M, H, 52] ``per_card_mass``/``Pcards`` intermediate.
-
-        card_ok masking is not needed: ``_block_beliefs`` already zeros
-        b_opp on board-conflicting combos, so they contribute nothing.
-        """
-        m = tl.program_id(0)
-        k_block = tl.program_id(1)
-
-        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
-        mask_k = k_offs < H
-
-        row_b = b_opp_sorted_ptr + m * H
-        row_c1 = c1_sorted_ptr + m * H
-        row_c2 = c2_sorted_ptr + m * H
-        row_L = L_idx_ptr + m * H
-        row_R = R_idx_ptr + m * H
-
-        c1_hero = tl.load(row_c1 + k_offs, mask=mask_k, other=-1).to(tl.int32)
-        c2_hero = tl.load(row_c2 + k_offs, mask=mask_k, other=-1).to(tl.int32)
-        L = tl.load(row_L + k_offs, mask=mask_k, other=0).to(tl.int32)
-        R = tl.load(row_R + k_offs, mask=mask_k, other=0).to(tl.int32)
-        b_k = tl.load(row_b + k_offs, mask=mask_k, other=0.0)
-
-        P_L = tl.zeros([BLOCK_K], dtype=tl.float32)
-        P_R = tl.zeros([BLOCK_K], dtype=tl.float32)
-        Pc_L_c1 = tl.zeros([BLOCK_K], dtype=tl.float32)
-        Pc_L_c2 = tl.zeros([BLOCK_K], dtype=tl.float32)
-        Pc_R_c1 = tl.zeros([BLOCK_K], dtype=tl.float32)
-        Pc_R_c2 = tl.zeros([BLOCK_K], dtype=tl.float32)
-        Pc_last_c1 = tl.zeros([BLOCK_K], dtype=tl.float32)
-        Pc_last_c2 = tl.zeros([BLOCK_K], dtype=tl.float32)
-
-        for j_start in tl.range(0, H, BLOCK_J):
-            j_offs = j_start + tl.arange(0, BLOCK_J)
-            mask_j = j_offs < H
-            b_j = tl.load(row_b + j_offs, mask=mask_j, other=0.0)      # [BJ]
-            cj1 = tl.load(row_c1 + j_offs, mask=mask_j, other=-1).to(tl.int32)
-            cj2 = tl.load(row_c2 + j_offs, mask=mask_j, other=-1).to(tl.int32)
-
-            # [BLOCK_K, BLOCK_J] masks
-            j_bc = j_offs[None, :]   # [1, BJ]
-            in_before_L = j_bc < L[:, None]                              # [BK, BJ]
-            in_before_R = j_bc < R[:, None]
-            has_c1 = (cj1[None, :] == c1_hero[:, None]) | (cj2[None, :] == c1_hero[:, None])
-            has_c2 = (cj1[None, :] == c2_hero[:, None]) | (cj2[None, :] == c2_hero[:, None])
-            b_bc = tl.where(mask_j[None, :], b_j[None, :], 0.0).broadcast_to((BLOCK_K, BLOCK_J))
-
-            P_L += tl.sum(tl.where(in_before_L, b_bc, 0.0), axis=1)
-            P_R += tl.sum(tl.where(in_before_R, b_bc, 0.0), axis=1)
-            Pc_L_c1 += tl.sum(tl.where(in_before_L & has_c1, b_bc, 0.0), axis=1)
-            Pc_L_c2 += tl.sum(tl.where(in_before_L & has_c2, b_bc, 0.0), axis=1)
-            Pc_R_c1 += tl.sum(tl.where(in_before_R & has_c1, b_bc, 0.0), axis=1)
-            Pc_R_c2 += tl.sum(tl.where(in_before_R & has_c2, b_bc, 0.0), axis=1)
-            Pc_last_c1 += tl.sum(tl.where(has_c1, b_bc, 0.0), axis=1)
-            Pc_last_c2 += tl.sum(tl.where(has_c2, b_bc, 0.0), axis=1)
-
-        win_mass = P_L - Pc_L_c1 - Pc_L_c2
-        seg_sum = P_R - P_L
-        seg_c1 = Pc_R_c1 - Pc_L_c1
-        seg_c2 = Pc_R_c2 - Pc_L_c2
-        tie_mass = seg_sum - seg_c1 - seg_c2 + b_k
-
-        denom = 1.0 - Pc_last_c1 - Pc_last_c2 + b_k
-        use_div = denom > EPS
-        denom_safe = tl.maximum(denom, EPS)
-        win_prob = tl.where(use_div, win_mass / denom_safe, 0.0)
-        tie_prob = tl.where(use_div, tie_mass / denom_safe, 0.0)
-        loss_prob = tl.where(use_div, 1.0 - win_prob - tie_prob, 0.0)
-        ev = win_prob - loss_prob
-        tl.store(ev_sorted_out_ptr + m * H + k_offs, ev, mask=mask_k)
-
-
-def showdown_ev_triton(
-    b_opp_sorted: torch.Tensor,       # [M, H] fp32
-    c1_sorted: torch.Tensor,          # [M, H] int
-    c2_sorted: torch.Tensor,          # [M, H] int
-    L_idx: torch.Tensor,              # [M, H] int
-    R_idx: torch.Tensor,              # [M, H] int
-    eps: float = 1e-8,
-    block_k: int = 32,
-    block_j: int = 128,
-) -> torch.Tensor:
-    """Compute ``EV_hand_sorted`` [M, H] directly from sorted-order inputs.
-
-    Replaces the PyTorch ``_showdown_value`` pipeline (per_card_mass cumsum +
-    Pcards gathers + divide) with one Triton kernel. Caller remains
-    responsible for: permuting EV back via ``inv_sorted``; multiplying by
-    ``hand_ok_mask``; and scaling by ``potential / scale``.
-    """
-    if not triton_is_available():
-        raise RuntimeError("Triton is not installed.")
-    assert b_opp_sorted.is_contiguous() and b_opp_sorted.dim() == 2
-    M, H = b_opp_sorted.shape
-    assert c1_sorted.shape == (M, H) and c2_sorted.shape == (M, H)
-    assert L_idx.shape == (M, H) and R_idx.shape == (M, H)
-    c1_i32 = c1_sorted.to(torch.int32).contiguous()
-    c2_i32 = c2_sorted.to(torch.int32).contiguous()
-    L_i32 = L_idx.to(torch.int32).contiguous()
-    R_i32 = R_idx.to(torch.int32).contiguous()
-    out = torch.empty(M, H, device=b_opp_sorted.device, dtype=torch.float32)
-
-    grid = (M, triton.cdiv(H, block_k))
-    _showdown_ev_kernel[grid](
-        b_opp_sorted.contiguous(),
-        c1_i32,
-        c2_i32,
-        L_i32,
-        R_i32,
-        out,
-        H,
-        eps,
-        BLOCK_K=block_k,
-        BLOCK_J=block_j,
-        num_warps=4,
-    )
-    return out
-
-
-# ---------------------------------------------------------------------------
 # CUDA graph capture of a full cfr_iteration.
 # ---------------------------------------------------------------------------
 
@@ -2463,32 +2307,40 @@ class GraphedCFRIteration:
 
 
 # ---------------------------------------------------------------------------
-# Kernel 16: alternative fused-both-heroes showdown EV via precomputed slots.
+# Showdown EV in Triton — replaces the torch.compile()'d
+# CFREvaluator._showdown_value_both with a 3-kernel pipeline.
 #
-# Status: NOT WIRED into FusedSparseCFREvaluator. Reaches parity with the
-# existing torch.compile()'d _showdown_value_both at the small-batch
-# benchmarking config (bench/bench_showdown.py reports ~1.0× of baseline);
-# kept as a starting point for future Triton-side iteration.
+# The PyTorch baseline materializes a [M, H, 52] per_card_mass cumsum
+# (~96% zeros, since each villain hand contains exactly 2 of 52 cards) and
+# then does four large gathers on it. We exploit the sparsity:
 #
-# Algorithm (vs the abandoned `showdown_ev_triton`):
-#   * Precompute, ONCE per subgame, the sorted j-positions where each
-#     non-board card appears — `card_positions[M, 52, MC]` padded with H,
-#     where MC = 64 (next power of 2 above 51, the max non-board incidence).
-#   * Precompute, ONCE per subgame, six `slot_*` tensors of shape [M, H]
-#     that count how many of card c1[k]/c2[k]'s sorted positions are
-#     strictly less than L[k]/R[k]/H. These are pure functions of the tree
-#     structure (no belief dependence) and never change inside CFR.
-#   * Per call: build the per-card cumsum on the SPARSE positions only —
-#     `card_cumsum[M, 2, 52, MC]` — bandwidth ~200× smaller than PyTorch's
-#     `Pcards[M, H, 52]` cumsum. Then run one Triton kernel that, per
-#     (m, k) program, does six SCALAR loads from `card_cumsum` at the
-#     precomputed slots, instead of loading [BLOCK_K, MC] blocks and
-#     reducing them.
+#   * Subgame setup (precompute_showdown_extras, called once per
+#     subgame): for each (env m, card c) record the sorted j-positions
+#     where card c appears in `hands_c1c2_sorted` — `card_positions[M, 52,
+#     MC=64]` padded with H. From those, derive six [M, H] int32
+#     `slot_*` tensors that count how many of card c1[k]/c2[k]'s
+#     positions are strictly less than L[k] / R[k] / H. All six slot
+#     tensors are pure functions of the tree structure (no belief
+#     dependence) and stay valid for every CFR iteration on the subgame.
 #
-# The precomputed-slot trick was the structural fix that took the kernel
-# from ~1.8× slower than baseline (variants v2/v3 in bench_showdown.py)
-# down to parity. Wiring this in still requires beating the baseline by
-# enough to justify the extra precompute path on `_init_hand_rank_data`.
+#   * Per call (showdown_ev_v15, three Triton kernels):
+#       1. _showdown_setup_b_P_kernel — gather `b_opp_sorted` along
+#          `sorted_indices` for both heroes and build P_padded (cumsum
+#          with leading 0).
+#       2. _showdown_build_cum_kernel — per-card cumsum on the SPARSE
+#          positions only, output shape [M, 2, 52, MC]. Bandwidth ~200×
+#          smaller than the PyTorch [M, H, 52] tensor.
+#       3. _showdown_ev_v15_kernel — per (m, k) program does six SCALAR
+#          loads from `card_cumsum` at the precomputed slot offsets
+#          (instead of loading [BLOCK_K, MC] blocks and reducing them),
+#          computes win/tie/loss EV for both heroes via tl.static_range,
+#          multiplies by the precomputed hand_ok_sorted × scale_factor,
+#          and scatters into `ev_out[m, hero, sorted_indices[m, k]]`.
+#
+#   * ShowdownGraphRunner wraps the 3-kernel sequence in a CUDA graph
+#     keyed on the subgame's (M, NUM_HANDS); replay does a single
+#     `copy_()` into a persistent input buffer. Captured in
+#     FusedSparseCFREvaluator._init_hand_rank_data.
 # ---------------------------------------------------------------------------
 
 
@@ -2542,173 +2394,6 @@ def precompute_showdown_lookup_slots(
     )
 
 
-if triton is not None:
-
-    @triton.jit
-    def _showdown_ev_v4_kernel(
-        b_opp_sorted_ptr,        # [M, 2, H] fp32 (per hero villain belief, sorted)
-        P_padded_ptr,            # [M, 2, H+1] fp32 (cumsum of b_opp with leading 0)
-        card_cumsum_ptr,         # [M, 2, 52, MC] fp32 (per-card cumsum on sparse positions)
-        L_idx_ptr,               # [M, H]
-        R_idx_ptr,               # [M, H]
-        c1_sorted_ptr,           # [M, H]
-        c2_sorted_ptr,           # [M, H]
-        slot_L_c1_ptr,           # [M, H]
-        slot_L_c2_ptr,
-        slot_R_c1_ptr,
-        slot_R_c2_ptr,
-        slot_last_c1_ptr,
-        slot_last_c2_ptr,
-        ev_out_ptr,              # [M, 2, H] fp32 in sorted order
-        H,
-        NUM_CARDS: tl.constexpr,
-        MC_K: tl.constexpr,
-        BLOCK_K: tl.constexpr,
-    ):
-        m = tl.program_id(0)
-        k_block = tl.program_id(1)
-        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
-        mask_k = k_offs < H
-
-        L = tl.load(L_idx_ptr + m * H + k_offs, mask=mask_k, other=0)
-        R = tl.load(R_idx_ptr + m * H + k_offs, mask=mask_k, other=0)
-        c1 = tl.load(c1_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
-        c2 = tl.load(c2_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sL1 = tl.load(slot_L_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sL2 = tl.load(slot_L_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sR1 = tl.load(slot_R_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sR2 = tl.load(slot_R_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sLast1 = tl.load(slot_last_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sLast2 = tl.load(slot_last_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
-
-        has_L1 = sL1 > 0
-        has_L2 = sL2 > 0
-        has_R1 = sR1 > 0
-        has_R2 = sR2 > 0
-        has_Last1 = sLast1 > 0
-        has_Last2 = sLast2 > 0
-        iL1 = tl.maximum(sL1 - 1, 0)
-        iL2 = tl.maximum(sL2 - 1, 0)
-        iR1 = tl.maximum(sR1 - 1, 0)
-        iR2 = tl.maximum(sR2 - 1, 0)
-        iLast1 = tl.maximum(sLast1 - 1, 0)
-        iLast2 = tl.maximum(sLast2 - 1, 0)
-
-        for hero in tl.static_range(2):
-            b_at_k = tl.load(
-                b_opp_sorted_ptr + m * 2 * H + hero * H + k_offs,
-                mask=mask_k, other=0.0,
-            )
-            P_L = tl.load(
-                P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + L,
-                mask=mask_k, other=0.0,
-            )
-            P_R = tl.load(
-                P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + R,
-                mask=mask_k, other=0.0,
-            )
-            cum_base = (
-                card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
-            )
-            Pcards_L_c1 = tl.where(
-                has_L1,
-                tl.load(cum_base + c1 * MC_K + iL1, mask=mask_k, other=0.0),
-                0.0,
-            )
-            Pcards_L_c2 = tl.where(
-                has_L2,
-                tl.load(cum_base + c2 * MC_K + iL2, mask=mask_k, other=0.0),
-                0.0,
-            )
-            Pcards_R_c1 = tl.where(
-                has_R1,
-                tl.load(cum_base + c1 * MC_K + iR1, mask=mask_k, other=0.0),
-                0.0,
-            )
-            Pcards_R_c2 = tl.where(
-                has_R2,
-                tl.load(cum_base + c2 * MC_K + iR2, mask=mask_k, other=0.0),
-                0.0,
-            )
-            Pcards_last_c1 = tl.where(
-                has_Last1,
-                tl.load(cum_base + c1 * MC_K + iLast1, mask=mask_k, other=0.0),
-                0.0,
-            )
-            Pcards_last_c2 = tl.where(
-                has_Last2,
-                tl.load(cum_base + c2 * MC_K + iLast2, mask=mask_k, other=0.0),
-                0.0,
-            )
-
-            win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
-            seg_c1 = Pcards_R_c1 - Pcards_L_c1
-            seg_c2 = Pcards_R_c2 - Pcards_L_c2
-            tie_mass = (P_R - P_L) - seg_c1 - seg_c2 + b_at_k
-
-            denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
-            valid = denom > 1e-8
-            denom_safe = tl.where(valid, denom, 1.0)
-            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
-            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
-            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
-            EV = win_prob - loss_prob
-            tl.store(ev_out_ptr + m * 2 * H + hero * H + k_offs, EV, mask=mask_k)
-
-
-def showdown_ev_v4_triton(
-    b_opp_sorted_both: torch.Tensor,  # [M, 2, H] fp32 (per hero)
-    P_padded_both: torch.Tensor,      # [M, 2, H+1] fp32
-    card_cumsum_both: torch.Tensor,   # [M, 2, 52, MC] fp32
-    L_idx: torch.Tensor,              # [M, H]
-    R_idx: torch.Tensor,
-    c1_sorted: torch.Tensor,          # [M, H]
-    c2_sorted: torch.Tensor,
-    slot_tensors: tuple,              # six [M, H] int32 from precompute
-    block_k: int = 64,
-) -> torch.Tensor:
-    """Compute showdown EV in sorted-hand order for both heroes via the
-    precomputed-slot kernel. Caller does the inv_sorted permutation,
-    hand_ok masking, and potential/scale scaling."""
-    if not triton_is_available():
-        raise RuntimeError("Triton is not installed.")
-    M, _, H = b_opp_sorted_both.shape
-    assert b_opp_sorted_both.shape[1] == 2
-    assert P_padded_both.shape == (M, 2, H + 1)
-    NUM_CARDS = card_cumsum_both.shape[2]
-    MC_K = card_cumsum_both.shape[3]
-    sL1, sL2, sR1, sR2, sLast1, sLast2 = slot_tensors
-    ev_sorted = torch.empty(M, 2, H, device=b_opp_sorted_both.device, dtype=torch.float32)
-    grid = (M, triton.cdiv(H, block_k))
-    _showdown_ev_v4_kernel[grid](
-        b_opp_sorted_both.contiguous(),
-        P_padded_both.contiguous(),
-        card_cumsum_both.contiguous(),
-        L_idx.contiguous(),
-        R_idx.contiguous(),
-        c1_sorted.contiguous(),
-        c2_sorted.contiguous(),
-        sL1.contiguous(), sL2.contiguous(),
-        sR1.contiguous(), sR2.contiguous(),
-        sLast1.contiguous(), sLast2.contiguous(),
-        ev_sorted,
-        H,
-        NUM_CARDS=NUM_CARDS,
-        MC_K=MC_K,
-        BLOCK_K=block_k,
-        num_warps=4,
-    )
-    return ev_sorted
-
-
-# ---------------------------------------------------------------------------
-# Kernel 17: full v15 showdown pipeline — three Triton kernels
-# (b_opp+P setup → per-card cumsum → main EV with fused postprocess)
-# replacing torch.compile()'d _showdown_value_both. See bench_showdown.py
-# for the iteration log; this version (v15) at M=256 ran 2.22× faster than
-# the compiled PyTorch baseline. With CUDA graph wrapping (handled by the
-# caller) the speedup hits ~5.5×.
-# ---------------------------------------------------------------------------
 
 
 if triton is not None:
@@ -2901,9 +2586,10 @@ def showdown_ev_v15(
     extras: dict,
     block_k: int = 64,
 ) -> torch.Tensor:
-    """Full v15 showdown EV: setup + per-card cumsum + main kernel. Returns
-    [M, 2, NUM_HANDS] with hand_ok masking and potential/scale scaling
-    applied — drop-in replacement for `_showdown_value_both`."""
+    """Drop-in replacement for `CFREvaluator._showdown_value_both` using the
+    three-kernel Triton pipeline (setup_b_P → build_cum → main_ev).
+    Returns `[M, 2, NUM_HANDS]` with `hand_ok` masking and
+    `potential / scale` scaling already applied."""
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
     M, _, NUM_HANDS = beliefs.shape
@@ -2947,17 +2633,16 @@ def showdown_ev_v15(
 
 
 # ---------------------------------------------------------------------------
-# v16: ShowdownGraphRunner — wraps the v15 pipeline (3 Triton kernels) in
-# a CUDA graph keyed on a fixed (M, NUM_HANDS) shape. Per the bench in
-# scripts/bench_showdown.py, the graph adds another 2.5× on top of v15
-# (193 µs → 77 µs at M=256), bringing the overall speedup vs the compiled
-# PyTorch baseline to ~5.5×. Persistent input/output buffers; replay
-# returns the same output buffer each call.
+# CUDA-graph wrapper for the showdown EV pipeline. Captures the three
+# kernels above into one graph keyed on a fixed (M, NUM_HANDS) shape;
+# replay does just a copy_() into a persistent input buffer + replay().
+# See FusedSparseCFREvaluator._init_hand_rank_data for the per-subgame
+# capture site.
 # ---------------------------------------------------------------------------
 
 
 class ShowdownGraphRunner:
-    """Captures the v15 showdown pipeline as a CUDA graph for one fixed
+    """Captures the showdown EV pipeline as a CUDA graph for one fixed
     (M, NUM_HANDS) configuration. Subsequent calls only do a copy_() into
     the persistent input buffer, then replay the graph.
 

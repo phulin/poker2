@@ -140,10 +140,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._skip_record_stats: bool = False
 
     def _init_hand_rank_data(self) -> None:
-        """Build hand-rank data, then precompute v15 showdown EV extras
-        and capture a CUDA graph that wraps the v15 pipeline (v16). The
-        graph is keyed on (M=showdown_indices.numel(), NUM_HANDS), both
-        constant per subgame; replay reuses persistent buffers."""
+        """Build hand-rank data, then precompute the constant-per-subgame
+        showdown EV inputs and capture a CUDA graph for the EV pipeline.
+        The graph is keyed on (M=showdown_indices.numel(), NUM_HANDS) and
+        replays via persistent buffers."""
         super()._init_hand_rank_data()
         if self.hand_rank_data is not None and self.showdown_indices.numel() > 0:
             self._showdown_extras = precompute_showdown_extras(
@@ -160,10 +160,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._showdown_graph_runner = None
 
     def _showdown_value_both(self, beliefs: torch.Tensor) -> torch.Tensor:
-        """Triton v15 + CUDA graph fast path; ~5.5× the compiled-PyTorch
-        baseline at M=256. The returned tensor is the runner's persistent
+        """Triton + CUDA-graph fast path. Returns the runner's persistent
         output buffer — callers must consume / copy before the next call.
-        Falls back to the compiled baseline when no graph is available."""
+        Falls back to the eager-Triton path or the compiled-PyTorch
+        baseline when no graph or extras are available (e.g. empty
+        showdown set)."""
         runner = getattr(self, "_showdown_graph_runner", None)
         if runner is not None:
             return runner(beliefs)

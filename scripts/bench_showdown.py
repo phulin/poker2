@@ -1597,15 +1597,12 @@ def main(dict_config: DictConfig) -> None:
             continue
         timings[v.name] = _bench(lambda v=v: v.fn_both(beliefs), label=v.name, m=m)
 
-    # v16: CUDA graph — created last to avoid interfering with PyTorch
-    # baseline bench (capturing graphs while other Triton kernels are
-    # being benched can corrupt PyTorch's torch.compile cache state).
+    # v16: CUDA graph wrapping v15.
     try:
         v16_replay = make_v15_graphed(
             beliefs, hrd, card_positions, slot_tensors,
             hand_ok_sorted, scale_factor,
         )
-        # Verify
         out = v16_replay(beliefs)
         diff = (out - ev_ref).abs().max().item()
         if diff < 1e-3:
@@ -1617,6 +1614,43 @@ def main(dict_config: DictConfig) -> None:
             print(f"  ✗ v16 mismatch (diff={diff:.2e}), skipping")
     except Exception as e:
         print(f"  ✗ v16 crashed: {type(e).__name__}: {e}")
+
+    # Fair-comparison baseline: PyTorch _showdown_value_both wrapped in a
+    # CUDA graph too, so we're comparing kernel work directly (not launch
+    # overhead). Replay reads from a persistent buffer.
+    try:
+        beliefs_in = torch.zeros_like(beliefs)
+        ev_out_buf = torch.empty_like(ev_ref)
+
+        def _pytorch_run():
+            ev_out_buf.copy_(eval_._showdown_value_both(beliefs_in))
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                _pytorch_run()
+        torch.cuda.current_stream().wait_stream(s)
+        g_pt = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_pt):
+            _pytorch_run()
+
+        def pt_replay(b):
+            beliefs_in.copy_(b)
+            g_pt.replay()
+            return ev_out_buf
+
+        out = pt_replay(beliefs)
+        diff = (out - ev_ref).abs().max().item()
+        if diff < 1e-3:
+            timings["PyTorch baseline + CUDA graph"] = _bench(
+                lambda: pt_replay(beliefs),
+                label="PyTorch baseline + CUDA graph", m=m,
+            )
+        else:
+            print(f"  ✗ pt+graph mismatch (diff={diff:.2e}), skipping")
+    except Exception as e:
+        print(f"  ✗ pt+graph crashed: {type(e).__name__}: {e}")
 
     # Summary table
     print("\n" + "=" * 78)
