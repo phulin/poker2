@@ -491,7 +491,7 @@ def _hero_ev_kernel_v7(
     R_idx_ptr,               # [M, H]
     c1_sorted_ptr,
     c2_sorted_ptr,
-    inv_sorted_ptr,          # [M, H] — write target index for each k
+    sorted_indices_ptr,      # [M, H] — original hand index at sorted position k
     slot_L_c1_ptr,
     slot_L_c2_ptr,
     slot_R_c1_ptr,
@@ -513,7 +513,7 @@ def _hero_ev_kernel_v7(
     R = tl.load(R_idx_ptr + m * H + k_offs, mask=mask_k, other=0)
     c1 = tl.load(c1_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
     c2 = tl.load(c2_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
-    inv_k = tl.load(inv_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
+    out_k = tl.load(sorted_indices_ptr + m * H + k_offs, mask=mask_k, other=0)
     sL1 = tl.load(slot_L_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
     sL2 = tl.load(slot_L_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
     sR1 = tl.load(slot_R_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
@@ -559,8 +559,10 @@ def _hero_ev_kernel_v7(
         tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
         loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
         EV = win_prob - loss_prob
-        # Write at the original (unsorted) position.
-        tl.store(ev_out_ptr + m * 2 * H + hero * H + inv_k, EV, mask=mask_k)
+        # Write at the original (unsorted) position. sorted_indices[m, k]
+        # gives the original hand index at sorted position k, so this
+        # scatter equals torch.gather(ev_sorted, 1, inv_sorted).
+        tl.store(ev_out_ptr + m * 2 * H + hero * H + out_k, EV, mask=mask_k)
 
 
 def run_v7_both(beliefs, hrd, card_positions, slot_tensors, showdown_potential, env_scale, block_k=64):
@@ -573,14 +575,14 @@ def run_v7_both(beliefs, hrd, card_positions, slot_tensors, showdown_potential, 
     c2 = hrd.hands_c1c2_sorted[..., 1].contiguous()
     L_idx = hrd.L_idx.contiguous()
     R_idx = hrd.R_idx.contiguous()
-    inv_sorted = hrd.inv_sorted.contiguous()
+    sorted_indices = hrd.sorted_indices.contiguous()
     sL1, sL2, sR1, sR2, sLast1, sLast2 = slot_tensors
 
     ev_unsorted = torch.zeros(M, 2, NUM_HANDS, device=device, dtype=dtype)
     grid = (M, triton.cdiv(NUM_HANDS, block_k))
     _hero_ev_kernel_v7[grid](
         b_opp_both, P_both, cum_both,
-        L_idx, R_idx, c1, c2, inv_sorted,
+        L_idx, R_idx, c1, c2, sorted_indices,
         sL1, sL2, sR1, sR2, sLast1, sLast2,
         ev_unsorted,
         NUM_HANDS, NUM_CARDS=card_positions.shape[1], MC_K=MC, BLOCK_K=block_k, num_warps=4,
@@ -703,6 +705,445 @@ def run_v5_both(beliefs, hrd, card_positions, slot_tensors, showdown_potential, 
     ev = ev_sorted.gather(2, inv_sorted.unsqueeze(1).expand(-1, 2, -1))
     ev = ev * hrd.hand_ok_mask.to(dtype).unsqueeze(1)
     return ev * showdown_potential.unsqueeze(-1) / env_scale[:, None, None]
+
+
+# =============================================================================
+# v12: v11 + per-card cumsum built in a Triton kernel. Eliminates the
+# PyTorch ops that build cum_both (gather + view + cumsum + stack).
+# =============================================================================
+
+
+@triton.jit
+def _build_cum_kernel(
+    b_opp_sorted_ptr,        # [M, 2, H] fp32
+    card_positions_ptr,      # [M, NUM_CARDS, MC] int32 (positions; pad=H)
+    cum_out_ptr,             # [M, 2, NUM_CARDS, MC] fp32
+    H,
+    NUM_CARDS: tl.constexpr,
+    MC_K: tl.constexpr,
+):
+    m = tl.program_id(0)
+    hc = tl.program_id(1)  # combined hero*NUM_CARDS + c
+    hero = hc // NUM_CARDS
+    c = hc % NUM_CARDS
+
+    slot_off = tl.arange(0, MC_K)
+    positions = tl.load(
+        card_positions_ptr + m * NUM_CARDS * MC_K + c * MC_K + slot_off,
+    )
+    # Pad-safe gather: positions == H means "no entry"; we want b=0 there.
+    in_range = positions < H
+    safe_pos = tl.where(in_range, positions, 0)
+    b_at = tl.load(
+        b_opp_sorted_ptr + m * 2 * H + hero * H + safe_pos,
+    )
+    b_at = tl.where(in_range, b_at, 0.0)
+    cum = tl.cumsum(b_at, axis=0)
+    tl.store(
+        cum_out_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+        + c * MC_K + slot_off,
+        cum,
+    )
+
+
+def make_v15_graphed(beliefs_proto, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor, block_k=64):
+    """Capture v15's kernel sequence as a CUDA graph; return a replay function.
+    All tensor addresses are pinned via pre-allocated buffers."""
+    M, _, NUM_HANDS = beliefs_proto.shape
+    device = beliefs_proto.device
+    dtype = torch.float32
+    H = hrd.sorted_indices.shape[1]
+    block_h = 1
+    while block_h < H:
+        block_h *= 2
+
+    # Persistent buffers.
+    beliefs_in = torch.zeros_like(beliefs_proto)
+    b_opp_both = torch.empty(M, 2, H, device=device, dtype=dtype)
+    P_padded_both = torch.empty(M, 2, H + 1, device=device, dtype=dtype)
+    cum_both = torch.empty(M, 2, 52, MC, device=device, dtype=dtype)
+    ev_unsorted = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+    sL1, sL2, sR1, sR2, sLast1, sLast2 = slot_tensors
+    c1 = hrd.hands_c1c2_sorted[..., 0].contiguous()
+    c2 = hrd.hands_c1c2_sorted[..., 1].contiguous()
+    L_idx = hrd.L_idx.contiguous()
+    R_idx = hrd.R_idx.contiguous()
+    sorted_indices = hrd.sorted_indices.contiguous()
+    card_positions_i32 = card_positions.to(torch.int32)
+
+    # Warmup before capture (Triton kernel cache).
+    def _run():
+        _setup_b_P_kernel[(M, 2)](
+            beliefs_in, sorted_indices, b_opp_both, P_padded_both,
+            H, NUM_HANDS, BLOCK_H=block_h,
+        )
+        _build_cum_kernel[(M, 2 * 52)](
+            b_opp_both, card_positions_i32, cum_both,
+            H, NUM_CARDS=52, MC_K=MC,
+        )
+        grid = (M, triton.cdiv(NUM_HANDS, block_k))
+        _hero_ev_kernel_v11[grid](
+            b_opp_both, P_padded_both, cum_both,
+            L_idx, R_idx, c1, c2, sorted_indices,
+            hand_ok_sorted, scale_factor,
+            sL1, sL2, sR1, sR2, sLast1, sLast2,
+            ev_unsorted,
+            NUM_HANDS, NUM_CARDS=card_positions.shape[1], MC_K=MC,
+            BLOCK_K=block_k, num_warps=4,
+        )
+
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(3):
+            _run()
+    torch.cuda.current_stream().wait_stream(s)
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        _run()
+
+    def replay(beliefs):
+        beliefs_in.copy_(beliefs)
+        g.replay()
+        return ev_unsorted
+
+    return replay
+
+
+@triton.jit
+def _setup_b_P_kernel(
+    beliefs_ptr,             # [M, 2, NUM_HANDS] fp32 (orig hand order)
+    sorted_indices_ptr,      # [M, H] int64
+    b_opp_both_ptr,          # [M, 2, H] fp32 OUT
+    P_padded_both_ptr,       # [M, 2, H+1] fp32 OUT (with leading 0)
+    H,
+    NUM_HANDS,
+    BLOCK_H: tl.constexpr,
+):
+    m = tl.program_id(0)
+    hero = tl.program_id(1)
+    villain = 1 - hero
+
+    h_offs = tl.arange(0, BLOCK_H)
+    mask_h = h_offs < H
+    sorted_idx = tl.load(
+        sorted_indices_ptr + m * H + h_offs, mask=mask_h, other=0,
+    )
+    safe_idx = tl.where(mask_h, sorted_idx, 0)
+    b_at = tl.load(
+        beliefs_ptr + m * 2 * NUM_HANDS + villain * NUM_HANDS + safe_idx,
+        mask=mask_h, other=0.0,
+    )
+    # Write b_opp_both
+    tl.store(
+        b_opp_both_ptr + m * 2 * H + hero * H + h_offs, b_at, mask=mask_h,
+    )
+    # Cumsum to build P
+    cum = tl.cumsum(b_at, axis=0)
+    # Write P_padded with leading 0: store cum[i] at index i+1, store 0 at index 0
+    p_offs = h_offs + 1
+    tl.store(
+        P_padded_both_ptr + m * 2 * (H + 1) + hero * (H + 1) + p_offs, cum,
+        mask=mask_h,
+    )
+    # Write the leading 0 at index 0 — only one program does this per (m, hero).
+    # Use a single-thread store from lane 0.
+    if hero >= 0:  # always
+        # Note: every k_block writes the leading 0 redundantly with mask, fine.
+        tl.store(P_padded_both_ptr + m * 2 * (H + 1) + hero * (H + 1) + 0, 0.0)
+
+
+def run_v15_both(beliefs, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor, block_k=64):
+    """v13 + b_opp/P setup in Triton."""
+    M, _, NUM_HANDS = beliefs.shape
+    device = beliefs.device
+    dtype = torch.float32
+    H = hrd.sorted_indices.shape[1]
+
+    b_opp_both = torch.empty(M, 2, H, device=device, dtype=dtype)
+    P_padded_both = torch.empty(M, 2, H + 1, device=device, dtype=dtype)
+    # Round H up to power-of-2 for tl.arange constraint.
+    block_h = 1
+    while block_h < H:
+        block_h *= 2
+    _setup_b_P_kernel[(M, 2)](
+        beliefs.contiguous(), hrd.sorted_indices.contiguous(),
+        b_opp_both, P_padded_both,
+        H, NUM_HANDS, BLOCK_H=block_h,
+    )
+
+    cum_both = torch.empty(M, 2, 52, MC, device=device, dtype=dtype)
+    _build_cum_kernel[(M, 2 * 52)](
+        b_opp_both, card_positions.to(torch.int32), cum_both,
+        H, NUM_CARDS=52, MC_K=MC,
+    )
+
+    c1 = hrd.hands_c1c2_sorted[..., 0].contiguous()
+    c2 = hrd.hands_c1c2_sorted[..., 1].contiguous()
+    L_idx = hrd.L_idx.contiguous()
+    R_idx = hrd.R_idx.contiguous()
+    sorted_indices = hrd.sorted_indices.contiguous()
+    sL1, sL2, sR1, sR2, sLast1, sLast2 = slot_tensors
+
+    ev_unsorted = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+    grid = (M, triton.cdiv(NUM_HANDS, block_k))
+    _hero_ev_kernel_v11[grid](
+        b_opp_both, P_padded_both, cum_both,
+        L_idx, R_idx, c1, c2, sorted_indices,
+        hand_ok_sorted, scale_factor,
+        sL1, sL2, sR1, sR2, sLast1, sLast2,
+        ev_unsorted,
+        NUM_HANDS, NUM_CARDS=card_positions.shape[1], MC_K=MC, BLOCK_K=block_k, num_warps=4,
+    )
+    return ev_unsorted
+
+
+@torch.compile(dynamic=True)
+def _setup_b_and_P(beliefs, sorted_indices, zeros):
+    b_opp_h0 = beliefs[:, 1, :].gather(1, sorted_indices)
+    b_opp_h1 = beliefs[:, 0, :].gather(1, sorted_indices)
+    b_opp_both = torch.stack([b_opp_h0, b_opp_h1], dim=1).contiguous()
+    P_h0 = b_opp_h0.cumsum(dim=1)
+    P_h1 = b_opp_h1.cumsum(dim=1)
+    P_both = torch.stack(
+        [torch.cat([zeros, P_h0], dim=1), torch.cat([zeros, P_h1], dim=1)], dim=1,
+    ).contiguous()
+    return b_opp_both, P_both
+
+
+def run_v14_both(beliefs, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor, block_k=64):
+    """v12 + torch.compile the b_opp/P setup."""
+    M, _, NUM_HANDS = beliefs.shape
+    device = beliefs.device
+    dtype = torch.float32
+    zeros = torch.zeros(M, 1, device=device, dtype=dtype)
+    b_opp_both, P_both = _setup_b_and_P(beliefs, hrd.sorted_indices, zeros)
+
+    cum_both = torch.empty(M, 2, 52, MC, device=device, dtype=dtype)
+    _build_cum_kernel[(M, 2 * 52)](
+        b_opp_both, card_positions.to(torch.int32), cum_both,
+        NUM_HANDS, NUM_CARDS=52, MC_K=MC,
+    )
+
+    c1 = hrd.hands_c1c2_sorted[..., 0].contiguous()
+    c2 = hrd.hands_c1c2_sorted[..., 1].contiguous()
+    L_idx = hrd.L_idx.contiguous()
+    R_idx = hrd.R_idx.contiguous()
+    sorted_indices = hrd.sorted_indices.contiguous()
+    sL1, sL2, sR1, sR2, sLast1, sLast2 = slot_tensors
+
+    ev_unsorted = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+    grid = (M, triton.cdiv(NUM_HANDS, block_k))
+    _hero_ev_kernel_v11[grid](
+        b_opp_both, P_both, cum_both,
+        L_idx, R_idx, c1, c2, sorted_indices,
+        hand_ok_sorted, scale_factor,
+        sL1, sL2, sR1, sR2, sLast1, sLast2,
+        ev_unsorted,
+        NUM_HANDS, NUM_CARDS=card_positions.shape[1], MC_K=MC, BLOCK_K=block_k, num_warps=4,
+    )
+    return ev_unsorted
+
+
+def run_v13_both(beliefs, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor, block_k=64):
+    """v12 + torch.empty instead of torch.zeros for ev_out."""
+    M, _, NUM_HANDS = beliefs.shape
+    device = beliefs.device
+    dtype = torch.float32
+
+    b_opp_h0 = beliefs[:, 1, :].gather(1, hrd.sorted_indices)
+    b_opp_h1 = beliefs[:, 0, :].gather(1, hrd.sorted_indices)
+    b_opp_both = torch.stack([b_opp_h0, b_opp_h1], dim=1).contiguous()
+    zeros = torch.zeros(M, 1, device=device, dtype=dtype)
+    P_h0 = b_opp_h0.cumsum(dim=1)
+    P_h1 = b_opp_h1.cumsum(dim=1)
+    P_both = torch.stack(
+        [torch.cat([zeros, P_h0], dim=1), torch.cat([zeros, P_h1], dim=1)], dim=1,
+    ).contiguous()
+    cum_both = torch.empty(M, 2, 52, MC, device=device, dtype=dtype)
+    _build_cum_kernel[(M, 2 * 52)](
+        b_opp_both, card_positions.to(torch.int32), cum_both,
+        NUM_HANDS, NUM_CARDS=52, MC_K=MC,
+    )
+
+    c1 = hrd.hands_c1c2_sorted[..., 0].contiguous()
+    c2 = hrd.hands_c1c2_sorted[..., 1].contiguous()
+    L_idx = hrd.L_idx.contiguous()
+    R_idx = hrd.R_idx.contiguous()
+    sorted_indices = hrd.sorted_indices.contiguous()
+    sL1, sL2, sR1, sR2, sLast1, sLast2 = slot_tensors
+
+    # Use empty: kernel writes all H positions per (m, hero) via the
+    # sorted_indices permutation, with zero values for hand_ok==False.
+    ev_unsorted = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+    grid = (M, triton.cdiv(NUM_HANDS, block_k))
+    _hero_ev_kernel_v11[grid](
+        b_opp_both, P_both, cum_both,
+        L_idx, R_idx, c1, c2, sorted_indices,
+        hand_ok_sorted, scale_factor,
+        sL1, sL2, sR1, sR2, sLast1, sLast2,
+        ev_unsorted,
+        NUM_HANDS, NUM_CARDS=card_positions.shape[1], MC_K=MC, BLOCK_K=block_k, num_warps=4,
+    )
+    return ev_unsorted
+
+
+def run_v12_both(beliefs, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor, block_k=64):
+    M, _, NUM_HANDS = beliefs.shape
+    device = beliefs.device
+    dtype = torch.float32
+
+    # b_opp_sorted_both: [M, 2, H] — beliefs flipped per hero.
+    b_opp_h0 = beliefs[:, 1, :].gather(1, hrd.sorted_indices)
+    b_opp_h1 = beliefs[:, 0, :].gather(1, hrd.sorted_indices)
+    b_opp_both = torch.stack([b_opp_h0, b_opp_h1], dim=1).contiguous()
+
+    zeros = torch.zeros(M, 1, device=device, dtype=dtype)
+    P_h0 = b_opp_h0.cumsum(dim=1)
+    P_h1 = b_opp_h1.cumsum(dim=1)
+    P_both = torch.stack(
+        [torch.cat([zeros, P_h0], dim=1), torch.cat([zeros, P_h1], dim=1)], dim=1,
+    ).contiguous()
+
+    # Build cum_both via Triton instead of PyTorch.
+    cum_both = torch.empty(M, 2, 52, MC, device=device, dtype=dtype)
+    _build_cum_kernel[(M, 2 * 52)](
+        b_opp_both, card_positions.to(torch.int32), cum_both,
+        NUM_HANDS, NUM_CARDS=52, MC_K=MC,
+    )
+
+    c1 = hrd.hands_c1c2_sorted[..., 0].contiguous()
+    c2 = hrd.hands_c1c2_sorted[..., 1].contiguous()
+    L_idx = hrd.L_idx.contiguous()
+    R_idx = hrd.R_idx.contiguous()
+    sorted_indices = hrd.sorted_indices.contiguous()
+    sL1, sL2, sR1, sR2, sLast1, sLast2 = slot_tensors
+
+    ev_unsorted = torch.zeros(M, 2, NUM_HANDS, device=device, dtype=dtype)
+    grid = (M, triton.cdiv(NUM_HANDS, block_k))
+    _hero_ev_kernel_v11[grid](
+        b_opp_both, P_both, cum_both,
+        L_idx, R_idx, c1, c2, sorted_indices,
+        hand_ok_sorted, scale_factor,
+        sL1, sL2, sR1, sR2, sLast1, sLast2,
+        ev_unsorted,
+        NUM_HANDS, NUM_CARDS=card_positions.shape[1], MC_K=MC, BLOCK_K=block_k, num_warps=4,
+    )
+    return ev_unsorted
+
+
+# =============================================================================
+# v11: v7 + fully fused postprocess. Multiply by hand_ok and scale_factor
+# inside the kernel write. Eliminates the gather + 2 elementwise ops from
+# the PyTorch wrapper.
+# =============================================================================
+
+
+@triton.jit
+def _hero_ev_kernel_v11(
+    b_opp_sorted_ptr,        # [M, 2, H]
+    P_padded_ptr,            # [M, 2, H+1]
+    card_cumsum_ptr,         # [M, 2, 52, MC]
+    L_idx_ptr, R_idx_ptr,
+    c1_sorted_ptr, c2_sorted_ptr,
+    sorted_indices_ptr,      # [M, H] — original index at sorted position k
+    hand_ok_sorted_ptr,      # [M, H] — bool/uint8 in sorted order
+    scale_factor_ptr,        # [M, 2] — potential[hero] / scale[m]
+    slot_L_c1_ptr, slot_L_c2_ptr, slot_R_c1_ptr, slot_R_c2_ptr,
+    slot_last_c1_ptr, slot_last_c2_ptr,
+    ev_out_ptr,              # [M, 2, H] in unsorted order
+    H,
+    NUM_CARDS: tl.constexpr,
+    MC_K: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    m = tl.program_id(0)
+    k_block = tl.program_id(1)
+    k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+    mask_k = k_offs < H
+
+    L = tl.load(L_idx_ptr + m * H + k_offs, mask=mask_k, other=0)
+    R = tl.load(R_idx_ptr + m * H + k_offs, mask=mask_k, other=0)
+    c1 = tl.load(c1_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
+    c2 = tl.load(c2_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
+    out_k = tl.load(sorted_indices_ptr + m * H + k_offs, mask=mask_k, other=0)
+    ok_int = tl.load(hand_ok_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
+    sL1 = tl.load(slot_L_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
+    sL2 = tl.load(slot_L_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
+    sR1 = tl.load(slot_R_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
+    sR2 = tl.load(slot_R_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
+    sLast1 = tl.load(slot_last_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
+    sLast2 = tl.load(slot_last_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
+
+    has_L1 = sL1 > 0
+    has_L2 = sL2 > 0
+    has_R1 = sR1 > 0
+    has_R2 = sR2 > 0
+    has_Last1 = sLast1 > 0
+    has_Last2 = sLast2 > 0
+    iL1 = tl.maximum(sL1 - 1, 0)
+    iL2 = tl.maximum(sL2 - 1, 0)
+    iR1 = tl.maximum(sR1 - 1, 0)
+    iR2 = tl.maximum(sR2 - 1, 0)
+    iLast1 = tl.maximum(sLast1 - 1, 0)
+    iLast2 = tl.maximum(sLast2 - 1, 0)
+    ok_factor = ok_int.to(tl.float32)
+
+    for hero in tl.static_range(2):
+        b_at_k = tl.load(b_opp_sorted_ptr + m * 2 * H + hero * H + k_offs, mask=mask_k, other=0.0)
+        P_L = tl.load(P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + L, mask=mask_k, other=0.0)
+        P_R = tl.load(P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + R, mask=mask_k, other=0.0)
+
+        cum_base = card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+        Pcards_L_c1 = tl.where(has_L1, tl.load(cum_base + c1 * MC_K + iL1, mask=mask_k, other=0.0), 0.0)
+        Pcards_L_c2 = tl.where(has_L2, tl.load(cum_base + c2 * MC_K + iL2, mask=mask_k, other=0.0), 0.0)
+        Pcards_R_c1 = tl.where(has_R1, tl.load(cum_base + c1 * MC_K + iR1, mask=mask_k, other=0.0), 0.0)
+        Pcards_R_c2 = tl.where(has_R2, tl.load(cum_base + c2 * MC_K + iR2, mask=mask_k, other=0.0), 0.0)
+        Pcards_last_c1 = tl.where(has_Last1, tl.load(cum_base + c1 * MC_K + iLast1, mask=mask_k, other=0.0), 0.0)
+        Pcards_last_c2 = tl.where(has_Last2, tl.load(cum_base + c2 * MC_K + iLast2, mask=mask_k, other=0.0), 0.0)
+
+        win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
+        seg_c1 = Pcards_R_c1 - Pcards_L_c1
+        seg_c2 = Pcards_R_c2 - Pcards_L_c2
+        tie_mass = (P_R - P_L) - seg_c1 - seg_c2 + b_at_k
+
+        denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
+        valid = denom > 1e-8
+        denom_safe = tl.where(valid, denom, 1.0)
+        win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+        tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+        loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+        EV = win_prob - loss_prob
+        scale = tl.load(scale_factor_ptr + m * 2 + hero)
+        EV_final = EV * ok_factor * scale
+        tl.store(ev_out_ptr + m * 2 * H + hero * H + out_k, EV_final, mask=mask_k)
+
+
+def run_v11_both(beliefs, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor, block_k=64):
+    M, _, NUM_HANDS = beliefs.shape
+    device = beliefs.device
+    dtype = torch.float32
+
+    b_opp_both, P_both, cum_both = _setup_both(beliefs, hrd, card_positions)
+    c1 = hrd.hands_c1c2_sorted[..., 0].contiguous()
+    c2 = hrd.hands_c1c2_sorted[..., 1].contiguous()
+    L_idx = hrd.L_idx.contiguous()
+    R_idx = hrd.R_idx.contiguous()
+    sorted_indices = hrd.sorted_indices.contiguous()
+    sL1, sL2, sR1, sR2, sLast1, sLast2 = slot_tensors
+
+    ev_unsorted = torch.zeros(M, 2, NUM_HANDS, device=device, dtype=dtype)
+    grid = (M, triton.cdiv(NUM_HANDS, block_k))
+    _hero_ev_kernel_v11[grid](
+        b_opp_both, P_both, cum_both,
+        L_idx, R_idx, c1, c2, sorted_indices,
+        hand_ok_sorted, scale_factor,
+        sL1, sL2, sR1, sR2, sLast1, sLast2,
+        ev_unsorted,
+        NUM_HANDS, NUM_CARDS=card_positions.shape[1], MC_K=MC, BLOCK_K=block_k, num_warps=4,
+    )
+    return ev_unsorted
 
 
 # =============================================================================
@@ -1089,6 +1530,14 @@ def main(dict_config: DictConfig) -> None:
     torch.cuda.synchronize()
     print(f"  {(time.perf_counter() - t0) * 1e3:.1f} ms")
 
+    # Pre-permute hand_ok and pre-compute scale_factor for v11.
+    hand_ok_sorted = (
+        hrd.hand_ok_mask.gather(1, hrd.sorted_indices).to(torch.uint8).contiguous()
+    )
+    scale_factor = (
+        showdown_potential / env_scale[:, None]
+    ).contiguous()  # [M, 2]
+
     # PyTorch baseline reference (both heroes).
     print("\nReference: PyTorch _showdown_value_both")
     ev_ref = eval_._showdown_value_both(beliefs)
@@ -1106,6 +1555,20 @@ def main(dict_config: DictConfig) -> None:
                 lambda b: run_v7_both(b, hrd, card_positions, slot_tensors, showdown_potential, env_scale)),
         Variant("v8: v4 + bf16 card_cumsum",
                 lambda b: run_v8_both(b, hrd, card_positions, slot_tensors, showdown_potential, env_scale)),
+        Variant("v9: v4 with BLOCK_K=128",
+                lambda b: run_v4_both(b, hrd, card_positions, slot_tensors, showdown_potential, env_scale, block_k=128)),
+        Variant("v10: v4 with BLOCK_K=32",
+                lambda b: run_v4_both(b, hrd, card_positions, slot_tensors, showdown_potential, env_scale, block_k=32)),
+        Variant("v11: v7 + fully fused postprocess",
+                lambda b: run_v11_both(b, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor)),
+        Variant("v12: v11 + cumsum in Triton",
+                lambda b: run_v12_both(b, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor)),
+        Variant("v13: v12 + torch.empty for ev_out",
+                lambda b: run_v13_both(b, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor)),
+        Variant("v14: v13 + torch.compile b_opp/P setup",
+                lambda b: run_v14_both(b, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor)),
+        Variant("v15: v13 + b_opp/P setup in Triton",
+                lambda b: run_v15_both(b, hrd, card_positions, slot_tensors, hand_ok_sorted, scale_factor)),
     ]
 
     print("\nVerifying correctness:")
@@ -1133,6 +1596,27 @@ def main(dict_config: DictConfig) -> None:
         if not v.enabled:
             continue
         timings[v.name] = _bench(lambda v=v: v.fn_both(beliefs), label=v.name, m=m)
+
+    # v16: CUDA graph — created last to avoid interfering with PyTorch
+    # baseline bench (capturing graphs while other Triton kernels are
+    # being benched can corrupt PyTorch's torch.compile cache state).
+    try:
+        v16_replay = make_v15_graphed(
+            beliefs, hrd, card_positions, slot_tensors,
+            hand_ok_sorted, scale_factor,
+        )
+        # Verify
+        out = v16_replay(beliefs)
+        diff = (out - ev_ref).abs().max().item()
+        if diff < 1e-3:
+            timings["v16: v15 captured as CUDA graph"] = _bench(
+                lambda: v16_replay(beliefs),
+                label="v16: v15 captured as CUDA graph", m=m,
+            )
+        else:
+            print(f"  ✗ v16 mismatch (diff={diff:.2e}), skipping")
+    except Exception as e:
+        print(f"  ✗ v16 crashed: {type(e).__name__}: {e}")
 
     # Summary table
     print("\n" + "=" * 78)
