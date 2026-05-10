@@ -2218,9 +2218,15 @@ class GraphedCFRIteration:
     Usage::
 
         runner = GraphedCFRIteration(evaluator)
-        runner.capture(t_capture=warm_start)   # records the graph
-        runner.replay(t=warm_start + 1)        # runs iteration t=warm_start+1
-        runner.replay(t=warm_start + 2)        # ...and so on
+        runner.capture(t_warmup=warm_start, t_capture=warm_start + 1)
+        runner.replay(t=warm_start + 2)        # runs iteration t=warm_start+2
+        runner.replay(t=warm_start + 3)        # ...and so on
+
+    Capture executes two *real* CFR iterations against evaluator state: one
+    on the capture stream (used to JIT-compile kernels and seed the graph
+    allocator pool) and one inside the graph itself (recorded for replay).
+    Callers are responsible for sequencing surrounding iterations so the
+    state mutation from these two iters is the intended forward progress.
 
     On replay, host-side Python schedules are re-applied and the evaluator's
     ``TScalars`` device tensors are refreshed *outside* the captured region,
@@ -2229,8 +2235,7 @@ class GraphedCFRIteration:
     Constraints on ``t`` values used for replay:
       - Must follow the same Python-level branches as ``t_capture`` (e.g.,
         both ``t > dcfr_delay`` / both ``t > 1`` so ``last_model_values`` is
-        populated). Typical practice: warm up past early-t branches, then
-        capture and reuse for the remaining iterations.
+        populated). Same constraint applies to ``t_warmup`` vs ``t_capture``.
       - Tree structure (depth_offsets, child_offsets, ...) is baked in at
         capture time. Don't re-construct subgames after capture.
     """
@@ -2246,8 +2251,22 @@ class GraphedCFRIteration:
     def _stub_record_stats(self, t, old_policy_probs):  # noqa: ARG002
         return
 
-    def capture(self, t_capture: int, num_warmup: int = 2) -> None:
-        """Warm-up a few real iterations, then capture one into a CUDA graph."""
+    def capture(self, t_warmup: int, t_capture: int) -> None:
+        """Warm up the capture stream by running ``cfr_iteration(t_warmup)``
+        on it, then capture ``cfr_iteration(t_capture)`` into a CUDA graph.
+
+        Only the warmup iteration mutates evaluator state — CUDA graph
+        capture is record-only, so the kernels issued under the capture
+        context are recorded but not executed. The warmup iter therefore
+        doubles as a real CFR step at ``t_warmup``; the captured graph
+        encodes work for ``t_capture`` and runs it on each ``replay()``.
+
+        ``_record_stats`` is stubbed for the warmup because it contains
+        ``.item()`` calls that are incompatible with graph capture (and
+        would also stub during capture); callers must choose
+        ``t_warmup`` / ``t_capture`` so neither coincides with a
+        stat-recording iteration.
+        """
         ev = self.evaluator
         if not hasattr(ev, "_t_scalars"):
             raise ValueError(
@@ -2255,34 +2274,34 @@ class GraphedCFRIteration:
                 "._t_scalars TScalars holder) for graph capture."
             )
 
-        for i in range(num_warmup):
-            ev.cfr_iteration(t_capture + i)
-
         ev._record_stats = self._stub_record_stats
         prev_skip_stats = getattr(ev, "_skip_record_stats", False)
         ev._skip_record_stats = True
+        prev_skip_scalars = ev._skip_t_scalars_update
+        ev._skip_t_scalars_update = True
         try:
-            # Fill scalars once before capture; inside capture we skip the
-            # Python-side update so no host→device fills get baked in.
+            s = torch.cuda.Stream()
+
+            # Warmup phase: real iter at t_warmup on the capture stream. Fill
+            # TScalars on the main stream first, then have s wait so its
+            # kernels read the freshly written values.
+            ev.prepare_replay(t_warmup)
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                ev.cfr_iteration(t_warmup)
+            torch.cuda.current_stream().wait_stream(s)
+            torch.cuda.synchronize()
+
+            # Capture phase: real iter at t_capture recorded into the graph.
+            # Replay later overwrites TScalars before each replay() call, so
+            # the kernels (which load scalars via pointers) pick up the new t.
             ev.prepare_replay(t_capture)
-
-            prev_skip = ev._skip_t_scalars_update
-            ev._skip_t_scalars_update = True
-            try:
-                s = torch.cuda.Stream()
-                s.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(s):
-                    # One warm-up on the capture stream (scalars pre-filled).
-                    ev.cfr_iteration(t_capture)
-                torch.cuda.current_stream().wait_stream(s)
-                torch.cuda.synchronize()
-
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, stream=s):
-                    ev.cfr_iteration(t_capture)
-            finally:
-                ev._skip_t_scalars_update = prev_skip
+            s.wait_stream(torch.cuda.current_stream())
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=s):
+                ev.cfr_iteration(t_capture)
         finally:
+            ev._skip_t_scalars_update = prev_skip_scalars
             ev._record_stats = self._orig_record_stats
             ev._skip_record_stats = prev_skip_stats
 

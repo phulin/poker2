@@ -677,13 +677,11 @@ def test_graphed_cfr_iteration_matches_uncaptured() -> None:
         torch.cuda.synchronize()
 
         runner = GraphedCFRIteration(ev)
-        # The capture() method does its own warmup iterations that mutate state,
-        # so we re-restore right before the actual captured region runs.
-        # Here we call the lower-level path manually: warmup then capture.
-        # Easiest: let capture() run, then restore, then replay — the captured
-        # graph operates on the same underlying tensors so replay starts from
-        # whatever state is in them.
-        runner.capture(t_capture=T, num_warmup=1)
+        # capture() executes two real iters (t_warmup, t_capture) that mutate
+        # state. We restore pre-state afterward and replay so the captured
+        # kernels (which write into the original tensors) run starting from
+        # the same pre-state as the baseline cfr_iteration(T) above.
+        runner.capture(t_warmup=T - 1, t_capture=T)
 
         pre.restore_to(ev)
         torch.cuda.synchronize()
@@ -728,7 +726,7 @@ def test_graphed_cfr_iteration_replays_across_t() -> None:
         getattr(ev_graph, name).copy_(getattr(ev_base, name))
 
     # Prime both past early-t branches so subsequent iters share Python branch.
-    for t in range(1, 4):
+    for t in range(1, 3):
         ev_base.cfr_iteration(t)
         ev_graph.cfr_iteration(t)
     torch.cuda.synchronize()
@@ -737,15 +735,15 @@ def test_graphed_cfr_iteration_replays_across_t() -> None:
     ev_base._record_stats = lambda t, old: None
     ev_graph._record_stats = lambda t, old: None
 
-    # Capture one iteration at t=4; we'll replay for t=5, 6, 7.
+    # capture()'s warmup at t=3 mutates state; the captured body for t=4
+    # doesn't execute until the first replay below.
     runner = GraphedCFRIteration(ev_graph)
-    runner.capture(t_capture=4, num_warmup=0)
-    # Capture consumed one iteration at t=4, so both are now post-t=4.
-    # Step baseline forward once (uncaptured) to match.
-    ev_base.cfr_iteration(4)
+    runner.capture(t_warmup=3, t_capture=4)
+    # Step baseline forward once to match the warmup mutation.
+    ev_base.cfr_iteration(3)
     torch.cuda.synchronize()
 
-    for replay_t in [5, 6, 7]:
+    for replay_t in [4, 5, 6, 7]:
         ev_base.cfr_iteration(replay_t)
         runner.replay(t=replay_t)
         torch.cuda.synchronize()

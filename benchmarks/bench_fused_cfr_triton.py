@@ -173,7 +173,12 @@ def bench_graphed_iteration(cfg: Config) -> None:
         t_baseline = _cuda_timed(baseline, n_iters=25, n_warmup=3)
 
         runner = GraphedCFRIteration(evaluator)
-        runner.capture(t_capture=replay_counter["t"], num_warmup=2)
+        # capture() runs two real iters (warmup + recorded); advance the
+        # baseline counter past them so subsequent replay()s use fresh ts.
+        runner.capture(
+            t_warmup=replay_counter["t"], t_capture=replay_counter["t"] + 1,
+        )
+        replay_counter["t"] += 2
 
         def replay() -> None:
             runner.replay(t=replay_counter["t"])

@@ -32,7 +32,6 @@ from p2.core.structured_config import CFRType
 from p2.env.card_utils import NUM_HANDS
 from p2.env.rules_triton import rank_hands_triton, triton_is_available as _rules_triton_ok
 from p2.search.fused_cfr_triton import (
-    _EvaluatorStateSnapshot,
     fused_average_policy_mix_with_tensors_,
     fused_avg_values_zero_sum_,
     fused_block_and_normalize_beliefs_,
@@ -654,10 +653,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         """CFR-loop with the body wrapped in a per-call CUDA graph.
 
         Runs uncaptured iterations until past all early-t Python branches
-        (``t > dcfr_delay`` and ``t > 1``), captures one iteration, then
-        replays the captured graph for the rest. Iterations whose ``t`` is
-        in ``_record_stats_percentile_ts()`` run uncaptured so stats hooks
-        still fire. Per-call capture is required because
+        (``t > dcfr_delay`` and ``t > 1``), then captures one iteration and
+        replays the captured graph for the rest. The capture step's
+        side-stream warmup is itself a real CFR iteration at ``t``, so no
+        snapshot/restore is needed (CUDA graph capture is record-only — the
+        body recorded for ``t+1`` doesn't execute until the first replay).
+        Iterations whose ``t`` is in ``_record_stats_percentile_ts()`` run
+        uncaptured so stats hooks still fire, and capture is deferred past
+        any such iter. Per-call capture is required because
         ``initialize_subgame`` reallocates the per-evaluator tensors.
         """
         self._ensure_fused_attrs()
@@ -680,28 +683,28 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # Python branches; past update_average_values' ``t > 1``.
         safe_t = max(start, self.dcfr_delay + 1, 2)
 
+        runner: GraphedCFRIteration | None = None
         t = start
-        while t < end and t < safe_t:
-            self.profiler_step()
-            self.cfr_iteration(t)
-            t += 1
-
-        runner = None
-        if t < end:
-            # Capture mutates evaluator state across several iterations;
-            # snapshot/restore so the schedule advances exactly one iter at
-            # a time.
-            snapshot = _EvaluatorStateSnapshot.from_evaluator(self)
-            runner = GraphedCFRIteration(self)
-            runner.capture(t_capture=t, num_warmup=0)
-            snapshot.restore_to(self)
-
         while t < end:
             self.profiler_step()
-            if runner is None or t in stat_iters:
-                self.cfr_iteration(t)
-            else:
+            can_capture = (
+                runner is None
+                and t >= safe_t
+                and t + 1 < end
+                and t not in stat_iters
+                and (t + 1) not in stat_iters
+            )
+            if can_capture:
+                # The warmup iter is a real CFR step at t; the captured body
+                # for t+1 doesn't execute until the first replay below.
+                runner = GraphedCFRIteration(self)
+                runner.capture(t_warmup=t, t_capture=t + 1)
+                t += 1
+                continue
+            if runner is not None and t not in stat_iters:
                 runner.replay(t=t)
+            else:
+                self.cfr_iteration(t)
             t += 1
 
         if self.use_final_policy_values:
