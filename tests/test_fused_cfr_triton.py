@@ -263,16 +263,22 @@ def test_fused_regret_tail_matches_pytorch() -> None:
     h = 1326
 
     values_achieved = torch.randn(total, 2, h, device=device)
-    actor_values = torch.randn(top, h, device=device)
+    values_expected = torch.randn(top, 2, h, device=device)
+    to_act = torch.randint(0, 2, (top,), device=device, dtype=torch.long)
     src_weights = torch.randn(top, h, device=device)
     # Children's parent_index points into [0, top).
     parent_index = torch.randint(0, top, (total,), device=device, dtype=torch.long)
     prev_actor = torch.randint(0, 2, (total,), device=device, dtype=torch.long)
 
-    # Reference via explicit PyTorch sequence with parent_index gather for weights.
+    # Reference via explicit PyTorch sequence with parent_index gather for weights
+    # and the in-kernel actor pick equivalent: actor_values = values_expected[p, to_act[p]].
     ref = torch.zeros(total, h, device=device)
-    expected = actor_values[parent_index[bottom:]]
-    weights = src_weights[parent_index[bottom:]]
+    parent_idx_children = parent_index[bottom:]
+    actor_values = values_expected[
+        torch.arange(top, device=device), to_act, :
+    ]  # [top, h]
+    expected = actor_values[parent_idx_children]
+    weights = src_weights[parent_idx_children]
     idx = torch.arange(total - bottom, device=device)
     achieved = values_achieved[bottom:][idx, prev_actor[bottom:], :]
     ref[bottom:] = weights * (achieved - expected)
@@ -281,7 +287,8 @@ def test_fused_regret_tail_matches_pytorch() -> None:
     fused_regret_tail_(
         regrets=out,
         values_achieved=values_achieved.contiguous(),
-        actor_values=actor_values.contiguous(),
+        values_expected=values_expected.contiguous(),
+        to_act=to_act.contiguous(),
         src_weights=src_weights.contiguous(),
         parent_index=parent_index.contiguous(),
         prev_actor=prev_actor.contiguous(),

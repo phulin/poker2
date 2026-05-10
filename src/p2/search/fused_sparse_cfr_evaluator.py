@@ -329,16 +329,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             beliefs, self.env.to_act, top
         )  # [top, H]
 
-        # actor_values is parent-aligned and gathered lazily per-child inside
-        # fused_regret_tail_; only compute it at parent rows too.
-        # actor_values[p, h] = values_expected[p, to_act[p], h]
-        row_idx = torch.arange(top, device=self.device)
-        actor_values = values_expected[:top][row_idx, self.env.to_act[:top], :]
-
+        # actor_values is now picked inside fused_regret_tail_ via to_act —
+        # no caller-side aten::index, no [top, H] intermediate buffer.
         fused_regret_tail_(
             regrets=regrets,
             values_achieved=values_achieved.contiguous(),
-            actor_values=actor_values.contiguous(),
+            values_expected=values_expected[:top].contiguous(),
+            to_act=self.env.to_act[:top].contiguous(),
             src_weights=src_weights.contiguous(),
             parent_index=self.parent_index.contiguous(),
             prev_actor=self.prev_actor.contiguous(),

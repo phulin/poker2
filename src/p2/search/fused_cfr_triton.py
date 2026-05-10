@@ -678,7 +678,8 @@ if triton is not None:
     @triton.jit
     def _fused_regret_tail_kernel(
         values_achieved_ptr,     # [total, 2, H]
-        actor_values_ptr,        # [top, H]     (parent-aligned)
+        values_expected_ptr,     # [top, 2, H]  (was: actor_values [top, H])
+        to_act_ptr,              # [top]        — selects the actor row inside values_expected
         src_weights_ptr,         # [top, H]     (parent-aligned — was post-fan_out)
         parent_index_ptr,        # [total] — parent_index[c] gives parent row in [0, top)
         prev_actor_ptr,          # [total] — 0 or 1
@@ -693,9 +694,12 @@ if triton is not None:
             return
         parent = tl.load(parent_index_ptr + c)
         prev_actor = tl.load(prev_actor_ptr + c)
+        # In-kernel actor select: replaces a [top, H] aten::index + intermediate
+        # buffer in the caller. One extra scalar load per program.
+        actor_p = tl.load(to_act_ptr + parent)
 
         # Row base pointers — weights now gathered from parent, same as expected.
-        exp_row = actor_values_ptr + parent * H
+        exp_row = values_expected_ptr + (parent * 2 + actor_p) * H
         w_row = src_weights_ptr + parent * H
         ach_row = values_achieved_ptr + (c * 2 + prev_actor) * H
         out_row = regrets_ptr + c * H
@@ -712,7 +716,8 @@ if triton is not None:
 def fused_regret_tail_(
     regrets: torch.Tensor,              # [total, H] — in/out (only [bottom:] written)
     values_achieved: torch.Tensor,      # [total, 2, H]
-    actor_values: torch.Tensor,         # [top, H] — parent-aligned
+    values_expected: torch.Tensor,      # [top, 2, H] — actor row picked in-kernel
+    to_act: torch.Tensor,               # [top]      — int64, picks the actor row
     src_weights: torch.Tensor,          # [top, H] — parent-aligned (was post-fan_out)
     parent_index: torch.Tensor,         # [total] int64
     prev_actor: torch.Tensor,           # [total] int64
@@ -725,35 +730,41 @@ def fused_regret_tail_(
 
         regrets[c, h] = src_weights[parent_index[c], h] * (
             values_achieved[c, prev_actor[c], h]
-            - actor_values[parent_index[c], h]
+            - values_expected[parent_index[c], to_act[parent_index[c]], h]
         )
 
     Replaces the sequence ``fan_out(actor_values) + fan_out(src_weights) +
     gather + subtract + multiply + assign`` (6 kernels + 3 intermediates)
-    with one kernel. ``src_weights`` is now parent-aligned — the fan-out is
-    performed via the in-kernel ``parent_index`` gather, eliminating the
-    ``[num_children, H]`` weights buffer.
+    with one kernel. ``src_weights`` is parent-aligned and ``actor_values``
+    is now picked from ``values_expected`` via an in-kernel ``to_act``
+    gather, eliminating the caller-side ``aten::index`` and the ``[top, H]``
+    intermediate buffer.
     """
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
     assert regrets.is_contiguous() and regrets.dim() == 2
     assert values_achieved.is_contiguous() and values_achieved.dim() == 3
     assert values_achieved.shape[1] == 2
-    assert actor_values.is_contiguous() and actor_values.dim() == 2
+    assert values_expected.is_contiguous() and values_expected.dim() == 3
+    assert values_expected.shape[1] == 2
     assert src_weights.is_contiguous() and src_weights.dim() == 2
-    assert actor_values.shape == src_weights.shape
+    assert to_act.is_contiguous() and to_act.dim() == 1
     assert parent_index.is_contiguous() and parent_index.dim() == 1
     assert prev_actor.is_contiguous() and prev_actor.dim() == 1
 
     total, h = regrets.shape
+    top = values_expected.shape[0]
     assert values_achieved.shape == (total, 2, h)
+    assert src_weights.shape == (top, h)
+    assert to_act.shape == (top,)
     assert parent_index.shape == (total,)
     assert prev_actor.shape == (total,)
 
     grid = (total - bottom,)
     _fused_regret_tail_kernel[grid](
         values_achieved,
-        actor_values,
+        values_expected,
+        to_act,
         src_weights,
         parent_index,
         prev_actor,
