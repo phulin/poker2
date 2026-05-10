@@ -2460,3 +2460,242 @@ class GraphedCFRIteration:
     @property
     def captured_t(self) -> int | None:
         return self._captured_t
+
+
+# ---------------------------------------------------------------------------
+# Kernel 16: alternative fused-both-heroes showdown EV via precomputed slots.
+#
+# Status: NOT WIRED into FusedSparseCFREvaluator. Reaches parity with the
+# existing torch.compile()'d _showdown_value_both at the small-batch
+# benchmarking config (bench/bench_showdown.py reports ~1.0× of baseline);
+# kept as a starting point for future Triton-side iteration.
+#
+# Algorithm (vs the abandoned `showdown_ev_triton`):
+#   * Precompute, ONCE per subgame, the sorted j-positions where each
+#     non-board card appears — `card_positions[M, 52, MC]` padded with H,
+#     where MC = 64 (next power of 2 above 51, the max non-board incidence).
+#   * Precompute, ONCE per subgame, six `slot_*` tensors of shape [M, H]
+#     that count how many of card c1[k]/c2[k]'s sorted positions are
+#     strictly less than L[k]/R[k]/H. These are pure functions of the tree
+#     structure (no belief dependence) and never change inside CFR.
+#   * Per call: build the per-card cumsum on the SPARSE positions only —
+#     `card_cumsum[M, 2, 52, MC]` — bandwidth ~200× smaller than PyTorch's
+#     `Pcards[M, H, 52]` cumsum. Then run one Triton kernel that, per
+#     (m, k) program, does six SCALAR loads from `card_cumsum` at the
+#     precomputed slots, instead of loading [BLOCK_K, MC] blocks and
+#     reducing them.
+#
+# The precomputed-slot trick was the structural fix that took the kernel
+# from ~1.8× slower than baseline (variants v2/v3 in bench_showdown.py)
+# down to parity. Wiring this in still requires beating the baseline by
+# enough to justify the extra precompute path on `_init_hand_rank_data`.
+# ---------------------------------------------------------------------------
+
+
+SHOWDOWN_MAX_PER_CARD = 64  # power-of-2 padding; non-board cards have 51 each
+
+
+def precompute_showdown_card_positions(
+    hands_c1c2_sorted: torch.Tensor,
+    num_cards: int = 52,
+    max_per_card: int = SHOWDOWN_MAX_PER_CARD,
+) -> torch.Tensor:
+    """For each (env m, card c), find sorted j-positions where c appears
+    in hands_c1c2_sorted. Returns [M, 52, max_per_card] int64 padded with H.
+    Computed once per subgame; reused across CFR iters."""
+    M, H, _ = hands_c1c2_sorted.shape
+    device = hands_c1c2_sorted.device
+    cards = torch.arange(num_cards, device=device).view(1, 1, num_cards)
+    c1 = hands_c1c2_sorted[..., 0].unsqueeze(-1)
+    c2 = hands_c1c2_sorted[..., 1].unsqueeze(-1)
+    incidence = (c1 == cards) | (c2 == cards)
+    j_idx = torch.arange(H, device=device).view(1, H, 1).expand(M, H, num_cards)
+    masked_j = torch.where(incidence, j_idx, H)
+    masked_j_t = masked_j.transpose(1, 2).contiguous()
+    sorted_j, _ = masked_j_t.sort(dim=-1)
+    return sorted_j[..., :max_per_card].contiguous()
+
+
+def precompute_showdown_lookup_slots(
+    card_positions: torch.Tensor,    # [M, 52, MC] padded with H
+    L_idx: torch.Tensor,             # [M, H]
+    R_idx: torch.Tensor,
+    hands_c1c2_sorted: torch.Tensor, # [M, H, 2]
+) -> tuple[torch.Tensor, ...]:
+    """Per (m, k), per lookup type, count #positions of c1[k]/c2[k] that are
+    strictly less than L[k] / R[k] / H. Returns six [M, H] int32 tensors:
+    slot_L_c1, slot_L_c2, slot_R_c1, slot_R_c2, slot_last_c1, slot_last_c2."""
+    _, _, mc = card_positions.shape
+    H = L_idx.shape[1]
+    c1 = hands_c1c2_sorted[..., 0]
+    c2 = hands_c1c2_sorted[..., 1]
+    pos_for_c1 = card_positions.gather(1, c1.unsqueeze(-1).expand(-1, -1, mc))
+    pos_for_c2 = card_positions.gather(1, c2.unsqueeze(-1).expand(-1, -1, mc))
+    H_t = torch.full_like(L_idx, H)
+    return (
+        (pos_for_c1 < L_idx.unsqueeze(-1)).sum(dim=-1).to(torch.int32),
+        (pos_for_c2 < L_idx.unsqueeze(-1)).sum(dim=-1).to(torch.int32),
+        (pos_for_c1 < R_idx.unsqueeze(-1)).sum(dim=-1).to(torch.int32),
+        (pos_for_c2 < R_idx.unsqueeze(-1)).sum(dim=-1).to(torch.int32),
+        (pos_for_c1 < H_t.unsqueeze(-1)).sum(dim=-1).to(torch.int32),
+        (pos_for_c2 < H_t.unsqueeze(-1)).sum(dim=-1).to(torch.int32),
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _showdown_ev_v4_kernel(
+        b_opp_sorted_ptr,        # [M, 2, H] fp32 (per hero villain belief, sorted)
+        P_padded_ptr,            # [M, 2, H+1] fp32 (cumsum of b_opp with leading 0)
+        card_cumsum_ptr,         # [M, 2, 52, MC] fp32 (per-card cumsum on sparse positions)
+        L_idx_ptr,               # [M, H]
+        R_idx_ptr,               # [M, H]
+        c1_sorted_ptr,           # [M, H]
+        c2_sorted_ptr,           # [M, H]
+        slot_L_c1_ptr,           # [M, H]
+        slot_L_c2_ptr,
+        slot_R_c1_ptr,
+        slot_R_c2_ptr,
+        slot_last_c1_ptr,
+        slot_last_c2_ptr,
+        ev_out_ptr,              # [M, 2, H] fp32 in sorted order
+        H,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask_k = k_offs < H
+
+        L = tl.load(L_idx_ptr + m * H + k_offs, mask=mask_k, other=0)
+        R = tl.load(R_idx_ptr + m * H + k_offs, mask=mask_k, other=0)
+        c1 = tl.load(c1_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
+        c2 = tl.load(c2_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
+        sL1 = tl.load(slot_L_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
+        sL2 = tl.load(slot_L_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
+        sR1 = tl.load(slot_R_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
+        sR2 = tl.load(slot_R_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
+        sLast1 = tl.load(slot_last_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
+        sLast2 = tl.load(slot_last_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
+
+        has_L1 = sL1 > 0
+        has_L2 = sL2 > 0
+        has_R1 = sR1 > 0
+        has_R2 = sR2 > 0
+        has_Last1 = sLast1 > 0
+        has_Last2 = sLast2 > 0
+        iL1 = tl.maximum(sL1 - 1, 0)
+        iL2 = tl.maximum(sL2 - 1, 0)
+        iR1 = tl.maximum(sR1 - 1, 0)
+        iR2 = tl.maximum(sR2 - 1, 0)
+        iLast1 = tl.maximum(sLast1 - 1, 0)
+        iLast2 = tl.maximum(sLast2 - 1, 0)
+
+        for hero in tl.static_range(2):
+            b_at_k = tl.load(
+                b_opp_sorted_ptr + m * 2 * H + hero * H + k_offs,
+                mask=mask_k, other=0.0,
+            )
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + L,
+                mask=mask_k, other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + R,
+                mask=mask_k, other=0.0,
+            )
+            cum_base = (
+                card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+            )
+            Pcards_L_c1 = tl.where(
+                has_L1,
+                tl.load(cum_base + c1 * MC_K + iL1, mask=mask_k, other=0.0),
+                0.0,
+            )
+            Pcards_L_c2 = tl.where(
+                has_L2,
+                tl.load(cum_base + c2 * MC_K + iL2, mask=mask_k, other=0.0),
+                0.0,
+            )
+            Pcards_R_c1 = tl.where(
+                has_R1,
+                tl.load(cum_base + c1 * MC_K + iR1, mask=mask_k, other=0.0),
+                0.0,
+            )
+            Pcards_R_c2 = tl.where(
+                has_R2,
+                tl.load(cum_base + c2 * MC_K + iR2, mask=mask_k, other=0.0),
+                0.0,
+            )
+            Pcards_last_c1 = tl.where(
+                has_Last1,
+                tl.load(cum_base + c1 * MC_K + iLast1, mask=mask_k, other=0.0),
+                0.0,
+            )
+            Pcards_last_c2 = tl.where(
+                has_Last2,
+                tl.load(cum_base + c2 * MC_K + iLast2, mask=mask_k, other=0.0),
+                0.0,
+            )
+
+            win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
+            seg_c1 = Pcards_R_c1 - Pcards_L_c1
+            seg_c2 = Pcards_R_c2 - Pcards_L_c2
+            tie_mass = (P_R - P_L) - seg_c1 - seg_c2 + b_at_k
+
+            denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+            EV = win_prob - loss_prob
+            tl.store(ev_out_ptr + m * 2 * H + hero * H + k_offs, EV, mask=mask_k)
+
+
+def showdown_ev_v4_triton(
+    b_opp_sorted_both: torch.Tensor,  # [M, 2, H] fp32 (per hero)
+    P_padded_both: torch.Tensor,      # [M, 2, H+1] fp32
+    card_cumsum_both: torch.Tensor,   # [M, 2, 52, MC] fp32
+    L_idx: torch.Tensor,              # [M, H]
+    R_idx: torch.Tensor,
+    c1_sorted: torch.Tensor,          # [M, H]
+    c2_sorted: torch.Tensor,
+    slot_tensors: tuple,              # six [M, H] int32 from precompute
+    block_k: int = 64,
+) -> torch.Tensor:
+    """Compute showdown EV in sorted-hand order for both heroes via the
+    precomputed-slot kernel. Caller does the inv_sorted permutation,
+    hand_ok masking, and potential/scale scaling."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    M, _, H = b_opp_sorted_both.shape
+    assert b_opp_sorted_both.shape[1] == 2
+    assert P_padded_both.shape == (M, 2, H + 1)
+    NUM_CARDS = card_cumsum_both.shape[2]
+    MC_K = card_cumsum_both.shape[3]
+    sL1, sL2, sR1, sR2, sLast1, sLast2 = slot_tensors
+    ev_sorted = torch.empty(M, 2, H, device=b_opp_sorted_both.device, dtype=torch.float32)
+    grid = (M, triton.cdiv(H, block_k))
+    _showdown_ev_v4_kernel[grid](
+        b_opp_sorted_both.contiguous(),
+        P_padded_both.contiguous(),
+        card_cumsum_both.contiguous(),
+        L_idx.contiguous(),
+        R_idx.contiguous(),
+        c1_sorted.contiguous(),
+        c2_sorted.contiguous(),
+        sL1.contiguous(), sL2.contiguous(),
+        sR1.contiguous(), sR2.contiguous(),
+        sLast1.contiguous(), sLast2.contiguous(),
+        ev_sorted,
+        H,
+        NUM_CARDS=NUM_CARDS,
+        MC_K=MC_K,
+        BLOCK_K=block_k,
+        num_warps=4,
+    )
+    return ev_sorted
