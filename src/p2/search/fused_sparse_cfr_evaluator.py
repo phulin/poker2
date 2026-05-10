@@ -45,6 +45,7 @@ from p2.search.fused_cfr_triton import (
     fused_weighted_parent_sum,
     precompute_showdown_extras,
     showdown_ev_v15,
+    ShowdownGraphRunner,
     triton_is_available,
     TScalars,
     unblocked_mass_opp_at_parents_triton,
@@ -140,19 +141,32 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
     def _init_hand_rank_data(self) -> None:
         """Build hand-rank data, then precompute v15 showdown EV extras
-        (constant-per-subgame inputs for `showdown_ev_v15`)."""
+        and capture a CUDA graph that wraps the v15 pipeline (v16). The
+        graph is keyed on (M=showdown_indices.numel(), NUM_HANDS), both
+        constant per subgame; replay reuses persistent buffers."""
         super()._init_hand_rank_data()
         if self.hand_rank_data is not None and self.showdown_indices.numel() > 0:
             self._showdown_extras = precompute_showdown_extras(
                 self.hand_rank_data, self.env, self.showdown_indices,
             )
+            self._showdown_graph_runner = ShowdownGraphRunner(
+                extras=self._showdown_extras,
+                M=self.showdown_indices.numel(),
+                NUM_HANDS=self.beliefs.shape[-1],
+                device=self.device,
+            )
         else:
             self._showdown_extras = None
+            self._showdown_graph_runner = None
 
     def _showdown_value_both(self, beliefs: torch.Tensor) -> torch.Tensor:
-        """Triton v15 fast path; ~2.2× the compiled-PyTorch baseline at
-        M=256 (per scripts/bench_showdown.py). Falls back to the compiled
-        baseline when no precomputed extras are available."""
+        """Triton v15 + CUDA graph fast path; ~5.5× the compiled-PyTorch
+        baseline at M=256. The returned tensor is the runner's persistent
+        output buffer — callers must consume / copy before the next call.
+        Falls back to the compiled baseline when no graph is available."""
+        runner = getattr(self, "_showdown_graph_runner", None)
+        if runner is not None:
+            return runner(beliefs)
         extras = getattr(self, "_showdown_extras", None)
         if extras is None:
             return super()._showdown_value_both(beliefs)

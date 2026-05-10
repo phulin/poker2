@@ -2944,3 +2944,101 @@ def showdown_ev_v15(
         BLOCK_K=block_k, num_warps=4,
     )
     return ev_unsorted
+
+
+# ---------------------------------------------------------------------------
+# v16: ShowdownGraphRunner — wraps the v15 pipeline (3 Triton kernels) in
+# a CUDA graph keyed on a fixed (M, NUM_HANDS) shape. Per the bench in
+# scripts/bench_showdown.py, the graph adds another 2.5× on top of v15
+# (193 µs → 77 µs at M=256), bringing the overall speedup vs the compiled
+# PyTorch baseline to ~5.5×. Persistent input/output buffers; replay
+# returns the same output buffer each call.
+# ---------------------------------------------------------------------------
+
+
+class ShowdownGraphRunner:
+    """Captures the v15 showdown pipeline as a CUDA graph for one fixed
+    (M, NUM_HANDS) configuration. Subsequent calls only do a copy_() into
+    the persistent input buffer, then replay the graph.
+
+    All buffers live on the runner; the returned EV tensor is the same
+    object across calls (callers must consume / copy before the next
+    call if they need the value to outlive the next replay).
+    """
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        NUM_HANDS: int,
+        device: torch.device,
+        block_k: int = 64,
+    ) -> None:
+        if not triton_is_available():
+            raise RuntimeError("Triton is not installed.")
+        self.extras = extras
+        self.M = M
+        self.NUM_HANDS = NUM_HANDS
+        self.device = device
+        self.block_k = block_k
+
+        H = extras["sorted_indices"].shape[1]
+        self.H = H
+        block_h = 1
+        while block_h < H:
+            block_h *= 2
+        self.block_h = block_h
+
+        # Persistent buffers.
+        dtype = torch.float32
+        self.beliefs_in = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+        self.b_opp_both = torch.empty(M, 2, H, device=device, dtype=dtype)
+        self.P_padded = torch.empty(M, 2, H + 1, device=device, dtype=dtype)
+        self.cum_both = torch.empty(
+            M, 2, 52, SHOWDOWN_MAX_PER_CARD, device=device, dtype=dtype,
+        )
+        self.ev_out = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+
+        # Warm up the kernels on a side stream so JIT compile + autotune
+        # happen outside the capture. Three replays match torch.cuda.graph
+        # docs' recommendation.
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._launch_pipeline()
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Capture.
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        _showdown_setup_b_P_kernel[(self.M, 2)](
+            self.beliefs_in, e["sorted_indices"],
+            self.b_opp_both, self.P_padded,
+            self.H, self.NUM_HANDS, BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_kernel[(self.M, 2 * 52)](
+            self.b_opp_both, e["card_positions"], self.cum_both,
+            self.H, NUM_CARDS=52, MC_K=SHOWDOWN_MAX_PER_CARD,
+        )
+        grid = (self.M, triton.cdiv(self.NUM_HANDS, self.block_k))
+        _showdown_ev_v15_kernel[grid](
+            self.b_opp_both, self.P_padded, self.cum_both,
+            e["L_idx"], e["R_idx"], e["c1"], e["c2"],
+            e["sorted_indices"], e["hand_ok_sorted"], e["scale_factor"],
+            e["slot_L_c1"], e["slot_L_c2"],
+            e["slot_R_c1"], e["slot_R_c2"],
+            e["slot_last_c1"], e["slot_last_c2"],
+            self.ev_out,
+            self.NUM_HANDS, NUM_CARDS=52, MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k, num_warps=4,
+        )
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.beliefs_in.copy_(beliefs)
+        self.graph.replay()
+        return self.ev_out
