@@ -537,7 +537,9 @@ class RebelCFRTrainer:
                     include_policy=False,
                 )
                 fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)
-                metrics["fresh_value_loss"] = fresh_loss_dict["value_loss"]
+                # loss_fn returns device tensors; .item() lands once per
+                # metric here (3 syncs/step in the EMA case, 1 otherwise).
+                metrics["fresh_value_loss"] = fresh_loss_dict["value_loss"].item()
 
                 if self.ema_helper is not None:
                     with self._eval_swap():
@@ -549,7 +551,7 @@ class RebelCFRTrainer:
                         )
                         metrics["fresh_value_loss_avg"] = self.loss_fn(
                             fresh_model_avg_output, fresh_value_batch
-                        )["value_loss"]
+                        )["value_loss"].item()
 
                         model_avg_output = self.model.repeat(
                             value_batch.features,
@@ -558,7 +560,7 @@ class RebelCFRTrainer:
                         )
                         metrics["value_loss_avg"] = self.loss_fn(
                             model_avg_output, value_batch
-                        )["value_loss"]
+                        )["value_loss"].item()
 
         if (
             fresh_value_batch is not None
@@ -732,9 +734,9 @@ class RebelCFRTrainer:
         # logging; total_loss already includes its weighted contribution.
         return (
             {
-                "policy_loss": policy_loss,
-                "value_loss": value_loss,
-                "entropy_loss": entropy_loss,
+                "policy_loss": policy_loss.detach(),
+                "value_loss": value_loss.detach(),
+                "entropy_loss": entropy_loss.detach(),
                 "permutation_loss": permutation_loss_tensor.detach(),
                 "total_loss": total_loss.detach(),
                 "update_norm": update_norm.detach(),
@@ -773,18 +775,17 @@ class RebelCFRTrainer:
         policy_output_all = []
         value_loss_update_all = []
         policy_loss_update_all = []
-        # Float-valued stats (already host-side from loss_fn's internal .item()
-        # calls — those happen anyway).
-        step_stats = {
-            "policy_loss": 0.0,
-            "value_loss": 0.0,
-            "entropy_loss": 0.0,
-        }
+        step_stats: dict[str, float] = {}
         # Tensor-valued accumulators kept on device until end-of-step. The
-        # original code did a host sync per supervision for each of these;
-        # accumulating as device tensors and syncing once below collapses
-        # ~3 syncs/episode into 1 syncs/step.
+        # original code did a host sync per supervision for each of these
+        # (loss_fn used to call .item() inline on policy/value/entropy/
+        # permutation losses, plus _supervise on total_loss/update_norm);
+        # accumulating on device and syncing once below collapses ~6
+        # syncs/episode into 1 sync/step.
         tensor_stats: dict[str, torch.Tensor | None] = {
+            "policy_loss": None,
+            "value_loss": None,
+            "entropy_loss": None,
             "permutation_loss": None,
             "total_loss": None,
             "update_norm": None,
@@ -851,10 +852,8 @@ class RebelCFRTrainer:
                     else None
                 )
 
-            # Keep track of last supervision stats. Floats accumulate on host;
-            # tensors stay on device until the single end-of-step sync.
-            for k in step_stats:
-                step_stats[k] += episode_stats[k]
+            # All loss/norm stats are device tensors now; keep them on
+            # device until the single end-of-step sync below.
             for k, acc in tensor_stats.items():
                 v = episode_stats[k]
                 tensor_stats[k] = v if acc is None else acc + v
@@ -880,7 +879,7 @@ class RebelCFRTrainer:
             )
             for k, val in zip(keys, stacked):
                 step_stats[k] = val
-        for k in ("permutation_loss", "total_loss", "update_norm"):
+        for k in tensor_stats:
             step_stats.setdefault(k, 0.0)
 
         metrics = self._compute_metrics(

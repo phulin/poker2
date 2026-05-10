@@ -837,14 +837,17 @@ class RebelSupervisedLoss(nn.Module):
             permutation_loss = F.mse_loss(hand_values, hand_values_permuted_reversed)
             total_loss += self.permutation_weight * permutation_loss
 
+        # All scalars are returned as device tensors. Callers accumulate on
+        # device and sync once per training step (or per metrics rollup),
+        # collapsing what used to be 4 host syncs per supervision into none.
         return {
             "total_loss": total_loss,
-            "policy_loss": policy_loss.item(),
+            "policy_loss": policy_loss,
             "policy_loss_all": policy_loss_all,
             "policy_weights": policy_weights,
-            "value_loss": value_loss.item(),
+            "value_loss": value_loss,
             "value_loss_all": value_loss_all,
             "value_weights": value_weights,
-            "entropy": entropy.item(),
-            "permutation_loss": permutation_loss.item(),
+            "entropy": entropy,
+            "permutation_loss": permutation_loss,
         }
