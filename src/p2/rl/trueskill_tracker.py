@@ -14,6 +14,7 @@ so no recompilation is triggered.
 from __future__ import annotations
 
 import math
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -326,6 +327,7 @@ class TrueSkillTracker:
 
         total_games_played = 0
         total_reward = 0.0
+        eval_start = time.perf_counter()
 
         # Bind candidate weights into the candidate model once for the full eval.
         with _bind_weights(self.candidate_model, new_snap.weights):
@@ -376,6 +378,8 @@ class TrueSkillTracker:
                     total_games_played += 1
                 total_reward += float(rewards.sum().item())
 
+        eval_elapsed = time.perf_counter() - eval_start
+
         self.snapshots.append(new_snap)
 
         # Build metrics.
@@ -406,6 +410,6 @@ class TrueSkillTracker:
         print(
             f"[TrueSkill] step={step} mu={new_snap.mu:.2f} sigma={new_snap.sigma:.2f} "
             f"skill={skill:.2f} games={total_games_played} "
-            f"snapshots={len(self.snapshots)}"
+            f"snapshots={len(self.snapshots)} elapsed={eval_elapsed:.1f}s"
         )
         return metrics
