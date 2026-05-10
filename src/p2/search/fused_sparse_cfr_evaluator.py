@@ -43,6 +43,8 @@ from p2.search.fused_cfr_triton import (
     fused_reach_weights_depth_,
     fused_regret_tail_,
     fused_weighted_parent_sum,
+    precompute_showdown_extras,
+    showdown_ev_v15,
     triton_is_available,
     TScalars,
     unblocked_mass_opp_at_parents_triton,
@@ -135,6 +137,26 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # When True, cfr_iteration skips the full policy_probs.clone() kept for
         # _record_stats. Set by GraphedCFRIteration when stats are stubbed out.
         self._skip_record_stats: bool = False
+
+    def _init_hand_rank_data(self) -> None:
+        """Build hand-rank data, then precompute v15 showdown EV extras
+        (constant-per-subgame inputs for `showdown_ev_v15`)."""
+        super()._init_hand_rank_data()
+        if self.hand_rank_data is not None and self.showdown_indices.numel() > 0:
+            self._showdown_extras = precompute_showdown_extras(
+                self.hand_rank_data, self.env, self.showdown_indices,
+            )
+        else:
+            self._showdown_extras = None
+
+    def _showdown_value_both(self, beliefs: torch.Tensor) -> torch.Tensor:
+        """Triton v15 fast path; ~2.2× the compiled-PyTorch baseline at
+        M=256 (per scripts/bench_showdown.py). Falls back to the compiled
+        baseline when no precomputed extras are available."""
+        extras = getattr(self, "_showdown_extras", None)
+        if extras is None:
+            return super()._showdown_value_both(beliefs)
+        return showdown_ev_v15(beliefs, extras)
 
     def _ensure_fused_attrs(self) -> None:
         """Populate optional fused-only attributes if the object was constructed
