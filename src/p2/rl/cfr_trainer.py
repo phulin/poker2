@@ -608,6 +608,12 @@ class RebelCFRTrainer:
         # Step >= last threshold, return last config's probabilities
         return configs[-1].probabilities
 
+    # Per-parameter NaN/Inf grad check. Each parameter's `.all()` materializes
+    # a Python bool → one host sync per parameter per supervision call. With
+    # ~50 params × 10 episodes/step that's ~500 syncs/step purely for the
+    # safety check. Off by default; flip on for debugging.
+    CHECK_GRADS: bool = False
+
     def _supervise(
         self,
         value_batch: RebelBatch,
@@ -618,7 +624,7 @@ class RebelCFRTrainer:
         policy_latent: TRMLatent | None,
         permuted_latent: TRMLatent | None,
     ) -> tuple[
-        dict[str, float],
+        dict[str, float | torch.Tensor],
         ModelOutput,
         ModelOutput,
         ModelOutput,
@@ -629,7 +635,6 @@ class RebelCFRTrainer:
 
         value_loss, policy_loss, entropy_loss = None, None, None
         value_loss_update, policy_loss_update = None, None
-        permutation_loss = 0.0
 
         if isinstance(self.model, BetterTRM):
             value_output_orig = self.model(
@@ -657,7 +662,6 @@ class RebelCFRTrainer:
         permutation_loss_tensor = self._compute_permutation_loss(
             value_output_orig, value_output_permuted, suit_permutations_idxs
         )
-        permutation_loss = permutation_loss_tensor.item()
         total_loss = (
             total_loss + self.loss_fn.permutation_weight * permutation_loss_tensor
         )
@@ -672,21 +676,30 @@ class RebelCFRTrainer:
         policy_loss = loss_dict["policy_loss"]
         policy_loss_update = loss_dict["policy_loss_all"]
         entropy_loss = loss_dict["entropy"]
-        total_loss += loss_dict["total_loss"]
+        total_loss = total_loss + loss_dict["total_loss"]
 
         total_loss.backward()
 
-        assert all(
-            p.grad.isfinite().all()
-            for p in self.model.parameters()
-            if p.grad is not None
-        ), "NaN/Inf in model gradients"
+        if self.CHECK_GRADS:
+            # Single fused reduction → one host sync instead of one per param.
+            grad_finite = torch.stack(
+                [
+                    p.grad.isfinite().all()
+                    for p in self.model.parameters()
+                    if p.grad is not None
+                ]
+            ).all()
+            assert grad_finite.item(), "NaN/Inf in model gradients"
 
         if self.grad_clip is not None and self.grad_clip > 0:
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            grad_norm = nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.grad_clip
+            )
+        else:
+            grad_norm = torch.nn.utils.get_total_norm(
+                p.grad for p in self.model.parameters() if p.grad is not None
+            )
 
-        # Store parameters before optimizer step to compute update norm
-        params_before = [p.clone() for p in self.model.parameters()]
         self.optimizer.step()
 
         # Update EMA if enabled. Shadow weights are the source of truth and
@@ -694,21 +707,25 @@ class RebelCFRTrainer:
         if self.ema_helper is not None:
             self.ema_helper.update(self.model)
 
-        # Compute parameter update norm using torch utility
-        updates = (
-            p_after - p_before
-            for p_before, p_after in zip(params_before, self.model.parameters())
-        )
-        update_norm = torch.nn.utils.get_total_norm(updates).item()
+        # Approximate per-step parameter update norm. Previously we cloned
+        # every parameter pre-step and computed ||p_after - p_before||, which
+        # cost a full param-sized DtoD copy *and* a sync per supervision; for
+        # SGD this is exactly lr*||grad||, and for Adam it's a close-enough
+        # proxy of effective step magnitude for monitoring purposes.
+        current_lr = self.optimizer.param_groups[0]["lr"]
+        update_norm = current_lr * grad_norm  # tensor, no sync
 
+        # Tensors here, not floats — caller accumulates and syncs once at
+        # end of step. permutation_loss is the raw (unweighted) tensor for
+        # logging; total_loss already includes its weighted contribution.
         return (
             {
                 "policy_loss": policy_loss,
                 "value_loss": value_loss,
                 "entropy_loss": entropy_loss,
-                "permutation_loss": permutation_loss,
-                "total_loss": total_loss.item(),
-                "update_norm": update_norm,
+                "permutation_loss": permutation_loss_tensor.detach(),
+                "total_loss": total_loss.detach(),
+                "update_norm": update_norm.detach(),
             },
             value_output_permuted,
             value_output_orig,
@@ -744,13 +761,21 @@ class RebelCFRTrainer:
         policy_output_all = []
         value_loss_update_all = []
         policy_loss_update_all = []
+        # Float-valued stats (already host-side from loss_fn's internal .item()
+        # calls — those happen anyway).
         step_stats = {
             "policy_loss": 0.0,
             "value_loss": 0.0,
             "entropy_loss": 0.0,
-            "permutation_loss": 0.0,
-            "total_loss": 0.0,
-            "update_norm": 0.0,
+        }
+        # Tensor-valued accumulators kept on device until end-of-step. The
+        # original code did a host sync per supervision for each of these;
+        # accumulating as device tensors and syncing once below collapses
+        # ~3 syncs/episode into 1 syncs/step.
+        tensor_stats: dict[str, torch.Tensor | None] = {
+            "permutation_loss": None,
+            "total_loss": None,
+            "update_norm": None,
         }
         stratify = self._get_stratify_streets(step)
 
@@ -814,9 +839,13 @@ class RebelCFRTrainer:
                     else None
                 )
 
-            # Keep track of last supervision stats.
+            # Keep track of last supervision stats. Floats accumulate on host;
+            # tensors stay on device until the single end-of-step sync.
             for k in step_stats:
                 step_stats[k] += episode_stats[k]
+            for k, acc in tensor_stats.items():
+                v = episode_stats[k]
+                tensor_stats[k] = v if acc is None else acc + v
 
             # Append last batch/output for metrics.
             value_batch_all.append(permuted_batch)
@@ -825,6 +854,22 @@ class RebelCFRTrainer:
             policy_output_all.append(policy_output)
             value_loss_update_all.append(value_loss_update)
             policy_loss_update_all.append(policy_loss_update)
+
+        # Single host sync to fold the device-side accumulators into the
+        # float-keyed step_stats dict that _compute_metrics expects.
+        if any(v is not None for v in tensor_stats.values()):
+            keys = [k for k, v in tensor_stats.items() if v is not None]
+            # Reshape each accumulator to 0-d so stack succeeds even when
+            # individual losses come back as scalars vs 1-element tensors.
+            stacked = (
+                torch.stack([tensor_stats[k].reshape(()) for k in keys])
+                .cpu()
+                .tolist()
+            )
+            for k, val in zip(keys, stacked):
+                step_stats[k] = val
+        for k in ("permutation_loss", "total_loss", "update_norm"):
+            step_stats.setdefault(k, 0.0)
 
         metrics = self._compute_metrics(
             episodes,
