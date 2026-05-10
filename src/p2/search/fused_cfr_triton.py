@@ -2725,5 +2725,11 @@ class ShowdownGraphRunner:
 
     def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
         self.beliefs_in.copy_(beliefs)
-        self.graph.replay()
+        # When called from inside an outer CUDA graph capture, replay() of
+        # a pre-captured graph isn't allowed; emit the kernels directly so
+        # they're recorded into the outer graph instead.
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
         return self.ev_out

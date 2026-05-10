@@ -32,6 +32,7 @@ from p2.core.structured_config import CFRType
 from p2.env.card_utils import NUM_HANDS
 from p2.env.rules_triton import rank_hands_triton, triton_is_available as _rules_triton_ok
 from p2.search.fused_cfr_triton import (
+    _EvaluatorStateSnapshot,
     fused_average_policy_mix_with_tensors_,
     fused_avg_values_zero_sum_,
     fused_block_and_normalize_beliefs_,
@@ -43,6 +44,7 @@ from p2.search.fused_cfr_triton import (
     fused_reach_weights_depth_,
     fused_regret_tail_,
     fused_weighted_parent_sum,
+    GraphedCFRIteration,
     precompute_showdown_extras,
     showdown_ev_v15,
     ShowdownGraphRunner,
@@ -646,3 +648,67 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             mix_old=float(mix_old),
             mix_new=float(mix_new),
         )
+
+    @torch.no_grad()
+    def evaluate_cfr(self, training_mode: bool = True):
+        """CFR-loop with the body wrapped in a per-call CUDA graph.
+
+        Runs uncaptured iterations until past all early-t Python branches
+        (``t > dcfr_delay`` and ``t > 1``), captures one iteration, then
+        replays the captured graph for the rest. Iterations whose ``t`` is
+        in ``_record_stats_percentile_ts()`` run uncaptured so stats hooks
+        still fire. Per-call capture is required because
+        ``initialize_subgame`` reallocates the per-evaluator tensors.
+        """
+        self._ensure_fused_attrs()
+        self.model.eval()
+
+        self.initialize_policy_and_beliefs()
+        if self.warm_start_iterations > 0:
+            self.warm_start()
+
+        self.set_leaf_values(0)
+        self.compute_expected_values()
+        self.values_avg[:] = self.latest_values
+
+        self.t_sample = self._get_sampling_schedule()
+
+        start = self.warm_start_iterations
+        end = self.cfr_iterations
+        stat_iters = self._record_stats_percentile_ts()
+        # Past update_average_policy's ``t == 0`` and ``t <= dcfr_delay``
+        # Python branches; past update_average_values' ``t > 1``.
+        safe_t = max(start, self.dcfr_delay + 1, 2)
+
+        t = start
+        while t < end and t < safe_t:
+            self.profiler_step()
+            self.cfr_iteration(t)
+            t += 1
+
+        runner = None
+        if t < end:
+            # Capture mutates evaluator state across several iterations;
+            # snapshot/restore so the schedule advances exactly one iter at
+            # a time.
+            snapshot = _EvaluatorStateSnapshot.from_evaluator(self)
+            runner = GraphedCFRIteration(self)
+            runner.capture(t_capture=t, num_warmup=0)
+            snapshot.restore_to(self)
+
+        while t < end:
+            self.profiler_step()
+            if runner is None or t in stat_iters:
+                self.cfr_iteration(t)
+            else:
+                runner.replay(t=t)
+            t += 1
+
+        if self.use_final_policy_values:
+            self.update_average_values_final()
+
+        self._record_action_mix()
+        self._record_cfr_entropy()
+        self._record_cumulative_regret()
+
+        return self.sample_leaves(training_mode)
