@@ -1378,10 +1378,14 @@ class CFREvaluator(ABC):
         if self.cfr_plus:
             self.cumulative_regrets.clamp_(min=0)
 
-        # Update policy
-        old_policy_probs = self.policy_probs.clone()
-        self.update_policy(t)
-        self._record_stats(t, old_policy_probs)
+        # Update policy. Only clone old_policy_probs on the iterations where
+        # _record_stats actually inspects it (5 percentile iters per CFR run).
+        if t in self._record_stats_percentile_ts():
+            old_policy_probs = self.policy_probs.clone()
+            self.update_policy(t)
+            self._record_stats(t, old_policy_probs)
+        else:
+            self.update_policy(t)
 
         # Set leaf values and back up
         self.set_leaf_values(t)
@@ -1580,6 +1584,20 @@ class CFREvaluator(ABC):
     # ============================================================================
     # Statistics Methods
     # ============================================================================
+
+    def _record_stats_percentile_ts(self) -> set[int]:
+        """The 5 CFR iterations at which `_record_stats` actually consumes
+        `old_policy_probs`. Used by `cfr_iteration` to skip the full-tensor
+        clone on the other iterations."""
+        return {
+            int(x)
+            for x in torch.linspace(
+                self.warm_start_iterations, self.cfr_iterations - 1, 5
+            )
+            .round()
+            .int()
+            .tolist()
+        }
 
     def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
         """Record statistics about the policy update."""

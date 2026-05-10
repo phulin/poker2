@@ -522,9 +522,16 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if self._skip_record_stats:
             self.update_policy(t)
         else:
-            old_policy_probs = self.policy_probs.clone()
-            self.update_policy(t)
-            self._record_stats(t, old_policy_probs)
+            # _record_stats only uses old_policy_probs at 5 percentile
+            # iterations (see CFREvaluator._record_stats). Skipping the
+            # full-tensor clone on the other ~395 of 400 iterations cuts a
+            # large per-CFR-iter DtoD copy.
+            if t in self._record_stats_percentile_ts():
+                old_policy_probs = self.policy_probs.clone()
+                self.update_policy(t)
+                self._record_stats(t, old_policy_probs)
+            else:
+                self.update_policy(t)
 
         self.set_leaf_values(t)
         self.compute_expected_values()
