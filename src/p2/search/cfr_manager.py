@@ -671,7 +671,8 @@ class CFRManager:
                 for start in range(0, p0_rows.numel(), chunk_size):
                     rows = p0_rows[start : start + chunk_size]
                     emb = self.encode_states(player=0, idxs=rows)
-                    out = model(emb)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        out = model(emb)
                     logits = out.policy_logits
                     if logits.dim() == 3:
                         logits = logits.mean(dim=-2)
@@ -681,7 +682,8 @@ class CFRManager:
                 for start in range(0, p1_rows.numel(), chunk_size):
                     rows = p1_rows[start : start + chunk_size]
                     emb = self.encode_states(player=1, idxs=rows)
-                    out = model(emb)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        out = model(emb)
                     logits = out.policy_logits
                     if logits.dim() == 3:
                         logits = logits.mean(dim=-2)
@@ -711,7 +713,8 @@ class CFRManager:
                 for start in range(0, p0.numel(), chunk_size):
                     rows = p0[start : start + chunk_size]
                     emb = self.encode_states(0, rows)
-                    out = model(emb)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        out = model(emb)
                     if out.hand_values is None:
                         raise ValueError(
                             "Model must provide hand_values for ReBeL search."
@@ -725,7 +728,8 @@ class CFRManager:
                 for start in range(0, p1.numel(), chunk_size):
                     rows = p1[start : start + chunk_size]
                     emb = self.encode_states(1, rows)
-                    out = model(emb)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        out = model(emb)
                     if out.hand_values is None:
                         raise ValueError(
                             "Model must provide hand_values for ReBeL search."
@@ -761,7 +765,8 @@ class CFRManager:
                     for start in range(0, p0.numel(), chunk_size):
                         rows = p0[start : start + chunk_size]
                         emb = self.encode_states(0, rows)
-                        out = model(emb)
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                            out = model(emb)
                         if out.hand_values is None:
                             raise ValueError(
                                 "Model must provide hand_values for ReBeL search."
@@ -777,7 +782,8 @@ class CFRManager:
                     for start in range(0, p1.numel(), chunk_size):
                         rows = p1[start : start + chunk_size]
                         emb = self.encode_states(1, rows)
-                        out = model(emb)
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                            out = model(emb)
                         if out.hand_values is None:
                             raise ValueError(
                                 "Model must provide hand_values for ReBeL search."

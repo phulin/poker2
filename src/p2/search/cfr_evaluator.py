@@ -312,20 +312,21 @@ class CFREvaluator(ABC):
     def _get_model_policy_probs(self, indices: torch.Tensor) -> torch.Tensor:
         """Get policy probabilities from model for given indices."""
         features = self.feature_encoder.encode(self.beliefs, indices=indices)
-        if isinstance(self.model, BetterTRM):
-            latent = None
-            for supervision in range(self.num_supervisions):
-                model_output = self.model(
-                    features,
-                    include_policy=supervision == self.num_supervisions - 1,
-                    include_value=False,
-                    latent=latent,
-                )
-                latent = model_output.latent
-        else:
-            model_output = self.model(features, include_policy=True)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            if isinstance(self.model, BetterTRM):
+                latent = None
+                for supervision in range(self.num_supervisions):
+                    model_output = self.model(
+                        features,
+                        include_policy=supervision == self.num_supervisions - 1,
+                        include_value=False,
+                        latent=latent,
+                    )
+                    latent = model_output.latent
+            else:
+                model_output = self.model(features, include_policy=True)
 
-        logits = model_output.policy_logits
+        logits = model_output.policy_logits.float()
         legal_masks = self.legal_mask[indices]
         masked_logits = compute_masked_logits(logits, legal_masks[:, None, :])
         probs = F.softmax(masked_logits, dim=-1)
@@ -994,30 +995,32 @@ class CFREvaluator(ABC):
         self, t: int, beliefs: torch.Tensor, features: MLPFeatures
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Set model values for non-terminal leaves
-        if isinstance(self.model, BetterTRM):
-            # Note self.latent gets reinitialized for each subgame.
-            model_output = self.model(
-                features,
-                include_policy=False,
-                latent=self.latent,
-            )
-            self.latent = model_output.latent
-        else:
-            model_output = self.model(features, include_policy=False)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            if isinstance(self.model, BetterTRM):
+                # Note self.latent gets reinitialized for each subgame.
+                model_output = self.model(
+                    features,
+                    include_policy=False,
+                    latent=self.latent,
+                )
+                self.latent = model_output.latent
+            else:
+                model_output = self.model(features, include_policy=False)
+        hand_values = model_output.hand_values.to(self.float_dtype)
 
         if not self.cfr_avg or t <= 1 or self.last_model_values is None:
             new_values = torch.index_copy(
                 self.latest_values,
                 0,
                 self.model_indices,
-                model_output.hand_values,
+                hand_values,
             )
         else:
             # Mix with previous values (CFR-AVG style)
             old, new = self._get_mixing_weights(t)
             unmixed = (
                 old + new
-            ) * model_output.hand_values - old * self.last_model_values
+            ) * hand_values - old * self.last_model_values
             unmixed /= new
             unmixed = self._maybe_enforce_zero_sum(unmixed, beliefs)
             new_values = torch.index_copy(
@@ -1026,7 +1029,7 @@ class CFREvaluator(ABC):
                 self.model_indices,
                 unmixed,
             )
-        return new_values, model_output.hand_values
+        return new_values, hand_values
 
     def _set_model_values(
         self, t: int, beliefs: torch.Tensor, features: MLPFeatures

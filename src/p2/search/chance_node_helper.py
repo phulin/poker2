@@ -305,7 +305,7 @@ class ChanceNodeHelper:
                 board=board_samples_flat,
                 beliefs=belief_features,
             )
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 hand_values = model(synthetic_features).hand_values
             hand_values = hand_values.to(dtype=dtype).view(
                 B, chunk_len, self.num_players, NUM_HANDS
@@ -461,7 +461,7 @@ class ChanceNodeHelper:
 
         # Note: Technically these are EVs from the model, not CFVs.
         # But reach-weight only changes evenly across the chance node, so we ignore it.
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             hand_values = model(synthetic_features).hand_values
         hand_values = hand_values.to(dtype=dtype)
 

@@ -484,20 +484,20 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def _set_model_values_impl(self, t, beliefs, features):
         from p2.models.mlp.better_trm import BetterTRM
 
-        if isinstance(self.model, BetterTRM):
-            model_output = self.model(features, include_policy=False, latent=self.latent)
-            self.latent = model_output.latent
-        else:
-            model_output = self.model(features, include_policy=False)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            if isinstance(self.model, BetterTRM):
+                model_output = self.model(features, include_policy=False, latent=self.latent)
+                self.latent = model_output.latent
+            else:
+                model_output = self.model(features, include_policy=False)
+        hand_values = model_output.hand_values.to(self.float_dtype)
 
         if not self.cfr_avg or t <= 1 or self.last_model_values is None:
-            self.latest_values.index_copy_(
-                0, self.model_indices, model_output.hand_values
-            )
+            self.latest_values.index_copy_(0, self.model_indices, hand_values)
         else:
-            unmixed = torch.empty_like(model_output.hand_values)
+            unmixed = torch.empty_like(hand_values)
             fused_model_values_mix_zero_sum(
-                hand_values=model_output.hand_values.contiguous(),
+                hand_values=hand_values.contiguous(),
                 last_model_values=self.last_model_values.contiguous(),
                 beliefs=beliefs.contiguous(),
                 old_plus_new_over_new=self._t_scalars.mix_onon,
@@ -506,7 +506,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 enforce_zero_sum=bool(self.model.enforce_zero_sum),
             )
             self.latest_values.index_copy_(0, self.model_indices, unmixed)
-        return self.latest_values, model_output.hand_values
+        return self.latest_values, hand_values
 
     @torch.no_grad()
     def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
