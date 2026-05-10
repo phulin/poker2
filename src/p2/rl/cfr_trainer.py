@@ -170,6 +170,7 @@ class RebelCFRTrainer:
             self.model.parameters(),
             lr=cfg.train.learning_rate,
             weight_decay=cfg.train.weight_decay,
+            fused=(device.type == "cuda"),
         )
         self.loss_fn = RebelSupervisedLoss(
             policy_weight=1.0,
