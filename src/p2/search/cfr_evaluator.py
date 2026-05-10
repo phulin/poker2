@@ -104,6 +104,12 @@ def padded_indices(mask: torch.Tensor, alignment: int) -> torch.Tensor:
 class CFREvaluator(ABC):
     """Base class for CFR evaluators with shared methods."""
 
+    # Per-step invariant checks (`isfinite().all()`, `min()/max() < bound`,
+    # ordering asserts). Each one materializes a Python bool → host sync; the
+    # CFR hot path triggers many per training step. Off by default; flip on
+    # for debugging numerical issues.
+    CHECK_INVARIANTS: bool = False
+
     model: BaseMLPModel
     device: torch.device
     env: HUNLTensorEnv
@@ -441,10 +447,11 @@ class CFREvaluator(ABC):
         R = torch.gather(ends, 1, group_id)  # (M,1326)
         L_idx = L
         R_idx = (R + 1).clamp(max=NUM_HANDS)
-        assert (L <= R).all(), "L must be <= R"
-        assert torch.all(
-            torch.gather(ranks_sorted, 1, L) == torch.gather(ranks_sorted, 1, R)
-        ), "L/R must have same rank"
+        if self.CHECK_INVARIANTS:
+            assert (L <= R).all(), "L must be <= R"
+            assert torch.all(
+                torch.gather(ranks_sorted, 1, L) == torch.gather(ranks_sorted, 1, R)
+            ), "L/R must have same rank"
 
         # Inverse permutation (sorted->original) for mapping EV back
         inv_sorted = torch.argsort(sorted_indices, dim=1)  # (M,1326)
@@ -581,7 +588,10 @@ class CFREvaluator(ABC):
             1.0 - Pc_last.gather(1, c1) - Pc_last.gather(1, c2) + b_opp_sorted
         ).clamp(min=1e-8)
         valid_denom = denom > 1e-8
-        assert ((valid_denom) | ((win_mass < 1e-5) & (tie_mass < 1e-5))).all()
+        if self.CHECK_INVARIANTS:
+            assert (
+                (valid_denom) | ((win_mass < 1e-5) & (tie_mass < 1e-5))
+            ).all()
 
         # Probabilities & EV (in sorted order)
         win_prob = torch.where(valid_denom, win_mass / denom, 0.0)
@@ -888,7 +898,7 @@ class CFREvaluator(ABC):
     def warm_start(self) -> None:
         """Simple warm start: use model values and do a best-response pass."""
         self.set_leaf_values(0)
-        if not self.latest_values.isfinite().all():
+        if self.CHECK_INVARIANTS and not self.latest_values.isfinite().all():
             num_nonfinite = (~self.latest_values.isfinite()).sum().item()
             raise ValueError(
                 f"Non-finite values in latest_values after set_leaf_values: "
@@ -901,7 +911,7 @@ class CFREvaluator(ABC):
             leaf_values=self.latest_values,
             values=self.latest_values,
         )
-        if not self.latest_values.isfinite().all():
+        if self.CHECK_INVARIANTS and not self.latest_values.isfinite().all():
             num_nonfinite = (~self.latest_values.isfinite()).sum().item()
             raise ValueError(
                 f"Non-finite values in latest_values after compute_expected_values: "
@@ -943,7 +953,8 @@ class CFREvaluator(ABC):
             self.prev_actor[:, None, None] == 0, values_br_p0, values_br_p1
         )
 
-        assert values_br.isfinite().all()
+        if self.CHECK_INVARIANTS:
+            assert values_br.isfinite().all()
 
         # heuristic: scale regrets by the number of warm start iterations
         regrets = self.compute_instantaneous_regrets(

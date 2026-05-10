@@ -417,24 +417,36 @@ class RebelCFRTrainer:
         def by_street(
             tensor: torch.Tensor, batch=value_batch, street=None, weights=None
         ) -> dict[str, float]:
+            # Stack the per-street reductions and pull them across in a
+            # single DtoH instead of one .item() per street. Empty streets
+            # produce NaN which the dict comprehension below filters out.
             if street is None:
                 street = batch.features.street
-            masks = {street_name: street == i for i, street_name in enumerate(STREETS)}
+            names = list(STREETS)
             if weights is not None:
-                result = {
-                    k: (tensor[mask] * weights[mask]).sum(dim=-1)
-                    / weights[mask].sum(dim=-1).mean().item()
-                    for k, mask in masks.items()
-                }
+                vals = torch.stack(
+                    [
+                        (tensor[street == i] * weights[street == i]).sum()
+                        / weights[street == i].sum().clamp(min=1e-12)
+                        for i, _ in enumerate(names)
+                    ]
+                )
             else:
-                result = {k: tensor[mask].mean().item() for k, mask in masks.items()}
-            return {k: v for k, v in result.items() if not math.isnan(v)}
+                vals = torch.stack(
+                    [tensor[street == i].mean() for i, _ in enumerate(names)]
+                )
+            vals_cpu = vals.cpu().tolist()
+            return {
+                k: v for k, v in zip(names, vals_cpu) if not math.isnan(v)
+            }
 
         def street_count(street: torch.Tensor) -> dict[str, float]:
-            return {
-                street_name: (street == i).sum().item()
-                for i, street_name in enumerate(STREETS)
-            }
+            # Single fused DtoH for all streets.
+            counts = torch.stack(
+                [(street == i).sum() for i, _ in enumerate(STREETS)]
+            )
+            counts_cpu = counts.cpu().tolist()
+            return {name: counts_cpu[i] for i, name in enumerate(STREETS)}
 
         value_buffer_streets_stats = street_count(
             self.value_buffer.features.street[: len(self.value_buffer)]

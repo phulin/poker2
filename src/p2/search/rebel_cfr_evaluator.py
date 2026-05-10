@@ -265,7 +265,8 @@ class RebelCFREvaluator(CFREvaluator):
             initial_beliefs: Optional belief tensor aligned with `src_indices`.
         """
         assert src_indices.shape[0] == self.root_nodes
-        assert src_indices.min().item() >= 0
+        if self.CHECK_INVARIANTS:
+            assert src_indices.min().item() >= 0
         if initial_beliefs is not None:
             assert initial_beliefs.shape[0] == src_indices.shape[0]
             assert initial_beliefs.shape[1] == self.num_players
@@ -350,7 +351,8 @@ class RebelCFREvaluator(CFREvaluator):
                 new_legal_indices = (
                     offset_next + (current_legal_indices - offset) * B + action
                 )
-                assert new_legal_indices.max().item() < M
+                if self.CHECK_INVARIANTS:
+                    assert new_legal_indices.max().item() < M
 
                 self.env.copy_state_from(
                     self.env, current_legal_indices, new_legal_indices
