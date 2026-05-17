@@ -52,6 +52,64 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 }
 `;
 
+const REDUCE_4X_256_WGSL = /* wgsl */ `
+  if (lane < 128u) {
+    partial0[lane] = partial0[lane] + partial0[lane + 128u];
+    partial1[lane] = partial1[lane] + partial1[lane + 128u];
+    partial2[lane] = partial2[lane] + partial2[lane + 128u];
+    partial3[lane] = partial3[lane] + partial3[lane + 128u];
+  }
+  workgroupBarrier();
+  if (lane < 64u) {
+    partial0[lane] = partial0[lane] + partial0[lane + 64u];
+    partial1[lane] = partial1[lane] + partial1[lane + 64u];
+    partial2[lane] = partial2[lane] + partial2[lane + 64u];
+    partial3[lane] = partial3[lane] + partial3[lane + 64u];
+  }
+  workgroupBarrier();
+  if (lane < 32u) {
+    partial0[lane] = partial0[lane] + partial0[lane + 32u];
+    partial1[lane] = partial1[lane] + partial1[lane + 32u];
+    partial2[lane] = partial2[lane] + partial2[lane + 32u];
+    partial3[lane] = partial3[lane] + partial3[lane + 32u];
+  }
+  workgroupBarrier();
+  if (lane < 16u) {
+    partial0[lane] = partial0[lane] + partial0[lane + 16u];
+    partial1[lane] = partial1[lane] + partial1[lane + 16u];
+    partial2[lane] = partial2[lane] + partial2[lane + 16u];
+    partial3[lane] = partial3[lane] + partial3[lane + 16u];
+  }
+  workgroupBarrier();
+  if (lane < 8u) {
+    partial0[lane] = partial0[lane] + partial0[lane + 8u];
+    partial1[lane] = partial1[lane] + partial1[lane + 8u];
+    partial2[lane] = partial2[lane] + partial2[lane + 8u];
+    partial3[lane] = partial3[lane] + partial3[lane + 8u];
+  }
+  workgroupBarrier();
+  if (lane < 4u) {
+    partial0[lane] = partial0[lane] + partial0[lane + 4u];
+    partial1[lane] = partial1[lane] + partial1[lane + 4u];
+    partial2[lane] = partial2[lane] + partial2[lane + 4u];
+    partial3[lane] = partial3[lane] + partial3[lane + 4u];
+  }
+  workgroupBarrier();
+  if (lane < 2u) {
+    partial0[lane] = partial0[lane] + partial0[lane + 2u];
+    partial1[lane] = partial1[lane] + partial1[lane + 2u];
+    partial2[lane] = partial2[lane] + partial2[lane + 2u];
+    partial3[lane] = partial3[lane] + partial3[lane + 2u];
+  }
+  workgroupBarrier();
+  if (lane < 1u) {
+    partial0[lane] = partial0[lane] + partial0[lane + 1u];
+    partial1[lane] = partial1[lane] + partial1[lane + 1u];
+    partial2[lane] = partial2[lane] + partial2[lane + 1u];
+    partial3[lane] = partial3[lane] + partial3[lane + 1u];
+  }
+`;
+
 export const MAT_VEC_BATCH_WGSL = /* wgsl */ `
 struct Params {
   rows: u32,
@@ -108,21 +166,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   partial2[lane] = sum2;
   partial3[lane] = sum3;
   workgroupBarrier();
-
-  var stride = 128u;
-  loop {
-    if (lane < stride) {
-      partial0[lane] = partial0[lane] + partial0[lane + stride];
-      partial1[lane] = partial1[lane] + partial1[lane + stride];
-      partial2[lane] = partial2[lane] + partial2[lane + stride];
-      partial3[lane] = partial3[lane] + partial3[lane + stride];
-    }
-    workgroupBarrier();
-    if (stride == 1u) {
-      break;
-    }
-    stride = stride / 2u;
-  }
+${REDUCE_4X_256_WGSL}
 
   if (lane == 0u) {
     let outputBase = batch * params.outputStride + params.outputOffset;
@@ -219,21 +263,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   partial2[lane] = sum2;
   partial3[lane] = sum3;
   workgroupBarrier();
-
-  var stride = 128u;
-  loop {
-    if (lane < stride) {
-      partial0[lane] = partial0[lane] + partial0[lane + stride];
-      partial1[lane] = partial1[lane] + partial1[lane + stride];
-      partial2[lane] = partial2[lane] + partial2[lane + stride];
-      partial3[lane] = partial3[lane] + partial3[lane + stride];
-    }
-    workgroupBarrier();
-    if (stride == 1u) {
-      break;
-    }
-    stride = stride / 2u;
-  }
+${REDUCE_4X_256_WGSL}
 
   if (lane == 0u) {
     let outputBase = batch * params.outputStride;
@@ -321,21 +351,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   partial2[lane] = sum2;
   partial3[lane] = sum3;
   workgroupBarrier();
-
-  var stride = 128u;
-  loop {
-    if (lane < stride) {
-      partial0[lane] = partial0[lane] + partial0[lane + stride];
-      partial1[lane] = partial1[lane] + partial1[lane + stride];
-      partial2[lane] = partial2[lane] + partial2[lane + stride];
-      partial3[lane] = partial3[lane] + partial3[lane + stride];
-    }
-    workgroupBarrier();
-    if (stride == 1u) {
-      break;
-    }
-    stride = stride / 2u;
-  }
+${REDUCE_4X_256_WGSL}
 
   if (lane == 0u) {
     let outputBase = batch * params.outputStride;
