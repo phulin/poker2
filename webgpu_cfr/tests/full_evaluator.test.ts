@@ -67,8 +67,9 @@ test("exported BetterFFN WebGPU evaluator matches Python fixture for call spot",
 
   const device = await createDawnDevice();
   const model = await loadNodeModel(device, exported.manifest, exported.weights);
+  const evaluator = new BrowserCfrEvaluator(device, model);
   try {
-    const result = await new BrowserCfrEvaluator(device, model).evaluateSpot({
+    const result = await evaluator.evaluateSpot({
       spot: [1],
       iterations: 2,
     });
@@ -85,6 +86,7 @@ test("exported BetterFFN WebGPU evaluator matches Python fixture for call spot",
       "actionProbs",
     );
   } finally {
+    evaluator.dispose();
     model.dispose();
     device.destroy();
   }
@@ -101,8 +103,9 @@ test("exported BetterFFN WebGPU evaluator handles a raise/call prefix", async ()
 
   const device = await createDawnDevice();
   const model = await loadNodeModel(device, exported.manifest, exported.weights);
+  const evaluator = new BrowserCfrEvaluator(device, model);
   try {
-    const result = await new BrowserCfrEvaluator(device, model).evaluateSpot({
+    const result = await evaluator.evaluateSpot({
       spot: [2, 1],
       iterations: 2,
     });
@@ -113,6 +116,7 @@ test("exported BetterFFN WebGPU evaluator handles a raise/call prefix", async ()
       "actionProbs",
     );
   } finally {
+    evaluator.dispose();
     model.dispose();
     device.destroy();
   }

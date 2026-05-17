@@ -6,11 +6,7 @@ import {
   FINALIZE_POLICY_WGSL,
   REGRET_MATCH_WGSL,
 } from "./kernels.js";
-import {
-  makeStorageBuffer,
-  makeUniformBuffer,
-  readFloatBuffer,
-} from "./gpuBuffers.js";
+import { readFloatBuffer } from "./gpuBuffers.js";
 import type {
   EvaluationResult,
   LocalCfrProblem,
@@ -22,6 +18,12 @@ import type {
 interface SolveReadOptions {
   readPolicy?: boolean;
   readActionProbs?: boolean;
+}
+
+interface TempBuffer {
+  buffer: GPUBuffer;
+  key: number;
+  kind: "storage" | "uniform";
 }
 
 function u32Params(
@@ -69,6 +71,9 @@ export class GpuCfrEvaluator {
   private readonly beliefApply: GPUComputePipeline;
   private readonly beliefNormalize: GPUComputePipeline;
   private readonly actionProbs: GPUComputePipeline;
+  private readonly storagePool = new Map<number, GPUBuffer[]>();
+  private readonly uniformPool = new Map<number, GPUBuffer[]>();
+  private readonly zeroFloatArrays = new Map<number, Float32Array<ArrayBuffer>>();
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -135,8 +140,7 @@ export class GpuCfrEvaluator {
     readOptions: SolveReadOptions = {},
   ): Promise<LocalSolveResult> {
     assertProblem(problem, numHands, numActions);
-    const childValues = makeStorageBuffer(
-      this.device,
+    const childValues = this.acquireStorageFromData(
       new Float32Array(problem.childValues),
     );
     return await this.solvePrepared(
@@ -145,8 +149,8 @@ export class GpuCfrEvaluator {
       numHands,
       numActions,
       iterations,
+      childValues.buffer,
       childValues,
-      true,
       readOptions,
     );
   }
@@ -172,7 +176,7 @@ export class GpuCfrEvaluator {
       numActions,
       iterations,
       childValues,
-      false,
+      undefined,
       readOptions,
     );
   }
@@ -184,7 +188,7 @@ export class GpuCfrEvaluator {
     numActions: number,
     iterations: number,
     childValues: GPUBuffer,
-    destroyChildValues: boolean,
+    ownedChildValues: TempBuffer | undefined,
     readOptions: SolveReadOptions = {},
   ): Promise<LocalSolveResult> {
     const readPolicy = readOptions.readPolicy ?? true;
@@ -196,186 +200,198 @@ export class GpuCfrEvaluator {
     const workgroupsHands = Math.ceil(numHands / 64);
     const workgroupsPolicy = Math.ceil(totalPolicy / 64);
 
-    const legal = makeStorageBuffer(this.device, asU32(problem.legalMask));
-    const regrets = makeStorageBuffer(this.device, new Float32Array(totalPolicy));
-    const policy = makeStorageBuffer(this.device, new Float32Array(totalPolicy));
-    const avgPolicy = makeStorageBuffer(this.device, new Float32Array(totalPolicy));
-    const params = makeUniformBuffer(
-      this.device,
-      u32Params(
-        numHands,
-        numActions,
-        problem.actor,
-        problem.action ?? 0,
-        iterations,
-      ),
-    );
-
-    const bindGroup = (
-      pipeline: GPUComputePipeline,
-      entries: GPUBindGroupEntry[],
-    ) =>
-      this.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries,
-      });
-
-    const regretMatchBindGroup = bindGroup(this.regretMatch, [
-      { binding: 0, resource: { buffer: legal } },
-      { binding: 2, resource: { buffer: regrets } },
-      { binding: 3, resource: { buffer: policy } },
-      { binding: 5, resource: { buffer: params } },
-    ]);
-    const accumulateRegretBindGroup = bindGroup(this.accumulateRegret, [
-      { binding: 0, resource: { buffer: legal } },
-      { binding: 1, resource: { buffer: childValues } },
-      { binding: 2, resource: { buffer: regrets } },
-      { binding: 3, resource: { buffer: policy } },
-      { binding: 4, resource: { buffer: avgPolicy } },
-      { binding: 5, resource: { buffer: params } },
-    ]);
-    const finalizePolicyBindGroup = bindGroup(this.finalizePolicy, [
-      { binding: 3, resource: { buffer: policy } },
-      { binding: 4, resource: { buffer: avgPolicy } },
-      { binding: 5, resource: { buffer: params } },
-    ]);
-
-    const beliefsIn = makeStorageBuffer(this.device, beliefs);
-    let actionProbs: GPUBuffer | undefined;
-    let actionBindGroup: GPUBindGroup | undefined;
-    if (readActionProbs) {
-      actionProbs = makeStorageBuffer(this.device, new Float32Array(numActions));
-      actionBindGroup = this.device.createBindGroup({
-        layout: this.actionProbs.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: beliefsIn } },
-          { binding: 1, resource: { buffer: policy } },
-          { binding: 2, resource: { buffer: actionProbs } },
-          { binding: 3, resource: { buffer: params } },
-        ],
-      });
+    const temps: TempBuffer[] = [];
+    if (ownedChildValues) {
+      temps.push(ownedChildValues);
     }
-
-    let beliefsOut: GPUBuffer | undefined;
-    let denom: GPUBuffer | undefined;
-    let applyBindGroup: GPUBindGroup | undefined;
-    let normalizeBindGroup: GPUBindGroup | undefined;
-    if (problem.action !== undefined) {
-      beliefsOut = makeStorageBuffer(this.device, new Float32Array(2 * numHands));
-      denom = makeStorageBuffer(this.device, new Float32Array([0]));
-      applyBindGroup = this.device.createBindGroup({
-        layout: this.beliefApply.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: beliefsIn } },
-          { binding: 1, resource: { buffer: policy } },
-          { binding: 2, resource: { buffer: beliefsOut } },
-          { binding: 3, resource: { buffer: denom } },
-          { binding: 4, resource: { buffer: params } },
-        ],
-      });
-      normalizeBindGroup = this.device.createBindGroup({
-        layout: this.beliefNormalize.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: beliefsIn } },
-          { binding: 2, resource: { buffer: beliefsOut } },
-          { binding: 3, resource: { buffer: denom } },
-          { binding: 4, resource: { buffer: params } },
-        ],
-      });
-    }
-
-    if (debug) console.error("solve:encode");
-    const encoder = this.device.createCommandEncoder();
-    for (let i = 0; i < iterations; i += 1) {
-      this.encodeCompute(
-        encoder,
-        this.regretMatch,
-        regretMatchBindGroup,
-        workgroupsHands,
-        debug ? "regret-match" : undefined,
-      );
-      this.encodeCompute(
-        encoder,
-        this.accumulateRegret,
-        accumulateRegretBindGroup,
-        workgroupsHands,
-        debug ? "accumulate-regret" : undefined,
-      );
-    }
-    this.encodeCompute(
-      encoder,
-      this.finalizePolicy,
-      finalizePolicyBindGroup,
-      workgroupsPolicy,
-      debug ? "finalize-policy" : undefined,
-    );
-    if (actionBindGroup) {
-      this.encodeCompute(
-        encoder,
-        this.actionProbs,
-        actionBindGroup,
-        numActions,
-        debug ? "action-probs" : undefined,
-      );
-    }
-
-    if (applyBindGroup && normalizeBindGroup) {
-      this.encodeCompute(
-        encoder,
-        this.beliefApply,
-        applyBindGroup,
-        1,
-        debug ? "belief-apply" : undefined,
-      );
-      this.encodeCompute(
-        encoder,
-        this.beliefNormalize,
-        normalizeBindGroup,
-        workgroupsHands,
-        debug ? "belief-normalize" : undefined,
-      );
-    }
-    if (debug) console.error("solve:submit");
-    this.device.queue.submit([encoder.finish()]);
-    if (debug) console.error("solve:read-policy");
-    const policyData = readPolicy
-      ? await readFloatBuffer(this.device, policy, totalPolicy)
-      : new Float32Array(0);
-    if (debug) console.error("solve:read-actions");
-    const actionProbData =
-      readActionProbs && actionProbs
-        ? await readFloatBuffer(this.device, actionProbs, numActions)
-        : new Float32Array(0);
-    if (debug) console.error("solve:read-beliefs");
-    const beliefsAfter = beliefsOut
-      ? await readFloatBuffer(this.device, beliefsOut, 2 * numHands)
-      : undefined;
-    if (debug) console.error("solve:destroy");
-
-    for (const buffer of [
-      legal,
-      destroyChildValues ? childValues : undefined,
-      regrets,
-      policy,
-      avgPolicy,
-      params,
-      beliefsIn,
-      actionProbs,
-      beliefsOut,
-      denom,
-    ]) {
-      buffer?.destroy();
-    }
-
-    const result: LocalSolveResult = {
-      policy: policyData,
-      actionProbs: actionProbData,
+    const storage = (
+      data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
+    ): GPUBuffer => {
+      const temp = this.acquireStorageFromData(data);
+      temps.push(temp);
+      return temp.buffer;
     };
-    if (beliefsAfter !== undefined) {
-      result.beliefsAfter = beliefsAfter;
+    const zeroed = (elements: number): GPUBuffer => {
+      const temp = this.acquireZeroedStorage(elements);
+      temps.push(temp);
+      return temp.buffer;
+    };
+    const uniform = (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ): GPUBuffer => {
+      const temp = this.acquireUniform(data);
+      temps.push(temp);
+      return temp.buffer;
+    };
+
+    try {
+      const legal = storage(asU32(problem.legalMask));
+      const regrets = zeroed(totalPolicy);
+      const policy = zeroed(totalPolicy);
+      const avgPolicy = zeroed(totalPolicy);
+      const params = uniform(
+        u32Params(
+          numHands,
+          numActions,
+          problem.actor,
+          problem.action ?? 0,
+          iterations,
+        ),
+      );
+      const bindGroup = (
+        pipeline: GPUComputePipeline,
+        entries: GPUBindGroupEntry[],
+      ) =>
+        this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries,
+        });
+
+      const regretMatchBindGroup = bindGroup(this.regretMatch, [
+        { binding: 0, resource: { buffer: legal } },
+        { binding: 2, resource: { buffer: regrets } },
+        { binding: 3, resource: { buffer: policy } },
+        { binding: 5, resource: { buffer: params } },
+      ]);
+      const accumulateRegretBindGroup = bindGroup(this.accumulateRegret, [
+        { binding: 0, resource: { buffer: legal } },
+        { binding: 1, resource: { buffer: childValues } },
+        { binding: 2, resource: { buffer: regrets } },
+        { binding: 3, resource: { buffer: policy } },
+        { binding: 4, resource: { buffer: avgPolicy } },
+        { binding: 5, resource: { buffer: params } },
+      ]);
+      const finalizePolicyBindGroup = bindGroup(this.finalizePolicy, [
+        { binding: 3, resource: { buffer: policy } },
+        { binding: 4, resource: { buffer: avgPolicy } },
+        { binding: 5, resource: { buffer: params } },
+      ]);
+
+      const beliefsIn = storage(beliefs);
+      let actionProbs: GPUBuffer | undefined;
+      let actionBindGroup: GPUBindGroup | undefined;
+      if (readActionProbs) {
+        actionProbs = zeroed(numActions);
+        actionBindGroup = this.device.createBindGroup({
+          layout: this.actionProbs.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: beliefsIn } },
+            { binding: 1, resource: { buffer: policy } },
+            { binding: 2, resource: { buffer: actionProbs } },
+            { binding: 3, resource: { buffer: params } },
+          ],
+        });
+      }
+
+      let beliefsOut: GPUBuffer | undefined;
+      let applyBindGroup: GPUBindGroup | undefined;
+      let normalizeBindGroup: GPUBindGroup | undefined;
+      if (problem.action !== undefined) {
+        beliefsOut = zeroed(2 * numHands);
+        const denom = zeroed(1);
+        applyBindGroup = this.device.createBindGroup({
+          layout: this.beliefApply.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: beliefsIn } },
+            { binding: 1, resource: { buffer: policy } },
+            { binding: 2, resource: { buffer: beliefsOut } },
+            { binding: 3, resource: { buffer: denom } },
+            { binding: 4, resource: { buffer: params } },
+          ],
+        });
+        normalizeBindGroup = this.device.createBindGroup({
+          layout: this.beliefNormalize.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: beliefsIn } },
+            { binding: 2, resource: { buffer: beliefsOut } },
+            { binding: 3, resource: { buffer: denom } },
+            { binding: 4, resource: { buffer: params } },
+          ],
+        });
+      }
+
+      if (debug) console.error("solve:encode");
+      const encoder = this.device.createCommandEncoder();
+      for (let i = 0; i < iterations; i += 1) {
+        this.encodeCompute(
+          encoder,
+          this.regretMatch,
+          regretMatchBindGroup,
+          workgroupsHands,
+          debug ? "regret-match" : undefined,
+        );
+        this.encodeCompute(
+          encoder,
+          this.accumulateRegret,
+          accumulateRegretBindGroup,
+          workgroupsHands,
+          debug ? "accumulate-regret" : undefined,
+        );
+      }
+      this.encodeCompute(
+        encoder,
+        this.finalizePolicy,
+        finalizePolicyBindGroup,
+        workgroupsPolicy,
+        debug ? "finalize-policy" : undefined,
+      );
+      if (actionBindGroup) {
+        this.encodeCompute(
+          encoder,
+          this.actionProbs,
+          actionBindGroup,
+          numActions,
+          debug ? "action-probs" : undefined,
+        );
+      }
+
+      if (applyBindGroup && normalizeBindGroup) {
+        this.encodeCompute(
+          encoder,
+          this.beliefApply,
+          applyBindGroup,
+          1,
+          debug ? "belief-apply" : undefined,
+        );
+        this.encodeCompute(
+          encoder,
+          this.beliefNormalize,
+          normalizeBindGroup,
+          workgroupsHands,
+          debug ? "belief-normalize" : undefined,
+        );
+      }
+      if (debug) console.error("solve:submit");
+      this.device.queue.submit([encoder.finish()]);
+      if (debug) console.error("solve:read-policy");
+      const policyData = readPolicy
+        ? await readFloatBuffer(this.device, policy, totalPolicy)
+        : new Float32Array(0);
+      if (debug) console.error("solve:read-actions");
+      const actionProbData =
+        readActionProbs && actionProbs
+          ? await readFloatBuffer(this.device, actionProbs, numActions)
+          : new Float32Array(0);
+      if (debug) console.error("solve:read-beliefs");
+      const beliefsAfter = beliefsOut
+        ? await readFloatBuffer(this.device, beliefsOut, 2 * numHands)
+        : undefined;
+
+      const result: LocalSolveResult = {
+        policy: policyData,
+        actionProbs: actionProbData,
+      };
+      if (beliefsAfter !== undefined) {
+        result.beliefsAfter = beliefsAfter;
+      }
+      if (debug) console.error("solve:done");
+      return result;
+    } finally {
+      if (debug) console.error("solve:release");
+      for (const temp of temps) {
+        this.releaseTemp(temp);
+      }
     }
-    if (debug) console.error("solve:done");
-    return result;
   }
 
   private pipeline(source: string, label: string): GPUComputePipeline {
@@ -423,11 +439,102 @@ export class GpuCfrEvaluator {
     pass.dispatchWorkgroups(x);
     pass.end();
   }
+
+  private acquireStorageFromData(
+    data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
+  ): TempBuffer {
+    const temp = this.acquireStorageBytes(data.byteLength);
+    this.device.queue.writeBuffer(
+      temp.buffer,
+      0,
+      data as Float32Array<ArrayBuffer> | Uint32Array<ArrayBuffer>,
+    );
+    return temp;
+  }
+
+  private acquireZeroedStorage(elements: number): TempBuffer {
+    const temp = this.acquireStorageBytes(elements * Float32Array.BYTES_PER_ELEMENT);
+    this.device.queue.writeBuffer(temp.buffer, 0, this.zeroFloatArray(elements));
+    return temp;
+  }
+
+  private acquireStorageBytes(byteLength: number): TempBuffer {
+    const key = Math.max(4, Math.ceil(byteLength / 4) * 4);
+    const buffer = this.storagePool.get(key)?.pop();
+    return {
+      buffer:
+        buffer ??
+        this.device.createBuffer({
+          size: key,
+          usage:
+            GPUBufferUsage.STORAGE |
+            GPUBufferUsage.COPY_SRC |
+            GPUBufferUsage.COPY_DST,
+        }),
+      key,
+      kind: "storage",
+    };
+  }
+
+  private acquireUniform(
+    data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+  ): TempBuffer {
+    const key = Math.max(16, Math.ceil(data.byteLength / 16) * 16);
+    const buffer = this.uniformPool.get(key)?.pop();
+    const temp: TempBuffer = {
+      buffer:
+        buffer ??
+        this.device.createBuffer({
+          size: key,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }),
+      key,
+      kind: "uniform",
+    };
+    this.device.queue.writeBuffer(temp.buffer, 0, data);
+    return temp;
+  }
+
+  private zeroFloatArray(elements: number): Float32Array<ArrayBuffer> {
+    let zeroes = this.zeroFloatArrays.get(elements);
+    if (!zeroes) {
+      zeroes = new Float32Array(elements);
+      this.zeroFloatArrays.set(elements, zeroes);
+    }
+    return zeroes;
+  }
+
+  private releaseTemp(temp: TempBuffer): void {
+    const pool = temp.kind === "storage" ? this.storagePool : this.uniformPool;
+    const buffers = pool.get(temp.key);
+    if (buffers) {
+      buffers.push(temp.buffer);
+    } else {
+      pool.set(temp.key, [temp.buffer]);
+    }
+  }
+
+  dispose(): void {
+    for (const pool of [this.storagePool, this.uniformPool]) {
+      for (const buffers of pool.values()) {
+        for (const buffer of buffers) {
+          buffer.destroy();
+        }
+      }
+      pool.clear();
+    }
+    this.zeroFloatArrays.clear();
+  }
 }
 
 export async function evaluateFixture(
   device: GPUDevice,
   fixture: WebgpuCfrFixture,
 ): Promise<EvaluationResult> {
-  return await new GpuCfrEvaluator(device).evaluate(fixture);
+  const evaluator = new GpuCfrEvaluator(device);
+  try {
+    return await evaluator.evaluate(fixture);
+  } finally {
+    evaluator.dispose();
+  }
 }

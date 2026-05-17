@@ -46,8 +46,9 @@ try {
     const weightsPath =
       options.weights ?? resolve(dirname(manifestPath), "weights.bin");
     const model = await loadNodeModel(device, manifestPath, weightsPath);
+    const evaluator = new BrowserCfrEvaluator(device, model);
     try {
-      const result = await new BrowserCfrEvaluator(device, model).evaluateSpot({
+      const result = await evaluator.evaluateSpot({
         spot: options.spot,
         iterations: options.iterations,
       });
@@ -57,6 +58,7 @@ try {
         actionProbs: Array.from(result.actionProbs),
       };
     } finally {
+      evaluator.dispose();
       model.dispose();
     }
   } else {
