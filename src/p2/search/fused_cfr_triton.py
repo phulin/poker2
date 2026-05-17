@@ -1878,6 +1878,126 @@ def fused_model_values_mix_zero_sum(
 
 
 # ---------------------------------------------------------------------------
+# Kernel 11c: model-values mix + zero-sum + indexed latest/last writeback.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_model_values_writeback_kernel(
+        h_ptr,        # [M, 2, H] hand_values
+        l_ptr,        # [M, 2, H] previous last_model_values
+        b_ptr,        # [M, 2, H] beliefs
+        idx_ptr,      # [M] absolute latest_values row
+        latest_ptr,   # [T, 2, H]
+        last_out_ptr, # [M, 2, H]
+        onon_ptr,     # 0-D (old + new) / new
+        oon_ptr,      # 0-D old / new
+        M, H,
+        DO_MIX: tl.constexpr,
+        ENFORCE_ZS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        if m >= M:
+            return
+
+        row = tl.load(idx_ptr + m)
+        onon = tl.load(onon_ptr)
+        oon = tl.load(oon_ptr)
+
+        offs = tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        h0_p = h_ptr + (m * 2 + 0) * H + offs
+        h1_p = h_ptr + (m * 2 + 1) * H + offs
+        l0_p = l_ptr + (m * 2 + 0) * H + offs
+        l1_p = l_ptr + (m * 2 + 1) * H + offs
+        b0_p = b_ptr + (m * 2 + 0) * H + offs
+        b1_p = b_ptr + (m * 2 + 1) * H + offs
+
+        latest0_p = latest_ptr + (row * 2 + 0) * H + offs
+        latest1_p = latest_ptr + (row * 2 + 1) * H + offs
+        last0_p = last_out_ptr + (m * 2 + 0) * H + offs
+        last1_p = last_out_ptr + (m * 2 + 1) * H + offs
+
+        h0 = tl.load(h0_p, mask=mask, other=0.0).to(tl.float32)
+        h1 = tl.load(h1_p, mask=mask, other=0.0).to(tl.float32)
+
+        v0 = h0
+        v1 = h1
+        if DO_MIX:
+            l0 = tl.load(l0_p, mask=mask, other=0.0).to(tl.float32)
+            l1 = tl.load(l1_p, mask=mask, other=0.0).to(tl.float32)
+            v0 = h0 * onon - l0 * oon
+            v1 = h1 * onon - l1 * oon
+
+        s = tl.zeros((), dtype=tl.float32)
+        if ENFORCE_ZS:
+            b0 = tl.load(b0_p, mask=mask, other=0.0).to(tl.float32)
+            b1 = tl.load(b1_p, mask=mask, other=0.0).to(tl.float32)
+            s = 0.5 * (
+                tl.sum(tl.where(mask, v0 * b0, 0.0))
+                + tl.sum(tl.where(mask, v1 * b1, 0.0))
+            )
+
+        tl.store(latest0_p, v0 - s, mask=mask)
+        tl.store(latest1_p, v1 - s, mask=mask)
+        tl.store(last0_p, h0, mask=mask)
+        tl.store(last1_p, h1, mask=mask)
+
+
+def fused_model_values_writeback_(
+    hand_values: torch.Tensor,             # [M, 2, H]
+    last_model_values: torch.Tensor,       # [M, 2, H]
+    beliefs: torch.Tensor,                 # [M, 2, H]
+    model_indices: torch.Tensor,           # [M]
+    latest_values: torch.Tensor,           # [T, 2, H]
+    last_out: torch.Tensor,                # [M, 2, H]
+    old_plus_new_over_new: torch.Tensor,   # 0-D
+    old_over_new: torch.Tensor,            # 0-D
+    do_mix: bool,
+    enforce_zero_sum: bool,
+    block_h: int = 2048,
+) -> None:
+    """Write model leaf values directly into evaluator buffers.
+
+    Combines the previous sequence ``to(fp32) -> optional mix/zero-sum ->
+    index_copy_(latest_values, model_indices, ...) -> last_out.copy_(hand_values)``.
+    ``last_model_values`` may alias ``hand_values`` when ``do_mix`` is false.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert hand_values.is_contiguous()
+    assert last_model_values.is_contiguous()
+    assert beliefs.is_contiguous()
+    assert model_indices.is_contiguous()
+    assert latest_values.is_contiguous()
+    assert last_out.is_contiguous()
+    assert hand_values.shape == last_model_values.shape == beliefs.shape == last_out.shape
+    assert hand_values.dim() == 3 and hand_values.shape[1] == 2
+    m, _, h = hand_values.shape
+    assert model_indices.shape == (m,)
+    assert h <= block_h, f"BLOCK_H={block_h} must cover H={h}"
+    _fused_model_values_writeback_kernel[(m,)](
+        hand_values,
+        last_model_values,
+        beliefs,
+        model_indices,
+        latest_values,
+        last_out,
+        old_plus_new_over_new,
+        old_over_new,
+        m, h,
+        DO_MIX=do_mix,
+        ENFORCE_ZS=enforce_zero_sum,
+        BLOCK_H=block_h,
+        num_warps=8,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Kernel 12: fused weighted parent-sum for compute_expected_values depth loop.
 #   Combines fused_weight_child_values + _pull_back_sum into a single
 #   parent-aligned reduction.

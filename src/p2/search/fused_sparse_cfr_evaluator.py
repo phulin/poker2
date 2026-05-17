@@ -40,7 +40,7 @@ from p2.search.fused_cfr_triton import (
     fused_dcfr_update_with_tensors_,
     fused_deep_beliefs_,
     fused_divide_by_parent_sum_,
-    fused_model_values_mix_zero_sum,
+    fused_model_values_writeback_,
     fused_parent_sum,
     fused_parent_sum_divide_,
     fused_policy_sample_update_,
@@ -776,23 +776,32 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 self.latent = model_output.latent
             else:
                 model_output = self.model(features, include_policy=False)
-        hand_values = model_output.hand_values.to(self.float_dtype)
+        hand_values = model_output.hand_values.contiguous()
 
-        if not self.cfr_avg or t <= 1 or self.last_model_values is None:
-            self.latest_values.index_copy_(0, self.model_indices, hand_values)
-        else:
-            unmixed = torch.empty_like(hand_values)
-            fused_model_values_mix_zero_sum(
-                hand_values=hand_values.contiguous(),
-                last_model_values=self.last_model_values.contiguous(),
-                beliefs=beliefs.contiguous(),
-                old_plus_new_over_new=self._t_scalars.mix_onon,
-                old_over_new=self._t_scalars.mix_oon,
-                out=unmixed,
-                enforce_zero_sum=bool(self.model.enforce_zero_sum),
-            )
-            self.latest_values.index_copy_(0, self.model_indices, unmixed)
-        return self.latest_values, hand_values
+        last_shape = (hand_values.shape[0], self.num_players, NUM_HANDS)
+        if self._last_model_values_buf is None or (
+            self._last_model_values_buf.shape != last_shape
+        ):
+            self._last_model_values_buf = self.latest_values.new_empty(last_shape)
+
+        do_mix = self.cfr_avg and t > 1 and self.last_model_values is not None
+        last_model_values = (
+            self.last_model_values.contiguous() if do_mix else hand_values
+        )
+        fused_model_values_writeback_(
+            hand_values=hand_values,
+            last_model_values=last_model_values,
+            beliefs=beliefs.contiguous(),
+            model_indices=self.model_indices.contiguous(),
+            latest_values=self.latest_values,
+            last_out=self._last_model_values_buf,
+            old_plus_new_over_new=self._t_scalars.mix_onon,
+            old_over_new=self._t_scalars.mix_oon,
+            do_mix=do_mix,
+            enforce_zero_sum=bool(self.model.enforce_zero_sum) and do_mix,
+        )
+        self.last_model_values = self._last_model_values_buf
+        return self.latest_values, self._last_model_values_buf
 
     @torch.no_grad()
     def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
@@ -841,15 +850,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     board=board,
                     beliefs=feat_beliefs,
                 )
-            _, last_model_values = self._set_model_values(
+            self._set_model_values(
                 t, beliefs_at_model, features_at_model
             )
-            if self._last_model_values_buf is None or (
-                self._last_model_values_buf.shape != last_model_values.shape
-            ):
-                self._last_model_values_buf = torch.empty_like(last_model_values)
-            self._last_model_values_buf.copy_(last_model_values)
-            self.last_model_values = self._last_model_values_buf
         else:
             empty_shape = (0, self.num_players, NUM_HANDS)
             if self._last_model_values_buf is None or (
