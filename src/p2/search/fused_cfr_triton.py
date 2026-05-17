@@ -778,6 +778,158 @@ def fused_regret_tail_(
 
 
 # ---------------------------------------------------------------------------
+# Kernel 6b: compute regret tail and apply DCFR update in one pass.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_regret_dcfr_update_kernel(
+        values_achieved_ptr,     # [total, 2, H]
+        values_expected_ptr,     # [top, 2, H]
+        to_act_ptr,              # [top]
+        src_weights_ptr,         # [top, H]
+        parent_index_ptr,        # [total]
+        prev_actor_ptr,          # [total]
+        cumul_ptr,               # [total, H]
+        weight_ptr,              # [total, H]
+        pos_out_ptr,             # [total, H]
+        t_alpha_num_ptr,
+        t_beta_num_ptr,
+        t_alpha_den_ptr,
+        t_beta_den_ptr,
+        bottom,
+        total,
+        H,
+        APPLY_DCFR: tl.constexpr,
+        CFR_PLUS: tl.constexpr,
+        WRITE_POS: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < total * H
+
+        row = offs // H
+        hand = offs - row * H
+        is_child = row >= bottom
+
+        parent = tl.load(parent_index_ptr + row, mask=mask & is_child, other=0)
+        prev_actor = tl.load(prev_actor_ptr + row, mask=mask & is_child, other=0)
+        actor_p = tl.load(to_act_ptr + parent, mask=mask & is_child, other=0)
+
+        expected = tl.load(
+            values_expected_ptr + (parent * 2 + actor_p) * H + hand,
+            mask=mask & is_child,
+            other=0.0,
+        )
+        achieved = tl.load(
+            values_achieved_ptr + (row * 2 + prev_actor) * H + hand,
+            mask=mask & is_child,
+            other=0.0,
+        )
+        src_w = tl.load(
+            src_weights_ptr + parent * H + hand,
+            mask=mask & is_child,
+            other=0.0,
+        )
+        r = tl.where(is_child, src_w * (achieved - expected), 0.0)
+
+        c = tl.load(cumul_ptr + offs, mask=mask, other=0.0)
+        w = tl.load(weight_ptr + offs, mask=mask, other=0.0)
+
+        if APPLY_DCFR:
+            t_alpha_num = tl.load(t_alpha_num_ptr)
+            t_beta_num = tl.load(t_beta_num_ptr)
+            t_alpha_den = tl.load(t_alpha_den_ptr)
+            t_beta_den = tl.load(t_beta_den_ptr)
+            positive = c > 0.0
+            num = tl.where(positive, t_alpha_num, t_beta_num)
+            den = tl.where(positive, t_alpha_den, t_beta_den)
+            c = c * num
+            c = c / den
+            w = w * num
+            w = w / den
+
+        w = w + 1.0
+        c = c + r
+        if CFR_PLUS:
+            c = tl.maximum(c, 0.0)
+
+        tl.store(cumul_ptr + offs, c, mask=mask)
+        tl.store(weight_ptr + offs, w, mask=mask)
+        if WRITE_POS:
+            tl.store(pos_out_ptr + offs, tl.maximum(c, 0.0), mask=mask)
+
+
+def fused_regret_dcfr_update_with_tensors_(
+    values_achieved: torch.Tensor,
+    values_expected: torch.Tensor,
+    to_act: torch.Tensor,
+    src_weights: torch.Tensor,
+    parent_index: torch.Tensor,
+    prev_actor: torch.Tensor,
+    cumulative_regrets: torch.Tensor,
+    regret_weight_sums: torch.Tensor,
+    t_alpha_num: torch.Tensor,
+    t_beta_num: torch.Tensor,
+    t_alpha_den: torch.Tensor,
+    t_beta_den: torch.Tensor,
+    bottom: int,
+    apply_dcfr: bool,
+    cfr_plus: bool,
+    positive_regrets_out: torch.Tensor | None = None,
+    block_size: int = 1024,
+) -> None:
+    """Fused ``compute_instantaneous_regrets`` tail plus DCFR update."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values_achieved.is_contiguous() and values_achieved.dim() == 3
+    assert values_expected.is_contiguous() and values_expected.dim() == 3
+    assert to_act.is_contiguous() and to_act.dim() == 1
+    assert src_weights.is_contiguous() and src_weights.dim() == 2
+    assert parent_index.is_contiguous() and parent_index.dim() == 1
+    assert prev_actor.is_contiguous() and prev_actor.dim() == 1
+    assert cumulative_regrets.is_contiguous() and regret_weight_sums.is_contiguous()
+    assert cumulative_regrets.shape == regret_weight_sums.shape
+    total, h = cumulative_regrets.shape
+    top = values_expected.shape[0]
+    assert values_achieved.shape == (total, 2, h)
+    assert values_expected.shape == (top, 2, h)
+    assert src_weights.shape == (top, h)
+    assert to_act.shape == (top,)
+    assert parent_index.shape == (total,)
+    assert prev_actor.shape == (total,)
+    write_pos = positive_regrets_out is not None
+    pos_ptr = positive_regrets_out if write_pos else cumulative_regrets
+    grid = (triton.cdiv(total * h, block_size),)
+    _fused_regret_dcfr_update_kernel[grid](
+        values_achieved,
+        values_expected,
+        to_act,
+        src_weights,
+        parent_index,
+        prev_actor,
+        cumulative_regrets,
+        regret_weight_sums,
+        pos_ptr,
+        t_alpha_num,
+        t_beta_num,
+        t_alpha_den,
+        t_beta_den,
+        bottom,
+        total,
+        h,
+        APPLY_DCFR=apply_dcfr,
+        CFR_PLUS=cfr_plus,
+        WRITE_POS=write_pos,
+        BLOCK=block_size,
+        num_warps=4,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Kernel 7: update_average_policy mixing (pre-renormalization).
 # ---------------------------------------------------------------------------
 

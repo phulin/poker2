@@ -44,6 +44,7 @@ from p2.search.fused_cfr_triton import (
     fused_parent_sum,
     fused_parent_sum_divide_,
     fused_policy_sample_update_,
+    fused_regret_dcfr_update_with_tensors_,
     fused_reach_weights_depth_,
     fused_regret_tail_,
     fused_weighted_parent_sum,
@@ -644,10 +645,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         # Compute opponent-reach unblocked mass only at parent rows [0, top)
         # rather than all [total, 2] rows — saves ~13× memory traffic.
-        src_weights = unblocked_mass_opp_at_parents_triton(
-            beliefs, self.env.to_act, top
-        )  # [top, H]
-        src_weights *= self.allowed_hands[:top].to(dtype=src_weights.dtype)
+        src_weights = self._regret_src_weights(beliefs, top)
 
         # actor_values is now picked inside fused_regret_tail_ via to_act —
         # no caller-side aten::index, no [top, H] intermediate buffer.
@@ -664,6 +662,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         self._mask_invalid(regrets)
         return regrets
+
+    def _regret_src_weights(self, beliefs: torch.Tensor, top: int) -> torch.Tensor:
+        src_weights = unblocked_mass_opp_at_parents_triton(
+            beliefs, self.env.to_act, top
+        )
+        src_weights *= self.allowed_hands[:top].to(dtype=src_weights.dtype)
+        return src_weights
 
     def _best_response_values(
         self,
@@ -994,10 +999,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 out=self.policy_probs_sample,
             )
 
-        regrets = self.compute_instantaneous_regrets(self.latest_values)
-
         if self.cfr_type == CFRType.linear:
             # Linear CFR not supported by the fused kernel; use parent path.
+            regrets = self.compute_instantaneous_regrets(self.latest_values)
             regrets.masked_fill_(self.prev_actor[:, None] == t % self.num_players, 0.0)
             self.regret_weight_sums += 1
             self.cumulative_regrets += regrets
@@ -1008,14 +1012,29 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 if self._opt_reuse_positive_regrets
                 else None
             )
-            fused_dcfr_update_with_tensors_(
+            self._prepare_tree_slices()
+            bottom = self._bottom
+            top = self._top
+            parent_index_all = self._parent_index_all
+            to_act_top = self._to_act_top
+            assert parent_index_all is not None
+            assert to_act_top is not None
+            beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+            src_weights = self._regret_src_weights(beliefs, top)
+            fused_regret_dcfr_update_with_tensors_(
+                values_achieved=self.latest_values.contiguous(),
+                values_expected=self.latest_values[:top].contiguous(),
+                to_act=to_act_top,
+                src_weights=src_weights.contiguous(),
+                parent_index=parent_index_all,
+                prev_actor=self.prev_actor.contiguous(),
                 cumulative_regrets=self.cumulative_regrets,
                 regret_weight_sums=self.regret_weight_sums,
-                regrets=regrets,
                 t_alpha_num=self._t_scalars.t_alpha_num,
                 t_beta_num=self._t_scalars.t_beta_num,
                 t_alpha_den=self._t_scalars.t_alpha_den,
                 t_beta_den=self._t_scalars.t_beta_den,
+                bottom=bottom,
                 apply_dcfr=apply_dcfr,
                 cfr_plus=self.cfr_plus,
                 positive_regrets_out=positive_regrets_out,
