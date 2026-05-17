@@ -210,6 +210,37 @@ def test_rebel_cfr_trainer_single_step_cpu():
     assert isinstance(metrics[0]["policy_buffer_mean_sample_count"], float)
 
 
+def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
+    cfg = Config()
+    cfg.num_envs = 1
+    cfg.train.batch_size = 1
+    cfg.env.bet_bins = [0.5, 1.0]
+    cfg.model.name = "rebel_ffn"
+    cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+    cfg.model.input_dim = 2661
+    cfg.model.hidden_dim = 16
+    cfg.model.num_hidden_layers = 1
+    cfg.model.value_head_type = ValueHeadType.scalar
+    cfg.search.depth = 0
+    cfg.search.iterations = 1
+    cfg.search.warm_start_iterations = 0
+    cfg.search.dcfr_plus_delay = 0
+    cfg.strict_model_loading = False
+
+    ckpt_path = tmp_path / "rebel.pt"
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    trainer.save_checkpoint(str(ckpt_path), step=3, save_optimizer=False)
+
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    checkpoint["model"]["unexpected.compat_key"] = torch.zeros(1)
+    torch.save(checkpoint, ckpt_path)
+
+    new_trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    loaded_step = new_trainer.load_checkpoint(str(ckpt_path))
+
+    assert loaded_step == 3
+
+
 def test_permutation_loss_echo_model():
     """
     Test that permutation loss is 0 for an "echo" model that outputs

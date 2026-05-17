@@ -991,7 +991,9 @@ class RebelCFRTrainer:
                 for k, v in model_state.items()
             }
 
-        self.model.load_state_dict(model_state)
+        self.model.load_state_dict(
+            model_state, strict=self.cfg.strict_model_loading
+        )
 
         # Load EMA state if it exists in checkpoint and EMA is enabled.
         if "model_avg" in ckpt and self.ema_helper is not None:
