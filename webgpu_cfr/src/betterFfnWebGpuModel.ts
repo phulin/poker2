@@ -763,7 +763,7 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit(this.matVecPipeline, Math.ceil(rows / 64), [
+    this.submit(this.matVecPipeline, rows, [
       { binding: 0, resource: { buffer: matrix } },
       { binding: 1, resource: { buffer: input } },
       { binding: 2, resource: { buffer: bias } },
@@ -805,7 +805,7 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit2d(this.matVecBatchPipeline, Math.ceil(rows / 64), batch, [
+    this.submit2d(this.matVecBatchPipeline, rows, batch, [
       { binding: 0, resource: { buffer: matrix } },
       { binding: 1, resource: { buffer: input } },
       { binding: 2, resource: { buffer: bias } },

@@ -16,21 +16,39 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> output: array<f32>;
 @group(0) @binding(4) var<uniform> params: Params;
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let row = gid.x;
-  if (row >= params.rows) {
-    return;
-  }
+var<workgroup> partial: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let row = wid.x;
+  let lane = lid.x;
   var sum = 0.0;
   let rowOffset = row * params.cols;
-  for (var col = 0u; col < params.cols; col = col + 1u) {
+  for (var col = lane; col < params.cols; col = col + 256u) {
     sum = sum + matrix[rowOffset + col] * input[params.inputOffset + col];
   }
-  if (params.biasPresent != 0u) {
-    sum = sum + bias[row];
+  partial[lane] = sum;
+  workgroupBarrier();
+
+  var stride = 128u;
+  loop {
+    if (lane < stride) {
+      partial[lane] = partial[lane] + partial[lane + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
   }
-  output[params.outputOffset + row] = sum;
+
+  if (lane == 0u) {
+    var out = partial[0];
+    if (params.biasPresent != 0u) {
+      out = out + bias[row];
+    }
+    output[params.outputOffset + row] = out;
+  }
 }
 `;
 
@@ -52,23 +70,41 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> output: array<f32>;
 @group(0) @binding(4) var<uniform> params: Params;
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let row = gid.x;
-  let batch = gid.y;
-  if (row >= params.rows || batch >= params.batch) {
-    return;
-  }
+var<workgroup> partial: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let row = wid.x;
+  let batch = wid.y;
+  let lane = lid.x;
   var sum = 0.0;
   let rowOffset = row * params.cols;
   let inputBase = batch * params.inputStride + params.inputOffset;
-  for (var col = 0u; col < params.cols; col = col + 1u) {
+  for (var col = lane; col < params.cols; col = col + 256u) {
     sum = sum + matrix[rowOffset + col] * input[inputBase + col];
   }
-  if (params.biasPresent != 0u) {
-    sum = sum + bias[row];
+  partial[lane] = sum;
+  workgroupBarrier();
+
+  var stride = 128u;
+  loop {
+    if (lane < stride) {
+      partial[lane] = partial[lane] + partial[lane + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
   }
-  output[batch * params.outputStride + params.outputOffset + row] = sum;
+
+  if (lane == 0u) {
+    var out = partial[0];
+    if (params.biasPresent != 0u) {
+      out = out + bias[row];
+    }
+    output[batch * params.outputStride + params.outputOffset + row] = out;
+  }
 }
 `;
 
