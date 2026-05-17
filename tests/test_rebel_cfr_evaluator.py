@@ -1769,12 +1769,20 @@ def test_flop_blocking_over_iterations() -> None:
         torch.tensor([0], device=device),
         flop_pbs.beliefs,
     )
-    evaluator.root_pre_chance_beliefs[:1] = evaluator.root_pre_chance_beliefs[:1]
+    board = evaluator.env.board_indices[0]
+    expected_mask = mask_conflicting_combos(board, device=device)
+    for player in range(evaluator.num_players):
+        assert torch.all(evaluator.beliefs[0, player, expected_mask] > 0)
+        assert torch.all(evaluator.beliefs[0, player, ~expected_mask] == 0)
+
+    torch.testing.assert_close(
+        evaluator.root_pre_chance_beliefs[0],
+        uniform[0],
+    )
+
     evaluator.initialize_policy_and_beliefs()
 
     flop_valid = torch.where(evaluator.valid_mask)[0]
-    board = evaluator.env.board_indices[flop_valid[0]]
-    expected_mask = mask_conflicting_combos(board, device=device)
 
     for idx in flop_valid:
         assert torch.equal(evaluator.allowed_hands[idx], expected_mask)

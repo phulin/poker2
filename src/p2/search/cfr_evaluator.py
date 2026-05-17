@@ -808,10 +808,11 @@ class CFREvaluator(ABC):
                 device=self.device, dtype=self.float_dtype
             )
 
-        # Set initial beliefs
-        self.beliefs[:N] = initial_beliefs
-        self.beliefs_avg[:N] = initial_beliefs
-        self.root_pre_chance_beliefs[:] = initial_beliefs
+        # Preserve the incoming root beliefs for pre-chance value targets. At
+        # street transitions these may still contain hands blocked by the newly
+        # dealt board, so the search-facing beliefs are normalized separately
+        # after the root board mask is available below.
+        self.root_pre_chance_beliefs[:N] = initial_beliefs
         self.self_reach[:N] = 1.0
         self.self_reach_avg[:N] = 1.0
 
@@ -822,12 +823,31 @@ class CFREvaluator(ABC):
         # Compute allowed hands from root board
         board_mask_root = self.env.board_onehot[:N].any(dim=1).reshape(N, -1).float()
         root_allowed = (self.combo_onehot_float @ board_mask_root.T).T < 0.5
-        root_allowed_prob = root_allowed.float()
+        root_allowed_prob = root_allowed.to(dtype=self.float_dtype)
         root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1.0)
 
         # Fan out allowed hands to all nodes
         self.allowed_hands = self._fan_out_deep(root_allowed)
         self.allowed_hands_prob = self._fan_out_deep(root_allowed_prob)
+
+        # Search/policy evaluation operates in the current public state. At street
+        # transitions, initial_beliefs may still be pre-chance ranges from the
+        # previous board, but initialize_policy_and_beliefs() asks the model for a
+        # root policy before the usual per-level block/normalize pass runs. Block
+        # and renormalize the search-facing roots here so model warm-start never
+        # conditions on hands made impossible by the newly dealt board. Keep the
+        # original pre-chance roots for transition-target supervision.
+        root_beliefs = self.beliefs[:N]
+        root_beliefs[:] = initial_beliefs
+        root_beliefs.masked_fill_((~root_allowed)[:, None, :], 0.0)
+        denom = root_beliefs.sum(dim=-1, keepdim=True)
+        torch.where(
+            denom > 1e-5,
+            root_beliefs / denom,
+            root_allowed_prob[:, None, :],
+            out=root_beliefs,
+        )
+        self.beliefs_avg[:N] = root_beliefs
 
         # Initialize hand rank data
         self._init_hand_rank_data()
