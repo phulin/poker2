@@ -539,6 +539,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         self.update_average_policy(t)
         self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
+        if self.cfr_avg or not self.use_final_policy_values:
+            self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
+
+    def _refresh_average_beliefs(self) -> None:
         self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
 
     # ------------------------------------------------------------------
@@ -1150,6 +1154,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             else:
                 self.cfr_iteration(t)
             t += 1
+
+        if not self.cfr_avg and self.use_final_policy_values:
+            self._refresh_average_beliefs()
 
         if self.use_final_policy_values:
             self.update_average_values_final()
