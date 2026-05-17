@@ -368,22 +368,35 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if self._sample_update_key == key:
             return
 
-        t_cpu = self.t_sample.detach().to(device="cpu", dtype=torch.long)
-        counts_cpu = torch.bincount(t_cpu, minlength=self.cfr_iterations)
-        max_updates = int(counts_cpu.max().item()) if counts_cpu.numel() else 0
-        rows_cpu = torch.zeros(
-            self.cfr_iterations,
-            max_updates,
-            dtype=torch.long,
-            device="cpu",
-        )
-        for t in range(self.cfr_iterations):
-            rows = torch.nonzero(t_cpu == t, as_tuple=False).flatten()
-            if rows.numel() > 0:
-                rows_cpu[t, : rows.numel()] = rows
+        t_sample = self.t_sample.to(device=self.device, dtype=torch.long)
+        counts = torch.bincount(t_sample, minlength=self.cfr_iterations).contiguous()
+        max_updates = int(counts.max().item()) if counts.numel() else 0
+        if max_updates == 0:
+            rows = torch.empty(
+                self.cfr_iterations,
+                0,
+                dtype=torch.long,
+                device=self.device,
+            )
+        else:
+            order = torch.argsort(t_sample, stable=True)
+            sorted_t = t_sample.index_select(0, order)
+            starts = torch.cumsum(counts, dim=0) - counts
+            position = torch.arange(
+                order.numel(),
+                device=self.device,
+                dtype=torch.long,
+            ) - starts.index_select(0, sorted_t)
+            rows = torch.empty(
+                self.cfr_iterations,
+                max_updates,
+                dtype=torch.long,
+                device=self.device,
+            )
+            rows[sorted_t, position] = order
 
-        self._sample_update_rows = rows_cpu.to(self.device, non_blocking=True).contiguous()
-        self._sample_update_counts = counts_cpu.to(self.device, non_blocking=True).contiguous()
+        self._sample_update_rows = rows.contiguous()
+        self._sample_update_counts = counts
         self._sample_update_key = key
 
     def _model_features_for_beliefs(self, beliefs_at_model: torch.Tensor) -> MLPFeatures:
