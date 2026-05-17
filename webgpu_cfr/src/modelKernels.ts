@@ -70,26 +70,52 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> output: array<f32>;
 @group(0) @binding(4) var<uniform> params: Params;
 
-var<workgroup> partial: array<f32, 256>;
+var<workgroup> partial0: array<f32, 256>;
+var<workgroup> partial1: array<f32, 256>;
+var<workgroup> partial2: array<f32, 256>;
+var<workgroup> partial3: array<f32, 256>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let row = wid.x;
+  let row0 = wid.x * 4u;
+  let row1 = row0 + 1u;
+  let row2 = row0 + 2u;
+  let row3 = row0 + 3u;
   let batch = wid.y;
   let lane = lid.x;
-  var sum = 0.0;
-  let rowOffset = row * params.cols;
+  var sum0 = 0.0;
+  var sum1 = 0.0;
+  var sum2 = 0.0;
+  var sum3 = 0.0;
   let inputBase = batch * params.inputStride + params.inputOffset;
   for (var col = lane; col < params.cols; col = col + 256u) {
-    sum = sum + matrix[rowOffset + col] * input[inputBase + col];
+    let x = input[inputBase + col];
+    if (row0 < params.rows) {
+      sum0 = sum0 + matrix[row0 * params.cols + col] * x;
+    }
+    if (row1 < params.rows) {
+      sum1 = sum1 + matrix[row1 * params.cols + col] * x;
+    }
+    if (row2 < params.rows) {
+      sum2 = sum2 + matrix[row2 * params.cols + col] * x;
+    }
+    if (row3 < params.rows) {
+      sum3 = sum3 + matrix[row3 * params.cols + col] * x;
+    }
   }
-  partial[lane] = sum;
+  partial0[lane] = sum0;
+  partial1[lane] = sum1;
+  partial2[lane] = sum2;
+  partial3[lane] = sum3;
   workgroupBarrier();
 
   var stride = 128u;
   loop {
     if (lane < stride) {
-      partial[lane] = partial[lane] + partial[lane + stride];
+      partial0[lane] = partial0[lane] + partial0[lane + stride];
+      partial1[lane] = partial1[lane] + partial1[lane + stride];
+      partial2[lane] = partial2[lane] + partial2[lane + stride];
+      partial3[lane] = partial3[lane] + partial3[lane + stride];
     }
     workgroupBarrier();
     if (stride == 1u) {
@@ -99,11 +125,35 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   }
 
   if (lane == 0u) {
-    var out = partial[0];
-    if (params.biasPresent != 0u) {
-      out = out + bias[row];
+    let outputBase = batch * params.outputStride + params.outputOffset;
+    if (row0 < params.rows) {
+      var out0 = partial0[0];
+      if (params.biasPresent != 0u) {
+        out0 = out0 + bias[row0];
+      }
+      output[outputBase + row0] = out0;
     }
-    output[batch * params.outputStride + params.outputOffset + row] = out;
+    if (row1 < params.rows) {
+      var out1 = partial1[0];
+      if (params.biasPresent != 0u) {
+        out1 = out1 + bias[row1];
+      }
+      output[outputBase + row1] = out1;
+    }
+    if (row2 < params.rows) {
+      var out2 = partial2[0];
+      if (params.biasPresent != 0u) {
+        out2 = out2 + bias[row2];
+      }
+      output[outputBase + row2] = out2;
+    }
+    if (row3 < params.rows) {
+      var out3 = partial3[0];
+      if (params.biasPresent != 0u) {
+        out3 = out3 + bias[row3];
+      }
+      output[outputBase + row3] = out3;
+    }
   }
 }
 `;
@@ -126,7 +176,10 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> output: array<f32>;
 @group(0) @binding(4) var<uniform> params: Params;
 
-var<workgroup> partial: array<f32, 256>;
+var<workgroup> partial0: array<f32, 256>;
+var<workgroup> partial1: array<f32, 256>;
+var<workgroup> partial2: array<f32, 256>;
+var<workgroup> partial3: array<f32, 256>;
 
 fn silu(x: f32) -> f32 {
   return x / (1.0 + exp(-x));
@@ -134,24 +187,46 @@ fn silu(x: f32) -> f32 {
 
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let row = wid.x;
+  let row0 = wid.x * 4u;
+  let row1 = row0 + 1u;
+  let row2 = row0 + 2u;
+  let row3 = row0 + 3u;
   let batch = wid.y;
   let lane = lid.x;
-  var sum = 0.0;
-  let rowOffset = row * params.cols;
+  var sum0 = 0.0;
+  var sum1 = 0.0;
+  var sum2 = 0.0;
+  var sum3 = 0.0;
   let inputBase = batch * params.inputStride;
   for (var col = lane; col < params.cols; col = col + 256u) {
     let g = gate[inputBase + col];
     let gated = silu(g) * up[inputBase + col];
-    sum = sum + down[rowOffset + col] * gated;
+    if (row0 < params.rows) {
+      sum0 = sum0 + down[row0 * params.cols + col] * gated;
+    }
+    if (row1 < params.rows) {
+      sum1 = sum1 + down[row1 * params.cols + col] * gated;
+    }
+    if (row2 < params.rows) {
+      sum2 = sum2 + down[row2 * params.cols + col] * gated;
+    }
+    if (row3 < params.rows) {
+      sum3 = sum3 + down[row3 * params.cols + col] * gated;
+    }
   }
-  partial[lane] = sum;
+  partial0[lane] = sum0;
+  partial1[lane] = sum1;
+  partial2[lane] = sum2;
+  partial3[lane] = sum3;
   workgroupBarrier();
 
   var stride = 128u;
   loop {
     if (lane < stride) {
-      partial[lane] = partial[lane] + partial[lane + stride];
+      partial0[lane] = partial0[lane] + partial0[lane + stride];
+      partial1[lane] = partial1[lane] + partial1[lane + stride];
+      partial2[lane] = partial2[lane] + partial2[lane + stride];
+      partial3[lane] = partial3[lane] + partial3[lane + stride];
     }
     workgroupBarrier();
     if (stride == 1u) {
@@ -161,7 +236,19 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   }
 
   if (lane == 0u) {
-    output[batch * params.outputStride + row] = partial[0];
+    let outputBase = batch * params.outputStride;
+    if (row0 < params.rows) {
+      output[outputBase + row0] = partial0[0];
+    }
+    if (row1 < params.rows) {
+      output[outputBase + row1] = partial1[0];
+    }
+    if (row2 < params.rows) {
+      output[outputBase + row2] = partial2[0];
+    }
+    if (row3 < params.rows) {
+      output[outputBase + row3] = partial3[0];
+    }
   }
 }
 `;
@@ -184,7 +271,10 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> output: array<f32>;
 @group(0) @binding(4) var<uniform> params: Params;
 
-var<workgroup> partial: array<f32, 256>;
+var<workgroup> partial0: array<f32, 256>;
+var<workgroup> partial1: array<f32, 256>;
+var<workgroup> partial2: array<f32, 256>;
+var<workgroup> partial3: array<f32, 256>;
 
 fn erf_approx(x: f32) -> f32 {
   let sign = select(-1.0, 1.0, x >= 0.0);
@@ -200,22 +290,45 @@ fn gelu(x: f32) -> f32 {
 
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let row = wid.x;
+  let row0 = wid.x * 4u;
+  let row1 = row0 + 1u;
+  let row2 = row0 + 2u;
+  let row3 = row0 + 3u;
   let batch = wid.y;
   let lane = lid.x;
-  var sum = 0.0;
-  let rowOffset = row * params.cols;
+  var sum0 = 0.0;
+  var sum1 = 0.0;
+  var sum2 = 0.0;
+  var sum3 = 0.0;
   let inputBase = batch * params.inputStride;
   for (var col = lane; col < params.cols; col = col + 256u) {
-    sum = sum + matrix[rowOffset + col] * gelu(input[inputBase + col]);
+    let x = gelu(input[inputBase + col]);
+    if (row0 < params.rows) {
+      sum0 = sum0 + matrix[row0 * params.cols + col] * x;
+    }
+    if (row1 < params.rows) {
+      sum1 = sum1 + matrix[row1 * params.cols + col] * x;
+    }
+    if (row2 < params.rows) {
+      sum2 = sum2 + matrix[row2 * params.cols + col] * x;
+    }
+    if (row3 < params.rows) {
+      sum3 = sum3 + matrix[row3 * params.cols + col] * x;
+    }
   }
-  partial[lane] = sum;
+  partial0[lane] = sum0;
+  partial1[lane] = sum1;
+  partial2[lane] = sum2;
+  partial3[lane] = sum3;
   workgroupBarrier();
 
   var stride = 128u;
   loop {
     if (lane < stride) {
-      partial[lane] = partial[lane] + partial[lane + stride];
+      partial0[lane] = partial0[lane] + partial0[lane + stride];
+      partial1[lane] = partial1[lane] + partial1[lane + stride];
+      partial2[lane] = partial2[lane] + partial2[lane + stride];
+      partial3[lane] = partial3[lane] + partial3[lane + stride];
     }
     workgroupBarrier();
     if (stride == 1u) {
@@ -225,11 +338,35 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   }
 
   if (lane == 0u) {
-    var out = partial[0];
-    if (params.biasPresent != 0u) {
-      out = out + bias[row];
+    let outputBase = batch * params.outputStride;
+    if (row0 < params.rows) {
+      var out0 = partial0[0];
+      if (params.biasPresent != 0u) {
+        out0 = out0 + bias[row0];
+      }
+      output[outputBase + row0] = out0;
     }
-    output[batch * params.outputStride + row] = out;
+    if (row1 < params.rows) {
+      var out1 = partial1[0];
+      if (params.biasPresent != 0u) {
+        out1 = out1 + bias[row1];
+      }
+      output[outputBase + row1] = out1;
+    }
+    if (row2 < params.rows) {
+      var out2 = partial2[0];
+      if (params.biasPresent != 0u) {
+        out2 = out2 + bias[row2];
+      }
+      output[outputBase + row2] = out2;
+    }
+    if (row3 < params.rows) {
+      var out3 = partial3[0];
+      if (params.biasPresent != 0u) {
+        out3 = out3 + bias[row3];
+      }
+      output[outputBase + row3] = out3;
+    }
   }
 }
 `;

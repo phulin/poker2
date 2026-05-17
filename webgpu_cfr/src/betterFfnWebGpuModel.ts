@@ -45,6 +45,8 @@ interface PredictOptions {
   includePolicy?: boolean;
 }
 
+const BATCH_ROW_BLOCK = 4;
+
 export interface BetterFfnPrediction {
   handValues: Float32Array<ArrayBufferLike>;
   policyLogits?: Float32Array<ArrayBufferLike>;
@@ -907,7 +909,7 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit2d(this.matVecBatchPipeline, rows, batch, [
+    this.submit2d(this.matVecBatchPipeline, this.batchRowGroups(rows), batch, [
       { binding: 0, resource: { buffer: matrix } },
       { binding: 1, resource: { buffer: input } },
       { binding: 2, resource: { buffer: bias } },
@@ -946,7 +948,7 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit2d(this.swigluDownBatchPipeline, rows, batch, [
+    this.submit2d(this.swigluDownBatchPipeline, this.batchRowGroups(rows), batch, [
       { binding: 0, resource: { buffer: down } },
       { binding: 1, resource: { buffer: gate } },
       { binding: 2, resource: { buffer: up } },
@@ -986,7 +988,7 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit2d(this.geluMatVecBatchPipeline, rows, batch, [
+    this.submit2d(this.geluMatVecBatchPipeline, this.batchRowGroups(rows), batch, [
       { binding: 0, resource: { buffer: matrix } },
       { binding: 1, resource: { buffer: input } },
       { binding: 2, resource: { buffer: bias } },
@@ -1009,6 +1011,10 @@ export class BetterFfnWebGpuModel {
         },
       },
     ]);
+  }
+
+  private batchRowGroups(rows: number): number {
+    return Math.ceil(rows / BATCH_ROW_BLOCK);
   }
 
   private siluMul(
