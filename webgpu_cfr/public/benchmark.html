@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BetterFFN WebGPU CFR Benchmark</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #0f1418;
+        color: #eef3f8;
+      }
+      main {
+        width: min(920px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 32px 0;
+      }
+      h1 {
+        font-size: 24px;
+        font-weight: 650;
+        margin: 0 0 18px;
+      }
+      .controls {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+      label {
+        display: grid;
+        gap: 5px;
+        color: #aeb8c2;
+        font-size: 13px;
+      }
+      input,
+      button {
+        height: 36px;
+        border: 1px solid #3a4652;
+        border-radius: 6px;
+        background: #151c23;
+        color: #eef3f8;
+        font: inherit;
+      }
+      input {
+        min-width: 0;
+        padding: 0 10px;
+      }
+      button {
+        padding: 0 14px;
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: wait;
+        opacity: 0.68;
+      }
+      .wide {
+        grid-column: span 2;
+      }
+      #status {
+        min-height: 22px;
+        color: #aab7c4;
+        margin-bottom: 12px;
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 18px;
+      }
+      .stat {
+        border: 1px solid #29323b;
+        border-radius: 6px;
+        padding: 10px;
+        background: #121920;
+      }
+      .stat span {
+        display: block;
+        color: #aeb8c2;
+        font-size: 12px;
+      }
+      .stat strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 18px;
+        font-weight: 650;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 10px 8px;
+        border-bottom: 1px solid #29323b;
+        text-align: left;
+      }
+      td:last-child,
+      th:last-child {
+        text-align: right;
+      }
+      @media (max-width: 720px) {
+        .controls,
+        .stats {
+          grid-template-columns: 1fr 1fr;
+        }
+        .wide {
+          grid-column: span 2;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>BetterFFN WebGPU CFR Benchmark</h1>
+      <div class="controls">
+        <label class="wide">
+          Manifest
+          <input id="manifest" value="./rebel_latest/model.json" />
+        </label>
+        <label class="wide">
+          Weights
+          <input id="weights" value="./rebel_latest/weights.bin" />
+        </label>
+        <label>
+          Spot
+          <input id="spot" value="1" />
+        </label>
+        <label>
+          Iterations
+          <input id="iterations" type="number" min="1" value="8" />
+        </label>
+        <label>
+          Warmups
+          <input id="warmups" type="number" min="0" value="1" />
+        </label>
+        <label>
+          Runs
+          <input id="runs" type="number" min="1" value="5" />
+        </label>
+        <button id="run">Run Benchmark</button>
+      </div>
+      <div id="status"></div>
+      <div class="stats">
+        <div class="stat"><span>Mean</span><strong id="mean">-</strong></div>
+        <div class="stat"><span>Median</span><strong id="median">-</strong></div>
+        <div class="stat"><span>Min</span><strong id="min">-</strong></div>
+        <div class="stat"><span>Max</span><strong id="max">-</strong></div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Action</th>
+            <th>Probability</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </main>
+    <script type="module">
+      import {
+        createBrowserCfrEvaluator,
+        createBrowserDevice,
+        loadBrowserModel,
+      } from "../dist/src/browser.js";
+
+      const ids = [
+        "manifest",
+        "weights",
+        "spot",
+        "iterations",
+        "warmups",
+        "runs",
+        "run",
+        "status",
+        "mean",
+        "median",
+        "min",
+        "max",
+        "rows",
+      ];
+      const ui = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
+      let cache;
+
+      function parsePositiveInt(input, name) {
+        const value = Number.parseInt(input.value, 10);
+        if (!Number.isInteger(value) || value < Number(input.min || 1)) {
+          throw new Error(`${name} is invalid`);
+        }
+        return value;
+      }
+
+      function parseSpot(value) {
+        return value
+          .split(",")
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .map((part) => {
+            const action = Number.parseInt(part, 10);
+            if (!Number.isInteger(action)) {
+              throw new Error(`invalid action "${part}"`);
+            }
+            return action;
+          });
+      }
+
+      async function getEvaluator(manifestUrl, weightsUrl) {
+        if (cache?.manifestUrl === manifestUrl && cache?.weightsUrl === weightsUrl) {
+          return cache.evaluator;
+        }
+        cache?.evaluator.dispose();
+        cache?.model.dispose();
+        cache?.device.destroy();
+        ui.status.textContent = "Loading model";
+        const device = await createBrowserDevice();
+        const model = await loadBrowserModel(manifestUrl, weightsUrl, device);
+        const evaluator = createBrowserCfrEvaluator(device, model);
+        cache = { manifestUrl, weightsUrl, device, model, evaluator };
+        return evaluator;
+      }
+
+      function formatMs(value) {
+        return `${value.toFixed(2)} ms`;
+      }
+
+      function renderStats(samples) {
+        const sorted = [...samples].sort((a, b) => a - b);
+        const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
+        const median = sorted[Math.floor(sorted.length / 2)];
+        ui.mean.textContent = formatMs(mean);
+        ui.median.textContent = formatMs(median);
+        ui.min.textContent = formatMs(sorted[0]);
+        ui.max.textContent = formatMs(sorted[sorted.length - 1]);
+      }
+
+      function renderActions(result) {
+        ui.rows.textContent = "";
+        for (let i = 0; i < result.actionLabels.length; i += 1) {
+          const row = document.createElement("tr");
+          const label = document.createElement("td");
+          const prob = document.createElement("td");
+          label.textContent = result.actionLabels[i];
+          prob.textContent = result.actionProbs[i].toFixed(6);
+          row.append(label, prob);
+          ui.rows.append(row);
+        }
+      }
+
+      ui.run.addEventListener("click", async () => {
+        try {
+          ui.run.disabled = true;
+          ui.rows.textContent = "";
+          for (const id of ["mean", "median", "min", "max"]) ui[id].textContent = "-";
+          const manifestUrl = ui.manifest.value.trim();
+          const weightsUrl = ui.weights.value.trim();
+          const spot = parseSpot(ui.spot.value);
+          const iterations = parsePositiveInt(ui.iterations, "iterations");
+          const warmups = parsePositiveInt(ui.warmups, "warmups");
+          const runs = parsePositiveInt(ui.runs, "runs");
+          const evaluator = await getEvaluator(manifestUrl, weightsUrl);
+          for (let i = 0; i < warmups; i += 1) {
+            ui.status.textContent = `Warmup ${i + 1}/${warmups}`;
+            await evaluator.evaluateSpot({ spot, iterations });
+          }
+          const samples = [];
+          let lastResult;
+          for (let i = 0; i < runs; i += 1) {
+            ui.status.textContent = `Run ${i + 1}/${runs}`;
+            const start = performance.now();
+            lastResult = await evaluator.evaluateSpot({ spot, iterations });
+            samples.push(performance.now() - start);
+          }
+          renderStats(samples);
+          renderActions(lastResult);
+          ui.status.textContent = "Done";
+        } catch (error) {
+          ui.status.textContent = error instanceof Error ? error.message : String(error);
+        } finally {
+          ui.run.disabled = false;
+        }
+      });
+
+      window.addEventListener("pagehide", () => {
+        cache?.evaluator.dispose();
+        cache?.model.dispose();
+        cache?.device.destroy();
+      });
+    </script>
+  </body>
+</html>

@@ -65,3 +65,7 @@ npm run eval -- --snapshot checkpoints-rebel/rebel_latest.pt --spot 1 --iteratio
 For the browser demo, run `npm run build`, export the model into
 `webgpu_cfr/public/rebel_latest`, and serve `webgpu_cfr/public/index.html` from a
 local static server.
+
+The same build/export flow also enables `webgpu_cfr/public/benchmark.html`,
+which times repeated browser evaluations with configurable spots, iterations,
+warmups, and run counts.
