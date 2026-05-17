@@ -1,0 +1,19 @@
+## Directory summary
+Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton kernels, and poker-specific reductions.
+
+### Source files
+- `bench_advanced_indexing.py`: Advanced indexing benchmark.
+- `bench_calculate_unblocked_mass.py`: Unblocked-mass calculation benchmark.
+- `bench_combo_mask.py`: Combo masking benchmark.
+- `bench_fused_cfr_triton.py`: Fused CFR Triton benchmark.
+- `bench_fused_sparse_speedups.py`: Fused sparse evaluator speedup benchmark.
+- `bench_indexed_add.py`: Indexed-add benchmark.
+- `bench_reach_weights.py`: Reach-weight computation benchmark.
+- `bench_rules_triton.py`: Triton hand-rules benchmark.
+- `bench_set_model_values_indexing.py`: Model-value indexing benchmark.
+- `bench_sparse_vs_rebel_cfr.py`: Sparse versus ReBeL CFR benchmark.
+- `cfr_optimizations_bench.py`: CFR optimization comparison benchmark.
+- `profile_chance_helper.py`: Chance-node helper profiler.
+
+### Subdirectories
+There are no child source directories.

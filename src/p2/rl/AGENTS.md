@@ -1,0 +1,26 @@
+## Directory summary
+Reinforcement learning and ReBeL training support: PPO losses, replay buffers, opponent pools, self-play orchestration, ratings, and public-belief game rollout helpers.
+
+### Source files
+- `__init__.py`: Package marker.
+- `agent_snapshot.py`: Snapshot wrapper for frozen agents.
+- `cfr_trainer.py`: ReBeL CFR supervised trainer.
+- `losses.py`: PPO variants, CFR distillation loss, and ReBeL supervised loss.
+- `self_play.py`: SelfPlayTrainer and model-history support.
+- `replay.py`: Scalar trajectory storage and GAE/PPO batch preparation.
+- `vectorized_replay.py`: Batched replay buffer for tensorized environments.
+- `rebel_replay.py`: ReBeL policy/value replay buffers.
+- `rebel_batch.py`: ReBeL batch dataclass.
+- `pbs_games.py`: Public-belief game rollout utilities.
+- `opponent_pool.py`: Abstract opponent-pool interface.
+- `fixed_opponent_pool.py`: Fixed opponent pool.
+- `k_best_pool.py`: K-best opponent selection and updates.
+- `dred_pool.py`: DReD opponent pool.
+- `kmedoids.py`: PyTorch k-medoids helper for pool diversity.
+- `elo_calculator.py`: Elo update helper.
+- `trueskill_tracker.py`: TrueSkill tracking and weight binding helpers.
+- `popart_normalizer.py`: PopArt normalization module.
+- `exponential_controller.py`: Generic exponential schedule/controller.
+
+### Subdirectories
+There are no child source directories.

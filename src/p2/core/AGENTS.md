@@ -1,0 +1,10 @@
+## Directory summary
+Shared package contracts and typed configuration used across environments, models, training, and search.
+
+### Source files
+- `__init__.py`: Package marker.
+- `interfaces.py`: Abstract interfaces for environments, encoders, models, policies, leagues, and build context.
+- `structured_config.py`: Dataclass-based Hydra config schema and enums for training, model, environment, search, and rating options.
+
+### Subdirectories
+There are no child source directories.
