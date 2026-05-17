@@ -109,7 +109,7 @@ class BetterFeatureEncoder:
         )
 
         return MLPFeatures(
-            context=torch.cat([scalar_context, player_context.view(N, -1)], dim=-1),
+            context=torch.cat([scalar_context, player_context.flatten(1)], dim=-1),
             street=street,
             to_act=to_act,
             board=torch.where(

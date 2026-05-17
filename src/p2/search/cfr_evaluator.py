@@ -1062,18 +1062,23 @@ class CFREvaluator(ABC):
         if beliefs is None:
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
-        features = self.feature_encoder.encode(
-            beliefs, pre_chance_node=self.new_street_mask
-        )
+        if self.model_indices.numel() > 0:
+            features = self.feature_encoder.encode(
+                beliefs, pre_chance_node=self.new_street_mask
+            )
 
-        # Pass the same beliefs used for feature encoding to _set_model_values
-        # so that zero-sum enforcement is consistent with the model input
-        new_values, last_model_values = self._set_model_values(
-            t, beliefs[self.model_indices], features[self.model_indices]
-        )
-        # this is necessary because of torch.compile.
-        self.latest_values = new_values.clone()
-        self.last_model_values = last_model_values.clone()
+            # Pass the same beliefs used for feature encoding to _set_model_values
+            # so that zero-sum enforcement is consistent with the model input
+            new_values, last_model_values = self._set_model_values(
+                t, beliefs[self.model_indices], features[self.model_indices]
+            )
+            # this is necessary because of torch.compile.
+            self.latest_values = new_values.clone()
+            self.last_model_values = last_model_values.clone()
+        else:
+            self.last_model_values = self.latest_values.new_empty(
+                (0, self.num_players, NUM_HANDS)
+            )
 
         # Set showdown values
         showdown_beliefs = beliefs[self.showdown_indices]

@@ -864,6 +864,30 @@ def test_set_leaf_values_only_updates_marked_nodes() -> None:
     )
 
 
+def test_set_leaf_values_skips_empty_model_batch() -> None:
+    evaluator, env = make_evaluator(batch_size=1, max_depth=0)
+    roots = torch.arange(evaluator.root_nodes, device=env.device)
+    evaluator.initialize_subgame(env, roots)
+    evaluator.initialize_policy_and_beliefs()
+    evaluator.model_indices = torch.empty(0, dtype=torch.long, device=env.device)
+    evaluator.showdown_indices = torch.empty(0, dtype=torch.long, device=env.device)
+
+    def fail_if_called(features: MLPFeatures) -> torch.Tensor:
+        raise AssertionError("model should not be called for an empty model batch")
+
+    evaluator.model = MockModel(
+        custom_hand_values_fn=fail_if_called,
+        num_actions=len(evaluator.bet_bins) + 3,
+        num_players=evaluator.num_players,
+        dtype=env.float_dtype,
+    )
+
+    evaluator.set_leaf_values(0)
+
+    assert evaluator.last_model_values is not None
+    assert evaluator.last_model_values.shape == (0, evaluator.num_players, NUM_HANDS)
+
+
 def test_sample_leaf_copies_selected_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test sample_leaves returns a valid PBS with sampled nodes."""
     torch.manual_seed(0)

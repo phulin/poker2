@@ -665,51 +665,62 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if beliefs is None:
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
-        if self._opt_leaf_feature_cache:
-            beliefs_at_model = beliefs[self.model_indices]
-            features_at_model = self._model_features_for_beliefs(beliefs_at_model)
-            showdown_beliefs = beliefs[self.showdown_indices]
+        if self.model_indices.numel() > 0:
+            if self._opt_leaf_feature_cache:
+                beliefs_at_model = beliefs[self.model_indices]
+                features_at_model = self._model_features_for_beliefs(beliefs_at_model)
+                showdown_beliefs = beliefs[self.showdown_indices]
+            else:
+                features = self.feature_encoder.encode(
+                    beliefs, pre_chance_node=self.new_street_mask
+                )
+                # Fused gather: 7 aten::index calls collapse into one Inductor graph
+                # so model_indices / showdown_indices are loaded once each and reused
+                # across the indexed tensors, instead of being re-issued per field.
+                (
+                    beliefs_at_model,
+                    ctx,
+                    street,
+                    to_act,
+                    board,
+                    feat_beliefs,
+                    showdown_beliefs,
+                ) = _set_leaf_gather(
+                    beliefs,
+                    features.context,
+                    features.street,
+                    features.to_act,
+                    features.board,
+                    features.beliefs,
+                    self.model_indices,
+                    self.showdown_indices,
+                )
+                features_at_model = MLPFeatures(
+                    context=ctx,
+                    street=street,
+                    to_act=to_act,
+                    board=board,
+                    beliefs=feat_beliefs,
+                )
+            _, last_model_values = self._set_model_values(
+                t, beliefs_at_model, features_at_model
+            )
+            if self._last_model_values_buf is None or (
+                self._last_model_values_buf.shape != last_model_values.shape
+            ):
+                self._last_model_values_buf = torch.empty_like(last_model_values)
+            self._last_model_values_buf.copy_(last_model_values)
+            self.last_model_values = self._last_model_values_buf
         else:
-            features = self.feature_encoder.encode(
-                beliefs, pre_chance_node=self.new_street_mask
-            )
-            # Fused gather: 7 aten::index calls collapse into one Inductor graph
-            # so model_indices / showdown_indices are loaded once each and reused
-            # across the indexed tensors, instead of being re-issued per field.
-            (
-                beliefs_at_model,
-                ctx,
-                street,
-                to_act,
-                board,
-                feat_beliefs,
-                showdown_beliefs,
-            ) = _set_leaf_gather(
-                beliefs,
-                features.context,
-                features.street,
-                features.to_act,
-                features.board,
-                features.beliefs,
-                self.model_indices,
-                self.showdown_indices,
-            )
-            features_at_model = MLPFeatures(
-                context=ctx,
-                street=street,
-                to_act=to_act,
-                board=board,
-                beliefs=feat_beliefs,
-            )
-        _, last_model_values = self._set_model_values(
-            t, beliefs_at_model, features_at_model
-        )
-        if self._last_model_values_buf is None or (
-            self._last_model_values_buf.shape != last_model_values.shape
-        ):
-            self._last_model_values_buf = torch.empty_like(last_model_values)
-        self._last_model_values_buf.copy_(last_model_values)
-        self.last_model_values = self._last_model_values_buf
+            empty_shape = (0, self.num_players, NUM_HANDS)
+            if self._last_model_values_buf is None or (
+                self._last_model_values_buf.shape != empty_shape
+            ):
+                self._last_model_values_buf = self.latest_values.new_empty(
+                    empty_shape
+                )
+            self.last_model_values = self._last_model_values_buf
+            showdown_beliefs = beliefs[self.showdown_indices]
 
         showdown_values = self._showdown_value_both(showdown_beliefs)
         self.latest_values[self.showdown_indices] = showdown_values

@@ -8,6 +8,11 @@ from p2.env.card_utils import (
     hand_combos_tensor,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
+from p2.models.mlp.better_features import (
+    PlayerContext,
+    ScalarContext,
+)
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 
@@ -129,6 +134,31 @@ def test_permute_suits():
             torch.testing.assert_close(
                 orig_player_beliefs_combo, permuted_player_beliefs_combo
             )
+
+
+def test_better_feature_encoder_empty_indices():
+    """Empty model batches should still produce well-shaped feature tensors."""
+    env = make_env(4)
+    encoder = BetterFeatureEncoder(env, device=env.device, dtype=torch.float32)
+    beliefs = torch.full(
+        (4, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
+    )
+    indices = torch.empty(0, dtype=torch.long, device=env.device)
+    pre_chance_node = torch.zeros(4, dtype=torch.bool, device=env.device)
+
+    features = encoder.encode(
+        beliefs, pre_chance_node=pre_chance_node, indices=indices
+    )
+
+    assert features.context.shape == (
+        0,
+        ScalarContext.NUM_SCALAR_CONTEXT.value
+        + PlayerContext.NUM_PLAYER_CONTEXT.value * 2,
+    )
+    assert features.street.shape == (0,)
+    assert features.to_act.shape == (0,)
+    assert features.board.shape == (0, 5)
+    assert features.beliefs.shape == (0, 2 * NUM_HANDS)
 
 
 def _expected_remap(suit_permutation: torch.Tensor) -> torch.Tensor:
