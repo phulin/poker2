@@ -1625,6 +1625,105 @@ def fused_parent_sum_divide_(
     )
 
 
+# ---------------------------------------------------------------------------
+# Kernel 10b: average-policy renormalization plus reach propagation for one depth.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _policy_renorm_reach_depth_kernel(
+        policy_ptr,         # [total, H] in/out
+        reach_ptr,          # [total, 2, H] in/out
+        allowed_mask_ptr,   # [total, H] bool
+        child_offsets_ptr,  # [num_parents]
+        child_count_ptr,    # [num_parents]
+        prev_actor_ptr,     # [total]
+        parent_base,
+        H,
+        EPS,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        hb = tl.program_id(1)
+        parent = parent_base + p
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        denom = tl.zeros([BLOCK_H], dtype=tl.float32)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                denom += tl.load(policy_ptr + child * H + offs, mask=mask, other=0.0)
+        use_div = denom > EPS
+        denom_safe = tl.maximum(denom, EPS)
+
+        parent0 = tl.load(reach_ptr + (parent * 2 + 0) * H + offs, mask=mask, other=0.0)
+        parent1 = tl.load(reach_ptr + (parent * 2 + 1) * H + offs, mask=mask, other=0.0)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                raw = tl.load(policy_ptr + child * H + offs, mask=mask, other=0.0)
+                pol = tl.where(use_div, raw / denom_safe, raw)
+                tl.store(policy_ptr + child * H + offs, pol, mask=mask)
+
+                prev_actor = tl.load(prev_actor_ptr + child)
+                allowed = tl.load(allowed_mask_ptr + child * H + offs, mask=mask, other=0).to(tl.int1)
+                r0 = tl.where(prev_actor == 0, parent0 * pol, parent0)
+                r1 = tl.where(prev_actor == 1, parent1 * pol, parent1)
+                r0 = tl.where(allowed, r0, 0.0)
+                r1 = tl.where(allowed, r1, 0.0)
+                tl.store(reach_ptr + (child * 2 + 0) * H + offs, r0, mask=mask)
+                tl.store(reach_ptr + (child * 2 + 1) * H + offs, r1, mask=mask)
+
+
+def fused_policy_renorm_reach_depth_(
+    policy: torch.Tensor,
+    reach: torch.Tensor,
+    allowed_mask: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    prev_actor: torch.Tensor,
+    parent_base: int,
+    max_children: int,
+    eps: float = 1e-5,
+    block_h: int = 1024,
+) -> None:
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert reach.is_contiguous() and reach.shape == (policy.shape[0], 2, policy.shape[1])
+    assert allowed_mask.is_contiguous() and allowed_mask.shape == policy.shape
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert prev_actor.is_contiguous()
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    h = policy.shape[1]
+    grid = (child_offsets.shape[0], triton.cdiv(h, block_h))
+    _policy_renorm_reach_depth_kernel[grid](
+        policy,
+        reach,
+        allowed_mask,
+        child_offsets,
+        child_count,
+        prev_actor,
+        parent_base,
+        h,
+        eps,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
 def fused_sibling_sum(
     values: torch.Tensor,          # [total, H]
     child_offsets: torch.Tensor,   # [num_parents] — child_offsets[p] gives first child idx

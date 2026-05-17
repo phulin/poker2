@@ -15,6 +15,8 @@ Fusion points
   block, and normalize in one ``fused_deep_beliefs_`` kernel.
 * ``update_policy`` / ``update_average_policy`` — parent-aligned positive-regret
   sum + in-kernel divide via ``fused_parent_sum`` + ``fused_divide_by_parent_sum_``.
+* ``update_average_policy`` — average-policy renorm + average-reach propagation
+  via ``fused_policy_renorm_reach_depth_`` in the hot ``update_policy`` path.
 * ``compute_expected_values`` — per-depth weight + parent-sum reduce via
   ``fused_weighted_parent_sum``.
 * ``compute_instantaneous_regrets`` — fan-out + gather + sub + mul into
@@ -46,6 +48,7 @@ from p2.search.fused_cfr_triton import (
     fused_parent_sum,
     fused_parent_sum_divide_,
     fused_policy_sample_update_,
+    fused_policy_renorm_reach_depth_,
     fused_regret_dcfr_update_with_tensors_,
     fused_reach_weights_depth_,
     fused_regret_tail_,
@@ -550,8 +553,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._calculate_reach_weights(self.self_reach, self.policy_probs)
         self._propagate_all_beliefs(self.beliefs, self.self_reach)
 
-        self.update_average_policy(t)
-        self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
+        self.update_average_policy(t, update_reach=True)
         if self.cfr_avg or not self.use_final_policy_values:
             self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
 
@@ -802,15 +804,19 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     # Update average policy: fused mixing + parent-aligned renorm.
     # ------------------------------------------------------------------
 
-    def update_average_policy(self, t: int) -> None:
+    def update_average_policy(self, t: int, update_reach: bool = False) -> None:
         if (
             self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
             and t <= self.dcfr_delay
         ):
             self.policy_probs_avg[:] = self.policy_probs
+            if update_reach:
+                self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
             return
         if t == 0:
             self.policy_probs_avg[:] = self.policy_probs
+            if update_reach:
+                self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
             return
 
         self._prepare_tree_slices()
@@ -837,6 +843,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             total_weight=self._t_scalars.mix_total,
             bottom=N,
         )
+
+        if update_reach:
+            prev_actor = self.prev_actor.contiguous()
+            for depth in range(self.tree_depth):
+                fused_policy_renorm_reach_depth_(
+                    policy=self.policy_probs_avg,
+                    reach=self.self_reach_avg,
+                    allowed_mask=self.allowed_hands,
+                    child_offsets=self._child_offsets_by_depth[depth],
+                    child_count=self._child_count_by_depth[depth],
+                    prev_actor=prev_actor,
+                    parent_base=self.depth_offsets[depth],
+                    max_children=self.num_actions,
+                )
+            return
 
         # For renorm, fallback is the un-normalized policy itself (i.e. identity).
         child_slice = self.policy_probs_avg[N:].contiguous()
