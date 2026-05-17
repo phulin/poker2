@@ -41,6 +41,7 @@ export class BrowserCfrEvaluator {
         NUM_HANDS,
         numActions,
         request.iterations,
+        { readPolicy: false, readActionProbs: false },
       );
       if (!solved.beliefsAfter) {
         throw new Error("internal error: prefix solve did not update beliefs");

@@ -19,6 +19,11 @@ import type {
   WebgpuCfrFixture,
 } from "./types.js";
 
+interface SolveReadOptions {
+  readPolicy?: boolean;
+  readActionProbs?: boolean;
+}
+
 function u32Params(
   numHands: number,
   numActions: number,
@@ -93,7 +98,16 @@ export class GpuCfrEvaluator {
 
     for (const problem of fixture.problems) {
       assertProblem(problem, numHands, numActions);
-      final = await this.solve(problem, beliefs, numHands, numActions, fixture.iterations);
+      final = await this.solve(
+        problem,
+        beliefs,
+        numHands,
+        numActions,
+        fixture.iterations,
+        problem.action === undefined
+          ? undefined
+          : { readPolicy: false, readActionProbs: false },
+      );
       if (problem.action !== undefined) {
         if (!final.beliefsAfter) {
           throw new Error("internal error: selected action did not produce beliefs");
@@ -118,7 +132,10 @@ export class GpuCfrEvaluator {
     numHands: number,
     numActions: number,
     iterations: number,
+    readOptions: SolveReadOptions = {},
   ): Promise<LocalSolveResult> {
+    const readPolicy = readOptions.readPolicy ?? true;
+    const readActionProbs = readOptions.readActionProbs ?? true;
     const debug =
       typeof process !== "undefined" && process.env?.WEBGPU_CFR_DEBUG === "1";
     if (debug) console.error("solve:start");
@@ -175,16 +192,20 @@ export class GpuCfrEvaluator {
     ]);
 
     const beliefsIn = makeStorageBuffer(this.device, beliefs);
-    const actionProbs = makeStorageBuffer(this.device, new Float32Array(numActions));
-    const actionBindGroup = this.device.createBindGroup({
-      layout: this.actionProbs.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: beliefsIn } },
-        { binding: 1, resource: { buffer: policy } },
-        { binding: 2, resource: { buffer: actionProbs } },
-        { binding: 3, resource: { buffer: params } },
-      ],
-    });
+    let actionProbs: GPUBuffer | undefined;
+    let actionBindGroup: GPUBindGroup | undefined;
+    if (readActionProbs) {
+      actionProbs = makeStorageBuffer(this.device, new Float32Array(numActions));
+      actionBindGroup = this.device.createBindGroup({
+        layout: this.actionProbs.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: beliefsIn } },
+          { binding: 1, resource: { buffer: policy } },
+          { binding: 2, resource: { buffer: actionProbs } },
+          { binding: 3, resource: { buffer: params } },
+        ],
+      });
+    }
 
     let beliefsOut: GPUBuffer | undefined;
     let denom: GPUBuffer | undefined;
@@ -239,13 +260,15 @@ export class GpuCfrEvaluator {
       workgroupsPolicy,
       debug ? "finalize-policy" : undefined,
     );
-    this.encodeCompute(
-      encoder,
-      this.actionProbs,
-      actionBindGroup,
-      numActions,
-      debug ? "action-probs" : undefined,
-    );
+    if (actionBindGroup) {
+      this.encodeCompute(
+        encoder,
+        this.actionProbs,
+        actionBindGroup,
+        numActions,
+        debug ? "action-probs" : undefined,
+      );
+    }
 
     if (applyBindGroup && normalizeBindGroup) {
       this.encodeCompute(
@@ -266,10 +289,14 @@ export class GpuCfrEvaluator {
     if (debug) console.error("solve:submit");
     this.device.queue.submit([encoder.finish()]);
     if (debug) console.error("solve:read-policy");
-
-    const policyData = await readFloatBuffer(this.device, policy, totalPolicy);
+    const policyData = readPolicy
+      ? await readFloatBuffer(this.device, policy, totalPolicy)
+      : new Float32Array(0);
     if (debug) console.error("solve:read-actions");
-    const actionProbData = await readFloatBuffer(this.device, actionProbs, numActions);
+    const actionProbData =
+      readActionProbs && actionProbs
+        ? await readFloatBuffer(this.device, actionProbs, numActions)
+        : new Float32Array(0);
     if (debug) console.error("solve:read-beliefs");
     const beliefsAfter = beliefsOut
       ? await readFloatBuffer(this.device, beliefsOut, 2 * numHands)
