@@ -2380,6 +2380,243 @@ def fused_weighted_parent_sum_child_opp(
 
 
 # ---------------------------------------------------------------------------
+# Kernel 12b: fused best-response depth backup helpers.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _br_best_action_mass_kernel(
+        values_ptr,              # [total, 2, H] current child values / parent out
+        actor_beliefs_ptr,       # [top, H]
+        to_act_ptr,              # [total]
+        deviator_ptr,            # [total]
+        child_offsets_ptr,       # [num_parents] absolute first child
+        child_count_ptr,         # [num_parents]
+        action_from_parent_ptr,  # [total]
+        mass_ptr,                # [num_parents, A, H]
+        best_value_ptr,          # [num_parents, H]
+        parent_base,
+        H,
+        NUM_ACTIONS: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        hb = tl.program_id(1)
+        row = parent_base + p
+        actor = tl.load(to_act_ptr + row)
+        deviator = tl.load(deviator_ptr + row)
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        best = tl.full([BLOCK_H], -3.4028234663852886e38, tl.float32)
+        best_action = tl.zeros([BLOCK_H], tl.int64)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                action = tl.load(action_from_parent_ptr + child)
+                v = tl.load(
+                    values_ptr + (child * 2 + actor) * H + offs,
+                    mask=mask,
+                    other=-3.4028234663852886e38,
+                )
+                take = v > best
+                best = tl.where(take, v, best)
+                best_action = tl.where(take, action, best_action)
+
+        belief = tl.load(actor_beliefs_ptr + row * H + offs, mask=mask, other=0.0)
+        use_mass = deviator == actor
+        for a in tl.static_range(0, NUM_ACTIONS):
+            out = tl.where((best_action == a) & use_mass, belief, 0.0)
+            tl.store(mass_ptr + (p * NUM_ACTIONS + a) * H + offs, out, mask=mask)
+        tl.store(best_value_ptr + p * H + offs, best, mask=mask)
+
+    @triton.jit
+    def _br_finalize_depth_kernel(
+        values_ptr,              # [total, 2, H] in/out
+        policy_ptr,              # [total, H] child policy
+        opponent_policy_ptr,     # [top, A, H]
+        p_dev_ptr,               # [num_parents, A, H]
+        best_value_ptr,          # [num_parents, H]
+        to_act_ptr,              # [total]
+        deviator_ptr,            # [total]
+        child_offsets_ptr,       # [num_parents]
+        child_count_ptr,         # [num_parents]
+        action_from_parent_ptr,  # [total]
+        parent_base,
+        H,
+        NUM_ACTIONS: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        hb = tl.program_id(1)
+        row = parent_base + p
+        actor = tl.load(to_act_ptr + row)
+        deviator = tl.load(deviator_ptr + row)
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        actor_avg = tl.zeros([BLOCK_H], tl.float32)
+        opp_avg = tl.zeros([BLOCK_H], tl.float32)
+        opp_br = tl.zeros([BLOCK_H], tl.float32)
+        opp = 1 - actor
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                action = tl.load(action_from_parent_ptr + child)
+                actor_v = tl.load(
+                    values_ptr + (child * 2 + actor) * H + offs,
+                    mask=mask,
+                    other=0.0,
+                )
+                opp_v = tl.load(
+                    values_ptr + (child * 2 + opp) * H + offs,
+                    mask=mask,
+                    other=0.0,
+                )
+                pol = tl.load(policy_ptr + child * H + offs, mask=mask, other=0.0)
+                opp_pol = tl.load(
+                    opponent_policy_ptr + (row * NUM_ACTIONS + action) * H + offs,
+                    mask=mask,
+                    other=0.0,
+                )
+                dev_pol = tl.load(
+                    p_dev_ptr + (p * NUM_ACTIONS + action) * H + offs,
+                    mask=mask,
+                    other=0.0,
+                )
+                actor_avg += actor_v * pol
+                opp_avg += opp_v * opp_pol
+                opp_br += opp_v * dev_pol
+
+        best = tl.load(best_value_ptr + p * H + offs, mask=mask, other=0.0)
+        actor_out = tl.where(deviator == actor, best, actor_avg)
+        opp_out = tl.where(deviator == actor, opp_br, opp_avg)
+        tl.store(values_ptr + (row * 2 + actor) * H + offs, actor_out, mask=mask)
+        tl.store(values_ptr + (row * 2 + opp) * H + offs, opp_out, mask=mask)
+
+
+def fused_br_best_action_mass(
+    values: torch.Tensor,
+    actor_beliefs: torch.Tensor,
+    to_act: torch.Tensor,
+    deviator: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    action_from_parent: torch.Tensor,
+    parent_base: int,
+    num_actions: int,
+    max_children: int,
+    block_h: int = 2048,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 3 and values.shape[1] == 2
+    assert actor_beliefs.is_contiguous() and actor_beliefs.dim() == 2
+    assert to_act.is_contiguous() and deviator.is_contiguous()
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert action_from_parent.is_contiguous()
+    num_parents = child_offsets.shape[0]
+    h = values.shape[-1]
+    assert actor_beliefs.shape[1] == h
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    mass = torch.empty(
+        (num_parents, num_actions, h),
+        device=values.device,
+        dtype=values.dtype,
+    )
+    best = torch.empty((num_parents, h), device=values.device, dtype=values.dtype)
+    grid = (num_parents, triton.cdiv(h, block_h))
+    _br_best_action_mass_kernel[grid](
+        values,
+        actor_beliefs,
+        to_act,
+        deviator,
+        child_offsets,
+        child_count,
+        action_from_parent,
+        mass,
+        best,
+        parent_base,
+        h,
+        NUM_ACTIONS=num_actions,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+    return mass, best
+
+
+def fused_br_finalize_depth_(
+    values: torch.Tensor,
+    policy: torch.Tensor,
+    opponent_policy: torch.Tensor,
+    p_dev: torch.Tensor,
+    best_values: torch.Tensor,
+    to_act: torch.Tensor,
+    deviator: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    action_from_parent: torch.Tensor,
+    parent_base: int,
+    num_actions: int,
+    max_children: int,
+    block_h: int = 2048,
+) -> None:
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 3 and values.shape[1] == 2
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert opponent_policy.is_contiguous() and opponent_policy.dim() == 3
+    assert p_dev.is_contiguous() and p_dev.dim() == 3
+    assert best_values.is_contiguous() and best_values.dim() == 2
+    assert to_act.is_contiguous() and deviator.is_contiguous()
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert action_from_parent.is_contiguous()
+    num_parents = child_offsets.shape[0]
+    h = values.shape[-1]
+    assert policy.shape == (values.shape[0], h)
+    assert opponent_policy.shape[1:] == (num_actions, h)
+    assert p_dev.shape == (num_parents, num_actions, h)
+    assert best_values.shape == (num_parents, h)
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    grid = (num_parents, triton.cdiv(h, block_h))
+    _br_finalize_depth_kernel[grid](
+        values,
+        policy,
+        opponent_policy,
+        p_dev,
+        best_values,
+        to_act,
+        deviator,
+        child_offsets,
+        child_count,
+        action_from_parent,
+        parent_base,
+        h,
+        NUM_ACTIONS=num_actions,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Kernel 13: fused reach-weights per-depth propagation.
 #   Replaces _fan_out + scatter_reduce(prod) from _calculate_reach_weights.
 # ---------------------------------------------------------------------------

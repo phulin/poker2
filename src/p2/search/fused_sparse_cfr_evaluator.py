@@ -36,6 +36,8 @@ from p2.env.rules_triton import rank_hands_triton, triton_is_available as _rules
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_with_tensors_,
     fused_avg_values_zero_sum_,
+    fused_br_best_action_mass,
+    fused_br_finalize_depth_,
     fused_block_and_normalize_beliefs_,
     fused_dcfr_update_with_tensors_,
     fused_deep_beliefs_,
@@ -173,6 +175,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._child_offsets_top: torch.Tensor | None = None
         self._child_count_top: torch.Tensor | None = None
         self._to_act_top: torch.Tensor | None = None
+        self._action_from_parent_all: torch.Tensor | None = None
         self._child_offsets_by_depth: tuple[torch.Tensor, ...] = ()
         self._child_count_by_depth: tuple[torch.Tensor, ...] = ()
         self._exploitability_cache_key: tuple[tuple[int, int, tuple[int, ...]], ...] | None = None
@@ -256,6 +259,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._child_offsets_by_depth = ()
         if not hasattr(self, "_child_count_by_depth"):
             self._child_count_by_depth = ()
+        if not hasattr(self, "_action_from_parent_all"):
+            self._action_from_parent_all = None
         if not hasattr(self, "_exploitability_cache_key"):
             self._exploitability_cache_key = None
         if not hasattr(self, "_exploitability_cache"):
@@ -277,6 +282,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             int(self.parent_index.data_ptr()),
             int(self.child_offsets.data_ptr()),
             int(self.child_count.data_ptr()),
+            int(self.action_from_parent.data_ptr()),
             int(self.env.to_act.data_ptr()),
         )
         if self._tree_slice_key == key:
@@ -291,6 +297,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._child_offsets_top = self.child_offsets[:top].contiguous()
         self._child_count_top = self.child_count[:top].contiguous()
         self._to_act_top = self.env.to_act[:top].contiguous()
+        self._action_from_parent_all = self.action_from_parent.contiguous()
         self._child_offsets_by_depth = tuple(
             self.child_offsets[
                 self.depth_offsets[d] : self.depth_offsets[d + 1]
@@ -736,7 +743,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             deviating_player = self._fan_out_deep(self.env.to_act[:N])
 
         values_br = torch.where(self.leaf_mask[:, None, None], base_values, 0.0)
-        min_value = torch.finfo(base_values.dtype).min
 
         policy_src_all = self._pull_back(policy)
 
@@ -751,65 +757,38 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         for depth in range(self.tree_depth - 1, -1, -1):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
-
-            indices = torch.arange(offset_next - offset, device=self.device)
-            actor = self.env.to_act[offset:offset_next]
-            deviator = deviating_player[offset:offset_next]
-            invalid_children = ~self.child_mask[offset:offset_next]
-
-            values_src = self._pull_back(values_br, level=depth)
-            policy_src = policy_src_all[offset:offset_next]
-            opponent_policy = opponent_conditioned_policy[offset:offset_next]
-
-            actor_indices = actor[:, None, None, None].expand(-1, B, 1, NUM_HANDS)
-            opp_indices = (1 - actor)[:, None, None, None].expand(
-                -1, B, 1, NUM_HANDS
+            action_from_parent = self._action_from_parent_all
+            assert action_from_parent is not None
+            mass_by_action, best_actor_values = fused_br_best_action_mass(
+                values=values_br,
+                actor_beliefs=actor_beliefs,
+                to_act=self.env.to_act.contiguous(),
+                deviator=deviating_player.contiguous(),
+                child_offsets=self._child_offsets_by_depth[depth],
+                child_count=self._child_count_by_depth[depth],
+                action_from_parent=action_from_parent,
+                parent_base=offset,
+                num_actions=B,
+                max_children=self.num_actions,
             )
-            actor_values_src = values_src.gather(2, actor_indices).squeeze(2)
-            opp_values_src = values_src.gather(2, opp_indices).squeeze(2)
-
-            actor_values_for_best = actor_values_src.masked_fill(
-                invalid_children[:, :, None], min_value
+            p_dev = self._conditioned_action_ratio(
+                mass_by_action,
+                actor_beliefs[offset:offset_next].contiguous(),
             )
-            best_action = actor_values_for_best.argmax(dim=1)
-            best_actor_values = actor_values_src.gather(
-                1, best_action[:, None, :]
-            ).squeeze(1)
-
-            deviator_beliefs = actor_beliefs[offset:offset_next]
-            mass_by_action = torch.zeros(
-                deviator_beliefs.size(0),
-                B,
-                deviator_beliefs.size(1),
-                dtype=deviator_beliefs.dtype,
-                device=self.device,
-            )
-            mass_by_action.scatter_add_(
-                1, best_action[:, None, :], deviator_beliefs[:, None, :]
-            )
-
-            p_dev = self._conditioned_action_ratio(mass_by_action, deviator_beliefs)
-            v_opp_exp = (p_dev * opp_values_src).sum(dim=1)
-
-            actor_values = torch.where(
-                (deviator == actor)[:, None],
-                best_actor_values,
-                (actor_values_src * policy_src).sum(dim=1),
-            )
-            opp_values = torch.where(
-                (deviator == actor)[:, None],
-                v_opp_exp,
-                (opp_values_src * opponent_policy).sum(dim=1),
-            )
-
-            values_br[indices + offset, actor] = actor_values
-            values_br[indices + offset, 1 - actor] = opp_values
-
-            torch.where(
-                self.leaf_mask[offset:offset_next, None, None],
-                base_values[offset:offset_next],
-                values_br[offset:offset_next],
-                out=values_br[offset:offset_next],
+            fused_br_finalize_depth_(
+                values=values_br,
+                policy=policy,
+                opponent_policy=opponent_conditioned_policy,
+                p_dev=p_dev,
+                best_values=best_actor_values,
+                to_act=self.env.to_act.contiguous(),
+                deviator=deviating_player.contiguous(),
+                child_offsets=self._child_offsets_by_depth[depth],
+                child_count=self._child_count_by_depth[depth],
+                action_from_parent=action_from_parent,
+                parent_base=offset,
+                num_actions=B,
+                max_children=self.num_actions,
             )
 
         return values_br
