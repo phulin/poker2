@@ -214,28 +214,33 @@ export class GpuCfrEvaluator {
       });
     }
 
-    if (debug) console.error("solve:dispatch");
+    if (debug) console.error("solve:encode");
+    const encoder = this.device.createCommandEncoder();
     for (let i = 0; i < iterations; i += 1) {
-      await this.runCompute(
+      this.encodeCompute(
+        encoder,
         this.regretMatch,
         regretMatchBindGroup,
         workgroupsHands,
         debug ? "regret-match" : undefined,
       );
-      await this.runCompute(
+      this.encodeCompute(
+        encoder,
         this.accumulateRegret,
         accumulateRegretBindGroup,
         workgroupsHands,
         debug ? "accumulate-regret" : undefined,
       );
     }
-    await this.runCompute(
+    this.encodeCompute(
+      encoder,
       this.finalizePolicy,
       finalizePolicyBindGroup,
       workgroupsPolicy,
       debug ? "finalize-policy" : undefined,
     );
-    await this.runCompute(
+    this.encodeCompute(
+      encoder,
       this.actionProbs,
       actionBindGroup,
       numActions,
@@ -243,19 +248,23 @@ export class GpuCfrEvaluator {
     );
 
     if (applyBindGroup && normalizeBindGroup) {
-      await this.runCompute(
+      this.encodeCompute(
+        encoder,
         this.beliefApply,
         applyBindGroup,
         1,
         debug ? "belief-apply" : undefined,
       );
-      await this.runCompute(
+      this.encodeCompute(
+        encoder,
         this.beliefNormalize,
         normalizeBindGroup,
         workgroupsHands,
         debug ? "belief-normalize" : undefined,
       );
     }
+    if (debug) console.error("solve:submit");
+    this.device.queue.submit([encoder.finish()]);
     if (debug) console.error("solve:read-policy");
 
     const policyData = await readFloatBuffer(this.device, policy, totalPolicy);
@@ -322,6 +331,21 @@ export class GpuCfrEvaluator {
     if (label) console.error(`solve:wait:${label}`);
     await this.device.queue.onSubmittedWorkDone();
     if (label) console.error(`solve:done:${label}`);
+  }
+
+  private encodeCompute(
+    encoder: GPUCommandEncoder,
+    pipeline: GPUComputePipeline,
+    bindGroup: GPUBindGroup,
+    x: number,
+    label?: string,
+  ): void {
+    if (label) console.error(`solve:encode:${label}`);
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(x);
+    pass.end();
   }
 }
 
