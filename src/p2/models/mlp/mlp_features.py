@@ -9,14 +9,9 @@ from p2.env.card_utils import (
 )
 
 
-# Inductor fuses the five separate `tensor[index]` ops into a single graph.
-# The win we care about is structural: the `index` tensor is read once and
-# reused across all five fields, instead of producing five independent
-# `aten::index` launches that each re-issue the index gather. dynamic=True
-# keeps a single artifact across the varying batch sizes that hit this path
-# (sample(), set_leaf_values, training_data, …). Tensor-index path only;
-# slice/int fall through to the eager branch where launch overhead is
-# negligible (no recompiles either).
+# Inductor fuses integer tensor gathers across all five fields. Boolean masks
+# are intentionally kept eager in __getitem__: mask indexing lowers through
+# nonzero, whose data-dependent output shape causes graph breaks and recompiles.
 @torch.compile(dynamic=True)
 def _index_all(
     context: torch.Tensor,
@@ -59,6 +54,14 @@ class MLPFeatures:
     def __getitem__(self, index: torch.Tensor | slice | int) -> "MLPFeatures":
         """Index into all features."""
         if isinstance(index, torch.Tensor):
+            if index.dtype == torch.bool:
+                return MLPFeatures(
+                    context=self.context[index],
+                    street=self.street[index],
+                    to_act=self.to_act[index],
+                    board=self.board[index],
+                    beliefs=self.beliefs[index],
+                )
             ctx, street, to_act, board, beliefs = _index_all(
                 self.context, self.street, self.to_act, self.board, self.beliefs, index
             )

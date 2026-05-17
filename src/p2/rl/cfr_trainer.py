@@ -257,6 +257,11 @@ class RebelCFRTrainer:
                 trainer_evaluator=self.cfr_evaluator,
             )
 
+    def _model_autocast(self):
+        if self.device.type == "cuda":
+            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return nullcontext()
+
     def _make_eval_twin(self) -> nn.Module:
         """Create a second compiled model instance with the same architecture
         as ``self.model``, used as the opponent side for TrueSkill matchups."""
@@ -532,11 +537,12 @@ class RebelCFRTrainer:
             with torch.no_grad():
                 self.model.eval()
                 fresh_value_batch = fresh_value_batch.to(self.device)
-                fresh_model_output = self.model.repeat(
-                    fresh_value_batch.features,
-                    count=self.cfg.model.num_supervisions,
-                    include_policy=False,
-                )
+                with self._model_autocast():
+                    fresh_model_output = self.model.repeat(
+                        fresh_value_batch.features,
+                        count=self.cfg.model.num_supervisions,
+                        include_policy=False,
+                    )
                 fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)
                 # loss_fn returns device tensors; .item() lands once per
                 # metric here (3 syncs/step in the EMA case, 1 otherwise).
@@ -545,20 +551,22 @@ class RebelCFRTrainer:
                 if self.ema_helper is not None:
                     with self._eval_swap():
                         self.model.eval()
-                        fresh_model_avg_output = self.model.repeat(
-                            fresh_value_batch.features,
-                            count=self.cfg.model.num_supervisions,
-                            include_policy=False,
-                        )
+                        with self._model_autocast():
+                            fresh_model_avg_output = self.model.repeat(
+                                fresh_value_batch.features,
+                                count=self.cfg.model.num_supervisions,
+                                include_policy=False,
+                            )
                         metrics["fresh_value_loss_avg"] = self.loss_fn(
                             fresh_model_avg_output, fresh_value_batch
                         )["value_loss"].item()
 
-                        model_avg_output = self.model.repeat(
-                            value_batch.features,
-                            count=self.cfg.model.num_supervisions,
-                            include_policy=False,
-                        )
+                        with self._model_autocast():
+                            model_avg_output = self.model.repeat(
+                                value_batch.features,
+                                count=self.cfg.model.num_supervisions,
+                                include_policy=False,
+                            )
                         metrics["value_loss_avg"] = self.loss_fn(
                             model_avg_output, value_batch
                         )["value_loss"].item()
@@ -651,23 +659,26 @@ class RebelCFRTrainer:
         value_loss, policy_loss, entropy_loss = None, None, None
         value_loss_update, policy_loss_update = None, None
 
-        if isinstance(self.model, BetterTRM):
-            value_output_orig = self.model(
-                value_batch.features,
-                include_policy=False,
-                latent=value_latent,
-            )
-            # Run model on permuted inputs [model(permute(features))]
-            value_output_permuted = self.model(
-                permuted_batch.features,
-                include_policy=False,
-                latent=permuted_latent,
-            )
-        else:
-            value_output_orig = self.model(value_batch.features, include_policy=False)
-            value_output_permuted = self.model(
-                permuted_batch.features, include_policy=False
-            )
+        with self._model_autocast():
+            if isinstance(self.model, BetterTRM):
+                value_output_orig = self.model(
+                    value_batch.features,
+                    include_policy=False,
+                    latent=value_latent,
+                )
+                # Run model on permuted inputs [model(permute(features))]
+                value_output_permuted = self.model(
+                    permuted_batch.features,
+                    include_policy=False,
+                    latent=permuted_latent,
+                )
+            else:
+                value_output_orig = self.model(
+                    value_batch.features, include_policy=False
+                )
+                value_output_permuted = self.model(
+                    permuted_batch.features, include_policy=False
+                )
 
         loss_dict = self.loss_fn(value_output_permuted, permuted_batch)
         value_loss = loss_dict["value_loss"]
@@ -681,19 +692,20 @@ class RebelCFRTrainer:
             total_loss + self.loss_fn.permutation_weight * permutation_loss_tensor
         )
 
-        if isinstance(self.model, BetterTRM):
-            policy_output = self.model(
-                policy_batch.features,
-                include_policy=True,
-                include_value=False,
-                latent=policy_latent,
-            )
-        else:
-            policy_output = self.model(
-                policy_batch.features,
-                include_policy=True,
-                include_value=False,
-            )
+        with self._model_autocast():
+            if isinstance(self.model, BetterTRM):
+                policy_output = self.model(
+                    policy_batch.features,
+                    include_policy=True,
+                    include_value=False,
+                    latent=policy_latent,
+                )
+            else:
+                policy_output = self.model(
+                    policy_batch.features,
+                    include_policy=True,
+                    include_value=False,
+                )
         loss_dict = self.loss_fn(policy_output, policy_batch)
         policy_loss = loss_dict["policy_loss"]
         policy_loss_update = loss_dict["policy_loss_all"]

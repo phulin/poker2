@@ -1,5 +1,6 @@
 import torch
 
+import p2.models.mlp.mlp_features as mlp_features_module
 from p2.env.card_utils import (
     HAND_EQUITY_ORDERING,
     IDX_TO_RANK,
@@ -29,6 +30,35 @@ def make_env(num_envs: int = 4) -> HUNLTensorEnv:
     )
     env.reset()
     return env
+
+
+def test_bool_mask_indexing_keeps_feature_fields_aligned(monkeypatch):
+    batch_size = 4
+    features = MLPFeatures(
+        context=torch.arange(batch_size * 3, dtype=torch.float32).reshape(
+            batch_size, 3
+        ),
+        street=torch.arange(batch_size, dtype=torch.long),
+        to_act=torch.arange(batch_size, dtype=torch.long) + 10,
+        board=torch.arange(batch_size * 5, dtype=torch.long).reshape(batch_size, 5),
+        beliefs=torch.arange(batch_size * 2 * NUM_HANDS, dtype=torch.float32).reshape(
+            batch_size, 2 * NUM_HANDS
+        ),
+    )
+
+    def fail_compiled_index_all(*args, **kwargs):
+        raise AssertionError("boolean masks should bypass compiled _index_all")
+
+    monkeypatch.setattr(mlp_features_module, "_index_all", fail_compiled_index_all)
+
+    mask = torch.tensor([True, False, True, False])
+    indexed = features[mask]
+
+    torch.testing.assert_close(indexed.context, features.context[mask])
+    torch.testing.assert_close(indexed.street, features.street[mask])
+    torch.testing.assert_close(indexed.to_act, features.to_act[mask])
+    torch.testing.assert_close(indexed.board, features.board[mask])
+    torch.testing.assert_close(indexed.beliefs, features.beliefs[mask])
 
 
 def build_hand_name_to_combos(device: torch.device) -> dict[str, list[int]]:
