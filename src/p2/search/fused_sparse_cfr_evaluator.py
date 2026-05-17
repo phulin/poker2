@@ -162,6 +162,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._sample_update_key: tuple[int, int, int] | None = None
         self._static_model_feature_key: tuple[int, int, int] | None = None
         self._static_model_feature_fields: tuple[torch.Tensor, ...] | None = None
+        self._br_action_parent_index_cache: dict[tuple[int, int], torch.Tensor] = {}
 
     def _init_hand_rank_data(self) -> None:
         """Build hand-rank data, then precompute the constant-per-subgame
@@ -233,6 +234,42 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._static_model_feature_key = None
         if not hasattr(self, "_static_model_feature_fields"):
             self._static_model_feature_fields = None
+        if not hasattr(self, "_br_action_parent_index_cache"):
+            self._br_action_parent_index_cache = {}
+
+    def _action_parent_index(self, rows: int, actions: int) -> torch.Tensor:
+        """Return [0,0,...,1,1,...] mapping flattened [rows, actions] to rows."""
+        key = (rows, actions)
+        cached = self._br_action_parent_index_cache.get(key)
+        if cached is not None:
+            return cached
+        out = torch.arange(rows, device=self.device, dtype=torch.long).repeat_interleave(
+            actions
+        )
+        self._br_action_parent_index_cache[key] = out.contiguous()
+        return self._br_action_parent_index_cache[key]
+
+    def _conditioned_action_ratio(
+        self,
+        numer_by_action: torch.Tensor,
+        denom_by_node: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute unblocked(numer[action]) / unblocked(denom[node]).
+
+        ``numer_by_action`` is [N, A, H] and ``denom_by_node`` is [N, H].
+        The Triton ratio kernel computes the blocker projections and the
+        guarded divide in one pass, gathering denominator stats by row index
+        instead of expanding them across actions.
+        """
+        rows, actions, hands = numer_by_action.shape
+        parent_index = self._action_parent_index(rows, actions)
+        flat = numer_by_action.reshape(rows * actions, hands).contiguous()
+        ratio = unblocked_mass_ratio_indirect_triton(
+            numer_target=flat,
+            denom_target=denom_by_node.contiguous(),
+            parent_index=parent_index,
+        )
+        return ratio.view(rows, actions, hands)
 
     def _get_root_index(self) -> torch.Tensor:
         cached = getattr(self, "_root_index", None)
@@ -546,6 +583,108 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         self._mask_invalid(regrets)
         return regrets
+
+    def _best_response_values(
+        self,
+        policy: torch.Tensor,
+        beliefs: torch.Tensor,
+        base_values: torch.Tensor,
+        deviating_player: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Fused blocker-projection fast path for local best response stats.
+
+        This mirrors ``CFREvaluator._best_response_values`` but replaces the
+        expensive ``calculate_unblocked_mass(...); calculate_unblocked_mass(...);
+        where(denom > eps, numer / denom, 0)`` sequences with
+        ``unblocked_mass_ratio_indirect_triton``. Exploitability is monitoring
+        only, so keeping the reference tree recursion while accelerating the
+        blocker math is the highest-leverage low-risk change.
+        """
+        self._ensure_fused_attrs()
+
+        N, B = self.root_nodes, self.num_actions
+        top = self.depth_offsets[-2]
+        if deviating_player is None:
+            deviating_player = self._fan_out_deep(self.env.to_act[:N])
+
+        values_br = torch.where(self.leaf_mask[:, None, None], base_values, 0.0)
+        min_value = torch.finfo(base_values.dtype).min
+
+        policy_src_all = self._pull_back(policy)
+
+        actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
+        actor_beliefs = beliefs.gather(1, actor_indices).squeeze(1)[:top]
+
+        marginal_policy = policy_src_all * actor_beliefs[:, None, :]
+        opponent_conditioned_policy = self._conditioned_action_ratio(
+            marginal_policy, actor_beliefs
+        )
+
+        for depth in range(self.tree_depth - 1, -1, -1):
+            offset = self.depth_offsets[depth]
+            offset_next = self.depth_offsets[depth + 1]
+
+            indices = torch.arange(offset_next - offset, device=self.device)
+            actor = self.env.to_act[offset:offset_next]
+            deviator = deviating_player[offset:offset_next]
+            invalid_children = ~self.child_mask[offset:offset_next]
+
+            values_src = self._pull_back(values_br, level=depth)
+            policy_src = policy_src_all[offset:offset_next]
+            opponent_policy = opponent_conditioned_policy[offset:offset_next]
+
+            actor_indices = actor[:, None, None, None].expand(-1, B, 1, NUM_HANDS)
+            opp_indices = (1 - actor)[:, None, None, None].expand(
+                -1, B, 1, NUM_HANDS
+            )
+            actor_values_src = values_src.gather(2, actor_indices).squeeze(2)
+            opp_values_src = values_src.gather(2, opp_indices).squeeze(2)
+
+            actor_values_for_best = actor_values_src.masked_fill(
+                invalid_children[:, :, None], min_value
+            )
+            best_action = actor_values_for_best.argmax(dim=1)
+            best_actor_values = actor_values_src.gather(
+                1, best_action[:, None, :]
+            ).squeeze(1)
+
+            deviator_beliefs = actor_beliefs[offset:offset_next]
+            mass_by_action = torch.zeros(
+                deviator_beliefs.size(0),
+                B,
+                deviator_beliefs.size(1),
+                dtype=deviator_beliefs.dtype,
+                device=self.device,
+            )
+            mass_by_action.scatter_add_(
+                1, best_action[:, None, :], deviator_beliefs[:, None, :]
+            )
+
+            p_dev = self._conditioned_action_ratio(mass_by_action, deviator_beliefs)
+            v_opp_exp = (p_dev * opp_values_src).sum(dim=1)
+
+            actor_values = torch.where(
+                (deviator == actor)[:, None],
+                best_actor_values,
+                (actor_values_src * policy_src).sum(dim=1),
+            )
+            opp_values = torch.where(
+                (deviator == actor)[:, None],
+                v_opp_exp,
+                (opp_values_src * opponent_policy).sum(dim=1),
+            )
+
+            values_br[indices + offset, actor] = actor_values
+            values_br[indices + offset, 1 - actor] = opp_values
+
+            torch.where(
+                self.leaf_mask[offset:offset_next, None, None],
+                base_values[offset:offset_next],
+                values_br[offset:offset_next],
+                out=values_br[offset:offset_next],
+            )
+
+        return values_br
 
     # ------------------------------------------------------------------
     # Update average policy: fused mixing + parent-aligned renorm.
