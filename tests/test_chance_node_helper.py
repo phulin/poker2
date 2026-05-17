@@ -8,7 +8,11 @@ from collections import Counter
 import pytest
 import torch
 
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import (
+    NUM_HANDS,
+    calculate_unblocked_mass,
+    combo_to_onehot_tensor,
+)
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
 from p2.search.chance_node_helper import ChanceNodeHelper
@@ -95,6 +99,43 @@ class BoardBasedModel:
             .expand(-1, 2, NUM_HANDS)
             .to(device=self.device, dtype=self.float_dtype)
         )
+        policy_logits = torch.zeros(
+            batch_size, 3, device=self.device, dtype=self.float_dtype
+        )
+        value = torch.zeros(batch_size, device=self.device, dtype=self.float_dtype)
+        return ModelOutput(
+            policy_logits=policy_logits,
+            value=value,
+            hand_values=hand_values,
+        )
+
+    def eval(self) -> None:
+        pass
+
+    def train(self) -> None:
+        pass
+
+
+class LegalHandMaskModel:
+    """Model that returns 1 for hands compatible with the board and 0 otherwise."""
+
+    def __init__(self, device: torch.device, float_dtype: torch.dtype):
+        self.device = device
+        self.float_dtype = float_dtype
+        self.combo_onehot = combo_to_onehot_tensor(device=device).float()
+
+    def __call__(self, features: MLPFeatures) -> ModelOutput:
+        batch_size = features.context.shape[0]
+        board = features.board
+        board_onehot = torch.zeros(
+            batch_size, 52, dtype=torch.float32, device=self.device
+        )
+        valid_rows, valid_slots = torch.nonzero(board >= 0, as_tuple=True)
+        if valid_rows.numel() > 0:
+            board_onehot[valid_rows, board[valid_rows, valid_slots]] = 1.0
+
+        allowed = (self.combo_onehot @ board_onehot.T < 0.5).T
+        hand_values = allowed[:, None, :].expand(-1, 2, -1).to(self.float_dtype)
         policy_logits = torch.zeros(
             batch_size, 3, device=self.device, dtype=self.float_dtype
         )
@@ -307,6 +348,7 @@ class TestChanceNodeHelper:
             num_players=2,
             model=model,
         )
+        helper.FLOP_SAMPLE_SIZE = 0
 
         B = 1
         root_indices = torch.arange(B, device=device, dtype=torch.long)
@@ -345,6 +387,7 @@ class TestChanceNodeHelper:
         values_sum = torch.zeros(
             B, helper.num_players, NUM_HANDS, device=device, dtype=helper.float_dtype
         )
+        weight_sum = torch.zeros_like(values_sum)
 
         model.eval()
         chunk_size = 128
@@ -379,18 +422,18 @@ class TestChanceNodeHelper:
                 .expand(B, chunk_len, helper.num_players, NUM_HANDS)
             )
 
-            post_beliefs = (
+            post_unnorm = (
                 pre_beliefs.unsqueeze(1).expand(-1, chunk_len, -1, -1).clone()
             )
-            post_beliefs[..., ~allowed_broadcast] = 0.0
+            post_unnorm[..., ~allowed_broadcast] = 0.0
 
-            sums = post_beliefs.sum(dim=-1, keepdim=True)
+            sums = post_unnorm.sum(dim=-1, keepdim=True)
             uniform = allowed_broadcast.to(helper.float_dtype)
             uniform_sum = uniform.sum(dim=-1, keepdim=True).clamp(min=1.0)
             uniform = uniform / uniform_sum
 
             normalized_beliefs = torch.where(
-                sums > 1e-12, post_beliefs / sums.clamp(min=1e-12), uniform
+                sums > 1e-12, post_unnorm / sums.clamp(min=1e-12), uniform
             )
 
             belief_features = normalized_beliefs.reshape(B * chunk_len, -1)
@@ -418,10 +461,49 @@ class TestChanceNodeHelper:
             )
             hand_values = hand_values.view(B, chunk_len, helper.num_players, NUM_HANDS)
 
-            values_sum += hand_values.sum(dim=1)
+            weights = calculate_unblocked_mass(post_unnorm).flip(dims=[-2])
+            weights = weights * allowed_chunk.unsqueeze(0).unsqueeze(2).to(
+                dtype=weights.dtype
+            )
+            values_sum += (hand_values * weights).sum(dim=1)
+            weight_sum += weights.sum(dim=1)
 
-        expected = values_sum / num_flops
+        expected = torch.where(
+            weight_sum > 1e-12,
+            values_sum / weight_sum.clamp(min=1e-12),
+            torch.zeros_like(values_sum),
+        )
         torch.testing.assert_close(result, expected)
+
+    def test_flop_chance_values_excludes_hand_colliding_flops(
+        self, device: torch.device
+    ):
+        """Legal post-flop hand slots should average to one, not be diluted."""
+        model = LegalHandMaskModel(device, torch.float32)
+        helper = ChanceNodeHelper(
+            device=device,
+            float_dtype=torch.float32,
+            num_players=2,
+            model=model,
+        )
+        helper.FLOP_SAMPLE_SIZE = 0
+
+        B = 1
+        root_indices = torch.arange(B, device=device, dtype=torch.long)
+        root_features = MLPFeatures(
+            context=torch.zeros(B, 1, device=device),
+            street=torch.zeros(B, device=device, dtype=torch.long),
+            to_act=torch.zeros(B, device=device, dtype=torch.long),
+            board=torch.full((B, 5), -1, device=device, dtype=torch.long),
+            beliefs=torch.zeros(B, 2 * NUM_HANDS, device=device),
+        )
+        pre_chance_beliefs = torch.ones(B, 2, NUM_HANDS, device=device) / NUM_HANDS
+
+        result = helper.flop_chance_values(
+            root_indices, root_features, pre_chance_beliefs
+        )
+
+        torch.testing.assert_close(result, torch.ones_like(result), atol=1e-6, rtol=0)
 
     def test_single_card_chance_values_empty_input(self, helper: ChanceNodeHelper):
         """Test single_card_chance_values with empty input."""
@@ -476,6 +558,51 @@ class TestChanceNodeHelper:
         assert result.shape == (B, 2, NUM_HANDS)
         assert result.device.type == device.type
         assert result.dtype == dtype
+
+    def test_single_card_chance_values_excludes_hand_colliding_cards(
+        self, device: torch.device
+    ):
+        """Legal post-card hand slots should average to one, not count invalid cards."""
+        model = LegalHandMaskModel(device, torch.float32)
+        helper = ChanceNodeHelper(
+            device=device,
+            float_dtype=torch.float32,
+            num_players=2,
+            model=model,
+        )
+
+        B = 1
+        root_indices = torch.arange(B, dtype=torch.long, device=device)
+        root_features = MLPFeatures(
+            context=torch.zeros(B, 1, device=device),
+            street=torch.ones(B, device=device, dtype=torch.long),
+            to_act=torch.zeros(B, device=device, dtype=torch.long),
+            board=torch.tensor([[0, 1, 2, 3, -1]], dtype=torch.long, device=device),
+            beliefs=torch.zeros(B, 2 * NUM_HANDS, device=device),
+        )
+        pre_chance_beliefs = torch.ones(B, 2, NUM_HANDS, device=device) / NUM_HANDS
+        board_pre = torch.tensor([[0, 1, 2, -1, -1]], dtype=torch.long, device=device)
+
+        result = helper.single_card_chance_values(
+            root_indices, root_features, pre_chance_beliefs, board_pre
+        )
+
+        board_onehot = torch.zeros(1, 52, dtype=torch.float32, device=device)
+        board_onehot[0, :3] = 1.0
+        pre_allowed = (helper.combo_onehot_float @ board_onehot.T < 0.5).T[0]
+
+        torch.testing.assert_close(
+            result[:, :, pre_allowed],
+            torch.ones_like(result[:, :, pre_allowed]),
+            atol=1e-6,
+            rtol=0,
+        )
+        torch.testing.assert_close(
+            result[:, :, ~pre_allowed],
+            torch.zeros_like(result[:, :, ~pre_allowed]),
+            atol=1e-6,
+            rtol=0,
+        )
 
     def test_cache_consistency(self, helper: ChanceNodeHelper):
         """Test that all cache components are consistent."""

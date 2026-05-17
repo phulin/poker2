@@ -1138,6 +1138,7 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
     available = [c for c in range(52) if c not in used_cards.tolist()]
 
     sum_values = torch.zeros(2, NUM_HANDS)
+    sum_weights = torch.zeros_like(sum_values)
     pre_belief = pre_beliefs[0]
     context = start_features.context[:1]
     street_tensor = start_features.street[:1]
@@ -1149,10 +1150,13 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
         empty_pos = (board_river == -1).nonzero(as_tuple=False)[0]
         board_river[empty_pos] = card
 
-        allowed = ~combo_onehot[:, board_river].any(dim=1)
-        post_belief = pre_belief.clone()
-        post_belief[..., ~allowed] = 0.0
-        post_belief /= post_belief.sum(dim=-1, keepdim=True)
+        board_valid = board_river[board_river >= 0]
+        allowed = ~combo_onehot[:, board_valid].any(dim=1)
+        post_unnorm = pre_belief.clone()
+        post_unnorm[..., ~allowed] = 0.0
+        post_belief = post_unnorm / post_unnorm.sum(dim=-1, keepdim=True).clamp(
+            min=1e-12
+        )
 
         env_card = HUNLTensorEnv.from_proto(env_proto, num_envs=1)
         env_card.reset()
@@ -1175,9 +1179,16 @@ def test_turn_pre_batch_matches_enumerated_river_expectation(board: list[int]) -
             beliefs=belief_feature,
         )
         hand_values = model(features).hand_values.squeeze(0)
-        sum_values += hand_values
+        weights = calculate_unblocked_mass(post_unnorm).flip(dims=[0])
+        weights = weights * allowed.unsqueeze(0).to(weights.dtype)
+        sum_values += hand_values * weights
+        sum_weights += weights
 
-    manual_expected[0] = sum_values / len(available)
+    manual_expected[0] = torch.where(
+        sum_weights > 1e-12,
+        sum_values / sum_weights.clamp(min=1e-12),
+        torch.zeros_like(sum_values),
+    )
 
     torch.testing.assert_close(pre_value_batch.value_targets[:1], manual_expected[:1])
 

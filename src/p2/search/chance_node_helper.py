@@ -6,38 +6,20 @@ import torch
 
 from p2.env.card_utils import (
     NUM_HANDS,
-    combo_suit_permutation_inverse_tensor,
-    combo_suit_permutation_tensor,
+    calculate_unblocked_mass,
     combo_to_onehot_tensor,
     suit_permutations_tensor,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 
 
-@torch.compile(dynamic=True)
-def _avg_over_perms(hand_values: torch.Tensor, perms: torch.Tensor) -> torch.Tensor:
-    """Mean of hand_values gathered along its last axis under each row of `perms`.
-
-    hand_values: [..., NH]; perms: [P, NH]. Returns [..., NH], the unbiased
-    estimate of the suit-orbit mean over the P sampled permutations.
-    """
-    P, NH = perms.shape
-    g = hand_values.index_select(-1, perms.reshape(-1))
-    shape = hand_values.shape[:-1] + (P, NH)
-    return g.view(shape).mean(dim=-2)
-
-
 class ChanceNodeHelper:
     """Utilities for enumerating chance nodes when generating value targets."""
 
     FLOP_CHUNK_SIZE = 128
-    # Number of canonical flops to importance-sample per call. 0 = exhaustive
-    # enumeration of all canonical flops (≈1755) in chunks of FLOP_CHUNK_SIZE.
+    # Number of raw flops to sample per call. 0 = exhaustive enumeration of all
+    # 22,100 raw flops in chunks of FLOP_CHUNK_SIZE.
     FLOP_SAMPLE_SIZE = 256
-    # Number of suit permutations to average per canonical flop. 0 or >= 24
-    # uses the full orbit (deterministic). Lower values are an unbiased MC
-    # estimate of the orbit mean and skip the corresponding index_select work.
-    NUM_PERM_SAMPLES = 6
 
     device: torch.device
     float_dtype: torch.dtype
@@ -67,8 +49,6 @@ class ChanceNodeHelper:
         self.combo_onehot_float = combo_to_onehot_tensor(device=device).float()
         self.suit_permutations = suit_permutations_tensor(device=device)
         self.num_permutations = self.suit_permutations.shape[0]
-        self.combo_perm = combo_suit_permutation_tensor(device=device)
-        self.combo_perm_inverse = combo_suit_permutation_inverse_tensor(device=device)
 
         # Initialize cache as instance variables
         self._build_canonical_flops_cache()
@@ -245,9 +225,11 @@ class ChanceNodeHelper:
         values_sum = torch.zeros(
             B, self.num_players, NUM_HANDS, device=device, dtype=dtype
         )
+        weight_sum = torch.zeros_like(values_sum)
 
         model = self.model
-        num_flops = self.flop_id_to_canonical.shape[0]
+        all_flops = self.all_flops
+        num_flops = all_flops.shape[0]
 
         pre_beliefs_broadcast = pre_beliefs.expand(
             B, self.num_players, NUM_HANDS
@@ -255,15 +237,27 @@ class ChanceNodeHelper:
 
         model.eval()
 
-        def eval_chunk(canonical_chunk, allowed_chunk):
-            chunk_len = canonical_chunk.shape[0]
-            canonical_chunk_5 = torch.cat(
+        def eval_chunk(flop_chunk: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            chunk_len = flop_chunk.shape[0]
+            board_chunk = torch.cat(
                 [
-                    canonical_chunk,
+                    flop_chunk,
                     torch.full((chunk_len, 2), -1, device=device, dtype=torch.long),
                 ],
                 dim=1,
             )
+
+            board_onehot = torch.zeros(
+                chunk_len, 52, dtype=self.combo_onehot_float.dtype, device=device
+            )
+            board_onehot.scatter_(
+                1,
+                flop_chunk,
+                torch.ones(
+                    chunk_len, 3, dtype=self.combo_onehot_float.dtype, device=device
+                ),
+            )
+            allowed_chunk = (self.combo_onehot_float @ board_onehot.T < 0.5).T
 
             allowed_broadcast = (
                 allowed_chunk.unsqueeze(0)
@@ -271,23 +265,23 @@ class ChanceNodeHelper:
                 .expand(B, chunk_len, self.num_players, NUM_HANDS)
             )
 
-            post_beliefs = (
+            post_unnorm = (
                 pre_beliefs_broadcast.unsqueeze(1).expand(-1, chunk_len, -1, -1).clone()
             )
-            post_beliefs[..., ~allowed_broadcast] = 0.0
+            post_unnorm.masked_fill_(~allowed_broadcast, 0.0)
 
-            sums = post_beliefs.sum(dim=-1, keepdim=True)
+            sums = post_unnorm.sum(dim=-1, keepdim=True)
             uniform = allowed_broadcast.to(dtype)
             uniform_sum = uniform.sum(dim=-1, keepdim=True).clamp(min=1.0)
             uniform = uniform / uniform_sum
 
             normalized_beliefs = torch.where(
-                sums > 1e-12, post_beliefs / sums.clamp(min=1e-12), uniform
+                sums > 1e-12, post_unnorm / sums.clamp(min=1e-12), uniform
             )
 
             belief_features = normalized_beliefs.reshape(B * chunk_len, -1)
             board_samples_flat = (
-                canonical_chunk_5.unsqueeze(0).expand(B, -1, -1).reshape(-1, 5)
+                board_chunk.unsqueeze(0).expand(B, -1, -1).reshape(-1, 5)
             )
 
             context_expand = (
@@ -311,50 +305,38 @@ class ChanceNodeHelper:
                 B, chunk_len, self.num_players, NUM_HANDS
             )
 
-            # Average over the 24-element suit-permutation orbit of each canonical
-            # flop. We rely on the model being suit-equivariant (enforced by an
-            # auxiliary permutation loss), so applying a suit permutation to the
-            # input is equivalent to permuting the output's hand axis. NUM_PERM_SAMPLES
-            # < 24 takes an unbiased Monte Carlo estimate of the orbit mean.
-            P = self.NUM_PERM_SAMPLES
-            if P > 0 and P < self.num_permutations:
-                perm_indices = torch.randperm(
-                    self.num_permutations,
-                    device=device,
-                    generator=self.generator,
-                )[:P]
-            else:
-                perm_indices = torch.arange(self.num_permutations, device=device)
-            perms = self.combo_perm[perm_indices]  # [P, NUM_HANDS]
-            return _avg_over_perms(hand_values, perms)
+            weights = calculate_unblocked_mass(post_unnorm).flip(dims=[-2])
+            weights = weights * allowed_chunk.unsqueeze(0).unsqueeze(2).to(
+                dtype=weights.dtype
+            )
+            return hand_values * weights.to(dtype=dtype), weights.to(dtype=dtype)
 
         S = self.FLOP_SAMPLE_SIZE
         if S > 0 and S < num_flops:
-            # Importance-weighted Monte Carlo over canonical flops. Sample with
-            # probability ∝ flop_id_to_count (number of raw flops collapsed into
-            # each canonical), so the simple mean of values is unbiased for the
-            # exact sum_i (counts_i / total_flop_count) * V_i.
-            probs = self.flop_id_to_count.to(dtype)
-            sample_idx = torch.multinomial(
-                probs, S, replacement=True, generator=self.generator
+            sample_idx = torch.randperm(
+                num_flops, device=device, generator=self.generator
+            )[:S]
+            weighted_values, weights = eval_chunk(all_flops[sample_idx])
+            values_sum = weighted_values.sum(dim=1)
+            weight_sum = weights.sum(dim=1)
+            return torch.where(
+                weight_sum > 1e-12,
+                values_sum / weight_sum.clamp(min=1e-12),
+                torch.zeros_like(values_sum),
             )
-            canonical_chunk = self.flop_id_to_canonical[sample_idx]
-            allowed_chunk = self.flop_id_to_allowed_mask[sample_idx]
-            permuted_sum = eval_chunk(canonical_chunk, allowed_chunk)
-            return permuted_sum.mean(dim=1)
 
         chunk_size = self.FLOP_CHUNK_SIZE
         for start in range(0, num_flops, chunk_size):
             end = min(start + chunk_size, num_flops)
-            canonical_chunk = self.flop_id_to_canonical[start:end]
-            counts_chunk = self.flop_id_to_count[start:end]
-            allowed_chunk = self.flop_id_to_allowed_mask[start:end]
-            permuted_sum = eval_chunk(canonical_chunk, allowed_chunk)
-            weight = counts_chunk.view(1, -1, 1, 1).to(dtype)
-            values_sum += (permuted_sum * weight).sum(dim=1)
+            weighted_values, weights = eval_chunk(all_flops[start:end])
+            values_sum += weighted_values.sum(dim=1)
+            weight_sum += weights.sum(dim=1)
 
-        expected = values_sum / self.total_flop_count
-        return expected
+        return torch.where(
+            weight_sum > 1e-12,
+            values_sum / weight_sum.clamp(min=1e-12),
+            torch.zeros_like(values_sum),
+        )
 
     @torch.no_grad()
     def single_card_chance_values(
@@ -433,14 +415,14 @@ class ChanceNodeHelper:
         # But want [num_samples, 1326], so transpose result
         allowed_mask = (self.combo_onehot_float @ board_onehot.T.float() < 0.5).T
 
-        post_beliefs = pre_beliefs[root_lookup].clone()
-        post_beliefs.masked_fill_(~allowed_mask.unsqueeze(1), 0.0)
-        sums = post_beliefs.sum(dim=-1, keepdim=True)
+        post_unnorm = pre_beliefs[root_lookup].clone()
+        post_unnorm.masked_fill_(~allowed_mask.unsqueeze(1), 0.0)
+        sums = post_unnorm.sum(dim=-1, keepdim=True)
         uniform = allowed_mask.unsqueeze(1).float()
         uniform_sum = uniform.sum(dim=-1, keepdim=True).clamp(min=1.0)
         uniform = uniform / uniform_sum
         post_beliefs = torch.where(
-            sums > 1e-12, post_beliefs / sums.clamp(min=1e-12), uniform
+            sums > 1e-12, post_unnorm / sums.clamp(min=1e-12), uniform
         )
 
         context_samples = context_root[root_lookup]
@@ -459,21 +441,25 @@ class ChanceNodeHelper:
         model = self.model
         model.eval()
 
-        # Note: Technically these are EVs from the model, not CFVs.
-        # But reach-weight only changes evenly across the chance node, so we ignore it.
+        # The model returns per-hand EVs; convert the chance expectation into a
+        # hand-conditional average with opponent compatible-mass weights.
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             hand_values = model(synthetic_features).hand_values
         hand_values = hand_values.to(dtype=dtype)
 
+        weights = calculate_unblocked_mass(post_unnorm).flip(dims=[-2])
+        weights = weights * allowed_mask.unsqueeze(1).to(dtype=weights.dtype)
+
         values_sum = torch.zeros(
             B, self.num_players, NUM_HANDS, device=device, dtype=dtype
         )
-        counts = torch.zeros(B, device=device, dtype=dtype)
-        values_sum.index_add_(0, root_lookup, hand_values)
-        counts.index_add_(
-            0, root_lookup, torch.ones(num_samples, device=device, dtype=dtype)
+        weight_sum = torch.zeros_like(values_sum)
+        values_sum.index_add_(0, root_lookup, hand_values * weights.to(dtype=dtype))
+        weight_sum.index_add_(0, root_lookup, weights.to(dtype=dtype))
+        expected = torch.where(
+            weight_sum > 1e-12,
+            values_sum / weight_sum.clamp(min=1e-12),
+            torch.zeros_like(values_sum),
         )
-        counts = counts.clamp(min=1.0)
-        expected = values_sum / counts.view(-1, 1, 1)
 
         return expected
