@@ -1101,9 +1101,11 @@ if triton is not None:
         S_ptr,         # [B]
         card_a_ptr,    # [H] int32
         card_b_ptr,    # [H] int32
+        allowed_ptr,   # optional [B, H] bool mask
         out_ptr,       # [B, H]
         H,
         NUM_CARDS: tl.constexpr,
+        HAS_ALLOWED: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
         b = tl.program_id(0)
@@ -1125,6 +1127,9 @@ if triton is not None:
 
         out = S - csa - csb + t
         out = tl.maximum(out, 0.0)
+        if HAS_ALLOWED:
+            allowed = tl.load(allowed_ptr + b * H + offs, mask=mask, other=0).to(tl.int1)
+            out = tl.where(allowed, out, 0.0)
         tl.store(out_row + offs, out, mask=mask)
 
 
@@ -1238,6 +1243,7 @@ def unblocked_mass_opp_at_parents_triton(
     to_act: torch.Tensor,    # [total] int64
     top: int,
     cached_stats: ParentBeliefUnblockedStats | None = None,
+    allowed_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute ``unblocked_mass(beliefs[:top, 1 - to_act[:top], :])``, returning
     a ``[top, H]`` tensor of opponent-reach unblocked mass at each parent node.
@@ -1266,10 +1272,15 @@ def unblocked_mass_opp_at_parents_triton(
 
     card_a, card_b = _get_combo_cards(target.device)
     out = torch.empty_like(target)
+    has_allowed = allowed_mask is not None
+    allowed_ptr = allowed_mask if has_allowed else out
+    if has_allowed:
+        assert allowed_mask.is_contiguous() and allowed_mask.shape == target.shape
     _unblocked_mass_finalize_kernel[(top,)](
-        target, cardsum, s, card_a, card_b, out,
+        target, cardsum, s, card_a, card_b, allowed_ptr, out,
         _UNBLOCKED_NUM_HANDS,
         NUM_CARDS=_UNBLOCKED_NUM_CARDS,
+        HAS_ALLOWED=has_allowed,
         BLOCK_H=2048,
         num_warps=4,
     )
@@ -1318,8 +1329,10 @@ def unblocked_mass_triton(target: torch.Tensor) -> torch.Tensor:
         card_a,
         card_b,
         out,
+        out,
         h,
         NUM_CARDS=_UNBLOCKED_NUM_CARDS,
+        HAS_ALLOWED=False,
         BLOCK_H=2048,
         num_warps=4,
     )
@@ -2055,6 +2068,7 @@ if triton is not None:
         M, H,
         DO_MIX: tl.constexpr,
         ENFORCE_ZS: tl.constexpr,
+        STORE_LAST: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
         m = tl.program_id(0)
@@ -2102,8 +2116,9 @@ if triton is not None:
 
         tl.store(latest0_p, v0 - s, mask=mask)
         tl.store(latest1_p, v1 - s, mask=mask)
-        tl.store(last0_p, h0, mask=mask)
-        tl.store(last1_p, h1, mask=mask)
+        if STORE_LAST:
+            tl.store(last0_p, h0, mask=mask)
+            tl.store(last1_p, h1, mask=mask)
 
 
 def fused_model_values_writeback_(
@@ -2117,6 +2132,7 @@ def fused_model_values_writeback_(
     old_over_new: torch.Tensor,            # 0-D
     do_mix: bool,
     enforce_zero_sum: bool,
+    store_last: bool = True,
     block_h: int = 2048,
 ) -> None:
     """Write model leaf values directly into evaluator buffers.
@@ -2150,6 +2166,7 @@ def fused_model_values_writeback_(
         m, h,
         DO_MIX=do_mix,
         ENFORCE_ZS=enforce_zero_sum,
+        STORE_LAST=store_last,
         BLOCK_H=block_h,
         num_warps=8,
     )

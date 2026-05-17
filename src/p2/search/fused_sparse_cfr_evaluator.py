@@ -681,11 +681,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         return regrets
 
     def _regret_src_weights(self, beliefs: torch.Tensor, top: int) -> torch.Tensor:
-        src_weights = unblocked_mass_opp_at_parents_triton(
-            beliefs, self.env.to_act, top
+        return unblocked_mass_opp_at_parents_triton(
+            beliefs,
+            self.env.to_act,
+            top,
+            allowed_mask=self.allowed_hands[:top].contiguous(),
         )
-        src_weights *= self.allowed_hands[:top].to(dtype=src_weights.dtype)
-        return src_weights
 
     def _best_response_values(
         self,
@@ -888,30 +889,36 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 model_output = self.model(features, include_policy=False)
         hand_values = model_output.hand_values.contiguous()
 
-        last_shape = (hand_values.shape[0], self.num_players, NUM_HANDS)
-        if self._last_model_values_buf is None or (
-            self._last_model_values_buf.shape != last_shape
-        ):
-            self._last_model_values_buf = self.latest_values.new_empty(last_shape)
-
         do_mix = self.cfr_avg and t > 1 and self.last_model_values is not None
-        last_model_values = (
-            self.last_model_values.contiguous() if do_mix else hand_values
-        )
+        store_last = bool(self.cfr_avg)
+        if store_last:
+            last_shape = (hand_values.shape[0], self.num_players, NUM_HANDS)
+            if self._last_model_values_buf is None or (
+                self._last_model_values_buf.shape != last_shape
+            ):
+                self._last_model_values_buf = self.latest_values.new_empty(last_shape)
+            last_out = self._last_model_values_buf
+            last_model_values = (
+                self.last_model_values.contiguous() if do_mix else hand_values
+            )
+        else:
+            last_out = hand_values
+            last_model_values = hand_values
         fused_model_values_writeback_(
             hand_values=hand_values,
             last_model_values=last_model_values,
             beliefs=beliefs.contiguous(),
             model_indices=self.model_indices.contiguous(),
             latest_values=self.latest_values,
-            last_out=self._last_model_values_buf,
+            last_out=last_out,
             old_plus_new_over_new=self._t_scalars.mix_onon,
             old_over_new=self._t_scalars.mix_oon,
             do_mix=do_mix,
             enforce_zero_sum=bool(self.model.enforce_zero_sum) and do_mix,
+            store_last=store_last,
         )
-        self.last_model_values = self._last_model_values_buf
-        return self.latest_values, self._last_model_values_buf
+        self.last_model_values = last_out if store_last else None
+        return self.latest_values, last_out
 
     @torch.no_grad()
     def set_leaf_values(self, t: int, beliefs: torch.Tensor | None = None) -> None:
