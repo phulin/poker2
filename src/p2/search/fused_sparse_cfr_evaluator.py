@@ -857,8 +857,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 out=self.policy_probs_avg[N:],
                 eps=1e-5,
             )
-        self.policy_probs_avg[:N] = 0.0
-
     # ------------------------------------------------------------------
     # Update average values: fused mixing.
     # ------------------------------------------------------------------

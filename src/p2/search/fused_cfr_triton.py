@@ -953,8 +953,14 @@ if triton is not None:
         EPS,
         BLOCK_H: tl.constexpr,
     ):
-        c = tl.program_id(0) + bottom
+        c = tl.program_id(0)
         if c >= total:
+            return
+        if c < bottom:
+            for start in tl.range(0, H, BLOCK_H):
+                offs = start + tl.arange(0, BLOCK_H)
+                mask = offs < H
+                tl.store(policy_probs_avg_ptr + c * H + offs, 0.0, mask=mask)
             return
         parent = tl.load(parent_index_ptr + c)
         actor = tl.load(to_act_ptr + parent)
@@ -1057,7 +1063,7 @@ def fused_average_policy_mix_with_tensors_(
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
     total, h = policy_probs_avg.shape
-    grid = (total - bottom,)
+    grid = (total,)
     _fused_average_policy_mix_kernel[grid](
         self_reach,
         self_reach_avg,
