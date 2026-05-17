@@ -41,6 +41,8 @@ def get_activation(
     """
     if nonlinearity == NonlinearityType.relu:
         return nn.ReLU(**activation_kwargs)
+    if nonlinearity == NonlinearityType.leaky_relu:
+        return nn.LeakyReLU(negative_slope=0.01, **activation_kwargs)
     if nonlinearity == NonlinearityType.gelu:
         activation_kwargs.pop("inplace", None)
         return nn.GELU(**activation_kwargs)

@@ -44,7 +44,7 @@ train:
 
 model:
   name: BetterFFN
-  nonlinearity: swiglu
+  nonlinearity: leaky_relu
   hidden_dim: 1024
   range_hidden_dim: 256
   ffn_dim: 1024

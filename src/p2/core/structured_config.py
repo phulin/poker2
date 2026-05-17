@@ -57,6 +57,7 @@ class WarmStartType(str, Enum):
 
 class NonlinearityType(str, Enum):
     relu = "relu"
+    leaky_relu = "leaky_relu"
     gelu = "gelu"
     silu = "silu"
     swiglu = "swiglu"
@@ -174,7 +175,7 @@ class ModelConfig:
     value_head_num_quantiles: int = -1
     use_gradient_checkpointing: bool = True
     detach_value_head: bool = False
-    nonlinearity: NonlinearityType = NonlinearityType.gelu
+    nonlinearity: NonlinearityType = NonlinearityType.leaky_relu
 
     # CNN-specific parameters (with defaults)
     cards_channels: int = 6
