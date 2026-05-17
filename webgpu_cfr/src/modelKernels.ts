@@ -108,6 +108,132 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 }
 `;
 
+export const SWIGLU_DOWN_BATCH_WGSL = /* wgsl */ `
+struct Params {
+  rows: u32,
+  cols: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> down: array<f32>;
+@group(0) @binding(1) var<storage, read> gate: array<f32>;
+@group(0) @binding(2) var<storage, read> up: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+var<workgroup> partial: array<f32, 256>;
+
+fn silu(x: f32) -> f32 {
+  return x / (1.0 + exp(-x));
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let row = wid.x;
+  let batch = wid.y;
+  let lane = lid.x;
+  var sum = 0.0;
+  let rowOffset = row * params.cols;
+  let inputBase = batch * params.inputStride;
+  for (var col = lane; col < params.cols; col = col + 256u) {
+    let g = gate[inputBase + col];
+    let gated = silu(g) * up[inputBase + col];
+    sum = sum + down[rowOffset + col] * gated;
+  }
+  partial[lane] = sum;
+  workgroupBarrier();
+
+  var stride = 128u;
+  loop {
+    if (lane < stride) {
+      partial[lane] = partial[lane] + partial[lane + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  if (lane == 0u) {
+    output[batch * params.outputStride + row] = partial[0];
+  }
+}
+`;
+
+export const GELU_MAT_VEC_BATCH_WGSL = /* wgsl */ `
+struct Params {
+  rows: u32,
+  cols: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+  biasPresent: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> matrix: array<f32>;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+var<workgroup> partial: array<f32, 256>;
+
+fn erf_approx(x: f32) -> f32 {
+  let sign = select(-1.0, 1.0, x >= 0.0);
+  let ax = abs(x);
+  let t = 1.0 / (1.0 + 0.3275911 * ax);
+  let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-ax * ax);
+  return sign * y;
+}
+
+fn gelu(x: f32) -> f32 {
+  return 0.5 * x * (1.0 + erf_approx(x * 0.7071067811865476));
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let row = wid.x;
+  let batch = wid.y;
+  let lane = lid.x;
+  var sum = 0.0;
+  let rowOffset = row * params.cols;
+  let inputBase = batch * params.inputStride;
+  for (var col = lane; col < params.cols; col = col + 256u) {
+    sum = sum + matrix[rowOffset + col] * gelu(input[inputBase + col]);
+  }
+  partial[lane] = sum;
+  workgroupBarrier();
+
+  var stride = 128u;
+  loop {
+    if (lane < stride) {
+      partial[lane] = partial[lane] + partial[lane + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  if (lane == 0u) {
+    var out = partial[0];
+    if (params.biasPresent != 0u) {
+      out = out + bias[row];
+    }
+    output[batch * params.outputStride + row] = out;
+  }
+}
+`;
+
 export const LAYER_NORM_WGSL = /* wgsl */ `
 struct Params {
   dim: u32,

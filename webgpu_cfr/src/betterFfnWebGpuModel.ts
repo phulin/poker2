@@ -1,5 +1,6 @@
 import {
   ADD3_WGSL,
+  GELU_MAT_VEC_BATCH_WGSL,
   GELU_WGSL,
   LAYER_NORM_BATCH_WGSL,
   LAYER_NORM_WGSL,
@@ -7,6 +8,7 @@ import {
   MAT_VEC_WGSL,
   SCALED_RESIDUAL_ADD_WGSL,
   SILU_MUL_WGSL,
+  SWIGLU_DOWN_BATCH_WGSL,
   ZERO_SUM_BATCH_WGSL,
 } from "./modelKernels.js";
 import {
@@ -64,6 +66,8 @@ export class BetterFfnWebGpuModel {
   private readonly handEmbeddingT: GPUBuffer;
   private readonly matVecPipeline: GPUComputePipeline;
   private readonly matVecBatchPipeline: GPUComputePipeline;
+  private readonly swigluDownBatchPipeline: GPUComputePipeline;
+  private readonly geluMatVecBatchPipeline: GPUComputePipeline;
   private readonly layerNormPipeline: GPUComputePipeline;
   private readonly layerNormBatchPipeline: GPUComputePipeline;
   private readonly siluMulPipeline: GPUComputePipeline;
@@ -98,6 +102,14 @@ export class BetterFfnWebGpuModel {
     this.matVecBatchPipeline = this.pipeline(
       MAT_VEC_BATCH_WGSL,
       "better-ffn-mat-vec-batch",
+    );
+    this.swigluDownBatchPipeline = this.pipeline(
+      SWIGLU_DOWN_BATCH_WGSL,
+      "better-ffn-swiglu-down-batch",
+    );
+    this.geluMatVecBatchPipeline = this.pipeline(
+      GELU_MAT_VEC_BATCH_WGSL,
+      "better-ffn-gelu-mat-vec-batch",
     );
     this.layerNormPipeline = this.pipeline(
       LAYER_NORM_WGSL,
@@ -631,22 +643,17 @@ export class BetterFfnWebGpuModel {
       false,
       uniform,
     );
-    const gated = empty(batch * hiddenDim);
-    this.siluMul(gate, up, gated, batch * hiddenDim, uniform);
     const out = empty(batch * outDim);
-    this.matVecBatch(
+    this.swigluDownBatch(
       this.tensor(`${prefix}.swiglu.down.weight`).buffer,
-      gated,
-      this.dummyBias,
+      gate,
+      up,
       out,
       outDim,
       hiddenDim,
       batch,
       hiddenDim,
       outDim,
-      0,
-      0,
-      false,
       uniform,
     );
     return out;
@@ -682,12 +689,10 @@ export class BetterFfnWebGpuModel {
       false,
       uniform,
     );
-    const activated = empty(batch * hiddenDim);
-    this.gelu(linear, activated, batch * hiddenDim, uniform);
     const out = empty(batch * outDim);
-    this.matVecBatch(
+    this.geluMatVecBatch(
       this.tensor(`${prefix}.linear_out.weight`).buffer,
-      activated,
+      linear,
       this.tensor(`${prefix}.linear_out.bias`).buffer,
       out,
       outDim,
@@ -695,8 +700,6 @@ export class BetterFfnWebGpuModel {
       batch,
       hiddenDim,
       outDim,
-      0,
-      0,
       true,
       uniform,
     );
@@ -922,6 +925,85 @@ export class BetterFfnWebGpuModel {
               inputOffset,
               outputOffset,
               biasPresent ? 1 : 0,
+            ]),
+          ),
+        },
+      },
+    ]);
+  }
+
+  private swigluDownBatch(
+    down: GPUBuffer,
+    gate: GPUBuffer,
+    up: GPUBuffer,
+    output: GPUBuffer,
+    rows: number,
+    cols: number,
+    batch: number,
+    inputStride: number,
+    outputStride: number,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    this.submit2d(this.swigluDownBatchPipeline, rows, batch, [
+      { binding: 0, resource: { buffer: down } },
+      { binding: 1, resource: { buffer: gate } },
+      { binding: 2, resource: { buffer: up } },
+      { binding: 3, resource: { buffer: output } },
+      {
+        binding: 4,
+        resource: {
+          buffer: uniform(
+            new Uint32Array([
+              rows,
+              cols,
+              batch,
+              inputStride,
+              outputStride,
+              0,
+              0,
+              0,
+            ]),
+          ),
+        },
+      },
+    ]);
+  }
+
+  private geluMatVecBatch(
+    matrix: GPUBuffer,
+    input: GPUBuffer,
+    bias: GPUBuffer,
+    output: GPUBuffer,
+    rows: number,
+    cols: number,
+    batch: number,
+    inputStride: number,
+    outputStride: number,
+    biasPresent: boolean,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    this.submit2d(this.geluMatVecBatchPipeline, rows, batch, [
+      { binding: 0, resource: { buffer: matrix } },
+      { binding: 1, resource: { buffer: input } },
+      { binding: 2, resource: { buffer: bias } },
+      { binding: 3, resource: { buffer: output } },
+      {
+        binding: 4,
+        resource: {
+          buffer: uniform(
+            new Uint32Array([
+              rows,
+              cols,
+              batch,
+              inputStride,
+              outputStride,
+              biasPresent ? 1 : 0,
+              0,
+              0,
             ]),
           ),
         },
