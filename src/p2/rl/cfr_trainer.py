@@ -405,7 +405,7 @@ class RebelCFRTrainer:
         value_batch: RebelBatch,
         policy_batch: RebelBatch,
         value_output: ModelOutput,
-        policy_output: ModelOutput,
+        policy_output: ModelOutput | None,
         value_loss_all: torch.Tensor,
         policy_loss_all: torch.Tensor,
         fresh_value_loss: float | None = None,
@@ -683,10 +683,17 @@ class RebelCFRTrainer:
 
         if isinstance(self.model, BetterTRM):
             policy_output = self.model(
-                policy_batch.features, include_policy=True, latent=policy_latent
+                policy_batch.features,
+                include_policy=True,
+                include_value=False,
+                latent=policy_latent,
             )
         else:
-            policy_output = self.model(policy_batch.features, include_policy=True)
+            policy_output = self.model(
+                policy_batch.features,
+                include_policy=True,
+                include_value=False,
+            )
         loss_dict = self.loss_fn(policy_output, policy_batch)
         policy_loss = loss_dict["policy_loss"]
         policy_loss_update = loss_dict["policy_loss_all"]
@@ -773,7 +780,6 @@ class RebelCFRTrainer:
         value_batch_all = []
         policy_batch_all = []
         value_output_all = []
-        policy_output_all = []
         value_loss_update_all = []
         policy_loss_update_all = []
         step_stats: dict[str, float] = {}
@@ -863,7 +869,6 @@ class RebelCFRTrainer:
             value_batch_all.append(permuted_batch)
             policy_batch_all.append(policy_batch)
             value_output_all.append(permuted_value_output)
-            policy_output_all.append(policy_output)
             value_loss_update_all.append(value_loss_update)
             policy_loss_update_all.append(policy_loss_update)
 
@@ -890,7 +895,7 @@ class RebelCFRTrainer:
             RebelBatch.cat(value_batch_all),
             RebelBatch.cat(policy_batch_all),
             ModelOutput.cat(value_output_all),
-            ModelOutput.cat(policy_output_all),
+            None,
             torch.cat(value_loss_update_all),
             torch.cat(policy_loss_update_all),
             fresh_value_batch=fresh_value_batch,
