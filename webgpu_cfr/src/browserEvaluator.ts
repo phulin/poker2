@@ -81,6 +81,7 @@ export class BrowserCfrEvaluator {
       );
     }
     const childValues = new Float32Array(numActions * 2 * NUM_HANDS);
+    const modelChildren: Array<{ action: number; env: PublicHunlEnv }> = [];
 
     for (let action = 0; action < numActions; action += 1) {
       if (!legal.mask[action]) {
@@ -93,8 +94,21 @@ export class BrowserCfrEvaluator {
         childValues.fill(step.reward, offset, offset + NUM_HANDS);
         childValues.fill(-step.reward, offset + NUM_HANDS, offset + 2 * NUM_HANDS);
       } else {
-        const values = await this.model.predictHandValues(child, beliefs);
-        childValues.set(values, offset);
+        modelChildren.push({ action, env: child });
+      }
+    }
+
+    if (modelChildren.length > 0) {
+      const values = await this.model.predictBatchHandValues(
+        modelChildren.map((child) => child.env),
+        beliefs,
+      );
+      const childValueSize = 2 * NUM_HANDS;
+      for (let i = 0; i < modelChildren.length; i += 1) {
+        childValues.set(
+          values.subarray(i * childValueSize, (i + 1) * childValueSize),
+          modelChildren[i]!.action * childValueSize,
+        );
       }
     }
 

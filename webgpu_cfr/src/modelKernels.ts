@@ -34,6 +34,44 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const MAT_VEC_BATCH_WGSL = /* wgsl */ `
+struct Params {
+  rows: u32,
+  cols: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+  inputOffset: u32,
+  outputOffset: u32,
+  biasPresent: u32,
+};
+
+@group(0) @binding(0) var<storage, read> matrix: array<f32>;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let row = gid.x;
+  let batch = gid.y;
+  if (row >= params.rows || batch >= params.batch) {
+    return;
+  }
+  var sum = 0.0;
+  let rowOffset = row * params.cols;
+  let inputBase = batch * params.inputStride + params.inputOffset;
+  for (var col = 0u; col < params.cols; col = col + 1u) {
+    sum = sum + matrix[rowOffset + col] * input[inputBase + col];
+  }
+  if (params.biasPresent != 0u) {
+    sum = sum + bias[row];
+  }
+  output[batch * params.outputStride + params.outputOffset + row] = sum;
+}
+`;
+
 export const LAYER_NORM_WGSL = /* wgsl */ `
 struct Params {
   dim: u32,
@@ -98,6 +136,79 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   for (var i = lane; i < params.dim; i = i + 256u) {
     output[params.outputOffset + i] =
       (input[params.inputOffset + i] - mean) * invStd * weight[i] + bias[i];
+  }
+}
+`;
+
+export const LAYER_NORM_BATCH_WGSL = /* wgsl */ `
+struct Params {
+  dim: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read> weight: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+var<workgroup> partialSum: array<f32, 256>;
+var<workgroup> partialSq: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let batch = wid.x;
+  let lane = lid.x;
+  if (batch >= params.batch) {
+    return;
+  }
+  let inputBase = batch * params.inputStride;
+  let outputBase = batch * params.outputStride;
+  var sum = 0.0;
+  for (var i = lane; i < params.dim; i = i + 256u) {
+    sum = sum + input[inputBase + i];
+  }
+  partialSum[lane] = sum;
+  workgroupBarrier();
+
+  var stride = 128u;
+  loop {
+    if (lane < stride) {
+      partialSum[lane] = partialSum[lane] + partialSum[lane + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  let mean = partialSum[0] / f32(params.dim);
+  var sq = 0.0;
+  for (var i = lane; i < params.dim; i = i + 256u) {
+    let centered = input[inputBase + i] - mean;
+    sq = sq + centered * centered;
+  }
+  partialSq[lane] = sq;
+  workgroupBarrier();
+
+  stride = 128u;
+  loop {
+    if (lane < stride) {
+      partialSq[lane] = partialSq[lane] + partialSq[lane + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  let invStd = inverseSqrt(partialSq[0] / f32(params.dim) + 1.0e-5);
+  for (var i = lane; i < params.dim; i = i + 256u) {
+    output[outputBase + i] = (input[inputBase + i] - mean) * invStd * weight[i] + bias[i];
   }
 }
 `;

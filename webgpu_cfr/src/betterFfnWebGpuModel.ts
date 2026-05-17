@@ -1,7 +1,9 @@
 import {
   ADD3_WGSL,
   GELU_WGSL,
+  LAYER_NORM_BATCH_WGSL,
   LAYER_NORM_WGSL,
+  MAT_VEC_BATCH_WGSL,
   MAT_VEC_WGSL,
   SCALED_RESIDUAL_ADD_WGSL,
   SILU_MUL_WGSL,
@@ -49,7 +51,9 @@ export class BetterFfnWebGpuModel {
   private readonly dummyBias: GPUBuffer;
   private readonly handEmbeddingT: GPUBuffer;
   private readonly matVecPipeline: GPUComputePipeline;
+  private readonly matVecBatchPipeline: GPUComputePipeline;
   private readonly layerNormPipeline: GPUComputePipeline;
+  private readonly layerNormBatchPipeline: GPUComputePipeline;
   private readonly siluMulPipeline: GPUComputePipeline;
   private readonly geluPipeline: GPUComputePipeline;
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
@@ -75,9 +79,17 @@ export class BetterFfnWebGpuModel {
     this.dummyBias = makeStorageBuffer(device, new Float32Array([0]));
     this.handEmbeddingT = makeStorageBuffer(device, this.buildHandEmbeddingT());
     this.matVecPipeline = this.pipeline(MAT_VEC_WGSL, "better-ffn-mat-vec");
+    this.matVecBatchPipeline = this.pipeline(
+      MAT_VEC_BATCH_WGSL,
+      "better-ffn-mat-vec-batch",
+    );
     this.layerNormPipeline = this.pipeline(
       LAYER_NORM_WGSL,
       "better-ffn-layer-norm",
+    );
+    this.layerNormBatchPipeline = this.pipeline(
+      LAYER_NORM_BATCH_WGSL,
+      "better-ffn-layer-norm-batch",
     );
     this.siluMulPipeline = this.pipeline(SILU_MUL_WGSL, "better-ffn-silu-mul");
     this.geluPipeline = this.pipeline(GELU_WGSL, "better-ffn-gelu");
@@ -103,16 +115,45 @@ export class BetterFfnWebGpuModel {
     return (await this.predict(env, beliefs, { includePolicy: false })).handValues;
   }
 
+  async predictBatchHandValues(
+    envs: readonly PublicHunlEnv[],
+    beliefs: Float32Array<ArrayBufferLike>,
+  ): Promise<Float32Array<ArrayBufferLike>> {
+    return (await this.predictBatch(envs, beliefs, { includePolicy: false }))
+      .handValues;
+  }
+
   async predict(
     env: PublicHunlEnv,
     beliefs: Float32Array<ArrayBufferLike>,
     options: PredictOptions = {},
   ): Promise<BetterFfnPrediction> {
+    const result = await this.predictBatch([env], beliefs, options);
+    const handValues = result.handValues.slice(0, 2 * NUM_HANDS);
+    const prediction: BetterFfnPrediction = { handValues };
+    if (result.policyLogits) {
+      prediction.policyLogits = result.policyLogits.slice(
+        0,
+        this.manifest.architecture.numActions * NUM_HANDS,
+      );
+    }
+    return prediction;
+  }
+
+  async predictBatch(
+    envs: readonly PublicHunlEnv[],
+    beliefs: Float32Array<ArrayBufferLike>,
+    options: PredictOptions = {},
+  ): Promise<BetterFfnPrediction> {
+    if (envs.length === 0) {
+      return { handValues: new Float32Array(0) };
+    }
     const hiddenDim = this.manifest.architecture.hiddenDim;
     const ffnDim = this.manifest.architecture.ffnDim;
     const rangeHiddenDim = this.manifest.architecture.rangeHiddenDim;
     const numPlayers = this.manifest.architecture.numPlayers;
     const numActions = this.manifest.architecture.numActions;
+    const batch = envs.length;
     if (beliefs.length !== numPlayers * NUM_HANDS) {
       throw new Error(
         `belief vector has ${beliefs.length} entries, expected ${numPlayers * NUM_HANDS}`,
@@ -132,23 +173,32 @@ export class BetterFfnWebGpuModel {
       temps.push(buffer);
       return buffer;
     };
-    const uniform = (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>): GPUBuffer => {
+    const uniform = (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ): GPUBuffer => {
       const buffer = makeUniformBuffer(this.device, data);
       temps.push(buffer);
       return buffer;
     };
 
     try {
-      const beliefBuffer = storage(beliefs);
-      const perPlayerBelief = empty(numPlayers * hiddenDim);
+      const batchedBeliefs = new Float32Array(batch * numPlayers * NUM_HANDS);
+      for (let i = 0; i < batch; i += 1) {
+        batchedBeliefs.set(beliefs, i * numPlayers * NUM_HANDS);
+      }
+      const beliefBuffer = storage(batchedBeliefs);
+      const perPlayerBelief = empty(batch * numPlayers * hiddenDim);
       for (let player = 0; player < numPlayers; player += 1) {
-        this.matVec(
+        this.matVecBatch(
           this.handEmbeddingT,
           beliefBuffer,
           this.dummyBias,
           perPlayerBelief,
           hiddenDim,
           NUM_HANDS,
+          batch,
+          numPlayers * NUM_HANDS,
+          numPlayers * hiddenDim,
           player * NUM_HANDS,
           player * hiddenDim,
           false,
@@ -156,9 +206,10 @@ export class BetterFfnWebGpuModel {
         );
       }
 
-      const beliefFeatures = this.swigluBlock(
+      const beliefFeatures = this.swigluBlockBatch(
         "belief_proj",
         perPlayerBelief,
+        batch,
         numPlayers * hiddenDim,
         numPlayers * rangeHiddenDim,
         hiddenDim,
@@ -166,58 +217,82 @@ export class BetterFfnWebGpuModel {
         uniform,
       );
 
-      const features = encodeBetterFeatures(env);
-      const contextFeatures = this.swigluBlock(
+      const context = new Float32Array(batch * 11);
+      const base = new Float32Array(batch * hiddenDim);
+      for (let i = 0; i < batch; i += 1) {
+        const features = encodeBetterFeatures(envs[i]!);
+        context.set(features.context, i * 11);
+        base.set(this.baseEmbedding(features.street, features.board), i * hiddenDim);
+      }
+      const contextFeatures = this.swigluBlockBatch(
         "context_encoder",
-        storage(features.context),
-        features.context.length,
+        storage(context),
+        batch,
+        11,
         hiddenDim,
         hiddenDim,
         empty,
         uniform,
       );
 
-      const baseEmbedding = storage(this.baseEmbedding(features.street, features.board));
-      let x = empty(hiddenDim);
-      this.add3(baseEmbedding, contextFeatures, beliefFeatures, x, hiddenDim, uniform);
+      const baseEmbedding = storage(base);
+      let x = empty(batch * hiddenDim);
+      this.add3(
+        baseEmbedding,
+        contextFeatures,
+        beliefFeatures,
+        x,
+        batch * hiddenDim,
+        uniform,
+      );
 
       const alpha = 1 / Math.sqrt(
         this.manifest.architecture.numHiddenLayers +
           this.manifest.architecture.numValueLayers,
       );
       for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
-        const inner = this.swigluBlock(
+        const inner = this.swigluBlockBatch(
           `trunk.${i}.inner`,
           x,
+          batch,
           hiddenDim,
           ffnDim,
           hiddenDim,
           empty,
           uniform,
         );
-        const out = empty(hiddenDim);
-        this.scaledResidualAdd(x, inner, out, hiddenDim, alpha, uniform);
+        const out = empty(batch * hiddenDim);
+        this.scaledResidualAdd(x, inner, out, batch * hiddenDim, alpha, uniform);
         x = out;
       }
 
       let valueInput = x;
       for (let i = 0; i < this.manifest.architecture.numValueLayers - 1; i += 1) {
-        const inner = this.swigluBlock(
+        const inner = this.swigluBlockBatch(
           `hand_value_head.${i}.inner`,
           valueInput,
+          batch,
           hiddenDim,
           ffnDim,
           hiddenDim,
           empty,
           uniform,
         );
-        const out = empty(hiddenDim);
-        this.scaledResidualAdd(valueInput, inner, out, hiddenDim, alpha, uniform);
+        const out = empty(batch * hiddenDim);
+        this.scaledResidualAdd(
+          valueInput,
+          inner,
+          out,
+          batch * hiddenDim,
+          alpha,
+          uniform,
+        );
         valueInput = out;
       }
-      const valueRawBuffer = this.geluBlock(
+      const valueRawBuffer = this.geluBlockBatch(
         `hand_value_head.${this.manifest.architecture.numValueLayers - 1}`,
         valueInput,
+        batch,
         hiddenDim,
         ffnDim,
         numPlayers * NUM_HANDS,
@@ -234,29 +309,31 @@ export class BetterFfnWebGpuModel {
           i < this.manifest.architecture.numPolicyLayers - 1;
           i += 1
         ) {
-          const inner = this.swigluBlock(
+          const inner = this.swigluBlockBatch(
             `policy_head.${i}.inner`,
             policyInput,
+            batch,
             hiddenDim,
             ffnDim,
             hiddenDim,
             empty,
             uniform,
           );
-          const out = empty(hiddenDim);
+          const out = empty(batch * hiddenDim);
           this.scaledResidualAdd(
             policyInput,
             inner,
             out,
-            hiddenDim,
+            batch * hiddenDim,
             policyAlpha,
             uniform,
           );
           policyInput = out;
         }
-        policyBuffer = this.geluBlock(
+        policyBuffer = this.geluBlockBatch(
           `policy_head.${this.manifest.architecture.numPolicyLayers - 1}`,
           policyInput,
+          batch,
           hiddenDim,
           ffnDim,
           numActions * NUM_HANDS,
@@ -268,16 +345,16 @@ export class BetterFfnWebGpuModel {
       const handValues = await readFloatBuffer(
         this.device,
         valueRawBuffer,
-        numPlayers * NUM_HANDS,
+        batch * numPlayers * NUM_HANDS,
       );
-      this.applyZeroSumIfNeeded(handValues, beliefs);
+      this.applyZeroSumBatchIfNeeded(handValues, beliefs, batch);
 
       const prediction: BetterFfnPrediction = { handValues };
       if (policyBuffer) {
         prediction.policyLogits = await readFloatBuffer(
           this.device,
           policyBuffer,
-          numActions * NUM_HANDS,
+          batch * numActions * NUM_HANDS,
         );
       }
       return prediction;
@@ -409,6 +486,124 @@ export class BetterFfnWebGpuModel {
     return out;
   }
 
+  private swigluBlockBatch(
+    prefix: string,
+    input: GPUBuffer,
+    batch: number,
+    inDim: number,
+    hiddenDim: number,
+    outDim: number,
+    empty: (elements: number) => GPUBuffer,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): GPUBuffer {
+    const normed = empty(batch * inDim);
+    this.layerNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+    const gate = empty(batch * hiddenDim);
+    const up = empty(batch * hiddenDim);
+    this.matVecBatch(
+      this.tensor(`${prefix}.swiglu.gate.weight`).buffer,
+      normed,
+      this.dummyBias,
+      gate,
+      hiddenDim,
+      inDim,
+      batch,
+      inDim,
+      hiddenDim,
+      0,
+      0,
+      false,
+      uniform,
+    );
+    this.matVecBatch(
+      this.tensor(`${prefix}.swiglu.up.weight`).buffer,
+      normed,
+      this.dummyBias,
+      up,
+      hiddenDim,
+      inDim,
+      batch,
+      inDim,
+      hiddenDim,
+      0,
+      0,
+      false,
+      uniform,
+    );
+    const gated = empty(batch * hiddenDim);
+    this.siluMul(gate, up, gated, batch * hiddenDim, uniform);
+    const out = empty(batch * outDim);
+    this.matVecBatch(
+      this.tensor(`${prefix}.swiglu.down.weight`).buffer,
+      gated,
+      this.dummyBias,
+      out,
+      outDim,
+      hiddenDim,
+      batch,
+      hiddenDim,
+      outDim,
+      0,
+      0,
+      false,
+      uniform,
+    );
+    return out;
+  }
+
+  private geluBlockBatch(
+    prefix: string,
+    input: GPUBuffer,
+    batch: number,
+    inDim: number,
+    hiddenDim: number,
+    outDim: number,
+    empty: (elements: number) => GPUBuffer,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): GPUBuffer {
+    const normed = empty(batch * inDim);
+    this.layerNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+    const linear = empty(batch * hiddenDim);
+    this.matVecBatch(
+      this.tensor(`${prefix}.linear_in.weight`).buffer,
+      normed,
+      this.dummyBias,
+      linear,
+      hiddenDim,
+      inDim,
+      batch,
+      inDim,
+      hiddenDim,
+      0,
+      0,
+      false,
+      uniform,
+    );
+    const activated = empty(batch * hiddenDim);
+    this.gelu(linear, activated, batch * hiddenDim, uniform);
+    const out = empty(batch * outDim);
+    this.matVecBatch(
+      this.tensor(`${prefix}.linear_out.weight`).buffer,
+      activated,
+      this.tensor(`${prefix}.linear_out.bias`).buffer,
+      out,
+      outDim,
+      hiddenDim,
+      batch,
+      hiddenDim,
+      outDim,
+      0,
+      0,
+      true,
+      uniform,
+    );
+    return out;
+  }
+
   private swigluBlock(
     prefix: string,
     input: GPUBuffer,
@@ -528,6 +723,32 @@ export class BetterFfnWebGpuModel {
     ]);
   }
 
+  private layerNormBatch(
+    prefix: string,
+    input: GPUBuffer,
+    output: GPUBuffer,
+    batch: number,
+    dim: number,
+    inputStride: number,
+    outputStride: number,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    this.submit(this.layerNormBatchPipeline, batch, [
+      { binding: 0, resource: { buffer: input } },
+      { binding: 1, resource: { buffer: this.tensor(`${prefix}.norm.weight`).buffer } },
+      { binding: 2, resource: { buffer: this.tensor(`${prefix}.norm.bias`).buffer } },
+      { binding: 3, resource: { buffer: output } },
+      {
+        binding: 4,
+        resource: {
+          buffer: uniform(new Uint32Array([dim, batch, inputStride, outputStride])),
+        },
+      },
+    ]);
+  }
+
   private matVec(
     matrix: GPUBuffer,
     input: GPUBuffer,
@@ -560,6 +781,48 @@ export class BetterFfnWebGpuModel {
               0,
               0,
               0,
+            ]),
+          ),
+        },
+      },
+    ]);
+  }
+
+  private matVecBatch(
+    matrix: GPUBuffer,
+    input: GPUBuffer,
+    bias: GPUBuffer,
+    output: GPUBuffer,
+    rows: number,
+    cols: number,
+    batch: number,
+    inputStride: number,
+    outputStride: number,
+    inputOffset: number,
+    outputOffset: number,
+    biasPresent: boolean,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    this.submit2d(this.matVecBatchPipeline, Math.ceil(rows / 64), batch, [
+      { binding: 0, resource: { buffer: matrix } },
+      { binding: 1, resource: { buffer: input } },
+      { binding: 2, resource: { buffer: bias } },
+      { binding: 3, resource: { buffer: output } },
+      {
+        binding: 4,
+        resource: {
+          buffer: uniform(
+            new Uint32Array([
+              rows,
+              cols,
+              batch,
+              inputStride,
+              outputStride,
+              inputOffset,
+              outputOffset,
+              biasPresent ? 1 : 0,
             ]),
           ),
         },
@@ -659,6 +922,30 @@ export class BetterFfnWebGpuModel {
     }
   }
 
+  private applyZeroSumBatchIfNeeded(
+    handValues: Float32Array<ArrayBufferLike>,
+    beliefs: Float32Array<ArrayBufferLike>,
+    batch: number,
+  ): void {
+    if (!this.manifest.architecture.enforceZeroSum) {
+      return;
+    }
+    const stride = 2 * NUM_HANDS;
+    for (let sample = 0; sample < batch; sample += 1) {
+      const base = sample * stride;
+      let p0 = 0;
+      let p1 = 0;
+      for (let h = 0; h < NUM_HANDS; h += 1) {
+        p0 += handValues[base + h]! * beliefs[h]!;
+        p1 += handValues[base + NUM_HANDS + h]! * beliefs[NUM_HANDS + h]!;
+      }
+      const offset = (p0 + p1) / 2;
+      for (let i = 0; i < stride; i += 1) {
+        handValues[base + i] = handValues[base + i]! - offset;
+      }
+    }
+  }
+
   private tensor(name: string): GpuTensor {
     const tensor = this.tensors.get(name);
     if (!tensor) {
@@ -694,6 +981,27 @@ export class BetterFfnWebGpuModel {
       }),
     );
     pass.dispatchWorkgroups(workgroups);
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
+  }
+
+  private submit2d(
+    pipeline: GPUComputePipeline,
+    workgroupsX: number,
+    workgroupsY: number,
+    entries: GPUBindGroupEntry[],
+  ): void {
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(
+      0,
+      this.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries,
+      }),
+    );
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
     pass.end();
     this.device.queue.submit([encoder.finish()]);
   }
