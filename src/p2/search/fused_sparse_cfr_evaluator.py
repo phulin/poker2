@@ -175,6 +175,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._to_act_top: torch.Tensor | None = None
         self._child_offsets_by_depth: tuple[torch.Tensor, ...] = ()
         self._child_count_by_depth: tuple[torch.Tensor, ...] = ()
+        self._exploitability_cache_key: tuple[tuple[int, int, tuple[int, ...]], ...] | None = None
+        self._exploitability_cache = None
 
     def _init_hand_rank_data(self) -> None:
         """Build hand-rank data, then precompute the constant-per-subgame
@@ -254,6 +256,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._child_offsets_by_depth = ()
         if not hasattr(self, "_child_count_by_depth"):
             self._child_count_by_depth = ()
+        if not hasattr(self, "_exploitability_cache_key"):
+            self._exploitability_cache_key = None
+        if not hasattr(self, "_exploitability_cache"):
+            self._exploitability_cache = None
 
     def initialize_subgame(self, *args, **kwargs) -> None:
         super().initialize_subgame(*args, **kwargs)
@@ -687,6 +693,24 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             top,
             allowed_mask=self.allowed_hands[:top].contiguous(),
         )
+
+    def _current_exploitability_cache_key(
+        self,
+    ) -> tuple[tuple[int, int, tuple[int, ...]], ...]:
+        tensors = (self.policy_probs_avg, self.beliefs_avg, self.values_avg)
+        return tuple(
+            (int(t.data_ptr()), int(t._version), tuple(t.shape))
+            for t in tensors
+        )
+
+    def _compute_exploitability(self):
+        key = self._current_exploitability_cache_key()
+        if self._exploitability_cache_key == key and self._exploitability_cache is not None:
+            return self._exploitability_cache
+        out = super()._compute_exploitability()
+        self._exploitability_cache_key = key
+        self._exploitability_cache = out
+        return out
 
     def _best_response_values(
         self,
