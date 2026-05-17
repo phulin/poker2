@@ -1,0 +1,205 @@
+export const MAT_VEC_WGSL = /* wgsl */ `
+struct Params {
+  rows: u32,
+  cols: u32,
+  inputOffset: u32,
+  outputOffset: u32,
+  biasPresent: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> matrix: array<f32>;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let row = gid.x;
+  if (row >= params.rows) {
+    return;
+  }
+  var sum = 0.0;
+  let rowOffset = row * params.cols;
+  for (var col = 0u; col < params.cols; col = col + 1u) {
+    sum = sum + matrix[rowOffset + col] * input[params.inputOffset + col];
+  }
+  if (params.biasPresent != 0u) {
+    sum = sum + bias[row];
+  }
+  output[params.outputOffset + row] = sum;
+}
+`;
+
+export const LAYER_NORM_WGSL = /* wgsl */ `
+struct Params {
+  dim: u32,
+  inputOffset: u32,
+  outputOffset: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read> weight: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+var<workgroup> partialSum: array<f32, 256>;
+var<workgroup> partialSq: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let lane = lid.x;
+  var sum = 0.0;
+  for (var i = lane; i < params.dim; i = i + 256u) {
+    sum = sum + input[params.inputOffset + i];
+  }
+  partialSum[lane] = sum;
+  workgroupBarrier();
+
+  var stride = 128u;
+  loop {
+    if (lane < stride) {
+      partialSum[lane] = partialSum[lane] + partialSum[lane + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  let mean = partialSum[0] / f32(params.dim);
+  var sq = 0.0;
+  for (var i = lane; i < params.dim; i = i + 256u) {
+    let centered = input[params.inputOffset + i] - mean;
+    sq = sq + centered * centered;
+  }
+  partialSq[lane] = sq;
+  workgroupBarrier();
+
+  stride = 128u;
+  loop {
+    if (lane < stride) {
+      partialSq[lane] = partialSq[lane] + partialSq[lane + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  let invStd = inverseSqrt(partialSq[0] / f32(params.dim) + 1.0e-5);
+  for (var i = lane; i < params.dim; i = i + 256u) {
+    output[params.outputOffset + i] =
+      (input[params.inputOffset + i] - mean) * invStd * weight[i] + bias[i];
+  }
+}
+`;
+
+export const SILU_MUL_WGSL = /* wgsl */ `
+struct Params {
+  dim: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> gate: array<f32>;
+@group(0) @binding(1) var<storage, read> up: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= params.dim) {
+    return;
+  }
+  let g = gate[i];
+  output[i] = (g / (1.0 + exp(-g))) * up[i];
+}
+`;
+
+export const GELU_WGSL = /* wgsl */ `
+struct Params {
+  dim: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn erf_approx(x: f32) -> f32 {
+  let sign = select(-1.0, 1.0, x >= 0.0);
+  let ax = abs(x);
+  let t = 1.0 / (1.0 + 0.3275911 * ax);
+  let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-ax * ax);
+  return sign * y;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= params.dim) {
+    return;
+  }
+  let x = input[i];
+  output[i] = 0.5 * x * (1.0 + erf_approx(x * 0.7071067811865476));
+}
+`;
+
+export const SCALED_RESIDUAL_ADD_WGSL = /* wgsl */ `
+struct Params {
+  dim: u32,
+  _pad0: u32,
+  alpha: f32,
+  _pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> residual: array<f32>;
+@group(0) @binding(1) var<storage, read> inner: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= params.dim) {
+    return;
+  }
+  output[i] = residual[i] + params.alpha * inner[i];
+}
+`;
+
+export const ADD3_WGSL = /* wgsl */ `
+struct Params {
+  dim: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> a: array<f32>;
+@group(0) @binding(1) var<storage, read> b: array<f32>;
+@group(0) @binding(2) var<storage, read> c: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= params.dim) {
+    return;
+  }
+  output[i] = a[i] + b[i] + c[i];
+}
+`;

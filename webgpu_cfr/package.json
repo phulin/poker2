@@ -1,0 +1,23 @@
+{
+  "name": "p2-webgpu-cfr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --import tsx tests/*.test.ts",
+    "fixture": "cd .. && uv run python webgpu_cfr/python/reference.py --snapshot checkpoints-rebel/rebel_latest.pt --spot 1 --iterations 8 --out webgpu_cfr/fixtures/latest_preflop_call.json",
+    "export:model": "cd .. && uv run python webgpu_cfr/python/export_model.py",
+    "eval": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "webgpu": "^0.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@webgpu/types": "^0.1.64",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3"
+  }
+}
