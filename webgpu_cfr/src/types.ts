@@ -66,6 +66,7 @@ export interface BetterFfnManifest {
     sharedTrunk: boolean;
     enforceZeroSum: boolean;
     nonlinearity: "swiglu";
+    normalization: "rmsnorm";
   };
   env: {
     stack: number;

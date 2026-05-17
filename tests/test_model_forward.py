@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import torch
+import torch.nn as nn
 
 from p2.encoding.action_mapping import bin_to_action, get_legal_mask
+from p2.env.card_utils import NUM_HANDS
 from p2.env.hunl_env import HUNLEnv
 from p2.env.types import GameState, PlayerState
 from p2.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 from p2.models.cnn.cnn_embedding_data import CNNEmbeddingData
+from p2.models.mlp.better_features import context_length
+from p2.models.mlp.better_ffn import BetterFFN
+from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.policy import CategoricalPolicyV1
 
 
@@ -59,6 +64,46 @@ def test_siamese_convnet_forward_and_policy_action():
     a, logp = policy.action(logits.squeeze(0))
     assert 0 <= a < nb
     assert torch.isfinite(torch.tensor(logp))
+
+
+def test_better_ffn_uses_rmsnorm_and_forward_shapes():
+    batch_size = 2
+    num_actions = 4
+    num_players = 2
+    model = BetterFFN(
+        num_actions=num_actions,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(0))
+
+    assert not any(isinstance(module, nn.LayerNorm) for module in model.modules())
+    assert any(isinstance(module, nn.RMSNorm) for module in model.modules())
+    assert not any(name.endswith(".norm.bias") for name in model.state_dict())
+
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    features = MLPFeatures(
+        context=torch.zeros(batch_size, context_length(num_players)),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+
+    output = model(features)
+
+    assert output.policy_logits.shape == (batch_size, NUM_HANDS, num_actions)
+    assert output.hand_values.shape == (batch_size, num_players, NUM_HANDS)
+    assert output.value.shape == (batch_size, num_players)
+    assert torch.isfinite(output.policy_logits).all()
+    assert torch.isfinite(output.hand_values).all()
 
 
 def test_action_mapping_with_env():

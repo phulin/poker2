@@ -24,6 +24,11 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
       `unsupported BetterFFN nonlinearity ${manifest.architecture.nonlinearity}`,
     );
   }
+  if (manifest.architecture.normalization !== "rmsnorm") {
+    throw new Error(
+      `unsupported BetterFFN normalization ${manifest.architecture.normalization}`,
+    );
+  }
   if (manifest.architecture.numHands !== 1326) {
     throw new Error(
       `unsupported hand count ${manifest.architecture.numHands}; expected 1326`,

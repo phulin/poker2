@@ -457,7 +457,7 @@ ${REDUCE_4X_256_WGSL}
 }
 `;
 
-export const LAYER_NORM_WGSL = /* wgsl */ `
+export const RMS_NORM_WGSL = /* wgsl */ `
 struct Params {
   dim: u32,
   inputOffset: u32,
@@ -467,43 +467,32 @@ struct Params {
 
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read> weight: array<f32>;
-@group(0) @binding(2) var<storage, read> bias: array<f32>;
-@group(0) @binding(3) var<storage, read_write> output: array<f32>;
-@group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
 
-var<workgroup> partialSum: array<f32, 256>;
 var<workgroup> partialSq: array<f32, 256>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   let lane = lid.x;
-  var sum = 0.0;
-  for (var i = lane; i < params.dim; i = i + 256u) {
-    sum = sum + input[params.inputOffset + i];
-  }
-  partialSum[lane] = sum;
-  workgroupBarrier();
-${REDUCE_PARTIAL_SUM_256_WGSL}
-
-  let mean = partialSum[0] / f32(params.dim);
   var sq = 0.0;
   for (var i = lane; i < params.dim; i = i + 256u) {
-    let centered = input[params.inputOffset + i] - mean;
-    sq = sq + centered * centered;
+    let value = input[params.inputOffset + i];
+    sq = sq + value * value;
   }
   partialSq[lane] = sq;
   workgroupBarrier();
 ${REDUCE_PARTIAL_SQ_256_WGSL}
 
-  let invStd = inverseSqrt(partialSq[0] / f32(params.dim) + 1.0e-5);
+  let invRms = inverseSqrt(partialSq[0] / f32(params.dim) + 1.0e-5);
   for (var i = lane; i < params.dim; i = i + 256u) {
     output[params.outputOffset + i] =
-      (input[params.inputOffset + i] - mean) * invStd * weight[i] + bias[i];
+      input[params.inputOffset + i] * invRms * weight[i];
   }
 }
 `;
 
-export const LAYER_NORM_BATCH_WGSL = /* wgsl */ `
+export const RMS_NORM_BATCH_WGSL = /* wgsl */ `
 struct Params {
   dim: u32,
   batch: u32,
@@ -513,11 +502,9 @@ struct Params {
 
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read> weight: array<f32>;
-@group(0) @binding(2) var<storage, read> bias: array<f32>;
-@group(0) @binding(3) var<storage, read_write> output: array<f32>;
-@group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
 
-var<workgroup> partialSum: array<f32, 256>;
 var<workgroup> partialSq: array<f32, 256>;
 
 @compute @workgroup_size(256)
@@ -529,27 +516,18 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   }
   let inputBase = batch * params.inputStride;
   let outputBase = batch * params.outputStride;
-  var sum = 0.0;
-  for (var i = lane; i < params.dim; i = i + 256u) {
-    sum = sum + input[inputBase + i];
-  }
-  partialSum[lane] = sum;
-  workgroupBarrier();
-${REDUCE_PARTIAL_SUM_256_WGSL}
-
-  let mean = partialSum[0] / f32(params.dim);
   var sq = 0.0;
   for (var i = lane; i < params.dim; i = i + 256u) {
-    let centered = input[inputBase + i] - mean;
-    sq = sq + centered * centered;
+    let value = input[inputBase + i];
+    sq = sq + value * value;
   }
   partialSq[lane] = sq;
   workgroupBarrier();
 ${REDUCE_PARTIAL_SQ_256_WGSL}
 
-  let invStd = inverseSqrt(partialSq[0] / f32(params.dim) + 1.0e-5);
+  let invRms = inverseSqrt(partialSq[0] / f32(params.dim) + 1.0e-5);
   for (var i = lane; i < params.dim; i = i + 256u) {
-    output[outputBase + i] = (input[inputBase + i] - mean) * invStd * weight[i] + bias[i];
+    output[outputBase + i] = input[inputBase + i] * invRms * weight[i];
   }
 }
 `;

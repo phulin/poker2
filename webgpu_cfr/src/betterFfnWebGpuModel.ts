@@ -2,10 +2,10 @@ import {
   ADD3_WGSL,
   GELU_MAT_VEC_BATCH_WGSL,
   GELU_WGSL,
-  LAYER_NORM_BATCH_WGSL,
-  LAYER_NORM_WGSL,
   MAT_VEC_BATCH_WGSL,
   MAT_VEC_WGSL,
+  RMS_NORM_BATCH_WGSL,
+  RMS_NORM_WGSL,
   SCALED_RESIDUAL_ADD_WGSL,
   SILU_MUL_WGSL,
   SWIGLU_DOWN_BATCH_WGSL,
@@ -70,8 +70,8 @@ export class BetterFfnWebGpuModel {
   private readonly matVecBatchPipeline: GPUComputePipeline;
   private readonly swigluDownBatchPipeline: GPUComputePipeline;
   private readonly geluMatVecBatchPipeline: GPUComputePipeline;
-  private readonly layerNormPipeline: GPUComputePipeline;
-  private readonly layerNormBatchPipeline: GPUComputePipeline;
+  private readonly rmsNormPipeline: GPUComputePipeline;
+  private readonly rmsNormBatchPipeline: GPUComputePipeline;
   private readonly siluMulPipeline: GPUComputePipeline;
   private readonly geluPipeline: GPUComputePipeline;
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
@@ -113,13 +113,13 @@ export class BetterFfnWebGpuModel {
       GELU_MAT_VEC_BATCH_WGSL,
       "better-ffn-gelu-mat-vec-batch",
     );
-    this.layerNormPipeline = this.pipeline(
-      LAYER_NORM_WGSL,
-      "better-ffn-layer-norm",
+    this.rmsNormPipeline = this.pipeline(
+      RMS_NORM_WGSL,
+      "better-ffn-rms-norm",
     );
-    this.layerNormBatchPipeline = this.pipeline(
-      LAYER_NORM_BATCH_WGSL,
-      "better-ffn-layer-norm-batch",
+    this.rmsNormBatchPipeline = this.pipeline(
+      RMS_NORM_BATCH_WGSL,
+      "better-ffn-rms-norm-batch",
     );
     this.siluMulPipeline = this.pipeline(SILU_MUL_WGSL, "better-ffn-silu-mul");
     this.geluPipeline = this.pipeline(GELU_WGSL, "better-ffn-gelu");
@@ -529,7 +529,6 @@ export class BetterFfnWebGpuModel {
     outDim: number,
   ): void {
     requireTensor(tensors, `${prefix}.norm.weight`, [inDim]);
-    requireTensor(tensors, `${prefix}.norm.bias`, [inDim]);
     requireTensor(tensors, `${prefix}.swiglu.gate.weight`, [hiddenDim, inDim]);
     requireTensor(tensors, `${prefix}.swiglu.up.weight`, [hiddenDim, inDim]);
     requireTensor(tensors, `${prefix}.swiglu.down.weight`, [outDim, hiddenDim]);
@@ -543,7 +542,6 @@ export class BetterFfnWebGpuModel {
     outDim: number,
   ): void {
     requireTensor(tensors, `${prefix}.norm.weight`, [inDim]);
-    requireTensor(tensors, `${prefix}.norm.bias`, [inDim]);
     requireTensor(tensors, `${prefix}.linear_in.weight`, [hiddenDim, inDim]);
     requireTensor(tensors, `${prefix}.linear_out.weight`, [outDim, hiddenDim]);
     requireTensor(tensors, `${prefix}.linear_out.bias`, [outDim]);
@@ -612,7 +610,7 @@ export class BetterFfnWebGpuModel {
     ) => GPUBuffer,
   ): GPUBuffer {
     const normed = empty(batch * inDim);
-    this.layerNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+    this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
     const gate = empty(batch * hiddenDim);
     const up = empty(batch * hiddenDim);
     this.matVecBatch(
@@ -674,7 +672,7 @@ export class BetterFfnWebGpuModel {
     ) => GPUBuffer,
   ): GPUBuffer {
     const normed = empty(batch * inDim);
-    this.layerNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+    this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
     const linear = empty(batch * hiddenDim);
     this.matVecBatch(
       this.tensor(`${prefix}.linear_in.weight`).buffer,
@@ -720,7 +718,7 @@ export class BetterFfnWebGpuModel {
     ) => GPUBuffer,
   ): GPUBuffer {
     const normed = empty(inDim);
-    this.layerNorm(prefix, input, normed, inDim, uniform);
+    this.rmsNorm(prefix, input, normed, inDim, uniform);
     const gate = empty(hiddenDim);
     const up = empty(hiddenDim);
     this.matVec(
@@ -777,7 +775,7 @@ export class BetterFfnWebGpuModel {
     ) => GPUBuffer,
   ): GPUBuffer {
     const normed = empty(inDim);
-    this.layerNorm(prefix, input, normed, inDim, uniform);
+    this.rmsNorm(prefix, input, normed, inDim, uniform);
     const linear = empty(hiddenDim);
     this.matVec(
       this.tensor(`${prefix}.linear_in.weight`).buffer,
@@ -809,7 +807,7 @@ export class BetterFfnWebGpuModel {
     return out;
   }
 
-  private layerNorm(
+  private rmsNorm(
     prefix: string,
     input: GPUBuffer,
     output: GPUBuffer,
@@ -818,16 +816,15 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit(this.layerNormPipeline, 1, [
+    this.submit(this.rmsNormPipeline, 1, [
       { binding: 0, resource: { buffer: input } },
       { binding: 1, resource: { buffer: this.tensor(`${prefix}.norm.weight`).buffer } },
-      { binding: 2, resource: { buffer: this.tensor(`${prefix}.norm.bias`).buffer } },
-      { binding: 3, resource: { buffer: output } },
-      { binding: 4, resource: { buffer: uniform(new Uint32Array([dim, 0, 0, 0])) } },
+      { binding: 2, resource: { buffer: output } },
+      { binding: 3, resource: { buffer: uniform(new Uint32Array([dim, 0, 0, 0])) } },
     ]);
   }
 
-  private layerNormBatch(
+  private rmsNormBatch(
     prefix: string,
     input: GPUBuffer,
     output: GPUBuffer,
@@ -839,13 +836,12 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit(this.layerNormBatchPipeline, batch, [
+    this.submit(this.rmsNormBatchPipeline, batch, [
       { binding: 0, resource: { buffer: input } },
       { binding: 1, resource: { buffer: this.tensor(`${prefix}.norm.weight`).buffer } },
-      { binding: 2, resource: { buffer: this.tensor(`${prefix}.norm.bias`).buffer } },
-      { binding: 3, resource: { buffer: output } },
+      { binding: 2, resource: { buffer: output } },
       {
-        binding: 4,
+        binding: 3,
         resource: {
           buffer: uniform(new Uint32Array([dim, batch, inputStride, outputStride])),
         },

@@ -30,7 +30,10 @@ def _load_checkpoint(snapshot: Path) -> tuple[Config, dict[str, torch.Tensor]]:
     checkpoint = torch.load(snapshot, map_location="cpu", weights_only=False)
     cfg = Config.from_dict(checkpoint["config"])
     state = checkpoint["model"]
-    if cfg.model.name != ModelType.better_ffn and "street_embedding.weight" not in state:
+    if (
+        cfg.model.name != ModelType.better_ffn
+        and "street_embedding.weight" not in state
+    ):
         raise ValueError(f"{snapshot} is not a BetterFFN checkpoint")
     cfg.model.name = ModelType.better_ffn
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
@@ -59,7 +62,9 @@ def _tensor_bytes(tensor: torch.Tensor) -> bytes:
     return arr.tobytes(order="C")
 
 
-def export_model(snapshot: Path, out: Path, weights_name: str = "weights.bin") -> dict[str, Any]:
+def export_model(
+    snapshot: Path, out: Path, weights_name: str = "weights.bin"
+) -> dict[str, Any]:
     cfg, state = _load_checkpoint(snapshot)
     _validate_supported(cfg)
 
@@ -108,6 +113,7 @@ def export_model(snapshot: Path, out: Path, weights_name: str = "weights.bin") -
             "sharedTrunk": bool(cfg.model.shared_trunk),
             "enforceZeroSum": bool(cfg.model.enforce_zero_sum),
             "nonlinearity": _enum_value(cfg.model.nonlinearity),
+            "normalization": "rmsnorm",
         },
         "env": {
             "stack": cfg.env.stack,

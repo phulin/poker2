@@ -39,7 +39,7 @@ def ffn_block(
         return nn.Sequential(
             OrderedDict(
                 [
-                    ("norm", nn.LayerNorm(in_dim)),
+                    ("norm", nn.RMSNorm(in_dim, eps=1e-5)),
                     ("swiglu", SwiGLU(in_dim, hidden_dim, out_dim)),
                 ]
             )
@@ -48,7 +48,7 @@ def ffn_block(
         return nn.Sequential(
             OrderedDict(
                 [
-                    ("norm", nn.LayerNorm(in_dim)),
+                    ("norm", nn.RMSNorm(in_dim, eps=1e-5)),
                     ("linear_in", nn.Linear(in_dim, hidden_dim, bias=False)),
                     ("activation", get_activation(nonlinearity)),
                     ("linear_out", nn.Linear(hidden_dim, out_dim)),
@@ -124,7 +124,9 @@ class BetterFFN(BaseMLPModel):
             for _ in range(num_policy_layers - 1)
         ]
         layers.append(
-            ffn_block(hidden_dim, ffn_dim, num_actions * NUM_HANDS, NonlinearityType.gelu)
+            ffn_block(
+                hidden_dim, ffn_dim, num_actions * NUM_HANDS, NonlinearityType.gelu
+            )
         )
         self.policy_head = nn.Sequential(*layers)
 
@@ -135,7 +137,9 @@ class BetterFFN(BaseMLPModel):
             for _ in range(num_value_layers - 1)
         ]
         layers.append(
-            ffn_block(hidden_dim, ffn_dim, num_players * NUM_HANDS, NonlinearityType.gelu)
+            ffn_block(
+                hidden_dim, ffn_dim, num_players * NUM_HANDS, NonlinearityType.gelu
+            )
         )
         self.hand_value_head = nn.Sequential(*layers)
 
@@ -220,15 +224,14 @@ class BetterFFN(BaseMLPModel):
         )
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
-        """Initialize parameters following Xavier/LayerNorm defaults."""
+        """Initialize parameters following Xavier/RMSNorm defaults."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.orthogonal_(module.weight, generator=rng)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.LayerNorm):
+            elif isinstance(module, nn.RMSNorm):
                 nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
 
         expansion_gain = math.sqrt(self.ffn_dim / self.hidden_dim)
         for sequential in [self.trunk, self.policy_head, self.hand_value_head]:
@@ -241,9 +244,7 @@ class BetterFFN(BaseMLPModel):
                     nn.init.orthogonal_(
                         swiglu.gate.weight, expansion_gain, generator=rng
                     )
-                    nn.init.orthogonal_(
-                        swiglu.up.weight, expansion_gain, generator=rng
-                    )
+                    nn.init.orthogonal_(swiglu.up.weight, expansion_gain, generator=rng)
                 else:
                     # 1.532 is the gain for GELU nonlinearity.
                     nn.init.orthogonal_(
