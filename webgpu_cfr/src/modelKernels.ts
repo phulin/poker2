@@ -110,6 +110,76 @@ const REDUCE_4X_256_WGSL = /* wgsl */ `
   }
 `;
 
+const REDUCE_PARTIAL_SUM_256_WGSL = /* wgsl */ `
+  if (lane < 128u) {
+    partialSum[lane] = partialSum[lane] + partialSum[lane + 128u];
+  }
+  workgroupBarrier();
+  if (lane < 64u) {
+    partialSum[lane] = partialSum[lane] + partialSum[lane + 64u];
+  }
+  workgroupBarrier();
+  if (lane < 32u) {
+    partialSum[lane] = partialSum[lane] + partialSum[lane + 32u];
+  }
+  workgroupBarrier();
+  if (lane < 16u) {
+    partialSum[lane] = partialSum[lane] + partialSum[lane + 16u];
+  }
+  workgroupBarrier();
+  if (lane < 8u) {
+    partialSum[lane] = partialSum[lane] + partialSum[lane + 8u];
+  }
+  workgroupBarrier();
+  if (lane < 4u) {
+    partialSum[lane] = partialSum[lane] + partialSum[lane + 4u];
+  }
+  workgroupBarrier();
+  if (lane < 2u) {
+    partialSum[lane] = partialSum[lane] + partialSum[lane + 2u];
+  }
+  workgroupBarrier();
+  if (lane < 1u) {
+    partialSum[lane] = partialSum[lane] + partialSum[lane + 1u];
+  }
+  workgroupBarrier();
+`;
+
+const REDUCE_PARTIAL_SQ_256_WGSL = /* wgsl */ `
+  if (lane < 128u) {
+    partialSq[lane] = partialSq[lane] + partialSq[lane + 128u];
+  }
+  workgroupBarrier();
+  if (lane < 64u) {
+    partialSq[lane] = partialSq[lane] + partialSq[lane + 64u];
+  }
+  workgroupBarrier();
+  if (lane < 32u) {
+    partialSq[lane] = partialSq[lane] + partialSq[lane + 32u];
+  }
+  workgroupBarrier();
+  if (lane < 16u) {
+    partialSq[lane] = partialSq[lane] + partialSq[lane + 16u];
+  }
+  workgroupBarrier();
+  if (lane < 8u) {
+    partialSq[lane] = partialSq[lane] + partialSq[lane + 8u];
+  }
+  workgroupBarrier();
+  if (lane < 4u) {
+    partialSq[lane] = partialSq[lane] + partialSq[lane + 4u];
+  }
+  workgroupBarrier();
+  if (lane < 2u) {
+    partialSq[lane] = partialSq[lane] + partialSq[lane + 2u];
+  }
+  workgroupBarrier();
+  if (lane < 1u) {
+    partialSq[lane] = partialSq[lane] + partialSq[lane + 1u];
+  }
+  workgroupBarrier();
+`;
+
 export const MAT_VEC_BATCH_WGSL = /* wgsl */ `
 struct Params {
   rows: u32,
@@ -413,18 +483,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   }
   partialSum[lane] = sum;
   workgroupBarrier();
-
-  var stride = 128u;
-  loop {
-    if (lane < stride) {
-      partialSum[lane] = partialSum[lane] + partialSum[lane + stride];
-    }
-    workgroupBarrier();
-    if (stride == 1u) {
-      break;
-    }
-    stride = stride / 2u;
-  }
+${REDUCE_PARTIAL_SUM_256_WGSL}
 
   let mean = partialSum[0] / f32(params.dim);
   var sq = 0.0;
@@ -434,18 +493,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   }
   partialSq[lane] = sq;
   workgroupBarrier();
-
-  stride = 128u;
-  loop {
-    if (lane < stride) {
-      partialSq[lane] = partialSq[lane] + partialSq[lane + stride];
-    }
-    workgroupBarrier();
-    if (stride == 1u) {
-      break;
-    }
-    stride = stride / 2u;
-  }
+${REDUCE_PARTIAL_SQ_256_WGSL}
 
   let invStd = inverseSqrt(partialSq[0] / f32(params.dim) + 1.0e-5);
   for (var i = lane; i < params.dim; i = i + 256u) {
@@ -487,18 +535,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   }
   partialSum[lane] = sum;
   workgroupBarrier();
-
-  var stride = 128u;
-  loop {
-    if (lane < stride) {
-      partialSum[lane] = partialSum[lane] + partialSum[lane + stride];
-    }
-    workgroupBarrier();
-    if (stride == 1u) {
-      break;
-    }
-    stride = stride / 2u;
-  }
+${REDUCE_PARTIAL_SUM_256_WGSL}
 
   let mean = partialSum[0] / f32(params.dim);
   var sq = 0.0;
@@ -508,18 +545,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   }
   partialSq[lane] = sq;
   workgroupBarrier();
-
-  stride = 128u;
-  loop {
-    if (lane < stride) {
-      partialSq[lane] = partialSq[lane] + partialSq[lane + stride];
-    }
-    workgroupBarrier();
-    if (stride == 1u) {
-      break;
-    }
-    stride = stride / 2u;
-  }
+${REDUCE_PARTIAL_SQ_256_WGSL}
 
   let invStd = inverseSqrt(partialSq[0] / f32(params.dim) + 1.0e-5);
   for (var i = lane; i < params.dim; i = i + 256u) {
