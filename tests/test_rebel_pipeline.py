@@ -6,6 +6,7 @@ from p2.core.structured_config import Config, StratifyConfig, ValueHeadType
 from p2.env.card_utils import (
     NUM_HANDS,
     combo_suit_permutation_inverse_tensor,
+    mask_conflicting_combos,
     suit_permutations_tensor,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
@@ -88,6 +89,77 @@ def test_rebel_supervised_loss_finite():
     loss_dict = loss_fn(output, batch)
     assert torch.isfinite(loss_dict["total_loss"]).all()
     loss_dict["total_loss"].backward()
+
+
+def test_rebel_supervised_loss_zeros_board_blocked_weights():
+    loss_fn = RebelSupervisedLoss()
+    batch_size, num_actions = 1, 5
+    board = torch.tensor([[0, 14, 28, -1, -1]])
+    allowed = mask_conflicting_combos(board[0])
+    beliefs = torch.zeros(batch_size, 2, NUM_HANDS)
+    beliefs[:, :, allowed] = 1.0 / allowed.sum()
+    mlp_features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.ones(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=board,
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    policy_targets = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    policy_targets[..., 1] = 1.0
+    legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
+    values = torch.zeros(batch_size, 2, NUM_HANDS)
+    output = ModelOutput(
+        policy_logits=torch.zeros(batch_size, NUM_HANDS, num_actions),
+        value=torch.zeros(batch_size),
+        hand_values=values,
+    )
+    batch = RebelBatch(
+        features=mlp_features,
+        policy_targets=policy_targets,
+        value_targets=torch.ones_like(values),
+        legal_masks=legal_masks,
+    )
+
+    loss_dict = loss_fn(output, batch)
+
+    assert torch.all(loss_dict["policy_weights"][0, ~allowed] == 0)
+    assert torch.all(loss_dict["value_weights"][0, :, ~allowed] == 0)
+    assert torch.all(loss_dict["policy_weights"][0, allowed] > 0)
+    assert torch.all(loss_dict["value_weights"][0, :, allowed] > 0)
+
+
+def test_rebel_policy_loss_has_saturated_wrong_action_gradient():
+    loss_fn = RebelSupervisedLoss()
+    batch_size, num_actions = 1, 2
+    beliefs = torch.full((batch_size, 2, NUM_HANDS), 1.0 / NUM_HANDS)
+    logits = torch.zeros(batch_size, NUM_HANDS, num_actions, requires_grad=True)
+    logits.data[..., 0] = 10.0
+    policy_targets = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    policy_targets[..., 1] = 1.0
+    mlp_features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    batch = RebelBatch(
+        features=mlp_features,
+        policy_targets=policy_targets,
+        value_targets=None,
+        legal_masks=torch.ones(batch_size, num_actions, dtype=torch.bool),
+    )
+    output = ModelOutput(
+        policy_logits=logits,
+        value=torch.zeros(batch_size),
+        hand_values=None,
+    )
+
+    loss_dict = loss_fn(output, batch)
+    loss_dict["total_loss"].backward()
+
+    assert logits.grad[..., 0].mean() > 1e-4
 
 
 def test_rebel_cfr_trainer_single_step_cpu():

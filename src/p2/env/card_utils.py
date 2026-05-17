@@ -111,6 +111,40 @@ def mask_conflicting_combos(
     return ~intersects
 
 
+def board_allowed_hands(board: torch.Tensor) -> torch.Tensor:
+    """Return a bool mask of hands compatible with each public board.
+
+    Args:
+        board: Tensor with shape ``(..., board_cards)`` containing card ids and
+            ``-1`` padding for undealt board slots.
+
+    Returns:
+        Bool tensor with shape ``(..., 1326)`` where True means the private hand
+        does not use any public board card.
+    """
+    if board.shape[-1] == 0:
+        return torch.ones(
+            *board.shape[:-1], NUM_HANDS, dtype=torch.bool, device=board.device
+        )
+
+    flat_board = board.reshape(-1, board.shape[-1]).long()
+    board_onehot = torch.zeros(
+        flat_board.shape[0], 52, dtype=torch.bool, device=board.device
+    )
+    valid = flat_board >= 0
+    if valid.any():
+        rows = torch.arange(flat_board.shape[0], device=board.device)[
+            :, None
+        ].expand_as(flat_board)
+        board_onehot[rows[valid], flat_board[valid]] = True
+
+    blocked_count = (
+        combo_to_onehot_tensor(device=board.device).float() @ board_onehot.float().T
+    )
+    allowed = blocked_count.T < 0.5
+    return allowed.reshape(*board.shape[:-1], NUM_HANDS)
+
+
 @lru_cache(maxsize=2)
 def combo_to_onehot_tensor(device: torch.device | None = None) -> torch.Tensor:
     """Return [1326, 52] bool tensor of one-hot encoded combos."""

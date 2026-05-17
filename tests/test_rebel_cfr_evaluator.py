@@ -975,6 +975,32 @@ def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) ->
     torch.testing.assert_close(root_policy, expected)
 
 
+def test_instantaneous_regrets_zero_board_blocked_hands() -> None:
+    evaluator, env = make_evaluator(
+        batch_size=1, max_depth=1, device=torch.device("cpu")
+    )
+    env.step_bins(torch.tensor([1]))
+    env.step_bins(torch.tensor([1]))
+    assert env.street[0] == 1
+    roots = torch.arange(evaluator.root_nodes, device=env.device)
+    evaluator.initialize_subgame(env, roots)
+
+    top = evaluator.depth_offsets[-2]
+    bottom = evaluator.depth_offsets[1]
+    blocked = ~evaluator.allowed_hands[0]
+    assert blocked.any()
+
+    values_achieved = torch.zeros_like(evaluator.latest_values)
+    values_expected = torch.zeros_like(evaluator.latest_values)
+    actor = evaluator.env.to_act[0].item()
+    values_achieved[bottom:, actor, :] = 1.0
+
+    regrets = evaluator.compute_instantaneous_regrets(values_achieved, values_expected)
+
+    assert torch.all(regrets[bottom:, blocked] == 0)
+    assert torch.any(regrets[bottom:, evaluator.allowed_hands[:top].squeeze(0)] > 0)
+
+
 def test_training_data_returns_root_batch() -> None:
     evaluator, env = make_evaluator(batch_size=2, max_depth=1)
     env.step_bins(torch.tensor([1, 1]))

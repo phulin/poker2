@@ -1178,6 +1178,7 @@ class CFREvaluator(ABC):
         # Unblocked mass translates opponent-hand space to hero-hand space.
         opponent_global_reach = calculate_unblocked_mass(beliefs.flip(dims=[1]))
         src_weights = opponent_global_reach.gather(1, src_actor_indices).squeeze(1)
+        src_weights *= self.allowed_hands.to(dtype=src_weights.dtype)
 
         # Weight advantages by our mass unblocked by the opponent hands.
         weights = self._fan_out(src_weights)

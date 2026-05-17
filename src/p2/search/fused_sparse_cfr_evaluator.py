@@ -396,6 +396,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         src_weights = unblocked_mass_opp_at_parents_triton(
             beliefs, self.env.to_act, top
         )  # [top, H]
+        src_weights *= self.allowed_hands[:top].to(dtype=src_weights.dtype)
 
         # actor_values is now picked inside fused_regret_tail_ via to_act —
         # no caller-side aten::index, no [top, H] intermediate buffer.

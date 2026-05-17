@@ -5,6 +5,7 @@ import torch
 
 from p2.env.card_utils import (
     NUM_HANDS,
+    board_allowed_hands,
     calculate_unblocked_mass,
     combo_blocking_tensor,
     combo_index,
@@ -208,6 +209,25 @@ class TestMaskConflictingCombos:
 
         # No combinations should be available
         assert torch.all(~mask)
+
+
+class TestBoardAllowedHands:
+    """Test vectorized public-board hand masks."""
+
+    def test_empty_board_allows_every_hand(self):
+        board = torch.full((2, 5), -1, dtype=torch.long)
+        allowed = board_allowed_hands(board)
+
+        assert allowed.shape == (2, NUM_HANDS)
+        assert torch.all(allowed)
+
+    def test_matches_single_board_mask(self):
+        board = torch.tensor([[0, 14, 28, -1, -1], [3, 17, 31, 45, -1]])
+        allowed = board_allowed_hands(board)
+
+        for i in range(board.shape[0]):
+            expected = mask_conflicting_combos(board[i])
+            torch.testing.assert_close(allowed[i], expected)
 
 
 class TestSuitPermutationHelpers:

@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from p2.core.structured_config import KLType, PPOClipping, ValueLossType
 from p2.env.card_utils import (
     NUM_HANDS,
+    board_allowed_hands,
     calculate_unblocked_mass,
     combo_suit_permutation_tensor,
 )
@@ -766,10 +767,15 @@ class RebelSupervisedLoss(nn.Module):
 
         opp = 1 - batch.features.to_act
         player_beliefs = batch.features.beliefs.view(-1, 2, NUM_HANDS)
+        allowed_hands = board_allowed_hands(batch.features.board)
+        allowed_hands_float = allowed_hands.to(dtype=player_beliefs.dtype)
         unblocked_mass = calculate_unblocked_mass(player_beliefs)
-        opp_matchup = unblocked_mass.gather(
-            1, opp[:, None, None].expand(-1, 1, NUM_HANDS)
-        ).squeeze(1)
+        opp_matchup = (
+            unblocked_mass.gather(
+                1, opp[:, None, None].expand(-1, 1, NUM_HANDS)
+            ).squeeze(1)
+            * allowed_hands_float
+        )
 
         if batch.policy_targets is None:
             policy_loss = torch.zeros(1, device=device)
@@ -782,16 +788,12 @@ class RebelSupervisedLoss(nn.Module):
             log_probs = F.log_softmax(masked_logits, dim=-1)
             probs = log_probs.exp()
 
-            policy_weights = opp_matchup[:, :, None].expand(*probs.shape)
-            policy_loss = F.huber_loss(
-                probs, batch.policy_targets, weight=policy_weights
+            policy_weights = opp_matchup
+            policy_loss_per_hand = (
+                -(batch.policy_targets * log_probs).sum(dim=-1) * policy_weights
             )
-            policy_loss_all = F.huber_loss(
-                probs.detach(),
-                batch.policy_targets,
-                reduction="none",
-                weight=policy_weights,
-            )
+            policy_loss = policy_loss_per_hand.mean()
+            policy_loss_all = policy_loss_per_hand.detach()
 
             entropy = -(probs * log_probs).sum(dim=-1).mean()
 
@@ -800,7 +802,7 @@ class RebelSupervisedLoss(nn.Module):
             value_loss = torch.zeros(1, device=device)
             value_loss_all = None
         else:
-            value_weights = unblocked_mass.flip(dims=[1])
+            value_weights = unblocked_mass.flip(dims=[1]) * allowed_hands_float[:, None]
             value_loss = F.mse_loss(
                 hand_values, batch.value_targets, weight=value_weights
             )
