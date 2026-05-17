@@ -134,6 +134,59 @@ export class GpuCfrEvaluator {
     iterations: number,
     readOptions: SolveReadOptions = {},
   ): Promise<LocalSolveResult> {
+    assertProblem(problem, numHands, numActions);
+    const childValues = makeStorageBuffer(
+      this.device,
+      new Float32Array(problem.childValues),
+    );
+    return await this.solvePrepared(
+      problem,
+      beliefs,
+      numHands,
+      numActions,
+      iterations,
+      childValues,
+      true,
+      readOptions,
+    );
+  }
+
+  async solveGpuChildValues(
+    problem: Omit<LocalCfrProblem, "childValues">,
+    beliefs: Float32Array<ArrayBufferLike>,
+    numHands: number,
+    numActions: number,
+    iterations: number,
+    childValues: GPUBuffer,
+    readOptions: SolveReadOptions = {},
+  ): Promise<LocalSolveResult> {
+    if (problem.legalMask.length !== numActions) {
+      throw new Error(
+        `legalMask has ${problem.legalMask.length} entries, expected ${numActions}`,
+      );
+    }
+    return await this.solvePrepared(
+      problem,
+      beliefs,
+      numHands,
+      numActions,
+      iterations,
+      childValues,
+      false,
+      readOptions,
+    );
+  }
+
+  private async solvePrepared(
+    problem: Omit<LocalCfrProblem, "childValues">,
+    beliefs: Float32Array<ArrayBufferLike>,
+    numHands: number,
+    numActions: number,
+    iterations: number,
+    childValues: GPUBuffer,
+    destroyChildValues: boolean,
+    readOptions: SolveReadOptions = {},
+  ): Promise<LocalSolveResult> {
     const readPolicy = readOptions.readPolicy ?? true;
     const readActionProbs = readOptions.readActionProbs ?? true;
     const debug =
@@ -144,10 +197,6 @@ export class GpuCfrEvaluator {
     const workgroupsPolicy = Math.ceil(totalPolicy / 64);
 
     const legal = makeStorageBuffer(this.device, asU32(problem.legalMask));
-    const childValues = makeStorageBuffer(
-      this.device,
-      new Float32Array(problem.childValues),
-    );
     const regrets = makeStorageBuffer(this.device, new Float32Array(totalPolicy));
     const policy = makeStorageBuffer(this.device, new Float32Array(totalPolicy));
     const avgPolicy = makeStorageBuffer(this.device, new Float32Array(totalPolicy));
@@ -305,7 +354,7 @@ export class GpuCfrEvaluator {
 
     for (const buffer of [
       legal,
-      childValues,
+      destroyChildValues ? childValues : undefined,
       regrets,
       policy,
       avgPolicy,

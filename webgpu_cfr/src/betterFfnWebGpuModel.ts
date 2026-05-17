@@ -7,6 +7,7 @@ import {
   MAT_VEC_WGSL,
   SCALED_RESIDUAL_ADD_WGSL,
   SILU_MUL_WGSL,
+  ZERO_SUM_BATCH_WGSL,
 } from "./modelKernels.js";
 import {
   makeStorageBuffer,
@@ -47,6 +48,13 @@ export interface BetterFfnPrediction {
   policyLogits?: Float32Array<ArrayBufferLike>;
 }
 
+export interface GpuHandValuePrediction {
+  buffer: GPUBuffer;
+  batch: number;
+  valuesPerSample: number;
+  dispose: () => void;
+}
+
 export class BetterFfnWebGpuModel {
   readonly device: GPUDevice;
   readonly manifest: BetterFfnManifest;
@@ -62,6 +70,7 @@ export class BetterFfnWebGpuModel {
   private readonly geluPipeline: GPUComputePipeline;
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
   private readonly add3Pipeline: GPUComputePipeline;
+  private readonly zeroSumBatchPipeline: GPUComputePipeline;
   private readonly storagePool = new Map<number, GPUBuffer[]>();
   private readonly uniformPool = new Map<number, GPUBuffer[]>();
   private recordingEncoder: GPUCommandEncoder | undefined;
@@ -105,6 +114,10 @@ export class BetterFfnWebGpuModel {
       "better-ffn-scaled-residual-add",
     );
     this.add3Pipeline = this.pipeline(ADD3_WGSL, "better-ffn-add3");
+    this.zeroSumBatchPipeline = this.pipeline(
+      ZERO_SUM_BATCH_WGSL,
+      "better-ffn-zero-sum-batch",
+    );
   }
 
   static fromBuffers(
@@ -130,6 +143,21 @@ export class BetterFfnWebGpuModel {
       .handValues;
   }
 
+  async predictBatchHandValuesGpu(
+    envs: readonly PublicHunlEnv[],
+    beliefs: Float32Array<ArrayBufferLike>,
+  ): Promise<GpuHandValuePrediction> {
+    const prediction = this.enqueuePredictBatch(envs, beliefs, {
+      includePolicy: false,
+    });
+    return {
+      buffer: prediction.handValuesBuffer,
+      batch: prediction.batch,
+      valuesPerSample: 2 * NUM_HANDS,
+      dispose: prediction.dispose,
+    };
+  }
+
   async predict(
     env: PublicHunlEnv,
     beliefs: Float32Array<ArrayBufferLike>,
@@ -152,8 +180,44 @@ export class BetterFfnWebGpuModel {
     beliefs: Float32Array<ArrayBufferLike>,
     options: PredictOptions = {},
   ): Promise<BetterFfnPrediction> {
+    const gpuPrediction = this.enqueuePredictBatch(envs, beliefs, options);
+    try {
+      const handValues = await readFloatBuffer(
+        this.device,
+        gpuPrediction.handValuesBuffer,
+        gpuPrediction.batch * 2 * NUM_HANDS,
+      );
+      const prediction: BetterFfnPrediction = { handValues };
+      if (gpuPrediction.policyLogitsBuffer) {
+        prediction.policyLogits = await readFloatBuffer(
+          this.device,
+          gpuPrediction.policyLogitsBuffer,
+          gpuPrediction.batch * this.manifest.architecture.numActions * NUM_HANDS,
+        );
+      }
+      return prediction;
+    } finally {
+      gpuPrediction.dispose();
+    }
+  }
+
+  private enqueuePredictBatch(
+    envs: readonly PublicHunlEnv[],
+    beliefs: Float32Array<ArrayBufferLike>,
+    options: PredictOptions = {},
+  ): {
+    handValuesBuffer: GPUBuffer;
+    policyLogitsBuffer?: GPUBuffer;
+    batch: number;
+    dispose: () => void;
+  } {
     if (envs.length === 0) {
-      return { handValues: new Float32Array(0) };
+      const empty = this.acquireStorage(1);
+      return {
+        handValuesBuffer: empty.buffer,
+        batch: 0,
+        dispose: () => this.releaseTemp(empty),
+      };
     }
     const hiddenDim = this.manifest.architecture.hiddenDim;
     const ffnDim = this.manifest.architecture.ffnDim;
@@ -365,28 +429,30 @@ export class BetterFfnWebGpuModel {
         );
       }
 
-      submitPredictionCommands();
-      const handValues = await readFloatBuffer(
-        this.device,
-        valueRawBuffer,
-        batch * numPlayers * NUM_HANDS,
-      );
-      this.applyZeroSumBatchIfNeeded(handValues, beliefs, batch);
-
-      const prediction: BetterFfnPrediction = { handValues };
-      if (policyBuffer) {
-        prediction.policyLogits = await readFloatBuffer(
-          this.device,
-          policyBuffer,
-          batch * numActions * NUM_HANDS,
-        );
+      if (this.manifest.architecture.enforceZeroSum) {
+        this.zeroSumBatch(valueRawBuffer, beliefBuffer, batch, uniform);
       }
-      return prediction;
-    } finally {
+      submitPredictionCommands();
+
+      let disposed = false;
+      return {
+        handValuesBuffer: valueRawBuffer,
+        ...(policyBuffer ? { policyLogitsBuffer: policyBuffer } : {}),
+        batch,
+        dispose: () => {
+          if (disposed) return;
+          disposed = true;
+          for (const temp of temps) {
+            this.releaseTemp(temp);
+          }
+        },
+      };
+    } catch (error) {
       this.recordingEncoder = undefined;
       for (const temp of temps) {
         this.releaseTemp(temp);
       }
+      throw error;
     }
   }
 
@@ -936,47 +1002,22 @@ export class BetterFfnWebGpuModel {
     ]);
   }
 
-  private applyZeroSumIfNeeded(
-    handValues: Float32Array<ArrayBufferLike>,
-    beliefs: Float32Array<ArrayBufferLike>,
-  ): void {
-    if (!this.manifest.architecture.enforceZeroSum) {
-      return;
-    }
-    let p0 = 0;
-    let p1 = 0;
-    for (let h = 0; h < NUM_HANDS; h += 1) {
-      p0 += handValues[h]! * beliefs[h]!;
-      p1 += handValues[NUM_HANDS + h]! * beliefs[NUM_HANDS + h]!;
-    }
-    const offset = (p0 + p1) / 2;
-    for (let i = 0; i < handValues.length; i += 1) {
-      handValues[i] = handValues[i]! - offset;
-    }
-  }
-
-  private applyZeroSumBatchIfNeeded(
-    handValues: Float32Array<ArrayBufferLike>,
-    beliefs: Float32Array<ArrayBufferLike>,
+  private zeroSumBatch(
+    values: GPUBuffer,
+    beliefs: GPUBuffer,
     batch: number,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
   ): void {
-    if (!this.manifest.architecture.enforceZeroSum) {
-      return;
-    }
-    const stride = 2 * NUM_HANDS;
-    for (let sample = 0; sample < batch; sample += 1) {
-      const base = sample * stride;
-      let p0 = 0;
-      let p1 = 0;
-      for (let h = 0; h < NUM_HANDS; h += 1) {
-        p0 += handValues[base + h]! * beliefs[h]!;
-        p1 += handValues[base + NUM_HANDS + h]! * beliefs[NUM_HANDS + h]!;
-      }
-      const offset = (p0 + p1) / 2;
-      for (let i = 0; i < stride; i += 1) {
-        handValues[base + i] = handValues[base + i]! - offset;
-      }
-    }
+    this.submit(this.zeroSumBatchPipeline, batch, [
+      { binding: 0, resource: { buffer: values } },
+      { binding: 1, resource: { buffer: beliefs } },
+      {
+        binding: 2,
+        resource: { buffer: uniform(new Uint32Array([NUM_HANDS, batch, 0, 0])) },
+      },
+    ]);
   }
 
   private acquireStorage(elements: number): TempBuffer {
