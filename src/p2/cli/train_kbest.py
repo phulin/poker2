@@ -193,7 +193,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
             merged_config.use_wandb = False
             run_cm = nullcontext()
 
-    with run_cm as run:
+    with run_cm:
         # Initialize trainer with merged config
         trainer = SelfPlayTrainer(cfg=merged_config, device=device)
 
@@ -306,9 +306,7 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
                 and exploiter_trainer is not None
                 and (step + 1) % merged_config.exploiter.training_interval == 0
             ):
-                exploiter_stats = train_exploiter(
-                    trainer, exploiter_trainer, step, merged_config
-                )
+                train_exploiter(trainer, exploiter_trainer, step, merged_config)
 
             # Checkpointing
             if (step + 1) % cfg.checkpoint_interval == 0:

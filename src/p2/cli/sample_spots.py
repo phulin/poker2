@@ -136,7 +136,6 @@ def sample_spots(
             collected_per_street[s].append(_select_rows(snap, take))
             counts[s] += take.numel()
 
-    K = trainer.K_value
     N = trainer.cfr_evaluator.root_nodes
     root_indices = torch.arange(N, device=device)
     passes = 0
