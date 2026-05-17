@@ -163,6 +163,17 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._static_model_feature_key: tuple[int, int, int] | None = None
         self._static_model_feature_fields: tuple[torch.Tensor, ...] | None = None
         self._br_action_parent_index_cache: dict[tuple[int, int], torch.Tensor] = {}
+        self._tree_slice_key: tuple[int, ...] | None = None
+        self._bottom: int = 0
+        self._top: int = 0
+        self._parent_index_all: torch.Tensor | None = None
+        self._parent_index_bottom: torch.Tensor | None = None
+        self._parent_index_nonroot: torch.Tensor | None = None
+        self._child_offsets_top: torch.Tensor | None = None
+        self._child_count_top: torch.Tensor | None = None
+        self._to_act_top: torch.Tensor | None = None
+        self._child_offsets_by_depth: tuple[torch.Tensor, ...] = ()
+        self._child_count_by_depth: tuple[torch.Tensor, ...] = ()
 
     def _init_hand_rank_data(self) -> None:
         """Build hand-rank data, then precompute the constant-per-subgame
@@ -236,6 +247,59 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._static_model_feature_fields = None
         if not hasattr(self, "_br_action_parent_index_cache"):
             self._br_action_parent_index_cache = {}
+        if not hasattr(self, "_tree_slice_key"):
+            self._tree_slice_key = None
+        if not hasattr(self, "_child_offsets_by_depth"):
+            self._child_offsets_by_depth = ()
+        if not hasattr(self, "_child_count_by_depth"):
+            self._child_count_by_depth = ()
+
+    def initialize_subgame(self, *args, **kwargs) -> None:
+        super().initialize_subgame(*args, **kwargs)
+        self._prepare_tree_slices()
+
+    def _prepare_tree_slices(self) -> None:
+        """Cache static contiguous tree slices for the current sparse subgame."""
+        bottom = self.depth_offsets[1] if len(self.depth_offsets) > 1 else self.root_nodes
+        top = self.depth_offsets[-2] if len(self.depth_offsets) > 1 else self.root_nodes
+        key = (
+            int(self.total_nodes),
+            int(self.root_nodes),
+            int(bottom),
+            int(top),
+            int(self.parent_index.data_ptr()),
+            int(self.child_offsets.data_ptr()),
+            int(self.child_count.data_ptr()),
+            int(self.env.to_act.data_ptr()),
+        )
+        if self._tree_slice_key == key:
+            return
+
+        self._tree_slice_key = key
+        self._bottom = bottom
+        self._top = top
+        self._parent_index_all = self.parent_index.contiguous()
+        self._parent_index_bottom = self.parent_index[bottom:].contiguous()
+        self._parent_index_nonroot = self.parent_index[self.root_nodes :].contiguous()
+        self._child_offsets_top = self.child_offsets[:top].contiguous()
+        self._child_count_top = self.child_count[:top].contiguous()
+        self._to_act_top = self.env.to_act[:top].contiguous()
+        self._child_offsets_by_depth = tuple(
+            self.child_offsets[
+                self.depth_offsets[d] : self.depth_offsets[d + 1]
+            ].contiguous()
+            for d in range(self.tree_depth)
+        )
+        self._child_count_by_depth = tuple(
+            self.child_count[
+                self.depth_offsets[d] : self.depth_offsets[d + 1]
+            ].contiguous()
+            for d in range(self.tree_depth)
+        )
+
+    def _tree_slices(self) -> None:
+        if self._tree_slice_key is None:
+            self._prepare_tree_slices()
 
     def _action_parent_index(self, rows: int, actions: int) -> torch.Tensor:
         """Return [0,0,...,1,1,...] mapping flattened [rows, actions] to rows."""
@@ -412,8 +476,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     # ------------------------------------------------------------------
 
     def update_policy(self, t: int) -> None:
-        bottom = self.depth_offsets[1]
-        top = self.depth_offsets[-2]
+        self._prepare_tree_slices()
+        bottom = self._bottom
+        top = self._top
+        child_offsets_top = self._child_offsets_top
+        child_count_top = self._child_count_top
+        parent_index_bottom = self._parent_index_bottom
+        assert child_offsets_top is not None
+        assert child_count_top is not None
+        assert parent_index_bottom is not None
         positive_regrets = self._ensure_positive_regrets_buf()
         if not (self._opt_reuse_positive_regrets and self._fused_positive_regrets_valid):
             torch.clamp(self.cumulative_regrets, min=0.0, out=positive_regrets)
@@ -427,8 +498,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             fused_parent_sum_divide_(
                 values=positive_regrets.contiguous(),
                 fallback=uniform_fallback,
-                child_offsets=self.child_offsets[:top].contiguous(),
-                child_count=self.child_count[:top].contiguous(),
+                child_offsets=child_offsets_top,
+                child_count=child_count_top,
                 out=self.policy_probs[bottom:],
                 out_offset=bottom,
                 max_children=self.num_actions,
@@ -436,15 +507,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         else:
             parent_sum = fused_parent_sum(
                 values=positive_regrets.contiguous(),
-                child_offsets=self.child_offsets[:top].contiguous(),
-                child_count=self.child_count[:top].contiguous(),
+                child_offsets=child_offsets_top,
+                child_count=child_count_top,
                 max_children=self.num_actions,
             )
             fused_divide_by_parent_sum_(
                 pos=positive_regrets[bottom:].contiguous(),
                 fallback=uniform_fallback,
                 parent_sum=parent_sum,
-                parent_index=self.parent_index[bottom:].contiguous(),
+                parent_index=parent_index_bottom,
                 out=self.policy_probs[bottom:],
             )
         self._mask_invalid(self.policy_probs)
@@ -490,8 +561,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 out=values,
             )
 
-        bottom, top = self.depth_offsets[1], self.depth_offsets[-2]
-        actor_indices = self.env.to_act[:top]
+        self._prepare_tree_slices()
+        bottom, top = self._bottom, self._top
+        parent_index_bottom = self._parent_index_bottom
+        to_act_top = self._to_act_top
+        assert parent_index_bottom is not None
+        assert to_act_top is not None
+        actor_indices = to_act_top
         actor_indices_expanded = actor_indices[:top, None, None].expand(
             -1, -1, NUM_HANDS
         )
@@ -500,13 +576,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # inline via index_select, and the denom side of the ratio kernel
         # gathers from actor_beliefs via parent_index instead.
         marginal_policy = (
-            actor_beliefs.index_select(0, self.parent_index[bottom:]) * policy[bottom:]
+            actor_beliefs.index_select(0, parent_index_bottom) * policy[bottom:]
         )
 
         opponent_conditioned_policy_child = unblocked_mass_ratio_indirect_triton(
             numer_target=marginal_policy.contiguous(),
             denom_target=actor_beliefs.contiguous(),
-            parent_index=self.parent_index[bottom:].contiguous(),
+            parent_index=parent_index_bottom,
         )
         if self._opt_child_opp_policy:
             opponent_conditioned_policy = opponent_conditioned_policy_child
@@ -525,8 +601,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     prev_actor=self.prev_actor,
                     policy_hero=policy,
                     policy_opp_child=opponent_conditioned_policy,
-                    child_offsets=self.child_offsets[parent_base:parent_end].contiguous(),
-                    child_count=self.child_count[parent_base:parent_end].contiguous(),
+                    child_offsets=self._child_offsets_by_depth[depth],
+                    child_count=self._child_count_by_depth[depth],
                     parent_base=parent_base,
                     child_base=bottom,
                     max_children=self.num_actions,
@@ -537,8 +613,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     prev_actor=self.prev_actor,
                     policy_hero=policy,
                     policy_opp=opponent_conditioned_policy,
-                    child_offsets=self.child_offsets[parent_base:parent_end].contiguous(),
-                    child_count=self.child_count[parent_base:parent_end].contiguous(),
+                    child_offsets=self._child_offsets_by_depth[depth],
+                    child_count=self._child_count_by_depth[depth],
                     parent_base=parent_base,
                     max_children=self.num_actions,
                 )
@@ -555,8 +631,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if values_expected is None:
             values_expected = values_achieved
 
-        bottom = self.depth_offsets[1]
-        top = self.depth_offsets[-2]
+        self._prepare_tree_slices()
+        bottom = self._bottom
+        top = self._top
+        parent_index_all = self._parent_index_all
+        to_act_top = self._to_act_top
+        assert parent_index_all is not None
+        assert to_act_top is not None
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         regrets = torch.zeros_like(self.policy_probs)
@@ -574,9 +655,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             regrets=regrets,
             values_achieved=values_achieved.contiguous(),
             values_expected=values_expected[:top].contiguous(),
-            to_act=self.env.to_act[:top].contiguous(),
+            to_act=to_act_top,
             src_weights=src_weights.contiguous(),
-            parent_index=self.parent_index.contiguous(),
+            parent_index=parent_index_all,
             prev_actor=self.prev_actor.contiguous(),
             bottom=bottom,
         )
@@ -701,7 +782,17 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self.policy_probs_avg[:] = self.policy_probs
             return
 
+        self._prepare_tree_slices()
         N = self.root_nodes
+        top = self._top
+        parent_index_all = self._parent_index_all
+        parent_index_nonroot = self._parent_index_nonroot
+        child_offsets_top = self._child_offsets_top
+        child_count_top = self._child_count_top
+        assert parent_index_all is not None
+        assert parent_index_nonroot is not None
+        assert child_offsets_top is not None
+        assert child_count_top is not None
 
         fused_average_policy_mix_with_tensors_(
             policy_probs_avg=self.policy_probs_avg,
@@ -709,22 +800,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self_reach=self.self_reach,
             self_reach_avg=self.self_reach_avg,
             to_act=self.env.to_act.contiguous(),
-            parent_index=self.parent_index.contiguous(),
+            parent_index=parent_index_all,
             old=self._t_scalars.mix_old,
             new=self._t_scalars.mix_new,
             total_weight=self._t_scalars.mix_total,
             bottom=N,
         )
 
-        top = self.depth_offsets[-2]
         # For renorm, fallback is the un-normalized policy itself (i.e. identity).
         child_slice = self.policy_probs_avg[N:].contiguous()
         if self._opt_parent_sum_divide:
             fused_parent_sum_divide_(
                 values=self.policy_probs_avg.contiguous(),
                 fallback=child_slice,
-                child_offsets=self.child_offsets[:top].contiguous(),
-                child_count=self.child_count[:top].contiguous(),
+                child_offsets=child_offsets_top,
+                child_count=child_count_top,
                 out=self.policy_probs_avg[N:],
                 out_offset=N,
                 max_children=self.num_actions,
@@ -733,15 +823,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         else:
             parent_sum = fused_parent_sum(
                 values=self.policy_probs_avg.contiguous(),
-                child_offsets=self.child_offsets[:top].contiguous(),
-                child_count=self.child_count[:top].contiguous(),
+                child_offsets=child_offsets_top,
+                child_count=child_count_top,
                 max_children=self.num_actions,
             )
             fused_divide_by_parent_sum_(
                 pos=child_slice,
                 fallback=child_slice,
                 parent_sum=parent_sum,
-                parent_index=self.parent_index[N:].contiguous(),
+                parent_index=parent_index_nonroot,
                 out=self.policy_probs_avg[N:],
                 eps=1e-5,
             )
