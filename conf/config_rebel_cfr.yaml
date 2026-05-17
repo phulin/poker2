@@ -3,9 +3,9 @@
 defaults:
   - _self_
 
-num_steps: 15000
+num_steps: 5000
 use_tensor_env: true
-num_envs: 512
+num_envs: 1024
 device: cuda
 checkpoint_dir: checkpoints-rebel
 checkpoint_interval: 50
@@ -20,7 +20,7 @@ train:
   lr_schedule: cosine
 
   weight_decay: 0.01
-  batch_size: 2048
+  batch_size: 4096
   episodes_per_step: 10
   replay_buffer_batches: 16
   value_reuse_goal: 4
@@ -70,7 +70,7 @@ env:
 
 search:
   enabled: true
-  depth: 5
+  depth: 4
   sparse: true
   sparse_fused: true
   value_targets_from_final_policy: true
@@ -79,8 +79,8 @@ search:
   cfr_avg: false
   cfr_plus: false
 
-  iterations: 200
-  iterations_final: 500
+  iterations: 400
+  iterations_final: 1000
   # warm_start_iterations and dcfr_plus_delay are derived from the
   # current cfr_iterations each step (iterations/20 and iterations*0.4
   # respectively); these static values are starting points that the
