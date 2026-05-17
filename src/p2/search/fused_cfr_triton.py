@@ -1286,6 +1286,48 @@ if triton is not None:
         out_ptrs = out_ptr + c_offs[:, None] * H + h_offs[None, :]
         tl.store(out_ptrs, result, mask=mask_2d)
 
+    @triton.jit
+    def _fused_parent_sum_divide_kernel(
+        values_ptr,         # [total, H] absolute-row values to sum over siblings
+        fallback_ptr,       # [num_children, H] child-aligned fallback
+        child_offsets_ptr,  # [num_parents] absolute first-child row
+        child_count_ptr,    # [num_parents]
+        out_ptr,            # [num_children, H] child-aligned output
+        out_offset,         # absolute row index corresponding to out row 0
+        H,
+        EPS,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        hb = tl.program_id(1)
+
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        row_offs = tl.arange(0, MAX_CHILDREN)
+        col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        row_mask = row_offs < count
+        col_mask = col_offs < H
+        mask_2d = row_mask[:, None] & col_mask[None, :]
+
+        ptrs = values_ptr + (first + row_offs)[:, None] * H + col_offs[None, :]
+        vals = tl.load(ptrs, mask=mask_2d, other=0.0)
+        denom = tl.sum(vals, axis=0)
+        use_div = denom > EPS
+        denom_safe = tl.maximum(denom, EPS)
+        divided = vals / denom_safe[None, :]
+
+        child_rel = first + row_offs - out_offset
+        f_ptrs = fallback_ptr + child_rel[:, None] * H + col_offs[None, :]
+        fallback = tl.load(f_ptrs, mask=mask_2d, other=0.0)
+        result = tl.where(use_div[None, :], divided, fallback)
+
+        out_ptrs = out_ptr + child_rel[:, None] * H + col_offs[None, :]
+        tl.store(out_ptrs, result, mask=mask_2d)
+
 
 def fused_parent_sum(
     values: torch.Tensor,          # [total, H]
@@ -1358,6 +1400,55 @@ def fused_divide_by_parent_sum_(
         h,
         eps,
         BLOCK_C=block_c,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+def fused_parent_sum_divide_(
+    values: torch.Tensor,          # [total, H] absolute-row numerator
+    fallback: torch.Tensor,        # [num_children, H] fallback for denom <= eps
+    child_offsets: torch.Tensor,   # [num_parents] absolute child row
+    child_count: torch.Tensor,     # [num_parents]
+    out: torch.Tensor,             # [num_children, H]
+    out_offset: int,
+    max_children: int = 8,
+    eps: float = 1e-8,
+    block_h: int = 512,
+) -> None:
+    """For each parent, sum its child rows in ``values`` and immediately write
+    normalized child rows to ``out``.
+
+    This is a fused replacement for ``fused_parent_sum`` followed by
+    ``fused_divide_by_parent_sum_``. ``fallback`` and ``out`` are child-aligned
+    starting at ``out_offset``; ``values`` is indexed by absolute tree row.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 2
+    assert fallback.is_contiguous() and out.is_contiguous()
+    assert fallback.shape == out.shape and fallback.dim() == 2
+    assert child_offsets.is_contiguous() and child_offsets.dim() == 1
+    assert child_count.is_contiguous() and child_count.shape == child_offsets.shape
+    assert values.shape[1] == fallback.shape[1]
+
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+
+    num_parents = child_offsets.shape[0]
+    h = values.shape[1]
+    grid = (num_parents, triton.cdiv(h, block_h))
+    _fused_parent_sum_divide_kernel[grid](
+        values,
+        fallback,
+        child_offsets,
+        child_count,
+        out,
+        out_offset,
+        h,
+        eps,
+        MAX_CHILDREN=mc_pow2,
         BLOCK_H=block_h,
         num_warps=4,
     )
@@ -1634,10 +1725,10 @@ if triton is not None:
         offs = pid * BLOCK + tl.arange(0, BLOCK)
         mask = offs < n_elements
         h = tl.load(hand_values_ptr + offs, mask=mask, other=0.0)
-        l = tl.load(last_model_values_ptr + offs, mask=mask, other=0.0)
+        last = tl.load(last_model_values_ptr + offs, mask=mask, other=0.0)
         old_plus_new_over_new = tl.load(old_plus_new_over_new_ptr)
         old_over_new = tl.load(old_over_new_ptr)
-        out = old_plus_new_over_new * h - old_over_new * l
+        out = old_plus_new_over_new * h - old_over_new * last
         tl.store(out_ptr + offs, out, mask=mask)
 
 
@@ -1900,6 +1991,99 @@ def fused_weighted_parent_sum(
     )
 
 
+if triton is not None:
+
+    @triton.jit
+    def _fused_weighted_parent_sum_child_opp_kernel(
+        values_ptr,          # [total, 2, H] in/out
+        prev_actor_ptr,      # [total]
+        policy_hero_ptr,     # [total, H]
+        policy_opp_ptr,      # [num_children, H], child-aligned from child_base
+        child_offsets_ptr,   # [num_parents] absolute first-child row
+        child_count_ptr,     # [num_parents]
+        parent_base,         # absolute row of first parent in this depth slice
+        child_base,          # absolute row corresponding to policy_opp row 0
+        H,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        player = tl.program_id(1)
+        hb = tl.program_id(2)
+
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        col_mask = col_offs < H
+
+        acc = tl.zeros([BLOCK_H], dtype=tl.float32)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                pa = tl.load(prev_actor_ptr + child)
+                pol_ptr = tl.where(pa == player, policy_hero_ptr + child * H, policy_opp_ptr + (child - child_base) * H)
+                pol = tl.load(pol_ptr + col_offs, mask=col_mask, other=0.0)
+                v = tl.load(
+                    values_ptr + (child * 2 + player) * H + col_offs,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                acc += v * pol
+
+        out_ptrs = values_ptr + ((parent_base + p) * 2 + player) * H + col_offs
+        tl.store(out_ptrs, acc, mask=col_mask)
+
+
+def fused_weighted_parent_sum_child_opp(
+    values: torch.Tensor,            # [total, 2, H] in/out
+    prev_actor: torch.Tensor,        # [total]
+    policy_hero: torch.Tensor,       # [total, H]
+    policy_opp_child: torch.Tensor,  # [num_children, H], child-aligned
+    child_offsets: torch.Tensor,     # [num_parents] absolute child row
+    child_count: torch.Tensor,       # [num_parents]
+    parent_base: int,
+    child_base: int,
+    max_children: int = 8,
+    block_h: int = 2048,
+) -> None:
+    """Variant of ``fused_weighted_parent_sum`` where opponent-conditioned
+    policy is stored only for child rows, starting at ``child_base``.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 3 and values.shape[1] == 2
+    assert policy_hero.is_contiguous() and policy_opp_child.is_contiguous()
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    total, two, h = values.shape
+    assert policy_hero.shape == (total, h)
+    assert policy_opp_child.dim() == 2 and policy_opp_child.shape[1] == h
+    assert prev_actor.shape == (total,)
+
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    num_parents = child_offsets.shape[0]
+
+    grid = (num_parents, 2, triton.cdiv(h, block_h))
+    _fused_weighted_parent_sum_child_opp_kernel[grid](
+        values,
+        prev_actor,
+        policy_hero,
+        policy_opp_child,
+        child_offsets,
+        child_count,
+        parent_base,
+        child_base,
+        h,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Kernel 13: fused reach-weights per-depth propagation.
 #   Replaces _fan_out + scatter_reduce(prod) from _calculate_reach_weights.
@@ -2098,6 +2282,77 @@ def fused_deep_beliefs_(
         n,
         h,
         eps,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Kernel 15: sparse policy sample snapshots.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_policy_sample_update_kernel(
+        policy_ptr,        # [total, H]
+        sample_ptr,        # [total, H] in/out
+        rows_ptr,          # [num_iters, max_updates] int64
+        counts_ptr,        # [num_iters] int64
+        t_ptr,             # 0-D int64
+        max_updates,
+        H,
+        BLOCK_H: tl.constexpr,
+    ):
+        j = tl.program_id(0)
+        hb = tl.program_id(1)
+        t = tl.load(t_ptr)
+        count = tl.load(counts_ptr + t)
+        if j >= count:
+            return
+
+        row = tl.load(rows_ptr + t * max_updates + j)
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+        vals = tl.load(policy_ptr + row * H + offs, mask=mask, other=0.0)
+        tl.store(sample_ptr + row * H + offs, vals, mask=mask)
+
+
+def fused_policy_sample_update_(
+    policy_probs: torch.Tensor,
+    policy_probs_sample: torch.Tensor,
+    sample_rows: torch.Tensor,
+    sample_counts: torch.Tensor,
+    t: torch.Tensor,
+    block_h: int = 512,
+) -> None:
+    """Copy only rows whose sampling iteration equals device scalar ``t``.
+
+    ``sample_rows`` is a padded ``[num_iters, max_updates]`` table of row ids,
+    and ``sample_counts[t]`` gives the valid row count for iteration ``t``.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert policy_probs.is_contiguous() and policy_probs.dim() == 2
+    assert policy_probs_sample.is_contiguous() and policy_probs_sample.shape == policy_probs.shape
+    assert sample_rows.is_contiguous() and sample_rows.dim() == 2
+    assert sample_counts.is_contiguous() and sample_counts.dim() == 1
+    assert t.dim() == 0
+
+    max_updates = sample_rows.shape[1]
+    if max_updates == 0:
+        return
+    h = policy_probs.shape[1]
+    grid = (max_updates, triton.cdiv(h, block_h))
+    _fused_policy_sample_update_kernel[grid](
+        policy_probs,
+        policy_probs_sample,
+        sample_rows,
+        sample_counts,
+        t,
+        max_updates,
+        h,
         BLOCK_H=block_h,
         num_warps=4,
     )

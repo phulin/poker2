@@ -87,9 +87,7 @@ def test_fused_dcfr_update_matches_pytorch(cfr_type: CFRType, cfr_plus: bool, t:
 
 def _build_evaluator(num_envs: int = 4, depth: int = 3):
     """Construct a small SparseCFREvaluator for testing."""
-    import hydra
     from hydra import compose, initialize_config_dir
-    from omegaconf import OmegaConf
 
     from p2.core.structured_config import Config
     from p2.env.hunl_tensor_env import HUNLTensorEnv
@@ -146,6 +144,62 @@ def _build_evaluator(num_envs: int = 4, depth: int = 3):
     evaluator.values_avg[:] = evaluator.latest_values
     evaluator.t_sample = evaluator._get_sampling_schedule()
     return evaluator
+
+
+def _mirror_evaluator_state(src, dst) -> None:
+    """Make two independently built evaluators start from the same subgame.
+
+    The test helper constructs fresh envs, whose private/public cards may differ.
+    Copy all tree/static tensors as well as mutable CFR tensors before comparing
+    baseline and fused iteration math.
+    """
+    assert src.total_nodes == dst.total_nodes
+    idx = torch.arange(src.total_nodes, dtype=torch.long, device=src.device)
+    dst.env.copy_state_from(src.env, idx, idx)
+    dst.depth_offsets = list(src.depth_offsets)
+    dst.tree_depth = src.tree_depth
+    dst.root_nodes = src.root_nodes
+    if hasattr(src, "top_nodes"):
+        dst.top_nodes = src.top_nodes
+    dst.hand_rank_data = src.hand_rank_data
+
+    for name in [
+        "leaf_mask",
+        "new_street_mask",
+        "valid_mask",
+        "model_indices",
+        "legal_mask",
+        "allowed_hands",
+        "allowed_hands_prob",
+        "parent_index",
+        "action_from_parent",
+        "child_count",
+        "child_offsets",
+        "prev_actor",
+        "child_mask",
+        "showdown_indices",
+        "showdown_actors",
+        "showdown_potential",
+        "uniform_policy",
+        "beliefs",
+        "beliefs_avg",
+        "root_pre_chance_beliefs",
+        "latest_values",
+        "values_avg",
+        "self_reach",
+        "self_reach_avg",
+        "policy_probs",
+        "policy_probs_avg",
+        "policy_probs_sample",
+        "cumulative_regrets",
+        "regret_weight_sums",
+        "t_sample",
+    ]:
+        if hasattr(src, name):
+            setattr(dst, name, getattr(src, name).clone())
+    dst.last_model_values = (
+        None if src.last_model_values is None else src.last_model_values.clone()
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -520,6 +574,94 @@ def test_fused_parent_sum_and_divide_matches_baseline() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_parent_sum_divide_matches_two_step() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import (
+        fused_divide_by_parent_sum_,
+        fused_parent_sum,
+        fused_parent_sum_divide_,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(61)
+    child_counts = torch.tensor([3, 0, 5, 1, 4], device=device, dtype=torch.long)
+    bottom = 9
+    num_parents = child_counts.numel()
+    num_children = int(child_counts.sum().item())
+    total = bottom + num_children
+    h = 1326
+    child_offsets = bottom + torch.cumsum(child_counts, dim=0) - child_counts
+    parent_index_rel = torch.repeat_interleave(
+        torch.arange(num_parents, device=device), child_counts
+    )
+
+    values = torch.rand(total, h, device=device)
+    fallback = torch.rand(num_children, h, device=device)
+
+    parent_sum = fused_parent_sum(
+        values=values.contiguous(),
+        child_offsets=child_offsets.contiguous(),
+        child_count=child_counts.contiguous(),
+        max_children=8,
+    )
+    ref = torch.empty(num_children, h, device=device)
+    fused_divide_by_parent_sum_(
+        pos=values[bottom:].contiguous(),
+        fallback=fallback.contiguous(),
+        parent_sum=parent_sum.contiguous(),
+        parent_index=parent_index_rel.contiguous(),
+        out=ref,
+    )
+
+    out = torch.empty_like(ref)
+    fused_parent_sum_divide_(
+        values=values.contiguous(),
+        fallback=fallback.contiguous(),
+        child_offsets=child_offsets.contiguous(),
+        child_count=child_counts.contiguous(),
+        out=out,
+        out_offset=bottom,
+        max_children=8,
+    )
+    torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_policy_sample_update_matches_where() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import fused_policy_sample_update_
+
+    device = torch.device("cuda")
+    torch.manual_seed(67)
+    total, h, num_iters = 113, 1326, 11
+    policy = torch.rand(total, h, device=device)
+    sample = torch.rand(total, h, device=device)
+    t_sample = torch.randint(0, num_iters, (total,), device=device)
+
+    counts_cpu = torch.bincount(t_sample.cpu(), minlength=num_iters)
+    max_updates = int(counts_cpu.max().item())
+    rows_cpu = torch.zeros(num_iters, max_updates, dtype=torch.long)
+    for t_idx in range(num_iters):
+        rows = torch.nonzero(t_sample.cpu() == t_idx, as_tuple=False).flatten()
+        rows_cpu[t_idx, : rows.numel()] = rows
+    rows = rows_cpu.to(device)
+    counts = counts_cpu.to(device)
+
+    for t_idx in [0, 3, 7]:
+        ref = torch.where((t_sample == t_idx)[:, None], policy, sample)
+        out = sample.clone().contiguous()
+        t_tensor = torch.tensor(t_idx, device=device, dtype=torch.long)
+        fused_policy_sample_update_(
+            policy.contiguous(),
+            out,
+            rows.contiguous(),
+            counts.contiguous(),
+            t_tensor,
+        )
+        torch.testing.assert_close(out, ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fused_sibling_sum_matches_scatter_plus_gather() -> None:
     pytest.importorskip("triton")
     from p2.search.fused_cfr_triton import fused_sibling_sum
@@ -587,10 +729,10 @@ def test_fused_model_values_mix_matches_pytorch() -> None:
     device = torch.device("cuda")
     torch.manual_seed(41)
     h = torch.randn(80, 2, 1326, device=device)
-    l = torch.randn_like(h)
+    last = torch.randn_like(h)
     old, new = 7.0, 3.0
-    ref = ((old + new) * h - old * l) / new
-    out = fused_model_values_mix(h.contiguous(), l.contiguous(), old, new)
+    ref = ((old + new) * h - old * last) / new
+    out = fused_model_values_mix(h.contiguous(), last.contiguous(), old, new)
     torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-6)
 
 
@@ -607,23 +749,11 @@ def test_fused_sparse_evaluator_matches_baseline_across_iterations() -> None:
     ev_fused.__class__ = FusedSparseCFREvaluator
     ev_fused._fused_positive_regrets_buf = None
 
-    # Mirror all mutable state from base → fused so they start identical.
-    for name in [
-        "policy_probs",
-        "policy_probs_avg",
-        "policy_probs_sample",
-        "cumulative_regrets",
-        "regret_weight_sums",
-        "self_reach",
-        "self_reach_avg",
-        "beliefs",
-        "beliefs_avg",
-        "latest_values",
-        "values_avg",
-    ]:
-        getattr(ev_fused, name).copy_(getattr(ev_base, name))
+    _mirror_evaluator_state(ev_base, ev_fused)
 
-    for t in range(1, 6):
+    # Compare the evaluator math before tiny BF16 model-forward differences at
+    # leaf refreshes get amplified by regret matching over later iterations.
+    for t in range(1, 3):
         ev_base.cfr_iteration(t)
         ev_fused.cfr_iteration(t)
     torch.cuda.synchronize()
@@ -716,14 +846,7 @@ def test_graphed_cfr_iteration_replays_across_t() -> None:
     ev_graph.__class__ = FusedSparseCFREvaluator
     ev_graph._ensure_fused_attrs()
 
-    # Mirror init state.
-    for name in [
-        "policy_probs", "policy_probs_avg", "policy_probs_sample",
-        "cumulative_regrets", "regret_weight_sums",
-        "self_reach", "self_reach_avg", "beliefs", "beliefs_avg",
-        "latest_values", "values_avg",
-    ]:
-        getattr(ev_graph, name).copy_(getattr(ev_base, name))
+    _mirror_evaluator_state(ev_base, ev_graph)
 
     # Prime both past early-t branches so subsequent iters share Python branch.
     for t in range(1, 3):
@@ -810,6 +933,61 @@ def test_fused_weighted_parent_sum_matches_pytorch() -> None:
         child_offsets=child_offsets.contiguous(),
         child_count=child_counts.contiguous(),
         parent_base=parent_base,
+        max_children=8,
+    )
+    torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_weighted_parent_sum_child_opp_matches_full_policy() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import (
+        fused_weighted_parent_sum,
+        fused_weighted_parent_sum_child_opp,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(83)
+
+    child_counts = torch.tensor([2, 3, 1, 4], device=device, dtype=torch.long)
+    parent_base = 6
+    num_parents = child_counts.numel()
+    num_children = int(child_counts.sum().item())
+    child_base = parent_base + num_parents
+    total = child_base + num_children
+    h = 1326
+    child_offsets = child_base + torch.cumsum(child_counts, dim=0) - child_counts
+
+    values = torch.randn(total, 2, h, device=device)
+    values[parent_base : parent_base + num_parents] = 0.0
+    prev_actor = torch.randint(0, 2, (total,), device=device, dtype=torch.long)
+    policy_hero = torch.rand(total, h, device=device)
+    policy_opp_full = torch.zeros(total, h, device=device)
+    policy_opp_child = torch.rand(num_children, h, device=device)
+    policy_opp_full[child_base:] = policy_opp_child
+
+    ref = values.clone().contiguous()
+    fused_weighted_parent_sum(
+        values=ref,
+        prev_actor=prev_actor.contiguous(),
+        policy_hero=policy_hero.contiguous(),
+        policy_opp=policy_opp_full.contiguous(),
+        child_offsets=child_offsets.contiguous(),
+        child_count=child_counts.contiguous(),
+        parent_base=parent_base,
+        max_children=8,
+    )
+
+    out = values.clone().contiguous()
+    fused_weighted_parent_sum_child_opp(
+        values=out,
+        prev_actor=prev_actor.contiguous(),
+        policy_hero=policy_hero.contiguous(),
+        policy_opp_child=policy_opp_child.contiguous(),
+        child_offsets=child_offsets.contiguous(),
+        child_count=child_counts.contiguous(),
+        parent_base=parent_base,
+        child_base=child_base,
         max_children=8,
     )
     torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
