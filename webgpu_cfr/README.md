@@ -54,6 +54,12 @@ Run the exported-model evaluator directly:
 npm run eval -- --manifest public/rebel_latest/model.json --weights public/rebel_latest/weights.bin --spot 1 --iterations 8
 ```
 
+Benchmark the exported-model evaluator on Node/Dawn:
+
+```bash
+npm run bench -- --manifest public/rebel_latest/model.json --weights public/rebel_latest/weights.bin --spot 1 --iterations 8 --warmups 1 --runs 5
+```
+
 Run the legacy Python-fixture evaluator directly:
 
 ```bash
