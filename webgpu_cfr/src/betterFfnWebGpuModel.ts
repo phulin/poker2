@@ -9,9 +9,7 @@ import {
   SILU_MUL_WGSL,
 } from "./modelKernels.js";
 import {
-  makeEmptyStorageBuffer,
   makeStorageBuffer,
-  makeUniformBuffer,
   readFloatBuffer,
 } from "./gpuBuffers.js";
 import {
@@ -32,6 +30,12 @@ interface GpuTensor {
   data: Float32Array<ArrayBufferLike>;
   shape: number[];
   buffer: GPUBuffer;
+}
+
+interface TempBuffer {
+  buffer: GPUBuffer;
+  key: number;
+  kind: "storage" | "uniform";
 }
 
 interface PredictOptions {
@@ -58,6 +62,9 @@ export class BetterFfnWebGpuModel {
   private readonly geluPipeline: GPUComputePipeline;
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
   private readonly add3Pipeline: GPUComputePipeline;
+  private readonly storagePool = new Map<number, GPUBuffer[]>();
+  private readonly uniformPool = new Map<number, GPUBuffer[]>();
+  private recordingEncoder: GPUCommandEncoder | undefined;
 
   constructor(
     device: GPUDevice,
@@ -160,28 +167,44 @@ export class BetterFfnWebGpuModel {
       );
     }
 
-    const temps: GPUBuffer[] = [];
+    const temps: TempBuffer[] = [];
     const storage = (
       data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
     ): GPUBuffer => {
-      const buffer = makeStorageBuffer(this.device, data);
-      temps.push(buffer);
-      return buffer;
+      const temp = this.acquireStorage(data.length);
+      this.device.queue.writeBuffer(
+        temp.buffer,
+        0,
+        data as Float32Array<ArrayBuffer> | Uint32Array<ArrayBuffer>,
+      );
+      temps.push(temp);
+      return temp.buffer;
     };
     const empty = (elements: number): GPUBuffer => {
-      const buffer = makeEmptyStorageBuffer(this.device, elements);
-      temps.push(buffer);
-      return buffer;
+      const temp = this.acquireStorage(elements);
+      temps.push(temp);
+      return temp.buffer;
     };
     const uniform = (
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ): GPUBuffer => {
-      const buffer = makeUniformBuffer(this.device, data);
-      temps.push(buffer);
-      return buffer;
+      const temp = this.acquireUniform(data.byteLength);
+      this.device.queue.writeBuffer(temp.buffer, 0, data);
+      temps.push(temp);
+      return temp.buffer;
     };
 
+    const encoder = this.device.createCommandEncoder();
+    this.recordingEncoder = encoder;
+    let submitted = false;
+
     try {
+      const submitPredictionCommands = (): void => {
+        if (submitted) return;
+        this.recordingEncoder = undefined;
+        this.device.queue.submit([encoder.finish()]);
+        submitted = true;
+      };
       const batchedBeliefs = new Float32Array(batch * numPlayers * NUM_HANDS);
       for (let i = 0; i < batch; i += 1) {
         batchedBeliefs.set(beliefs, i * numPlayers * NUM_HANDS);
@@ -342,6 +365,7 @@ export class BetterFfnWebGpuModel {
         );
       }
 
+      submitPredictionCommands();
       const handValues = await readFloatBuffer(
         this.device,
         valueRawBuffer,
@@ -359,8 +383,9 @@ export class BetterFfnWebGpuModel {
       }
       return prediction;
     } finally {
-      for (const buffer of temps) {
-        buffer.destroy();
+      this.recordingEncoder = undefined;
+      for (const temp of temps) {
+        this.releaseTemp(temp);
       }
     }
   }
@@ -371,6 +396,14 @@ export class BetterFfnWebGpuModel {
     }
     this.dummyBias.destroy();
     this.handEmbeddingT.destroy();
+    for (const pool of [this.storagePool, this.uniformPool]) {
+      for (const buffers of pool.values()) {
+        for (const buffer of buffers) {
+          buffer.destroy();
+        }
+      }
+      pool.clear();
+    }
   }
 
   private validateRequiredTensors(tensors: TensorMap): void {
@@ -946,6 +979,49 @@ export class BetterFfnWebGpuModel {
     }
   }
 
+  private acquireStorage(elements: number): TempBuffer {
+    const key = Math.max(4, Math.ceil((elements * 4) / 4) * 4);
+    const buffer = this.storagePool.get(key)?.pop();
+    return {
+      buffer:
+        buffer ??
+        this.device.createBuffer({
+          size: key,
+          usage:
+            GPUBufferUsage.STORAGE |
+            GPUBufferUsage.COPY_SRC |
+            GPUBufferUsage.COPY_DST,
+        }),
+      key,
+      kind: "storage",
+    };
+  }
+
+  private acquireUniform(byteLength: number): TempBuffer {
+    const key = Math.max(16, Math.ceil(byteLength / 16) * 16);
+    const buffer = this.uniformPool.get(key)?.pop();
+    return {
+      buffer:
+        buffer ??
+        this.device.createBuffer({
+          size: key,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }),
+      key,
+      kind: "uniform",
+    };
+  }
+
+  private releaseTemp(temp: TempBuffer): void {
+    const pool = temp.kind === "storage" ? this.storagePool : this.uniformPool;
+    const buffers = pool.get(temp.key);
+    if (buffers) {
+      buffers.push(temp.buffer);
+    } else {
+      pool.set(temp.key, [temp.buffer]);
+    }
+  }
+
   private tensor(name: string): GpuTensor {
     const tensor = this.tensors.get(name);
     if (!tensor) {
@@ -970,7 +1046,7 @@ export class BetterFfnWebGpuModel {
     workgroups: number,
     entries: GPUBindGroupEntry[],
   ): void {
-    const encoder = this.device.createCommandEncoder();
+    const encoder = this.recordingEncoder ?? this.device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(
@@ -982,7 +1058,9 @@ export class BetterFfnWebGpuModel {
     );
     pass.dispatchWorkgroups(workgroups);
     pass.end();
-    this.device.queue.submit([encoder.finish()]);
+    if (!this.recordingEncoder) {
+      this.device.queue.submit([encoder.finish()]);
+    }
   }
 
   private submit2d(
@@ -991,7 +1069,7 @@ export class BetterFfnWebGpuModel {
     workgroupsY: number,
     entries: GPUBindGroupEntry[],
   ): void {
-    const encoder = this.device.createCommandEncoder();
+    const encoder = this.recordingEncoder ?? this.device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(
@@ -1003,6 +1081,8 @@ export class BetterFfnWebGpuModel {
     );
     pass.dispatchWorkgroups(workgroupsX, workgroupsY);
     pass.end();
-    this.device.queue.submit([encoder.finish()]);
+    if (!this.recordingEncoder) {
+      this.device.queue.submit([encoder.finish()]);
+    }
   }
 }
