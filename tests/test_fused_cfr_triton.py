@@ -419,7 +419,7 @@ def test_unblocked_mass_triton_matches_pytorch(shape) -> None:
     ref = calculate_unblocked_mass(target)
     out = unblocked_mass_triton(target)
 
-    # O(N) formula is numerically easier than the fp64 GEMM → tight tolerance.
+    # O(N) formula is numerically easier than the compatibility GEMM.
     torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
 
 

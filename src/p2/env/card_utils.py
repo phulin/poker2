@@ -200,12 +200,8 @@ def calculate_unblocked_mass(
     Equivalent to multiplying by the compatibility matrix ~combo_blocking_tensor().
     Used for finding matchup. See DEVN paper for details. CFV = matchup * EV.
 
-    Note that blocking = combo_onehot @ combo_onehot.T - torch.eye(1326).
-    Optimization: compatible = ~blocking = 1 - blocking
-    = 1 - (combo_onehot @ combo_onehot.T) + torch.eye(1326)
-
-    BUT WE ARE NOT USING THIS OPTIMIZATION.
-    It's numerically unstable and gives incorrect results.
+    This uses the equivalent inclusion-exclusion form:
+    unblocked[(a,b)] = total - mass_with_card[a] - mass_with_card[b] + target[(a,b)].
 
     Args:
         target: [..., 1326] tensor of reach weights for each node.
@@ -214,9 +210,23 @@ def calculate_unblocked_mass(
     Returns:
         [..., 1326] tensor of unblocked mass for each hand.
     """
-    target_batched = target.view(-1, NUM_HANDS)
-    # Use higher precision to avoid accumulation error when summing over 1326 combos
-    compatible = combo_compatible_tensor(device=target.device).double()
-    multiply = (target_batched.double() @ compatible).float()
+    target_batched = target.view(-1, NUM_HANDS).float()
+    combos = hand_combos_tensor(device=target.device)
+    card_a = combos[:, 0].long()
+    card_b = combos[:, 1].long()
+
+    total = target_batched.sum(dim=-1, keepdim=True)
+    cardsum = torch.zeros(
+        target_batched.shape[0],
+        52,
+        dtype=target_batched.dtype,
+        device=target_batched.device,
+    )
+    card_a_idx = card_a[None, :].expand(target_batched.shape[0], -1)
+    card_b_idx = card_b[None, :].expand(target_batched.shape[0], -1)
+    cardsum.scatter_add_(1, card_a_idx, target_batched)
+    cardsum.scatter_add_(1, card_b_idx, target_batched)
+
+    multiply = total - cardsum[:, card_a] - cardsum[:, card_b] + target_batched
     # Make sure it's min-0 (sometimes get numerical precision issues)
     return multiply.view_as(target).clamp(min=0.0)
