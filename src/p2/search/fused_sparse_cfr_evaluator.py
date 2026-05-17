@@ -578,13 +578,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if values is None:
             values = leaf_values
 
-        if leaf_values is values:
+        use_leaf_source = leaf_values is not values
+        if not use_leaf_source:
             # Skip the (~leaf_mask) zero: every non-leaf row is overwritten by
             # the parent_sum sweep below (count == 0 iff leaf, so non-leaf
             # parents always have children to reduce). Leaf rows are preserved
             # by parent_sum's `if count == 0: return` early-out.
             pass
-        else:
+        elif self.tree_depth == 0:
             torch.where(
                 self.leaf_mask[:, None, None],
                 leaf_values,
@@ -637,6 +638,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     parent_base=parent_base,
                     child_base=bottom,
                     max_children=self.num_actions,
+                    leaf_values=leaf_values if use_leaf_source else None,
+                    leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
                 )
             else:
                 fused_weighted_parent_sum(
@@ -648,6 +651,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     child_count=self._child_count_by_depth[depth],
                     parent_base=parent_base,
                     max_children=self.num_actions,
+                    leaf_values=leaf_values if use_leaf_source else None,
+                    leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
                 )
 
     # ------------------------------------------------------------------

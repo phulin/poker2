@@ -2184,6 +2184,8 @@ if triton is not None:
     @triton.jit
     def _fused_weighted_parent_sum_kernel(
         values_ptr,          # [total, 2, H] in/out
+        leaf_values_ptr,     # optional [total, 2, H]
+        leaf_mask_ptr,       # optional [total] bool
         prev_actor_ptr,      # [total]
         policy_hero_ptr,     # [total, H]
         policy_opp_ptr,      # [total, H]
@@ -2191,6 +2193,7 @@ if triton is not None:
         child_count_ptr,     # [num_parents]
         parent_base,         # absolute row of first parent in this depth slice
         H,
+        HAS_LEAF_SOURCE: tl.constexpr,
         MAX_CHILDREN: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
@@ -2201,10 +2204,23 @@ if triton is not None:
         first = tl.load(child_offsets_ptr + p)
         count = tl.load(child_count_ptr + p)
         # Leaf "parents" (at intermediate depths in the sparse tree) have no
-        # children; their values were set by set_leaf_values and must not be
-        # overwritten. Original path used scatter_reduce(include_self=True),
-        # which was a no-op for leaves.
+        # children. In final-policy mode, copy them from leaf_values here so
+        # the caller does not need a full leaf/non-leaf initialization pass.
         if count == 0:
+            if HAS_LEAF_SOURCE:
+                col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+                col_mask = col_offs < H
+                is_leaf = tl.load(leaf_mask_ptr + parent_base + p).to(tl.int1)
+                src = tl.load(
+                    leaf_values_ptr + (((parent_base + p) * 2 + player) * H + col_offs),
+                    mask=col_mask & is_leaf,
+                    other=0.0,
+                )
+                tl.store(
+                    values_ptr + (((parent_base + p) * 2 + player) * H + col_offs),
+                    src,
+                    mask=col_mask,
+                )
             return
 
         col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
@@ -2226,6 +2242,19 @@ if triton is not None:
                     mask=col_mask,
                     other=0.0,
                 )
+                if HAS_LEAF_SOURCE:
+                    leaf_v = tl.load(
+                        leaf_values_ptr + (child * 2 + player) * H + col_offs,
+                        mask=col_mask,
+                        other=0.0,
+                    )
+                    child_is_leaf = tl.load(leaf_mask_ptr + child).to(tl.int1)
+                    v = tl.where(child_is_leaf, leaf_v, v)
+                    tl.store(
+                        values_ptr + (child * 2 + player) * H + col_offs,
+                        leaf_v,
+                        mask=col_mask & child_is_leaf,
+                    )
                 acc += v * pol
 
         out_ptrs = values_ptr + ((parent_base + p) * 2 + player) * H + col_offs
@@ -2241,6 +2270,8 @@ def fused_weighted_parent_sum(
     child_count: torch.Tensor,       # [num_parents]
     parent_base: int,
     max_children: int = 8,
+    leaf_values: torch.Tensor | None = None,
+    leaf_mask: torch.Tensor | None = None,
     block_h: int = 2048,
 ) -> None:
     """Fuses ``fused_weight_child_values`` + ``_pull_back_sum`` for one depth.
@@ -2264,6 +2295,16 @@ def fused_weighted_parent_sum(
     total, two, h = values.shape
     assert policy_hero.shape == (total, h) and policy_opp.shape == (total, h)
     assert prev_actor.shape == (total,)
+    has_leaf_source = leaf_values is not None
+    if has_leaf_source:
+        assert leaf_values is not None and leaf_mask is not None
+        assert leaf_values.is_contiguous() and leaf_values.shape == values.shape
+        assert leaf_mask.is_contiguous() and leaf_mask.shape == (total,)
+        leaf_values_ptr = leaf_values
+        leaf_mask_ptr = leaf_mask
+    else:
+        leaf_values_ptr = values
+        leaf_mask_ptr = child_count
 
     mc_pow2 = 1
     while mc_pow2 < max_children:
@@ -2273,6 +2314,8 @@ def fused_weighted_parent_sum(
     grid = (num_parents, 2, triton.cdiv(h, block_h))
     _fused_weighted_parent_sum_kernel[grid](
         values,
+        leaf_values_ptr,
+        leaf_mask_ptr,
         prev_actor,
         policy_hero,
         policy_opp,
@@ -2280,6 +2323,7 @@ def fused_weighted_parent_sum(
         child_count,
         parent_base,
         h,
+        HAS_LEAF_SOURCE=has_leaf_source,
         MAX_CHILDREN=mc_pow2,
         BLOCK_H=block_h,
         num_warps=4,
@@ -2291,6 +2335,8 @@ if triton is not None:
     @triton.jit
     def _fused_weighted_parent_sum_child_opp_kernel(
         values_ptr,          # [total, 2, H] in/out
+        leaf_values_ptr,     # optional [total, 2, H]
+        leaf_mask_ptr,       # optional [total] bool
         prev_actor_ptr,      # [total]
         policy_hero_ptr,     # [total, H]
         policy_opp_ptr,      # [num_children, H], child-aligned from child_base
@@ -2299,6 +2345,7 @@ if triton is not None:
         parent_base,         # absolute row of first parent in this depth slice
         child_base,          # absolute row corresponding to policy_opp row 0
         H,
+        HAS_LEAF_SOURCE: tl.constexpr,
         MAX_CHILDREN: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
@@ -2309,6 +2356,21 @@ if triton is not None:
         first = tl.load(child_offsets_ptr + p)
         count = tl.load(child_count_ptr + p)
         if count == 0:
+            if HAS_LEAF_SOURCE:
+                col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+                col_mask = col_offs < H
+                row = parent_base + p
+                is_leaf = tl.load(leaf_mask_ptr + row).to(tl.int1)
+                src = tl.load(
+                    leaf_values_ptr + (row * 2 + player) * H + col_offs,
+                    mask=col_mask & is_leaf,
+                    other=0.0,
+                )
+                tl.store(
+                    values_ptr + (row * 2 + player) * H + col_offs,
+                    src,
+                    mask=col_mask,
+                )
             return
 
         col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
@@ -2326,6 +2388,19 @@ if triton is not None:
                     mask=col_mask,
                     other=0.0,
                 )
+                if HAS_LEAF_SOURCE:
+                    leaf_v = tl.load(
+                        leaf_values_ptr + (child * 2 + player) * H + col_offs,
+                        mask=col_mask,
+                        other=0.0,
+                    )
+                    child_is_leaf = tl.load(leaf_mask_ptr + child).to(tl.int1)
+                    v = tl.where(child_is_leaf, leaf_v, v)
+                    tl.store(
+                        values_ptr + (child * 2 + player) * H + col_offs,
+                        leaf_v,
+                        mask=col_mask & child_is_leaf,
+                    )
                 acc += v * pol
 
         out_ptrs = values_ptr + ((parent_base + p) * 2 + player) * H + col_offs
@@ -2342,6 +2417,8 @@ def fused_weighted_parent_sum_child_opp(
     parent_base: int,
     child_base: int,
     max_children: int = 8,
+    leaf_values: torch.Tensor | None = None,
+    leaf_mask: torch.Tensor | None = None,
     block_h: int = 2048,
 ) -> None:
     """Variant of ``fused_weighted_parent_sum`` where opponent-conditioned
@@ -2356,6 +2433,16 @@ def fused_weighted_parent_sum_child_opp(
     assert policy_hero.shape == (total, h)
     assert policy_opp_child.dim() == 2 and policy_opp_child.shape[1] == h
     assert prev_actor.shape == (total,)
+    has_leaf_source = leaf_values is not None
+    if has_leaf_source:
+        assert leaf_values is not None and leaf_mask is not None
+        assert leaf_values.is_contiguous() and leaf_values.shape == values.shape
+        assert leaf_mask.is_contiguous() and leaf_mask.shape == (total,)
+        leaf_values_ptr = leaf_values
+        leaf_mask_ptr = leaf_mask
+    else:
+        leaf_values_ptr = values
+        leaf_mask_ptr = child_count
 
     mc_pow2 = 1
     while mc_pow2 < max_children:
@@ -2365,6 +2452,8 @@ def fused_weighted_parent_sum_child_opp(
     grid = (num_parents, 2, triton.cdiv(h, block_h))
     _fused_weighted_parent_sum_child_opp_kernel[grid](
         values,
+        leaf_values_ptr,
+        leaf_mask_ptr,
         prev_actor,
         policy_hero,
         policy_opp_child,
@@ -2373,6 +2462,7 @@ def fused_weighted_parent_sum_child_opp(
         parent_base,
         child_base,
         h,
+        HAS_LEAF_SOURCE=has_leaf_source,
         MAX_CHILDREN=mc_pow2,
         BLOCK_H=block_h,
         num_warps=4,
