@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import random
-from collections import Counter
-
 import pytest
 import torch
 
@@ -39,35 +36,6 @@ class MockModel:
             policy_logits=policy_logits,
             value=value,
             hand_values=hand_values,
-        )
-
-    def eval(self) -> None:
-        pass
-
-    def train(self) -> None:
-        pass
-
-
-class BeliefEchoModel:
-    """Model that echoes normalized beliefs for testing permutation logic."""
-
-    def __init__(self, device: torch.device, float_dtype: torch.dtype):
-        self.device = device
-        self.float_dtype = float_dtype
-
-    def __call__(self, features: MLPFeatures) -> ModelOutput:
-        belief_tensor = features.beliefs.view(-1, 2, NUM_HANDS).to(
-            device=self.device, dtype=self.float_dtype
-        )
-        batch_size = belief_tensor.shape[0]
-        policy_logits = torch.zeros(
-            batch_size, 3, device=self.device, dtype=self.float_dtype
-        )
-        value = torch.zeros(batch_size, device=self.device, dtype=self.float_dtype)
-        return ModelOutput(
-            policy_logits=policy_logits,
-            value=value,
-            hand_values=belief_tensor,
         )
 
     def eval(self) -> None:
@@ -176,116 +144,30 @@ class TestChanceNodeHelper:
             model=model,
         )
 
-    def test_cache_initialization(self, helper: ChanceNodeHelper):
-        """Test that cache tensors are initialized correctly."""
-        assert helper.board_to_flop_id is not None
-        assert helper.flop_id_to_canonical is not None
-        assert helper.flop_id_to_count is not None
-        assert helper.total_flop_count > 0
+    def test_raw_flop_initialization(self, helper: ChanceNodeHelper):
+        """Test that raw flop enumeration is initialized correctly."""
+        assert helper.all_flops.shape == (22100, 3)
+        assert helper.all_flops.dtype == torch.long
+        assert helper.all_flops.device.type == helper.device.type
 
-    def test_tensor_shapes(self, helper: ChanceNodeHelper):
-        """Test tensor shapes are correct."""
-        # board_to_flop_id: [52, 52, 52]
-        assert helper.board_to_flop_id.shape == (52, 52, 52)
-        assert helper.board_to_flop_id.dtype == torch.long
+    def test_raw_flop_values_are_valid(self, helper: ChanceNodeHelper):
+        """Test that raw flops contain sorted unique card triples."""
+        all_flops = helper.all_flops
+        assert torch.all(all_flops >= 0)
+        assert torch.all(all_flops < 52)
+        assert torch.all(all_flops[:, 0] < all_flops[:, 1])
+        assert torch.all(all_flops[:, 1] < all_flops[:, 2])
 
-        # flop_id_to_canonical: [num_flops, 3]
-        num_flops = helper.flop_id_to_canonical.shape[0]
-        assert helper.flop_id_to_canonical.shape == (num_flops, 3)
-        assert helper.flop_id_to_canonical.dtype == torch.long
-
-        # flop_id_to_count: [num_flops]
-        assert helper.flop_id_to_count.shape == (num_flops,)
-        assert helper.flop_id_to_count.dtype == torch.long
-
-        # Should have 1755 unique canonical flops
-        assert num_flops == 1755
-
-    def test_total_flop_count(self, helper: ChanceNodeHelper):
-        """Test total flop count is correct."""
-        # Total should be sum of all counts
-        expected_total = helper.flop_id_to_count.sum().item()
-        assert helper.total_flop_count == expected_total
-        assert helper.total_flop_count == 22100
-
-    def test_flop_perm_counts_consistency(self, helper: ChanceNodeHelper):
-        """Ensure per-permutation counts sum to total canonical counts."""
-        perm_counts = helper.flop_id_perm_counts
-        summed = perm_counts.sum(dim=1)
-        assert torch.equal(summed, helper.flop_id_to_count)
-
-    def test_board_to_flop_id_mapping(self, helper: ChanceNodeHelper):
-        """Test board_to_flop_id tensor maps correctly."""
-        # Test a few known flops
-        test_cases = [
-            (0, 1, 2),
-            (0, 13, 26),
-            (12, 25, 38),
-            (1, 14, 27),
-        ]
-
-        for board in test_cases:
-            flop_id = helper.board_to_flop_id[board[0], board[1], board[2]].item()
-            assert flop_id >= 0, f"Board {board} should map to a valid flop_id"
-            assert flop_id < helper.flop_id_to_canonical.shape[0]
-
-    def test_flop_id_to_canonical_mapping(self, helper: ChanceNodeHelper):
-        """Test flop_id maps to correct canonical flop."""
-        # Get canonical for a known flop
-        board = (0, 1, 2)
-        flop_id = helper.board_to_flop_id[board[0], board[1], board[2]].item()
-        canonical = helper.flop_id_to_canonical[flop_id]
-
-        # Canonical should have 3 cards, all valid (0-51)
-        assert canonical.shape == (3,)
-        assert torch.all(canonical >= 0)
-        assert torch.all(canonical < 52)
-
-    def test_flop_id_to_count_consistency(self, helper: ChanceNodeHelper):
-        """Test that counts are consistent with total."""
-        total = helper.flop_id_to_count.sum().item()
-        assert total == helper.total_flop_count
-        assert total == 22100
-
-        # All counts should be positive
-        assert torch.all(helper.flop_id_to_count > 0)
-
-    def test_canonical_flop_uniqueness(self, helper: ChanceNodeHelper):
-        """Test that canonical flops are unique."""
-        canonical_flops = helper.flop_id_to_canonical
-        # Convert to tuples for comparison
-        canonical_set = set()
-        for i in range(canonical_flops.shape[0]):
-            canonical_tuple = tuple(canonical_flops[i].tolist())
-            assert (
-                canonical_tuple not in canonical_set
-            ), f"Duplicate canonical flop {canonical_tuple}"
-            canonical_set.add(canonical_tuple)
-
-        assert len(canonical_set) == canonical_flops.shape[0]
-
-    def test_board_to_flop_id_inverse_mapping(self, helper: ChanceNodeHelper):
-        """Test that board_to_flop_id and flop_id_to_canonical are consistent."""
-        # Sample some flops and verify consistency
-        random.seed(42)
-
-        # Test random sample of flops
-        num_samples = 100
-        all_flops = torch.combinations(torch.arange(52, dtype=torch.long), r=3)
-        sample_indices = random.sample(
-            range(len(all_flops)), min(num_samples, len(all_flops))
+    def test_raw_flop_enumeration_matches_torch_combinations(
+        self, helper: ChanceNodeHelper
+    ):
+        """Test that helper flops cover every 3-card combination exactly once."""
+        expected = torch.combinations(
+            torch.arange(52, dtype=torch.long, device=helper.device),
+            r=3,
+            with_replacement=False,
         )
-
-        for idx in sample_indices:
-            flop = all_flops[idx]
-            flop_id = helper.board_to_flop_id[flop[0], flop[1], flop[2]].item()
-            assert flop_id >= 0, f"Flop {flop.tolist()} should map to valid flop_id"
-
-            # The canonical for this flop_id should be a valid canonical representation
-            canonical = helper.flop_id_to_canonical[flop_id]
-            assert canonical.shape == (3,)
-            assert torch.all(canonical >= 0)
-            assert torch.all(canonical < 52)
+        torch.testing.assert_close(helper.all_flops, expected)
 
     def test_flop_chance_values_empty_input(self, helper: ChanceNodeHelper):
         """Test flop_chance_values with empty input."""
@@ -604,63 +486,6 @@ class TestChanceNodeHelper:
             rtol=0,
         )
 
-    def test_cache_consistency(self, helper: ChanceNodeHelper):
-        """Test that all cache components are consistent."""
-        # Verify that all flop IDs map to valid canonical flops
-        num_flops = helper.flop_id_to_canonical.shape[0]
-        for flop_id in range(num_flops):
-            canonical = helper.flop_id_to_canonical[flop_id]
-            count = helper.flop_id_to_count[flop_id]
-
-            # Canonical should be valid cards
-            assert torch.all(canonical >= 0)
-            assert torch.all(canonical < 52)
-
-            # Count should be positive
-            assert count > 0
-
-    def test_board_to_flop_id_coverage(self, helper: ChanceNodeHelper):
-        """Test that board_to_flop_id covers all valid sorted flops."""
-        # All sorted flops (c0 < c1 < c2) should map to valid flop_id
-        all_flops = torch.combinations(torch.arange(52, dtype=torch.long), r=3)
-        device = helper.device
-        all_flops = all_flops.to(device)
-
-        flop_ids = helper.board_to_flop_id[
-            all_flops[:, 0], all_flops[:, 1], all_flops[:, 2]
-        ]
-
-        # All should be valid (>= 0)
-        assert torch.all(flop_ids >= 0), "All sorted flops should map to valid flop_id"
-
-        # All should be within range
-        assert torch.all(flop_ids < helper.flop_id_to_canonical.shape[0])
-
-        # Should have exactly 22100 valid entries
-        assert (flop_ids >= 0).sum().item() == 22100
-
-    def test_canonical_flop_validity(self, helper: ChanceNodeHelper):
-        """Test that all canonical flops are valid."""
-        canonical_flops = helper.flop_id_to_canonical
-
-        for i in range(canonical_flops.shape[0]):
-            canonical = canonical_flops[i]
-            # All cards should be valid
-            assert torch.all(canonical >= 0)
-            assert torch.all(canonical < 52)
-
-            # Cards should be sorted (c0 < c1 < c2) - actually no, they're canonical, not necessarily sorted
-            # But they should be unique
-            assert (
-                len(torch.unique(canonical)) == 3
-            ), "Canonical flop should have 3 unique cards"
-
-    def test_count_sum_matches_total(self, helper: ChanceNodeHelper):
-        """Test that sum of counts equals total flop count."""
-        count_sum = helper.flop_id_to_count.sum().item()
-        assert count_sum == helper.total_flop_count
-        assert count_sum == 22100
-
     def test_flop_chance_values_device_handling(self, helper: ChanceNodeHelper):
         """Test flop_chance_values handles device correctly."""
         device = helper.device
@@ -715,48 +540,3 @@ class TestChanceNodeHelper:
         )
 
         assert result.device.type == device.type
-
-    def test_canonical_flop_basic_properties(self, helper: ChanceNodeHelper):
-        """Test that canonical flops have basic expected properties."""
-        # Test a few flops to ensure canonicalization is reasonable
-        test_flops = [
-            (0, 1, 2),
-            (0, 13, 26),
-            (12, 25, 38),
-            (1, 14, 27),
-        ]
-
-        for flop in test_flops:
-            # Get flop_id from tensor
-            flop_id = helper.board_to_flop_id[flop[0], flop[1], flop[2]].item()
-            canonical_from_tensor = helper.flop_id_to_canonical[flop_id]
-
-            # Canonical should have 3 valid cards
-            assert canonical_from_tensor.shape == (3,)
-            assert torch.all(canonical_from_tensor >= 0)
-            assert torch.all(canonical_from_tensor < 52)
-
-            # All cards should be unique
-            assert len(torch.unique(canonical_from_tensor)) == 3
-
-    def test_flop_id_counts_are_correct(self, helper: ChanceNodeHelper):
-        """Test that flop_id counts accurately reflect number of flops per canonical."""
-        # Verify that each canonical flop's count matches the number of flops mapping to it
-        all_flops = torch.combinations(torch.arange(52, dtype=torch.long), r=3)
-        device = helper.device
-        all_flops = all_flops.to(device)
-
-        flop_ids = helper.board_to_flop_id[
-            all_flops[:, 0], all_flops[:, 1], all_flops[:, 2]
-        ]
-
-        # Count how many flops map to each canonical flop_id
-        flop_id_counts = Counter(flop_ids.cpu().tolist())
-
-        # Verify counts match
-        for flop_id, expected_count in flop_id_counts.items():
-            actual_count = helper.flop_id_to_count[flop_id].item()
-            assert actual_count == expected_count, (
-                f"Count mismatch for flop_id {flop_id}: "
-                f"expected={expected_count}, actual={actual_count}"
-            )

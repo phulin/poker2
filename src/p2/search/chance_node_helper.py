@@ -8,7 +8,6 @@ from p2.env.card_utils import (
     NUM_HANDS,
     calculate_unblocked_mass,
     combo_to_onehot_tensor,
-    suit_permutations_tensor,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 
@@ -26,12 +25,7 @@ class ChanceNodeHelper:
     num_players: int
     model: Any
     combo_onehot_float: torch.Tensor
-    board_to_flop_id: torch.Tensor
-    board_to_canonical: torch.Tensor
-    flop_id_to_canonical: torch.Tensor
-    flop_id_to_allowed_mask: torch.Tensor
-    flop_id_to_count: torch.Tensor
-    total_flop_count: int
+    all_flops: torch.Tensor
 
     def __init__(
         self,
@@ -47,153 +41,8 @@ class ChanceNodeHelper:
         self.model = model
         self.generator = generator
         self.combo_onehot_float = combo_to_onehot_tensor(device=device).float()
-        self.suit_permutations = suit_permutations_tensor(device=device)
-        self.num_permutations = self.suit_permutations.shape[0]
-
-        # Initialize cache as instance variables
-        self._build_canonical_flops_cache()
-
-    def _build_canonical_flops_cache(self) -> None:
-        # Use vectorized approach to build canonical flop mapping
-        device = self.device
-
-        # 1) all 3-card combinations from 52
         cards = torch.arange(52, device=device, dtype=torch.long)
-        flops = torch.combinations(cards, r=3, with_replacement=False)  # (22100, 3)
-
-        # 2) Split cards into rank/suit
-        # Card encoding: card = suit * 13 + rank
-        # So: rank = card % 13, suit = card // 13
-        ranks = flops % 13  # (22100, 3), values 0..12
-        suits = flops // 13  # (22100, 3), values 0..3
-
-        # 3) Sort by rank descending (deterministic). This fixes card order per flop.
-        ranks_sorted, sort_idx = torch.sort(ranks, dim=1, descending=True)  # (22100, 3)
-
-        # 4) All 24 permutations of 4 suits, as a (24, 4) tensor
-        perms = self.suit_permutations
-        num_perms = self.num_permutations
-        N = flops.size(0)
-
-        # 5) Apply every suit permutation to every flop, all at once.
-        suits_perm = perms[:, suits]  # (24, N, 3)
-
-        # 6) Re-order the permuted suits according to the rank-sort order we fixed in step 3
-        sort_idx_exp = sort_idx.unsqueeze(0).expand(24, -1, -1)  # (24, N, 3)
-        suits_perm_sorted = torch.gather(suits_perm, 2, sort_idx_exp)  # (24, N, 3)
-
-        # 7) Canonicalize suits within equal-rank groups
-        # Build masks on (N,) then broadcast
-        eq01 = ranks_sorted[:, 0] == ranks_sorted[:, 1]  # (N,)
-        eq12 = ranks_sorted[:, 1] == ranks_sorted[:, 2]  # (N,)
-        all_eq = eq01 & eq12  # ranks like (x,x,x)
-        first2_eq = eq01 & ~eq12  # (x,x,y)
-        last2_eq = eq12 & ~eq01  # (x,y,y)
-
-        # Case 1: all three equal → sort all 3 suits
-        if all_eq.any():
-            tmp = suits_perm_sorted[:, all_eq, :]
-            tmp, _ = torch.sort(tmp, dim=2)
-            suits_perm_sorted[:, all_eq, :] = tmp
-
-        # Case 2: first two equal → sort positions 0 and 1
-        if first2_eq.any():
-            tmp = suits_perm_sorted[:, first2_eq, :]
-            first2, _ = torch.sort(tmp[:, :, :2], dim=2)
-            tmp[:, :, :2] = first2
-            suits_perm_sorted[:, first2_eq, :] = tmp
-
-        # Case 3: last two equal → sort positions 1 and 2
-        if last2_eq.any():
-            tmp = suits_perm_sorted[:, last2_eq, :]
-            last2, _ = torch.sort(tmp[:, :, 1:], dim=2)
-            tmp[:, :, 1:] = last2
-            suits_perm_sorted[:, last2_eq, :] = tmp
-
-        # 8) Make the ranks broadcast to (24, N, 3) so we can form "permuted cards"
-        ranks_sorted_b = ranks_sorted.unsqueeze(0).expand(num_perms, -1, -1)
-
-        # 9) Encode each card as suit*13 + rank → value in 0..51
-        card_codes = suits_perm_sorted * 13 + ranks_sorted_b
-
-        # 10) Turn each 3-card flop into a single scalar so we can pick the min over 24 perms
-        # Use base-52 numbering: c0 * 52^2 + c1 * 52 + c2
-        scalar_codes = (
-            card_codes[:, :, 0] * (52 * 52)
-            + card_codes[:, :, 1] * 52
-            + card_codes[:, :, 2]
-        )
-
-        # 11) Canonical representative = lexicographically smallest (i.e. smallest scalar) over 24 perms
-        canonical_scalar, perm_indices = scalar_codes.min(dim=0)
-
-        # 12) Map each canonical scalar to a dense id 0..(num_flops-1)
-        unique_vals, flop_to_canon = torch.unique(
-            canonical_scalar, sorted=True, return_inverse=True
-        )
-        num_flops = unique_vals.shape[0]
-
-        # Build canonical cards from unique scalars
-        canonical_cards = torch.zeros(num_flops, 3, dtype=torch.long, device=device)
-        canonical_cards[:, 0] = unique_vals // (52 * 52)
-        canonical_cards[:, 1] = (unique_vals // 52) % 52
-        canonical_cards[:, 2] = unique_vals % 52
-
-        # Build board_to_flop_id tensor (vectorized)
-        board_to_flop_id_tensor = torch.full(
-            (52, 52, 52), -1, dtype=torch.long, device=device
-        )
-        # Vectorized indexing: flops[i] gives us [c0, c1, c2], use these as indices
-        board_to_flop_id_tensor[flops[:, 0], flops[:, 1], flops[:, 2]] = flop_to_canon
-
-        # Build count tensor - count how many flops map to each canonical id
-        flop_id_to_count = torch.zeros(num_flops, dtype=torch.long, device=device)
-        flop_id_to_count.index_add_(
-            0, flop_to_canon, torch.ones(N, dtype=torch.long, device=device)
-        )
-
-        # Build board_to_canonical tensor (52, 52, 52, 3) mapping board indices to canonical cards
-        board_to_canonical_tensor = torch.full(
-            (52, 52, 52, 3), -1, dtype=torch.long, device=device
-        )
-        # Vectorized indexing: for each flop, store its canonical representation
-        canonical_for_flops = canonical_cards[flop_to_canon]  # (N, 3)
-        board_to_canonical_tensor[flops[:, 0], flops[:, 1], flops[:, 2]] = (
-            canonical_for_flops
-        )
-
-        # Build flop_id_to_allowed_mask: [num_flops, NUM_HANDS]
-        # For each canonical flop, which hands are allowed (don't conflict with board)?
-        board_onehot = torch.zeros(num_flops, 52, dtype=self.float_dtype, device=device)
-        board_onehot.scatter_(
-            1,
-            canonical_cards,
-            torch.ones(num_flops, 3, dtype=self.float_dtype, device=device),
-        )
-        # Matrix multiply: [1326, 52] @ [52, num_flops] = [1326, num_flops]
-        # If > 0, combo shares a card with board (conflict)
-        conflict_matrix = self.combo_onehot_float @ board_onehot.T  # [1326, num_flops]
-        flop_id_to_allowed_mask = (
-            conflict_matrix == 0
-        ).T  # [num_flops, 1326] -> [num_flops, NUM_HANDS]
-
-        perm_offset = flop_to_canon * num_perms + perm_indices
-        perm_counts_flat = torch.bincount(
-            perm_offset,
-            minlength=num_flops * num_perms,
-        )
-        flop_id_perm_counts = perm_counts_flat.view(num_flops, num_perms)
-
-        self.board_to_flop_id = board_to_flop_id_tensor
-        self.board_to_canonical = board_to_canonical_tensor
-        self.flop_id_to_canonical = canonical_cards
-        self.flop_id_to_allowed_mask = flop_id_to_allowed_mask
-        self.flop_id_to_count = flop_id_to_count
-        self.flop_id_perm_counts = flop_id_perm_counts
-        self.total_flop_count = self.flop_id_to_count.sum().item()
-        self.all_flops = flops
-        self.flop_to_canon = flop_to_canon
-        self.flop_perm_index = perm_indices
+        self.all_flops = torch.combinations(cards, r=3, with_replacement=False)
 
     @torch.no_grad()
     def flop_chance_values(
@@ -202,7 +51,7 @@ class ChanceNodeHelper:
         root_features: MLPFeatures,
         pre_chance_beliefs: torch.Tensor,
     ) -> torch.Tensor:
-        """Expected CFVs over three-card flop chance using canonical flops."""
+        """Expected CFVs over three-card flop chance using raw flop samples."""
 
         if root_indices.numel() == 0:
             return torch.zeros(
