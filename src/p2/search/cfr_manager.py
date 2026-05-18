@@ -338,16 +338,16 @@ class CFRManager:
         # Mark children initialized
         self.initialized[children] = self.initialized[rep_parents]
         # Verify critical fields cloned correctly (spot-check)
-        assert torch.equal(
-            self.env.to_act[children], self.env.to_act[rep_parents]
-        ), "to_act mismatch after clone_states"
-        assert torch.equal(
-            self.env.street[children], self.env.street[rep_parents]
-        ), "street mismatch after clone_states"
+        assert torch.equal(self.env.to_act[children], self.env.to_act[rep_parents]), (
+            "to_act mismatch after clone_states"
+        )
+        assert torch.equal(self.env.street[children], self.env.street[rep_parents]), (
+            "street mismatch after clone_states"
+        )
         # Deck/deck_pos must exactly match after clone
-        assert torch.equal(
-            self.env.deck[children], self.env.deck[rep_parents]
-        ), "deck mismatch after clone_states"
+        assert torch.equal(self.env.deck[children], self.env.deck[rep_parents]), (
+            "deck mismatch after clone_states"
+        )
         assert torch.equal(
             self.env.deck_pos[children], self.env.deck_pos[rep_parents]
         ), "deck_pos mismatch after clone_states"
@@ -518,10 +518,8 @@ class CFRManager:
             pot,
             torch.where(winners == 2, pot / 2.0, torch.zeros_like(pot)),
         )
-        p0_starting_stack = self.env.starting_stacks[env_indices, 0].to(
-            self.float_dtype
-        )
-        return (my_stack + pot_share - p0_starting_stack) / self.env.scale[env_indices]
+        p0_starting_stack = self.env.starting_stacks[idxs, 0].to(self.float_dtype)
+        return (my_stack + pot_share - p0_starting_stack) / self.env.scale[idxs]
 
     def expand_and_step_all_branches(
         self, parents: torch.Tensor, depth: int
@@ -540,19 +538,18 @@ class CFRManager:
         child_masks = self.legal_mask_full(children)
         # Sanity: child_masks shape and bin dimension
         B = len(self.bet_bins) + 3
-        assert (
-            child_masks.shape
-            == (
-                children.numel(),
-                B,
-            )
-        ), f"child_masks shape mismatch: got {tuple(child_masks.shape)}, expected ({children.numel()}, {B})"
+        assert child_masks.shape == (
+            children.numel(),
+            B,
+        ), (
+            f"child_masks shape mismatch: got {tuple(child_masks.shape)}, expected ({children.numel()}, {B})"
+        )
         amounts, full_mask = self.env.legal_bins_amounts_and_mask(self.bet_bins)
         # Map collapsed->bin index
         B = len(self.bet_bins) + 3
-        assert (
-            B == self.env.num_bet_bins
-        ), f"num_bet_bins mismatch: computed {B} from bet_bins, env has {self.env.num_bet_bins}"
+        assert B == self.env.num_bet_bins, (
+            f"num_bet_bins mismatch: computed {B} from bet_bins, env has {self.env.num_bet_bins}"
+        )
         mapped = torch.full_like(collapsed_bins, -1)
         # Stop if parents are done: mark children as no-op (-1)
         parent_done = self.env.done[parents]
@@ -586,9 +583,9 @@ class CFRManager:
         fallback_rows = torch.where((mapped < 0) & nd)[0]
         if fallback_rows.numel() > 0:
             legal_subset = child_masks[fallback_rows]
-            assert legal_subset.any(
-                dim=1
-            ).all(), "No legal actions available for fallback"
+            assert legal_subset.any(dim=1).all(), (
+                "No legal actions available for fallback"
+            )
             fallback_indices = torch.argmax(legal_subset.int(), dim=1)
             mapped[fallback_rows] = fallback_indices
         action_ids = mapped

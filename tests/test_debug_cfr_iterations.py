@@ -1,4 +1,5 @@
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,6 @@ from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from p2.models.mlp.better_ffn import BetterFFN
 from p2.models.mlp.better_trm import BetterTRM
 from p2.models.model_output import ModelOutput
-from p2.rl.cfr_trainer import RebelCFRTrainer
 from debugging.debug_cfr_iterations import (
     UniformPolicyWrapper,
     load_model_from_checkpoint,
@@ -40,6 +40,53 @@ def _make_cfg(bet_bins: list[float] | None = None) -> Config:
     return cfg
 
 
+def _checkpoint_model_from_cfg(cfg: Config) -> BetterFFN | BetterTRM:
+    if cfg.model.name == ModelType.better_ffn:
+        model = BetterFFN(
+            num_actions=cfg.model.num_actions,
+            hidden_dim=cfg.model.hidden_dim,
+            range_hidden_dim=cfg.model.range_hidden_dim,
+            ffn_dim=cfg.model.ffn_dim,
+            num_hidden_layers=cfg.model.num_hidden_layers,
+            num_policy_layers=cfg.model.num_policy_layers,
+            num_value_layers=cfg.model.num_value_layers,
+            shared_trunk=cfg.model.shared_trunk,
+            enforce_zero_sum=cfg.model.enforce_zero_sum,
+            nonlinearity=cfg.model.nonlinearity,
+        )
+    else:
+        model = BetterTRM(
+            num_actions=cfg.model.num_actions,
+            hidden_dim=cfg.model.hidden_dim,
+            range_hidden_dim=cfg.model.range_hidden_dim,
+            ffn_dim=cfg.model.ffn_dim,
+            num_hidden_layers=cfg.model.num_hidden_layers,
+            num_policy_layers=cfg.model.num_policy_layers,
+            num_value_layers=cfg.model.num_value_layers,
+            num_recursions=cfg.model.num_recursions,
+            num_iterations=cfg.model.num_iterations,
+            shared_trunk=cfg.model.shared_trunk,
+            enforce_zero_sum=cfg.model.enforce_zero_sum,
+            nonlinearity=cfg.model.nonlinearity,
+        )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(0))
+    return model
+
+
+def _save_checkpoint(path: Path, cfg: Config, step: int) -> None:
+    model = _checkpoint_model_from_cfg(cfg)
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "step": step,
+            "save_dtype": None,
+            "config": asdict(cfg),
+            "wandb_run_id": None,
+        },
+        path,
+    )
+
+
 def test_load_model_uses_checkpoint_config_for_better_ffn(tmp_path) -> None:
     cfg_save = _make_cfg()
     cfg_save.model.name = ModelType.better_ffn
@@ -52,9 +99,8 @@ def test_load_model_uses_checkpoint_config_for_better_ffn(tmp_path) -> None:
     cfg_save.model.shared_trunk = False
     cfg_save.model.enforce_zero_sum = False
 
-    trainer = RebelCFRTrainer(cfg_save, torch.device(cfg_save.device))
     ckpt_path = tmp_path / "better_ffn.pt"
-    trainer.save_checkpoint(str(ckpt_path), step=7, save_optimizer=False)
+    _save_checkpoint(ckpt_path, cfg_save, step=7)
 
     cfg_load = _make_cfg(bet_bins=[0.75])
     model = load_model_from_checkpoint(
@@ -75,11 +121,14 @@ def test_load_model_uses_checkpoint_config_for_better_ffn(tmp_path) -> None:
 def test_load_model_resets_nonlinearity_from_state(tmp_path) -> None:
     cfg_save = _make_cfg()
     cfg_save.model.name = ModelType.better_trm
+    cfg_save.model.hidden_dim = 16
+    cfg_save.model.range_hidden_dim = 4
+    cfg_save.model.ffn_dim = 16
+    cfg_save.model.num_hidden_layers = 1
     cfg_save.model.nonlinearity = NonlinearityType.gelu
 
-    trainer = RebelCFRTrainer(cfg_save, torch.device(cfg_save.device))
     ckpt_path = tmp_path / "better_trm_gelu.pt"
-    trainer.save_checkpoint(str(ckpt_path), step=1, save_optimizer=False)
+    _save_checkpoint(ckpt_path, cfg_save, step=1)
 
     cfg_load = _make_cfg()
     cfg_load.model.name = ModelType.better_trm
@@ -96,21 +145,20 @@ def test_load_model_resets_nonlinearity_from_state(tmp_path) -> None:
 def test_load_model_uses_checkpoint_config_for_better_trm(tmp_path) -> None:
     cfg_save = _make_cfg()
     cfg_save.model.name = ModelType.better_trm
-    cfg_save.model.hidden_dim = 40
-    cfg_save.model.range_hidden_dim = 10
-    cfg_save.model.ffn_dim = 80
+    cfg_save.model.hidden_dim = 16
+    cfg_save.model.range_hidden_dim = 4
+    cfg_save.model.ffn_dim = 16
     cfg_save.model.num_hidden_layers = 2
     cfg_save.model.num_policy_layers = 2
     cfg_save.model.num_value_layers = 3
-    cfg_save.model.num_recursions = 4
-    cfg_save.model.num_iterations = 5
+    cfg_save.model.num_recursions = 2
+    cfg_save.model.num_iterations = 2
     cfg_save.model.shared_trunk = True
     cfg_save.model.enforce_zero_sum = False
     cfg_save.model.nonlinearity = NonlinearityType.swiglu
 
-    trainer = RebelCFRTrainer(cfg_save, torch.device(cfg_save.device))
     ckpt_path = tmp_path / "better_trm.pt"
-    trainer.save_checkpoint(str(ckpt_path), step=3, save_optimizer=False)
+    _save_checkpoint(ckpt_path, cfg_save, step=3)
 
     cfg_load = _make_cfg(bet_bins=[1.0])
     model = load_model_from_checkpoint(
@@ -135,10 +183,12 @@ def test_load_model_uses_checkpoint_config_for_better_trm(tmp_path) -> None:
 def test_load_model_overrides_hidden_layers_from_state(tmp_path) -> None:
     cfg_save = _make_cfg()
     cfg_save.model.name = ModelType.better_trm
+    cfg_save.model.hidden_dim = 16
+    cfg_save.model.range_hidden_dim = 4
+    cfg_save.model.ffn_dim = 16
     cfg_save.model.num_hidden_layers = 2
-    trainer = RebelCFRTrainer(cfg_save, torch.device(cfg_save.device))
     ckpt_path = tmp_path / "better_trm_hidden.pt"
-    trainer.save_checkpoint(str(ckpt_path), step=1, save_optimizer=False)
+    _save_checkpoint(ckpt_path, cfg_save, step=1)
 
     cfg_load = _make_cfg()
     cfg_load.model.name = ModelType.better_trm

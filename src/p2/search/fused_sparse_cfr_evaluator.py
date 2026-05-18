@@ -34,14 +34,16 @@ import torch
 
 from p2.core.structured_config import CFRType
 from p2.env.card_utils import NUM_HANDS
-from p2.env.rules_triton import rank_hands_triton, triton_is_available as _rules_triton_ok
+from p2.env.rules_triton import (
+    rank_hands_triton,
+    triton_is_available as _rules_triton_ok,
+)
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_with_tensors_,
     fused_avg_values_zero_sum_,
     fused_br_best_action_mass,
     fused_br_finalize_depth_,
     fused_block_and_normalize_beliefs_,
-    fused_dcfr_update_with_tensors_,
     fused_deep_beliefs_,
     fused_divide_by_parent_sum_,
     fused_model_values_writeback_,
@@ -126,6 +128,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # rank-dependent cumsum.
         if _rules_triton_ok():
             import p2.search.cfr_evaluator as _ce
+
             if _ce.rank_hands is not rank_hands_triton:
                 _ce.rank_hands = rank_hands_triton
 
@@ -181,7 +184,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._action_from_parent_all: torch.Tensor | None = None
         self._child_offsets_by_depth: tuple[torch.Tensor, ...] = ()
         self._child_count_by_depth: tuple[torch.Tensor, ...] = ()
-        self._exploitability_cache_key: tuple[tuple[int, int, tuple[int, ...]], ...] | None = None
+        self._exploitability_cache_key: (
+            tuple[tuple[int, int, tuple[int, ...]], ...] | None
+        ) = None
         self._exploitability_cache = None
 
     def _init_hand_rank_data(self) -> None:
@@ -192,7 +197,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         super()._init_hand_rank_data()
         if self.hand_rank_data is not None and self.showdown_indices.numel() > 0:
             self._showdown_extras = precompute_showdown_extras(
-                self.hand_rank_data, self.env, self.showdown_indices,
+                self.hand_rank_data,
+                self.env,
+                self.showdown_indices,
             )
             self._showdown_graph_runner = ShowdownGraphRunner(
                 extras=self._showdown_extras,
@@ -275,7 +282,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
     def _prepare_tree_slices(self) -> None:
         """Cache static contiguous tree slices for the current sparse subgame."""
-        bottom = self.depth_offsets[1] if len(self.depth_offsets) > 1 else self.root_nodes
+        bottom = (
+            self.depth_offsets[1] if len(self.depth_offsets) > 1 else self.root_nodes
+        )
         top = self.depth_offsets[-2] if len(self.depth_offsets) > 1 else self.root_nodes
         key = (
             int(self.total_nodes),
@@ -324,9 +333,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         cached = self._br_action_parent_index_cache.get(key)
         if cached is not None:
             return cached
-        out = torch.arange(rows, device=self.device, dtype=torch.long).repeat_interleave(
-            actions
-        )
+        out = torch.arange(
+            rows, device=self.device, dtype=torch.long
+        ).repeat_interleave(actions)
         self._br_action_parent_index_cache[key] = out.contiguous()
         return self._br_action_parent_index_cache[key]
 
@@ -380,12 +389,22 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def _prepare_sample_update_table(self) -> None:
         if not self._opt_sparse_sample:
             return
-        key = (int(self.t_sample.data_ptr()), int(self.total_nodes), int(self.cfr_iterations))
+        key = (
+            int(self.t_sample.data_ptr()),
+            int(self.total_nodes),
+            int(self.cfr_iterations),
+        )
         if self._sample_update_key == key:
             return
 
         t_sample = self.t_sample.to(device=self.device, dtype=torch.long)
-        counts = torch.bincount(t_sample, minlength=self.cfr_iterations).contiguous()
+        valid_sample = t_sample < self.cfr_iterations
+        valid_rows = torch.nonzero(valid_sample, as_tuple=False).flatten()
+        t_sample_valid = t_sample.index_select(0, valid_rows)
+        counts = torch.bincount(
+            t_sample_valid,
+            minlength=self.cfr_iterations,
+        )[: self.cfr_iterations].contiguous()
         max_updates = int(counts.max().item()) if counts.numel() else 0
         if max_updates == 0:
             rows = torch.empty(
@@ -395,8 +414,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 device=self.device,
             )
         else:
-            order = torch.argsort(t_sample, stable=True)
-            sorted_t = t_sample.index_select(0, order)
+            order = torch.argsort(t_sample_valid, stable=True)
+            sorted_t = t_sample_valid.index_select(0, order)
+            sorted_rows = valid_rows.index_select(0, order)
             starts = torch.cumsum(counts, dim=0) - counts
             position = torch.arange(
                 order.numel(),
@@ -409,19 +429,24 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 dtype=torch.long,
                 device=self.device,
             )
-            rows[sorted_t, position] = order
+            rows[sorted_t, position] = sorted_rows
 
         self._sample_update_rows = rows.contiguous()
         self._sample_update_counts = counts
         self._sample_update_key = key
 
-    def _model_features_for_beliefs(self, beliefs_at_model: torch.Tensor) -> MLPFeatures:
+    def _model_features_for_beliefs(
+        self, beliefs_at_model: torch.Tensor
+    ) -> MLPFeatures:
         key = (
             int(self.model_indices.data_ptr()),
             int(self.new_street_mask.data_ptr()),
             int(self.model_indices.numel()),
         )
-        if self._static_model_feature_key != key or self._static_model_feature_fields is None:
+        if (
+            self._static_model_feature_key != key
+            or self._static_model_feature_fields is None
+        ):
             static_features = self.feature_encoder.encode(
                 self.beliefs,
                 pre_chance_node=self.new_street_mask,
@@ -508,7 +533,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def update_policy(self, t: int) -> None:
         self._prepare_tree_slices()
         bottom = self._bottom
-        top = self._top
         child_offsets_top = self._child_offsets_top
         child_count_top = self._child_count_top
         parent_index_bottom = self._parent_index_bottom
@@ -516,7 +540,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         assert child_count_top is not None
         assert parent_index_bottom is not None
         positive_regrets = self._ensure_positive_regrets_buf()
-        if not (self._opt_reuse_positive_regrets and self._fused_positive_regrets_valid):
+        if not (
+            self._opt_reuse_positive_regrets and self._fused_positive_regrets_valid
+        ):
             torch.clamp(self.cumulative_regrets, min=0.0, out=positive_regrets)
         self._fused_positive_regrets_valid = False
 
@@ -626,7 +652,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         for depth in range(self.tree_depth - 1, -1, -1):
             parent_base = self.depth_offsets[depth]
-            parent_end = self.depth_offsets[depth + 1]
             # Fused weight + parent-sum: replaces the per-child clone +
             # scatter_reduce pair with one parent-aligned reduce.
             if self._opt_child_opp_policy:
@@ -713,13 +738,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     ) -> tuple[tuple[int, int, tuple[int, ...]], ...]:
         tensors = (self.policy_probs_avg, self.beliefs_avg, self.values_avg)
         return tuple(
-            (int(t.data_ptr()), int(t._version), tuple(t.shape))
-            for t in tensors
+            (int(t.data_ptr()), int(t._version), tuple(t.shape)) for t in tensors
         )
 
     def _compute_exploitability(self):
         key = self._current_exploitability_cache_key()
-        if self._exploitability_cache_key == key and self._exploitability_cache is not None:
+        if (
+            self._exploitability_cache_key == key
+            and self._exploitability_cache is not None
+        ):
             return self._exploitability_cache
         out = super()._compute_exploitability()
         self._exploitability_cache_key = key
@@ -811,17 +838,20 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         ):
             self.policy_probs_avg[:] = self.policy_probs
             if update_reach:
-                self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
+                self._calculate_reach_weights(
+                    self.self_reach_avg, self.policy_probs_avg
+                )
             return
         if t == 0:
             self.policy_probs_avg[:] = self.policy_probs
             if update_reach:
-                self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
+                self._calculate_reach_weights(
+                    self.self_reach_avg, self.policy_probs_avg
+                )
             return
 
         self._prepare_tree_slices()
         N = self.root_nodes
-        top = self._top
         parent_index_all = self._parent_index_all
         parent_index_nonroot = self._parent_index_nonroot
         child_offsets_top = self._child_offsets_top
@@ -887,6 +917,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 out=self.policy_probs_avg[N:],
                 eps=1e-5,
             )
+
     # ------------------------------------------------------------------
     # Update average values: fused mixing.
     # ------------------------------------------------------------------
@@ -912,7 +943,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             if isinstance(self.model, BetterTRM):
-                model_output = self.model(features, include_policy=False, latent=self.latent)
+                model_output = self.model(
+                    features, include_policy=False, latent=self.latent
+                )
                 self.latent = model_output.latent
             else:
                 model_output = self.model(features, include_policy=False)
@@ -996,17 +1029,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     board=board,
                     beliefs=feat_beliefs,
                 )
-            self._set_model_values(
-                t, beliefs_at_model, features_at_model
-            )
+            self._set_model_values(t, beliefs_at_model, features_at_model)
         else:
             empty_shape = (0, self.num_players, NUM_HANDS)
             if self._last_model_values_buf is None or (
                 self._last_model_values_buf.shape != empty_shape
             ):
-                self._last_model_values_buf = self.latest_values.new_empty(
-                    empty_shape
-                )
+                self._last_model_values_buf = self.latest_values.new_empty(empty_shape)
             self.last_model_values = self._last_model_values_buf
             showdown_beliefs = beliefs[self.showdown_indices]
 

@@ -246,7 +246,7 @@ class UniformPolicyWrapper(BaseMLPModel):
 def load_model_from_checkpoint(
     checkpoint_path: str, config: Config, device: torch.device
 ) -> RebelFFN | BetterFFN | BetterTRM:
-    """Load a model from checkpoint using RebelCFRTrainer."""
+    """Load a model from checkpoint."""
     print(f"Loading model from {checkpoint_path}")
 
     # Check if checkpoint exists
@@ -285,17 +285,55 @@ def load_model_from_checkpoint(
         _infer_better_dimensions(config, model_state, detected_type)
     config.model.num_actions = len(config.env.bet_bins) + 3
 
-    # Create trainer with the adjusted config
-    trainer = RebelCFRTrainer(cfg=config, device=device)
+    if detected_type == ModelType.better_ffn:
+        model = BetterFFN(
+            num_actions=config.model.num_actions,
+            hidden_dim=config.model.hidden_dim,
+            range_hidden_dim=config.model.range_hidden_dim,
+            ffn_dim=config.model.ffn_dim,
+            num_hidden_layers=config.model.num_hidden_layers,
+            num_policy_layers=config.model.num_policy_layers,
+            num_value_layers=config.model.num_value_layers,
+            shared_trunk=config.model.shared_trunk,
+            enforce_zero_sum=config.model.enforce_zero_sum,
+            nonlinearity=config.model.nonlinearity,
+        )
+    elif detected_type == ModelType.better_trm:
+        model = BetterTRM(
+            num_actions=config.model.num_actions,
+            hidden_dim=config.model.hidden_dim,
+            range_hidden_dim=config.model.range_hidden_dim,
+            ffn_dim=config.model.ffn_dim,
+            num_hidden_layers=config.model.num_hidden_layers,
+            num_policy_layers=config.model.num_policy_layers,
+            num_value_layers=config.model.num_value_layers,
+            num_recursions=config.model.num_recursions,
+            num_iterations=config.model.num_iterations,
+            shared_trunk=config.model.shared_trunk,
+            enforce_zero_sum=config.model.enforce_zero_sum,
+            nonlinearity=config.model.nonlinearity,
+        )
+    else:
+        model = RebelFFN(
+            input_dim=config.model.input_dim,
+            num_actions=config.model.num_actions,
+            hidden_dim=config.model.hidden_dim,
+            num_hidden_layers=config.model.num_hidden_layers,
+            detach_value_head=config.model.detach_value_head,
+            nonlinearity=config.model.nonlinearity,
+            enforce_zero_sum=config.model.enforce_zero_sum,
+        )
 
-    # Load checkpoint using trainer's method
-    loaded_step = trainer.load_checkpoint(checkpoint_path)
-
-    print(f"Model loaded successfully (step: {loaded_step + 1})")
-
-    # Extract and return the model
-    model = trainer.model
+    save_dtype_str = checkpoint.get("save_dtype")
+    if save_dtype_str is not None and save_dtype_str != "torch.float32":
+        model_state = {
+            k: v.to(torch.float32) if v.dtype.is_floating_point else v
+            for k, v in model_state.items()
+        }
+    model.load_state_dict(model_state, strict=config.strict_model_loading)
+    model.to(device)
     model.eval()
+    print(f"Model loaded successfully (step: {int(checkpoint.get('step', -1)) + 1})")
     return model
 
 

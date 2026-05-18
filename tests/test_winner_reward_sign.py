@@ -1,120 +1,62 @@
-import os
-
 import torch
-from omegaconf import OmegaConf
 
-from p2.core.structured_config import (
-    Config,
-    EnvConfig,
-    ExploiterConfig,
-    ModelConfig,
-    SearchConfig,
-    TrainingConfig,
-)
-from p2.rl.self_play import SelfPlayTrainer
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from p2.core.structured_config import Config
+from p2.models.transformer.structured_embedding_data import StructuredEmbeddingData
+from p2.rl.vectorized_replay import VectorizedReplayBuffer
 
 
-def _load_config(config_path: str) -> Config:
-    hydra_cfg = OmegaConf.load(config_path)
-    cfg_dict = OmegaConf.to_container(hydra_cfg, resolve=True)
-
-    train_config = TrainingConfig(**cfg_dict.get("train", {}))
-    model_config = ModelConfig(**cfg_dict.get("model", {}))
-    env_config = EnvConfig(**cfg_dict.get("env", {}))
-    exploiter_config = ExploiterConfig(**cfg_dict.get("exploiter", {}))
-    search_config = SearchConfig(**cfg_dict.get("search", {}))
-
-    return Config(
-        train=train_config,
-        model=model_config,
-        env=env_config,
-        exploiter=exploiter_config,
-        search=search_config,
-        **{
-            k: v
-            for k, v in cfg_dict.items()
-            if k
-            not in ["train", "model", "env", "state_encoder", "exploiter", "search"]
-        },
+def _embedding(batch_size: int, sequence_length: int, num_bet_bins: int):
+    return StructuredEmbeddingData(
+        token_ids=torch.zeros(batch_size, sequence_length, dtype=torch.long),
+        token_streets=torch.zeros(batch_size, sequence_length, dtype=torch.long),
+        card_ranks=torch.zeros(batch_size, sequence_length, dtype=torch.long),
+        card_suits=torch.zeros(batch_size, sequence_length, dtype=torch.long),
+        action_actors=torch.zeros(batch_size, sequence_length, dtype=torch.long),
+        action_legal_masks=torch.ones(
+            batch_size, sequence_length, num_bet_bins, dtype=torch.bool
+        ),
+        action_amounts=torch.zeros(batch_size, sequence_length, dtype=torch.int32),
+        context_features=torch.zeros(batch_size, sequence_length, 9),
+        lengths=torch.ones(batch_size, dtype=torch.long),
     )
 
 
 def test_winner_reward_sign_and_replay_buffer_alignment():
-    cfg = _load_config(os.path.join(PROJECT_ROOT, "conf", "config_transformer.yaml"))
+    cfg = Config()
+    cfg.env.bet_bins = [0.5, 1.0]
+    cfg.train.max_trajectory_length = 4
+    cfg.train.max_sequence_length = 8
+    cfg.model.num_bet_bins = len(cfg.env.bet_bins) + 3
 
-    # Debug overrides suitable for CI
-    cfg.num_envs = 100
-    cfg.use_wandb = False
-    cfg.use_tensor_env = True
-    cfg.device = "cpu"
-    cfg.train.use_mixed_precision = False
-    cfg.train.use_kv_cache = False
-    cfg.exploiter.enabled = False
-    cfg.train.max_trajectory_length = max(8, int(cfg.train.max_trajectory_length))
-
-    torch.manual_seed(cfg.seed)
-    device = torch.device("cpu")
-
-    trainer = SelfPlayTrainer(cfg=cfg, device=device)
-
-    # Collect one completed round of trajectories; store into replay buffer
-    per_episode_rewards = trainer.collect_tensor_trajectories(
-        min_trajectories=1, add_to_replay_buffer=True
+    buffer = VectorizedReplayBuffer(
+        capacity=3,
+        cfg=cfg,
+        device=torch.device("cpu"),
+        float_dtype=torch.float32,
+        is_transformer=True,
     )
 
-    winners = trainer.tensor_env.winner
-    rewards = per_episode_rewards
+    winners = torch.tensor([0, 1, 2])
+    rewards = torch.tensor([1.25, -0.75, 0.0])
+    buffer.start_adding_trajectory_batches(3, model_age=0)
+    buffer.add_transitions(
+        embedding_data=_embedding(3, buffer.max_sequence_length, buffer.num_bet_bins),
+        trajectory_indices=torch.arange(3),
+        action_indices=torch.ones(3, dtype=torch.long),
+        logits=torch.zeros(3, buffer.num_bet_bins),
+        rewards=rewards,
+        dones=torch.ones(3, dtype=torch.bool),
+        legal_masks=torch.ones(3, buffer.num_bet_bins, dtype=torch.bool),
+        delta2=torch.zeros(3),
+        delta3=torch.zeros(3),
+        values=torch.zeros(3),
+    )
+    added, steps = buffer.finish_adding_trajectory_batches()
 
-    EPS = 1e-6
-
-    # Verify env-level winner sign (for episodes we actually recorded)
-    for i in range(int(rewards.numel())):
-        w = int(winners[i].item())
-        r = float(rewards[i].item())
-        if w == 0:
-            assert r > 0, f"idx={i} expected positive reward for winner=0, got {r}"
-        elif w == 1:
-            assert r < 0, f"idx={i} expected negative reward for winner=1, got {r}"
-        else:  # tie
-            assert abs(r) < EPS, f"idx={i} expected ~0 reward for tie, got {r}"
-
-    # Validate replay buffer final-step rewards match env rewards
-    buf = trainer.replay_buffer
-    valid_idxs = torch.where(buf.trajectory_lengths > 0)[0]
-
-    # Take the last episode_count_raw valid trajectories (most recent)
-    traj_lengths = buf.trajectory_lengths[valid_idxs]
-    last_pos = traj_lengths - 1
-    final_rewards = buf.rewards[valid_idxs, last_pos].cpu()
-
-    # Filter out opp SB folds (+0.005) from both env rewards and buffer rewards in aligned order
-    sb_mask = (rewards - 0.005).abs() > EPS
-    winners_f = winners[sb_mask]
-    rewards_f = rewards[sb_mask]
-    final_rewards_f = final_rewards
-
-    assert (
-        rewards_f.numel() == final_rewards_f.numel()
-    ), "Filtered env rewards and buffer rewards length mismatch"
-
-    for i in range(int(rewards_f.numel())):
-        w = int(winners_f[i].item())
-        r_env = float(rewards_f[i].item())
-        r_buf = float(final_rewards_f[i].item())
-        # Rewards must match closely
-        assert abs(r_env - r_buf) < EPS, f"idx={i} env={r_env} buf={r_buf}"
-        # Winner sign must match
-        if w == 0:
-            assert (
-                r_buf > 0
-            ), f"idx={i} expected positive buf reward for winner=0, got {r_buf}"
-        elif w == 1:
-            assert (
-                r_buf < 0
-            ), f"idx={i} expected negative buf reward for winner=1, got {r_buf}"
-        else:
-            assert (
-                abs(r_buf) < EPS
-            ), f"idx={i} expected ~0 buf reward for tie, got {r_buf}"
+    assert added == 3
+    assert steps == 3
+    final_rewards = buffer.rewards[torch.arange(3), buffer.trajectory_lengths[:3] - 1]
+    torch.testing.assert_close(final_rewards, rewards)
+    assert torch.all(final_rewards[winners == 0] > 0)
+    assert torch.all(final_rewards[winners == 1] < 0)
+    assert torch.all(final_rewards[winners == 2] == 0)

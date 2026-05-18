@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 import torch
 
@@ -18,7 +20,9 @@ from p2.core.structured_config import CFRType
     ],
 )
 @pytest.mark.parametrize("t", [1, 7, 42])
-def test_fused_dcfr_update_matches_pytorch(cfr_type: CFRType, cfr_plus: bool, t: int) -> None:
+def test_fused_dcfr_update_matches_pytorch(
+    cfr_type: CFRType, cfr_plus: bool, t: int
+) -> None:
     pytest.importorskip("triton")
     from p2.search.fused_cfr_triton import fused_dcfr_update_
 
@@ -40,12 +44,8 @@ def test_fused_dcfr_update_matches_pytorch(cfr_type: CFRType, cfr_plus: bool, t:
     r_ref = regrets.clone()
 
     if cfr_type in (CFRType.discounted, CFRType.discounted_plus):
-        numerator = torch.where(
-            cumul_ref > 0, t**alpha, t**beta
-        )
-        denominator = torch.where(
-            cumul_ref > 0, t**alpha + 1, t**beta + 1
-        )
+        numerator = torch.where(cumul_ref > 0, t**alpha, t**beta)
+        denominator = torch.where(cumul_ref > 0, t**alpha + 1, t**beta + 1)
         cumul_ref *= numerator
         cumul_ref /= denominator
         weight_ref *= numerator
@@ -85,7 +85,7 @@ def test_fused_dcfr_update_matches_pytorch(cfr_type: CFRType, cfr_plus: bool, t:
 # ---------------------------------------------------------------------------
 
 
-def _build_evaluator(num_envs: int = 4, depth: int = 3):
+def _build_evaluator(num_envs: int = 2, depth: int = 2):
     """Construct a small SparseCFREvaluator for testing."""
     from hydra import compose, initialize_config_dir
 
@@ -94,15 +94,22 @@ def _build_evaluator(num_envs: int = 4, depth: int = 3):
     from p2.models.mlp.rebel_ffn import RebelFFN
     from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
-    conf_dir = str((__import__("pathlib").Path(__file__).parent.parent / "conf").resolve())
+    conf_dir = str(
+        (__import__("pathlib").Path(__file__).parent.parent / "conf").resolve()
+    )
     with initialize_config_dir(config_dir=conf_dir, version_base=None):
         dcfg = compose(
             config_name="config_rebel_cfr",
             overrides=[
                 f"num_envs={num_envs}",
                 f"search.depth={depth}",
-                "search.iterations=10",
+                "search.iterations=8",
                 "search.warm_start_iterations=0",
+                "model.hidden_dim=32",
+                "model.ffn_dim=32",
+                "model.num_hidden_layers=1",
+                "model.num_value_layers=1",
+                "model.num_policy_layers=1",
                 "use_wandb=false",
             ],
         )
@@ -200,6 +207,19 @@ def _mirror_evaluator_state(src, dst) -> None:
     dst.last_model_values = (
         None if src.last_model_values is None else src.last_model_values.clone()
     )
+
+
+def _clone_evaluator_state(src):
+    """Shallow-copy an initialized evaluator and clone top-level tensor state."""
+    dst = copy.copy(src)
+    for name, value in vars(src).items():
+        if torch.is_tensor(value):
+            setattr(dst, name, value.clone())
+    dst.depth_offsets = list(src.depth_offsets)
+    dst.last_model_values = (
+        None if src.last_model_values is None else src.last_model_values.clone()
+    )
+    return dst
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -312,7 +332,7 @@ def test_fused_regret_tail_matches_pytorch() -> None:
     torch.manual_seed(19)
 
     total = 80
-    top = 30     # parents live in [0, top)
+    top = 30  # parents live in [0, top)
     bottom = top  # children live in [bottom, total)
     h = 1326
 
@@ -364,7 +384,9 @@ def test_unblocked_mass_ratio_indirect_matches_baseline() -> None:
     h = 1326
 
     actor_beliefs = torch.rand(top, h, device=device)
-    parent_index = torch.randint(0, top, (num_children,), device=device, dtype=torch.long)
+    parent_index = torch.randint(
+        0, top, (num_children,), device=device, dtype=torch.long
+    )
     policy = torch.rand(num_children, h, device=device)
     marginal_policy = actor_beliefs[parent_index] * policy
 
@@ -432,6 +454,7 @@ def test_fused_average_policy_mix_matches_pytorch() -> None:
 
     # Reference: mirror fused kernel math exactly.
     ref = policy_avg.clone()
+    ref[:bottom] = 0.0
     for c in range(bottom, total):
         parent = parent_index[c].item()
         actor = to_act[parent].item()
@@ -460,7 +483,9 @@ def test_fused_average_policy_mix_matches_pytorch() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("shape", [(1, 1326), (37, 1326), (13, 2, 1326), (200, 2, 1326)])
+@pytest.mark.parametrize(
+    "shape", [(1, 1326), (37, 1326), (13, 2, 1326), (200, 2, 1326)]
+)
 def test_unblocked_mass_triton_matches_pytorch(shape) -> None:
     pytest.importorskip("triton")
     from p2.env.card_utils import calculate_unblocked_mass
@@ -558,9 +583,7 @@ def test_fused_parent_sum_and_divide_matches_baseline() -> None:
     # --- divide-by-parent-sum kernel ---
     denom = ref_parent_sum[parent_index_rel]  # [num_children, H]
     eps = 1e-8
-    ref_div = torch.where(
-        denom > eps, pos / denom.clamp(min=eps), fallback
-    )
+    ref_div = torch.where(denom > eps, pos / denom.clamp(min=eps), fallback)
     out_div = torch.empty_like(pos)
     fused_divide_by_parent_sum_(
         pos=pos.contiguous(),
@@ -743,26 +766,34 @@ def test_fused_sparse_evaluator_matches_baseline_across_iterations() -> None:
     from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
     # Build one baseline evaluator and clone its init state into a fused one.
-    ev_base = _build_evaluator(num_envs=4, depth=3)
-    ev_fused = _build_evaluator(num_envs=4, depth=3)
+    ev_base = _build_evaluator()
+    ev_fused = _clone_evaluator_state(ev_base)
     # Swap the fused evaluator's class to inherit the same initial tensors.
     ev_fused.__class__ = FusedSparseCFREvaluator
     ev_fused._fused_positive_regrets_buf = None
 
-    _mirror_evaluator_state(ev_base, ev_fused)
-
     # Compare the evaluator math before tiny BF16 model-forward differences at
     # leaf refreshes get amplified by regret matching over later iterations.
+    ev_base.set_leaf_values = lambda t: None
+    ev_fused.set_leaf_values = lambda t: None
     for t in range(1, 3):
         ev_base.cfr_iteration(t)
         ev_fused.cfr_iteration(t)
     torch.cuda.synchronize()
 
-    for name in ["policy_probs", "cumulative_regrets", "beliefs", "self_reach", "values_avg"]:
+    for name in [
+        "policy_probs",
+        "cumulative_regrets",
+        "beliefs",
+        "self_reach",
+        "values_avg",
+    ]:
         a = getattr(ev_base, name)
         b = getattr(ev_fused, name)
         # Accumulated rounding over 5 iterations; generous but still tight.
-        torch.testing.assert_close(a, b, rtol=1e-3, atol=1e-4, msg=f"mismatch on {name}")
+        torch.testing.assert_close(
+            a, b, rtol=1e-3, atol=1e-4, msg=f"mismatch on {name}"
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -778,7 +809,7 @@ def test_graphed_cfr_iteration_matches_uncaptured() -> None:
     )
     from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
-    ev = _build_evaluator(num_envs=4, depth=3)
+    ev = _build_evaluator()
     # Swap to fused (pinned storage; device-scalar TScalars).
     ev.__class__ = FusedSparseCFREvaluator
     ev._ensure_fused_attrs()
@@ -839,14 +870,12 @@ def test_graphed_cfr_iteration_replays_across_t() -> None:
     from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
     # Two independent evaluators: one for uncaptured baseline, one for graph.
-    ev_base = _build_evaluator(num_envs=4, depth=3)
+    ev_base = _build_evaluator()
+    ev_graph = _clone_evaluator_state(ev_base)
     ev_base.__class__ = FusedSparseCFREvaluator
-    ev_base._ensure_fused_attrs()
-    ev_graph = _build_evaluator(num_envs=4, depth=3)
     ev_graph.__class__ = FusedSparseCFREvaluator
+    ev_base._ensure_fused_attrs()
     ev_graph._ensure_fused_attrs()
-
-    _mirror_evaluator_state(ev_base, ev_graph)
 
     # Prime both past early-t branches so subsequent iters share Python branch.
     for t in range(1, 3):
@@ -874,9 +903,7 @@ def test_graphed_cfr_iteration_replays_across_t() -> None:
         b = _EvaluatorStateSnapshot.from_evaluator(ev_graph)
         diffs = a.max_abs_diff(b)
         worst = max(diffs.values())
-        assert worst < 1e-2, (
-            f"t={replay_t}: replay diverges from baseline: {diffs}"
-        )
+        assert worst < 1e-2, f"t={replay_t}: replay diverges from baseline: {diffs}"
 
 
 # ---------------------------------------------------------------------------

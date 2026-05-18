@@ -428,9 +428,9 @@ class CFREvaluator(ABC):
 
         # Ranks in sorted order
         ranks_sorted = torch.gather(hand_ranks, 1, sorted_indices)  # (M,1326)
-        assert torch.all(
-            ranks_sorted[:, 1:] >= ranks_sorted[:, :-1]
-        ), "rank_hands order is descending; flip or fix rank_hands"
+        assert torch.all(ranks_sorted[:, 1:] >= ranks_sorted[:, :-1]), (
+            "rank_hands order is descending; flip or fix rank_hands"
+        )
 
         # --- Tie groups: start flags, group ids, [L,R] spans per sorted position ---
         is_start = torch.ones_like(ranks_sorted, dtype=torch.bool)  # (M,1326)
@@ -590,9 +590,7 @@ class CFREvaluator(ABC):
         ).clamp(min=1e-8)
         valid_denom = denom > 1e-8
         if self.CHECK_INVARIANTS:
-            assert (
-                (valid_denom) | ((win_mass < 1e-5) & (tie_mass < 1e-5))
-            ).all()
+            assert ((valid_denom) | ((win_mass < 1e-5) & (tie_mass < 1e-5))).all()
 
         # Probabilities & EV (in sorted order)
         win_prob = torch.where(valid_denom, win_mass / denom, 0.0)
@@ -1038,9 +1036,7 @@ class CFREvaluator(ABC):
         else:
             # Mix with previous values (CFR-AVG style)
             old, new = self._get_mixing_weights(t)
-            unmixed = (
-                old + new
-            ) * hand_values - old * self.last_model_values
+            unmixed = (old + new) * hand_values - old * self.last_model_values
             unmixed /= new
             unmixed = self._maybe_enforce_zero_sum(unmixed, beliefs)
             new_values = torch.index_copy(
@@ -1435,7 +1431,10 @@ class CFREvaluator(ABC):
         policy_targets = self._pull_back(self.policy_probs_avg)
         policy_targets = policy_targets[:top].permute(0, 2, 1)
 
-        value_targets = self.values_avg[:N].clamp(-1.0, 1.0)
+        source_values = (
+            self.latest_values if self.use_final_policy_values else self.values_avg
+        )
+        value_targets = source_values[:N].clamp(-1.0, 1.0)
 
         features = self.feature_encoder.encode(self.beliefs_avg, pre_chance_node=False)[
             :top
@@ -1728,6 +1727,57 @@ class CFREvaluator(ABC):
         self.stats["local_exploitability_min"] = (
             exploit_stats.local_exploitability.min().item()
         )
+        self._save_high_exploitability_roots(exploit_stats.local_exploitability)
+
+    def _save_high_exploitability_roots(
+        self, local_exploitability: torch.Tensor, threshold: float = 10.0
+    ) -> None:
+        """Persist small debug bundles for roots with unusually high exploitability."""
+        high_roots = torch.where(local_exploitability > threshold)[0]
+        if high_roots.numel() == 0:
+            return
+
+        for root_idx_tensor in high_roots.cpu():
+            root_idx = int(root_idx_tensor.item())
+            tree_mask = torch.zeros(
+                self.total_nodes, dtype=torch.bool, device=self.device
+            )
+            tree_mask[root_idx] = True
+            for depth in range(self.tree_depth):
+                parent_start = self.depth_offsets[depth]
+                child_start = self.depth_offsets[depth + 1]
+                child_end = self.depth_offsets[depth + 2]
+                parent_mask = tree_mask[parent_start:child_start]
+                if not parent_mask.any():
+                    continue
+                parent_actions = parent_mask[:, None].expand(-1, self.num_actions)
+                child_mask = self._push_down(parent_actions, level=depth)
+                tree_mask[child_start:child_end] |= child_mask
+
+            tree_indices = torch.where(tree_mask & self.valid_mask)[0]
+            if tree_indices.numel() == 0:
+                continue
+
+            env_state = HUNLTensorEnv.from_proto(
+                self.env, num_envs=tree_indices.numel()
+            )
+            env_state.copy_state_from(
+                self.env,
+                tree_indices.to(self.device),
+                torch.arange(tree_indices.numel(), device=self.device),
+                copy_deck=True,
+            )
+            payload = {
+                "env_state": env_state,
+                "tree_indices": tree_indices.cpu(),
+                "root_idx": root_idx,
+                "exploitability": float(local_exploitability[root_idx].item()),
+                "model_state_dict": self.model.state_dict(),
+            }
+            torch.save(
+                payload,
+                f"high_exploitability_root_{root_idx}_{self.cfr_iterations}.pt",
+            )
 
     def _record_action_mix(self) -> None:
         """Record the action mix of the policy."""

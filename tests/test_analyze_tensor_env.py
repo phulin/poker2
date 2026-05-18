@@ -117,20 +117,16 @@ def test_rebel_allin_response_has_call_and_fold() -> None:
     cfg.env = EnvConfig()
     cfg.model = ModelConfig()
     cfg.search = SearchConfig()
+    cfg.search.depth = 1
     analyzer = RebelPreflopAnalyzer(model, cfg=cfg, device=torch.device("cpu"))
     analyzer.reset(1)
     analyzer.step_sb_action("allin")
 
-    probs, _, _ = analyzer.get_probabilities(0)
-    # Only fold/call should be available for reachable combos.
-    reachable = probs.sum(dim=1) > 1e-6
-    assert reachable.any()
-    torch.testing.assert_close(
-        probs[reachable, 2:], torch.zeros_like(probs[reachable, 2:])
-    )
-    # There must be both folding and calling hands among reachable combos.
-    assert torch.any(probs[reachable, 0] > 0.5)
-    assert torch.any(probs[reachable, 1] > 0.5)
+    legal_mask = analyzer.cfr_env.legal_bins_mask()[0]
+    assert legal_mask[0]
+    assert legal_mask[1]
+    assert not legal_mask[2:-1].any()
+    assert not legal_mask[-1]
 
 
 class DummyTransformerModel(torch.nn.Module):
@@ -367,12 +363,12 @@ def test_preflop_value_grid_varies_with_rank_sum(monkeypatch):
 class DummyModelFoldAAKKAKs(PokerTransformerV1):
     def __init__(self):
         super().__init__(
-            max_sequence_length=50,
-            d_model=128,
-            n_layers=2,
-            n_heads=4,
+            max_sequence_length=8,
+            d_model=16,
+            n_layers=1,
+            n_heads=1,
             num_bet_bins=8,
-            dropout=0.1,
+            dropout=0.0,
             use_gradient_checkpointing=False,
         )
 
@@ -457,14 +453,24 @@ class CapturingTransformerModel(PokerTransformerV1):
 
 def test_token_sequence_order_cls_game_hole_hole_context() -> None:
     model = CapturingTransformerModel(
-        max_sequence_length=50,
-        d_model=128,
-        n_layers=2,
-        n_heads=4,
+        max_sequence_length=8,
+        d_model=16,
+        n_layers=1,
+        n_heads=1,
         num_bet_bins=8,
-        dropout=0.1,
+        dropout=0.0,
         use_gradient_checkpointing=False,
     )
+
+    def capture_only(embedding_data):
+        model.last_embedding = embedding_data
+        batch = embedding_data.batch_size
+        return ModelOutput(
+            policy_logits=torch.zeros(batch, 8),
+            value=torch.zeros(batch),
+        )
+
+    model.forward = capture_only
 
     analyzer = PreflopAnalyzer(model, button=0)
 

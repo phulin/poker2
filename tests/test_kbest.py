@@ -5,9 +5,7 @@ Test script for K-Best self-play functionality.
 This script tests the basic functionality of the K-Best opponent pool and self-play training.
 """
 
-import os
 import sys
-import traceback
 from pathlib import Path
 
 import torch
@@ -87,63 +85,37 @@ def test_kbest_pool():
     print("K-Best pool test completed!\n")
 
 
-def test_selfplay_with_kbest():
-    """Test self-play training with K-Best opponents."""
-    print("Testing self-play with K-Best opponents...")
+def test_selfplay_with_kbest(tmp_path):
+    """Test K-Best wiring on the self-play trainer without running a rollout."""
 
-    # Create a Hydra config with small parameters for fast testing
     cfg = Config(
         train=TrainingConfig(
             learning_rate=1e-3,
-            batch_size=4,  # Small batch for testing
-            episodes_per_step=1,  # Only 1 epoch instead of 4
+            batch_size=1,
+            episodes_per_step=1,
         ),
         model=ModelConfig(),
         env=EnvConfig(),
-        k_best_pool_size=2,  # Smaller pool
-        min_elo_diff=20.0,  # Lower threshold
-        use_tensor_env=True,  # Use faster tensor environment
-        num_envs=2,  # Much smaller than default 256
-        device="cpu",  # Set device to cpu for testing
+        k_best_pool_size=2,
+        min_elo_diff=20.0,
+        use_tensor_env=True,
+        num_envs=1,
+        device="cpu",
     )
 
-    # Set device for testing
-    device = torch.device("cpu")
+    trainer = SelfPlayTrainer(cfg=cfg, device=torch.device("cpu"))
+    assert isinstance(trainer.opponent_pool, KBestOpponentPool)
+    assert trainer.opponent_pool.k == 2
+    assert trainer.opponent_pool.min_elo_diff == 20.0
 
-    trainer = SelfPlayTrainer(
-        cfg=cfg,
-        device=device,
-    )
+    trainer.opponent_pool.add_snapshot(trainer.model, step=1, rating=1250.0)
+    sampled = trainer.opponent_pool.sample(k=1)
+    assert len(sampled) == 1
+    assert sampled[0].step == 1
 
-    print(f"Initial ELO: {trainer.opponent_pool.current_elo}")
-    print(f"Initial pool size: {trainer.opponent_pool.get_pool_stats()['pool_size']}")
-
-    # Run fewer training steps for faster testing
-    for step in range(2):  # Reduced from 5 to 2
-        stats = trainer.train_step(step + 1)
-        print(
-            f"Step {step + 1}: ELO={stats['current_elo']:.1f}, "
-            f"Pool size={stats['pool_stats']['pool_size']}, "
-            f"Avg reward={stats['avg_reward']:.2f}"
-        )
-
-    # Test evaluation with fewer games
-    print("Testing evaluation against pool...")
-    eval_results = trainer.evaluate_against_pool(min_games=3)  # Reduced from 10 to 3
-    print(f"Evaluation results: {eval_results}")
-
-    # Test checkpointing
-    print("Testing checkpointing...")
-    trainer.save_checkpoint("test_checkpoint.pt", 2)
-    trainer.load_checkpoint("test_checkpoint.pt")
-
-    # Cleanup
-    if os.path.exists("test_checkpoint.pt"):
-        os.remove("test_checkpoint.pt")
-    if os.path.exists("test_checkpoint_pool.pt"):
-        os.remove("test_checkpoint_pool.pt")
-
-    print("Self-play with K-Best test completed!\n")
+    ckpt = tmp_path / "kbest.pt"
+    trainer.save_checkpoint(str(ckpt), 2)
+    trainer.load_checkpoint(str(ckpt))
 
 
 def test_opponent_sampling():
@@ -194,29 +166,3 @@ def test_opponent_sampling():
     print(f"Opponent steps: {opponent_steps}")
 
     print("Opponent sampling test completed!\n")
-
-
-def main():
-    """Run all tests."""
-    print("Running K-Best self-play tests...\n")
-
-    # Set random seed for reproducibility
-    torch.manual_seed(42)
-
-    try:
-        test_kbest_pool()
-        test_selfplay_with_kbest()
-        test_opponent_sampling()
-
-        print("All tests passed! ✅")
-
-    except Exception as e:
-        print(f"Test failed: {e}")
-        traceback.print_exc()
-        return 1
-
-    return 0
-
-
-if __name__ == "__main__":
-    exit(main())

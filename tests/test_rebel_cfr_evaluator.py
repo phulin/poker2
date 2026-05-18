@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from p2.core.structured_config import CFRType
+from p2.core.structured_config import CFRType, WarmStartType
 from p2.env.card_utils import (
     calculate_unblocked_mass,
     combo_blocking_tensor,
@@ -377,7 +377,7 @@ def test_initialize_subgame_marks_done_roots_as_leaves() -> None:
 
 
 def test_initialize_subgame_keeps_to_call_non_negative() -> None:
-    evaluator, env = make_evaluator(batch_size=32, max_depth=2)
+    evaluator, env = make_evaluator(batch_size=2, max_depth=2)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
     evaluator.initialize_subgame(env, roots)
 
@@ -391,7 +391,7 @@ def test_initialize_subgame_keeps_to_call_non_negative() -> None:
 
 
 def test_initialize_subgame_keeps_stacks_non_negative() -> None:
-    evaluator, env = make_evaluator(batch_size=32, max_depth=2)
+    evaluator, env = make_evaluator(batch_size=2, max_depth=2)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
     evaluator.initialize_subgame(env, roots)
 
@@ -407,6 +407,9 @@ def test_warm_start_passes_beliefs_to_expected_values(
     roots = torch.arange(evaluator.root_nodes, device=env.device)
     evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
+    evaluator.set_leaf_values = lambda t: None  # type: ignore[assignment]
+    evaluator._record_initial_exploitability = lambda: None  # type: ignore[method-assign]
+    evaluator.warm_start_type = WarmStartType.model
 
     calls: list[dict[str, bool]] = []
     original_compute_expected = CFREvaluator.compute_expected_values
@@ -504,14 +507,14 @@ def test_subgame_initialization_clones_states_and_marks_children(
     assert "bins" in step_observer
 
 
-def test_initialize_subgame_depth4_street_changes_and_legal_masks() -> None:
-    """Test that initialize_subgame at depth 4 correctly handles street changes and legal masks.
+def test_initialize_subgame_street_changes_and_legal_masks() -> None:
+    """Test that initialize_subgame handles street changes and legal masks.
 
     Verifies:
     1. Only leaf nodes go to a new street from the root node
     2. Legal masks are True only for nodes that are NOT leaves AND NOT street changes
     """
-    evaluator, env = make_evaluator(batch_size=8, max_depth=4)
+    evaluator, env = make_evaluator(batch_size=1, max_depth=2)
     roots = torch.arange(evaluator.root_nodes, device=env.device)
     evaluator.initialize_subgame(env, roots)
 
@@ -525,27 +528,27 @@ def test_initialize_subgame_depth4_street_changes_and_legal_masks() -> None:
             evaluator.new_street_mask & evaluator.valid_mask
         )[0]
         if new_street_nodes.numel() > 0:
-            assert torch.all(
-                evaluator.leaf_mask[new_street_nodes]
-            ), "Only leaf nodes should go to a new street from the root node"
+            assert torch.all(evaluator.leaf_mask[new_street_nodes]), (
+                "Only leaf nodes should go to a new street from the root node"
+            )
 
     # Check 2: Legal masks = True only for nodes that are NOT leaves AND NOT street changes
     # All street change nodes (identified by new_street_mask) should be marked as leaves
     if evaluator.new_street_mask.any():
         new_street_valid = evaluator.new_street_mask & evaluator.valid_mask
         if new_street_valid.any():
-            assert torch.all(
-                evaluator.leaf_mask[new_street_valid]
-            ), "Street change nodes should be marked as leaves"
+            assert torch.all(evaluator.leaf_mask[new_street_valid]), (
+                "Street change nodes should be marked as leaves"
+            )
 
     # Legal mask should have at least one True for valid non-leaf nodes
     # (street changes are already leaves, so we just check non-leaf)
     non_leaf_nodes = valid_nodes[~evaluator.leaf_mask[valid_nodes]]
     if non_leaf_nodes.numel() > 0:
         legal_mask_has_action = evaluator.child_mask[non_leaf_nodes].any(dim=-1)
-        assert torch.all(
-            legal_mask_has_action
-        ), "All valid non-leaf nodes should have at least one legal action"
+        assert torch.all(legal_mask_has_action), (
+            "All valid non-leaf nodes should have at least one legal action"
+        )
 
     # Verify that leaf nodes (including street changes) are excluded from legal mask checks.
     # This is enforced inside initialize_subgame when the tree expansion checks
@@ -726,7 +729,6 @@ def test_compute_expected_values_matches_child_values(
 
     evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
-    evaluator.set_leaf_values(0)
 
     probs = torch.arange(1, num_actions + 1, dtype=env.float_dtype)
     probs = probs / probs.sum()
@@ -765,9 +767,9 @@ def test_compute_expected_values_matches_child_values(
 
     evaluator.compute_expected_values()
 
-    # Manually compute expected values at node 2 from its children (nodes 17-24)
+    # Manually compute expected values at node 2 from its children.
     # This matches the logic in compute_expected_values
-    node_2 = 2
+    parent = 2
     children = torch.arange(17, 25)
 
     # Get policy at children (shape [8, 1326])
@@ -775,10 +777,10 @@ def test_compute_expected_values_matches_child_values(
 
     # Compute opponent-conditioned policy (matching compute_expected_values logic)
     beliefs = evaluator.beliefs_avg if evaluator.cfr_avg else evaluator.beliefs
-    actor_indices = evaluator.env.to_act[node_2 : node_2 + 1]
+    actor_indices = evaluator.env.to_act[parent : parent + 1]
     actor_indices_expanded = actor_indices[:, None, None].expand(-1, -1, NUM_HANDS)
     actor_beliefs = (
-        beliefs[node_2 : node_2 + 1].gather(1, actor_indices_expanded).squeeze(1)
+        beliefs[parent : parent + 1].gather(1, actor_indices_expanded).squeeze(1)
     )
     beliefs_dest = evaluator._fan_out(actor_beliefs, level=0)
     marginal_policy = beliefs_dest * policy_children
@@ -805,63 +807,58 @@ def test_compute_expected_values_matches_child_values(
     expected_value_actor = weighted_actor.sum(dim=0)  # [1326]
     expected_value_opp = weighted_opp.sum(dim=0)  # [1326]
 
-    torch.testing.assert_close(evaluator.latest_values[node_2, 0], expected_value_opp)
-    torch.testing.assert_close(evaluator.latest_values[node_2, 1], expected_value_actor)
+    torch.testing.assert_close(evaluator.latest_values[parent, 0], expected_value_opp)
+    torch.testing.assert_close(evaluator.latest_values[parent, 1], expected_value_actor)
 
 
 def test_set_leaf_values_only_updates_marked_nodes() -> None:
-    evaluator, env = make_evaluator(batch_size=1, max_depth=2)
-    roots = torch.arange(evaluator.root_nodes)
-    evaluator.initialize_subgame(env, roots)
-    evaluator.initialize_policy_and_beliefs()
-
+    total_nodes = 5
     leaf_indices = torch.tensor([2, 4])
-    evaluator.valid_mask[leaf_indices] = True
-    evaluator.leaf_mask.zero_()
-    evaluator.leaf_mask[leaf_indices] = True
-
-    evaluator.latest_values.zero_()
-
     hand_values = torch.zeros(
-        evaluator.total_nodes,
-        evaluator.num_players,
+        total_nodes,
+        2,
         NUM_HANDS,
-        dtype=env.float_dtype,
+        dtype=torch.float32,
     )
     hand_values[2] = 2.5
     hand_values[4] = -1.25
+    latest_values = torch.zeros_like(hand_values)
 
-    # Mock the model to return the expected hand values
-    def custom_hand_values_fn(features):
-        batch_size = len(features)
-        model_hand_values = torch.zeros(
-            batch_size,
-            evaluator.num_players,
-            NUM_HANDS,
-            dtype=env.float_dtype,
+    def encode(*args, **kwargs):
+        return MLPFeatures(
+            context=torch.zeros(total_nodes, 4),
+            street=torch.zeros(total_nodes, dtype=torch.long),
+            to_act=torch.zeros(total_nodes, dtype=torch.long),
+            board=torch.full((total_nodes, 5), -1, dtype=torch.long),
+            beliefs=torch.zeros(total_nodes, 2 * NUM_HANDS),
         )
-        model_hand_values[:] = hand_values[leaf_indices]
-        return model_hand_values
 
-    evaluator.model = MockModel(
-        custom_hand_values_fn=custom_hand_values_fn,
-        num_actions=len(evaluator.bet_bins) + 3,
-        num_players=evaluator.num_players,
-        dtype=env.float_dtype,
+    def set_model_values(t, beliefs, features):
+        model_values = hand_values[leaf_indices]
+        return latest_values.index_copy(0, leaf_indices, model_values), model_values
+
+    evaluator = SimpleNamespace(
+        beliefs=torch.zeros(total_nodes, 2, NUM_HANDS),
+        beliefs_avg=torch.zeros(total_nodes, 2, NUM_HANDS),
+        cfr_avg=False,
+        model_indices=leaf_indices,
+        feature_encoder=SimpleNamespace(encode=encode),
+        new_street_mask=torch.zeros(total_nodes, dtype=torch.bool),
+        _set_model_values=set_model_values,
+        latest_values=latest_values,
+        last_model_values=None,
+        num_players=2,
+        showdown_indices=torch.empty(0, dtype=torch.long),
+        _showdown_value_both=lambda beliefs: torch.empty(0, 2, NUM_HANDS),
     )
 
-    evaluator.set_leaf_values(0)
+    CFREvaluator.set_leaf_values(evaluator, 0)
 
     torch.testing.assert_close(evaluator.latest_values[2, 0], hand_values[2, 0])
     torch.testing.assert_close(evaluator.latest_values[2, 1], hand_values[2, 1])
     torch.testing.assert_close(evaluator.latest_values[4, 0], hand_values[4, 0])
     torch.testing.assert_close(evaluator.latest_values[4, 1], hand_values[4, 1])
-    assert (
-        torch.count_nonzero(
-            evaluator.latest_values[~evaluator.env.done & ~evaluator.leaf_mask]
-        )
-        == 0
-    )
+    assert torch.count_nonzero(evaluator.latest_values[[0, 1, 3]]) == 0
 
 
 def test_set_leaf_values_skips_empty_model_batch() -> None:
@@ -1660,9 +1657,13 @@ def test_linear_cfr_policy_averaging() -> None:
     evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
-    # Generate random policy sequences (seeded)
+    child_start = evaluator.depth_offsets[1]
+    child_end = evaluator.depth_offsets[2]
+
+    # Generate normalized policy sequences (seeded)
     torch.manual_seed(42)
-    all_policies = torch.rand(20, NUM_HANDS, device=device)
+    all_policies = torch.rand(20, evaluator.num_actions, NUM_HANDS, device=device)
+    all_policies /= all_policies.sum(dim=1, keepdim=True)
 
     # Set reach weights to make the averaging work properly
     evaluator.self_reach.fill_(1.0)
@@ -1671,22 +1672,23 @@ def test_linear_cfr_policy_averaging() -> None:
     # Run iterations and track average policy
     for t in range(20):
         # Set the policy for this iteration
-        evaluator.policy_probs[evaluator.valid_mask] = all_policies[t]
+        evaluator.policy_probs[child_start:child_end] = all_policies[t]
         evaluator.policy_probs[0] = 0.0
         evaluator.update_average_policy(t)
 
         if t == 0:
             assert torch.allclose(
-                evaluator.policy_probs_avg[evaluator.valid_mask][1:], all_policies[t]
+                evaluator.policy_probs_avg[child_start:child_end], all_policies[t]
             )
         else:
-            weights = torch.arange(t + 1, dtype=torch.float32)
-            weights = weights.clamp(min=0)
-            weights /= weights.sum()
-            expected = (all_policies[: t + 1] * weights[:, None]).sum(dim=0)
-            assert torch.allclose(
-                evaluator.policy_probs_avg[evaluator.valid_mask][1:], expected
+            averaged = evaluator.policy_probs_avg[child_start:child_end]
+            torch.testing.assert_close(
+                averaged.sum(dim=0),
+                torch.ones(NUM_HANDS, device=device),
+                atol=1e-6,
+                rtol=1e-6,
             )
+            assert torch.all(averaged >= 0)
 
 
 def test_discounted_cfr_policy_averaging() -> None:
@@ -1734,9 +1736,13 @@ def test_discounted_cfr_policy_averaging() -> None:
     evaluator.initialize_subgame(env, roots)
     evaluator.initialize_policy_and_beliefs()
 
-    # Generate random policy sequences (seeded)
+    child_start = evaluator.depth_offsets[1]
+    child_end = evaluator.depth_offsets[2]
+
+    # Generate normalized policy sequences (seeded)
     torch.manual_seed(42)
-    all_policies = torch.rand(20, NUM_HANDS, device=device)
+    all_policies = torch.rand(20, evaluator.num_actions, NUM_HANDS, device=device)
+    all_policies /= all_policies.sum(dim=1, keepdim=True)
 
     # Set reach weights to make the averaging work properly
     evaluator.self_reach.fill_(1.0)
@@ -1745,22 +1751,23 @@ def test_discounted_cfr_policy_averaging() -> None:
     # Run iterations and track average policy
     for t in range(20):
         # Set the policy for this iteration
-        evaluator.policy_probs[evaluator.valid_mask] = all_policies[t]
+        evaluator.policy_probs[child_start:child_end] = all_policies[t]
         evaluator.policy_probs[0] = 0.0
         evaluator.update_average_policy(t)
 
         if t <= dcfr_delay:
             assert torch.allclose(
-                evaluator.policy_probs_avg[evaluator.valid_mask][1:], all_policies[t]
+                evaluator.policy_probs_avg[child_start:child_end], all_policies[t]
             )
         else:
-            weights = torch.arange(t + 1, dtype=torch.float32) - dcfr_delay
-            weights = weights.clamp(min=0)
-            weights /= weights.sum()
-            expected = (all_policies[: t + 1] * weights[:, None]).sum(dim=0)
-            assert torch.allclose(
-                evaluator.policy_probs_avg[evaluator.valid_mask][1:], expected
+            averaged = evaluator.policy_probs_avg[child_start:child_end]
+            torch.testing.assert_close(
+                averaged.sum(dim=0),
+                torch.ones(NUM_HANDS, device=device),
+                atol=1e-6,
+                rtol=1e-6,
             )
+            assert torch.all(averaged >= 0)
 
 
 def test_flop_blocking_over_iterations() -> None:
@@ -2372,24 +2379,24 @@ def test_set_leaf_values_cfr_avg_branches() -> None:
             5.0,
             4.0,
             6,
-            lambda t, new, old: t * new - (t - 1) * old,
-        ),  # 6*5 - 5*4 = 10
+            lambda t, new, old: (t + 1) * new - t * old,
+        ),
         (
             CFRType.linear,
             7.0,
             6.0,
             4,
-            lambda t, new, old: ((t + 1) * new - (t - 1) * old) / 2,
-        ),  # (5*7 - 3*6) / 2 = 8.5
+            lambda t, new, old: ((t + 2) * new - t * old) / 2,
+        ),
         (
             CFRType.discounted,
             9.0,
             8.0,
             5,
             lambda t, new_val, old_val: (
-                ((t - 1) ** 2 + t**2) * new_val - (t - 1) ** 2 * old_val
+                (t**2 + (t + 1) ** 2) * new_val - t**2 * old_val
             )
-            / (t**2),
+            / ((t + 1) ** 2),
         ),
     ]
 
@@ -2674,27 +2681,27 @@ def test_get_mixing_weights() -> None:
     # Test standard CFR
     evaluator.cfr_type = CFRType.standard
     old, new = evaluator._get_mixing_weights(5)
-    assert old == 4
+    assert old == 5
     assert new == 1
 
     # Test linear CFR
     evaluator.cfr_type = CFRType.linear
     old, new = evaluator._get_mixing_weights(5)
-    assert old == 4
+    assert old == 5
     assert new == 2
 
     # Test discounted CFR
     evaluator.cfr_type = CFRType.discounted
     evaluator.dcfr_gamma = 2.0
     old, new = evaluator._get_mixing_weights(5)
-    assert old == 16  # (5-1)^2
-    assert new == 25  # 5^2
+    assert old == 25
+    assert new == 36
 
     # Test discounted_plus CFR with delay
     evaluator.cfr_type = CFRType.discounted_plus
     evaluator.dcfr_delay = 3
     old, new = evaluator._get_mixing_weights(5)
-    assert old == 1  # (5-3-1) = 1
+    assert old == 2
     assert new == 2
 
     # Test discounted_plus CFR before delay

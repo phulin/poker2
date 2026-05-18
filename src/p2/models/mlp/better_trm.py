@@ -286,7 +286,7 @@ class BetterTRM(BaseMLPModel):
 
         # Guess hand values are around stddev 0.1.
         if self.nonlinearity == NonlinearityType.swiglu:
-            self.hand_value_head[-1].get_submodule("swiglu").V.weight.data.mul_(0.1)
+            self.hand_value_head[-1].get_submodule("swiglu").down.weight.data.mul_(0.1)
         else:
             self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
 

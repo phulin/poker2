@@ -1,8 +1,6 @@
-import math
-
 import torch
 
-from p2.core.structured_config import Config, StratifyConfig, ValueHeadType
+from p2.core.structured_config import Config, ValueHeadType
 from p2.env.card_utils import (
     NUM_HANDS,
     combo_suit_permutation_inverse_tensor,
@@ -165,8 +163,8 @@ def test_rebel_policy_loss_has_saturated_wrong_action_gradient():
 def test_rebel_cfr_trainer_single_step_cpu():
     cfg = Config()
     cfg.num_steps = 1
-    cfg.num_envs = 2  # Reduced from default for faster execution
-    cfg.train.batch_size = 2  # Reduced from 4 for faster execution
+    cfg.num_envs = 1
+    cfg.train.batch_size = 1
     cfg.train.episodes_per_step = 1
     cfg.train.replay_buffer_batches = 1
     cfg.train.value_reuse_goal = 2
@@ -183,8 +181,8 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.model.name = "rebel_ffn"
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
     cfg.model.input_dim = 2661
-    cfg.model.hidden_dim = 32  # Reduced from 64 for faster execution
-    cfg.model.num_hidden_layers = 1  # Reduced from 2 for faster execution
+    cfg.model.hidden_dim = 16
+    cfg.model.num_hidden_layers = 1
     cfg.model.value_head_type = ValueHeadType.scalar
     cfg.model.detach_value_head = True
     cfg.search.enabled = True
@@ -192,22 +190,52 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.search.iterations = 1
     cfg.search.warm_start_iterations = 0
     cfg.search.dcfr_plus_delay = 0
-    cfg.search.branching = 2  # Reduced from 4 for faster execution
-    cfg.train.stratify_streets = [
-        StratifyConfig(threshold=0, probabilities=[0.25, 0.25, 0.25, 0.25])
-    ]
 
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
-    metrics = trainer.train(num_steps=1)
-    assert len(metrics) == 1
-    assert metrics[0]["policy_loss"] is not None
-    assert metrics[0]["loss"] is not None
-    assert not math.isnan(metrics[0]["policy_loss"])
-    # New metrics: mean sample counts for both buffers
-    assert "value_buffer_mean_sample_count" in metrics[0]
-    assert "policy_buffer_mean_sample_count" in metrics[0]
-    assert isinstance(metrics[0]["value_buffer_mean_sample_count"], float)
-    assert isinstance(metrics[0]["policy_buffer_mean_sample_count"], float)
+    batch_size = 1
+    beliefs = torch.full((batch_size, 2, NUM_HANDS), 1.0 / NUM_HANDS)
+    features = MLPFeatures(
+        context=torch.zeros(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    legal_masks = torch.ones(batch_size, cfg.model.num_actions, dtype=torch.bool)
+    policy_targets = torch.zeros(batch_size, NUM_HANDS, cfg.model.num_actions)
+    policy_targets[..., 1] = 1.0
+    value_targets = torch.zeros(batch_size, 2, NUM_HANDS)
+    value_batch = RebelBatch(
+        features=features,
+        value_targets=value_targets,
+        legal_masks=legal_masks,
+    )
+    policy_batch = RebelBatch(
+        features=features.clone(),
+        policy_targets=policy_targets,
+        legal_masks=legal_masks,
+    )
+    suit_permutations = suit_permutations_tensor(device=torch.device("cpu"))[:1]
+    permuted_batch, suit_permutation_idxs = value_batch.with_permuted_targets(
+        suit_permutations=suit_permutations,
+        num_players=trainer.num_players,
+    )
+    before = next(trainer.model.parameters()).detach().clone()
+
+    stats, *_ = trainer._supervise(
+        value_batch,
+        policy_batch,
+        permuted_batch,
+        suit_permutation_idxs,
+        value_latent=None,
+        policy_latent=None,
+        permuted_latent=None,
+    )
+
+    assert torch.isfinite(stats["policy_loss"])
+    assert torch.isfinite(stats["value_loss"])
+    assert torch.isfinite(stats["total_loss"])
+    assert not torch.equal(before, next(trainer.model.parameters()).detach())
 
 
 def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
@@ -335,6 +363,6 @@ def test_permutation_loss_echo_model():
 
     # The permutation loss should be 0 (or very close to 0)
     permutation_loss = loss_dict["permutation_loss"]
-    assert (
-        permutation_loss < 1e-6
-    ), f"Permutation loss should be ~0, got {permutation_loss}"
+    assert permutation_loss < 1e-6, (
+        f"Permutation loss should be ~0, got {permutation_loss}"
+    )

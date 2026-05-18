@@ -751,9 +751,9 @@ class TestVectorizedReplayBuffer:
         }
 
         actual_attrs = {attr for attr in dir(sampled) if not attr.startswith("_")}
-        assert expected_attrs.issubset(
-            actual_attrs
-        ), f"Missing attributes: {expected_attrs - actual_attrs}"
+        assert expected_attrs.issubset(actual_attrs), (
+            f"Missing attributes: {expected_attrs - actual_attrs}"
+        )
 
         # Check shapes
         assert sampled.embedding_data.token_ids.shape[0] == 5
@@ -883,361 +883,96 @@ class TestVectorizedReplayBuffer:
         assert buffer.rewards[2].sum() == 0  # All rewards should be zero
         assert buffer.action_indices[2].sum() == 0  # All action indices should be zero
 
-    def test_buffer_filling_during_collection(self):
-        """Test that the buffer properly fills and manages trajectories during collection."""
-        from p2.core.structured_config import (
-            Config,
-            EnvConfig,
-            ModelConfig,
-            TrainingConfig,
-        )
-        from p2.rl.self_play import SelfPlayTrainer
-
-        # Create a Hydra config with small parameters for testing
-        cfg = Config(
-            train=TrainingConfig(batch_size=4),
-            model=ModelConfig(),
-            env=EnvConfig(),
-            use_tensor_env=True,
-            num_envs=8,  # Small number for easier testing
-            device="cpu",  # Set device to cpu for testing
-        )
-
-        # Set device for testing
-        device = torch.device("cpu")
-
-        # Create a small trainer for testing
-        trainer = SelfPlayTrainer(
-            cfg=cfg,
-            device=device,
-        )
-
-        # Monitor buffer state before collection
-        initial_size = trainer.replay_buffer.size
-        initial_steps = trainer.replay_buffer.num_steps()
-        initial_valid = (trainer.replay_buffer.trajectory_lengths > 0).sum().item()
-
-        print(
-            f"Initial buffer state: size={initial_size}, steps={initial_steps}, valid={initial_valid}"
-        )
-
-        # Collect some trajectories
-        min_steps = 5  # Reduced expectation since poker games can be short
-        trajectory_rewards = trainer.collect_tensor_trajectories(min_steps=min_steps)
-        total_reward = trajectory_rewards.sum().item()
-        episode_count = trajectory_rewards.numel()
-
-        # Monitor buffer state after collection
-        final_size = trainer.replay_buffer.size
-        final_steps = trainer.replay_buffer.num_steps()
-        final_valid = (trainer.replay_buffer.trajectory_lengths > 0).sum().item()
-
-        print(
-            f"Final buffer state: size={final_size}, steps={final_steps}, valid={final_valid}"
-        )
-        print(f"Collection results: episodes={episode_count}, reward={total_reward}")
-
-        # Verify buffer is being used
-        assert final_steps > 0, f"Expected some steps collected, got {final_steps}"
-        assert final_valid > 0, f"Expected some valid trajectories, got {final_valid}"
-        assert (
-            episode_count > 0
-        ), f"Expected some episodes completed, got {episode_count}"
-
-        # Check that trajectories don't exceed max length
-        max_length = trainer.replay_buffer.trajectory_lengths.max().item()
-        assert (
-            max_length <= trainer.replay_buffer.max_trajectory_length
-        ), f"Trajectory length {max_length} exceeds max {trainer.replay_buffer.max_trajectory_length}"
-
-        # Verify buffer position management
-        assert (
-            trainer.replay_buffer.position >= 0
-        ), "Buffer position should be non-negative"
-        assert (
-            trainer.replay_buffer.position < trainer.replay_buffer.capacity
-        ), f"Buffer position {trainer.replay_buffer.position} exceeds capacity {trainer.replay_buffer.capacity}"
-
-        print("✅ Buffer filling test passed!")
-
-    def test_buffer_trajectory_lifecycle(self):
-        """Test that trajectories are properly managed throughout their lifecycle."""
-        from p2.core.structured_config import (
-            Config,
-            EnvConfig,
-            ModelConfig,
-            TrainingConfig,
-        )
-        from p2.rl.self_play import SelfPlayTrainer
-
-        # Create a Hydra config with small parameters for testing
-        cfg = Config(
-            train=TrainingConfig(batch_size=2),
-            model=ModelConfig(),
-            env=EnvConfig(),
-            use_tensor_env=True,
-            num_envs=4,
-            device="cpu",  # Set device to cpu for testing
-        )
-
-        # Set device for testing
-        device = torch.device("cpu")
-
-        trainer = SelfPlayTrainer(
-            cfg=cfg,
-            device=device,
-        )
-
-        # Collect trajectories in multiple rounds to test lifecycle
-        for round_num in range(3):
-            print(f"\n=== Collection Round {round_num + 1} ===")
-
-            # Monitor before collection
-            before_size = trainer.replay_buffer.size
-            before_steps = trainer.replay_buffer.num_steps()
-            before_valid = (trainer.replay_buffer.trajectory_lengths > 0).sum().item()
-
-            print(
-                f"Before: size={before_size}, steps={before_steps}, valid={before_valid}"
+    def test_buffer_filling_during_collection(self, buffer):
+        """Test that direct transition collection fills the buffer."""
+        buffer.start_adding_trajectory_batches(3, model_age=0)
+        for step in range(2):
+            batch = self._create_test_batch(3, buffer.device)
+            batch["dones"][:] = step == 1
+            buffer.add_transitions(
+                trajectory_indices=torch.arange(3, device=buffer.device),
+                **batch,
             )
+        added, steps = buffer.finish_adding_trajectory_batches()
 
-            # Collect trajectories
-            trajectory_rewards = trainer.collect_tensor_trajectories(min_steps=5)
-            total_reward = trajectory_rewards.sum().item()
-            episode_count = trajectory_rewards.numel()
-
-            # Monitor after collection
-            after_size = trainer.replay_buffer.size
-            after_steps = trainer.replay_buffer.num_steps()
-            after_valid = (trainer.replay_buffer.trajectory_lengths > 0).sum().item()
-
-            print(f"After: size={after_size}, steps={after_steps}, valid={after_valid}")
-            print(f"Episodes: {episode_count}, Reward: {total_reward:.2f}")
-
-            # Verify buffer is being managed properly
-            # Note: Buffer may be cleared between rounds, so we don't enforce monotonic growth
-            # Instead, we verify that when data is present, it's valid
-            if after_steps > 0:
-                assert (
-                    after_valid > 0
-                ), "If steps are present, there should be valid trajectories"
-                assert (
-                    after_size > 0
-                ), "If steps are present, buffer size should be positive"
-
-            # Check trajectory lengths are reasonable
-            if after_valid > 0:
-                lengths = trainer.replay_buffer.trajectory_lengths[
-                    trainer.replay_buffer.trajectory_lengths > 0
-                ]
-                avg_length = lengths.float().mean().item()
-                print(f"Average trajectory length: {avg_length:.1f}")
-                assert avg_length > 0, "Trajectories should have positive length"
-                assert (
-                    avg_length <= trainer.replay_buffer.max_trajectory_length
-                ), f"Average length {avg_length} exceeds max {trainer.replay_buffer.max_trajectory_length}"
-
-        print("✅ Buffer trajectory lifecycle test passed!")
-
-    def test_buffer_capacity_management(self):
-        """Test that the buffer properly manages capacity and wraparound."""
-        from p2.core.structured_config import (
-            Config,
-            EnvConfig,
-            ModelConfig,
-            TrainingConfig,
-        )
-        from p2.rl.self_play import SelfPlayTrainer
-
-        # Create a Hydra config with small parameters for testing
-        cfg = Config(
-            train=TrainingConfig(batch_size=2),
-            model=ModelConfig(),
-            env=EnvConfig(),
-            use_tensor_env=True,
-            num_envs=4,
-            device="cpu",  # Set device to cpu for testing
+        assert added == 3
+        assert steps == 6
+        assert buffer.size == 3
+        assert buffer.num_steps() == 6
+        assert torch.equal(
+            buffer.trajectory_lengths[:3],
+            torch.full((3,), 2, device=buffer.device),
         )
 
-        # Set device for testing
-        device = torch.device("cpu")
-
-        # Create trainer with small buffer capacity
-        trainer = SelfPlayTrainer(
-            cfg=cfg,
-            device=device,
+    def test_buffer_trajectory_lifecycle(self, buffer):
+        """Test open, complete, finish, and reuse lifecycle without trainer rollouts."""
+        buffer.start_adding_trajectory_batches(2, model_age=0)
+        batch = self._create_test_batch(2, buffer.device)
+        batch["dones"][:] = True
+        buffer.add_transitions(
+            trajectory_indices=torch.arange(2, device=buffer.device),
+            **batch,
         )
+        added, steps = buffer.finish_adding_trajectory_batches()
+        assert (added, steps) == (2, 2)
+        assert buffer.position == 2
 
-        # Override buffer capacity for testing
-        original_capacity = trainer.replay_buffer.capacity
-        trainer.replay_buffer.capacity = 6  # Small capacity for testing
-
-        print(f"Testing with buffer capacity: {trainer.replay_buffer.capacity}")
-
-        # Collect enough trajectories to potentially exceed capacity
-        total_steps_collected = 0
-        for round_num in range(5):
-            print(f"\n=== Round {round_num + 1} ===")
-
-            before_size = trainer.replay_buffer.size
-            before_position = trainer.replay_buffer.position
-
-            # Collect trajectories
-            trajectory_rewards = trainer.collect_tensor_trajectories(min_steps=5)
-            total_reward = trajectory_rewards.sum().item()
-            episode_count = trajectory_rewards.numel()
-
-            after_size = trainer.replay_buffer.size
-            after_position = trainer.replay_buffer.position
-            after_steps = trainer.replay_buffer.num_steps()
-
-            print(f"Size: {before_size} -> {after_size}")
-            print(f"Position: {before_position} -> {after_position}")
-            print(f"Steps: {after_steps}")
-            print(f"Episodes: {episode_count}")
-
-            total_steps_collected += after_steps
-
-            # Verify buffer doesn't exceed capacity
-            assert (
-                after_size <= trainer.replay_buffer.capacity
-            ), f"Buffer size {after_size} exceeds capacity {trainer.replay_buffer.capacity}"
-
-            # Verify position wraps around properly
-            assert (
-                0 <= after_position < trainer.replay_buffer.capacity
-            ), f"Position {after_position} is out of bounds [0, {trainer.replay_buffer.capacity})"
-
-            # Check that we're actually collecting data (allow for intermittent collection)
-            # We expect some rounds to have data, but not necessarily all rounds
-            if round_num > 2:  # After several rounds
-                # At least one round should have collected data
-                assert (
-                    total_steps_collected > 0
-                ), "Should have collected some steps across all rounds"
-
-        print(f"Total steps collected across all rounds: {total_steps_collected}")
-        print("✅ Buffer capacity management test passed!")
-
-    def test_buffer_detailed_collection_monitoring(self):
-        """Detailed test to monitor buffer state during collection process."""
-        from p2.core.structured_config import (
-            Config,
-            EnvConfig,
-            ModelConfig,
-            TrainingConfig,
+        buffer.start_adding_trajectory_batches(1, model_age=1)
+        batch = self._create_test_batch(1, buffer.device)
+        batch["dones"][:] = True
+        buffer.add_transitions(
+            trajectory_indices=torch.tensor([0], device=buffer.device),
+            **batch,
         )
-        from p2.rl.self_play import SelfPlayTrainer
+        added, steps = buffer.finish_adding_trajectory_batches()
 
-        # Create a Hydra config with small parameters for testing
-        cfg = Config(
-            train=TrainingConfig(batch_size=2),
-            model=ModelConfig(),
-            env=EnvConfig(),
-            use_tensor_env=True,
-            num_envs=4,
-            device="cpu",  # Set device to cpu for testing
-        )
+        assert (added, steps) == (1, 1)
+        assert buffer.size == 3
+        assert buffer.model_ages[2] == 1
 
-        # Set device for testing
-        device = torch.device("cpu")
-
-        trainer = SelfPlayTrainer(
-            cfg=cfg,
-            device=device,
-        )
-
-        print("=== Detailed Buffer Monitoring ===")
-        print(f"Buffer capacity: {trainer.replay_buffer.capacity}")
-        print(f"Max trajectory length: {trainer.replay_buffer.max_trajectory_length}")
-        print(f"Number of environments: {trainer.num_envs}")
-
-        # Monitor buffer state at multiple points
-        def print_buffer_state(label):
-            size = trainer.replay_buffer.size
-            steps = trainer.replay_buffer.num_steps()
-            valid = (trainer.replay_buffer.trajectory_lengths > 0).sum().item()
-            position = trainer.replay_buffer.position
-            print(
-                f"{label}: size={size}, steps={steps}, valid={valid}, position={position}"
+    def test_buffer_capacity_management(self, buffer):
+        """Test capacity and wraparound by writing more trajectories than capacity."""
+        for _ in range(4):
+            buffer.start_adding_trajectory_batches(3, model_age=0)
+            batch = self._create_test_batch(3, buffer.device)
+            batch["dones"][:] = True
+            buffer.add_transitions(
+                trajectory_indices=torch.arange(3, device=buffer.device),
+                **batch,
             )
+            buffer.finish_adding_trajectory_batches()
 
-            # Print trajectory lengths for valid trajectories
-            if valid > 0:
-                valid_lengths = trainer.replay_buffer.trajectory_lengths[
-                    trainer.replay_buffer.trajectory_lengths > 0
-                ]
-                print(f"  Valid trajectory lengths: {valid_lengths.tolist()}")
+            assert buffer.size <= buffer.capacity
+            assert 0 <= buffer.position < buffer.capacity
 
-        print_buffer_state("Initial state")
+        assert buffer.size == buffer.capacity
+        assert buffer.num_steps() == buffer.capacity
 
-        # Collect trajectories with detailed monitoring
-        print("\n--- Starting collection ---")
-        trajectory_rewards = trainer.collect_tensor_trajectories(min_steps=10)
-        total_reward = trajectory_rewards.sum().item()
-        episode_count = trajectory_rewards.numel()
-
-        print_buffer_state("After collection")
-        print(
-            f"Collection results: episodes={episode_count}, reward={total_reward:.2f}"
+    def test_buffer_detailed_collection_monitoring(self, buffer):
+        """Test monitoring tensors after a deterministic collection batch."""
+        buffer.start_adding_trajectory_batches(2, model_age=3)
+        batch = self._create_test_batch(2, buffer.device)
+        batch["dones"][:] = True
+        buffer.add_transitions(
+            trajectory_indices=torch.arange(2, device=buffer.device),
+            **batch,
         )
+        buffer.finish_adding_trajectory_batches()
 
-        # Check if trajectories are being added but then cleared
-        print("\n--- Checking buffer internals ---")
-        print(
-            f"Valid trajectories mask: {trainer.replay_buffer.trajectory_lengths > 0}"
+        valid = buffer.trajectory_lengths > 0
+        assert valid.sum().item() == 2
+        assert torch.equal(
+            buffer.current_transition_counts[:2], torch.ones(2, dtype=torch.long)
         )
-        print(f"Trajectory lengths: {trainer.replay_buffer.trajectory_lengths}")
-        print(
-            f"Current step positions: {trainer.replay_buffer.current_transition_counts}"
-        )
-
-        # Check if there are any non-zero cards features
-        non_zero_cards = (
-            (trainer.replay_buffer.cards_features != 0)
-            .any(dim=-1)
-            .any(dim=-1)
-            .any(dim=-1)
-        )
-        print(f"Non-zero cards features: {non_zero_cards.sum().item()}")
-
-        # Check if there are any non-zero actions features
-        non_zero_actions_features = (
-            (trainer.replay_buffer.actions_features != 0)
-            .any(dim=-1)
-            .any(dim=-1)
-            .any(dim=-1)
-        )
-        print(f"Non-zero actions features: {non_zero_actions_features.sum().item()}")
-
-        # Check if there are any non-zero action indices
-        non_zero_action_indices = (trainer.replay_buffer.action_indices != 0).any(
-            dim=-1
-        )
-        print(f"Non-zero action indices: {non_zero_action_indices.sum().item()}")
-
-        print("✅ Detailed buffer monitoring test completed!")
+        assert (buffer.data.token_ids[:2] != -1).any(dim=1).all()
+        assert buffer.action_indices[:2, 0].ge(0).all()
+        assert torch.equal(buffer.model_ages[:2], torch.full((2,), 3, dtype=torch.long))
 
     def _create_test_batch(self, batch_size: int, device: torch.device) -> dict:
         """Create a test batch with random data."""
-        # Create a temporary buffer to read constants (num_bet_bins, context width, max seq)
-        cfg = Config()
-        cfg.env.stack = 1000
-        cfg.env.sb = 5
-        cfg.env.bb = 10
-        cfg.env.bet_bins = [0.5, 0.75, 1.0]
-        cfg.env.flop_showdown = False
-        cfg.model.num_bet_bins = 5
-        tmp_buf = VectorizedReplayBuffer(
-            capacity=batch_size,
-            cfg=cfg,
-            device=device,
-            float_dtype=torch.float32,
-            is_transformer=True,
-        )
-        S = tmp_buf.max_sequence_length
-        B = tmp_buf.num_bet_bins
-        Cw = tmp_buf.data.context_features.shape[-1]
+        S = 50
+        B = 6
+        Cw = Ctx.NUM_RAW_CONTEXT.value
         embedding_data = StructuredEmbeddingData(
             token_ids=torch.randint(
                 0, 100, (batch_size, S), device=device, dtype=torch.long

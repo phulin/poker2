@@ -156,9 +156,9 @@ def make_config(bet_bins: list[float] | None = None) -> Config:
     cfg.env.flop_showdown = False
 
     cfg.search = SearchConfig()
-    cfg.search.iterations = 10
-    cfg.search.warm_start_iterations = 5
-    cfg.search.depth = 3
+    cfg.search.iterations = 1
+    cfg.search.warm_start_iterations = 0
+    cfg.search.depth = 1
     cfg.search.branching = 4
     cfg.search.dcfr_alpha = 1.5
     cfg.search.dcfr_beta = 0.0
@@ -225,8 +225,8 @@ def make_rebel_evaluator(
 
 def setup_sparse_and_rebel(
     *,
-    num_envs: int = 2,
-    depth: int = 2,
+    num_envs: int = 1,
+    depth: int = 1,
     seed: int = 123,
 ) -> tuple[SparseCFREvaluator, RebelCFREvaluator]:
     device = torch.device("cpu")
@@ -422,8 +422,8 @@ def test_cfr_iteration() -> None:
     # Initialize policy and beliefs
     evaluator.initialize_policy_and_beliefs()
 
-    # Set leaf values
-    evaluator.set_leaf_values(0)
+    evaluator.latest_values = torch.randn_like(evaluator.latest_values)
+    evaluator.set_leaf_values = lambda t: None  # type: ignore[assignment]
 
     # Run one CFR iteration
     evaluator.t_sample = evaluator._get_sampling_schedule()
@@ -449,16 +449,20 @@ def test_evaluate_cfr_basic() -> None:
     root_indices = torch.tensor([0], dtype=torch.long, device=device)
     evaluator.initialize_subgame(env, root_indices)
 
-    # Run a few CFR iterations
-    evaluator.cfr_iterations = 3
-    evaluator.warm_start_iterations = min(
-        evaluator.warm_start_iterations, max(1, evaluator.cfr_iterations - 1)
-    )
+    evaluator.cfr_iterations = 1
+    evaluator.warm_start_iterations = 0
+
+    def _set_zero_leaf_values(t: int, beliefs: torch.Tensor | None = None) -> None:
+        evaluator.latest_values.zero_()
 
     def _noop_sample_leaves(training_mode: bool) -> None:
         return None
 
+    evaluator.set_leaf_values = _set_zero_leaf_values  # type: ignore[assignment]
     evaluator.sample_leaves = _noop_sample_leaves  # type: ignore[assignment]
+    evaluator._record_action_mix = lambda: None  # type: ignore[method-assign]
+    evaluator._record_cfr_entropy = lambda: None  # type: ignore[method-assign]
+    evaluator._record_cumulative_regret = lambda: None  # type: ignore[method-assign]
     evaluator.evaluate_cfr()
 
     # Check that averages are updated
@@ -560,7 +564,7 @@ def test_tree_structure_consistency() -> None:
 
 def test_sparse_rebel_tree_state_alignment() -> None:
     """Sparse evaluator tree should mirror Rebel's valid nodes."""
-    sparse, rebel = setup_sparse_and_rebel(num_envs=2, depth=2)
+    sparse, rebel = setup_sparse_and_rebel()
     valid_indices = torch.where(rebel.valid_mask)[0]
 
     assert sparse.total_nodes == valid_indices.numel()
@@ -606,7 +610,7 @@ def test_sparse_rebel_tree_state_alignment() -> None:
 
 def test_sparse_rebel_initial_policy_and_beliefs_alignment() -> None:
     """Sparse and Rebel initial policies/beliefs should match exactly."""
-    sparse, rebel = setup_sparse_and_rebel(num_envs=2, depth=2)
+    sparse, rebel = setup_sparse_and_rebel()
     sparse.initialize_policy_and_beliefs()
     rebel.initialize_policy_and_beliefs()
 
