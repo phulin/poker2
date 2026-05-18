@@ -5,7 +5,7 @@ from torch.testing import assert_close
 
 from p2.env.card_utils import NUM_HANDS
 from p2.rl.pbs_games import _two_prior_river_payoffs
-from p2.rl.trueskill_tracker import TrueSkillTracker
+from p2.rl.trueskill_tracker import TSSnapshot, TrueSkillTracker
 
 
 def _tracker_with_alloc_config(
@@ -107,6 +107,50 @@ def test_compute_games_per_eval_accounts_for_eval_cost_multipliers() -> None:
     )
 
     assert games == 384
+
+
+def test_mu_step_regression_metrics_perfect_positive_trend() -> None:
+    snapshots = [
+        TSSnapshot(step=10, mu=20.0, sigma=1.0),
+        TSSnapshot(step=20, mu=25.0, sigma=1.0),
+        TSSnapshot(step=30, mu=30.0, sigma=1.0),
+    ]
+
+    metrics = TrueSkillTracker._mu_step_regression_metrics(snapshots)
+
+    assert_close(
+        torch.tensor(metrics["trueskill/mu_step_correlation"]),
+        torch.tensor(1.0),
+    )
+    assert_close(torch.tensor(metrics["trueskill/mu_step_r2"]), torch.tensor(1.0))
+
+
+def test_mu_step_regression_metrics_preserves_negative_correlation_sign() -> None:
+    snapshots = [
+        TSSnapshot(step=10, mu=30.0, sigma=1.0),
+        TSSnapshot(step=20, mu=25.0, sigma=1.0),
+        TSSnapshot(step=30, mu=20.0, sigma=1.0),
+    ]
+
+    metrics = TrueSkillTracker._mu_step_regression_metrics(snapshots)
+
+    assert_close(
+        torch.tensor(metrics["trueskill/mu_step_correlation"]),
+        torch.tensor(-1.0),
+    )
+    assert_close(torch.tensor(metrics["trueskill/mu_step_r2"]), torch.tensor(1.0))
+
+
+def test_mu_step_regression_metrics_handles_degenerate_variance() -> None:
+    snapshots = [
+        TSSnapshot(step=10, mu=25.0, sigma=1.0),
+        TSSnapshot(step=20, mu=25.0, sigma=1.0),
+    ]
+
+    metrics = TrueSkillTracker._mu_step_regression_metrics(snapshots)
+
+    assert metrics["trueskill/mu_step_correlation"] == 0.0
+    assert metrics["trueskill/mu_step_r2"] == 0.0
 
 
 class _FakeShowdownEvaluator:

@@ -327,6 +327,47 @@ class TrueSkillTracker:
         eval_game_budget = eval_action_budget / cost_per_eval_game
         return max(1, int(eval_game_budget / max(1, n_snapshots)))
 
+    @staticmethod
+    def _mu_step_regression_metrics(snapshots: List[TSSnapshot]) -> Dict[str, float]:
+        """Fit current snapshot mu values against snapshot step.
+
+        For an intercept linear regression with one feature, R^2 is the squared
+        Pearson correlation. Degenerate one-point or zero-variance cases are
+        reported as zero signal rather than NaN so log streams stay numeric.
+        """
+        n = len(snapshots)
+        if n < 2:
+            return {
+                "trueskill/mu_step_correlation": 0.0,
+                "trueskill/mu_step_r2": 0.0,
+            }
+
+        xs = [float(s.step) for s in snapshots]
+        ys = [float(s.mu) for s in snapshots]
+        x_mean = sum(xs) / n
+        y_mean = sum(ys) / n
+
+        ss_xx = 0.0
+        ss_yy = 0.0
+        ss_xy = 0.0
+        for x, y in zip(xs, ys):
+            dx = x - x_mean
+            dy = y - y_mean
+            ss_xx += dx * dx
+            ss_yy += dy * dy
+            ss_xy += dx * dy
+
+        if ss_xx <= 0.0 or ss_yy <= 0.0:
+            corr = 0.0
+        else:
+            corr = ss_xy / math.sqrt(ss_xx * ss_yy)
+            corr = max(-1.0, min(1.0, corr))
+
+        return {
+            "trueskill/mu_step_correlation": corr,
+            "trueskill/mu_step_r2": corr * corr,
+        }
+
     # ------------------------------------------------------- opponent sampling
 
     def _opponent_sampling_weights(self, n_opponents: int) -> torch.Tensor:
@@ -457,6 +498,7 @@ class TrueSkillTracker:
                 total_reward / total_games_played if total_games_played else 0.0
             ),
         }
+        metrics.update(self._mu_step_regression_metrics(self.snapshots))
 
         # Best (by conservative skill) across all snapshots so far.
         if self.snapshots:
@@ -474,6 +516,9 @@ class TrueSkillTracker:
             f"[TrueSkill] step={step} mu={new_snap.mu:.2f} sigma={new_snap.sigma:.2f} "
             f"skill={skill:.2f} games={total_games_played} "
             f"opponents={len(sampled_opponents)} "
-            f"snapshots={len(self.snapshots)} elapsed={eval_elapsed:.1f}s"
+            f"snapshots={len(self.snapshots)} "
+            f"mu_step_corr={metrics['trueskill/mu_step_correlation']:.3f} "
+            f"mu_step_r2={metrics['trueskill/mu_step_r2']:.3f} "
+            f"elapsed={eval_elapsed:.1f}s"
         )
         return metrics
