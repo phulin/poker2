@@ -22,6 +22,7 @@ from p2.models.mlp import RebelFFN
 from p2.models.mlp.better_features import context_length
 from p2.models.mlp.better_ffn import BetterFFN
 from p2.models.mlp.better_trm import BetterTRM
+from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput, TRMLatent
 from p2.rl.losses import RebelSupervisedLoss
 from p2.rl.rebel_batch import RebelBatch
@@ -654,7 +655,7 @@ class RebelCFRTrainer:
         torch.Tensor,
         torch.Tensor,
     ]:
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
 
         value_loss, policy_loss, entropy_loss = None, None, None
         value_loss_update, policy_loss_update = None, None
@@ -673,12 +674,15 @@ class RebelCFRTrainer:
                     latent=permuted_latent,
                 )
             else:
-                value_output_orig = self.model(
-                    value_batch.features, include_policy=False
+                value_count = len(value_batch)
+                value_output_both = self.model(
+                    MLPFeatures.cat(
+                        [value_batch.features, permuted_batch.features]
+                    ),
+                    include_policy=False,
                 )
-                value_output_permuted = self.model(
-                    permuted_batch.features, include_policy=False
-                )
+                value_output_orig = value_output_both[:value_count]
+                value_output_permuted = value_output_both[value_count:]
 
         loss_dict = self.loss_fn(value_output_permuted, permuted_batch)
         value_loss = loss_dict["value_loss"]
