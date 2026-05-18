@@ -439,47 +439,53 @@ def test_fused_average_policy_mix_matches_pytorch() -> None:
     h = 1326
 
     self_reach = torch.rand(total, 2, h, device=device)
-    self_reach_avg = torch.rand(total, 2, h, device=device)
     policy = torch.rand(total, h, device=device)
     policy /= policy.sum(-1, keepdim=True).clamp(min=1e-8)
     policy_avg = torch.rand(total, h, device=device)
     policy_avg /= policy_avg.sum(-1, keepdim=True).clamp(min=1e-8)
+    avg_num = torch.rand(total, h, device=device)
+    avg_den = torch.rand(total, h, device=device) * 4.0
     # Force some (parent, actor) combinations to give den ≈ 0 to exercise fallback.
     self_reach[:5] = 0.0
-    self_reach_avg[:5] = 0.0
     to_act = torch.randint(0, 2, (total,), device=device, dtype=torch.long)
     parent_index = torch.randint(0, bottom, (total,), device=device, dtype=torch.long)
+    fallback_rows = parent_index < 5
+    avg_num[fallback_rows] = 0.0
+    avg_den[fallback_rows] = 0.0
 
-    old, new = 4.0, 2.0
+    new = 2.0
 
     # Reference: mirror fused kernel math exactly.
     ref = policy_avg.clone()
+    ref_num = avg_num.clone()
+    ref_den = avg_den.clone()
     ref[:bottom] = 0.0
     for c in range(bottom, total):
         parent = parent_index[c].item()
         actor = to_act[parent].item()
-        reach_a = self_reach_avg[parent, actor] * old
         reach_n = self_reach[parent, actor] * new
-        avg_row = policy_avg[c]
         cur_row = policy[c]
-        num = reach_a * avg_row + reach_n * cur_row
-        den = reach_a + reach_n
-        unw = (old * avg_row + new * cur_row) / (old + new)
-        ref[c] = torch.where(den > 1e-5, num / den, unw)
+        ref_num[c] += reach_n * cur_row
+        ref_den[c] += reach_n
+        ref[c] = torch.where(ref_den[c] > 1e-5, ref_num[c] / ref_den[c], cur_row)
 
     out = policy_avg.clone().contiguous()
+    out_num = avg_num.clone().contiguous()
+    out_den = avg_den.clone().contiguous()
     fused_average_policy_mix_(
         policy_probs_avg=out,
+        average_policy_numerator=out_num,
+        average_policy_denominator=out_den,
         policy_probs=policy.contiguous(),
         self_reach=self_reach.contiguous(),
-        self_reach_avg=self_reach_avg.contiguous(),
         to_act=to_act.contiguous(),
         parent_index=parent_index.contiguous(),
-        old=old,
         new=new,
         bottom=bottom,
     )
     torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(out_num, ref_num, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(out_den, ref_den, rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

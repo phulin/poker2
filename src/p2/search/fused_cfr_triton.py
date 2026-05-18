@@ -939,14 +939,13 @@ if triton is not None:
     @triton.jit
     def _fused_average_policy_mix_kernel(
         self_reach_ptr,         # [total, 2, H]
-        self_reach_avg_ptr,     # [total, 2, H]
         policy_probs_ptr,       # [total, H]
         policy_probs_avg_ptr,   # [total, H] in/out
+        avg_num_ptr,            # [total, H] in/out
+        avg_den_ptr,            # [total, H] in/out
         to_act_ptr,             # [total] int64
         parent_index_ptr,       # [total] int64
-        old_scalar_ptr,
         new_scalar_ptr,
-        total_weight_ptr,       # old + new
         bottom,                 # first child row to update
         total,
         H,
@@ -965,96 +964,96 @@ if triton is not None:
         parent = tl.load(parent_index_ptr + c)
         actor = tl.load(to_act_ptr + parent)
 
-        old_scalar = tl.load(old_scalar_ptr)
         new_scalar = tl.load(new_scalar_ptr)
-        total_weight = tl.load(total_weight_ptr)
 
         reach_row = self_reach_ptr + (parent * 2 + actor) * H
-        reach_avg_row = self_reach_avg_ptr + (parent * 2 + actor) * H
         policy_row = policy_probs_ptr + c * H
         avg_row = policy_probs_avg_ptr + c * H
+        num_row = avg_num_ptr + c * H
+        den_row = avg_den_ptr + c * H
 
         for start in tl.range(0, H, BLOCK_H):
             offs = start + tl.arange(0, BLOCK_H)
             mask = offs < H
-            reach_a = tl.load(reach_avg_row + offs, mask=mask, other=0.0) * old_scalar
             reach_n = tl.load(reach_row + offs, mask=mask, other=0.0) * new_scalar
-            avg = tl.load(avg_row + offs, mask=mask, other=0.0)
             cur = tl.load(policy_row + offs, mask=mask, other=0.0)
+            num_old = tl.load(num_row + offs, mask=mask, other=0.0)
+            den_old = tl.load(den_row + offs, mask=mask, other=0.0)
 
-            num = reach_a * avg + reach_n * cur
-            den = reach_a + reach_n
-            unweighted = (old_scalar * avg + new_scalar * cur) / total_weight
-            out = tl.where(den > EPS, num / den, unweighted)
+            num = num_old + reach_n * cur
+            den = den_old + reach_n
+            out = tl.where(den > EPS, num / tl.maximum(den, EPS), cur)
+            tl.store(num_row + offs, num, mask=mask)
+            tl.store(den_row + offs, den, mask=mask)
             tl.store(avg_row + offs, out, mask=mask)
 
 
 def fused_average_policy_mix_(
     policy_probs_avg: torch.Tensor,   # [total, H] in/out
+    average_policy_numerator: torch.Tensor,    # [total, H] in/out
+    average_policy_denominator: torch.Tensor,  # [total, H] in/out
     policy_probs: torch.Tensor,       # [total, H]
     self_reach: torch.Tensor,         # [total, 2, H]
-    self_reach_avg: torch.Tensor,     # [total, 2, H]
     to_act: torch.Tensor,             # [total]
     parent_index: torch.Tensor,       # [total]
-    old: float,
     new: float,
     bottom: int,
     eps: float = 1e-5,
     block_h: int = 512,
 ) -> None:
-    """Fused mixing step of ``update_average_policy`` (pre-renormalization).
+    """Fused true-CFR average-policy accumulation (pre-renormalization).
 
     For each child row ``c in [bottom, total)`` and hand ``h``, replicates the
     PyTorch sequence::
 
-        reach_avg_actor = self_reach_avg[parent, to_act[parent], h] * old
-        reach_actor     = self_reach[parent, to_act[parent], h]     * new
-        num = reach_avg_actor * policy_probs_avg[c, h] + reach_actor * policy_probs[c, h]
-        den = reach_avg_actor + reach_actor
-        unweighted = (old * policy_probs_avg[c, h] + new * policy_probs[c, h]) / (old + new)
-        policy_probs_avg[c, h] = where(den > eps, num / den, unweighted)
+        reach_actor = self_reach[parent, to_act[parent], h] * new
+        average_policy_numerator[c, h] += reach_actor * policy_probs[c, h]
+        average_policy_denominator[c, h] += reach_actor
+        policy_probs_avg[c, h] = where(
+            average_policy_denominator[c, h] > eps,
+            average_policy_numerator[c, h] / average_policy_denominator[c, h],
+            policy_probs[c, h],
+        )
 
-    Collapses ~8 kernels + 5 intermediate buffers into one kernel. Caller is
+    Collapses gather + multiply + two accumulator writes + divide into one
+    kernel. Caller is
     responsible for running the subsequent per-parent renormalization
     (``_pull_back_sum`` + ``_fan_out`` + divide) and zeroing the root slice.
     """
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
     assert policy_probs_avg.is_contiguous() and policy_probs_avg.dim() == 2
+    assert average_policy_numerator.is_contiguous() and average_policy_numerator.dim() == 2
+    assert average_policy_denominator.is_contiguous() and average_policy_denominator.dim() == 2
     assert policy_probs.is_contiguous() and policy_probs.dim() == 2
     assert self_reach.is_contiguous() and self_reach.dim() == 3
-    assert self_reach_avg.is_contiguous() and self_reach_avg.dim() == 3
-    assert self_reach.shape[1] == 2 and self_reach_avg.shape[1] == 2
+    assert self_reach.shape[1] == 2
     total, h = policy_probs_avg.shape
+    assert average_policy_numerator.shape == (total, h)
+    assert average_policy_denominator.shape == (total, h)
     assert policy_probs.shape == (total, h)
     assert self_reach.shape == (total, 2, h)
-    assert self_reach_avg.shape == (total, 2, h)
     assert to_act.shape == (total,)
     assert parent_index.shape == (total,)
-    total_weight = float(old) + float(new)
-    assert total_weight != 0.0
     dev = policy_probs_avg.device
     dt = policy_probs_avg.dtype
-    old_t = torch.tensor(float(old), dtype=dt, device=dev)
     new_t = torch.tensor(float(new), dtype=dt, device=dev)
-    tot_t = torch.tensor(total_weight, dtype=dt, device=dev)
     fused_average_policy_mix_with_tensors_(
-        policy_probs_avg, policy_probs, self_reach, self_reach_avg,
-        to_act, parent_index, old_t, new_t, tot_t,
+        policy_probs_avg, average_policy_numerator, average_policy_denominator,
+        policy_probs, self_reach, to_act, parent_index, new_t,
         bottom=bottom, eps=eps, block_h=block_h,
     )
 
 
 def fused_average_policy_mix_with_tensors_(
     policy_probs_avg: torch.Tensor,
+    average_policy_numerator: torch.Tensor,
+    average_policy_denominator: torch.Tensor,
     policy_probs: torch.Tensor,
     self_reach: torch.Tensor,
-    self_reach_avg: torch.Tensor,
     to_act: torch.Tensor,
     parent_index: torch.Tensor,
-    old: torch.Tensor,
     new: torch.Tensor,
-    total_weight: torch.Tensor,
     bottom: int,
     eps: float = 1e-5,
     block_h: int = 512,
@@ -1066,14 +1065,13 @@ def fused_average_policy_mix_with_tensors_(
     grid = (total,)
     _fused_average_policy_mix_kernel[grid](
         self_reach,
-        self_reach_avg,
         policy_probs,
         policy_probs_avg,
+        average_policy_numerator,
+        average_policy_denominator,
         to_act,
         parent_index,
-        old,
         new,
-        total_weight,
         bottom,
         total,
         h,

@@ -39,6 +39,7 @@ from p2.env.rules_triton import (
     triton_is_available as _rules_triton_ok,
 )
 from p2.search.fused_cfr_triton import (
+    fused_average_policy_mix_with_tensors_,
     fused_avg_values_zero_sum_,
     fused_br_best_action_mass,
     fused_br_finalize_depth_,
@@ -837,13 +838,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def _ensure_average_policy_buffers(self) -> tuple[torch.Tensor, torch.Tensor]:
         return self._ensure_average_policy_accumulators()
 
-    def _average_policy_actor_reach(self, reach: torch.Tensor) -> torch.Tensor:
-        N = self.root_nodes
-        parent = self.parent_index[N:]
-        actor = self.env.to_act[parent]
-        actor_index = actor[:, None, None].expand(-1, 1, NUM_HANDS)
-        return reach[parent].gather(1, actor_index).squeeze(1)
-
     def _renormalize_average_policy(self, update_reach: bool) -> None:
         N = self.root_nodes
         self.policy_probs_avg[:N] = 0.0
@@ -916,19 +910,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._prepare_tree_slices()
         N = self.root_nodes
         num, den = self._ensure_average_policy_buffers()
-        reach_cur = self._average_policy_actor_reach(self.self_reach)
-
-        contribution_weight = reach_cur * self._t_scalars.mix_new
-        num[N:] += contribution_weight * self.policy_probs[N:]
-        den[N:] += contribution_weight
+        parent_index_all = self._parent_index_all
+        assert parent_index_all is not None
+        fused_average_policy_mix_with_tensors_(
+            policy_probs_avg=self.policy_probs_avg,
+            average_policy_numerator=num,
+            average_policy_denominator=den,
+            policy_probs=self.policy_probs,
+            self_reach=self.self_reach,
+            to_act=self.env.to_act.contiguous(),
+            parent_index=parent_index_all,
+            new=self._t_scalars.mix_new,
+            bottom=N,
+        )
         self.average_policy_initialized = True
 
-        torch.where(
-            den[N:] > 1e-5,
-            num[N:] / den[N:].clamp(min=1e-8),
-            self.policy_probs[N:],
-            out=self.policy_probs_avg[N:],
-        )
         self._renormalize_average_policy(update_reach=update_reach)
 
     # ------------------------------------------------------------------
