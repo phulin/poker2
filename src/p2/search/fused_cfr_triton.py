@@ -1198,6 +1198,114 @@ def _preprocess_unblocked_stats(
     return s, cardsum
 
 
+if triton is not None:
+
+    @triton.jit
+    def _select_actor_beliefs_kernel(
+        beliefs_ptr,  # [total, 2, H]
+        to_act_ptr,  # [top]
+        out_ptr,  # [top, H]
+        H,
+        BLOCK_H: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hb = tl.program_id(1)
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+        actor = tl.load(to_act_ptr + row)
+        vals = tl.load(
+            beliefs_ptr + (row * 2 + actor) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        tl.store(out_ptr + row * H + offs, vals, mask=mask)
+
+
+def select_actor_beliefs_triton(
+    beliefs: torch.Tensor,
+    to_act: torch.Tensor,
+    top: int,
+    block_h: int = 512,
+) -> torch.Tensor:
+    """Materialize ``beliefs[row, to_act[row], hand]`` for parent rows."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert beliefs.is_contiguous() and beliefs.dim() == 3 and beliefs.shape[1] == 2
+    assert to_act.is_contiguous()
+    h = beliefs.shape[-1]
+    out = torch.empty((top, h), device=beliefs.device, dtype=beliefs.dtype)
+    _select_actor_beliefs_kernel[(top, triton.cdiv(h, block_h))](
+        beliefs,
+        to_act,
+        out,
+        h,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+    return out
+
+
+if triton is not None:
+
+    @triton.jit
+    def _marginal_policy_kernel(
+        actor_beliefs_ptr,  # [top, H]
+        policy_ptr,  # [total, H]
+        parent_index_ptr,  # [num_children]
+        out_ptr,  # [num_children, H]
+        bottom,
+        num_children,
+        H,
+        BLOCK_H: tl.constexpr,
+    ):
+        child_rel = tl.program_id(0)
+        hb = tl.program_id(1)
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = (child_rel < num_children) & (offs < H)
+        parent = tl.load(parent_index_ptr + child_rel, mask=child_rel < num_children)
+        belief = tl.load(
+            actor_beliefs_ptr + parent * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        pol = tl.load(
+            policy_ptr + (bottom + child_rel) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        tl.store(out_ptr + child_rel * H + offs, belief * pol, mask=mask)
+
+
+def marginal_policy_triton(
+    actor_beliefs: torch.Tensor,
+    policy: torch.Tensor,
+    parent_index_bottom: torch.Tensor,
+    bottom: int,
+    block_h: int = 512,
+) -> torch.Tensor:
+    """Materialize ``actor_beliefs[parent_index_bottom] * policy[bottom:]``."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert actor_beliefs.is_contiguous() and actor_beliefs.dim() == 2
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert parent_index_bottom.is_contiguous()
+    num_children = parent_index_bottom.numel()
+    h = actor_beliefs.shape[-1]
+    out = torch.empty((num_children, h), device=policy.device, dtype=policy.dtype)
+    _marginal_policy_kernel[(num_children, triton.cdiv(h, block_h))](
+        actor_beliefs,
+        policy,
+        parent_index_bottom,
+        out,
+        bottom,
+        num_children,
+        h,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+    return out
+
+
 class ParentBeliefUnblockedStats:
     """Caches S + cardsum at parent shape for both player slices of beliefs.
 
@@ -2800,6 +2908,161 @@ def fused_weighted_parent_sum_inline_opp_both(
         MAX_CHILDREN=mc_pow2,
         BLOCK_H=block_h,
         num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_weighted_parent_sum_inline_opp_both_noleaf_kernel(
+        values_ptr,  # [total, 2, H] in/out
+        prev_actor_ptr,  # [total]
+        policy_hero_ptr,  # [total, H]
+        actor_beliefs_ptr,  # [top, H]
+        numer_s_ptr,  # [num_children]
+        numer_cardsum_ptr,  # [num_children, 52]
+        denom_s_ptr,  # [top]
+        denom_cardsum_ptr,  # [top, 52]
+        card_a_ptr,  # [H]
+        card_b_ptr,  # [H]
+        child_offsets_ptr,  # [num_parents] absolute first-child row
+        child_count_ptr,  # [num_parents]
+        parent_base,  # absolute row of first parent in this depth slice
+        child_base,  # absolute row corresponding to numer row 0
+        H,
+        NUM_CARDS: tl.constexpr,
+        EPS,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        hb = tl.program_id(1)
+
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        row = parent_base + p
+        col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        col_mask = col_offs < H
+        ca = tl.load(card_a_ptr + col_offs, mask=col_mask, other=0)
+        cb = tl.load(card_b_ptr + col_offs, mask=col_mask, other=0)
+        dt = tl.load(
+            actor_beliefs_ptr + row * H + col_offs,
+            mask=col_mask,
+            other=0.0,
+        )
+        sd = tl.load(denom_s_ptr + row)
+        dcsa = tl.load(denom_cardsum_ptr + row * NUM_CARDS + ca, mask=col_mask)
+        dcsb = tl.load(denom_cardsum_ptr + row * NUM_CARDS + cb, mask=col_mask)
+        pa = tl.load(prev_actor_ptr + first)
+
+        acc0 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        acc1 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                child_rel = child - child_base
+                hero_pol = tl.load(
+                    policy_hero_ptr + child * H + col_offs,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                nt = dt * hero_pol
+                sn = tl.load(numer_s_ptr + child_rel)
+                ncsa = tl.load(
+                    numer_cardsum_ptr + child_rel * NUM_CARDS + ca,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                ncsb = tl.load(
+                    numer_cardsum_ptr + child_rel * NUM_CARDS + cb,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                numer = tl.maximum(sn - ncsa - ncsb + nt, 0.0)
+                denom = tl.maximum(sd - dcsa - dcsb + dt, 0.0)
+                opp_pol = tl.where(denom > EPS, numer / denom, 0.0)
+                pol0 = tl.where(pa == 0, hero_pol, opp_pol)
+                pol1 = tl.where(pa == 1, hero_pol, opp_pol)
+                v0 = tl.load(
+                    values_ptr + (child * 2) * H + col_offs,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                v1 = tl.load(
+                    values_ptr + (child * 2 + 1) * H + col_offs,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                acc0 += v0 * pol0
+                acc1 += v1 * pol1
+
+        tl.store(values_ptr + (row * 2) * H + col_offs, acc0, mask=col_mask)
+        tl.store(values_ptr + (row * 2 + 1) * H + col_offs, acc1, mask=col_mask)
+
+
+def fused_weighted_parent_sum_inline_opp_both_noleaf(
+    values: torch.Tensor,
+    prev_actor: torch.Tensor,
+    policy_hero: torch.Tensor,
+    actor_beliefs: torch.Tensor,
+    numer_s: torch.Tensor,
+    numer_cardsum: torch.Tensor,
+    denom_s: torch.Tensor,
+    denom_cardsum: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    parent_base: int,
+    child_base: int,
+    max_children: int,
+    eps: float = 1e-5,
+    block_h: int = 512,
+    num_warps: int = 8,
+) -> None:
+    """No-leaf-source hot variant of inline-opponent EV backup."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 3 and values.shape[1] == 2
+    assert policy_hero.is_contiguous() and actor_beliefs.is_contiguous()
+    assert numer_s.is_contiguous() and numer_cardsum.is_contiguous()
+    assert denom_s.is_contiguous() and denom_cardsum.is_contiguous()
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    total, two, h = values.shape
+    top = actor_beliefs.shape[0]
+    num_children = numer_s.shape[0]
+    assert two == 2 and policy_hero.shape == (total, h)
+    assert actor_beliefs.shape == (top, h)
+    assert numer_cardsum.shape == (num_children, _UNBLOCKED_NUM_CARDS)
+    assert denom_cardsum.shape == (top, _UNBLOCKED_NUM_CARDS)
+    assert denom_s.shape == (top,)
+    assert prev_actor.shape == (total,)
+
+    num_parents = child_offsets.shape[0]
+    card_a, card_b = _get_combo_cards(values.device)
+    grid = (num_parents, triton.cdiv(h, block_h))
+    _fused_weighted_parent_sum_inline_opp_both_noleaf_kernel[grid](
+        values,
+        prev_actor,
+        policy_hero,
+        actor_beliefs,
+        numer_s,
+        numer_cardsum,
+        denom_s,
+        denom_cardsum,
+        card_a,
+        card_b,
+        child_offsets,
+        child_count,
+        parent_base,
+        child_base,
+        h,
+        NUM_CARDS=_UNBLOCKED_NUM_CARDS,
+        EPS=eps,
+        MAX_CHILDREN=max_children,
+        BLOCK_H=block_h,
+        num_warps=num_warps,
     )
 
 

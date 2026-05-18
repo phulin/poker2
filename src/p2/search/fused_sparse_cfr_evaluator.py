@@ -57,8 +57,11 @@ from p2.search.fused_cfr_triton import (
     fused_weighted_parent_sum,
     fused_weighted_parent_sum_child_opp,
     fused_weighted_parent_sum_inline_opp_both,
+    fused_weighted_parent_sum_inline_opp_both_noleaf,
     GraphedCFRIteration,
+    marginal_policy_triton,
     precompute_showdown_extras,
+    select_actor_beliefs_triton,
     showdown_ev_v15,
     ShowdownGraphRunner,
     triton_is_available,
@@ -643,41 +646,58 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         assert parent_index_bottom is not None
         assert to_act_top is not None
         actor_indices = to_act_top
-        actor_indices_expanded = actor_indices[:top, None, None].expand(
-            -1, -1, NUM_HANDS
+        actor_beliefs = select_actor_beliefs_triton(
+            beliefs,
+            actor_indices,
+            top,
         )
-        actor_beliefs = (
-            beliefs[:top].gather(1, actor_indices_expanded).squeeze(1).contiguous()
+        marginal_policy = marginal_policy_triton(
+            actor_beliefs,
+            policy,
+            parent_index_bottom,
+            bottom,
         )
-        # Skip materializing beliefs_dest as a separate tensor — fan-out is done
-        # inline via index_select, and the denom side of the ratio kernel
-        # gathers from actor_beliefs via parent_index instead.
-        marginal_policy = (
-            actor_beliefs.index_select(0, parent_index_bottom) * policy[bottom:]
-        ).contiguous()
 
         if self._opt_ev_inline_opp:
             numer_s, numer_cardsum = _preprocess_unblocked_stats(marginal_policy)
             denom_s, denom_cardsum = _preprocess_unblocked_stats(actor_beliefs)
             for depth in range(self.tree_depth - 1, -1, -1):
-                fused_weighted_parent_sum_inline_opp_both(
-                    values=values,
-                    prev_actor=self.prev_actor,
-                    policy_hero=policy,
-                    actor_beliefs=actor_beliefs,
-                    numer_s=numer_s,
-                    numer_cardsum=numer_cardsum,
-                    denom_s=denom_s,
-                    denom_cardsum=denom_cardsum,
-                    child_offsets=self._child_offsets_by_depth[depth],
-                    child_count=self._child_count_by_depth[depth],
-                    parent_base=self.depth_offsets[depth],
-                    child_base=bottom,
-                    max_children=self.num_actions,
-                    max_children_pow2=self._child_count_pow2_by_depth[depth],
-                    leaf_values=leaf_values if use_leaf_source else None,
-                    leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
-                )
+                if not use_leaf_source:
+                    fused_weighted_parent_sum_inline_opp_both_noleaf(
+                        values=values,
+                        prev_actor=self.prev_actor,
+                        policy_hero=policy,
+                        actor_beliefs=actor_beliefs,
+                        numer_s=numer_s,
+                        numer_cardsum=numer_cardsum,
+                        denom_s=denom_s,
+                        denom_cardsum=denom_cardsum,
+                        child_offsets=self._child_offsets_by_depth[depth],
+                        child_count=self._child_count_by_depth[depth],
+                        parent_base=self.depth_offsets[depth],
+                        child_base=bottom,
+                        max_children=self.num_actions,
+                    )
+                else:
+                    fused_weighted_parent_sum_inline_opp_both(
+                        values=values,
+                        prev_actor=self.prev_actor,
+                        policy_hero=policy,
+                        actor_beliefs=actor_beliefs,
+                        numer_s=numer_s,
+                        numer_cardsum=numer_cardsum,
+                        denom_s=denom_s,
+                        denom_cardsum=denom_cardsum,
+                        child_offsets=self._child_offsets_by_depth[depth],
+                        child_count=self._child_count_by_depth[depth],
+                        parent_base=self.depth_offsets[depth],
+                        child_base=bottom,
+                        max_children=self.num_actions,
+                        max_children_pow2=self.num_actions,
+                        leaf_values=leaf_values,
+                        leaf_mask=self.leaf_mask.contiguous(),
+                        block_h=512,
+                    )
             return
 
         opponent_conditioned_policy_child = unblocked_mass_ratio_indirect_triton(
@@ -706,7 +726,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     parent_base=parent_base,
                     child_base=bottom,
                     max_children=self.num_actions,
-                    max_children_pow2=self._child_count_pow2_by_depth[depth],
+                    max_children_pow2=self.num_actions,
                     leaf_values=leaf_values if use_leaf_source else None,
                     leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
                 )
@@ -720,7 +740,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     child_count=self._child_count_by_depth[depth],
                     parent_base=parent_base,
                     max_children=self.num_actions,
-                    max_children_pow2=self._child_count_pow2_by_depth[depth],
+                    max_children_pow2=self.num_actions,
                     leaf_values=leaf_values if use_leaf_source else None,
                     leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
                 )
