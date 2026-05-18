@@ -1,14 +1,11 @@
 import {
   ADD3_WGSL,
-  GELU_MAT_VEC_BATCH_WGSL,
-  GELU_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   MAT_VEC_BATCH_WGSL,
   MAT_VEC_WGSL,
   RMS_NORM_BATCH_WGSL,
   RMS_NORM_WGSL,
   SCALED_RESIDUAL_ADD_WGSL,
-  SILU_MUL_WGSL,
-  SWIGLU_DOWN_BATCH_WGSL,
   ZERO_SUM_BATCH_WGSL,
 } from "./modelKernels.js";
 import {
@@ -68,12 +65,9 @@ export class BetterFfnWebGpuModel {
   private readonly handEmbeddingT: GPUBuffer;
   private readonly matVecPipeline: GPUComputePipeline;
   private readonly matVecBatchPipeline: GPUComputePipeline;
-  private readonly swigluDownBatchPipeline: GPUComputePipeline;
-  private readonly geluMatVecBatchPipeline: GPUComputePipeline;
+  private readonly leakyReluMatVecBatchPipeline: GPUComputePipeline;
   private readonly rmsNormPipeline: GPUComputePipeline;
   private readonly rmsNormBatchPipeline: GPUComputePipeline;
-  private readonly siluMulPipeline: GPUComputePipeline;
-  private readonly geluPipeline: GPUComputePipeline;
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
   private readonly add3Pipeline: GPUComputePipeline;
   private readonly zeroSumBatchPipeline: GPUComputePipeline;
@@ -105,13 +99,9 @@ export class BetterFfnWebGpuModel {
       MAT_VEC_BATCH_WGSL,
       "better-ffn-mat-vec-batch",
     );
-    this.swigluDownBatchPipeline = this.pipeline(
-      SWIGLU_DOWN_BATCH_WGSL,
-      "better-ffn-swiglu-down-batch",
-    );
-    this.geluMatVecBatchPipeline = this.pipeline(
-      GELU_MAT_VEC_BATCH_WGSL,
-      "better-ffn-gelu-mat-vec-batch",
+    this.leakyReluMatVecBatchPipeline = this.pipeline(
+      LEAKY_RELU_MAT_VEC_BATCH_WGSL,
+      "better-ffn-leaky-relu-mat-vec-batch",
     );
     this.rmsNormPipeline = this.pipeline(
       RMS_NORM_WGSL,
@@ -121,8 +111,6 @@ export class BetterFfnWebGpuModel {
       RMS_NORM_BATCH_WGSL,
       "better-ffn-rms-norm-batch",
     );
-    this.siluMulPipeline = this.pipeline(SILU_MUL_WGSL, "better-ffn-silu-mul");
-    this.geluPipeline = this.pipeline(GELU_WGSL, "better-ffn-gelu");
     this.scaledResidualAddPipeline = this.pipeline(
       SCALED_RESIDUAL_ADD_WGSL,
       "better-ffn-scaled-residual-add",
@@ -307,7 +295,7 @@ export class BetterFfnWebGpuModel {
         );
       }
 
-      const beliefFeatures = this.swigluBlockBatch(
+      const beliefFeatures = this.leakyReluBlockBatch(
         "belief_proj",
         perPlayerBelief,
         batch,
@@ -325,7 +313,7 @@ export class BetterFfnWebGpuModel {
         context.set(features.context, i * 11);
         base.set(this.baseEmbedding(features.street, features.board), i * hiddenDim);
       }
-      const contextFeatures = this.swigluBlockBatch(
+      const contextFeatures = this.leakyReluBlockBatch(
         "context_encoder",
         storage(context),
         batch,
@@ -352,7 +340,7 @@ export class BetterFfnWebGpuModel {
           this.manifest.architecture.numValueLayers,
       );
       for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
-        const inner = this.swigluBlockBatch(
+        const inner = this.leakyReluBlockBatch(
           `trunk.${i}.inner`,
           x,
           batch,
@@ -369,7 +357,7 @@ export class BetterFfnWebGpuModel {
 
       let valueInput = x;
       for (let i = 0; i < this.manifest.architecture.numValueLayers - 1; i += 1) {
-        const inner = this.swigluBlockBatch(
+        const inner = this.leakyReluBlockBatch(
           `hand_value_head.${i}.inner`,
           valueInput,
           batch,
@@ -390,7 +378,7 @@ export class BetterFfnWebGpuModel {
         );
         valueInput = out;
       }
-      const valueRawBuffer = this.geluBlockBatch(
+      const valueRawBuffer = this.leakyReluBlockBatch(
         `hand_value_head.${this.manifest.architecture.numValueLayers - 1}`,
         valueInput,
         batch,
@@ -410,7 +398,7 @@ export class BetterFfnWebGpuModel {
           i < this.manifest.architecture.numPolicyLayers - 1;
           i += 1
         ) {
-          const inner = this.swigluBlockBatch(
+          const inner = this.leakyReluBlockBatch(
             `policy_head.${i}.inner`,
             policyInput,
             batch,
@@ -431,7 +419,7 @@ export class BetterFfnWebGpuModel {
           );
           policyInput = out;
         }
-        policyBuffer = this.geluBlockBatch(
+        policyBuffer = this.leakyReluBlockBatch(
           `policy_head.${this.manifest.architecture.numPolicyLayers - 1}`,
           policyInput,
           batch,
@@ -494,15 +482,15 @@ export class BetterFfnWebGpuModel {
     requireTensor(tensors, "street_embedding.weight", [5, hidden]);
     requireTensor(tensors, "rank_embedding.weight", [14, hidden]);
     requireTensor(tensors, "suit_embedding.weight", [5, hidden]);
-    this.requireSwiglu(tensors, "belief_proj", 2 * hidden, 2 * rangeHidden, hidden);
-    this.requireSwiglu(tensors, "context_encoder", 11, hidden, hidden);
+    this.requireLinearBlock(tensors, "belief_proj", 2 * hidden, 2 * rangeHidden, hidden);
+    this.requireLinearBlock(tensors, "context_encoder", 11, hidden, hidden);
     for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
-      this.requireSwiglu(tensors, `trunk.${i}.inner`, hidden, ffn, hidden);
+      this.requireLinearBlock(tensors, `trunk.${i}.inner`, hidden, ffn, hidden);
     }
     for (let i = 0; i < this.manifest.architecture.numValueLayers - 1; i += 1) {
-      this.requireSwiglu(tensors, `hand_value_head.${i}.inner`, hidden, ffn, hidden);
+      this.requireLinearBlock(tensors, `hand_value_head.${i}.inner`, hidden, ffn, hidden);
     }
-    this.requireGelu(
+    this.requireLinearBlock(
       tensors,
       `hand_value_head.${this.manifest.architecture.numValueLayers - 1}`,
       hidden,
@@ -510,9 +498,9 @@ export class BetterFfnWebGpuModel {
       2 * NUM_HANDS,
     );
     for (let i = 0; i < this.manifest.architecture.numPolicyLayers - 1; i += 1) {
-      this.requireSwiglu(tensors, `policy_head.${i}.inner`, hidden, ffn, hidden);
+      this.requireLinearBlock(tensors, `policy_head.${i}.inner`, hidden, ffn, hidden);
     }
-    this.requireGelu(
+    this.requireLinearBlock(
       tensors,
       `policy_head.${this.manifest.architecture.numPolicyLayers - 1}`,
       hidden,
@@ -521,20 +509,7 @@ export class BetterFfnWebGpuModel {
     );
   }
 
-  private requireSwiglu(
-    tensors: TensorMap,
-    prefix: string,
-    inDim: number,
-    hiddenDim: number,
-    outDim: number,
-  ): void {
-    requireTensor(tensors, `${prefix}.norm.weight`, [inDim]);
-    requireTensor(tensors, `${prefix}.swiglu.gate.weight`, [hiddenDim, inDim]);
-    requireTensor(tensors, `${prefix}.swiglu.up.weight`, [hiddenDim, inDim]);
-    requireTensor(tensors, `${prefix}.swiglu.down.weight`, [outDim, hiddenDim]);
-  }
-
-  private requireGelu(
+  private requireLinearBlock(
     tensors: TensorMap,
     prefix: string,
     inDim: number,
@@ -597,69 +572,7 @@ export class BetterFfnWebGpuModel {
     return out;
   }
 
-  private swigluBlockBatch(
-    prefix: string,
-    input: GPUBuffer,
-    batch: number,
-    inDim: number,
-    hiddenDim: number,
-    outDim: number,
-    empty: (elements: number) => GPUBuffer,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
-  ): GPUBuffer {
-    const normed = empty(batch * inDim);
-    this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
-    const gate = empty(batch * hiddenDim);
-    const up = empty(batch * hiddenDim);
-    this.matVecBatch(
-      this.tensor(`${prefix}.swiglu.gate.weight`).buffer,
-      normed,
-      this.dummyBias,
-      gate,
-      hiddenDim,
-      inDim,
-      batch,
-      inDim,
-      hiddenDim,
-      0,
-      0,
-      false,
-      uniform,
-    );
-    this.matVecBatch(
-      this.tensor(`${prefix}.swiglu.up.weight`).buffer,
-      normed,
-      this.dummyBias,
-      up,
-      hiddenDim,
-      inDim,
-      batch,
-      inDim,
-      hiddenDim,
-      0,
-      0,
-      false,
-      uniform,
-    );
-    const out = empty(batch * outDim);
-    this.swigluDownBatch(
-      this.tensor(`${prefix}.swiglu.down.weight`).buffer,
-      gate,
-      up,
-      out,
-      outDim,
-      hiddenDim,
-      batch,
-      hiddenDim,
-      outDim,
-      uniform,
-    );
-    return out;
-  }
-
-  private geluBlockBatch(
+  private leakyReluBlockBatch(
     prefix: string,
     input: GPUBuffer,
     batch: number,
@@ -690,7 +603,7 @@ export class BetterFfnWebGpuModel {
       uniform,
     );
     const out = empty(batch * outDim);
-    this.geluMatVecBatch(
+    this.leakyReluMatVecBatch(
       this.tensor(`${prefix}.linear_out.weight`).buffer,
       linear,
       this.tensor(`${prefix}.linear_out.bias`).buffer,
@@ -700,107 +613,6 @@ export class BetterFfnWebGpuModel {
       batch,
       hiddenDim,
       outDim,
-      true,
-      uniform,
-    );
-    return out;
-  }
-
-  private swigluBlock(
-    prefix: string,
-    input: GPUBuffer,
-    inDim: number,
-    hiddenDim: number,
-    outDim: number,
-    empty: (elements: number) => GPUBuffer,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
-  ): GPUBuffer {
-    const normed = empty(inDim);
-    this.rmsNorm(prefix, input, normed, inDim, uniform);
-    const gate = empty(hiddenDim);
-    const up = empty(hiddenDim);
-    this.matVec(
-      this.tensor(`${prefix}.swiglu.gate.weight`).buffer,
-      normed,
-      this.dummyBias,
-      gate,
-      hiddenDim,
-      inDim,
-      0,
-      0,
-      false,
-      uniform,
-    );
-    this.matVec(
-      this.tensor(`${prefix}.swiglu.up.weight`).buffer,
-      normed,
-      this.dummyBias,
-      up,
-      hiddenDim,
-      inDim,
-      0,
-      0,
-      false,
-      uniform,
-    );
-    const gated = empty(hiddenDim);
-    this.siluMul(gate, up, gated, hiddenDim, uniform);
-    const out = empty(outDim);
-    this.matVec(
-      this.tensor(`${prefix}.swiglu.down.weight`).buffer,
-      gated,
-      this.dummyBias,
-      out,
-      outDim,
-      hiddenDim,
-      0,
-      0,
-      false,
-      uniform,
-    );
-    return out;
-  }
-
-  private geluBlock(
-    prefix: string,
-    input: GPUBuffer,
-    inDim: number,
-    hiddenDim: number,
-    outDim: number,
-    empty: (elements: number) => GPUBuffer,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
-  ): GPUBuffer {
-    const normed = empty(inDim);
-    this.rmsNorm(prefix, input, normed, inDim, uniform);
-    const linear = empty(hiddenDim);
-    this.matVec(
-      this.tensor(`${prefix}.linear_in.weight`).buffer,
-      normed,
-      this.dummyBias,
-      linear,
-      hiddenDim,
-      inDim,
-      0,
-      0,
-      false,
-      uniform,
-    );
-    const activated = empty(hiddenDim);
-    this.gelu(linear, activated, hiddenDim, uniform);
-    const out = empty(outDim);
-    this.matVec(
-      this.tensor(`${prefix}.linear_out.weight`).buffer,
-      activated,
-      this.tensor(`${prefix}.linear_out.bias`).buffer,
-      out,
-      outDim,
-      hiddenDim,
-      0,
-      0,
       true,
       uniform,
     );
@@ -930,46 +742,7 @@ export class BetterFfnWebGpuModel {
     ]);
   }
 
-  private swigluDownBatch(
-    down: GPUBuffer,
-    gate: GPUBuffer,
-    up: GPUBuffer,
-    output: GPUBuffer,
-    rows: number,
-    cols: number,
-    batch: number,
-    inputStride: number,
-    outputStride: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
-  ): void {
-    this.submit2d(this.swigluDownBatchPipeline, this.batchRowGroups(rows), batch, [
-      { binding: 0, resource: { buffer: down } },
-      { binding: 1, resource: { buffer: gate } },
-      { binding: 2, resource: { buffer: up } },
-      { binding: 3, resource: { buffer: output } },
-      {
-        binding: 4,
-        resource: {
-          buffer: uniform(
-            new Uint32Array([
-              rows,
-              cols,
-              batch,
-              inputStride,
-              outputStride,
-              0,
-              0,
-              0,
-            ]),
-          ),
-        },
-      },
-    ]);
-  }
-
-  private geluMatVecBatch(
+  private leakyReluMatVecBatch(
     matrix: GPUBuffer,
     input: GPUBuffer,
     bias: GPUBuffer,
@@ -984,7 +757,7 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit2d(this.geluMatVecBatchPipeline, this.batchRowGroups(rows), batch, [
+    this.submit2d(this.leakyReluMatVecBatchPipeline, this.batchRowGroups(rows), batch, [
       { binding: 0, resource: { buffer: matrix } },
       { binding: 1, resource: { buffer: input } },
       { binding: 2, resource: { buffer: bias } },
@@ -1011,38 +784,6 @@ export class BetterFfnWebGpuModel {
 
   private batchRowGroups(rows: number): number {
     return Math.ceil(rows / BATCH_ROW_BLOCK);
-  }
-
-  private siluMul(
-    gate: GPUBuffer,
-    up: GPUBuffer,
-    output: GPUBuffer,
-    dim: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
-  ): void {
-    this.submit(this.siluMulPipeline, Math.ceil(dim / 64), [
-      { binding: 0, resource: { buffer: gate } },
-      { binding: 1, resource: { buffer: up } },
-      { binding: 2, resource: { buffer: output } },
-      { binding: 3, resource: { buffer: uniform(new Uint32Array([dim, 0, 0, 0])) } },
-    ]);
-  }
-
-  private gelu(
-    input: GPUBuffer,
-    output: GPUBuffer,
-    dim: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
-  ): void {
-    this.submit(this.geluPipeline, Math.ceil(dim / 64), [
-      { binding: 0, resource: { buffer: input } },
-      { binding: 1, resource: { buffer: output } },
-      { binding: 2, resource: { buffer: uniform(new Uint32Array([dim, 0, 0, 0])) } },
-    ]);
   }
 
   private add3(

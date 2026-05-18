@@ -19,7 +19,7 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
     throw new Error("unsupported BetterFFN manifest schema");
   }
   const manifest = value as unknown as BetterFfnManifest;
-  if (manifest.architecture.nonlinearity !== "swiglu") {
+  if (manifest.architecture.nonlinearity !== "leaky_relu") {
     throw new Error(
       `unsupported BetterFFN nonlinearity ${manifest.architecture.nonlinearity}`,
     );

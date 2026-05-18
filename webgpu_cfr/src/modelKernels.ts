@@ -272,88 +272,7 @@ ${REDUCE_4X_256_WGSL}
 }
 `;
 
-export const SWIGLU_DOWN_BATCH_WGSL = /* wgsl */ `
-struct Params {
-  rows: u32,
-  cols: u32,
-  batch: u32,
-  inputStride: u32,
-  outputStride: u32,
-  _pad0: u32,
-  _pad1: u32,
-  _pad2: u32,
-};
-
-@group(0) @binding(0) var<storage, read> down: array<f32>;
-@group(0) @binding(1) var<storage, read> gate: array<f32>;
-@group(0) @binding(2) var<storage, read> up: array<f32>;
-@group(0) @binding(3) var<storage, read_write> output: array<f32>;
-@group(0) @binding(4) var<uniform> params: Params;
-
-var<workgroup> partial0: array<f32, 256>;
-var<workgroup> partial1: array<f32, 256>;
-var<workgroup> partial2: array<f32, 256>;
-var<workgroup> partial3: array<f32, 256>;
-
-fn silu(x: f32) -> f32 {
-  return x / (1.0 + exp(-x));
-}
-
-@compute @workgroup_size(256)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let row0 = wid.x * 4u;
-  let row1 = row0 + 1u;
-  let row2 = row0 + 2u;
-  let row3 = row0 + 3u;
-  let batch = wid.y;
-  let lane = lid.x;
-  var sum0 = 0.0;
-  var sum1 = 0.0;
-  var sum2 = 0.0;
-  var sum3 = 0.0;
-  let inputBase = batch * params.inputStride;
-  for (var col = lane; col < params.cols; col = col + 256u) {
-    let g = gate[inputBase + col];
-    let gated = silu(g) * up[inputBase + col];
-    if (row0 < params.rows) {
-      sum0 = sum0 + down[row0 * params.cols + col] * gated;
-    }
-    if (row1 < params.rows) {
-      sum1 = sum1 + down[row1 * params.cols + col] * gated;
-    }
-    if (row2 < params.rows) {
-      sum2 = sum2 + down[row2 * params.cols + col] * gated;
-    }
-    if (row3 < params.rows) {
-      sum3 = sum3 + down[row3 * params.cols + col] * gated;
-    }
-  }
-  partial0[lane] = sum0;
-  partial1[lane] = sum1;
-  partial2[lane] = sum2;
-  partial3[lane] = sum3;
-  workgroupBarrier();
-${REDUCE_4X_256_WGSL}
-
-  if (lane == 0u) {
-    let outputBase = batch * params.outputStride;
-    if (row0 < params.rows) {
-      output[outputBase + row0] = partial0[0];
-    }
-    if (row1 < params.rows) {
-      output[outputBase + row1] = partial1[0];
-    }
-    if (row2 < params.rows) {
-      output[outputBase + row2] = partial2[0];
-    }
-    if (row3 < params.rows) {
-      output[outputBase + row3] = partial3[0];
-    }
-  }
-}
-`;
-
-export const GELU_MAT_VEC_BATCH_WGSL = /* wgsl */ `
+export const LEAKY_RELU_MAT_VEC_BATCH_WGSL = /* wgsl */ `
 struct Params {
   rows: u32,
   cols: u32,
@@ -376,16 +295,8 @@ var<workgroup> partial1: array<f32, 256>;
 var<workgroup> partial2: array<f32, 256>;
 var<workgroup> partial3: array<f32, 256>;
 
-fn erf_approx(x: f32) -> f32 {
-  let sign = select(-1.0, 1.0, x >= 0.0);
-  let ax = abs(x);
-  let t = 1.0 / (1.0 + 0.3275911 * ax);
-  let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-ax * ax);
-  return sign * y;
-}
-
-fn gelu(x: f32) -> f32 {
-  return 0.5 * x * (1.0 + erf_approx(x * 0.7071067811865476));
+fn leaky_relu(x: f32) -> f32 {
+  return select(0.01 * x, x, x >= 0.0);
 }
 
 @compute @workgroup_size(256)
@@ -402,7 +313,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   var sum3 = 0.0;
   let inputBase = batch * params.inputStride;
   for (var col = lane; col < params.cols; col = col + 256u) {
-    let x = gelu(input[inputBase + col]);
+    let x = leaky_relu(input[inputBase + col]);
     if (row0 < params.rows) {
       sum0 = sum0 + matrix[row0 * params.cols + col] * x;
     }
@@ -529,61 +440,6 @@ ${REDUCE_PARTIAL_SQ_256_WGSL}
   for (var i = lane; i < params.dim; i = i + 256u) {
     output[outputBase + i] = input[inputBase + i] * invRms * weight[i];
   }
-}
-`;
-
-export const SILU_MUL_WGSL = /* wgsl */ `
-struct Params {
-  dim: u32,
-  _pad0: u32,
-  _pad1: u32,
-  _pad2: u32,
-};
-
-@group(0) @binding(0) var<storage, read> gate: array<f32>;
-@group(0) @binding(1) var<storage, read> up: array<f32>;
-@group(0) @binding(2) var<storage, read_write> output: array<f32>;
-@group(0) @binding(3) var<uniform> params: Params;
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
-  if (i >= params.dim) {
-    return;
-  }
-  let g = gate[i];
-  output[i] = (g / (1.0 + exp(-g))) * up[i];
-}
-`;
-
-export const GELU_WGSL = /* wgsl */ `
-struct Params {
-  dim: u32,
-  _pad0: u32,
-  _pad1: u32,
-  _pad2: u32,
-};
-
-@group(0) @binding(0) var<storage, read> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
-fn erf_approx(x: f32) -> f32 {
-  let sign = select(-1.0, 1.0, x >= 0.0);
-  let ax = abs(x);
-  let t = 1.0 / (1.0 + 0.3275911 * ax);
-  let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-ax * ax);
-  return sign * y;
-}
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
-  if (i >= params.dim) {
-    return;
-  }
-  let x = input[i];
-  output[i] = 0.5 * x * (1.0 + erf_approx(x * 0.7071067811865476));
 }
 `;
 

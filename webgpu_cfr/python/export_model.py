@@ -43,9 +43,9 @@ def _load_checkpoint(snapshot: Path) -> tuple[Config, dict[str, torch.Tensor]]:
 def _validate_supported(cfg: Config) -> None:
     if cfg.model.name != ModelType.better_ffn:
         raise ValueError(f"unsupported model type {cfg.model.name}")
-    if _enum_value(cfg.model.nonlinearity) != NonlinearityType.swiglu.value:
+    if _enum_value(cfg.model.nonlinearity) != NonlinearityType.leaky_relu.value:
         raise ValueError(
-            "webgpu_cfr currently supports only BetterFFN checkpoints with swiglu"
+            "webgpu_cfr currently supports only BetterFFN checkpoints with leaky_relu"
         )
     if not cfg.model.shared_trunk:
         raise ValueError("webgpu_cfr currently requires shared_trunk=True")

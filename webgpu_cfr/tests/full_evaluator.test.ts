@@ -58,9 +58,9 @@ function exportModel(t: TestContext): { manifest: string; weights: string } | un
     },
   );
   if (result.status !== 0) {
-    if (result.stderr.includes("supports only BetterFFN checkpoints with swiglu")) {
+    if (result.stderr.includes("supports only BetterFFN checkpoints with leaky_relu")) {
       const skipReason =
-        "checkpoints-rebel/rebel_latest.pt is not an exportable swiglu BetterFFN checkpoint";
+        "checkpoints-rebel/rebel_latest.pt is not an exportable leaky_relu BetterFFN checkpoint";
       cachedExport = { skipReason };
       t.skip(skipReason);
       return undefined;
@@ -116,7 +116,7 @@ test("exported BetterFFN WebGPU evaluator handles a raise/call prefix", async (t
   if (!exported) return;
   const fixture = loadPythonReference({
     snapshot: "checkpoints-rebel/rebel_latest.pt",
-    spot: [2, 1],
+    spot: [3, 1],
     iterations: 2,
   });
   assert.ok(fixture.expected);
@@ -126,7 +126,7 @@ test("exported BetterFFN WebGPU evaluator handles a raise/call prefix", async (t
   const evaluator = new BrowserCfrEvaluator(device, model);
   try {
     const result = await evaluator.evaluateSpot({
-      spot: [2, 1],
+      spot: [3, 1],
       iterations: 2,
     });
     assertCloseArray(

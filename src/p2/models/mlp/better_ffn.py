@@ -125,7 +125,7 @@ class BetterFFN(BaseMLPModel):
         ]
         layers.append(
             ffn_block(
-                hidden_dim, ffn_dim, num_actions * NUM_HANDS, NonlinearityType.gelu
+                hidden_dim, ffn_dim, num_actions * NUM_HANDS, NonlinearityType.leaky_relu
             )
         )
         self.policy_head = nn.Sequential(*layers)
@@ -138,7 +138,7 @@ class BetterFFN(BaseMLPModel):
         ]
         layers.append(
             ffn_block(
-                hidden_dim, ffn_dim, num_players * NUM_HANDS, NonlinearityType.gelu
+                hidden_dim, ffn_dim, num_players * NUM_HANDS, NonlinearityType.leaky_relu
             )
         )
         self.hand_value_head = nn.Sequential(*layers)

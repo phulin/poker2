@@ -17,7 +17,7 @@ BetterFFN-backed local CFR problem. It supports two paths:
 - `python/reference.py` loads a PyTorch `BetterFFN` checkpoint, replays a
   heads-up action-bin sequence, emits model-derived local CFR fixtures, and
   computes the Python reference result.
-- `src/betterFfnWebGpuModel.ts` runs the supported `swiglu` BetterFFN family
+- `src/betterFfnWebGpuModel.ts` runs the supported `leaky_relu` BetterFFN family
   with WebGPU dense-vector kernels.
 - `src/hunlEnv.ts` ports the single-state public HUNL action-bin environment.
 - `src/browserEvaluator.ts` replays prefixes, builds child values, solves local
