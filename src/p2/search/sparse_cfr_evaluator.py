@@ -273,7 +273,10 @@ class SparseCFREvaluator(CFREvaluator):
         self.cumulative_regrets = torch.zeros_like(self.policy_probs)
         self.regret_weight_sums = torch.zeros_like(self.policy_probs)
 
-        child_count_dest = self._fan_out(self.child_count)
+        # `parent_index[root_nodes:]` is already the child-to-parent expansion
+        # needed here; using it avoids another repeat_interleave during subgame
+        # construction.
+        child_count_dest = self.child_count[self.parent_index[self.root_nodes :]]
         self.uniform_policy = torch.zeros_like(self.policy_probs)
         self.uniform_policy[self.root_nodes :] = (1.0 / child_count_dest)[
             :, None
