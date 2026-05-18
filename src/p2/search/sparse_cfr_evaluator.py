@@ -126,6 +126,9 @@ class SparseCFREvaluator(CFREvaluator):
             0, NUM_HANDS, dtype=self.float_dtype, device=self.device
         )
         self.policy_probs_avg = torch.empty_like(self.policy_probs)
+        self.average_policy_numerator = torch.empty_like(self.policy_probs)
+        self.average_policy_denominator = torch.empty_like(self.policy_probs)
+        self.average_policy_initialized = False
         self.policy_probs_sample = torch.empty_like(self.policy_probs)
         self.cumulative_regrets = torch.empty_like(self.policy_probs)
         self.regret_weight_sums = torch.empty_like(self.policy_probs)
@@ -263,6 +266,9 @@ class SparseCFREvaluator(CFREvaluator):
             self.total_nodes, NUM_HANDS, dtype=self.float_dtype, device=self.device
         )
         self.policy_probs_avg = torch.zeros_like(self.policy_probs)
+        self.average_policy_numerator = torch.zeros_like(self.policy_probs)
+        self.average_policy_denominator = torch.zeros_like(self.policy_probs)
+        self.average_policy_initialized = False
         self.policy_probs_sample = torch.zeros_like(self.policy_probs)
         self.cumulative_regrets = torch.zeros_like(self.policy_probs)
         self.regret_weight_sums = torch.zeros_like(self.policy_probs)

@@ -54,6 +54,9 @@ class RebelCFREvaluator(CFREvaluator):
     allowed_hands_prob: torch.Tensor
     policy_probs: torch.Tensor
     policy_probs_avg: torch.Tensor
+    average_policy_numerator: torch.Tensor
+    average_policy_denominator: torch.Tensor
+    average_policy_initialized: bool
     policy_probs_sample: torch.Tensor
     self_reach: torch.Tensor
     self_reach_avg: torch.Tensor
@@ -177,6 +180,9 @@ class RebelCFREvaluator(CFREvaluator):
             dtype=self.float_dtype,
         )
         self.policy_probs_avg = torch.zeros_like(self.policy_probs)
+        self.average_policy_numerator = torch.zeros_like(self.policy_probs)
+        self.average_policy_denominator = torch.zeros_like(self.policy_probs)
+        self.average_policy_initialized = False
         self.policy_probs_sample = torch.zeros_like(self.policy_probs)
         self.uniform_policy = torch.zeros_like(self.policy_probs)
         # Cumulative regret of taking this node vs the best at the parent node.
@@ -294,6 +300,9 @@ class RebelCFREvaluator(CFREvaluator):
         self.new_street_mask.zero_()
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
+        self.average_policy_numerator.zero_()
+        self.average_policy_denominator.zero_()
+        self.average_policy_initialized = False
         self.policy_probs_sample.zero_()
         self.uniform_policy.zero_()
         self.cumulative_regrets.zero_()

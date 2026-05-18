@@ -8,6 +8,7 @@ Reusable profiling and benchmark scripts that are broader than a single repro bu
 - `bench_parent_expand.py`: Benchmarks parent expansion behavior.
 - `bench_breakdown.py`: Produces benchmark breakdowns for selected paths.
 - `bench_model_share.py`: Benchmarks model sharing or reuse behavior.
+- `probe_cfr_fp_precision.py`: Probes fp32 precision loss in fused sparse CFR average-policy/value updates from saved spots and checkpoints.
 - `test_survey_runner.py`: Runs pytest files or node ids with per-invocation timeouts and records structured audit results.
 
 ### Subdirectories

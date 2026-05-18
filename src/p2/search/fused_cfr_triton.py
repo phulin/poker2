@@ -3162,6 +3162,8 @@ class _EvaluatorStateSnapshot:
         names = [
             "policy_probs",
             "policy_probs_avg",
+            "average_policy_numerator",
+            "average_policy_denominator",
             "policy_probs_sample",
             "cumulative_regrets",
             "regret_weight_sums",

@@ -39,7 +39,6 @@ from p2.env.rules_triton import (
     triton_is_available as _rules_triton_ok,
 )
 from p2.search.fused_cfr_triton import (
-    fused_average_policy_mix_with_tensors_,
     fused_avg_values_zero_sum_,
     fused_br_best_action_mass,
     fused_br_finalize_depth_,
@@ -279,6 +278,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def initialize_subgame(self, *args, **kwargs) -> None:
         super().initialize_subgame(*args, **kwargs)
         self._prepare_tree_slices()
+        self._reset_average_policy_accumulators()
 
     def _prepare_tree_slices(self) -> None:
         """Cache static contiguous tree slices for the current sparse subgame."""
@@ -832,48 +832,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     # ------------------------------------------------------------------
 
     def update_average_policy(self, t: int, update_reach: bool = False) -> None:
-        if (
-            self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
-            and t <= self.dcfr_delay
-        ):
-            self.policy_probs_avg[:] = self.policy_probs
-            if update_reach:
-                self._calculate_reach_weights(
-                    self.self_reach_avg, self.policy_probs_avg
-                )
-            return
-        if t == 0:
-            self.policy_probs_avg[:] = self.policy_probs
-            if update_reach:
-                self._calculate_reach_weights(
-                    self.self_reach_avg, self.policy_probs_avg
-                )
-            return
+        self._update_average_policy_true(t, update_reach=update_reach)
 
-        self._prepare_tree_slices()
+    def _ensure_average_policy_buffers(self) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._ensure_average_policy_accumulators()
+
+    def _average_policy_actor_reach(self, reach: torch.Tensor) -> torch.Tensor:
         N = self.root_nodes
-        parent_index_all = self._parent_index_all
-        parent_index_nonroot = self._parent_index_nonroot
-        child_offsets_top = self._child_offsets_top
-        child_count_top = self._child_count_top
-        assert parent_index_all is not None
-        assert parent_index_nonroot is not None
-        assert child_offsets_top is not None
-        assert child_count_top is not None
+        parent = self.parent_index[N:]
+        actor = self.env.to_act[parent]
+        actor_index = actor[:, None, None].expand(-1, 1, NUM_HANDS)
+        return reach[parent].gather(1, actor_index).squeeze(1)
 
-        fused_average_policy_mix_with_tensors_(
-            policy_probs_avg=self.policy_probs_avg,
-            policy_probs=self.policy_probs,
-            self_reach=self.self_reach,
-            self_reach_avg=self.self_reach_avg,
-            to_act=self.env.to_act.contiguous(),
-            parent_index=parent_index_all,
-            old=self._t_scalars.mix_old,
-            new=self._t_scalars.mix_new,
-            total_weight=self._t_scalars.mix_total,
-            bottom=N,
-        )
-
+    def _renormalize_average_policy(self, update_reach: bool) -> None:
+        N = self.root_nodes
+        self.policy_probs_avg[:N] = 0.0
         if update_reach:
             prev_actor = self.prev_actor.contiguous()
             for depth in range(self.tree_depth):
@@ -889,7 +862,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 )
             return
 
-        # For renorm, fallback is the un-normalized policy itself (i.e. identity).
+        self._prepare_tree_slices()
+        child_offsets_top = self._child_offsets_top
+        child_count_top = self._child_count_top
+        parent_index_nonroot = self._parent_index_nonroot
+        assert child_offsets_top is not None
+        assert child_count_top is not None
+        assert parent_index_nonroot is not None
+
         child_slice = self.policy_probs_avg[N:].contiguous()
         if self._opt_parent_sum_divide:
             fused_parent_sum_divide_(
@@ -917,6 +897,39 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 out=self.policy_probs_avg[N:],
                 eps=1e-5,
             )
+
+    def _update_average_policy_true(
+        self, t: int, update_reach: bool = False
+    ) -> None:
+        if (
+            self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
+            and t <= self.dcfr_delay
+        ):
+            self.policy_probs_avg[:] = self.policy_probs
+            if update_reach:
+                self._calculate_reach_weights(
+                    self.self_reach_avg, self.policy_probs_avg
+                )
+            self.average_policy_initialized = False
+            return
+
+        self._prepare_tree_slices()
+        N = self.root_nodes
+        num, den = self._ensure_average_policy_buffers()
+        reach_cur = self._average_policy_actor_reach(self.self_reach)
+
+        contribution_weight = reach_cur * self._t_scalars.mix_new
+        num[N:] += contribution_weight * self.policy_probs[N:]
+        den[N:] += contribution_weight
+        self.average_policy_initialized = True
+
+        torch.where(
+            den[N:] > 1e-5,
+            num[N:] / den[N:].clamp(min=1e-8),
+            self.policy_probs[N:],
+            out=self.policy_probs_avg[N:],
+        )
+        self._renormalize_average_policy(update_reach=update_reach)
 
     # ------------------------------------------------------------------
     # Update average values: fused mixing.

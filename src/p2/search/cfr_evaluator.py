@@ -156,6 +156,9 @@ class CFREvaluator(ABC):
     allowed_hands_prob: torch.Tensor
     policy_probs: torch.Tensor
     policy_probs_avg: torch.Tensor
+    average_policy_numerator: torch.Tensor
+    average_policy_denominator: torch.Tensor
+    average_policy_initialized: bool
     policy_probs_sample: torch.Tensor
     uniform_policy: torch.Tensor
     cumulative_regrets: torch.Tensor
@@ -307,6 +310,36 @@ class CFREvaluator(ABC):
                 return t_delay, 2
             else:
                 return 0, 1
+
+    def _get_average_policy_weight(self, t: int) -> float:
+        """Return the current-iteration weight for CFR average strategy."""
+        _, new = self._get_mixing_weights(t)
+        return float(new)
+
+    def _reset_average_policy_accumulators(self) -> None:
+        """Clear true CFR average-strategy accumulators for a fresh subgame."""
+        if (
+            hasattr(self, "average_policy_numerator")
+            and self.average_policy_numerator.shape == self.policy_probs_avg.shape
+        ):
+            self.average_policy_numerator.zero_()
+            self.average_policy_denominator.zero_()
+        else:
+            self.average_policy_numerator = torch.zeros_like(self.policy_probs_avg)
+            self.average_policy_denominator = torch.zeros_like(self.policy_probs_avg)
+        self.average_policy_initialized = False
+
+    def _ensure_average_policy_accumulators(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            not hasattr(self, "average_policy_numerator")
+            or self.average_policy_numerator.shape != self.policy_probs_avg.shape
+        ):
+            self.average_policy_numerator = torch.zeros_like(self.policy_probs_avg)
+            self.average_policy_denominator = torch.zeros_like(self.policy_probs_avg)
+            self.average_policy_initialized = False
+        return self.average_policy_numerator, self.average_policy_denominator
 
     @torch.no_grad()
     def _get_model_policy_probs(self, indices: torch.Tensor) -> torch.Tensor:
@@ -873,6 +906,7 @@ class CFREvaluator(ABC):
             self.policy_probs_avg[:] = self.policy_probs
             self.self_reach_avg[:] = self.self_reach
             self.beliefs_avg[:] = self.beliefs
+            self._reset_average_policy_accumulators()
             return
 
         # Pre-allocate policy_probs_src for efficiency (used by sparse, but harmless for dense)
@@ -913,6 +947,7 @@ class CFREvaluator(ABC):
         self.policy_probs_avg[:] = self.policy_probs
         self.self_reach_avg[:] = self.self_reach
         self.beliefs_avg[:] = self.beliefs
+        self._reset_average_policy_accumulators()
 
     def warm_start(self) -> None:
         """Simple warm start: use model values and do a best-response pass."""
@@ -1229,49 +1264,36 @@ class CFREvaluator(ABC):
         self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
 
     def update_average_policy(self, t: int) -> None:
-        """Update the average policy by mixing it with the current policy."""
+        """Update the average policy using true CFR reach-weighted sums."""
         if (
             self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
             and t <= self.dcfr_delay
         ):
             self.policy_probs_avg[:] = self.policy_probs
-            return
-        if t == 0:
-            self.policy_probs_avg[:] = self.policy_probs
+            self.average_policy_initialized = False
             return
 
         N = self.root_nodes
-
-        old, new = self._get_mixing_weights(t)
+        weight = self._get_average_policy_weight(t)
+        numerator, denominator = self._ensure_average_policy_accumulators()
 
         # Get actor indices at source nodes (nodes that have children)
         # _fan_out expects tensors aligned with source nodes (0 to depth_offsets[-2])
         top = self.depth_offsets[-2]
         actor_indices = self.env.to_act[:top, None, None].expand(-1, -1, NUM_HANDS)
         reach_actor = self.self_reach[:top].gather(1, actor_indices).squeeze(1)
-        reach_avg_actor = self.self_reach_avg[:top].gather(1, actor_indices).squeeze(1)
 
-        reach_avg_actor *= old
-        reach_actor *= new
-
-        # Fan out reach weights to get per-action reach weights
+        # Fan out actor reach to get per-action CFR average weights.
         reach_actor_dest = self._fan_out(reach_actor)
-        reach_avg_actor_dest = self._fan_out(reach_avg_actor)
-
-        # Compute weighted average of policies
-        numerator = (
-            reach_avg_actor_dest * self.policy_probs_avg[N:]
-            + reach_actor_dest * self.policy_probs[N:]
-        )
-        denom = reach_avg_actor_dest + reach_actor_dest
-        unweighted = (old * self.policy_probs_avg[N:] + new * self.policy_probs[N:]) / (
-            old + new
-        )
+        contribution_weight = reach_actor_dest * weight
+        numerator[N:] += contribution_weight * self.policy_probs[N:]
+        denominator[N:] += contribution_weight
+        self.average_policy_initialized = True
 
         torch.where(
-            denom > 1e-5,
-            numerator / denom,
-            unweighted,
+            denominator[N:] > 1e-5,
+            numerator[N:] / denominator[N:].clamp(min=1e-8),
+            self.policy_probs[N:],
             out=self.policy_probs_avg[N:],
         )
 
