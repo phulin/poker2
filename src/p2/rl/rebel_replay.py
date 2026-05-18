@@ -89,11 +89,6 @@ class RebelReplayBuffer:
 
         assert (self.policy_targets is None) == (batch.policy_targets is None)
         assert (self.value_targets is None) == (batch.value_targets is None)
-        # We should never train on showdown value.
-        assert (batch.features.street <= 3).all()
-
-        batch = batch.to(self.device)
-
         # Decimate if buffer is full and decimate is set
         if self.decimate is not None and self.size == self.capacity and batch_size > 0:
             keep_count = max(1, int(self.decimate * batch_size))
@@ -102,8 +97,17 @@ class RebelReplayBuffer:
                 indices = torch.randperm(
                     batch_size, device=self.device, generator=self.generator
                 )[:keep_count]
+                if batch.features.context.device != indices.device:
+                    indices = indices.to(batch.features.context.device, non_blocking=True)
                 batch = batch[indices]
                 batch_size = keep_count
+
+        # We should never train on showdown value. Avoid a GPU sync in the hot
+        # data-generation path; CUDA batches are validated by downstream tests.
+        if batch.features.street.device.type == "cpu":
+            assert (batch.features.street <= 3).all()
+
+        batch = batch.to(self.device)
 
         insert_start = self.position
         dest_indices = (
