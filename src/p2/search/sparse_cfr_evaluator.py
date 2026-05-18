@@ -10,6 +10,7 @@ from p2.search.cfr_evaluator import (
     CFREvaluator,
     HandRankData,
     PublicBeliefState,
+    STREETS,
     padded_indices,
 )
 from p2.search.chance_node_helper import ChanceNodeHelper
@@ -557,6 +558,84 @@ class SparseCFREvaluator(CFREvaluator):
             "bet": action_mix_by_node[:, 2:-1].mean(dim=1).mean().item(),
             "allin": action_mix_by_node[:, -1].mean().item(),
         }
+
+    def _record_cfr_entropy(self) -> None:
+        """Record root policy entropy without full-tree action pullback."""
+        if self.max_depth == 0:
+            return
+        N = self.root_nodes
+        child_start = self.depth_offsets[1]
+        child_end = self.depth_offsets[2]
+        parent_index = self.parent_index[child_start:child_end]
+
+        probs = self.policy_probs_avg[child_start:child_end]
+        child_entropy = torch.where(probs > 1e-5, -(probs * probs.log()), 0.0)
+        entropy_by_root = torch.zeros(
+            N,
+            probs.shape[1],
+            dtype=probs.dtype,
+            device=self.device,
+        )
+        entropy_by_root.scatter_reduce_(
+            dim=0,
+            index=parent_index[:, None].expand_as(child_entropy),
+            src=child_entropy,
+            reduce="sum",
+            include_self=True,
+        )
+        self.stats["cfr_entropy"] = entropy_by_root[~self.leaf_mask[:N]].mean().item()
+
+    def _record_cumulative_regret(self) -> None:
+        self.stats["mean_positive_regret"] = (
+            self.cumulative_regrets.clamp(min=0).mean().item()
+        )
+
+        N = self.root_nodes
+        child_start = self.depth_offsets[1]
+        child_end = self.depth_offsets[2]
+        parent_index = self.parent_index[child_start:child_end]
+
+        regret_quotient = self.cumulative_regrets.clamp(
+            min=0
+        ) / self.regret_weight_sums
+        child_regret = regret_quotient[child_start:child_end]
+        regret_quotient_max = torch.zeros(
+            N,
+            child_regret.shape[1],
+            dtype=child_regret.dtype,
+            device=self.device,
+        )
+        regret_quotient_max.scatter_reduce_(
+            dim=0,
+            index=parent_index[:, None].expand_as(child_regret),
+            src=child_regret,
+            reduce="amax",
+            include_self=True,
+        )
+        regret_quotient_sum = regret_quotient_max.sum(dim=1)
+        regret_quotient_mean = regret_quotient_sum.sum() / self.valid_mask[:N].sum()
+        self.stats["mean_regret_bound"] = regret_quotient_mean.item()
+
+        exploit_stats = self._compute_exploitability()
+        self.stats["local_exploitability"] = (
+            exploit_stats.local_exploitability.mean().item()
+        )
+
+        root_streets = self.env.street[:N]
+        self.stats["local_exploitability_street"] = {
+            street_name: exploit_stats.local_exploitability[root_streets == i]
+            .mean()
+            .item()
+            for i, street_name in enumerate(STREETS)
+            if (root_streets == i).any()
+        }
+        self.stats["local_exploitability_max"] = (
+            exploit_stats.local_exploitability.max().item()
+        )
+        self.stats["local_exploitability_min"] = (
+            exploit_stats.local_exploitability.min().item()
+        )
+        self._save_high_exploitability_roots(exploit_stats.local_exploitability)
 
     def _fan_out_deep(self, tensor: torch.Tensor) -> torch.Tensor:
         """Fan out a root-aligned tensor across every node in the tree."""
