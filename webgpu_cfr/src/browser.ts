@@ -4,6 +4,7 @@ import {
   createBrowserCfrEvaluator,
 } from "./browserEvaluator.js";
 import { parseBetterFfnManifest } from "./modelFormat.js";
+import { loadModelBytesWithCache, type ModelCacheProgress } from "./modelCache.js";
 import type { BetterFfnManifest } from "./types.js";
 
 export async function createBrowserDevice(): Promise<GPUDevice> {
@@ -41,6 +42,28 @@ export async function loadBrowserModel(
   );
 }
 
+export async function loadBrowserModelCached(
+  manifestUrl: string,
+  options: {
+    weightsUrl?: string;
+    device?: GPUDevice;
+    onProgress?: (progress: ModelCacheProgress) => void;
+  } = {},
+): Promise<BetterFfnWebGpuModel> {
+  const cacheOptions: {
+    weightsUrl?: string;
+    onProgress?: (progress: ModelCacheProgress) => void;
+  } = {};
+  if (options.weightsUrl) cacheOptions.weightsUrl = options.weightsUrl;
+  if (options.onProgress) cacheOptions.onProgress = options.onProgress;
+  const loaded = await loadModelBytesWithCache(manifestUrl, cacheOptions);
+  return BetterFfnWebGpuModel.fromBuffers(
+    options.device ?? (await createBrowserDevice()),
+    loaded.manifest,
+    loaded.weights,
+  );
+}
+
 export function loadBrowserModelFromBuffers(
   device: GPUDevice,
   manifest: BetterFfnManifest | unknown,
@@ -49,4 +72,9 @@ export function loadBrowserModelFromBuffers(
   return BetterFfnWebGpuModel.fromBuffers(device, manifest, weights);
 }
 
-export { BetterFfnWebGpuModel, BrowserCfrEvaluator, createBrowserCfrEvaluator };
+export {
+  BetterFfnWebGpuModel,
+  BrowserCfrEvaluator,
+  createBrowserCfrEvaluator,
+  loadModelBytesWithCache,
+};

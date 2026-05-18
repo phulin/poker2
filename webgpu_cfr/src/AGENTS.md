@@ -1,5 +1,5 @@
 ## Directory summary
-TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node loading, WGSL kernels, and HUNL public-state replay.
+TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node loading, WGSL kernels, HUNL public-state replay, shared browser helpers, and the Vite/Solid spot solver UI.
 
 ### Source files
 - `types.ts`: Shared request, fixture, manifest, and result types.
@@ -8,11 +8,18 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `kernels.ts`: WGSL kernels for regret matching, belief updates, and action probability reductions.
 - `modelKernels.ts`: WGSL kernels for BetterFFN matvec, activations, normalization, residuals, and batching.
 - `modelFormat.ts`: Manifest parsing, tensor loading, and action-label helpers.
+- `cards.ts`: Standard card notation parsing/formatting, duplicate validation, and 1326 hand-combo lookup helpers.
+- `beliefs.ts`: Initial belief normalization, hero-only exact-hand beliefs, and blocked-hand mask helpers.
+- `modelCache.ts`: Browser IndexedDB model cache, streamed weights download progress, and cache invalidation helpers.
 - `betterFfnWebGpuModel.ts`: WebGPU BetterFFN inference implementation.
 - `hunlEnv.ts`: Browser-safe public HUNL environment and feature encoder.
 - `evaluator.ts`: Local GPU CFR evaluator for fixtures.
 - `browserEvaluator.ts`: Browser-facing evaluator that replays prefixes, builds child values, and solves local CFR.
 - `browser.ts`: Browser device/model loading exports.
+- `main.tsx`: Vite/Solid application mount entry point.
+- `App.tsx`: Guided browser spot solver UI and result rendering.
+- `styles.css`: Solver UI styling.
+- `vite-env.d.ts`: Vite client ambient types.
 - `nodeGpu.ts`: Node/Dawn GPU device creation.
 - `nodeModel.ts`: Node model loading from manifest and weights.
 - `pythonBridge.ts`: Python fixture bridge for Node parity tests.

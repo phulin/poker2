@@ -1,5 +1,11 @@
 import { GpuCfrEvaluator } from "./evaluator.js";
-import { initialUniformBeliefs, NUM_HANDS, PublicHunlEnv } from "./hunlEnv.js";
+import {
+  initialUniformBeliefs,
+  NUM_HANDS,
+  PublicHunlEnv,
+  showdownTerminalValues,
+} from "./hunlEnv.js";
+import { buildHeroOnlyBeliefs, normalizeBeliefs } from "./beliefs.js";
 import type { BetterFfnWebGpuModel } from "./betterFfnWebGpuModel.js";
 import type {
   BrowserEvaluationResult,
@@ -48,12 +54,22 @@ export class BrowserCfrEvaluator {
       this.model.manifest,
       request.initialState,
     );
-    let beliefs: Float32Array<ArrayBufferLike> = initialUniformBeliefs();
+    const knownCards: {
+      publicCards?: readonly number[];
+      heroPlayer?: 0 | 1;
+      heroHand?: readonly [number, number];
+    } = {};
+    if (request.publicCards) knownCards.publicCards = request.publicCards;
+    if (request.heroPlayer !== undefined) knownCards.heroPlayer = request.heroPlayer;
+    if (request.heroHand) knownCards.heroHand = request.heroHand;
+    env.configureKnownCards(knownCards);
+    let beliefs: Float32Array<ArrayBufferLike> = this.initialBeliefs(request);
     let finalPolicy: Float32Array<ArrayBufferLike> | undefined;
     let finalActionProbs: Float32Array<ArrayBufferLike> | undefined;
 
     for (const action of request.spot) {
       this.assertAction(action, numActions);
+      this.assertLegalAction(env, action);
       const solved = await this.solveCurrentProblem(
         env,
         beliefs,
@@ -76,12 +92,15 @@ export class BrowserCfrEvaluator {
     );
     finalPolicy = final.policy;
     finalActionProbs = final.actionProbs;
+    const legal = env.legalBinsAmountAndMask();
 
     return {
       beliefsAtSpot: beliefs,
       actionProbs: finalActionProbs,
       policy: finalPolicy,
       actionLabels: [...this.model.actionLabels],
+      legalMask: legal.mask,
+      actor: env.toAct,
     };
   }
 
@@ -140,7 +159,7 @@ export class BrowserCfrEvaluator {
     env: PublicHunlEnv,
     beliefs: Float32Array<ArrayBufferLike>,
   ): Promise<LocalCfrProblem> {
-    const collected = this.collectChildStates(env);
+    const collected = this.collectChildStates(env, beliefs);
     const childValues = collected.terminalValues;
 
     if (collected.modelChildren.length > 0) {
@@ -168,7 +187,7 @@ export class BrowserCfrEvaluator {
     env: PublicHunlEnv,
     beliefs: Float32Array<ArrayBufferLike>,
   ): Promise<GpuLocalCfrProblem> {
-    const collected = this.collectChildStates(env);
+    const collected = this.collectChildStates(env, beliefs);
     const childValueSize = 2 * NUM_HANDS;
     const childValues = this.acquireChildValueBuffer(collected.terminalValues);
     let modelValuesDispose: (() => void) | undefined;
@@ -204,7 +223,10 @@ export class BrowserCfrEvaluator {
     };
   }
 
-  private collectChildStates(env: PublicHunlEnv): CollectedChildStates {
+  private collectChildStates(
+    env: PublicHunlEnv,
+    beliefs: Float32Array<ArrayBufferLike>,
+  ): CollectedChildStates {
     const actor = env.toAct;
     const numActions = this.model.manifest.architecture.numActions;
     const legal = env.legalBinsAmountAndMask();
@@ -224,8 +246,19 @@ export class BrowserCfrEvaluator {
       const step = child.stepBin(action, legal);
       const offset = action * childValueSize;
       if (child.done) {
-        terminalValues.fill(step.reward, offset, offset + NUM_HANDS);
-        terminalValues.fill(-step.reward, offset + NUM_HANDS, offset + childValueSize);
+        if (child.hasFolded[0] || child.hasFolded[1]) {
+          terminalValues.fill(step.reward, offset, offset + NUM_HANDS);
+          terminalValues.fill(
+            -step.reward,
+            offset + NUM_HANDS,
+            offset + childValueSize,
+          );
+        } else {
+          terminalValues.set(
+            showdownTerminalValues(child, beliefs),
+            offset,
+          );
+        }
       } else {
         modelChildren.push({ action, env: child });
       }
@@ -266,6 +299,34 @@ export class BrowserCfrEvaluator {
   private assertAction(action: number, numActions: number): void {
     if (!Number.isInteger(action) || action < 0 || action >= numActions) {
       throw new Error(`action ${action} is outside [0, ${numActions})`);
+    }
+  }
+
+  private initialBeliefs(
+    request: EvaluateSpotRequest,
+  ): Float32Array<ArrayBufferLike> {
+    if (request.initialBeliefs) {
+      return normalizeBeliefs(request.initialBeliefs);
+    }
+    if (request.heroHand) {
+      const options: {
+        heroPlayer: 0 | 1;
+        heroHand: readonly [number, number];
+        publicCards?: readonly number[];
+      } = {
+        heroPlayer: request.heroPlayer ?? 0,
+        heroHand: request.heroHand,
+      };
+      if (request.publicCards) options.publicCards = request.publicCards;
+      return buildHeroOnlyBeliefs(options);
+    }
+    return initialUniformBeliefs();
+  }
+
+  private assertLegalAction(env: PublicHunlEnv, action: number): void {
+    const legal = env.legalBinsAmountAndMask();
+    if (!legal.mask[action]) {
+      throw new Error(`action ${action} is not legal for the current public state`);
     }
   }
 }

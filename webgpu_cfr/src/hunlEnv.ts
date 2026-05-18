@@ -3,6 +3,13 @@ import type {
   BrowserCfrInitialState,
   PlayerIndex,
 } from "./types.js";
+import {
+  assertUniqueCards,
+  HAND_COMBOS,
+  handComboCards,
+  handsOverlap,
+  NUM_CARDS,
+} from "./cards.js";
 
 export const NUM_HANDS = 1326;
 export const DEFAULT_FORCE_DECK = [12, 25, 38, 51, 0, 13, 26, 1, 14];
@@ -16,6 +23,32 @@ export interface StepResult {
   reward: number;
   newStreet: number;
   dealtCards: number[];
+}
+
+function completeDeck(seed: readonly number[], blocked: readonly number[] = []): number[] {
+  const out: number[] = [];
+  const used = new Set<number>();
+  for (const card of [...blocked, ...seed]) {
+    if (!Number.isInteger(card) || card < 0 || card >= NUM_CARDS) continue;
+    if (used.has(card)) continue;
+    used.add(card);
+    if (!blocked.includes(card)) out.push(card);
+  }
+  for (let card = 0; card < NUM_CARDS; card += 1) {
+    if (!used.has(card)) {
+      used.add(card);
+      out.push(card);
+    }
+  }
+  return out;
+}
+
+function streetForPublicCardCount(count: number): number {
+  if (count === 0) return 0;
+  if (count === 3) return 1;
+  if (count === 4) return 2;
+  if (count === 5) return 3;
+  throw new Error("publicCards must contain 0, 3, 4, or 5 cards");
 }
 
 export class PublicHunlEnv {
@@ -56,9 +89,6 @@ export class PublicHunlEnv {
     forceDeck: number[];
     flopShowdown?: boolean;
   }) {
-    if (options.forceDeck.length < 9) {
-      throw new Error("forceDeck must contain at least 9 public deterministic cards");
-    }
     this.betBins = [...options.betBins];
     this.sb = options.sb;
     this.bb = options.bb;
@@ -70,7 +100,7 @@ export class PublicHunlEnv {
     this.minRaise = options.bb;
     this.startingStacks = [options.stack, options.stack];
     this.scale = options.stack;
-    this.deck = options.forceDeck.slice(0, 9);
+    this.deck = completeDeck(options.forceDeck).slice(0, 9);
     this.holeIndices = [
       [this.deck[0]!, this.deck[1]!],
       [this.deck[2]!, this.deck[3]!],
@@ -138,6 +168,82 @@ export class PublicHunlEnv {
       ],
     });
     return env;
+  }
+
+  configureKnownCards(options: {
+    publicCards?: readonly number[];
+    heroPlayer?: PlayerIndex;
+    heroHand?: readonly [number, number];
+  }): void {
+    const publicCards = options.publicCards ?? [];
+    assertUniqueCards([
+      ...publicCards,
+      ...(options.heroHand ? [...options.heroHand] : []),
+    ]);
+    const street = streetForPublicCardCount(publicCards.length);
+
+    const knownPrivate: Array<number | undefined> = [
+      this.holeIndices[0][0],
+      this.holeIndices[0][1],
+      this.holeIndices[1][0],
+      this.holeIndices[1][1],
+    ];
+    if (options.heroHand) {
+      const offset = (options.heroPlayer ?? 0) * 2;
+      knownPrivate[offset] = options.heroHand[0];
+      knownPrivate[offset + 1] = options.heroHand[1];
+    }
+
+    const blocked = new Set<number>([...publicCards]);
+    const privateCards: number[] = [];
+    const candidates = completeDeck(
+      [...knownPrivate.filter((card): card is number => card !== undefined), ...this.deck],
+      publicCards,
+    );
+    for (let slot = 0; slot < 4; slot += 1) {
+      const known = knownPrivate[slot];
+      if (known !== undefined && !blocked.has(known) && !privateCards.includes(known)) {
+        privateCards.push(known);
+        blocked.add(known);
+        continue;
+      }
+      const next = candidates.find(
+        (card) => !blocked.has(card) && !privateCards.includes(card),
+      );
+      if (next === undefined) {
+        throw new Error("could not construct deterministic deck placeholders");
+      }
+      privateCards.push(next);
+      blocked.add(next);
+    }
+
+    this.holeIndices = [
+      [privateCards[0]!, privateCards[1]!],
+      [privateCards[2]!, privateCards[3]!],
+    ];
+    this.boardIndices = [-1, -1, -1, -1, -1];
+    for (let i = 0; i < publicCards.length; i += 1) {
+      this.boardIndices[i] = publicCards[i]!;
+    }
+    this.lastBoardIndices = [...this.boardIndices];
+    this.street = street;
+
+    if (street > 0 && this.actionsThisRound === 0) {
+      this.toAct = (1 - this.button) as PlayerIndex;
+      this.lastToAct = this.button;
+      this.committed = [0, 0];
+      this.minRaise = this.bb;
+      this.actedSinceReset = false;
+    }
+
+    const future = completeDeck(this.deck, [...blocked]);
+    const deck = [...privateCards, ...publicCards];
+    for (const card of future) {
+      if (deck.length >= 9) break;
+      deck.push(card);
+    }
+    this.deck = deck;
+    this.deckPos = 4 + publicCards.length;
   }
 
   legalBinsAmountAndMask(): LegalBins {
@@ -323,13 +429,62 @@ export function initialUniformBeliefs(): Float32Array<ArrayBuffer> {
 }
 
 export function handCombos(): Array<[number, number]> {
-  const combos: Array<[number, number]> = [];
-  for (let c1 = 0; c1 < 52; c1 += 1) {
-    for (let c2 = c1 + 1; c2 < 52; c2 += 1) {
-      combos.push([c1, c2]);
-    }
+  return HAND_COMBOS.map(([c0, c1]) => [c0, c1]);
+}
+
+export function showdownTerminalValues(
+  env: PublicHunlEnv,
+  beliefs: Float32Array<ArrayBufferLike>,
+): Float32Array<ArrayBuffer> {
+  const board = env.boardIndices.filter((card) => card >= 0);
+  if (board.length !== 5) {
+    throw new Error("showdown terminal values require a complete five-card board");
   }
-  return combos;
+
+  const boardSet = new Set(board);
+  const handRanks: Array<RankVector | undefined> = new Array(NUM_HANDS);
+  for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+    const [c0, c1] = handComboCards(hand);
+    if (boardSet.has(c0) || boardSet.has(c1)) continue;
+    handRanks[hand] = evaluateSeven([c0, c1, ...board]);
+  }
+
+  const winValue = (env.stacks[0] + env.pot - env.startingStacks[0]) / env.scale;
+  const loseValue = (env.stacks[0] - env.startingStacks[0]) / env.scale;
+  const tieValue =
+    (env.stacks[0] + env.pot / 2 - env.startingStacks[0]) / env.scale;
+  const payoffForPlayer0 = (cmp: number): number =>
+    cmp > 0 ? winValue : cmp < 0 ? loseValue : tieValue;
+
+  const out = new Float32Array(2 * NUM_HANDS);
+  for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+    const rank = handRanks[hand];
+    if (!rank) continue;
+
+    let p0Value = 0;
+    let p0Mass = 0;
+    let p1Value = 0;
+    let p1Mass = 0;
+    for (let oppHand = 0; oppHand < NUM_HANDS; oppHand += 1) {
+      const oppRank = handRanks[oppHand];
+      if (!oppRank || handsOverlap(hand, oppHand)) continue;
+
+      const cmpP0Hand = compareRanks(rank, oppRank);
+      const p0Payoff = payoffForPlayer0(cmpP0Hand);
+      const p1Belief = beliefs[NUM_HANDS + oppHand]!;
+      p0Value += p1Belief * p0Payoff;
+      p0Mass += p1Belief;
+
+      const cmpOppP0Hand = compareRanks(oppRank, rank);
+      const p0PayoffAgainstP1 = payoffForPlayer0(cmpOppP0Hand);
+      const p0Belief = beliefs[oppHand]!;
+      p1Value += p0Belief * -p0PayoffAgainstP1;
+      p1Mass += p0Belief;
+    }
+    out[hand] = p0Mass > 1.0e-12 ? p0Value / p0Mass : 0;
+    out[NUM_HANDS + hand] = p1Mass > 1.0e-12 ? p1Value / p1Mass : 0;
+  }
+  return out;
 }
 
 export function encodeBetterFeatures(env: PublicHunlEnv): {

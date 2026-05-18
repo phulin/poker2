@@ -100,8 +100,14 @@ export interface EvaluateSpotRequest {
   spot: number[];
   iterations: number;
   initialState?: BrowserCfrInitialState;
+  initialBeliefs?: Float32Array<ArrayBufferLike> | ArrayLike<number>;
+  publicCards?: number[];
+  heroPlayer?: PlayerIndex;
+  heroHand?: [number, number];
 }
 
 export interface BrowserEvaluationResult extends EvaluationResult {
   actionLabels: string[];
+  legalMask: number[];
+  actor: PlayerIndex;
 }
