@@ -166,15 +166,28 @@ class RebelReplayBuffer:
         self.sample_count[idxs] += 1
 
         return RebelBatch(
-            features=self.features[idxs],
+            features=MLPFeatures(
+                context=torch.index_select(self.features.context, 0, idxs),
+                street=torch.index_select(self.features.street, 0, idxs),
+                to_act=torch.index_select(self.features.to_act, 0, idxs),
+                board=torch.index_select(self.features.board, 0, idxs),
+                beliefs=torch.index_select(self.features.beliefs, 0, idxs),
+            ),
             policy_targets=(
-                self.policy_targets[idxs] if self.policy_targets is not None else None
+                torch.index_select(self.policy_targets, 0, idxs)
+                if self.policy_targets is not None
+                else None
             ),
             value_targets=(
-                self.value_targets[idxs] if self.value_targets is not None else None
+                torch.index_select(self.value_targets, 0, idxs)
+                if self.value_targets is not None
+                else None
             ),
-            legal_masks=self.legal_masks[idxs],
-            statistics={key: self.statistics[key][idxs] for key in self.statistics},
+            legal_masks=torch.index_select(self.legal_masks, 0, idxs),
+            statistics={
+                key: torch.index_select(self.statistics[key], 0, idxs)
+                for key in self.statistics
+            },
         )
 
     def clear(self) -> None:
