@@ -403,6 +403,7 @@ class RebelCFRTrainer:
         entropy = -(norm * norm.log()).sum(dim=-1).mean()
         return float(entropy.item())
 
+    @torch.no_grad()
     def _compute_metrics(
         self,
         episodes: int,
