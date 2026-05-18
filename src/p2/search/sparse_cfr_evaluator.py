@@ -528,6 +528,36 @@ class SparseCFREvaluator(CFREvaluator):
             include_self=True,
         )
 
+    def _record_action_mix(self) -> None:
+        """Record action mix without materializing [parent, action, hand]."""
+        top = self.depth_offsets[-2]
+        child_start = self.depth_offsets[1]
+        child_end = self.total_nodes
+        parent_index = self.parent_index[child_start:child_end]
+        action_from_parent = self.action_from_parent[child_start:child_end]
+
+        denom = self.allowed_hands[:top].sum(dim=1).clamp(min=1)
+        child_mass = (
+            self.policy_probs_avg[child_start:child_end].sum(dim=1)
+            / denom.index_select(0, parent_index)
+        )
+
+        action_mix_by_node = torch.zeros(
+            top,
+            self.num_actions,
+            dtype=self.policy_probs_avg.dtype,
+            device=self.device,
+        )
+        action_mix_by_node[parent_index, action_from_parent] = child_mass
+
+        action_mix_by_node = action_mix_by_node[~self.leaf_mask[:top]]
+        self.stats["action_mix"] = {
+            "fold": action_mix_by_node[:, 0].mean().item(),
+            "call": action_mix_by_node[:, 1].mean().item(),
+            "bet": action_mix_by_node[:, 2:-1].mean(dim=1).mean().item(),
+            "allin": action_mix_by_node[:, -1].mean().item(),
+        }
+
     def _fan_out_deep(self, tensor: torch.Tensor) -> torch.Tensor:
         """Fan out a root-aligned tensor across every node in the tree."""
         output = torch.zeros(
