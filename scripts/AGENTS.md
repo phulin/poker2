@@ -9,6 +9,7 @@ Reusable profiling and benchmark scripts that are broader than a single repro bu
 - `bench_breakdown.py`: Produces benchmark breakdowns for selected paths.
 - `bench_model_share.py`: Benchmarks model sharing or reuse behavior.
 - `bench_cfr_main_path.py`: Runs realistic ReBeL CFR train-step source profiling and component microbenchmarks with optional train_rebel pause/resume handling.
+- `bench_cfr_iterator_spots.py`: Profiles eager fused sparse CFR iterator segments from evenly balanced saved spots across preflop/flop/turn/river roots.
 - `probe_cfr_fp_precision.py`: Probes fp32 precision loss in fused sparse CFR average-policy/value updates from saved spots and checkpoints.
 - `test_survey_runner.py`: Runs pytest files or node ids with per-invocation timeouts and records structured audit results.
 
