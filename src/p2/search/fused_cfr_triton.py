@@ -2367,6 +2367,7 @@ def fused_weighted_parent_sum(
     child_count: torch.Tensor,       # [num_parents]
     parent_base: int,
     max_children: int = 8,
+    max_children_pow2: int | None = None,
     leaf_values: torch.Tensor | None = None,
     leaf_mask: torch.Tensor | None = None,
     block_h: int = 2048,
@@ -2403,9 +2404,12 @@ def fused_weighted_parent_sum(
         leaf_values_ptr = values
         leaf_mask_ptr = child_count
 
-    mc_pow2 = 1
-    while mc_pow2 < max_children:
-        mc_pow2 *= 2
+    if max_children_pow2 is None:
+        mc_pow2 = 1
+        while mc_pow2 < max_children:
+            mc_pow2 *= 2
+    else:
+        mc_pow2 = max_children_pow2
     num_parents = child_offsets.shape[0]
 
     grid = (num_parents, 2, triton.cdiv(h, block_h))
@@ -2514,6 +2518,7 @@ def fused_weighted_parent_sum_child_opp(
     parent_base: int,
     child_base: int,
     max_children: int = 8,
+    max_children_pow2: int | None = None,
     leaf_values: torch.Tensor | None = None,
     leaf_mask: torch.Tensor | None = None,
     block_h: int = 2048,
@@ -2541,9 +2546,12 @@ def fused_weighted_parent_sum_child_opp(
         leaf_values_ptr = values
         leaf_mask_ptr = child_count
 
-    mc_pow2 = 1
-    while mc_pow2 < max_children:
-        mc_pow2 *= 2
+    if max_children_pow2 is None:
+        mc_pow2 = 1
+        while mc_pow2 < max_children:
+            mc_pow2 *= 2
+    else:
+        mc_pow2 = max_children_pow2
     num_parents = child_offsets.shape[0]
 
     grid = (num_parents, 2, triton.cdiv(h, block_h))
@@ -2559,6 +2567,235 @@ def fused_weighted_parent_sum_child_opp(
         parent_base,
         child_base,
         h,
+        HAS_LEAF_SOURCE=has_leaf_source,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_weighted_parent_sum_inline_opp_both_kernel(
+        values_ptr,          # [total, 2, H] in/out
+        leaf_values_ptr,     # optional [total, 2, H]
+        leaf_mask_ptr,       # optional [total] bool
+        prev_actor_ptr,      # [total]
+        policy_hero_ptr,     # [total, H]
+        actor_beliefs_ptr,   # [top, H]
+        numer_s_ptr,         # [num_children]
+        numer_cardsum_ptr,   # [num_children, 52]
+        denom_s_ptr,         # [top]
+        denom_cardsum_ptr,   # [top, 52]
+        card_a_ptr,          # [H]
+        card_b_ptr,          # [H]
+        child_offsets_ptr,   # [num_parents] absolute first-child row
+        child_count_ptr,     # [num_parents]
+        parent_base,         # absolute row of first parent in this depth slice
+        child_base,          # absolute row corresponding to numer row 0
+        H,
+        NUM_CARDS: tl.constexpr,
+        EPS,
+        HAS_LEAF_SOURCE: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        hb = tl.program_id(1)
+
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        row = parent_base + p
+        col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        col_mask = col_offs < H
+
+        if count == 0:
+            if HAS_LEAF_SOURCE:
+                is_leaf = tl.load(leaf_mask_ptr + row).to(tl.int1)
+                src0 = tl.load(
+                    leaf_values_ptr + (row * 2) * H + col_offs,
+                    mask=col_mask & is_leaf,
+                    other=0.0,
+                )
+                src1 = tl.load(
+                    leaf_values_ptr + (row * 2 + 1) * H + col_offs,
+                    mask=col_mask & is_leaf,
+                    other=0.0,
+                )
+                tl.store(values_ptr + (row * 2) * H + col_offs, src0, mask=col_mask)
+                tl.store(
+                    values_ptr + (row * 2 + 1) * H + col_offs,
+                    src1,
+                    mask=col_mask,
+                )
+            return
+
+        ca = tl.load(card_a_ptr + col_offs, mask=col_mask, other=0)
+        cb = tl.load(card_b_ptr + col_offs, mask=col_mask, other=0)
+        dt = tl.load(
+            actor_beliefs_ptr + row * H + col_offs,
+            mask=col_mask,
+            other=0.0,
+        )
+        sd = tl.load(denom_s_ptr + row)
+        dcsa = tl.load(denom_cardsum_ptr + row * NUM_CARDS + ca, mask=col_mask)
+        dcsb = tl.load(denom_cardsum_ptr + row * NUM_CARDS + cb, mask=col_mask)
+
+        acc0 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        acc1 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                child_rel = child - child_base
+                pa = tl.load(prev_actor_ptr + child)
+                hero_pol = tl.load(
+                    policy_hero_ptr + child * H + col_offs,
+                    mask=col_mask,
+                    other=0.0,
+                )
+
+                nt = dt * hero_pol
+                sn = tl.load(numer_s_ptr + child_rel)
+                ncsa = tl.load(
+                    numer_cardsum_ptr + child_rel * NUM_CARDS + ca,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                ncsb = tl.load(
+                    numer_cardsum_ptr + child_rel * NUM_CARDS + cb,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                numer = tl.maximum(sn - ncsa - ncsb + nt, 0.0)
+                denom = tl.maximum(sd - dcsa - dcsb + dt, 0.0)
+                opp_pol = tl.where(denom > EPS, numer / denom, 0.0)
+                pol0 = tl.where(pa == 0, hero_pol, opp_pol)
+                pol1 = tl.where(pa == 1, hero_pol, opp_pol)
+
+                v0 = tl.load(
+                    values_ptr + (child * 2) * H + col_offs,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                v1 = tl.load(
+                    values_ptr + (child * 2 + 1) * H + col_offs,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                if HAS_LEAF_SOURCE:
+                    leaf_v0 = tl.load(
+                        leaf_values_ptr + (child * 2) * H + col_offs,
+                        mask=col_mask,
+                        other=0.0,
+                    )
+                    leaf_v1 = tl.load(
+                        leaf_values_ptr + (child * 2 + 1) * H + col_offs,
+                        mask=col_mask,
+                        other=0.0,
+                    )
+                    child_is_leaf = tl.load(leaf_mask_ptr + child).to(tl.int1)
+                    v0 = tl.where(child_is_leaf, leaf_v0, v0)
+                    v1 = tl.where(child_is_leaf, leaf_v1, v1)
+                    tl.store(
+                        values_ptr + (child * 2) * H + col_offs,
+                        leaf_v0,
+                        mask=col_mask & child_is_leaf,
+                    )
+                    tl.store(
+                        values_ptr + (child * 2 + 1) * H + col_offs,
+                        leaf_v1,
+                        mask=col_mask & child_is_leaf,
+                    )
+                acc0 += v0 * pol0
+                acc1 += v1 * pol1
+
+        tl.store(values_ptr + (row * 2) * H + col_offs, acc0, mask=col_mask)
+        tl.store(values_ptr + (row * 2 + 1) * H + col_offs, acc1, mask=col_mask)
+
+
+def fused_weighted_parent_sum_inline_opp_both(
+    values: torch.Tensor,
+    prev_actor: torch.Tensor,
+    policy_hero: torch.Tensor,
+    actor_beliefs: torch.Tensor,
+    numer_s: torch.Tensor,
+    numer_cardsum: torch.Tensor,
+    denom_s: torch.Tensor,
+    denom_cardsum: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    parent_base: int,
+    child_base: int,
+    max_children: int = 8,
+    max_children_pow2: int | None = None,
+    eps: float = 1e-5,
+    leaf_values: torch.Tensor | None = None,
+    leaf_mask: torch.Tensor | None = None,
+    block_h: int = 512,
+) -> None:
+    """Two-player variant of inline-opponent EV backup.
+
+    Computes the opponent-conditioned ratio once per child/hand block and uses
+    it for both player accumulators, reducing duplicate ratio work.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 3 and values.shape[1] == 2
+    assert policy_hero.is_contiguous() and actor_beliefs.is_contiguous()
+    assert numer_s.is_contiguous() and numer_cardsum.is_contiguous()
+    assert denom_s.is_contiguous() and denom_cardsum.is_contiguous()
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    total, two, h = values.shape
+    top = actor_beliefs.shape[0]
+    num_children = numer_s.shape[0]
+    assert two == 2 and policy_hero.shape == (total, h)
+    assert actor_beliefs.shape == (top, h)
+    assert numer_cardsum.shape == (num_children, _UNBLOCKED_NUM_CARDS)
+    assert denom_cardsum.shape == (top, _UNBLOCKED_NUM_CARDS)
+    assert denom_s.shape == (top,)
+    assert prev_actor.shape == (total,)
+    has_leaf_source = leaf_values is not None
+    if has_leaf_source:
+        assert leaf_values is not None and leaf_mask is not None
+        assert leaf_values.is_contiguous() and leaf_values.shape == values.shape
+        assert leaf_mask.is_contiguous() and leaf_mask.shape == (total,)
+        leaf_values_ptr = leaf_values
+        leaf_mask_ptr = leaf_mask
+    else:
+        leaf_values_ptr = values
+        leaf_mask_ptr = child_count
+
+    if max_children_pow2 is None:
+        mc_pow2 = 1
+        while mc_pow2 < max_children:
+            mc_pow2 *= 2
+    else:
+        mc_pow2 = max_children_pow2
+    num_parents = child_offsets.shape[0]
+    card_a, card_b = _get_combo_cards(values.device)
+
+    grid = (num_parents, triton.cdiv(h, block_h))
+    _fused_weighted_parent_sum_inline_opp_both_kernel[grid](
+        values,
+        leaf_values_ptr,
+        leaf_mask_ptr,
+        prev_actor,
+        policy_hero,
+        actor_beliefs,
+        numer_s,
+        numer_cardsum,
+        denom_s,
+        denom_cardsum,
+        card_a,
+        card_b,
+        child_offsets,
+        child_count,
+        parent_base,
+        child_base,
+        h,
+        NUM_CARDS=_UNBLOCKED_NUM_CARDS,
+        EPS=eps,
         HAS_LEAF_SOURCE=has_leaf_source,
         MAX_CHILDREN=mc_pow2,
         BLOCK_H=block_h,

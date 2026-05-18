@@ -56,12 +56,14 @@ from p2.search.fused_cfr_triton import (
     fused_regret_tail_,
     fused_weighted_parent_sum,
     fused_weighted_parent_sum_child_opp,
+    fused_weighted_parent_sum_inline_opp_both,
     GraphedCFRIteration,
     precompute_showdown_extras,
     showdown_ev_v15,
     ShowdownGraphRunner,
     triton_is_available,
     TScalars,
+    _preprocess_unblocked_stats,
     unblocked_mass_opp_at_parents_triton,
     unblocked_mass_ratio_indirect_triton,
 )
@@ -165,6 +167,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._opt_sparse_sample = _env_flag("P2_FUSED_OPT_SPARSE_SAMPLE")
         self._opt_leaf_feature_cache = _env_flag("P2_FUSED_OPT_LEAF_FEATURE_CACHE")
         self._opt_child_opp_policy = _env_flag("P2_FUSED_OPT_CHILD_OPP_POLICY")
+        self._opt_ev_inline_opp = _env_flag("P2_FUSED_OPT_EV_INLINE_OPP")
         self._fused_positive_regrets_valid: bool = False
         self._sample_update_rows: torch.Tensor | None = None
         self._sample_update_counts: torch.Tensor | None = None
@@ -184,6 +187,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._action_from_parent_all: torch.Tensor | None = None
         self._child_offsets_by_depth: tuple[torch.Tensor, ...] = ()
         self._child_count_by_depth: tuple[torch.Tensor, ...] = ()
+        self._child_count_pow2_by_depth: tuple[int, ...] = ()
         self._exploitability_cache_key: (
             tuple[tuple[int, int, tuple[int, ...]], ...] | None
         ) = None
@@ -249,6 +253,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._opt_leaf_feature_cache = _env_flag("P2_FUSED_OPT_LEAF_FEATURE_CACHE")
         if not hasattr(self, "_opt_child_opp_policy"):
             self._opt_child_opp_policy = _env_flag("P2_FUSED_OPT_CHILD_OPP_POLICY")
+        if not hasattr(self, "_opt_ev_inline_opp"):
+            self._opt_ev_inline_opp = _env_flag("P2_FUSED_OPT_EV_INLINE_OPP")
         if not hasattr(self, "_fused_positive_regrets_valid"):
             self._fused_positive_regrets_valid = False
         if not hasattr(self, "_sample_update_rows"):
@@ -269,6 +275,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._child_offsets_by_depth = ()
         if not hasattr(self, "_child_count_by_depth"):
             self._child_count_by_depth = ()
+        if not hasattr(self, "_child_count_pow2_by_depth"):
+            self._child_count_pow2_by_depth = ()
         if not hasattr(self, "_action_from_parent_all"):
             self._action_from_parent_all = None
         if not hasattr(self, "_exploitability_cache_key"):
@@ -322,6 +330,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 self.depth_offsets[d] : self.depth_offsets[d + 1]
             ].contiguous()
             for d in range(self.tree_depth)
+        )
+        self._child_count_pow2_by_depth = tuple(
+            1 << max(0, int(counts.max().item()) - 1).bit_length()
+            if counts.numel() > 0
+            else 1
+            for counts in self._child_count_by_depth
         )
 
     def _tree_slices(self) -> None:
@@ -632,17 +646,43 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         actor_indices_expanded = actor_indices[:top, None, None].expand(
             -1, -1, NUM_HANDS
         )
-        actor_beliefs = beliefs[:top].gather(1, actor_indices_expanded).squeeze(1)
+        actor_beliefs = (
+            beliefs[:top].gather(1, actor_indices_expanded).squeeze(1).contiguous()
+        )
         # Skip materializing beliefs_dest as a separate tensor — fan-out is done
         # inline via index_select, and the denom side of the ratio kernel
         # gathers from actor_beliefs via parent_index instead.
         marginal_policy = (
             actor_beliefs.index_select(0, parent_index_bottom) * policy[bottom:]
-        )
+        ).contiguous()
+
+        if self._opt_ev_inline_opp:
+            numer_s, numer_cardsum = _preprocess_unblocked_stats(marginal_policy)
+            denom_s, denom_cardsum = _preprocess_unblocked_stats(actor_beliefs)
+            for depth in range(self.tree_depth - 1, -1, -1):
+                fused_weighted_parent_sum_inline_opp_both(
+                    values=values,
+                    prev_actor=self.prev_actor,
+                    policy_hero=policy,
+                    actor_beliefs=actor_beliefs,
+                    numer_s=numer_s,
+                    numer_cardsum=numer_cardsum,
+                    denom_s=denom_s,
+                    denom_cardsum=denom_cardsum,
+                    child_offsets=self._child_offsets_by_depth[depth],
+                    child_count=self._child_count_by_depth[depth],
+                    parent_base=self.depth_offsets[depth],
+                    child_base=bottom,
+                    max_children=self.num_actions,
+                    max_children_pow2=self._child_count_pow2_by_depth[depth],
+                    leaf_values=leaf_values if use_leaf_source else None,
+                    leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
+                )
+            return
 
         opponent_conditioned_policy_child = unblocked_mass_ratio_indirect_triton(
-            numer_target=marginal_policy.contiguous(),
-            denom_target=actor_beliefs.contiguous(),
+            numer_target=marginal_policy,
+            denom_target=actor_beliefs,
             parent_index=parent_index_bottom,
         )
         if self._opt_child_opp_policy:
@@ -666,6 +706,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     parent_base=parent_base,
                     child_base=bottom,
                     max_children=self.num_actions,
+                    max_children_pow2=self._child_count_pow2_by_depth[depth],
                     leaf_values=leaf_values if use_leaf_source else None,
                     leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
                 )
@@ -679,6 +720,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     child_count=self._child_count_by_depth[depth],
                     parent_base=parent_base,
                     max_children=self.num_actions,
+                    max_children_pow2=self._child_count_pow2_by_depth[depth],
                     leaf_values=leaf_values if use_leaf_source else None,
                     leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
                 )
