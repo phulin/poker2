@@ -17,7 +17,7 @@ import math
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -148,6 +148,7 @@ class TrueSkillTracker:
                 from p2.search.fused_sparse_cfr_evaluator import (
                     FusedSparseCFREvaluator,
                 )
+
                 ev = FusedSparseCFREvaluator(
                     model=model,
                     device=self.device,
@@ -156,6 +157,7 @@ class TrueSkillTracker:
                 )
             else:
                 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+
                 ev = SparseCFREvaluator(
                     model=model,
                     device=self.device,
@@ -164,6 +166,7 @@ class TrueSkillTracker:
                 )
         else:
             from p2.search.rebel_cfr_evaluator import T_WARM
+
             ev = RebelCFREvaluator(
                 search_batch_size=1,
                 env_proto=self.env_proto,
@@ -210,7 +213,9 @@ class TrueSkillTracker:
             return False
         return step_public % self.snapshot_interval == 0
 
-    def _clone_weights_cpu(self, src_weights: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def _clone_weights_cpu(
+        self, src_weights: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
         out: Dict[str, torch.Tensor] = {}
         for name, t in src_weights.items():
             out[name] = t.detach().to(device="cpu", dtype=self.snapshot_dtype).clone()
@@ -280,17 +285,72 @@ class TrueSkillTracker:
     def _allocate_games(self, n_opponents: int, total_games: int) -> List[int]:
         """Distribute ``total_games`` across ``n_opponents`` weighted toward
         most-recent (highest index = most recent)."""
-        if n_opponents == 0 or total_games == 0:
+        if n_opponents == 0 or total_games <= 0:
             return [0] * n_opponents
+
+        lo = max(0, int(self.ts_cfg.min_games_per_opponent))
+        hi = max(1, int(self.ts_cfg.max_games_per_opponent))
+        lo = min(lo, hi)
+        target_games = min(int(total_games), n_opponents * hi)
+        if target_games <= 0:
+            return [0] * n_opponents
+
+        if lo > 0 and target_games >= lo:
+            active_count = max(1, target_games // lo)
+        else:
+            active_count = min(n_opponents, target_games)
+        active_count = max(active_count, math.ceil(target_games / hi))
+        active_count = min(n_opponents, active_count)
+
         tau = max(1e-3, self.ts_cfg.recency_tau_frac) * n_opponents
-        # weights for index i (0..n-1), with i = n-1 most recent
-        raw = [math.exp(-(n_opponents - 1 - i) / tau) for i in range(n_opponents)]
-        s = sum(raw)
-        norm = [r / s for r in raw]
-        alloc = [int(round(w * total_games)) for w in norm]
-        # clamp
-        lo, hi = self.ts_cfg.min_games_per_opponent, self.ts_cfg.max_games_per_opponent
-        alloc = [max(lo, min(hi, a)) for a in alloc]
+        active_start = n_opponents - active_count
+        active_weights = [
+            math.exp(-(n_opponents - 1 - i) / tau)
+            for i in range(active_start, n_opponents)
+        ]
+
+        alloc = [0] * n_opponents
+        active_alloc = [0] * active_count
+        base_games = lo if lo > 0 else 1
+        if target_games >= active_count * base_games:
+            active_alloc = [base_games] * active_count
+
+        remaining = target_games - sum(active_alloc)
+        caps = [hi - a for a in active_alloc]
+        while remaining > 0 and any(cap > 0 for cap in caps):
+            weight_sum = sum(w for w, cap in zip(active_weights, caps) if cap > 0)
+            if weight_sum <= 0.0:
+                break
+            quotas = [
+                (remaining * weight / weight_sum) if cap > 0 else 0.0
+                for weight, cap in zip(active_weights, caps)
+            ]
+            adds = [
+                min(cap, int(math.floor(quota))) for quota, cap in zip(quotas, caps)
+            ]
+            added = sum(adds)
+            if added == 0:
+                order = sorted(
+                    range(active_count),
+                    key=lambda i: (quotas[i], active_weights[i]),
+                    reverse=True,
+                )
+                for i in order:
+                    if remaining == 0:
+                        break
+                    if caps[i] <= 0:
+                        continue
+                    active_alloc[i] += 1
+                    caps[i] -= 1
+                    remaining -= 1
+                continue
+
+            for i, add in enumerate(adds):
+                active_alloc[i] += add
+                caps[i] -= add
+            remaining -= added
+
+        alloc[active_start:] = active_alloc
         return alloc
 
     # ------------------------------------------------------- main entrypoint
@@ -376,7 +436,7 @@ class TrueSkillTracker:
                     new_snap.games += 1
                     opp.games += 1
                     total_games_played += 1
-                total_reward += float(rewards.sum().item())
+                total_reward += float(sum(rewards_list))
 
         eval_elapsed = time.perf_counter() - eval_start
 

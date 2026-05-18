@@ -57,47 +57,84 @@ def _build_action_to_child(ev, num_roots: int) -> torch.Tensor:
     return a2c
 
 
-def _two_prior_river_payoff(
-    ev_a, ev_b,
-    a_child: int,
-    b_child: int,
-    bel_a_post: torch.Tensor,  # [2, NH] post-action belief in eval A's tree
-    bel_b_post: torch.Tensor,  # [2, NH] post-action belief in eval B's tree
-    last_actor: int,
+def _beliefs_to_absolute(
+    child_beliefs: torch.Tensor,
+    last_actor: torch.Tensor,
 ) -> torch.Tensor:
-    """Compute the candidate-perspective two-prior showdown payoff for one
-    finished river game. ``bel_*_post`` are stored in (acting, other) order
-    at the terminal child; we reorder them to (p0, p1) using ``last_actor``.
+    """Reorder child beliefs from (acting, other) to absolute (p0, p1)."""
+    abs_beliefs = torch.empty_like(child_beliefs)
+    rows = torch.arange(child_beliefs.shape[0], device=child_beliefs.device)
+    abs_beliefs[rows, 1 - last_actor] = child_beliefs[:, 0]
+    abs_beliefs[rows, last_actor] = child_beliefs[:, 1]
+    return abs_beliefs
 
-    All tensor work is on-device; the only host values needed are the python
-    ints ``a_child``, ``b_child``, and ``last_actor``.
-    """
 
-    def _to_abs(child_belief: torch.Tensor) -> torch.Tensor:
-        bel = torch.empty_like(child_belief)  # [2, NH]
-        bel[1 - last_actor] = child_belief[0]
-        bel[last_actor] = child_belief[1]
-        return bel
+def _showdown_rows_for_children(
+    ev, children: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map terminal child node indices to rows in ``ev.showdown_indices``."""
+    rows = torch.zeros_like(children)
+    valid = children >= 0
+    if ev.showdown_indices.numel() == 0 or children.numel() == 0:
+        return rows, torch.zeros_like(valid)
 
-    bel_a = _to_abs(bel_a_post)  # [2, NH]
-    bel_b = _to_abs(bel_b_post)
+    lookup = torch.full(
+        (ev.total_nodes,),
+        -1,
+        dtype=torch.long,
+        device=ev.device,
+    )
+    lookup[ev.showdown_indices] = torch.arange(
+        ev.showdown_indices.numel(),
+        dtype=torch.long,
+        device=ev.device,
+    )
+    safe_children = children.clamp(min=0, max=ev.total_nodes - 1)
+    rows = lookup[safe_children]
+    valid = valid & (rows >= 0)
+    rows = torch.where(valid, rows, torch.zeros_like(rows))
+    return rows, valid
 
-    def _payoff(ev, child: int, bel: torch.Tensor) -> torch.Tensor:
-        # Broadcast our single belief across all of ev's showdown rows so we
-        # can call _showdown_value once, then pick the row matching `child`.
-        M = ev.showdown_indices.numel()
-        row = 0
-        if child >= 0:
-            matches = (ev.showdown_indices == child).nonzero(as_tuple=True)[0]
-            if matches.numel() > 0:
-                # One small DtoH per finished river game (rare).
-                row = int(matches[0].item())
-        bel_M = bel.unsqueeze(0).expand(M, -1, -1)
-        sv = ev._showdown_value(bel_M, 0)  # [M, NH]
-        return (bel[0] * sv[row]).sum()
 
-    payoff_a = _payoff(ev_a, a_child, bel_a)
-    payoff_b = _payoff(ev_b, b_child, bel_b)
+def _showdown_range_payoffs(
+    ev,
+    children: torch.Tensor,
+    abs_beliefs: torch.Tensor,
+) -> torch.Tensor:
+    """Compute candidate-perspective range payoffs for river terminal children."""
+    payoffs = torch.zeros(children.shape[0], device=ev.device, dtype=torch.float32)
+    M = ev.showdown_indices.numel()
+    if M == 0 or children.numel() == 0:
+        return payoffs
+
+    rows, valid = _showdown_rows_for_children(ev, children)
+    showdown_beliefs = torch.zeros(
+        M,
+        2,
+        NUM_HANDS,
+        dtype=abs_beliefs.dtype,
+        device=ev.device,
+    )
+    showdown_beliefs[rows[valid]] = abs_beliefs[valid]
+    showdown_values = ev._showdown_value(showdown_beliefs, 0)
+    raw_payoffs = (abs_beliefs[:, 0] * showdown_values[rows]).sum(dim=1)
+    return torch.where(valid, raw_payoffs, payoffs)
+
+
+def _two_prior_river_payoffs(
+    ev_a,
+    ev_b,
+    a_children: torch.Tensor,
+    b_children: torch.Tensor,
+    bel_a_post: torch.Tensor,  # [R, 2, NH] post-action belief in eval A's tree
+    bel_b_post: torch.Tensor,  # [R, 2, NH] post-action belief in eval B's tree
+    last_actor: torch.Tensor,
+) -> torch.Tensor:
+    """Compute candidate-perspective two-prior showdown payoffs in one batch."""
+    bel_a = _beliefs_to_absolute(bel_a_post, last_actor)
+    bel_b = _beliefs_to_absolute(bel_b_post, last_actor)
+    payoff_a = _showdown_range_payoffs(ev_a, a_children, bel_a)
+    payoff_b = _showdown_range_payoffs(ev_b, b_children, bel_b)
     return 0.5 * (payoff_a + payoff_b)
 
 
@@ -139,16 +176,6 @@ def play_public_belief_games(
 
     # Track which games are still active (not yet terminal).
     active_indices = torch.arange(G, device=device, dtype=torch.long)
-
-    # Per-game last-actor tracking for showdown reordering. Initialized
-    # arbitrarily; updated each step before we step the env.
-    last_actor = torch.zeros(G, dtype=torch.long, device=device)
-
-    # Per-game last child node within each evaluator's tree at the moment a
-    # game became terminal. Only meaningful for newly-finished games and is
-    # consumed immediately in the same iteration.
-    a_child_full = torch.full((G,), -1, dtype=torch.long, device=device)
-    b_child_full = torch.full((G,), -1, dtype=torch.long, device=device)
 
     # Initial subgame build for all games.
     evaluator_a.initialize_subgame(env, active_indices)
@@ -208,14 +235,9 @@ def play_public_belief_games(
         # *acting* evaluator's policy_probs_avg, indexed by the chosen child
         # nodes for that root. For invalid action bins (-1 in a2c) the
         # probability is forced to 0 by clamping the index then masking.
-        cur_a2c = torch.where(is_p0[:, None], a2c_a, a2c_b)  # [A, num_actions]
-        valid = cur_a2c >= 0
-        safe_idx = cur_a2c.clamp(min=0)
-        a_policy = evaluator_a.policy_probs_avg[safe_idx, hands[:, None]]
-        b_policy = evaluator_b.policy_probs_avg[safe_idx, hands[:, None]]
-        # Note: safe_idx is in the *acting* evaluator's tree. For non-acting
-        # rows (e.g., is_p0=False) we'd be indexing eval A with eval B's
-        # child indices; that's why we keep separate safe indices.
+        valid = torch.where(is_p0[:, None], a2c_a, a2c_b) >= 0
+        # Keep separate safe indices: action-to-child node IDs are local to
+        # each evaluator's current tree.
         safe_idx_a = a2c_a.clamp(min=0)
         safe_idx_b = a2c_b.clamp(min=0)
         a_action_probs = evaluator_a.policy_probs_avg[safe_idx_a, hands[:, None]]
@@ -242,12 +264,6 @@ def play_public_belief_games(
         post_belief_a = evaluator_a.beliefs[a_child_active]
         post_belief_b = evaluator_b.beliefs[b_child_active]
 
-        # Record per-game state we may need at end-of-game (last_actor /
-        # terminal child indices) into G-shaped buffers.
-        last_actor[active_indices] = to_act_active
-        a_child_full[active_indices] = a_child_active
-        b_child_full[active_indices] = b_child_active
-
         # Step the env. Build a G-shaped action vector with -1 for inactive
         # games (so step_bins no-ops on them).
         full_actions = torch.full((G,), -1, dtype=torch.long, device=device)
@@ -272,28 +288,19 @@ def play_public_belief_games(
 
             # River finishes: two-prior showdown payoff, computed per finished
             # game using the evaluator state we still hold (re-init hasn't
-            # run yet). This loop runs at most G times *over the entire game
-            # batch's lifetime*, so it's not on the per-iter hot path.
+            # run yet). Batch this so each evaluator's showdown kernel runs
+            # once for all river finishes in this step.
             river_pos = done_active_pos[is_river]
             if river_pos.numel() > 0:
-                # Pull the small ints we need to host once per river game.
-                river_pos_cpu = river_pos.tolist()
-                river_game_ids_cpu = active_indices[river_pos].tolist()
-                a_child_cpu = a_child_active[river_pos].tolist()
-                b_child_cpu = b_child_active[river_pos].tolist()
-                last_actor_cpu = to_act_active[river_pos].tolist()
-                for k, gid in enumerate(river_game_ids_cpu):
-                    pos = river_pos_cpu[k]
-                    payoff = _two_prior_river_payoff(
-                        evaluator_a,
-                        evaluator_b,
-                        int(a_child_cpu[k]),
-                        int(b_child_cpu[k]),
-                        post_belief_a[pos],
-                        post_belief_b[pos],
-                        int(last_actor_cpu[k]),
-                    )
-                    rewards[gid] = payoff
+                rewards[active_indices[river_pos]] = _two_prior_river_payoffs(
+                    evaluator_a,
+                    evaluator_b,
+                    a_child_active[river_pos],
+                    b_child_active[river_pos],
+                    post_belief_a[river_pos],
+                    post_belief_b[river_pos],
+                    to_act_active[river_pos],
+                )
 
             # Drop done games from the active set and the propagated beliefs.
             still_active = ~done_active
