@@ -1,7 +1,7 @@
 """TrueSkill rating tracker for periodic model checkpoints.
 
 Snapshots EMA weights at fixed fractions of the training run, then plays each
-new snapshot against a recency-weighted sample of all prior snapshots using
+new snapshot against a bounded recency-weighted sample of prior snapshots using
 public-belief CFR games. Ratings are updated per-game with the standard
 TrueSkill 1v1 Bayesian update.
 
@@ -120,17 +120,20 @@ class TrueSkillTracker:
         # Number of snapshots we'll take over the run.
         n_snapshots = max(1, total_steps // self.snapshot_interval)
 
-        self.games_per_eval = self._compute_games_per_eval(
+        self.opponents_per_eval = max(1, int(self.ts_cfg.opponents_per_eval))
+        self.games_per_opponent = self._compute_games_per_opponent(
             total_steps=total_steps,
             num_envs=cfg.num_envs,
             n_snapshots=n_snapshots,
             ts_cfg=self.ts_cfg,
+            opponents_per_eval=self.opponents_per_eval,
         )
 
         print(
             f"[TrueSkill] enabled. snapshot_interval={self.snapshot_interval} "
             f"steps; ~{n_snapshots} snapshots planned; "
-            f"games_per_eval={self.games_per_eval}; "
+            f"opponents_per_eval={self.opponents_per_eval}; "
+            f"games_per_opponent={self.games_per_opponent}; "
             f"eval_solves_per_action={self.ts_cfg.eval_solves_per_action:g}; "
             f"eval_inefficiency_factor={self.ts_cfg.eval_inefficiency_factor:g}"
         )
@@ -278,14 +281,15 @@ class TrueSkillTracker:
         return snap.mu - 3.0 * snap.sigma
 
     @staticmethod
-    def _compute_games_per_eval(
+    def _compute_games_per_opponent(
         *,
         total_steps: int,
         num_envs: int,
         n_snapshots: int,
         ts_cfg,
+        opponents_per_eval: int | None = None,
     ) -> int:
-        """Convert the nominal eval action budget into games per snapshot."""
+        """Convert the nominal eval action budget into games per sampled opponent."""
         total_actions = total_steps * num_envs * ts_cfg.actions_per_game
         eval_action_budget = ts_cfg.game_budget_frac * total_actions
         cost_per_eval_game = (
@@ -296,80 +300,60 @@ class TrueSkillTracker:
         eval_game_budget = eval_action_budget / cost_per_eval_game
         # Spread across n_snapshots evals. The first eval has no opponents, so
         # this leaves a small amount of budget headroom.
+        games_per_eval = int(eval_game_budget / max(1, n_snapshots))
+        if opponents_per_eval is None:
+            opponents_per_eval = max(1, int(getattr(ts_cfg, "opponents_per_eval", 10)))
+        games_per_opponent = games_per_eval // max(1, int(opponents_per_eval))
+        lo = max(1, int(ts_cfg.min_games_per_opponent))
+        hi = max(lo, int(ts_cfg.max_games_per_opponent))
+        return min(hi, max(lo, games_per_opponent))
+
+    @staticmethod
+    def _compute_games_per_eval(
+        *,
+        total_steps: int,
+        num_envs: int,
+        n_snapshots: int,
+        ts_cfg,
+    ) -> int:
+        """Convert the nominal eval action budget into total games per snapshot."""
+        total_actions = total_steps * num_envs * ts_cfg.actions_per_game
+        eval_action_budget = ts_cfg.game_budget_frac * total_actions
+        cost_per_eval_game = (
+            ts_cfg.actions_per_game
+            * max(1e-6, float(ts_cfg.eval_solves_per_action))
+            * max(1e-6, float(ts_cfg.eval_inefficiency_factor))
+        )
+        eval_game_budget = eval_action_budget / cost_per_eval_game
         return max(1, int(eval_game_budget / max(1, n_snapshots)))
 
     # ------------------------------------------------------- opponent sampling
 
-    def _allocate_games(self, n_opponents: int, total_games: int) -> List[int]:
-        """Distribute ``total_games`` across ``n_opponents`` weighted toward
-        most-recent (highest index = most recent)."""
-        if n_opponents == 0 or total_games <= 0:
-            return [0] * n_opponents
-
-        lo = max(0, int(self.ts_cfg.min_games_per_opponent))
-        hi = max(1, int(self.ts_cfg.max_games_per_opponent))
-        lo = min(lo, hi)
-        target_games = min(int(total_games), n_opponents * hi)
-        if target_games <= 0:
-            return [0] * n_opponents
-
-        if lo > 0 and target_games >= lo:
-            active_count = max(1, target_games // lo)
-        else:
-            active_count = min(n_opponents, target_games)
-        active_count = max(active_count, math.ceil(target_games / hi))
-        active_count = min(n_opponents, active_count)
-
+    def _opponent_sampling_weights(self, n_opponents: int) -> torch.Tensor:
+        """Return recency weights for stored opponents, oldest -> newest."""
         tau = max(1e-3, self.ts_cfg.recency_tau_frac) * n_opponents
-        active_start = n_opponents - active_count
-        active_weights = [
-            math.exp(-(n_opponents - 1 - i) / tau)
-            for i in range(active_start, n_opponents)
-        ]
+        return torch.tensor(
+            [math.exp(-(n_opponents - 1 - i) / tau) for i in range(n_opponents)],
+            dtype=torch.float32,
+            device=self.device,
+        )
 
-        alloc = [0] * n_opponents
-        active_alloc = [0] * active_count
-        base_games = lo if lo > 0 else 1
-        if target_games >= active_count * base_games:
-            active_alloc = [base_games] * active_count
+    def _sample_opponent_indices(self, n_opponents: int) -> List[int]:
+        """Sample a bounded set of opponent indices, sorted oldest -> newest."""
+        if n_opponents <= 0:
+            return []
+        sample_count = min(n_opponents, self.opponents_per_eval)
+        if sample_count == n_opponents:
+            return list(range(n_opponents))
 
-        remaining = target_games - sum(active_alloc)
-        caps = [hi - a for a in active_alloc]
-        while remaining > 0 and any(cap > 0 for cap in caps):
-            weight_sum = sum(w for w, cap in zip(active_weights, caps) if cap > 0)
-            if weight_sum <= 0.0:
-                break
-            quotas = [
-                (remaining * weight / weight_sum) if cap > 0 else 0.0
-                for weight, cap in zip(active_weights, caps)
-            ]
-            adds = [
-                min(cap, int(math.floor(quota))) for quota, cap in zip(quotas, caps)
-            ]
-            added = sum(adds)
-            if added == 0:
-                order = sorted(
-                    range(active_count),
-                    key=lambda i: (quotas[i], active_weights[i]),
-                    reverse=True,
-                )
-                for i in order:
-                    if remaining == 0:
-                        break
-                    if caps[i] <= 0:
-                        continue
-                    active_alloc[i] += 1
-                    caps[i] -= 1
-                    remaining -= 1
-                continue
-
-            for i, add in enumerate(adds):
-                active_alloc[i] += add
-                caps[i] -= add
-            remaining -= added
-
-        alloc[active_start:] = active_alloc
-        return alloc
+        weights = self._opponent_sampling_weights(n_opponents)
+        sampled = torch.multinomial(
+            weights,
+            num_samples=sample_count,
+            replacement=False,
+            generator=self.generator,
+        )
+        return sorted(sampled.detach().cpu().tolist())
 
     # ------------------------------------------------------- main entrypoint
 
@@ -398,7 +382,8 @@ class TrueSkillTracker:
         )
 
         opponents = list(self.snapshots)  # ordered oldest -> newest
-        allocations = self._allocate_games(len(opponents), self.games_per_eval)
+        opponent_indices = self._sample_opponent_indices(len(opponents))
+        sampled_opponents = [opponents[i] for i in opponent_indices]
 
         # Use the same search fidelity the trainer is currently running with.
         self._sync_live_schedule()
@@ -409,15 +394,13 @@ class TrueSkillTracker:
 
         # Bind candidate weights into the candidate model once for the full eval.
         with _bind_weights(self.candidate_model, new_snap.weights):
-            for opp, n_games in zip(opponents, allocations):
-                if n_games <= 0:
-                    continue
+            for opp in sampled_opponents:
                 with _bind_weights(self.opponent_model, opp.weights):
                     rewards = play_public_belief_games(
                         self.evaluator_a,
                         self.evaluator_b,
                         self.env_proto,
-                        n_games,
+                        self.games_per_opponent,
                         self.generator,
                         self.device,
                     )
@@ -467,6 +450,8 @@ class TrueSkillTracker:
             "trueskill/sigma": new_snap.sigma,
             "trueskill/skill": skill,
             "trueskill/games_played": total_games_played,
+            "trueskill/opponents_sampled": len(sampled_opponents),
+            "trueskill/games_per_opponent": self.games_per_opponent,
             "trueskill/snapshots": len(self.snapshots),
             "trueskill/avg_reward": (
                 total_reward / total_games_played if total_games_played else 0.0
@@ -488,6 +473,7 @@ class TrueSkillTracker:
         print(
             f"[TrueSkill] step={step} mu={new_snap.mu:.2f} sigma={new_snap.sigma:.2f} "
             f"skill={skill:.2f} games={total_games_played} "
+            f"opponents={len(sampled_opponents)} "
             f"snapshots={len(self.snapshots)} elapsed={eval_elapsed:.1f}s"
         )
         return metrics

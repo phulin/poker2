@@ -286,7 +286,10 @@ class TrueSkillConfig:
     # distribution is exp(-(N - i) / recency_tau_frac * N), where N = number
     # of stored snapshots. Larger -> more uniform; smaller -> more recent-heavy.
     recency_tau_frac: float = 0.25
-    # Minimum and maximum games to play against any single opponent per eval.
+    # Number of prior snapshots sampled for each eval. When fewer snapshots
+    # exist, all available opponents are used.
+    opponents_per_eval: int = 10
+    # Minimum and maximum games to play against any sampled opponent per eval.
     min_games_per_opponent: int = 1
     max_games_per_opponent: int = 64
     # TrueSkill priors.

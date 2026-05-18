@@ -13,53 +13,82 @@ def _tracker_with_alloc_config(
     min_games: int = 1,
     max_games: int = 64,
     recency_tau_frac: float = 0.25,
+    opponents_per_eval: int = 10,
 ) -> TrueSkillTracker:
     tracker = object.__new__(TrueSkillTracker)
     tracker.ts_cfg = SimpleNamespace(
         min_games_per_opponent=min_games,
         max_games_per_opponent=max_games,
         recency_tau_frac=recency_tau_frac,
+        opponents_per_eval=opponents_per_eval,
     )
+    tracker.opponents_per_eval = opponents_per_eval
+    tracker.device = torch.device("cpu")
+    tracker.generator = torch.Generator(device="cpu").manual_seed(0)
     return tracker
 
 
-def test_allocate_games_respects_budget_when_opponents_exceed_games() -> None:
-    tracker = _tracker_with_alloc_config(min_games=1, max_games=64)
+def test_sample_opponent_indices_uses_all_when_pool_under_cap() -> None:
+    tracker = _tracker_with_alloc_config(opponents_per_eval=10)
 
-    alloc = tracker._allocate_games(n_opponents=10, total_games=3)
+    sampled = tracker._sample_opponent_indices(n_opponents=4)
 
-    assert sum(alloc) == 3
-    assert alloc[:7] == [0] * 7
-    assert alloc[-3:] == [1, 1, 1]
+    assert sampled == [0, 1, 2, 3]
 
 
-def test_allocate_games_respects_per_opponent_cap() -> None:
-    tracker = _tracker_with_alloc_config(min_games=1, max_games=4)
+def test_sample_opponent_indices_caps_large_pool() -> None:
+    tracker = _tracker_with_alloc_config(opponents_per_eval=10)
 
-    alloc = tracker._allocate_games(n_opponents=3, total_games=100)
+    sampled = tracker._sample_opponent_indices(n_opponents=25)
 
-    assert alloc == [4, 4, 4]
-
-
-def test_allocate_games_uses_budget_with_minimums_when_feasible() -> None:
-    tracker = _tracker_with_alloc_config(min_games=2, max_games=4)
-
-    alloc = tracker._allocate_games(n_opponents=5, total_games=17)
-
-    assert sum(alloc) == 17
-    assert all(2 <= games <= 4 for games in alloc)
+    assert len(sampled) == 10
+    assert sampled == sorted(sampled)
+    assert len(set(sampled)) == 10
+    assert all(0 <= idx < 25 for idx in sampled)
 
 
-def test_allocate_games_supports_zero_minimum_without_single_opponent_collapse() -> (
+def test_compute_games_per_opponent_splits_eval_budget_across_sampled_opponents() -> (
     None
 ):
-    tracker = _tracker_with_alloc_config(min_games=0, max_games=64)
+    ts_cfg = SimpleNamespace(
+        game_budget_frac=0.03,
+        actions_per_game=16,
+        eval_solves_per_action=2.0,
+        eval_inefficiency_factor=2.0,
+        min_games_per_opponent=1,
+        max_games_per_opponent=64,
+    )
 
-    alloc = tracker._allocate_games(n_opponents=10, total_games=3)
+    games = TrueSkillTracker._compute_games_per_opponent(
+        total_steps=5000,
+        num_envs=1024,
+        n_snapshots=100,
+        ts_cfg=ts_cfg,
+        opponents_per_eval=10,
+    )
 
-    assert sum(alloc) == 3
-    assert alloc[:7] == [0] * 7
-    assert all(games > 0 for games in alloc[-3:])
+    assert games == 38
+
+
+def test_compute_games_per_opponent_respects_per_opponent_cap() -> None:
+    ts_cfg = SimpleNamespace(
+        game_budget_frac=0.03,
+        actions_per_game=16,
+        eval_solves_per_action=2.0,
+        eval_inefficiency_factor=2.0,
+        min_games_per_opponent=1,
+        max_games_per_opponent=64,
+    )
+
+    games = TrueSkillTracker._compute_games_per_opponent(
+        total_steps=5000,
+        num_envs=4096,
+        n_snapshots=100,
+        ts_cfg=ts_cfg,
+        opponents_per_eval=10,
+    )
+
+    assert games == 64
 
 
 def test_compute_games_per_eval_accounts_for_eval_cost_multipliers() -> None:

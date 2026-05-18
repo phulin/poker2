@@ -106,6 +106,7 @@ trueskill:
   eval_solves_per_action: 2.0
   eval_inefficiency_factor: 2.0
   recency_tau_frac: 0.25
+  opponents_per_eval: 10
   min_games_per_opponent: 1
   max_games_per_opponent: 64
   snapshot_dtype: bfloat16
