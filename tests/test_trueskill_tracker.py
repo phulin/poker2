@@ -62,6 +62,24 @@ def test_allocate_games_supports_zero_minimum_without_single_opponent_collapse()
     assert all(games > 0 for games in alloc[-3:])
 
 
+def test_compute_games_per_eval_accounts_for_eval_cost_multipliers() -> None:
+    ts_cfg = SimpleNamespace(
+        game_budget_frac=0.03,
+        actions_per_game=16,
+        eval_solves_per_action=2.0,
+        eval_inefficiency_factor=2.0,
+    )
+
+    games = TrueSkillTracker._compute_games_per_eval(
+        total_steps=5000,
+        num_envs=1024,
+        n_snapshots=100,
+        ts_cfg=ts_cfg,
+    )
+
+    assert games == 384
+
+
 class _FakeShowdownEvaluator:
     def __init__(self, showdown_indices: list[int], scale: float) -> None:
         self.device = torch.device("cpu")

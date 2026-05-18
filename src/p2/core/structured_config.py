@@ -276,6 +276,11 @@ class TrueSkillConfig:
     # num_steps * num_envs * actions_per_game (a game = ~16 actions).
     game_budget_frac: float = 0.03
     actions_per_game: int = 16
+    # TrueSkill plays two independently searched models at each decision and
+    # runs with less efficient batching than data generation. These factors
+    # convert the nominal action budget into a more realistic game budget.
+    eval_solves_per_action: float = 2.0
+    eval_inefficiency_factor: float = 2.0
     # Recency weighting: weight of opponent i (1 = oldest) in the sampling
     # distribution is exp(-(N - i) / recency_tau_frac * N), where N = number
     # of stored snapshots. Larger -> more uniform; smaller -> more recent-heavy.

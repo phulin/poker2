@@ -120,22 +120,19 @@ class TrueSkillTracker:
         # Number of snapshots we'll take over the run.
         n_snapshots = max(1, total_steps // self.snapshot_interval)
 
-        # Total scheduled training "actions" ≈ steps * envs * actions_per_game.
-        # Eval budget (in actions) = game_budget_frac * total. Convert to games
-        # by dividing by actions_per_game, then split across snapshots. The
-        # k-th snapshot (1-indexed) plays vs k-1 prior opponents, so total
-        # eval games are roughly (n_snapshots - 1) * games_per_eval.
-        total_actions = total_steps * cfg.num_envs * self.ts_cfg.actions_per_game
-        eval_action_budget = self.ts_cfg.game_budget_frac * total_actions
-        eval_game_budget = eval_action_budget / self.ts_cfg.actions_per_game
-        # Spread across n_snapshots evals (the very first eval has no opponents
-        # so it's free; that just gives us a small budget headroom).
-        self.games_per_eval = max(1, int(eval_game_budget / max(1, n_snapshots)))
+        self.games_per_eval = self._compute_games_per_eval(
+            total_steps=total_steps,
+            num_envs=cfg.num_envs,
+            n_snapshots=n_snapshots,
+            ts_cfg=self.ts_cfg,
+        )
 
         print(
             f"[TrueSkill] enabled. snapshot_interval={self.snapshot_interval} "
             f"steps; ~{n_snapshots} snapshots planned; "
-            f"games_per_eval={self.games_per_eval}"
+            f"games_per_eval={self.games_per_eval}; "
+            f"eval_solves_per_action={self.ts_cfg.eval_solves_per_action:g}; "
+            f"eval_inefficiency_factor={self.ts_cfg.eval_inefficiency_factor:g}"
         )
 
     # ------------------------------------------------------------- evaluators
@@ -279,6 +276,27 @@ class TrueSkillTracker:
 
     def _conservative_skill(self, snap: TSSnapshot) -> float:
         return snap.mu - 3.0 * snap.sigma
+
+    @staticmethod
+    def _compute_games_per_eval(
+        *,
+        total_steps: int,
+        num_envs: int,
+        n_snapshots: int,
+        ts_cfg,
+    ) -> int:
+        """Convert the nominal eval action budget into games per snapshot."""
+        total_actions = total_steps * num_envs * ts_cfg.actions_per_game
+        eval_action_budget = ts_cfg.game_budget_frac * total_actions
+        cost_per_eval_game = (
+            ts_cfg.actions_per_game
+            * max(1e-6, float(ts_cfg.eval_solves_per_action))
+            * max(1e-6, float(ts_cfg.eval_inefficiency_factor))
+        )
+        eval_game_budget = eval_action_budget / cost_per_eval_game
+        # Spread across n_snapshots evals. The first eval has no opponents, so
+        # this leaves a small amount of budget headroom.
+        return max(1, int(eval_game_budget / max(1, n_snapshots)))
 
     # ------------------------------------------------------- opponent sampling
 
