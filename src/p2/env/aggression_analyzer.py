@@ -55,7 +55,9 @@ def build_hand_to_group_mapping(device: torch.device | None = None) -> torch.Ten
     combos_ranked_list = [
         hand_name_to_combos[hand_name] for hand_name in HAND_EQUITY_ORDERING
     ]
-    combos_ranked_tensor = torch.tensor(sum(combos_ranked_list, []), dtype=torch.long)
+    combos_ranked_tensor = torch.tensor(
+        sum(combos_ranked_list, []), dtype=torch.long, device=device
+    )
 
     return torch.chunk(combos_ranked_tensor, NUM_GROUPS)
 
@@ -65,6 +67,11 @@ class AggressionAnalyzer:
 
     def __init__(self, device: torch.device | None = None):
         self._group_mapping = build_hand_to_group_mapping(device=device)
+        self._group_states = torch.tensor(
+            [len(chunk) for chunk in self._group_mapping],
+            dtype=torch.long,
+            device=device,
+        )
 
     def analyze_batch(
         self, batch: RebelBatch, max_batch_size: int | None = None
@@ -93,7 +100,7 @@ class AggressionAnalyzer:
                 overall_var = (result["overall_sum_sq"] / result["overall_count"]) - (
                     overall_avg**2
                 )
-                overall_std = max(0.0, overall_var) ** 0.5
+                overall_std = overall_var.clamp_min(0.0).sqrt()
             else:
                 overall_avg = 0.0
                 overall_std = 0.0
@@ -122,8 +129,8 @@ class AggressionAnalyzer:
         total_group_bet_sums = torch.zeros_like(results[0]["group_avg_bets"])
 
         # Track overall statistics: sum, sum of squares, and count
-        overall_sum = 0.0
-        overall_sum_sq = 0.0
+        overall_sum = torch.zeros((), device=total_group_bet_sums.device)
+        overall_sum_sq = torch.zeros((), device=total_group_bet_sums.device)
         overall_count = 0
 
         for result in results:
@@ -152,7 +159,7 @@ class AggressionAnalyzer:
             overall_avg = overall_sum / overall_count
             # Variance = E[X^2] - (E[X])^2
             overall_var = (overall_sum_sq / overall_count) - (overall_avg**2)
-            overall_std = max(0.0, overall_var) ** 0.5
+            overall_std = overall_var.clamp_min(0.0).sqrt()
         else:
             overall_avg = 0.0
             overall_std = 0.0
@@ -183,16 +190,8 @@ class AggressionAnalyzer:
 
         bet_amounts = batch.statistics["bet_amounts"]  # [N, num_bins]
 
-        # Get the group chunks (tuple of 5 tensors)
-        chunk_tuples = self._group_mapping
-
-        # Build a mapping from combo_idx to group_idx
-        group_mapping = torch.zeros(
-            NUM_HANDS, dtype=torch.long, device=bet_amounts.device
-        )
-        for group_idx, chunk in enumerate(chunk_tuples):
-            chunk = chunk.to(bet_amounts.device)
-            group_mapping[chunk] = group_idx
+        chunk_tuples = tuple(chunk.to(bet_amounts.device) for chunk in self._group_mapping)
+        group_states = self._group_states.to(bet_amounts.device)
 
         # Get policy targets if available - shape [N, NUM_HANDS, num_actions]
         if batch.policy_targets is not None:
@@ -213,30 +212,13 @@ class AggressionAnalyzer:
                 dim=-1
             )  # [N, NUM_HANDS]
 
-            # Group by hand equity groups
-            # Flatten to [N * NUM_HANDS]
-            total_bet_flat = expected_bet_per_hand.flatten()
-
-            # Get group for each hand: [NUM_HANDS]
-            hand_groups = group_mapping
-
-            # Expand to match the flattened batch
-            batch_size = num_states
-            group_indices = (
-                hand_groups.unsqueeze(0).expand(batch_size, -1).flatten()
-            )  # [N * 1326]
-
-            # Compute statistics per group
-            num_groups = 5
-            group_bet_sums = torch.zeros(num_groups, device=bet_amounts.device)
-            group_counts = torch.zeros(
-                num_groups, device=bet_amounts.device, dtype=torch.long
+            group_bet_sums = torch.stack(
+                [
+                    expected_bet_per_hand.index_select(1, chunk).sum()
+                    for chunk in chunk_tuples
+                ]
             )
-
-            for group_idx in range(num_groups):
-                mask = group_indices == group_idx
-                group_bet_sums[group_idx] = torch.where(mask, total_bet_flat, 0).sum()
-                group_counts[group_idx] = mask.sum()
+            group_counts = group_states * num_states
 
             # Average bet amount per group
             group_avg_bets = torch.where(
@@ -244,16 +226,14 @@ class AggressionAnalyzer:
             )
 
             # Compute overall statistics for aggregation
-            overall_sum = total_bet_flat.sum().item()
-            overall_sum_sq = (total_bet_flat**2).sum().item()
-            overall_count = len(total_bet_flat)
+            overall_sum = expected_bet_per_hand.sum()
+            overall_sum_sq = (expected_bet_per_hand**2).sum()
+            overall_count = expected_bet_per_hand.numel()
 
             return {
                 "group_avg_bets": group_avg_bets,
                 "group_counts": group_counts,
-                "group_states": torch.tensor(
-                    [len(chunk) for chunk in chunk_tuples], device=bet_amounts.device
-                ),
+                "group_states": group_states,
                 "overall_sum": overall_sum,
                 "overall_sum_sq": overall_sum_sq,
                 "overall_count": overall_count,
@@ -261,16 +241,14 @@ class AggressionAnalyzer:
 
         # Fallback: if no policy targets, just return overall statistics
         total_bet_amount = bet_amounts.sum(dim=1)
-        overall_sum = total_bet_amount.sum().item()
-        overall_sum_sq = (total_bet_amount**2).sum().item()
+        overall_sum = total_bet_amount.sum()
+        overall_sum_sq = (total_bet_amount**2).sum()
         overall_count = len(total_bet_amount)
 
         return {
             "group_avg_bets": torch.zeros(5, device=bet_amounts.device),
             "group_counts": torch.zeros(5, device=bet_amounts.device, dtype=torch.long),
-            "group_states": torch.tensor(
-                [len(chunk) for chunk in self._group_mapping], device=bet_amounts.device
-            ),
+            "group_states": group_states,
             "overall_sum": overall_sum,
             "overall_sum_sq": overall_sum_sq,
             "overall_count": overall_count,

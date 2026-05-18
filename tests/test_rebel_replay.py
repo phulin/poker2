@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.mlp_features import MLPFeatures
@@ -38,6 +39,46 @@ def test_rebel_replay_buffer_roundtrip():
     assert sample.policy_targets.shape == (2, NUM_HANDS, 5)
     assert sample.value_targets.shape == (2, 2, NUM_HANDS)
     assert sample.legal_masks.shape == (2, 5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_rebel_replay_buffer_cuda_roundtrip():
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device)
+    generator.manual_seed(123)
+    buffer = RebelReplayBuffer(
+        capacity=16,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=device,
+        generator=generator,
+    )
+    batch_size = 4
+    batch = RebelBatch(
+        features=MLPFeatures(
+            context=torch.randn(batch_size, 4, device=device),
+            street=torch.zeros(batch_size, dtype=torch.long, device=device),
+            to_act=torch.zeros(batch_size, dtype=torch.long, device=device),
+            board=torch.zeros(batch_size, 5, dtype=torch.long, device=device),
+            beliefs=torch.randn(batch_size, 2 * NUM_HANDS, device=device),
+        ),
+        policy_targets=torch.softmax(
+            torch.randn(batch_size, NUM_HANDS, 5, device=device), dim=-1
+        ),
+        value_targets=torch.randn(batch_size, 2, NUM_HANDS, device=device),
+        legal_masks=torch.ones(batch_size, 5, dtype=torch.bool, device=device),
+    )
+
+    buffer.add_batch(batch)
+    sample = buffer.sample(2)
+
+    assert len(buffer) == batch_size
+    assert sample.features.context.device.type == "cuda"
+    assert sample.policy_targets is not None
+    assert sample.policy_targets.device.type == "cuda"
+    assert sample.value_targets is not None
+    assert sample.value_targets.device.type == "cuda"
 
 
 def test_decimation():
@@ -97,9 +138,6 @@ def test_decimation():
         value_targets=None,
         legal_masks=legal_masks2,
     )
-
-    # Store original size
-    original_size = len(buffer)
 
     # Add the batch - should be decimated to ~50%
     buffer.add_batch(batch2)

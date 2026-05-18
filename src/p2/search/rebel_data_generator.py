@@ -51,7 +51,10 @@ class RebelDataGenerator:
 
     @profile
     def generate_data(
-        self, value_sample_count: int
+        self,
+        value_sample_count: int,
+        return_value_batch: bool = True,
+        return_policy_batch: bool = True,
     ) -> tuple[RebelBatch | None, RebelBatch | None]:
         N = self.evaluator.root_nodes
         root_indices = torch.arange(N, device=self.device)
@@ -81,15 +84,25 @@ class RebelDataGenerator:
             self.value_buffer.add_batch(value_batch)
             self.value_buffer.add_batch(augmented_value_batch)
 
-            policy_batches.append(policy_batch)
-            value_batches.append(value_batch)
-            value_batches.append(augmented_value_batch)
+            if return_policy_batch:
+                policy_batches.append(policy_batch)
+            if return_value_batch:
+                value_batches.append(value_batch)
+                value_batches.append(augmented_value_batch)
 
             collected += len(value_batch)
 
         self.last_extra = collected - value_sample_count
 
-        fresh_value_batch = RebelBatch.cat(value_batches) if value_batches else None
-        fresh_policy_batch = RebelBatch.cat(policy_batches) if policy_batches else None
+        fresh_value_batch = (
+            RebelBatch.cat(value_batches)
+            if return_value_batch and value_batches
+            else None
+        )
+        fresh_policy_batch = (
+            RebelBatch.cat(policy_batches)
+            if return_policy_batch and policy_batches
+            else None
+        )
 
         return fresh_value_batch, fresh_policy_batch

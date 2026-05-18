@@ -6,6 +6,7 @@ from typing import Optional, cast
 import torch
 
 from p2.env.card_utils import (
+    NUM_HANDS,
     combo_suit_permutation_inverse_tensor,
     suit_permutations_tensor,
 )
@@ -70,6 +71,7 @@ class RebelBatch:
     def with_permuted_targets(
         self,
         suit_permutations: torch.Tensor,
+        suit_permutation_idxs: Optional[torch.Tensor] = None,
         num_players: int = 2,
     ) -> tuple[RebelBatch, torch.Tensor]:
         """
@@ -77,23 +79,47 @@ class RebelBatch:
 
         Args:
             suit_permutations: Optional explicit suit permutations [B, 4].
-            generator: Optional RNG to match MLPFeatures.permute_suits API.
+            suit_permutation_idxs: Optional indices into the canonical 24 suit
+                permutations. Supplying them avoids rematching permutations.
             num_players: Number of players used to reshape value targets.
         """
         permuted_features = self.features.clone()
-        permuted_features.permute_suits(suit_permutations)
 
         # Map permutations back to their enumeration index.
-        all_perms = suit_permutations_tensor(device=suit_permutations.device)
-        matches = (suit_permutations[:, None, :] == all_perms[None, :, :]).all(dim=2)
-        assert matches.any(
-            dim=1
-        ).all(), "Invalid suit permutation encountered in with_permuted_targets"
-        suit_permutation_idxs = matches.float().argmax(dim=1)
+        if suit_permutation_idxs is None:
+            all_perms = suit_permutations_tensor(device=suit_permutations.device)
+            matches = (suit_permutations[:, None, :] == all_perms[None, :, :]).all(
+                dim=2
+            )
+            assert matches.any(
+                dim=1
+            ).all(), "Invalid suit permutation encountered in with_permuted_targets"
+            suit_permutation_idxs = matches.float().argmax(dim=1)
+        else:
+            suit_permutation_idxs = suit_permutation_idxs.to(suit_permutations.device)
 
         combo_permutations_inverse = combo_suit_permutation_inverse_tensor(
             device=suit_permutation_idxs.device
         )[suit_permutation_idxs]
+
+        board_valid = permuted_features.board >= 0
+        ranks = (permuted_features.board % 13).clamp(0, 12)
+        suits = (permuted_features.board // 13).clamp(0, 3)
+        new_suits = torch.gather(
+            suit_permutations.unsqueeze(1).expand(-1, 5, -1),
+            dim=2,
+            index=suits.unsqueeze(2).to(torch.long),
+        ).squeeze(2)
+        permuted_features.board[:] = torch.where(
+            board_valid, new_suits * 13 + ranks, permuted_features.board
+        )
+
+        beliefs = permuted_features.beliefs.view(-1, 2, NUM_HANDS)
+        permuted_features.beliefs[:] = torch.gather(
+            beliefs,
+            2,
+            combo_permutations_inverse[:, None, :].expand(-1, beliefs.shape[1], -1),
+        ).reshape(len(self), -1)
 
         value_targets = None
         if self.value_targets is not None:

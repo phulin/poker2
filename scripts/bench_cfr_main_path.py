@@ -438,6 +438,7 @@ def _make_supervise_callable(trainer: RebelCFRTrainer) -> Callable[[], Any]:
     suit_perms = suit_permutations_tensor(device=trainer.device)[suit_idxs]
     permuted_batch, suit_idxs = value_batch.with_permuted_targets(
         suit_permutations=suit_perms,
+        suit_permutation_idxs=suit_idxs,
         num_players=trainer.num_players,
     )
 
@@ -469,6 +470,7 @@ def _sample_training_inputs(trainer: RebelCFRTrainer):
     suit_perms = suit_permutations_tensor(device=trainer.device)[suit_idxs]
     permuted_batch, suit_idxs = value_batch.with_permuted_targets(
         suit_permutations=suit_perms,
+        suit_permutation_idxs=suit_idxs,
         num_players=trainer.num_players,
     )
     return value_batch, policy_batch, permuted_batch, suit_idxs
@@ -621,6 +623,7 @@ def run_microbenchmarks(
         suit_perms = suit_permutations_tensor(device=trainer.device)[suit_idxs]
         return value_batch.with_permuted_targets(
             suit_permutations=suit_perms,
+            suit_permutation_idxs=suit_idxs,
             num_players=trainer.num_players,
         )
 
@@ -701,6 +704,7 @@ def main(argv: list[str]) -> None:
     config_summary = {
         "num_envs": cfg.num_envs,
         "batch_size": cfg.train.batch_size,
+        "replay_buffer_device": cfg.train.replay_buffer_device,
         "iterations": cfg.search.iterations,
         "iterations_final": cfg.search.iterations_final,
         "depth": cfg.search.depth,

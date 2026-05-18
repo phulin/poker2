@@ -92,6 +92,7 @@ class TrainingConfig:
     # how many batches of data do we want to store in the replay buffer?
     # i.e. maximum age of a sample.
     replay_buffer_batches: int = 4
+    replay_buffer_device: str = "cpu"
 
     # how many times do we want to reuse the same policy/value data?
     value_reuse_goal: int = 8

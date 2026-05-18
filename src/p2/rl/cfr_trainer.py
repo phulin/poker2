@@ -52,7 +52,13 @@ class RebelCFRTrainer:
         self.bet_bins = cfg.env.bet_bins
         self.num_bet_bins = len(self.bet_bins) + 3
         self.batch_size = cfg.train.batch_size
-        self.buffer_device = torch.device("cpu")
+        buffer_device = cfg.train.replay_buffer_device.lower()
+        if buffer_device in {"cuda", "gpu", "device"} and device.type == "cuda":
+            self.buffer_device = device
+        elif buffer_device == "device":
+            self.buffer_device = device
+        else:
+            self.buffer_device = torch.device("cpu")
         self.buffer_rng = torch.Generator(device=self.buffer_device)
         if cfg.seed is not None:
             self.rng.manual_seed(int(cfg.seed))
@@ -778,15 +784,19 @@ class RebelCFRTrainer:
         self, step: int
     ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
         with self._eval_swap():
-            fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
-                self.K_value
+            fresh_value_batch, _ = self.data_generator.generate_data(
+                self.K_value, return_policy_batch=False
             )
 
             # Warmup: make sure we have enough samples.
             while (
                 min(len(self.value_buffer), len(self.policy_buffer)) < self.batch_size
             ):
-                self.data_generator.generate_data(self.K_value)
+                self.data_generator.generate_data(
+                    self.K_value,
+                    return_value_batch=False,
+                    return_policy_batch=False,
+                )
 
         value_fullness = len(self.value_buffer) / self.value_buffer.capacity
         episodes = math.ceil(self.cfg.train.episodes_per_step * value_fullness)
@@ -840,7 +850,9 @@ class RebelCFRTrainer:
                 suit_permutations_idxs
             ]
             permuted_batch, suit_permutations_idxs = value_batch.with_permuted_targets(
-                suit_permutations=suit_permutations, num_players=self.num_players
+                suit_permutations=suit_permutations,
+                suit_permutation_idxs=suit_permutations_idxs,
+                num_players=self.num_players,
             )
 
             for _ in range(supervisions):
