@@ -6,6 +6,10 @@ from typing import Optional, Tuple
 import torch
 
 from p2.env import rules
+from p2.env.env_gather_triton import (
+    gather_env_rows_triton,
+    triton_is_available as env_gather_triton_is_available,
+)
 
 DEBUG_STEP_TABLE_ENVS = 3
 DEFAULT_BET_BINS = [0.5, 0.75, 1.0, 1.5, 2.0]
@@ -666,6 +670,50 @@ class HUNLTensorEnv:
         dst_env.deck_pos[:] = self.deck_pos.repeat_interleave(
             repeats, dim=0, output_size=output_size
         )
+        return dst_env
+
+    def gather_rows(self, indices: torch.Tensor) -> "HUNLTensorEnv":
+        """Return a new env whose rows are gathered from ``indices``.
+
+        This is the sparse-tree expansion hot path: callers already need the
+        row map for child parent indices, so gathering by that row map avoids
+        repeating every env field independently.
+        """
+        output_size = indices.numel()
+        dst_env = HUNLTensorEnv.from_proto(self, num_envs=output_size)
+        if (
+            self.device.type == "cuda"
+            and indices.device.type == "cuda"
+            and env_gather_triton_is_available()
+        ):
+            gather_env_rows_triton(self, dst_env, indices)
+            return dst_env
+
+        dst_env.button[:] = self.button[indices]
+        dst_env.street[:] = self.street[indices]
+        dst_env.to_act[:] = self.to_act[indices]
+        dst_env.last_to_act[:] = self.last_to_act[indices]
+        dst_env.pot[:] = self.pot[indices]
+        dst_env.min_raise[:] = self.min_raise[indices]
+        dst_env.actions_this_round[:] = self.actions_this_round[indices]
+        dst_env.actions_last_round[:] = self.actions_last_round[indices]
+        dst_env.acted_since_reset[:] = self.acted_since_reset[indices]
+        dst_env.stacks[:] = self.stacks[indices]
+        dst_env.committed[:] = self.committed[indices]
+        dst_env.has_folded[:] = self.has_folded[indices]
+        dst_env.is_allin[:] = self.is_allin[indices]
+        dst_env.chips_placed[:] = self.chips_placed[indices]
+        dst_env.starting_stacks[:] = self.starting_stacks[indices]
+        dst_env.scale[:] = self.scale[indices]
+        dst_env.board_onehot[:] = self.board_onehot[indices]
+        dst_env.hole_onehot[:] = self.hole_onehot[indices]
+        dst_env.board_indices[:] = self.board_indices[indices]
+        dst_env.last_board_indices[:] = self.last_board_indices[indices]
+        dst_env.hole_indices[:] = self.hole_indices[indices]
+        dst_env.done[:] = self.done[indices]
+        dst_env.winner[:] = self.winner[indices]
+        dst_env.deck[:] = self.deck[indices]
+        dst_env.deck_pos[:] = self.deck_pos[indices]
         return dst_env
 
     def get_action_history(self) -> torch.Tensor:

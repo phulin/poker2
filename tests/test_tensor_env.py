@@ -203,6 +203,54 @@ def test_repeat_interleave_copies_rows():
     assert env.pot[0].item() == original_pot
 
 
+def test_gather_rows_matches_repeat_interleave_cuda():
+    if not torch.cuda.is_available():
+        return
+
+    env = _make_env(N=8, seed=321, device=torch.device("cuda"))
+    actions = torch.ones(env.N, dtype=torch.long, device=env.device)
+    env.step_bins(actions)
+    env.step_bins(actions)
+    repeats = torch.tensor([2, 0, 1, 3, 0, 2, 1, 0], device=env.device)
+    output_size = int(repeats.sum().item())
+    indices = torch.arange(env.N, device=env.device).repeat_interleave(
+        repeats, output_size=output_size
+    )
+
+    expected = env.repeat_interleave(repeats, output_size=output_size)
+    actual = env.gather_rows(indices)
+
+    fields = (
+        "button",
+        "street",
+        "to_act",
+        "last_to_act",
+        "pot",
+        "min_raise",
+        "actions_this_round",
+        "actions_last_round",
+        "acted_since_reset",
+        "stacks",
+        "committed",
+        "has_folded",
+        "is_allin",
+        "chips_placed",
+        "starting_stacks",
+        "scale",
+        "board_onehot",
+        "hole_onehot",
+        "board_indices",
+        "last_board_indices",
+        "hole_indices",
+        "done",
+        "winner",
+        "deck",
+        "deck_pos",
+    )
+    for field in fields:
+        assert torch.equal(getattr(actual, field), getattr(expected, field)), field
+
+
 def test_legal_mask_handles_all_in_states():
     """Ensure legal mask behaviour stays correct for all-in scenarios across envs."""
     device = torch.device("cpu")
@@ -285,7 +333,6 @@ def test_step_bins_negative_one_no_action():
     initial_acted_since_reset = env.acted_since_reset.clone()
 
     # Step with -1 for middle environment (index 1), valid actions for others
-    mask = env.legal_bins_mask()
     actions = torch.tensor(
         [1, -1, 1], device=env.device
     )  # check/call for envs 0,2, no action for env 1
@@ -1326,9 +1373,6 @@ def test_button_position_and_blind_posting():
     # Test 2: Button randomization on reset (not rotation)
     env2 = _make_env(N=2, mean_stack=1000, sb=25, bb=50)
     env2.reset()
-
-    initial_button_0 = env2.button[0].item()
-    initial_button_1 = env2.button[1].item()
 
     # Complete a hand by forcing showdown
     for _ in range(10):  # Enough steps to complete hand

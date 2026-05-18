@@ -171,7 +171,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.depth_offsets = [0, num_roots]
         depth = 0
         while depth < self.max_depth:
-            parent_start, parent_end = self.depth_offsets[-2], self.depth_offsets[-1]
+            parent_start = self.depth_offsets[-2]
             parent_env = env_levels[-1]
             legal_mask = parent_env.legal_bins_mask()
             stop_mask = parent_env.actions_this_round == 0
@@ -183,13 +183,12 @@ class SparseCFREvaluator(CFREvaluator):
             if child_count == 0:
                 break
 
-            env_next = parent_env.repeat_interleave(
-                child_counts, output_size=child_count
-            )
-
-            parent_indices_level = torch.arange(
-                parent_start, parent_end, device=self.device
+            parent_local_indices = torch.arange(
+                parent_env.N, device=self.device
             ).repeat_interleave(child_counts, output_size=child_count)
+            env_next = parent_env.gather_rows(parent_local_indices)
+
+            parent_indices_level = parent_local_indices + parent_start
 
             rewards, _, _ = env_next.step_bins(action_bins)
             env_levels.append(env_next)
