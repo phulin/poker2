@@ -905,13 +905,19 @@ class RebelCFRTrainer:
         for k in tensor_stats:
             step_stats.setdefault(k, 0.0)
 
+        value_metric_tensors = [
+            output.value for output in value_output_all if output.value is not None
+        ]
+        value_metric_output = ModelOutput(
+            value=torch.cat(value_metric_tensors) if value_metric_tensors else None
+        )
         metrics = self._compute_metrics(
             episodes,
             updates,
             step_stats,
             RebelBatch.cat(value_batch_all),
             RebelBatch.cat(policy_batch_all),
-            ModelOutput.cat(value_output_all),
+            value_metric_output,
             None,
             torch.cat(value_loss_update_all),
             torch.cat(policy_loss_update_all),
