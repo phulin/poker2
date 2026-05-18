@@ -85,6 +85,27 @@ def test_fused_dcfr_update_matches_pytorch(
 # ---------------------------------------------------------------------------
 
 
+def test_fused_sparse_graph_capture_regime_splits_dcfr_delay() -> None:
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    ev = FusedSparseCFREvaluator.__new__(FusedSparseCFREvaluator)
+    ev.cfr_type = CFRType.discounted_plus
+    ev.dcfr_delay = 5
+
+    assert ev._graph_capture_regime(0) is None
+    assert ev._graph_capture_regime(1) is None
+    assert ev._graph_capture_regime(2) == "pre_dcfr_delay"
+    assert ev._graph_capture_regime(5) == "pre_dcfr_delay"
+    assert ev._graph_capture_regime(6) == "post_dcfr_delay"
+
+    ev.cfr_type = CFRType.discounted
+    assert ev._graph_capture_regime(5) == "pre_dcfr_delay"
+
+    ev.cfr_type = CFRType.standard
+    assert ev._graph_capture_regime(2) == "post_dcfr_delay"
+    assert ev._graph_capture_regime(5) == "post_dcfr_delay"
+
+
 def _build_evaluator(num_envs: int = 2, depth: int = 2):
     """Construct a small SparseCFREvaluator for testing."""
     from hydra import compose, initialize_config_dir
@@ -910,6 +931,51 @@ def test_graphed_cfr_iteration_replays_across_t() -> None:
         diffs = a.max_abs_diff(b)
         worst = max(diffs.values())
         assert worst < 1e-2, f"t={replay_t}: replay diverges from baseline: {diffs}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_sparse_evaluate_cfr_captures_pre_and_post_dcfr_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import GraphedCFRIteration
+    import p2.search.fused_sparse_cfr_evaluator as fused_sparse_module
+
+    captures: list[tuple[int, int, str | None]] = []
+
+    class CountingGraphedCFRIteration(GraphedCFRIteration):
+        def capture(self, t_warmup: int, t_capture: int) -> None:
+            captures.append(
+                (
+                    t_warmup,
+                    t_capture,
+                    self.evaluator._graph_capture_regime(t_capture),
+                )
+            )
+            super().capture(t_warmup=t_warmup, t_capture=t_capture)
+
+    monkeypatch.setattr(
+        fused_sparse_module, "GraphedCFRIteration", CountingGraphedCFRIteration
+    )
+
+    ev = _build_evaluator(num_envs=1, depth=2)
+    ev.__class__ = fused_sparse_module.FusedSparseCFREvaluator
+    ev._ensure_fused_attrs()
+    ev.cfr_iterations = 14
+    ev.warm_start_iterations = 1
+    ev.dcfr_delay = 5
+
+    ev.evaluate_cfr(training_mode=False)
+    torch.cuda.synchronize()
+
+    assert [regime for _, _, regime in captures] == [
+        "pre_dcfr_delay",
+        "post_dcfr_delay",
+    ]
+    assert captures[0][0] <= ev.dcfr_delay
+    assert captures[0][1] <= ev.dcfr_delay
+    assert captures[1][0] > ev.dcfr_delay
+    assert captures[1][1] > ev.dcfr_delay
 
 
 # ---------------------------------------------------------------------------
