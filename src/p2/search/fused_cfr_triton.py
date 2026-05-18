@@ -3210,8 +3210,9 @@ class GraphedCFRIteration:
 
     Constraints on ``t`` values used for replay:
       - Must follow the same Python-level branches as ``t_capture`` (e.g.,
-        both ``t > dcfr_delay`` / both ``t > 1`` so ``last_model_values`` is
-        populated). Same constraint applies to ``t_warmup`` vs ``t_capture``.
+        both on the same side of ``dcfr_delay`` / both ``t > 1`` so
+        ``last_model_values`` is populated). Same constraint applies to
+        ``t_warmup`` vs ``t_capture``.
       - Tree structure (depth_offsets, child_offsets, ...) is baked in at
         capture time. Don't re-construct subgames after capture.
     """

@@ -1167,20 +1167,31 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             mix_new=float(mix_new),
         )
 
+    def _graph_capture_regime(self, t: int) -> str | None:
+        """Return the Python-branch regime that is safe to CUDA-graph replay."""
+        if t < 2:
+            return None
+        if (
+            self.cfr_type in (CFRType.discounted, CFRType.discounted_plus)
+            and t <= self.dcfr_delay
+        ):
+            return "pre_dcfr_delay"
+        return "post_dcfr_delay"
+
     @torch.no_grad()
     def evaluate_cfr(self, training_mode: bool = True):
-        """CFR-loop with the body wrapped in a per-call CUDA graph.
+        """CFR-loop with per-call CUDA graphs for each Python branch regime.
 
-        Runs uncaptured iterations until past all early-t Python branches
-        (``t > dcfr_delay`` and ``t > 1``), then captures one iteration and
-        replays the captured graph for the rest. The capture step's
-        side-stream warmup is itself a real CFR iteration at ``t``, so no
-        snapshot/restore is needed (CUDA graph capture is record-only — the
-        body recorded for ``t+1`` doesn't execute until the first replay).
-        Iterations whose ``t`` is in ``_record_stats_percentile_ts()`` run
-        uncaptured so stats hooks still fire, and capture is deferred past
-        any such iter. Per-call capture is required because
-        ``initialize_subgame`` reallocates the per-evaluator tensors.
+        Runs ``t < 2`` uncaptured, then captures/replays one graph for the
+        pre-DCFR-delay average-policy branch and another graph for the
+        post-delay branch. The capture step's side-stream warmup is itself a
+        real CFR iteration at ``t``, so no snapshot/restore is needed (CUDA
+        graph capture is record-only — the body recorded for ``t+1`` doesn't
+        execute until the first replay). Iterations whose ``t`` is in
+        ``_record_stats_percentile_ts()`` run uncaptured so stats hooks still
+        fire, and capture is deferred past any such iter. Per-call capture is
+        required because ``initialize_subgame`` reallocates the per-evaluator
+        tensors.
         """
         self._ensure_fused_attrs()
         self.model.eval()
@@ -1199,18 +1210,17 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         start = self.warm_start_iterations
         end = self.cfr_iterations
         stat_iters = self._record_stats_percentile_ts()
-        # Past update_average_policy's ``t == 0`` and ``t <= dcfr_delay``
-        # Python branches; past update_average_values' ``t > 1``.
-        safe_t = max(start, self.dcfr_delay + 1, 2)
 
-        runner: GraphedCFRIteration | None = None
+        runners: dict[str, GraphedCFRIteration] = {}
         t = start
         while t < end:
             self.profiler_step()
+            regime = self._graph_capture_regime(t)
             can_capture = (
-                runner is None
-                and t >= safe_t
+                regime is not None
+                and regime not in runners
                 and t + 1 < end
+                and self._graph_capture_regime(t + 1) == regime
                 and t not in stat_iters
                 and (t + 1) not in stat_iters
             )
@@ -1219,8 +1229,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 # for t+1 doesn't execute until the first replay below.
                 runner = GraphedCFRIteration(self)
                 runner.capture(t_warmup=t, t_capture=t + 1)
+                runners[regime] = runner
                 t += 1
                 continue
+            runner = runners.get(regime) if regime is not None else None
             if runner is not None and t not in stat_iters:
                 runner.replay(t=t)
             else:
