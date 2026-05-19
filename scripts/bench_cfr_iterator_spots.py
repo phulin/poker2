@@ -469,7 +469,7 @@ def _run_component_benchmarks(
                 old_plus_new_over_new=ev._t_scalars.mix_onon,
                 old_over_new=ev._t_scalars.mix_oon,
                 do_mix=False,
-                enforce_zero_sum=False,
+                enforce_zero_sum=bool(ev.model.enforce_zero_sum) and not ev.cfr_avg,
                 store_last=False,
             )
 
