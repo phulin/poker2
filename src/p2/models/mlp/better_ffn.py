@@ -57,6 +57,17 @@ def ffn_block(
         )
 
 
+def output_projection(in_dim: int, out_dim: int) -> nn.Module:
+    return nn.Sequential(
+        OrderedDict(
+            [
+                ("norm", nn.RMSNorm(in_dim, eps=1e-5)),
+                ("linear_out", nn.Linear(in_dim, out_dim)),
+            ]
+        )
+    )
+
+
 class BetterFFN(BaseMLPModel):
     """Better PBS feed-forward poker model."""
 
@@ -163,32 +174,18 @@ class BetterFFN(BaseMLPModel):
             ResidualBlock(
                 ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), policy_alpha
             )
-            for _ in range(num_policy_layers - 1)
+            for _ in range(num_policy_layers)
         ]
-        layers.append(
-            ffn_block(
-                hidden_dim,
-                ffn_dim,
-                num_actions * NUM_HANDS,
-                NonlinearityType.leaky_relu,
-            )
-        )
+        layers.append(output_projection(hidden_dim, num_actions * NUM_HANDS))
         self.policy_head = nn.Sequential(*layers)
 
         layers = [
             ResidualBlock(
                 ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), alpha
             )
-            for _ in range(num_value_layers - 1)
+            for _ in range(num_value_layers)
         ]
-        layers.append(
-            ffn_block(
-                hidden_dim,
-                ffn_dim,
-                num_players * NUM_HANDS,
-                NonlinearityType.leaky_relu,
-            )
-        )
+        layers.append(output_projection(hidden_dim, num_players * NUM_HANDS))
         self.hand_value_head = nn.Sequential(*layers)
 
     @staticmethod

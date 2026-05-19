@@ -437,35 +437,15 @@ export class BetterFfnWebGpuModel {
       }
 
       let valueInput = x;
-      for (let i = 0; i < this.manifest.architecture.numValueLayers - 1; i += 1) {
-        const inner = this.leakyReluBlockBatch(
-          `hand_value_head.${i}.inner`,
-          valueInput,
-          batch,
-          hiddenDim,
-          ffnDim,
-          hiddenDim,
-          empty,
-          uniform,
-        );
-        const out = empty(batch * hiddenDim);
-        this.scaledResidualAdd(
-          valueInput,
-          inner,
-          out,
-          batch * hiddenDim,
-          alpha,
-          uniform,
-        );
-        valueInput = out;
-      }
-      const valueRawBuffer = this.leakyReluBlockBatch(
-        `hand_value_head.${this.manifest.architecture.numValueLayers - 1}`,
+      const valueRawBuffer = this.headBatch(
+        "hand_value_head",
         valueInput,
         batch,
         hiddenDim,
         ffnDim,
+        this.manifest.architecture.numValueLayers,
         numPlayers * NUM_HANDS,
+        alpha,
         empty,
         uniform,
       );
@@ -474,39 +454,15 @@ export class BetterFfnWebGpuModel {
       if (options.includePolicy) {
         let policyInput = x;
         const policyAlpha = alpha;
-        for (
-          let i = 0;
-          i < this.manifest.architecture.numPolicyLayers - 1;
-          i += 1
-        ) {
-          const inner = this.leakyReluBlockBatch(
-            `policy_head.${i}.inner`,
-            policyInput,
-            batch,
-            hiddenDim,
-            ffnDim,
-            hiddenDim,
-            empty,
-            uniform,
-          );
-          const out = empty(batch * hiddenDim);
-          this.scaledResidualAdd(
-            policyInput,
-            inner,
-            out,
-            batch * hiddenDim,
-            policyAlpha,
-            uniform,
-          );
-          policyInput = out;
-        }
-        policyBuffer = this.leakyReluBlockBatch(
-          `policy_head.${this.manifest.architecture.numPolicyLayers - 1}`,
+        policyBuffer = this.headBatch(
+          "policy_head",
           policyInput,
           batch,
           hiddenDim,
           ffnDim,
+          this.manifest.architecture.numPolicyLayers,
           numActions * NUM_HANDS,
+          policyAlpha,
           empty,
           uniform,
         );
@@ -731,48 +687,30 @@ export class BetterFfnWebGpuModel {
       }
 
       let valueInput = x;
-      for (let i = 0; i < this.manifest.architecture.numValueLayers - 1; i += 1) {
-        const inner = this.leakyReluBlockBatch(
-          `hand_value_head.${i}.inner`,
-          valueInput,
-          batch,
-          hiddenDim,
-          ffnDim,
-          hiddenDim,
-          empty,
-          uniform,
-        );
-        const out = empty(batch * hiddenDim);
-        this.scaledResidualAdd(
-          valueInput,
-          inner,
-          out,
-          batch * hiddenDim,
-          alpha,
-          uniform,
-        );
-        valueInput = out;
-      }
-      const valueRawBuffer = this.leakyReluBlockBatch(
-        `hand_value_head.${this.manifest.architecture.numValueLayers - 1}`,
+      const valueRawBuffer = this.headBatch(
+        "hand_value_head",
         valueInput,
         batch,
         hiddenDim,
         ffnDim,
+        this.manifest.architecture.numValueLayers,
         numPlayers * NUM_HANDS,
+        alpha,
         empty,
         uniform,
       );
 
       let policyBuffer: GPUBuffer | undefined;
       if (options.includePolicy) {
-        policyBuffer = this.leakyReluBlockBatch(
-          `policy_head.${this.manifest.architecture.numPolicyLayers - 1}`,
+        policyBuffer = this.headBatch(
+          "policy_head",
           x,
           batch,
           hiddenDim,
           ffnDim,
+          this.manifest.architecture.numPolicyLayers,
           numActions * NUM_HANDS,
+          alpha,
           empty,
           uniform,
         );
@@ -859,25 +797,50 @@ export class BetterFfnWebGpuModel {
     for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
       this.requireLinearBlock(tensors, `trunk.${i}.inner`, hidden, ffn, hidden);
     }
-    for (let i = 0; i < this.manifest.architecture.numValueLayers - 1; i += 1) {
-      this.requireLinearBlock(tensors, `hand_value_head.${i}.inner`, hidden, ffn, hidden);
-    }
-    this.requireLinearBlock(
+    this.requireHead(
       tensors,
-      `hand_value_head.${this.manifest.architecture.numValueLayers - 1}`,
+      "hand_value_head",
+      this.manifest.architecture.numValueLayers,
       hidden,
       ffn,
       2 * NUM_HANDS,
     );
-    for (let i = 0; i < this.manifest.architecture.numPolicyLayers - 1; i += 1) {
-      this.requireLinearBlock(tensors, `policy_head.${i}.inner`, hidden, ffn, hidden);
-    }
-    this.requireLinearBlock(
+    this.requireHead(
       tensors,
-      `policy_head.${this.manifest.architecture.numPolicyLayers - 1}`,
+      "policy_head",
+      this.manifest.architecture.numPolicyLayers,
       hidden,
       ffn,
       actions * NUM_HANDS,
+    );
+  }
+
+  private requireHead(
+    tensors: TensorMap,
+    head: "hand_value_head" | "policy_head",
+    numLayers: number,
+    hiddenDim: number,
+    ffnDim: number,
+    outDim: number,
+  ): void {
+    const directOutputPrefix = `${head}.${numLayers}`;
+    if (tensors.has(`${directOutputPrefix}.linear_out.weight`)) {
+      for (let i = 0; i < numLayers; i += 1) {
+        this.requireLinearBlock(tensors, `${head}.${i}.inner`, hiddenDim, ffnDim, hiddenDim);
+      }
+      this.requireOutputProjection(tensors, directOutputPrefix, hiddenDim, outDim);
+      return;
+    }
+
+    for (let i = 0; i < numLayers - 1; i += 1) {
+      this.requireLinearBlock(tensors, `${head}.${i}.inner`, hiddenDim, ffnDim, hiddenDim);
+    }
+    this.requireLinearBlock(
+      tensors,
+      `${head}.${numLayers - 1}`,
+      hiddenDim,
+      ffnDim,
+      outDim,
     );
   }
 
@@ -891,6 +854,17 @@ export class BetterFfnWebGpuModel {
     requireTensor(tensors, `${prefix}.norm.weight`, [inDim]);
     requireTensor(tensors, `${prefix}.linear_in.weight`, [hiddenDim, inDim]);
     requireTensor(tensors, `${prefix}.linear_out.weight`, [outDim, hiddenDim]);
+    requireTensor(tensors, `${prefix}.linear_out.bias`, [outDim]);
+  }
+
+  private requireOutputProjection(
+    tensors: TensorMap,
+    prefix: string,
+    inDim: number,
+    outDim: number,
+  ): void {
+    requireTensor(tensors, `${prefix}.norm.weight`, [inDim]);
+    requireTensor(tensors, `${prefix}.linear_out.weight`, [outDim, inDim]);
     requireTensor(tensors, `${prefix}.linear_out.bias`, [outDim]);
   }
 
@@ -1190,6 +1164,109 @@ export class BetterFfnWebGpuModel {
           suit.data[suitIndex * hidden + d]!;
       }
     }
+    return out;
+  }
+
+  private headBatch(
+    head: "hand_value_head" | "policy_head",
+    input: GPUBuffer,
+    batch: number,
+    hiddenDim: number,
+    ffnDim: number,
+    numLayers: number,
+    outDim: number,
+    alpha: number,
+    empty: (elements: number) => GPUBuffer,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): GPUBuffer {
+    const directOutputPrefix = `${head}.${numLayers}`;
+    if (this.tensors.has(`${directOutputPrefix}.linear_out.weight`)) {
+      let headInput = input;
+      for (let i = 0; i < numLayers; i += 1) {
+        const inner = this.leakyReluBlockBatch(
+          `${head}.${i}.inner`,
+          headInput,
+          batch,
+          hiddenDim,
+          ffnDim,
+          hiddenDim,
+          empty,
+          uniform,
+        );
+        const out = empty(batch * hiddenDim);
+        this.scaledResidualAdd(headInput, inner, out, batch * hiddenDim, alpha, uniform);
+        headInput = out;
+      }
+      return this.outputProjectionBatch(
+        directOutputPrefix,
+        headInput,
+        batch,
+        hiddenDim,
+        outDim,
+        empty,
+        uniform,
+      );
+    }
+
+    let headInput = input;
+    for (let i = 0; i < numLayers - 1; i += 1) {
+      const inner = this.leakyReluBlockBatch(
+        `${head}.${i}.inner`,
+        headInput,
+        batch,
+        hiddenDim,
+        ffnDim,
+        hiddenDim,
+        empty,
+        uniform,
+      );
+      const out = empty(batch * hiddenDim);
+      this.scaledResidualAdd(headInput, inner, out, batch * hiddenDim, alpha, uniform);
+      headInput = out;
+    }
+    return this.leakyReluBlockBatch(
+      `${head}.${numLayers - 1}`,
+      headInput,
+      batch,
+      hiddenDim,
+      ffnDim,
+      outDim,
+      empty,
+      uniform,
+    );
+  }
+
+  private outputProjectionBatch(
+    prefix: string,
+    input: GPUBuffer,
+    batch: number,
+    inDim: number,
+    outDim: number,
+    empty: (elements: number) => GPUBuffer,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): GPUBuffer {
+    const normed = empty(batch * inDim);
+    this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+    const out = empty(batch * outDim);
+    this.matVecBatch(
+      this.tensor(`${prefix}.linear_out.weight`).buffer,
+      normed,
+      this.tensor(`${prefix}.linear_out.bias`).buffer,
+      out,
+      outDim,
+      inDim,
+      batch,
+      inDim,
+      outDim,
+      0,
+      0,
+      true,
+      uniform,
+    );
     return out;
   }
 
