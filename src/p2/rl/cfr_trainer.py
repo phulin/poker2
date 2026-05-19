@@ -491,9 +491,7 @@ class RebelCFRTrainer:
             "loss": step_stats["total_loss"] / episodes,
             "policy_loss": step_stats["policy_loss"] / episodes,
             "policy_target_entropy": step_stats["policy_target_entropy"] / episodes,
-            "policy_target_model_kl": (
-                step_stats["policy_target_model_kl"] / episodes
-            ),
+            "policy_target_model_kl": (step_stats["policy_target_model_kl"] / episodes),
             "value_loss": step_stats["value_loss"] / episodes,
             "entropy_loss": step_stats["entropy_loss"] / episodes,
             "permutation_loss": step_stats["permutation_loss"] / episodes,
@@ -590,11 +588,9 @@ class RebelCFRTrainer:
                                 count=self.cfg.model.num_supervisions,
                                 include_policy=False,
                             )
-                        metrics["fresh_value_loss_avg"] = (
-                            self.loss_fn.forward_value(
-                                fresh_model_avg_output, fresh_value_batch
-                            )["value_loss"].item()
-                        )
+                        metrics["fresh_value_loss_avg"] = self.loss_fn.forward_value(
+                            fresh_model_avg_output, fresh_value_batch
+                        )["value_loss"].item()
 
                         with self._model_autocast():
                             model_avg_output = self.model.repeat(

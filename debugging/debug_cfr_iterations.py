@@ -54,7 +54,6 @@ from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.mlp.better_ffn import BetterFFN
 from p2.models.mlp.better_trm import BetterTRM
 from p2.models.mlp.rebel_ffn import RebelFFN
-from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
@@ -234,6 +233,21 @@ class UniformPolicyWrapper(BaseMLPModel):
         if output.policy_logits is not None:
             output.policy_logits = torch.ones_like(output.policy_logits)
         return output
+
+    def forward_policy(self, *args, **kwargs):
+        kwargs["include_policy"] = True
+        kwargs["include_value"] = False
+        return self.forward(*args, **kwargs)
+
+    def forward_value(self, *args, **kwargs):
+        kwargs["include_policy"] = False
+        kwargs["include_value"] = True
+        return self.forward(*args, **kwargs)
+
+    def forward_both(self, *args, **kwargs):
+        kwargs["include_policy"] = True
+        kwargs["include_value"] = True
+        return self.forward(*args, **kwargs)
 
     def create_feature_encoder(self, *args, **kwargs):
         return self.base_model.create_feature_encoder(*args, **kwargs)
