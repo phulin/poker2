@@ -10,7 +10,7 @@ CFR/DCFR search, public-belief state handling, ReBeL data generation, evaluator 
 - `rebel_cfr_evaluator.py`: ReBeL-specific CFR evaluator.
 - `sparse_cfr_evaluator.py`: Sparse CFR evaluator implementation.
 - `fused_sparse_cfr_evaluator.py`: Sparse evaluator with fused operations, graph-friendly paths, and BetterFFN static leaf-feature caching.
-- `fused_cfr_triton.py`: Triton kernels and graph runner utilities for fused DCFR updates, belief math, showdown EV, and related reductions.
+- `fused_cfr_triton.py`: Triton kernels and graph runner utilities for fused DCFR updates, reach/belief/average-policy propagation, showdown EV, and related reductions.
 
 ### Subdirectories
 There are no child source directories.

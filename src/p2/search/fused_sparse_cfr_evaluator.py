@@ -13,6 +13,8 @@ Fusion points
   ``fused_reach_weights_depth_``.
 * ``_propagate_all_beliefs`` — gather root beliefs, multiply by reach,
   block, and normalize in one ``fused_deep_beliefs_`` kernel.
+* ``update_policy`` — optional per-depth fusion of reach propagation, belief
+  propagation, and deferred average-policy accumulation.
 * ``update_policy`` / ``update_average_policy`` — parent-aligned positive-regret
   sum + in-kernel divide via ``fused_parent_sum`` + ``fused_divide_by_parent_sum_``.
 * ``update_average_policy`` — average-policy renorm + average-reach propagation
@@ -53,6 +55,7 @@ from p2.search.fused_cfr_triton import (
     fused_parent_sum_divide_,
     fused_policy_sample_update_,
     fused_policy_renorm_reach_depth_,
+    fused_reach_beliefs_avg_depth_,
     fused_regret_dcfr_update_with_tensors_,
     fused_reach_weights_depth_,
     fused_regret_tail_,
@@ -187,6 +190,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._opt_ev_inline_opp = _env_flag("P2_FUSED_OPT_EV_INLINE_OPP")
         self._opt_defer_avg_reach = _env_flag("P2_FUSED_OPT_DEFER_AVG_REACH")
         self._opt_defer_avg_policy = _env_flag("P2_FUSED_OPT_DEFER_AVG_POLICY")
+        self._opt_fuse_reach_beliefs_avg = _env_flag(
+            "P2_FUSED_OPT_REACH_BELIEF_AVG"
+        )
         self._fused_positive_regrets_valid: bool = False
         self._sample_update_rows: torch.Tensor | None = None
         self._sample_update_counts: torch.Tensor | None = None
@@ -284,6 +290,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._opt_defer_avg_reach = _env_flag("P2_FUSED_OPT_DEFER_AVG_REACH")
         if not hasattr(self, "_opt_defer_avg_policy"):
             self._opt_defer_avg_policy = _env_flag("P2_FUSED_OPT_DEFER_AVG_POLICY")
+        if not hasattr(self, "_opt_fuse_reach_beliefs_avg"):
+            self._opt_fuse_reach_beliefs_avg = _env_flag(
+                "P2_FUSED_OPT_REACH_BELIEF_AVG"
+            )
         if not hasattr(self, "_fused_positive_regrets_valid"):
             self._fused_positive_regrets_valid = False
         if not hasattr(self, "_sample_update_rows"):
@@ -630,15 +640,56 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             )
         self._mask_invalid(self.policy_probs)
 
-        self._calculate_reach_weights(self.self_reach, self.policy_probs)
-        self._propagate_all_beliefs(self.beliefs, self.self_reach)
-
         defer_avg_reach = (
             self._opt_defer_avg_reach
             and not self.cfr_avg
             and self.use_final_policy_values
         )
-        self.update_average_policy(t, update_reach=not defer_avg_reach)
+        defer_avg_policy = (
+            self._opt_defer_avg_policy
+            and not self.cfr_avg
+            and self.use_final_policy_values
+        )
+        fuse_reach_beliefs_avg = (
+            self._opt_fuse_reach_beliefs_avg
+            and defer_avg_reach
+            and defer_avg_policy
+        )
+        if fuse_reach_beliefs_avg:
+            skip_avg_update = (
+                self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
+                and t <= self.dcfr_delay
+            )
+            write_average_policy = not skip_avg_update
+            avg_num, avg_den = self._ensure_average_policy_buffers()
+            root_index = self._get_root_index()
+            parent_index_all = self._parent_index_all
+            assert parent_index_all is not None
+            to_act = self.env.to_act.contiguous()
+            prev_actor = self.prev_actor.contiguous()
+            for depth in range(self.tree_depth):
+                fused_reach_beliefs_avg_depth_(
+                    reach=self.self_reach,
+                    beliefs=self.beliefs,
+                    policy=self.policy_probs,
+                    allowed_mask=self.allowed_hands,
+                    allowed_prob=self.allowed_hands_prob,
+                    root_index=root_index,
+                    parent_index=parent_index_all,
+                    prev_actor=prev_actor,
+                    to_act=to_act,
+                    average_policy_numerator=avg_num,
+                    average_policy_denominator=avg_den,
+                    new=self._t_scalars.mix_new,
+                    start=self.depth_offsets[depth + 1],
+                    end=self.depth_offsets[depth + 2],
+                    write_average_policy=write_average_policy,
+                )
+            self.average_policy_initialized = write_average_policy
+        else:
+            self._calculate_reach_weights(self.self_reach, self.policy_probs)
+            self._propagate_all_beliefs(self.beliefs, self.self_reach)
+            self.update_average_policy(t, update_reach=not defer_avg_reach)
         if self.cfr_avg or not self.use_final_policy_values:
             self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
 

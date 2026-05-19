@@ -3406,6 +3406,166 @@ def fused_reach_weights_depth_(
     )
 
 
+if triton is not None:
+
+    @triton.jit
+    def _fused_reach_beliefs_avg_depth_kernel(
+        reach_ptr,              # [total, 2, H] in/out
+        beliefs_ptr,            # [total, 2, H] in/out
+        policy_ptr,             # [total, H]
+        allowed_mask_ptr,       # [total, H] bool
+        allowed_prob_ptr,       # [total, H]
+        root_index_ptr,         # [total]
+        parent_index_ptr,       # [total]
+        prev_actor_ptr,         # [total]
+        to_act_ptr,             # [total]
+        avg_num_ptr,            # [total, H] in/out if WRITE_AVG
+        avg_den_ptr,            # [total, H] in/out if WRITE_AVG
+        new_scalar_ptr,
+        start,
+        end,
+        H,
+        EPS,
+        WRITE_AVG: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        c = tl.program_id(0) + start
+        if c >= end:
+            return
+
+        parent = tl.load(parent_index_ptr + c)
+        prev_actor = tl.load(prev_actor_ptr + c)
+        actor = tl.load(to_act_ptr + parent)
+        root = tl.load(root_index_ptr + c)
+
+        offs = tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        pol = tl.load(policy_ptr + c * H + offs, mask=mask, other=0.0)
+        allowed = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(tl.int1)
+
+        parent0 = tl.load(
+            reach_ptr + (parent * 2 + 0) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        parent1 = tl.load(
+            reach_ptr + (parent * 2 + 1) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        child0 = tl.where(prev_actor == 0, parent0 * pol, parent0)
+        child1 = tl.where(prev_actor == 1, parent1 * pol, parent1)
+        child0 = tl.where(allowed, child0, 0.0)
+        child1 = tl.where(allowed, child1, 0.0)
+
+        tl.store(reach_ptr + (c * 2 + 0) * H + offs, child0, mask=mask)
+        tl.store(reach_ptr + (c * 2 + 1) * H + offs, child1, mask=mask)
+
+        if WRITE_AVG:
+            new_scalar = tl.load(new_scalar_ptr)
+            parent_actor = tl.where(actor == 0, parent0, parent1)
+            reach_n = parent_actor * new_scalar
+            num_old = tl.load(avg_num_ptr + c * H + offs, mask=mask, other=0.0)
+            den_old = tl.load(avg_den_ptr + c * H + offs, mask=mask, other=0.0)
+            tl.store(
+                avg_num_ptr + c * H + offs,
+                num_old + reach_n * pol,
+                mask=mask,
+            )
+            tl.store(avg_den_ptr + c * H + offs, den_old + reach_n, mask=mask)
+
+        root0 = tl.load(
+            beliefs_ptr + (root * 2 + 0) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        root1 = tl.load(
+            beliefs_ptr + (root * 2 + 1) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        b0 = root0 * child0
+        b1 = root1 * child1
+        sum0 = tl.sum(b0, axis=0)
+        sum1 = tl.sum(b1, axis=0)
+        fallback = tl.load(allowed_prob_ptr + c * H + offs, mask=mask, other=0.0)
+        out0 = tl.where(sum0 > EPS, b0 / sum0, fallback)
+        out1 = tl.where(sum1 > EPS, b1 / sum1, fallback)
+        tl.store(beliefs_ptr + (c * 2 + 0) * H + offs, out0, mask=mask)
+        tl.store(beliefs_ptr + (c * 2 + 1) * H + offs, out1, mask=mask)
+
+
+def fused_reach_beliefs_avg_depth_(
+    reach: torch.Tensor,
+    beliefs: torch.Tensor,
+    policy: torch.Tensor,
+    allowed_mask: torch.Tensor,
+    allowed_prob: torch.Tensor,
+    root_index: torch.Tensor,
+    parent_index: torch.Tensor,
+    prev_actor: torch.Tensor,
+    to_act: torch.Tensor,
+    average_policy_numerator: torch.Tensor,
+    average_policy_denominator: torch.Tensor,
+    new: torch.Tensor,
+    start: int,
+    end: int,
+    write_average_policy: bool,
+    eps: float = 1e-5,
+    block_h: int = 2048,
+) -> None:
+    """Fuse reach propagation, belief normalization, and deferred avg-policy.
+
+    The average-policy update is optional so pre-DCFR-delay iterations can use
+    the same reach/belief fusion without changing deferred-average semantics.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert reach.is_contiguous() and reach.dim() == 3 and reach.shape[1] == 2
+    assert beliefs.is_contiguous() and beliefs.shape == reach.shape
+    assert policy.is_contiguous() and policy.dim() == 2
+    total, two, h = reach.shape
+    assert two == 2 and policy.shape == (total, h)
+    assert allowed_mask.is_contiguous() and allowed_mask.shape == (total, h)
+    assert allowed_prob.is_contiguous() and allowed_prob.shape == (total, h)
+    assert root_index.is_contiguous() and root_index.shape == (total,)
+    assert parent_index.is_contiguous() and parent_index.shape == (total,)
+    assert prev_actor.is_contiguous() and prev_actor.shape == (total,)
+    assert to_act.is_contiguous() and to_act.shape == (total,)
+    assert average_policy_numerator.is_contiguous()
+    assert average_policy_numerator.shape == (total, h)
+    assert average_policy_denominator.is_contiguous()
+    assert average_policy_denominator.shape == (total, h)
+    assert new.is_cuda and new.numel() == 1
+    assert h <= block_h, f"fused reach/beliefs assumes H ({h}) <= BLOCK_H ({block_h})"
+    n = end - start
+    if n <= 0:
+        return
+    grid = (n,)
+    _fused_reach_beliefs_avg_depth_kernel[grid](
+        reach,
+        beliefs,
+        policy,
+        allowed_mask,
+        allowed_prob,
+        root_index,
+        parent_index,
+        prev_actor,
+        to_act,
+        average_policy_numerator,
+        average_policy_denominator,
+        new,
+        start,
+        end,
+        h,
+        eps,
+        WRITE_AVG=write_average_policy,
+        BLOCK_H=block_h,
+        num_warps=8,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Kernel 14: fan_out_deep * reach_weights + block + normalize in one kernel.
 # ---------------------------------------------------------------------------
