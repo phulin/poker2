@@ -57,17 +57,6 @@ def ffn_block(
         )
 
 
-def direct_projection_block(in_dim: int, out_dim: int) -> nn.Module:
-    return nn.Sequential(
-        OrderedDict(
-            [
-                ("norm", nn.RMSNorm(in_dim, eps=1e-5)),
-                ("linear", nn.Linear(in_dim, out_dim)),
-            ]
-        )
-    )
-
-
 class BetterFFN(BaseMLPModel):
     """Better PBS feed-forward poker model."""
 
@@ -83,6 +72,7 @@ class BetterFFN(BaseMLPModel):
         num_players: int = 2,
         shared_trunk: bool = True,
         enforce_zero_sum: bool = True,
+        board_interaction_dim: int = 0,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
         super().__init__()
@@ -93,35 +83,66 @@ class BetterFFN(BaseMLPModel):
         self.num_players = num_players
         self.shared_trunk = shared_trunk
         self.enforce_zero_sum = enforce_zero_sum
+        self.board_interaction_dim = board_interaction_dim
 
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
+        if board_interaction_dim < 0:
+            raise ValueError("board_interaction_dim must be non-negative")
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
         self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)
         # Hand-aware belief encoder: project per-player belief vectors through a
         # hand embedding tied to the rank/suit embeddings, then fuse across
-        # players. Gives each "hand axis" learned card structure for free
-        # instead of treating beliefs as an unstructured 1326-dim vector.
+        # players. range_hidden_dim=0 keeps this path and uses ffn_dim for the
+        # belief FFN width instead of num_players * range_hidden_dim.
         combos = hand_combos_tensor()  # [NUM_HANDS, 2]
         self.register_buffer("hand_combos", combos, persistent=False)
         self.register_buffer("hand_ranks", combos % 13, persistent=False)
         self.register_buffer("hand_suits", combos // 13, persistent=False)
-        belief_in_dim = num_players * hidden_dim
-        self.belief_proj = (
-            direct_projection_block(belief_in_dim, hidden_dim)
-            if range_hidden_dim == 0
-            else ffn_block(
-                belief_in_dim,
-                num_players * range_hidden_dim,
-                hidden_dim,
-                nonlinearity,
+        hand_rank_pair_idx = self._unordered_pair_index(
+            self.hand_ranks[:, 0], self.hand_ranks[:, 1], 13
+        )
+        self.register_buffer(
+            "hand_rank_pair_one_hot",
+            torch.nn.functional.one_hot(hand_rank_pair_idx, 91).to(torch.float32),
+            persistent=False,
+        )
+        hand_suit_pair_idx = self._unordered_pair_index(
+            self.hand_suits[:, 0], self.hand_suits[:, 1], 4
+        )
+        self.register_buffer(
+            "hand_suit_pair_one_hot",
+            torch.nn.functional.one_hot(hand_suit_pair_idx, 10).to(torch.float32),
+            persistent=False,
+        )
+        if range_hidden_dim == 0 and ffn_dim % num_players != 0:
+            raise ValueError(
+                "ffn_dim must be divisible by num_players when range_hidden_dim is 0"
             )
+        effective_range_hidden_dim = (
+            ffn_dim // num_players if range_hidden_dim == 0 else range_hidden_dim
+        )
+        belief_in_dim = num_players * hidden_dim
+        belief_hidden_dim = num_players * effective_range_hidden_dim
+        self.belief_proj = ffn_block(
+            belief_in_dim, belief_hidden_dim, hidden_dim, nonlinearity
         )
         self.context_encoder = ffn_block(
             context_length(num_players), hidden_dim, hidden_dim, nonlinearity
         )
+        if board_interaction_dim > 0:
+            self.rank_pair_low_embedding = nn.Embedding(91, board_interaction_dim)
+            self.board_rank_low = nn.Linear(13, board_interaction_dim, bias=False)
+            self.rank_board_interaction_out = nn.Linear(
+                num_players * board_interaction_dim, hidden_dim, bias=False
+            )
+            self.suit_pair_low_embedding = nn.Embedding(10, board_interaction_dim)
+            self.board_suit_low = nn.Linear(4, board_interaction_dim, bias=False)
+            self.suit_board_interaction_out = nn.Linear(
+                num_players * board_interaction_dim, hidden_dim, bias=False
+            )
 
         # Build trunk
         # Default alpha is always based on hidden + value layers
@@ -170,12 +191,70 @@ class BetterFFN(BaseMLPModel):
         )
         self.hand_value_head = nn.Sequential(*layers)
 
+    @staticmethod
+    def _unordered_pair_index(
+        first: torch.Tensor, second: torch.Tensor, num_items: int
+    ) -> torch.Tensor:
+        lo = torch.minimum(first, second)
+        hi = torch.maximum(first, second)
+        return lo * num_items - (lo * (lo - 1)) // 2 + (hi - lo)
+
+    @staticmethod
+    def _index_counts(
+        indices: torch.Tensor,
+        valid: torch.Tensor,
+        num_items: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        safe_indices = torch.where(valid, indices, torch.zeros_like(indices))
+        counts = torch.zeros(
+            indices.shape[0],
+            num_items,
+            device=indices.device,
+            dtype=dtype,
+        )
+        return counts.scatter_add(1, safe_indices, valid.to(dtype))
+
     def _hand_embedding(self) -> torch.Tensor:
         """Per-hand embedding tied to rank/suit embeddings — shape [NUM_HANDS, hidden_dim]."""
         card_emb = self.rank_embedding(self.hand_ranks) + self.suit_embedding(
             self.hand_suits
         )
         return card_emb.sum(dim=1)
+
+    def _belief_board_interaction(
+        self,
+        player_beliefs: torch.Tensor,
+        board: torch.Tensor,
+    ) -> torch.Tensor | None:
+        valid = board >= 0
+        ranks = torch.where(valid, board % 13, torch.zeros_like(board))
+        suits = torch.where(valid, board // 13, torch.zeros_like(board))
+
+        if self.board_interaction_dim <= 0:
+            return None
+
+        rank_pair_mass = player_beliefs @ self.hand_rank_pair_one_hot.to(
+            dtype=player_beliefs.dtype
+        )
+        rank_pair_low = rank_pair_mass @ self.rank_pair_low_embedding.weight
+        board_rank_counts = self._index_counts(ranks, valid, 13, player_beliefs.dtype)
+        board_rank_low = self.board_rank_low(board_rank_counts)
+        rank_features = self.rank_board_interaction_out(
+            (rank_pair_low * board_rank_low[:, None, :]).flatten(1)
+        )
+
+        suit_pair_mass = player_beliefs @ self.hand_suit_pair_one_hot.to(
+            dtype=player_beliefs.dtype
+        )
+        suit_pair_low = suit_pair_mass @ self.suit_pair_low_embedding.weight
+        board_suit_counts = self._index_counts(suits, valid, 4, player_beliefs.dtype)
+        board_suit_low = self.board_suit_low(board_suit_counts)
+        suit_features = self.suit_board_interaction_out(
+            (suit_pair_low * board_suit_low[:, None, :]).flatten(1)
+        )
+
+        return rank_features + suit_features
 
     def static_feature_base(self, features: MLPFeatures) -> torch.Tensor:
         """Feature contribution that is fixed for a CFR leaf row."""
@@ -202,6 +281,11 @@ class BetterFFN(BaseMLPModel):
         if static_base_features is None:
             static_base_features = self.static_feature_base(features)
         flat_features = static_base_features + belief_features
+        interaction_features = self._belief_board_interaction(
+            player_beliefs, features.board
+        )
+        if interaction_features is not None:
+            flat_features = flat_features + interaction_features
         # assert flat_features.isfinite().all()
 
         x = self.trunk(flat_features)
@@ -346,6 +430,9 @@ class BetterFFN(BaseMLPModel):
 
         # Guess hand values are around stddev 0.1.
         self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
+        if self.board_interaction_dim > 0:
+            self.rank_board_interaction_out.weight.data.mul_(0.1)
+            self.suit_board_interaction_out.weight.data.mul_(0.1)
 
     def create_feature_encoder(
         self,

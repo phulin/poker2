@@ -211,8 +211,7 @@ class ModelConfig:
     ffn_dim: int = 1024
     shared_trunk: bool = True
     enforce_zero_sum: bool = True
-    rank_board_interaction_dim: int = 0
-    suit_board_interaction_dim: int = 0
+    board_interaction_dim: int = 0
 
     # Better TRM parameters
     num_recursions: int = 6
@@ -374,6 +373,25 @@ class Config:
         ]
         container["train"] = TrainingConfig(**train_container)
         model_container = container.get("model", {})
+        if "board_interaction_dim" not in model_container:
+            rank_interaction_dim = model_container.pop(
+                "rank_board_interaction_dim", None
+            )
+            suit_interaction_dim = model_container.pop(
+                "suit_board_interaction_dim", None
+            )
+            if rank_interaction_dim is not None or suit_interaction_dim is not None:
+                rank_interaction_dim = rank_interaction_dim or 0
+                suit_interaction_dim = suit_interaction_dim or 0
+                if rank_interaction_dim != suit_interaction_dim:
+                    raise ValueError(
+                        "rank_board_interaction_dim and suit_board_interaction_dim "
+                        "must match; use board_interaction_dim"
+                    )
+                model_container["board_interaction_dim"] = rank_interaction_dim
+        else:
+            model_container.pop("rank_board_interaction_dim", None)
+            model_container.pop("suit_board_interaction_dim", None)
         compile_setting = model_container.get("compile", "default")
         if isinstance(compile_setting, bool):
             model_container["compile"] = "default" if compile_setting else "off"

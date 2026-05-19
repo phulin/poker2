@@ -207,6 +207,19 @@ def _infer_better_dimensions(
 
     if any("swiglu" in k for k in model_state):
         cfg.model.nonlinearity = NonlinearityType.swiglu
+    rank_interaction_dim = (
+        model_state.get("rank_pair_low_embedding.weight", torch.empty(0)).shape[1]
+        if "rank_pair_low_embedding.weight" in model_state
+        else 0
+    )
+    suit_interaction_dim = (
+        model_state.get("suit_pair_low_embedding.weight", torch.empty(0)).shape[1]
+        if "suit_pair_low_embedding.weight" in model_state
+        else 0
+    )
+    if rank_interaction_dim != suit_interaction_dim:
+        raise ValueError("checkpoint rank/suit board interaction dims do not match")
+    cfg.model.board_interaction_dim = rank_interaction_dim
 
 
 class UniformPolicyWrapper(BaseMLPModel):
@@ -296,6 +309,7 @@ def load_model_from_checkpoint(
             num_value_layers=config.model.num_value_layers,
             shared_trunk=config.model.shared_trunk,
             enforce_zero_sum=config.model.enforce_zero_sum,
+            board_interaction_dim=config.model.board_interaction_dim,
             nonlinearity=config.model.nonlinearity,
         )
     elif detected_type == ModelType.better_trm:

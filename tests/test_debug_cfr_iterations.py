@@ -52,6 +52,7 @@ def _checkpoint_model_from_cfg(cfg: Config) -> BetterFFN | BetterTRM:
             num_value_layers=cfg.model.num_value_layers,
             shared_trunk=cfg.model.shared_trunk,
             enforce_zero_sum=cfg.model.enforce_zero_sum,
+            board_interaction_dim=cfg.model.board_interaction_dim,
             nonlinearity=cfg.model.nonlinearity,
         )
     else:
