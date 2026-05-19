@@ -28,6 +28,7 @@ from torch.profiler import ProfilerActivity, profile, record_function
 from p2.cli.sample_spots import build_pbs_from_spots, load_spots
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.search.fused_cfr_triton import fused_model_values_writeback_
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -401,6 +402,81 @@ def _run_component_benchmarks(
         setup_state,
         lambda: ev.set_leaf_values(next_t()),
     )
+    if hasattr(ev, "_leaf_beliefs_for_model_and_showdown") and hasattr(
+        ev, "_model_features_for_beliefs"
+    ):
+        leaf_box: dict[str, Any] = {}
+
+        def setup_leaf_parts() -> None:
+            setup_state()
+            ev.prepare_replay(start_t)
+            beliefs = ev.beliefs_avg if ev.cfr_avg else ev.beliefs
+            beliefs_at_model, showdown_beliefs = (
+                ev._leaf_beliefs_for_model_and_showdown(beliefs)
+            )
+            features_at_model = ev._model_features_for_beliefs(beliefs_at_model)
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                base_model = getattr(ev.model, "_orig_mod", ev.model)
+                static_features = None
+                if hasattr(base_model, "static_feature_base"):
+                    static_features = getattr(ev, "_static_model_base_features", None)
+                    if static_features is None:
+                        static_features = base_model.static_feature_base(
+                            features_at_model
+                        )
+                model_output = ev.model(
+                    features_at_model,
+                    include_policy=False,
+                    static_base_features=static_features,
+                )
+            leaf_box["beliefs"] = beliefs
+            leaf_box["beliefs_at_model"] = beliefs_at_model
+            leaf_box["showdown_beliefs"] = showdown_beliefs
+            leaf_box["features_at_model"] = features_at_model
+            leaf_box["static_features"] = getattr(
+                ev, "_static_model_base_features", None
+            )
+            leaf_box["hand_values"] = model_output.hand_values.contiguous()
+
+        def leaf_belief_gather():
+            beliefs = leaf_box["beliefs"]
+            return ev._leaf_beliefs_for_model_and_showdown(beliefs)
+
+        def leaf_feature_assembly():
+            return ev._model_features_for_beliefs(leaf_box["beliefs_at_model"])
+
+        def leaf_model_forward():
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                return ev.model(
+                    leaf_box["features_at_model"],
+                    include_policy=False,
+                    static_base_features=leaf_box["static_features"],
+                )
+
+        def leaf_model_writeback():
+            hand_values = leaf_box["hand_values"]
+            fused_model_values_writeback_(
+                hand_values=hand_values,
+                last_model_values=hand_values,
+                beliefs=leaf_box["beliefs_at_model"].contiguous(),
+                model_indices=ev.model_indices.contiguous(),
+                latest_values=ev.latest_values,
+                last_out=hand_values,
+                old_plus_new_over_new=ev._t_scalars.mix_onon,
+                old_over_new=ev._t_scalars.mix_oon,
+                do_mix=False,
+                enforce_zero_sum=False,
+                store_last=False,
+            )
+
+        def leaf_showdown_ev():
+            return ev._showdown_value_both(leaf_box["showdown_beliefs"])
+
+        time_component("leaf_belief_gather", setup_leaf_parts, leaf_belief_gather)
+        time_component("leaf_feature_assembly", setup_leaf_parts, leaf_feature_assembly)
+        time_component("leaf_model_forward", setup_leaf_parts, leaf_model_forward)
+        time_component("leaf_model_writeback", setup_leaf_parts, leaf_model_writeback)
+        time_component("leaf_showdown_ev", setup_leaf_parts, leaf_showdown_ev)
     time_component(
         "compute_expected_values",
         setup_state,
