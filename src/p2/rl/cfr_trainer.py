@@ -204,6 +204,8 @@ class RebelCFRTrainer:
             permutation_weight=cfg.train.permutation_coef,
             num_players=self.num_players,
         )
+        if self.device.type == "cuda" and _compile_setting(cfg) != "off":
+            self.loss_fn.compile(**_compile_kwargs(cfg))
         self.grad_clip = cfg.train.grad_clip
 
         # EMA setup. Shadow weights live in EMAHelper; at search/eval time we

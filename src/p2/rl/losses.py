@@ -765,11 +765,15 @@ class RebelSupervisedLoss(nn.Module):
         hand_values = output.hand_values
         device = logits.device if logits is not None else output.value.device
 
-        opp = 1 - batch.features.to_act
+        actor = batch.features.to_act
+        opp = 1 - actor
         player_beliefs = batch.features.beliefs.view(-1, 2, NUM_HANDS)
         allowed_hands = board_allowed_hands(batch.features.board)
         allowed_hands_float = allowed_hands.to(dtype=player_beliefs.dtype)
         unblocked_mass = calculate_unblocked_mass(player_beliefs)
+        actor_belief = player_beliefs.gather(
+            1, actor[:, None, None].expand(-1, 1, NUM_HANDS)
+        ).squeeze(1)
         opp_matchup = (
             unblocked_mass.gather(
                 1, opp[:, None, None].expand(-1, 1, NUM_HANDS)
@@ -788,12 +792,15 @@ class RebelSupervisedLoss(nn.Module):
             log_probs = F.log_softmax(masked_logits, dim=-1)
             probs = log_probs.exp()
 
-            policy_weights = opp_matchup
-            policy_loss_per_hand = (
-                -(batch.policy_targets * log_probs).sum(dim=-1) * policy_weights
-            )
-            policy_loss = policy_loss_per_hand.mean()
-            policy_loss_all = policy_loss_per_hand.detach()
+            policy_weights_unnormalized = actor_belief * opp_matchup
+            policy_weight_sum = policy_weights_unnormalized.sum(
+                dim=-1, keepdim=True
+            ).clamp(min=1e-8)
+            policy_weights = policy_weights_unnormalized / policy_weight_sum
+            policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
+            policy_loss_per_hand = policy_ce_per_hand * policy_weights
+            policy_loss = policy_loss_per_hand.sum(dim=-1).mean()
+            policy_loss_all = policy_loss_per_hand.sum(dim=-1).detach()
 
             entropy = -(probs * log_probs).sum(dim=-1).mean()
 
