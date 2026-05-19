@@ -1011,6 +1011,50 @@ def test_deferred_average_reach_matches_eager_reach() -> None:
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_scratch_reach_belief_avg_matches_full_reach_path() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    base = _build_evaluator(num_envs=2, depth=3)
+    full = _clone_evaluator_state(base)
+    scratch = _clone_evaluator_state(base)
+    full.__class__ = FusedSparseCFREvaluator
+    scratch.__class__ = FusedSparseCFREvaluator
+    full._ensure_fused_attrs()
+    scratch._ensure_fused_attrs()
+    full._opt_scratch_reach_beliefs_avg = False
+    scratch._opt_scratch_reach_beliefs_avg = True
+    for ev in (full, scratch):
+        ev._skip_record_stats = True
+        ev._record_stats = lambda t, old_policy: None
+
+    for t in range(1, 6):
+        full.cfr_iteration(t)
+        scratch.cfr_iteration(t)
+    torch.cuda.synchronize()
+
+    for name in (
+        "policy_probs",
+        "policy_probs_avg",
+        "average_policy_numerator",
+        "average_policy_denominator",
+        "policy_probs_sample",
+        "cumulative_regrets",
+        "beliefs",
+        "beliefs_avg",
+        "latest_values",
+        "values_avg",
+    ):
+        torch.testing.assert_close(
+            getattr(scratch, name),
+            getattr(full, name),
+            rtol=1e-4,
+            atol=1e-5,
+            msg=name,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Kernel 12-14 correctness tests: weighted parent-sum, reach weights, deep beliefs.
 # ---------------------------------------------------------------------------

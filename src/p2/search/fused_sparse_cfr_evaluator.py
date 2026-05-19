@@ -56,6 +56,7 @@ from p2.search.fused_cfr_triton import (
     fused_policy_sample_update_,
     fused_policy_renorm_reach_depth_,
     fused_reach_beliefs_avg_depth_,
+    fused_reach_beliefs_avg_scratch_depth_,
     fused_regret_dcfr_update_with_tensors_,
     fused_reach_weights_depth_,
     fused_regret_tail_,
@@ -193,7 +194,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._opt_fuse_reach_beliefs_avg = _env_flag(
             "P2_FUSED_OPT_REACH_BELIEF_AVG"
         )
+        self._opt_scratch_reach_beliefs_avg = _env_flag(
+            "P2_FUSED_OPT_SCRATCH_REACH_BELIEF_AVG"
+        )
         self._fused_positive_regrets_valid: bool = False
+        self._reach_scratch_a: torch.Tensor | None = None
+        self._reach_scratch_b: torch.Tensor | None = None
+        self._reach_scratch_width: int = 0
         self._sample_update_rows: torch.Tensor | None = None
         self._sample_update_counts: torch.Tensor | None = None
         self._sample_update_key: tuple[int, int, int] | None = None
@@ -296,8 +303,18 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._opt_fuse_reach_beliefs_avg = _env_flag(
                 "P2_FUSED_OPT_REACH_BELIEF_AVG"
             )
+        if not hasattr(self, "_opt_scratch_reach_beliefs_avg"):
+            self._opt_scratch_reach_beliefs_avg = _env_flag(
+                "P2_FUSED_OPT_SCRATCH_REACH_BELIEF_AVG"
+            )
         if not hasattr(self, "_fused_positive_regrets_valid"):
             self._fused_positive_regrets_valid = False
+        if not hasattr(self, "_reach_scratch_a"):
+            self._reach_scratch_a = None
+        if not hasattr(self, "_reach_scratch_b"):
+            self._reach_scratch_b = None
+        if not hasattr(self, "_reach_scratch_width"):
+            self._reach_scratch_width = 0
         if not hasattr(self, "_sample_update_rows"):
             self._sample_update_rows = None
         if not hasattr(self, "_sample_update_counts"):
@@ -457,6 +474,19 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._fused_positive_regrets_buf = torch.empty_like(self.cumulative_regrets)
             self._fused_positive_regrets_valid = False
         return self._fused_positive_regrets_buf
+
+    def _ensure_reach_scratch_buffers(self) -> tuple[torch.Tensor, torch.Tensor]:
+        max_width = 1
+        for d in range(self.tree_depth + 1):
+            width = self.depth_offsets[d + 1] - self.depth_offsets[d]
+            max_width = max(max_width, int(width))
+        shape = (max_width, self.num_players, NUM_HANDS)
+        if self._reach_scratch_a is None or self._reach_scratch_a.shape != shape:
+            self._reach_scratch_a = self.beliefs.new_empty(shape)
+            self._reach_scratch_b = self.beliefs.new_empty(shape)
+            self._reach_scratch_width = max_width
+        assert self._reach_scratch_b is not None
+        return self._reach_scratch_a, self._reach_scratch_b
 
     def _prepare_sample_update_table(self) -> None:
         if not self._opt_sparse_sample:
@@ -696,30 +726,65 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             assert parent_index_all is not None
             to_act = self.env.to_act.contiguous()
             prev_actor = self.prev_actor.contiguous()
-            for depth in range(self.tree_depth):
-                fused_reach_beliefs_avg_depth_(
-                    reach=self.self_reach,
-                    beliefs=self.beliefs,
-                    policy=self.policy_probs,
-                    allowed_mask=self.allowed_hands,
-                    allowed_prob=self.allowed_hands_prob,
-                    root_index=root_index,
-                    parent_index=parent_index_all,
-                    prev_actor=prev_actor,
-                    to_act=to_act,
-                    average_policy_numerator=avg_num,
-                    average_policy_denominator=avg_den,
-                    new=self._t_scalars.mix_new,
-                    start=self.depth_offsets[depth + 1],
-                    end=self.depth_offsets[depth + 2],
-                    write_average_policy=write_average_policy,
-                    # Final-depth reach has no descendants and stats only read
-                    # non-leaf reach. When stats are stubbed, keep leaf reach
-                    # register-local and avoid two full leaf-row stores.
-                    store_reach=(
-                        depth < self.tree_depth - 1 or not self._skip_record_stats
-                    ),
-                )
+            use_scratch_reach = (
+                self._opt_scratch_reach_beliefs_avg and self._skip_record_stats
+            )
+            if use_scratch_reach:
+                scratch_a, scratch_b = self._ensure_reach_scratch_buffers()
+                parent_reach = scratch_a
+                child_reach = scratch_b
+                for depth in range(self.tree_depth):
+                    start = self.depth_offsets[depth + 1]
+                    end = self.depth_offsets[depth + 2]
+                    parent_base = self.depth_offsets[depth]
+                    store_child = depth < self.tree_depth - 1
+                    fused_reach_beliefs_avg_scratch_depth_(
+                        parent_reach=parent_reach,
+                        child_reach=child_reach,
+                        beliefs=self.beliefs,
+                        policy=self.policy_probs,
+                        allowed_mask=self.allowed_hands,
+                        allowed_prob=self.allowed_hands_prob,
+                        root_index=root_index,
+                        parent_index=parent_index_all,
+                        prev_actor=prev_actor,
+                        to_act=to_act,
+                        average_policy_numerator=avg_num,
+                        average_policy_denominator=avg_den,
+                        new=self._t_scalars.mix_new,
+                        parent_base=parent_base,
+                        start=start,
+                        end=end,
+                        root_parent=depth == 0,
+                        write_average_policy=write_average_policy,
+                        store_child=store_child,
+                    )
+                    parent_reach, child_reach = child_reach, parent_reach
+            else:
+                for depth in range(self.tree_depth):
+                    fused_reach_beliefs_avg_depth_(
+                        reach=self.self_reach,
+                        beliefs=self.beliefs,
+                        policy=self.policy_probs,
+                        allowed_mask=self.allowed_hands,
+                        allowed_prob=self.allowed_hands_prob,
+                        root_index=root_index,
+                        parent_index=parent_index_all,
+                        prev_actor=prev_actor,
+                        to_act=to_act,
+                        average_policy_numerator=avg_num,
+                        average_policy_denominator=avg_den,
+                        new=self._t_scalars.mix_new,
+                        start=self.depth_offsets[depth + 1],
+                        end=self.depth_offsets[depth + 2],
+                        write_average_policy=write_average_policy,
+                        # Final-depth reach has no descendants and stats only read
+                        # non-leaf reach. When stats are stubbed, keep leaf reach
+                        # register-local and avoid two full leaf-row stores.
+                        store_reach=(
+                            depth < self.tree_depth - 1 or not self._skip_record_stats
+                        ),
+                    )
             self.average_policy_initialized = write_average_policy
         else:
             self._calculate_reach_weights(self.self_reach, self.policy_probs)
