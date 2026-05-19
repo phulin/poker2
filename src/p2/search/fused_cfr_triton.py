@@ -3427,6 +3427,7 @@ if triton is not None:
         H,
         EPS,
         WRITE_AVG: tl.constexpr,
+        STORE_REACH: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
         c = tl.program_id(0) + start
@@ -3458,8 +3459,9 @@ if triton is not None:
         child0 = tl.where(allowed, child0, 0.0)
         child1 = tl.where(allowed, child1, 0.0)
 
-        tl.store(reach_ptr + (c * 2 + 0) * H + offs, child0, mask=mask)
-        tl.store(reach_ptr + (c * 2 + 1) * H + offs, child1, mask=mask)
+        if STORE_REACH:
+            tl.store(reach_ptr + (c * 2 + 0) * H + offs, child0, mask=mask)
+            tl.store(reach_ptr + (c * 2 + 1) * H + offs, child1, mask=mask)
 
         if WRITE_AVG:
             actor = tl.load(to_act_ptr + parent)
@@ -3511,6 +3513,7 @@ def fused_reach_beliefs_avg_depth_(
     start: int,
     end: int,
     write_average_policy: bool,
+    store_reach: bool = True,
     eps: float = 1e-5,
     block_h: int = 2048,
 ) -> None:
@@ -3560,6 +3563,7 @@ def fused_reach_beliefs_avg_depth_(
         h,
         eps,
         WRITE_AVG=write_average_policy,
+        STORE_REACH=store_reach,
         BLOCK_H=block_h,
         num_warps=8,
     )
@@ -3820,6 +3824,7 @@ class _EvaluatorStateSnapshot:
 
     names: tuple[str, ...]
     tensors: tuple[torch.Tensor, ...]
+    reach_top: int | None = None
 
     @classmethod
     def from_evaluator(cls, evaluator) -> "_EvaluatorStateSnapshot":
@@ -3839,7 +3844,13 @@ class _EvaluatorStateSnapshot:
             "values_avg",
         ]
         tensors = tuple(getattr(evaluator, n).detach().clone() for n in names)
-        return cls(tuple(names), tensors)
+        reach_top = None
+        if hasattr(evaluator, "depth_offsets") and len(evaluator.depth_offsets) >= 2:
+            # Leaf self_reach can be skipped in graph/stat-free hot paths:
+            # no downstream CFR math consumes it, and _record_stats only reads
+            # non-leaf reach. Keep graph parity focused on observable state.
+            reach_top = int(evaluator.depth_offsets[-2])
+        return cls(tuple(names), tensors, reach_top)
 
     def restore_to(self, evaluator) -> None:
         for name, saved in zip(self.names, self.tensors):
@@ -3849,6 +3860,12 @@ class _EvaluatorStateSnapshot:
         assert self.names == other.names
         out = {}
         for name, a, b in zip(self.names, self.tensors, other.tensors):
+            if name == "self_reach" and self.reach_top is not None:
+                top = self.reach_top
+                if other.reach_top is not None:
+                    top = min(top, other.reach_top)
+                a = a[:top]
+                b = b[:top]
             out[name] = (a - b).abs().max().item()
         return out
 

@@ -684,6 +684,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     start=self.depth_offsets[depth + 1],
                     end=self.depth_offsets[depth + 2],
                     write_average_policy=write_average_policy,
+                    # Final-depth reach has no descendants and stats only read
+                    # non-leaf reach. When stats are stubbed, keep leaf reach
+                    # register-local and avoid two full leaf-row stores.
+                    store_reach=(
+                        depth < self.tree_depth - 1 or not self._skip_record_stats
+                    ),
                 )
             self.average_policy_initialized = write_average_policy
         else:
