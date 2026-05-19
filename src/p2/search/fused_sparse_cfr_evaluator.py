@@ -203,6 +203,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._static_model_base_fn_key: int | None = None
         self._static_model_feature_key: tuple[int, int, int] | None = None
         self._static_model_feature_fields: tuple[torch.Tensor, ...] | None = None
+        self._leaf_belief_gather_indices: torch.Tensor | None = None
+        self._leaf_belief_gather_key: tuple[int, int, int, int] | None = None
         self._br_action_parent_index_cache: dict[tuple[int, int], torch.Tensor] = {}
         self._tree_slice_key: tuple[int, ...] | None = None
         self._bottom: int = 0
@@ -314,6 +316,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._static_model_feature_key = None
         if not hasattr(self, "_static_model_feature_fields"):
             self._static_model_feature_fields = None
+        if not hasattr(self, "_leaf_belief_gather_indices"):
+            self._leaf_belief_gather_indices = None
+        if not hasattr(self, "_leaf_belief_gather_key"):
+            self._leaf_belief_gather_key = None
         if not hasattr(self, "_br_action_parent_index_cache"):
             self._br_action_parent_index_cache = {}
         if not hasattr(self, "_tree_slice_key"):
@@ -335,6 +341,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         super().initialize_subgame(*args, **kwargs)
         self._static_model_base_key = None
         self._static_model_base_features = None
+        self._leaf_belief_gather_indices = None
+        self._leaf_belief_gather_key = None
         self._prepare_tree_slices()
         self._reset_average_policy_accumulators()
 
@@ -532,6 +540,27 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             board=board,
             beliefs=beliefs_at_model.reshape(-1, 2 * NUM_HANDS),
         )
+
+    def _leaf_beliefs_for_model_and_showdown(
+        self, beliefs: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        m = int(self.model_indices.numel())
+        s = int(self.showdown_indices.numel())
+        key = (
+            int(self.model_indices.data_ptr()),
+            int(self.showdown_indices.data_ptr()),
+            m,
+            s,
+        )
+        if self._leaf_belief_gather_key != key or self._leaf_belief_gather_indices is None:
+            self._leaf_belief_gather_indices = torch.cat(
+                (self.model_indices, self.showdown_indices),
+                dim=0,
+            ).contiguous()
+            self._leaf_belief_gather_key = key
+
+        gathered = beliefs[self._leaf_belief_gather_indices]
+        return gathered[:m], gathered[m:]
 
     # ------------------------------------------------------------------
     # Beliefs: fused block + normalize.
@@ -1227,9 +1256,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         if self.model_indices.numel() > 0:
             if self._opt_leaf_feature_cache:
-                beliefs_at_model = beliefs[self.model_indices]
+                beliefs_at_model, showdown_beliefs = (
+                    self._leaf_beliefs_for_model_and_showdown(beliefs)
+                )
                 features_at_model = self._model_features_for_beliefs(beliefs_at_model)
-                showdown_beliefs = beliefs[self.showdown_indices]
             else:
                 features = self.feature_encoder.encode(
                     beliefs, pre_chance_node=self.new_street_mask
