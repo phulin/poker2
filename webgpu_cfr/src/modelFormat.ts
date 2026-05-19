@@ -40,6 +40,15 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
   if (!manifest.architecture.sharedTrunk) {
     throw new Error("BetterFFN checkpoints with shared_trunk=false are not supported");
   }
+  manifest.architecture.boardInteractionDim ??= 0;
+  if (
+    !Number.isInteger(manifest.architecture.boardInteractionDim) ||
+    manifest.architecture.boardInteractionDim < 0
+  ) {
+    throw new Error(
+      `unsupported boardInteractionDim ${manifest.architecture.boardInteractionDim}`,
+    );
+  }
   return manifest;
 }
 

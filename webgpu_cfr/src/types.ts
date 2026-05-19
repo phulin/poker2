@@ -59,6 +59,7 @@ export interface BetterFfnManifest {
     numActions: number;
     hiddenDim: number;
     rangeHiddenDim: number;
+    boardInteractionDim: number;
     ffnDim: number;
     numHiddenLayers: number;
     numPolicyLayers: number;

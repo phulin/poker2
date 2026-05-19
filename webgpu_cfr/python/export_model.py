@@ -49,10 +49,6 @@ def _validate_supported(cfg: Config) -> None:
         )
     if not cfg.model.shared_trunk:
         raise ValueError("webgpu_cfr currently requires shared_trunk=True")
-    if cfg.model.board_interaction_dim != 0:
-        raise ValueError(
-            "webgpu_cfr does not yet support BetterFFN rank/suit board interactions"
-        )
     if cfg.model.num_actions != len(cfg.env.bet_bins) + 3:
         raise ValueError("num_actions must equal len(env.bet_bins) + 3")
 
@@ -110,6 +106,7 @@ def export_model(
             "numActions": cfg.model.num_actions,
             "hiddenDim": cfg.model.hidden_dim,
             "rangeHiddenDim": cfg.model.range_hidden_dim,
+            "boardInteractionDim": cfg.model.board_interaction_dim,
             "ffnDim": cfg.model.ffn_dim,
             "numHiddenLayers": cfg.model.num_hidden_layers,
             "numPolicyLayers": cfg.model.num_policy_layers,
