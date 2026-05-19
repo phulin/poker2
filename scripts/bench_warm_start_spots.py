@@ -30,7 +30,6 @@ from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.better_trm import BetterTRM
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.search.fused_cfr_triton import fused_model_values_writeback_
-from p2.search.fused_sparse_cfr_evaluator import _set_leaf_gather
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -287,55 +286,18 @@ def _run_split_set_leaf_values(ev, timed: Callable[[str, Callable[[], Any]], Any
     beliefs = ev.beliefs_avg if ev.cfr_avg else ev.beliefs
 
     if ev.model_indices.numel() > 0:
-        if getattr(ev, "_opt_leaf_feature_cache", False):
-            beliefs_at_model = timed(
-                "set_leaf_gather_beliefs",
-                lambda: beliefs[ev.model_indices],
-            )
-            features_at_model = timed(
-                "set_leaf_feature_encode",
-                lambda: ev._model_features_for_beliefs(beliefs_at_model),
-            )
-            showdown_beliefs = timed(
-                "set_leaf_gather_showdown",
-                lambda: beliefs[ev.showdown_indices],
-            )
-        else:
-            features = timed(
-                "set_leaf_feature_encode",
-                lambda: ev.feature_encoder.encode(
-                    beliefs, pre_chance_node=ev.new_street_mask
-                ),
-            )
-            gathered = timed(
-                "set_leaf_gather",
-                lambda: _set_leaf_gather(
-                    beliefs,
-                    features.context,
-                    features.street,
-                    features.to_act,
-                    features.board,
-                    features.beliefs,
-                    ev.model_indices,
-                    ev.showdown_indices,
-                ),
-            )
-            (
-                beliefs_at_model,
-                ctx,
-                street,
-                to_act,
-                board,
-                feat_beliefs,
-                showdown_beliefs,
-            ) = gathered
-            features_at_model = MLPFeatures(
-                context=ctx,
-                street=street,
-                to_act=to_act,
-                board=board,
-                beliefs=feat_beliefs,
-            )
+        beliefs_at_model = timed(
+            "set_leaf_gather_beliefs",
+            lambda: beliefs[ev.model_indices],
+        )
+        features_at_model = timed(
+            "set_leaf_feature_encode",
+            lambda: ev._model_features_for_beliefs(beliefs_at_model),
+        )
+        showdown_beliefs = timed(
+            "set_leaf_gather_showdown",
+            lambda: beliefs[ev.showdown_indices],
+        )
         timed(
             "set_leaf_model_forward",
             lambda: _model_forward_values(ev, features_at_model),

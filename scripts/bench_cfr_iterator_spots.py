@@ -380,7 +380,7 @@ def _run_component_benchmarks(
         setup_state,
         lambda: ev.cfr_iteration(next_t()),
     )
-    if getattr(ev, "_opt_sparse_sample", False) and all(
+    if all(
         hasattr(ev, name)
         for name in (
             "_prepare_sample_update_table",
@@ -590,11 +590,7 @@ def _run_component_benchmarks(
             beliefs = ev.beliefs_avg if ev.cfr_avg else ev.beliefs
             top = ev._top
             target, stats = ev._ensure_regret_src_buffers(top)
-            positive_regrets = (
-                ev._ensure_positive_regrets_buf()
-                if getattr(ev, "_opt_reuse_positive_regrets", False)
-                else None
-            )
+            positive_regrets = ev._ensure_positive_regrets_buf()
             inline_regret_box["beliefs"] = beliefs
             inline_regret_box["top"] = top
             inline_regret_box["target"] = target
@@ -685,7 +681,6 @@ def _run_component_benchmarks(
             "_ensure_average_policy_buffers",
             "_get_root_index",
             "_ensure_reach_scratch_buffers",
-            "_opt_scratch_reach_beliefs_avg",
             "_t_scalars",
         )
     ):
@@ -701,9 +696,7 @@ def _run_component_benchmarks(
             reach_box["parent_index_all"] = ev._parent_index_all
             reach_box["to_act"] = ev.env.to_act.contiguous()
             reach_box["prev_actor"] = ev.prev_actor.contiguous()
-            reach_box["use_scratch"] = bool(
-                ev._opt_scratch_reach_beliefs_avg and skip_record_stats
-            )
+            reach_box["use_scratch"] = bool(skip_record_stats)
             if reach_box["use_scratch"]:
                 reach_box["scratch_a"], reach_box["scratch_b"] = (
                     ev._ensure_reach_scratch_buffers()

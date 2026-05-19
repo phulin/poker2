@@ -16,11 +16,11 @@ Fusion points
 * ``update_policy`` — optional per-depth fusion of reach propagation, belief
   propagation, and deferred average-policy accumulation.
 * ``update_policy`` / ``update_average_policy`` — parent-aligned positive-regret
-  sum + in-kernel divide via ``fused_parent_sum`` + ``fused_divide_by_parent_sum_``.
+  sum + in-kernel divide via ``fused_parent_sum_divide_``.
 * ``update_average_policy`` — average-policy renorm + average-reach propagation
   via ``fused_policy_renorm_reach_depth_`` in the hot ``update_policy`` path.
-* ``compute_expected_values`` — per-depth weight + parent-sum reduce via
-  ``fused_weighted_parent_sum``.
+* ``compute_expected_values`` — per-depth weight + parent-sum reduce with
+  inline opponent blocker projections.
 * ``compute_instantaneous_regrets`` — fan-out + gather + sub + mul into
   ``fused_regret_tail_``.
 * ``update_average_policy`` mixing — ``fused_average_policy_mix_with_tensors_``.
@@ -49,20 +49,15 @@ from p2.search.fused_cfr_triton import (
     fused_br_finalize_depth_,
     fused_block_and_normalize_beliefs_,
     fused_deep_beliefs_,
-    fused_divide_by_parent_sum_,
     fused_model_values_writeback_,
-    fused_parent_sum,
     fused_parent_sum_divide_,
     fused_policy_sample_update_,
     fused_policy_renorm_reach_depth_,
     fused_reach_beliefs_avg_depth_,
     fused_reach_beliefs_avg_scratch_depth_,
-    fused_regret_dcfr_update_with_tensors_,
     fused_reach_weights_depth_,
     fused_regret_tail_,
     fused_unblocked_regret_dcfr_update_with_tensors_,
-    fused_weighted_parent_sum,
-    fused_weighted_parent_sum_child_opp,
     fused_weighted_parent_sum_inline_opp_both,
     fused_weighted_parent_sum_inline_opp_both_noleaf,
     GraphedCFRIteration,
@@ -105,35 +100,6 @@ def _compile_kwargs_from_env(cfg=None) -> dict[str, object]:
     if mode == "max-autotune":
         kwargs["mode"] = mode
     return kwargs
-
-
-# Inductor folds the 7 separate aten::index ops in `set_leaf_values` (one per
-# MLPFeatures field at model_indices, plus beliefs at model_indices, plus
-# beliefs at showdown_indices) into a single graph. The structural win is
-# that model_indices and showdown_indices are read once and reused across
-# tensors instead of producing 6 redundant index gathers. dynamic=True keeps
-# a single artifact across runs with different model_indices /
-# showdown_indices sizes — both vary per CFR root configuration.
-@torch.compile(dynamic=True)
-def _set_leaf_gather(
-    beliefs: torch.Tensor,
-    feat_context: torch.Tensor,
-    feat_street: torch.Tensor,
-    feat_to_act: torch.Tensor,
-    feat_board: torch.Tensor,
-    feat_beliefs: torch.Tensor,
-    model_indices: torch.Tensor,
-    showdown_indices: torch.Tensor,
-) -> tuple[torch.Tensor, ...]:
-    return (
-        beliefs[model_indices],
-        feat_context[model_indices],
-        feat_street[model_indices],
-        feat_to_act[model_indices],
-        feat_board[model_indices],
-        feat_beliefs[model_indices],
-        beliefs[showdown_indices],
-    )
 
 
 class FusedSparseCFREvaluator(SparseCFREvaluator):
@@ -197,17 +163,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # When True, cfr_iteration skips the full policy_probs.clone() kept for
         # _record_stats. Set by GraphedCFRIteration when stats are stubbed out.
         self._skip_record_stats: bool = False
-        self._opt_reuse_positive_regrets = True
-        self._opt_parent_sum_divide = True
-        self._opt_sparse_sample = True
-        self._opt_leaf_feature_cache = True
-        self._opt_child_opp_policy = True
-        self._opt_ev_inline_opp = True
-        self._opt_defer_avg_reach = True
-        self._opt_defer_avg_policy = True
-        self._opt_fuse_reach_beliefs_avg = True
-        self._opt_scratch_reach_beliefs_avg = True
-        self._opt_inline_regret_src_update = True
         self._fused_positive_regrets_valid: bool = False
         self._reach_scratch_a: torch.Tensor | None = None
         self._reach_scratch_b: torch.Tensor | None = None
@@ -305,28 +260,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._skip_record_stats = False
         if not hasattr(self, "_compile_kwargs"):
             self._compile_kwargs = _compile_kwargs_from_env()
-        if not hasattr(self, "_opt_reuse_positive_regrets"):
-            self._opt_reuse_positive_regrets = True
-        if not hasattr(self, "_opt_parent_sum_divide"):
-            self._opt_parent_sum_divide = True
-        if not hasattr(self, "_opt_sparse_sample"):
-            self._opt_sparse_sample = True
-        if not hasattr(self, "_opt_leaf_feature_cache"):
-            self._opt_leaf_feature_cache = True
-        if not hasattr(self, "_opt_child_opp_policy"):
-            self._opt_child_opp_policy = True
-        if not hasattr(self, "_opt_ev_inline_opp"):
-            self._opt_ev_inline_opp = True
-        if not hasattr(self, "_opt_defer_avg_reach"):
-            self._opt_defer_avg_reach = True
-        if not hasattr(self, "_opt_defer_avg_policy"):
-            self._opt_defer_avg_policy = True
-        if not hasattr(self, "_opt_fuse_reach_beliefs_avg"):
-            self._opt_fuse_reach_beliefs_avg = True
-        if not hasattr(self, "_opt_scratch_reach_beliefs_avg"):
-            self._opt_scratch_reach_beliefs_avg = True
-        if not hasattr(self, "_opt_inline_regret_src_update"):
-            self._opt_inline_regret_src_update = True
         if not hasattr(self, "_fused_positive_regrets_valid"):
             self._fused_positive_regrets_valid = False
         if not hasattr(self, "_reach_scratch_a"):
@@ -553,8 +486,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         return self._regret_src_target_buf, self._regret_src_stats_buf
 
     def _prepare_sample_update_table(self) -> None:
-        if not self._opt_sparse_sample:
-            return
         key = (
             int(self.t_sample.data_ptr()),
             int(self.total_nodes),
@@ -727,9 +658,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         assert child_count_top is not None
         assert parent_index_bottom is not None
         positive_regrets = self._ensure_positive_regrets_buf()
-        if not (
-            self._opt_reuse_positive_regrets and self._fused_positive_regrets_valid
-        ):
+        if not self._fused_positive_regrets_valid:
             torch.clamp(self.cumulative_regrets, min=0.0, out=positive_regrets)
         self._fused_positive_regrets_valid = False
 
@@ -737,48 +666,20 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # gathers from parent_sum via parent_index on the fly. Skips
         # materializing the [num_children, H] denom intermediate.
         uniform_fallback = self.uniform_policy[bottom:].contiguous()
-        if self._opt_parent_sum_divide:
-            fused_parent_sum_divide_(
-                values=positive_regrets.contiguous(),
-                fallback=uniform_fallback,
-                child_offsets=child_offsets_top,
-                child_count=child_count_top,
-                out=self.policy_probs[bottom:],
-                out_offset=bottom,
-                max_children=self.num_actions,
-            )
-        else:
-            parent_sum = fused_parent_sum(
-                values=positive_regrets.contiguous(),
-                child_offsets=child_offsets_top,
-                child_count=child_count_top,
-                max_children=self.num_actions,
-            )
-            fused_divide_by_parent_sum_(
-                pos=positive_regrets[bottom:].contiguous(),
-                fallback=uniform_fallback,
-                parent_sum=parent_sum,
-                parent_index=parent_index_bottom,
-                out=self.policy_probs[bottom:],
-            )
+        fused_parent_sum_divide_(
+            values=positive_regrets.contiguous(),
+            fallback=uniform_fallback,
+            child_offsets=child_offsets_top,
+            child_count=child_count_top,
+            out=self.policy_probs[bottom:],
+            out_offset=bottom,
+            max_children=self.num_actions,
+        )
         self._mask_invalid(self.policy_probs)
 
-        defer_avg_reach = (
-            self._opt_defer_avg_reach
-            and not self.cfr_avg
-            and self.use_final_policy_values
-        )
-        defer_avg_policy = (
-            self._opt_defer_avg_policy
-            and not self.cfr_avg
-            and self.use_final_policy_values
-        )
-        fuse_reach_beliefs_avg = (
-            self._opt_fuse_reach_beliefs_avg
-            and defer_avg_reach
-            and defer_avg_policy
-        )
-        if fuse_reach_beliefs_avg:
+        defer_avg_reach = not self.cfr_avg and self.use_final_policy_values
+        defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
+        if defer_avg_reach and defer_avg_policy:
             skip_avg_update = (
                 self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
                 and t <= self.dcfr_delay
@@ -790,9 +691,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             assert parent_index_all is not None
             to_act = self.env.to_act.contiguous()
             prev_actor = self.prev_actor.contiguous()
-            use_scratch_reach = (
-                self._opt_scratch_reach_beliefs_avg and self._skip_record_stats
-            )
+            use_scratch_reach = self._skip_record_stats
             if use_scratch_reach:
                 scratch_a, scratch_b = self._ensure_reach_scratch_buffers()
                 parent_reach = scratch_a
@@ -920,91 +819,44 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             marginal_policy,
         )
 
-        if self._opt_ev_inline_opp:
-            numer_s, numer_cardsum = _preprocess_unblocked_stats(marginal_policy)
-            denom_s, denom_cardsum = _preprocess_unblocked_stats(actor_beliefs)
-            for depth in range(self.tree_depth - 1, -1, -1):
-                if not use_leaf_source:
-                    fused_weighted_parent_sum_inline_opp_both_noleaf(
-                        values=values,
-                        prev_actor=self.prev_actor,
-                        policy_hero=policy,
-                        actor_beliefs=actor_beliefs,
-                        numer_s=numer_s,
-                        numer_cardsum=numer_cardsum,
-                        denom_s=denom_s,
-                        denom_cardsum=denom_cardsum,
-                        child_offsets=self._child_offsets_by_depth[depth],
-                        child_count=self._child_count_by_depth[depth],
-                        parent_base=self.depth_offsets[depth],
-                        child_base=bottom,
-                        max_children=self.num_actions,
-                    )
-                else:
-                    fused_weighted_parent_sum_inline_opp_both(
-                        values=values,
-                        prev_actor=self.prev_actor,
-                        policy_hero=policy,
-                        actor_beliefs=actor_beliefs,
-                        numer_s=numer_s,
-                        numer_cardsum=numer_cardsum,
-                        denom_s=denom_s,
-                        denom_cardsum=denom_cardsum,
-                        child_offsets=self._child_offsets_by_depth[depth],
-                        child_count=self._child_count_by_depth[depth],
-                        parent_base=self.depth_offsets[depth],
-                        child_base=bottom,
-                        max_children=self.num_actions,
-                        max_children_pow2=self.num_actions,
-                        leaf_values=leaf_values,
-                        leaf_mask=self.leaf_mask.contiguous(),
-                        block_h=512,
-                    )
-            return
-
-        opponent_conditioned_policy_child = unblocked_mass_ratio_indirect_triton(
-            numer_target=marginal_policy,
-            denom_target=actor_beliefs,
-            parent_index=parent_index_bottom,
-        )
-        if self._opt_child_opp_policy:
-            opponent_conditioned_policy = opponent_conditioned_policy_child
-        else:
-            opponent_conditioned_policy = torch.zeros_like(policy)
-            opponent_conditioned_policy[bottom:] = opponent_conditioned_policy_child
-
+        numer_s, numer_cardsum = _preprocess_unblocked_stats(marginal_policy)
+        denom_s, denom_cardsum = _preprocess_unblocked_stats(actor_beliefs)
         for depth in range(self.tree_depth - 1, -1, -1):
-            parent_base = self.depth_offsets[depth]
-            # Fused weight + parent-sum: replaces the per-child clone +
-            # scatter_reduce pair with one parent-aligned reduce.
-            if self._opt_child_opp_policy:
-                fused_weighted_parent_sum_child_opp(
+            if not use_leaf_source:
+                fused_weighted_parent_sum_inline_opp_both_noleaf(
                     values=values,
                     prev_actor=self.prev_actor,
                     policy_hero=policy,
-                    policy_opp_child=opponent_conditioned_policy,
+                    actor_beliefs=actor_beliefs,
+                    numer_s=numer_s,
+                    numer_cardsum=numer_cardsum,
+                    denom_s=denom_s,
+                    denom_cardsum=denom_cardsum,
                     child_offsets=self._child_offsets_by_depth[depth],
                     child_count=self._child_count_by_depth[depth],
-                    parent_base=parent_base,
+                    parent_base=self.depth_offsets[depth],
+                    child_base=bottom,
+                    max_children=self.num_actions,
+                )
+            else:
+                fused_weighted_parent_sum_inline_opp_both(
+                    values=values,
+                    prev_actor=self.prev_actor,
+                    policy_hero=policy,
+                    actor_beliefs=actor_beliefs,
+                    numer_s=numer_s,
+                    numer_cardsum=numer_cardsum,
+                    denom_s=denom_s,
+                    denom_cardsum=denom_cardsum,
+                    child_offsets=self._child_offsets_by_depth[depth],
+                    child_count=self._child_count_by_depth[depth],
+                    parent_base=self.depth_offsets[depth],
                     child_base=bottom,
                     max_children=self.num_actions,
                     max_children_pow2=self.num_actions,
-                    leaf_values=leaf_values if use_leaf_source else None,
-                    leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
-                )
-            else:
-                fused_weighted_parent_sum(
-                    values=values,
-                    prev_actor=self.prev_actor,
-                    policy_hero=policy,
-                    policy_opp=opponent_conditioned_policy,
-                    child_offsets=self._child_offsets_by_depth[depth],
-                    child_count=self._child_count_by_depth[depth],
-                    parent_base=parent_base,
-                    max_children=self.num_actions,
-                    max_children_pow2=self.num_actions,
-                    leaf_values=leaf_values if use_leaf_source else None,
-                    leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
+                    leaf_values=leaf_values,
+                    leaf_mask=self.leaf_mask.contiguous(),
+                    block_h=512,
                 )
 
     # ------------------------------------------------------------------
@@ -1189,41 +1041,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         assert parent_index_nonroot is not None
 
         child_slice = self.policy_probs_avg[N:].contiguous()
-        if self._opt_parent_sum_divide:
-            fused_parent_sum_divide_(
-                values=self.policy_probs_avg.contiguous(),
-                fallback=child_slice,
-                child_offsets=child_offsets_top,
-                child_count=child_count_top,
-                out=self.policy_probs_avg[N:],
-                out_offset=N,
-                max_children=self.num_actions,
-                eps=1e-5,
-            )
-        else:
-            parent_sum = fused_parent_sum(
-                values=self.policy_probs_avg.contiguous(),
-                child_offsets=child_offsets_top,
-                child_count=child_count_top,
-                max_children=self.num_actions,
-            )
-            fused_divide_by_parent_sum_(
-                pos=child_slice,
-                fallback=child_slice,
-                parent_sum=parent_sum,
-                parent_index=parent_index_nonroot,
-                out=self.policy_probs_avg[N:],
-                eps=1e-5,
-            )
+        fused_parent_sum_divide_(
+            values=self.policy_probs_avg.contiguous(),
+            fallback=child_slice,
+            child_offsets=child_offsets_top,
+            child_count=child_count_top,
+            out=self.policy_probs_avg[N:],
+            out_offset=N,
+            max_children=self.num_actions,
+            eps=1e-5,
+        )
 
     def _update_average_policy_true(
         self, t: int, update_reach: bool = False
     ) -> None:
-        defer_avg_policy = (
-            self._opt_defer_avg_policy
-            and not self.cfr_avg
-            and self.use_final_policy_values
-        )
+        defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
         if (
             self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
             and t <= self.dcfr_delay
@@ -1395,43 +1227,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         if self.model_indices.numel() > 0:
-            if self._opt_leaf_feature_cache:
-                beliefs_at_model, showdown_beliefs = (
-                    self._leaf_beliefs_for_model_and_showdown(beliefs)
-                )
-                features_at_model = self._model_features_for_beliefs(beliefs_at_model)
-            else:
-                features = self.feature_encoder.encode(
-                    beliefs, pre_chance_node=self.new_street_mask
-                )
-                # Fused gather: 7 aten::index calls collapse into one Inductor graph
-                # so model_indices / showdown_indices are loaded once each and reused
-                # across the indexed tensors, instead of being re-issued per field.
-                (
-                    beliefs_at_model,
-                    ctx,
-                    street,
-                    to_act,
-                    board,
-                    feat_beliefs,
-                    showdown_beliefs,
-                ) = _set_leaf_gather(
-                    beliefs,
-                    features.context,
-                    features.street,
-                    features.to_act,
-                    features.board,
-                    features.beliefs,
-                    self.model_indices,
-                    self.showdown_indices,
-                )
-                features_at_model = MLPFeatures(
-                    context=ctx,
-                    street=street,
-                    to_act=to_act,
-                    board=board,
-                    beliefs=feat_beliefs,
-                )
+            beliefs_at_model, showdown_beliefs = (
+                self._leaf_beliefs_for_model_and_showdown(beliefs)
+            )
+            features_at_model = self._model_features_for_beliefs(beliefs_at_model)
             self._set_model_values(t, beliefs_at_model, features_at_model)
         else:
             empty_shape = (0, self.num_players, NUM_HANDS)
@@ -1465,22 +1264,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 mix_new=float(mix_new),
             )
 
-        if self._opt_sparse_sample:
-            self._prepare_sample_update_table()
-            fused_policy_sample_update_(
-                self.policy_probs,
-                self.policy_probs_sample,
-                self._sample_update_rows,
-                self._sample_update_counts,
-                self._t_scalars.t_tensor,
-            )
-        else:
-            torch.where(
-                (self.t_sample == self._t_scalars.t_tensor)[:, None],
-                self.policy_probs,
-                self.policy_probs_sample,
-                out=self.policy_probs_sample,
-            )
+        self._prepare_sample_update_table()
+        fused_policy_sample_update_(
+            self.policy_probs,
+            self.policy_probs_sample,
+            self._sample_update_rows,
+            self._sample_update_counts,
+            self._t_scalars.t_tensor,
+        )
 
         if self.cfr_type == CFRType.linear:
             # Linear CFR not supported by the fused kernel; use parent path.
@@ -1489,72 +1280,45 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self.cumulative_regrets += regrets
         else:
             apply_dcfr = self.cfr_type in (CFRType.discounted, CFRType.discounted_plus)
-            positive_regrets_out = (
-                self._ensure_positive_regrets_buf()
-                if self._opt_reuse_positive_regrets
-                else None
-            )
+            positive_regrets_out = self._ensure_positive_regrets_buf()
             self._prepare_tree_slices()
-            bottom = self._bottom
             top = self._top
-            parent_index_all = self._parent_index_all
             to_act_top = self._to_act_top
-            assert parent_index_all is not None
             assert to_act_top is not None
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
-            if self._opt_inline_regret_src_update:
-                src_target, src_stats = self._ensure_regret_src_buffers(top)
-                select_opponent_beliefs_triton_out_(
-                    beliefs,
-                    self.env.to_act.contiguous(),
-                    top,
-                    src_target,
-                )
-                _preprocess_unblocked_stats_out(src_target, src_stats)
-                child_offsets_top = self._child_offsets_top
-                child_count_top = self._child_count_top
-                assert child_offsets_top is not None
-                assert child_count_top is not None
-                fused_unblocked_regret_dcfr_update_with_tensors_(
-                    target=src_target,
-                    stats=src_stats,
-                    allowed_mask=self.allowed_hands[:top].contiguous(),
-                    values_achieved=self.latest_values.contiguous(),
-                    values_expected=self.latest_values[:top].contiguous(),
-                    to_act=to_act_top,
-                    child_offsets=child_offsets_top,
-                    child_count=child_count_top,
-                    prev_actor=self.prev_actor.contiguous(),
-                    cumulative_regrets=self.cumulative_regrets,
-                    t_alpha_num=self._t_scalars.t_alpha_num,
-                    t_beta_num=self._t_scalars.t_beta_num,
-                    t_alpha_den=self._t_scalars.t_alpha_den,
-                    t_beta_den=self._t_scalars.t_beta_den,
-                    apply_dcfr=apply_dcfr,
-                    cfr_plus=self.cfr_plus,
-                    max_children=self.num_actions,
-                    positive_regrets_out=positive_regrets_out,
-                )
-            else:
-                src_weights = self._regret_src_weights(beliefs, top)
-                fused_regret_dcfr_update_with_tensors_(
-                    values_achieved=self.latest_values.contiguous(),
-                    values_expected=self.latest_values[:top].contiguous(),
-                    to_act=to_act_top,
-                    src_weights=src_weights.contiguous(),
-                    parent_index=parent_index_all,
-                    prev_actor=self.prev_actor.contiguous(),
-                    cumulative_regrets=self.cumulative_regrets,
-                    t_alpha_num=self._t_scalars.t_alpha_num,
-                    t_beta_num=self._t_scalars.t_beta_num,
-                    t_alpha_den=self._t_scalars.t_alpha_den,
-                    t_beta_den=self._t_scalars.t_beta_den,
-                    bottom=bottom,
-                    apply_dcfr=apply_dcfr,
-                    cfr_plus=self.cfr_plus,
-                    positive_regrets_out=positive_regrets_out,
-                )
-            self._fused_positive_regrets_valid = positive_regrets_out is not None
+            src_target, src_stats = self._ensure_regret_src_buffers(top)
+            select_opponent_beliefs_triton_out_(
+                beliefs,
+                self.env.to_act.contiguous(),
+                top,
+                src_target,
+            )
+            _preprocess_unblocked_stats_out(src_target, src_stats)
+            child_offsets_top = self._child_offsets_top
+            child_count_top = self._child_count_top
+            assert child_offsets_top is not None
+            assert child_count_top is not None
+            fused_unblocked_regret_dcfr_update_with_tensors_(
+                target=src_target,
+                stats=src_stats,
+                allowed_mask=self.allowed_hands[:top].contiguous(),
+                values_achieved=self.latest_values.contiguous(),
+                values_expected=self.latest_values[:top].contiguous(),
+                to_act=to_act_top,
+                child_offsets=child_offsets_top,
+                child_count=child_count_top,
+                prev_actor=self.prev_actor.contiguous(),
+                cumulative_regrets=self.cumulative_regrets,
+                t_alpha_num=self._t_scalars.t_alpha_num,
+                t_beta_num=self._t_scalars.t_beta_num,
+                t_alpha_den=self._t_scalars.t_alpha_den,
+                t_beta_den=self._t_scalars.t_beta_den,
+                apply_dcfr=apply_dcfr,
+                cfr_plus=self.cfr_plus,
+                max_children=self.num_actions,
+                positive_regrets_out=positive_regrets_out,
+            )
+            self._fused_positive_regrets_valid = True
 
         if self._skip_record_stats:
             self.update_policy(t)
@@ -1666,13 +1430,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             t += 1
 
         if not self.cfr_avg and self.use_final_policy_values:
-            if self._opt_defer_avg_policy:
-                self._finalize_deferred_average_policy()
-            if self._opt_defer_avg_reach or self._opt_defer_avg_policy:
-                self.self_reach_avg[: self.root_nodes] = 1.0
-                self._calculate_reach_weights(
-                    self.self_reach_avg, self.policy_probs_avg
-                )
+            self._finalize_deferred_average_policy()
+            self.self_reach_avg[: self.root_nodes] = 1.0
+            self._calculate_reach_weights(
+                self.self_reach_avg, self.policy_probs_avg
+            )
             self._refresh_average_beliefs()
 
         if self.use_final_policy_values:

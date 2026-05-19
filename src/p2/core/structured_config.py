@@ -359,13 +359,9 @@ class Config:
         ]
         container["train"] = TrainingConfig(**train_container)
         model_container = container.get("model", {})
-        legacy_mode = model_container.pop("compile_mode", None)
         compile_setting = model_container.get("compile", "default")
         if isinstance(compile_setting, bool):
             model_container["compile"] = "default" if compile_setting else "off"
-        if legacy_mode is not None:
-            mode = str(legacy_mode).strip().lower()
-            model_container["compile"] = "default" if mode in {"", "none", "null"} else mode
         container["model"] = ModelConfig(**model_container)
         container["env"] = EnvConfig(**(container.get("env", {})))
         container["exploiter"] = ExploiterConfig(**(container.get("exploiter", {})))
