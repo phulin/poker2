@@ -18,7 +18,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import hydra
 import torch
@@ -183,6 +183,39 @@ def _sync(device: torch.device) -> None:
         torch.cuda.synchronize()
 
 
+def _cuda_event_time(
+    device: torch.device,
+    fn: Callable[[], Any],
+    warmup: int,
+    iters: int,
+) -> dict[str, float]:
+    for _ in range(warmup):
+        fn()
+    _sync(device)
+
+    wall: list[float] = []
+    cuda_ms: list[float] = []
+    for _ in range(iters):
+        if device.type == "cuda":
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+        t0 = time.perf_counter()
+        fn()
+        if device.type == "cuda":
+            end.record()
+            torch.cuda.synchronize()
+            cuda_ms.append(float(start.elapsed_time(end)))
+        else:
+            _sync(device)
+        wall.append(time.perf_counter() - t0)
+    return {
+        "iters": float(iters),
+        "wall_ms_mean": 1e3 * sum(wall) / max(1, len(wall)),
+        "cuda_ms_mean": sum(cuda_ms) / max(1, len(cuda_ms)) if cuda_ms else 0.0,
+    }
+
+
 def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
     cfg.use_wandb = False
     cfg.trueskill.enabled = False
@@ -294,6 +327,94 @@ def _run_segment(
     }
 
 
+def _run_component_benchmarks(
+    trainer: RebelCFRTrainer,
+    pbs,
+    start_t: int,
+    warmup_iters: int,
+    active_iters: int,
+    skip_record_stats: bool,
+) -> dict[str, Any]:
+    ev = trainer.cfr_evaluator
+    results: dict[str, Any] = {}
+
+    def time_component(name: str, setup: Callable[[], None], fn: Callable[[], Any]):
+        setup()
+        results[name] = _cuda_event_time(
+            trainer.device,
+            fn,
+            warmup=warmup_iters,
+            iters=active_iters,
+        )
+
+    def setup_state() -> None:
+        _prepare_iterator_state(
+            trainer,
+            pbs,
+            skip_record_stats=skip_record_stats,
+        )
+
+    t_box = {"t": start_t}
+
+    def next_t() -> int:
+        t = t_box["t"]
+        t_box["t"] += 1
+        return t
+
+    time_component(
+        "cfr_iteration",
+        setup_state,
+        lambda: ev.cfr_iteration(next_t()),
+    )
+    time_component(
+        "set_leaf_values",
+        setup_state,
+        lambda: ev.set_leaf_values(next_t()),
+    )
+    time_component(
+        "compute_expected_values",
+        setup_state,
+        ev.compute_expected_values,
+    )
+    time_component(
+        "update_policy",
+        setup_state,
+        lambda: ev.update_policy(next_t()),
+    )
+    time_component(
+        "calculate_reach_weights",
+        setup_state,
+        lambda: ev._calculate_reach_weights(ev.self_reach, ev.policy_probs),
+    )
+    time_component(
+        "propagate_beliefs",
+        setup_state,
+        lambda: ev._propagate_all_beliefs(ev.beliefs, ev.self_reach),
+    )
+    time_component(
+        "update_average_policy",
+        setup_state,
+        lambda: ev.update_average_policy(next_t()),
+    )
+    time_component(
+        "update_average_values",
+        setup_state,
+        lambda: ev.update_average_values(next_t()),
+    )
+    if hasattr(ev, "_finalize_deferred_average_policy"):
+        def setup_deferred_average_policy() -> None:
+            setup_state()
+            ev.update_average_policy(next_t())
+            _sync(trainer.device)
+
+        time_component(
+            "finalize_deferred_average_policy",
+            setup_deferred_average_policy,
+            ev._finalize_deferred_average_policy,
+        )
+    return results
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spots", default="outputs/spots.pt")
@@ -304,6 +425,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--dcfr-delay", type=int, default=None)
     parser.add_argument("--warmup-iters", type=int, default=2)
     parser.add_argument("--active-iters", type=int, default=10)
+    parser.add_argument("--component-warmup", type=int, default=2)
+    parser.add_argument("--component-iters", type=int, default=10)
     parser.add_argument("--random-spots", action="store_true")
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--no-compile", action="store_true")
@@ -318,6 +441,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--record-stats",
         action="store_true",
         help="Include percentile iteration stats cloning/recording in cfr_iteration.",
+    )
+    parser.add_argument(
+        "--no-component-bench",
+        action="store_true",
+        help="Skip isolated CUDA-event component microbenchmarks.",
     )
     parser.add_argument("hydra_override", nargs="*")
     return parser.parse_args(argv)
@@ -408,6 +536,15 @@ def main(argv: list[str]) -> None:
                 skip_record_stats=not args.record_stats,
             ),
         ]
+        if not args.no_component_bench:
+            output["component_microbenchmarks"] = _run_component_benchmarks(
+                trainer,
+                pbs,
+                start_t=start_post,
+                warmup_iters=args.component_warmup,
+                active_iters=args.component_iters,
+                skip_record_stats=not args.record_stats,
+            )
 
     for seg in output["segments"]:
         print(
@@ -420,6 +557,16 @@ def main(argv: list[str]) -> None:
                 f" cuda={row['cuda_ms_per_iter']:>8.3f} ms/iter"
                 f" cpu={row['cpu_ms_per_iter']:>8.3f}"
                 f" calls/iter={row['calls_per_iter']:.1f}"
+            )
+
+    if "component_microbenchmarks" in output:
+        print("\nComponent microbenchmarks:")
+        for name, row in output["component_microbenchmarks"].items():
+            print(
+                f"  {name:<34}"
+                f" cuda={row['cuda_ms_mean']:>8.3f} ms"
+                f" wall={row['wall_ms_mean']:>8.3f} ms"
+                f" iters={int(row['iters'])}"
             )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
