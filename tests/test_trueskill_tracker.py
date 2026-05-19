@@ -113,9 +113,9 @@ def test_compute_games_per_eval_accounts_for_eval_cost_multipliers() -> None:
 
 def test_mu_step_regression_metrics_perfect_positive_trend() -> None:
     snapshots = [
-        TSSnapshot(step=10, mu=20.0, sigma=1.0),
-        TSSnapshot(step=20, mu=25.0, sigma=1.0),
-        TSSnapshot(step=30, mu=30.0, sigma=1.0),
+        TSSnapshot(step=10, mu=20.0, sigma=1.0, gaussian_mu=-0.3),
+        TSSnapshot(step=20, mu=25.0, sigma=1.0, gaussian_mu=0.0),
+        TSSnapshot(step=30, mu=30.0, sigma=1.0, gaussian_mu=0.3),
     ]
 
     metrics = TrueSkillTracker._mu_step_regression_metrics(snapshots)
@@ -125,13 +125,18 @@ def test_mu_step_regression_metrics_perfect_positive_trend() -> None:
         torch.tensor(1.0),
     )
     assert_close(torch.tensor(metrics["trueskill/mu_step_r2"]), torch.tensor(1.0))
+    assert_close(
+        torch.tensor(metrics["gaussian/mu_step_correlation"]),
+        torch.tensor(1.0),
+    )
+    assert_close(torch.tensor(metrics["gaussian/mu_step_r2"]), torch.tensor(1.0))
 
 
 def test_mu_step_regression_metrics_preserves_negative_correlation_sign() -> None:
     snapshots = [
-        TSSnapshot(step=10, mu=30.0, sigma=1.0),
-        TSSnapshot(step=20, mu=25.0, sigma=1.0),
-        TSSnapshot(step=30, mu=20.0, sigma=1.0),
+        TSSnapshot(step=10, mu=30.0, sigma=1.0, gaussian_mu=0.3),
+        TSSnapshot(step=20, mu=25.0, sigma=1.0, gaussian_mu=0.0),
+        TSSnapshot(step=30, mu=20.0, sigma=1.0, gaussian_mu=-0.3),
     ]
 
     metrics = TrueSkillTracker._mu_step_regression_metrics(snapshots)
@@ -141,6 +146,11 @@ def test_mu_step_regression_metrics_preserves_negative_correlation_sign() -> Non
         torch.tensor(-1.0),
     )
     assert_close(torch.tensor(metrics["trueskill/mu_step_r2"]), torch.tensor(1.0))
+    assert_close(
+        torch.tensor(metrics["gaussian/mu_step_correlation"]),
+        torch.tensor(-1.0),
+    )
+    assert_close(torch.tensor(metrics["gaussian/mu_step_r2"]), torch.tensor(1.0))
 
 
 def test_mu_step_regression_metrics_handles_degenerate_variance() -> None:
@@ -154,6 +164,8 @@ def test_mu_step_regression_metrics_handles_degenerate_variance() -> None:
 
     assert metrics["trueskill/mu_step_correlation"] == 0.0
     assert metrics["trueskill/mu_step_r2"] == 0.0
+    assert metrics["gaussian/mu_step_correlation"] == 0.0
+    assert metrics["gaussian/mu_step_r2"] == 0.0
 
 
 def test_mu_step_regression_metrics_omits_under_three_snapshots() -> None:

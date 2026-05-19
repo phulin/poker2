@@ -366,8 +366,12 @@ class TrueSkillTracker:
         return max(1, int(eval_game_budget / max(1, n_snapshots)))
 
     @staticmethod
-    def _mu_step_regression_metrics(snapshots: List[TSSnapshot]) -> Dict[str, float]:
-        """Fit current snapshot mu values against snapshot step.
+    def _step_regression_metrics(
+        snapshots: List[TSSnapshot],
+        values: List[float],
+        prefix: str,
+    ) -> Dict[str, float]:
+        """Fit snapshot values against snapshot step.
 
         For an intercept linear regression with one feature, R^2 is the squared
         Pearson correlation. Fewer than three snapshots are too thin to report
@@ -380,7 +384,7 @@ class TrueSkillTracker:
             return {}
 
         xs = [float(s.step) for s in snapshots]
-        ys = [float(s.mu) for s in snapshots]
+        ys = [float(y) for y in values]
         x_mean = sum(xs) / n
         y_mean = sum(ys) / n
 
@@ -401,9 +405,26 @@ class TrueSkillTracker:
             corr = max(-1.0, min(1.0, corr))
 
         return {
-            "trueskill/mu_step_correlation": corr,
-            "trueskill/mu_step_r2": corr * corr,
+            f"{prefix}/mu_step_correlation": corr,
+            f"{prefix}/mu_step_r2": corr * corr,
         }
+
+    @staticmethod
+    def _mu_step_regression_metrics(snapshots: List[TSSnapshot]) -> Dict[str, float]:
+        """Fit TrueSkill and Gaussian snapshot mu values against snapshot step."""
+        metrics = TrueSkillTracker._step_regression_metrics(
+            snapshots,
+            [s.mu for s in snapshots],
+            "trueskill",
+        )
+        metrics.update(
+            TrueSkillTracker._step_regression_metrics(
+                snapshots,
+                [s.gaussian_mu for s in snapshots],
+                "gaussian",
+            )
+        )
+        return metrics
 
     # ------------------------------------------------------- opponent sampling
 
@@ -581,6 +602,8 @@ class TrueSkillTracker:
             trend_suffix = (
                 f" mu_step_corr={metrics['trueskill/mu_step_correlation']:.3f}"
                 f" mu_step_r2={metrics['trueskill/mu_step_r2']:.3f}"
+                f" gaussian_mu_step_corr={metrics['gaussian/mu_step_correlation']:.3f}"
+                f" gaussian_mu_step_r2={metrics['gaussian/mu_step_r2']:.3f}"
             )
         print(
             f"[TrueSkill] step={step} mu={new_snap.mu:.2f} sigma={new_snap.sigma:.2f} "
