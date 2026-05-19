@@ -7,15 +7,53 @@ import { parseBetterFfnManifest } from "./modelFormat.js";
 import { loadModelBytesWithCache, type ModelCacheProgress } from "./modelCache.js";
 import type { BetterFfnManifest } from "./types.js";
 
+function currentOrigin(): string {
+  if (typeof location === "undefined") return "this origin";
+  return location.origin === "null" ? location.href : location.origin;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
+}
+
+function webGpuUnavailableMessage(): string {
+  if (typeof isSecureContext === "boolean" && !isSecureContext) {
+    return `WebGPU requires a secure context. This page is running from ${currentOrigin()}; open it through http://localhost, 127.0.0.1, or HTTPS.`;
+  }
+
+  if (
+    typeof location !== "undefined" &&
+    location.protocol !== "https:" &&
+    location.protocol !== "file:" &&
+    !isLoopbackHost(location.hostname)
+  ) {
+    return `WebGPU may be hidden on non-secure origins. This page is running from ${currentOrigin()}; open it through http://localhost, 127.0.0.1, or HTTPS.`;
+  }
+
+  return "WebGPU is not exposed by this browser. Use a browser with WebGPU enabled and hardware acceleration available.";
+}
+
 export async function createBrowserDevice(): Promise<GPUDevice> {
-  if (!navigator.gpu) {
-    throw new Error("WebGPU is unavailable in this browser");
+  if (typeof navigator === "undefined" || !navigator.gpu) {
+    throw new Error(webGpuUnavailableMessage());
   }
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) {
-    throw new Error("WebGPU did not return an adapter");
+    throw new Error(
+      "WebGPU is exposed, but the browser did not return an adapter. Check that hardware acceleration and the GPU backend are enabled.",
+    );
   }
-  return await adapter.requestDevice();
+  try {
+    return await adapter.requestDevice();
+  } catch (error) {
+    const detail = error instanceof Error ? `: ${error.message}` : "";
+    throw new Error(`WebGPU adapter was found, but requestDevice failed${detail}`);
+  }
 }
 
 export async function loadBrowserModel(

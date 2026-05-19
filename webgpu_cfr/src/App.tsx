@@ -123,9 +123,6 @@ function App(): JSX.Element {
 
   async function loadRuntime(): Promise<void> {
     try {
-      if (!navigator.gpu) {
-        throw new Error("WebGPU is unavailable in this browser");
-      }
       setModelProgress({ phase: "manifest", message: "Requesting WebGPU device" });
       const device = await createBrowserDevice();
       const loaded = await loadModelBytesWithCache(MODEL_MANIFEST_URL, {
