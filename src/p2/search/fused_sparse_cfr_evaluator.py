@@ -238,6 +238,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         showdown EV inputs and capture a CUDA graph for the EV pipeline.
         The graph is keyed on (M=showdown_indices.numel(), NUM_HANDS) and
         replays via persistent buffers."""
+        self.showdown_indices = torch.where(self.env.street == 4)[0].contiguous()
+        self.showdown_actors = self.env.to_act[self.showdown_indices]
+        self.showdown_potential = (
+            self.env.stacks[self.showdown_indices]
+            + self.env.pot[self.showdown_indices, None]
+            - self.env.starting_stacks[self.showdown_indices]
+        )
         super()._init_hand_rank_data()
         if self.hand_rank_data is not None and self.showdown_indices.numel() > 0:
             self._showdown_extras = precompute_showdown_extras(
