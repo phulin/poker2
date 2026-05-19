@@ -2,7 +2,7 @@
 
 Triton kernels (pointwise + simple reductions):
 
-1. ``fused_dcfr_update_`` — DCFR rescale + weight_sum bump + cumulative-regret
+1. ``fused_dcfr_update_`` — DCFR rescale + cumulative-regret
    accumulate + optional CFR+ clamp. Replaces ~7 PyTorch kernels with 1.
    Fuses the block between ``compute_instantaneous_regrets`` and
    ``update_policy`` in ``cfr_iteration``.
@@ -72,7 +72,6 @@ if triton is not None:
     def _fused_dcfr_update_kernel(
         regrets_ptr,
         cumul_ptr,
-        weight_ptr,
         pos_out_ptr,
         t_alpha_num_ptr,
         t_beta_num_ptr,
@@ -90,8 +89,6 @@ if triton is not None:
 
         r = tl.load(regrets_ptr + offs, mask=mask, other=0.0)
         c = tl.load(cumul_ptr + offs, mask=mask, other=0.0)
-        w = tl.load(weight_ptr + offs, mask=mask, other=0.0)
-
         if APPLY_DCFR:
             t_alpha_num = tl.load(t_alpha_num_ptr)
             t_beta_num = tl.load(t_beta_num_ptr)
@@ -103,17 +100,13 @@ if triton is not None:
             # Match PyTorch: `c *= num; c /= den` (two rounding steps).
             c = c * num
             c = c / den
-            w = w * num
-            w = w / den
 
-        w = w + 1.0
         c = c + r
 
         if CFR_PLUS:
             c = tl.maximum(c, 0.0)
 
         tl.store(cumul_ptr + offs, c, mask=mask)
-        tl.store(weight_ptr + offs, w, mask=mask)
 
         if WRITE_POS:
             pos = tl.maximum(c, 0.0)
@@ -122,7 +115,6 @@ if triton is not None:
 
 def fused_dcfr_update_(
     cumulative_regrets: torch.Tensor,
-    regret_weight_sums: torch.Tensor,
     regrets: torch.Tensor,
     t: int,
     cfr_type: CFRType,
@@ -140,8 +132,6 @@ def fused_dcfr_update_(
             num = where(c > 0, t**a, t**b)
             den = where(c > 0, t**a + 1, t**b + 1)
             c *= num; c /= den
-            w *= num; w /= den
-        w += 1
         c += regrets
         if cfr_plus:
             c.clamp_(min=0)
@@ -162,9 +152,8 @@ def fused_dcfr_update_(
         )
 
     assert cumulative_regrets.is_contiguous()
-    assert regret_weight_sums.is_contiguous()
     assert regrets.is_contiguous()
-    assert cumulative_regrets.shape == regret_weight_sums.shape == regrets.shape
+    assert cumulative_regrets.shape == regrets.shape
 
     apply_dcfr = cfr_type in (CFRType.discounted, CFRType.discounted_plus)
     if apply_dcfr:
@@ -184,7 +173,6 @@ def fused_dcfr_update_(
 
     fused_dcfr_update_with_tensors_(
         cumulative_regrets=cumulative_regrets,
-        regret_weight_sums=regret_weight_sums,
         regrets=regrets,
         t_alpha_num=t_alpha_num,
         t_beta_num=t_beta_num,
@@ -199,7 +187,6 @@ def fused_dcfr_update_(
 
 def fused_dcfr_update_with_tensors_(
     cumulative_regrets: torch.Tensor,
-    regret_weight_sums: torch.Tensor,
     regrets: torch.Tensor,
     t_alpha_num: torch.Tensor,
     t_beta_num: torch.Tensor,
@@ -220,7 +207,6 @@ def fused_dcfr_update_with_tensors_(
     _fused_dcfr_update_kernel[grid](
         regrets,
         cumulative_regrets,
-        regret_weight_sums,
         pos_ptr,
         t_alpha_num,
         t_beta_num,
@@ -793,7 +779,6 @@ if triton is not None:
         parent_index_ptr,        # [total]
         prev_actor_ptr,          # [total]
         cumul_ptr,               # [total, H]
-        weight_ptr,              # [total, H]
         pos_out_ptr,             # [total, H]
         t_alpha_num_ptr,
         t_beta_num_ptr,
@@ -837,8 +822,6 @@ if triton is not None:
         r = tl.where(is_child, src_w * (achieved - expected), 0.0)
 
         c = tl.load(cumul_ptr + offs, mask=mask, other=0.0)
-        w = tl.load(weight_ptr + offs, mask=mask, other=0.0)
-
         if APPLY_DCFR:
             t_alpha_num = tl.load(t_alpha_num_ptr)
             t_beta_num = tl.load(t_beta_num_ptr)
@@ -849,16 +832,12 @@ if triton is not None:
             den = tl.where(positive, t_alpha_den, t_beta_den)
             c = c * num
             c = c / den
-            w = w * num
-            w = w / den
 
-        w = w + 1.0
         c = c + r
         if CFR_PLUS:
             c = tl.maximum(c, 0.0)
 
         tl.store(cumul_ptr + offs, c, mask=mask)
-        tl.store(weight_ptr + offs, w, mask=mask)
         if WRITE_POS:
             tl.store(pos_out_ptr + offs, tl.maximum(c, 0.0), mask=mask)
 
@@ -871,7 +850,6 @@ def fused_regret_dcfr_update_with_tensors_(
     parent_index: torch.Tensor,
     prev_actor: torch.Tensor,
     cumulative_regrets: torch.Tensor,
-    regret_weight_sums: torch.Tensor,
     t_alpha_num: torch.Tensor,
     t_beta_num: torch.Tensor,
     t_alpha_den: torch.Tensor,
@@ -891,8 +869,7 @@ def fused_regret_dcfr_update_with_tensors_(
     assert src_weights.is_contiguous() and src_weights.dim() == 2
     assert parent_index.is_contiguous() and parent_index.dim() == 1
     assert prev_actor.is_contiguous() and prev_actor.dim() == 1
-    assert cumulative_regrets.is_contiguous() and regret_weight_sums.is_contiguous()
-    assert cumulative_regrets.shape == regret_weight_sums.shape
+    assert cumulative_regrets.is_contiguous()
     total, h = cumulative_regrets.shape
     top = values_expected.shape[0]
     assert values_achieved.shape == (total, 2, h)
@@ -912,7 +889,6 @@ def fused_regret_dcfr_update_with_tensors_(
         parent_index,
         prev_actor,
         cumulative_regrets,
-        regret_weight_sums,
         pos_ptr,
         t_alpha_num,
         t_beta_num,
@@ -3835,7 +3811,6 @@ class _EvaluatorStateSnapshot:
             "average_policy_denominator",
             "policy_probs_sample",
             "cumulative_regrets",
-            "regret_weight_sums",
             "self_reach",
             "self_reach_avg",
             "beliefs",

@@ -132,7 +132,6 @@ class SparseCFREvaluator(CFREvaluator):
         self.average_policy_initialized = False
         self.policy_probs_sample = torch.empty_like(self.policy_probs)
         self.cumulative_regrets = torch.empty_like(self.policy_probs)
-        self.regret_weight_sums = torch.empty_like(self.policy_probs)
 
         self.feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder | None = None
 
@@ -271,7 +270,6 @@ class SparseCFREvaluator(CFREvaluator):
         self.average_policy_initialized = False
         self.policy_probs_sample = torch.zeros_like(self.policy_probs)
         self.cumulative_regrets = torch.zeros_like(self.policy_probs)
-        self.regret_weight_sums = torch.zeros_like(self.policy_probs)
 
         # `parent_index[root_nodes:]` is already the child-to-parent expansion
         # needed here; using it avoids another repeat_interleave during subgame
@@ -592,37 +590,12 @@ class SparseCFREvaluator(CFREvaluator):
             self.cumulative_regrets.clamp(min=0).mean().item()
         )
 
-        N = self.root_nodes
-        child_start = self.depth_offsets[1]
-        child_end = self.depth_offsets[2]
-        parent_index = self.parent_index[child_start:child_end]
-
-        regret_quotient = self.cumulative_regrets.clamp(
-            min=0
-        ) / self.regret_weight_sums
-        child_regret = regret_quotient[child_start:child_end]
-        regret_quotient_max = torch.zeros(
-            N,
-            child_regret.shape[1],
-            dtype=child_regret.dtype,
-            device=self.device,
-        )
-        regret_quotient_max.scatter_reduce_(
-            dim=0,
-            index=parent_index[:, None].expand_as(child_regret),
-            src=child_regret,
-            reduce="amax",
-            include_self=True,
-        )
-        regret_quotient_sum = regret_quotient_max.sum(dim=1)
-        regret_quotient_mean = regret_quotient_sum.sum() / self.valid_mask[:N].sum()
-        self.stats["mean_regret_bound"] = regret_quotient_mean.item()
-
         exploit_stats = self._compute_exploitability()
         self.stats["local_exploitability"] = (
             exploit_stats.local_exploitability.mean().item()
         )
 
+        N = self.root_nodes
         root_streets = self.env.street[:N]
         self.stats["local_exploitability_street"] = {
             street_name: exploit_stats.local_exploitability[root_streets == i]

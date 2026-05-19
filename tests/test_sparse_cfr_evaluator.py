@@ -375,8 +375,6 @@ def test_update_policy() -> None:
         device=device,
         dtype=torch.float32,
     )
-    evaluator.regret_weight_sums = torch.ones_like(evaluator.cumulative_regrets)
-
     # Update policy
     evaluator.update_policy(t=0)
 

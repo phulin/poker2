@@ -238,7 +238,6 @@ def _run_split_warm_start(trainer: RebelCFRTrainer, pbs) -> dict[str, float]:
                 ev.cumulative_regrets[bottom:] = (
                     ev.policy_probs[bottom:] * weights[:, None]
                 )
-                ev.regret_weight_sums[bottom:] = weights[:, None]
 
             timed("seed_regrets", seed_regrets)
             timed("update_policy", lambda: ev.update_policy(ev.warm_start_iterations))
@@ -271,7 +270,6 @@ def _run_split_warm_start(trainer: RebelCFRTrainer, pbs) -> dict[str, float]:
                     ev.warm_start_multiplier
                 )
                 ev.cumulative_regrets += scale * regrets
-                ev.regret_weight_sums += scale
 
             timed("seed_regrets", seed_regrets)
             timed("update_policy", lambda: ev.update_policy(ev.warm_start_iterations))

@@ -1346,7 +1346,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             # Linear CFR not supported by the fused kernel; use parent path.
             regrets = self.compute_instantaneous_regrets(self.latest_values)
             regrets.masked_fill_(self.prev_actor[:, None] == t % self.num_players, 0.0)
-            self.regret_weight_sums += 1
             self.cumulative_regrets += regrets
         else:
             apply_dcfr = self.cfr_type in (CFRType.discounted, CFRType.discounted_plus)
@@ -1372,7 +1371,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 parent_index=parent_index_all,
                 prev_actor=self.prev_actor.contiguous(),
                 cumulative_regrets=self.cumulative_regrets,
-                regret_weight_sums=self.regret_weight_sums,
                 t_alpha_num=self._t_scalars.t_alpha_num,
                 t_beta_num=self._t_scalars.t_beta_num,
                 t_alpha_den=self._t_scalars.t_alpha_den,

@@ -2796,14 +2796,12 @@ def test_record_cumulative_regret() -> None:
     evaluator.cumulative_regrets[:] = (
         torch.rand_like(evaluator.cumulative_regrets) - 0.5
     )
-    evaluator.regret_weight_sums[:] = torch.ones_like(evaluator.regret_weight_sums)
-
     # Record regret stats
     evaluator._record_cumulative_regret()
 
     # Should have recorded stats
     assert "mean_positive_regret" in evaluator.stats
-    assert "mean_regret_bound" in evaluator.stats
+    assert "mean_regret_bound" not in evaluator.stats
     assert evaluator.stats["mean_positive_regret"] >= 0
     # Exploitability should be recorded as a generation-time statistic
     assert "local_exploitability" in evaluator.stats

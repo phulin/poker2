@@ -33,14 +33,12 @@ def test_fused_dcfr_update_matches_pytorch(
     cumul = torch.randn(shape, device=device, dtype=torch.float32)
     cumul[:20] = cumul[:20].abs()  # some strictly positive
     cumul[20:40] = -cumul[20:40].abs()  # some strictly negative
-    weight = torch.rand(shape, device=device, dtype=torch.float32) * 5.0
     regrets = torch.randn(shape, device=device, dtype=torch.float32) * 0.1
 
     alpha, beta = 1.5, 0.5
 
     # Reference: replicate cfr_iteration block exactly.
     cumul_ref = cumul.clone()
-    weight_ref = weight.clone()
     r_ref = regrets.clone()
 
     if cfr_type in (CFRType.discounted, CFRType.discounted_plus):
@@ -48,10 +46,7 @@ def test_fused_dcfr_update_matches_pytorch(
         denominator = torch.where(cumul_ref > 0, t**alpha + 1, t**beta + 1)
         cumul_ref *= numerator
         cumul_ref /= denominator
-        weight_ref *= numerator
-        weight_ref /= denominator
 
-    weight_ref += 1
     cumul_ref += r_ref
     if cfr_plus:
         cumul_ref.clamp_(min=0)
@@ -59,11 +54,9 @@ def test_fused_dcfr_update_matches_pytorch(
 
     # Fused kernel.
     cumul_out = cumul.clone()
-    weight_out = weight.clone()
     pos_out = torch.empty_like(cumul_out)
     fused_dcfr_update_(
         cumulative_regrets=cumul_out,
-        regret_weight_sums=weight_out,
         regrets=regrets,
         t=t,
         cfr_type=cfr_type,
@@ -76,7 +69,6 @@ def test_fused_dcfr_update_matches_pytorch(
     # Tolerances accommodate Triton-side FMA fusion vs PyTorch's separate
     # mul/div kernels; absolute diffs observed at ~1 ULP (5e-7).
     torch.testing.assert_close(cumul_out, cumul_ref, rtol=1e-5, atol=1e-6)
-    torch.testing.assert_close(weight_out, weight_ref, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(pos_out, pos_ref, rtol=1e-5, atol=1e-6)
 
 
@@ -220,7 +212,6 @@ def _mirror_evaluator_state(src, dst) -> None:
         "policy_probs_avg",
         "policy_probs_sample",
         "cumulative_regrets",
-        "regret_weight_sums",
         "t_sample",
     ]:
         if hasattr(src, name):

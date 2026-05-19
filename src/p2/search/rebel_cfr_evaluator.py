@@ -61,7 +61,6 @@ class RebelCFREvaluator(CFREvaluator):
     self_reach: torch.Tensor
     self_reach_avg: torch.Tensor
     cumulative_regrets: torch.Tensor
-    regret_weight_sums: torch.Tensor
     last_model_values: torch.Tensor | None
     # NOTE: Latest values and values_avg are EVs, NOT CFVs.
     latest_values: torch.Tensor
@@ -187,8 +186,6 @@ class RebelCFREvaluator(CFREvaluator):
         self.uniform_policy = torch.zeros_like(self.policy_probs)
         # Cumulative regret of taking this node vs the best at the parent node.
         self.cumulative_regrets = torch.zeros_like(self.policy_probs)
-        # Running per-infoset sums of positive regret mass over hands
-        self.regret_weight_sums = torch.zeros_like(self.policy_probs)
 
         self.last_model_values = None
 
@@ -306,7 +303,6 @@ class RebelCFREvaluator(CFREvaluator):
         self.policy_probs_sample.zero_()
         self.uniform_policy.zero_()
         self.cumulative_regrets.zero_()
-        self.regret_weight_sums.zero_()
         self.allowed_hands.zero_()
         self.allowed_hands_prob.zero_()
         self.prev_actor.zero_()

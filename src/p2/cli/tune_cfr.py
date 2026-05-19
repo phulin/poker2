@@ -149,7 +149,6 @@ def _aggregate_trial(
             default=None,
         ),
         "cfr_entropy": wmean("cfr_entropy"),
-        "mean_regret_bound": wmean("mean_regret_bound"),
         "mean_positive_regret": wmean("mean_positive_regret"),
         "n_spots": total_n,
     }

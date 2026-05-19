@@ -162,7 +162,6 @@ class CFREvaluator(ABC):
     policy_probs_sample: torch.Tensor
     uniform_policy: torch.Tensor
     cumulative_regrets: torch.Tensor
-    regret_weight_sums: torch.Tensor
     latest_values: torch.Tensor
     values_avg: torch.Tensor
     self_reach: torch.Tensor
@@ -985,7 +984,6 @@ class CFREvaluator(ABC):
             self.cumulative_regrets[bottom:] = (
                 self.policy_probs[bottom:] * weights[:, None]
             )
-            self.regret_weight_sums[bottom:] = weights[:, None]
             self.update_policy(self.warm_start_iterations)
             return
 
@@ -1016,7 +1014,6 @@ class CFREvaluator(ABC):
         )
         scale = float(self.warm_start_iterations) * float(self.warm_start_multiplier)
         self.cumulative_regrets += scale * regrets
-        self.regret_weight_sums += scale
         self.update_policy(self.warm_start_iterations)
 
     def _maybe_enforce_zero_sum(
@@ -1414,11 +1411,7 @@ class CFREvaluator(ABC):
             )
             self.cumulative_regrets *= numerator
             self.cumulative_regrets /= denominator
-            self.regret_weight_sums *= numerator
-            self.regret_weight_sums /= denominator
-
         # Update cumulative regrets
-        self.regret_weight_sums += 1
         self.cumulative_regrets += regrets
 
         # CFR+ trick: clamp regrets to non-negative
@@ -1715,19 +1708,6 @@ class CFREvaluator(ABC):
             self.cumulative_regrets.clamp(min=0).mean().item()
         )
 
-        N = self.root_nodes
-
-        # Compute something like the theoretical exploitability bound.
-        regret_quotient = self.cumulative_regrets.clamp(min=0) / self.regret_weight_sums
-        regret_quotient_src = self._pull_back(regret_quotient)[:N]
-        # take max over actions.
-        regret_quotient_max = regret_quotient_src.max(dim=1).values
-        # sum over hands.
-        regret_quotient_sum = regret_quotient_max.sum(dim=1)
-        # take mean over parallelized envs.
-        regret_quotient_mean = regret_quotient_sum.sum() / self.valid_mask[:N].sum()
-        self.stats["mean_regret_bound"] = regret_quotient_mean.item()
-
         # Compute and record exploitability as a generation-time statistic
         exploit_stats = self._compute_exploitability()
         self.stats["local_exploitability"] = (
@@ -1735,6 +1715,7 @@ class CFREvaluator(ABC):
         )
 
         # Record exploitability by street
+        N = self.root_nodes
         root_streets = self.env.street[:N]  # (N,)
         self.stats["local_exploitability_street"] = {
             street_name: exploit_stats.local_exploitability[root_streets == i]
