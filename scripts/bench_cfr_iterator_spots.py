@@ -376,6 +376,20 @@ def _run_component_benchmarks(
         setup_state,
         ev.compute_expected_values,
     )
+    if hasattr(ev, "_regret_src_weights"):
+        def setup_regret_src_weights() -> None:
+            setup_state()
+            ev._prepare_tree_slices()
+
+        def regret_src_weights():
+            beliefs = ev.beliefs_avg if ev.cfr_avg else ev.beliefs
+            return ev._regret_src_weights(beliefs, ev._top)
+
+        time_component(
+            "regret_src_weights",
+            setup_regret_src_weights,
+            regret_src_weights,
+        )
     time_component(
         "update_policy",
         setup_state,
