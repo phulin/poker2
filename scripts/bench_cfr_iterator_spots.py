@@ -198,7 +198,7 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
     cfg.search.iterations = args.iterations
     cfg.search.iterations_final = None
     cfg.search.sparse = True
-    cfg.search.sparse_fused = True
+    cfg.search.sparse_fused = not args.unfused
     if args.dcfr_delay is not None:
         cfg.search.dcfr_plus_delay = args.dcfr_delay
 
@@ -307,6 +307,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--random-spots", action="store_true")
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--no-compile", action="store_true")
+    parser.add_argument(
+        "--unfused",
+        action="store_true",
+        help="Use SparseCFREvaluator instead of FusedSparseCFREvaluator.",
+    )
     parser.add_argument("--no-pause", action="store_true")
     parser.add_argument("--pause-pattern", default="train_rebel")
     parser.add_argument(

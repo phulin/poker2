@@ -92,6 +92,8 @@ class BetterFFN(BaseMLPModel):
         # instead of treating beliefs as an unstructured 1326-dim vector.
         combos = hand_combos_tensor()  # [NUM_HANDS, 2]
         self.register_buffer("hand_combos", combos, persistent=False)
+        self.register_buffer("hand_ranks", combos % 13, persistent=False)
+        self.register_buffer("hand_suits", combos // 13, persistent=False)
         self.belief_proj = ffn_block(
             num_players * hidden_dim,
             num_players * range_hidden_dim,
@@ -145,10 +147,9 @@ class BetterFFN(BaseMLPModel):
 
     def _hand_embedding(self) -> torch.Tensor:
         """Per-hand embedding tied to rank/suit embeddings — shape [NUM_HANDS, hidden_dim]."""
-        cards = self.hand_combos  # [NUM_HANDS, 2]
-        ranks = cards % 13
-        suits = cards // 13
-        card_emb = self.rank_embedding(ranks) + self.suit_embedding(suits)
+        card_emb = self.rank_embedding(self.hand_ranks) + self.suit_embedding(
+            self.hand_suits
+        )
         return card_emb.sum(dim=1)
 
     @profile
