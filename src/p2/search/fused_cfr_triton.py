@@ -1433,8 +1433,8 @@ def unblocked_mass_opp_at_parents_triton(
         _UNBLOCKED_NUM_HANDS,
         NUM_CARDS=_UNBLOCKED_NUM_CARDS,
         HAS_ALLOWED=has_allowed,
-        BLOCK_H=2048,
-        num_warps=8,
+        BLOCK_H=1024,
+        num_warps=4,
     )
     return out
 
@@ -1472,8 +1472,8 @@ def unblocked_mass_finalize_triton_out_(
         _UNBLOCKED_NUM_HANDS,
         NUM_CARDS=_UNBLOCKED_NUM_CARDS,
         HAS_ALLOWED=has_allowed,
-        BLOCK_H=2048,
-        num_warps=8,
+        BLOCK_H=1024,
+        num_warps=4,
     )
 
 
