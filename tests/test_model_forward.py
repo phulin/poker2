@@ -113,6 +113,47 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
     assert torch.isfinite(output.hand_values).all()
 
 
+def test_better_ffn_range_hidden_dim_zero_uses_direct_belief_projection():
+    batch_size = 2
+    num_actions = 4
+    num_players = 2
+    hidden_dim = 16
+    model = BetterFFN(
+        num_actions=num_actions,
+        hidden_dim=hidden_dim,
+        range_hidden_dim=0,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+    )
+
+    assert model.belief_proj.linear.weight.shape == (
+        hidden_dim,
+        num_players * hidden_dim,
+    )
+    assert "belief_proj.linear_in.weight" not in model.state_dict()
+    assert "belief_proj.linear_out.weight" not in model.state_dict()
+
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    features = MLPFeatures(
+        context=torch.zeros(batch_size, context_length(num_players)),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+
+    output = model(features)
+
+    assert output.policy_logits.shape == (batch_size, NUM_HANDS, num_actions)
+    assert output.hand_values.shape == (batch_size, num_players, NUM_HANDS)
+    assert output.value.shape == (batch_size, num_players)
+
+
 def test_action_mapping_with_env():
     env = HUNLEnv(starting_stack=1000, sb=50, bb=100)
     state = env.reset()

@@ -295,16 +295,27 @@ export class BetterFfnWebGpuModel {
         );
       }
 
-      const beliefFeatures = this.leakyReluBlockBatch(
-        "belief_proj",
-        perPlayerBelief,
-        batch,
-        numPlayers * hiddenDim,
-        numPlayers * rangeHiddenDim,
-        hiddenDim,
-        empty,
-        uniform,
-      );
+      const beliefFeatures =
+        rangeHiddenDim === 0
+          ? this.directBlockBatch(
+              "belief_proj",
+              perPlayerBelief,
+              batch,
+              numPlayers * hiddenDim,
+              hiddenDim,
+              empty,
+              uniform,
+            )
+          : this.leakyReluBlockBatch(
+              "belief_proj",
+              perPlayerBelief,
+              batch,
+              numPlayers * hiddenDim,
+              numPlayers * rangeHiddenDim,
+              hiddenDim,
+              empty,
+              uniform,
+            );
 
       const context = new Float32Array(batch * 11);
       const base = new Float32Array(batch * hiddenDim);
@@ -482,7 +493,17 @@ export class BetterFfnWebGpuModel {
     requireTensor(tensors, "street_embedding.weight", [5, hidden]);
     requireTensor(tensors, "rank_embedding.weight", [14, hidden]);
     requireTensor(tensors, "suit_embedding.weight", [5, hidden]);
-    this.requireLinearBlock(tensors, "belief_proj", 2 * hidden, 2 * rangeHidden, hidden);
+    if (rangeHidden === 0) {
+      this.requireDirectBlock(tensors, "belief_proj", 2 * hidden, hidden);
+    } else {
+      this.requireLinearBlock(
+        tensors,
+        "belief_proj",
+        2 * hidden,
+        2 * rangeHidden,
+        hidden,
+      );
+    }
     this.requireLinearBlock(tensors, "context_encoder", 11, hidden, hidden);
     for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
       this.requireLinearBlock(tensors, `trunk.${i}.inner`, hidden, ffn, hidden);
@@ -520,6 +541,17 @@ export class BetterFfnWebGpuModel {
     requireTensor(tensors, `${prefix}.linear_in.weight`, [hiddenDim, inDim]);
     requireTensor(tensors, `${prefix}.linear_out.weight`, [outDim, hiddenDim]);
     requireTensor(tensors, `${prefix}.linear_out.bias`, [outDim]);
+  }
+
+  private requireDirectBlock(
+    tensors: TensorMap,
+    prefix: string,
+    inDim: number,
+    outDim: number,
+  ): void {
+    requireTensor(tensors, `${prefix}.norm.weight`, [inDim]);
+    requireTensor(tensors, `${prefix}.linear.weight`, [outDim, inDim]);
+    requireTensor(tensors, `${prefix}.linear.bias`, [outDim]);
   }
 
   private buildHandEmbeddingT(): Float32Array<ArrayBuffer> {
@@ -613,6 +645,38 @@ export class BetterFfnWebGpuModel {
       batch,
       hiddenDim,
       outDim,
+      true,
+      uniform,
+    );
+    return out;
+  }
+
+  private directBlockBatch(
+    prefix: string,
+    input: GPUBuffer,
+    batch: number,
+    inDim: number,
+    outDim: number,
+    empty: (elements: number) => GPUBuffer,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): GPUBuffer {
+    const normed = empty(batch * inDim);
+    this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+    const out = empty(batch * outDim);
+    this.matVecBatch(
+      this.tensor(`${prefix}.linear.weight`).buffer,
+      normed,
+      this.tensor(`${prefix}.linear.bias`).buffer,
+      out,
+      outDim,
+      inDim,
+      batch,
+      inDim,
+      outDim,
+      0,
+      0,
       true,
       uniform,
     );

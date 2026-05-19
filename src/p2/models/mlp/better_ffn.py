@@ -57,6 +57,17 @@ def ffn_block(
         )
 
 
+def direct_projection_block(in_dim: int, out_dim: int) -> nn.Module:
+    return nn.Sequential(
+        OrderedDict(
+            [
+                ("norm", nn.RMSNorm(in_dim, eps=1e-5)),
+                ("linear", nn.Linear(in_dim, out_dim)),
+            ]
+        )
+    )
+
+
 class BetterFFN(BaseMLPModel):
     """Better PBS feed-forward poker model."""
 
@@ -83,6 +94,9 @@ class BetterFFN(BaseMLPModel):
         self.shared_trunk = shared_trunk
         self.enforce_zero_sum = enforce_zero_sum
 
+        if range_hidden_dim < 0:
+            raise ValueError("range_hidden_dim must be non-negative")
+
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
         self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)
@@ -97,11 +111,16 @@ class BetterFFN(BaseMLPModel):
         self._hand_embedding_cache: torch.Tensor | None = None
         self._hand_embedding_cache_key: tuple[int, int, int, int] | None = None
         self._skip_hand_embedding_cache_when_compiling = False
-        self.belief_proj = ffn_block(
-            num_players * hidden_dim,
-            num_players * range_hidden_dim,
-            hidden_dim,
-            nonlinearity,
+        belief_in_dim = num_players * hidden_dim
+        self.belief_proj = (
+            direct_projection_block(belief_in_dim, hidden_dim)
+            if range_hidden_dim == 0
+            else ffn_block(
+                belief_in_dim,
+                num_players * range_hidden_dim,
+                hidden_dim,
+                nonlinearity,
+            )
         )
         self.context_encoder = ffn_block(
             context_length(num_players), hidden_dim, hidden_dim, nonlinearity
