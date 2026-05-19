@@ -146,7 +146,10 @@ class BetterFFN(BaseMLPModel):
         ]
         layers.append(
             ffn_block(
-                hidden_dim, ffn_dim, num_actions * NUM_HANDS, NonlinearityType.leaky_relu
+                hidden_dim,
+                ffn_dim,
+                num_actions * NUM_HANDS,
+                NonlinearityType.leaky_relu,
             )
         )
         self.policy_head = nn.Sequential(*layers)
@@ -159,7 +162,10 @@ class BetterFFN(BaseMLPModel):
         ]
         layers.append(
             ffn_block(
-                hidden_dim, ffn_dim, num_players * NUM_HANDS, NonlinearityType.leaky_relu
+                hidden_dim,
+                ffn_dim,
+                num_players * NUM_HANDS,
+                NonlinearityType.leaky_relu,
             )
         )
         self.hand_value_head = nn.Sequential(*layers)
@@ -183,30 +189,11 @@ class BetterFFN(BaseMLPModel):
             + self.context_encoder(features.context)
         )
 
-    @profile
-    def forward(
+    def _forward_base(
         self,
         features: MLPFeatures,
-        include_policy: bool = True,
-        include_value: bool = True,
-        apply_zero_sum: bool = True,
         static_base_features: torch.Tensor | None = None,
-        latent=None,
-    ) -> ModelOutput:
-        """
-        Forward pass over flat feature vectors.
-
-        Args:
-            features: MLPFeatures
-            apply_zero_sum: Controls where the zero-sum projection is applied,
-                not whether it is required. If ``enforce_zero_sum`` is false this
-                flag has no effect; if it is true and this flag is false, the
-                caller must apply the projection after any value mixing.
-
-        Returns:
-            ModelOutput with policy logits and value predictions.
-        """
-
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         player_beliefs = features.beliefs.view(-1, self.num_players, NUM_HANDS)
         hand_emb = self._hand_embedding()  # [NUM_HANDS, hidden_dim]
         per_player_belief = player_beliefs @ hand_emb  # [B, P, H]
@@ -219,37 +206,113 @@ class BetterFFN(BaseMLPModel):
 
         x = self.trunk(flat_features)
         # assert x.isfinite().all()
+        return player_beliefs, flat_features, x
 
+    def forward_policy(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        static_base_features: torch.Tensor | None = None,
+    ) -> ModelOutput:
+        _, flat_features, x = self._forward_base(
+            features, static_base_features=static_base_features
+        )
         policy_input = x if self.shared_trunk else flat_features.detach()
+        policy_logits = self.policy_head(policy_input).view(
+            -1, NUM_HANDS, self.num_actions
+        )
+        return ModelOutput(policy_logits=policy_logits)
 
-        if include_policy:
-            policy_logits = self.policy_head(policy_input).view(
-                -1, NUM_HANDS, self.num_actions
+    def forward_value(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+    ) -> ModelOutput:
+        """
+        Value-only pass.
+
+        apply_zero_sum controls where the zero-sum projection is applied, not
+        whether it is required. If ``enforce_zero_sum`` is false this flag has no
+        effect; if it is true and this flag is false, the caller must apply the
+        projection after any value mixing.
+        """
+        player_beliefs, _, x = self._forward_base(
+            features, static_base_features=static_base_features
+        )
+        hand_values_raw = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
+        if self.enforce_zero_sum and apply_zero_sum:
+            hand_value_sums = (
+                (hand_values_raw * player_beliefs)
+                .sum(dim=2, keepdim=True)
+                .mean(dim=1, keepdim=True)
             )
+            hand_values = hand_values_raw - hand_value_sums
         else:
-            policy_logits = None
-        hand_values = None
-        value = None
-        if include_value:
-            hand_values_raw = self.hand_value_head(x).view(
-                -1, self.num_players, NUM_HANDS
-            )
-            if self.enforce_zero_sum and apply_zero_sum:
-                hand_value_sums = (
-                    (hand_values_raw * player_beliefs)
-                    .sum(dim=2, keepdim=True)
-                    .mean(dim=1, keepdim=True)
-                )
-                hand_values = hand_values_raw - hand_value_sums
-            else:
-                hand_values = hand_values_raw
-            value = hand_values.mean(dim=-1)
+            hand_values = hand_values_raw
+        value = hand_values.mean(dim=-1)
+        return ModelOutput(value=value, hand_values=hand_values)
 
+    def forward_both(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+    ) -> ModelOutput:
+        player_beliefs, flat_features, x = self._forward_base(
+            features, static_base_features=static_base_features
+        )
+        policy_input = x if self.shared_trunk else flat_features.detach()
+        policy_logits = self.policy_head(policy_input).view(
+            -1, NUM_HANDS, self.num_actions
+        )
+        hand_values_raw = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
+        if self.enforce_zero_sum and apply_zero_sum:
+            hand_value_sums = (
+                (hand_values_raw * player_beliefs)
+                .sum(dim=2, keepdim=True)
+                .mean(dim=1, keepdim=True)
+            )
+            hand_values = hand_values_raw - hand_value_sums
+        else:
+            hand_values = hand_values_raw
+        value = hand_values.mean(dim=-1)
         return ModelOutput(
             policy_logits=policy_logits,
             value=value,
             hand_values=hand_values,
         )
+
+    @profile
+    def forward(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = True,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+        latent=None,
+    ) -> ModelOutput:
+        """Forward pass over flat feature vectors."""
+        if include_policy and include_value:
+            return self._call_forward_both(
+                features,
+                apply_zero_sum=apply_zero_sum,
+                static_base_features=static_base_features,
+            )
+        if include_policy:
+            return self._call_forward_policy(
+                features, static_base_features=static_base_features
+            )
+        if include_value:
+            return self._call_forward_value(
+                features,
+                apply_zero_sum=apply_zero_sum,
+                static_base_features=static_base_features,
+            )
+        raise ValueError("At least one of include_policy/include_value must be true")
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
         """Initialize parameters following Xavier/RMSNorm defaults."""

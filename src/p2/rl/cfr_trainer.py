@@ -162,7 +162,7 @@ class RebelCFRTrainer:
         self.model.init_weights(cpu_rng)
         self.model.to(self.device)
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
-            self.model.compile(**_compile_kwargs(cfg))
+            self.model.compile_forward_modes(**_compile_kwargs(cfg))
 
         # data generation rate per training step
         self.K_value = max(1, self.batch_size // self.cfg.train.value_reuse_goal)
@@ -204,8 +204,9 @@ class RebelCFRTrainer:
             permutation_weight=cfg.train.permutation_coef,
             num_players=self.num_players,
         )
+        self.loss_fn.to(self.device)
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
-            self.loss_fn.compile(**_compile_kwargs(cfg))
+            self.loss_fn.compile_forward_modes(**_compile_kwargs(cfg))
         self.grad_clip = cfg.train.grad_clip
 
         # EMA setup. Shadow weights live in EMAHelper; at search/eval time we
@@ -339,7 +340,7 @@ class RebelCFRTrainer:
         for p in twin.parameters():
             p.requires_grad = False
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
-            twin.compile(**_compile_kwargs(cfg))
+            twin.compile_forward_modes(**_compile_kwargs(cfg))
         return twin
 
     def trueskill_snapshot_weights(self) -> dict[str, torch.Tensor]:
@@ -470,15 +471,11 @@ class RebelCFRTrainer:
                     [tensor[street == i].mean() for i, _ in enumerate(names)]
                 )
             vals_cpu = vals.cpu().tolist()
-            return {
-                k: v for k, v in zip(names, vals_cpu) if not math.isnan(v)
-            }
+            return {k: v for k, v in zip(names, vals_cpu) if not math.isnan(v)}
 
         def street_count(street: torch.Tensor) -> dict[str, float]:
             # Single fused DtoH for all streets.
-            counts = torch.stack(
-                [(street == i).sum() for i, _ in enumerate(STREETS)]
-            )
+            counts = torch.stack([(street == i).sum() for i, _ in enumerate(STREETS)])
             counts_cpu = counts.cpu().tolist()
             return {name: counts_cpu[i] for i, name in enumerate(STREETS)}
 
@@ -571,7 +568,9 @@ class RebelCFRTrainer:
                         count=self.cfg.model.num_supervisions,
                         include_policy=False,
                     )
-                fresh_loss_dict = self.loss_fn(fresh_model_output, fresh_value_batch)
+                fresh_loss_dict = self.loss_fn.forward_value(
+                    fresh_model_output, fresh_value_batch
+                )
                 # loss_fn returns device tensors; .item() lands once per
                 # metric here (3 syncs/step in the EMA case, 1 otherwise).
                 metrics["fresh_value_loss"] = fresh_loss_dict["value_loss"].item()
@@ -585,9 +584,11 @@ class RebelCFRTrainer:
                                 count=self.cfg.model.num_supervisions,
                                 include_policy=False,
                             )
-                        metrics["fresh_value_loss_avg"] = self.loss_fn(
-                            fresh_model_avg_output, fresh_value_batch
-                        )["value_loss"].item()
+                        metrics["fresh_value_loss_avg"] = (
+                            self.loss_fn.forward_value(
+                                fresh_model_avg_output, fresh_value_batch
+                            )["value_loss"].item()
+                        )
 
                         with self._model_autocast():
                             model_avg_output = self.model.repeat(
@@ -595,7 +596,7 @@ class RebelCFRTrainer:
                                 count=self.cfg.model.num_supervisions,
                                 include_policy=False,
                             )
-                        metrics["value_loss_avg"] = self.loss_fn(
+                        metrics["value_loss_avg"] = self.loss_fn.forward_value(
                             model_avg_output, value_batch
                         )["value_loss"].item()
 
@@ -703,15 +704,15 @@ class RebelCFRTrainer:
             else:
                 value_count = len(value_batch)
                 value_output_both = self.model(
-                    MLPFeatures.cat(
-                        [value_batch.features, permuted_batch.features]
-                    ),
+                    MLPFeatures.cat([value_batch.features, permuted_batch.features]),
                     include_policy=False,
                 )
                 value_output_orig = value_output_both[:value_count]
                 value_output_permuted = value_output_both[value_count:]
 
-        loss_dict = self.loss_fn(value_output_permuted, permuted_batch)
+        loss_dict = self.loss_fn._call_forward_value(
+            value_output_permuted, permuted_batch
+        )
         value_loss = loss_dict["value_loss"]
         value_loss_update = loss_dict["value_loss_all"]
         total_loss = loss_dict["total_loss"]
@@ -737,7 +738,7 @@ class RebelCFRTrainer:
                     include_policy=True,
                     include_value=False,
                 )
-        loss_dict = self.loss_fn(policy_output, policy_batch)
+        loss_dict = self.loss_fn._call_forward_policy(policy_output, policy_batch)
         policy_loss = loss_dict["policy_loss"]
         policy_loss_update = loss_dict["policy_loss_all"]
         entropy_loss = loss_dict["entropy"]
@@ -928,9 +929,7 @@ class RebelCFRTrainer:
             # Reshape each accumulator to 0-d so stack succeeds even when
             # individual losses come back as scalars vs 1-element tensors.
             stacked = (
-                torch.stack([tensor_stats[k].reshape(()) for k in keys])
-                .cpu()
-                .tolist()
+                torch.stack([tensor_stats[k].reshape(()) for k in keys]).cpu().tolist()
             )
             for k, val in zip(keys, stacked):
                 step_stats[k] = val
@@ -1046,9 +1045,7 @@ class RebelCFRTrainer:
                 for k, v in model_state.items()
             }
 
-        self.model.load_state_dict(
-            model_state, strict=self.cfg.strict_model_loading
-        )
+        self.model.load_state_dict(model_state, strict=self.cfg.strict_model_loading)
 
         # Load EMA state if it exists in checkpoint and EMA is enabled.
         if "model_avg" in ckpt and self.ema_helper is not None:

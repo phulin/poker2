@@ -11,9 +11,8 @@ import torch.nn.functional as F
 from p2.core.structured_config import KLType, PPOClipping, ValueLossType
 from p2.env.card_utils import (
     NUM_HANDS,
-    board_allowed_hands,
-    calculate_unblocked_mass,
     combo_suit_permutation_tensor,
+    hand_combos_tensor,
 )
 from p2.models.model_output import ModelOutput
 from p2.rl.exponential_controller import ExponentialController
@@ -743,6 +742,258 @@ class RebelSupervisedLoss(nn.Module):
         self.entropy_coef = entropy_coef
         self.permutation_weight = permutation_weight
         self.num_players = num_players
+        combos = hand_combos_tensor()
+        self.register_buffer("_combo_card_a", combos[:, 0].long(), persistent=False)
+        self.register_buffer("_combo_card_b", combos[:, 1].long(), persistent=False)
+        self.register_buffer(
+            "_combo_suit_permutations",
+            combo_suit_permutation_tensor(),
+            persistent=False,
+        )
+
+    def compile_forward_modes(self, **kwargs):
+        """Compile fixed-mode loss forwards without compiling optional dispatch."""
+        self._compiled_forward_policy = torch.compile(self.forward_policy, **kwargs)
+        self._compiled_forward_value = torch.compile(self.forward_value, **kwargs)
+        self._compiled_forward_both = torch.compile(self.forward_both, **kwargs)
+        return self
+
+    def _call_forward_policy(self, *args, **kwargs):
+        fn = getattr(self, "_compiled_forward_policy", None)
+        if fn is None:
+            fn = self.forward_policy
+        return fn(*args, **kwargs)
+
+    def _call_forward_value(self, *args, **kwargs):
+        fn = getattr(self, "_compiled_forward_value", None)
+        if fn is None:
+            fn = self.forward_value
+        return fn(*args, **kwargs)
+
+    def _call_forward_both(self, *args, **kwargs):
+        fn = getattr(self, "_compiled_forward_both", None)
+        if fn is None:
+            fn = self.forward_both
+        return fn(*args, **kwargs)
+
+    def _board_allowed_hands(self, board: torch.Tensor) -> torch.Tensor:
+        """Return private-hand mask using precomputed combo card buffers."""
+        if board.shape[-1] == 0:
+            return torch.ones(
+                *board.shape[:-1], NUM_HANDS, dtype=torch.bool, device=board.device
+            )
+
+        flat_board = board.reshape(-1, board.shape[-1]).long()
+        valid = flat_board >= 0
+        flat_board_safe = torch.where(
+            valid, flat_board, torch.full_like(flat_board, 52)
+        )
+        board_onehot = torch.zeros(
+            flat_board.shape[0], 53, dtype=torch.bool, device=board.device
+        )
+        board_onehot.scatter_(1, flat_board_safe, valid)
+        board_onehot = board_onehot[:, :52]
+        allowed = ~(
+            board_onehot[:, self._combo_card_a] | board_onehot[:, self._combo_card_b]
+        )
+        return allowed.reshape(*board.shape[:-1], NUM_HANDS)
+
+    def _calculate_unblocked_mass(self, target: torch.Tensor) -> torch.Tensor:
+        """PIE unblocked mass using precomputed combo card buffers."""
+        target_batched = target.view(-1, NUM_HANDS).float()
+        card_a = self._combo_card_a
+        card_b = self._combo_card_b
+
+        total = target_batched.sum(dim=-1, keepdim=True)
+        cardsum = torch.zeros(
+            target_batched.shape[0],
+            52,
+            dtype=target_batched.dtype,
+            device=target_batched.device,
+        )
+        card_a_idx = card_a[None, :].expand(target_batched.shape[0], -1)
+        card_b_idx = card_b[None, :].expand(target_batched.shape[0], -1)
+        cardsum.scatter_add_(1, card_a_idx, target_batched)
+        cardsum.scatter_add_(1, card_b_idx, target_batched)
+
+        multiply = total - cardsum[:, card_a] - cardsum[:, card_b] + target_batched
+        return multiply.view_as(target).clamp(min=0.0)
+
+    def _base_weights(
+        self, batch: RebelBatch
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        player_beliefs = batch.features.beliefs.view(-1, 2, NUM_HANDS)
+        allowed_hands = self._board_allowed_hands(batch.features.board)
+        allowed_hands_float = allowed_hands.to(dtype=player_beliefs.dtype)
+        unblocked_mass = self._calculate_unblocked_mass(player_beliefs)
+        return player_beliefs, allowed_hands_float, unblocked_mass
+
+    def _policy_weights(
+        self, batch: RebelBatch
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        actor = batch.features.to_act
+        opp = 1 - actor
+        player_beliefs, allowed_hands_float, unblocked_mass = self._base_weights(batch)
+        actor_belief = player_beliefs.gather(
+            1, actor[:, None, None].expand(-1, 1, NUM_HANDS)
+        ).squeeze(1)
+        opp_matchup = (
+            unblocked_mass.gather(
+                1, opp[:, None, None].expand(-1, 1, NUM_HANDS)
+            ).squeeze(1)
+            * allowed_hands_float
+        )
+        return (
+            player_beliefs,
+            allowed_hands_float,
+            unblocked_mass,
+            actor_belief,
+            opp_matchup,
+        )
+
+    def _zero(self, device: torch.device) -> torch.Tensor:
+        return torch.zeros((), device=device)
+
+    def _permutation_loss(
+        self,
+        output: ModelOutput,
+        output_permuted: ModelOutput,
+        suit_permutation_idxs: torch.Tensor,
+    ) -> torch.Tensor:
+        combo_permutations = self._combo_suit_permutations[suit_permutation_idxs]
+        hand_values_permuted_reversed = torch.gather(
+            output_permuted.hand_values,
+            2,
+            combo_permutations[:, None, :].expand(-1, self.num_players, -1),
+        )
+        return F.mse_loss(output.hand_values, hand_values_permuted_reversed)
+
+    def forward_policy(
+        self,
+        output: ModelOutput,
+        batch: RebelBatch,
+    ) -> dict[str, torch.Tensor]:
+        logits = output.policy_logits
+        device = logits.device
+        _, _, _, actor_belief, opp_matchup = self._policy_weights(batch)
+
+        legal_masks = batch.legal_masks[:, None, :]
+        masked_logits = compute_masked_logits(logits, legal_masks)
+        log_probs = F.log_softmax(masked_logits, dim=-1)
+        probs = log_probs.exp()
+
+        policy_weights_unnormalized = actor_belief * opp_matchup
+        policy_weight_sum = policy_weights_unnormalized.sum(dim=-1, keepdim=True).clamp(
+            min=1e-8
+        )
+        policy_weights = policy_weights_unnormalized / policy_weight_sum
+        policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
+        policy_loss_per_hand = policy_ce_per_hand * policy_weights
+        policy_loss = policy_loss_per_hand.sum(dim=-1).mean()
+        policy_loss_all = policy_loss_per_hand.sum(dim=-1).detach()
+
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+        total_loss = self.policy_weight * policy_loss
+        if self.entropy_coef is not None and self.entropy_coef != 0.0:
+            total_loss -= self.entropy_coef * entropy
+
+        zero = self._zero(device)
+        return {
+            "total_loss": total_loss,
+            "policy_loss": policy_loss,
+            "policy_loss_all": policy_loss_all,
+            "policy_weights": policy_weights,
+            "value_loss": zero,
+            "value_loss_all": None,
+            "value_weights": None,
+            "entropy": entropy,
+            "permutation_loss": zero,
+        }
+
+    def forward_value(
+        self,
+        output: ModelOutput,
+        batch: RebelBatch,
+    ) -> dict[str, torch.Tensor]:
+        hand_values = output.hand_values
+        device = hand_values.device
+        _, allowed_hands_float, unblocked_mass = self._base_weights(batch)
+
+        value_weights = unblocked_mass.flip(dims=[1]) * allowed_hands_float[:, None]
+        value_loss = F.mse_loss(hand_values, batch.value_targets, weight=value_weights)
+        value_loss_all = F.mse_loss(
+            hand_values.detach(),
+            batch.value_targets,
+            reduction="none",
+            weight=value_weights,
+        )
+        total_loss = self.value_weight * value_loss
+
+        zero = self._zero(device)
+        return {
+            "total_loss": total_loss,
+            "policy_loss": zero,
+            "policy_loss_all": None,
+            "policy_weights": None,
+            "value_loss": value_loss,
+            "value_loss_all": value_loss_all,
+            "value_weights": value_weights,
+            "entropy": zero,
+            "permutation_loss": zero,
+        }
+
+    def forward_both(
+        self,
+        output: ModelOutput,
+        batch: RebelBatch,
+    ) -> dict[str, torch.Tensor]:
+        logits = output.policy_logits
+        hand_values = output.hand_values
+        device = logits.device
+        _, allowed_hands_float, unblocked_mass, actor_belief, opp_matchup = (
+            self._policy_weights(batch)
+        )
+
+        legal_masks = batch.legal_masks[:, None, :]
+        masked_logits = compute_masked_logits(logits, legal_masks)
+        log_probs = F.log_softmax(masked_logits, dim=-1)
+        probs = log_probs.exp()
+
+        policy_weights_unnormalized = actor_belief * opp_matchup
+        policy_weight_sum = policy_weights_unnormalized.sum(dim=-1, keepdim=True).clamp(
+            min=1e-8
+        )
+        policy_weights = policy_weights_unnormalized / policy_weight_sum
+        policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
+        policy_loss_per_hand = policy_ce_per_hand * policy_weights
+        policy_loss = policy_loss_per_hand.sum(dim=-1).mean()
+        policy_loss_all = policy_loss_per_hand.sum(dim=-1).detach()
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+
+        value_weights = unblocked_mass.flip(dims=[1]) * allowed_hands_float[:, None]
+        value_loss = F.mse_loss(hand_values, batch.value_targets, weight=value_weights)
+        value_loss_all = F.mse_loss(
+            hand_values.detach(),
+            batch.value_targets,
+            reduction="none",
+            weight=value_weights,
+        )
+
+        total_loss = self.policy_weight * policy_loss + self.value_weight * value_loss
+        if self.entropy_coef is not None and self.entropy_coef != 0.0:
+            total_loss -= self.entropy_coef * entropy
+
+        return {
+            "total_loss": total_loss,
+            "policy_loss": policy_loss,
+            "policy_loss_all": policy_loss_all,
+            "policy_weights": policy_weights,
+            "value_loss": value_loss,
+            "value_loss_all": value_loss_all,
+            "value_weights": value_weights,
+            "entropy": entropy,
+            "permutation_loss": self._zero(device),
+        }
 
     def forward(
         self,
@@ -761,102 +1012,34 @@ class RebelSupervisedLoss(nn.Module):
             Dict of scalar tensors for loss components and diagnostics.
         """
 
-        logits = output.policy_logits
-        hand_values = output.hand_values
-        device = logits.device if logits is not None else output.value.device
-
-        actor = batch.features.to_act
-        opp = 1 - actor
-        player_beliefs = batch.features.beliefs.view(-1, 2, NUM_HANDS)
-        allowed_hands = board_allowed_hands(batch.features.board)
-        allowed_hands_float = allowed_hands.to(dtype=player_beliefs.dtype)
-        unblocked_mass = calculate_unblocked_mass(player_beliefs)
-        actor_belief = player_beliefs.gather(
-            1, actor[:, None, None].expand(-1, 1, NUM_HANDS)
-        ).squeeze(1)
-        opp_matchup = (
-            unblocked_mass.gather(
-                1, opp[:, None, None].expand(-1, 1, NUM_HANDS)
-            ).squeeze(1)
-            * allowed_hands_float
-        )
-
-        if batch.policy_targets is None:
-            policy_loss = torch.zeros(1, device=device)
-            policy_loss_all = None
-            policy_weights = None
-            entropy = torch.zeros(1, device=device)
+        if batch.policy_targets is not None and batch.value_targets is not None:
+            result = self._call_forward_both(output, batch)
+        elif batch.policy_targets is not None:
+            result = self._call_forward_policy(output, batch)
+        elif batch.value_targets is not None:
+            result = self._call_forward_value(output, batch)
         else:
-            legal_masks = batch.legal_masks[:, None, :]
-            masked_logits = compute_masked_logits(logits, legal_masks)
-            log_probs = F.log_softmax(masked_logits, dim=-1)
-            probs = log_probs.exp()
+            device = output.value.device
+            zero = self._zero(device)
+            result = {
+                "total_loss": zero,
+                "policy_loss": zero,
+                "policy_loss_all": None,
+                "policy_weights": None,
+                "value_loss": zero,
+                "value_loss_all": None,
+                "value_weights": None,
+                "entropy": zero,
+                "permutation_loss": zero,
+            }
 
-            policy_weights_unnormalized = actor_belief * opp_matchup
-            policy_weight_sum = policy_weights_unnormalized.sum(
-                dim=-1, keepdim=True
-            ).clamp(min=1e-8)
-            policy_weights = policy_weights_unnormalized / policy_weight_sum
-            policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
-            policy_loss_per_hand = policy_ce_per_hand * policy_weights
-            policy_loss = policy_loss_per_hand.sum(dim=-1).mean()
-            policy_loss_all = policy_loss_per_hand.sum(dim=-1).detach()
-
-            entropy = -(probs * log_probs).sum(dim=-1).mean()
-
-        if batch.value_targets is None:
-            value_weights = None
-            value_loss = torch.zeros(1, device=device)
-            value_loss_all = None
-        else:
-            value_weights = unblocked_mass.flip(dims=[1]) * allowed_hands_float[:, None]
-            value_loss = F.mse_loss(
-                hand_values, batch.value_targets, weight=value_weights
-            )
-            value_loss_all = F.mse_loss(
-                hand_values.detach(),
-                batch.value_targets,
-                reduction="none",
-                weight=value_weights,
-            )
-
-        total_loss = self.policy_weight * policy_loss + self.value_weight * value_loss
-
-        if self.entropy_coef is not None and self.entropy_coef != 0.0:
-            total_loss -= self.entropy_coef * entropy
-
-        permutation_loss = torch.tensor(0.0, device=device)
         if output_permuted is not None and suit_permutation_idxs is not None:
-            # Reverse the permutation on the output hand values.
-            # combo_suit_permutation_tensor[perm_idx, i] = permuted combo index for original combo i
-            # To rearrange hand_values_permuted to original order:
-            # hand_values_reversed[b, p, i] = hand_values_permuted[b, p, remap[b, i]]
-            # where remap[b, i] is the permuted combo index for original combo i
-            combo_permutations = combo_suit_permutation_tensor(device=device)[
-                suit_permutation_idxs
-            ]  # (B, 1326)
-            hand_values_permuted_reversed = torch.gather(
-                output_permuted.hand_values,  # (B, 2, 1326)
-                2,
-                combo_permutations[:, None, :].expand(
-                    -1, self.num_players, -1
-                ),  # (B, 2, 1326)
+            permutation_loss = self._permutation_loss(
+                output, output_permuted, suit_permutation_idxs
             )
-            # This loss confirms that model commutes with suit permutations.
-            permutation_loss = F.mse_loss(hand_values, hand_values_permuted_reversed)
-            total_loss += self.permutation_weight * permutation_loss
+            result["permutation_loss"] = permutation_loss
+            result["total_loss"] = (
+                result["total_loss"] + self.permutation_weight * permutation_loss
+            )
 
-        # All scalars are returned as device tensors. Callers accumulate on
-        # device and sync once per training step (or per metrics rollup),
-        # collapsing what used to be 4 host syncs per supervision into none.
-        return {
-            "total_loss": total_loss,
-            "policy_loss": policy_loss,
-            "policy_loss_all": policy_loss_all,
-            "policy_weights": policy_weights,
-            "value_loss": value_loss,
-            "value_loss_all": value_loss_all,
-            "value_weights": value_weights,
-            "entropy": entropy,
-            "permutation_loss": permutation_loss,
-        }
+        return result

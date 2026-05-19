@@ -138,7 +138,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if compile_model and compile_setting != "off" and self.model is not None:
             torch.set_float32_matmul_precision("high")
             try:
-                self.model = torch.compile(self.model, **self._compile_kwargs)
+                if hasattr(self.model, "compile_forward_modes"):
+                    if getattr(self.model, "_compiled_forward_value", None) is None:
+                        self.model.compile_forward_modes(**self._compile_kwargs)
+                else:
+                    self.model = torch.compile(self.model, **self._compile_kwargs)
             except Exception:
                 pass
 
@@ -1148,7 +1152,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     self._static_model_base_fn is None
                     or self._static_model_base_fn_key != model_key
                 ):
-                    if getattr(self.model, "_orig_mod", None) is not None:
+                    if (
+                        getattr(self.model, "_orig_mod", None) is not None
+                        or getattr(base_model, "_compiled_forward_value", None)
+                        is not None
+                    ):
                         self._static_model_base_fn = torch.compile(
                             base_model.static_feature_base,
                             **self._compile_kwargs,

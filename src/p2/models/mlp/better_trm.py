@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 from collections import OrderedDict
 
@@ -174,24 +173,11 @@ class BetterTRM(BaseMLPModel):
         y = self.trunk(y + z)
         return y, z
 
-    @profile
-    def forward(
+    def _forward_latent(
         self,
         features: MLPFeatures,
-        include_policy: bool = True,
-        include_value: bool = True,
         latent: TRMLatent | None = None,
-    ) -> ModelOutput:
-        """
-        Forward pass over flat feature vectors.
-
-        Args:
-            features: MLPFeatures
-
-        Returns:
-            ModelOutput with policy logits and value predictions.
-        """
-
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         board = features.board
         ranks = torch.where(board >= 0, board % 13, torch.full_like(board, 13))
         suits = torch.where(board >= 0, board // 13, torch.full_like(board, 4))
@@ -221,35 +207,64 @@ class BetterTRM(BaseMLPModel):
             else self.z_init.clone()[None, :].expand(x.shape[0], -1)
         )
         with torch.no_grad():
-            for j in range(self.num_iterations - 1):
+            for _ in range(self.num_iterations - 1):
                 y, z = self.latent_recursion(x, y, z)
         y, z = self.latent_recursion(x, y, z)
+        return player_beliefs, y, z
 
-        if include_policy:
-            policy_input = y if self.shared_trunk else y.detach()
-            policy_logits = self.policy_head(policy_input).view(
-                -1, NUM_HANDS, self.num_actions
-            )
-        else:
-            policy_logits = None
+    def forward_policy(
+        self, features: MLPFeatures, latent: TRMLatent | None = None
+    ) -> ModelOutput:
+        _, y, z = self._forward_latent(features, latent)
+        policy_input = y if self.shared_trunk else y.detach()
+        policy_logits = self.policy_head(policy_input).view(
+            -1, NUM_HANDS, self.num_actions
+        )
+        return ModelOutput(
+            policy_logits=policy_logits,
+            latent=TRMLatent(y=y.detach(), z=z.detach()),
+        )
 
-        if include_value:
-            hand_values_raw = self.hand_value_head(y).view(
-                -1, self.num_players, NUM_HANDS
+    def forward_value(
+        self, features: MLPFeatures, latent: TRMLatent | None = None
+    ) -> ModelOutput:
+        player_beliefs, y, z = self._forward_latent(features, latent)
+        hand_values_raw = self.hand_value_head(y).view(-1, self.num_players, NUM_HANDS)
+        if self.enforce_zero_sum:
+            hand_value_sums = (
+                (hand_values_raw * player_beliefs)
+                .sum(dim=2, keepdim=True)
+                .mean(dim=1, keepdim=True)
             )
-            if self.enforce_zero_sum:
-                hand_value_sums = (
-                    (hand_values_raw * player_beliefs)
-                    .sum(dim=2, keepdim=True)
-                    .mean(dim=1, keepdim=True)
-                )
-                hand_values = hand_values_raw - hand_value_sums
-            else:
-                hand_values = hand_values_raw
-            value = hand_values.mean(dim=-1)
+            hand_values = hand_values_raw - hand_value_sums
         else:
-            hand_values = None
-            value = None
+            hand_values = hand_values_raw
+        value = hand_values.mean(dim=-1)
+        return ModelOutput(
+            value=value,
+            hand_values=hand_values,
+            latent=TRMLatent(y=y.detach(), z=z.detach()),
+        )
+
+    def forward_both(
+        self, features: MLPFeatures, latent: TRMLatent | None = None
+    ) -> ModelOutput:
+        player_beliefs, y, z = self._forward_latent(features, latent)
+        policy_input = y if self.shared_trunk else y.detach()
+        policy_logits = self.policy_head(policy_input).view(
+            -1, NUM_HANDS, self.num_actions
+        )
+        hand_values_raw = self.hand_value_head(y).view(-1, self.num_players, NUM_HANDS)
+        if self.enforce_zero_sum:
+            hand_value_sums = (
+                (hand_values_raw * player_beliefs)
+                .sum(dim=2, keepdim=True)
+                .mean(dim=1, keepdim=True)
+            )
+            hand_values = hand_values_raw - hand_value_sums
+        else:
+            hand_values = hand_values_raw
+        value = hand_values.mean(dim=-1)
 
         return ModelOutput(
             policy_logits=policy_logits,
@@ -257,6 +272,23 @@ class BetterTRM(BaseMLPModel):
             hand_values=hand_values,
             latent=TRMLatent(y=y.detach(), z=z.detach()),
         )
+
+    @profile
+    def forward(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = True,
+        latent: TRMLatent | None = None,
+    ) -> ModelOutput:
+        """Forward pass over flat feature vectors."""
+        if include_policy and include_value:
+            return self._call_forward_both(features, latent=latent)
+        if include_policy:
+            return self._call_forward_policy(features, latent=latent)
+        if include_value:
+            return self._call_forward_value(features, latent=latent)
+        raise ValueError("At least one of include_policy/include_value must be true")
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
         """Initialize parameters following Xavier/LayerNorm defaults."""
