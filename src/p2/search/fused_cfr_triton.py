@@ -1210,12 +1210,25 @@ def select_actor_beliefs_triton(
     block_h: int = 512,
 ) -> torch.Tensor:
     """Materialize ``beliefs[row, to_act[row], hand]`` for parent rows."""
+    out = torch.empty((top, beliefs.shape[-1]), device=beliefs.device, dtype=beliefs.dtype)
+    select_actor_beliefs_triton_out_(beliefs, to_act, top, out, block_h=block_h)
+    return out
+
+
+def select_actor_beliefs_triton_out_(
+    beliefs: torch.Tensor,
+    to_act: torch.Tensor,
+    top: int,
+    out: torch.Tensor,
+    block_h: int = 512,
+) -> None:
+    """Write ``beliefs[row, to_act[row], hand]`` for parent rows into ``out``."""
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
     assert beliefs.is_contiguous() and beliefs.dim() == 3 and beliefs.shape[1] == 2
     assert to_act.is_contiguous()
     h = beliefs.shape[-1]
-    out = torch.empty((top, h), device=beliefs.device, dtype=beliefs.dtype)
+    assert out.is_contiguous() and out.shape == (top, h)
     _select_actor_beliefs_kernel[(top, triton.cdiv(h, block_h))](
         beliefs,
         to_act,
@@ -1224,7 +1237,6 @@ def select_actor_beliefs_triton(
         BLOCK_H=block_h,
         num_warps=4,
     )
-    return out
 
 
 if triton is not None:
@@ -1266,6 +1278,31 @@ def marginal_policy_triton(
     block_h: int = 512,
 ) -> torch.Tensor:
     """Materialize ``actor_beliefs[parent_index_bottom] * policy[bottom:]``."""
+    out = torch.empty(
+        (parent_index_bottom.numel(), actor_beliefs.shape[-1]),
+        device=policy.device,
+        dtype=policy.dtype,
+    )
+    marginal_policy_triton_out_(
+        actor_beliefs,
+        policy,
+        parent_index_bottom,
+        bottom,
+        out,
+        block_h=block_h,
+    )
+    return out
+
+
+def marginal_policy_triton_out_(
+    actor_beliefs: torch.Tensor,
+    policy: torch.Tensor,
+    parent_index_bottom: torch.Tensor,
+    bottom: int,
+    out: torch.Tensor,
+    block_h: int = 512,
+) -> None:
+    """Write ``actor_beliefs[parent_index_bottom] * policy[bottom:]`` into ``out``."""
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
     assert actor_beliefs.is_contiguous() and actor_beliefs.dim() == 2
@@ -1273,7 +1310,7 @@ def marginal_policy_triton(
     assert parent_index_bottom.is_contiguous()
     num_children = parent_index_bottom.numel()
     h = actor_beliefs.shape[-1]
-    out = torch.empty((num_children, h), device=policy.device, dtype=policy.dtype)
+    assert out.is_contiguous() and out.shape == (num_children, h)
     _marginal_policy_kernel[(num_children, triton.cdiv(h, block_h))](
         actor_beliefs,
         policy,
@@ -1285,7 +1322,6 @@ def marginal_policy_triton(
         BLOCK_H=block_h,
         num_warps=4,
     )
-    return out
 
 
 class ParentBeliefUnblockedStats:

@@ -65,9 +65,7 @@ from p2.search.fused_cfr_triton import (
     fused_weighted_parent_sum_inline_opp_both,
     fused_weighted_parent_sum_inline_opp_both_noleaf,
     GraphedCFRIteration,
-    marginal_policy_triton,
     precompute_showdown_extras,
-    select_actor_beliefs_triton,
     showdown_ev_v15,
     ShowdownGraphRunner,
     triton_is_available,
@@ -75,6 +73,8 @@ from p2.search.fused_cfr_triton import (
     _preprocess_unblocked_stats,
     unblocked_mass_opp_at_parents_triton,
     unblocked_mass_ratio_indirect_triton,
+    marginal_policy_triton_out_,
+    select_actor_beliefs_triton_out_,
 )
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
@@ -201,6 +201,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._reach_scratch_a: torch.Tensor | None = None
         self._reach_scratch_b: torch.Tensor | None = None
         self._reach_scratch_width: int = 0
+        self._ev_actor_beliefs_buf: torch.Tensor | None = None
+        self._ev_marginal_policy_buf: torch.Tensor | None = None
         self._sample_update_rows: torch.Tensor | None = None
         self._sample_update_counts: torch.Tensor | None = None
         self._sample_update_key: tuple[int, int, int] | None = None
@@ -315,6 +317,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._reach_scratch_b = None
         if not hasattr(self, "_reach_scratch_width"):
             self._reach_scratch_width = 0
+        if not hasattr(self, "_ev_actor_beliefs_buf"):
+            self._ev_actor_beliefs_buf = None
+        if not hasattr(self, "_ev_marginal_policy_buf"):
+            self._ev_marginal_policy_buf = None
         if not hasattr(self, "_sample_update_rows"):
             self._sample_update_rows = None
         if not hasattr(self, "_sample_update_counts"):
@@ -487,6 +493,25 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._reach_scratch_width = max_width
         assert self._reach_scratch_b is not None
         return self._reach_scratch_a, self._reach_scratch_b
+
+    def _ensure_ev_policy_buffers(
+        self, top: int, num_children: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        actor_shape = (top, NUM_HANDS)
+        marginal_shape = (num_children, NUM_HANDS)
+        if (
+            self._ev_actor_beliefs_buf is None
+            or self._ev_actor_beliefs_buf.shape != actor_shape
+        ):
+            self._ev_actor_beliefs_buf = self.beliefs.new_empty(actor_shape)
+        if (
+            self._ev_marginal_policy_buf is None
+            or self._ev_marginal_policy_buf.shape != marginal_shape
+        ):
+            self._ev_marginal_policy_buf = self.policy_probs.new_empty(
+                marginal_shape
+            )
+        return self._ev_actor_beliefs_buf, self._ev_marginal_policy_buf
 
     def _prepare_sample_update_table(self) -> None:
         if not self._opt_sparse_sample:
@@ -838,16 +863,22 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         assert parent_index_bottom is not None
         assert to_act_top is not None
         actor_indices = to_act_top
-        actor_beliefs = select_actor_beliefs_triton(
+        actor_beliefs, marginal_policy = self._ensure_ev_policy_buffers(
+            top,
+            parent_index_bottom.numel(),
+        )
+        select_actor_beliefs_triton_out_(
             beliefs,
             actor_indices,
             top,
+            actor_beliefs,
         )
-        marginal_policy = marginal_policy_triton(
+        marginal_policy_triton_out_(
             actor_beliefs,
             policy,
             parent_index_bottom,
             bottom,
+            marginal_policy,
         )
 
         if self._opt_ev_inline_opp:
