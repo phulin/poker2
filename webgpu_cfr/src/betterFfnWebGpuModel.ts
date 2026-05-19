@@ -3,6 +3,7 @@ import {
   LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   MAT_VEC_BATCH_WGSL,
   MAT_VEC_WGSL,
+  PLAYER_BOARD_HADAMARD_WGSL,
   RMS_NORM_BATCH_WGSL,
   RMS_NORM_WGSL,
   SCALED_RESIDUAL_ADD_WGSL,
@@ -63,9 +64,14 @@ export class BetterFfnWebGpuModel {
   private readonly tensors = new Map<string, GpuTensor>();
   private readonly dummyBias: GPUBuffer;
   private readonly handEmbeddingT: GPUBuffer;
+  private readonly rankPairOneHotT?: GPUBuffer;
+  private readonly suitPairOneHotT?: GPUBuffer;
+  private readonly rankPairLowT?: GPUBuffer;
+  private readonly suitPairLowT?: GPUBuffer;
   private readonly matVecPipeline: GPUComputePipeline;
   private readonly matVecBatchPipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchPipeline: GPUComputePipeline;
+  private readonly playerBoardHadamardPipeline: GPUComputePipeline;
   private readonly rmsNormPipeline: GPUComputePipeline;
   private readonly rmsNormBatchPipeline: GPUComputePipeline;
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
@@ -94,6 +100,18 @@ export class BetterFfnWebGpuModel {
     }
     this.dummyBias = makeStorageBuffer(device, new Float32Array([0]));
     this.handEmbeddingT = makeStorageBuffer(device, this.buildHandEmbeddingT());
+    if (this.manifest.architecture.boardInteractionDim > 0) {
+      this.rankPairOneHotT = makeStorageBuffer(device, this.buildPairOneHotT(13, 91));
+      this.suitPairOneHotT = makeStorageBuffer(device, this.buildPairOneHotT(4, 10));
+      this.rankPairLowT = makeStorageBuffer(
+        device,
+        this.transposeTensor("rank_pair_low_embedding.weight"),
+      );
+      this.suitPairLowT = makeStorageBuffer(
+        device,
+        this.transposeTensor("suit_pair_low_embedding.weight"),
+      );
+    }
     this.matVecPipeline = this.pipeline(MAT_VEC_WGSL, "better-ffn-mat-vec");
     this.matVecBatchPipeline = this.pipeline(
       MAT_VEC_BATCH_WGSL,
@@ -102,6 +120,10 @@ export class BetterFfnWebGpuModel {
     this.leakyReluMatVecBatchPipeline = this.pipeline(
       LEAKY_RELU_MAT_VEC_BATCH_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch",
+    );
+    this.playerBoardHadamardPipeline = this.pipeline(
+      PLAYER_BOARD_HADAMARD_WGSL,
+      "better-ffn-player-board-hadamard",
     );
     this.rmsNormPipeline = this.pipeline(
       RMS_NORM_WGSL,
@@ -307,9 +329,15 @@ export class BetterFfnWebGpuModel {
       );
 
       const encodedFeatures = envs.map((env) => encodeBetterFeatures(env));
-      const interactionFeatures = this.buildBeliefBoardInteraction(
-        beliefs,
+      const interactionFeatures = this.buildBeliefBoardInteractionGpu(
+        beliefBuffer,
         encodedFeatures.map((features) => features.board),
+        batch,
+        numPlayers,
+        hiddenDim,
+        empty,
+        storage,
+        uniform,
       );
       const context = new Float32Array(batch * 11);
       const base = new Float32Array(batch * hiddenDim);
@@ -317,12 +345,6 @@ export class BetterFfnWebGpuModel {
         const features = encodedFeatures[i]!;
         context.set(features.context, i * 11);
         base.set(this.baseEmbedding(features.street, features.board), i * hiddenDim);
-        if (interactionFeatures) {
-          const offset = i * hiddenDim;
-          for (let d = 0; d < hiddenDim; d += 1) {
-            base[offset + d] = base[offset + d]! + interactionFeatures[offset + d]!;
-          }
-        }
       }
       const contextFeatures = this.leakyReluBlockBatch(
         "context_encoder",
@@ -337,14 +359,34 @@ export class BetterFfnWebGpuModel {
 
       const baseEmbedding = storage(base);
       let x = empty(batch * hiddenDim);
-      this.add3(
-        baseEmbedding,
-        contextFeatures,
-        beliefFeatures,
-        x,
-        batch * hiddenDim,
-        uniform,
-      );
+      if (interactionFeatures) {
+        const interactedBase = empty(batch * hiddenDim);
+        this.add3(
+          baseEmbedding,
+          interactionFeatures.rank,
+          interactionFeatures.suit,
+          interactedBase,
+          batch * hiddenDim,
+          uniform,
+        );
+        this.add3(
+          interactedBase,
+          contextFeatures,
+          beliefFeatures,
+          x,
+          batch * hiddenDim,
+          uniform,
+        );
+      } else {
+        this.add3(
+          baseEmbedding,
+          contextFeatures,
+          beliefFeatures,
+          x,
+          batch * hiddenDim,
+          uniform,
+        );
+      }
 
       const alpha = 1 / Math.sqrt(
         this.manifest.architecture.numHiddenLayers +
@@ -475,6 +517,10 @@ export class BetterFfnWebGpuModel {
     }
     this.dummyBias.destroy();
     this.handEmbeddingT.destroy();
+    this.rankPairOneHotT?.destroy();
+    this.suitPairOneHotT?.destroy();
+    this.rankPairLowT?.destroy();
+    this.suitPairLowT?.destroy();
     for (const pool of [this.storagePool, this.uniformPool]) {
       for (const buffers of pool.values()) {
         for (const buffer of buffers) {
@@ -577,98 +623,202 @@ export class BetterFfnWebGpuModel {
     return out;
   }
 
-  private buildBeliefBoardInteraction(
-    beliefs: Float32Array<ArrayBufferLike>,
+  private buildBeliefBoardInteractionGpu(
+    beliefBuffer: GPUBuffer,
     boards: readonly (readonly number[])[],
-  ): Float32Array<ArrayBuffer> | undefined {
+    batch: number,
+    numPlayers: number,
+    hidden: number,
+    empty: (elements: number) => GPUBuffer,
+    storage: (
+      data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
+    ) => GPUBuffer,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): { rank: GPUBuffer; suit: GPUBuffer } | undefined {
     const interactionDim = this.manifest.architecture.boardInteractionDim;
     if (interactionDim <= 0) return undefined;
-
-    const hidden = this.manifest.architecture.hiddenDim;
-    const numPlayers = this.manifest.architecture.numPlayers;
-    const rankMass = new Float32Array(numPlayers * 91);
-    const suitMass = new Float32Array(numPlayers * 10);
-    const combos = handCombos();
-    for (let hand = 0; hand < combos.length; hand += 1) {
-      const [c0, c1] = combos[hand]!;
-      const rankPair = this.unorderedPairIndex(c0 % 13, c1 % 13, 13);
-      const suitPair = this.unorderedPairIndex(
-        Math.floor(c0 / 13),
-        Math.floor(c1 / 13),
-        4,
-      );
-      for (let player = 0; player < numPlayers; player += 1) {
-        const belief = beliefs[player * NUM_HANDS + hand]!;
-        const rankOffset = player * 91 + rankPair;
-        const suitOffset = player * 10 + suitPair;
-        rankMass[rankOffset] = rankMass[rankOffset]! + belief;
-        suitMass[suitOffset] = suitMass[suitOffset]! + belief;
-      }
+    if (
+      !this.rankPairOneHotT ||
+      !this.suitPairOneHotT ||
+      !this.rankPairLowT ||
+      !this.suitPairLowT
+    ) {
+      throw new Error("board interaction buffers are not initialized");
     }
 
-    const rankPairLow = this.projectPairMass(
-      rankMass,
-      91,
-      this.tensor("rank_pair_low_embedding.weight").data,
-      interactionDim,
-      numPlayers,
-    );
-    const suitPairLow = this.projectPairMass(
-      suitMass,
-      10,
-      this.tensor("suit_pair_low_embedding.weight").data,
-      interactionDim,
-      numPlayers,
-    );
-    const boardRankLowWeight = this.tensor("board_rank_low.weight").data;
-    const boardSuitLowWeight = this.tensor("board_suit_low.weight").data;
-    const rankOutWeight = this.tensor("rank_board_interaction_out.weight").data;
-    const suitOutWeight = this.tensor("suit_board_interaction_out.weight").data;
-    const out = new Float32Array(boards.length * hidden);
+    const rankMass = empty(batch * numPlayers * 91);
+    const suitMass = empty(batch * numPlayers * 10);
+    for (let player = 0; player < numPlayers; player += 1) {
+      this.matVecBatch(
+        this.rankPairOneHotT,
+        beliefBuffer,
+        this.dummyBias,
+        rankMass,
+        91,
+        NUM_HANDS,
+        batch,
+        numPlayers * NUM_HANDS,
+        numPlayers * 91,
+        player * NUM_HANDS,
+        player * 91,
+        false,
+        uniform,
+      );
+      this.matVecBatch(
+        this.suitPairOneHotT,
+        beliefBuffer,
+        this.dummyBias,
+        suitMass,
+        10,
+        NUM_HANDS,
+        batch,
+        numPlayers * NUM_HANDS,
+        numPlayers * 10,
+        player * NUM_HANDS,
+        player * 10,
+        false,
+        uniform,
+      );
+    }
 
-    for (let batch = 0; batch < boards.length; batch += 1) {
-      const rankCounts = new Float32Array(13);
-      const suitCounts = new Float32Array(4);
-      const board = boards[batch]!;
+    const rankPairLow = empty(batch * numPlayers * interactionDim);
+    const suitPairLow = empty(batch * numPlayers * interactionDim);
+    for (let player = 0; player < numPlayers; player += 1) {
+      this.matVecBatch(
+        this.rankPairLowT,
+        rankMass,
+        this.dummyBias,
+        rankPairLow,
+        interactionDim,
+        91,
+        batch,
+        numPlayers * 91,
+        numPlayers * interactionDim,
+        player * 91,
+        player * interactionDim,
+        false,
+        uniform,
+      );
+      this.matVecBatch(
+        this.suitPairLowT,
+        suitMass,
+        this.dummyBias,
+        suitPairLow,
+        interactionDim,
+        10,
+        batch,
+        numPlayers * 10,
+        numPlayers * interactionDim,
+        player * 10,
+        player * interactionDim,
+        false,
+        uniform,
+      );
+    }
+
+    const rankCounts = new Float32Array(batch * 13);
+    const suitCounts = new Float32Array(batch * 4);
+    for (let row = 0; row < boards.length; row += 1) {
+      const board = boards[row]!;
       for (let i = 0; i < 5; i += 1) {
         const card = board[i] ?? -1;
         if (card >= 0) {
-          rankCounts[card % 13]! += 1;
-          suitCounts[Math.floor(card / 13)]! += 1;
+          const rankOffset = row * 13 + (card % 13);
+          const suitOffset = row * 4 + Math.floor(card / 13);
+          rankCounts[rankOffset] = rankCounts[rankOffset]! + 1;
+          suitCounts[suitOffset] = suitCounts[suitOffset]! + 1;
         }
-      }
-
-      const boardRankLow = this.projectCounts(
-        rankCounts,
-        boardRankLowWeight,
-        interactionDim,
-      );
-      const boardSuitLow = this.projectCounts(
-        suitCounts,
-        boardSuitLowWeight,
-        interactionDim,
-      );
-      for (let h = 0; h < hidden; h += 1) {
-        let sum = 0;
-        const outRow = h * numPlayers * interactionDim;
-        for (let player = 0; player < numPlayers; player += 1) {
-          const playerOffset = player * interactionDim;
-          for (let r = 0; r < interactionDim; r += 1) {
-            const k = playerOffset + r;
-            sum +=
-              rankOutWeight[outRow + k]! *
-                rankPairLow[playerOffset + r]! *
-                boardRankLow[r]! +
-              suitOutWeight[outRow + k]! *
-                suitPairLow[playerOffset + r]! *
-                boardSuitLow[r]!;
-          }
-        }
-        out[batch * hidden + h] = sum;
       }
     }
+    const boardRankLow = empty(batch * interactionDim);
+    this.matVecBatch(
+      this.tensor("board_rank_low.weight").buffer,
+      storage(rankCounts),
+      this.dummyBias,
+      boardRankLow,
+      interactionDim,
+      13,
+      batch,
+      13,
+      interactionDim,
+      0,
+      0,
+      false,
+      uniform,
+    );
+    const boardSuitLow = empty(batch * interactionDim);
+    this.matVecBatch(
+      this.tensor("board_suit_low.weight").buffer,
+      storage(suitCounts),
+      this.dummyBias,
+      boardSuitLow,
+      interactionDim,
+      4,
+      batch,
+      4,
+      interactionDim,
+      0,
+      0,
+      false,
+      uniform,
+    );
 
-    return out;
+    const rankGated = empty(batch * numPlayers * interactionDim);
+    this.playerBoardHadamard(
+      rankPairLow,
+      boardRankLow,
+      rankGated,
+      batch,
+      numPlayers,
+      interactionDim,
+      uniform,
+    );
+    const suitGated = empty(batch * numPlayers * interactionDim);
+    this.playerBoardHadamard(
+      suitPairLow,
+      boardSuitLow,
+      suitGated,
+      batch,
+      numPlayers,
+      interactionDim,
+      uniform,
+    );
+
+    const rank = empty(batch * hidden);
+    this.matVecBatch(
+      this.tensor("rank_board_interaction_out.weight").buffer,
+      rankGated,
+      this.dummyBias,
+      rank,
+      hidden,
+      numPlayers * interactionDim,
+      batch,
+      numPlayers * interactionDim,
+      hidden,
+      0,
+      0,
+      false,
+      uniform,
+    );
+    const suit = empty(batch * hidden);
+    this.matVecBatch(
+      this.tensor("suit_board_interaction_out.weight").buffer,
+      suitGated,
+      this.dummyBias,
+      suit,
+      hidden,
+      numPlayers * interactionDim,
+      batch,
+      numPlayers * interactionDim,
+      hidden,
+      0,
+      0,
+      false,
+      uniform,
+    );
+    return { rank, suit };
   }
 
   private unorderedPairIndex(first: number, second: number, numItems: number): number {
@@ -677,40 +827,33 @@ export class BetterFfnWebGpuModel {
     return lo * numItems - Math.floor((lo * (lo - 1)) / 2) + (hi - lo);
   }
 
-  private projectPairMass(
-    mass: Float32Array,
-    rows: number,
-    weight: Float32Array<ArrayBufferLike>,
-    outDim: number,
-    numPlayers: number,
+  private buildPairOneHotT(
+    numItems: number,
+    numPairs: number,
   ): Float32Array<ArrayBuffer> {
-    const out = new Float32Array(numPlayers * outDim);
-    for (let player = 0; player < numPlayers; player += 1) {
-      for (let row = 0; row < rows; row += 1) {
-        const value = mass[player * rows + row]!;
-        if (value === 0) continue;
-        for (let d = 0; d < outDim; d += 1) {
-          const offset = player * outDim + d;
-          out[offset] = out[offset]! + value * weight[row * outDim + d]!;
-        }
-      }
+    const combos = handCombos();
+    const out = new Float32Array(numPairs * NUM_HANDS);
+    for (let hand = 0; hand < combos.length; hand += 1) {
+      const [c0, c1] = combos[hand]!;
+      const first = numItems === 13 ? c0 % 13 : Math.floor(c0 / 13);
+      const second = numItems === 13 ? c1 % 13 : Math.floor(c1 / 13);
+      const pair = this.unorderedPairIndex(first, second, numItems);
+      out[pair * NUM_HANDS + hand] = 1;
     }
     return out;
   }
 
-  private projectCounts(
-    counts: Float32Array,
-    weight: Float32Array<ArrayBufferLike>,
-    outDim: number,
-  ): Float32Array<ArrayBuffer> {
-    const out = new Float32Array(outDim);
-    const inDim = counts.length;
-    for (let row = 0; row < outDim; row += 1) {
-      let sum = 0;
-      for (let col = 0; col < inDim; col += 1) {
-        sum += weight[row * inDim + col]! * counts[col]!;
+  private transposeTensor(name: string): Float32Array<ArrayBuffer> {
+    const tensor = this.tensor(name);
+    if (tensor.shape.length !== 2) {
+      throw new Error(`model tensor ${name} is not rank-2`);
+    }
+    const [rows, cols] = tensor.shape as [number, number];
+    const out = new Float32Array(rows * cols);
+    for (let row = 0; row < rows; row += 1) {
+      for (let col = 0; col < cols; col += 1) {
+        out[col * rows + row] = tensor.data[row * cols + col]!;
       }
-      out[row] = sum;
     }
     return out;
   }
@@ -972,6 +1115,33 @@ export class BetterFfnWebGpuModel {
       { binding: 2, resource: { buffer: c } },
       { binding: 3, resource: { buffer: output } },
       { binding: 4, resource: { buffer: uniform(new Uint32Array([dim, 0, 0, 0])) } },
+    ]);
+  }
+
+  private playerBoardHadamard(
+    pairLow: GPUBuffer,
+    boardLow: GPUBuffer,
+    output: GPUBuffer,
+    batch: number,
+    numPlayers: number,
+    interactionDim: number,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    const elements = batch * numPlayers * interactionDim;
+    this.submit(this.playerBoardHadamardPipeline, Math.ceil(elements / 64), [
+      { binding: 0, resource: { buffer: pairLow } },
+      { binding: 1, resource: { buffer: boardLow } },
+      { binding: 2, resource: { buffer: output } },
+      {
+        binding: 3,
+        resource: {
+          buffer: uniform(
+            new Uint32Array([elements, interactionDim, numPlayers, 0]),
+          ),
+        },
+      },
     ]);
   }
 
