@@ -54,6 +54,11 @@ interface GpuPokerStateSharedResources {
   terminalValuesPipeline: GPUComputePipeline;
 }
 
+interface PooledStorageBuffer {
+  buffer: GPUBuffer;
+  key: number;
+}
+
 const sharedResourcesByDevice = new WeakMap<GPUDevice, GpuPokerStateSharedResources>();
 
 export class GpuPokerState {
@@ -68,6 +73,7 @@ export class GpuPokerState {
   private readonly terminalRanksPipeline: GPUComputePipeline;
   private readonly terminalValuesPipeline: GPUComputePipeline;
   private readonly paramsBuffer: GPUBuffer;
+  private readonly childBatchPool = new Map<number, GPUBuffer[]>();
   private readonly numBetBins: number;
   private readonly flopShowdown: boolean;
 
@@ -140,39 +146,36 @@ export class GpuPokerState {
 
   buildChildren(encoder?: GPUCommandEncoder): GpuChildStateBatch {
     this.writeParams(0);
-    const states = makeEmptyStorageBuffer(this.device, this.numActions * STATE_STRIDE);
-    const legalMask = makeEmptyStorageBuffer(this.device, this.numActions);
-    const terminalMask = makeEmptyStorageBuffer(this.device, this.numActions);
-    const terminalRanks = makeEmptyStorageBuffer(this.device, this.numActions * 1326);
-    const childValues = makeEmptyStorageBuffer(
-      this.device,
-      this.numActions * 2 * 1326,
-    );
+    const states = this.acquireChildBatchStorage(this.numActions * STATE_STRIDE);
+    const legalMask = this.acquireChildBatchStorage(this.numActions);
+    const terminalMask = this.acquireChildBatchStorage(this.numActions);
+    const terminalRanks = this.acquireChildBatchStorage(this.numActions * 1326);
+    const childValues = this.acquireChildBatchStorage(this.numActions * 2 * 1326);
     const commandEncoder = encoder ?? this.device.createCommandEncoder();
     this.encode(commandEncoder, this.buildChildrenPipeline, Math.ceil(this.numActions / 64), [
       { binding: 0, resource: { buffer: this.state } },
-      { binding: 1, resource: { buffer: states } },
+      { binding: 1, resource: { buffer: states.buffer } },
       { binding: 2, resource: { buffer: this.betBins } },
-      { binding: 3, resource: { buffer: legalMask } },
-      { binding: 4, resource: { buffer: terminalMask } },
+      { binding: 3, resource: { buffer: legalMask.buffer } },
+      { binding: 4, resource: { buffer: terminalMask.buffer } },
       { binding: 5, resource: { buffer: this.paramsBuffer } },
     ]);
     if (!encoder) {
       this.device.queue.submit([commandEncoder.finish()]);
     }
     return {
-      states,
-      legalMask,
-      terminalMask,
-      terminalRanks,
-      childValues,
+      states: states.buffer,
+      legalMask: legalMask.buffer,
+      terminalMask: terminalMask.buffer,
+      terminalRanks: terminalRanks.buffer,
+      childValues: childValues.buffer,
       numActions: this.numActions,
       dispose: () => {
-        states.destroy();
-        legalMask.destroy();
-        terminalMask.destroy();
-        terminalRanks.destroy();
-        childValues.destroy();
+        this.releaseChildBatchStorage(states);
+        this.releaseChildBatchStorage(legalMask);
+        this.releaseChildBatchStorage(terminalMask);
+        this.releaseChildBatchStorage(terminalRanks);
+        this.releaseChildBatchStorage(childValues);
       },
     };
   }
@@ -214,6 +217,12 @@ export class GpuPokerState {
     this.state.destroy();
     this.betBins.destroy();
     this.paramsBuffer.destroy();
+    for (const buffers of this.childBatchPool.values()) {
+      for (const buffer of buffers) {
+        buffer.destroy();
+      }
+    }
+    this.childBatchPool.clear();
   }
 
   private writeParams(action: number): void {
@@ -227,6 +236,29 @@ export class GpuPokerState {
         this.flopShowdown ? 1 : 0,
       ]),
     );
+  }
+
+  private acquireChildBatchStorage(elements: number): PooledStorageBuffer {
+    const key = Math.max(4, Math.ceil(elements * Float32Array.BYTES_PER_ELEMENT / 4) * 4);
+    const buffer =
+      this.childBatchPool.get(key)?.pop() ??
+      this.device.createBuffer({
+        size: key,
+        usage:
+          GPUBufferUsage.STORAGE |
+          GPUBufferUsage.COPY_SRC |
+          GPUBufferUsage.COPY_DST,
+      });
+    return { buffer, key };
+  }
+
+  private releaseChildBatchStorage(storage: PooledStorageBuffer): void {
+    const buffers = this.childBatchPool.get(storage.key);
+    if (buffers) {
+      buffers.push(storage.buffer);
+    } else {
+      this.childBatchPool.set(storage.key, [storage.buffer]);
+    }
   }
 
   private encode(
