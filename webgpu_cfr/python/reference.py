@@ -20,7 +20,10 @@ def _load_better_ffn(snapshot: Path, device: torch.device) -> tuple[BetterFFN, C
     checkpoint = torch.load(snapshot, map_location=device, weights_only=False)
     cfg = Config.from_dict(checkpoint["config"])
     state = checkpoint["model"]
-    if cfg.model.name != ModelType.better_ffn and "street_embedding.weight" not in state:
+    if (
+        cfg.model.name != ModelType.better_ffn
+        and "street_embedding.weight" not in state
+    ):
         raise ValueError(f"{snapshot} is not a BetterFFN checkpoint")
 
     cfg.model.name = ModelType.better_ffn
@@ -36,6 +39,7 @@ def _load_better_ffn(snapshot: Path, device: torch.device) -> tuple[BetterFFN, C
         num_players=2,
         shared_trunk=cfg.model.shared_trunk,
         enforce_zero_sum=cfg.model.enforce_zero_sum,
+        board_interaction_dim=cfg.model.board_interaction_dim,
         nonlinearity=cfg.model.nonlinearity,
     )
     state = {
@@ -79,7 +83,9 @@ def _clone_env(env: HUNLTensorEnv) -> HUNLTensorEnv:
 def _model_values(
     model: BetterFFN, env: HUNLTensorEnv, beliefs: torch.Tensor
 ) -> torch.Tensor:
-    encoder = model.create_feature_encoder(env=env, device=env.device, dtype=torch.float32)
+    encoder = model.create_feature_encoder(
+        env=env, device=env.device, dtype=torch.float32
+    )
     features = encoder.encode(beliefs)
     with torch.no_grad():
         out = model(features, include_policy=False, include_value=True)
@@ -139,7 +145,9 @@ def _solve_local(
         positive[:, ~legal] = 0.0
         denom = positive.sum(dim=1, keepdim=True)
         uniform = legal.float() / legal.float().sum().clamp(min=1.0)
-        policy = torch.where(denom > 1.0e-8, positive / denom.clamp(min=1.0e-8), uniform)
+        policy = torch.where(
+            denom > 1.0e-8, positive / denom.clamp(min=1.0e-8), uniform
+        )
         values = child_values[:, actor, :].T
         expected = (policy * values).sum(dim=1, keepdim=True)
         regrets[:, legal] += values[:, legal] - expected
@@ -209,7 +217,9 @@ def build_fixture(
         "numHands": NUM_HANDS,
         "numActions": cfg.model.num_actions,
         "actionLabels": _action_labels(cfg.env.bet_bins),
-        "initialBeliefs": torch.full((2, NUM_HANDS), 1.0 / NUM_HANDS).reshape(-1).tolist(),
+        "initialBeliefs": torch.full((2, NUM_HANDS), 1.0 / NUM_HANDS)
+        .reshape(-1)
+        .tolist(),
         "problems": problems,
         "expected": {
             "beliefsAtSpot": beliefs.cpu().reshape(-1).tolist(),
