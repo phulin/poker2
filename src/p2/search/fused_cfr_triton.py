@@ -2373,7 +2373,7 @@ def fused_model_values_writeback_(
         ENFORCE_ZS=enforce_zero_sum,
         STORE_LAST=store_last,
         BLOCK_H=block_h,
-        num_warps=8,
+        num_warps=8 if (do_mix or enforce_zero_sum) else 4,
     )
 
 
