@@ -3,7 +3,8 @@
 Snapshots EMA weights at fixed fractions of the training run, then plays each
 new snapshot against a bounded recency-weighted sample of prior snapshots using
 public-belief CFR games. Ratings are updated per-game with the standard
-TrueSkill 1v1 Bayesian update.
+TrueSkill 1v1 Bayesian update. A second Gaussian score rating is updated once
+per opponent matchup from the mean stack-normalized PBS reward.
 
 Snapshots are kept in CPU RAM (bfloat16 by default) — never written to disk.
 A single pair of compiled model instances is reused for all matchups; per-pair
@@ -40,6 +41,8 @@ class TSSnapshot:
     step: int
     mu: float
     sigma: float
+    gaussian_mu: float = 0.0
+    gaussian_sigma: float = 1.0
     games: int = 0
     wins: int = 0
     losses: int = 0
@@ -280,6 +283,41 @@ class TrueSkillTracker:
     def _conservative_skill(self, snap: TSSnapshot) -> float:
         return snap.mu - 3.0 * snap.sigma
 
+    def _gaussian_conservative_skill(self, snap: TSSnapshot) -> float:
+        return snap.gaussian_mu - 3.0 * snap.gaussian_sigma
+
+    def _gaussian_score_update(
+        self,
+        mu_a: float,
+        sig_a: float,
+        mu_b: float,
+        sig_b: float,
+        reward_mean: float,
+        num_games: int,
+    ) -> Tuple[float, float, float, float]:
+        """Gaussian score-rating update from stack-normalized matchup reward.
+
+        Observation model:
+            reward_mean ~ Normal(skill_a - skill_b, beta^2 / num_games)
+
+        We keep only independent marginal variances after each update, matching
+        the rest of the lightweight tracker implementation.
+        """
+        games = max(1, int(num_games))
+        beta = max(1e-9, float(self.ts_cfg.gaussian_beta))
+        tau = max(0.0, float(self.ts_cfg.gaussian_tau))
+        var_a = sig_a * sig_a
+        var_b = sig_b * sig_b
+        obs_var = beta * beta / games
+        c2 = max(1e-12, var_a + var_b + obs_var)
+        residual = reward_mean - (mu_a - mu_b)
+
+        mu_a_new = mu_a + (var_a / c2) * residual
+        mu_b_new = mu_b - (var_b / c2) * residual
+        sig_a_new = math.sqrt(max(1e-12, var_a - (var_a * var_a / c2) + tau * tau))
+        sig_b_new = math.sqrt(max(1e-12, var_b - (var_b * var_b / c2) + tau * tau))
+        return mu_a_new, sig_a_new, mu_b_new, sig_b_new
+
     @staticmethod
     def _compute_games_per_opponent(
         *,
@@ -418,6 +456,8 @@ class TrueSkillTracker:
             step=step,
             mu=self.ts_cfg.initial_mu,
             sigma=self.ts_cfg.initial_sigma,
+            gaussian_mu=self.ts_cfg.gaussian_initial_mu,
+            gaussian_sigma=self.ts_cfg.gaussian_initial_sigma,
             weights=self._clone_weights_cpu(candidate_weights),
         )
 
@@ -447,6 +487,22 @@ class TrueSkillTracker:
 
                 # Per-game TrueSkill updates from candidate (=p0) perspective.
                 rewards_list = rewards.detach().cpu().tolist()
+                matchup_games = len(rewards_list)
+                if matchup_games > 0:
+                    matchup_mean_reward = float(sum(rewards_list) / matchup_games)
+                    (
+                        new_snap.gaussian_mu,
+                        new_snap.gaussian_sigma,
+                        opp.gaussian_mu,
+                        opp.gaussian_sigma,
+                    ) = self._gaussian_score_update(
+                        new_snap.gaussian_mu,
+                        new_snap.gaussian_sigma,
+                        opp.gaussian_mu,
+                        opp.gaussian_sigma,
+                        matchup_mean_reward,
+                        matchup_games,
+                    )
                 for r in rewards_list:
                     if r > 1e-6:
                         # candidate wins
@@ -485,10 +541,14 @@ class TrueSkillTracker:
 
         # Build metrics.
         skill = self._conservative_skill(new_snap)
+        gaussian_skill = self._gaussian_conservative_skill(new_snap)
         metrics: Dict[str, float] = {
             "trueskill/mu": new_snap.mu,
             "trueskill/sigma": new_snap.sigma,
             "trueskill/skill": skill,
+            "gaussian/mu": new_snap.gaussian_mu,
+            "gaussian/sigma": new_snap.gaussian_sigma,
+            "gaussian/skill": gaussian_skill,
             "trueskill/games_played": total_games_played,
             "trueskill/opponents_sampled": len(sampled_opponents),
             "trueskill/games_per_opponent": self.games_per_opponent,
@@ -504,6 +564,11 @@ class TrueSkillTracker:
             best = max(self.snapshots, key=self._conservative_skill)
             metrics["trueskill/best_step"] = best.step
             metrics["trueskill/best_skill"] = self._conservative_skill(best)
+            best_gaussian = max(self.snapshots, key=self._gaussian_conservative_skill)
+            metrics["gaussian/best_step"] = best_gaussian.step
+            metrics["gaussian/best_skill"] = self._gaussian_conservative_skill(
+                best_gaussian
+            )
 
         if wandb_run is not None:
             try:
@@ -519,7 +584,9 @@ class TrueSkillTracker:
             )
         print(
             f"[TrueSkill] step={step} mu={new_snap.mu:.2f} sigma={new_snap.sigma:.2f} "
-            f"skill={skill:.2f} games={total_games_played} "
+            f"skill={skill:.2f} gaussian_mu={new_snap.gaussian_mu:.4f} "
+            f"gaussian_sigma={new_snap.gaussian_sigma:.4f} "
+            f"gaussian_skill={gaussian_skill:.4f} games={total_games_played} "
             f"opponents={len(sampled_opponents)} "
             f"snapshots={len(self.snapshots)}"
             f"{trend_suffix} "

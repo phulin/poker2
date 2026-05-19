@@ -21,6 +21,8 @@ def _tracker_with_alloc_config(
         max_games_per_opponent=max_games,
         recency_tau_frac=recency_tau_frac,
         opponents_per_eval=opponents_per_eval,
+        gaussian_beta=1.0,
+        gaussian_tau=0.0,
     )
     tracker.opponents_per_eval = opponents_per_eval
     tracker.device = torch.device("cpu")
@@ -163,6 +165,27 @@ def test_mu_step_regression_metrics_omits_under_three_snapshots() -> None:
     assert TrueSkillTracker._mu_step_regression_metrics([]) == {}
     assert TrueSkillTracker._mu_step_regression_metrics(snapshots[:1]) == {}
     assert TrueSkillTracker._mu_step_regression_metrics(snapshots) == {}
+
+
+def test_gaussian_score_update_uses_mean_reward_observation() -> None:
+    tracker = _tracker_with_alloc_config()
+
+    mu_a, sig_a, mu_b, sig_b = tracker._gaussian_score_update(
+        mu_a=0.0,
+        sig_a=1.0,
+        mu_b=0.0,
+        sig_b=1.0,
+        reward_mean=0.5,
+        num_games=4,
+    )
+
+    c2 = 1.0 + 1.0 + 0.25
+    expected_mu = 0.5 / c2
+    expected_sigma = (1.0 - 1.0 / c2) ** 0.5
+    assert_close(torch.tensor(mu_a), torch.tensor(expected_mu))
+    assert_close(torch.tensor(mu_b), torch.tensor(-expected_mu))
+    assert_close(torch.tensor(sig_a), torch.tensor(expected_sigma))
+    assert_close(torch.tensor(sig_b), torch.tensor(expected_sigma))
 
 
 class _FakeShowdownEvaluator:

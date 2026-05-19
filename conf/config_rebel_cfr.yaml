@@ -50,6 +50,8 @@ model:
   hidden_dim: 1024
   range_hidden_dim: 256
   ffn_dim: 1024
+  rank_board_interaction_dim: 64
+  suit_board_interaction_dim: 64
 
   shared_trunk: true # DO NOT detach policy head from trunk
   num_hidden_layers: 4
@@ -110,4 +112,8 @@ trueskill:
   opponents_per_eval: 10
   min_games_per_opponent: 1
   max_games_per_opponent: 64
+  gaussian_initial_mu: 0.0
+  gaussian_initial_sigma: 1.0
+  gaussian_beta: 1.0
+  gaussian_tau: 0.01
   snapshot_dtype: bfloat16

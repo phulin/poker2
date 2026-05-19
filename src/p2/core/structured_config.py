@@ -211,6 +211,8 @@ class ModelConfig:
     ffn_dim: int = 1024
     shared_trunk: bool = True
     enforce_zero_sum: bool = True
+    rank_board_interaction_dim: int = 0
+    suit_board_interaction_dim: int = 0
 
     # Better TRM parameters
     num_recursions: int = 6
@@ -303,6 +305,13 @@ class TrueSkillConfig:
     initial_sigma: float = 25.0 / 3.0
     beta: float = 25.0 / 6.0
     tau: float = 25.0 / 300.0
+    # Parallel Gaussian score rating, in stack-normalized reward units.
+    # Each opponent matchup observes mean_reward ~= mu_a - mu_b with
+    # observation std gaussian_beta / sqrt(num_games).
+    gaussian_initial_mu: float = 0.0
+    gaussian_initial_sigma: float = 1.0
+    gaussian_beta: float = 1.0
+    gaussian_tau: float = 0.01
     # Snapshots are kept in CPU RAM as bfloat16 shadow weights.
     snapshot_dtype: str = "bfloat16"
 
