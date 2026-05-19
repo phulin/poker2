@@ -75,3 +75,24 @@ export async function readFloatBuffer(
   readback.destroy();
   return copy;
 }
+
+export async function readUintBuffer(
+  device: GPUDevice,
+  source: GPUBuffer,
+  elementCount: number,
+): Promise<Uint32Array<ArrayBufferLike>> {
+  const size = paddedSize(elementCount * Uint32Array.BYTES_PER_ELEMENT);
+  const readback = device.createBuffer({
+    size,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(source, 0, readback, 0, size);
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  await readback.mapAsync(GPUMapMode.READ);
+  const copy = new Uint32Array(readback.getMappedRange()).slice(0, elementCount);
+  readback.unmap();
+  readback.destroy();
+  return copy;
+}

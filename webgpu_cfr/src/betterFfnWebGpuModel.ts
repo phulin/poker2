@@ -9,6 +9,7 @@ import {
   SCALED_RESIDUAL_ADD_WGSL,
   ZERO_SUM_BATCH_WGSL,
 } from "./modelKernels.js";
+import { POKER_ENCODE_FEATURES_WGSL } from "./pokerStateKernels.js";
 import {
   makeStorageBuffer,
   readFloatBuffer,
@@ -77,6 +78,7 @@ export class BetterFfnWebGpuModel {
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
   private readonly add3Pipeline: GPUComputePipeline;
   private readonly zeroSumBatchPipeline: GPUComputePipeline;
+  private readonly stateFeaturePipeline: GPUComputePipeline;
   private readonly storagePool = new Map<number, GPUBuffer[]>();
   private readonly uniformPool = new Map<number, GPUBuffer[]>();
   private recordingEncoder: GPUCommandEncoder | undefined;
@@ -142,6 +144,10 @@ export class BetterFfnWebGpuModel {
       ZERO_SUM_BATCH_WGSL,
       "better-ffn-zero-sum-batch",
     );
+    this.stateFeaturePipeline = this.pipeline(
+      POKER_ENCODE_FEATURES_WGSL,
+      "better-ffn-state-features",
+    );
   }
 
   static fromBuffers(
@@ -172,6 +178,22 @@ export class BetterFfnWebGpuModel {
     beliefs: Float32Array<ArrayBufferLike>,
   ): Promise<GpuHandValuePrediction> {
     const prediction = this.enqueuePredictBatch(envs, beliefs, {
+      includePolicy: false,
+    });
+    return {
+      buffer: prediction.handValuesBuffer,
+      batch: prediction.batch,
+      valuesPerSample: 2 * NUM_HANDS,
+      dispose: prediction.dispose,
+    };
+  }
+
+  async predictBatchHandValuesGpuStates(
+    states: GPUBuffer,
+    batch: number,
+    beliefs: Float32Array<ArrayBufferLike>,
+  ): Promise<GpuHandValuePrediction> {
+    const prediction = this.enqueuePredictBatchFromStateBuffer(states, batch, beliefs, {
       includePolicy: false,
     });
     return {
@@ -511,6 +533,268 @@ export class BetterFfnWebGpuModel {
     }
   }
 
+  private enqueuePredictBatchFromStateBuffer(
+    states: GPUBuffer,
+    batch: number,
+    beliefs: Float32Array<ArrayBufferLike>,
+    options: PredictOptions = {},
+  ): {
+    handValuesBuffer: GPUBuffer;
+    policyLogitsBuffer?: GPUBuffer;
+    batch: number;
+    dispose: () => void;
+  } {
+    if (batch === 0) {
+      const empty = this.acquireStorage(1);
+      return {
+        handValuesBuffer: empty.buffer,
+        batch: 0,
+        dispose: () => this.releaseTemp(empty),
+      };
+    }
+    const hiddenDim = this.manifest.architecture.hiddenDim;
+    const ffnDim = this.manifest.architecture.ffnDim;
+    const rangeHiddenDim = this.manifest.architecture.rangeHiddenDim;
+    const numPlayers = this.manifest.architecture.numPlayers;
+    const numActions = this.manifest.architecture.numActions;
+    if (beliefs.length !== numPlayers * NUM_HANDS) {
+      throw new Error(
+        `belief vector has ${beliefs.length} entries, expected ${numPlayers * NUM_HANDS}`,
+      );
+    }
+
+    const temps: TempBuffer[] = [];
+    const storage = (
+      data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
+    ): GPUBuffer => {
+      const temp = this.acquireStorage(data.length);
+      this.device.queue.writeBuffer(
+        temp.buffer,
+        0,
+        data as Float32Array<ArrayBuffer> | Uint32Array<ArrayBuffer>,
+      );
+      temps.push(temp);
+      return temp.buffer;
+    };
+    const empty = (elements: number): GPUBuffer => {
+      const temp = this.acquireStorage(elements);
+      temps.push(temp);
+      return temp.buffer;
+    };
+    const uniform = (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ): GPUBuffer => {
+      const temp = this.acquireUniform(data.byteLength);
+      this.device.queue.writeBuffer(temp.buffer, 0, data);
+      temps.push(temp);
+      return temp.buffer;
+    };
+
+    const encoder = this.device.createCommandEncoder();
+    this.recordingEncoder = encoder;
+    let submitted = false;
+
+    try {
+      const submitPredictionCommands = (): void => {
+        if (submitted) return;
+        this.recordingEncoder = undefined;
+        this.device.queue.submit([encoder.finish()]);
+        submitted = true;
+      };
+
+      const beliefBuffer = storage(beliefs);
+      const context = empty(batch * 11);
+      const baseEmbedding = empty(batch * hiddenDim);
+      const rankCounts = empty(batch * 13);
+      const suitCounts = empty(batch * 4);
+      this.stateFeatures(
+        states,
+        context,
+        baseEmbedding,
+        rankCounts,
+        suitCounts,
+        batch,
+        hiddenDim,
+        uniform,
+      );
+
+      const perPlayerBelief = empty(batch * numPlayers * hiddenDim);
+      for (let player = 0; player < numPlayers; player += 1) {
+        this.matVecBatch(
+          this.handEmbeddingT,
+          beliefBuffer,
+          this.dummyBias,
+          perPlayerBelief,
+          hiddenDim,
+          NUM_HANDS,
+          batch,
+          0,
+          numPlayers * hiddenDim,
+          player * NUM_HANDS,
+          player * hiddenDim,
+          false,
+          uniform,
+        );
+      }
+
+      const beliefFeatures = this.leakyReluBlockBatch(
+        "belief_proj",
+        perPlayerBelief,
+        batch,
+        numPlayers * hiddenDim,
+        rangeHiddenDim === 0 ? ffnDim : numPlayers * rangeHiddenDim,
+        hiddenDim,
+        empty,
+        uniform,
+      );
+
+      const interactionFeatures = this.buildBeliefBoardInteractionGpu(
+        beliefBuffer,
+        undefined,
+        batch,
+        numPlayers,
+        hiddenDim,
+        empty,
+        storage,
+        uniform,
+        { rankCounts, suitCounts, sharedBeliefs: true },
+      );
+      const contextFeatures = this.leakyReluBlockBatch(
+        "context_encoder",
+        context,
+        batch,
+        11,
+        hiddenDim,
+        hiddenDim,
+        empty,
+        uniform,
+      );
+
+      let x = empty(batch * hiddenDim);
+      if (interactionFeatures) {
+        const interactedBase = empty(batch * hiddenDim);
+        this.add3(
+          baseEmbedding,
+          interactionFeatures.rank,
+          interactionFeatures.suit,
+          interactedBase,
+          batch * hiddenDim,
+          uniform,
+        );
+        this.add3(
+          interactedBase,
+          contextFeatures,
+          beliefFeatures,
+          x,
+          batch * hiddenDim,
+          uniform,
+        );
+      } else {
+        this.add3(
+          baseEmbedding,
+          contextFeatures,
+          beliefFeatures,
+          x,
+          batch * hiddenDim,
+          uniform,
+        );
+      }
+
+      const alpha = 1 / Math.sqrt(
+        this.manifest.architecture.numHiddenLayers +
+          this.manifest.architecture.numValueLayers,
+      );
+      for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
+        const inner = this.leakyReluBlockBatch(
+          `trunk.${i}.inner`,
+          x,
+          batch,
+          hiddenDim,
+          ffnDim,
+          hiddenDim,
+          empty,
+          uniform,
+        );
+        const out = empty(batch * hiddenDim);
+        this.scaledResidualAdd(x, inner, out, batch * hiddenDim, alpha, uniform);
+        x = out;
+      }
+
+      let valueInput = x;
+      for (let i = 0; i < this.manifest.architecture.numValueLayers - 1; i += 1) {
+        const inner = this.leakyReluBlockBatch(
+          `hand_value_head.${i}.inner`,
+          valueInput,
+          batch,
+          hiddenDim,
+          ffnDim,
+          hiddenDim,
+          empty,
+          uniform,
+        );
+        const out = empty(batch * hiddenDim);
+        this.scaledResidualAdd(
+          valueInput,
+          inner,
+          out,
+          batch * hiddenDim,
+          alpha,
+          uniform,
+        );
+        valueInput = out;
+      }
+      const valueRawBuffer = this.leakyReluBlockBatch(
+        `hand_value_head.${this.manifest.architecture.numValueLayers - 1}`,
+        valueInput,
+        batch,
+        hiddenDim,
+        ffnDim,
+        numPlayers * NUM_HANDS,
+        empty,
+        uniform,
+      );
+
+      let policyBuffer: GPUBuffer | undefined;
+      if (options.includePolicy) {
+        policyBuffer = this.leakyReluBlockBatch(
+          `policy_head.${this.manifest.architecture.numPolicyLayers - 1}`,
+          x,
+          batch,
+          hiddenDim,
+          ffnDim,
+          numActions * NUM_HANDS,
+          empty,
+          uniform,
+        );
+      }
+
+      if (this.manifest.architecture.enforceZeroSum) {
+        this.zeroSumBatch(valueRawBuffer, beliefBuffer, batch, uniform, 0);
+      }
+      submitPredictionCommands();
+
+      let disposed = false;
+      return {
+        handValuesBuffer: valueRawBuffer,
+        ...(policyBuffer ? { policyLogitsBuffer: policyBuffer } : {}),
+        batch,
+        dispose: () => {
+          if (disposed) return;
+          disposed = true;
+          for (const temp of temps) {
+            this.releaseTemp(temp);
+          }
+        },
+      };
+    } catch (error) {
+      this.recordingEncoder = undefined;
+      for (const temp of temps) {
+        this.releaseTemp(temp);
+      }
+      throw error;
+    }
+  }
+
   dispose(): void {
     for (const tensor of this.tensors.values()) {
       tensor.buffer.destroy();
@@ -625,7 +909,7 @@ export class BetterFfnWebGpuModel {
 
   private buildBeliefBoardInteractionGpu(
     beliefBuffer: GPUBuffer,
-    boards: readonly (readonly number[])[],
+    boards: readonly (readonly number[])[] | undefined,
     batch: number,
     numPlayers: number,
     hidden: number,
@@ -636,6 +920,11 @@ export class BetterFfnWebGpuModel {
     uniform: (
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
+    precomputed?: {
+      rankCounts: GPUBuffer;
+      suitCounts: GPUBuffer;
+      sharedBeliefs?: boolean;
+    },
   ): { rank: GPUBuffer; suit: GPUBuffer } | undefined {
     const interactionDim = this.manifest.architecture.boardInteractionDim;
     if (interactionDim <= 0) return undefined;
@@ -658,9 +947,9 @@ export class BetterFfnWebGpuModel {
         rankMass,
         91,
         NUM_HANDS,
-        batch,
-        numPlayers * NUM_HANDS,
-        numPlayers * 91,
+          batch,
+          precomputed?.sharedBeliefs ? 0 : numPlayers * NUM_HANDS,
+          numPlayers * 91,
         player * NUM_HANDS,
         player * 91,
         false,
@@ -673,9 +962,9 @@ export class BetterFfnWebGpuModel {
         suitMass,
         10,
         NUM_HANDS,
-        batch,
-        numPlayers * NUM_HANDS,
-        numPlayers * 10,
+          batch,
+          precomputed?.sharedBeliefs ? 0 : numPlayers * NUM_HANDS,
+          numPlayers * 10,
         player * NUM_HANDS,
         player * 10,
         false,
@@ -718,24 +1007,33 @@ export class BetterFfnWebGpuModel {
       );
     }
 
-    const rankCounts = new Float32Array(batch * 13);
-    const suitCounts = new Float32Array(batch * 4);
-    for (let row = 0; row < boards.length; row += 1) {
-      const board = boards[row]!;
-      for (let i = 0; i < 5; i += 1) {
-        const card = board[i] ?? -1;
-        if (card >= 0) {
-          const rankOffset = row * 13 + (card % 13);
-          const suitOffset = row * 4 + Math.floor(card / 13);
-          rankCounts[rankOffset] = rankCounts[rankOffset]! + 1;
-          suitCounts[suitOffset] = suitCounts[suitOffset]! + 1;
+    let rankCounts = precomputed?.rankCounts;
+    let suitCounts = precomputed?.suitCounts;
+    if (!rankCounts || !suitCounts) {
+      if (!boards) {
+        throw new Error("board arrays are required when board counts are not precomputed");
+      }
+      const rankCountsCpu = new Float32Array(batch * 13);
+      const suitCountsCpu = new Float32Array(batch * 4);
+      for (let row = 0; row < boards.length; row += 1) {
+        const board = boards[row]!;
+        for (let i = 0; i < 5; i += 1) {
+          const card = board[i] ?? -1;
+          if (card >= 0) {
+            const rankOffset = row * 13 + (card % 13);
+            const suitOffset = row * 4 + Math.floor(card / 13);
+            rankCountsCpu[rankOffset] = rankCountsCpu[rankOffset]! + 1;
+            suitCountsCpu[suitOffset] = suitCountsCpu[suitOffset]! + 1;
+          }
         }
       }
+      rankCounts = storage(rankCountsCpu);
+      suitCounts = storage(suitCountsCpu);
     }
     const boardRankLow = empty(batch * interactionDim);
     this.matVecBatch(
       this.tensor("board_rank_low.weight").buffer,
-      storage(rankCounts),
+      rankCounts,
       this.dummyBias,
       boardRankLow,
       interactionDim,
@@ -751,7 +1049,7 @@ export class BetterFfnWebGpuModel {
     const boardSuitLow = empty(batch * interactionDim);
     this.matVecBatch(
       this.tensor("board_suit_low.weight").buffer,
-      storage(suitCounts),
+      suitCounts,
       this.dummyBias,
       boardSuitLow,
       interactionDim,
@@ -1145,6 +1443,31 @@ export class BetterFfnWebGpuModel {
     ]);
   }
 
+  private stateFeatures(
+    states: GPUBuffer,
+    context: GPUBuffer,
+    baseEmbedding: GPUBuffer,
+    rankCounts: GPUBuffer,
+    suitCounts: GPUBuffer,
+    batch: number,
+    hidden: number,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    this.submit(this.stateFeaturePipeline, batch, [
+      { binding: 0, resource: { buffer: states } },
+      { binding: 1, resource: { buffer: this.tensor("street_embedding.weight").buffer } },
+      { binding: 2, resource: { buffer: this.tensor("rank_embedding.weight").buffer } },
+      { binding: 3, resource: { buffer: this.tensor("suit_embedding.weight").buffer } },
+      { binding: 4, resource: { buffer: context } },
+      { binding: 5, resource: { buffer: baseEmbedding } },
+      { binding: 6, resource: { buffer: rankCounts } },
+      { binding: 7, resource: { buffer: suitCounts } },
+      { binding: 8, resource: { buffer: uniform(new Uint32Array([hidden, batch, 0, 0])) } },
+    ]);
+  }
+
   private scaledResidualAdd(
     residual: GPUBuffer,
     inner: GPUBuffer,
@@ -1174,13 +1497,14 @@ export class BetterFfnWebGpuModel {
     uniform: (
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
+    beliefStride = 2 * NUM_HANDS,
   ): void {
     this.submit(this.zeroSumBatchPipeline, batch, [
       { binding: 0, resource: { buffer: values } },
       { binding: 1, resource: { buffer: beliefs } },
       {
         binding: 2,
-        resource: { buffer: uniform(new Uint32Array([NUM_HANDS, batch, 0, 0])) },
+        resource: { buffer: uniform(new Uint32Array([NUM_HANDS, batch, beliefStride, 0])) },
       },
     ]);
   }

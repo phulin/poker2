@@ -1,4 +1,6 @@
 import { GpuCfrEvaluator } from "./evaluator.js";
+import { makeStorageBuffer, readUintBuffer } from "./gpuBuffers.js";
+import { GpuPokerState } from "./gpuPokerState.js";
 import {
   initialUniformBeliefs,
   NUM_HANDS,
@@ -54,6 +56,12 @@ export class BrowserCfrEvaluator {
       this.model.manifest,
       request.initialState,
     );
+    const gpuState = new GpuPokerState(this.device, this.model.manifest, {
+      ...(request.initialState ? { initialState: request.initialState } : {}),
+      ...(request.publicCards ? { publicCards: request.publicCards } : {}),
+      ...(request.heroPlayer !== undefined ? { heroPlayer: request.heroPlayer } : {}),
+      ...(request.heroHand ? { heroHand: request.heroHand } : {}),
+    });
     const knownCards: {
       publicCards?: readonly number[];
       heroPlayer?: 0 | 1;
@@ -67,41 +75,48 @@ export class BrowserCfrEvaluator {
     let finalPolicy: Float32Array<ArrayBufferLike> | undefined;
     let finalActionProbs: Float32Array<ArrayBufferLike> | undefined;
 
-    for (const action of request.spot) {
-      this.assertAction(action, numActions);
-      this.assertLegalAction(env, action);
-      const solved = await this.solveCurrentProblem(
-        env,
-        beliefs,
-        action,
-        request.iterations,
-        { readPolicy: false, readActionProbs: false },
-      );
-      if (!solved.beliefsAfter) {
-        throw new Error("internal error: prefix solve did not update beliefs");
+    try {
+      for (const action of request.spot) {
+        this.assertAction(action, numActions);
+        this.assertLegalAction(env, action);
+        const solved = await this.solveCurrentGpuState(
+          gpuState,
+          env.toAct,
+          beliefs,
+          action,
+          request.iterations,
+          { readPolicy: false, readActionProbs: false },
+        );
+        if (!solved.beliefsAfter) {
+          throw new Error("internal error: prefix solve did not update beliefs");
+        }
+        beliefs = solved.beliefsAfter;
+        gpuState.step(action);
+        env.stepBin(action);
       }
-      beliefs = solved.beliefsAfter;
-      env.stepBin(action);
+
+      const final = await this.solveCurrentGpuState(
+        gpuState,
+        env.toAct,
+        beliefs,
+        undefined,
+        request.iterations,
+      );
+      finalPolicy = final.policy;
+      finalActionProbs = final.actionProbs;
+      const legal = await gpuState.legalMask();
+
+      return {
+        beliefsAtSpot: beliefs,
+        actionProbs: finalActionProbs,
+        policy: finalPolicy,
+        actionLabels: [...this.model.actionLabels],
+        legalMask: Array.from(legal),
+        actor: env.toAct,
+      };
+    } finally {
+      gpuState.dispose();
     }
-
-    const final = await this.solveCurrentProblem(
-      env,
-      beliefs,
-      undefined,
-      request.iterations,
-    );
-    finalPolicy = final.policy;
-    finalActionProbs = final.actionProbs;
-    const legal = env.legalBinsAmountAndMask();
-
-    return {
-      beliefsAtSpot: beliefs,
-      actionProbs: finalActionProbs,
-      policy: finalPolicy,
-      actionLabels: [...this.model.actionLabels],
-      legalMask: legal.mask,
-      actor: env.toAct,
-    };
   }
 
   dispose(): void {
@@ -153,6 +168,33 @@ export class BrowserCfrEvaluator {
       iterations,
       readOptions,
     );
+  }
+
+  private async solveCurrentGpuState(
+    state: GpuPokerState,
+    actor: 0 | 1,
+    beliefs: Float32Array<ArrayBufferLike>,
+    selectedAction: number | undefined,
+    iterations: number,
+    readOptions?: { readPolicy?: boolean; readActionProbs?: boolean },
+  ) {
+    const problem = await this.buildGpuStateProblem(state, actor, beliefs);
+    if (selectedAction !== undefined) {
+      problem.action = selectedAction;
+    }
+    try {
+      return await this.cfr.solveGpuChildValues(
+        problem,
+        beliefs,
+        NUM_HANDS,
+        this.model.manifest.architecture.numActions,
+        iterations,
+        problem.childValuesBuffer,
+        readOptions,
+      );
+    } finally {
+      problem.dispose();
+    }
   }
 
   private async buildProblem(
@@ -219,6 +261,43 @@ export class BrowserCfrEvaluator {
       dispose: () => {
         modelValuesDispose?.();
         this.releaseChildValueBuffer(childValues);
+      },
+    };
+  }
+
+  private async buildGpuStateProblem(
+    state: GpuPokerState,
+    actor: 0 | 1,
+    beliefs: Float32Array<ArrayBufferLike>,
+  ): Promise<GpuLocalCfrProblem> {
+    const children = state.buildChildren();
+    const modelValues = await this.model.predictBatchHandValuesGpuStates(
+      children.states,
+      children.numActions,
+      beliefs,
+    );
+    const beliefBuffer = makeStorageBuffer(this.device, beliefs);
+    const bytesPerChild = 2 * NUM_HANDS * Float32Array.BYTES_PER_ELEMENT;
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(
+      modelValues.buffer,
+      0,
+      children.childValues,
+      0,
+      children.numActions * bytesPerChild,
+    );
+    this.device.queue.submit([encoder.finish()]);
+    state.writeTerminalValues(children, beliefBuffer);
+    const legalMask = await readUintBuffer(this.device, children.legalMask, children.numActions);
+
+    return {
+      actor,
+      legalMask: Array.from(legalMask),
+      childValuesBuffer: children.childValues,
+      dispose: () => {
+        modelValues.dispose();
+        beliefBuffer.destroy();
+        children.dispose();
       },
     };
   }

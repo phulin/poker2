@@ -520,7 +520,7 @@ export const ZERO_SUM_BATCH_WGSL = /* wgsl */ `
 struct Params {
   numHands: u32,
   batch: u32,
-  _pad0: u32,
+  beliefStride: u32,
   _pad1: u32,
 };
 
@@ -539,12 +539,13 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     return;
   }
   let base = sample * 2u * params.numHands;
+  let beliefBase = sample * params.beliefStride;
 
   var s0 = 0.0;
   var s1 = 0.0;
   for (var h = lane; h < params.numHands; h = h + 256u) {
-    s0 = s0 + values[base + h] * beliefs[base + h];
-    s1 = s1 + values[base + params.numHands + h] * beliefs[base + params.numHands + h];
+    s0 = s0 + values[base + h] * beliefs[beliefBase + h];
+    s1 = s1 + values[base + params.numHands + h] * beliefs[beliefBase + params.numHands + h];
   }
   partial0[lane] = s0;
   partial1[lane] = s1;
