@@ -366,6 +366,36 @@ def _run_component_benchmarks(
         setup_state,
         lambda: ev.cfr_iteration(next_t()),
     )
+    if all(
+        hasattr(ev, name)
+        for name in (
+            "_prepare_sample_update_table",
+            "_sample_update_rows",
+            "_sample_update_counts",
+            "_t_scalars",
+        )
+    ):
+        from p2.search.fused_cfr_triton import fused_policy_sample_update_
+
+        def setup_policy_sample_update() -> None:
+            setup_state()
+            ev.prepare_replay(start_t)
+            ev._prepare_sample_update_table()
+
+        def policy_sample_update():
+            return fused_policy_sample_update_(
+                ev.policy_probs,
+                ev.policy_probs_sample,
+                ev._sample_update_rows,
+                ev._sample_update_counts,
+                ev._t_scalars.t_tensor,
+            )
+
+        time_component(
+            "policy_sample_update",
+            setup_policy_sample_update,
+            policy_sample_update,
+        )
     time_component(
         "set_leaf_values",
         setup_state,
