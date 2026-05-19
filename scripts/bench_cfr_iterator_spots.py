@@ -29,6 +29,7 @@ from p2.cli.sample_spots import build_pbs_from_spots, load_spots
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.search.fused_cfr_triton import fused_model_values_writeback_
+from p2.search.fused_cfr_triton import fused_parent_sum_divide_
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -505,6 +506,39 @@ def _run_component_benchmarks(
         setup_state,
         lambda: ev.update_policy(next_t()),
     )
+    if hasattr(ev, "_ensure_positive_regrets_buf"):
+
+        def setup_regret_matching_parent_sum_divide() -> None:
+            setup_state()
+            ev._prepare_tree_slices()
+            positive_regrets = ev._ensure_positive_regrets_buf()
+            torch.clamp(ev.cumulative_regrets, min=0.0, out=positive_regrets)
+            bottom = ev._bottom
+            parent_sum_box["positive_regrets"] = positive_regrets.contiguous()
+            parent_sum_box["fallback"] = ev.uniform_policy[bottom:].contiguous()
+            parent_sum_box["out"] = ev.policy_probs[bottom:]
+            parent_sum_box["bottom"] = bottom
+            parent_sum_box["child_offsets"] = ev._child_offsets_top
+            parent_sum_box["child_count"] = ev._child_count_top
+
+        parent_sum_box: dict[str, Any] = {}
+
+        def regret_matching_parent_sum_divide():
+            return fused_parent_sum_divide_(
+                values=parent_sum_box["positive_regrets"],
+                fallback=parent_sum_box["fallback"],
+                child_offsets=parent_sum_box["child_offsets"],
+                child_count=parent_sum_box["child_count"],
+                out=parent_sum_box["out"],
+                out_offset=parent_sum_box["bottom"],
+                max_children=ev.num_actions,
+            )
+
+        time_component(
+            "regret_matching_parent_sum_divide",
+            setup_regret_matching_parent_sum_divide,
+            regret_matching_parent_sum_divide,
+        )
     time_component(
         "calculate_reach_weights",
         setup_state,
