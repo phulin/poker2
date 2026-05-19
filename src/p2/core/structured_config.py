@@ -134,6 +134,12 @@ class TrainingConfig:
     auxiliary_loss_coef: float = 0.0
     warmup_steps: int = 0  # Learning rate warmup steps
     weight_decay: float = 0.01  # Weight decay for regularization
+    optimizer: str = "adamw"  # ReBeL trainer: "adamw" or "muon"
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = True
+    muon_eps: float = 1e-7
+    muon_ns_steps: int = 5
+    muon_adjust_lr_fn: str | None = None
 
     use_kv_cache: bool = False
 

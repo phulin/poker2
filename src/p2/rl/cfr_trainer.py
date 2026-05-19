@@ -25,6 +25,7 @@ from p2.models.mlp.better_trm import BetterTRM
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput, TRMLatent
 from p2.rl.losses import RebelSupervisedLoss
+from p2.rl.optimizers import build_optimizer
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.trueskill_tracker import TrueSkillTracker
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
@@ -205,12 +206,7 @@ class RebelCFRTrainer:
         )
 
         # Optimizer & loss
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=cfg.train.learning_rate,
-            weight_decay=cfg.train.weight_decay,
-            fused=(device.type == "cuda"),
-        )
+        self.optimizer = build_optimizer(self.model, cfg.train, device)
         self.loss_fn = RebelSupervisedLoss(
             policy_weight=1.0,
             value_weight=cfg.train.value_coef,
