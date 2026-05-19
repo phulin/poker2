@@ -28,8 +28,12 @@ from torch.profiler import ProfilerActivity, profile, record_function
 from p2.cli.sample_spots import build_pbs_from_spots, load_spots
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
-from p2.search.fused_cfr_triton import fused_model_values_writeback_
-from p2.search.fused_cfr_triton import fused_parent_sum_divide_
+from p2.search.fused_cfr_triton import (
+    fused_model_values_writeback_,
+    fused_parent_sum_divide_,
+    fused_reach_beliefs_avg_depth_,
+    fused_reach_beliefs_avg_scratch_depth_,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -538,6 +542,96 @@ def _run_component_benchmarks(
             "regret_matching_parent_sum_divide",
             setup_regret_matching_parent_sum_divide,
             regret_matching_parent_sum_divide,
+        )
+    if all(
+        hasattr(ev, name)
+        for name in (
+            "_ensure_average_policy_buffers",
+            "_get_root_index",
+            "_ensure_reach_scratch_buffers",
+            "_opt_scratch_reach_beliefs_avg",
+            "_t_scalars",
+        )
+    ):
+
+        def setup_reach_beliefs_avg_fused() -> None:
+            setup_state()
+            ev.prepare_replay(start_t)
+            ev._prepare_tree_slices()
+            avg_num, avg_den = ev._ensure_average_policy_buffers()
+            reach_box["avg_num"] = avg_num
+            reach_box["avg_den"] = avg_den
+            reach_box["root_index"] = ev._get_root_index()
+            reach_box["parent_index_all"] = ev._parent_index_all
+            reach_box["to_act"] = ev.env.to_act.contiguous()
+            reach_box["prev_actor"] = ev.prev_actor.contiguous()
+            reach_box["use_scratch"] = bool(
+                ev._opt_scratch_reach_beliefs_avg and skip_record_stats
+            )
+            if reach_box["use_scratch"]:
+                reach_box["scratch_a"], reach_box["scratch_b"] = (
+                    ev._ensure_reach_scratch_buffers()
+                )
+
+        reach_box: dict[str, Any] = {}
+
+        def reach_beliefs_avg_fused():
+            parent_index_all = reach_box["parent_index_all"]
+            assert parent_index_all is not None
+            if reach_box["use_scratch"]:
+                parent_reach = reach_box["scratch_a"]
+                child_reach = reach_box["scratch_b"]
+                for depth in range(ev.tree_depth):
+                    start = ev.depth_offsets[depth + 1]
+                    end = ev.depth_offsets[depth + 2]
+                    parent_base = ev.depth_offsets[depth]
+                    fused_reach_beliefs_avg_scratch_depth_(
+                        parent_reach=parent_reach,
+                        child_reach=child_reach,
+                        beliefs=ev.beliefs,
+                        policy=ev.policy_probs,
+                        allowed_mask=ev.allowed_hands,
+                        allowed_prob=ev.allowed_hands_prob,
+                        root_index=reach_box["root_index"],
+                        parent_index=parent_index_all,
+                        prev_actor=reach_box["prev_actor"],
+                        to_act=reach_box["to_act"],
+                        average_policy_numerator=reach_box["avg_num"],
+                        average_policy_denominator=reach_box["avg_den"],
+                        new=ev._t_scalars.mix_new,
+                        parent_base=parent_base,
+                        start=start,
+                        end=end,
+                        root_parent=depth == 0,
+                        write_average_policy=True,
+                        store_child=depth < ev.tree_depth - 1,
+                    )
+                    parent_reach, child_reach = child_reach, parent_reach
+                return
+            for depth in range(ev.tree_depth):
+                fused_reach_beliefs_avg_depth_(
+                    reach=ev.self_reach,
+                    beliefs=ev.beliefs,
+                    policy=ev.policy_probs,
+                    allowed_mask=ev.allowed_hands,
+                    allowed_prob=ev.allowed_hands_prob,
+                    root_index=reach_box["root_index"],
+                    parent_index=parent_index_all,
+                    prev_actor=reach_box["prev_actor"],
+                    to_act=reach_box["to_act"],
+                    average_policy_numerator=reach_box["avg_num"],
+                    average_policy_denominator=reach_box["avg_den"],
+                    new=ev._t_scalars.mix_new,
+                    start=ev.depth_offsets[depth + 1],
+                    end=ev.depth_offsets[depth + 2],
+                    write_average_policy=True,
+                    store_reach=depth < ev.tree_depth - 1 or not skip_record_stats,
+                )
+
+        time_component(
+            "reach_beliefs_avg_fused",
+            setup_reach_beliefs_avg_fused,
+            reach_beliefs_avg_fused,
         )
     time_component(
         "calculate_reach_weights",
