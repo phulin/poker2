@@ -1209,7 +1209,7 @@ def select_actor_beliefs_triton(
     beliefs: torch.Tensor,
     to_act: torch.Tensor,
     top: int,
-    block_h: int = 512,
+    block_h: int = 1024,
 ) -> torch.Tensor:
     """Materialize ``beliefs[row, to_act[row], hand]`` for parent rows."""
     out = torch.empty((top, beliefs.shape[-1]), device=beliefs.device, dtype=beliefs.dtype)
@@ -1222,7 +1222,7 @@ def select_actor_beliefs_triton_out_(
     to_act: torch.Tensor,
     top: int,
     out: torch.Tensor,
-    block_h: int = 512,
+    block_h: int = 1024,
 ) -> None:
     """Write ``beliefs[row, to_act[row], hand]`` for parent rows into ``out``."""
     if not triton_is_available():
@@ -1247,7 +1247,7 @@ def select_opponent_beliefs_triton_out_(
     to_act: torch.Tensor,
     top: int,
     out: torch.Tensor,
-    block_h: int = 512,
+    block_h: int = 2048,
 ) -> None:
     """Write ``beliefs[row, 1 - to_act[row], hand]`` for parent rows into ``out``."""
     if not triton_is_available():
@@ -1437,6 +1437,44 @@ def unblocked_mass_opp_at_parents_triton(
         num_warps=4,
     )
     return out
+
+
+def unblocked_mass_finalize_triton_out_(
+    target: torch.Tensor,
+    s: torch.Tensor,
+    cardsum: torch.Tensor,
+    out: torch.Tensor,
+    allowed_mask: torch.Tensor | None = None,
+) -> None:
+    """Finalize ``unblocked_mass`` from precomputed row/card sums."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert target.is_contiguous() and target.dim() == 2
+    assert target.shape[1] == _UNBLOCKED_NUM_HANDS
+    assert s.is_contiguous() and s.shape == (target.shape[0],)
+    assert cardsum.is_contiguous()
+    assert cardsum.shape == (target.shape[0], _UNBLOCKED_NUM_CARDS)
+    assert out.is_contiguous() and out.shape == target.shape
+    card_a, card_b = _get_combo_cards(target.device)
+    has_allowed = allowed_mask is not None
+    allowed_ptr = allowed_mask if has_allowed else out
+    if has_allowed:
+        assert allowed_mask is not None
+        assert allowed_mask.is_contiguous() and allowed_mask.shape == target.shape
+    _unblocked_mass_finalize_kernel[(target.shape[0],)](
+        target,
+        cardsum,
+        s,
+        card_a,
+        card_b,
+        allowed_ptr,
+        out,
+        _UNBLOCKED_NUM_HANDS,
+        NUM_CARDS=_UNBLOCKED_NUM_CARDS,
+        HAS_ALLOWED=has_allowed,
+        BLOCK_H=2048,
+        num_warps=4,
+    )
 
 
 def unblocked_mass_triton(target: torch.Tensor) -> torch.Tensor:

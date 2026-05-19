@@ -29,10 +29,13 @@ from p2.cli.sample_spots import build_pbs_from_spots, load_spots
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.search.fused_cfr_triton import (
+    _preprocess_unblocked_stats,
     fused_model_values_writeback_,
     fused_parent_sum_divide_,
     fused_reach_beliefs_avg_depth_,
     fused_reach_beliefs_avg_scratch_depth_,
+    select_opponent_beliefs_triton_out_,
+    unblocked_mass_finalize_triton_out_,
 )
 
 
@@ -504,6 +507,68 @@ def _run_component_benchmarks(
             "regret_src_weights",
             setup_regret_src_weights,
             regret_src_weights,
+        )
+        regret_src_box: dict[str, Any] = {}
+
+        def setup_regret_src_weight_parts() -> None:
+            setup_state()
+            ev._prepare_tree_slices()
+            beliefs = ev.beliefs_avg if ev.cfr_avg else ev.beliefs
+            top = ev._top
+            target = torch.empty(
+                (top, beliefs.shape[-1]),
+                device=beliefs.device,
+                dtype=beliefs.dtype,
+            )
+            select_opponent_beliefs_triton_out_(
+                beliefs,
+                ev.env.to_act.contiguous(),
+                top,
+                target,
+            )
+            s, cardsum = _preprocess_unblocked_stats(target)
+            regret_src_box["beliefs"] = beliefs
+            regret_src_box["top"] = top
+            regret_src_box["target"] = target
+            regret_src_box["s"] = s
+            regret_src_box["cardsum"] = cardsum
+            regret_src_box["allowed"] = ev.allowed_hands[:top].contiguous()
+            regret_src_box["out"] = torch.empty_like(target)
+
+        def regret_src_select_opponent():
+            select_opponent_beliefs_triton_out_(
+                regret_src_box["beliefs"],
+                ev.env.to_act.contiguous(),
+                regret_src_box["top"],
+                regret_src_box["target"],
+            )
+
+        def regret_src_preprocess():
+            return _preprocess_unblocked_stats(regret_src_box["target"])
+
+        def regret_src_finalize():
+            return unblocked_mass_finalize_triton_out_(
+                regret_src_box["target"],
+                regret_src_box["s"],
+                regret_src_box["cardsum"],
+                regret_src_box["out"],
+                allowed_mask=regret_src_box["allowed"],
+            )
+
+        time_component(
+            "regret_src_select_opponent",
+            setup_regret_src_weight_parts,
+            regret_src_select_opponent,
+        )
+        time_component(
+            "regret_src_preprocess",
+            setup_regret_src_weight_parts,
+            regret_src_preprocess,
+        )
+        time_component(
+            "regret_src_finalize",
+            setup_regret_src_weight_parts,
+            regret_src_finalize,
         )
     time_component(
         "update_policy",
