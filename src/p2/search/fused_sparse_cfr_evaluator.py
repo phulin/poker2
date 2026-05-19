@@ -173,6 +173,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._opt_child_opp_policy = _env_flag("P2_FUSED_OPT_CHILD_OPP_POLICY")
         self._opt_ev_inline_opp = _env_flag("P2_FUSED_OPT_EV_INLINE_OPP")
         self._opt_defer_avg_reach = _env_flag("P2_FUSED_OPT_DEFER_AVG_REACH")
+        self._opt_defer_avg_policy = _env_flag("P2_FUSED_OPT_DEFER_AVG_POLICY")
         self._fused_positive_regrets_valid: bool = False
         self._sample_update_rows: torch.Tensor | None = None
         self._sample_update_counts: torch.Tensor | None = None
@@ -266,6 +267,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._opt_ev_inline_opp = _env_flag("P2_FUSED_OPT_EV_INLINE_OPP")
         if not hasattr(self, "_opt_defer_avg_reach"):
             self._opt_defer_avg_reach = _env_flag("P2_FUSED_OPT_DEFER_AVG_REACH")
+        if not hasattr(self, "_opt_defer_avg_policy"):
+            self._opt_defer_avg_policy = _env_flag("P2_FUSED_OPT_DEFER_AVG_POLICY")
         if not hasattr(self, "_fused_positive_regrets_valid"):
             self._fused_positive_regrets_valid = False
         if not hasattr(self, "_sample_update_rows"):
@@ -980,10 +983,18 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def _update_average_policy_true(
         self, t: int, update_reach: bool = False
     ) -> None:
+        defer_avg_policy = (
+            self._opt_defer_avg_policy
+            and not self.cfr_avg
+            and self.use_final_policy_values
+        )
         if (
             self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
             and t <= self.dcfr_delay
         ):
+            if defer_avg_policy:
+                self.average_policy_initialized = False
+                return
             self.policy_probs_avg[:] = self.policy_probs
             if update_reach:
                 self._calculate_reach_weights(
@@ -1007,10 +1018,32 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             parent_index=parent_index_all,
             new=self._t_scalars.mix_new,
             bottom=N,
+            write_policy=not defer_avg_policy,
         )
         self.average_policy_initialized = True
 
-        self._renormalize_average_policy(update_reach=update_reach)
+        if not defer_avg_policy:
+            self._renormalize_average_policy(update_reach=update_reach)
+
+    def _finalize_deferred_average_policy(self) -> None:
+        """Materialize normalized average policy after deferred accumulation."""
+        self._prepare_tree_slices()
+        N = self.root_nodes
+        num, den = self._ensure_average_policy_buffers()
+        parent_index_all = self._parent_index_all
+        assert parent_index_all is not None
+        fused_average_policy_mix_with_tensors_(
+            policy_probs_avg=self.policy_probs_avg,
+            average_policy_numerator=num,
+            average_policy_denominator=den,
+            policy_probs=self.policy_probs,
+            self_reach=self.self_reach,
+            to_act=self.env.to_act.contiguous(),
+            parent_index=parent_index_all,
+            new=self._t_scalars.zero,
+            bottom=N,
+        )
+        self._renormalize_average_policy(update_reach=False)
 
     # ------------------------------------------------------------------
     # Update average values: fused mixing.
@@ -1358,7 +1391,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             t += 1
 
         if not self.cfr_avg and self.use_final_policy_values:
-            if self._opt_defer_avg_reach:
+            if self._opt_defer_avg_policy:
+                self._finalize_deferred_average_policy()
+            if self._opt_defer_avg_reach or self._opt_defer_avg_policy:
                 self.self_reach_avg[: self.root_nodes] = 1.0
                 self._calculate_reach_weights(
                     self.self_reach_avg, self.policy_probs_avg

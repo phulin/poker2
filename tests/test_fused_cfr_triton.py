@@ -991,7 +991,9 @@ def test_deferred_average_reach_matches_eager_reach() -> None:
     eager._ensure_fused_attrs()
     deferred._ensure_fused_attrs()
     eager._opt_defer_avg_reach = False
+    eager._opt_defer_avg_policy = False
     deferred._opt_defer_avg_reach = True
+    deferred._opt_defer_avg_policy = True
     for ev in (eager, deferred):
         ev.cfr_iterations = 14
         ev.warm_start_iterations = 1

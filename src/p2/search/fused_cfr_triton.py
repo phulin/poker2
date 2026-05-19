@@ -950,16 +950,18 @@ if triton is not None:
         total,
         H,
         EPS,
+        WRITE_AVG: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
         c = tl.program_id(0)
         if c >= total:
             return
         if c < bottom:
-            for start in tl.range(0, H, BLOCK_H):
-                offs = start + tl.arange(0, BLOCK_H)
-                mask = offs < H
-                tl.store(policy_probs_avg_ptr + c * H + offs, 0.0, mask=mask)
+            if WRITE_AVG:
+                for start in tl.range(0, H, BLOCK_H):
+                    offs = start + tl.arange(0, BLOCK_H)
+                    mask = offs < H
+                    tl.store(policy_probs_avg_ptr + c * H + offs, 0.0, mask=mask)
             return
         parent = tl.load(parent_index_ptr + c)
         actor = tl.load(to_act_ptr + parent)
@@ -982,10 +984,11 @@ if triton is not None:
 
             num = num_old + reach_n * cur
             den = den_old + reach_n
-            out = tl.where(den > EPS, num / tl.maximum(den, EPS), cur)
             tl.store(num_row + offs, num, mask=mask)
             tl.store(den_row + offs, den, mask=mask)
-            tl.store(avg_row + offs, out, mask=mask)
+            if WRITE_AVG:
+                out = tl.where(den > EPS, num / tl.maximum(den, EPS), cur)
+                tl.store(avg_row + offs, out, mask=mask)
 
 
 def fused_average_policy_mix_(
@@ -1000,6 +1003,7 @@ def fused_average_policy_mix_(
     bottom: int,
     eps: float = 1e-5,
     block_h: int = 512,
+    write_policy: bool = True,
 ) -> None:
     """Fused true-CFR average-policy accumulation (pre-renormalization).
 
@@ -1041,7 +1045,7 @@ def fused_average_policy_mix_(
     fused_average_policy_mix_with_tensors_(
         policy_probs_avg, average_policy_numerator, average_policy_denominator,
         policy_probs, self_reach, to_act, parent_index, new_t,
-        bottom=bottom, eps=eps, block_h=block_h,
+        bottom=bottom, eps=eps, block_h=block_h, write_policy=write_policy,
     )
 
 
@@ -1057,6 +1061,7 @@ def fused_average_policy_mix_with_tensors_(
     bottom: int,
     eps: float = 1e-5,
     block_h: int = 512,
+    write_policy: bool = True,
 ) -> None:
     """Graph-capturable version: scalars come from pre-filled 0-D tensors."""
     if not triton_is_available():
@@ -1076,6 +1081,7 @@ def fused_average_policy_mix_with_tensors_(
         total,
         h,
         eps,
+        WRITE_AVG=write_policy,
         BLOCK_H=block_h,
         num_warps=4,
     )
@@ -3597,6 +3603,7 @@ class TScalars:
 
         self.device = device
         self.dtype = dtype
+        self.zero = _z()
         # DCFR rescale scalars (all fp)
         self.t_alpha_num = _z()
         self.t_beta_num = _z()
