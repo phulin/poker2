@@ -4,6 +4,7 @@ import {
   POKER_BUILD_CHILD_STATES_WGSL,
   POKER_LEGAL_WGSL,
   POKER_STEP_WGSL,
+  POKER_TERMINAL_RANKS_WGSL,
   POKER_TERMINAL_VALUES_WGSL,
   STATE_ACTIONS_LAST_ROUND,
   STATE_ACTIONS_THIS_ROUND,
@@ -38,6 +39,7 @@ export interface GpuChildStateBatch {
   states: GPUBuffer;
   legalMask: GPUBuffer;
   terminalMask: GPUBuffer;
+  terminalRanks: GPUBuffer;
   childValues: GPUBuffer;
   numActions: number;
   dispose: () => void;
@@ -48,9 +50,11 @@ export class GpuPokerState {
   readonly numActions: number;
   readonly state: GPUBuffer;
   private readonly betBins: GPUBuffer;
+  private readonly handCards: GPUBuffer;
   private readonly legalPipeline: GPUComputePipeline;
   private readonly stepPipeline: GPUComputePipeline;
   private readonly buildChildrenPipeline: GPUComputePipeline;
+  private readonly terminalRanksPipeline: GPUComputePipeline;
   private readonly terminalValuesPipeline: GPUComputePipeline;
   private readonly paramsBuffer: GPUBuffer;
   private readonly numBetBins: number;
@@ -81,6 +85,7 @@ export class GpuPokerState {
       device,
       new Float32Array(options.initialState?.betBins ?? manifest.env.betBins),
     );
+    this.handCards = makeStorageBuffer(device, buildHandCards());
     this.paramsBuffer = device.createBuffer({
       size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -90,6 +95,10 @@ export class GpuPokerState {
     this.buildChildrenPipeline = this.pipeline(
       POKER_BUILD_CHILD_STATES_WGSL,
       "poker-state-build-children",
+    );
+    this.terminalRanksPipeline = this.pipeline(
+      POKER_TERMINAL_RANKS_WGSL,
+      "poker-state-terminal-ranks",
     );
     this.terminalValuesPipeline = this.pipeline(
       POKER_TERMINAL_VALUES_WGSL,
@@ -131,6 +140,7 @@ export class GpuPokerState {
     const states = makeEmptyStorageBuffer(this.device, this.numActions * STATE_STRIDE);
     const legalMask = makeEmptyStorageBuffer(this.device, this.numActions);
     const terminalMask = makeEmptyStorageBuffer(this.device, this.numActions);
+    const terminalRanks = makeEmptyStorageBuffer(this.device, this.numActions * 1326);
     const childValues = makeEmptyStorageBuffer(
       this.device,
       this.numActions * 2 * 1326,
@@ -149,12 +159,14 @@ export class GpuPokerState {
       states,
       legalMask,
       terminalMask,
+      terminalRanks,
       childValues,
       numActions: this.numActions,
       dispose: () => {
         states.destroy();
         legalMask.destroy();
         terminalMask.destroy();
+        terminalRanks.destroy();
         childValues.destroy();
       },
     };
@@ -163,13 +175,23 @@ export class GpuPokerState {
   writeTerminalValues(batch: GpuChildStateBatch, beliefs: GPUBuffer): void {
     this.writeParams(0);
     const encoder = this.device.createCommandEncoder();
+    this.encode3d(encoder, this.terminalRanksPipeline, 21, 1, this.numActions, [
+      { binding: 0, resource: { buffer: batch.states } },
+      { binding: 1, resource: { buffer: batch.legalMask } },
+      { binding: 2, resource: { buffer: batch.terminalMask } },
+      { binding: 3, resource: { buffer: this.handCards } },
+      { binding: 4, resource: { buffer: batch.terminalRanks } },
+      { binding: 5, resource: { buffer: this.paramsBuffer } },
+    ]);
     this.encode3d(encoder, this.terminalValuesPipeline, 21, 2, this.numActions, [
       { binding: 0, resource: { buffer: batch.states } },
       { binding: 1, resource: { buffer: batch.legalMask } },
       { binding: 2, resource: { buffer: batch.terminalMask } },
       { binding: 3, resource: { buffer: beliefs } },
-      { binding: 4, resource: { buffer: batch.childValues } },
-      { binding: 5, resource: { buffer: this.paramsBuffer } },
+      { binding: 4, resource: { buffer: this.handCards } },
+      { binding: 5, resource: { buffer: batch.terminalRanks } },
+      { binding: 6, resource: { buffer: batch.childValues } },
+      { binding: 7, resource: { buffer: this.paramsBuffer } },
     ]);
     this.device.queue.submit([encoder.finish()]);
   }
@@ -177,6 +199,7 @@ export class GpuPokerState {
   dispose(): void {
     this.state.destroy();
     this.betBins.destroy();
+    this.handCards.destroy();
     this.paramsBuffer.destroy();
   }
 
@@ -243,6 +266,19 @@ export class GpuPokerState {
     pass.dispatchWorkgroups(x, y, z);
     pass.end();
   }
+}
+
+function buildHandCards(): Uint32Array<ArrayBuffer> {
+  const data = new Uint32Array(1326 * 2);
+  let hand = 0;
+  for (let c0 = 0; c0 < 51; c0 += 1) {
+    for (let c1 = c0 + 1; c1 < 52; c1 += 1) {
+      data[2 * hand] = c0;
+      data[2 * hand + 1] = c1;
+      hand += 1;
+    }
+  }
+  return data;
 }
 
 function stateDataFromEnv(env: PublicHunlEnv): Float32Array<ArrayBuffer> {
