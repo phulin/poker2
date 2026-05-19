@@ -3435,7 +3435,6 @@ if triton is not None:
 
         parent = tl.load(parent_index_ptr + c)
         prev_actor = tl.load(prev_actor_ptr + c)
-        actor = tl.load(to_act_ptr + parent)
         root = tl.load(root_index_ptr + c)
 
         offs = tl.arange(0, BLOCK_H)
@@ -3463,6 +3462,7 @@ if triton is not None:
         tl.store(reach_ptr + (c * 2 + 1) * H + offs, child1, mask=mask)
 
         if WRITE_AVG:
+            actor = tl.load(to_act_ptr + parent)
             new_scalar = tl.load(new_scalar_ptr)
             parent_actor = tl.where(actor == 0, parent0, parent1)
             reach_n = parent_actor * new_scalar
@@ -3494,7 +3494,6 @@ if triton is not None:
         out1 = tl.where(sum1 > EPS, b1 / sum1, fallback)
         tl.store(beliefs_ptr + (c * 2 + 0) * H + offs, out0, mask=mask)
         tl.store(beliefs_ptr + (c * 2 + 1) * H + offs, out1, mask=mask)
-
 
 def fused_reach_beliefs_avg_depth_(
     reach: torch.Tensor,
