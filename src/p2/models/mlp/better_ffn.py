@@ -108,9 +108,6 @@ class BetterFFN(BaseMLPModel):
         self.register_buffer("hand_combos", combos, persistent=False)
         self.register_buffer("hand_ranks", combos % 13, persistent=False)
         self.register_buffer("hand_suits", combos // 13, persistent=False)
-        self._hand_embedding_cache: torch.Tensor | None = None
-        self._hand_embedding_cache_key: tuple[int, int, int, int] | None = None
-        self._skip_hand_embedding_cache_when_compiling = False
         belief_in_dim = num_players * hidden_dim
         self.belief_proj = (
             direct_projection_block(belief_in_dim, hidden_dim)
@@ -169,26 +166,10 @@ class BetterFFN(BaseMLPModel):
 
     def _hand_embedding(self) -> torch.Tensor:
         """Per-hand embedding tied to rank/suit embeddings — shape [NUM_HANDS, hidden_dim]."""
-        use_cache = not torch.is_grad_enabled()
-        if self._skip_hand_embedding_cache_when_compiling and torch.compiler.is_compiling():
-            use_cache = False
-        if use_cache:
-            key = (
-                int(self.rank_embedding.weight.data_ptr()),
-                int(self.rank_embedding.weight._version),
-                int(self.suit_embedding.weight.data_ptr()),
-                int(self.suit_embedding.weight._version),
-            )
-            if self._hand_embedding_cache_key == key and self._hand_embedding_cache is not None:
-                return self._hand_embedding_cache
         card_emb = self.rank_embedding(self.hand_ranks) + self.suit_embedding(
             self.hand_suits
         )
-        out = card_emb.sum(dim=1)
-        if use_cache:
-            self._hand_embedding_cache = out
-            self._hand_embedding_cache_key = key
-        return out
+        return card_emb.sum(dim=1)
 
     def static_feature_base(self, features: MLPFeatures) -> torch.Tensor:
         """Feature contribution that is fixed for a CFR leaf row."""
@@ -217,6 +198,10 @@ class BetterFFN(BaseMLPModel):
 
         Args:
             features: MLPFeatures
+            apply_zero_sum: Controls where the zero-sum projection is applied,
+                not whether it is required. If ``enforce_zero_sum`` is false this
+                flag has no effect; if it is true and this flag is false, the
+                caller must apply the projection after any value mixing.
 
         Returns:
             ModelOutput with policy logits and value predictions.

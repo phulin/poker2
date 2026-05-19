@@ -136,10 +136,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._compile_kwargs = _compile_kwargs_from_env(self.cfg)
         compile_setting = _compile_setting_from_env(self.cfg)
         if compile_model and compile_setting != "off" and self.model is not None:
-            mode = self._compile_kwargs.get("mode")
-            base_model = getattr(self.model, "_orig_mod", self.model)
-            if mode == "max-autotune" and isinstance(base_model, BetterFFN):
-                base_model._skip_hand_embedding_cache_when_compiling = True
             torch.set_float32_matmul_precision("high")
             try:
                 self.model = torch.compile(self.model, **self._compile_kwargs)
@@ -1137,6 +1133,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def _set_model_values_impl(self, t, beliefs, features):
         from p2.models.mlp.better_trm import BetterTRM
 
+        model_applied_zero_sum = False
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             base_model = getattr(self.model, "_orig_mod", self.model)
             if isinstance(base_model, BetterTRM):
@@ -1144,6 +1141,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     features, include_policy=False, latent=self.latent
                 )
                 self.latent = model_output.latent
+                model_applied_zero_sum = bool(base_model.enforce_zero_sum)
             elif isinstance(base_model, BetterFFN):
                 model_key = id(base_model)
                 if (
@@ -1177,9 +1175,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 model_output = self.model(
                     features,
                     include_policy=False,
-                    apply_zero_sum=bool(self.cfr_avg),
+                    apply_zero_sum=True,
                     static_base_features=self._static_model_base_features,
                 )
+                model_applied_zero_sum = bool(base_model.enforce_zero_sum)
             else:
                 model_output = self.model(features, include_policy=False)
         hand_values = model_output.hand_values.contiguous()
@@ -1199,6 +1198,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         else:
             last_out = hand_values
             last_model_values = hand_values
+        # ``apply_zero_sum`` controls when the projection is applied, not if.
+        # BetterFFN/BetterTRM already return zero-sum values when configured to
+        # do so. CFR-AVG mixing can break that projection, and models without
+        # internal projection still need the fused writeback to apply it.
+        enforce_writeback_zero_sum = bool(self.model.enforce_zero_sum) and (
+            do_mix or not model_applied_zero_sum
+        )
         fused_model_values_writeback_(
             hand_values=hand_values,
             last_model_values=last_model_values,
@@ -1209,8 +1215,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             old_plus_new_over_new=self._t_scalars.mix_onon,
             old_over_new=self._t_scalars.mix_oon,
             do_mix=do_mix,
-            enforce_zero_sum=bool(self.model.enforce_zero_sum)
-            and (do_mix or not self.cfr_avg),
+            enforce_zero_sum=enforce_writeback_zero_sum,
             store_last=store_last,
         )
         self.last_model_values = last_out if store_last else None

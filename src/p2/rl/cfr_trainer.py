@@ -61,15 +61,6 @@ def _compile_kwargs(cfg: Config) -> dict[str, object]:
     return kwargs
 
 
-def _uses_compile_cudagraphs(cfg: Config) -> bool:
-    return _compile_setting(cfg) == "max-autotune"
-
-
-def _prepare_model_for_compile(model: nn.Module, cfg: Config) -> None:
-    if _uses_compile_cudagraphs(cfg) and isinstance(model, BetterFFN):
-        model._skip_hand_embedding_cache_when_compiling = True
-
-
 class RebelCFRTrainer:
     """Trainer that couples DCFR search with a ReBeL-style FFN."""
 
@@ -171,7 +162,6 @@ class RebelCFRTrainer:
         self.model.init_weights(cpu_rng)
         self.model.to(self.device)
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
-            _prepare_model_for_compile(self.model, cfg)
             self.model.compile(**_compile_kwargs(cfg))
 
         # data generation rate per training step
@@ -347,7 +337,6 @@ class RebelCFRTrainer:
         for p in twin.parameters():
             p.requires_grad = False
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
-            _prepare_model_for_compile(twin, cfg)
             twin.compile(**_compile_kwargs(cfg))
         return twin
 
