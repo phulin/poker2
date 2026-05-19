@@ -6,6 +6,7 @@ Reinforcement learning and ReBeL training support: PPO losses, replay buffers, o
 - `agent_snapshot.py`: Snapshot wrapper for frozen agents.
 - `cfr_trainer.py`: ReBeL CFR supervised trainer.
 - `losses.py`: PPO variants, CFR distillation loss, and ReBeL supervised loss.
+- `optimizers.py`: Optimizer construction helpers, including optional Muon/AdamW splitting for ReBeL training.
 - `self_play.py`: SelfPlayTrainer and model-history support.
 - `replay.py`: Scalar trajectory storage and GAE/PPO batch preparation.
 - `vectorized_replay.py`: Batched replay buffer for tensorized environments.

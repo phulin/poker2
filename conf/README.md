@@ -122,6 +122,7 @@ python src/p2/cli/train_kbest.py --config-name=config_custom
 
 ### Training Parameters (`train:` section)
 - `learning_rate`: Learning rate for optimizer
+- `optimizer`: ReBeL trainer optimizer backend (`adamw`, or `muon` to use PyTorch Muon for 2D linear weights and AdamW for the remaining parameters)
 - `batch_size`: Batch size for training
 - `episodes_per_step`: PPO epochs per step
 - `ppo_eps`: PPO clipping parameter
