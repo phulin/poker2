@@ -45,6 +45,17 @@ export interface GpuChildStateBatch {
   dispose: () => void;
 }
 
+interface GpuPokerStateSharedResources {
+  handCards: GPUBuffer;
+  legalPipeline: GPUComputePipeline;
+  stepPipeline: GPUComputePipeline;
+  buildChildrenPipeline: GPUComputePipeline;
+  terminalRanksPipeline: GPUComputePipeline;
+  terminalValuesPipeline: GPUComputePipeline;
+}
+
+const sharedResourcesByDevice = new WeakMap<GPUDevice, GpuPokerStateSharedResources>();
+
 export class GpuPokerState {
   readonly device: GPUDevice;
   readonly numActions: number;
@@ -85,25 +96,17 @@ export class GpuPokerState {
       device,
       new Float32Array(options.initialState?.betBins ?? manifest.env.betBins),
     );
-    this.handCards = makeStorageBuffer(device, buildHandCards());
+    const shared = sharedResources(device);
+    this.handCards = shared.handCards;
     this.paramsBuffer = device.createBuffer({
       size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    this.legalPipeline = this.pipeline(POKER_LEGAL_WGSL, "poker-state-legal");
-    this.stepPipeline = this.pipeline(POKER_STEP_WGSL, "poker-state-step");
-    this.buildChildrenPipeline = this.pipeline(
-      POKER_BUILD_CHILD_STATES_WGSL,
-      "poker-state-build-children",
-    );
-    this.terminalRanksPipeline = this.pipeline(
-      POKER_TERMINAL_RANKS_WGSL,
-      "poker-state-terminal-ranks",
-    );
-    this.terminalValuesPipeline = this.pipeline(
-      POKER_TERMINAL_VALUES_WGSL,
-      "poker-state-terminal-values",
-    );
+    this.legalPipeline = shared.legalPipeline;
+    this.stepPipeline = shared.stepPipeline;
+    this.buildChildrenPipeline = shared.buildChildrenPipeline;
+    this.terminalRanksPipeline = shared.terminalRanksPipeline;
+    this.terminalValuesPipeline = shared.terminalValuesPipeline;
   }
 
   async legalMask(): Promise<Uint32Array<ArrayBufferLike>> {
@@ -210,7 +213,6 @@ export class GpuPokerState {
   dispose(): void {
     this.state.destroy();
     this.betBins.destroy();
-    this.handCards.destroy();
     this.paramsBuffer.destroy();
   }
 
@@ -225,17 +227,6 @@ export class GpuPokerState {
         this.flopShowdown ? 1 : 0,
       ]),
     );
-  }
-
-  private pipeline(source: string, label: string): GPUComputePipeline {
-    return this.device.createComputePipeline({
-      label,
-      layout: "auto",
-      compute: {
-        module: this.device.createShaderModule({ label: `${label}.wgsl`, code: source }),
-        entryPoint: "main",
-      },
-    });
   }
 
   private encode(
@@ -277,6 +268,49 @@ export class GpuPokerState {
     pass.dispatchWorkgroups(x, y, z);
     pass.end();
   }
+}
+
+function sharedResources(device: GPUDevice): GpuPokerStateSharedResources {
+  let resources = sharedResourcesByDevice.get(device);
+  if (!resources) {
+    resources = {
+      handCards: makeStorageBuffer(device, buildHandCards()),
+      legalPipeline: pipeline(device, POKER_LEGAL_WGSL, "poker-state-legal"),
+      stepPipeline: pipeline(device, POKER_STEP_WGSL, "poker-state-step"),
+      buildChildrenPipeline: pipeline(
+        device,
+        POKER_BUILD_CHILD_STATES_WGSL,
+        "poker-state-build-children",
+      ),
+      terminalRanksPipeline: pipeline(
+        device,
+        POKER_TERMINAL_RANKS_WGSL,
+        "poker-state-terminal-ranks",
+      ),
+      terminalValuesPipeline: pipeline(
+        device,
+        POKER_TERMINAL_VALUES_WGSL,
+        "poker-state-terminal-values",
+      ),
+    };
+    sharedResourcesByDevice.set(device, resources);
+  }
+  return resources;
+}
+
+function pipeline(
+  device: GPUDevice,
+  source: string,
+  label: string,
+): GPUComputePipeline {
+  return device.createComputePipeline({
+    label,
+    layout: "auto",
+    compute: {
+      module: device.createShaderModule({ label: `${label}.wgsl`, code: source }),
+      entryPoint: "main",
+    },
+  });
 }
 
 function buildHandCards(): Uint32Array<ArrayBuffer> {
