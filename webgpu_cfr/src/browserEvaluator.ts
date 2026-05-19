@@ -1,6 +1,7 @@
 import { GpuCfrEvaluator } from "./evaluator.js";
 import { makeStorageBuffer, readUintBuffer } from "./gpuBuffers.js";
 import { GpuPokerState } from "./gpuPokerState.js";
+import { STATE_STRIDE } from "./pokerStateKernels.js";
 import {
   initialUniformBeliefs,
   NUM_HANDS,
@@ -81,6 +82,7 @@ export class BrowserCfrEvaluator {
         this.assertLegalAction(env, action);
         const solved = await this.solveCurrentGpuState(
           gpuState,
+          env,
           env.toAct,
           beliefs,
           action,
@@ -97,6 +99,7 @@ export class BrowserCfrEvaluator {
 
       const final = await this.solveCurrentGpuState(
         gpuState,
+        env,
         env.toAct,
         beliefs,
         undefined,
@@ -172,13 +175,14 @@ export class BrowserCfrEvaluator {
 
   private async solveCurrentGpuState(
     state: GpuPokerState,
+    env: PublicHunlEnv,
     actor: 0 | 1,
     beliefs: Float32Array<ArrayBufferLike>,
     selectedAction: number | undefined,
     iterations: number,
     readOptions?: { readPolicy?: boolean; readActionProbs?: boolean },
   ) {
-    const problem = await this.buildGpuStateProblem(state, actor, beliefs);
+    const problem = await this.buildGpuStateProblem(state, env, actor, beliefs);
     if (selectedAction !== undefined) {
       problem.action = selectedAction;
     }
@@ -267,26 +271,53 @@ export class BrowserCfrEvaluator {
 
   private async buildGpuStateProblem(
     state: GpuPokerState,
+    env: PublicHunlEnv,
     actor: 0 | 1,
     beliefs: Float32Array<ArrayBufferLike>,
   ): Promise<GpuLocalCfrProblem> {
     const children = state.buildChildren();
-    const modelValues = await this.model.predictBatchHandValuesGpuStates(
-      children.states,
-      children.numActions,
-      beliefs,
-    );
+    const modelActions = this.collectModelActionBins(env);
+    let modelValues: Awaited<ReturnType<BetterFfnWebGpuModel["predictBatchHandValuesGpuStates"]>> | undefined;
+    let modelStates: GPUBuffer | undefined;
     const beliefBuffer = makeStorageBuffer(this.device, beliefs);
     const bytesPerChild = 2 * NUM_HANDS * Float32Array.BYTES_PER_ELEMENT;
-    const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(
-      modelValues.buffer,
-      0,
-      children.childValues,
-      0,
-      children.numActions * bytesPerChild,
-    );
-    this.device.queue.submit([encoder.finish()]);
+    if (modelActions.length > 0) {
+      modelStates = this.device.createBuffer({
+        size: modelActions.length * STATE_STRIDE * Float32Array.BYTES_PER_ELEMENT,
+        usage:
+          GPUBufferUsage.STORAGE |
+          GPUBufferUsage.COPY_SRC |
+          GPUBufferUsage.COPY_DST,
+      });
+      const stateBytes = STATE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
+      const compactEncoder = this.device.createCommandEncoder();
+      for (let i = 0; i < modelActions.length; i += 1) {
+        compactEncoder.copyBufferToBuffer(
+          children.states,
+          modelActions[i]! * stateBytes,
+          modelStates,
+          i * stateBytes,
+          stateBytes,
+        );
+      }
+      this.device.queue.submit([compactEncoder.finish()]);
+      modelValues = await this.model.predictBatchHandValuesGpuStates(
+        modelStates,
+        modelActions.length,
+        beliefs,
+      );
+      const valueEncoder = this.device.createCommandEncoder();
+      for (let i = 0; i < modelActions.length; i += 1) {
+        valueEncoder.copyBufferToBuffer(
+          modelValues.buffer,
+          i * bytesPerChild,
+          children.childValues,
+          modelActions[i]! * bytesPerChild,
+          bytesPerChild,
+        );
+      }
+      this.device.queue.submit([valueEncoder.finish()]);
+    }
     state.writeTerminalValues(children, beliefBuffer);
     const legalMask = await readUintBuffer(this.device, children.legalMask, children.numActions);
 
@@ -295,11 +326,26 @@ export class BrowserCfrEvaluator {
       legalMask: Array.from(legalMask),
       childValuesBuffer: children.childValues,
       dispose: () => {
-        modelValues.dispose();
+        modelValues?.dispose();
+        modelStates?.destroy();
         beliefBuffer.destroy();
         children.dispose();
       },
     };
+  }
+
+  private collectModelActionBins(env: PublicHunlEnv): number[] {
+    const legal = env.legalBinsAmountAndMask();
+    const actions: number[] = [];
+    for (let action = 0; action < legal.mask.length; action += 1) {
+      if (!legal.mask[action]) continue;
+      const child = env.clone();
+      child.stepBin(action, legal);
+      if (!child.done) {
+        actions.push(action);
+      }
+    }
+    return actions;
   }
 
   private collectChildStates(
