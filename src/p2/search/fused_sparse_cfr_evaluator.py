@@ -1018,6 +1018,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             parent_index=parent_index_all,
             new=self._t_scalars.mix_new,
             bottom=N,
+            block_h=1024 if defer_avg_policy else 512,
             write_policy=not defer_avg_policy,
         )
         self.average_policy_initialized = True
