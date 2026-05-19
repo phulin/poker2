@@ -906,6 +906,197 @@ def fused_regret_dcfr_update_with_tensors_(
 
 
 # ---------------------------------------------------------------------------
+# Kernel 6c: unblocked source-weight finalize + regret/DCFR update.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_unblocked_regret_dcfr_update_kernel(
+        target_ptr,              # [top, H] opponent beliefs at parent rows
+        cardsum_ptr,             # [top, 52]
+        S_ptr,                   # [top]
+        card_a_ptr,              # [H]
+        card_b_ptr,              # [H]
+        allowed_ptr,             # optional [top, H]
+        values_achieved_ptr,     # [total, 2, H]
+        values_expected_ptr,     # [top, 2, H]
+        to_act_ptr,              # [top]
+        child_offsets_ptr,       # [top]
+        child_count_ptr,         # [top]
+        prev_actor_ptr,          # [total]
+        cumul_ptr,               # [total, H]
+        pos_out_ptr,             # [total, H]
+        t_alpha_num_ptr,
+        t_beta_num_ptr,
+        t_alpha_den_ptr,
+        t_beta_den_ptr,
+        H,
+        NUM_CARDS: tl.constexpr,
+        APPLY_DCFR: tl.constexpr,
+        CFR_PLUS: tl.constexpr,
+        WRITE_POS: tl.constexpr,
+        HAS_ALLOWED: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        hb = tl.program_id(1)
+
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        ca = tl.load(card_a_ptr + offs, mask=mask, other=0)
+        cb = tl.load(card_b_ptr + offs, mask=mask, other=0)
+        S = tl.load(S_ptr + p)
+        t = tl.load(target_ptr + p * H + offs, mask=mask, other=0.0)
+        csa = tl.load(cardsum_ptr + p * NUM_CARDS + ca, mask=mask, other=0.0)
+        csb = tl.load(cardsum_ptr + p * NUM_CARDS + cb, mask=mask, other=0.0)
+        src_w = tl.maximum(S - csa - csb + t, 0.0)
+        if HAS_ALLOWED:
+            allowed = tl.load(allowed_ptr + p * H + offs, mask=mask, other=0).to(tl.int1)
+            src_w = tl.where(allowed, src_w, 0.0)
+
+        actor = tl.load(to_act_ptr + p)
+        expected = tl.load(
+            values_expected_ptr + (p * 2 + actor) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+
+        if APPLY_DCFR:
+            t_alpha_num = tl.load(t_alpha_num_ptr)
+            t_beta_num = tl.load(t_beta_num_ptr)
+            t_alpha_den = tl.load(t_alpha_den_ptr)
+            t_beta_den = tl.load(t_beta_den_ptr)
+
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                prev_actor = tl.load(prev_actor_ptr + child)
+                achieved = tl.load(
+                    values_achieved_ptr + (child * 2 + prev_actor) * H + offs,
+                    mask=mask,
+                    other=0.0,
+                )
+                r = src_w * (achieved - expected)
+
+                cumul_offs = child * H + offs
+                c = tl.load(cumul_ptr + cumul_offs, mask=mask, other=0.0)
+                if APPLY_DCFR:
+                    positive = c > 0.0
+                    num = tl.where(positive, t_alpha_num, t_beta_num)
+                    den = tl.where(positive, t_alpha_den, t_beta_den)
+                    c = c * num
+                    c = c / den
+
+                c = c + r
+                if CFR_PLUS:
+                    c = tl.maximum(c, 0.0)
+
+                tl.store(cumul_ptr + cumul_offs, c, mask=mask)
+                if WRITE_POS:
+                    tl.store(pos_out_ptr + cumul_offs, tl.maximum(c, 0.0), mask=mask)
+
+
+def fused_unblocked_regret_dcfr_update_with_tensors_(
+    target: torch.Tensor,
+    s: torch.Tensor,
+    cardsum: torch.Tensor,
+    allowed_mask: torch.Tensor | None,
+    values_achieved: torch.Tensor,
+    values_expected: torch.Tensor,
+    to_act: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    prev_actor: torch.Tensor,
+    cumulative_regrets: torch.Tensor,
+    t_alpha_num: torch.Tensor,
+    t_beta_num: torch.Tensor,
+    t_alpha_den: torch.Tensor,
+    t_beta_den: torch.Tensor,
+    apply_dcfr: bool,
+    cfr_plus: bool,
+    max_children: int,
+    positive_regrets_out: torch.Tensor | None = None,
+    block_h: int = 512,
+) -> None:
+    """Finalize parent opponent reach and update child cumulative regrets.
+
+    This is equivalent to ``unblocked_mass_finalize_triton_out_`` followed by
+    ``fused_regret_dcfr_update_with_tensors_``, but keeps each parent source
+    weight tile in registers while updating all child rows.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert target.is_contiguous() and target.dim() == 2
+    assert target.shape[1] == _UNBLOCKED_NUM_HANDS
+    assert s.is_contiguous() and s.shape == (target.shape[0],)
+    assert cardsum.is_contiguous()
+    assert cardsum.shape == (target.shape[0], _UNBLOCKED_NUM_CARDS)
+    assert values_achieved.is_contiguous() and values_achieved.dim() == 3
+    assert values_expected.is_contiguous() and values_expected.dim() == 3
+    assert values_achieved.shape[1] == 2 and values_expected.shape[1] == 2
+    assert to_act.is_contiguous() and to_act.shape == (target.shape[0],)
+    assert child_offsets.is_contiguous() and child_offsets.shape == (target.shape[0],)
+    assert child_count.is_contiguous() and child_count.shape == child_offsets.shape
+    assert prev_actor.is_contiguous() and prev_actor.shape == (values_achieved.shape[0],)
+    assert cumulative_regrets.is_contiguous()
+    total, h = cumulative_regrets.shape
+    top = target.shape[0]
+    assert h == _UNBLOCKED_NUM_HANDS
+    assert values_achieved.shape == (total, 2, h)
+    assert values_expected.shape == (top, 2, h)
+    if allowed_mask is not None:
+        assert allowed_mask.is_contiguous() and allowed_mask.shape == target.shape
+        allowed_ptr = allowed_mask
+    else:
+        allowed_ptr = target
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    write_pos = positive_regrets_out is not None
+    pos_ptr = positive_regrets_out if write_pos else cumulative_regrets
+    card_a, card_b = _get_combo_cards(target.device)
+    grid = (top, triton.cdiv(h, block_h))
+    _fused_unblocked_regret_dcfr_update_kernel[grid](
+        target,
+        cardsum,
+        s,
+        card_a,
+        card_b,
+        allowed_ptr,
+        values_achieved,
+        values_expected,
+        to_act,
+        child_offsets,
+        child_count,
+        prev_actor,
+        cumulative_regrets,
+        pos_ptr,
+        t_alpha_num,
+        t_beta_num,
+        t_alpha_den,
+        t_beta_den,
+        h,
+        NUM_CARDS=_UNBLOCKED_NUM_CARDS,
+        APPLY_DCFR=apply_dcfr,
+        CFR_PLUS=cfr_plus,
+        WRITE_POS=write_pos,
+        HAS_ALLOWED=allowed_mask is not None,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Kernel 7: update_average_policy mixing (pre-renormalization).
 # ---------------------------------------------------------------------------
 

@@ -60,6 +60,7 @@ from p2.search.fused_cfr_triton import (
     fused_regret_dcfr_update_with_tensors_,
     fused_reach_weights_depth_,
     fused_regret_tail_,
+    fused_unblocked_regret_dcfr_update_with_tensors_,
     fused_weighted_parent_sum,
     fused_weighted_parent_sum_child_opp,
     fused_weighted_parent_sum_inline_opp_both,
@@ -75,6 +76,7 @@ from p2.search.fused_cfr_triton import (
     unblocked_mass_ratio_indirect_triton,
     marginal_policy_triton_out_,
     select_actor_beliefs_triton_out_,
+    select_opponent_beliefs_triton_out_,
 )
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
@@ -204,6 +206,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._opt_scratch_reach_beliefs_avg = _env_flag(
             "P2_FUSED_OPT_SCRATCH_REACH_BELIEF_AVG"
         )
+        self._opt_inline_regret_src_update = _env_flag(
+            "P2_FUSED_OPT_INLINE_REGRET_SRC_UPDATE"
+        )
         self._fused_positive_regrets_valid: bool = False
         self._reach_scratch_a: torch.Tensor | None = None
         self._reach_scratch_b: torch.Tensor | None = None
@@ -322,6 +327,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if not hasattr(self, "_opt_scratch_reach_beliefs_avg"):
             self._opt_scratch_reach_beliefs_avg = _env_flag(
                 "P2_FUSED_OPT_SCRATCH_REACH_BELIEF_AVG"
+            )
+        if not hasattr(self, "_opt_inline_regret_src_update"):
+            self._opt_inline_regret_src_update = _env_flag(
+                "P2_FUSED_OPT_INLINE_REGRET_SRC_UPDATE"
             )
         if not hasattr(self, "_fused_positive_regrets_valid"):
             self._fused_positive_regrets_valid = False
@@ -1477,24 +1486,63 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             assert parent_index_all is not None
             assert to_act_top is not None
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
-            src_weights = self._regret_src_weights(beliefs, top)
-            fused_regret_dcfr_update_with_tensors_(
-                values_achieved=self.latest_values.contiguous(),
-                values_expected=self.latest_values[:top].contiguous(),
-                to_act=to_act_top,
-                src_weights=src_weights.contiguous(),
-                parent_index=parent_index_all,
-                prev_actor=self.prev_actor.contiguous(),
-                cumulative_regrets=self.cumulative_regrets,
-                t_alpha_num=self._t_scalars.t_alpha_num,
-                t_beta_num=self._t_scalars.t_beta_num,
-                t_alpha_den=self._t_scalars.t_alpha_den,
-                t_beta_den=self._t_scalars.t_beta_den,
-                bottom=bottom,
-                apply_dcfr=apply_dcfr,
-                cfr_plus=self.cfr_plus,
-                positive_regrets_out=positive_regrets_out,
-            )
+            if self._opt_inline_regret_src_update:
+                src_target = torch.empty(
+                    (top, beliefs.shape[-1]),
+                    device=beliefs.device,
+                    dtype=beliefs.dtype,
+                )
+                select_opponent_beliefs_triton_out_(
+                    beliefs,
+                    self.env.to_act.contiguous(),
+                    top,
+                    src_target,
+                )
+                src_s, src_cardsum = _preprocess_unblocked_stats(src_target)
+                child_offsets_top = self._child_offsets_top
+                child_count_top = self._child_count_top
+                assert child_offsets_top is not None
+                assert child_count_top is not None
+                fused_unblocked_regret_dcfr_update_with_tensors_(
+                    target=src_target,
+                    s=src_s,
+                    cardsum=src_cardsum,
+                    allowed_mask=self.allowed_hands[:top].contiguous(),
+                    values_achieved=self.latest_values.contiguous(),
+                    values_expected=self.latest_values[:top].contiguous(),
+                    to_act=to_act_top,
+                    child_offsets=child_offsets_top,
+                    child_count=child_count_top,
+                    prev_actor=self.prev_actor.contiguous(),
+                    cumulative_regrets=self.cumulative_regrets,
+                    t_alpha_num=self._t_scalars.t_alpha_num,
+                    t_beta_num=self._t_scalars.t_beta_num,
+                    t_alpha_den=self._t_scalars.t_alpha_den,
+                    t_beta_den=self._t_scalars.t_beta_den,
+                    apply_dcfr=apply_dcfr,
+                    cfr_plus=self.cfr_plus,
+                    max_children=self.num_actions,
+                    positive_regrets_out=positive_regrets_out,
+                )
+            else:
+                src_weights = self._regret_src_weights(beliefs, top)
+                fused_regret_dcfr_update_with_tensors_(
+                    values_achieved=self.latest_values.contiguous(),
+                    values_expected=self.latest_values[:top].contiguous(),
+                    to_act=to_act_top,
+                    src_weights=src_weights.contiguous(),
+                    parent_index=parent_index_all,
+                    prev_actor=self.prev_actor.contiguous(),
+                    cumulative_regrets=self.cumulative_regrets,
+                    t_alpha_num=self._t_scalars.t_alpha_num,
+                    t_beta_num=self._t_scalars.t_beta_num,
+                    t_alpha_den=self._t_scalars.t_alpha_den,
+                    t_beta_den=self._t_scalars.t_beta_den,
+                    bottom=bottom,
+                    apply_dcfr=apply_dcfr,
+                    cfr_plus=self.cfr_plus,
+                    positive_regrets_out=positive_regrets_out,
+                )
             self._fused_positive_regrets_valid = positive_regrets_out is not None
 
         if self._skip_record_stats:
