@@ -26,14 +26,16 @@ from omegaconf import DictConfig
 from torch.profiler import ProfilerActivity, profile, record_function
 
 from p2.cli.sample_spots import build_pbs_from_spots, load_spots
-from p2.core.structured_config import Config
+from p2.core.structured_config import CFRType, Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.search.fused_cfr_triton import (
     _preprocess_unblocked_stats,
+    _preprocess_unblocked_stats_out,
     fused_model_values_writeback_,
     fused_parent_sum_divide_,
     fused_reach_beliefs_avg_depth_,
     fused_reach_beliefs_avg_scratch_depth_,
+    fused_unblocked_regret_dcfr_update_with_tensors_,
     select_opponent_beliefs_triton_out_,
     unblocked_mass_finalize_triton_out_,
 )
@@ -377,7 +379,7 @@ def _run_component_benchmarks(
         setup_state,
         lambda: ev.cfr_iteration(next_t()),
     )
-    if all(
+    if getattr(ev, "_opt_sparse_sample", False) and all(
         hasattr(ev, name)
         for name in (
             "_prepare_sample_update_table",
@@ -569,6 +571,74 @@ def _run_component_benchmarks(
             "regret_src_finalize",
             setup_regret_src_weight_parts,
             regret_src_finalize,
+        )
+    if all(
+        hasattr(ev, name)
+        for name in (
+            "_ensure_regret_src_buffers",
+            "_ensure_positive_regrets_buf",
+            "_t_scalars",
+        )
+    ):
+        inline_regret_box: dict[str, Any] = {}
+
+        def setup_inline_regret_src_update() -> None:
+            setup_state()
+            ev.prepare_replay(start_t)
+            ev._prepare_tree_slices()
+            beliefs = ev.beliefs_avg if ev.cfr_avg else ev.beliefs
+            top = ev._top
+            target, stats = ev._ensure_regret_src_buffers(top)
+            positive_regrets = (
+                ev._ensure_positive_regrets_buf()
+                if getattr(ev, "_opt_reuse_positive_regrets", False)
+                else None
+            )
+            inline_regret_box["beliefs"] = beliefs
+            inline_regret_box["top"] = top
+            inline_regret_box["target"] = target
+            inline_regret_box["stats"] = stats
+            inline_regret_box["positive_regrets"] = positive_regrets
+            inline_regret_box["child_offsets"] = ev._child_offsets_top
+            inline_regret_box["child_count"] = ev._child_count_top
+            inline_regret_box["to_act"] = ev._to_act_top
+            inline_regret_box["allowed"] = ev.allowed_hands[:top].contiguous()
+
+        def inline_regret_src_update():
+            target = inline_regret_box["target"]
+            stats = inline_regret_box["stats"]
+            select_opponent_beliefs_triton_out_(
+                inline_regret_box["beliefs"],
+                ev.env.to_act.contiguous(),
+                inline_regret_box["top"],
+                target,
+            )
+            _preprocess_unblocked_stats_out(target, stats)
+            return fused_unblocked_regret_dcfr_update_with_tensors_(
+                target=target,
+                stats=stats,
+                allowed_mask=inline_regret_box["allowed"],
+                values_achieved=ev.latest_values.contiguous(),
+                values_expected=ev.latest_values[: inline_regret_box["top"]].contiguous(),
+                to_act=inline_regret_box["to_act"],
+                child_offsets=inline_regret_box["child_offsets"],
+                child_count=inline_regret_box["child_count"],
+                prev_actor=ev.prev_actor.contiguous(),
+                cumulative_regrets=ev.cumulative_regrets,
+                t_alpha_num=ev._t_scalars.t_alpha_num,
+                t_beta_num=ev._t_scalars.t_beta_num,
+                t_alpha_den=ev._t_scalars.t_alpha_den,
+                t_beta_den=ev._t_scalars.t_beta_den,
+                apply_dcfr=ev.cfr_type in (CFRType.discounted, CFRType.discounted_plus),
+                cfr_plus=ev.cfr_plus,
+                max_children=ev.num_actions,
+                positive_regrets_out=inline_regret_box["positive_regrets"],
+            )
+
+        time_component(
+            "inline_regret_src_update",
+            setup_inline_regret_src_update,
+            inline_regret_src_update,
         )
     time_component(
         "update_policy",
