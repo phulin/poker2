@@ -887,10 +887,22 @@ class RebelSupervisedLoss(nn.Module):
             min=1e-8
         )
         policy_weights = policy_weights_unnormalized / policy_weight_sum
+        target_log_probs = batch.policy_targets.clamp_min(1e-8).log()
+        target_entropy_per_hand = -(batch.policy_targets * target_log_probs).sum(
+            dim=-1
+        )
         policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
         policy_loss_per_hand = policy_ce_per_hand * policy_weights
         policy_loss = policy_loss_per_hand.sum(dim=-1).mean()
         policy_loss_all = policy_loss_per_hand.sum(dim=-1).detach()
+        target_entropy_per_sample = (target_entropy_per_hand * policy_weights).sum(
+            dim=-1
+        )
+        target_entropy = target_entropy_per_sample.mean()
+        target_model_kl_all = (
+            (policy_ce_per_hand - target_entropy_per_hand) * policy_weights
+        ).sum(dim=-1)
+        target_model_kl = target_model_kl_all.mean()
 
         entropy = -(probs * log_probs).sum(dim=-1).mean()
         total_loss = self.policy_weight * policy_loss
@@ -902,6 +914,8 @@ class RebelSupervisedLoss(nn.Module):
             "total_loss": total_loss,
             "policy_loss": policy_loss,
             "policy_loss_all": policy_loss_all,
+            "target_entropy": target_entropy,
+            "target_model_kl": target_model_kl,
             "policy_weights": policy_weights,
             "value_loss": zero,
             "value_loss_all": None,
@@ -934,6 +948,8 @@ class RebelSupervisedLoss(nn.Module):
             "total_loss": total_loss,
             "policy_loss": zero,
             "policy_loss_all": None,
+            "target_entropy": zero,
+            "target_model_kl": zero,
             "policy_weights": None,
             "value_loss": value_loss,
             "value_loss_all": value_loss_all,
@@ -964,10 +980,22 @@ class RebelSupervisedLoss(nn.Module):
             min=1e-8
         )
         policy_weights = policy_weights_unnormalized / policy_weight_sum
+        target_log_probs = batch.policy_targets.clamp_min(1e-8).log()
+        target_entropy_per_hand = -(batch.policy_targets * target_log_probs).sum(
+            dim=-1
+        )
         policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
         policy_loss_per_hand = policy_ce_per_hand * policy_weights
         policy_loss = policy_loss_per_hand.sum(dim=-1).mean()
         policy_loss_all = policy_loss_per_hand.sum(dim=-1).detach()
+        target_entropy_per_sample = (target_entropy_per_hand * policy_weights).sum(
+            dim=-1
+        )
+        target_entropy = target_entropy_per_sample.mean()
+        target_model_kl_all = (
+            (policy_ce_per_hand - target_entropy_per_hand) * policy_weights
+        ).sum(dim=-1)
+        target_model_kl = target_model_kl_all.mean()
         entropy = -(probs * log_probs).sum(dim=-1).mean()
 
         value_weights = unblocked_mass.flip(dims=[1]) * allowed_hands_float[:, None]
@@ -987,6 +1015,8 @@ class RebelSupervisedLoss(nn.Module):
             "total_loss": total_loss,
             "policy_loss": policy_loss,
             "policy_loss_all": policy_loss_all,
+            "target_entropy": target_entropy,
+            "target_model_kl": target_model_kl,
             "policy_weights": policy_weights,
             "value_loss": value_loss,
             "value_loss_all": value_loss_all,

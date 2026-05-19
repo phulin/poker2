@@ -20,6 +20,7 @@ from p2.rl.fixed_opponent_pool import FixedOpponentPool
 # Import encoders and models to register them
 from p2.rl.self_play import SelfPlayTrainer
 from p2.utils.config_loader import load_config_from_checkpoint
+from p2.utils.model_utils import count_model_parameters
 from p2.utils.training_utils import (
     print_checkpoint_info,
     print_evaluation_results,
@@ -193,9 +194,17 @@ def train_kbest(cfg: Config) -> SelfPlayTrainer:
             merged_config.use_wandb = False
             run_cm = nullcontext()
 
-    with run_cm:
+    with run_cm as run:
         # Initialize trainer with merged config
         trainer = SelfPlayTrainer(cfg=merged_config, device=device)
+        parameter_metrics = count_model_parameters(trainer.model)
+        print(
+            "Model parameters: "
+            f"total={parameter_metrics['total_parameters']:,}; "
+            f"trainable={parameter_metrics['trainable_parameters']:,}"
+        )
+        if isinstance(run, wandb.Run):
+            run.summary.update(parameter_metrics)
 
         # Initialize exploiter trainer if enabled
         exploiter_trainer = None

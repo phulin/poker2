@@ -488,6 +488,10 @@ class RebelCFRTrainer:
             "updates": updates,
             "loss": step_stats["total_loss"] / episodes,
             "policy_loss": step_stats["policy_loss"] / episodes,
+            "policy_target_entropy": step_stats["policy_target_entropy"] / episodes,
+            "policy_target_model_kl": (
+                step_stats["policy_target_model_kl"] / episodes
+            ),
             "value_loss": step_stats["value_loss"] / episodes,
             "entropy_loss": step_stats["entropy_loss"] / episodes,
             "permutation_loss": step_stats["permutation_loss"] / episodes,
@@ -741,6 +745,8 @@ class RebelCFRTrainer:
         loss_dict = self.loss_fn._call_forward_policy(policy_output, policy_batch)
         policy_loss = loss_dict["policy_loss"]
         policy_loss_update = loss_dict["policy_loss_all"]
+        target_entropy = loss_dict["target_entropy"]
+        target_model_kl = loss_dict["target_model_kl"]
         entropy_loss = loss_dict["entropy"]
         total_loss = total_loss + loss_dict["total_loss"]
 
@@ -787,6 +793,8 @@ class RebelCFRTrainer:
         return (
             {
                 "policy_loss": policy_loss.detach(),
+                "policy_target_entropy": target_entropy.detach(),
+                "policy_target_model_kl": target_model_kl.detach(),
                 "value_loss": value_loss.detach(),
                 "entropy_loss": entropy_loss.detach(),
                 "permutation_loss": permutation_loss_tensor.detach(),
@@ -839,6 +847,8 @@ class RebelCFRTrainer:
         # syncs/episode into 1 sync/step.
         tensor_stats: dict[str, torch.Tensor | None] = {
             "policy_loss": None,
+            "policy_target_entropy": None,
+            "policy_target_model_kl": None,
             "value_loss": None,
             "entropy_loss": None,
             "permutation_loss": None,

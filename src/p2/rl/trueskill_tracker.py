@@ -332,15 +332,14 @@ class TrueSkillTracker:
         """Fit current snapshot mu values against snapshot step.
 
         For an intercept linear regression with one feature, R^2 is the squared
-        Pearson correlation. Degenerate one-point or zero-variance cases are
-        reported as zero signal rather than NaN so log streams stay numeric.
+        Pearson correlation. Fewer than three snapshots are too thin to report
+        a useful trend, so no trend metrics are emitted. Degenerate variance
+        cases with at least three snapshots are reported as zero signal rather
+        than NaN so log streams stay numeric.
         """
         n = len(snapshots)
-        if n < 2:
-            return {
-                "trueskill/mu_step_correlation": 0.0,
-                "trueskill/mu_step_r2": 0.0,
-            }
+        if n < 3:
+            return {}
 
         xs = [float(s.step) for s in snapshots]
         ys = [float(s.mu) for s in snapshots]
@@ -512,13 +511,18 @@ class TrueSkillTracker:
             except Exception:
                 pass
 
+        trend_suffix = ""
+        if "trueskill/mu_step_correlation" in metrics:
+            trend_suffix = (
+                f" mu_step_corr={metrics['trueskill/mu_step_correlation']:.3f}"
+                f" mu_step_r2={metrics['trueskill/mu_step_r2']:.3f}"
+            )
         print(
             f"[TrueSkill] step={step} mu={new_snap.mu:.2f} sigma={new_snap.sigma:.2f} "
             f"skill={skill:.2f} games={total_games_played} "
             f"opponents={len(sampled_opponents)} "
-            f"snapshots={len(self.snapshots)} "
-            f"mu_step_corr={metrics['trueskill/mu_step_correlation']:.3f} "
-            f"mu_step_r2={metrics['trueskill/mu_step_r2']:.3f} "
+            f"snapshots={len(self.snapshots)}"
+            f"{trend_suffix} "
             f"elapsed={eval_elapsed:.1f}s"
         )
         return metrics

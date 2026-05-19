@@ -18,6 +18,18 @@ from p2.models.transformer.structured_embedding_data import (
 from p2.rl.vectorized_replay import BatchSample
 
 
+def count_model_parameters(model: nn.Module) -> dict[str, int]:
+    """Return total and trainable parameter counts for a module."""
+    total_parameters = sum(param.numel() for param in model.parameters())
+    trainable_parameters = sum(
+        param.numel() for param in model.parameters() if param.requires_grad
+    )
+    return {
+        "total_parameters": total_parameters,
+        "trainable_parameters": trainable_parameters,
+    }
+
+
 def compute_masked_logits(
     logits: torch.Tensor,
     legal_masks: torch.Tensor,

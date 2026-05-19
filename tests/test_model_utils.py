@@ -14,6 +14,7 @@ from p2.models.transformer.structured_embedding_data import (
 )
 from p2.utils.model_utils import (
     compute_masked_logits,
+    count_model_parameters,
     get_best_action,
     get_log_probs,
     get_logits_log_probs_values,
@@ -61,6 +62,21 @@ class SimpleModel(nn.Module):
 
 class TestModelUtils:
     """Test cases for model utility functions."""
+
+    def test_count_model_parameters(self):
+        """Test total and trainable parameter counts."""
+        model = SimpleModel(num_actions=4)
+        model.value_head.weight.requires_grad_(False)
+        metrics = count_model_parameters(model)
+
+        expected_total = sum(param.numel() for param in model.parameters())
+        expected_trainable = sum(
+            param.numel() for param in model.parameters() if param.requires_grad
+        )
+        assert metrics == {
+            "total_parameters": expected_total,
+            "trainable_parameters": expected_trainable,
+        }
 
     def test_compute_masked_logits(self):
         """Test compute_masked_logits function."""

@@ -86,6 +86,12 @@ def test_rebel_supervised_loss_finite():
     )
     loss_dict = loss_fn(output, batch)
     assert torch.isfinite(loss_dict["total_loss"]).all()
+    assert torch.isfinite(loss_dict["target_entropy"]).all()
+    assert torch.isfinite(loss_dict["target_model_kl"]).all()
+    torch.testing.assert_close(
+        loss_dict["target_model_kl"],
+        loss_dict["policy_loss"] - loss_dict["target_entropy"],
+    )
     loss_dict["total_loss"].backward()
 
 

@@ -145,12 +145,24 @@ def test_mu_step_regression_metrics_handles_degenerate_variance() -> None:
     snapshots = [
         TSSnapshot(step=10, mu=25.0, sigma=1.0),
         TSSnapshot(step=20, mu=25.0, sigma=1.0),
+        TSSnapshot(step=30, mu=25.0, sigma=1.0),
     ]
 
     metrics = TrueSkillTracker._mu_step_regression_metrics(snapshots)
 
     assert metrics["trueskill/mu_step_correlation"] == 0.0
     assert metrics["trueskill/mu_step_r2"] == 0.0
+
+
+def test_mu_step_regression_metrics_omits_under_three_snapshots() -> None:
+    snapshots = [
+        TSSnapshot(step=10, mu=20.0, sigma=1.0),
+        TSSnapshot(step=20, mu=25.0, sigma=1.0),
+    ]
+
+    assert TrueSkillTracker._mu_step_regression_metrics([]) == {}
+    assert TrueSkillTracker._mu_step_regression_metrics(snapshots[:1]) == {}
+    assert TrueSkillTracker._mu_step_regression_metrics(snapshots) == {}
 
 
 class _FakeShowdownEvaluator:

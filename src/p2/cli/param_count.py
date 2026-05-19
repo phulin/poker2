@@ -12,6 +12,7 @@ import p2.models.policy  # noqa: F401
 import p2.models.siamese_convnet  # noqa: F401
 from p2.core.builders import build_components_from_config
 from p2.core.structured_config import Config
+from p2.utils.model_utils import count_model_parameters
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
@@ -25,8 +26,9 @@ def main(cfg: Config) -> None:
     _, _, model, _, _ = build_components_from_config(cfg)
 
     # Totals
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    parameter_metrics = count_model_parameters(model)
+    total_params = parameter_metrics["total_parameters"]
+    trainable_params = parameter_metrics["trainable_parameters"]
 
     # Split: conv trunks vs the rest (fusion + heads)
     conv_modules = []

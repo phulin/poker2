@@ -22,6 +22,7 @@ from omegaconf import DictConfig
 
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.utils.model_utils import count_model_parameters
 from p2.utils.training_utils import print_preflop_range_grid
 
 
@@ -158,6 +159,17 @@ def print_training_stats(
     )
 
 
+def _log_model_parameter_summary(model: torch.nn.Module, run: Any) -> None:
+    metrics = count_model_parameters(model)
+    print(
+        "Model parameters: "
+        f"total={metrics['total_parameters']:,}; "
+        f"trainable={metrics['trainable_parameters']:,}"
+    )
+    if isinstance(run, wandb.Run):
+        run.summary.update(metrics)
+
+
 def train_rebel(cfg: Config) -> None:
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
     device = _device_from_config(cfg)
@@ -174,6 +186,7 @@ def train_rebel(cfg: Config) -> None:
 
     with run_cm as run:
         trainer = RebelCFRTrainer(cfg=cfg, device=device)
+        _log_model_parameter_summary(trainer.model, run)
         if isinstance(run, wandb.Run):
             run.watch(trainer.model, log_freq=100)
 
