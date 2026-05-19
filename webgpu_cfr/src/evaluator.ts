@@ -151,6 +151,7 @@ export class GpuCfrEvaluator {
       iterations,
       childValues.buffer,
       childValues,
+      undefined,
       readOptions,
     );
   }
@@ -177,18 +178,44 @@ export class GpuCfrEvaluator {
       iterations,
       childValues,
       undefined,
+      undefined,
+      readOptions,
+    );
+  }
+
+  async solveGpuBuffers(
+    problem: Pick<LocalCfrProblem, "actor" | "action">,
+    beliefs: Float32Array<ArrayBufferLike>,
+    numHands: number,
+    numActions: number,
+    iterations: number,
+    childValues: GPUBuffer,
+    legalMask: GPUBuffer,
+    readOptions: SolveReadOptions = {},
+  ): Promise<LocalSolveResult> {
+    return await this.solvePrepared(
+      problem,
+      beliefs,
+      numHands,
+      numActions,
+      iterations,
+      childValues,
+      undefined,
+      legalMask,
       readOptions,
     );
   }
 
   private async solvePrepared(
-    problem: Omit<LocalCfrProblem, "childValues">,
+    problem: Pick<LocalCfrProblem, "actor" | "action"> &
+      Partial<Pick<LocalCfrProblem, "legalMask">>,
     beliefs: Float32Array<ArrayBufferLike>,
     numHands: number,
     numActions: number,
     iterations: number,
     childValues: GPUBuffer,
     ownedChildValues: TempBuffer | undefined,
+    legalMask: GPUBuffer | undefined,
     readOptions: SolveReadOptions = {},
   ): Promise<LocalSolveResult> {
     const readPolicy = readOptions.readPolicy ?? true;
@@ -225,7 +252,20 @@ export class GpuCfrEvaluator {
     };
 
     try {
-      const legal = storage(asU32(problem.legalMask));
+      let legal: GPUBuffer;
+      if (legalMask) {
+        legal = legalMask;
+      } else {
+        if (!problem.legalMask) {
+          throw new Error("legalMask is required when no GPU legal mask is provided");
+        }
+        if (problem.legalMask.length !== numActions) {
+          throw new Error(
+            `legalMask has ${problem.legalMask.length} entries, expected ${numActions}`,
+          );
+        }
+        legal = storage(asU32(problem.legalMask));
+      }
       const regrets = zeroed(totalPolicy);
       const policy = zeroed(totalPolicy);
       const avgPolicy = zeroed(totalPolicy);

@@ -1,5 +1,5 @@
 import { GpuCfrEvaluator } from "./evaluator.js";
-import { makeStorageBuffer, readUintBuffer } from "./gpuBuffers.js";
+import { makeStorageBuffer } from "./gpuBuffers.js";
 import { GpuPokerState } from "./gpuPokerState.js";
 import { STATE_STRIDE } from "./pokerStateKernels.js";
 import {
@@ -20,6 +20,14 @@ interface GpuLocalCfrProblem {
   actor: 0 | 1;
   action?: number;
   legalMask: number[];
+  childValuesBuffer: GPUBuffer;
+  dispose: () => void;
+}
+
+interface GpuStateLocalCfrProblem {
+  actor: 0 | 1;
+  action?: number;
+  legalMaskBuffer: GPUBuffer;
   childValuesBuffer: GPUBuffer;
   dispose: () => void;
 }
@@ -187,13 +195,20 @@ export class BrowserCfrEvaluator {
       problem.action = selectedAction;
     }
     try {
-      return await this.cfr.solveGpuChildValues(
-        problem,
+      const cfrProblem: { actor: 0 | 1; action?: number } = {
+        actor: problem.actor,
+      };
+      if (problem.action !== undefined) {
+        cfrProblem.action = problem.action;
+      }
+      return await this.cfr.solveGpuBuffers(
+        cfrProblem,
         beliefs,
         NUM_HANDS,
         this.model.manifest.architecture.numActions,
         iterations,
         problem.childValuesBuffer,
+        problem.legalMaskBuffer,
         readOptions,
       );
     } finally {
@@ -274,7 +289,7 @@ export class BrowserCfrEvaluator {
     env: PublicHunlEnv,
     actor: 0 | 1,
     beliefs: Float32Array<ArrayBufferLike>,
-  ): Promise<GpuLocalCfrProblem> {
+  ): Promise<GpuStateLocalCfrProblem> {
     const children = state.buildChildren();
     const modelActions = this.collectModelActionBins(env);
     let modelValues: Awaited<ReturnType<BetterFfnWebGpuModel["predictBatchHandValuesGpuStates"]>> | undefined;
@@ -319,11 +334,10 @@ export class BrowserCfrEvaluator {
       this.device.queue.submit([valueEncoder.finish()]);
     }
     state.writeTerminalValues(children, beliefBuffer);
-    const legalMask = await readUintBuffer(this.device, children.legalMask, children.numActions);
 
     return {
       actor,
-      legalMask: Array.from(legalMask),
+      legalMaskBuffer: children.legalMask,
       childValuesBuffer: children.childValues,
       dispose: () => {
         modelValues?.dispose();
