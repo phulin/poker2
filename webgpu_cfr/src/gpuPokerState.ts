@@ -135,7 +135,7 @@ export class GpuPokerState {
     this.device.queue.submit([encoder.finish()]);
   }
 
-  buildChildren(): GpuChildStateBatch {
+  buildChildren(encoder?: GPUCommandEncoder): GpuChildStateBatch {
     this.writeParams(0);
     const states = makeEmptyStorageBuffer(this.device, this.numActions * STATE_STRIDE);
     const legalMask = makeEmptyStorageBuffer(this.device, this.numActions);
@@ -145,8 +145,8 @@ export class GpuPokerState {
       this.device,
       this.numActions * 2 * 1326,
     );
-    const encoder = this.device.createCommandEncoder();
-    this.encode(encoder, this.buildChildrenPipeline, Math.ceil(this.numActions / 64), [
+    const commandEncoder = encoder ?? this.device.createCommandEncoder();
+    this.encode(commandEncoder, this.buildChildrenPipeline, Math.ceil(this.numActions / 64), [
       { binding: 0, resource: { buffer: this.state } },
       { binding: 1, resource: { buffer: states } },
       { binding: 2, resource: { buffer: this.betBins } },
@@ -154,7 +154,9 @@ export class GpuPokerState {
       { binding: 4, resource: { buffer: terminalMask } },
       { binding: 5, resource: { buffer: this.paramsBuffer } },
     ]);
-    this.device.queue.submit([encoder.finish()]);
+    if (!encoder) {
+      this.device.queue.submit([commandEncoder.finish()]);
+    }
     return {
       states,
       legalMask,
@@ -175,6 +177,16 @@ export class GpuPokerState {
   writeTerminalValues(batch: GpuChildStateBatch, beliefs: GPUBuffer): void {
     this.writeParams(0);
     const encoder = this.device.createCommandEncoder();
+    this.encodeTerminalValues(encoder, batch, beliefs);
+    this.device.queue.submit([encoder.finish()]);
+  }
+
+  encodeTerminalValues(
+    encoder: GPUCommandEncoder,
+    batch: GpuChildStateBatch,
+    beliefs: GPUBuffer,
+  ): void {
+    this.writeParams(0);
     this.encode3d(encoder, this.terminalRanksPipeline, 21, 1, this.numActions, [
       { binding: 0, resource: { buffer: batch.states } },
       { binding: 1, resource: { buffer: batch.legalMask } },
@@ -193,7 +205,6 @@ export class GpuPokerState {
       { binding: 6, resource: { buffer: batch.childValues } },
       { binding: 7, resource: { buffer: this.paramsBuffer } },
     ]);
-    this.device.queue.submit([encoder.finish()]);
   }
 
   dispose(): void {

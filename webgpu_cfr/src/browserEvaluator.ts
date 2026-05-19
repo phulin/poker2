@@ -326,7 +326,6 @@ export class BrowserCfrEvaluator {
     actor: 0 | 1,
     beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
   ): Promise<GpuStateLocalCfrProblem> {
-    const children = state.buildChildren();
     const modelActions = this.collectModelActionBins(env);
     let modelValues: Awaited<ReturnType<BetterFfnWebGpuModel["predictBatchHandValuesGpuStates"]>> | undefined;
     let modelStates: GPUBuffer | undefined;
@@ -334,6 +333,8 @@ export class BrowserCfrEvaluator {
       beliefs instanceof Float32Array ? makeStorageBuffer(this.device, beliefs) : beliefs;
     const ownsBeliefBuffer = beliefs instanceof Float32Array;
     const bytesPerChild = 2 * NUM_HANDS * Float32Array.BYTES_PER_ELEMENT;
+    const preModelEncoder = this.device.createCommandEncoder();
+    const children = state.buildChildren(preModelEncoder);
     if (modelActions.length > 0) {
       modelStates = this.device.createBuffer({
         size: modelActions.length * STATE_STRIDE * Float32Array.BYTES_PER_ELEMENT,
@@ -343,9 +344,8 @@ export class BrowserCfrEvaluator {
           GPUBufferUsage.COPY_DST,
       });
       const stateBytes = STATE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
-      const compactEncoder = this.device.createCommandEncoder();
       for (let i = 0; i < modelActions.length; i += 1) {
-        compactEncoder.copyBufferToBuffer(
+        preModelEncoder.copyBufferToBuffer(
           children.states,
           modelActions[i]! * stateBytes,
           modelStates,
@@ -353,9 +353,13 @@ export class BrowserCfrEvaluator {
           stateBytes,
         );
       }
-      this.device.queue.submit([compactEncoder.finish()]);
+    }
+    state.encodeTerminalValues(preModelEncoder, children, beliefBuffer);
+    this.device.queue.submit([preModelEncoder.finish()]);
+
+    if (modelActions.length > 0) {
       modelValues = await this.model.predictBatchHandValuesGpuStates(
-        modelStates,
+        modelStates!,
         modelActions.length,
         beliefs,
       );
@@ -371,7 +375,6 @@ export class BrowserCfrEvaluator {
       }
       this.device.queue.submit([valueEncoder.finish()]);
     }
-    state.writeTerminalValues(children, beliefBuffer);
 
     return {
       actor,
