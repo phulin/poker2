@@ -407,6 +407,60 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const POKER_COMPACT_MODEL_STATES_WGSL = /* wgsl */ `
+${STATE_WGSL}
+@group(0) @binding(0) var<storage, read> childStates: array<f32>;
+@group(0) @binding(1) var<storage, read> legalMask: array<u32>;
+@group(0) @binding(2) var<storage, read> terminalMask: array<u32>;
+@group(0) @binding(3) var<storage, read_write> modelStates: array<f32>;
+@group(0) @binding(4) var<storage, read_write> modelActionMap: array<u32>;
+@group(0) @binding(5) var<storage, read_write> modelCount: atomic<u32>;
+@group(0) @binding(6) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let action = gid.x;
+  if (action >= params.numActions) { return; }
+  if (legalMask[action] == 0u || terminalMask[action] != 0u) { return; }
+  let dst = atomicAdd(&modelCount, 1u);
+  let srcBase = action * STATE_STRIDE;
+  let dstBase = dst * STATE_STRIDE;
+  for (var i = 0u; i < STATE_STRIDE; i = i + 1u) {
+    modelStates[dstBase + i] = childStates[srcBase + i];
+  }
+  modelActionMap[dst] = action;
+}
+`;
+
+export const POKER_SCATTER_MODEL_VALUES_WGSL = /* wgsl */ `
+${STATE_WGSL}
+struct ScatterParams {
+  numModelActions: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> modelValues: array<f32>;
+@group(0) @binding(1) var<storage, read> modelActionMap: array<u32>;
+@group(0) @binding(2) var<storage, read_write> childValues: array<f32>;
+@group(0) @binding(3) var<uniform> params: ScatterParams;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let hand = gid.x;
+  let player = gid.y;
+  let modelAction = gid.z;
+  if (hand >= NUM_HANDS || player >= 2u || modelAction >= params.numModelActions) {
+    return;
+  }
+  let action = modelActionMap[modelAction];
+  let src = (modelAction * 2u + player) * NUM_HANDS + hand;
+  let dst = (action * 2u + player) * NUM_HANDS + hand;
+  childValues[dst] = modelValues[src];
+}
+`;
+
 export const POKER_TERMINAL_VALUES_WGSL = /* wgsl */ `
 ${STATE_WGSL}
 @group(0) @binding(0) var<storage, read_write> childStates: array<f32>;

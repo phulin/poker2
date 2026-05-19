@@ -2,7 +2,9 @@ import { makeEmptyStorageBuffer, makeStorageBuffer, readUintBuffer } from "./gpu
 import { PublicHunlEnv } from "./hunlEnv.js";
 import {
   POKER_BUILD_CHILD_STATES_WGSL,
+  POKER_COMPACT_MODEL_STATES_WGSL,
   POKER_LEGAL_WGSL,
+  POKER_SCATTER_MODEL_VALUES_WGSL,
   POKER_STEP_WGSL,
   POKER_TERMINAL_RANKS_WGSL,
   POKER_TERMINAL_VALUES_WGSL,
@@ -50,6 +52,8 @@ interface GpuPokerStateSharedResources {
   legalPipeline: GPUComputePipeline;
   stepPipeline: GPUComputePipeline;
   buildChildrenPipeline: GPUComputePipeline;
+  compactModelStatesPipeline: GPUComputePipeline;
+  scatterModelValuesPipeline: GPUComputePipeline;
   terminalRanksPipeline: GPUComputePipeline;
   terminalValuesPipeline: GPUComputePipeline;
 }
@@ -70,6 +74,8 @@ export class GpuPokerState {
   private readonly legalPipeline: GPUComputePipeline;
   private readonly stepPipeline: GPUComputePipeline;
   private readonly buildChildrenPipeline: GPUComputePipeline;
+  private readonly compactModelStatesPipeline: GPUComputePipeline;
+  private readonly scatterModelValuesPipeline: GPUComputePipeline;
   private readonly terminalRanksPipeline: GPUComputePipeline;
   private readonly terminalValuesPipeline: GPUComputePipeline;
   private readonly paramsBuffer: GPUBuffer;
@@ -111,6 +117,8 @@ export class GpuPokerState {
     this.legalPipeline = shared.legalPipeline;
     this.stepPipeline = shared.stepPipeline;
     this.buildChildrenPipeline = shared.buildChildrenPipeline;
+    this.compactModelStatesPipeline = shared.compactModelStatesPipeline;
+    this.scatterModelValuesPipeline = shared.scatterModelValuesPipeline;
     this.terminalRanksPipeline = shared.terminalRanksPipeline;
     this.terminalValuesPipeline = shared.terminalValuesPipeline;
   }
@@ -213,6 +221,52 @@ export class GpuPokerState {
     ]);
   }
 
+  encodeCompactModelStates(
+    encoder: GPUCommandEncoder,
+    batch: GpuChildStateBatch,
+    modelStates: GPUBuffer,
+    modelActionMap: GPUBuffer,
+    modelCount: GPUBuffer,
+  ): void {
+    this.writeParams(0);
+    this.encode(encoder, this.compactModelStatesPipeline, Math.ceil(this.numActions / 64), [
+      { binding: 0, resource: { buffer: batch.states } },
+      { binding: 1, resource: { buffer: batch.legalMask } },
+      { binding: 2, resource: { buffer: batch.terminalMask } },
+      { binding: 3, resource: { buffer: modelStates } },
+      { binding: 4, resource: { buffer: modelActionMap } },
+      { binding: 5, resource: { buffer: modelCount } },
+      { binding: 6, resource: { buffer: this.paramsBuffer } },
+    ]);
+  }
+
+  encodeScatterModelValues(
+    encoder: GPUCommandEncoder,
+    modelValues: GPUBuffer,
+    modelActionMap: GPUBuffer,
+    modelActionCount: number,
+    childValues: GPUBuffer,
+  ): void {
+    this.device.queue.writeBuffer(
+      this.paramsBuffer,
+      0,
+      new Uint32Array([Math.max(0, Math.trunc(modelActionCount)), 0, 0, 0]),
+    );
+    this.encode3d(
+      encoder,
+      this.scatterModelValuesPipeline,
+      21,
+      2,
+      modelActionCount,
+      [
+        { binding: 0, resource: { buffer: modelValues } },
+        { binding: 1, resource: { buffer: modelActionMap } },
+        { binding: 2, resource: { buffer: childValues } },
+        { binding: 3, resource: { buffer: this.paramsBuffer } },
+      ],
+    );
+  }
+
   dispose(): void {
     this.state.destroy();
     this.betBins.destroy();
@@ -313,6 +367,16 @@ function sharedResources(device: GPUDevice): GpuPokerStateSharedResources {
         device,
         POKER_BUILD_CHILD_STATES_WGSL,
         "poker-state-build-children",
+      ),
+      compactModelStatesPipeline: pipeline(
+        device,
+        POKER_COMPACT_MODEL_STATES_WGSL,
+        "poker-state-compact-model-states",
+      ),
+      scatterModelValuesPipeline: pipeline(
+        device,
+        POKER_SCATTER_MODEL_VALUES_WGSL,
+        "poker-state-scatter-model-values",
       ),
       terminalRanksPipeline: pipeline(
         device,
