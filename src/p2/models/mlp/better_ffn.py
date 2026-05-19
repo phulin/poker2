@@ -96,6 +96,7 @@ class BetterFFN(BaseMLPModel):
         self.register_buffer("hand_suits", combos // 13, persistent=False)
         self._hand_embedding_cache: torch.Tensor | None = None
         self._hand_embedding_cache_key: tuple[int, int, int, int] | None = None
+        self._skip_hand_embedding_cache_when_compiling = False
         self.belief_proj = ffn_block(
             num_players * hidden_dim,
             num_players * range_hidden_dim,
@@ -149,7 +150,10 @@ class BetterFFN(BaseMLPModel):
 
     def _hand_embedding(self) -> torch.Tensor:
         """Per-hand embedding tied to rank/suit embeddings — shape [NUM_HANDS, hidden_dim]."""
-        if not torch.is_grad_enabled():
+        use_cache = not torch.is_grad_enabled()
+        if self._skip_hand_embedding_cache_when_compiling and torch.compiler.is_compiling():
+            use_cache = False
+        if use_cache:
             key = (
                 int(self.rank_embedding.weight.data_ptr()),
                 int(self.rank_embedding.weight._version),
@@ -162,7 +166,7 @@ class BetterFFN(BaseMLPModel):
             self.hand_suits
         )
         out = card_emb.sum(dim=1)
-        if not torch.is_grad_enabled():
+        if use_cache:
             self._hand_embedding_cache = out
             self._hand_embedding_cache_key = key
         return out
@@ -185,6 +189,7 @@ class BetterFFN(BaseMLPModel):
         features: MLPFeatures,
         include_policy: bool = True,
         include_value: bool = True,
+        apply_zero_sum: bool = True,
         static_base_features: torch.Tensor | None = None,
         latent=None,
     ) -> ModelOutput:
@@ -225,7 +230,7 @@ class BetterFFN(BaseMLPModel):
             hand_values_raw = self.hand_value_head(x).view(
                 -1, self.num_players, NUM_HANDS
             )
-            if self.enforce_zero_sum:
+            if self.enforce_zero_sum and apply_zero_sum:
                 hand_value_sums = (
                     (hand_values_raw * player_beliefs)
                     .sum(dim=2, keepdim=True)

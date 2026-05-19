@@ -228,6 +228,8 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
     cfg.model.num_value_layers = 1
     cfg.model.num_policy_layers = 1
     cfg.model.compile = not args.no_compile
+    if args.compile_mode is not None:
+        cfg.model.compile_mode = args.compile_mode
     cfg.search.depth = args.depth
     cfg.search.iterations = args.iterations
     cfg.search.iterations_final = None
@@ -427,6 +429,7 @@ def _run_component_benchmarks(
                 model_output = ev.model(
                     features_at_model,
                     include_policy=False,
+                    apply_zero_sum=bool(ev.cfr_avg),
                     static_base_features=static_features,
                 )
             leaf_box["beliefs"] = beliefs
@@ -450,6 +453,7 @@ def _run_component_benchmarks(
                 return ev.model(
                     leaf_box["features_at_model"],
                     include_policy=False,
+                    apply_zero_sum=bool(ev.cfr_avg),
                     static_base_features=leaf_box["static_features"],
                 )
 
@@ -551,6 +555,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument(
+        "--compile-mode",
+        default=None,
+        help="Optional torch.compile mode, e.g. max-autotune.",
+    )
+    parser.add_argument(
         "--unfused",
         action="store_true",
         help="Use SparseCFREvaluator instead of FusedSparseCFREvaluator.",
@@ -619,6 +628,7 @@ def main(argv: list[str]) -> None:
                 "num_value_layers": cfg.model.num_value_layers,
                 "num_policy_layers": cfg.model.num_policy_layers,
                 "compile": cfg.model.compile,
+                "compile_mode": cfg.model.compile_mode,
             },
         },
     }

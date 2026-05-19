@@ -57,6 +57,7 @@ model:
 
   detach_value_head: false
   compile: true
+  compile_mode: null
   enforce_zero_sum: true
 
   num_recursions: 6

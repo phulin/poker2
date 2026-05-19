@@ -38,6 +38,26 @@ from p2.utils.profiling import profile
 STREETS = ["preflop", "flop", "turn", "river", "showdown"]
 
 
+def _compile_kwargs(cfg: Config) -> dict[str, object]:
+    kwargs: dict[str, object] = {"dynamic": True}
+    mode = cfg.model.compile_mode
+    if mode is not None:
+        mode = mode.strip()
+        if mode.lower() not in {"", "default", "none"}:
+            kwargs["mode"] = mode
+    return kwargs
+
+
+def _uses_compile_cudagraphs(cfg: Config) -> bool:
+    mode = cfg.model.compile_mode
+    return mode is not None and mode.strip().lower() == "max-autotune"
+
+
+def _prepare_model_for_compile(model: nn.Module, cfg: Config) -> None:
+    if _uses_compile_cudagraphs(cfg) and isinstance(model, BetterFFN):
+        model._skip_hand_embedding_cache_when_compiling = True
+
+
 class RebelCFRTrainer:
     """Trainer that couples DCFR search with a ReBeL-style FFN."""
 
@@ -139,7 +159,8 @@ class RebelCFRTrainer:
         self.model.init_weights(cpu_rng)
         self.model.to(self.device)
         if self.device.type == "cuda" and cfg.model.compile:
-            self.model.compile(dynamic=True)
+            _prepare_model_for_compile(self.model, cfg)
+            self.model.compile(**_compile_kwargs(cfg))
 
         # data generation rate per training step
         self.K_value = max(1, self.batch_size // self.cfg.train.value_reuse_goal)
@@ -319,7 +340,8 @@ class RebelCFRTrainer:
         for p in twin.parameters():
             p.requires_grad = False
         if self.device.type == "cuda" and cfg.model.compile:
-            twin.compile(dynamic=True)
+            _prepare_model_for_compile(twin, cfg)
+            twin.compile(**_compile_kwargs(cfg))
         return twin
 
     def trueskill_snapshot_weights(self) -> dict[str, torch.Tensor]:

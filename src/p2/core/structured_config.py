@@ -172,6 +172,7 @@ class TrainingConfig:
 class ModelConfig:
     name: ModelType = ModelType.siamese_convnet_v1
     compile: bool = True
+    compile_mode: str | None = None
     value_head_type: ValueHeadType = ValueHeadType.scalar
     value_head_num_quantiles: int = -1
     use_gradient_checkpointing: bool = True

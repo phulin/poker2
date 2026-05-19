@@ -86,9 +86,12 @@ def _env_flag(name: str, default: bool = True) -> bool:
     return value.lower() not in {"0", "false", "no", "off"}
 
 
-def _compile_kwargs_from_env() -> dict[str, object]:
+def _compile_kwargs_from_env(cfg=None) -> dict[str, object]:
     kwargs: dict[str, object] = {"dynamic": True}
     mode = os.environ.get("P2_FUSED_COMPILE_MODE")
+    if mode is None:
+        if cfg is not None:
+            mode = getattr(cfg.model, "compile_mode", None)
     if mode is None:
         return kwargs
     mode = mode.strip()
@@ -158,8 +161,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # keeps a single compiled graph as model_indices count varies. TF32 is
         # safe here: the NN only produces leaf value estimates; the precision-
         # sensitive DCFR regret accumulation stays in fp32.
-        self._compile_kwargs = _compile_kwargs_from_env()
+        self._compile_kwargs = _compile_kwargs_from_env(self.cfg)
         if compile_model and self.model is not None:
+            mode = self._compile_kwargs.get("mode")
+            base_model = getattr(self.model, "_orig_mod", self.model)
+            if mode == "max-autotune" and isinstance(base_model, BetterFFN):
+                base_model._skip_hand_embedding_cache_when_compiling = True
             torch.set_float32_matmul_precision("high")
             try:
                 self.model = torch.compile(self.model, **self._compile_kwargs)
@@ -1303,13 +1310,17 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     self._static_model_base_key != key
                     or self._static_model_base_features is None
                 ):
+                    # Clone outside torch.compile so compile modes that enable
+                    # cudagraphs can safely reuse this cached tensor across
+                    # repeated model calls.
                     self._static_model_base_features = self._static_model_base_fn(
                         features
-                    )
+                    ).clone()
                     self._static_model_base_key = key
                 model_output = self.model(
                     features,
                     include_policy=False,
+                    apply_zero_sum=bool(self.cfr_avg),
                     static_base_features=self._static_model_base_features,
                 )
             else:
@@ -1341,7 +1352,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             old_plus_new_over_new=self._t_scalars.mix_onon,
             old_over_new=self._t_scalars.mix_oon,
             do_mix=do_mix,
-            enforce_zero_sum=bool(self.model.enforce_zero_sum) and do_mix,
+            enforce_zero_sum=bool(self.model.enforce_zero_sum)
+            and (do_mix or not self.cfr_avg),
             store_last=store_last,
         )
         self.last_model_values = last_out if store_last else None
