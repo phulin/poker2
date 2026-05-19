@@ -18,6 +18,8 @@ import type {
 interface SolveReadOptions {
   readPolicy?: boolean;
   readActionProbs?: boolean;
+  readBeliefs?: boolean;
+  returnGpuBeliefs?: boolean;
 }
 
 interface TempBuffer {
@@ -185,7 +187,7 @@ export class GpuCfrEvaluator {
 
   async solveGpuBuffers(
     problem: Pick<LocalCfrProblem, "actor" | "action">,
-    beliefs: Float32Array<ArrayBufferLike>,
+    beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
     numHands: number,
     numActions: number,
     iterations: number,
@@ -209,7 +211,7 @@ export class GpuCfrEvaluator {
   private async solvePrepared(
     problem: Pick<LocalCfrProblem, "actor" | "action"> &
       Partial<Pick<LocalCfrProblem, "legalMask">>,
-    beliefs: Float32Array<ArrayBufferLike>,
+    beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
     numHands: number,
     numActions: number,
     iterations: number,
@@ -220,6 +222,8 @@ export class GpuCfrEvaluator {
   ): Promise<LocalSolveResult> {
     const readPolicy = readOptions.readPolicy ?? true;
     const readActionProbs = readOptions.readActionProbs ?? true;
+    const readBeliefs = readOptions.readBeliefs ?? true;
+    const returnGpuBeliefs = readOptions.returnGpuBeliefs ?? false;
     const debug =
       typeof process !== "undefined" && process.env?.WEBGPU_CFR_DEBUG === "1";
     if (debug) console.error("solve:start");
@@ -307,7 +311,7 @@ export class GpuCfrEvaluator {
         { binding: 5, resource: { buffer: params } },
       ]);
 
-      const beliefsIn = storage(beliefs);
+      const beliefsIn = beliefs instanceof Float32Array ? storage(beliefs) : beliefs;
       let actionProbs: GPUBuffer | undefined;
       let actionBindGroup: GPUBindGroup | undefined;
       if (readActionProbs) {
@@ -324,10 +328,15 @@ export class GpuCfrEvaluator {
       }
 
       let beliefsOut: GPUBuffer | undefined;
+      let beliefsOutTemp: TempBuffer | undefined;
       let applyBindGroup: GPUBindGroup | undefined;
       let normalizeBindGroup: GPUBindGroup | undefined;
       if (problem.action !== undefined) {
-        beliefsOut = zeroed(2 * numHands);
+        beliefsOutTemp = this.acquireZeroedStorage(2 * numHands);
+        if (!returnGpuBeliefs) {
+          temps.push(beliefsOutTemp);
+        }
+        beliefsOut = beliefsOutTemp.buffer;
         const denom = zeroed(1);
         applyBindGroup = this.device.createBindGroup({
           layout: this.beliefApply.getBindGroupLayout(0),
@@ -413,7 +422,7 @@ export class GpuCfrEvaluator {
           ? await readFloatBuffer(this.device, actionProbs, numActions)
           : new Float32Array(0);
       if (debug) console.error("solve:read-beliefs");
-      const beliefsAfter = beliefsOut
+      const beliefsAfter = beliefsOut && readBeliefs
         ? await readFloatBuffer(this.device, beliefsOut, 2 * numHands)
         : undefined;
 
@@ -423,6 +432,10 @@ export class GpuCfrEvaluator {
       };
       if (beliefsAfter !== undefined) {
         result.beliefsAfter = beliefsAfter;
+      }
+      if (beliefsOutTemp && returnGpuBeliefs) {
+        result.beliefsAfterBuffer = beliefsOutTemp.buffer;
+        result.releaseBeliefsAfterBuffer = () => this.releaseTemp(beliefsOutTemp);
       }
       if (debug) console.error("solve:done");
       return result;

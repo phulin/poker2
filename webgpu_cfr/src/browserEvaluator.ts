@@ -1,5 +1,5 @@
 import { GpuCfrEvaluator } from "./evaluator.js";
-import { makeStorageBuffer } from "./gpuBuffers.js";
+import { makeStorageBuffer, readFloatBuffer } from "./gpuBuffers.js";
 import { GpuPokerState } from "./gpuPokerState.js";
 import { STATE_STRIDE } from "./pokerStateKernels.js";
 import {
@@ -80,9 +80,15 @@ export class BrowserCfrEvaluator {
     if (request.heroPlayer !== undefined) knownCards.heroPlayer = request.heroPlayer;
     if (request.heroHand) knownCards.heroHand = request.heroHand;
     env.configureKnownCards(knownCards);
-    let beliefs: Float32Array<ArrayBufferLike> = this.initialBeliefs(request);
+    const initialBeliefs = this.initialBeliefs(request);
+    const initialBeliefsBuffer = makeStorageBuffer(this.device, initialBeliefs);
+    let beliefsBuffer = initialBeliefsBuffer;
+    const releaseBeliefBuffers: Array<() => void> = [
+      () => initialBeliefsBuffer.destroy(),
+    ];
     let finalPolicy: Float32Array<ArrayBufferLike> | undefined;
     let finalActionProbs: Float32Array<ArrayBufferLike> | undefined;
+    let beliefsAtSpot: Float32Array<ArrayBufferLike> | undefined;
 
     try {
       for (const action of request.spot) {
@@ -92,15 +98,21 @@ export class BrowserCfrEvaluator {
           gpuState,
           env,
           env.toAct,
-          beliefs,
+          beliefsBuffer,
           action,
           request.iterations,
-          { readPolicy: false, readActionProbs: false },
+          {
+            readPolicy: false,
+            readActionProbs: false,
+            readBeliefs: false,
+            returnGpuBeliefs: true,
+          },
         );
-        if (!solved.beliefsAfter) {
-          throw new Error("internal error: prefix solve did not update beliefs");
+        if (!solved.beliefsAfterBuffer || !solved.releaseBeliefsAfterBuffer) {
+          throw new Error("internal error: prefix solve did not produce GPU beliefs");
         }
-        beliefs = solved.beliefsAfter;
+        beliefsBuffer = solved.beliefsAfterBuffer;
+        releaseBeliefBuffers.push(solved.releaseBeliefsAfterBuffer);
         gpuState.step(action);
         env.stepBin(action);
       }
@@ -109,16 +121,20 @@ export class BrowserCfrEvaluator {
         gpuState,
         env,
         env.toAct,
-        beliefs,
+        beliefsBuffer,
         undefined,
         request.iterations,
       );
       finalPolicy = final.policy;
       finalActionProbs = final.actionProbs;
+      beliefsAtSpot =
+        request.spot.length === 0
+          ? initialBeliefs
+          : await readFloatBuffer(this.device, beliefsBuffer, 2 * NUM_HANDS);
       const legal = await gpuState.legalMask();
 
       return {
-        beliefsAtSpot: beliefs,
+        beliefsAtSpot,
         actionProbs: finalActionProbs,
         policy: finalPolicy,
         actionLabels: [...this.model.actionLabels],
@@ -126,6 +142,9 @@ export class BrowserCfrEvaluator {
         actor: env.toAct,
       };
     } finally {
+      for (let i = releaseBeliefBuffers.length - 1; i >= 0; i -= 1) {
+        releaseBeliefBuffers[i]!();
+      }
       gpuState.dispose();
     }
   }
@@ -185,15 +204,21 @@ export class BrowserCfrEvaluator {
     state: GpuPokerState,
     env: PublicHunlEnv,
     actor: 0 | 1,
-    beliefs: Float32Array<ArrayBufferLike>,
+    beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
     selectedAction: number | undefined,
     iterations: number,
-    readOptions?: { readPolicy?: boolean; readActionProbs?: boolean },
+    readOptions?: {
+      readPolicy?: boolean;
+      readActionProbs?: boolean;
+      readBeliefs?: boolean;
+      returnGpuBeliefs?: boolean;
+    },
   ) {
     const problem = await this.buildGpuStateProblem(state, env, actor, beliefs);
     if (selectedAction !== undefined) {
       problem.action = selectedAction;
     }
+    let disposeWithGpuBeliefs = false;
     try {
       const cfrProblem: { actor: 0 | 1; action?: number } = {
         actor: problem.actor,
@@ -201,7 +226,7 @@ export class BrowserCfrEvaluator {
       if (problem.action !== undefined) {
         cfrProblem.action = problem.action;
       }
-      return await this.cfr.solveGpuBuffers(
+      const solved = await this.cfr.solveGpuBuffers(
         cfrProblem,
         beliefs,
         NUM_HANDS,
@@ -211,8 +236,19 @@ export class BrowserCfrEvaluator {
         problem.legalMaskBuffer,
         readOptions,
       );
+      if (solved.releaseBeliefsAfterBuffer) {
+        const releaseBeliefsAfterBuffer = solved.releaseBeliefsAfterBuffer;
+        solved.releaseBeliefsAfterBuffer = () => {
+          releaseBeliefsAfterBuffer();
+          problem.dispose();
+        };
+        disposeWithGpuBeliefs = true;
+      }
+      return solved;
     } finally {
-      problem.dispose();
+      if (!disposeWithGpuBeliefs) {
+        problem.dispose();
+      }
     }
   }
 
@@ -288,13 +324,15 @@ export class BrowserCfrEvaluator {
     state: GpuPokerState,
     env: PublicHunlEnv,
     actor: 0 | 1,
-    beliefs: Float32Array<ArrayBufferLike>,
+    beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
   ): Promise<GpuStateLocalCfrProblem> {
     const children = state.buildChildren();
     const modelActions = this.collectModelActionBins(env);
     let modelValues: Awaited<ReturnType<BetterFfnWebGpuModel["predictBatchHandValuesGpuStates"]>> | undefined;
     let modelStates: GPUBuffer | undefined;
-    const beliefBuffer = makeStorageBuffer(this.device, beliefs);
+    const beliefBuffer =
+      beliefs instanceof Float32Array ? makeStorageBuffer(this.device, beliefs) : beliefs;
+    const ownsBeliefBuffer = beliefs instanceof Float32Array;
     const bytesPerChild = 2 * NUM_HANDS * Float32Array.BYTES_PER_ELEMENT;
     if (modelActions.length > 0) {
       modelStates = this.device.createBuffer({
@@ -342,7 +380,9 @@ export class BrowserCfrEvaluator {
       dispose: () => {
         modelValues?.dispose();
         modelStates?.destroy();
-        beliefBuffer.destroy();
+        if (ownsBeliefBuffer) {
+          beliefBuffer.destroy();
+        }
         children.dispose();
       },
     };

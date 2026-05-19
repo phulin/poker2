@@ -191,7 +191,7 @@ export class BetterFfnWebGpuModel {
   async predictBatchHandValuesGpuStates(
     states: GPUBuffer,
     batch: number,
-    beliefs: Float32Array<ArrayBufferLike>,
+    beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
   ): Promise<GpuHandValuePrediction> {
     const prediction = this.enqueuePredictBatchFromStateBuffer(states, batch, beliefs, {
       includePolicy: false,
@@ -536,7 +536,7 @@ export class BetterFfnWebGpuModel {
   private enqueuePredictBatchFromStateBuffer(
     states: GPUBuffer,
     batch: number,
-    beliefs: Float32Array<ArrayBufferLike>,
+    beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
     options: PredictOptions = {},
   ): {
     handValuesBuffer: GPUBuffer;
@@ -557,7 +557,7 @@ export class BetterFfnWebGpuModel {
     const rangeHiddenDim = this.manifest.architecture.rangeHiddenDim;
     const numPlayers = this.manifest.architecture.numPlayers;
     const numActions = this.manifest.architecture.numActions;
-    if (beliefs.length !== numPlayers * NUM_HANDS) {
+    if (beliefs instanceof Float32Array && beliefs.length !== numPlayers * NUM_HANDS) {
       throw new Error(
         `belief vector has ${beliefs.length} entries, expected ${numPlayers * NUM_HANDS}`,
       );
@@ -602,7 +602,7 @@ export class BetterFfnWebGpuModel {
         submitted = true;
       };
 
-      const beliefBuffer = storage(beliefs);
+      const beliefBuffer = beliefs instanceof Float32Array ? storage(beliefs) : beliefs;
       const context = empty(batch * 11);
       const baseEmbedding = empty(batch * hiddenDim);
       const rankCounts = empty(batch * 13);

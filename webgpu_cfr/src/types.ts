@@ -29,6 +29,8 @@ export interface LocalSolveResult {
   policy: Float32Array<ArrayBufferLike>;
   actionProbs: Float32Array<ArrayBufferLike>;
   beliefsAfter?: Float32Array<ArrayBufferLike>;
+  beliefsAfterBuffer?: GPUBuffer;
+  releaseBeliefsAfterBuffer?: () => void;
 }
 
 export interface EvaluationResult {
