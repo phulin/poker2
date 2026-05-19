@@ -82,6 +82,18 @@ def _env_flag(name: str, default: bool = True) -> bool:
     return value.lower() not in {"0", "false", "no", "off"}
 
 
+def _compile_kwargs_from_env() -> dict[str, object]:
+    kwargs: dict[str, object] = {"dynamic": True}
+    mode = os.environ.get("P2_FUSED_COMPILE_MODE")
+    if mode is None:
+        return kwargs
+    mode = mode.strip()
+    if mode.lower() in {"", "default", "none"}:
+        return kwargs
+    kwargs["mode"] = mode
+    return kwargs
+
+
 # Inductor folds the 7 separate aten::index ops in `set_leaf_values` (one per
 # MLPFeatures field at model_indices, plus beliefs at model_indices, plus
 # beliefs at showdown_indices) into a single graph. The structural win is
@@ -142,10 +154,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # keeps a single compiled graph as model_indices count varies. TF32 is
         # safe here: the NN only produces leaf value estimates; the precision-
         # sensitive DCFR regret accumulation stays in fp32.
+        self._compile_kwargs = _compile_kwargs_from_env()
         if compile_model and self.model is not None:
             torch.set_float32_matmul_precision("high")
             try:
-                self.model = torch.compile(self.model, dynamic=True)
+                self.model = torch.compile(self.model, **self._compile_kwargs)
             except Exception:
                 pass
 
@@ -253,6 +266,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._fused_positive_regrets_buf = None
         if not hasattr(self, "_skip_record_stats"):
             self._skip_record_stats = False
+        if not hasattr(self, "_compile_kwargs"):
+            self._compile_kwargs = _compile_kwargs_from_env()
         if not hasattr(self, "_opt_reuse_positive_regrets"):
             self._opt_reuse_positive_regrets = _env_flag("P2_FUSED_OPT_REUSE_POSITIVE")
         if not hasattr(self, "_opt_parent_sum_divide"):
@@ -1085,7 +1100,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     if getattr(self.model, "_orig_mod", None) is not None:
                         self._static_model_base_fn = torch.compile(
                             base_model.static_feature_base,
-                            dynamic=True,
+                            **self._compile_kwargs,
                         )
                     else:
                         self._static_model_base_fn = base_model.static_feature_base
