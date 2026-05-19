@@ -915,8 +915,7 @@ if triton is not None:
     @triton.jit
     def _fused_unblocked_regret_dcfr_update_kernel(
         target_ptr,              # [top, H] opponent beliefs at parent rows
-        cardsum_ptr,             # [top, 52]
-        S_ptr,                   # [top]
+        stats_ptr,               # [top, 53] stacked (S, cardsum)
         card_a_ptr,              # [H]
         card_b_ptr,              # [H]
         allowed_ptr,             # optional [top, H]
@@ -954,10 +953,18 @@ if triton is not None:
 
         ca = tl.load(card_a_ptr + offs, mask=mask, other=0)
         cb = tl.load(card_b_ptr + offs, mask=mask, other=0)
-        S = tl.load(S_ptr + p)
+        S = tl.load(stats_ptr + p * (NUM_CARDS + 1))
         t = tl.load(target_ptr + p * H + offs, mask=mask, other=0.0)
-        csa = tl.load(cardsum_ptr + p * NUM_CARDS + ca, mask=mask, other=0.0)
-        csb = tl.load(cardsum_ptr + p * NUM_CARDS + cb, mask=mask, other=0.0)
+        csa = tl.load(
+            stats_ptr + p * (NUM_CARDS + 1) + 1 + ca,
+            mask=mask,
+            other=0.0,
+        )
+        csb = tl.load(
+            stats_ptr + p * (NUM_CARDS + 1) + 1 + cb,
+            mask=mask,
+            other=0.0,
+        )
         src_w = tl.maximum(S - csa - csb + t, 0.0)
         if HAS_ALLOWED:
             allowed = tl.load(allowed_ptr + p * H + offs, mask=mask, other=0).to(tl.int1)
@@ -1007,8 +1014,7 @@ if triton is not None:
 
 def fused_unblocked_regret_dcfr_update_with_tensors_(
     target: torch.Tensor,
-    s: torch.Tensor,
-    cardsum: torch.Tensor,
+    stats: torch.Tensor,
     allowed_mask: torch.Tensor | None,
     values_achieved: torch.Tensor,
     values_expected: torch.Tensor,
@@ -1037,9 +1043,8 @@ def fused_unblocked_regret_dcfr_update_with_tensors_(
         raise RuntimeError("Triton is not installed.")
     assert target.is_contiguous() and target.dim() == 2
     assert target.shape[1] == _UNBLOCKED_NUM_HANDS
-    assert s.is_contiguous() and s.shape == (target.shape[0],)
-    assert cardsum.is_contiguous()
-    assert cardsum.shape == (target.shape[0], _UNBLOCKED_NUM_CARDS)
+    assert stats.is_contiguous()
+    assert stats.shape == (target.shape[0], 1 + _UNBLOCKED_NUM_CARDS)
     assert values_achieved.is_contiguous() and values_achieved.dim() == 3
     assert values_expected.is_contiguous() and values_expected.dim() == 3
     assert values_achieved.shape[1] == 2 and values_expected.shape[1] == 2
@@ -1067,8 +1072,7 @@ def fused_unblocked_regret_dcfr_update_with_tensors_(
     grid = (top, triton.cdiv(h, block_h))
     _fused_unblocked_regret_dcfr_update_kernel[grid](
         target,
-        cardsum,
-        s,
+        stats,
         card_a,
         card_b,
         allowed_ptr,
@@ -1369,6 +1373,19 @@ def _preprocess_unblocked_stats(
     s = stacked[:, 0].contiguous()
     cardsum = stacked[:, 1:].contiguous()
     return s, cardsum
+
+
+def _preprocess_unblocked_stats_out(
+    target: torch.Tensor,  # [B, H] contiguous
+    stacked_out: torch.Tensor,  # [B, 53] contiguous
+) -> None:
+    """Write stacked ``(S, cardsum)`` stats into a caller-owned buffer."""
+    assert target.is_contiguous() and target.dim() == 2
+    assert target.shape[1] == _UNBLOCKED_NUM_HANDS
+    assert stacked_out.is_contiguous()
+    assert stacked_out.shape == (target.shape[0], 1 + _UNBLOCKED_NUM_CARDS)
+    P = _get_card_projection(target.device).to(target.dtype)
+    torch.mm(target, P, out=stacked_out)
 
 
 if triton is not None:

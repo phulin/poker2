@@ -72,6 +72,7 @@ from p2.search.fused_cfr_triton import (
     triton_is_available,
     TScalars,
     _preprocess_unblocked_stats,
+    _preprocess_unblocked_stats_out,
     unblocked_mass_opp_at_parents_triton,
     unblocked_mass_ratio_indirect_triton,
     marginal_policy_triton_out_,
@@ -215,6 +216,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._reach_scratch_width: int = 0
         self._ev_actor_beliefs_buf: torch.Tensor | None = None
         self._ev_marginal_policy_buf: torch.Tensor | None = None
+        self._regret_src_target_buf: torch.Tensor | None = None
+        self._regret_src_stats_buf: torch.Tensor | None = None
         self._sample_update_rows: torch.Tensor | None = None
         self._sample_update_counts: torch.Tensor | None = None
         self._sample_update_key: tuple[int, int, int] | None = None
@@ -344,6 +347,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._ev_actor_beliefs_buf = None
         if not hasattr(self, "_ev_marginal_policy_buf"):
             self._ev_marginal_policy_buf = None
+        if not hasattr(self, "_regret_src_target_buf"):
+            self._regret_src_target_buf = None
+        if not hasattr(self, "_regret_src_stats_buf"):
+            self._regret_src_stats_buf = None
         if not hasattr(self, "_sample_update_rows"):
             self._sample_update_rows = None
         if not hasattr(self, "_sample_update_counts"):
@@ -535,6 +542,23 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 marginal_shape
             )
         return self._ev_actor_beliefs_buf, self._ev_marginal_policy_buf
+
+    def _ensure_regret_src_buffers(
+        self, top: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        target_shape = (top, NUM_HANDS)
+        stats_shape = (top, 53)
+        if (
+            self._regret_src_target_buf is None
+            or self._regret_src_target_buf.shape != target_shape
+        ):
+            self._regret_src_target_buf = self.beliefs.new_empty(target_shape)
+        if (
+            self._regret_src_stats_buf is None
+            or self._regret_src_stats_buf.shape != stats_shape
+        ):
+            self._regret_src_stats_buf = self.beliefs.new_empty(stats_shape)
+        return self._regret_src_target_buf, self._regret_src_stats_buf
 
     def _prepare_sample_update_table(self) -> None:
         if not self._opt_sparse_sample:
@@ -1487,26 +1511,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             assert to_act_top is not None
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
             if self._opt_inline_regret_src_update:
-                src_target = torch.empty(
-                    (top, beliefs.shape[-1]),
-                    device=beliefs.device,
-                    dtype=beliefs.dtype,
-                )
+                src_target, src_stats = self._ensure_regret_src_buffers(top)
                 select_opponent_beliefs_triton_out_(
                     beliefs,
                     self.env.to_act.contiguous(),
                     top,
                     src_target,
                 )
-                src_s, src_cardsum = _preprocess_unblocked_stats(src_target)
+                _preprocess_unblocked_stats_out(src_target, src_stats)
                 child_offsets_top = self._child_offsets_top
                 child_count_top = self._child_count_top
                 assert child_offsets_top is not None
                 assert child_count_top is not None
                 fused_unblocked_regret_dcfr_update_with_tensors_(
                     target=src_target,
-                    s=src_s,
-                    cardsum=src_cardsum,
+                    stats=src_stats,
                     allowed_mask=self.allowed_hands[:top].contiguous(),
                     values_achieved=self.latest_values.contiguous(),
                     values_expected=self.latest_values[:top].contiguous(),
