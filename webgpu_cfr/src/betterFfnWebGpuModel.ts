@@ -4,6 +4,7 @@ import {
   MAT_VEC_BATCH_WGSL,
   MAT_VEC_WGSL,
   PLAYER_BOARD_HADAMARD_WGSL,
+  REPEAT_ROWS_WGSL,
   RMS_NORM_BATCH_WGSL,
   RMS_NORM_WGSL,
   SCALED_RESIDUAL_ADD_WGSL,
@@ -77,6 +78,7 @@ export class BetterFfnWebGpuModel {
   private readonly rmsNormBatchPipeline: GPUComputePipeline;
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
   private readonly add3Pipeline: GPUComputePipeline;
+  private readonly repeatRowsPipeline: GPUComputePipeline;
   private readonly zeroSumBatchPipeline: GPUComputePipeline;
   private readonly stateFeaturePipeline: GPUComputePipeline;
   private readonly storagePool = new Map<number, GPUBuffer[]>();
@@ -140,6 +142,10 @@ export class BetterFfnWebGpuModel {
       "better-ffn-scaled-residual-add",
     );
     this.add3Pipeline = this.pipeline(ADD3_WGSL, "better-ffn-add3");
+    this.repeatRowsPipeline = this.pipeline(
+      REPEAT_ROWS_WGSL,
+      "better-ffn-repeat-rows",
+    );
     this.zeroSumBatchPipeline = this.pipeline(
       ZERO_SUM_BATCH_WGSL,
       "better-ffn-zero-sum-batch",
@@ -627,7 +633,7 @@ export class BetterFfnWebGpuModel {
           perPlayerBelief,
           hiddenDim,
           NUM_HANDS,
-          batch,
+          1,
           0,
           numPlayers * hiddenDim,
           player * NUM_HANDS,
@@ -637,16 +643,20 @@ export class BetterFfnWebGpuModel {
         );
       }
 
-      const beliefFeatures = this.leakyReluBlockBatch(
+      const singleBeliefFeatures = this.leakyReluBlockBatch(
         "belief_proj",
         perPlayerBelief,
-        batch,
+        1,
         numPlayers * hiddenDim,
         rangeHiddenDim === 0 ? ffnDim : numPlayers * rangeHiddenDim,
         hiddenDim,
         empty,
         uniform,
       );
+      const beliefFeatures =
+        batch === 1
+          ? singleBeliefFeatures
+          : this.repeatRows(singleBeliefFeatures, batch, hiddenDim, empty, uniform);
 
       const interactionFeatures = this.buildBeliefBoardInteractionGpu(
         beliefBuffer,
@@ -1414,6 +1424,24 @@ export class BetterFfnWebGpuModel {
       { binding: 3, resource: { buffer: output } },
       { binding: 4, resource: { buffer: uniform(new Uint32Array([dim, 0, 0, 0])) } },
     ]);
+  }
+
+  private repeatRows(
+    input: GPUBuffer,
+    batch: number,
+    dim: number,
+    empty: (elements: number) => GPUBuffer,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): GPUBuffer {
+    const output = empty(batch * dim);
+    this.submit(this.repeatRowsPipeline, Math.ceil((batch * dim) / 64), [
+      { binding: 0, resource: { buffer: input } },
+      { binding: 1, resource: { buffer: output } },
+      { binding: 2, resource: { buffer: uniform(new Uint32Array([dim, batch, 0, 0])) } },
+    ]);
+    return output;
   }
 
   private playerBoardHadamard(
