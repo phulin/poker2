@@ -439,6 +439,25 @@ def test_unblocked_mass_opp_at_parents_matches_full_pipeline() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_select_opponent_beliefs_matches_advanced_indexing() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import select_opponent_beliefs_triton_out_
+
+    device = torch.device("cuda")
+    torch.manual_seed(53)
+    top, total, h = 17, 23, 1326
+    beliefs = torch.rand(total, 2, h, device=device)
+    to_act = torch.randint(0, 2, (total,), device=device)
+    out = torch.empty(top, h, device=device)
+
+    select_opponent_beliefs_triton_out_(beliefs, to_act, top, out)
+
+    row_idx = torch.arange(top, device=device)
+    ref = beliefs[:top][row_idx, 1 - to_act[:top], :].contiguous()
+    torch.testing.assert_close(out, ref, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fused_average_policy_mix_matches_pytorch() -> None:
     pytest.importorskip("triton")
     from p2.search.fused_cfr_triton import fused_average_policy_mix_

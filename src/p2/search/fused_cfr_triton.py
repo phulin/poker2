@@ -1183,11 +1183,12 @@ def _preprocess_unblocked_stats(
 if triton is not None:
 
     @triton.jit
-    def _select_actor_beliefs_kernel(
+    def _select_player_beliefs_kernel(
         beliefs_ptr,  # [total, 2, H]
         to_act_ptr,  # [top]
         out_ptr,  # [top, H]
         H,
+        OPPONENT: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
         row = tl.program_id(0)
@@ -1195,8 +1196,9 @@ if triton is not None:
         offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
         mask = offs < H
         actor = tl.load(to_act_ptr + row)
+        player = 1 - actor if OPPONENT else actor
         vals = tl.load(
-            beliefs_ptr + (row * 2 + actor) * H + offs,
+            beliefs_ptr + (row * 2 + player) * H + offs,
             mask=mask,
             other=0.0,
         )
@@ -1229,11 +1231,37 @@ def select_actor_beliefs_triton_out_(
     assert to_act.is_contiguous()
     h = beliefs.shape[-1]
     assert out.is_contiguous() and out.shape == (top, h)
-    _select_actor_beliefs_kernel[(top, triton.cdiv(h, block_h))](
+    _select_player_beliefs_kernel[(top, triton.cdiv(h, block_h))](
         beliefs,
         to_act,
         out,
         h,
+        OPPONENT=False,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+def select_opponent_beliefs_triton_out_(
+    beliefs: torch.Tensor,
+    to_act: torch.Tensor,
+    top: int,
+    out: torch.Tensor,
+    block_h: int = 512,
+) -> None:
+    """Write ``beliefs[row, 1 - to_act[row], hand]`` for parent rows into ``out``."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert beliefs.is_contiguous() and beliefs.dim() == 3 and beliefs.shape[1] == 2
+    assert to_act.is_contiguous()
+    h = beliefs.shape[-1]
+    assert out.is_contiguous() and out.shape == (top, h)
+    _select_player_beliefs_kernel[(top, triton.cdiv(h, block_h))](
+        beliefs,
+        to_act,
+        out,
+        h,
+        OPPONENT=True,
         BLOCK_H=block_h,
         num_warps=4,
     )
@@ -1390,8 +1418,8 @@ def unblocked_mass_opp_at_parents_triton(
     if cached_stats is not None:
         target, s, cardsum = cached_stats.slice_for_player(opp_idx)
     else:
-        row_idx = torch.arange(top, device=beliefs.device)
-        target = beliefs[:top][row_idx, opp_idx, :].contiguous()
+        target = torch.empty((top, h), device=beliefs.device, dtype=beliefs.dtype)
+        select_opponent_beliefs_triton_out_(beliefs, to_act, top, target)
         s, cardsum = _preprocess_unblocked_stats(target)
 
     card_a, card_b = _get_combo_cards(target.device)
