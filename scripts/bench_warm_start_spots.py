@@ -123,7 +123,7 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
     cfg.model.num_hidden_layers = 3
     cfg.model.num_value_layers = 1
     cfg.model.num_policy_layers = 1
-    cfg.model.compile = not args.no_compile
+    cfg.model.compile = "off" if args.no_compile else "default"
     cfg.search.depth = args.depth
     cfg.search.iterations = args.iterations
     cfg.search.iterations_final = None
@@ -492,7 +492,7 @@ def main(argv: list[str]) -> None:
         "warm_start_type": str(ev.warm_start_type),
         "warm_start_multiplier": float(ev.warm_start_multiplier),
         "dcfr_delay": int(ev.dcfr_delay),
-        "compile": bool(cfg.model.compile),
+        "compile": cfg.model.compile,
         "repeats": args.repeats,
         "compile_warmups": args.compile_warmups,
     }

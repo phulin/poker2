@@ -56,8 +56,7 @@ model:
   num_policy_layers: 2
 
   detach_value_head: false
-  compile: true
-  compile_mode: null
+  compile: default
   enforce_zero_sum: true
 
   num_recursions: 6

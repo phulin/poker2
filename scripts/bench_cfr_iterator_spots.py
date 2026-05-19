@@ -237,9 +237,10 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
     cfg.model.num_hidden_layers = 3
     cfg.model.num_value_layers = 1
     cfg.model.num_policy_layers = 1
-    cfg.model.compile = not args.no_compile
-    if args.compile_mode is not None:
-        cfg.model.compile_mode = args.compile_mode
+    if args.no_compile:
+        cfg.model.compile = "off"
+    if args.compile is not None:
+        cfg.model.compile = args.compile
     cfg.search.depth = args.depth
     cfg.search.iterations = args.iterations
     cfg.search.iterations_final = None
@@ -818,9 +819,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument(
-        "--compile-mode",
+        "--compile",
+        choices=("off", "default", "max-autotune"),
         default=None,
-        help="Optional torch.compile mode, e.g. max-autotune.",
+        help="torch.compile setting for the model.",
     )
     parser.add_argument(
         "--unfused",
@@ -891,7 +893,6 @@ def main(argv: list[str]) -> None:
                 "num_value_layers": cfg.model.num_value_layers,
                 "num_policy_layers": cfg.model.num_policy_layers,
                 "compile": cfg.model.compile,
-                "compile_mode": cfg.model.compile_mode,
             },
         },
     }

@@ -82,25 +82,28 @@ from p2.search.fused_cfr_triton import (
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
-def _env_flag(name: str, default: bool = True) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.lower() not in {"0", "false", "no", "off"}
+def _compile_setting_from_env(cfg=None) -> str:
+    mode = os.environ.get("P2_FUSED_COMPILE_MODE")
+    if mode is None and cfg is not None:
+        mode = getattr(cfg.model, "compile", "default")
+    value = str(mode if mode is not None else "default").strip().lower()
+    if value in {"0", "false", "no", "none"}:
+        return "off"
+    if value in {"", "true", "yes", "1"}:
+        return "default"
+    if value not in {"off", "default", "max-autotune"}:
+        raise ValueError(
+            "compile mode must be one of: off, default, max-autotune; "
+            f"got {mode!r}"
+        )
+    return value
 
 
 def _compile_kwargs_from_env(cfg=None) -> dict[str, object]:
     kwargs: dict[str, object] = {"dynamic": True}
-    mode = os.environ.get("P2_FUSED_COMPILE_MODE")
-    if mode is None:
-        if cfg is not None:
-            mode = getattr(cfg.model, "compile_mode", None)
-    if mode is None:
-        return kwargs
-    mode = mode.strip()
-    if mode.lower() in {"", "default", "none"}:
-        return kwargs
-    kwargs["mode"] = mode
+    mode = _compile_setting_from_env(cfg)
+    if mode == "max-autotune":
+        kwargs["mode"] = mode
     return kwargs
 
 
@@ -165,7 +168,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # safe here: the NN only produces leaf value estimates; the precision-
         # sensitive DCFR regret accumulation stays in fp32.
         self._compile_kwargs = _compile_kwargs_from_env(self.cfg)
-        if compile_model and self.model is not None:
+        compile_setting = _compile_setting_from_env(self.cfg)
+        if compile_model and compile_setting != "off" and self.model is not None:
             mode = self._compile_kwargs.get("mode")
             base_model = getattr(self.model, "_orig_mod", self.model)
             if mode == "max-autotune" and isinstance(base_model, BetterFFN):
@@ -193,23 +197,17 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # When True, cfr_iteration skips the full policy_probs.clone() kept for
         # _record_stats. Set by GraphedCFRIteration when stats are stubbed out.
         self._skip_record_stats: bool = False
-        self._opt_reuse_positive_regrets = _env_flag("P2_FUSED_OPT_REUSE_POSITIVE")
-        self._opt_parent_sum_divide = _env_flag("P2_FUSED_OPT_PARENT_SUM_DIVIDE")
-        self._opt_sparse_sample = _env_flag("P2_FUSED_OPT_SPARSE_SAMPLE")
-        self._opt_leaf_feature_cache = _env_flag("P2_FUSED_OPT_LEAF_FEATURE_CACHE")
-        self._opt_child_opp_policy = _env_flag("P2_FUSED_OPT_CHILD_OPP_POLICY")
-        self._opt_ev_inline_opp = _env_flag("P2_FUSED_OPT_EV_INLINE_OPP")
-        self._opt_defer_avg_reach = _env_flag("P2_FUSED_OPT_DEFER_AVG_REACH")
-        self._opt_defer_avg_policy = _env_flag("P2_FUSED_OPT_DEFER_AVG_POLICY")
-        self._opt_fuse_reach_beliefs_avg = _env_flag(
-            "P2_FUSED_OPT_REACH_BELIEF_AVG"
-        )
-        self._opt_scratch_reach_beliefs_avg = _env_flag(
-            "P2_FUSED_OPT_SCRATCH_REACH_BELIEF_AVG"
-        )
-        self._opt_inline_regret_src_update = _env_flag(
-            "P2_FUSED_OPT_INLINE_REGRET_SRC_UPDATE"
-        )
+        self._opt_reuse_positive_regrets = True
+        self._opt_parent_sum_divide = True
+        self._opt_sparse_sample = True
+        self._opt_leaf_feature_cache = True
+        self._opt_child_opp_policy = True
+        self._opt_ev_inline_opp = True
+        self._opt_defer_avg_reach = True
+        self._opt_defer_avg_policy = True
+        self._opt_fuse_reach_beliefs_avg = True
+        self._opt_scratch_reach_beliefs_avg = True
+        self._opt_inline_regret_src_update = True
         self._fused_positive_regrets_valid: bool = False
         self._reach_scratch_a: torch.Tensor | None = None
         self._reach_scratch_b: torch.Tensor | None = None
@@ -308,33 +306,27 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if not hasattr(self, "_compile_kwargs"):
             self._compile_kwargs = _compile_kwargs_from_env()
         if not hasattr(self, "_opt_reuse_positive_regrets"):
-            self._opt_reuse_positive_regrets = _env_flag("P2_FUSED_OPT_REUSE_POSITIVE")
+            self._opt_reuse_positive_regrets = True
         if not hasattr(self, "_opt_parent_sum_divide"):
-            self._opt_parent_sum_divide = _env_flag("P2_FUSED_OPT_PARENT_SUM_DIVIDE")
+            self._opt_parent_sum_divide = True
         if not hasattr(self, "_opt_sparse_sample"):
-            self._opt_sparse_sample = _env_flag("P2_FUSED_OPT_SPARSE_SAMPLE")
+            self._opt_sparse_sample = True
         if not hasattr(self, "_opt_leaf_feature_cache"):
-            self._opt_leaf_feature_cache = _env_flag("P2_FUSED_OPT_LEAF_FEATURE_CACHE")
+            self._opt_leaf_feature_cache = True
         if not hasattr(self, "_opt_child_opp_policy"):
-            self._opt_child_opp_policy = _env_flag("P2_FUSED_OPT_CHILD_OPP_POLICY")
+            self._opt_child_opp_policy = True
         if not hasattr(self, "_opt_ev_inline_opp"):
-            self._opt_ev_inline_opp = _env_flag("P2_FUSED_OPT_EV_INLINE_OPP")
+            self._opt_ev_inline_opp = True
         if not hasattr(self, "_opt_defer_avg_reach"):
-            self._opt_defer_avg_reach = _env_flag("P2_FUSED_OPT_DEFER_AVG_REACH")
+            self._opt_defer_avg_reach = True
         if not hasattr(self, "_opt_defer_avg_policy"):
-            self._opt_defer_avg_policy = _env_flag("P2_FUSED_OPT_DEFER_AVG_POLICY")
+            self._opt_defer_avg_policy = True
         if not hasattr(self, "_opt_fuse_reach_beliefs_avg"):
-            self._opt_fuse_reach_beliefs_avg = _env_flag(
-                "P2_FUSED_OPT_REACH_BELIEF_AVG"
-            )
+            self._opt_fuse_reach_beliefs_avg = True
         if not hasattr(self, "_opt_scratch_reach_beliefs_avg"):
-            self._opt_scratch_reach_beliefs_avg = _env_flag(
-                "P2_FUSED_OPT_SCRATCH_REACH_BELIEF_AVG"
-            )
+            self._opt_scratch_reach_beliefs_avg = True
         if not hasattr(self, "_opt_inline_regret_src_update"):
-            self._opt_inline_regret_src_update = _env_flag(
-                "P2_FUSED_OPT_INLINE_REGRET_SRC_UPDATE"
-            )
+            self._opt_inline_regret_src_update = True
         if not hasattr(self, "_fused_positive_regrets_valid"):
             self._fused_positive_regrets_valid = False
         if not hasattr(self, "_reach_scratch_a"):

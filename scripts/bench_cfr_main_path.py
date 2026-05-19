@@ -243,7 +243,7 @@ def _apply_realistic_overrides(cfg: Config, args: argparse.Namespace) -> None:
     if args.depth is not None:
         cfg.search.depth = args.depth
     if args.no_compile:
-        cfg.model.compile = False
+        cfg.model.compile = "off"
 
 
 def _load_config(args: argparse.Namespace) -> Config:

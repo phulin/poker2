@@ -126,7 +126,7 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
     cfg.model.num_hidden_layers = 3
     cfg.model.num_value_layers = 1
     cfg.model.num_policy_layers = 1
-    cfg.model.compile = False
+    cfg.model.compile = "off"
     cfg.search.depth = args.depth
     cfg.search.iterations = args.iterations
     cfg.search.iterations_final = None

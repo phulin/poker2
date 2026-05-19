@@ -38,19 +38,30 @@ from p2.utils.profiling import profile
 STREETS = ["preflop", "flop", "turn", "river", "showdown"]
 
 
+def _compile_setting(cfg: Config) -> str:
+    value = str(cfg.model.compile).strip().lower()
+    if value in {"0", "false", "no", "none"}:
+        return "off"
+    if value in {"", "true", "yes", "1"}:
+        return "default"
+    if value not in {"off", "default", "max-autotune"}:
+        raise ValueError(
+            "model.compile must be one of: off, default, max-autotune; "
+            f"got {cfg.model.compile!r}"
+        )
+    return value
+
+
 def _compile_kwargs(cfg: Config) -> dict[str, object]:
     kwargs: dict[str, object] = {"dynamic": True}
-    mode = cfg.model.compile_mode
-    if mode is not None:
-        mode = mode.strip()
-        if mode.lower() not in {"", "default", "none"}:
-            kwargs["mode"] = mode
+    mode = _compile_setting(cfg)
+    if mode == "max-autotune":
+        kwargs["mode"] = mode
     return kwargs
 
 
 def _uses_compile_cudagraphs(cfg: Config) -> bool:
-    mode = cfg.model.compile_mode
-    return mode is not None and mode.strip().lower() == "max-autotune"
+    return _compile_setting(cfg) == "max-autotune"
 
 
 def _prepare_model_for_compile(model: nn.Module, cfg: Config) -> None:
@@ -158,7 +169,7 @@ class RebelCFRTrainer:
             cpu_rng.manual_seed(self.cfg.seed)
         self.model.init_weights(cpu_rng)
         self.model.to(self.device)
-        if self.device.type == "cuda" and cfg.model.compile:
+        if self.device.type == "cuda" and _compile_setting(cfg) != "off":
             _prepare_model_for_compile(self.model, cfg)
             self.model.compile(**_compile_kwargs(cfg))
 
@@ -339,7 +350,7 @@ class RebelCFRTrainer:
         twin.eval()
         for p in twin.parameters():
             p.requires_grad = False
-        if self.device.type == "cuda" and cfg.model.compile:
+        if self.device.type == "cuda" and _compile_setting(cfg) != "off":
             _prepare_model_for_compile(twin, cfg)
             twin.compile(**_compile_kwargs(cfg))
         return twin

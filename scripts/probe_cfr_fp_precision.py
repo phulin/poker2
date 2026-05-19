@@ -289,7 +289,7 @@ def _build_trainer_and_evaluator(
 ) -> tuple[RebelCFRTrainer, FusedSparseCFREvaluator]:
     trainer_cfg = copy.deepcopy(cfg)
     trainer_cfg.num_envs = batch_size
-    trainer_cfg.model.compile = False
+    trainer_cfg.model.compile = "off"
     trainer_cfg.trueskill.enabled = False
     trainer_cfg.search.sparse = True
     trainer_cfg.search.sparse_fused = False
@@ -300,7 +300,7 @@ def _build_trainer_and_evaluator(
 
     eval_cfg = copy.deepcopy(cfg)
     eval_cfg.num_envs = batch_size
-    eval_cfg.model.compile = False
+    eval_cfg.model.compile = "off"
     eval_cfg.trueskill.enabled = False
     eval_cfg.search.sparse = True
     eval_cfg.search.sparse_fused = True
