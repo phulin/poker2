@@ -152,12 +152,25 @@ class BetterFFN(BaseMLPModel):
         )
         return card_emb.sum(dim=1)
 
+    def static_feature_base(self, features: MLPFeatures) -> torch.Tensor:
+        """Feature contribution that is fixed for a CFR leaf row."""
+        board = features.board
+        ranks = torch.where(board >= 0, board % 13, torch.full_like(board, 13))
+        suits = torch.where(board >= 0, board // 13, torch.full_like(board, 4))
+        board_features = self.rank_embedding(ranks) + self.suit_embedding(suits)
+        return (
+            board_features.sum(dim=1)
+            + self.street_embedding(features.street)
+            + self.context_encoder(features.context)
+        )
+
     @profile
     def forward(
         self,
         features: MLPFeatures,
         include_policy: bool = True,
         include_value: bool = True,
+        static_base_features: torch.Tensor | None = None,
         latent=None,
     ) -> ModelOutput:
         """
@@ -170,24 +183,14 @@ class BetterFFN(BaseMLPModel):
             ModelOutput with policy logits and value predictions.
         """
 
-        board = features.board
-        ranks = torch.where(board >= 0, board % 13, torch.full_like(board, 13))
-        suits = torch.where(board >= 0, board // 13, torch.full_like(board, 4))
-        board_features = self.rank_embedding(ranks) + self.suit_embedding(suits)
-
-        street_features = self.street_embedding(features.street)
-        context_features = self.context_encoder(features.context)
         player_beliefs = features.beliefs.view(-1, self.num_players, NUM_HANDS)
         hand_emb = self._hand_embedding()  # [NUM_HANDS, hidden_dim]
         per_player_belief = player_beliefs @ hand_emb  # [B, P, H]
         belief_features = self.belief_proj(per_player_belief.flatten(1))
 
-        flat_features = (
-            board_features.sum(dim=1)
-            + street_features
-            + context_features
-            + belief_features
-        )
+        if static_base_features is None:
+            static_base_features = self.static_feature_base(features)
+        flat_features = static_base_features + belief_features
         # assert flat_features.isfinite().all()
 
         x = self.trunk(flat_features)

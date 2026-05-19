@@ -98,10 +98,17 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
     )
 
     output = model(features)
+    static_output = model(
+        features,
+        static_base_features=model.static_feature_base(features),
+    )
 
     assert output.policy_logits.shape == (batch_size, NUM_HANDS, num_actions)
     assert output.hand_values.shape == (batch_size, num_players, NUM_HANDS)
     assert output.value.shape == (batch_size, num_players)
+    torch.testing.assert_close(static_output.policy_logits, output.policy_logits)
+    torch.testing.assert_close(static_output.hand_values, output.hand_values)
+    torch.testing.assert_close(static_output.value, output.value)
     assert torch.isfinite(output.policy_logits).all()
     assert torch.isfinite(output.hand_values).all()
 

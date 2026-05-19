@@ -38,6 +38,8 @@ from p2.env.rules_triton import (
     rank_hands_triton,
     triton_is_available as _rules_triton_ok,
 )
+from p2.models.mlp.better_ffn import BetterFFN
+from p2.models.mlp.mlp_features import MLPFeatures
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_with_tensors_,
     fused_avg_values_zero_sum_,
@@ -70,7 +72,6 @@ from p2.search.fused_cfr_triton import (
     unblocked_mass_opp_at_parents_triton,
     unblocked_mass_ratio_indirect_triton,
 )
-from p2.models.mlp.mlp_features import MLPFeatures
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
@@ -175,6 +176,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._sample_update_rows: torch.Tensor | None = None
         self._sample_update_counts: torch.Tensor | None = None
         self._sample_update_key: tuple[int, int, int] | None = None
+        self._static_model_base_key: tuple[int, int, int] | None = None
+        self._static_model_base_features: torch.Tensor | None = None
+        self._static_model_base_fn = None
+        self._static_model_base_fn_key: int | None = None
         self._static_model_feature_key: tuple[int, int, int] | None = None
         self._static_model_feature_fields: tuple[torch.Tensor, ...] | None = None
         self._br_action_parent_index_cache: dict[tuple[int, int], torch.Tensor] = {}
@@ -266,6 +271,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._sample_update_counts = None
         if not hasattr(self, "_sample_update_key"):
             self._sample_update_key = None
+        if not hasattr(self, "_static_model_base_key"):
+            self._static_model_base_key = None
+        if not hasattr(self, "_static_model_base_features"):
+            self._static_model_base_features = None
+        if not hasattr(self, "_static_model_base_fn"):
+            self._static_model_base_fn = None
+        if not hasattr(self, "_static_model_base_fn_key"):
+            self._static_model_base_fn_key = None
         if not hasattr(self, "_static_model_feature_key"):
             self._static_model_feature_key = None
         if not hasattr(self, "_static_model_feature_fields"):
@@ -289,6 +302,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
     def initialize_subgame(self, *args, **kwargs) -> None:
         super().initialize_subgame(*args, **kwargs)
+        self._static_model_base_key = None
+        self._static_model_base_features = None
         self._prepare_tree_slices()
         self._reset_average_policy_accumulators()
 
@@ -1013,11 +1028,44 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         from p2.models.mlp.better_trm import BetterTRM
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            if isinstance(self.model, BetterTRM):
+            base_model = getattr(self.model, "_orig_mod", self.model)
+            if isinstance(base_model, BetterTRM):
                 model_output = self.model(
                     features, include_policy=False, latent=self.latent
                 )
                 self.latent = model_output.latent
+            elif isinstance(base_model, BetterFFN):
+                model_key = id(base_model)
+                if (
+                    self._static_model_base_fn is None
+                    or self._static_model_base_fn_key != model_key
+                ):
+                    if getattr(self.model, "_orig_mod", None) is not None:
+                        self._static_model_base_fn = torch.compile(
+                            base_model.static_feature_base,
+                            dynamic=True,
+                        )
+                    else:
+                        self._static_model_base_fn = base_model.static_feature_base
+                    self._static_model_base_fn_key = model_key
+                key = (
+                    int(features.context.data_ptr()),
+                    int(features.street.data_ptr()),
+                    int(features.board.data_ptr()),
+                )
+                if (
+                    self._static_model_base_key != key
+                    or self._static_model_base_features is None
+                ):
+                    self._static_model_base_features = self._static_model_base_fn(
+                        features
+                    )
+                    self._static_model_base_key = key
+                model_output = self.model(
+                    features,
+                    include_policy=False,
+                    static_base_features=self._static_model_base_features,
+                )
             else:
                 model_output = self.model(features, include_policy=False)
         hand_values = model_output.hand_values.contiguous()
