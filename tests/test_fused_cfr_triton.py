@@ -978,6 +978,46 @@ def test_fused_sparse_evaluate_cfr_captures_pre_and_post_dcfr_delay(
     assert captures[1][1] > ev.dcfr_delay
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_deferred_average_reach_matches_eager_reach() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    base = _build_evaluator(num_envs=1, depth=2)
+    eager = _clone_evaluator_state(base)
+    deferred = _clone_evaluator_state(base)
+    eager.__class__ = FusedSparseCFREvaluator
+    deferred.__class__ = FusedSparseCFREvaluator
+    eager._ensure_fused_attrs()
+    deferred._ensure_fused_attrs()
+    eager._opt_defer_avg_reach = False
+    deferred._opt_defer_avg_reach = True
+    for ev in (eager, deferred):
+        ev.cfr_iterations = 14
+        ev.warm_start_iterations = 1
+        ev.dcfr_delay = 5
+        ev._record_stats = lambda t, old_policy: None
+
+    eager.evaluate_cfr(training_mode=False)
+    deferred.evaluate_cfr(training_mode=False)
+    torch.cuda.synchronize()
+
+    for name in (
+        "policy_probs_avg",
+        "self_reach_avg",
+        "beliefs_avg",
+        "values_avg",
+        "latest_values",
+    ):
+        torch.testing.assert_close(
+            getattr(deferred, name),
+            getattr(eager, name),
+            rtol=1e-4,
+            atol=1e-5,
+            msg=name,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Kernel 12-14 correctness tests: weighted parent-sum, reach weights, deep beliefs.
 # ---------------------------------------------------------------------------

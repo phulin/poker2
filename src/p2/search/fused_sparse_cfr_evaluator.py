@@ -172,6 +172,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._opt_leaf_feature_cache = _env_flag("P2_FUSED_OPT_LEAF_FEATURE_CACHE")
         self._opt_child_opp_policy = _env_flag("P2_FUSED_OPT_CHILD_OPP_POLICY")
         self._opt_ev_inline_opp = _env_flag("P2_FUSED_OPT_EV_INLINE_OPP")
+        self._opt_defer_avg_reach = _env_flag("P2_FUSED_OPT_DEFER_AVG_REACH")
         self._fused_positive_regrets_valid: bool = False
         self._sample_update_rows: torch.Tensor | None = None
         self._sample_update_counts: torch.Tensor | None = None
@@ -263,6 +264,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._opt_child_opp_policy = _env_flag("P2_FUSED_OPT_CHILD_OPP_POLICY")
         if not hasattr(self, "_opt_ev_inline_opp"):
             self._opt_ev_inline_opp = _env_flag("P2_FUSED_OPT_EV_INLINE_OPP")
+        if not hasattr(self, "_opt_defer_avg_reach"):
+            self._opt_defer_avg_reach = _env_flag("P2_FUSED_OPT_DEFER_AVG_REACH")
         if not hasattr(self, "_fused_positive_regrets_valid"):
             self._fused_positive_regrets_valid = False
         if not hasattr(self, "_sample_update_rows"):
@@ -612,7 +615,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._calculate_reach_weights(self.self_reach, self.policy_probs)
         self._propagate_all_beliefs(self.beliefs, self.self_reach)
 
-        self.update_average_policy(t, update_reach=True)
+        defer_avg_reach = (
+            self._opt_defer_avg_reach
+            and not self.cfr_avg
+            and self.use_final_policy_values
+        )
+        self.update_average_policy(t, update_reach=not defer_avg_reach)
         if self.cfr_avg or not self.use_final_policy_values:
             self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
 
@@ -1350,6 +1358,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             t += 1
 
         if not self.cfr_avg and self.use_final_policy_values:
+            if self._opt_defer_avg_reach:
+                self.self_reach_avg[: self.root_nodes] = 1.0
+                self._calculate_reach_weights(
+                    self.self_reach_avg, self.policy_probs_avg
+                )
             self._refresh_average_beliefs()
 
         if self.use_final_policy_values:
