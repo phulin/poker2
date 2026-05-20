@@ -472,6 +472,29 @@ def test_evaluate_cfr_basic() -> None:
     assert evaluator.values_avg.isfinite().all()
 
 
+def test_variable_stack_root_training_data_is_finite() -> None:
+    device = get_device()
+    env = make_env(2, device=device)
+    env.starting_stacks[:] = torch.tensor([[200, 200], [1500, 1500]], device=device)
+    env.scale[:] = env.starting_stacks[:, 0].to(env.float_dtype)
+    env.stacks[:] = env.starting_stacks
+    env.stacks[torch.arange(env.N, device=device), env.button] -= env.sb
+    env.stacks[torch.arange(env.N, device=device), 1 - env.button] -= env.bb
+
+    evaluator, _, _ = make_sparse_evaluator(env=env, device=device)
+    roots = torch.arange(env.N, device=device)
+    evaluator.initialize_subgame(env, roots)
+    evaluator.evaluate_cfr(training_mode=False)
+
+    value_batch, pre_value_batch, policy_batch = evaluator.training_data(
+        exclude_start=False
+    )
+    assert torch.isfinite(value_batch.value_targets).all()
+    assert torch.isfinite(policy_batch.policy_targets).all()
+    if len(pre_value_batch) > 0:
+        assert torch.isfinite(pre_value_batch.value_targets).all()
+
+
 def test_leaf_mask() -> None:
     """Test that leaf mask is correctly set."""
     device = get_device()

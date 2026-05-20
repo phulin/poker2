@@ -35,10 +35,9 @@ class RebelFeatureEncoder:
         self._combo_lookup = combo_lookup_tensor(device=self.device)
 
     def _pot_fraction(self) -> torch.Tensor:
-        starting = self.env.starting_stacks.to(torch.float32)
-        total_stack = starting.sum(dim=1).clamp(min=1.0)
+        scale = self.env.scale.to(torch.float32).clamp(min=1.0)
         pot = self.env.pot.to(torch.float32)
-        return (pot / total_stack).clamp_(0.0, 10.0)
+        return (pot / scale).clamp_(0.0, 10.0)
 
     def _has_bet_flag(self) -> torch.Tensor:
         """Return [B] float flag: 1.0 if a bet/raise has occurred this round, else 0.0.
@@ -102,10 +101,9 @@ class RebelFeatureEncoder:
         context_features[:, 1] = (to_act - get_env_tensor("button")) % num_players
 
         # Inlined _pot_fraction
-        starting = get_env_tensor("starting_stacks").to(torch.float32)
-        total_stack = starting.sum(dim=1).clamp(min=1.0)
+        scale = get_env_tensor("scale").to(torch.float32).clamp(min=1.0)
         pot = get_env_tensor("pot").to(torch.float32)
-        context_features[:, 2] = (pot / total_stack).clamp_(0.0, 10.0)
+        context_features[:, 2] = (pot / scale).clamp_(0.0, 10.0)
 
         # Inlined _has_bet_flag
         committed = get_env_tensor("committed")

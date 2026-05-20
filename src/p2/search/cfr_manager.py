@@ -71,6 +71,11 @@ class CFRManager:
             debug_step_table=False,
             flop_showdown=env_proto.flop_showdown,
             randomize_stacks=env_proto.randomize_stacks,
+            stack_mode=env_proto.stack_mode,
+            min_stack_bb=env_proto.min_stack_bb,
+            mid_stack_bb=env_proto.mid_stack_bb,
+            max_stack_bb=env_proto.max_stack_bb,
+            high_stack_mass_ratio=env_proto.high_stack_mass_ratio,
         )
 
         self.use_rebel_features = use_rebel_features
@@ -818,11 +823,6 @@ class CFRManager:
         root_avg = (
             res.root_policy_avg_collapsed
             if res.root_policy_avg_collapsed is not None
-            else res.root_policy_collapsed
-        )
-        root_sampled = (
-            res.root_policy_sampled_collapsed
-            if res.root_policy_sampled_collapsed is not None
             else res.root_policy_collapsed
         )
         collapsed_target = res.root_policy_collapsed

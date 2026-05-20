@@ -84,12 +84,15 @@ class BetterFeatureEncoder:
         ) % num_players
         scalar_context[:, ScalarContext.ACTIONS_ROUND.value] = actions_round
         pot = get_env_tensor("pot")
-        scalar_context[:, ScalarContext.POT.value] = pot
-        scalar_context[:, ScalarContext.MIN_RAISE.value] = get_env_tensor("min_raise")
+        scale = get_env_tensor("scale").to(self.dtype).clamp_min(1.0)
+        pot_float = pot.to(self.dtype)
+        scalar_context[:, ScalarContext.POT.value] = pot_float / scale
+        scalar_context[:, ScalarContext.MIN_RAISE.value] = (
+            get_env_tensor("min_raise").to(self.dtype) / scale
+        )
 
         stacks = get_env_tensor("stacks").to(self.dtype)
         committed = get_env_tensor("committed").to(self.dtype)
-        pot = pot.to(self.dtype)
         player_context = torch.zeros(
             N,
             PlayerContext.NUM_PLAYER_CONTEXT.value,
@@ -97,9 +100,11 @@ class BetterFeatureEncoder:
             device=self.device,
             dtype=self.dtype,
         )
-        player_context[:, PlayerContext.STACK.value] = stacks
-        player_context[:, PlayerContext.COMMITTED.value] = committed
-        player_context[:, PlayerContext.SPR.value] = stacks / pot[:, None]
+        player_context[:, PlayerContext.STACK.value] = stacks / scale[:, None]
+        player_context[:, PlayerContext.COMMITTED.value] = committed / scale[:, None]
+        player_context[:, PlayerContext.SPR.value] = (
+            stacks / pot_float.clamp_min(1.0)[:, None]
+        )
 
         street_tensor = get_env_tensor("street")
         street = torch.where(

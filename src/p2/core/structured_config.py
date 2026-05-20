@@ -221,10 +221,16 @@ class ModelConfig:
 
 @dataclass
 class EnvConfig:
-    stack: int = 1000
-    sb: int = 5
-    bb: int = 10
+    stack: int = 10000
+    stack_mode: str = "fixed"
+    min_stack_bb: int = 10
+    mid_stack_bb: int = 200
+    max_stack_bb: int = 400
+    high_stack_mass_ratio: float = 1.0 / 3.0
+    sb: int = 50
+    bb: int = 100
     bet_bins: List[float] = field(default_factory=lambda: [0.5, 0.75, 1.0, 1.5, 2.0])
+    randomize_stacks: bool = False
     debug_step_table: bool = (
         False  # Print debug table during step_bins when batch_size <= 8
     )

@@ -213,6 +213,14 @@ class SelfPlayTrainer:
             float_dtype=self.float_dtype,
             debug_step_table=self.cfg.env.debug_step_table,
             flop_showdown=getattr(self.cfg.env, "flop_showdown", False),
+            randomize_stacks=getattr(self.cfg.env, "randomize_stacks", False),
+            stack_mode=getattr(self.cfg.env, "stack_mode", "fixed"),
+            min_stack_bb=getattr(self.cfg.env, "min_stack_bb", 10),
+            mid_stack_bb=getattr(self.cfg.env, "mid_stack_bb", 200),
+            max_stack_bb=getattr(self.cfg.env, "max_stack_bb", 400),
+            high_stack_mass_ratio=getattr(
+                self.cfg.env, "high_stack_mass_ratio", 1.0 / 3.0
+            ),
         )
 
         if not self.use_tensor_env:

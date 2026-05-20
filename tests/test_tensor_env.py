@@ -16,6 +16,11 @@ def _make_env(
     device=None,
     seed=123,
     randomize_stacks=False,
+    stack_mode="fixed",
+    min_stack_bb=10,
+    mid_stack_bb=200,
+    max_stack_bb=400,
+    high_stack_mass_ratio=1.0 / 3.0,
 ):
     # Create RNG
     if device is None:
@@ -33,6 +38,11 @@ def _make_env(
         device=device,
         rng=rng,
         randomize_stacks=randomize_stacks,
+        stack_mode=stack_mode,
+        min_stack_bb=min_stack_bb,
+        mid_stack_bb=mid_stack_bb,
+        max_stack_bb=max_stack_bb,
+        high_stack_mass_ratio=high_stack_mass_ratio,
     )
     env.reset()
     return env
@@ -44,6 +54,14 @@ def test_n1_reset_and_shapes():
     assert env.deck.shape == (1, 9)
     assert env.deck_pos.shape == (1,)
     assert env.stacks.shape == (1, 2)
+    torch.testing.assert_close(
+        env.starting_stacks,
+        torch.full((1, 2), env.mean_stack, dtype=torch.long, device=env.device),
+    )
+    torch.testing.assert_close(
+        env.scale,
+        torch.full((1,), float(env.mean_stack), dtype=env.float_dtype, device=env.device),
+    )
     assert env.hole_onehot.shape == (1, 2, 2, 4, 13)
     assert env.board_onehot.shape == (1, 5, 4, 13)
     assert env.to_act.item() in (0, 1)
@@ -109,8 +127,10 @@ def test_randomize_stacks_on_reset():
     # Total chips preserved and minimum enforced
     assert torch.all(env.starting_stacks.sum(dim=1) == mean_stack * 2)
     assert torch.all(env.starting_stacks >= min_allowed)
-    # Scale uses p0 starting stack
-    torch.testing.assert_close(env.scale, env.starting_stacks[:, 0].to(env.float_dtype))
+    # Scale uses the effective stack.
+    torch.testing.assert_close(
+        env.scale, env.starting_stacks.min(dim=1).values.to(env.float_dtype)
+    )
     # Stacks after posting blinds are based on sampled stacks
     torch.testing.assert_close(
         env.stacks[env_rows, env.button],
@@ -122,21 +142,115 @@ def test_randomize_stacks_on_reset():
     )
 
 
-def test_rewards_scale_with_p0_starting_stack():
+def test_weighted_uniform_stacks_on_reset():
+    env = _make_env(
+        N=1024,
+        sb=5,
+        bb=10,
+        seed=999,
+        stack_mode="weighted_uniform_bb",
+        min_stack_bb=10,
+        mid_stack_bb=200,
+        max_stack_bb=400,
+        high_stack_mass_ratio=1.0 / 3.0,
+    )
+    min_chips = 10 * env.bb
+    mid_chips = 200 * env.bb
+    max_chips = 400 * env.bb
+    env_rows = torch.arange(env.N, device=env.device)
+
+    assert torch.all(env.starting_stacks >= min_chips)
+    assert torch.all(env.starting_stacks <= max_chips)
+    torch.testing.assert_close(env.starting_stacks[:, 0], env.starting_stacks[:, 1])
+    assert torch.any(env.starting_stacks[:, 0] <= mid_chips)
+    assert torch.any(env.starting_stacks[:, 0] >= mid_chips)
+    high_fraction = (env.starting_stacks[:, 0] >= mid_chips).to(torch.float32).mean()
+    assert 0.20 <= high_fraction.item() <= 0.30
+    assert torch.unique(env.starting_stacks[:, 0]).numel() > 1
+    torch.testing.assert_close(
+        env.scale, env.starting_stacks[:, 0].to(env.float_dtype)
+    )
+    torch.testing.assert_close(
+        env.stacks[env_rows, env.button],
+        env.starting_stacks[env_rows, env.button] - env.sb,
+    )
+    torch.testing.assert_close(
+        env.stacks[env_rows, 1 - env.button],
+        env.starting_stacks[env_rows, 1 - env.button] - env.bb,
+    )
+
+
+def test_weighted_uniform_stacks_reproducible_with_seed():
+    env_a = _make_env(
+        N=16,
+        seed=1234,
+        stack_mode="weighted_uniform_bb",
+        min_stack_bb=10,
+        mid_stack_bb=200,
+        max_stack_bb=400,
+        high_stack_mass_ratio=1.0 / 3.0,
+    )
+    env_b = _make_env(
+        N=16,
+        seed=1234,
+        stack_mode="weighted_uniform_bb",
+        min_stack_bb=10,
+        mid_stack_bb=200,
+        max_stack_bb=400,
+        high_stack_mass_ratio=1.0 / 3.0,
+    )
+
+    torch.testing.assert_close(env_a.starting_stacks, env_b.starting_stacks)
+    torch.testing.assert_close(env_a.scale, env_b.scale)
+
+
+def test_rewards_scale_with_effective_stack():
     env = _make_env(N=1, mean_stack=500, sb=0, bb=0, randomize_stacks=True, seed=1234)
     gain = 25
     env.pot[0] = 0
     env.stacks[0, 0] = env.starting_stacks[0, 0] + gain
     env.stacks[0, 1] = env.starting_stacks[0, 1] - gain
+    env.scale[0] = env.starting_stacks[0].min().to(env.float_dtype)
     reward = env.finish_and_assign_rewards(
         torch.tensor([0], device=env.device), torch.tensor([0], device=env.device)
     )
     expected = torch.tensor(
-        [gain / float(env.starting_stacks[0, 0])],
+        [gain / float(env.scale[0])],
         dtype=env.float_dtype,
         device=env.device,
     )
     torch.testing.assert_close(reward, expected)
+
+
+def test_fold_and_showdown_rewards_use_effective_stack():
+    env = _make_env(N=1, mean_stack=1000, sb=0, bb=0)
+    env.starting_stacks[0] = torch.tensor([500, 500], device=env.device)
+    env.scale[0] = 500
+    env.stacks[0] = torch.tensor([450, 400], device=env.device)
+    env.committed[0] = torch.tensor([50, 100], device=env.device)
+    env.pot[0] = 150
+    env.to_act[0] = 0
+    reward, *_ = env.step(
+        torch.tensor([0], device=env.device),
+        torch.zeros(1, dtype=torch.long, device=env.device),
+    )
+    torch.testing.assert_close(
+        reward,
+        torch.tensor([-0.1], dtype=env.float_dtype, device=env.device),
+    )
+
+    env = _make_env(N=1, mean_stack=1000, sb=0, bb=0)
+    env.starting_stacks[0] = torch.tensor([500, 500], device=env.device)
+    env.scale[0] = 500
+    env.stacks[0] = torch.tensor([0, 400], device=env.device)
+    env.pot[0] = 600
+    reward = env.finish_and_assign_rewards(
+        torch.tensor([0], device=env.device), torch.tensor([0], device=env.device)
+    )
+    torch.testing.assert_close(
+        reward,
+        torch.tensor([0.2], dtype=env.float_dtype, device=env.device),
+    )
 
 
 def test_n1_action_history_logging():

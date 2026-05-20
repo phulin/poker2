@@ -187,6 +187,11 @@ def sample_spots(
     env = trainer.env
     env_config = {
         "mean_stack": env.mean_stack,
+        "stack_mode": env.stack_mode,
+        "min_stack_bb": env.min_stack_bb,
+        "mid_stack_bb": env.mid_stack_bb,
+        "max_stack_bb": env.max_stack_bb,
+        "high_stack_mass_ratio": env.high_stack_mass_ratio,
         "sb": env.sb,
         "bb": env.bb,
         "default_bet_bins": list(env.default_bet_bins),
@@ -249,8 +254,13 @@ def build_pbs_from_spots(
         default_bet_bins=ec["default_bet_bins"],
         device=device,
         float_dtype=float_dtype,
-        flop_showdown=ec["flop_showdown"],
-        randomize_stacks=ec["randomize_stacks"],
+        flop_showdown=ec.get("flop_showdown", False),
+        randomize_stacks=ec.get("randomize_stacks", False),
+        stack_mode=ec.get("stack_mode", "fixed"),
+        min_stack_bb=ec.get("min_stack_bb", 10),
+        mid_stack_bb=ec.get("mid_stack_bb", 200),
+        max_stack_bb=ec.get("max_stack_bb", 400),
+        high_stack_mass_ratio=ec.get("high_stack_mass_ratio", 1.0 / 3.0),
     )
     for name in ENV_STATE_FIELDS:
         getattr(env, name).copy_(spots[name][idx_t].to(device))

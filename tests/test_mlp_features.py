@@ -191,6 +191,62 @@ def test_better_feature_encoder_empty_indices():
     assert features.beliefs.shape == (0, 2 * NUM_HANDS)
 
 
+def test_better_feature_encoder_normalizes_chip_context_by_effective_stack():
+    env = make_env(1)
+    env.starting_stacks[0] = torch.tensor([500, 500], device=env.device)
+    env.scale[0] = 500
+    env.stacks[0] = torch.tensor([450, 400], device=env.device)
+    env.committed[0] = torch.tensor([50, 100], device=env.device)
+    env.pot[0] = 150
+    env.min_raise[0] = 20
+
+    encoder = BetterFeatureEncoder(env, device=env.device, dtype=torch.float32)
+    beliefs = torch.full(
+        (1, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
+    )
+
+    context = encoder.encode(beliefs).context
+    scalar_count = ScalarContext.NUM_SCALAR_CONTEXT.value
+    num_players = 2
+
+    torch.testing.assert_close(
+        context[:, ScalarContext.POT.value],
+        torch.tensor([0.3], dtype=torch.float32, device=env.device),
+    )
+    torch.testing.assert_close(
+        context[:, ScalarContext.MIN_RAISE.value],
+        torch.tensor([0.04], dtype=torch.float32, device=env.device),
+    )
+
+    def player_ctx(field: PlayerContext, player: int) -> torch.Tensor:
+        return context[:, scalar_count + field.value * num_players + player]
+
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.STACK, 0),
+        torch.tensor([0.9], dtype=torch.float32, device=env.device),
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.STACK, 1),
+        torch.tensor([0.8], dtype=torch.float32, device=env.device),
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.COMMITTED, 0),
+        torch.tensor([0.1], dtype=torch.float32, device=env.device),
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.COMMITTED, 1),
+        torch.tensor([0.2], dtype=torch.float32, device=env.device),
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.SPR, 0),
+        torch.tensor([3.0], dtype=torch.float32, device=env.device),
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.SPR, 1),
+        torch.tensor([400.0 / 150.0], dtype=torch.float32, device=env.device),
+    )
+
+
 def _expected_remap(suit_permutation: torch.Tensor) -> torch.Tensor:
     device = suit_permutation.device
     hand_combos = hand_combos_tensor(device=device)

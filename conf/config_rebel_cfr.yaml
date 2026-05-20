@@ -66,9 +66,14 @@ model:
   num_supervisions: 16
 
 env:
-  stack: 1000
-  sb: 5
-  bb: 10
+  stack: 10000
+  stack_mode: weighted_uniform_bb
+  min_stack_bb: 10
+  mid_stack_bb: 200
+  max_stack_bb: 400
+  high_stack_mass_ratio: 0.3333333333333333
+  sb: 50
+  bb: 100
   bet_bins: [0.5, 1.0]
 
 search:

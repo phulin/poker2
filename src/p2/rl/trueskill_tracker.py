@@ -106,6 +106,12 @@ class TrueSkillTracker:
             device=device,
             float_dtype=torch.float32,
             flop_showdown=cfg.env.flop_showdown,
+            randomize_stacks=cfg.env.randomize_stacks,
+            stack_mode=cfg.env.stack_mode,
+            min_stack_bb=cfg.env.min_stack_bb,
+            mid_stack_bb=cfg.env.mid_stack_bb,
+            max_stack_bb=cfg.env.max_stack_bb,
+            high_stack_mass_ratio=cfg.env.high_stack_mass_ratio,
         )
 
         # Build matchup evaluators that mirror the trainer's data-generator

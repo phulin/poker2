@@ -237,6 +237,11 @@ class VectorizedReplayBuffer:
             float_dtype=float_dtype,
             flop_showdown=cfg.env.flop_showdown,
             randomize_stacks=getattr(cfg.env, "randomize_stacks", False),
+            stack_mode=cfg.env.stack_mode,
+            min_stack_bb=cfg.env.min_stack_bb,
+            mid_stack_bb=cfg.env.mid_stack_bb,
+            max_stack_bb=cfg.env.max_stack_bb,
+            high_stack_mass_ratio=cfg.env.high_stack_mass_ratio,
         )
 
     def start_adding_trajectory_batches(
@@ -432,6 +437,11 @@ class VectorizedReplayBuffer:
                 float_dtype=self.snapshot_env.float_dtype,
                 flop_showdown=self.snapshot_env.flop_showdown,
                 randomize_stacks=self.snapshot_env.randomize_stacks,
+                stack_mode=self.snapshot_env.stack_mode,
+                min_stack_bb=self.snapshot_env.min_stack_bb,
+                mid_stack_bb=self.snapshot_env.mid_stack_bb,
+                max_stack_bb=self.snapshot_env.max_stack_bb,
+                high_stack_mass_ratio=self.snapshot_env.high_stack_mass_ratio,
             )
             # (debug snapshot zeroing removed)
             temp_indices = torch.arange(k_valid * T, device=self.device)
