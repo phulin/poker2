@@ -101,7 +101,6 @@ class RebelCFREvaluator(CFREvaluator):
         value_targets_from_final_policy: bool = False,
         allin_call_terminal_abstraction: bool = True,
         preflop_allin_table_path: str | None = None,
-        precompute_flop_allin_tables: bool = False,
     ):
         assert warm_start_iterations < cfr_iterations
 
@@ -135,7 +134,6 @@ class RebelCFREvaluator(CFREvaluator):
         self.use_final_policy_values = value_targets_from_final_policy
         self.allin_call_terminal_abstraction = allin_call_terminal_abstraction
         self.preflop_allin_table_path = preflop_allin_table_path
-        self.precompute_flop_allin_tables = precompute_flop_allin_tables
 
         self.num_players = 2
         self.num_actions = len(bet_bins) + 3

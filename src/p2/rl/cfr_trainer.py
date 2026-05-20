@@ -263,7 +263,6 @@ class RebelCFRTrainer:
                 value_targets_from_final_policy=self.cfg.search.value_targets_from_final_policy,
                 allin_call_terminal_abstraction=self.cfg.search.allin_call_terminal_abstraction,
                 preflop_allin_table_path=self.cfg.search.preflop_allin_table_path,
-                precompute_flop_allin_tables=self.cfg.search.precompute_flop_allin_tables,
             )
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,

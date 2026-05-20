@@ -44,10 +44,9 @@ from p2.models.mlp.better_ffn import BetterFFN
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.search.allin_payoff import (
     FLOP_I8_SCALE,
+    I16_SCALE,
     _flop_combination_index_tensor,
-    compute_postflop_payoff_quantized_triton_batched,
     write_allin_table_values_triton_,
-    write_turn_allin_values_triton_,
 )
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_with_tensors_,
@@ -1297,47 +1296,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         node_idx = indices_by_street[1]
         if node_idx.numel() > 0:
             flop_boards = boards_by_street[1][:, :3].long().sort(dim=1).values
-            if resolver._flop_i8 is not None:
-                actual_to_canon, actual_perm, combo_perms = resolver.flop_lookup_tensors()
-                actual_idx = _flop_combination_index_tensor(flop_boards)
-                canon_ids = actual_to_canon[actual_idx]
-                perm_ids = actual_perm[actual_idx]
-                write_allin_table_values_triton_(
-                    table=resolver._flop_i8,
-                    beliefs=beliefs,
-                    node_indices=node_idx,
-                    latest_values=self.latest_values,
-                    stacks=self.env.stacks,
-                    pot=self.env.pot,
-                    starting_stacks=self.env.starting_stacks,
-                    env_scale=self.env.scale,
-                    table_scale=FLOP_I8_SCALE,
-                    canon_ids=canon_ids,
-                    perm_ids=perm_ids,
-                    combo_perms=combo_perms,
-                )
-            else:
-                tables = compute_postflop_payoff_quantized_triton_batched(
-                    flop_boards,
-                    dtype=torch.int8,
-                )
-                write_allin_table_values_triton_(
-                    table=tables,
-                    beliefs=beliefs,
-                    node_indices=node_idx,
-                    latest_values=self.latest_values,
-                    stacks=self.env.stacks,
-                    pot=self.env.pot,
-                    starting_stacks=self.env.starting_stacks,
-                    env_scale=self.env.scale,
-                    table_scale=FLOP_I8_SCALE,
-                    batch_table=True,
-                )
-
-        node_idx = indices_by_street[2]
-        if node_idx.numel() > 0:
-            write_turn_allin_values_triton_(
-                boards=boards_by_street[2],
+            if resolver._flop_i8 is None:
+                raise RuntimeError("Fused all-in flop evaluation requires cached CUDA flop tables.")
+            actual_to_canon, actual_perm, combo_perms = resolver.flop_lookup_tensors()
+            actual_idx = _flop_combination_index_tensor(flop_boards)
+            canon_ids = actual_to_canon[actual_idx]
+            perm_ids = actual_perm[actual_idx]
+            write_allin_table_values_triton_(
+                table=resolver._flop_i8,
                 beliefs=beliefs,
                 node_indices=node_idx,
                 latest_values=self.latest_values,
@@ -1345,6 +1311,29 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 pot=self.env.pot,
                 starting_stacks=self.env.starting_stacks,
                 env_scale=self.env.scale,
+                table_scale=FLOP_I8_SCALE,
+                canon_ids=canon_ids,
+                perm_ids=perm_ids,
+                combo_perms=combo_perms,
+            )
+
+        node_idx = indices_by_street[2]
+        if node_idx.numel() > 0:
+            turn_tables = getattr(self, "allin_turn_tables_i16", None)
+            turn_ids = getattr(self, "allin_turn_table_ids", None)
+            if turn_tables is None or turn_ids is None or turn_tables.numel() == 0:
+                raise RuntimeError("Fused all-in turn evaluation requires cached turn tables.")
+            write_allin_table_values_triton_(
+                table=turn_tables,
+                beliefs=beliefs,
+                node_indices=node_idx,
+                latest_values=self.latest_values,
+                stacks=self.env.stacks,
+                pot=self.env.pot,
+                starting_stacks=self.env.starting_stacks,
+                env_scale=self.env.scale,
+                table_scale=I16_SCALE,
+                canon_ids=turn_ids,
             )
 
     # ------------------------------------------------------------------

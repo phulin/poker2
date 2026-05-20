@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import itertools
+import hashlib
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -28,6 +30,9 @@ except ImportError:  # pragma: no cover - optional dependency
 
 FLOP_I8_SCALE = 127.0
 I16_SCALE = 32768.0
+_CACHE_VERSION = 1
+_FLOP_CACHE_NAME = f"canonical_flop_i8_v{_CACHE_VERSION}.pt"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _rank_hands(board: torch.Tensor) -> torch.Tensor:
@@ -210,21 +215,153 @@ def precompute_canonical_flop_tables_i8(device: torch.device) -> torch.Tensor:
     return out
 
 
-def load_preflop_payoff_i16(path: str | Path, device: torch.device) -> torch.Tensor:
-    path = Path(path)
-    data = path.read_bytes()
+def _allin_cache_dir() -> Path:
+    root = os.environ.get("P2_ALLIN_CACHE_DIR")
+    if root:
+        return Path(root).expanduser()
+    return _REPO_ROOT / "outputs" / "allin_cache"
+
+
+def _atomic_torch_save(payload: dict[str, object], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    torch.save(payload, tmp)
+    tmp.replace(path)
+
+
+def _device_cache_key(device: torch.device) -> str:
+    if device.type == "cuda":
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        return f"cuda:{index}"
+    return str(device)
+
+
+def _validate_payoff_tensor(
+    tensor: torch.Tensor,
+    *,
+    name: str,
+    dtype: torch.dtype,
+    shape: tuple[int, ...],
+) -> torch.Tensor:
+    if tensor.dtype != dtype or tuple(tensor.shape) != shape:
+        raise ValueError(
+            f"{name} cache tensor must be shape={shape} dtype={dtype}; "
+            f"got shape={tuple(tensor.shape)} dtype={tensor.dtype}"
+        )
+    return tensor.contiguous()
+
+
+_FLOP_I8_CACHE: dict[int, torch.Tensor] = {}
+
+
+def canonical_flop_tables_i8(device: torch.device) -> torch.Tensor | None:
+    """Process-local canonical flop payoff table cache.
+
+    CUDA evaluators always use the precomputed canonical flop table. CPU
+    evaluators keep the existing per-board eager fallback to avoid forcing a
+    multi-GB host allocation.
+    """
+    if device.type != "cuda":
+        return None
+    key = device.index if device.index is not None else torch.cuda.current_device()
+    table = _FLOP_I8_CACHE.get(key)
+    if table is None:
+        cache_path = _allin_cache_dir() / _FLOP_CACHE_NAME
+        if cache_path.exists():
+            payload = torch.load(cache_path, map_location=device, weights_only=False)
+            table = _validate_payoff_tensor(
+                payload["flop_i8"],
+                name=str(cache_path),
+                dtype=torch.int8,
+                shape=(canonical_flop_data_cpu()[0].shape[0], NUM_HANDS, NUM_HANDS),
+            )
+            _FLOP_I8_CACHE[key] = table
+            return table
+        table = precompute_canonical_flop_tables_i8(device)
+        _atomic_torch_save(
+            {
+                "flop_i8": table.cpu(),
+                "metadata": {
+                    "version": _CACHE_VERSION,
+                    "scale": FLOP_I8_SCALE,
+                    "num_hands": NUM_HANDS,
+                    "canonical_flops": canonical_flop_data_cpu()[0],
+                },
+            },
+            cache_path,
+        )
+        _FLOP_I8_CACHE[key] = table
+    return table
+
+
+_PREFLOP_I16_CACHE: dict[tuple[str, int, int, str], torch.Tensor] = {}
+
+
+def _preflop_cache_path(path: Path, size: int, mtime_ns: int) -> Path:
+    source = str(path.expanduser().resolve())
+    digest = hashlib.sha256(f"{source}:{size}:{mtime_ns}".encode()).hexdigest()[:16]
+    return _allin_cache_dir() / f"preflop_i16_v{_CACHE_VERSION}_{digest}.pt"
+
+
+def _load_preflop_source_cpu(path: Path) -> torch.Tensor:
     if path.suffix == ".zst":
         import io
 
         import zstandard as zstd
 
-        data = zstd.ZstdDecompressor().decompress(data)
-        payload = torch.load(io.BytesIO(data), map_location=device, weights_only=False)
+        data = zstd.ZstdDecompressor().decompress(path.read_bytes())
+        payload = torch.load(io.BytesIO(data), map_location="cpu", weights_only=False)
     else:
-        payload = torch.load(path, map_location=device, weights_only=False)
+        payload = torch.load(path, map_location="cpu", weights_only=False)
     if "payoff_i16" not in payload:
         raise KeyError(f"{path} does not contain payoff_i16")
-    return payload["payoff_i16"].to(device=device, dtype=torch.int16).contiguous()
+    return _validate_payoff_tensor(
+        payload["payoff_i16"],
+        name=str(path),
+        dtype=torch.int16,
+        shape=(NUM_HANDS, NUM_HANDS),
+    )
+
+
+def load_preflop_payoff_i16(path: str | Path, device: torch.device) -> torch.Tensor:
+    path = Path(path).expanduser()
+    stat = path.stat()
+    device_key = _device_cache_key(device)
+    source_key = str(path.resolve())
+    key = (source_key, int(stat.st_size), int(stat.st_mtime_ns), device_key)
+    cached = _PREFLOP_I16_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    cache_path = _preflop_cache_path(path, int(stat.st_size), int(stat.st_mtime_ns))
+    if cache_path.exists():
+        payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+        table_cpu = _validate_payoff_tensor(
+            payload["payoff_i16"],
+            name=str(cache_path),
+            dtype=torch.int16,
+            shape=(NUM_HANDS, NUM_HANDS),
+        )
+    else:
+        table_cpu = _load_preflop_source_cpu(path)
+        _atomic_torch_save(
+            {
+                "payoff_i16": table_cpu,
+                "metadata": {
+                    "version": _CACHE_VERSION,
+                    "source": source_key,
+                    "source_size": int(stat.st_size),
+                    "source_mtime_ns": int(stat.st_mtime_ns),
+                    "scale": I16_SCALE,
+                    "num_hands": NUM_HANDS,
+                },
+            },
+            cache_path,
+        )
+
+    table = table_cpu.to(device=device, dtype=torch.int16).contiguous()
+    _PREFLOP_I16_CACHE[key] = table
+    return table
 
 
 class AllInPayoffResolver:
@@ -235,16 +372,11 @@ class AllInPayoffResolver:
         *,
         device: torch.device,
         preflop_table_path: str | Path | None = None,
-        precompute_flops: bool = False,
     ) -> None:
         self.device = device
         self.preflop_table_path = preflop_table_path
         self._preflop_i16: torch.Tensor | None = None
-        self._flop_i8: torch.Tensor | None = (
-            precompute_canonical_flop_tables_i8(device)
-            if precompute_flops and device.type == "cuda"
-            else None
-        )
+        self._flop_i8: torch.Tensor | None = canonical_flop_tables_i8(device)
         self._turn_cache: dict[tuple[int, ...], torch.Tensor] = {}
         self._flop_cache: dict[tuple[int, int, int], torch.Tensor] = {}
         self._actual_to_canon_device: torch.Tensor | None = None
@@ -381,7 +513,7 @@ def _flop_combination_index_tensor(flop: torch.Tensor) -> torch.Tensor:
 if triton is not None:
 
     @triton.jit
-    def _allin_table_values_kernel(
+    def _allin_table_values_both_players_kernel(
         table,
         beliefs,
         node_indices,
@@ -404,16 +536,17 @@ if triton is not None:
         HAS_PERM: tl.constexpr,
     ):
         m = tl.program_id(0)
-        player = tl.program_id(1)
-        bh = tl.program_id(2)
+        bh = tl.program_id(1)
         h = bh * BH + tl.arange(0, BH)
         hmask = h < H
         node = tl.load(node_indices + m)
-        opp = 1 - player
 
-        denom = tl.zeros((BH,), tl.float32)
-        numer = tl.zeros((BH,), tl.float32)
+        denom0 = tl.zeros((BH,), tl.float32)
+        numer0 = tl.zeros((BH,), tl.float32)
+        denom1 = tl.zeros((BH,), tl.float32)
+        numer1 = tl.zeros((BH,), tl.float32)
         hero_table = h
+        perm_id = tl.full((), 0, tl.int64)
         if HAS_PERM:
             perm_id = tl.load(perm_ids + m)
             hero_table = tl.load(combo_perms + perm_id * H + h, mask=hmask, other=0)
@@ -427,36 +560,49 @@ if triton is not None:
         for k0 in range(0, H, BK):
             k = k0 + tl.arange(0, BK)
             kmask = k < H
-            belief = tl.load(
-                beliefs + (node * 2 + opp) * H + k,
+            belief0 = tl.load(
+                beliefs + (node * 2) * H + k,
+                mask=kmask,
+                other=0.0,
+            ).to(tl.float32)
+            belief1 = tl.load(
+                beliefs + (node * 2 + 1) * H + k,
                 mask=kmask,
                 other=0.0,
             ).to(tl.float32)
             opp_table = k
             if HAS_PERM:
-                perm_id = tl.load(perm_ids + m)
                 opp_table = tl.load(combo_perms + perm_id * H + k, mask=kmask, other=0)
-            pair_ok = tl.load(
-                compatible + h[:, None] * H + k[None, :],
-                mask=hmask[:, None] & kmask[None, :],
-                other=0,
-            ).to(tl.int1)
             q = tl.load(
                 table + table_base + hero_table[:, None] * H + opp_table[None, :],
                 mask=hmask[:, None] & kmask[None, :],
                 other=0,
             ).to(tl.float32)
-            b = tl.where(pair_ok, belief[None, :], 0.0)
-            denom += tl.sum(b, axis=1)
-            numer += tl.sum((q / TABLE_SCALE) * b, axis=1)
+            q = q / TABLE_SCALE
+            pair_ok = tl.load(
+                compatible + h[:, None] * H + k[None, :],
+                mask=hmask[:, None] & kmask[None, :],
+                other=0,
+            ).to(tl.int1)
+            b0 = tl.where(pair_ok, belief0[None, :], 0.0)
+            b1 = tl.where(pair_ok, belief1[None, :], 0.0)
+            denom0 += tl.sum(b1, axis=1)
+            numer0 += tl.sum(q * b1, axis=1)
+            denom1 += tl.sum(b0, axis=1)
+            numer1 += tl.sum(q * b0, axis=1)
 
-        ev = tl.where(denom > 1.0e-8, numer / denom, 0.0)
-        stack = tl.load(stacks + node * 2 + player).to(tl.float32)
+        ev0 = tl.where(denom0 > 1.0e-8, numer0 / denom0, 0.0)
+        ev1 = tl.where(denom1 > 1.0e-8, numer1 / denom1, 0.0)
         p = tl.load(pot + node).to(tl.float32)
-        start = tl.load(starting_stacks + node * 2 + player).to(tl.float32)
         sc = tl.load(env_scale + node).to(tl.float32)
-        ev *= (stack + p - start) / tl.maximum(sc, 1.0e-8)
-        tl.store(latest_values + (node * 2 + player) * H + h, ev, mask=hmask)
+        stack0 = tl.load(stacks + node * 2).to(tl.float32)
+        stack1 = tl.load(stacks + node * 2 + 1).to(tl.float32)
+        start0 = tl.load(starting_stacks + node * 2).to(tl.float32)
+        start1 = tl.load(starting_stacks + node * 2 + 1).to(tl.float32)
+        ev0 *= (stack0 + p - start0) / tl.maximum(sc, 1.0e-8)
+        ev1 *= (stack1 + p - start1) / tl.maximum(sc, 1.0e-8)
+        tl.store(latest_values + (node * 2) * H + h, ev0, mask=hmask)
+        tl.store(latest_values + (node * 2 + 1) * H + h, ev1, mask=hmask)
 
 
     @triton.jit
@@ -867,8 +1013,8 @@ def write_allin_table_values_triton_(
     if node_indices.numel() == 0:
         return
     device = beliefs.device
-    compatible = combo_compatible_tensor(device=device).contiguous()
     empty = torch.empty(0, dtype=torch.long, device=device)
+    compatible = combo_compatible_tensor(device=device).contiguous()
     has_canon = canon_ids is not None
     has_perm = perm_ids is not None
     if canon_ids is None:
@@ -877,8 +1023,8 @@ def write_allin_table_values_triton_(
         perm_ids = empty
     if combo_perms is None:
         combo_perms = empty
-    grid = (node_indices.numel(), 2, triton.cdiv(NUM_HANDS, block_h))
-    _allin_table_values_kernel[grid](
+    grid = (node_indices.numel(), triton.cdiv(NUM_HANDS, block_h))
+    _allin_table_values_both_players_kernel[grid](
         table.contiguous(),
         beliefs.contiguous(),
         node_indices.contiguous(),

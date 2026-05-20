@@ -24,7 +24,12 @@ from p2.models.mlp.better_trm import BetterTRM
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from p2.models.model_output import TRMLatent
-from p2.search.allin_payoff import AllInPayoffResolver
+from p2.search.allin_payoff import (
+    I16_SCALE,
+    AllInPayoffResolver,
+    allin_values_from_payoff_batch,
+    compute_postflop_payoff_quantized_triton_batched,
+)
 from p2.rl.rebel_batch import RebelBatch
 from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.utils.model_utils import compute_masked_logits
@@ -320,13 +325,6 @@ class CFREvaluator(ABC):
                     "preflop_allin_table_path",
                     getattr(self, "preflop_allin_table_path", None),
                 ),
-                precompute_flops=bool(
-                    getattr(
-                        search_cfg,
-                        "precompute_flop_allin_tables",
-                        getattr(self, "precompute_flop_allin_tables", False),
-                    )
-                ),
             )
             self.allin_payoff_resolver = resolver
         return resolver
@@ -348,6 +346,10 @@ class CFREvaluator(ABC):
             torch.empty(0, 5, dtype=torch.long, device=self.device),
             torch.empty(0, 5, dtype=torch.long, device=self.device),
         )
+        self.allin_turn_tables_i16 = torch.empty(
+            0, NUM_HANDS, NUM_HANDS, dtype=torch.int16, device=self.device
+        )
+        self.allin_turn_table_ids = empty
         self.allin_call_mask = torch.zeros(
             self.total_nodes, dtype=torch.bool, device=self.device
         )
@@ -398,6 +400,10 @@ class CFREvaluator(ABC):
             self.allin_call_indices_by_street = (empty, empty, empty)
             self.allin_call_parent_indices_by_street = (empty, empty, empty)
             self.allin_call_boards_by_street = (empty_boards, empty_boards, empty_boards)
+            self.allin_turn_tables_i16 = torch.empty(
+                0, NUM_HANDS, NUM_HANDS, dtype=torch.int16, device=self.device
+            )
+            self.allin_turn_table_ids = empty
             return
 
         boards = self.env.board_indices[self.allin_call_parent_indices].long()
@@ -419,6 +425,29 @@ class CFREvaluator(ABC):
             boards[street1].contiguous(),
             boards[street2].contiguous(),
         )
+        self._cache_allin_turn_tables()
+
+    def _cache_allin_turn_tables(self) -> None:
+        empty = torch.empty(0, dtype=torch.long, device=self.device)
+        turn_boards = self.allin_call_boards_by_street[2][:, :4].long().contiguous()
+        if turn_boards.numel() == 0 or self.device.type != "cuda":
+            self.allin_turn_tables_i16 = torch.empty(
+                0, NUM_HANDS, NUM_HANDS, dtype=torch.int16, device=self.device
+            )
+            self.allin_turn_table_ids = empty
+            return
+
+        unique_boards, inverse = torch.unique(
+            turn_boards,
+            dim=0,
+            sorted=True,
+            return_inverse=True,
+        )
+        self.allin_turn_tables_i16 = compute_postflop_payoff_quantized_triton_batched(
+            unique_boards,
+            dtype=torch.int16,
+        ).contiguous()
+        self.allin_turn_table_ids = inverse.contiguous()
 
     def _allin_call_child_mask(
         self,
@@ -524,11 +553,24 @@ class CFREvaluator(ABC):
 
         node_idx = indices_by_street[2]
         if node_idx.numel() > 0:
-            values = resolver.values_for_boards(
-                street=2,
-                boards=boards_by_street[2],
-                beliefs=beliefs[node_idx],
-            )
+            turn_tables = getattr(self, "allin_turn_tables_i16", None)
+            turn_ids = getattr(self, "allin_turn_table_ids", None)
+            if (
+                turn_tables is not None
+                and turn_ids is not None
+                and turn_tables.numel() > 0
+            ):
+                values = allin_values_from_payoff_batch(
+                    turn_tables.index_select(0, turn_ids),
+                    beliefs[node_idx],
+                    scale=I16_SCALE,
+                )
+            else:
+                values = resolver.values_for_boards(
+                    street=2,
+                    boards=boards_by_street[2],
+                    beliefs=beliefs[node_idx],
+                )
             self._write_scaled_allin_values(node_idx, values)
 
     def _write_scaled_allin_values(self, node_idx: torch.Tensor, values: torch.Tensor) -> None:
