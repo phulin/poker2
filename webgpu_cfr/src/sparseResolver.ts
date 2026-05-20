@@ -74,7 +74,13 @@ interface SparseStaticGpuData {
 
 interface SparseTreeCacheEntry {
   tree: SparseTree;
+  initialStates: Map<string, SparseInitialState>;
   gpu?: SparseStaticGpuData;
+}
+
+interface SparseInitialState {
+  policy: Float32Array;
+  beliefs: Float32Array;
 }
 
 export interface SparseResolveOptions {
@@ -130,7 +136,18 @@ export class SparseCfrResolver {
     this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
     this.copyBeliefsToNode(rootBeliefs, beliefsAvg, 0);
 
-    await this.initializePolicyAndBeliefs(tree, rootBeliefs, policy, beliefs);
+    const initialStateKey = this.beliefsCacheKey(rootBeliefs);
+    const cachedInitialState = cachedTree.initialStates.get(initialStateKey);
+    if (cachedInitialState) {
+      policy.set(cachedInitialState.policy);
+      beliefs.set(cachedInitialState.beliefs);
+    } else {
+      await this.initializePolicyAndBeliefs(tree, rootBeliefs, policy, beliefs);
+      cachedTree.initialStates.set(initialStateKey, {
+        policy: new Float32Array(policy),
+        beliefs: new Float32Array(beliefs),
+      });
+    }
     policyAvg.set(policy);
     beliefsAvg.set(beliefs);
 
@@ -226,7 +243,7 @@ export class SparseCfrResolver {
     const cached = this.treeCache.get(key);
     if (cached) return cached;
     const tree = this.buildTree(rootEnv, maxDepth);
-    const entry: SparseTreeCacheEntry = { tree };
+    const entry: SparseTreeCacheEntry = { tree, initialStates: new Map() };
     if (this.gpuKernels) {
       entry.gpu = this.createStaticGpuData(tree);
     }
@@ -297,6 +314,12 @@ export class SparseCfrResolver {
       rootEnv.boardIndices,
       rootEnv.holeIndices,
     ]);
+  }
+
+  private beliefsCacheKey(beliefs: Float32Array<ArrayBuffer>): string {
+    return Array.from(
+      new Uint32Array(beliefs.buffer, beliefs.byteOffset, beliefs.length),
+    ).join(",");
   }
 
   private buildTree(rootEnv: PublicHunlEnv, maxDepth: number): SparseTree {
