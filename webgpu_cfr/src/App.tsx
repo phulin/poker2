@@ -17,7 +17,7 @@ import {
 import { parseBetterFfnManifest, resolveCfrDefaults } from "./modelFormat.js";
 import { loadModelBytesWithCache, type ModelCacheProgress } from "./modelCache.js";
 import { formatCard, handComboIndex, handComboCards } from "./cards.js";
-import { PublicHunlEnv, NUM_HANDS } from "./hunlEnv.js";
+import { PublicHunlEnv, NUM_HANDS, type LegalBins } from "./hunlEnv.js";
 import type {
   BetterFfnManifest,
   BrowserEvaluationResult,
@@ -36,16 +36,26 @@ interface Runtime {
   cached: boolean;
 }
 
+interface ActionContext {
+  amounts: number[];
+  toCall: number;
+  meCommitted: number;
+  stack: number;
+  allInIndex: number;
+}
+
 interface ActionRow {
   action: number;
   actor: PlayerIndex;
   legalMask: number[];
+  context: ActionContext;
 }
 
 interface StateDescriptor {
   rows: ActionRow[];
   finalActor: PlayerIndex;
   finalLegalMask: number[];
+  finalContext: ActionContext;
 }
 
 interface SolveResult {
@@ -66,6 +76,41 @@ interface RangeSummary {
 
 function asPlayer(value: string): PlayerIndex {
   return value === "1" ? 1 : 0;
+}
+
+function contextFromEnv(env: PublicHunlEnv, legal: LegalBins): ActionContext {
+  const me = env.toAct;
+  const opp = (1 - me) as PlayerIndex;
+  return {
+    amounts: [...legal.amounts],
+    toCall: env.committed[opp] - env.committed[me],
+    meCommitted: env.committed[me],
+    stack: env.stacks[me],
+    allInIndex: legal.amounts.length - 1,
+  };
+}
+
+function formatChips(amount: number): string {
+  if (!Number.isFinite(amount)) return "?";
+  const rounded = Math.round(amount * 100) / 100;
+  if (Number.isInteger(rounded)) return rounded.toString();
+  return rounded.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function formatActionLabel(bin: number, ctx: ActionContext): string {
+  if (bin === 0) return "Fold";
+  if (bin === 1) {
+    return ctx.toCall > 0 ? `Call ${formatChips(ctx.toCall)}` : "Check";
+  }
+  if (bin === ctx.allInIndex) return "All-in";
+  const amount = ctx.amounts[bin] ?? -1;
+  if (amount < 0) return `Bin ${bin}`;
+  if (amount >= ctx.stack) return "All-in";
+  if (ctx.toCall > 0) {
+    const raiseTo = ctx.meCommitted + amount;
+    return `Raise to ${formatChips(raiseTo)}`;
+  }
+  return `Bet ${formatChips(amount)}`;
 }
 
 function positiveNumber(value: string, fallback: number): number {
@@ -198,7 +243,12 @@ function App(): JSX.Element {
       const rows: ActionRow[] = [];
       for (const action of actions()) {
         const legal = env.legalBinsAmountAndMask();
-        rows.push({ action, actor: env.toAct, legalMask: legal.mask });
+        rows.push({
+          action,
+          actor: env.toAct,
+          legalMask: legal.mask,
+          context: contextFromEnv(env, legal),
+        });
         if (!legal.mask[action]) {
           throw new Error(`Action ${action} is no longer legal`);
         }
@@ -209,6 +259,7 @@ function App(): JSX.Element {
         rows,
         finalActor: env.toAct,
         finalLegalMask: finalLegal.mask,
+        finalContext: contextFromEnv(env, finalLegal),
       };
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
@@ -312,7 +363,10 @@ function App(): JSX.Element {
     }
   }
 
-  function actionName(index: number): string {
+  function actionName(index: number, context?: ActionContext): string {
+    if (context) {
+      return formatActionLabel(index, context);
+    }
     return manifestActionLabels()[index] ?? `action_${index}`;
   }
 
@@ -473,7 +527,9 @@ function App(): JSX.Element {
                       onChange={(event) => setActionAt(index(), Number(event.currentTarget.value))}
                     >
                       <For each={legalActions(row.legalMask)}>
-                        {(action) => <option value={String(action)}>{actionName(action)}</option>}
+                        {(action) => (
+                          <option value={String(action)}>{actionName(action, row.context)}</option>
+                        )}
                       </For>
                     </select>
                     <button
@@ -492,7 +548,7 @@ function App(): JSX.Element {
                   {(action) => (
                     <button type="button" onClick={() => addAction(action)}>
                       <Plus size={15} />
-                      <span>{actionName(action)}</span>
+                      <span>{actionName(action, (descriptor() as StateDescriptor).finalContext)}</span>
                     </button>
                   )}
                 </For>
@@ -551,6 +607,7 @@ function App(): JSX.Element {
                   labels={solved().result.actionLabels}
                   legalMask={solved().result.legalMask}
                   actionProbs={solved().result.actionProbs}
+                  context={(descriptor() as StateDescriptor).finalContext}
                 />
 
                 <HeroPolicy
@@ -560,6 +617,7 @@ function App(): JSX.Element {
                   handIndex={solved().heroHandIndex}
                   actor={solved().result.actor}
                   heroPlayer={heroPlayer()}
+                  context={(descriptor() as StateDescriptor).finalContext}
                 />
 
                 <RangeSummaryView summary={solved().villainSummary} />
@@ -576,6 +634,7 @@ function StrategyTable(props: {
   labels: readonly string[];
   legalMask: readonly number[];
   actionProbs: Float32Array<ArrayBufferLike>;
+  context?: ActionContext;
 }): JSX.Element {
   return (
     <table class="strategy-table">
@@ -590,7 +649,7 @@ function StrategyTable(props: {
         <For each={props.labels}>
           {(label, index) => (
             <tr class={props.legalMask[index()] ? "" : "muted-row"}>
-              <td>{label}</td>
+              <td>{props.context ? formatActionLabel(index(), props.context) : label}</td>
               <td>{props.legalMask[index()] ? "yes" : "no"}</td>
               <td>{formatPercent(props.actionProbs[index()] ?? 0)}</td>
             </tr>
@@ -608,11 +667,12 @@ function HeroPolicy(props: {
   handIndex: number;
   actor: PlayerIndex;
   heroPlayer: PlayerIndex;
+  context?: ActionContext;
 }): JSX.Element {
   const row = createMemo(() => {
     const offset = props.handIndex * props.labels.length;
     return props.labels.map((label, index) => ({
-      label,
+      label: props.context ? formatActionLabel(index, props.context) : label,
       legal: props.legalMask[index] ?? 0,
       value: props.policy[offset + index] ?? 0,
     }));
