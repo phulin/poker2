@@ -150,7 +150,7 @@ h3 {
 }
 
 .grid.four {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
 }
 
 .card-grid {
@@ -183,6 +183,13 @@ h3 {
   background: #fbfcfa;
   color: #182224;
   padding: 0 10px;
+}
+
+.checkbox-field input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  accent-color: #168575;
 }
 
 .compact-field select {

@@ -61,6 +61,7 @@ interface SparseLeafGpuBatch {
 export interface SparseResolveOptions {
   depth: number;
   iterations: number;
+  cfrAvg?: boolean;
   selectedAction?: number;
   readPolicy?: boolean;
   readActionProbs?: boolean;
@@ -91,6 +92,7 @@ export class SparseCfrResolver {
     if (!Number.isInteger(options.iterations) || options.iterations <= 0) {
       throw new Error("iterations must be a positive integer");
     }
+    const cfrAvg = options.cfrAvg ?? true;
 
     const tree = this.buildTree(env, options.depth);
     const totalNodes = tree.nodes.length;
@@ -113,7 +115,7 @@ export class SparseCfrResolver {
       policyAvg.set(policy);
       beliefsAvg.set(beliefs);
 
-      await this.setLeafValues(tree, beliefsAvg, latestValues);
+      await this.setLeafValues(tree, cfrAvg ? beliefsAvg : beliefs, latestValues);
       if (this.gpuKernels && gpuTreeBuffers) {
         await this.solveIterationsGpuResident(
           tree,
@@ -128,12 +130,18 @@ export class SparseCfrResolver {
           latestValues,
           gpuTreeBuffers,
           options.iterations,
+          cfrAvg,
         );
       } else {
         let values = this.computeExpectedValues(tree, policy, beliefs, latestValues);
 
         for (let t = 0; t < options.iterations; t += 1) {
-          this.accumulateRegrets(tree, beliefsAvg, values, cumulativeRegrets);
+          this.accumulateRegrets(
+            tree,
+            cfrAvg ? beliefsAvg : beliefs,
+            values,
+            cumulativeRegrets,
+          );
           this.updatePolicy(tree, cumulativeRegrets, policy);
 
           const current = this.propagateReachAndBeliefs(tree, rootBeliefs, policy);
@@ -146,10 +154,16 @@ export class SparseCfrResolver {
             avgDenominator,
             policyAvg,
           );
-          const avg = this.propagateReachAndBeliefs(tree, rootBeliefs, policyAvg);
-          beliefsAvg.set(avg.beliefs);
+          if (cfrAvg) {
+            const avg = this.propagateReachAndBeliefs(tree, rootBeliefs, policyAvg);
+            beliefsAvg.set(avg.beliefs);
+          }
 
-          await this.setLeafValues(tree, beliefsAvg, latestValues);
+          await this.setLeafValues(
+            tree,
+            cfrAvg ? beliefsAvg : beliefs,
+            latestValues,
+          );
           values = this.computeExpectedValues(tree, policy, beliefs, latestValues);
         }
       }
@@ -362,6 +376,7 @@ export class SparseCfrResolver {
     latestValues: Float32Array,
     treeBuffers: SparseGpuTreeBuffers,
     iterations: number,
+    cfrAvg: boolean,
   ): Promise<void> {
     if (!this.gpuKernels) {
       throw new Error("GPU sparse kernels are not initialized");
@@ -378,7 +393,9 @@ export class SparseCfrResolver {
     const avgNumeratorBuffer = makeStorageBuffer(device, avgNumerator);
     const avgDenominatorBuffer = makeStorageBuffer(device, avgDenominator);
     const beliefsBuffer = makeStorageBuffer(device, beliefs);
-    const beliefsAvgBuffer = makeStorageBuffer(device, beliefsAvg);
+    const beliefsAvgBuffer = cfrAvg
+      ? makeStorageBuffer(device, beliefsAvg)
+      : undefined;
     const valuesBuffer = makeStorageBuffer(device, this.leafOnlyValues(tree, latestValues));
     const reachBuffer = makeEmptyStorageBuffer(device, valueCount);
     const denomBuffer = makeEmptyStorageBuffer(device, totalNodes * 2);
@@ -406,10 +423,11 @@ export class SparseCfrResolver {
       );
 
       for (let t = 0; t < iterations; t += 1) {
+        const regretBeliefsBuffer = cfrAvg ? beliefsAvgBuffer! : beliefsBuffer;
         this.encodeAccumulateRegretsGpuResident(
           tree,
           treeBuffers,
-          beliefsAvgBuffer,
+          regretBeliefsBuffer,
           valuesBuffer,
           regretWeightsBuffer,
           regretsBuffer,
@@ -439,22 +457,24 @@ export class SparseCfrResolver {
           avgDenominatorBuffer,
           policyAvgBuffer,
         );
-        this.encodePropagateGpuResident(
-          tree,
-          treeBuffers,
-          rootBeliefs,
-          rootReach,
-          policyAvgBuffer,
-          reachBuffer,
-          beliefsAvgBuffer,
-          denomBuffer,
-        );
+        if (cfrAvg) {
+          this.encodePropagateGpuResident(
+            tree,
+            treeBuffers,
+            rootBeliefs,
+            rootReach,
+            policyAvgBuffer,
+            reachBuffer,
+            beliefsAvgBuffer!,
+            denomBuffer,
+          );
+        }
 
         const disposeLeafPrediction = await this.updateLeafValuesGpuBridge(
           tree,
           treeBuffers,
           leafBatch,
-          beliefsAvgBuffer,
+          cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
           valuesBuffer,
           modelLeafNodeBuffer,
           modelLeafBeliefsBuffer,
@@ -483,7 +503,7 @@ export class SparseCfrResolver {
       avgNumeratorBuffer.destroy();
       avgDenominatorBuffer.destroy();
       beliefsBuffer.destroy();
-      beliefsAvgBuffer.destroy();
+      beliefsAvgBuffer?.destroy();
       valuesBuffer.destroy();
       reachBuffer.destroy();
       denomBuffer.destroy();
@@ -501,7 +521,7 @@ export class SparseCfrResolver {
     tree: SparseTree,
     treeBuffers: SparseGpuTreeBuffers,
     leafBatch: SparseLeafGpuBatch,
-    beliefsAvgBuffer: GPUBuffer,
+    leafBeliefsBuffer: GPUBuffer,
     valuesBuffer: GPUBuffer,
     modelLeafNodeBuffer: GPUBuffer,
     modelLeafBeliefsBuffer: GPUBuffer,
@@ -525,7 +545,7 @@ export class SparseCfrResolver {
         showdownNodeBuffer,
         showdownRankBuffer,
         showdownPayoffBuffer,
-        beliefsAvgBuffer,
+        leafBeliefsBuffer,
         valuesBuffer,
         leafBatch.showdownNodeIndices.length,
       );
@@ -540,7 +560,7 @@ export class SparseCfrResolver {
       gatherEncoder,
       treeBuffers,
       modelLeafNodeBuffer,
-      beliefsAvgBuffer,
+      leafBeliefsBuffer,
       modelLeafBeliefsBuffer,
       leafBatch.modelNodeIndices.length,
     );

@@ -115,29 +115,33 @@ test("sparse resolver can route CFR tensor operations through WGSL kernels", asy
     const cpu = new SparseCfrResolver(fakeModel(numActions));
     const gpu = new SparseCfrResolver(fakeModel(numActions, device));
 
-    const [cpuResult, gpuResult] = await Promise.all([
-      cpu.solve(env.clone(), uniformBeliefs(), {
-        depth: 3,
-        iterations: 2,
-        selectedAction: 1,
-      }),
-      gpu.solve(env.clone(), uniformBeliefs(), {
-        depth: 3,
-        iterations: 2,
-        selectedAction: 1,
-      }),
-    ]);
+    for (const cfrAvg of [true, false]) {
+      const [cpuResult, gpuResult] = await Promise.all([
+        cpu.solve(env.clone(), uniformBeliefs(), {
+          depth: 3,
+          iterations: 2,
+          cfrAvg,
+          selectedAction: 1,
+        }),
+        gpu.solve(env.clone(), uniformBeliefs(), {
+          depth: 3,
+          iterations: 2,
+          cfrAvg,
+          selectedAction: 1,
+        }),
+      ]);
 
-    assert.equal(gpuResult.policy.length, cpuResult.policy.length);
-    assert.equal(gpuResult.actionProbs.length, cpuResult.actionProbs.length);
-    let maxDiff = 0;
-    for (let i = 0; i < gpuResult.actionProbs.length; i += 1) {
-      maxDiff = Math.max(
-        maxDiff,
-        Math.abs(gpuResult.actionProbs[i]! - cpuResult.actionProbs[i]!),
-      );
+      assert.equal(gpuResult.policy.length, cpuResult.policy.length);
+      assert.equal(gpuResult.actionProbs.length, cpuResult.actionProbs.length);
+      let maxDiff = 0;
+      for (let i = 0; i < gpuResult.actionProbs.length; i += 1) {
+        maxDiff = Math.max(
+          maxDiff,
+          Math.abs(gpuResult.actionProbs[i]! - cpuResult.actionProbs[i]!),
+        );
+      }
+      assert.ok(maxDiff < 1e-5, `cfrAvg=${cfrAvg} action prob max diff ${maxDiff}`);
     }
-    assert.ok(maxDiff < 1e-5, `action prob max diff ${maxDiff}`);
   } finally {
     device.destroy();
   }

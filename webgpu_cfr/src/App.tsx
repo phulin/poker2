@@ -53,6 +53,7 @@ interface SolveResult {
   elapsedMs: number;
   iterations: number;
   depth: number;
+  cfrAvg: boolean;
   heroHandIndex: number;
   villainSummary: RangeSummary;
 }
@@ -106,6 +107,7 @@ function App(): JSX.Element {
   const [street, setStreet] = createSignal(0);
   const [iterations, setIterations] = createSignal("16");
   const [depth, setDepth] = createSignal("1");
+  const [cfrAvg, setCfrAvg] = createSignal(true);
   const [heroCards, setHeroCards] = createSignal<[string, string]>(["As", "Kd"]);
   const [boardCards, setBoardCards] = createSignal(["", "", "", "", ""]);
   const [actions, setActions] = createSignal<number[]>([]);
@@ -269,6 +271,7 @@ function App(): JSX.Element {
       setSolveError("");
       const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 16)));
       const solveDepth = Math.max(1, Math.trunc(positiveNumber(depth(), 1)));
+      const solveCfrAvg = cfrAvg();
       setSolveStatus(`Solving depth ${solveDepth} for ${solveIterations} CFR iterations`);
       setSolveResult(undefined);
       const started = performance.now();
@@ -276,6 +279,7 @@ function App(): JSX.Element {
         spot: actions(),
         iterations: solveIterations,
         depth: solveDepth,
+        cfrAvg: solveCfrAvg,
         initialState: {
           button: button(),
           stack: positiveNumber(stack(), current.manifest.env.stack),
@@ -293,6 +297,7 @@ function App(): JSX.Element {
         elapsedMs,
         iterations: solveIterations,
         depth: solveDepth,
+        cfrAvg: solveCfrAvg,
         heroHandIndex,
         villainSummary: summarizeVillainRange(result.beliefsAtSpot, heroPlayer()),
       });
@@ -409,6 +414,17 @@ function App(): JSX.Element {
               <span>Depth</span>
               <input value={depth()} inputmode="numeric" min="1" step="1" onInput={(event) => setDepth(event.currentTarget.value)} />
             </label>
+            <label class="field checkbox-field">
+              <span>CFR avg beliefs</span>
+              <input
+                type="checkbox"
+                checked={cfrAvg()}
+                onChange={(event) => {
+                  setCfrAvg(event.currentTarget.checked);
+                  setSolveResult(undefined);
+                }}
+              />
+            </label>
           </div>
 
           <div class="card-grid">
@@ -521,6 +537,7 @@ function App(): JSX.Element {
                 <div class="metadata">
                   <span>{solved().iterations} iterations</span>
                   <span>depth {solved().depth}</span>
+                  <span>{solved().cfrAvg ? "cfr-avg beliefs" : "current beliefs"}</span>
                   <span>{solved().elapsedMs.toFixed(1)} ms</span>
                   <span>{runtime()?.cached ? "cached model" : "fresh model"}</span>
                   <span>actor P{solved().result.actor}</span>

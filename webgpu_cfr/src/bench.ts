@@ -10,6 +10,7 @@ interface BenchOptions {
   spot: number[];
   iterations: number;
   depth: number;
+  cfrAvg: boolean;
   warmups: number;
   runs: number;
 }
@@ -60,6 +61,7 @@ function readArgs(): BenchOptions {
     spot: parseSpot(getArg(args, "--spot", "1")),
     iterations: parsePositiveInt(getArg(args, "--iterations", "8"), "iterations"),
     depth: parsePositiveInt(getArg(args, "--depth", "1"), "depth"),
+    cfrAvg: !args.includes("--no-cfr-avg"),
     warmups: parseNonNegativeInt(getArg(args, "--warmups", "1"), "warmups"),
     runs: parsePositiveInt(getArg(args, "--runs", "5"), "runs"),
   };
@@ -96,6 +98,7 @@ try {
       spot: options.spot,
       iterations: options.iterations,
       depth: options.depth,
+      cfrAvg: options.cfrAvg,
     });
   }
 
@@ -108,6 +111,7 @@ try {
       spot: options.spot,
       iterations: options.iterations,
       depth: options.depth,
+      cfrAvg: options.cfrAvg,
     });
     samples.push(performance.now() - start);
     actionLabels = result.actionLabels;
@@ -120,6 +124,7 @@ try {
         spot: options.spot,
         iterations: options.iterations,
         depth: options.depth,
+        cfrAvg: options.cfrAvg,
         warmups: options.warmups,
         runs: options.runs,
         ...stats(samples),

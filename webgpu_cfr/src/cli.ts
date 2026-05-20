@@ -10,6 +10,7 @@ interface CliOptions {
   spot: number[];
   iterations: number;
   depth: number;
+  cfrAvg: boolean;
   manifest?: string;
   weights?: string;
 }
@@ -33,6 +34,7 @@ function readArgs(): CliOptions {
       .map((v) => Number.parseInt(v, 10)),
     iterations: Number.parseInt(get("--iterations", "8"), 10),
     depth: Number.parseInt(get("--depth", "1"), 10),
+    cfrAvg: !args.includes("--no-cfr-avg"),
   };
   if (manifest) options.manifest = manifest;
   if (weights) options.weights = weights;
@@ -54,10 +56,12 @@ try {
         spot: options.spot,
         iterations: options.iterations,
         depth: options.depth,
+        cfrAvg: options.cfrAvg,
       });
       output = {
         spot: options.spot,
         depth: options.depth,
+        cfrAvg: options.cfrAvg,
         actionLabels: result.actionLabels,
         actionProbs: Array.from(result.actionProbs),
       };
@@ -71,6 +75,7 @@ try {
     output = {
       spot: fixture.spot,
       depth: 1,
+      cfrAvg: options.cfrAvg,
       actionLabels: fixture.actionLabels,
       actionProbs: Array.from(result.actionProbs),
     };

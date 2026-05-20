@@ -178,6 +178,7 @@ export class BrowserCfrEvaluator {
     request: EvaluateSpotRequest,
     depth: number,
   ): Promise<BrowserEvaluationResult> {
+    const cfrAvg = request.cfrAvg ?? true;
     const numActions = this.model.manifest.architecture.numActions;
     const env = PublicHunlEnv.fromManifest(
       this.model.manifest,
@@ -200,6 +201,7 @@ export class BrowserCfrEvaluator {
       const solved = await this.sparseCfr.solve(env, beliefs, {
         depth,
         iterations: request.iterations,
+        cfrAvg,
         selectedAction: action,
         readPolicy: false,
         readActionProbs: false,
@@ -215,6 +217,7 @@ export class BrowserCfrEvaluator {
     const final = await this.sparseCfr.solve(env, beliefs, {
       depth,
       iterations: request.iterations,
+      cfrAvg,
     });
     const legal = env.legalBinsAmountAndMask();
     return {
