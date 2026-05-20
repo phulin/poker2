@@ -141,6 +141,9 @@ export interface EvaluateSpotRequest {
   publicCards?: number[];
   heroPlayer?: PlayerIndex;
   heroHand?: [number, number];
+  readPolicy?: boolean;
+  readActionProbs?: boolean;
+  readBeliefs?: boolean;
 }
 
 export interface BrowserEvaluationResult extends EvaluationResult {

@@ -115,6 +115,9 @@ function makeRequest(spot: BenchSpot): EvaluateSpotRequest {
     initialState: { button: spot.button as PlayerIndex },
     heroPlayer: spot.hero_player as PlayerIndex,
     heroHand: spot.hero_hand,
+    readPolicy: false,
+    readActionProbs: false,
+    readBeliefs: false,
   };
   if (spot.public_cards.length > 0) {
     req.publicCards = spot.public_cards;

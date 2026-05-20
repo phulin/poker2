@@ -201,6 +201,9 @@ export class SparseCfrResolver {
         cachedTree.gpu,
         options.iterations,
         cfrAvg,
+        (options.readPolicy ?? true) ||
+          (options.readActionProbs ?? true) ||
+          (options.selectedAction !== undefined && (options.readBeliefs ?? true)),
       );
     }
 
@@ -522,6 +525,7 @@ export class SparseCfrResolver {
     staticGpu: SparseStaticGpuData,
     iterations: number,
     cfrAvg: boolean,
+    readPolicyAvg: boolean,
   ): Promise<void> {
     if (!this.gpuKernels) {
       throw new Error("GPU sparse kernels are not initialized");
@@ -665,7 +669,9 @@ export class SparseCfrResolver {
         console.error("PROFILE", JSON.stringify({ tree: treeStats, phases: stats }));
       }
 
-      policyAvg.set(await readFloatBuffer(device, policyAvgBuffer, policyAvg.length));
+      if (readPolicyAvg) {
+        policyAvg.set(await readFloatBuffer(device, policyAvgBuffer, policyAvg.length));
+      }
       for (const dispose of pendingLeafDisposals.splice(0)) dispose();
     } finally {
       for (const dispose of pendingLeafDisposals.splice(0)) dispose();

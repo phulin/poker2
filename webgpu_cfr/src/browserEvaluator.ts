@@ -225,14 +225,25 @@ export class BrowserCfrEvaluator {
       beliefs = solved.beliefsAfter;
     }
 
-    const final = await this.sparseCfr.solve(env, beliefs, {
+    const finalOptions: {
+      depth: number;
+      iterations: number;
+      cfrAvg: boolean;
+      readPolicy?: boolean;
+      readActionProbs?: boolean;
+    } = {
       depth,
       iterations,
       cfrAvg,
-    });
+    };
+    if (request.readPolicy !== undefined) finalOptions.readPolicy = request.readPolicy;
+    if (request.readActionProbs !== undefined) {
+      finalOptions.readActionProbs = request.readActionProbs;
+    }
+    const final = await this.sparseCfr.solve(env, beliefs, finalOptions);
     const legal = env.legalBinsAmountAndMask();
     return {
-      beliefsAtSpot: beliefs,
+      beliefsAtSpot: request.readBeliefs === false ? new Float32Array(0) : beliefs,
       actionProbs: final.actionProbs,
       policy: final.policy,
       actionLabels: [...this.model.actionLabels],
