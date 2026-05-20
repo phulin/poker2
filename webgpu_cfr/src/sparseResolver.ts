@@ -277,14 +277,42 @@ export class SparseCfrResolver {
     policy: Float32Array,
     beliefs: Float32Array,
   ): Promise<void> {
+    const beliefSize = 2 * NUM_HANDS;
     for (let depth = 0; depth < tree.treeDepth; depth += 1) {
       const start = tree.depthOffsets[depth]!;
       const end = tree.depthOffsets[depth + 1]!;
+      const batchEnvs: PublicHunlEnv[] = [];
+      const batchNodeIndices: number[] = [];
       for (let nodeIndex = start; nodeIndex < end; nodeIndex += 1) {
         const node = tree.nodes[nodeIndex]!;
         if (node.leaf || node.children.length === 0) continue;
-        const nodeBeliefs = this.nodeBeliefs(beliefs, nodeIndex);
-        const modelPolicy = await this.modelPolicy(node.env, nodeBeliefs, node.legalMask);
+        batchEnvs.push(node.env);
+        batchNodeIndices.push(nodeIndex);
+      }
+      if (batchEnvs.length === 0) continue;
+
+      const batchedBeliefs = new Float32Array(batchEnvs.length * beliefSize);
+      for (let i = 0; i < batchNodeIndices.length; i += 1) {
+        batchedBeliefs.set(
+          beliefs.subarray(
+            batchNodeIndices[i]! * beliefSize,
+            (batchNodeIndices[i]! + 1) * beliefSize,
+          ),
+          i * beliefSize,
+        );
+      }
+      const prediction = await this.model.predictBatch(batchEnvs, batchedBeliefs, {
+        includePolicy: true,
+      });
+      if (!prediction.policyLogits) {
+        throw new Error("model did not return policy logits");
+      }
+      const stride = NUM_HANDS * this.numActions;
+      for (let i = 0; i < batchNodeIndices.length; i += 1) {
+        const nodeIndex = batchNodeIndices[i]!;
+        const node = tree.nodes[nodeIndex]!;
+        const slice = prediction.policyLogits.subarray(i * stride, (i + 1) * stride);
+        const modelPolicy = this.softmaxPolicy(slice, node.legalMask);
         this.writeChildPolicy(node, modelPolicy, policy);
         for (const childIndex of node.children) {
           this.propagateChildBelief(
@@ -302,18 +330,10 @@ export class SparseCfrResolver {
     this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
   }
 
-  private async modelPolicy(
-    env: PublicHunlEnv,
-    beliefs: Float32Array<ArrayBuffer>,
+  private softmaxPolicy(
+    logits: Float32Array<ArrayBufferLike>,
     legalMask: readonly number[],
-  ): Promise<Float32Array<ArrayBuffer>> {
-    const prediction = await this.model.predict(env, beliefs, {
-      includePolicy: true,
-    });
-    if (!prediction.policyLogits) {
-      throw new Error("model did not return policy logits");
-    }
-    const logits = prediction.policyLogits;
+  ): Float32Array<ArrayBuffer> {
     const out = new Float32Array(NUM_HANDS * this.numActions);
     let legalCount = 0;
     for (let action = 0; action < this.numActions; action += 1) {

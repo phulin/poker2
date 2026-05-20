@@ -31,6 +31,12 @@ function fakeModel(
         policyLogits: new Float32Array(NUM_HANDS * numActions),
       };
     },
+    async predictBatch(envs: readonly PublicHunlEnv[]): Promise<BetterFfnPrediction> {
+      return {
+        handValues: new Float32Array(envs.length * 2 * NUM_HANDS),
+        policyLogits: new Float32Array(envs.length * NUM_HANDS * numActions),
+      };
+    },
     async predictHandValues(): Promise<Float32Array<ArrayBuffer>> {
       if (counters) counters.singleLeafCalls += 1;
       return new Float32Array(2 * NUM_HANDS);
