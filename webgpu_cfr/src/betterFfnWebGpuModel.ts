@@ -1,7 +1,11 @@
 import {
   ADD3_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   MAT_VEC_BATCH_WGSL,
   MAT_VEC_WGSL,
@@ -84,8 +88,12 @@ export class BetterFfnWebGpuModel {
   private readonly matVecPipeline: GPUComputePipeline;
   private readonly matVecBatchPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsPipeline: GPUComputePipeline;
+  private readonly matVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
+  private readonly matVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchPipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsPipeline: GPUComputePipeline;
+  private readonly leakyReluMatVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
+  private readonly leakyReluMatVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
   private readonly playerBoardHadamardPipeline: GPUComputePipeline;
   private readonly rmsNormPipeline: GPUComputePipeline;
   private readonly rmsNormBatchPipeline: GPUComputePipeline;
@@ -138,6 +146,14 @@ export class BetterFfnWebGpuModel {
       MAT_VEC_BATCH_EXACT_ROWS_WGSL,
       "better-ffn-mat-vec-batch-exact-rows",
     );
+    this.matVecBatchExactRowsCols512Pipeline = this.pipeline(
+      MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+      "better-ffn-mat-vec-batch-exact-rows-cols-512",
+    );
+    this.matVecBatchExactRowsCols1024Pipeline = this.pipeline(
+      MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+      "better-ffn-mat-vec-batch-exact-rows-cols-1024",
+    );
     this.leakyReluMatVecBatchPipeline = this.pipeline(
       LEAKY_RELU_MAT_VEC_BATCH_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch",
@@ -145,6 +161,14 @@ export class BetterFfnWebGpuModel {
     this.leakyReluMatVecBatchExactRowsPipeline = this.pipeline(
       LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch-exact-rows",
+    );
+    this.leakyReluMatVecBatchExactRowsCols512Pipeline = this.pipeline(
+      LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+      "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-512",
+    );
+    this.leakyReluMatVecBatchExactRowsCols1024Pipeline = this.pipeline(
+      LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+      "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-1024",
     );
     this.playerBoardHadamardPipeline = this.pipeline(
       PLAYER_BOARD_HADAMARD_WGSL,
@@ -1669,7 +1693,11 @@ export class BetterFfnWebGpuModel {
   ): void {
     const pipeline =
       rows % BATCH_ROW_BLOCK === 0
-        ? this.matVecBatchExactRowsPipeline
+        ? cols === 512
+          ? this.matVecBatchExactRowsCols512Pipeline
+          : cols === 1024
+            ? this.matVecBatchExactRowsCols1024Pipeline
+            : this.matVecBatchExactRowsPipeline
         : this.matVecBatchPipeline;
     this.submit2d(pipeline, this.batchRowGroups(rows), batch, [
       { binding: 0, resource: { buffer: matrix } },
@@ -1713,7 +1741,11 @@ export class BetterFfnWebGpuModel {
   ): void {
     const pipeline =
       rows % BATCH_ROW_BLOCK === 0
-        ? this.leakyReluMatVecBatchExactRowsPipeline
+        ? cols === 512
+          ? this.leakyReluMatVecBatchExactRowsCols512Pipeline
+          : cols === 1024
+            ? this.leakyReluMatVecBatchExactRowsCols1024Pipeline
+            : this.leakyReluMatVecBatchExactRowsPipeline
         : this.leakyReluMatVecBatchPipeline;
     this.submit2d(pipeline, this.batchRowGroups(rows), batch, [
       { binding: 0, resource: { buffer: matrix } },

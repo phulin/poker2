@@ -484,6 +484,48 @@ export const MAT_VEC_BATCH_EXACT_ROWS_WGSL =
 export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL =
   removeMatVecBatchRowBounds(LEAKY_RELU_MAT_VEC_BATCH_WGSL);
 
+function unrollMatVecBatchColumns(
+  source: string,
+  cols: 512 | 1024,
+  applyLeakyRelu: boolean,
+): string {
+  const xExpression = applyLeakyRelu
+    ? "leaky_relu(input[inputBase + col])"
+    : "input[inputBase + col]";
+  const loopBlock = `  for (var col = lane; col < params.cols; col = col + 256u) {
+    let x = ${xExpression};
+    sum0 = sum0 + matrix[row0 * params.cols + col] * x;
+    sum1 = sum1 + matrix[row1 * params.cols + col] * x;
+    sum2 = sum2 + matrix[row2 * params.cols + col] * x;
+    sum3 = sum3 + matrix[row3 * params.cols + col] * x;
+  }`;
+  const chunks: string[] = [];
+  for (let offset = 0; offset < cols; offset += 256) {
+    const suffix = offset === 0 ? "" : String(offset);
+    const colExpr = offset === 0 ? "lane" : `lane + ${offset}u`;
+    const valueExpr = applyLeakyRelu
+      ? `leaky_relu(input[inputBase + col${suffix}])`
+      : `input[inputBase + col${suffix}]`;
+    chunks.push(`  let col${suffix} = ${colExpr};
+  let x${suffix} = ${valueExpr};
+  sum0 = sum0 + matrix[row0 * params.cols + col${suffix}] * x${suffix};
+  sum1 = sum1 + matrix[row1 * params.cols + col${suffix}] * x${suffix};
+  sum2 = sum2 + matrix[row2 * params.cols + col${suffix}] * x${suffix};
+  sum3 = sum3 + matrix[row3 * params.cols + col${suffix}] * x${suffix};`);
+  }
+  return source.replace(loopBlock, chunks.join("\n"));
+}
+
+export const MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
+  unrollMatVecBatchColumns(MAT_VEC_BATCH_EXACT_ROWS_WGSL, 512, false);
+export const MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL =
+  unrollMatVecBatchColumns(MAT_VEC_BATCH_EXACT_ROWS_WGSL, 1024, false);
+
+export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
+  unrollMatVecBatchColumns(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL, 512, true);
+export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL =
+  unrollMatVecBatchColumns(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL, 1024, true);
+
 export const RMS_NORM_WGSL = /* wgsl */ `
 struct Params {
   dim: u32,
