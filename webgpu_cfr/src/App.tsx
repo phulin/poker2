@@ -511,7 +511,7 @@ function App(): JSX.Element {
       <section class="workspace">
         <form class="panel controls" onSubmit={(event) => event.preventDefault()}>
           <div class="section-head">
-            <h2>Spot</h2>
+            <h2>Configure Spot</h2>
             <button
               type="button"
               class="icon-button"
@@ -525,68 +525,51 @@ function App(): JSX.Element {
             </button>
           </div>
 
-          <div class="grid two">
-            <label class="field">
-              <span>Hero</span>
-              <select
-                value={String(heroPlayer())}
-                onChange={(event) => {
-                  setHeroPlayer(asPlayer(event.currentTarget.value));
-                  setSolveResult(undefined);
-                }}
-              >
-                <option value="0">Player 0</option>
-                <option value="1">Player 1</option>
-              </select>
-            </label>
-            <label class="field">
-              <span>Button / small blind</span>
-              <select
-                value={String(button())}
-                onChange={(event) => {
-                  setButton(asPlayer(event.currentTarget.value));
-                  setActions([]);
-                  setSolveResult(undefined);
-                }}
-              >
-                <option value="0">Player 0</option>
-                <option value="1">Player 1</option>
-              </select>
-            </label>
-          </div>
-
-          <div class="grid four">
-            <label class="field">
-              <span>Stack</span>
-              <input value={stack()} inputmode="decimal" onInput={(event) => setStack(event.currentTarget.value)} />
-            </label>
-            <label class="field">
-              <span>Small blind</span>
-              <input value={sb()} inputmode="decimal" onInput={(event) => setSb(event.currentTarget.value)} />
-            </label>
-            <label class="field">
-              <span>Big blind</span>
-              <input value={bb()} inputmode="decimal" onInput={(event) => setBb(event.currentTarget.value)} />
-            </label>
-            <label class="field">
-              <span>Iterations</span>
-              <input value={iterations()} inputmode="numeric" min="1" step="1" onInput={(event) => setIterations(event.currentTarget.value)} />
-            </label>
-            <label class="field">
-              <span>Depth</span>
-              <input value={depth()} inputmode="numeric" min="1" step="1" onInput={(event) => setDepth(event.currentTarget.value)} />
-            </label>
-            <label class="field checkbox-field">
-              <span>CFR avg beliefs</span>
-              <input
-                type="checkbox"
-                checked={cfrAvg()}
-                onChange={(event) => {
-                  setCfrAvg(event.currentTarget.checked);
-                  setSolveResult(undefined);
-                }}
-              />
-            </label>
+          <div class="subgroup">
+            <span class="subgroup-title">Game</span>
+            <div class="grid two">
+              <label class="field">
+                <span>Hero seat</span>
+                <select
+                  value={String(heroPlayer())}
+                  onChange={(event) => {
+                    setHeroPlayer(asPlayer(event.currentTarget.value));
+                    setSolveResult(undefined);
+                  }}
+                >
+                  <option value="0">Player 0</option>
+                  <option value="1">Player 1</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Button (small blind)</span>
+                <select
+                  value={String(button())}
+                  onChange={(event) => {
+                    setButton(asPlayer(event.currentTarget.value));
+                    setActions([]);
+                    setSolveResult(undefined);
+                  }}
+                >
+                  <option value="0">Player 0</option>
+                  <option value="1">Player 1</option>
+                </select>
+              </label>
+            </div>
+            <div class="grid three">
+              <label class="field">
+                <span>Stack</span>
+                <input value={stack()} inputmode="decimal" onInput={(event) => setStack(event.currentTarget.value)} />
+              </label>
+              <label class="field">
+                <span>Small blind</span>
+                <input value={sb()} inputmode="decimal" onInput={(event) => setSb(event.currentTarget.value)} />
+              </label>
+              <label class="field">
+                <span>Big blind</span>
+                <input value={bb()} inputmode="decimal" onInput={(event) => setBb(event.currentTarget.value)} />
+              </label>
+            </div>
           </div>
 
           <div class="card-section">
@@ -685,15 +668,43 @@ function App(): JSX.Element {
             </Show>
           </div>
 
-          <button
-            type="button"
-            class="solve-button"
-            disabled={!runtime() || Boolean(descriptorError())}
-            onClick={() => void solve()}
-          >
-            <Play size={18} />
-            <span>Solve Spot</span>
-          </button>
+          <div class="subgroup">
+            <span class="subgroup-title">Solve</span>
+            <div class="grid three">
+              <label class="field">
+                <span>Iterations</span>
+                <input value={iterations()} inputmode="numeric" min="1" step="1" onInput={(event) => setIterations(event.currentTarget.value)} />
+              </label>
+              <label class="field">
+                <span>Depth</span>
+                <input value={depth()} inputmode="numeric" min="1" step="1" onInput={(event) => setDepth(event.currentTarget.value)} />
+              </label>
+              <label class="field toggle-field">
+                <span>CFR avg beliefs</span>
+                <button
+                  type="button"
+                  class={`toggle ${cfrAvg() ? "on" : "off"}`}
+                  role="switch"
+                  aria-checked={cfrAvg()}
+                  onClick={() => {
+                    setCfrAvg(!cfrAvg());
+                    setSolveResult(undefined);
+                  }}
+                >
+                  <span class="toggle-thumb" />
+                </button>
+              </label>
+            </div>
+            <button
+              type="button"
+              class="solve-button"
+              disabled={!runtime() || Boolean(descriptorError())}
+              onClick={() => void solve()}
+            >
+              <Play size={18} />
+              <span>Solve Spot</span>
+            </button>
+          </div>
         </form>
 
         <section class="panel results">
