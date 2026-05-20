@@ -503,15 +503,16 @@ function unrollMatVecBatchColumns(
   for (let offset = 0; offset < cols; offset += 256) {
     const suffix = offset === 0 ? "" : String(offset);
     const colExpr = offset === 0 ? "lane" : `lane + ${offset}u`;
+    const rowStride = `${cols}u`;
     const valueExpr = applyLeakyRelu
       ? `leaky_relu(input[inputBase + col${suffix}])`
       : `input[inputBase + col${suffix}]`;
     chunks.push(`  let col${suffix} = ${colExpr};
   let x${suffix} = ${valueExpr};
-  sum0 = sum0 + matrix[row0 * params.cols + col${suffix}] * x${suffix};
-  sum1 = sum1 + matrix[row1 * params.cols + col${suffix}] * x${suffix};
-  sum2 = sum2 + matrix[row2 * params.cols + col${suffix}] * x${suffix};
-  sum3 = sum3 + matrix[row3 * params.cols + col${suffix}] * x${suffix};`);
+  sum0 = sum0 + matrix[row0 * ${rowStride} + col${suffix}] * x${suffix};
+  sum1 = sum1 + matrix[row1 * ${rowStride} + col${suffix}] * x${suffix};
+  sum2 = sum2 + matrix[row2 * ${rowStride} + col${suffix}] * x${suffix};
+  sum3 = sum3 + matrix[row3 * ${rowStride} + col${suffix}] * x${suffix};`);
   }
   return source.replace(loopBlock, chunks.join("\n"));
 }
