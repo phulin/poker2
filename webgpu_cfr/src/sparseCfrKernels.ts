@@ -289,6 +289,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_BACKUP_DEPTH_1326_WGSL = SPARSE_BACKUP_DEPTH_WGSL
+  .replace("numHands: u32,", "_numHands: u32,")
+  .replaceAll("nodeCount * 2u * params.numHands", "nodeCount * 2652u")
+  .replaceAll("linear % params.numHands", "linear % 1326u")
+  .replaceAll("(linear / params.numHands) % 2u", "(linear / 1326u) % 2u")
+  .replaceAll("linear / (2u * params.numHands)", "linear / 2652u")
+  .replaceAll("child * params.numHands + hand", "child * 1326u + hand")
+  .replaceAll(
+    "(child * 2u + player) * params.numHands + hand",
+    "child * 2652u + player * 1326u + hand",
+  )
+  .replaceAll(
+    "(parent * 2u + player) * params.numHands + hand",
+    "parent * 2652u + player * 1326u + hand",
+  );
+
 export const SPARSE_REGRET_TAIL_WGSL = /* wgsl */ `
 struct Params {
   numHands: u32,
@@ -594,6 +610,7 @@ export class SparseCfrGpuKernels {
   private readonly reachApplyPipeline: GPUComputePipeline;
   private readonly averagePolicyPipeline: GPUComputePipeline;
   private readonly backupDepthPipeline: GPUComputePipeline;
+  private readonly backupDepth1326Pipeline: GPUComputePipeline;
   private readonly regretTailPipeline: GPUComputePipeline;
   private readonly opponentPolicyPipeline: GPUComputePipeline;
   private readonly regretWeightPipeline: GPUComputePipeline;
@@ -626,6 +643,10 @@ export class SparseCfrGpuKernels {
     this.backupDepthPipeline = this.pipeline(
       SPARSE_BACKUP_DEPTH_WGSL,
       "sparse-cfr-backup-depth",
+    );
+    this.backupDepth1326Pipeline = this.pipeline(
+      SPARSE_BACKUP_DEPTH_1326_WGSL,
+      "sparse-cfr-backup-depth-1326",
     );
     this.regretTailPipeline = this.pipeline(
       SPARSE_REGRET_TAIL_WGSL,
@@ -846,12 +867,16 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer {
+    const pipeline =
+      tree.numHands === 1326
+        ? this.backupDepth1326Pipeline
+        : this.backupDepthPipeline;
     const params = makeUniformBuffer(
       this.device,
       new Uint32Array([tree.numHands, start, end, 0]),
     );
     const bindGroup = this.device.createBindGroup({
-      layout: this.backupDepthPipeline.getBindGroupLayout(0),
+      layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: tree.childOffsets } },
         { binding: 1, resource: { buffer: tree.childCount } },
@@ -865,7 +890,7 @@ export class SparseCfrGpuKernels {
     });
     this.encode(
       encoder,
-      this.backupDepthPipeline,
+      pipeline,
       bindGroup,
       Math.ceil(((end - start) * 2 * tree.numHands) / 128),
     );
