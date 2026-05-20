@@ -674,13 +674,27 @@ export class SparseCfrResolver {
 
     const device = this.model.device;
     const values = this.leafOnlyValues(tree, leafValues);
-    const opponentPolicy = this.computeOpponentConditionedPolicy(tree, policy, beliefs);
     const treeBuffers = this.gpuKernels.createTreeBuffers(this.gpuTreeData(tree));
     const policyBuffer = makeStorageBuffer(device, policy);
-    const opponentPolicyBuffer = makeStorageBuffer(device, opponentPolicy);
+    const beliefsBuffer = makeStorageBuffer(device, beliefs);
+    const opponentPolicyBuffer = makeEmptyStorageBuffer(
+      device,
+      tree.nodes.length * NUM_HANDS,
+    );
     const valuesBuffer = makeStorageBuffer(device, values);
     const encoder = device.createCommandEncoder();
     const params: GPUBuffer[] = [];
+    params.push(
+      this.gpuKernels.encodeComputeOpponentPolicyRange(
+        encoder,
+        treeBuffers,
+        beliefsBuffer,
+        policyBuffer,
+        opponentPolicyBuffer,
+        1,
+        tree.nodes.length,
+      ),
+    );
     for (let depth = tree.treeDepth - 1; depth >= 0; depth -= 1) {
       params.push(
         this.gpuKernels.encodeBackupDepth(
@@ -700,6 +714,7 @@ export class SparseCfrResolver {
     for (const param of params) param.destroy();
     treeBuffers.dispose();
     policyBuffer.destroy();
+    beliefsBuffer.destroy();
     opponentPolicyBuffer.destroy();
     valuesBuffer.destroy();
     return new Float32Array(out);
@@ -749,28 +764,39 @@ export class SparseCfrResolver {
     }
 
     const device = this.model.device;
-    const regretWeights = this.computeRegretWeights(tree, beliefs);
     const treeBuffers = this.gpuKernels.createTreeBuffers(this.gpuTreeData(tree));
-    const weightsBuffer = makeStorageBuffer(device, regretWeights);
+    const beliefsBuffer = makeStorageBuffer(device, beliefs);
+    const weightsBuffer = makeEmptyStorageBuffer(device, tree.nodes.length * NUM_HANDS);
     const valuesBuffer = makeStorageBuffer(device, values);
     const regretsBuffer = makeStorageBuffer(device, cumulativeRegrets);
     const encoder = device.createCommandEncoder();
-    const params = this.gpuKernels.encodeAccumulateRegretsRange(
-      encoder,
-      treeBuffers,
-      weightsBuffer,
-      valuesBuffer,
-      regretsBuffer,
-      1,
-      tree.nodes.length,
-    );
+    const params = [
+      this.gpuKernels.encodeComputeRegretWeightsRange(
+        encoder,
+        treeBuffers,
+        beliefsBuffer,
+        weightsBuffer,
+        0,
+        tree.nodes.length,
+      ),
+      this.gpuKernels.encodeAccumulateRegretsRange(
+        encoder,
+        treeBuffers,
+        weightsBuffer,
+        valuesBuffer,
+        regretsBuffer,
+        1,
+        tree.nodes.length,
+      ),
+    ];
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
     cumulativeRegrets.set(
       await readFloatBuffer(device, regretsBuffer, cumulativeRegrets.length),
     );
-    params.destroy();
+    for (const param of params) param.destroy();
     treeBuffers.dispose();
+    beliefsBuffer.destroy();
     weightsBuffer.destroy();
     valuesBuffer.destroy();
     regretsBuffer.destroy();
@@ -933,61 +959,6 @@ export class SparseCfrResolver {
     return values;
   }
 
-  private computeOpponentConditionedPolicy(
-    tree: SparseTree,
-    policy: Float32Array,
-    beliefs: Float32Array,
-  ): Float32Array {
-    const opponentPolicy = new Float32Array(tree.nodes.length * NUM_HANDS);
-    const actorBelief = new Float32Array(NUM_HANDS);
-    const marginal = new Float32Array(NUM_HANDS);
-    const denom = new Float32Array(NUM_HANDS);
-    const numer = new Float32Array(NUM_HANDS);
-    for (let parentIndex = 0; parentIndex < tree.nodes.length; parentIndex += 1) {
-      const parent = tree.nodes[parentIndex]!;
-      if (parent.leaf || parent.children.length === 0) continue;
-      const actor = parent.env.toAct;
-      const parentActorBase = (parentIndex * 2 + actor) * NUM_HANDS;
-      actorBelief.set(beliefs.subarray(parentActorBase, parentActorBase + NUM_HANDS));
-      this.unblockedMass(actorBelief, denom);
-      for (const childIndex of parent.children) {
-        const policyBase = childIndex * NUM_HANDS;
-        for (let hand = 0; hand < NUM_HANDS; hand += 1) {
-          marginal[hand] = actorBelief[hand]! * policy[policyBase + hand]!;
-        }
-        this.unblockedMass(marginal, numer);
-        for (let hand = 0; hand < NUM_HANDS; hand += 1) {
-          opponentPolicy[policyBase + hand] =
-            denom[hand]! > EPS ? numer[hand]! / denom[hand]! : 0;
-        }
-      }
-    }
-    return opponentPolicy;
-  }
-
-  private computeRegretWeights(
-    tree: SparseTree,
-    beliefs: Float32Array,
-  ): Float32Array {
-    const weights = new Float32Array(tree.nodes.length * NUM_HANDS);
-    const oppBelief = new Float32Array(NUM_HANDS);
-    const unblocked = new Float32Array(NUM_HANDS);
-    for (let parentIndex = 0; parentIndex < tree.nodes.length; parentIndex += 1) {
-      const parent = tree.nodes[parentIndex]!;
-      if (parent.leaf || parent.children.length === 0) continue;
-      const actor = parent.env.toAct;
-      const opp = (1 - actor) as PlayerIndex;
-      const oppBase = (parentIndex * 2 + opp) * NUM_HANDS;
-      oppBelief.set(beliefs.subarray(oppBase, oppBase + NUM_HANDS));
-      this.unblockedMass(oppBelief, unblocked);
-      const outBase = parentIndex * NUM_HANDS;
-      for (let hand = 0; hand < NUM_HANDS; hand += 1) {
-        weights[outBase + hand] = parent.allowedMask[hand] ? unblocked[hand]! : 0;
-      }
-    }
-    return weights;
-  }
-
   private gpuTreeData(tree: SparseTree): SparseGpuTreeData {
     const nodeCount = tree.nodes.length;
     const childOffsets = new Uint32Array(nodeCount);
@@ -1000,6 +971,12 @@ export class SparseCfrResolver {
     const toAct = new Uint32Array(nodeCount);
     const allowedMask = new Uint32Array(nodeCount * NUM_HANDS);
     const allowedProb = new Float32Array(nodeCount * NUM_HANDS);
+    const handCard0 = new Uint32Array(NUM_HANDS);
+    const handCard1 = new Uint32Array(NUM_HANDS);
+    for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+      handCard0[hand] = HAND_CARD0[hand]!;
+      handCard1[hand] = HAND_CARD1[hand]!;
+    }
 
     let cursor = 0;
     for (let nodeIndex = 0; nodeIndex < nodeCount; nodeIndex += 1) {
@@ -1038,6 +1015,8 @@ export class SparseCfrResolver {
       toAct,
       allowedMask,
       allowedProb,
+      handCard0,
+      handCard1,
     };
   }
 

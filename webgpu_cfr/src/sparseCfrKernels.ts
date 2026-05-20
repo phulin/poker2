@@ -325,6 +325,111 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_OPPONENT_POLICY_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  start: u32,
+  end: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> parentIndex: array<u32>;
+@group(0) @binding(1) var<storage, read> prevActor: array<u32>;
+@group(0) @binding(2) var<storage, read> handCard0: array<u32>;
+@group(0) @binding(3) var<storage, read> handCard1: array<u32>;
+@group(0) @binding(4) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(5) var<storage, read> policy: array<f32>;
+@group(0) @binding(6) var<storage, read_write> opponentPolicy: array<f32>;
+@group(0) @binding(7) var<uniform> params: Params;
+
+fn overlaps(a: u32, b: u32) -> bool {
+  return handCard0[a] == handCard0[b] ||
+    handCard0[a] == handCard1[b] ||
+    handCard1[a] == handCard0[b] ||
+    handCard1[a] == handCard1[b];
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let nodeCount = params.end - params.start;
+  let total = nodeCount * params.numHands;
+  if (linear >= total) {
+    return;
+  }
+
+  let hand = linear % params.numHands;
+  let child = params.start + linear / params.numHands;
+  let parent = parentIndex[child];
+  let actor = prevActor[child];
+  let beliefBase = (parent * 2u + actor) * params.numHands;
+  let policyBase = child * params.numHands;
+  var denom = 0.0;
+  var numer = 0.0;
+  for (var other = 0u; other < params.numHands; other = other + 1u) {
+    if (!overlaps(hand, other)) {
+      let belief = beliefs[beliefBase + other];
+      denom = denom + belief;
+      numer = numer + belief * policy[policyBase + other];
+    }
+  }
+  if (denom > 1.0e-8) {
+    opponentPolicy[policyBase + hand] = numer / denom;
+  } else {
+    opponentPolicy[policyBase + hand] = 0.0;
+  }
+}
+`;
+
+export const SPARSE_REGRET_WEIGHT_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  start: u32,
+  end: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> toAct: array<u32>;
+@group(0) @binding(1) var<storage, read> allowedMask: array<u32>;
+@group(0) @binding(2) var<storage, read> handCard0: array<u32>;
+@group(0) @binding(3) var<storage, read> handCard1: array<u32>;
+@group(0) @binding(4) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(5) var<storage, read_write> regretWeights: array<f32>;
+@group(0) @binding(6) var<uniform> params: Params;
+
+fn overlaps(a: u32, b: u32) -> bool {
+  return handCard0[a] == handCard0[b] ||
+    handCard0[a] == handCard1[b] ||
+    handCard1[a] == handCard0[b] ||
+    handCard1[a] == handCard1[b];
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let nodeCount = params.end - params.start;
+  let total = nodeCount * params.numHands;
+  if (linear >= total) {
+    return;
+  }
+
+  let hand = linear % params.numHands;
+  let node = params.start + linear / params.numHands;
+  let actor = toAct[node];
+  let opp = 1u - actor;
+  let beliefBase = (node * 2u + opp) * params.numHands;
+  var weight = 0.0;
+  if (allowedMask[node * params.numHands + hand] != 0u) {
+    for (var other = 0u; other < params.numHands; other = other + 1u) {
+      if (!overlaps(hand, other)) {
+        weight = weight + beliefs[beliefBase + other];
+      }
+    }
+  }
+  regretWeights[node * params.numHands + hand] = weight;
+}
+`;
+
 export interface SparseGpuTreeData {
   nodeCount: number;
   numHands: number;
@@ -336,6 +441,8 @@ export interface SparseGpuTreeData {
   toAct: Uint32Array<ArrayBufferLike>;
   allowedMask: Uint32Array<ArrayBufferLike>;
   allowedProb: Float32Array<ArrayBufferLike>;
+  handCard0: Uint32Array<ArrayBufferLike>;
+  handCard1: Uint32Array<ArrayBufferLike>;
 }
 
 export interface SparseGpuTreeBuffers {
@@ -349,6 +456,8 @@ export interface SparseGpuTreeBuffers {
   toAct: GPUBuffer;
   allowedMask: GPUBuffer;
   allowedProb: GPUBuffer;
+  handCard0: GPUBuffer;
+  handCard1: GPUBuffer;
   dispose: () => void;
 }
 
@@ -361,6 +470,8 @@ export class SparseCfrGpuKernels {
   private readonly averagePolicyPipeline: GPUComputePipeline;
   private readonly backupDepthPipeline: GPUComputePipeline;
   private readonly regretTailPipeline: GPUComputePipeline;
+  private readonly opponentPolicyPipeline: GPUComputePipeline;
+  private readonly regretWeightPipeline: GPUComputePipeline;
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -392,6 +503,14 @@ export class SparseCfrGpuKernels {
       SPARSE_REGRET_TAIL_WGSL,
       "sparse-cfr-regret-tail",
     );
+    this.opponentPolicyPipeline = this.pipeline(
+      SPARSE_OPPONENT_POLICY_WGSL,
+      "sparse-cfr-opponent-policy",
+    );
+    this.regretWeightPipeline = this.pipeline(
+      SPARSE_REGRET_WEIGHT_WGSL,
+      "sparse-cfr-regret-weight",
+    );
   }
 
   createTreeBuffers(data: SparseGpuTreeData): SparseGpuTreeBuffers {
@@ -404,6 +523,8 @@ export class SparseCfrGpuKernels {
       makeStorageBuffer(this.device, data.toAct),
       makeStorageBuffer(this.device, data.allowedMask),
       makeStorageBuffer(this.device, data.allowedProb),
+      makeStorageBuffer(this.device, data.handCard0),
+      makeStorageBuffer(this.device, data.handCard1),
     ] as const;
     return {
       nodeCount: data.nodeCount,
@@ -416,6 +537,8 @@ export class SparseCfrGpuKernels {
       toAct: buffers[5],
       allowedMask: buffers[6],
       allowedProb: buffers[7],
+      handCard0: buffers[8],
+      handCard1: buffers[9],
       dispose: () => {
         for (const buffer of buffers) {
           buffer.destroy();
@@ -636,6 +759,74 @@ export class SparseCfrGpuKernels {
     this.encode(
       encoder,
       this.regretTailPipeline,
+      bindGroup,
+      Math.ceil(((end - start) * tree.numHands) / 64),
+    );
+    return params;
+  }
+
+  encodeComputeOpponentPolicyRange(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    beliefs: GPUBuffer,
+    policy: GPUBuffer,
+    opponentPolicy: GPUBuffer,
+    start: number,
+    end: number,
+  ): GPUBuffer {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, start, end, 0]),
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.opponentPolicyPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: tree.parentIndex } },
+        { binding: 1, resource: { buffer: tree.prevActor } },
+        { binding: 2, resource: { buffer: tree.handCard0 } },
+        { binding: 3, resource: { buffer: tree.handCard1 } },
+        { binding: 4, resource: { buffer: beliefs } },
+        { binding: 5, resource: { buffer: policy } },
+        { binding: 6, resource: { buffer: opponentPolicy } },
+        { binding: 7, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.opponentPolicyPipeline,
+      bindGroup,
+      Math.ceil(((end - start) * tree.numHands) / 64),
+    );
+    return params;
+  }
+
+  encodeComputeRegretWeightsRange(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    beliefs: GPUBuffer,
+    regretWeights: GPUBuffer,
+    start: number,
+    end: number,
+  ): GPUBuffer {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, start, end, 0]),
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.regretWeightPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: tree.toAct } },
+        { binding: 1, resource: { buffer: tree.allowedMask } },
+        { binding: 2, resource: { buffer: tree.handCard0 } },
+        { binding: 3, resource: { buffer: tree.handCard1 } },
+        { binding: 4, resource: { buffer: beliefs } },
+        { binding: 5, resource: { buffer: regretWeights } },
+        { binding: 6, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.regretWeightPipeline,
       bindGroup,
       Math.ceil(((end - start) * tree.numHands) / 64),
     );
