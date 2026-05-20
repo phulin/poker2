@@ -418,7 +418,7 @@ export class SparseCfrResolver {
     const beliefsAvgBuffer = cfrAvg
       ? makeStorageBuffer(device, beliefsAvg)
       : undefined;
-    const valuesBuffer = makeStorageBuffer(device, this.leafOnlyValues(tree, latestValues));
+    const valuesBuffer = makeStorageBuffer(device, this.foldTerminalLeafValues(tree));
     const reachBuffer = makeEmptyStorageBuffer(device, valueCount);
     const denomBuffer = makeEmptyStorageBuffer(device, totalNodes * 2);
     const opponentPolicyBuffer = makeEmptyStorageBuffer(device, policyCount);
@@ -451,7 +451,6 @@ export class SparseCfrResolver {
     try {
       const initialLeafDispose = await time("leafValues0", () =>
         this.updateLeafValuesGpuBridge(
-          tree,
           treeBuffers,
           leafBatch,
           cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
@@ -535,7 +534,6 @@ export class SparseCfrResolver {
 
         const disposeLeafPrediction = await time("leafValues", () =>
           this.updateLeafValuesGpuBridge(
-            tree,
             treeBuffers,
             leafBatch,
             cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
@@ -601,7 +599,6 @@ export class SparseCfrResolver {
   }
 
   private async updateLeafValuesGpuBridge(
-    tree: SparseTree,
     treeBuffers: SparseGpuTreeBuffers,
     leafBatch: SparseLeafGpuBatch,
     leafBeliefsBuffer: GPUBuffer,
@@ -615,11 +612,6 @@ export class SparseCfrResolver {
     if (!this.gpuKernels) return () => undefined;
     const device = this.model.device;
 
-    device.queue.writeBuffer(
-      valuesBuffer,
-      0,
-      new Float32Array(this.foldTerminalLeafValues(tree)),
-    );
     if (leafBatch.showdownNodeIndices.length > 0) {
       const showdownEncoder = device.createCommandEncoder();
       const showdownParams = this.gpuKernels.encodeShowdownValues(
@@ -1247,24 +1239,6 @@ export class SparseCfrResolver {
     reach.fill(1, 0, NUM_HANDS);
     reach.fill(1, NUM_HANDS, 2 * NUM_HANDS);
     return reach;
-  }
-
-  private leafOnlyValues(
-    tree: SparseTree,
-    leafValues: Float32Array,
-  ): Float32Array {
-    const values = new Float32Array(leafValues.length);
-    for (let nodeIndex = 0; nodeIndex < tree.nodes.length; nodeIndex += 1) {
-      if (!tree.nodes[nodeIndex]!.leaf) continue;
-      values.set(
-        leafValues.subarray(
-          nodeIndex * 2 * NUM_HANDS,
-          (nodeIndex + 1) * 2 * NUM_HANDS,
-        ),
-        nodeIndex * 2 * NUM_HANDS,
-      );
-    }
-    return values;
   }
 
   private gpuTreeData(tree: SparseTree): SparseGpuTreeData {
