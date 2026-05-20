@@ -682,13 +682,33 @@ function App(): JSX.Element {
             </Show>
           </div>
 
-          <div class="actions-editor">
-            <h3>Action Sequence</h3>
+          <div class="subgroup">
+            <div class="subgroup-head">
+              <span class="subgroup-title">Action sequence</span>
+              <Show when={actions().length > 0}>
+                <button
+                  type="button"
+                  class="link-button"
+                  onClick={() => {
+                    setActions(actions().slice(0, -1));
+                    setSolveResult(undefined);
+                  }}
+                >
+                  Undo last
+                </button>
+              </Show>
+            </div>
             <Show when={!descriptorError()} fallback={<p class="inline-error">{descriptorError()}</p>}>
+              <Show when={(descriptor() as StateDescriptor).rows.length === 0}>
+                <p class="subtle">Choose an action below to start building the spot.</p>
+              </Show>
               <For each={(descriptor() as StateDescriptor).rows}>
                 {(row, index) => (
                   <div class="action-row">
-                    <span class="actor">P{row.actor}</span>
+                    <span class="step-num">{index() + 1}</span>
+                    <span class={`actor-pill ${row.actor === heroPlayer() ? "hero" : "villain"}`}>
+                      {row.actor === heroPlayer() ? "Hero" : "Villain"}
+                    </span>
                     <select
                       value={String(row.action)}
                       onChange={(event) => setActionAt(index(), Number(event.currentTarget.value))}
@@ -710,16 +730,24 @@ function App(): JSX.Element {
                   </div>
                 )}
               </For>
-              <div class="add-actions">
-                <For each={legalActions((descriptor() as StateDescriptor).finalLegalMask)}>
-                  {(action) => (
-                    <button type="button" onClick={() => addAction(action)}>
-                      <Plus size={15} />
-                      <span>{actionName(action, (descriptor() as StateDescriptor).finalContext)}</span>
-                    </button>
-                  )}
-                </For>
-              </div>
+              <Show when={legalActions((descriptor() as StateDescriptor).finalLegalMask).length > 0}>
+                <div class="next-to-act">
+                  <span class={`actor-pill ${(descriptor() as StateDescriptor).finalActor === heroPlayer() ? "hero" : "villain"}`}>
+                    {(descriptor() as StateDescriptor).finalActor === heroPlayer() ? "Hero" : "Villain"}
+                  </span>
+                  <span class="next-to-act-label">to act</span>
+                </div>
+                <div class="add-actions">
+                  <For each={legalActions((descriptor() as StateDescriptor).finalLegalMask)}>
+                    {(action) => (
+                      <button type="button" onClick={() => addAction(action)}>
+                        <Plus size={15} />
+                        <span>{actionName(action, (descriptor() as StateDescriptor).finalContext)}</span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
             </Show>
           </div>
 

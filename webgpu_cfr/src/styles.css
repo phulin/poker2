@@ -555,9 +555,9 @@ h3 {
 
 .action-row {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) 36px;
+  grid-template-columns: 28px auto minmax(0, 1fr) 36px;
   gap: 8px;
-  align-items: end;
+  align-items: center;
 }
 
 .actor {
@@ -569,6 +569,76 @@ h3 {
   background: #eef3ef;
   color: #314042;
   font-weight: 700;
+}
+
+.step-num {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #e6ece8;
+  color: #5d686a;
+  font-size: 12px;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+}
+
+.actor-pill {
+  display: inline-grid;
+  place-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 720;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.actor-pill.hero {
+  background: #d6efe7;
+  color: #0f665a;
+  border: 1px solid #b9d8cc;
+}
+
+.actor-pill.villain {
+  background: #f1ece3;
+  color: #6b5a35;
+  border: 1px solid #d8cfb8;
+}
+
+.subgroup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.link-button {
+  border: 0;
+  background: transparent;
+  color: #168575;
+  font-size: 12px;
+  font-weight: 660;
+  padding: 0;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+.next-to-act {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.next-to-act-label {
+  color: #5d686a;
+  font-size: 12px;
+  font-weight: 660;
 }
 
 .add-actions {
