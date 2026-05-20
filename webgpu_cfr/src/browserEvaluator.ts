@@ -174,6 +174,7 @@ export class BrowserCfrEvaluator {
 
   dispose(): void {
     this.cfr.dispose();
+    this.sparseCfr.dispose();
     for (const buffers of this.childValuePool.values()) {
       for (const buffer of buffers) {
         buffer.destroy();
