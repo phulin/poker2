@@ -734,6 +734,7 @@ export class SparseCfrResolver {
   ): void {
     if (!this.gpuKernels) return;
     const encoder = this.model.device.createCommandEncoder();
+    const regretWeightEnd = tree.depthOffsets[tree.treeDepth] ?? tree.nodes.length;
     const params = [
       this.gpuKernels.encodeComputeRegretWeightsRange(
         encoder,
@@ -741,7 +742,7 @@ export class SparseCfrResolver {
         beliefsAvgBuffer,
         regretWeightsBuffer,
         0,
-        tree.nodes.length,
+        regretWeightEnd,
       ),
       this.gpuKernels.encodeAccumulateRegretsRange(
         encoder,
@@ -775,6 +776,7 @@ export class SparseCfrResolver {
   ): void {
     if (!this.gpuKernels) return;
     const encoder = this.model.device.createCommandEncoder();
+    const regretWeightEnd = tree.depthOffsets[tree.treeDepth] ?? tree.nodes.length;
     const params: GPUBuffer[] = [
       this.gpuKernels.encodeComputeRegretWeightsRange(
         encoder,
@@ -782,7 +784,7 @@ export class SparseCfrResolver {
         regretBeliefsBuffer,
         regretWeightsBuffer,
         0,
-        tree.nodes.length,
+        regretWeightEnd,
       ),
       this.gpuKernels.encodeAccumulateRegretsRange(
         encoder,
