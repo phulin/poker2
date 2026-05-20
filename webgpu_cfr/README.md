@@ -22,7 +22,9 @@ BetterFFN-backed local CFR problem. It supports two paths:
 - `src/hunlEnv.ts` ports the single-state public HUNL action-bin environment.
 - `src/browserEvaluator.ts` replays prefixes, builds child values, solves local
   CFR, and returns beliefs/action probabilities. It also has a sparse
-  arbitrary-depth resolver path enabled by `depth > 1`.
+  arbitrary-depth resolver path enabled by `depth > 1`; sparse CFR tensor
+  updates run through WGSL kernels while model leaf evaluation remains on the
+  exported BetterFFN WebGPU runtime.
 - `src/cards.ts`, `src/beliefs.ts`, and `src/modelCache.ts` provide browser-safe
   card parsing, hero-only belief initialization, blocked combo masks, streamed
   model download progress, and IndexedDB cache invalidation.

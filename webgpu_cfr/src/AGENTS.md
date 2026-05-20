@@ -6,7 +6,7 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `gpu.ts`: Barrel exports for GPU helpers.
 - `gpuBuffers.ts`: WebGPU storage/uniform buffer creation and readback helpers.
 - `kernels.ts`: WGSL kernels for regret matching, belief updates, and action probability reductions.
-- `sparseCfrKernels.ts`: WGSL sparse-tree CFR kernels and buffer helpers for regret matching and per-depth belief propagation.
+- `sparseCfrKernels.ts`: WGSL sparse-tree CFR kernels and buffer helpers for regret matching, per-depth belief/reach propagation, value backup, average-policy accumulation, and regret accumulation.
 - `modelKernels.ts`: WGSL kernels for BetterFFN matvec, activations, normalization, residuals, and batching.
 - `pokerStateKernels.ts`: WGSL kernels and state-layout constants for GPU-resident HUNL public state, legal masks, stepping, child-state construction, terminal values, and state feature encoding.
 - `gpuPokerState.ts`: TypeScript wrapper for packed GPU poker state buffers and the poker-state kernels used by browser solving.
@@ -18,7 +18,7 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `hunlEnv.ts`: Browser-safe public HUNL environment and feature encoder.
 - `evaluator.ts`: Local GPU CFR evaluator for fixtures.
 - `browserEvaluator.ts`: Browser-facing evaluator that replays prefixes, builds child values, and solves local CFR.
-- `sparseResolver.ts`: Arbitrary-depth sparse public-tree CFR resolver that uses the WebGPU BetterFFN runtime for policy/value inference while keeping sparse CFR control flow in TypeScript.
+- `sparseResolver.ts`: Arbitrary-depth sparse public-tree CFR resolver that uses the WebGPU BetterFFN runtime for policy/value inference and WGSL sparse CFR kernels for tensor updates when a GPU device is available.
 - `browser.ts`: Browser device/model loading exports.
 - `main.tsx`: Vite/Solid application mount entry point.
 - `App.tsx`: Guided browser spot solver UI and result rendering.

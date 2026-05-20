@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BetterFfnWebGpuModel, BetterFfnPrediction } from "../src/betterFfnWebGpuModel.js";
+import { createDawnDevice } from "../src/gpu.js";
 import { DEFAULT_FORCE_DECK, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js";
 import { SparseCfrResolver } from "../src/sparseResolver.js";
 
-function fakeModel(numActions: number): BetterFfnWebGpuModel {
+function fakeModel(numActions: number, device?: GPUDevice): BetterFfnWebGpuModel {
   return {
+    ...(device ? { device } : {}),
     manifest: {
       architecture: { numActions },
     },
@@ -60,5 +62,49 @@ test("sparse resolver supports depth greater than one", async () => {
       beliefMass += result.beliefsAfter![offset + hand]!;
     }
     assert.ok(Math.abs(beliefMass - 1) < 1e-5, `belief mass ${beliefMass}`);
+  }
+});
+
+test("sparse resolver can route CFR tensor operations through WGSL kernels", async () => {
+  const device = await createDawnDevice();
+  try {
+    const betBins = [0.5];
+    const numActions = betBins.length + 3;
+    const env = new PublicHunlEnv({
+      stack: 20,
+      sb: 1,
+      bb: 2,
+      betBins,
+      button: 1,
+      forceDeck: DEFAULT_FORCE_DECK,
+    });
+    const cpu = new SparseCfrResolver(fakeModel(numActions));
+    const gpu = new SparseCfrResolver(fakeModel(numActions, device));
+
+    const [cpuResult, gpuResult] = await Promise.all([
+      cpu.solve(env.clone(), uniformBeliefs(), {
+        depth: 3,
+        iterations: 2,
+        selectedAction: 1,
+      }),
+      gpu.solve(env.clone(), uniformBeliefs(), {
+        depth: 3,
+        iterations: 2,
+        selectedAction: 1,
+      }),
+    ]);
+
+    assert.equal(gpuResult.policy.length, cpuResult.policy.length);
+    assert.equal(gpuResult.actionProbs.length, cpuResult.actionProbs.length);
+    let maxDiff = 0;
+    for (let i = 0; i < gpuResult.actionProbs.length; i += 1) {
+      maxDiff = Math.max(
+        maxDiff,
+        Math.abs(gpuResult.actionProbs[i]! - cpuResult.actionProbs[i]!),
+      );
+    }
+    assert.ok(maxDiff < 1e-5, `action prob max diff ${maxDiff}`);
+  } finally {
+    device.destroy();
   }
 });
