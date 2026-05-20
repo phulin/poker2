@@ -8,6 +8,7 @@ import {
   Plus,
   RotateCcw,
   Trash2,
+  X,
 } from "lucide-solid";
 import {
   BetterFfnWebGpuModel,
@@ -118,22 +119,112 @@ function positiveNumber(value: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function CardSelect(props: {
+const RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"];
+const SUITS = ["s", "h", "d", "c"] as const;
+const SUIT_GLYPHS: Record<string, string> = { s: "♠", h: "♥", d: "♦", c: "♣" };
+
+function suitClass(suit: string): string {
+  if (suit === "h") return "suit-h";
+  if (suit === "d") return "suit-d";
+  if (suit === "c") return "suit-c";
+  return "suit-s";
+}
+
+function CardChip(props: { value: string; placeholder?: string }): JSX.Element {
+  return (
+    <Show
+      when={props.value}
+      fallback={<span class="card-chip empty">{props.placeholder ?? "+"}</span>}
+    >
+      <span class={`card-chip ${suitClass(props.value[1] ?? "s")}`}>
+        <span class="card-rank">{props.value[0]}</span>
+        <span class="card-suit">{SUIT_GLYPHS[props.value[1] ?? "s"]}</span>
+      </span>
+    </Show>
+  );
+}
+
+function CardPicker(props: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  disabled?: ReadonlySet<string>;
   allowEmpty?: boolean;
 }): JSX.Element {
+  const [open, setOpen] = createSignal(false);
+
+  function close() {
+    setOpen(false);
+  }
+
+  function select(card: string) {
+    props.onChange(card);
+    close();
+  }
+
   return (
-    <label class="field compact-field">
-      <span>{props.label}</span>
-      <select value={props.value} onChange={(event) => props.onChange(event.currentTarget.value)}>
-        <Show when={props.allowEmpty}>
-          <option value="">--</option>
-        </Show>
-        <For each={CARD_OPTIONS}>{(card) => <option value={card}>{card}</option>}</For>
-      </select>
-    </label>
+    <div class="card-picker">
+      <span class="card-picker-label">{props.label}</span>
+      <button
+        type="button"
+        class="card-picker-trigger"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <CardChip value={props.value} />
+      </button>
+      <Show when={open()}>
+        <div class="card-picker-backdrop" onClick={close} />
+        <div class="card-picker-popover" role="dialog">
+          <div class="card-picker-header">
+            <span>Pick a card</span>
+            <button type="button" class="icon-button small" onClick={close} title="Close">
+              <X size={14} />
+            </button>
+          </div>
+          <div class="card-picker-grid">
+            <For each={SUITS}>
+              {(suit) => (
+                <For each={RANKS}>
+                  {(rank) => {
+                    const card = `${rank}${suit}`;
+                    const taken = () => props.disabled?.has(card) && card !== props.value;
+                    const selected = () => props.value === card;
+                    return (
+                      <button
+                        type="button"
+                        class={
+                          "card-cell " +
+                          suitClass(suit) +
+                          (selected() ? " selected" : "") +
+                          (taken() ? " taken" : "")
+                        }
+                        disabled={taken()}
+                        onClick={() => select(card)}
+                      >
+                        <span class="card-rank">{rank}</span>
+                        <span class="card-suit">{SUIT_GLYPHS[suit]}</span>
+                      </button>
+                    );
+                  }}
+                </For>
+              )}
+            </For>
+          </div>
+          <Show when={props.allowEmpty || props.value}>
+            <button
+              type="button"
+              class="card-picker-clear"
+              onClick={() => {
+                props.onChange("");
+                close();
+              }}
+            >
+              Clear
+            </button>
+          </Show>
+        </div>
+      </Show>
+    </div>
   );
 }
 
@@ -264,6 +355,19 @@ function App(): JSX.Element {
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
     }
+  });
+
+  const usedCards = createMemo<Set<string>>(() => {
+    const used = new Set<string>();
+    for (const card of heroCards()) {
+      if (card) used.add(card);
+    }
+    const publicCount = STREET_CARD_COUNTS[street()] ?? 0;
+    for (let i = 0; i < publicCount; i += 1) {
+      const card = boardCards()[i];
+      if (card) used.add(card);
+    }
+    return used;
   });
 
   const manifestActionLabels = createMemo(() => runtime()?.manifest.actionLabels ?? []);
@@ -485,34 +589,59 @@ function App(): JSX.Element {
             </label>
           </div>
 
-          <div class="card-grid">
-            <CardSelect label="Hero 1" value={heroCards()[0]} onChange={(value) => updateHeroCard(0, value)} />
-            <CardSelect label="Hero 2" value={heroCards()[1]} onChange={(value) => updateHeroCard(1, value)} />
-            <label class="field compact-field">
-              <span>Street</span>
-              <select
-                value={String(street())}
-                onChange={(event) => {
-                  setStreet(Number(event.currentTarget.value));
-                  setActions([]);
-                  setSolveResult(undefined);
-                }}
-              >
-                <option value="0">Preflop</option>
-                <option value="1">Flop</option>
-                <option value="2">Turn</option>
-                <option value="3">River</option>
-              </select>
-            </label>
-            <For each={Array.from({ length: STREET_CARD_COUNTS[street()] ?? 0 }, (_, index) => index)}>
-              {(index) => (
-                <CardSelect
-                  label={`Board ${index + 1}`}
-                  value={boardCards()[index] ?? ""}
-                  onChange={(value) => updateBoardCard(index, value)}
-                />
-              )}
-            </For>
+          <div class="card-section">
+            <div class="card-section-head">
+              <span class="card-section-title">Hero hand</span>
+              <div class="street-toggle" role="tablist">
+                <For each={["Preflop", "Flop", "Turn", "River"]}>
+                  {(name, index) => (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={street() === index()}
+                      class={street() === index() ? "active" : ""}
+                      onClick={() => {
+                        setStreet(index());
+                        setActions([]);
+                        setSolveResult(undefined);
+                      }}
+                    >
+                      {name}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+            <div class="card-row">
+              <CardPicker
+                label="Hero 1"
+                value={heroCards()[0]}
+                disabled={usedCards()}
+                onChange={(value) => updateHeroCard(0, value)}
+              />
+              <CardPicker
+                label="Hero 2"
+                value={heroCards()[1]}
+                disabled={usedCards()}
+                onChange={(value) => updateHeroCard(1, value)}
+              />
+            </div>
+            <Show when={(STREET_CARD_COUNTS[street()] ?? 0) > 0}>
+              <span class="card-section-title">Board</span>
+              <div class="card-row">
+                <For each={Array.from({ length: STREET_CARD_COUNTS[street()] ?? 0 }, (_, index) => index)}>
+                  {(index) => (
+                    <CardPicker
+                      label={`Board ${index + 1}`}
+                      value={boardCards()[index] ?? ""}
+                      disabled={usedCards()}
+                      allowEmpty
+                      onChange={(value) => updateBoardCard(index, value)}
+                    />
+                  )}
+                </For>
+              </div>
+            </Show>
           </div>
 
           <div class="actions-editor">
