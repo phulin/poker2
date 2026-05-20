@@ -7,6 +7,7 @@ import {
 } from "./gpuBuffers.js";
 import { GpuPokerState } from "./gpuPokerState.js";
 import { STATE_STRIDE } from "./pokerStateKernels.js";
+import { SparseCfrResolver } from "./sparseResolver.js";
 import {
   initialUniformBeliefs,
   NUM_HANDS,
@@ -53,17 +54,26 @@ export class BrowserCfrEvaluator {
   readonly device: GPUDevice;
   readonly model: BetterFfnWebGpuModel;
   private readonly cfr: GpuCfrEvaluator;
+  private readonly sparseCfr: SparseCfrResolver;
   private readonly childValuePool = new Map<number, GPUBuffer[]>();
 
   constructor(device: GPUDevice, model: BetterFfnWebGpuModel) {
     this.device = device;
     this.model = model;
     this.cfr = new GpuCfrEvaluator(device);
+    this.sparseCfr = new SparseCfrResolver(model);
   }
 
   async evaluateSpot(request: EvaluateSpotRequest): Promise<BrowserEvaluationResult> {
     if (!Number.isInteger(request.iterations) || request.iterations <= 0) {
       throw new Error("iterations must be a positive integer");
+    }
+    const depth = request.depth ?? 1;
+    if (!Number.isInteger(depth) || depth <= 0) {
+      throw new Error("depth must be a positive integer");
+    }
+    if (depth > 1) {
+      return await this.evaluateSpotSparse(request, depth);
     }
     const numActions = this.model.manifest.architecture.numActions;
     const env = PublicHunlEnv.fromManifest(
@@ -162,6 +172,59 @@ export class BrowserCfrEvaluator {
       }
     }
     this.childValuePool.clear();
+  }
+
+  private async evaluateSpotSparse(
+    request: EvaluateSpotRequest,
+    depth: number,
+  ): Promise<BrowserEvaluationResult> {
+    const numActions = this.model.manifest.architecture.numActions;
+    const env = PublicHunlEnv.fromManifest(
+      this.model.manifest,
+      request.initialState,
+    );
+    const knownCards: {
+      publicCards?: readonly number[];
+      heroPlayer?: 0 | 1;
+      heroHand?: readonly [number, number];
+    } = {};
+    if (request.publicCards) knownCards.publicCards = request.publicCards;
+    if (request.heroPlayer !== undefined) knownCards.heroPlayer = request.heroPlayer;
+    if (request.heroHand) knownCards.heroHand = request.heroHand;
+    env.configureKnownCards(knownCards);
+
+    let beliefs = this.initialBeliefs(request);
+    for (const action of request.spot) {
+      this.assertAction(action, numActions);
+      this.assertLegalAction(env, action);
+      const solved = await this.sparseCfr.solve(env, beliefs, {
+        depth,
+        iterations: request.iterations,
+        selectedAction: action,
+        readPolicy: false,
+        readActionProbs: false,
+        readBeliefs: true,
+      });
+      if (!solved.beliefsAfter) {
+        throw new Error("internal error: sparse prefix solve did not produce beliefs");
+      }
+      env.stepBin(action);
+      beliefs = solved.beliefsAfter;
+    }
+
+    const final = await this.sparseCfr.solve(env, beliefs, {
+      depth,
+      iterations: request.iterations,
+    });
+    const legal = env.legalBinsAmountAndMask();
+    return {
+      beliefsAtSpot: beliefs,
+      actionProbs: final.actionProbs,
+      policy: final.policy,
+      actionLabels: [...this.model.actionLabels],
+      legalMask: legal.mask,
+      actor: env.toAct,
+    };
   }
 
   private async solveCurrentProblem(

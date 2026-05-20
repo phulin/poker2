@@ -21,7 +21,8 @@ BetterFFN-backed local CFR problem. It supports two paths:
   with WebGPU dense-vector kernels.
 - `src/hunlEnv.ts` ports the single-state public HUNL action-bin environment.
 - `src/browserEvaluator.ts` replays prefixes, builds child values, solves local
-  CFR, and returns beliefs/action probabilities.
+  CFR, and returns beliefs/action probabilities. It also has a sparse
+  arbitrary-depth resolver path enabled by `depth > 1`.
 - `src/cards.ts`, `src/beliefs.ts`, and `src/modelCache.ts` provide browser-safe
   card parsing, hero-only belief initialization, blocked combo masks, streamed
   model download progress, and IndexedDB cache invalidation.
@@ -79,13 +80,13 @@ uv run python webgpu_cfr/python/export_model.py --snapshot checkpoints-rebel/reb
 Run the exported-model evaluator directly:
 
 ```bash
-npm run eval -- --manifest public/models/rebel_latest/model.json --weights public/models/rebel_latest/weights.bin --spot 1 --iterations 8
+npm run eval -- --manifest public/models/rebel_latest/model.json --weights public/models/rebel_latest/weights.bin --spot 1 --iterations 8 --depth 2
 ```
 
 Benchmark the exported-model evaluator on Node/Dawn:
 
 ```bash
-npm run bench -- --manifest public/models/rebel_latest/model.json --weights public/models/rebel_latest/weights.bin --spot 1 --iterations 8 --warmups 1 --runs 5
+npm run bench -- --manifest public/models/rebel_latest/model.json --weights public/models/rebel_latest/weights.bin --spot 1 --iterations 8 --depth 2 --warmups 1 --runs 5
 ```
 
 Run the legacy Python-fixture evaluator directly:

@@ -102,6 +102,7 @@ export interface BrowserCfrInitialState {
 export interface EvaluateSpotRequest {
   spot: number[];
   iterations: number;
+  depth?: number;
   initialState?: BrowserCfrInitialState;
   initialBeliefs?: Float32Array<ArrayBufferLike> | ArrayLike<number>;
   publicCards?: number[];

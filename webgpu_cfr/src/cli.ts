@@ -9,6 +9,7 @@ interface CliOptions {
   snapshot: string;
   spot: number[];
   iterations: number;
+  depth: number;
   manifest?: string;
   weights?: string;
 }
@@ -31,6 +32,7 @@ function readArgs(): CliOptions {
       .filter(Boolean)
       .map((v) => Number.parseInt(v, 10)),
     iterations: Number.parseInt(get("--iterations", "8"), 10),
+    depth: Number.parseInt(get("--depth", "1"), 10),
   };
   if (manifest) options.manifest = manifest;
   if (weights) options.weights = weights;
@@ -51,9 +53,11 @@ try {
       const result = await evaluator.evaluateSpot({
         spot: options.spot,
         iterations: options.iterations,
+        depth: options.depth,
       });
       output = {
         spot: options.spot,
+        depth: options.depth,
         actionLabels: result.actionLabels,
         actionProbs: Array.from(result.actionProbs),
       };
@@ -66,6 +70,7 @@ try {
     const result = await evaluateFixture(device, fixture);
     output = {
       spot: fixture.spot,
+      depth: 1,
       actionLabels: fixture.actionLabels,
       actionProbs: Array.from(result.actionProbs),
     };

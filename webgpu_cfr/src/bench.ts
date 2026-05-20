@@ -9,6 +9,7 @@ interface BenchOptions {
   weights?: string;
   spot: number[];
   iterations: number;
+  depth: number;
   warmups: number;
   runs: number;
 }
@@ -58,6 +59,7 @@ function readArgs(): BenchOptions {
     manifest: getArg(args, "--manifest"),
     spot: parseSpot(getArg(args, "--spot", "1")),
     iterations: parsePositiveInt(getArg(args, "--iterations", "8"), "iterations"),
+    depth: parsePositiveInt(getArg(args, "--depth", "1"), "depth"),
     warmups: parseNonNegativeInt(getArg(args, "--warmups", "1"), "warmups"),
     runs: parsePositiveInt(getArg(args, "--runs", "5"), "runs"),
   };
@@ -93,6 +95,7 @@ try {
     await evaluator.evaluateSpot({
       spot: options.spot,
       iterations: options.iterations,
+      depth: options.depth,
     });
   }
 
@@ -104,6 +107,7 @@ try {
     const result = await evaluator.evaluateSpot({
       spot: options.spot,
       iterations: options.iterations,
+      depth: options.depth,
     });
     samples.push(performance.now() - start);
     actionLabels = result.actionLabels;
@@ -115,6 +119,7 @@ try {
       {
         spot: options.spot,
         iterations: options.iterations,
+        depth: options.depth,
         warmups: options.warmups,
         runs: options.runs,
         ...stats(samples),
