@@ -2,18 +2,90 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from p2.core.structured_config import Config, ModelType
 from p2.env.card_utils import NUM_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
-from p2.models.mlp.better_ffn import BetterFFN
+from p2.models.mlp.better_ffn import BetterFFN, ResidualBlock, ffn_block
 
 
 DEFAULT_FORCE_DECK = [12, 25, 38, 51, 0, 13, 26, 1, 14]
+
+
+def _uses_legacy_direct_head(
+    state: dict[str, torch.Tensor],
+    head: str,
+    num_layers: int,
+) -> bool:
+    return (
+        f"{head}.{num_layers - 1}.linear_in.weight" in state
+        and f"{head}.{num_layers}.linear_out.weight" not in state
+    )
+
+
+def _legacy_head(
+    *,
+    hidden_dim: int,
+    ffn_dim: int,
+    out_dim: int,
+    num_layers: int,
+    alpha: float,
+    nonlinearity: Any,
+) -> nn.Sequential:
+    layers: list[nn.Module] = [
+        ResidualBlock(
+            ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity),
+            alpha,
+        )
+        for _ in range(num_layers - 1)
+    ]
+    layers.append(
+        ffn_block(hidden_dim, ffn_dim, out_dim=out_dim, nonlinearity=nonlinearity)
+    )
+    return nn.Sequential(*layers)
+
+
+def _adapt_legacy_direct_heads(
+    model: BetterFFN,
+    cfg: Config,
+    state: dict[str, torch.Tensor],
+) -> None:
+    value_alpha = 1 / math.sqrt(
+        cfg.model.num_hidden_layers + cfg.model.num_value_layers
+    )
+    if _uses_legacy_direct_head(
+        state, "policy_head", cfg.model.num_policy_layers
+    ):
+        policy_alpha = (
+            value_alpha
+            if cfg.model.shared_trunk
+            else 1 / math.sqrt(cfg.model.num_policy_layers)
+        )
+        model.policy_head = _legacy_head(
+            hidden_dim=cfg.model.hidden_dim,
+            ffn_dim=cfg.model.ffn_dim,
+            out_dim=cfg.model.num_actions * NUM_HANDS,
+            num_layers=cfg.model.num_policy_layers,
+            alpha=policy_alpha,
+            nonlinearity=cfg.model.nonlinearity,
+        )
+    if _uses_legacy_direct_head(
+        state, "hand_value_head", cfg.model.num_value_layers
+    ):
+        model.hand_value_head = _legacy_head(
+            hidden_dim=cfg.model.hidden_dim,
+            ffn_dim=cfg.model.ffn_dim,
+            out_dim=2 * NUM_HANDS,
+            num_layers=cfg.model.num_value_layers,
+            alpha=value_alpha,
+            nonlinearity=cfg.model.nonlinearity,
+        )
 
 
 def _load_better_ffn(snapshot: Path, device: torch.device) -> tuple[BetterFFN, Config]:
@@ -46,6 +118,7 @@ def _load_better_ffn(snapshot: Path, device: torch.device) -> tuple[BetterFFN, C
         key: value.to(torch.float32) if value.dtype.is_floating_point else value
         for key, value in state.items()
     }
+    _adapt_legacy_direct_heads(model, cfg, state)
     model.load_state_dict(state)
     model.to(device)
     model.eval()
