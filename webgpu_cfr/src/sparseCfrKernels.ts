@@ -486,6 +486,75 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_SHOWDOWN_VALUES_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  batch: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> nodeIndices: array<u32>;
+@group(0) @binding(1) var<storage, read> allowedMask: array<u32>;
+@group(0) @binding(2) var<storage, read> handCard0: array<u32>;
+@group(0) @binding(3) var<storage, read> handCard1: array<u32>;
+@group(0) @binding(4) var<storage, read> rankCodes: array<u32>;
+@group(0) @binding(5) var<storage, read> payoffs: array<f32>;
+@group(0) @binding(6) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(7) var<storage, read_write> values: array<f32>;
+@group(0) @binding(8) var<uniform> params: Params;
+
+fn overlaps(a: u32, b: u32) -> bool {
+  return handCard0[a] == handCard0[b] ||
+    handCard0[a] == handCard1[b] ||
+    handCard1[a] == handCard0[b] ||
+    handCard1[a] == handCard1[b];
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let total = params.batch * 2u * params.numHands;
+  if (linear >= total) {
+    return;
+  }
+  let hand = linear % params.numHands;
+  let player = (linear / params.numHands) % 2u;
+  let sample = linear / (2u * params.numHands);
+  let node = nodeIndices[sample];
+  let valueIdx = (node * 2u + player) * params.numHands + hand;
+  if (allowedMask[node * params.numHands + hand] == 0u) {
+    values[valueIdx] = 0.0;
+    return;
+  }
+
+  let rank = rankCodes[sample * params.numHands + hand];
+  let winValue = payoffs[sample * 3u];
+  let loseValue = payoffs[sample * 3u + 1u];
+  let tieValue = payoffs[sample * 3u + 2u];
+  var value = 0.0;
+  var mass = 0.0;
+  for (var opp = 0u; opp < params.numHands; opp = opp + 1u) {
+    if (allowedMask[node * params.numHands + opp] == 0u || overlaps(hand, opp)) {
+      continue;
+    }
+    let oppRank = rankCodes[sample * params.numHands + opp];
+    if (player == 0u) {
+      let belief = beliefs[(node * 2u + 1u) * params.numHands + opp];
+      let payoff = select(select(tieValue, loseValue, rank < oppRank), winValue, rank > oppRank);
+      value = value + belief * payoff;
+      mass = mass + belief;
+    } else {
+      let belief = beliefs[node * 2u * params.numHands + opp];
+      let p0Payoff = select(select(tieValue, loseValue, oppRank < rank), winValue, oppRank > rank);
+      value = value + belief * -p0Payoff;
+      mass = mass + belief;
+    }
+  }
+  values[valueIdx] = select(0.0, value / mass, mass > 1.0e-12);
+}
+`;
+
 export interface SparseGpuTreeData {
   nodeCount: number;
   numHands: number;
@@ -530,6 +599,7 @@ export class SparseCfrGpuKernels {
   private readonly regretWeightPipeline: GPUComputePipeline;
   private readonly gatherNodeBeliefsPipeline: GPUComputePipeline;
   private readonly scatterNodeValuesPipeline: GPUComputePipeline;
+  private readonly showdownValuesPipeline: GPUComputePipeline;
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -576,6 +646,10 @@ export class SparseCfrGpuKernels {
     this.scatterNodeValuesPipeline = this.pipeline(
       SPARSE_SCATTER_NODE_VALUES_WGSL,
       "sparse-cfr-scatter-node-values",
+    );
+    this.showdownValuesPipeline = this.pipeline(
+      SPARSE_SHOWDOWN_VALUES_WGSL,
+      "sparse-cfr-showdown-values",
     );
   }
 
@@ -953,6 +1027,43 @@ export class SparseCfrGpuKernels {
     this.encode(
       encoder,
       this.scatterNodeValuesPipeline,
+      bindGroup,
+      Math.ceil((batch * 2 * tree.numHands) / 64),
+    );
+    return params;
+  }
+
+  encodeShowdownValues(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    rankCodes: GPUBuffer,
+    payoffs: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    batch: number,
+  ): GPUBuffer {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, batch, 0, 0]),
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.showdownValuesPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices } },
+        { binding: 1, resource: { buffer: tree.allowedMask } },
+        { binding: 2, resource: { buffer: tree.handCard0 } },
+        { binding: 3, resource: { buffer: tree.handCard1 } },
+        { binding: 4, resource: { buffer: rankCodes } },
+        { binding: 5, resource: { buffer: payoffs } },
+        { binding: 6, resource: { buffer: beliefs } },
+        { binding: 7, resource: { buffer: values } },
+        { binding: 8, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.showdownValuesPipeline,
       bindGroup,
       Math.ceil((batch * 2 * tree.numHands) / 64),
     );

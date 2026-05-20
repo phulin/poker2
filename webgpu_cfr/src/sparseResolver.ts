@@ -9,6 +9,7 @@ import {
 import {
   NUM_HANDS,
   PublicHunlEnv,
+  showdownTerminalRankCodes,
   showdownTerminalValues,
 } from "./hunlEnv.js";
 import {
@@ -53,6 +54,8 @@ interface SparseLeafGpuBatch {
   modelEnvs: PublicHunlEnv[];
   modelNodeIndices: Uint32Array<ArrayBuffer>;
   showdownNodeIndices: Uint32Array<ArrayBuffer>;
+  showdownRankCodes: Uint32Array<ArrayBuffer>;
+  showdownPayoffs: Float32Array<ArrayBuffer>;
 }
 
 export interface SparseResolveOptions {
@@ -388,10 +391,8 @@ export class SparseCfrResolver {
       leafBatch.modelNodeIndices.length * 2 * NUM_HANDS,
     );
     const showdownNodeBuffer = makeStorageBuffer(device, leafBatch.showdownNodeIndices);
-    const showdownBeliefsBuffer = makeEmptyStorageBuffer(
-      device,
-      leafBatch.showdownNodeIndices.length * 2 * NUM_HANDS,
-    );
+    const showdownRankBuffer = makeStorageBuffer(device, leafBatch.showdownRankCodes);
+    const showdownPayoffBuffer = makeStorageBuffer(device, leafBatch.showdownPayoffs);
     const pendingLeafDisposals: Array<() => void> = [];
 
     try {
@@ -458,7 +459,8 @@ export class SparseCfrResolver {
           modelLeafNodeBuffer,
           modelLeafBeliefsBuffer,
           showdownNodeBuffer,
-          showdownBeliefsBuffer,
+          showdownRankBuffer,
+          showdownPayoffBuffer,
         );
         pendingLeafDisposals.push(disposeLeafPrediction);
         this.encodeExpectedValuesGpuResident(
@@ -490,7 +492,8 @@ export class SparseCfrResolver {
       modelLeafNodeBuffer.destroy();
       modelLeafBeliefsBuffer.destroy();
       showdownNodeBuffer.destroy();
-      showdownBeliefsBuffer.destroy();
+      showdownRankBuffer.destroy();
+      showdownPayoffBuffer.destroy();
     }
   }
 
@@ -503,35 +506,32 @@ export class SparseCfrResolver {
     modelLeafNodeBuffer: GPUBuffer,
     modelLeafBeliefsBuffer: GPUBuffer,
     showdownNodeBuffer: GPUBuffer,
-    showdownBeliefsBuffer: GPUBuffer,
+    showdownRankBuffer: GPUBuffer,
+    showdownPayoffBuffer: GPUBuffer,
   ): Promise<() => void> {
     if (!this.gpuKernels) return () => undefined;
     const device = this.model.device;
-    let showdownBeliefs: Float32Array<ArrayBufferLike> | undefined;
-    if (leafBatch.showdownNodeIndices.length > 0) {
-      const encoder = device.createCommandEncoder();
-      const params = this.gpuKernels.encodeGatherNodeBeliefs(
-        encoder,
-        treeBuffers,
-        showdownNodeBuffer,
-        beliefsAvgBuffer,
-        showdownBeliefsBuffer,
-        leafBatch.showdownNodeIndices.length,
-      );
-      device.queue.submit([encoder.finish()]);
-      params.destroy();
-      showdownBeliefs = await readFloatBuffer(
-        device,
-        showdownBeliefsBuffer,
-        leafBatch.showdownNodeIndices.length * 2 * NUM_HANDS,
-      );
-    }
 
     device.queue.writeBuffer(
       valuesBuffer,
       0,
-      new Float32Array(this.terminalLeafValues(tree, leafBatch, showdownBeliefs)),
+      new Float32Array(this.foldTerminalLeafValues(tree)),
     );
+    if (leafBatch.showdownNodeIndices.length > 0) {
+      const showdownEncoder = device.createCommandEncoder();
+      const showdownParams = this.gpuKernels.encodeShowdownValues(
+        showdownEncoder,
+        treeBuffers,
+        showdownNodeBuffer,
+        showdownRankBuffer,
+        showdownPayoffBuffer,
+        beliefsAvgBuffer,
+        valuesBuffer,
+        leafBatch.showdownNodeIndices.length,
+      );
+      device.queue.submit([showdownEncoder.finish()]);
+      showdownParams.destroy();
+    }
 
     if (leafBatch.modelNodeIndices.length === 0) return () => undefined;
 
@@ -569,6 +569,8 @@ export class SparseCfrResolver {
     const modelEnvs: PublicHunlEnv[] = [];
     const modelNodeIndices: number[] = [];
     const showdownNodeIndices: number[] = [];
+    const showdownRankCodes: number[] = [];
+    const showdownPayoffs: number[] = [];
     for (let nodeIndex = 0; nodeIndex < tree.nodes.length; nodeIndex += 1) {
       const node = tree.nodes[nodeIndex]!;
       if (!node.leaf) continue;
@@ -577,25 +579,29 @@ export class SparseCfrResolver {
         modelNodeIndices.push(nodeIndex);
       } else if (!node.env.hasFolded[0] && !node.env.hasFolded[1]) {
         showdownNodeIndices.push(nodeIndex);
+        showdownRankCodes.push(...showdownTerminalRankCodes(node.env));
+        showdownPayoffs.push(...this.showdownPayoffs(node.env));
       }
     }
     return {
       modelEnvs,
       modelNodeIndices: new Uint32Array(modelNodeIndices),
       showdownNodeIndices: new Uint32Array(showdownNodeIndices),
+      showdownRankCodes: new Uint32Array(showdownRankCodes),
+      showdownPayoffs: new Float32Array(showdownPayoffs),
     };
   }
 
-  private terminalLeafValues(
-    tree: SparseTree,
-    leafBatch: SparseLeafGpuBatch,
-    showdownBeliefs?: Float32Array<ArrayBufferLike>,
-  ): Float32Array {
+  private showdownPayoffs(env: PublicHunlEnv): [number, number, number] {
+    return [
+      (env.stacks[0] + env.pot - env.startingStacks[0]) / env.scale,
+      (env.stacks[0] - env.startingStacks[0]) / env.scale,
+      (env.stacks[0] + env.pot / 2 - env.startingStacks[0]) / env.scale,
+    ];
+  }
+
+  private foldTerminalLeafValues(tree: SparseTree): Float32Array {
     const values = new Float32Array(tree.nodes.length * 2 * NUM_HANDS);
-    const showdownOffsetByNode = new Map<number, number>();
-    for (let i = 0; i < leafBatch.showdownNodeIndices.length; i += 1) {
-      showdownOffsetByNode.set(leafBatch.showdownNodeIndices[i]!, i * 2 * NUM_HANDS);
-    }
     for (let nodeIndex = 0; nodeIndex < tree.nodes.length; nodeIndex += 1) {
       const node = tree.nodes[nodeIndex]!;
       if (!node.leaf || !node.env.done) continue;
@@ -603,20 +609,6 @@ export class SparseCfrResolver {
       if (node.env.hasFolded[0] || node.env.hasFolded[1]) {
         values.fill(node.reward, valueBase, valueBase + NUM_HANDS);
         values.fill(-node.reward, valueBase + NUM_HANDS, valueBase + 2 * NUM_HANDS);
-      } else {
-        const showdownOffset = showdownOffsetByNode.get(nodeIndex);
-        if (showdownOffset === undefined || !showdownBeliefs) {
-          throw new Error("internal error: missing showdown beliefs for terminal leaf");
-        }
-        values.set(
-          showdownTerminalValues(
-            node.env,
-            new Float32Array(
-              showdownBeliefs.slice(showdownOffset, showdownOffset + 2 * NUM_HANDS),
-            ),
-          ),
-          valueBase,
-        );
       }
     }
     return values;

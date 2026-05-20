@@ -101,6 +101,10 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     const nodeIndices = makeStorageBuffer(device, new Uint32Array([1, 2]));
     const gatheredBeliefs = makeEmptyStorageBuffer(device, 16);
     const scatteredValues = makeEmptyStorageBuffer(device, 24);
+    const showdownNode = makeStorageBuffer(device, new Uint32Array([1]));
+    const showdownRanks = makeStorageBuffer(device, new Uint32Array([4, 3, 2, 1]));
+    const showdownPayoffs = makeStorageBuffer(device, new Float32Array([10, -5, 2]));
+    const showdownValues = makeEmptyStorageBuffer(device, 24);
 
     const encoder = device.createCommandEncoder();
     const paramsA = kernels.encodeRegretMatch(encoder, tree, regrets, policy);
@@ -148,6 +152,16 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
       scatteredValues,
       2,
     );
+    const paramsShowdown = kernels.encodeShowdownValues(
+      encoder,
+      tree,
+      showdownNode,
+      showdownRanks,
+      showdownPayoffs,
+      beliefs,
+      showdownValues,
+      1,
+    );
     const paramsOpponent = kernels.encodeComputeOpponentPolicyRange(
       encoder,
       tree,
@@ -191,6 +205,7 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     paramsB.destroy();
     paramsGather.destroy();
     paramsScatter.destroy();
+    paramsShowdown.destroy();
     paramsOpponent.destroy();
     paramsBackup.destroy();
     paramsWeights.destroy();
@@ -267,6 +282,19 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
       "scatteredValues",
     );
     assertCloseArray(
+      await readFloatBuffer(device, showdownValues, 24),
+      [
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        10, 10, 0, -5,
+        5, 5, -4, -10,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+      ],
+      1e-6,
+      "showdownValues",
+    );
+    assertCloseArray(
       await readFloatBuffer(device, opponentPolicy, 12),
       [
         0, 0, 0, 0,
@@ -336,6 +364,10 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     nodeIndices.destroy();
     gatheredBeliefs.destroy();
     scatteredValues.destroy();
+    showdownNode.destroy();
+    showdownRanks.destroy();
+    showdownPayoffs.destroy();
+    showdownValues.destroy();
   } finally {
     device.destroy();
   }

@@ -487,6 +487,30 @@ export function showdownTerminalValues(
   return out;
 }
 
+export function showdownTerminalRankCodes(env: PublicHunlEnv): Uint32Array<ArrayBuffer> {
+  const board = env.boardIndices.filter((card) => card >= 0);
+  if (board.length !== 5) {
+    throw new Error("showdown terminal ranks require a complete five-card board");
+  }
+
+  const boardSet = new Set(board);
+  const out = new Uint32Array(NUM_HANDS);
+  for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+    const [c0, c1] = handComboCards(hand);
+    if (boardSet.has(c0) || boardSet.has(c1)) continue;
+    out[hand] = encodeRankCode(evaluateSeven([c0, c1, ...board]));
+  }
+  return out;
+}
+
+function encodeRankCode(rank: RankVector): number {
+  let out = rank[0] ?? 0;
+  for (let i = 1; i <= 5; i += 1) {
+    out = out * 13 + (rank[i] ?? 0);
+  }
+  return out;
+}
+
 export function encodeBetterFeatures(env: PublicHunlEnv): {
   context: Float32Array<ArrayBuffer>;
   street: number;
