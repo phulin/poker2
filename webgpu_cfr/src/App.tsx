@@ -840,12 +840,16 @@ function App(): JSX.Element {
                   <span>actor P{solved().result.actor}</span>
                 </div>
 
-                <StrategyTable
-                  labels={solved().result.actionLabels}
-                  legalMask={solved().result.legalMask}
-                  actionProbs={solved().result.actionProbs}
-                  context={(descriptor() as StateDescriptor).finalContext}
-                />
+                <section class="subsection no-border">
+                  <h3>Aggregated strategy</h3>
+                  <p class="subtle">Probability of each action across the actor's range</p>
+                  <StrategyTable
+                    labels={solved().result.actionLabels}
+                    legalMask={solved().result.legalMask}
+                    actionProbs={solved().result.actionProbs}
+                    context={(descriptor() as StateDescriptor).finalContext}
+                  />
+                </section>
 
                 <HeroPolicy
                   labels={solved().result.actionLabels}
@@ -874,26 +878,25 @@ function StrategyTable(props: {
   context?: ActionContext;
 }): JSX.Element {
   return (
-    <table class="strategy-table">
-      <thead>
-        <tr>
-          <th>Action</th>
-          <th>Legal</th>
-          <th>Strategy</th>
-        </tr>
-      </thead>
-      <tbody>
-        <For each={props.labels}>
-          {(label, index) => (
-            <tr class={props.legalMask[index()] ? "" : "muted-row"}>
-              <td>{props.context ? formatActionLabel(index(), props.context) : label}</td>
-              <td>{props.legalMask[index()] ? "yes" : "no"}</td>
-              <td>{formatPercent(props.actionProbs[index()] ?? 0)}</td>
-            </tr>
-          )}
-        </For>
-      </tbody>
-    </table>
+    <div class="strategy-bars">
+      <For each={props.labels}>
+        {(label, index) => {
+          const legal = props.legalMask[index()] === 1;
+          const value = props.actionProbs[index()] ?? 0;
+          if (!legal && value <= 0) return null;
+          const name = props.context ? formatActionLabel(index(), props.context) : label;
+          return (
+            <div class={`bar-row ${legal ? "" : "muted"}`}>
+              <span class="bar-label">{name}</span>
+              <div class="bar-track">
+                <div class="bar-fill" style={{ width: `${Math.min(100, value * 100)}%` }} />
+              </div>
+              <span class="bar-value">{formatPercent(value)}</span>
+            </div>
+          );
+        }}
+      </For>
+    </div>
   );
 }
 
@@ -916,20 +919,26 @@ function HeroPolicy(props: {
   });
   return (
     <section class="subsection">
-      <h3>Hero Hand Policy</h3>
+      <h3>Hero hand policy</h3>
       <p class="subtle">
         {props.actor === props.heroPlayer
-          ? `Hand index ${props.handIndex}`
-          : `Current actor is P${props.actor}; hero is P${props.heroPlayer}`}
+          ? `Action distribution for this exact hand`
+          : `Villain (P${props.actor}) is to act; this is hero's hypothetical response`}
       </p>
-      <div class="policy-row">
+      <div class="strategy-bars">
         <For each={row()}>
-          {(item) => (
-            <div class={item.legal ? "policy-cell" : "policy-cell disabled"}>
-              <span>{item.label}</span>
-              <strong>{formatPercent(item.value)}</strong>
-            </div>
-          )}
+          {(item) => {
+            if (!item.legal && item.value <= 0) return null;
+            return (
+              <div class={`bar-row ${item.legal ? "" : "muted"}`}>
+                <span class="bar-label">{item.label}</span>
+                <div class="bar-track">
+                  <div class="bar-fill alt" style={{ width: `${Math.min(100, item.value * 100)}%` }} />
+                </div>
+                <span class="bar-value">{formatPercent(item.value)}</span>
+              </div>
+            );
+          }}
         </For>
       </div>
     </section>
@@ -939,19 +948,25 @@ function HeroPolicy(props: {
 function RangeSummaryView(props: { summary: RangeSummary }): JSX.Element {
   return (
     <section class="subsection">
-      <h3>Villain Range</h3>
+      <h3>Villain range</h3>
       <div class="metadata">
         <span>{props.summary.combos} combos</span>
         <span>mass {props.summary.mass.toFixed(4)}</span>
       </div>
       <div class="range-list">
         <For each={props.summary.top}>
-          {(item) => (
-            <div>
-              <span>{item.hand}</span>
-              <strong>{formatPercent(item.weight)}</strong>
-            </div>
-          )}
+          {(item) => {
+            const cards = item.hand.split(" ");
+            return (
+              <div class="range-row">
+                <span class="range-cards">
+                  <CardChip value={cards[0] ?? ""} />
+                  <CardChip value={cards[1] ?? ""} />
+                </span>
+                <strong>{formatPercent(item.weight)}</strong>
+              </div>
+            );
+          }}
         </For>
       </div>
     </section>

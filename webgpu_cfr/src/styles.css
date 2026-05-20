@@ -743,6 +743,87 @@ h3 {
   font-weight: 680;
 }
 
+.strategy-bars {
+  display: grid;
+  gap: 8px;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) 64px;
+  gap: 12px;
+  align-items: center;
+}
+
+.bar-row.muted {
+  opacity: 0.45;
+}
+
+.bar-label {
+  color: #1c2526;
+  font-size: 13px;
+  font-weight: 660;
+}
+
+.bar-value {
+  text-align: right;
+  color: #0f665a;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.bar-track {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: #e6ece8;
+  overflow: hidden;
+}
+
+.bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, #168575, #2da591);
+  border-radius: 999px;
+  transition: width 160ms ease;
+}
+
+.bar-fill.alt {
+  background: linear-gradient(90deg, #6b5a35, #a0884f);
+}
+
+.subsection.no-border {
+  border-top: 0;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+.range-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid #d8e2dc;
+  border-radius: 6px;
+  background: #fbfcfa;
+  padding: 6px 10px;
+}
+
+.range-cards {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.range-cards .card-chip {
+  font-size: 18px;
+}
+
+.range-cards .card-chip .card-suit {
+  font-size: 18px;
+}
+
 .strategy-table {
   width: 100%;
   border-collapse: collapse;
