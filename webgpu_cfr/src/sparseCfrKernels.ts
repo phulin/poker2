@@ -349,7 +349,7 @@ fn overlaps(a: u32, b: u32) -> bool {
     handCard1[a] == handCard1[b];
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let linear = gid.x;
   let nodeCount = params.end - params.start;
@@ -404,7 +404,7 @@ fn overlaps(a: u32, b: u32) -> bool {
     handCard1[a] == handCard1[b];
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let linear = gid.x;
   let nodeCount = params.end - params.start;
@@ -511,7 +511,7 @@ fn overlaps(a: u32, b: u32) -> bool {
     handCard1[a] == handCard1[b];
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let linear = gid.x;
   let total = params.batch * 2u * params.numHands;
@@ -935,7 +935,7 @@ export class SparseCfrGpuKernels {
       encoder,
       this.opponentPolicyPipeline,
       bindGroup,
-      Math.ceil(((end - start) * tree.numHands) / 64),
+      Math.ceil(((end - start) * tree.numHands) / 128),
     );
     return params;
   }
@@ -968,7 +968,7 @@ export class SparseCfrGpuKernels {
       encoder,
       this.regretWeightPipeline,
       bindGroup,
-      Math.ceil(((end - start) * tree.numHands) / 64),
+      Math.ceil(((end - start) * tree.numHands) / 128),
     );
     return params;
   }
@@ -1065,7 +1065,7 @@ export class SparseCfrGpuKernels {
       encoder,
       this.showdownValuesPipeline,
       bindGroup,
-      Math.ceil((batch * 2 * tree.numHands) / 64),
+      Math.ceil((batch * 2 * tree.numHands) / 128),
     );
     return params;
   }
