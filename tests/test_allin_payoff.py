@@ -15,6 +15,7 @@ def test_write_allin_table_values_triton_matches_eager_for_both_players() -> Non
     )
     from p2.search.allin_payoff import (
         FLOP_I8_SCALE,
+        I16_SCALE,
         allin_values_from_payoff_batch,
         write_allin_table_values_card_denom_dot_triton_,
         write_allin_table_values_card_denom_triton_,
@@ -34,19 +35,30 @@ def test_write_allin_table_values_triton_matches_eager_for_both_players() -> Non
     env_scale = torch.full((num_nodes,), 1000.0, device=device)
     compatible = combo_compatible_tensor(device=device)
 
-    def masked_random_tables(shape: tuple[int, int, int]) -> torch.Tensor:
-        table = torch.randint(-127, 128, shape, device=device, dtype=torch.int8)
+    def masked_random_tables(
+        shape: tuple[int, int, int],
+        *,
+        dtype: torch.dtype = torch.int8,
+    ) -> torch.Tensor:
+        if dtype == torch.int8:
+            table = torch.randint(-127, 128, shape, device=device, dtype=dtype)
+        else:
+            table = torch.randint(-32768, 32768, shape, device=device, dtype=dtype)
         return torch.where(
             compatible,
             table,
-            torch.zeros((), device=device, dtype=torch.int8),
+            torch.zeros((), device=device, dtype=dtype),
         )
 
-    def expected_values(tables: torch.Tensor) -> torch.Tensor:
+    def expected_values(
+        tables: torch.Tensor,
+        *,
+        scale: float = FLOP_I8_SCALE,
+    ) -> torch.Tensor:
         values = allin_values_from_payoff_batch(
             tables,
             beliefs[node_indices],
-            scale=FLOP_I8_SCALE,
+            scale=scale,
         )
         potential = (
             stacks[node_indices]
@@ -151,4 +163,31 @@ def test_write_allin_table_values_triton_matches_eager_for_both_players() -> Non
         expected_values(canon_tables.index_select(0, canon_ids)),
         rtol=1e-3,
         atol=5e-4,
+    )
+
+    turn_tables = masked_random_tables(
+        (3, NUM_HANDS, NUM_HANDS),
+        dtype=torch.int16,
+    )
+    latest_values_turn_dot = torch.empty(num_nodes, 2, NUM_HANDS, device=device)
+    write_allin_table_values_card_denom_dot_triton_(
+        table=turn_tables,
+        beliefs=beliefs,
+        node_indices=node_indices,
+        latest_values=latest_values_turn_dot,
+        stacks=stacks,
+        pot=pot,
+        starting_stacks=starting_stacks,
+        env_scale=env_scale,
+        table_scale=I16_SCALE,
+        canon_ids=canon_ids,
+        block_h=64,
+        block_k=128,
+        block_p=8,
+    )
+    torch.testing.assert_close(
+        latest_values_turn_dot[node_indices],
+        expected_values(turn_tables.index_select(0, canon_ids), scale=I16_SCALE),
+        rtol=1e-3,
+        atol=1e-3,
     )

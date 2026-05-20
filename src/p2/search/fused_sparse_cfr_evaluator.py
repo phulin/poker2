@@ -45,8 +45,8 @@ from p2.models.mlp.mlp_features import MLPFeatures
 from p2.search.allin_payoff import (
     FLOP_I8_SCALE,
     I16_SCALE,
-    write_allin_table_values_card_denom_dot_triton_,
-    write_allin_table_values_card_denom_triton_,
+    write_allin_belief_card_stats_split_triton_,
+    write_allin_table_values_card_denom_dot_values_triton_,
     write_allin_table_values_triton_,
 )
 from p2.search.fused_cfr_triton import (
@@ -1294,14 +1294,39 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 table_scale=scale,
             )
 
-        node_idx = indices_by_street[1]
+        flop_node_idx = indices_by_street[1]
+        turn_node_idx = indices_by_street[2]
+        flop_tables = getattr(self, "allin_flop_tables_i8", None)
+        flop_ids = getattr(self, "allin_flop_table_ids", None)
+        flop_stats = getattr(self, "allin_flop_stats_buffer", None)
+        turn_tables = getattr(self, "allin_turn_tables_i16", None)
+        turn_ids = getattr(self, "allin_turn_table_ids", None)
+        turn_stats = getattr(self, "allin_turn_stats_buffer", None)
+        if flop_node_idx.numel() > 0:
+            if flop_tables is None or flop_ids is None or flop_stats is None or flop_tables.numel() == 0:
+                raise RuntimeError("Fused all-in flop evaluation requires cached flop tables.")
+        if turn_node_idx.numel() > 0:
+            if turn_tables is None or turn_ids is None or turn_stats is None or turn_tables.numel() == 0:
+                raise RuntimeError("Fused all-in turn evaluation requires cached turn tables.")
+        if flop_node_idx.numel() > 0 or turn_node_idx.numel() > 0:
+            if flop_stats is None or turn_stats is None:
+                raise RuntimeError("Fused all-in evaluation requires cached stats buffers.")
+            write_allin_belief_card_stats_split_triton_(
+                beliefs=beliefs,
+                node_indices0=flop_node_idx,
+                stats_buffer0=flop_stats,
+                node_indices1=turn_node_idx,
+                stats_buffer1=turn_stats,
+            )
+
+        node_idx = flop_node_idx
         if node_idx.numel() > 0:
             flop_tables = getattr(self, "allin_flop_tables_i8", None)
             flop_ids = getattr(self, "allin_flop_table_ids", None)
             flop_stats = getattr(self, "allin_flop_stats_buffer", None)
-            if flop_tables is None or flop_ids is None or flop_tables.numel() == 0:
+            if flop_tables is None or flop_ids is None or flop_stats is None or flop_tables.numel() == 0:
                 raise RuntimeError("Fused all-in flop evaluation requires cached flop tables.")
-            write_allin_table_values_card_denom_dot_triton_(
+            write_allin_table_values_card_denom_dot_values_triton_(
                 table=flop_tables,
                 beliefs=beliefs,
                 node_indices=node_idx,
@@ -1318,14 +1343,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 block_p=8,
             )
 
-        node_idx = indices_by_street[2]
+        node_idx = turn_node_idx
         if node_idx.numel() > 0:
             turn_tables = getattr(self, "allin_turn_tables_i16", None)
             turn_ids = getattr(self, "allin_turn_table_ids", None)
             turn_stats = getattr(self, "allin_turn_stats_buffer", None)
-            if turn_tables is None or turn_ids is None or turn_tables.numel() == 0:
+            if turn_tables is None or turn_ids is None or turn_stats is None or turn_tables.numel() == 0:
                 raise RuntimeError("Fused all-in turn evaluation requires cached turn tables.")
-            write_allin_table_values_card_denom_triton_(
+            write_allin_table_values_card_denom_dot_values_triton_(
                 table=turn_tables,
                 beliefs=beliefs,
                 node_indices=node_idx,
@@ -1337,8 +1362,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 table_scale=I16_SCALE,
                 canon_ids=turn_ids,
                 stats_buffer=turn_stats,
-                block_h=32,
-                block_k=16,
+                block_h=64,
+                block_k=128,
+                block_p=8,
             )
 
     # ------------------------------------------------------------------

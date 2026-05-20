@@ -571,6 +571,61 @@ if triton is not None:
         total = tl.sum(tl.where(card < NUM_CARDS, card_sum, 0.0), axis=0) * 0.5
         tl.store(stats_out + row * (NUM_CARDS + 1), total)
 
+    @triton.jit
+    def _allin_belief_card_stats_split_kernel(
+        beliefs,
+        node_indices0,
+        stats_out0,
+        node_indices1,
+        stats_out1,
+        card_combo_indices,
+        M0: tl.constexpr,
+        M1: tl.constexpr,
+        H: tl.constexpr,
+        NUM_CARDS: tl.constexpr,
+        PER_CARD: tl.constexpr,
+        BLOCK_NC: tl.constexpr,
+        BLOCK_C: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        row0 = row
+        row1 = row - M0 * 2
+        is0 = row < M0 * 2
+        m0 = row0 // 2
+        m1 = row1 // 2
+        player0 = row0 - m0 * 2
+        player1 = row1 - m1 * 2
+        node0 = tl.load(node_indices0 + m0, mask=is0, other=0)
+        node1 = tl.load(node_indices1 + m1, mask=~is0, other=0)
+        node = tl.where(is0, node0, node1)
+        player = tl.where(is0, player0, player1)
+        card = tl.arange(0, BLOCK_NC)
+        j = tl.arange(0, BLOCK_C)
+        combo = tl.load(
+            card_combo_indices + card[:, None] * PER_CARD + j[None, :],
+            mask=(card[:, None] < NUM_CARDS) & (j[None, :] < PER_CARD),
+            other=0,
+        )
+        b = tl.load(
+            beliefs + (node * 2 + player) * H + combo,
+            mask=(card[:, None] < NUM_CARDS) & (j[None, :] < PER_CARD),
+            other=0.0,
+        ).to(tl.float32)
+        card_sum = tl.sum(b, axis=1)
+        total = tl.sum(tl.where(card < NUM_CARDS, card_sum, 0.0), axis=0) * 0.5
+        tl.store(
+            stats_out0 + row0 * (NUM_CARDS + 1) + 1 + card,
+            card_sum,
+            mask=is0 & (card < NUM_CARDS),
+        )
+        tl.store(stats_out0 + row0 * (NUM_CARDS + 1), total, mask=is0)
+        tl.store(
+            stats_out1 + row1 * (NUM_CARDS + 1) + 1 + card,
+            card_sum,
+            mask=(~is0) & (card < NUM_CARDS),
+        )
+        tl.store(stats_out1 + row1 * (NUM_CARDS + 1), total, mask=~is0)
+
 
     @triton.jit
     def _allin_table_values_card_denom_kernel(
@@ -1386,6 +1441,114 @@ def write_allin_table_values_card_denom_triton_(
         BH=block_h,
         BK=block_k,
         HAS_CANON_TABLE=has_canon,
+        num_warps=4,
+    )
+
+
+def write_allin_belief_card_stats_split_triton_(
+    *,
+    beliefs: torch.Tensor,
+    node_indices0: torch.Tensor,
+    stats_buffer0: torch.Tensor,
+    node_indices1: torch.Tensor,
+    stats_buffer1: torch.Tensor,
+) -> None:
+    if triton is None or beliefs.device.type != "cuda":
+        raise RuntimeError("split all-in card stats requires CUDA + Triton")
+    if node_indices0.numel() == 0 and node_indices1.numel() == 0:
+        return
+    device = beliefs.device
+    if (
+        stats_buffer0.shape != (node_indices0.numel(), 2, 53)
+        or stats_buffer0.dtype != torch.float32
+        or stats_buffer0.device != device
+    ):
+        raise ValueError(
+            "stats_buffer0 must have shape "
+            f"{(node_indices0.numel(), 2, 53)} on {device} with dtype float32"
+        )
+    if (
+        stats_buffer1.shape != (node_indices1.numel(), 2, 53)
+        or stats_buffer1.dtype != torch.float32
+        or stats_buffer1.device != device
+    ):
+        raise ValueError(
+            "stats_buffer1 must have shape "
+            f"{(node_indices1.numel(), 2, 53)} on {device} with dtype float32"
+        )
+    card_combo_indices = card_combo_indices_tensor(device=device)
+    _allin_belief_card_stats_split_kernel[((node_indices0.numel() + node_indices1.numel()) * 2,)](
+        beliefs.contiguous(),
+        node_indices0.contiguous(),
+        stats_buffer0,
+        node_indices1.contiguous(),
+        stats_buffer1,
+        card_combo_indices,
+        node_indices0.numel(),
+        node_indices1.numel(),
+        NUM_HANDS,
+        52,
+        51,
+        BLOCK_NC=64,
+        BLOCK_C=64,
+        num_warps=8,
+    )
+
+
+def write_allin_table_values_card_denom_dot_values_triton_(
+    *,
+    table: torch.Tensor,
+    beliefs: torch.Tensor,
+    node_indices: torch.Tensor,
+    latest_values: torch.Tensor,
+    stacks: torch.Tensor,
+    pot: torch.Tensor,
+    starting_stacks: torch.Tensor,
+    env_scale: torch.Tensor,
+    table_scale: float,
+    canon_ids: torch.Tensor,
+    stats_buffer: torch.Tensor,
+    block_h: int = 64,
+    block_k: int = 64,
+    block_p: int = 8,
+) -> None:
+    if triton is None or beliefs.device.type != "cuda":
+        raise RuntimeError("fused dot all-in table value writeback requires CUDA + Triton")
+    if node_indices.numel() == 0:
+        return
+    device = beliefs.device
+    if (
+        stats_buffer.shape != (node_indices.numel(), 2, 53)
+        or stats_buffer.dtype != torch.float32
+        or stats_buffer.device != device
+    ):
+        raise ValueError(
+            "stats_buffer must have shape "
+            f"{(node_indices.numel(), 2, 53)} on {device} with dtype float32"
+        )
+    combo_card_a, combo_card_b = combo_cards_i32_tensor(device=device)
+    grid = (node_indices.numel(), triton.cdiv(NUM_HANDS, block_h))
+    _allin_table_values_card_denom_dot_kernel[grid](
+        table.contiguous(),
+        beliefs.contiguous(),
+        node_indices.contiguous(),
+        latest_values,
+        stacks,
+        pot,
+        starting_stacks,
+        env_scale,
+        stats_buffer.contiguous(),
+        combo_card_a,
+        combo_card_b,
+        canon_ids.contiguous(),
+        node_indices.numel(),
+        NUM_HANDS,
+        52,
+        float(table_scale),
+        BH=block_h,
+        BK=block_k,
+        BP=block_p,
+        HAS_CANON_TABLE=True,
         num_warps=4,
     )
 
