@@ -181,7 +181,7 @@ export class BetterFfnWebGpuModel {
 
   async predictBatchHandValuesGpu(
     envs: readonly PublicHunlEnv[],
-    beliefs: Float32Array<ArrayBufferLike>,
+    beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
   ): Promise<GpuHandValuePrediction> {
     const prediction = this.enqueuePredictBatch(envs, beliefs, {
       includePolicy: false,
@@ -255,7 +255,7 @@ export class BetterFfnWebGpuModel {
 
   private enqueuePredictBatch(
     envs: readonly PublicHunlEnv[],
-    beliefs: Float32Array<ArrayBufferLike>,
+    beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
     options: PredictOptions = {},
   ): {
     handValuesBuffer: GPUBuffer;
@@ -279,7 +279,11 @@ export class BetterFfnWebGpuModel {
     const batch = envs.length;
     const singleBeliefSize = numPlayers * NUM_HANDS;
     const batchBeliefSize = batch * singleBeliefSize;
-    if (beliefs.length !== singleBeliefSize && beliefs.length !== batchBeliefSize) {
+    if (
+      beliefs instanceof Float32Array &&
+      beliefs.length !== singleBeliefSize &&
+      beliefs.length !== batchBeliefSize
+    ) {
       throw new Error(
         `belief vector has ${beliefs.length} entries, expected ${singleBeliefSize} or ${batchBeliefSize}`,
       );
@@ -323,16 +327,21 @@ export class BetterFfnWebGpuModel {
         this.device.queue.submit([encoder.finish()]);
         submitted = true;
       };
-      const batchedBeliefs =
-        beliefs.length === batchBeliefSize
-          ? beliefs
-          : new Float32Array(batchBeliefSize);
-      if (beliefs.length === singleBeliefSize) {
-        for (let i = 0; i < batch; i += 1) {
-          batchedBeliefs.set(beliefs, i * singleBeliefSize);
+      let beliefBuffer: GPUBuffer;
+      if (beliefs instanceof Float32Array) {
+        const batchedBeliefs =
+          beliefs.length === batchBeliefSize
+            ? beliefs
+            : new Float32Array(batchBeliefSize);
+        if (beliefs.length === singleBeliefSize) {
+          for (let i = 0; i < batch; i += 1) {
+            batchedBeliefs.set(beliefs, i * singleBeliefSize);
+          }
         }
+        beliefBuffer = storage(batchedBeliefs);
+      } else {
+        beliefBuffer = beliefs;
       }
-      const beliefBuffer = storage(batchedBeliefs);
       const perPlayerBelief = empty(batch * numPlayers * hiddenDim);
       for (let player = 0; player < numPlayers; player += 1) {
         this.matVecBatch(

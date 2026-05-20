@@ -49,6 +49,12 @@ interface SparseTree {
   treeDepth: number;
 }
 
+interface SparseLeafGpuBatch {
+  modelEnvs: PublicHunlEnv[];
+  modelNodeIndices: Uint32Array<ArrayBuffer>;
+  showdownNodeIndices: Uint32Array<ArrayBuffer>;
+}
+
 export interface SparseResolveOptions {
   depth: number;
   iterations: number;
@@ -375,6 +381,18 @@ export class SparseCfrResolver {
     const denomBuffer = makeEmptyStorageBuffer(device, totalNodes * 2);
     const opponentPolicyBuffer = makeEmptyStorageBuffer(device, policyCount);
     const regretWeightsBuffer = makeEmptyStorageBuffer(device, policyCount);
+    const leafBatch = this.leafGpuBatch(tree);
+    const modelLeafNodeBuffer = makeStorageBuffer(device, leafBatch.modelNodeIndices);
+    const modelLeafBeliefsBuffer = makeEmptyStorageBuffer(
+      device,
+      leafBatch.modelNodeIndices.length * 2 * NUM_HANDS,
+    );
+    const showdownNodeBuffer = makeStorageBuffer(device, leafBatch.showdownNodeIndices);
+    const showdownBeliefsBuffer = makeEmptyStorageBuffer(
+      device,
+      leafBatch.showdownNodeIndices.length * 2 * NUM_HANDS,
+    );
+    const pendingLeafDisposals: Array<() => void> = [];
 
     try {
       this.encodeExpectedValuesGpuResident(
@@ -431,14 +449,18 @@ export class SparseCfrResolver {
           denomBuffer,
         );
 
-        beliefsAvg.set(await readFloatBuffer(device, beliefsAvgBuffer, valueCount));
-        await this.setLeafValues(tree, beliefsAvg, latestValues);
-        const nextLeafValues = new Float32Array(this.leafOnlyValues(tree, latestValues));
-        device.queue.writeBuffer(
+        const disposeLeafPrediction = await this.updateLeafValuesGpuBridge(
+          tree,
+          treeBuffers,
+          leafBatch,
+          beliefsAvgBuffer,
           valuesBuffer,
-          0,
-          nextLeafValues,
+          modelLeafNodeBuffer,
+          modelLeafBeliefsBuffer,
+          showdownNodeBuffer,
+          showdownBeliefsBuffer,
         );
+        pendingLeafDisposals.push(disposeLeafPrediction);
         this.encodeExpectedValuesGpuResident(
           tree,
           treeBuffers,
@@ -450,7 +472,9 @@ export class SparseCfrResolver {
       }
 
       policyAvg.set(await readFloatBuffer(device, policyAvgBuffer, policyAvg.length));
+      for (const dispose of pendingLeafDisposals.splice(0)) dispose();
     } finally {
+      for (const dispose of pendingLeafDisposals.splice(0)) dispose();
       policyBuffer.destroy();
       policyAvgBuffer.destroy();
       regretsBuffer.destroy();
@@ -463,7 +487,139 @@ export class SparseCfrResolver {
       denomBuffer.destroy();
       opponentPolicyBuffer.destroy();
       regretWeightsBuffer.destroy();
+      modelLeafNodeBuffer.destroy();
+      modelLeafBeliefsBuffer.destroy();
+      showdownNodeBuffer.destroy();
+      showdownBeliefsBuffer.destroy();
     }
+  }
+
+  private async updateLeafValuesGpuBridge(
+    tree: SparseTree,
+    treeBuffers: SparseGpuTreeBuffers,
+    leafBatch: SparseLeafGpuBatch,
+    beliefsAvgBuffer: GPUBuffer,
+    valuesBuffer: GPUBuffer,
+    modelLeafNodeBuffer: GPUBuffer,
+    modelLeafBeliefsBuffer: GPUBuffer,
+    showdownNodeBuffer: GPUBuffer,
+    showdownBeliefsBuffer: GPUBuffer,
+  ): Promise<() => void> {
+    if (!this.gpuKernels) return () => undefined;
+    const device = this.model.device;
+    let showdownBeliefs: Float32Array<ArrayBufferLike> | undefined;
+    if (leafBatch.showdownNodeIndices.length > 0) {
+      const encoder = device.createCommandEncoder();
+      const params = this.gpuKernels.encodeGatherNodeBeliefs(
+        encoder,
+        treeBuffers,
+        showdownNodeBuffer,
+        beliefsAvgBuffer,
+        showdownBeliefsBuffer,
+        leafBatch.showdownNodeIndices.length,
+      );
+      device.queue.submit([encoder.finish()]);
+      params.destroy();
+      showdownBeliefs = await readFloatBuffer(
+        device,
+        showdownBeliefsBuffer,
+        leafBatch.showdownNodeIndices.length * 2 * NUM_HANDS,
+      );
+    }
+
+    device.queue.writeBuffer(
+      valuesBuffer,
+      0,
+      new Float32Array(this.terminalLeafValues(tree, leafBatch, showdownBeliefs)),
+    );
+
+    if (leafBatch.modelNodeIndices.length === 0) return () => undefined;
+
+    const gatherEncoder = device.createCommandEncoder();
+    const gatherParams = this.gpuKernels.encodeGatherNodeBeliefs(
+      gatherEncoder,
+      treeBuffers,
+      modelLeafNodeBuffer,
+      beliefsAvgBuffer,
+      modelLeafBeliefsBuffer,
+      leafBatch.modelNodeIndices.length,
+    );
+    device.queue.submit([gatherEncoder.finish()]);
+    gatherParams.destroy();
+
+    const prediction = await this.model.predictBatchHandValuesGpu(
+      leafBatch.modelEnvs,
+      modelLeafBeliefsBuffer,
+    );
+    const scatterEncoder = device.createCommandEncoder();
+    const scatterParams = this.gpuKernels.encodeScatterNodeValues(
+      scatterEncoder,
+      treeBuffers,
+      modelLeafNodeBuffer,
+      prediction.buffer,
+      valuesBuffer,
+      leafBatch.modelNodeIndices.length,
+    );
+    device.queue.submit([scatterEncoder.finish()]);
+    scatterParams.destroy();
+    return () => prediction.dispose();
+  }
+
+  private leafGpuBatch(tree: SparseTree): SparseLeafGpuBatch {
+    const modelEnvs: PublicHunlEnv[] = [];
+    const modelNodeIndices: number[] = [];
+    const showdownNodeIndices: number[] = [];
+    for (let nodeIndex = 0; nodeIndex < tree.nodes.length; nodeIndex += 1) {
+      const node = tree.nodes[nodeIndex]!;
+      if (!node.leaf) continue;
+      if (!node.env.done) {
+        modelEnvs.push(node.env);
+        modelNodeIndices.push(nodeIndex);
+      } else if (!node.env.hasFolded[0] && !node.env.hasFolded[1]) {
+        showdownNodeIndices.push(nodeIndex);
+      }
+    }
+    return {
+      modelEnvs,
+      modelNodeIndices: new Uint32Array(modelNodeIndices),
+      showdownNodeIndices: new Uint32Array(showdownNodeIndices),
+    };
+  }
+
+  private terminalLeafValues(
+    tree: SparseTree,
+    leafBatch: SparseLeafGpuBatch,
+    showdownBeliefs?: Float32Array<ArrayBufferLike>,
+  ): Float32Array {
+    const values = new Float32Array(tree.nodes.length * 2 * NUM_HANDS);
+    const showdownOffsetByNode = new Map<number, number>();
+    for (let i = 0; i < leafBatch.showdownNodeIndices.length; i += 1) {
+      showdownOffsetByNode.set(leafBatch.showdownNodeIndices[i]!, i * 2 * NUM_HANDS);
+    }
+    for (let nodeIndex = 0; nodeIndex < tree.nodes.length; nodeIndex += 1) {
+      const node = tree.nodes[nodeIndex]!;
+      if (!node.leaf || !node.env.done) continue;
+      const valueBase = nodeIndex * 2 * NUM_HANDS;
+      if (node.env.hasFolded[0] || node.env.hasFolded[1]) {
+        values.fill(node.reward, valueBase, valueBase + NUM_HANDS);
+        values.fill(-node.reward, valueBase + NUM_HANDS, valueBase + 2 * NUM_HANDS);
+      } else {
+        const showdownOffset = showdownOffsetByNode.get(nodeIndex);
+        if (showdownOffset === undefined || !showdownBeliefs) {
+          throw new Error("internal error: missing showdown beliefs for terminal leaf");
+        }
+        values.set(
+          showdownTerminalValues(
+            node.env,
+            new Float32Array(
+              showdownBeliefs.slice(showdownOffset, showdownOffset + 2 * NUM_HANDS),
+            ),
+          ),
+          valueBase,
+        );
+      }
+    }
+    return values;
   }
 
   private encodeExpectedValuesGpuResident(

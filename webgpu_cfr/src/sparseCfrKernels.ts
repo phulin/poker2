@@ -430,6 +430,62 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_GATHER_NODE_BELIEFS_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  batch: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> nodeIndices: array<u32>;
+@group(0) @binding(1) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let total = params.batch * 2u * params.numHands;
+  if (linear >= total) {
+    return;
+  }
+  let hand = linear % params.numHands;
+  let player = (linear / params.numHands) % 2u;
+  let sample = linear / (2u * params.numHands);
+  let node = nodeIndices[sample];
+  out[linear] = beliefs[(node * 2u + player) * params.numHands + hand];
+}
+`;
+
+export const SPARSE_SCATTER_NODE_VALUES_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  batch: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> nodeIndices: array<u32>;
+@group(0) @binding(1) var<storage, read> sourceValues: array<f32>;
+@group(0) @binding(2) var<storage, read_write> values: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let total = params.batch * 2u * params.numHands;
+  if (linear >= total) {
+    return;
+  }
+  let hand = linear % params.numHands;
+  let player = (linear / params.numHands) % 2u;
+  let sample = linear / (2u * params.numHands);
+  let node = nodeIndices[sample];
+  values[(node * 2u + player) * params.numHands + hand] = sourceValues[linear];
+}
+`;
+
 export interface SparseGpuTreeData {
   nodeCount: number;
   numHands: number;
@@ -472,6 +528,8 @@ export class SparseCfrGpuKernels {
   private readonly regretTailPipeline: GPUComputePipeline;
   private readonly opponentPolicyPipeline: GPUComputePipeline;
   private readonly regretWeightPipeline: GPUComputePipeline;
+  private readonly gatherNodeBeliefsPipeline: GPUComputePipeline;
+  private readonly scatterNodeValuesPipeline: GPUComputePipeline;
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -510,6 +568,14 @@ export class SparseCfrGpuKernels {
     this.regretWeightPipeline = this.pipeline(
       SPARSE_REGRET_WEIGHT_WGSL,
       "sparse-cfr-regret-weight",
+    );
+    this.gatherNodeBeliefsPipeline = this.pipeline(
+      SPARSE_GATHER_NODE_BELIEFS_WGSL,
+      "sparse-cfr-gather-node-beliefs",
+    );
+    this.scatterNodeValuesPipeline = this.pipeline(
+      SPARSE_SCATTER_NODE_VALUES_WGSL,
+      "sparse-cfr-scatter-node-values",
     );
   }
 
@@ -829,6 +895,66 @@ export class SparseCfrGpuKernels {
       this.regretWeightPipeline,
       bindGroup,
       Math.ceil(((end - start) * tree.numHands) / 64),
+    );
+    return params;
+  }
+
+  encodeGatherNodeBeliefs(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    beliefs: GPUBuffer,
+    out: GPUBuffer,
+    batch: number,
+  ): GPUBuffer {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, batch, 0, 0]),
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.gatherNodeBeliefsPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices } },
+        { binding: 1, resource: { buffer: beliefs } },
+        { binding: 2, resource: { buffer: out } },
+        { binding: 3, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.gatherNodeBeliefsPipeline,
+      bindGroup,
+      Math.ceil((batch * 2 * tree.numHands) / 64),
+    );
+    return params;
+  }
+
+  encodeScatterNodeValues(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    sourceValues: GPUBuffer,
+    values: GPUBuffer,
+    batch: number,
+  ): GPUBuffer {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, batch, 0, 0]),
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.scatterNodeValuesPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices } },
+        { binding: 1, resource: { buffer: sourceValues } },
+        { binding: 2, resource: { buffer: values } },
+        { binding: 3, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.scatterNodeValuesPipeline,
+      bindGroup,
+      Math.ceil((batch * 2 * tree.numHands) / 64),
     );
     return params;
   }

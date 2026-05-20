@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { BetterFfnWebGpuModel, BetterFfnPrediction } from "../src/betterFfnWebGpuModel.js";
+import type {
+  BetterFfnWebGpuModel,
+  BetterFfnPrediction,
+  GpuHandValuePrediction,
+} from "../src/betterFfnWebGpuModel.js";
+import { makeEmptyStorageBuffer } from "../src/gpuBuffers.js";
 import { createDawnDevice } from "../src/gpu.js";
 import { DEFAULT_FORCE_DECK, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js";
 import { SparseCfrResolver } from "../src/sparseResolver.js";
@@ -35,6 +40,19 @@ function fakeModel(
     ): Promise<Float32Array<ArrayBuffer>> {
       if (counters) counters.batchLeafSizes.push(envs.length);
       return new Float32Array(envs.length * 2 * NUM_HANDS);
+    },
+    async predictBatchHandValuesGpu(
+      envs: readonly PublicHunlEnv[],
+    ): Promise<GpuHandValuePrediction> {
+      if (!device) throw new Error("fake GPU model has no device");
+      if (counters) counters.batchLeafSizes.push(envs.length);
+      const buffer = makeEmptyStorageBuffer(device, envs.length * 2 * NUM_HANDS);
+      return {
+        buffer,
+        batch: envs.length,
+        valuesPerSample: 2 * NUM_HANDS,
+        dispose: () => buffer.destroy(),
+      };
     },
   } as unknown as BetterFfnWebGpuModel;
 }
