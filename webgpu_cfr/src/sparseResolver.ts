@@ -64,6 +64,7 @@ interface SparseLeafGpuBatch {
 interface SparseStaticGpuData {
   treeBuffers: SparseGpuTreeBuffers;
   leafBatch: SparseLeafGpuBatch;
+  foldTerminalValues: Float32Array;
   modelLeafNodeBuffer: GPUBuffer;
   showdownNodeBuffer: GPUBuffer;
   showdownRankBuffer: GPUBuffer;
@@ -258,6 +259,7 @@ export class SparseCfrResolver {
     const device = this.model.device;
     const treeBuffers = this.gpuKernels.createTreeBuffers(this.gpuTreeData(tree));
     const leafBatch = this.leafGpuBatch(tree);
+    const foldTerminalValues = this.foldTerminalLeafValues(tree);
     const modelLeafNodeBuffer = makeStorageBuffer(device, leafBatch.modelNodeIndices);
     const showdownNodeBuffer = makeStorageBuffer(device, leafBatch.showdownNodeIndices);
     const showdownRankBuffer = makeStorageBuffer(device, leafBatch.showdownRankCodes);
@@ -269,6 +271,7 @@ export class SparseCfrResolver {
     return {
       treeBuffers,
       leafBatch,
+      foldTerminalValues,
       modelLeafNodeBuffer,
       showdownNodeBuffer,
       showdownRankBuffer,
@@ -543,7 +546,7 @@ export class SparseCfrResolver {
     const beliefsAvgBuffer = cfrAvg
       ? makeStorageBuffer(device, beliefsAvg)
       : undefined;
-    const valuesBuffer = makeStorageBuffer(device, this.foldTerminalLeafValues(tree));
+    const valuesBuffer = makeStorageBuffer(device, staticGpu.foldTerminalValues);
     const reachBuffer = makeEmptyStorageBuffer(device, valueCount);
     const denomBuffer = makeEmptyStorageBuffer(device, totalNodes * 2);
     const opponentPolicyBuffer = makeEmptyStorageBuffer(device, policyCount);
