@@ -1,6 +1,8 @@
 import {
   ADD3_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   MAT_VEC_BATCH_WGSL,
   MAT_VEC_WGSL,
   PLAYER_BOARD_HADAMARD_WGSL,
@@ -81,7 +83,9 @@ export class BetterFfnWebGpuModel {
   private readonly suitPairLowT?: GPUBuffer;
   private readonly matVecPipeline: GPUComputePipeline;
   private readonly matVecBatchPipeline: GPUComputePipeline;
+  private readonly matVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchPipeline: GPUComputePipeline;
+  private readonly leakyReluMatVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly playerBoardHadamardPipeline: GPUComputePipeline;
   private readonly rmsNormPipeline: GPUComputePipeline;
   private readonly rmsNormBatchPipeline: GPUComputePipeline;
@@ -130,9 +134,17 @@ export class BetterFfnWebGpuModel {
       MAT_VEC_BATCH_WGSL,
       "better-ffn-mat-vec-batch",
     );
+    this.matVecBatchExactRowsPipeline = this.pipeline(
+      MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+      "better-ffn-mat-vec-batch-exact-rows",
+    );
     this.leakyReluMatVecBatchPipeline = this.pipeline(
       LEAKY_RELU_MAT_VEC_BATCH_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch",
+    );
+    this.leakyReluMatVecBatchExactRowsPipeline = this.pipeline(
+      LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+      "better-ffn-leaky-relu-mat-vec-batch-exact-rows",
     );
     this.playerBoardHadamardPipeline = this.pipeline(
       PLAYER_BOARD_HADAMARD_WGSL,
@@ -1655,7 +1667,11 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit2d(this.matVecBatchPipeline, this.batchRowGroups(rows), batch, [
+    const pipeline =
+      rows % BATCH_ROW_BLOCK === 0
+        ? this.matVecBatchExactRowsPipeline
+        : this.matVecBatchPipeline;
+    this.submit2d(pipeline, this.batchRowGroups(rows), batch, [
       { binding: 0, resource: { buffer: matrix } },
       { binding: 1, resource: { buffer: input } },
       { binding: 2, resource: { buffer: bias } },
@@ -1695,7 +1711,11 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit2d(this.leakyReluMatVecBatchPipeline, this.batchRowGroups(rows), batch, [
+    const pipeline =
+      rows % BATCH_ROW_BLOCK === 0
+        ? this.leakyReluMatVecBatchExactRowsPipeline
+        : this.leakyReluMatVecBatchPipeline;
+    this.submit2d(pipeline, this.batchRowGroups(rows), batch, [
       { binding: 0, resource: { buffer: matrix } },
       { binding: 1, resource: { buffer: input } },
       { binding: 2, resource: { buffer: bias } },

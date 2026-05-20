@@ -394,6 +394,96 @@ ${REDUCE_4X_256_WGSL}
 }
 `;
 
+function removeMatVecBatchRowBounds(source: string): string {
+  return source
+    .replace(
+      `    if (row0 < params.rows) {
+      sum0 = sum0 + matrix[row0 * params.cols + col] * x;
+    }`,
+      `    sum0 = sum0 + matrix[row0 * params.cols + col] * x;`,
+    )
+    .replace(
+      `    if (row1 < params.rows) {
+      sum1 = sum1 + matrix[row1 * params.cols + col] * x;
+    }`,
+      `    sum1 = sum1 + matrix[row1 * params.cols + col] * x;`,
+    )
+    .replace(
+      `    if (row2 < params.rows) {
+      sum2 = sum2 + matrix[row2 * params.cols + col] * x;
+    }`,
+      `    sum2 = sum2 + matrix[row2 * params.cols + col] * x;`,
+    )
+    .replace(
+      `    if (row3 < params.rows) {
+      sum3 = sum3 + matrix[row3 * params.cols + col] * x;
+    }`,
+      `    sum3 = sum3 + matrix[row3 * params.cols + col] * x;`,
+    )
+    .replace(
+      `    if (row0 < params.rows) {
+      var out0 = partial0[0];
+      if (params.biasPresent != 0u) {
+        out0 = out0 + bias[row0];
+      }
+      output[outputBase + row0] = out0;
+    }`,
+      `    var out0 = partial0[0];
+    if (params.biasPresent != 0u) {
+      out0 = out0 + bias[row0];
+    }
+    output[outputBase + row0] = out0;`,
+    )
+    .replace(
+      `    if (row1 < params.rows) {
+      var out1 = partial1[0];
+      if (params.biasPresent != 0u) {
+        out1 = out1 + bias[row1];
+      }
+      output[outputBase + row1] = out1;
+    }`,
+      `    var out1 = partial1[0];
+    if (params.biasPresent != 0u) {
+      out1 = out1 + bias[row1];
+    }
+    output[outputBase + row1] = out1;`,
+    )
+    .replace(
+      `    if (row2 < params.rows) {
+      var out2 = partial2[0];
+      if (params.biasPresent != 0u) {
+        out2 = out2 + bias[row2];
+      }
+      output[outputBase + row2] = out2;
+    }`,
+      `    var out2 = partial2[0];
+    if (params.biasPresent != 0u) {
+      out2 = out2 + bias[row2];
+    }
+    output[outputBase + row2] = out2;`,
+    )
+    .replace(
+      `    if (row3 < params.rows) {
+      var out3 = partial3[0];
+      if (params.biasPresent != 0u) {
+        out3 = out3 + bias[row3];
+      }
+      output[outputBase + row3] = out3;
+    }`,
+      `    var out3 = partial3[0];
+    if (params.biasPresent != 0u) {
+      out3 = out3 + bias[row3];
+    }
+    output[outputBase + row3] = out3;`,
+    );
+}
+
+export const MAT_VEC_BATCH_EXACT_ROWS_WGSL =
+  removeMatVecBatchRowBounds(MAT_VEC_BATCH_WGSL);
+
+export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL =
+  removeMatVecBatchRowBounds(LEAKY_RELU_MAT_VEC_BATCH_WGSL);
+
 export const RMS_NORM_WGSL = /* wgsl */ `
 struct Params {
   dim: u32,
