@@ -3,7 +3,7 @@
 Snapshots EMA weights at fixed fractions of the training run, then plays each
 new snapshot against a bounded recency-weighted sample of prior snapshots using
 public-belief CFR games. Ratings are updated per-game with the standard
-TrueSkill 1v1 Bayesian update. A second Gaussian score rating is updated once
+TrueSkill 1v1 Bayesian update. A second Gaussian reward rating is updated once
 per opponent matchup from the mean stack-normalized PBS reward.
 
 Snapshots are kept in CPU RAM (bfloat16 by default) — never written to disk.
@@ -301,7 +301,7 @@ class TrueSkillTracker:
         reward_mean: float,
         num_games: int,
     ) -> Tuple[float, float, float, float]:
-        """Gaussian score-rating update from stack-normalized matchup reward.
+        """Gaussian reward-rating update from stack-normalized matchup reward.
 
         Observation model:
             reward_mean ~ Normal(skill_a - skill_b, beta^2 / num_games)
@@ -497,6 +497,7 @@ class TrueSkillTracker:
 
         total_games_played = 0
         total_reward = 0.0
+        total_reward_sq = 0.0
         eval_start = time.perf_counter()
 
         # Bind candidate weights into the candidate model once for the full eval.
@@ -561,6 +562,7 @@ class TrueSkillTracker:
                     opp.games += 1
                     total_games_played += 1
                 total_reward += float(sum(rewards_list))
+                total_reward_sq += float(sum(r * r for r in rewards_list))
 
         eval_elapsed = time.perf_counter() - eval_start
 
@@ -569,20 +571,35 @@ class TrueSkillTracker:
         # Build metrics.
         skill = self._conservative_skill(new_snap)
         gaussian_skill = self._gaussian_conservative_skill(new_snap)
+        avg_reward = total_reward / total_games_played if total_games_played else 0.0
+        reward_var = (
+            max(0.0, total_reward_sq / total_games_played - avg_reward * avg_reward)
+            if total_games_played
+            else 0.0
+        )
+        reward_std = math.sqrt(reward_var)
+        reward_se = reward_std / math.sqrt(total_games_played) if total_games_played else 0.0
+        win_rate = new_snap.wins / total_games_played if total_games_played else 0.0
+        loss_rate = new_snap.losses / total_games_played if total_games_played else 0.0
+        draw_rate = new_snap.draws / total_games_played if total_games_played else 0.0
         metrics: Dict[str, float] = {
             "trueskill/mu": new_snap.mu,
             "trueskill/sigma": new_snap.sigma,
             "trueskill/skill": skill,
+            "trueskill/win_rate": win_rate,
+            "trueskill/loss_rate": loss_rate,
+            "trueskill/draw_rate": draw_rate,
             "gaussian/mu": new_snap.gaussian_mu,
             "gaussian/sigma": new_snap.gaussian_sigma,
             "gaussian/skill": gaussian_skill,
+            "gaussian/avg_reward": avg_reward,
+            "gaussian/reward_std": reward_std,
+            "gaussian/reward_se": reward_se,
             "trueskill/games_played": total_games_played,
             "trueskill/opponents_sampled": len(sampled_opponents),
             "trueskill/games_per_opponent": self.games_per_opponent,
             "trueskill/snapshots": len(self.snapshots),
-            "trueskill/avg_reward": (
-                total_reward / total_games_played if total_games_played else 0.0
-            ),
+            "trueskill/avg_reward": avg_reward,
         }
         metrics.update(self._mu_step_regression_metrics(self.snapshots))
 
@@ -613,7 +630,9 @@ class TrueSkillTracker:
             )
         print(
             f"[TrueSkill] step={step} mu={new_snap.mu:.2f} sigma={new_snap.sigma:.2f} "
-            f"skill={skill:.2f} gaussian_mu={new_snap.gaussian_mu:.4f} "
+            f"skill={skill:.2f} win_rate={win_rate:.3f} "
+            f"avg_reward={avg_reward:.4f} reward_se={reward_se:.4f} "
+            f"gaussian_mu={new_snap.gaussian_mu:.4f} "
             f"gaussian_sigma={new_snap.gaussian_sigma:.4f} "
             f"gaussian_skill={gaussian_skill:.4f} games={total_games_played} "
             f"opponents={len(sampled_opponents)} "

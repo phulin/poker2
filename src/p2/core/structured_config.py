@@ -312,7 +312,7 @@ class TrueSkillConfig:
     initial_sigma: float = 25.0 / 3.0
     beta: float = 25.0 / 6.0
     tau: float = 25.0 / 300.0
-    # Parallel Gaussian score rating, in stack-normalized reward units.
+    # Parallel Gaussian reward rating, in stack-normalized reward units.
     # Each opponent matchup observes mean_reward ~= mu_a - mu_b with
     # observation std gaussian_beta / sqrt(num_games).
     gaussian_initial_mu: float = 0.0
