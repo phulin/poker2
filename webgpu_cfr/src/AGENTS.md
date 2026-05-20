@@ -6,6 +6,7 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `gpu.ts`: Barrel exports for GPU helpers.
 - `gpuBuffers.ts`: WebGPU storage/uniform buffer creation and readback helpers.
 - `kernels.ts`: WGSL kernels for regret matching, belief updates, and action probability reductions.
+- `sparseCfrKernels.ts`: WGSL sparse-tree CFR kernels and buffer helpers for regret matching and per-depth belief propagation.
 - `modelKernels.ts`: WGSL kernels for BetterFFN matvec, activations, normalization, residuals, and batching.
 - `pokerStateKernels.ts`: WGSL kernels and state-layout constants for GPU-resident HUNL public state, legal masks, stepping, child-state construction, terminal values, and state feature encoding.
 - `gpuPokerState.ts`: TypeScript wrapper for packed GPU poker state buffers and the poker-state kernels used by browser solving.
