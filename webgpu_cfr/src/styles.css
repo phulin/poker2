@@ -183,6 +183,94 @@ h3 {
   align-items: start;
 }
 
+.stepper-row {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.stepper-label {
+  color: #5d686a;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.stepper {
+  display: grid;
+  grid-template-columns: 32px 70px 32px 1fr;
+  gap: 6px;
+  align-items: center;
+}
+
+.stepper-btn {
+  height: 32px;
+  border: 1px solid #b9c7c0;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #344144;
+  font-size: 16px;
+  font-weight: 700;
+  padding: 0;
+}
+
+.stepper-btn:hover {
+  border-color: #168575;
+  color: #168575;
+}
+
+.stepper-input {
+  height: 32px;
+  border: 1px solid #b9c7c0;
+  border-radius: 6px;
+  background: #fbfcfa;
+  color: #182224;
+  padding: 0 8px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 660;
+}
+
+.stepper-presets {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.preset {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid #cbd6cf;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #4a565a;
+  font-size: 12px;
+  font-weight: 660;
+  font-variant-numeric: tabular-nums;
+}
+
+.preset:hover {
+  border-color: #168575;
+  color: #0f665a;
+}
+
+.preset.active {
+  background: #168575;
+  border-color: #137365;
+  color: #ffffff;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  color: #344144;
+  font-size: 13px;
+  font-weight: 660;
+}
+
 .toggle {
   position: relative;
   width: 46px;

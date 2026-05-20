@@ -144,6 +144,61 @@ function CardChip(props: { value: string; placeholder?: string }): JSX.Element {
   );
 }
 
+function NumberStepper(props: {
+  value: string;
+  presets: number[];
+  min?: number;
+  onChange: (value: string) => void;
+}): JSX.Element {
+  const current = createMemo(() => Number(props.value));
+  const minValue = () => props.min ?? 1;
+
+  function nudge(delta: number) {
+    const next = Math.max(minValue(), Math.trunc((Number.isFinite(current()) ? current() : minValue()) + delta));
+    props.onChange(String(next));
+  }
+
+  return (
+    <div class="stepper">
+      <button
+        type="button"
+        class="stepper-btn"
+        onClick={() => nudge(-1)}
+        title="Decrement"
+      >
+        −
+      </button>
+      <input
+        class="stepper-input"
+        value={props.value}
+        inputmode="numeric"
+        onInput={(event) => props.onChange(event.currentTarget.value)}
+      />
+      <button
+        type="button"
+        class="stepper-btn"
+        onClick={() => nudge(1)}
+        title="Increment"
+      >
+        +
+      </button>
+      <div class="stepper-presets">
+        <For each={props.presets}>
+          {(preset) => (
+            <button
+              type="button"
+              class={`preset ${current() === preset ? "active" : ""}`}
+              onClick={() => props.onChange(String(preset))}
+            >
+              {preset}
+            </button>
+          )}
+        </For>
+      </div>
+    </div>
+  );
+}
+
 function CardPicker(props: {
   label: string;
   value: string;
@@ -670,31 +725,45 @@ function App(): JSX.Element {
 
           <div class="subgroup">
             <span class="subgroup-title">Solve</span>
-            <div class="grid three">
-              <label class="field">
-                <span>Iterations</span>
-                <input value={iterations()} inputmode="numeric" min="1" step="1" onInput={(event) => setIterations(event.currentTarget.value)} />
-              </label>
-              <label class="field">
-                <span>Depth</span>
-                <input value={depth()} inputmode="numeric" min="1" step="1" onInput={(event) => setDepth(event.currentTarget.value)} />
-              </label>
-              <label class="field toggle-field">
-                <span>CFR avg beliefs</span>
-                <button
-                  type="button"
-                  class={`toggle ${cfrAvg() ? "on" : "off"}`}
-                  role="switch"
-                  aria-checked={cfrAvg()}
-                  onClick={() => {
-                    setCfrAvg(!cfrAvg());
-                    setSolveResult(undefined);
-                  }}
-                >
-                  <span class="toggle-thumb" />
-                </button>
-              </label>
+            <div class="stepper-row">
+              <span class="stepper-label">Iterations</span>
+              <NumberStepper
+                value={iterations()}
+                presets={[8, 32, 128, 512, 2048]}
+                min={1}
+                onChange={(value) => {
+                  setIterations(value);
+                  setSolveResult(undefined);
+                }}
+              />
             </div>
+            <div class="stepper-row">
+              <span class="stepper-label">Depth</span>
+              <NumberStepper
+                value={depth()}
+                presets={[1, 2, 3, 4]}
+                min={1}
+                onChange={(value) => {
+                  setDepth(value);
+                  setSolveResult(undefined);
+                }}
+              />
+            </div>
+            <label class="toggle-row">
+              <span>CFR average beliefs</span>
+              <button
+                type="button"
+                class={`toggle ${cfrAvg() ? "on" : "off"}`}
+                role="switch"
+                aria-checked={cfrAvg()}
+                onClick={() => {
+                  setCfrAvg(!cfrAvg());
+                  setSolveResult(undefined);
+                }}
+              >
+                <span class="toggle-thumb" />
+              </button>
+            </label>
             <button
               type="button"
               class="solve-button"
