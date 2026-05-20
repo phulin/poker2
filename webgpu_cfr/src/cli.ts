@@ -4,13 +4,14 @@ import { BrowserCfrEvaluator } from "./browserEvaluator.js";
 import { evaluateFixture } from "./evaluator.js";
 import { loadNodeModel } from "./nodeModel.js";
 import { loadPythonReference } from "./pythonBridge.js";
+import { resolveCfrDefaults } from "./modelFormat.js";
 
 interface CliOptions {
   snapshot: string;
   spot: number[];
-  iterations: number;
-  depth: number;
-  cfrAvg: boolean;
+  iterations?: number;
+  depth?: number;
+  cfrAvg?: boolean;
   manifest?: string;
   weights?: string;
 }
@@ -26,16 +27,19 @@ function readArgs(): CliOptions {
   };
   const manifest = get("--manifest", "");
   const weights = get("--weights", "");
+  const iterations = get("--iterations", "");
+  const depth = get("--depth", "");
   const options: CliOptions = {
     snapshot: get("--snapshot", "checkpoints-rebel/rebel_latest.pt"),
     spot: get("--spot", "1")
       .split(",")
       .filter(Boolean)
       .map((v) => Number.parseInt(v, 10)),
-    iterations: Number.parseInt(get("--iterations", "8"), 10),
-    depth: Number.parseInt(get("--depth", "1"), 10),
-    cfrAvg: !args.includes("--no-cfr-avg"),
   };
+  if (iterations) options.iterations = Number.parseInt(iterations, 10);
+  if (depth) options.depth = Number.parseInt(depth, 10);
+  if (args.includes("--cfr-avg")) options.cfrAvg = true;
+  if (args.includes("--no-cfr-avg")) options.cfrAvg = false;
   if (manifest) options.manifest = manifest;
   if (weights) options.weights = weights;
   return options;
@@ -52,16 +56,21 @@ try {
     const model = await loadNodeModel(device, manifestPath, weightsPath);
     const evaluator = new BrowserCfrEvaluator(device, model);
     try {
+      const cfrDefaults = resolveCfrDefaults(model.manifest);
+      const iterations = options.iterations ?? cfrDefaults.iterations;
+      const depth = options.depth ?? cfrDefaults.depth;
+      const cfrAvg = options.cfrAvg ?? cfrDefaults.cfrAvg;
       const result = await evaluator.evaluateSpot({
         spot: options.spot,
-        iterations: options.iterations,
-        depth: options.depth,
-        cfrAvg: options.cfrAvg,
+        iterations,
+        depth,
+        cfrAvg,
       });
       output = {
         spot: options.spot,
-        depth: options.depth,
-        cfrAvg: options.cfrAvg,
+        iterations,
+        depth,
+        cfrAvg,
         actionLabels: result.actionLabels,
         actionProbs: Array.from(result.actionProbs),
       };
@@ -70,12 +79,15 @@ try {
       model.dispose();
     }
   } else {
-    const fixture = loadPythonReference(options);
+    const iterations = options.iterations ?? 8;
+    const cfrAvg = options.cfrAvg ?? true;
+    const fixture = loadPythonReference({ ...options, iterations });
     const result = await evaluateFixture(device, fixture);
     output = {
       spot: fixture.spot,
       depth: 1,
-      cfrAvg: options.cfrAvg,
+      iterations,
+      cfrAvg,
       actionLabels: fixture.actionLabels,
       actionProbs: Array.from(result.actionProbs),
     };

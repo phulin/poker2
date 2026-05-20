@@ -7,8 +7,24 @@ export interface LoadedTensor {
 
 export type TensorMap = Map<string, LoadedTensor>;
 
+export interface ResolvedCfrDefaults {
+  iterations: number;
+  depth: number;
+  cfrAvg: boolean;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) > 0;
+}
+
+function optionalNumber(value: unknown, label: string): void {
+  if (value !== undefined && value !== null && typeof value !== "number") {
+    throw new Error(`model manifest cfr.${label} must be a number`);
+  }
 }
 
 export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
@@ -49,7 +65,45 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
       `unsupported boardInteractionDim ${manifest.architecture.boardInteractionDim}`,
     );
   }
+  if (manifest.cfr !== undefined) {
+    if (!isRecord(manifest.cfr)) {
+      throw new Error("model manifest cfr must be an object");
+    }
+    if (
+      manifest.cfr.iterations !== undefined &&
+      !isPositiveInteger(manifest.cfr.iterations)
+    ) {
+      throw new Error("model manifest cfr.iterations must be a positive integer");
+    }
+    if (manifest.cfr.depth !== undefined && !isPositiveInteger(manifest.cfr.depth)) {
+      throw new Error("model manifest cfr.depth must be a positive integer");
+    }
+    if (
+      manifest.cfr.cfrAvg !== undefined &&
+      typeof manifest.cfr.cfrAvg !== "boolean"
+    ) {
+      throw new Error("model manifest cfr.cfrAvg must be a boolean");
+    }
+    optionalNumber(manifest.cfr.scheduleProgress, "scheduleProgress");
+    optionalNumber(manifest.cfr.dcfrAlpha, "dcfrAlpha");
+    optionalNumber(manifest.cfr.dcfrAlphaFinal, "dcfrAlphaFinal");
+    optionalNumber(manifest.cfr.dcfrBeta, "dcfrBeta");
+    optionalNumber(manifest.cfr.dcfrBetaFinal, "dcfrBetaFinal");
+    optionalNumber(manifest.cfr.dcfrGamma, "dcfrGamma");
+    optionalNumber(manifest.cfr.dcfrGammaFinal, "dcfrGammaFinal");
+  }
   return manifest;
+}
+
+export function resolveCfrDefaults(manifest: BetterFfnManifest): ResolvedCfrDefaults {
+  return {
+    iterations: isPositiveInteger(manifest.cfr?.iterations)
+      ? manifest.cfr.iterations
+      : 16,
+    depth: isPositiveInteger(manifest.cfr?.depth) ? manifest.cfr.depth : 1,
+    cfrAvg:
+      typeof manifest.cfr?.cfrAvg === "boolean" ? manifest.cfr.cfrAvg : true,
+  };
 }
 
 export function tensorsFromWeights(

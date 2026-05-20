@@ -26,7 +26,7 @@ def _action_labels(bet_bins: list[float]) -> list[str]:
     return labels
 
 
-def _load_checkpoint(snapshot: Path) -> tuple[Config, dict[str, torch.Tensor]]:
+def _load_checkpoint(snapshot: Path) -> tuple[Config, dict[str, torch.Tensor], int | None]:
     checkpoint = torch.load(snapshot, map_location="cpu", weights_only=False)
     cfg = Config.from_dict(checkpoint["config"])
     state = checkpoint["model"]
@@ -37,7 +37,10 @@ def _load_checkpoint(snapshot: Path) -> tuple[Config, dict[str, torch.Tensor]]:
         raise ValueError(f"{snapshot} is not a BetterFFN checkpoint")
     cfg.model.name = ModelType.better_ffn
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
-    return cfg, state
+    step = checkpoint.get("step")
+    if step is not None:
+        step = int(step)
+    return cfg, state, step
 
 
 def _validate_supported(cfg: Config) -> None:
@@ -62,10 +65,63 @@ def _tensor_bytes(tensor: torch.Tensor) -> bytes:
     return arr.tobytes(order="C")
 
 
+def _scheduled_cfr_config(cfg: Config, step: int | None) -> dict[str, Any]:
+    search = cfg.search
+    if search.iterations_final is not None:
+        if step is None:
+            progress = 1.0
+        else:
+            progress = max(0.0, min(1.0, float(step) / max(1.0, float(cfg.num_steps))))
+        iterations = int(
+            round(
+                search.iterations
+                + (search.iterations_final - search.iterations) * progress
+            )
+        )
+    else:
+        progress = None
+        iterations = int(search.iterations)
+
+    warm_start_iterations = max(1, iterations // 20)
+    dcfr_plus_delay = int(round(iterations * 0.4))
+    iterations = max(warm_start_iterations + 1, iterations)
+
+    return {
+        "source": "checkpoint.config.search",
+        "enabled": bool(search.enabled),
+        "depth": int(search.depth),
+        "iterations": iterations,
+        "iterationsStart": int(search.iterations),
+        "iterationsFinal": search.iterations_final,
+        "scheduleProgress": progress,
+        "warmStartIterations": warm_start_iterations,
+        "warmStartType": _enum_value(search.warm_start_type),
+        "warmStartMultiplier": float(search.warm_start_multiplier),
+        "branching": int(search.branching),
+        "beliefSamples": int(search.belief_samples),
+        "sampleEpsilon": float(search.sample_epsilon),
+        "dcfrAlpha": float(search.dcfr_alpha),
+        "dcfrAlphaFinal": search.dcfr_alpha_final,
+        "dcfrBeta": float(search.dcfr_beta),
+        "dcfrBetaFinal": search.dcfr_beta_final,
+        "dcfrGamma": float(search.dcfr_gamma),
+        "dcfrGammaFinal": search.dcfr_gamma_final,
+        "dcfrPlusDelay": dcfr_plus_delay,
+        "dcfrPlusDelayConfigured": int(search.dcfr_plus_delay),
+        "includeAveragePolicy": bool(search.include_average_policy),
+        "cfrType": _enum_value(search.cfr_type),
+        "cfrPlus": bool(search.cfr_plus),
+        "cfrAvg": bool(search.cfr_avg),
+        "sparse": bool(search.sparse),
+        "sparseFused": bool(search.sparse_fused),
+        "valueTargetsFromFinalPolicy": bool(search.value_targets_from_final_policy),
+    }
+
+
 def export_model(
     snapshot: Path, out: Path, weights_name: str = "weights.bin"
 ) -> dict[str, Any]:
-    cfg, state = _load_checkpoint(snapshot)
+    cfg, state, step = _load_checkpoint(snapshot)
     _validate_supported(cfg)
 
     out.mkdir(parents=True, exist_ok=True)
@@ -125,6 +181,7 @@ def export_model(
             "defaultButton": 1,
             "defaultForceDeck": DEFAULT_FORCE_DECK,
         },
+        "cfr": _scheduled_cfr_config(cfg, step),
         "actionLabels": _action_labels(list(cfg.env.bet_bins)),
         "tensors": tensors,
         "weights": {

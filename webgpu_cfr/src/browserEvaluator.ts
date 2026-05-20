@@ -15,6 +15,7 @@ import {
   showdownTerminalValues,
 } from "./hunlEnv.js";
 import { buildHeroOnlyBeliefs, normalizeBeliefs } from "./beliefs.js";
+import { resolveCfrDefaults } from "./modelFormat.js";
 import type { BetterFfnWebGpuModel } from "./betterFfnWebGpuModel.js";
 import type {
   BrowserEvaluationResult,
@@ -65,15 +66,22 @@ export class BrowserCfrEvaluator {
   }
 
   async evaluateSpot(request: EvaluateSpotRequest): Promise<BrowserEvaluationResult> {
-    if (!Number.isInteger(request.iterations) || request.iterations <= 0) {
+    const cfrDefaults = resolveCfrDefaults(this.model.manifest);
+    const iterations = request.iterations ?? cfrDefaults.iterations;
+    if (!Number.isInteger(iterations) || iterations <= 0) {
       throw new Error("iterations must be a positive integer");
     }
-    const depth = request.depth ?? 1;
+    const depth = request.depth ?? cfrDefaults.depth;
     if (!Number.isInteger(depth) || depth <= 0) {
       throw new Error("depth must be a positive integer");
     }
     if (depth > 1) {
-      return await this.evaluateSpotSparse(request, depth);
+      return await this.evaluateSpotSparse(
+        request,
+        depth,
+        iterations,
+        cfrDefaults.cfrAvg,
+      );
     }
     const numActions = this.model.manifest.architecture.numActions;
     const env = PublicHunlEnv.fromManifest(
@@ -115,7 +123,7 @@ export class BrowserCfrEvaluator {
           env.toAct,
           beliefsBuffer,
           action,
-          request.iterations,
+          iterations,
           {
             readPolicy: false,
             readActionProbs: false,
@@ -138,7 +146,7 @@ export class BrowserCfrEvaluator {
         env.toAct,
         beliefsBuffer,
         undefined,
-        request.iterations,
+        iterations,
       );
       finalPolicy = final.policy;
       finalActionProbs = final.actionProbs;
@@ -177,8 +185,10 @@ export class BrowserCfrEvaluator {
   private async evaluateSpotSparse(
     request: EvaluateSpotRequest,
     depth: number,
+    iterations: number,
+    defaultCfrAvg: boolean,
   ): Promise<BrowserEvaluationResult> {
-    const cfrAvg = request.cfrAvg ?? true;
+    const cfrAvg = request.cfrAvg ?? defaultCfrAvg;
     const numActions = this.model.manifest.architecture.numActions;
     const env = PublicHunlEnv.fromManifest(
       this.model.manifest,
@@ -200,7 +210,7 @@ export class BrowserCfrEvaluator {
       this.assertLegalAction(env, action);
       const solved = await this.sparseCfr.solve(env, beliefs, {
         depth,
-        iterations: request.iterations,
+        iterations,
         cfrAvg,
         selectedAction: action,
         readPolicy: false,
@@ -216,7 +226,7 @@ export class BrowserCfrEvaluator {
 
     const final = await this.sparseCfr.solve(env, beliefs, {
       depth,
-      iterations: request.iterations,
+      iterations,
       cfrAvg,
     });
     const legal = env.legalBinsAmountAndMask();

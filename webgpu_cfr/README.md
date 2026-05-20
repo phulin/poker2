@@ -82,14 +82,19 @@ uv run python webgpu_cfr/python/export_model.py --snapshot checkpoints-rebel/reb
 Run the exported-model evaluator directly:
 
 ```bash
-npm run eval -- --manifest public/models/rebel_latest/model.json --weights public/models/rebel_latest/weights.bin --spot 1 --iterations 8 --depth 2
+npm run eval -- --manifest public/models/rebel_latest/model.json --weights public/models/rebel_latest/weights.bin --spot 1
 ```
 
 Benchmark the exported-model evaluator on Node/Dawn:
 
 ```bash
-npm run bench -- --manifest public/models/rebel_latest/model.json --weights public/models/rebel_latest/weights.bin --spot 1 --iterations 8 --depth 2 --warmups 1 --runs 5
+npm run bench -- --manifest public/models/rebel_latest/model.json --weights public/models/rebel_latest/weights.bin --spot 1 --warmups 1 --runs 5
 ```
+
+Exported manifests include the checkpoint `search:` CFR configuration. The
+browser, CLI, and benchmark default to the exported `depth`, scheduled
+`iterations`, and `cfr_avg` values; pass `--iterations`, `--depth`,
+`--cfr-avg`, or `--no-cfr-avg` to override them for experiments.
 
 Run the legacy Python-fixture evaluator directly:
 
@@ -106,5 +111,5 @@ and `/models/rebel_latest/weights.bin`, caching the weights in IndexedDB until t
 manifest weight hash or byte length changes.
 
 The same build/export flow also enables `webgpu_cfr/public/benchmark.html`,
-which times repeated browser evaluations with configurable spots, iterations,
+which times repeated browser evaluations with configurable spots, CFR settings,
 warmups, and run counts.

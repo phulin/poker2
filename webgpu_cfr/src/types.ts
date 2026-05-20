@@ -48,6 +48,37 @@ export interface BetterFfnTensorManifest {
   sha256: string;
 }
 
+export interface BetterFfnCfrManifest {
+  source?: string;
+  enabled?: boolean;
+  depth?: number;
+  iterations?: number;
+  iterationsStart?: number;
+  iterationsFinal?: number | null;
+  scheduleProgress?: number | null;
+  warmStartIterations?: number;
+  warmStartType?: string;
+  warmStartMultiplier?: number;
+  branching?: number;
+  beliefSamples?: number;
+  sampleEpsilon?: number;
+  dcfrAlpha?: number;
+  dcfrAlphaFinal?: number | null;
+  dcfrBeta?: number;
+  dcfrBetaFinal?: number | null;
+  dcfrGamma?: number;
+  dcfrGammaFinal?: number | null;
+  dcfrPlusDelay?: number;
+  dcfrPlusDelayConfigured?: number;
+  includeAveragePolicy?: boolean;
+  cfrType?: string;
+  cfrPlus?: boolean;
+  cfrAvg?: boolean;
+  sparse?: boolean;
+  sparseFused?: boolean;
+  valueTargetsFromFinalPolicy?: boolean;
+}
+
 export interface BetterFfnManifest {
   schemaVersion: 1;
   format: "p2.better_ffn.webgpu";
@@ -80,6 +111,7 @@ export interface BetterFfnManifest {
     defaultButton: PlayerIndex;
     defaultForceDeck: number[];
   };
+  cfr?: BetterFfnCfrManifest;
   actionLabels: string[];
   tensors: BetterFfnTensorManifest[];
   weights: {
@@ -101,7 +133,7 @@ export interface BrowserCfrInitialState {
 
 export interface EvaluateSpotRequest {
   spot: number[];
-  iterations: number;
+  iterations?: number;
   depth?: number;
   cfrAvg?: boolean;
   initialState?: BrowserCfrInitialState;

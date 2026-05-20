@@ -2,7 +2,7 @@
 TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node loading, WGSL kernels, HUNL public-state replay, shared browser helpers, and the Vite/Solid spot solver UI.
 
 ### Source files
-- `types.ts`: Shared request, fixture, manifest, and result types.
+- `types.ts`: Shared request, fixture, exported manifest, CFR config, and result types.
 - `gpu.ts`: Barrel exports for GPU helpers.
 - `gpuBuffers.ts`: WebGPU storage/uniform buffer creation and readback helpers.
 - `kernels.ts`: WGSL kernels for regret matching, belief updates, and action probability reductions.
@@ -10,7 +10,7 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `modelKernels.ts`: WGSL kernels for BetterFFN matvec, activations, normalization, residuals, and batching.
 - `pokerStateKernels.ts`: WGSL kernels and state-layout constants for GPU-resident HUNL public state, legal masks, stepping, child-state construction, terminal values, and state feature encoding.
 - `gpuPokerState.ts`: TypeScript wrapper for packed GPU poker state buffers and the poker-state kernels used by browser solving.
-- `modelFormat.ts`: Manifest parsing, tensor loading, and action-label helpers.
+- `modelFormat.ts`: Manifest parsing, CFR default resolution, tensor loading, and action-label helpers.
 - `cards.ts`: Standard card notation parsing/formatting, duplicate validation, and 1326 hand-combo lookup helpers.
 - `beliefs.ts`: Initial belief normalization, hero-only exact-hand beliefs, and blocked-hand mask helpers.
 - `modelCache.ts`: Browser IndexedDB model cache, streamed weights download progress, and cache invalidation helpers.

@@ -13,6 +13,7 @@ import {
   compatibleHandMask,
 } from "../src/beliefs.js";
 import { isCachedModelFresh } from "../src/modelCache.js";
+import { resolveCfrDefaults } from "../src/modelFormat.js";
 import type { BetterFfnManifest } from "../src/types.js";
 
 function sum(values: Float32Array, start: number, count: number): number {
@@ -79,4 +80,20 @@ test("cached model metadata invalidates on size or sha mismatch", () => {
     isCachedModelFresh({ byteLength: 1234, sha256: "def" }, manifest),
     false,
   );
+});
+
+test("CFR defaults resolve from manifest configuration", () => {
+  const manifest = {
+    cfr: { iterations: 1000, depth: 4, cfrAvg: false },
+  } as BetterFfnManifest;
+  assert.deepEqual(resolveCfrDefaults(manifest), {
+    iterations: 1000,
+    depth: 4,
+    cfrAvg: false,
+  });
+  assert.deepEqual(resolveCfrDefaults({} as BetterFfnManifest), {
+    iterations: 16,
+    depth: 1,
+    cfrAvg: true,
+  });
 });

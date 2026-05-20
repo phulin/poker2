@@ -91,6 +91,7 @@ test("exported BetterFFN WebGPU evaluator matches Python fixture for call spot",
     const result = await evaluator.evaluateSpot({
       spot: [1],
       iterations: 2,
+      depth: 1,
     });
     assertCloseArray(
       result.beliefsAtSpot,
@@ -128,6 +129,7 @@ test("exported BetterFFN WebGPU evaluator handles a raise/call prefix", async (t
     const result = await evaluator.evaluateSpot({
       spot: [3, 1],
       iterations: 2,
+      depth: 1,
     });
     assertCloseArray(
       result.actionProbs,

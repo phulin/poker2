@@ -14,7 +14,7 @@ import {
   createBrowserCfrEvaluator,
   createBrowserDevice,
 } from "./browser.js";
-import { parseBetterFfnManifest } from "./modelFormat.js";
+import { parseBetterFfnManifest, resolveCfrDefaults } from "./modelFormat.js";
 import { loadModelBytesWithCache, type ModelCacheProgress } from "./modelCache.js";
 import { formatCard, handComboIndex, handComboCards } from "./cards.js";
 import { PublicHunlEnv, NUM_HANDS } from "./hunlEnv.js";
@@ -135,6 +135,10 @@ function App(): JSX.Element {
       });
       setModelProgress({ phase: "manifest", message: "Creating WebGPU model" });
       const manifest = parseBetterFfnManifest(loaded.manifest);
+      const cfrDefaults = resolveCfrDefaults(manifest);
+      setIterations(String(cfrDefaults.iterations));
+      setDepth(String(cfrDefaults.depth));
+      setCfrAvg(cfrDefaults.cfrAvg);
       const model = BetterFfnWebGpuModel.fromBuffers(device, manifest, loaded.weights);
       const evaluator = createBrowserCfrEvaluator(device, model);
       setRuntime({ device, model, evaluator, manifest, cached: loaded.cached });

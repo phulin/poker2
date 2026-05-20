@@ -2,15 +2,16 @@ import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { BrowserCfrEvaluator } from "./browserEvaluator.js";
 import { createDawnDevice } from "./gpu.js";
+import { resolveCfrDefaults } from "./modelFormat.js";
 import { loadNodeModel } from "./nodeModel.js";
 
 interface BenchOptions {
   manifest: string;
   weights?: string;
   spot: number[];
-  iterations: number;
-  depth: number;
-  cfrAvg: boolean;
+  iterations?: number;
+  depth?: number;
+  cfrAvg?: boolean;
   warmups: number;
   runs: number;
 }
@@ -56,15 +57,18 @@ function parseSpot(value: string): number[] {
 function readArgs(): BenchOptions {
   const args = process.argv.slice(2);
   const weights = getArg(args, "--weights", "");
+  const iterations = getArg(args, "--iterations", "");
+  const depth = getArg(args, "--depth", "");
   const options: BenchOptions = {
     manifest: getArg(args, "--manifest"),
     spot: parseSpot(getArg(args, "--spot", "1")),
-    iterations: parsePositiveInt(getArg(args, "--iterations", "8"), "iterations"),
-    depth: parsePositiveInt(getArg(args, "--depth", "1"), "depth"),
-    cfrAvg: !args.includes("--no-cfr-avg"),
     warmups: parseNonNegativeInt(getArg(args, "--warmups", "1"), "warmups"),
     runs: parsePositiveInt(getArg(args, "--runs", "5"), "runs"),
   };
+  if (iterations) options.iterations = parsePositiveInt(iterations, "iterations");
+  if (depth) options.depth = parsePositiveInt(depth, "depth");
+  if (args.includes("--cfr-avg")) options.cfrAvg = true;
+  if (args.includes("--no-cfr-avg")) options.cfrAvg = false;
   if (weights) options.weights = weights;
   return options;
 }
@@ -91,14 +95,18 @@ const weightsPath =
 const device = await createDawnDevice();
 const model = await loadNodeModel(device, options.manifest, weightsPath);
 const evaluator = new BrowserCfrEvaluator(device, model);
+const cfrDefaults = resolveCfrDefaults(model.manifest);
+const iterations = options.iterations ?? cfrDefaults.iterations;
+const depth = options.depth ?? cfrDefaults.depth;
+const cfrAvg = options.cfrAvg ?? cfrDefaults.cfrAvg;
 
 try {
   for (let i = 0; i < options.warmups; i += 1) {
     await evaluator.evaluateSpot({
       spot: options.spot,
-      iterations: options.iterations,
-      depth: options.depth,
-      cfrAvg: options.cfrAvg,
+      iterations,
+      depth,
+      cfrAvg,
     });
   }
 
@@ -109,9 +117,9 @@ try {
     const start = performance.now();
     const result = await evaluator.evaluateSpot({
       spot: options.spot,
-      iterations: options.iterations,
-      depth: options.depth,
-      cfrAvg: options.cfrAvg,
+      iterations,
+      depth,
+      cfrAvg,
     });
     samples.push(performance.now() - start);
     actionLabels = result.actionLabels;
@@ -122,9 +130,9 @@ try {
     JSON.stringify(
       {
         spot: options.spot,
-        iterations: options.iterations,
-        depth: options.depth,
-        cfrAvg: options.cfrAvg,
+        iterations,
+        depth,
+        cfrAvg,
         warmups: options.warmups,
         runs: options.runs,
         ...stats(samples),
