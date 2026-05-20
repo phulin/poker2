@@ -51,6 +51,8 @@ interface StateDescriptor {
 interface SolveResult {
   result: BrowserEvaluationResult;
   elapsedMs: number;
+  iterations: number;
+  depth: number;
   heroHandIndex: number;
   villainSummary: RangeSummary;
 }
@@ -265,13 +267,15 @@ function App(): JSX.Element {
 
     try {
       setSolveError("");
-      setSolveStatus(`Solving depth ${depth()} for ${iterations()} CFR iterations`);
+      const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 16)));
+      const solveDepth = Math.max(1, Math.trunc(positiveNumber(depth(), 1)));
+      setSolveStatus(`Solving depth ${solveDepth} for ${solveIterations} CFR iterations`);
       setSolveResult(undefined);
       const started = performance.now();
       const result = await current.evaluator.evaluateSpot({
         spot: actions(),
-        iterations: Math.max(1, Math.trunc(positiveNumber(iterations(), 16))),
-        depth: Math.max(1, Math.trunc(positiveNumber(depth(), 1))),
+        iterations: solveIterations,
+        depth: solveDepth,
         initialState: {
           button: button(),
           stack: positiveNumber(stack(), current.manifest.env.stack),
@@ -287,6 +291,8 @@ function App(): JSX.Element {
       setSolveResult({
         result,
         elapsedMs,
+        iterations: solveIterations,
+        depth: solveDepth,
         heroHandIndex,
         villainSummary: summarizeVillainRange(result.beliefsAtSpot, heroPlayer()),
       });
@@ -397,11 +403,11 @@ function App(): JSX.Element {
             </label>
             <label class="field">
               <span>Iterations</span>
-              <input value={iterations()} inputmode="numeric" onInput={(event) => setIterations(event.currentTarget.value)} />
+              <input value={iterations()} inputmode="numeric" min="1" step="1" onInput={(event) => setIterations(event.currentTarget.value)} />
             </label>
             <label class="field">
               <span>Depth</span>
-              <input value={depth()} inputmode="numeric" onInput={(event) => setDepth(event.currentTarget.value)} />
+              <input value={depth()} inputmode="numeric" min="1" step="1" onInput={(event) => setDepth(event.currentTarget.value)} />
             </label>
           </div>
 
@@ -513,8 +519,8 @@ function App(): JSX.Element {
             {(solved) => (
               <>
                 <div class="metadata">
-                  <span>{iterations()} iterations</span>
-                  <span>depth {depth()}</span>
+                  <span>{solved().iterations} iterations</span>
+                  <span>depth {solved().depth}</span>
                   <span>{solved().elapsedMs.toFixed(1)} ms</span>
                   <span>{runtime()?.cached ? "cached model" : "fresh model"}</span>
                   <span>actor P{solved().result.actor}</span>
