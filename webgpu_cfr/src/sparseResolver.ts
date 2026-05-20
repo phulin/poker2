@@ -131,7 +131,6 @@ export class SparseCfrResolver {
     const avgDenominator = new Float32Array(totalNodes * NUM_HANDS);
     const beliefs = new Float32Array(totalNodes * 2 * NUM_HANDS);
     const beliefsAvg = new Float32Array(totalNodes * 2 * NUM_HANDS);
-    const latestValues = new Float32Array(totalNodes * 2 * NUM_HANDS);
 
     const rootBeliefs = this.rootBeliefsForEnv(tree.nodes[0]!.env, inputBeliefs);
     this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
@@ -153,25 +152,8 @@ export class SparseCfrResolver {
     beliefsAvg.set(beliefs);
 
     if (!(this.gpuKernels && cachedTree.gpu)) {
+      const latestValues = new Float32Array(totalNodes * 2 * NUM_HANDS);
       await this.setLeafValues(tree, cfrAvg ? beliefsAvg : beliefs, latestValues);
-    }
-    if (this.gpuKernels && cachedTree.gpu) {
-      await this.solveIterationsGpuResident(
-        tree,
-        rootBeliefs,
-        policy,
-        policyAvg,
-        beliefs,
-        beliefsAvg,
-        cumulativeRegrets,
-        avgNumerator,
-        avgDenominator,
-        latestValues,
-        cachedTree.gpu,
-        options.iterations,
-        cfrAvg,
-      );
-    } else {
       let values = this.computeExpectedValues(tree, policy, beliefs, latestValues);
 
       for (let t = 0; t < options.iterations; t += 1) {
@@ -205,6 +187,21 @@ export class SparseCfrResolver {
         );
         values = this.computeExpectedValues(tree, policy, beliefs, latestValues);
       }
+    } else {
+      await this.solveIterationsGpuResident(
+        tree,
+        rootBeliefs,
+        policy,
+        policyAvg,
+        beliefs,
+        beliefsAvg,
+        cumulativeRegrets,
+        avgNumerator,
+        avgDenominator,
+        cachedTree.gpu,
+        options.iterations,
+        cfrAvg,
+      );
     }
 
     const readPolicy = options.readPolicy ?? true;
@@ -522,7 +519,6 @@ export class SparseCfrResolver {
     cumulativeRegrets: Float32Array,
     avgNumerator: Float32Array,
     avgDenominator: Float32Array,
-    latestValues: Float32Array,
     staticGpu: SparseStaticGpuData,
     iterations: number,
     cfrAvg: boolean,
