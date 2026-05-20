@@ -433,6 +433,11 @@ export class SparseCfrResolver {
     const showdownRankBuffer = makeStorageBuffer(device, leafBatch.showdownRankCodes);
     const showdownPayoffBuffer = makeStorageBuffer(device, leafBatch.showdownPayoffs);
     const pendingLeafDisposals: Array<() => void> = [];
+    device.queue.writeBuffer(reachBuffer, 0, rootReach);
+    device.queue.writeBuffer(beliefsBuffer, 0, rootBeliefs);
+    if (beliefsAvgBuffer) {
+      device.queue.writeBuffer(beliefsAvgBuffer, 0, rootBeliefs);
+    }
 
     const profile = Boolean(globalThis.process?.env?.P2_PROFILE);
     const phaseTotals = new Map<string, number>();
@@ -476,61 +481,24 @@ export class SparseCfrResolver {
 
       for (let t = 0; t < iterations; t += 1) {
         const regretBeliefsBuffer = cfrAvg ? beliefsAvgBuffer! : beliefsBuffer;
-        await time("accumulateRegrets", () => {
-          this.encodeAccumulateRegretsGpuResident(
+        await time("iterationPrefix", () => {
+          this.encodeIterationPrefixGpuResident(
             tree,
             treeBuffers,
             regretBeliefsBuffer,
             valuesBuffer,
             regretWeightsBuffer,
             regretsBuffer,
-          );
-        });
-        await time("regretMatch", () => {
-          this.encodeRegretMatchGpuResident(
-            tree,
-            treeBuffers,
-            regretsBuffer,
-            policyBuffer,
-          );
-        });
-        await time("propagate", () => {
-          this.encodePropagateGpuResident(
-            tree,
-            treeBuffers,
-            rootBeliefs,
-            rootReach,
             policyBuffer,
             reachBuffer,
             beliefsBuffer,
             denomBuffer,
-          );
-        });
-        await time("averagePolicy", () => {
-          this.encodeAveragePolicyGpuResident(
-            tree,
-            treeBuffers,
-            reachBuffer,
-            policyBuffer,
             avgNumeratorBuffer,
             avgDenominatorBuffer,
             policyAvgBuffer,
+            cfrAvg ? beliefsAvgBuffer! : undefined,
           );
         });
-        if (cfrAvg) {
-          await time("propagateAvg", () => {
-            this.encodePropagateGpuResident(
-              tree,
-              treeBuffers,
-              rootBeliefs,
-              rootReach,
-              policyAvgBuffer,
-              reachBuffer,
-              beliefsAvgBuffer!,
-              denomBuffer,
-            );
-          });
-        }
 
         const disposeLeafPrediction = await time("leafValues", () =>
           this.updateLeafValuesGpuBridge(
@@ -780,6 +748,88 @@ export class SparseCfrResolver {
     for (const param of params) param.destroy();
   }
 
+  private encodeIterationPrefixGpuResident(
+    tree: SparseTree,
+    treeBuffers: SparseGpuTreeBuffers,
+    regretBeliefsBuffer: GPUBuffer,
+    valuesBuffer: GPUBuffer,
+    regretWeightsBuffer: GPUBuffer,
+    regretsBuffer: GPUBuffer,
+    policyBuffer: GPUBuffer,
+    reachBuffer: GPUBuffer,
+    beliefsBuffer: GPUBuffer,
+    denomBuffer: GPUBuffer,
+    numeratorBuffer: GPUBuffer,
+    denominatorBuffer: GPUBuffer,
+    policyAvgBuffer: GPUBuffer,
+    beliefsAvgBuffer: GPUBuffer | undefined,
+  ): void {
+    if (!this.gpuKernels) return;
+    const encoder = this.model.device.createCommandEncoder();
+    const params: GPUBuffer[] = [
+      this.gpuKernels.encodeComputeRegretWeightsRange(
+        encoder,
+        treeBuffers,
+        regretBeliefsBuffer,
+        regretWeightsBuffer,
+        0,
+        tree.nodes.length,
+      ),
+      this.gpuKernels.encodeAccumulateRegretsRange(
+        encoder,
+        treeBuffers,
+        regretWeightsBuffer,
+        valuesBuffer,
+        regretsBuffer,
+        1,
+        tree.nodes.length,
+      ),
+      this.gpuKernels.encodeRegretMatch(
+        encoder,
+        treeBuffers,
+        regretsBuffer,
+        policyBuffer,
+      ),
+    ];
+    this.encodePropagateInto(
+      encoder,
+      params,
+      tree,
+      treeBuffers,
+      policyBuffer,
+      reachBuffer,
+      beliefsBuffer,
+      denomBuffer,
+    );
+    params.push(
+      this.gpuKernels.encodeUpdateAveragePolicyRange(
+        encoder,
+        treeBuffers,
+        reachBuffer,
+        policyBuffer,
+        numeratorBuffer,
+        denominatorBuffer,
+        policyAvgBuffer,
+        1,
+        tree.nodes.length,
+      ),
+    );
+    if (beliefsAvgBuffer) {
+      this.encodePropagateInto(
+        encoder,
+        params,
+        tree,
+        treeBuffers,
+        policyAvgBuffer,
+        reachBuffer,
+        beliefsAvgBuffer,
+        denomBuffer,
+      );
+    }
+    this.model.device.queue.submit([encoder.finish()]);
+    for (const param of params) param.destroy();
+  }
+
   private encodeRegretMatchGpuResident(
     tree: SparseTree,
     treeBuffers: SparseGpuTreeBuffers,
@@ -814,6 +864,31 @@ export class SparseCfrResolver {
     device.queue.writeBuffer(beliefsBuffer, 0, rootBeliefs);
     const encoder = device.createCommandEncoder();
     const params: GPUBuffer[] = [];
+    this.encodePropagateInto(
+      encoder,
+      params,
+      tree,
+      treeBuffers,
+      policyBuffer,
+      reachBuffer,
+      beliefsBuffer,
+      denomBuffer,
+    );
+    device.queue.submit([encoder.finish()]);
+    for (const param of params) param.destroy();
+  }
+
+  private encodePropagateInto(
+    encoder: GPUCommandEncoder,
+    params: GPUBuffer[],
+    tree: SparseTree,
+    treeBuffers: SparseGpuTreeBuffers,
+    policyBuffer: GPUBuffer,
+    reachBuffer: GPUBuffer,
+    beliefsBuffer: GPUBuffer,
+    denomBuffer: GPUBuffer,
+  ): void {
+    if (!this.gpuKernels) return;
     for (let depth = 0; depth < tree.treeDepth; depth += 1) {
       const start = tree.depthOffsets[depth + 1]!;
       const end = tree.depthOffsets[depth + 2]!;
@@ -839,8 +914,6 @@ export class SparseCfrResolver {
         ),
       );
     }
-    device.queue.submit([encoder.finish()]);
-    for (const param of params) param.destroy();
   }
 
   private encodeAveragePolicyGpuResident(
