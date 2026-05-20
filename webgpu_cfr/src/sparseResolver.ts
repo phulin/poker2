@@ -612,6 +612,9 @@ export class SparseCfrResolver {
     latestValues: Float32Array,
   ): Promise<void> {
     latestValues.fill(0);
+    const modelEnvs: PublicHunlEnv[] = [];
+    const modelBeliefs: Float32Array<ArrayBuffer>[] = [];
+    const modelValueBases: number[] = [];
     for (let nodeIndex = 0; nodeIndex < tree.nodes.length; nodeIndex += 1) {
       const node = tree.nodes[nodeIndex]!;
       if (!node.leaf) continue;
@@ -625,8 +628,27 @@ export class SparseCfrResolver {
           latestValues.set(showdownTerminalValues(node.env, nodeBeliefs), valueBase);
         }
       } else {
-        const handValues = await this.model.predictHandValues(node.env, nodeBeliefs);
-        latestValues.set(handValues, valueBase);
+        modelEnvs.push(node.env);
+        modelBeliefs.push(nodeBeliefs);
+        modelValueBases.push(valueBase);
+      }
+    }
+
+    if (modelEnvs.length > 0) {
+      const beliefSize = 2 * NUM_HANDS;
+      const batchedBeliefs = new Float32Array(modelEnvs.length * beliefSize);
+      for (let i = 0; i < modelBeliefs.length; i += 1) {
+        batchedBeliefs.set(modelBeliefs[i]!, i * beliefSize);
+      }
+      const handValues = await this.model.predictBatchHandValues(
+        modelEnvs,
+        batchedBeliefs,
+      );
+      for (let i = 0; i < modelValueBases.length; i += 1) {
+        latestValues.set(
+          handValues.subarray(i * beliefSize, (i + 1) * beliefSize),
+          modelValueBases[i]!,
+        );
       }
     }
   }

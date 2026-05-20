@@ -5,7 +5,16 @@ import { createDawnDevice } from "../src/gpu.js";
 import { DEFAULT_FORCE_DECK, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js";
 import { SparseCfrResolver } from "../src/sparseResolver.js";
 
-function fakeModel(numActions: number, device?: GPUDevice): BetterFfnWebGpuModel {
+interface FakeModelCounters {
+  singleLeafCalls: number;
+  batchLeafSizes: number[];
+}
+
+function fakeModel(
+  numActions: number,
+  device?: GPUDevice,
+  counters?: FakeModelCounters,
+): BetterFfnWebGpuModel {
   return {
     ...(device ? { device } : {}),
     manifest: {
@@ -18,7 +27,14 @@ function fakeModel(numActions: number, device?: GPUDevice): BetterFfnWebGpuModel
       };
     },
     async predictHandValues(): Promise<Float32Array<ArrayBuffer>> {
+      if (counters) counters.singleLeafCalls += 1;
       return new Float32Array(2 * NUM_HANDS);
+    },
+    async predictBatchHandValues(
+      envs: readonly PublicHunlEnv[],
+    ): Promise<Float32Array<ArrayBuffer>> {
+      if (counters) counters.batchLeafSizes.push(envs.length);
+      return new Float32Array(envs.length * 2 * NUM_HANDS);
     },
   } as unknown as BetterFfnWebGpuModel;
 }
@@ -107,4 +123,36 @@ test("sparse resolver can route CFR tensor operations through WGSL kernels", asy
   } finally {
     device.destroy();
   }
+});
+
+test("sparse resolver batches nonterminal leaf value evaluation", async () => {
+  const betBins = [0.5];
+  const numActions = betBins.length + 3;
+  const env = new PublicHunlEnv({
+    stack: 20,
+    sb: 1,
+    bb: 2,
+    betBins,
+    button: 1,
+    forceDeck: DEFAULT_FORCE_DECK,
+  });
+  const counters: FakeModelCounters = {
+    singleLeafCalls: 0,
+    batchLeafSizes: [],
+  };
+  const resolver = new SparseCfrResolver(fakeModel(numActions, undefined, counters));
+
+  await resolver.solve(env, uniformBeliefs(), {
+    depth: 3,
+    iterations: 2,
+    readPolicy: false,
+    readActionProbs: false,
+  });
+
+  assert.equal(counters.singleLeafCalls, 0);
+  assert.ok(counters.batchLeafSizes.length > 0, "expected batched leaf calls");
+  assert.ok(
+    counters.batchLeafSizes.some((size) => size > 1),
+    `expected at least one multi-leaf batch, saw ${counters.batchLeafSizes.join(",")}`,
+  );
 });

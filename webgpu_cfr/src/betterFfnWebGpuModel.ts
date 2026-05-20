@@ -277,9 +277,11 @@ export class BetterFfnWebGpuModel {
     const numPlayers = this.manifest.architecture.numPlayers;
     const numActions = this.manifest.architecture.numActions;
     const batch = envs.length;
-    if (beliefs.length !== numPlayers * NUM_HANDS) {
+    const singleBeliefSize = numPlayers * NUM_HANDS;
+    const batchBeliefSize = batch * singleBeliefSize;
+    if (beliefs.length !== singleBeliefSize && beliefs.length !== batchBeliefSize) {
       throw new Error(
-        `belief vector has ${beliefs.length} entries, expected ${numPlayers * NUM_HANDS}`,
+        `belief vector has ${beliefs.length} entries, expected ${singleBeliefSize} or ${batchBeliefSize}`,
       );
     }
 
@@ -321,9 +323,14 @@ export class BetterFfnWebGpuModel {
         this.device.queue.submit([encoder.finish()]);
         submitted = true;
       };
-      const batchedBeliefs = new Float32Array(batch * numPlayers * NUM_HANDS);
-      for (let i = 0; i < batch; i += 1) {
-        batchedBeliefs.set(beliefs, i * numPlayers * NUM_HANDS);
+      const batchedBeliefs =
+        beliefs.length === batchBeliefSize
+          ? beliefs
+          : new Float32Array(batchBeliefSize);
+      if (beliefs.length === singleBeliefSize) {
+        for (let i = 0; i < batch; i += 1) {
+          batchedBeliefs.set(beliefs, i * singleBeliefSize);
+        }
       }
       const beliefBuffer = storage(batchedBeliefs);
       const perPlayerBelief = empty(batch * numPlayers * hiddenDim);
