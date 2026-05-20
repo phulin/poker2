@@ -45,6 +45,7 @@ from p2.models.mlp.mlp_features import MLPFeatures
 from p2.search.allin_payoff import (
     FLOP_I8_SCALE,
     I16_SCALE,
+    write_allin_table_values_card_denom_dot_triton_,
     write_allin_table_values_card_denom_triton_,
     write_allin_table_values_triton_,
 )
@@ -1300,7 +1301,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             flop_stats = getattr(self, "allin_flop_stats_buffer", None)
             if flop_tables is None or flop_ids is None or flop_tables.numel() == 0:
                 raise RuntimeError("Fused all-in flop evaluation requires cached flop tables.")
-            write_allin_table_values_card_denom_triton_(
+            write_allin_table_values_card_denom_dot_triton_(
                 table=flop_tables,
                 beliefs=beliefs,
                 node_indices=node_idx,
@@ -1313,7 +1314,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 canon_ids=flop_ids,
                 stats_buffer=flop_stats,
                 block_h=64,
-                block_k=16,
+                block_k=64,
+                block_p=8,
             )
 
         node_idx = indices_by_street[2]
