@@ -45,7 +45,6 @@ from p2.models.mlp.mlp_features import MLPFeatures
 from p2.search.allin_payoff import (
     FLOP_I8_SCALE,
     I16_SCALE,
-    _flop_combination_index_tensor,
     write_allin_table_values_triton_,
 )
 from p2.search.fused_cfr_triton import (
@@ -1295,15 +1294,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         node_idx = indices_by_street[1]
         if node_idx.numel() > 0:
-            flop_boards = boards_by_street[1][:, :3].long().sort(dim=1).values
-            if resolver._flop_i8 is None:
-                raise RuntimeError("Fused all-in flop evaluation requires cached CUDA flop tables.")
-            actual_to_canon, actual_perm, combo_perms = resolver.flop_lookup_tensors()
-            actual_idx = _flop_combination_index_tensor(flop_boards)
-            canon_ids = actual_to_canon[actual_idx]
-            perm_ids = actual_perm[actual_idx]
+            flop_tables = getattr(self, "allin_flop_tables_i8", None)
+            flop_ids = getattr(self, "allin_flop_table_ids", None)
+            if flop_tables is None or flop_ids is None or flop_tables.numel() == 0:
+                raise RuntimeError("Fused all-in flop evaluation requires cached flop tables.")
             write_allin_table_values_triton_(
-                table=resolver._flop_i8,
+                table=flop_tables,
                 beliefs=beliefs,
                 node_indices=node_idx,
                 latest_values=self.latest_values,
@@ -1312,9 +1308,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 starting_stacks=self.env.starting_stacks,
                 env_scale=self.env.scale,
                 table_scale=FLOP_I8_SCALE,
-                canon_ids=canon_ids,
-                perm_ids=perm_ids,
-                combo_perms=combo_perms,
+                canon_ids=flop_ids,
             )
 
         node_idx = indices_by_street[2]

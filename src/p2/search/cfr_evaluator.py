@@ -25,8 +25,10 @@ from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from p2.models.model_output import TRMLatent
 from p2.search.allin_payoff import (
+    FLOP_I8_SCALE,
     I16_SCALE,
     AllInPayoffResolver,
+    _flop_combination_index_tensor,
     allin_values_from_payoff_batch,
     compute_postflop_payoff_quantized_triton_batched,
 )
@@ -350,6 +352,10 @@ class CFREvaluator(ABC):
             0, NUM_HANDS, NUM_HANDS, dtype=torch.int16, device=self.device
         )
         self.allin_turn_table_ids = empty
+        self.allin_flop_tables_i8 = torch.empty(
+            0, NUM_HANDS, NUM_HANDS, dtype=torch.int8, device=self.device
+        )
+        self.allin_flop_table_ids = empty
         self.allin_call_mask = torch.zeros(
             self.total_nodes, dtype=torch.bool, device=self.device
         )
@@ -404,6 +410,10 @@ class CFREvaluator(ABC):
                 0, NUM_HANDS, NUM_HANDS, dtype=torch.int16, device=self.device
             )
             self.allin_turn_table_ids = empty
+            self.allin_flop_tables_i8 = torch.empty(
+                0, NUM_HANDS, NUM_HANDS, dtype=torch.int8, device=self.device
+            )
+            self.allin_flop_table_ids = empty
             return
 
         boards = self.env.board_indices[self.allin_call_parent_indices].long()
@@ -425,7 +435,48 @@ class CFREvaluator(ABC):
             boards[street1].contiguous(),
             boards[street2].contiguous(),
         )
+        self._cache_allin_flop_tables()
         self._cache_allin_turn_tables()
+
+    def _cache_allin_flop_tables(self) -> None:
+        empty = torch.empty(0, dtype=torch.long, device=self.device)
+        flop_boards = (
+            self.allin_call_boards_by_street[1][:, :3].long().sort(dim=1).values
+        )
+        if flop_boards.numel() == 0 or self.device.type != "cuda":
+            self.allin_flop_tables_i8 = torch.empty(
+                0, NUM_HANDS, NUM_HANDS, dtype=torch.int8, device=self.device
+            )
+            self.allin_flop_table_ids = empty
+            return
+
+        resolver = self._ensure_allin_payoff_resolver()
+        if resolver._flop_i8 is None:
+            self.allin_flop_tables_i8 = torch.empty(
+                0, NUM_HANDS, NUM_HANDS, dtype=torch.int8, device=self.device
+            )
+            self.allin_flop_table_ids = empty
+            return
+
+        actual_to_canon, actual_perm, combo_perms = resolver.flop_lookup_tensors()
+        actual_idx = _flop_combination_index_tensor(flop_boards)
+        unique_actual_idx, inverse = torch.unique(
+            actual_idx,
+            sorted=True,
+            return_inverse=True,
+        )
+        canon_ids = actual_to_canon.index_select(0, unique_actual_idx)
+        perm_ids = actual_perm.index_select(0, unique_actual_idx)
+        tables = resolver._flop_i8.index_select(0, canon_ids)
+        perms = combo_perms.index_select(0, perm_ids)
+        self.allin_flop_tables_i8 = tables.gather(
+            1,
+            perms[:, :, None].expand(-1, -1, NUM_HANDS),
+        ).gather(
+            2,
+            perms[:, None, :].expand(-1, NUM_HANDS, -1),
+        ).contiguous()
+        self.allin_flop_table_ids = inverse.contiguous()
 
     def _cache_allin_turn_tables(self) -> None:
         empty = torch.empty(0, dtype=torch.long, device=self.device)
@@ -544,11 +595,24 @@ class CFREvaluator(ABC):
 
         node_idx = indices_by_street[1]
         if node_idx.numel() > 0:
-            values = resolver.values_for_boards(
-                street=1,
-                boards=boards_by_street[1],
-                beliefs=beliefs[node_idx],
-            )
+            flop_tables = getattr(self, "allin_flop_tables_i8", None)
+            flop_ids = getattr(self, "allin_flop_table_ids", None)
+            if (
+                flop_tables is not None
+                and flop_ids is not None
+                and flop_tables.numel() > 0
+            ):
+                values = allin_values_from_payoff_batch(
+                    flop_tables.index_select(0, flop_ids),
+                    beliefs[node_idx],
+                    scale=FLOP_I8_SCALE,
+                )
+            else:
+                values = resolver.values_for_boards(
+                    street=1,
+                    boards=boards_by_street[1],
+                    beliefs=beliefs[node_idx],
+                )
             self._write_scaled_allin_values(node_idx, values)
 
         node_idx = indices_by_street[2]
