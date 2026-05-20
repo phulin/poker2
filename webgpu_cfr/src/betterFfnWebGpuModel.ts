@@ -59,6 +59,15 @@ export interface GpuHandValuePrediction {
   dispose: () => void;
 }
 
+export interface PreparedBatchFeatures {
+  batch: number;
+  baseEmbedding: GPUBuffer;
+  contextFeatures: GPUBuffer;
+  boardRankLow?: GPUBuffer;
+  boardSuitLow?: GPUBuffer;
+  dispose: () => void;
+}
+
 export class BetterFfnWebGpuModel {
   readonly device: GPUDevice;
   readonly manifest: BetterFfnManifest;
@@ -182,16 +191,178 @@ export class BetterFfnWebGpuModel {
   async predictBatchHandValuesGpu(
     envs: readonly PublicHunlEnv[],
     beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
+    prepared?: PreparedBatchFeatures,
   ): Promise<GpuHandValuePrediction> {
     const prediction = this.enqueuePredictBatch(envs, beliefs, {
       includePolicy: false,
-    });
+    }, prepared);
     return {
       buffer: prediction.handValuesBuffer,
       batch: prediction.batch,
       valuesPerSample: 2 * NUM_HANDS,
       dispose: prediction.dispose,
     };
+  }
+
+  prepareBatchFeatures(envs: readonly PublicHunlEnv[]): PreparedBatchFeatures {
+    if (envs.length === 0) {
+      const empty = this.device.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+      });
+      return {
+        batch: 0,
+        baseEmbedding: empty,
+        contextFeatures: empty,
+        dispose: () => empty.destroy(),
+      };
+    }
+
+    const batch = envs.length;
+    const hiddenDim = this.manifest.architecture.hiddenDim;
+    const interactionDim = this.manifest.architecture.boardInteractionDim;
+    const temps: TempBuffer[] = [];
+    const persistent: TempBuffer[] = [];
+    const detach = (buffer: GPUBuffer): void => {
+      const index = temps.findIndex((temp) => temp.buffer === buffer);
+      if (index < 0) return;
+      persistent.push(temps[index]!);
+      temps.splice(index, 1);
+    };
+    const storage = (
+      data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
+    ): GPUBuffer => {
+      const temp = this.acquireStorage(data.length);
+      this.device.queue.writeBuffer(
+        temp.buffer,
+        0,
+        data as Float32Array<ArrayBuffer> | Uint32Array<ArrayBuffer>,
+      );
+      temps.push(temp);
+      return temp.buffer;
+    };
+    const empty = (elements: number): GPUBuffer => {
+      const temp = this.acquireStorage(elements);
+      temps.push(temp);
+      return temp.buffer;
+    };
+    const uniform = (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ): GPUBuffer => {
+      const temp = this.acquireUniform(data.byteLength);
+      this.device.queue.writeBuffer(temp.buffer, 0, data);
+      temps.push(temp);
+      return temp.buffer;
+    };
+
+    const encoder = this.device.createCommandEncoder();
+    this.recordingEncoder = encoder;
+    try {
+      const encodedFeatures = envs.map((env) => encodeBetterFeatures(env));
+      const context = new Float32Array(batch * 11);
+      const base = new Float32Array(batch * hiddenDim);
+      for (let i = 0; i < batch; i += 1) {
+        const features = encodedFeatures[i]!;
+        context.set(features.context, i * 11);
+        base.set(this.baseEmbedding(features.street, features.board), i * hiddenDim);
+      }
+      const contextFeatures = this.leakyReluBlockBatch(
+        "context_encoder",
+        storage(context),
+        batch,
+        11,
+        hiddenDim,
+        hiddenDim,
+        empty,
+        uniform,
+      );
+      const baseEmbedding = storage(base);
+
+      let boardRankLow: GPUBuffer | undefined;
+      let boardSuitLow: GPUBuffer | undefined;
+      if (interactionDim > 0) {
+        const rankCountsCpu = new Float32Array(batch * 13);
+        const suitCountsCpu = new Float32Array(batch * 4);
+        for (let row = 0; row < encodedFeatures.length; row += 1) {
+          const board = encodedFeatures[row]!.board;
+          for (let i = 0; i < 5; i += 1) {
+            const card = board[i] ?? -1;
+            if (card >= 0) {
+              const rankOffset = row * 13 + (card % 13);
+              const suitOffset = row * 4 + Math.floor(card / 13);
+              rankCountsCpu[rankOffset] = rankCountsCpu[rankOffset]! + 1;
+              suitCountsCpu[suitOffset] = suitCountsCpu[suitOffset]! + 1;
+            }
+          }
+        }
+        boardRankLow = empty(batch * interactionDim);
+        this.matVecBatch(
+          this.tensor("board_rank_low.weight").buffer,
+          storage(rankCountsCpu),
+          this.dummyBias,
+          boardRankLow,
+          interactionDim,
+          13,
+          batch,
+          13,
+          interactionDim,
+          0,
+          0,
+          false,
+          uniform,
+        );
+        boardSuitLow = empty(batch * interactionDim);
+        this.matVecBatch(
+          this.tensor("board_suit_low.weight").buffer,
+          storage(suitCountsCpu),
+          this.dummyBias,
+          boardSuitLow,
+          interactionDim,
+          4,
+          batch,
+          4,
+          interactionDim,
+          0,
+          0,
+          false,
+          uniform,
+        );
+      }
+
+      this.recordingEncoder = undefined;
+      this.device.queue.submit([encoder.finish()]);
+      detach(baseEmbedding);
+      detach(contextFeatures);
+      if (boardRankLow) detach(boardRankLow);
+      if (boardSuitLow) detach(boardSuitLow);
+      let disposed = false;
+      return {
+        batch,
+        baseEmbedding,
+        contextFeatures,
+        ...(boardRankLow ? { boardRankLow } : {}),
+        ...(boardSuitLow ? { boardSuitLow } : {}),
+        dispose: () => {
+          if (disposed) return;
+          disposed = true;
+          for (const temp of persistent) {
+            temp.buffer.destroy();
+          }
+          for (const temp of temps) {
+            this.releaseTemp(temp);
+          }
+        },
+      };
+    } catch (error) {
+      this.recordingEncoder = undefined;
+      for (const temp of persistent) {
+        temp.buffer.destroy();
+      }
+      for (const temp of temps) {
+        this.releaseTemp(temp);
+      }
+      throw error;
+    }
   }
 
   async predictBatchHandValuesGpuStates(
@@ -257,6 +428,7 @@ export class BetterFfnWebGpuModel {
     envs: readonly PublicHunlEnv[],
     beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
     options: PredictOptions = {},
+    prepared?: PreparedBatchFeatures,
   ): {
     handValuesBuffer: GPUBuffer;
     policyLogitsBuffer?: GPUBuffer;
@@ -277,6 +449,9 @@ export class BetterFfnWebGpuModel {
     const numPlayers = this.manifest.architecture.numPlayers;
     const numActions = this.manifest.architecture.numActions;
     const batch = envs.length;
+    if (prepared && prepared.batch !== batch) {
+      throw new Error(`prepared features batch ${prepared.batch} does not match ${batch}`);
+    }
     const singleBeliefSize = numPlayers * NUM_HANDS;
     const batchBeliefSize = batch * singleBeliefSize;
     if (
@@ -372,36 +547,33 @@ export class BetterFfnWebGpuModel {
         uniform,
       );
 
-      const encodedFeatures = envs.map((env) => encodeBetterFeatures(env));
+      const encodedFeatures = prepared
+        ? undefined
+        : envs.map((env) => encodeBetterFeatures(env));
       const interactionFeatures = this.buildBeliefBoardInteractionGpu(
         beliefBuffer,
-        encodedFeatures.map((features) => features.board),
+        encodedFeatures?.map((features) => features.board),
         batch,
         numPlayers,
         hiddenDim,
         empty,
         storage,
         uniform,
+        prepared,
       );
-      const context = new Float32Array(batch * 11);
-      const base = new Float32Array(batch * hiddenDim);
-      for (let i = 0; i < batch; i += 1) {
-        const features = encodedFeatures[i]!;
-        context.set(features.context, i * 11);
-        base.set(this.baseEmbedding(features.street, features.board), i * hiddenDim);
-      }
-      const contextFeatures = this.leakyReluBlockBatch(
-        "context_encoder",
-        storage(context),
-        batch,
-        11,
-        hiddenDim,
-        hiddenDim,
-        empty,
-        uniform,
-      );
-
-      const baseEmbedding = storage(base);
+      const contextFeatures =
+        prepared?.contextFeatures ??
+        this.contextFeaturesForBatch(
+          encodedFeatures!,
+          batch,
+          hiddenDim,
+          empty,
+          storage,
+          uniform,
+        );
+      const baseEmbedding =
+        prepared?.baseEmbedding ??
+        this.baseEmbeddingForBatch(encodedFeatures!, batch, hiddenDim, storage);
       let x = empty(batch * hiddenDim);
       if (interactionFeatures) {
         const interactedBase = empty(batch * hiddenDim);
@@ -921,9 +1093,11 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
     precomputed?: {
-      rankCounts: GPUBuffer;
-      suitCounts: GPUBuffer;
+      rankCounts?: GPUBuffer;
+      suitCounts?: GPUBuffer;
       sharedBeliefs?: boolean;
+      boardRankLow?: GPUBuffer;
+      boardSuitLow?: GPUBuffer;
     },
   ): { rank: GPUBuffer; suit: GPUBuffer } | undefined {
     const interactionDim = this.manifest.architecture.boardInteractionDim;
@@ -947,9 +1121,9 @@ export class BetterFfnWebGpuModel {
         rankMass,
         91,
         NUM_HANDS,
-          batch,
-          precomputed?.sharedBeliefs ? 0 : numPlayers * NUM_HANDS,
-          numPlayers * 91,
+        batch,
+        precomputed?.sharedBeliefs ? 0 : numPlayers * NUM_HANDS,
+        numPlayers * 91,
         player * NUM_HANDS,
         player * 91,
         false,
@@ -962,9 +1136,9 @@ export class BetterFfnWebGpuModel {
         suitMass,
         10,
         NUM_HANDS,
-          batch,
-          precomputed?.sharedBeliefs ? 0 : numPlayers * NUM_HANDS,
-          numPlayers * 10,
+        batch,
+        precomputed?.sharedBeliefs ? 0 : numPlayers * NUM_HANDS,
+        numPlayers * 10,
         player * NUM_HANDS,
         player * 10,
         false,
@@ -1009,7 +1183,9 @@ export class BetterFfnWebGpuModel {
 
     let rankCounts = precomputed?.rankCounts;
     let suitCounts = precomputed?.suitCounts;
-    if (!rankCounts || !suitCounts) {
+    let boardRankLow = precomputed?.boardRankLow;
+    let boardSuitLow = precomputed?.boardSuitLow;
+    if ((!boardRankLow || !boardSuitLow) && (!rankCounts || !suitCounts)) {
       if (!boards) {
         throw new Error("board arrays are required when board counts are not precomputed");
       }
@@ -1030,38 +1206,42 @@ export class BetterFfnWebGpuModel {
       rankCounts = storage(rankCountsCpu);
       suitCounts = storage(suitCountsCpu);
     }
-    const boardRankLow = empty(batch * interactionDim);
-    this.matVecBatch(
-      this.tensor("board_rank_low.weight").buffer,
-      rankCounts,
-      this.dummyBias,
-      boardRankLow,
-      interactionDim,
-      13,
-      batch,
-      13,
-      interactionDim,
-      0,
-      0,
-      false,
-      uniform,
-    );
-    const boardSuitLow = empty(batch * interactionDim);
-    this.matVecBatch(
-      this.tensor("board_suit_low.weight").buffer,
-      suitCounts,
-      this.dummyBias,
-      boardSuitLow,
-      interactionDim,
-      4,
-      batch,
-      4,
-      interactionDim,
-      0,
-      0,
-      false,
-      uniform,
-    );
+    if (!boardRankLow) {
+      boardRankLow = empty(batch * interactionDim);
+      this.matVecBatch(
+        this.tensor("board_rank_low.weight").buffer,
+        rankCounts!,
+        this.dummyBias,
+        boardRankLow,
+        interactionDim,
+        13,
+        batch,
+        13,
+        interactionDim,
+        0,
+        0,
+        false,
+        uniform,
+      );
+    }
+    if (!boardSuitLow) {
+      boardSuitLow = empty(batch * interactionDim);
+      this.matVecBatch(
+        this.tensor("board_suit_low.weight").buffer,
+        suitCounts!,
+        this.dummyBias,
+        boardSuitLow,
+        interactionDim,
+        4,
+        batch,
+        4,
+        interactionDim,
+        0,
+        0,
+        false,
+        uniform,
+      );
+    }
 
     const rankGated = empty(batch * numPlayers * interactionDim);
     this.playerBoardHadamard(
@@ -1117,6 +1297,50 @@ export class BetterFfnWebGpuModel {
       uniform,
     );
     return { rank, suit };
+  }
+
+  private contextFeaturesForBatch(
+    encodedFeatures: readonly ReturnType<typeof encodeBetterFeatures>[],
+    batch: number,
+    hiddenDim: number,
+    empty: (elements: number) => GPUBuffer,
+    storage: (
+      data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
+    ) => GPUBuffer,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): GPUBuffer {
+    const context = new Float32Array(batch * 11);
+    for (let i = 0; i < batch; i += 1) {
+      context.set(encodedFeatures[i]!.context, i * 11);
+    }
+    return this.leakyReluBlockBatch(
+      "context_encoder",
+      storage(context),
+      batch,
+      11,
+      hiddenDim,
+      hiddenDim,
+      empty,
+      uniform,
+    );
+  }
+
+  private baseEmbeddingForBatch(
+    encodedFeatures: readonly ReturnType<typeof encodeBetterFeatures>[],
+    batch: number,
+    hiddenDim: number,
+    storage: (
+      data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
+    ) => GPUBuffer,
+  ): GPUBuffer {
+    const base = new Float32Array(batch * hiddenDim);
+    for (let i = 0; i < batch; i += 1) {
+      const features = encodedFeatures[i]!;
+      base.set(this.baseEmbedding(features.street, features.board), i * hiddenDim);
+    }
+    return storage(base);
   }
 
   private unorderedPairIndex(first: number, second: number, numItems: number): number {

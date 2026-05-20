@@ -433,6 +433,10 @@ export class SparseCfrResolver {
     const showdownRankBuffer = makeStorageBuffer(device, leafBatch.showdownRankCodes);
     const showdownPayoffBuffer = makeStorageBuffer(device, leafBatch.showdownPayoffs);
     const pendingLeafDisposals: Array<() => void> = [];
+    const preparedLeafFeatures =
+      leafBatch.modelEnvs.length > 0 && this.model.prepareBatchFeatures
+        ? this.model.prepareBatchFeatures(leafBatch.modelEnvs)
+        : undefined;
     device.queue.writeBuffer(reachBuffer, 0, rootReach);
     device.queue.writeBuffer(beliefsBuffer, 0, rootBeliefs);
     if (beliefsAvgBuffer) {
@@ -465,6 +469,7 @@ export class SparseCfrResolver {
           showdownNodeBuffer,
           showdownRankBuffer,
           showdownPayoffBuffer,
+          preparedLeafFeatures,
         ),
       );
       pendingLeafDisposals.push(initialLeafDispose);
@@ -511,6 +516,7 @@ export class SparseCfrResolver {
             showdownNodeBuffer,
             showdownRankBuffer,
             showdownPayoffBuffer,
+            preparedLeafFeatures,
           ),
         );
         pendingLeafDisposals.push(disposeLeafPrediction);
@@ -558,6 +564,7 @@ export class SparseCfrResolver {
       denomBuffer.destroy();
       opponentPolicyBuffer.destroy();
       regretWeightsBuffer.destroy();
+      preparedLeafFeatures?.dispose();
       modelLeafNodeBuffer.destroy();
       modelLeafBeliefsBuffer.destroy();
       showdownNodeBuffer.destroy();
@@ -576,6 +583,7 @@ export class SparseCfrResolver {
     showdownNodeBuffer: GPUBuffer,
     showdownRankBuffer: GPUBuffer,
     showdownPayoffBuffer: GPUBuffer,
+    preparedLeafFeatures?: ReturnType<BetterFfnWebGpuModel["prepareBatchFeatures"]>,
   ): Promise<() => void> {
     if (!this.gpuKernels) return () => undefined;
     const device = this.model.device;
@@ -613,6 +621,7 @@ export class SparseCfrResolver {
     const prediction = await this.model.predictBatchHandValuesGpu(
       leafBatch.modelEnvs,
       modelLeafBeliefsBuffer,
+      preparedLeafFeatures,
     );
     const scatterEncoder = device.createCommandEncoder();
     const scatterParams = this.gpuKernels.encodeScatterNodeValues(
