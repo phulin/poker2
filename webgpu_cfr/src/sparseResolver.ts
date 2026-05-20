@@ -505,31 +505,33 @@ export class SparseCfrResolver {
           );
         });
 
-        const disposeLeafPrediction = await time("leafValues", () =>
-          this.updateLeafValuesGpuBridge(
-            treeBuffers,
-            leafBatch,
-            cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
-            valuesBuffer,
-            modelLeafNodeBuffer,
-            modelLeafBeliefsBuffer,
-            showdownNodeBuffer,
-            showdownRankBuffer,
-            showdownPayoffBuffer,
-            preparedLeafFeatures,
-          ),
-        );
-        pendingLeafDisposals.push(disposeLeafPrediction);
-        await time("backup", () => {
-          this.encodeExpectedValuesGpuResident(
-            tree,
-            treeBuffers,
-            policyBuffer,
-            beliefsBuffer,
-            opponentPolicyBuffer,
-            valuesBuffer,
+        if (t + 1 < iterations) {
+          const disposeLeafPrediction = await time("leafValues", () =>
+            this.updateLeafValuesGpuBridge(
+              treeBuffers,
+              leafBatch,
+              cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
+              valuesBuffer,
+              modelLeafNodeBuffer,
+              modelLeafBeliefsBuffer,
+              showdownNodeBuffer,
+              showdownRankBuffer,
+              showdownPayoffBuffer,
+              preparedLeafFeatures,
+            ),
           );
-        });
+          pendingLeafDisposals.push(disposeLeafPrediction);
+          await time("backup", () => {
+            this.encodeExpectedValuesGpuResident(
+              tree,
+              treeBuffers,
+              policyBuffer,
+              beliefsBuffer,
+              opponentPolicyBuffer,
+              valuesBuffer,
+            );
+          });
+        }
       }
       if (profile) {
         const stats = Array.from(phaseTotals.entries()).map(([label, total]) => ({
