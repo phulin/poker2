@@ -34,6 +34,7 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
       childIndices: new Uint32Array([1, 2]),
       parentIndex: new Uint32Array([0, 0, 0]),
       prevActor: new Uint32Array([0, 0, 0]),
+      toAct: new Uint32Array([0, 1, 1]),
       allowedMask: new Uint32Array([
         1, 1, 1, 1,
         1, 1, 1, 1,
@@ -81,6 +82,34 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     const denominator = makeEmptyStorageBuffer(device, 12);
     const policyAvg = makeEmptyStorageBuffer(device, 12);
     const denom = makeEmptyStorageBuffer(device, 6);
+    const opponentPolicy = makeStorageBuffer(
+      device,
+      new Float32Array([
+        0, 0, 0, 0,
+        0.4, 0.4, 0.4, 0.4,
+        0.6, 0.6, 0.6, 0.6,
+      ]),
+    );
+    const values = makeStorageBuffer(
+      device,
+      new Float32Array([
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        1, 2, 3, 4,
+        -1, -2, -3, -4,
+        5, 6, 7, 8,
+        -5, -6, -7, -8,
+      ]),
+    );
+    const regretWeights = makeStorageBuffer(
+      device,
+      new Float32Array([
+        1, 1, 1, 1,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+      ]),
+    );
+    const tailRegrets = makeEmptyStorageBuffer(device, 12);
 
     const encoder = device.createCommandEncoder();
     const paramsA = kernels.encodeRegretMatch(encoder, tree, regrets, policy);
@@ -112,12 +141,32 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
       1,
       3,
     );
+    const paramsBackup = kernels.encodeBackupDepth(
+      encoder,
+      tree,
+      policy,
+      opponentPolicy,
+      values,
+      0,
+      1,
+    );
+    const paramsRegret = kernels.encodeAccumulateRegretsRange(
+      encoder,
+      tree,
+      regretWeights,
+      values,
+      tailRegrets,
+      1,
+      3,
+    );
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
     paramsA.destroy();
     paramsReach.destroy();
     paramsAvg.destroy();
     paramsB.destroy();
+    paramsBackup.destroy();
+    paramsRegret.destroy();
 
     assertCloseArray(
       await readFloatBuffer(device, policy, 12),
@@ -165,6 +214,39 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
       1e-6,
       "policyAvg",
     );
+    assertCloseArray(
+      await readFloatBuffer(device, values, 24),
+      [
+        4, 4, 4, 6,
+        -3.4, -4.4, -5.4, -6.4,
+        1, 2, 3, 4,
+        -1, -2, -3, -4,
+        5, 6, 7, 8,
+        -5, -6, -7, -8,
+      ],
+      1e-6,
+      "values",
+    );
+    assertCloseArray(
+      await readFloatBuffer(device, regrets, 12),
+      [
+        0, 0, 0, 0,
+        1, 0, 3, 0,
+        3, 0, 1, 0,
+      ],
+      1e-6,
+      "source regrets",
+    );
+    assertCloseArray(
+      await readFloatBuffer(device, tailRegrets, 12),
+      [
+        0, 0, 0, 0,
+        -3, -2, -1, -2,
+        1, 2, 3, 2,
+      ],
+      1e-6,
+      "tailRegrets",
+    );
 
     tree.dispose();
     regrets.destroy();
@@ -175,6 +257,10 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     denominator.destroy();
     policyAvg.destroy();
     denom.destroy();
+    opponentPolicy.destroy();
+    values.destroy();
+    regretWeights.destroy();
+    tailRegrets.destroy();
   } finally {
     device.destroy();
   }

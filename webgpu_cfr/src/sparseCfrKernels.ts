@@ -239,6 +239,92 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_BACKUP_DEPTH_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  start: u32,
+  end: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> childOffsets: array<u32>;
+@group(0) @binding(1) var<storage, read> childCount: array<u32>;
+@group(0) @binding(2) var<storage, read> childIndices: array<u32>;
+@group(0) @binding(3) var<storage, read> toAct: array<u32>;
+@group(0) @binding(4) var<storage, read> policy: array<f32>;
+@group(0) @binding(5) var<storage, read> opponentPolicy: array<f32>;
+@group(0) @binding(6) var<storage, read_write> values: array<f32>;
+@group(0) @binding(7) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let nodeCount = params.end - params.start;
+  let total = nodeCount * 2u * params.numHands;
+  if (linear >= total) {
+    return;
+  }
+
+  let hand = linear % params.numHands;
+  let player = (linear / params.numHands) % 2u;
+  let parent = params.start + linear / (2u * params.numHands);
+  let count = childCount[parent];
+  if (count == 0u) {
+    return;
+  }
+
+  let actor = toAct[parent];
+  let offset = childOffsets[parent];
+  var sum = 0.0;
+  for (var i = 0u; i < count; i = i + 1u) {
+    let child = childIndices[offset + i];
+    let weight = select(
+      opponentPolicy[child * params.numHands + hand],
+      policy[child * params.numHands + hand],
+      player == actor,
+    );
+    sum = sum + weight * values[(child * 2u + player) * params.numHands + hand];
+  }
+  values[(parent * 2u + player) * params.numHands + hand] = sum;
+}
+`;
+
+export const SPARSE_REGRET_TAIL_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  start: u32,
+  end: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> parentIndex: array<u32>;
+@group(0) @binding(1) var<storage, read> prevActor: array<u32>;
+@group(0) @binding(2) var<storage, read> regretWeights: array<f32>;
+@group(0) @binding(3) var<storage, read> values: array<f32>;
+@group(0) @binding(4) var<storage, read_write> regrets: array<f32>;
+@group(0) @binding(5) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let nodeCount = params.end - params.start;
+  let total = nodeCount * params.numHands;
+  if (linear >= total) {
+    return;
+  }
+
+  let hand = linear % params.numHands;
+  let child = params.start + linear / params.numHands;
+  let parent = parentIndex[child];
+  let actor = prevActor[child];
+  let weight = regretWeights[parent * params.numHands + hand];
+  let childValue = values[(child * 2u + actor) * params.numHands + hand];
+  let parentValue = values[(parent * 2u + actor) * params.numHands + hand];
+  let idx = child * params.numHands + hand;
+  regrets[idx] = regrets[idx] + weight * (childValue - parentValue);
+}
+`;
+
 export interface SparseGpuTreeData {
   nodeCount: number;
   numHands: number;
@@ -247,6 +333,7 @@ export interface SparseGpuTreeData {
   childIndices: Uint32Array<ArrayBufferLike>;
   parentIndex: Uint32Array<ArrayBufferLike>;
   prevActor: Uint32Array<ArrayBufferLike>;
+  toAct: Uint32Array<ArrayBufferLike>;
   allowedMask: Uint32Array<ArrayBufferLike>;
   allowedProb: Float32Array<ArrayBufferLike>;
 }
@@ -259,6 +346,7 @@ export interface SparseGpuTreeBuffers {
   childIndices: GPUBuffer;
   parentIndex: GPUBuffer;
   prevActor: GPUBuffer;
+  toAct: GPUBuffer;
   allowedMask: GPUBuffer;
   allowedProb: GPUBuffer;
   dispose: () => void;
@@ -271,6 +359,8 @@ export class SparseCfrGpuKernels {
   private readonly beliefNormalizePipeline: GPUComputePipeline;
   private readonly reachApplyPipeline: GPUComputePipeline;
   private readonly averagePolicyPipeline: GPUComputePipeline;
+  private readonly backupDepthPipeline: GPUComputePipeline;
+  private readonly regretTailPipeline: GPUComputePipeline;
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -294,6 +384,14 @@ export class SparseCfrGpuKernels {
       SPARSE_AVERAGE_POLICY_WGSL,
       "sparse-cfr-average-policy",
     );
+    this.backupDepthPipeline = this.pipeline(
+      SPARSE_BACKUP_DEPTH_WGSL,
+      "sparse-cfr-backup-depth",
+    );
+    this.regretTailPipeline = this.pipeline(
+      SPARSE_REGRET_TAIL_WGSL,
+      "sparse-cfr-regret-tail",
+    );
   }
 
   createTreeBuffers(data: SparseGpuTreeData): SparseGpuTreeBuffers {
@@ -303,6 +401,7 @@ export class SparseCfrGpuKernels {
       makeStorageBuffer(this.device, data.childIndices),
       makeStorageBuffer(this.device, data.parentIndex),
       makeStorageBuffer(this.device, data.prevActor),
+      makeStorageBuffer(this.device, data.toAct),
       makeStorageBuffer(this.device, data.allowedMask),
       makeStorageBuffer(this.device, data.allowedProb),
     ] as const;
@@ -314,8 +413,9 @@ export class SparseCfrGpuKernels {
       childIndices: buffers[2],
       parentIndex: buffers[3],
       prevActor: buffers[4],
-      allowedMask: buffers[5],
-      allowedProb: buffers[6],
+      toAct: buffers[5],
+      allowedMask: buffers[6],
+      allowedProb: buffers[7],
       dispose: () => {
         for (const buffer of buffers) {
           buffer.destroy();
@@ -468,6 +568,74 @@ export class SparseCfrGpuKernels {
     this.encode(
       encoder,
       this.averagePolicyPipeline,
+      bindGroup,
+      Math.ceil(((end - start) * tree.numHands) / 64),
+    );
+    return params;
+  }
+
+  encodeBackupDepth(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    policy: GPUBuffer,
+    opponentPolicy: GPUBuffer,
+    values: GPUBuffer,
+    start: number,
+    end: number,
+  ): GPUBuffer {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, start, end, 0]),
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.backupDepthPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: tree.childOffsets } },
+        { binding: 1, resource: { buffer: tree.childCount } },
+        { binding: 2, resource: { buffer: tree.childIndices } },
+        { binding: 3, resource: { buffer: tree.toAct } },
+        { binding: 4, resource: { buffer: policy } },
+        { binding: 5, resource: { buffer: opponentPolicy } },
+        { binding: 6, resource: { buffer: values } },
+        { binding: 7, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.backupDepthPipeline,
+      bindGroup,
+      Math.ceil(((end - start) * 2 * tree.numHands) / 64),
+    );
+    return params;
+  }
+
+  encodeAccumulateRegretsRange(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    regretWeights: GPUBuffer,
+    values: GPUBuffer,
+    regrets: GPUBuffer,
+    start: number,
+    end: number,
+  ): GPUBuffer {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, start, end, 0]),
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.regretTailPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: tree.parentIndex } },
+        { binding: 1, resource: { buffer: tree.prevActor } },
+        { binding: 2, resource: { buffer: regretWeights } },
+        { binding: 3, resource: { buffer: values } },
+        { binding: 4, resource: { buffer: regrets } },
+        { binding: 5, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.regretTailPipeline,
       bindGroup,
       Math.ceil(((end - start) * tree.numHands) / 64),
     );
