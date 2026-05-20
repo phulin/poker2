@@ -341,6 +341,13 @@ class CFREvaluator(ABC):
         empty = torch.empty(0, dtype=torch.long, device=self.device)
         self.allin_call_indices = empty
         self.allin_call_parent_indices = empty
+        self.allin_call_indices_by_street = (empty, empty, empty)
+        self.allin_call_parent_indices_by_street = (empty, empty, empty)
+        self.allin_call_boards_by_street = (
+            torch.empty(0, 5, dtype=torch.long, device=self.device),
+            torch.empty(0, 5, dtype=torch.long, device=self.device),
+            torch.empty(0, 5, dtype=torch.long, device=self.device),
+        )
         self.allin_call_mask = torch.zeros(
             self.total_nodes, dtype=torch.bool, device=self.device
         )
@@ -381,7 +388,37 @@ class CFREvaluator(ABC):
         self.allin_call_mask[self.allin_call_indices] = True
         self.leaf_mask[self.allin_call_indices] = True
         self.new_street_mask[self.allin_call_indices] = False
+        self._cache_allin_call_street_partitions(parent_street[mask].contiguous())
         self._prune_allin_call_descendants()
+
+    def _cache_allin_call_street_partitions(self, parent_streets: torch.Tensor) -> None:
+        if self.allin_call_indices.numel() == 0:
+            empty = torch.empty(0, dtype=torch.long, device=self.device)
+            empty_boards = torch.empty(0, 5, dtype=torch.long, device=self.device)
+            self.allin_call_indices_by_street = (empty, empty, empty)
+            self.allin_call_parent_indices_by_street = (empty, empty, empty)
+            self.allin_call_boards_by_street = (empty_boards, empty_boards, empty_boards)
+            return
+
+        boards = self.env.board_indices[self.allin_call_parent_indices].long()
+        street0 = parent_streets == 0
+        street1 = parent_streets == 1
+        street2 = parent_streets == 2
+        self.allin_call_indices_by_street = (
+            self.allin_call_indices[street0].contiguous(),
+            self.allin_call_indices[street1].contiguous(),
+            self.allin_call_indices[street2].contiguous(),
+        )
+        self.allin_call_parent_indices_by_street = (
+            self.allin_call_parent_indices[street0].contiguous(),
+            self.allin_call_parent_indices[street1].contiguous(),
+            self.allin_call_parent_indices[street2].contiguous(),
+        )
+        self.allin_call_boards_by_street = (
+            boards[street0].contiguous(),
+            boards[street1].contiguous(),
+            boards[street2].contiguous(),
+        )
 
     def _allin_call_child_mask(
         self,
@@ -458,35 +495,38 @@ class CFREvaluator(ABC):
         if indices is None or indices.numel() == 0:
             return
         resolver = self._ensure_allin_payoff_resolver()
-        parents = self.allin_call_parent_indices
-        parent_streets = self.env.street[parents]
-        boards = self.env.board_indices[parents]
-        local_mask = parent_streets == 0
-        if local_mask.any():
-            node_idx = indices[local_mask]
+        indices_by_street = getattr(self, "allin_call_indices_by_street", None)
+        boards_by_street = getattr(self, "allin_call_boards_by_street", None)
+        if indices_by_street is None or boards_by_street is None:
+            self._cache_allin_call_street_partitions(
+                self.env.street[self.allin_call_parent_indices]
+            )
+            indices_by_street = self.allin_call_indices_by_street
+            boards_by_street = self.allin_call_boards_by_street
+
+        node_idx = indices_by_street[0]
+        if node_idx.numel() > 0:
             values = resolver.values_for_boards(
                 street=0,
-                boards=boards[local_mask],
+                boards=boards_by_street[0],
                 beliefs=beliefs[node_idx],
             )
             self._write_scaled_allin_values(node_idx, values)
 
-        local_mask = parent_streets == 1
-        if local_mask.any():
-            node_idx = indices[local_mask]
+        node_idx = indices_by_street[1]
+        if node_idx.numel() > 0:
             values = resolver.values_for_boards(
                 street=1,
-                boards=boards[local_mask],
+                boards=boards_by_street[1],
                 beliefs=beliefs[node_idx],
             )
             self._write_scaled_allin_values(node_idx, values)
 
-        local_mask = parent_streets == 2
-        if local_mask.any():
-            node_idx = indices[local_mask]
+        node_idx = indices_by_street[2]
+        if node_idx.numel() > 0:
             values = resolver.values_for_boards(
                 street=2,
-                boards=boards[local_mask],
+                boards=boards_by_street[2],
                 beliefs=beliefs[node_idx],
             )
             self._write_scaled_allin_values(node_idx, values)

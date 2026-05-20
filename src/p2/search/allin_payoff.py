@@ -77,8 +77,6 @@ def compute_postflop_payoff_reference(
 
     score = torch.zeros(NUM_HANDS, NUM_HANDS, dtype=torch.float32, device=device)
     counts = torch.zeros_like(score)
-    hero_cards = combos[:, None, :]
-    villain_cards = combos[None, :, :]
     pair_ok = compatible & hand_ok[:, None] & hand_ok[None, :]
     for t in range(full_boards.shape[0]):
         runout = runouts[t]
@@ -249,6 +247,22 @@ class AllInPayoffResolver:
         )
         self._turn_cache: dict[tuple[int, ...], torch.Tensor] = {}
         self._flop_cache: dict[tuple[int, int, int], torch.Tensor] = {}
+        self._actual_to_canon_device: torch.Tensor | None = None
+        self._actual_perm_device: torch.Tensor | None = None
+        self._combo_perms_device: torch.Tensor | None = None
+
+    def flop_lookup_tensors(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self._actual_to_canon_device is None or self._actual_perm_device is None:
+            _, actual_to_canon, actual_perm = canonical_flop_data_cpu()
+            self._actual_to_canon_device = actual_to_canon.to(self.device)
+            self._actual_perm_device = actual_perm.to(self.device)
+        if self._combo_perms_device is None:
+            self._combo_perms_device = combo_suit_permutation_tensor(device=self.device)
+        return (
+            self._actual_to_canon_device,
+            self._actual_perm_device,
+            self._combo_perms_device,
+        )
 
     def payoff_for_board(self, board: torch.Tensor, street: int) -> tuple[torch.Tensor, float]:
         if street == 0:
@@ -365,6 +379,182 @@ def _flop_combination_index_tensor(flop: torch.Tensor) -> torch.Tensor:
 
 
 if triton is not None:
+
+    @triton.jit
+    def _allin_table_values_kernel(
+        table,
+        beliefs,
+        node_indices,
+        latest_values,
+        stacks,
+        pot,
+        starting_stacks,
+        env_scale,
+        compatible,
+        canon_ids,
+        perm_ids,
+        combo_perms,
+        M: tl.constexpr,
+        H: tl.constexpr,
+        TABLE_SCALE: tl.constexpr,
+        BH: tl.constexpr,
+        BK: tl.constexpr,
+        HAS_BATCH_TABLE: tl.constexpr,
+        HAS_CANON_TABLE: tl.constexpr,
+        HAS_PERM: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        player = tl.program_id(1)
+        bh = tl.program_id(2)
+        h = bh * BH + tl.arange(0, BH)
+        hmask = h < H
+        node = tl.load(node_indices + m)
+        opp = 1 - player
+
+        denom = tl.zeros((BH,), tl.float32)
+        numer = tl.zeros((BH,), tl.float32)
+        hero_table = h
+        if HAS_PERM:
+            perm_id = tl.load(perm_ids + m)
+            hero_table = tl.load(combo_perms + perm_id * H + h, mask=hmask, other=0)
+        table_base = tl.full((), 0, tl.int64)
+        if HAS_BATCH_TABLE:
+            table_base = m * H * H
+        if HAS_CANON_TABLE:
+            canon_id = tl.load(canon_ids + m)
+            table_base = canon_id * H * H
+
+        for k0 in range(0, H, BK):
+            k = k0 + tl.arange(0, BK)
+            kmask = k < H
+            belief = tl.load(
+                beliefs + (node * 2 + opp) * H + k,
+                mask=kmask,
+                other=0.0,
+            ).to(tl.float32)
+            opp_table = k
+            if HAS_PERM:
+                perm_id = tl.load(perm_ids + m)
+                opp_table = tl.load(combo_perms + perm_id * H + k, mask=kmask, other=0)
+            pair_ok = tl.load(
+                compatible + h[:, None] * H + k[None, :],
+                mask=hmask[:, None] & kmask[None, :],
+                other=0,
+            ).to(tl.int1)
+            q = tl.load(
+                table + table_base + hero_table[:, None] * H + opp_table[None, :],
+                mask=hmask[:, None] & kmask[None, :],
+                other=0,
+            ).to(tl.float32)
+            b = tl.where(pair_ok, belief[None, :], 0.0)
+            denom += tl.sum(b, axis=1)
+            numer += tl.sum((q / TABLE_SCALE) * b, axis=1)
+
+        ev = tl.where(denom > 1.0e-8, numer / denom, 0.0)
+        stack = tl.load(stacks + node * 2 + player).to(tl.float32)
+        p = tl.load(pot + node).to(tl.float32)
+        start = tl.load(starting_stacks + node * 2 + player).to(tl.float32)
+        sc = tl.load(env_scale + node).to(tl.float32)
+        ev *= (stack + p - start) / tl.maximum(sc, 1.0e-8)
+        tl.store(latest_values + (node * 2 + player) * H + h, ev, mask=hmask)
+
+
+    @triton.jit
+    def _turn_allin_values_kernel(
+        ranks,
+        river_valid,
+        beliefs,
+        node_indices,
+        latest_values,
+        stacks,
+        pot,
+        starting_stacks,
+        env_scale,
+        combos,
+        hand_ok,
+        compatible,
+        M: tl.constexpr,
+        T: tl.constexpr,
+        H: tl.constexpr,
+        BH: tl.constexpr,
+        BK: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        player = tl.program_id(1)
+        bh = tl.program_id(2)
+        h = bh * BH + tl.arange(0, BH)
+        hmask = h < H
+        node = tl.load(node_indices + m)
+        opp = 1 - player
+
+        hi0 = tl.load(combos + h * 2, mask=hmask, other=-99)
+        hi1 = tl.load(combos + h * 2 + 1, mask=hmask, other=-98)
+        hok = tl.load(hand_ok + m * H + h, mask=hmask, other=0).to(tl.int1)
+        denom = tl.zeros((BH,), tl.float32)
+        numer = tl.zeros((BH,), tl.float32)
+
+        for k0 in range(0, H, BK):
+            k = k0 + tl.arange(0, BK)
+            kmask = k < H
+            kj0 = tl.load(combos + k * 2, mask=kmask, other=-97)
+            kj1 = tl.load(combos + k * 2 + 1, mask=kmask, other=-96)
+            belief = tl.load(
+                beliefs + (node * 2 + opp) * H + k,
+                mask=kmask,
+                other=0.0,
+            ).to(tl.float32)
+            pair_ok = (
+                hok[:, None]
+                & tl.load(hand_ok + m * H + k, mask=kmask, other=0)[None, :].to(tl.int1)
+                & tl.load(
+                    compatible + h[:, None] * H + k[None, :],
+                    mask=hmask[:, None] & kmask[None, :],
+                    other=0,
+                ).to(tl.int1)
+            )
+            score = tl.zeros((BH, BK), tl.float32)
+            count = tl.zeros((BH, BK), tl.float32)
+            for t in range(0, T):
+                rv_ok = tl.load(river_valid + m * T + t).to(tl.int1)
+                river = t
+                valid = (
+                    rv_ok
+                    & pair_ok
+                    & (river != hi0[:, None])
+                    & (river != hi1[:, None])
+                    & (river != kj0[None, :])
+                    & (river != kj1[None, :])
+                )
+                rh = tl.load(
+                    ranks + (m * T + t) * H + h,
+                    mask=hmask,
+                    other=0,
+                )
+                rk = tl.load(
+                    ranks + (m * T + t) * H + k,
+                    mask=kmask,
+                    other=0,
+                )
+                cmp = tl.where(
+                    rh[:, None] > rk[None, :],
+                    1.0,
+                    tl.where(rh[:, None] < rk[None, :], -1.0, 0.0),
+                )
+                score += tl.where(valid, cmp, 0.0)
+                count += tl.where(valid, 1.0, 0.0)
+
+            payoff = tl.where(count > 0.0, score / tl.maximum(count, 1.0), 0.0)
+            b = tl.where(pair_ok & (count > 0.0), belief[None, :], 0.0)
+            denom += tl.sum(b, axis=1)
+            numer += tl.sum(payoff * b, axis=1)
+
+        ev = tl.where(denom > 1.0e-8, numer / denom, 0.0)
+        stack = tl.load(stacks + node * 2 + player).to(tl.float32)
+        p = tl.load(pot + node).to(tl.float32)
+        start = tl.load(starting_stacks + node * 2 + player).to(tl.float32)
+        sc = tl.load(env_scale + node).to(tl.float32)
+        ev *= (stack + p - start) / tl.maximum(sc, 1.0e-8)
+        tl.store(latest_values + (node * 2 + player) * H + h, ev, mask=hmask)
 
     @triton.jit
     def _postflop_payoff_tile_kernel(
@@ -589,10 +779,16 @@ def compute_postflop_payoff_quantized_triton_batched(
     missing = 5 - boards.shape[1]
     if missing == 2:
         runouts = hand_combos_tensor(device=device).to(torch.long)
-        runout_valid = ~torch.isin(runouts[None, :, :], boards[:, None, :]).any(dim=2)
+        runout_valid = (
+            runouts.view(1, runouts.shape[0], runouts.shape[1], 1)
+            != boards.view(batch, 1, 1, boards.shape[1])
+        ).all(dim=(2, 3))
     else:
         runouts = torch.arange(52, device=device, dtype=torch.long)[:, None]
-        runout_valid = ~torch.isin(runouts[None, :, :], boards[:, None, :]).any(dim=2)
+        runout_valid = (
+            runouts.view(1, runouts.shape[0], 1)
+            != boards.view(batch, 1, boards.shape[1])
+        ).all(dim=2)
     T = runouts.shape[0]
     R = runouts.shape[1]
     runouts_b = runouts.view(1, T, R).expand(batch, T, R).contiguous()
@@ -646,3 +842,117 @@ def compute_postflop_payoff_quantized_triton_batched(
         info = torch.iinfo(torch.int16)
         return (payoff * I16_SCALE).round().clamp(info.min, info.max).to(torch.int16)
     raise ValueError(f"unsupported quantized dtype {dtype}")
+
+
+def write_allin_table_values_triton_(
+    *,
+    table: torch.Tensor,
+    beliefs: torch.Tensor,
+    node_indices: torch.Tensor,
+    latest_values: torch.Tensor,
+    stacks: torch.Tensor,
+    pot: torch.Tensor,
+    starting_stacks: torch.Tensor,
+    env_scale: torch.Tensor,
+    table_scale: float,
+    canon_ids: torch.Tensor | None = None,
+    perm_ids: torch.Tensor | None = None,
+    combo_perms: torch.Tensor | None = None,
+    batch_table: bool = False,
+    block_h: int = 16,
+    block_k: int = 64,
+) -> None:
+    if triton is None or beliefs.device.type != "cuda":
+        raise RuntimeError("fused all-in table matvec requires CUDA + Triton")
+    if node_indices.numel() == 0:
+        return
+    device = beliefs.device
+    compatible = combo_compatible_tensor(device=device).contiguous()
+    empty = torch.empty(0, dtype=torch.long, device=device)
+    has_canon = canon_ids is not None
+    has_perm = perm_ids is not None
+    if canon_ids is None:
+        canon_ids = empty
+    if perm_ids is None:
+        perm_ids = empty
+    if combo_perms is None:
+        combo_perms = empty
+    grid = (node_indices.numel(), 2, triton.cdiv(NUM_HANDS, block_h))
+    _allin_table_values_kernel[grid](
+        table.contiguous(),
+        beliefs.contiguous(),
+        node_indices.contiguous(),
+        latest_values,
+        stacks,
+        pot,
+        starting_stacks,
+        env_scale,
+        compatible,
+        canon_ids.contiguous(),
+        perm_ids.contiguous(),
+        combo_perms.contiguous(),
+        node_indices.numel(),
+        NUM_HANDS,
+        float(table_scale),
+        BH=block_h,
+        BK=block_k,
+        HAS_BATCH_TABLE=batch_table,
+        HAS_CANON_TABLE=has_canon,
+        HAS_PERM=has_perm,
+        num_warps=4,
+    )
+
+
+def write_turn_allin_values_triton_(
+    *,
+    boards: torch.Tensor,
+    beliefs: torch.Tensor,
+    node_indices: torch.Tensor,
+    latest_values: torch.Tensor,
+    stacks: torch.Tensor,
+    pot: torch.Tensor,
+    starting_stacks: torch.Tensor,
+    env_scale: torch.Tensor,
+    block_h: int = 8,
+    block_k: int = 32,
+) -> None:
+    if triton is None or beliefs.device.type != "cuda":
+        raise RuntimeError("fused turn all-in EV requires CUDA + Triton")
+    if node_indices.numel() == 0:
+        return
+    device = beliefs.device
+    turn_boards = boards[:, :4].long().contiguous()
+    rivers = torch.arange(52, dtype=torch.long, device=device)
+    river_valid = (rivers.view(1, 52, 1) != turn_boards[:, None, :]).all(dim=2)
+    full_boards = torch.cat(
+        [
+            turn_boards[:, None, :].expand(turn_boards.shape[0], 52, 4),
+            rivers.view(1, 52, 1).expand(turn_boards.shape[0], 52, 1),
+        ],
+        dim=2,
+    ).reshape(-1, 5)
+    ranks = _rank_hands(full_boards).view(turn_boards.shape[0], 52, NUM_HANDS)
+    combos = hand_combos_tensor(device=device).to(torch.int16).contiguous()
+    hand_ok = board_allowed_hands(turn_boards).contiguous()
+    compatible = combo_compatible_tensor(device=device).contiguous()
+    grid = (node_indices.numel(), 2, triton.cdiv(NUM_HANDS, block_h))
+    _turn_allin_values_kernel[grid](
+        ranks.contiguous(),
+        river_valid,
+        beliefs.contiguous(),
+        node_indices.contiguous(),
+        latest_values,
+        stacks,
+        pot,
+        starting_stacks,
+        env_scale,
+        combos,
+        hand_ok,
+        compatible,
+        node_indices.numel(),
+        52,
+        NUM_HANDS,
+        BH=block_h,
+        BK=block_k,
+        num_warps=4,
+    )

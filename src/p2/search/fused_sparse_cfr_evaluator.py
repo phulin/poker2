@@ -42,6 +42,13 @@ from p2.env.rules_triton import (
 )
 from p2.models.mlp.better_ffn import BetterFFN
 from p2.models.mlp.mlp_features import MLPFeatures
+from p2.search.allin_payoff import (
+    FLOP_I8_SCALE,
+    _flop_combination_index_tensor,
+    compute_postflop_payoff_quantized_triton_batched,
+    write_allin_table_values_triton_,
+    write_turn_allin_values_triton_,
+)
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_with_tensors_,
     fused_avg_values_zero_sum_,
@@ -1257,6 +1264,88 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         showdown_values = self._showdown_value_both(showdown_beliefs)
         self.latest_values[self.showdown_indices] = showdown_values
         self._set_allin_call_values(beliefs)
+
+    def _set_allin_call_values(self, beliefs: torch.Tensor) -> None:
+        indices = getattr(self, "allin_call_indices", None)
+        if indices is None or indices.numel() == 0:
+            return
+        resolver = self._ensure_allin_payoff_resolver()
+        indices_by_street = getattr(self, "allin_call_indices_by_street", None)
+        boards_by_street = getattr(self, "allin_call_boards_by_street", None)
+        if indices_by_street is None or boards_by_street is None:
+            self._cache_allin_call_street_partitions(
+                self.env.street[self.allin_call_parent_indices]
+            )
+            indices_by_street = self.allin_call_indices_by_street
+            boards_by_street = self.allin_call_boards_by_street
+
+        node_idx = indices_by_street[0]
+        if node_idx.numel() > 0:
+            table, scale = resolver.payoff_for_board(boards_by_street[0].new_empty(0), 0)
+            write_allin_table_values_triton_(
+                table=table,
+                beliefs=beliefs,
+                node_indices=node_idx,
+                latest_values=self.latest_values,
+                stacks=self.env.stacks,
+                pot=self.env.pot,
+                starting_stacks=self.env.starting_stacks,
+                env_scale=self.env.scale,
+                table_scale=scale,
+            )
+
+        node_idx = indices_by_street[1]
+        if node_idx.numel() > 0:
+            flop_boards = boards_by_street[1][:, :3].long().sort(dim=1).values
+            if resolver._flop_i8 is not None:
+                actual_to_canon, actual_perm, combo_perms = resolver.flop_lookup_tensors()
+                actual_idx = _flop_combination_index_tensor(flop_boards)
+                canon_ids = actual_to_canon[actual_idx]
+                perm_ids = actual_perm[actual_idx]
+                write_allin_table_values_triton_(
+                    table=resolver._flop_i8,
+                    beliefs=beliefs,
+                    node_indices=node_idx,
+                    latest_values=self.latest_values,
+                    stacks=self.env.stacks,
+                    pot=self.env.pot,
+                    starting_stacks=self.env.starting_stacks,
+                    env_scale=self.env.scale,
+                    table_scale=FLOP_I8_SCALE,
+                    canon_ids=canon_ids,
+                    perm_ids=perm_ids,
+                    combo_perms=combo_perms,
+                )
+            else:
+                tables = compute_postflop_payoff_quantized_triton_batched(
+                    flop_boards,
+                    dtype=torch.int8,
+                )
+                write_allin_table_values_triton_(
+                    table=tables,
+                    beliefs=beliefs,
+                    node_indices=node_idx,
+                    latest_values=self.latest_values,
+                    stacks=self.env.stacks,
+                    pot=self.env.pot,
+                    starting_stacks=self.env.starting_stacks,
+                    env_scale=self.env.scale,
+                    table_scale=FLOP_I8_SCALE,
+                    batch_table=True,
+                )
+
+        node_idx = indices_by_street[2]
+        if node_idx.numel() > 0:
+            write_turn_allin_values_triton_(
+                boards=boards_by_street[2],
+                beliefs=beliefs,
+                node_indices=node_idx,
+                latest_values=self.latest_values,
+                stacks=self.env.stacks,
+                pot=self.env.pot,
+                starting_stacks=self.env.starting_stacks,
+                env_scale=self.env.scale,
+            )
 
     # ------------------------------------------------------------------
     # CFR iteration: fused DCFR update.
