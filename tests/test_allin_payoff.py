@@ -16,6 +16,7 @@ def test_write_allin_table_values_triton_matches_eager_for_both_players() -> Non
     from p2.search.allin_payoff import (
         FLOP_I8_SCALE,
         allin_values_from_payoff_batch,
+        write_allin_table_values_card_denom_triton_,
         write_allin_table_values_triton_,
     )
 
@@ -107,6 +108,26 @@ def test_write_allin_table_values_triton_matches_eager_for_both_players() -> Non
     torch.testing.assert_close(
         latest_values_perm[node_indices],
         expected_values(permuted_tables),
+        rtol=3e-6,
+        atol=3e-6,
+    )
+
+    latest_values_card = torch.empty(num_nodes, 2, NUM_HANDS, device=device)
+    write_allin_table_values_card_denom_triton_(
+        table=canon_tables,
+        beliefs=beliefs,
+        node_indices=node_indices,
+        latest_values=latest_values_card,
+        stacks=stacks,
+        pot=pot,
+        starting_stacks=starting_stacks,
+        env_scale=env_scale,
+        table_scale=FLOP_I8_SCALE,
+        canon_ids=canon_ids,
+    )
+    torch.testing.assert_close(
+        latest_values_card[node_indices],
+        expected_values(canon_tables.index_select(0, canon_ids)),
         rtol=3e-6,
         atol=3e-6,
     )

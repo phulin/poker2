@@ -352,10 +352,16 @@ class CFREvaluator(ABC):
             0, NUM_HANDS, NUM_HANDS, dtype=torch.int16, device=self.device
         )
         self.allin_turn_table_ids = empty
+        self.allin_turn_stats_buffer = torch.empty(
+            0, 2, 53, dtype=torch.float32, device=self.device
+        )
         self.allin_flop_tables_i8 = torch.empty(
             0, NUM_HANDS, NUM_HANDS, dtype=torch.int8, device=self.device
         )
         self.allin_flop_table_ids = empty
+        self.allin_flop_stats_buffer = torch.empty(
+            0, 2, 53, dtype=torch.float32, device=self.device
+        )
         self.allin_call_mask = torch.zeros(
             self.total_nodes, dtype=torch.bool, device=self.device
         )
@@ -410,10 +416,16 @@ class CFREvaluator(ABC):
                 0, NUM_HANDS, NUM_HANDS, dtype=torch.int16, device=self.device
             )
             self.allin_turn_table_ids = empty
+            self.allin_turn_stats_buffer = torch.empty(
+                0, 2, 53, dtype=torch.float32, device=self.device
+            )
             self.allin_flop_tables_i8 = torch.empty(
                 0, NUM_HANDS, NUM_HANDS, dtype=torch.int8, device=self.device
             )
             self.allin_flop_table_ids = empty
+            self.allin_flop_stats_buffer = torch.empty(
+                0, 2, 53, dtype=torch.float32, device=self.device
+            )
             return
 
         boards = self.env.board_indices[self.allin_call_parent_indices].long()
@@ -448,6 +460,9 @@ class CFREvaluator(ABC):
                 0, NUM_HANDS, NUM_HANDS, dtype=torch.int8, device=self.device
             )
             self.allin_flop_table_ids = empty
+            self.allin_flop_stats_buffer = torch.empty(
+                0, 2, 53, dtype=torch.float32, device=self.device
+            )
             return
 
         resolver = self._ensure_allin_payoff_resolver()
@@ -456,6 +471,9 @@ class CFREvaluator(ABC):
                 0, NUM_HANDS, NUM_HANDS, dtype=torch.int8, device=self.device
             )
             self.allin_flop_table_ids = empty
+            self.allin_flop_stats_buffer = torch.empty(
+                0, 2, 53, dtype=torch.float32, device=self.device
+            )
             return
 
         actual_to_canon, actual_perm, combo_perms = resolver.flop_lookup_tensors()
@@ -477,6 +495,13 @@ class CFREvaluator(ABC):
             perms[:, None, :].expand(-1, NUM_HANDS, -1),
         ).contiguous()
         self.allin_flop_table_ids = inverse.contiguous()
+        self.allin_flop_stats_buffer = torch.empty(
+            flop_boards.shape[0],
+            2,
+            53,
+            dtype=torch.float32,
+            device=self.device,
+        )
 
     def _cache_allin_turn_tables(self) -> None:
         empty = torch.empty(0, dtype=torch.long, device=self.device)
@@ -486,6 +511,9 @@ class CFREvaluator(ABC):
                 0, NUM_HANDS, NUM_HANDS, dtype=torch.int16, device=self.device
             )
             self.allin_turn_table_ids = empty
+            self.allin_turn_stats_buffer = torch.empty(
+                0, 2, 53, dtype=torch.float32, device=self.device
+            )
             return
 
         unique_boards, inverse = torch.unique(
@@ -499,6 +527,13 @@ class CFREvaluator(ABC):
             dtype=torch.int16,
         ).contiguous()
         self.allin_turn_table_ids = inverse.contiguous()
+        self.allin_turn_stats_buffer = torch.empty(
+            turn_boards.shape[0],
+            2,
+            53,
+            dtype=torch.float32,
+            device=self.device,
+        )
 
     def _allin_call_child_mask(
         self,

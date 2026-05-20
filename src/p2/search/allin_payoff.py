@@ -12,6 +12,7 @@ from p2.env.card_utils import (
     NUM_HANDS,
     board_allowed_hands,
     calculate_unblocked_mass,
+    combo_lookup_tensor,
     combo_compatible_tensor,
     combo_suit_permutation_tensor,
     hand_combos_tensor,
@@ -510,7 +511,166 @@ def _flop_combination_index_tensor(flop: torch.Tensor) -> torch.Tensor:
     return (prefix_a + prefix_b + c - b - 1).long()
 
 
+@lru_cache(maxsize=2)
+def card_combo_indices_tensor(device: torch.device | None = None) -> torch.Tensor:
+    """Return ``[52, 51]`` combo ids containing each card."""
+    lookup = combo_lookup_tensor()
+    rows = []
+    for card in range(52):
+        others = [c for c in range(52) if c != card]
+        rows.append(lookup[card, torch.tensor(others, dtype=torch.long)])
+    out = torch.stack(rows, dim=0).to(torch.int32).contiguous()
+    if device is not None:
+        out = out.to(device)
+    return out
+
+
+@lru_cache(maxsize=2)
+def combo_cards_i32_tensor(device: torch.device | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    combos = hand_combos_tensor(device=device)
+    return combos[:, 0].to(torch.int32).contiguous(), combos[:, 1].to(torch.int32).contiguous()
+
+
 if triton is not None:
+
+    @triton.jit
+    def _allin_belief_card_stats_kernel(
+        beliefs,
+        node_indices,
+        card_combo_indices,
+        stats_out,
+        M: tl.constexpr,
+        H: tl.constexpr,
+        NUM_CARDS: tl.constexpr,
+        PER_CARD: tl.constexpr,
+        BLOCK_NC: tl.constexpr,
+        BLOCK_C: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        m = row // 2
+        player = row - m * 2
+        node = tl.load(node_indices + m)
+        card = tl.arange(0, BLOCK_NC)
+        j = tl.arange(0, BLOCK_C)
+        combo = tl.load(
+            card_combo_indices + card[:, None] * PER_CARD + j[None, :],
+            mask=(card[:, None] < NUM_CARDS) & (j[None, :] < PER_CARD),
+            other=0,
+        )
+        b = tl.load(
+            beliefs + (node * 2 + player) * H + combo,
+            mask=(card[:, None] < NUM_CARDS) & (j[None, :] < PER_CARD),
+            other=0.0,
+        ).to(tl.float32)
+        card_sum = tl.sum(b, axis=1)
+        tl.store(
+            stats_out + row * (NUM_CARDS + 1) + 1 + card,
+            card_sum,
+            mask=card < NUM_CARDS,
+        )
+        total = tl.sum(tl.where(card < NUM_CARDS, card_sum, 0.0), axis=0) * 0.5
+        tl.store(stats_out + row * (NUM_CARDS + 1), total)
+
+
+    @triton.jit
+    def _allin_table_values_card_denom_kernel(
+        table,
+        beliefs,
+        node_indices,
+        latest_values,
+        stacks,
+        pot,
+        starting_stacks,
+        env_scale,
+        stats,
+        combo_card_a,
+        combo_card_b,
+        canon_ids,
+        M: tl.constexpr,
+        H: tl.constexpr,
+        NUM_CARDS: tl.constexpr,
+        TABLE_SCALE: tl.constexpr,
+        BH: tl.constexpr,
+        BK: tl.constexpr,
+        HAS_CANON_TABLE: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        bh = tl.program_id(1)
+        h = bh * BH + tl.arange(0, BH)
+        hmask = h < H
+        node = tl.load(node_indices + m)
+
+        ca = tl.load(combo_card_a + h, mask=hmask, other=0)
+        cb = tl.load(combo_card_b + h, mask=hmask, other=0)
+        belief0_h = tl.load(
+            beliefs + (node * 2) * H + h,
+            mask=hmask,
+            other=0.0,
+        ).to(tl.float32)
+        belief1_h = tl.load(
+            beliefs + (node * 2 + 1) * H + h,
+            mask=hmask,
+            other=0.0,
+        ).to(tl.float32)
+        stats0 = (m * 2) * (NUM_CARDS + 1)
+        stats1 = (m * 2 + 1) * (NUM_CARDS + 1)
+        total0 = tl.load(stats + stats0).to(tl.float32)
+        total1 = tl.load(stats + stats1).to(tl.float32)
+        denom0 = (
+            total1
+            - tl.load(stats + stats1 + 1 + ca, mask=hmask, other=0.0).to(tl.float32)
+            - tl.load(stats + stats1 + 1 + cb, mask=hmask, other=0.0).to(tl.float32)
+            + belief1_h
+        )
+        denom1 = (
+            total0
+            - tl.load(stats + stats0 + 1 + ca, mask=hmask, other=0.0).to(tl.float32)
+            - tl.load(stats + stats0 + 1 + cb, mask=hmask, other=0.0).to(tl.float32)
+            + belief0_h
+        )
+        denom0 = tl.maximum(denom0, 0.0)
+        denom1 = tl.maximum(denom1, 0.0)
+
+        table_base = tl.full((), 0, tl.int64)
+        if HAS_CANON_TABLE:
+            canon_id = tl.load(canon_ids + m)
+            table_base = canon_id * H * H
+        numer0 = tl.zeros((BH,), tl.float32)
+        numer1 = tl.zeros((BH,), tl.float32)
+        for k0 in range(0, H, BK):
+            k = k0 + tl.arange(0, BK)
+            kmask = k < H
+            belief0 = tl.load(
+                beliefs + (node * 2) * H + k,
+                mask=kmask,
+                other=0.0,
+            ).to(tl.float32)
+            belief1 = tl.load(
+                beliefs + (node * 2 + 1) * H + k,
+                mask=kmask,
+                other=0.0,
+            ).to(tl.float32)
+            q = tl.load(
+                table + table_base + h[:, None] * H + k[None, :],
+                mask=hmask[:, None] & kmask[None, :],
+                other=0,
+            ).to(tl.float32)
+            q = q / TABLE_SCALE
+            numer0 += tl.sum(q * belief1[None, :], axis=1)
+            numer1 += tl.sum(q * belief0[None, :], axis=1)
+
+        ev0 = tl.where(denom0 > 1.0e-8, numer0 / denom0, 0.0)
+        ev1 = tl.where(denom1 > 1.0e-8, numer1 / denom1, 0.0)
+        p = tl.load(pot + node).to(tl.float32)
+        sc = tl.load(env_scale + node).to(tl.float32)
+        stack0 = tl.load(stacks + node * 2).to(tl.float32)
+        stack1 = tl.load(stacks + node * 2 + 1).to(tl.float32)
+        start0 = tl.load(starting_stacks + node * 2).to(tl.float32)
+        start1 = tl.load(starting_stacks + node * 2 + 1).to(tl.float32)
+        ev0 *= (stack0 + p - start0) / tl.maximum(sc, 1.0e-8)
+        ev1 *= (stack1 + p - start1) / tl.maximum(sc, 1.0e-8)
+        tl.store(latest_values + (node * 2) * H + h, ev0, mask=hmask)
+        tl.store(latest_values + (node * 2 + 1) * H + h, ev1, mask=hmask)
 
     @triton.jit
     def _allin_table_values_both_players_kernel(
@@ -1045,6 +1205,90 @@ def write_allin_table_values_triton_(
         HAS_BATCH_TABLE=batch_table,
         HAS_CANON_TABLE=has_canon,
         HAS_PERM=has_perm,
+        num_warps=4,
+    )
+
+
+def write_allin_table_values_card_denom_triton_(
+    *,
+    table: torch.Tensor,
+    beliefs: torch.Tensor,
+    node_indices: torch.Tensor,
+    latest_values: torch.Tensor,
+    stacks: torch.Tensor,
+    pot: torch.Tensor,
+    starting_stacks: torch.Tensor,
+    env_scale: torch.Tensor,
+    table_scale: float,
+    canon_ids: torch.Tensor | None = None,
+    stats_buffer: torch.Tensor | None = None,
+    block_h: int = 16,
+    block_k: int = 64,
+) -> None:
+    if triton is None or beliefs.device.type != "cuda":
+        raise RuntimeError("fused all-in table matvec requires CUDA + Triton")
+    if node_indices.numel() == 0:
+        return
+    device = beliefs.device
+    empty = torch.empty(0, dtype=torch.long, device=device)
+    has_canon = canon_ids is not None
+    if canon_ids is None:
+        canon_ids = empty
+    if stats_buffer is None:
+        stats = torch.empty(
+            node_indices.numel(),
+            2,
+            53,
+            dtype=torch.float32,
+            device=device,
+        )
+    else:
+        if (
+            stats_buffer.shape != (node_indices.numel(), 2, 53)
+            or stats_buffer.dtype != torch.float32
+            or stats_buffer.device != device
+        ):
+            raise ValueError(
+                "stats_buffer must have shape "
+                f"{(node_indices.numel(), 2, 53)} on {device} with dtype float32"
+            )
+        stats = stats_buffer
+    card_combo_indices = card_combo_indices_tensor(device=device)
+    _allin_belief_card_stats_kernel[(node_indices.numel() * 2,)](
+        beliefs.contiguous(),
+        node_indices.contiguous(),
+        card_combo_indices,
+        stats,
+        node_indices.numel(),
+        NUM_HANDS,
+        52,
+        51,
+        BLOCK_NC=64,
+        BLOCK_C=64,
+        num_warps=8,
+    )
+    combo_card_a, combo_card_b = combo_cards_i32_tensor(device=device)
+    grid = (node_indices.numel(), triton.cdiv(NUM_HANDS, block_h))
+    _allin_table_values_card_denom_kernel[grid](
+        table.contiguous(),
+        beliefs.contiguous(),
+        node_indices.contiguous(),
+        latest_values,
+        stacks,
+        pot,
+        starting_stacks,
+        env_scale,
+        stats.contiguous(),
+        combo_card_a,
+        combo_card_b,
+        canon_ids.contiguous(),
+        node_indices.numel(),
+        NUM_HANDS,
+        52,
+        float(table_scale),
+        BH=block_h,
+        BK=block_k,
+        HAS_CANON_TABLE=has_canon,
         num_warps=4,
     )
 
