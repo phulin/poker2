@@ -539,9 +539,9 @@ export class SparseCfrResolver {
     const rootReach = this.rootReach();
     const policyBuffer = makeStorageBuffer(device, policy);
     const policyAvgBuffer = makeStorageBuffer(device, policyAvg);
-    const regretsBuffer = makeStorageBuffer(device, cumulativeRegrets);
-    const avgNumeratorBuffer = makeStorageBuffer(device, avgNumerator);
-    const avgDenominatorBuffer = makeStorageBuffer(device, avgDenominator);
+    const regretsBuffer = makeEmptyStorageBuffer(device, cumulativeRegrets.length);
+    const avgNumeratorBuffer = makeEmptyStorageBuffer(device, avgNumerator.length);
+    const avgDenominatorBuffer = makeEmptyStorageBuffer(device, avgDenominator.length);
     const beliefsBuffer = makeStorageBuffer(device, beliefs);
     const beliefsAvgBuffer = cfrAvg
       ? makeStorageBuffer(device, beliefsAvg)
