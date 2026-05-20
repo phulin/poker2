@@ -115,7 +115,9 @@ export class SparseCfrResolver {
       policyAvg.set(policy);
       beliefsAvg.set(beliefs);
 
-      await this.setLeafValues(tree, cfrAvg ? beliefsAvg : beliefs, latestValues);
+      if (!(this.gpuKernels && gpuTreeBuffers)) {
+        await this.setLeafValues(tree, cfrAvg ? beliefsAvg : beliefs, latestValues);
+      }
       if (this.gpuKernels && gpuTreeBuffers) {
         await this.solveIterationsGpuResident(
           tree,
@@ -412,65 +414,23 @@ export class SparseCfrResolver {
     const showdownPayoffBuffer = makeStorageBuffer(device, leafBatch.showdownPayoffs);
     const pendingLeafDisposals: Array<() => void> = [];
 
+    const profile = Boolean(globalThis.process?.env?.P2_PROFILE);
+    const phaseTotals = new Map<string, number>();
+    const phaseCounts = new Map<string, number>();
+    const time = async <T>(label: string, fn: () => T | Promise<T>): Promise<T> => {
+      if (!profile) return await fn();
+      const start = performance.now();
+      const out = await fn();
+      await device.queue.onSubmittedWorkDone();
+      const elapsed = performance.now() - start;
+      phaseTotals.set(label, (phaseTotals.get(label) ?? 0) + elapsed);
+      phaseCounts.set(label, (phaseCounts.get(label) ?? 0) + 1);
+      return out;
+    };
+
     try {
-      this.encodeExpectedValuesGpuResident(
-        tree,
-        treeBuffers,
-        policyBuffer,
-        beliefsBuffer,
-        opponentPolicyBuffer,
-        valuesBuffer,
-      );
-
-      for (let t = 0; t < iterations; t += 1) {
-        const regretBeliefsBuffer = cfrAvg ? beliefsAvgBuffer! : beliefsBuffer;
-        this.encodeAccumulateRegretsGpuResident(
-          tree,
-          treeBuffers,
-          regretBeliefsBuffer,
-          valuesBuffer,
-          regretWeightsBuffer,
-          regretsBuffer,
-        );
-        this.encodeRegretMatchGpuResident(
-          tree,
-          treeBuffers,
-          regretsBuffer,
-          policyBuffer,
-        );
-        this.encodePropagateGpuResident(
-          tree,
-          treeBuffers,
-          rootBeliefs,
-          rootReach,
-          policyBuffer,
-          reachBuffer,
-          beliefsBuffer,
-          denomBuffer,
-        );
-        this.encodeAveragePolicyGpuResident(
-          tree,
-          treeBuffers,
-          reachBuffer,
-          policyBuffer,
-          avgNumeratorBuffer,
-          avgDenominatorBuffer,
-          policyAvgBuffer,
-        );
-        if (cfrAvg) {
-          this.encodePropagateGpuResident(
-            tree,
-            treeBuffers,
-            rootBeliefs,
-            rootReach,
-            policyAvgBuffer,
-            reachBuffer,
-            beliefsAvgBuffer!,
-            denomBuffer,
-          );
-        }
-
-        const disposeLeafPrediction = await this.updateLeafValuesGpuBridge(
+      const initialLeafDispose = await time("leafValues0", () =>
+        this.updateLeafValuesGpuBridge(
           tree,
           treeBuffers,
           leafBatch,
@@ -481,8 +441,10 @@ export class SparseCfrResolver {
           showdownNodeBuffer,
           showdownRankBuffer,
           showdownPayoffBuffer,
-        );
-        pendingLeafDisposals.push(disposeLeafPrediction);
+        ),
+      );
+      pendingLeafDisposals.push(initialLeafDispose);
+      await time("backup0", () => {
         this.encodeExpectedValuesGpuResident(
           tree,
           treeBuffers,
@@ -491,6 +453,107 @@ export class SparseCfrResolver {
           opponentPolicyBuffer,
           valuesBuffer,
         );
+      });
+
+      for (let t = 0; t < iterations; t += 1) {
+        const regretBeliefsBuffer = cfrAvg ? beliefsAvgBuffer! : beliefsBuffer;
+        await time("accumulateRegrets", () => {
+          this.encodeAccumulateRegretsGpuResident(
+            tree,
+            treeBuffers,
+            regretBeliefsBuffer,
+            valuesBuffer,
+            regretWeightsBuffer,
+            regretsBuffer,
+          );
+        });
+        await time("regretMatch", () => {
+          this.encodeRegretMatchGpuResident(
+            tree,
+            treeBuffers,
+            regretsBuffer,
+            policyBuffer,
+          );
+        });
+        await time("propagate", () => {
+          this.encodePropagateGpuResident(
+            tree,
+            treeBuffers,
+            rootBeliefs,
+            rootReach,
+            policyBuffer,
+            reachBuffer,
+            beliefsBuffer,
+            denomBuffer,
+          );
+        });
+        await time("averagePolicy", () => {
+          this.encodeAveragePolicyGpuResident(
+            tree,
+            treeBuffers,
+            reachBuffer,
+            policyBuffer,
+            avgNumeratorBuffer,
+            avgDenominatorBuffer,
+            policyAvgBuffer,
+          );
+        });
+        if (cfrAvg) {
+          await time("propagateAvg", () => {
+            this.encodePropagateGpuResident(
+              tree,
+              treeBuffers,
+              rootBeliefs,
+              rootReach,
+              policyAvgBuffer,
+              reachBuffer,
+              beliefsAvgBuffer!,
+              denomBuffer,
+            );
+          });
+        }
+
+        const disposeLeafPrediction = await time("leafValues", () =>
+          this.updateLeafValuesGpuBridge(
+            tree,
+            treeBuffers,
+            leafBatch,
+            cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
+            valuesBuffer,
+            modelLeafNodeBuffer,
+            modelLeafBeliefsBuffer,
+            showdownNodeBuffer,
+            showdownRankBuffer,
+            showdownPayoffBuffer,
+          ),
+        );
+        pendingLeafDisposals.push(disposeLeafPrediction);
+        await time("backup", () => {
+          this.encodeExpectedValuesGpuResident(
+            tree,
+            treeBuffers,
+            policyBuffer,
+            beliefsBuffer,
+            opponentPolicyBuffer,
+            valuesBuffer,
+          );
+        });
+      }
+      if (profile) {
+        const stats = Array.from(phaseTotals.entries()).map(([label, total]) => ({
+          phase: label,
+          totalMs: total,
+          count: phaseCounts.get(label) ?? 0,
+          avgMs: total / (phaseCounts.get(label) ?? 1),
+        }));
+        const treeStats = {
+          totalNodes: tree.nodes.length,
+          treeDepth: tree.treeDepth,
+          showdownLeaves: leafBatch.showdownNodeIndices.length,
+          modelLeaves: leafBatch.modelNodeIndices.length,
+          street: tree.nodes[0]!.env.street,
+        };
+        console.error("PROFILE", JSON.stringify({ tree: treeStats, phases: stats }));
       }
 
       policyAvg.set(await readFloatBuffer(device, policyAvgBuffer, policyAvg.length));
@@ -820,39 +883,6 @@ export class SparseCfrResolver {
     }
   }
 
-  private async updatePolicyMaybeGpu(
-    tree: SparseTree,
-    cumulativeRegrets: Float32Array,
-    gpuTreeBuffers?: SparseGpuTreeBuffers,
-  ): Promise<Float32Array> {
-    if (!this.gpuKernels) {
-      const out = new Float32Array(tree.nodes.length * NUM_HANDS);
-      this.updatePolicy(tree, cumulativeRegrets, out);
-      return out;
-    }
-
-    const device = this.model.device;
-    const treeBuffers =
-      gpuTreeBuffers ?? this.gpuKernels.createTreeBuffers(this.gpuTreeData(tree));
-    const regrets = makeStorageBuffer(device, cumulativeRegrets);
-    const policy = makeEmptyStorageBuffer(device, tree.nodes.length * NUM_HANDS);
-    const encoder = device.createCommandEncoder();
-    const params = this.gpuKernels.encodeRegretMatch(
-      encoder,
-      treeBuffers,
-      regrets,
-      policy,
-    );
-    device.queue.submit([encoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
-    const out = await readFloatBuffer(device, policy, tree.nodes.length * NUM_HANDS);
-    params.destroy();
-    if (!gpuTreeBuffers) treeBuffers.dispose();
-    regrets.destroy();
-    policy.destroy();
-    return new Float32Array(out);
-  }
-
   private updateAveragePolicy(
     tree: SparseTree,
     policy: Float32Array,
@@ -878,60 +908,6 @@ export class SparseCfrResolver {
         }
       }
     }
-  }
-
-  private async updateAveragePolicyMaybeGpu(
-    tree: SparseTree,
-    policy: Float32Array,
-    reach: Float32Array,
-    numerator: Float32Array,
-    denominator: Float32Array,
-    policyAvg: Float32Array,
-    gpuTreeBuffers?: SparseGpuTreeBuffers,
-  ): Promise<Float32Array> {
-    if (!this.gpuKernels) {
-      this.updateAveragePolicy(tree, policy, reach, numerator, denominator, policyAvg);
-      return policyAvg;
-    }
-
-    const device = this.model.device;
-    const treeBuffers =
-      gpuTreeBuffers ?? this.gpuKernels.createTreeBuffers(this.gpuTreeData(tree));
-    const reachBuffer = makeStorageBuffer(device, reach);
-    const policyBuffer = makeStorageBuffer(device, policy);
-    const numeratorBuffer = makeStorageBuffer(device, numerator);
-    const denominatorBuffer = makeStorageBuffer(device, denominator);
-    const policyAvgBuffer = makeStorageBuffer(device, policyAvg);
-    const encoder = device.createCommandEncoder();
-    const params = this.gpuKernels.encodeUpdateAveragePolicyRange(
-      encoder,
-      treeBuffers,
-      reachBuffer,
-      policyBuffer,
-      numeratorBuffer,
-      denominatorBuffer,
-      policyAvgBuffer,
-      1,
-      tree.nodes.length,
-    );
-    device.queue.submit([encoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
-    const [nextNumerator, nextDenominator, nextPolicyAvg] = await Promise.all([
-      readFloatBuffer(device, numeratorBuffer, numerator.length),
-      readFloatBuffer(device, denominatorBuffer, denominator.length),
-      readFloatBuffer(device, policyAvgBuffer, policyAvg.length),
-    ]);
-    numerator.set(nextNumerator);
-    denominator.set(nextDenominator);
-    policyAvg.set(nextPolicyAvg);
-    params.destroy();
-    if (!gpuTreeBuffers) treeBuffers.dispose();
-    reachBuffer.destroy();
-    policyBuffer.destroy();
-    numeratorBuffer.destroy();
-    denominatorBuffer.destroy();
-    policyAvgBuffer.destroy();
-    return policyAvg;
   }
 
   private propagateReachAndBeliefs(
@@ -976,71 +952,6 @@ export class SparseCfrResolver {
     return { reach, beliefs };
   }
 
-  private async propagateReachAndBeliefsMaybeGpu(
-    tree: SparseTree,
-    rootBeliefs: Float32Array<ArrayBuffer>,
-    policy: Float32Array,
-    gpuTreeBuffers?: SparseGpuTreeBuffers,
-  ): Promise<{ reach: Float32Array; beliefs: Float32Array }> {
-    if (!this.gpuKernels) {
-      return this.propagateReachAndBeliefs(tree, rootBeliefs, policy);
-    }
-
-    const device = this.model.device;
-    const totalNodes = tree.nodes.length;
-    const treeBuffers =
-      gpuTreeBuffers ?? this.gpuKernels.createTreeBuffers(this.gpuTreeData(tree));
-    const reach = this.initialReach(totalNodes);
-    const beliefs = new Float32Array(totalNodes * 2 * NUM_HANDS);
-    this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
-    const reachBuffer = makeStorageBuffer(device, reach);
-    const beliefsBuffer = makeStorageBuffer(device, beliefs);
-    const policyBuffer = makeStorageBuffer(device, policy);
-    const denomBuffer = makeEmptyStorageBuffer(device, totalNodes * 2);
-    const encoder = device.createCommandEncoder();
-    const params: GPUBuffer[] = [];
-    for (let depth = 0; depth < tree.treeDepth; depth += 1) {
-      const start = tree.depthOffsets[depth + 1]!;
-      const end = tree.depthOffsets[depth + 2]!;
-      params.push(
-        this.gpuKernels.encodePropagateReachDepth(
-          encoder,
-          treeBuffers,
-          policyBuffer,
-          reachBuffer,
-          start,
-          end,
-        ),
-      );
-      params.push(
-        this.gpuKernels.encodePropagateBeliefsDepth(
-          encoder,
-          treeBuffers,
-          policyBuffer,
-          beliefsBuffer,
-          denomBuffer,
-          start,
-          end,
-        ),
-      );
-    }
-    device.queue.submit([encoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
-    const [nextReach, nextBeliefs] = await Promise.all([
-      readFloatBuffer(device, reachBuffer, reach.length),
-      readFloatBuffer(device, beliefsBuffer, beliefs.length),
-    ]);
-    for (const param of params) param.destroy();
-    if (!gpuTreeBuffers) treeBuffers.dispose();
-    reachBuffer.destroy();
-    beliefsBuffer.destroy();
-    policyBuffer.destroy();
-    denomBuffer.destroy();
-    return {
-      reach: new Float32Array(nextReach),
-      beliefs: new Float32Array(nextBeliefs),
-    };
-  }
 
   private async setLeafValues(
     tree: SparseTree,
@@ -1147,66 +1058,6 @@ export class SparseCfrResolver {
     return values;
   }
 
-  private async computeExpectedValuesMaybeGpu(
-    tree: SparseTree,
-    policy: Float32Array,
-    beliefs: Float32Array,
-    leafValues: Float32Array,
-    gpuTreeBuffers?: SparseGpuTreeBuffers,
-  ): Promise<Float32Array> {
-    if (!this.gpuKernels) {
-      return this.computeExpectedValues(tree, policy, beliefs, leafValues);
-    }
-
-    const device = this.model.device;
-    const values = this.leafOnlyValues(tree, leafValues);
-    const treeBuffers =
-      gpuTreeBuffers ?? this.gpuKernels.createTreeBuffers(this.gpuTreeData(tree));
-    const policyBuffer = makeStorageBuffer(device, policy);
-    const beliefsBuffer = makeStorageBuffer(device, beliefs);
-    const opponentPolicyBuffer = makeEmptyStorageBuffer(
-      device,
-      tree.nodes.length * NUM_HANDS,
-    );
-    const valuesBuffer = makeStorageBuffer(device, values);
-    const encoder = device.createCommandEncoder();
-    const params: GPUBuffer[] = [];
-    params.push(
-      this.gpuKernels.encodeComputeOpponentPolicyRange(
-        encoder,
-        treeBuffers,
-        beliefsBuffer,
-        policyBuffer,
-        opponentPolicyBuffer,
-        1,
-        tree.nodes.length,
-      ),
-    );
-    for (let depth = tree.treeDepth - 1; depth >= 0; depth -= 1) {
-      params.push(
-        this.gpuKernels.encodeBackupDepth(
-          encoder,
-          treeBuffers,
-          policyBuffer,
-          opponentPolicyBuffer,
-          valuesBuffer,
-          tree.depthOffsets[depth]!,
-          tree.depthOffsets[depth + 1]!,
-        ),
-      );
-    }
-    device.queue.submit([encoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
-    const out = await readFloatBuffer(device, valuesBuffer, values.length);
-    for (const param of params) param.destroy();
-    if (!gpuTreeBuffers) treeBuffers.dispose();
-    policyBuffer.destroy();
-    beliefsBuffer.destroy();
-    opponentPolicyBuffer.destroy();
-    valuesBuffer.destroy();
-    return new Float32Array(out);
-  }
-
   private accumulateRegrets(
     tree: SparseTree,
     beliefs: Float32Array,
@@ -1237,58 +1088,6 @@ export class SparseCfrResolver {
         }
       }
     }
-  }
-
-  private async accumulateRegretsMaybeGpu(
-    tree: SparseTree,
-    beliefs: Float32Array,
-    values: Float32Array,
-    cumulativeRegrets: Float32Array,
-    gpuTreeBuffers?: SparseGpuTreeBuffers,
-  ): Promise<void> {
-    if (!this.gpuKernels) {
-      this.accumulateRegrets(tree, beliefs, values, cumulativeRegrets);
-      return;
-    }
-
-    const device = this.model.device;
-    const treeBuffers =
-      gpuTreeBuffers ?? this.gpuKernels.createTreeBuffers(this.gpuTreeData(tree));
-    const beliefsBuffer = makeStorageBuffer(device, beliefs);
-    const weightsBuffer = makeEmptyStorageBuffer(device, tree.nodes.length * NUM_HANDS);
-    const valuesBuffer = makeStorageBuffer(device, values);
-    const regretsBuffer = makeStorageBuffer(device, cumulativeRegrets);
-    const encoder = device.createCommandEncoder();
-    const params = [
-      this.gpuKernels.encodeComputeRegretWeightsRange(
-        encoder,
-        treeBuffers,
-        beliefsBuffer,
-        weightsBuffer,
-        0,
-        tree.nodes.length,
-      ),
-      this.gpuKernels.encodeAccumulateRegretsRange(
-        encoder,
-        treeBuffers,
-        weightsBuffer,
-        valuesBuffer,
-        regretsBuffer,
-        1,
-        tree.nodes.length,
-      ),
-    ];
-    device.queue.submit([encoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
-    cumulativeRegrets.set(
-      await readFloatBuffer(device, regretsBuffer, cumulativeRegrets.length),
-    );
-    for (const param of params) param.destroy();
-    if (!gpuTreeBuffers) treeBuffers.dispose();
-    beliefsBuffer.destroy();
-    weightsBuffer.destroy();
-    valuesBuffer.destroy();
-    regretsBuffer.destroy();
   }
 
   private rootPolicy(tree: SparseTree, policy: Float32Array): Float32Array<ArrayBuffer> {
@@ -1421,13 +1220,6 @@ export class SparseCfrResolver {
       normalizeBeliefVector(out, player as PlayerIndex);
     }
     return out;
-  }
-
-  private initialReach(totalNodes: number): Float32Array {
-    const reach = new Float32Array(totalNodes * 2 * NUM_HANDS);
-    reach.fill(1, 0, NUM_HANDS);
-    reach.fill(1, NUM_HANDS, 2 * NUM_HANDS);
-    return reach;
   }
 
   private rootReach(): Float32Array<ArrayBuffer> {

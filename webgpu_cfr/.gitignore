@@ -2,3 +2,4 @@ node_modules/
 fixtures/
 dist/
 public/models/rebel_latest/
+bench_spots.json

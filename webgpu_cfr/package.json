@@ -14,7 +14,9 @@
     "fixture": "cd .. && uv run python webgpu_cfr/python/reference.py --snapshot checkpoints-rebel/rebel_latest.pt --spot 1 --iterations 8 --out webgpu_cfr/fixtures/latest_preflop_call.json",
     "export:model": "cd .. && uv run python webgpu_cfr/python/export_model.py --snapshot checkpoints-rebel/rebel_latest.pt --out webgpu_cfr/public/models/rebel_latest",
     "eval": "tsx src/cli.ts",
-    "bench": "tsx src/bench.ts"
+    "bench": "tsx src/bench.ts",
+    "bench:spots": "tsx src/benchSpots.ts",
+    "bench:spots:extract": "cd .. && uv run python webgpu_cfr/python/extract_bench_spots.py"
   },
   "dependencies": {
     "lucide-solid": "^1.16.0",
