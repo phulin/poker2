@@ -7,14 +7,17 @@ class ScalarContext(Enum):
     ACTIONS_ROUND = 2
     POT = 3
     MIN_RAISE = 4
-    NUM_SCALAR_CONTEXT = 5
+    LOG_STACK_DEPTH_BB = 5
+    LOG_POT_BB = 6
+    NUM_SCALAR_CONTEXT = 7
 
 
 class PlayerContext(Enum):
     STACK = 0
     COMMITTED = 1
     SPR = 2
-    NUM_PLAYER_CONTEXT = 3
+    LOG_COMMITTED_BB = 3
+    NUM_PLAYER_CONTEXT = 4
 
 
 def context_length(num_players: int) -> int:

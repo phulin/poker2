@@ -217,6 +217,15 @@ def test_better_feature_encoder_normalizes_chip_context_by_effective_stack():
         context[:, ScalarContext.MIN_RAISE.value],
         torch.tensor([0.04], dtype=torch.float32, device=env.device),
     )
+    torch.testing.assert_close(
+        context[:, ScalarContext.LOG_STACK_DEPTH_BB.value],
+        torch.log(torch.tensor([50.0], dtype=torch.float32, device=env.device))
+        / torch.log(torch.tensor([400.0], dtype=torch.float32, device=env.device)),
+    )
+    torch.testing.assert_close(
+        context[:, ScalarContext.LOG_POT_BB.value],
+        torch.log1p(torch.tensor([15.0], dtype=torch.float32, device=env.device)),
+    )
 
     def player_ctx(field: PlayerContext, player: int) -> torch.Tensor:
         return context[:, scalar_count + field.value * num_players + player]
@@ -244,6 +253,14 @@ def test_better_feature_encoder_normalizes_chip_context_by_effective_stack():
     torch.testing.assert_close(
         player_ctx(PlayerContext.SPR, 1),
         torch.tensor([400.0 / 150.0], dtype=torch.float32, device=env.device),
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.LOG_COMMITTED_BB, 0),
+        torch.log1p(torch.tensor([5.0], dtype=torch.float32, device=env.device)),
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.LOG_COMMITTED_BB, 1),
+        torch.log1p(torch.tensor([10.0], dtype=torch.float32, device=env.device)),
     )
 
 
