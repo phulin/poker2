@@ -1256,6 +1256,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         showdown_values = self._showdown_value_both(showdown_beliefs)
         self.latest_values[self.showdown_indices] = showdown_values
+        self._set_allin_call_values(beliefs)
 
     # ------------------------------------------------------------------
     # CFR iteration: fused DCFR update.

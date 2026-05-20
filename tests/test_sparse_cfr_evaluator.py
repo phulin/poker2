@@ -489,6 +489,37 @@ def test_leaf_mask() -> None:
     assert evaluator.leaf_mask.shape == (evaluator.total_nodes,)
 
 
+def test_sparse_allin_call_leaf_does_not_create_descendants() -> None:
+    device = get_device()
+    env = make_env(1, device=device)
+    cfg = make_config(env.default_bet_bins)
+    cfg.search.depth = 3
+
+    env.street[0] = 1
+    env.board_indices[0] = torch.tensor([0, 1, 2, -1, -1], device=device)
+    env.board_onehot[0].zero_()
+    env.board_onehot[0, 0] = env.card_onehot_cache[0]
+    env.board_onehot[0, 1] = env.card_onehot_cache[1]
+    env.board_onehot[0, 2] = env.card_onehot_cache[2]
+    env.to_act[0] = 0
+    env.actions_this_round[0] = 1
+    env.stacks[0] = torch.tensor([100, 0], device=device)
+    env.starting_stacks[0] = torch.tensor([100, 100], device=device)
+    env.scale[0] = 100
+    env.committed[0] = torch.tensor([0, 100], device=device)
+    env.pot[0] = 100
+    env.is_allin[0] = torch.tensor([False, True], device=device)
+
+    evaluator, _, _ = make_sparse_evaluator(env=env, cfg=cfg, device=device)
+    evaluator.initialize_subgame(env, torch.tensor([0], device=device))
+
+    assert evaluator.total_nodes == 3
+    assert evaluator.action_from_parent.tolist() == [-1, 0, 1]
+    assert evaluator.allin_call_indices.tolist() == [2]
+    assert evaluator.leaf_mask[2]
+    assert evaluator.child_count[2] == 0
+
+
 def test_parent_child_indices() -> None:
     """Test that parent and child indices are correctly set."""
     device = get_device()

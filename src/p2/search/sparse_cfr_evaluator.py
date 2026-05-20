@@ -140,6 +140,12 @@ class SparseCFREvaluator(CFREvaluator):
         self.sample_count = 0
         self.next_pbs: PublicBeliefState | None = None
         self.next_pbs_idx = 0
+        self.allin_payoff_resolver = None
+        self.allin_call_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.allin_call_parent_indices = torch.empty(
+            0, dtype=torch.long, device=self.device
+        )
+        self.allin_call_mask = torch.empty(0, dtype=torch.bool, device=self.device)
 
     @profile
     def _construct_subgame(
@@ -166,6 +172,9 @@ class SparseCFREvaluator(CFREvaluator):
         reward_levels = [
             torch.zeros(num_roots, dtype=self.float_dtype, device=self.device)
         ]
+        allin_leaf_levels = [
+            torch.zeros(num_roots, dtype=torch.bool, device=self.device)
+        ]
 
         self.depth_offsets = [0, num_roots]
         depth = 0
@@ -173,6 +182,7 @@ class SparseCFREvaluator(CFREvaluator):
             parent_start = self.depth_offsets[-2]
             parent_env = env_levels[-1]
             legal_mask = parent_env.legal_bins_mask()
+            legal_mask &= (~allin_leaf_levels[-1])[:, None]
             stop_mask = parent_env.actions_this_round == 0
             if depth > 0:
                 legal_mask &= (~stop_mask)[:, None]
@@ -189,11 +199,17 @@ class SparseCFREvaluator(CFREvaluator):
 
             parent_indices_level = parent_local_indices + parent_start
 
+            allin_leaf_level = self._allin_call_child_mask(
+                parent_env,
+                parent_local_indices,
+                action_bins,
+            )
             rewards, _, _ = env_next.step_bins(action_bins)
             env_levels.append(env_next)
             parent_index_levels.append(parent_indices_level)
             action_levels.append(action_bins)
             reward_levels.append(rewards.to(self.float_dtype))
+            allin_leaf_levels.append(allin_leaf_level)
 
             depth += 1
             self.depth_offsets.append(self.depth_offsets[-1] + env_next.N)
@@ -223,6 +239,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.parent_index = torch.cat(parent_index_levels)
         self.action_from_parent = torch.cat(action_levels)
         rewards_tensor = torch.cat(reward_levels)
+        allin_leaf_tensor = torch.cat(allin_leaf_levels)
 
         self.legal_mask = self.env.legal_bins_mask()
 
@@ -231,10 +248,15 @@ class SparseCFREvaluator(CFREvaluator):
         self.new_street_mask = (self.env.actions_this_round == 0) & ~root_mask
         self.leaf_mask = self.env.done | self.new_street_mask
         self.leaf_mask[self.depth_offsets[-2] :] = True
+        self.leaf_mask |= allin_leaf_tensor
+        self.new_street_mask.masked_fill_(allin_leaf_tensor, False)
+        self._mark_allin_call_leaves()
         self.model_indices = self._compute_model_indices()
-        self.child_mask = self.legal_mask & (~self.leaf_mask)[:, None]
+        self.child_mask = (
+            self.legal_mask & self.valid_mask[:, None] & (~self.leaf_mask)[:, None]
+        )
         self.child_count = self.child_mask.sum(dim=-1)
-        assert self.total_nodes == self.root_nodes + self.child_count.sum()
+        assert self.valid_mask.sum() == self.root_nodes + self.child_count.sum()
         assert (self.child_count[self.leaf_mask] == 0).all()
         assert (self.child_count[~self.leaf_mask] > 0).all()
         assert (~self.leaf_mask[: self.root_nodes]).all()

@@ -99,6 +99,9 @@ class RebelCFREvaluator(CFREvaluator):
         dcfr_delay: int = 0,
         sample_epsilon: float = 0.25,
         value_targets_from_final_policy: bool = False,
+        allin_call_terminal_abstraction: bool = True,
+        preflop_allin_table_path: str | None = None,
+        precompute_flop_allin_tables: bool = False,
     ):
         assert warm_start_iterations < cfr_iterations
 
@@ -130,6 +133,9 @@ class RebelCFREvaluator(CFREvaluator):
         self.float_dtype = float_dtype
         self.generator = generator
         self.use_final_policy_values = value_targets_from_final_policy
+        self.allin_call_terminal_abstraction = allin_call_terminal_abstraction
+        self.preflop_allin_table_path = preflop_allin_table_path
+        self.precompute_flop_allin_tables = precompute_flop_allin_tables
 
         self.num_players = 2
         self.num_actions = len(bet_bins) + 3
@@ -165,6 +171,12 @@ class RebelCFREvaluator(CFREvaluator):
         self.showdown_potential = torch.empty(
             0, 2, dtype=self.float_dtype, device=self.device
         )
+        self.allin_payoff_resolver = None
+        self.allin_call_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.allin_call_parent_indices = torch.empty(
+            0, dtype=torch.long, device=self.device
+        )
+        self.allin_call_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
 
         # Set during initialize_subgame and not updated.
         self.folded_mask = torch.zeros(M, dtype=torch.bool, device=self.device)
@@ -295,6 +307,11 @@ class RebelCFREvaluator(CFREvaluator):
         self.folded_mask.zero_()
         self.folded_rewards.zero_()
         self.new_street_mask.zero_()
+        self.allin_call_mask.zero_()
+        self.allin_call_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.allin_call_parent_indices = torch.empty(
+            0, dtype=torch.long, device=self.device
+        )
         self.policy_probs.zero_()
         self.policy_probs_avg.zero_()
         self.average_policy_numerator.zero_()
@@ -402,8 +419,10 @@ class RebelCFREvaluator(CFREvaluator):
 
         top = self.depth_offsets[-2]
         self.leaf_mask[top:] = self.valid_mask[top:]
+        self._mark_allin_call_leaves()
         self.legal_mask = self.env.legal_bins_mask()
         self.child_mask[:top] = self._pull_back(self.valid_mask)
+        self.child_mask[self.allin_call_indices] = False
         self.child_count = self.child_mask.sum(dim=-1)
         valid_child_masks = self.child_mask[self.valid_mask & ~self.leaf_mask]
         has_legal = valid_child_masks.any(dim=-1)

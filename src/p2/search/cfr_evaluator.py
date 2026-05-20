@@ -24,6 +24,7 @@ from p2.models.mlp.better_trm import BetterTRM
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from p2.models.model_output import TRMLatent
+from p2.search.allin_payoff import AllInPayoffResolver
 from p2.rl.rebel_batch import RebelBatch
 from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.utils.model_utils import compute_masked_logits
@@ -172,6 +173,10 @@ class CFREvaluator(ABC):
     showdown_indices: torch.Tensor
     showdown_actors: torch.Tensor
     showdown_potential: torch.Tensor
+    allin_call_indices: torch.Tensor
+    allin_call_parent_indices: torch.Tensor
+    allin_call_mask: torch.Tensor
+    allin_payoff_resolver: AllInPayoffResolver | None
     prev_actor: torch.Tensor
     combo_onehot_float: torch.Tensor
     chance_helper: ChanceNodeHelper
@@ -288,7 +293,213 @@ class CFREvaluator(ABC):
             of num_envs by repeating the last item.
         """
         model_mask = self.leaf_mask & ~self.env.done
+        allin_mask = getattr(self, "allin_call_mask", None)
+        if allin_mask is not None and allin_mask.shape == model_mask.shape:
+            model_mask = model_mask & ~allin_mask
         return padded_indices(model_mask, self.root_nodes)
+
+    def _allin_abstraction_enabled(self) -> bool:
+        cfg = getattr(self, "cfg", None)
+        search_cfg = getattr(cfg, "search", None)
+        return bool(
+            getattr(
+                search_cfg,
+                "allin_call_terminal_abstraction",
+                getattr(self, "allin_call_terminal_abstraction", False),
+            )
+        )
+
+    def _ensure_allin_payoff_resolver(self) -> AllInPayoffResolver:
+        resolver = getattr(self, "allin_payoff_resolver", None)
+        if resolver is None:
+            search_cfg = getattr(getattr(self, "cfg", None), "search", None)
+            resolver = AllInPayoffResolver(
+                device=self.device,
+                preflop_table_path=getattr(
+                    search_cfg,
+                    "preflop_allin_table_path",
+                    getattr(self, "preflop_allin_table_path", None),
+                ),
+                precompute_flops=bool(
+                    getattr(
+                        search_cfg,
+                        "precompute_flop_allin_tables",
+                        getattr(self, "precompute_flop_allin_tables", False),
+                    )
+                ),
+            )
+            self.allin_payoff_resolver = resolver
+        return resolver
+
+    def _mark_allin_call_leaves(self) -> None:
+        """Mark children reached by calling an all-in bet as terminal leaves.
+
+        The child environment has already stepped and may have dealt a future
+        street. The all-in payoff is evaluated from the parent public board and
+        the child's post-call pot/stacks.
+        """
+        empty = torch.empty(0, dtype=torch.long, device=self.device)
+        self.allin_call_indices = empty
+        self.allin_call_parent_indices = empty
+        self.allin_call_mask = torch.zeros(
+            self.total_nodes, dtype=torch.bool, device=self.device
+        )
+        if not self._allin_abstraction_enabled() or self.total_nodes <= self.root_nodes:
+            return
+
+        child_indices = torch.arange(self.root_nodes, self.total_nodes, device=self.device)
+        parent, action = self._parent_action_for_nodes(child_indices)
+        actor = self.env.to_act[parent]
+        opp = 1 - actor
+        parent_to_call = (
+            self.env.committed[parent, opp] - self.env.committed[parent, actor]
+        )
+        parent_street = self.env.street[parent]
+        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
+        has_preflop_table = (
+            getattr(
+                search_cfg,
+                "preflop_allin_table_path",
+                getattr(self, "preflop_allin_table_path", None),
+            )
+            is not None
+        )
+
+        mask = (
+            (action == 1)
+            & self.env.is_allin[parent, opp]
+            & (parent_to_call > 0)
+            & (parent_street < 3)
+        )
+        if not has_preflop_table:
+            mask &= parent_street > 0
+        indices = child_indices[mask]
+        if indices.numel() == 0:
+            return
+        self.allin_call_indices = indices.contiguous()
+        self.allin_call_parent_indices = parent[mask].contiguous()
+        self.allin_call_mask[self.allin_call_indices] = True
+        self.leaf_mask[self.allin_call_indices] = True
+        self.new_street_mask[self.allin_call_indices] = False
+        self._prune_allin_call_descendants()
+
+    def _allin_call_child_mask(
+        self,
+        parent_env: HUNLTensorEnv,
+        parent_local_indices: torch.Tensor,
+        action_bins: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self._allin_abstraction_enabled() or action_bins.numel() == 0:
+            return torch.zeros_like(action_bins, dtype=torch.bool)
+
+        actor = parent_env.to_act[parent_local_indices]
+        opp = 1 - actor
+        parent_to_call = (
+            parent_env.committed[parent_local_indices, opp]
+            - parent_env.committed[parent_local_indices, actor]
+        )
+        parent_street = parent_env.street[parent_local_indices]
+        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
+        has_preflop_table = (
+            getattr(
+                search_cfg,
+                "preflop_allin_table_path",
+                getattr(self, "preflop_allin_table_path", None),
+            )
+            is not None
+        )
+        mask = (
+            (action_bins == 1)
+            & parent_env.is_allin[parent_local_indices, opp]
+            & (parent_to_call > 0)
+            & (parent_street < 3)
+        )
+        if not has_preflop_table:
+            mask &= parent_street > 0
+        return mask
+
+    def _prune_allin_call_descendants(self) -> None:
+        if not hasattr(self, "valid_mask") or self.allin_call_indices.numel() == 0:
+            return
+        pruned = self.allin_call_mask.clone()
+        for depth in range(1, self.tree_depth + 1):
+            start = self.depth_offsets[depth]
+            end = self.depth_offsets[depth + 1]
+            if start >= end:
+                continue
+            nodes = torch.arange(start, end, device=self.device)
+            parent, _ = self._parent_action_for_nodes(nodes)
+            invalid = pruned[parent]
+            if invalid.any():
+                self.valid_mask[nodes[invalid]] = False
+                self.leaf_mask[nodes[invalid]] = False
+                self.new_street_mask[nodes[invalid]] = False
+                pruned[nodes[invalid]] = True
+
+    def _parent_action_for_nodes(
+        self, node_indices: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        parent_index = getattr(self, "parent_index", None)
+        action_from_parent = getattr(self, "action_from_parent", None)
+        if parent_index is not None and action_from_parent is not None:
+            return parent_index[node_indices], action_from_parent[node_indices]
+
+        offsets = torch.tensor(self.depth_offsets, dtype=torch.long, device=self.device)
+        parent_depth = torch.bucketize(node_indices, offsets[1:], right=False)
+        parent_start = offsets[parent_depth]
+        child_start = offsets[parent_depth + 1]
+        local = node_indices - child_start
+        parent = parent_start + torch.div(local, self.num_actions, rounding_mode="floor")
+        action = local.remainder(self.num_actions)
+        return parent, action
+
+    def _set_allin_call_values(self, beliefs: torch.Tensor) -> None:
+        indices = getattr(self, "allin_call_indices", None)
+        if indices is None or indices.numel() == 0:
+            return
+        resolver = self._ensure_allin_payoff_resolver()
+        parents = self.allin_call_parent_indices
+        parent_streets = self.env.street[parents]
+        boards = self.env.board_indices[parents]
+        local_mask = parent_streets == 0
+        if local_mask.any():
+            node_idx = indices[local_mask]
+            values = resolver.values_for_boards(
+                street=0,
+                boards=boards[local_mask],
+                beliefs=beliefs[node_idx],
+            )
+            self._write_scaled_allin_values(node_idx, values)
+
+        local_mask = parent_streets == 1
+        if local_mask.any():
+            node_idx = indices[local_mask]
+            values = resolver.values_for_boards(
+                street=1,
+                boards=boards[local_mask],
+                beliefs=beliefs[node_idx],
+            )
+            self._write_scaled_allin_values(node_idx, values)
+
+        local_mask = parent_streets == 2
+        if local_mask.any():
+            node_idx = indices[local_mask]
+            values = resolver.values_for_boards(
+                street=2,
+                boards=boards[local_mask],
+                beliefs=beliefs[node_idx],
+            )
+            self._write_scaled_allin_values(node_idx, values)
+
+    def _write_scaled_allin_values(self, node_idx: torch.Tensor, values: torch.Tensor) -> None:
+        potential = (
+            self.env.stacks[node_idx].to(values.dtype)
+            + self.env.pot[node_idx, None].to(values.dtype)
+            - self.env.starting_stacks[node_idx].to(values.dtype)
+        )
+        env_scale = self.env.scale[node_idx].to(values.dtype).clamp_min(1e-8)
+        values *= potential[:, :, None] / env_scale[:, None, None]
+        self.latest_values[node_idx] = values
 
     def _get_mixing_weights(self, t: int) -> tuple[float, float]:
         """Get the mixing weights for the current iteration (0-indexed).
@@ -1112,6 +1323,9 @@ class CFREvaluator(ABC):
         showdown_beliefs = beliefs[self.showdown_indices]
         showdown_values = self._showdown_value_both(showdown_beliefs)
         self.latest_values[self.showdown_indices] = showdown_values
+        set_allin = getattr(self, "_set_allin_call_values", None)
+        if set_allin is not None:
+            set_allin(beliefs)
 
     def compute_expected_values(
         self,

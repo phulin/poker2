@@ -568,6 +568,9 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
                 dcfr_gamma=dcfr_gamma,
                 dcfr_delay=dcfr_delay,
                 value_targets_from_final_policy=value_targets_from_final_policy,
+                allin_call_terminal_abstraction=cfg_copy.search.allin_call_terminal_abstraction,
+                preflop_allin_table_path=cfg_copy.search.preflop_allin_table_path,
+                precompute_flop_allin_tables=cfg_copy.search.precompute_flop_allin_tables,
             )
         self.current_index = 1  # Root node is at index 0, so current_index = 1 for root_index = current_index - 1
 

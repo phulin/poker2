@@ -272,6 +272,9 @@ class SearchConfig:
     sparse: bool = False
     sparse_fused: bool = False
     value_targets_from_final_policy: bool = False
+    allin_call_terminal_abstraction: bool = True
+    preflop_allin_table_path: str | None = None
+    precompute_flop_allin_tables: bool = False
 
 
 @dataclass
