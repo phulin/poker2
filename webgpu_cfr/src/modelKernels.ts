@@ -1527,20 +1527,20 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> output: array<f32>;
 @group(0) @binding(4) var<uniform> params: Params;
 
-var<workgroup> subgroupPartial00: array<f32, 256>;
-var<workgroup> subgroupPartial01: array<f32, 256>;
-var<workgroup> subgroupPartial02: array<f32, 256>;
-var<workgroup> subgroupPartial03: array<f32, 256>;
-var<workgroup> subgroupPartial10: array<f32, 256>;
-var<workgroup> subgroupPartial11: array<f32, 256>;
-var<workgroup> subgroupPartial12: array<f32, 256>;
-var<workgroup> subgroupPartial13: array<f32, 256>;
+var<workgroup> subgroupPartial00: array<f32, 128>;
+var<workgroup> subgroupPartial01: array<f32, 128>;
+var<workgroup> subgroupPartial02: array<f32, 128>;
+var<workgroup> subgroupPartial03: array<f32, 128>;
+var<workgroup> subgroupPartial10: array<f32, 128>;
+var<workgroup> subgroupPartial11: array<f32, 128>;
+var<workgroup> subgroupPartial12: array<f32, 128>;
+var<workgroup> subgroupPartial13: array<f32, 128>;
 
 fn leaky_relu(x: f32) -> f32 {
   return select(0.01 * x, x, x >= 0.0);
 }
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(128)
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
@@ -1576,7 +1576,7 @@ fn main(
   var sum12 = m20 * x10;
   var sum13 = m30 * x10;
 
-  let col1 = lane + 256u;
+  let col1 = lane + 128u;
   let x01 = leaky_relu(input[inputBase0 + col1]);
   var x11 = 0.0;
   if (batch1 < params.batch) {
@@ -1595,7 +1595,7 @@ fn main(
   sum12 = sum12 + m21 * x11;
   sum13 = sum13 + m31 * x11;
 
-  let col2 = lane + 512u;
+  let col2 = lane + 256u;
   let x02 = leaky_relu(input[inputBase0 + col2]);
   var x12 = 0.0;
   if (batch1 < params.batch) {
@@ -1614,7 +1614,7 @@ fn main(
   sum12 = sum12 + m22 * x12;
   sum13 = sum13 + m32 * x12;
 
-  let col3 = lane + 768u;
+  let col3 = lane + 384u;
   let x03 = leaky_relu(input[inputBase0 + col3]);
   var x13 = 0.0;
   if (batch1 < params.batch) {
@@ -1632,6 +1632,82 @@ fn main(
   sum11 = sum11 + m13 * x13;
   sum12 = sum12 + m23 * x13;
   sum13 = sum13 + m33 * x13;
+
+  let col4 = lane + 512u;
+  let x04 = leaky_relu(input[inputBase0 + col4]);
+  var x14 = 0.0;
+  if (batch1 < params.batch) {
+    x14 = leaky_relu(input[inputBase1 + col4]);
+  }
+  let m04 = matrix[row0 * 1024u + col4];
+  let m14 = matrix[row1 * 1024u + col4];
+  let m24 = matrix[row2 * 1024u + col4];
+  let m34 = matrix[row3 * 1024u + col4];
+  sum00 = sum00 + m04 * x04;
+  sum01 = sum01 + m14 * x04;
+  sum02 = sum02 + m24 * x04;
+  sum03 = sum03 + m34 * x04;
+  sum10 = sum10 + m04 * x14;
+  sum11 = sum11 + m14 * x14;
+  sum12 = sum12 + m24 * x14;
+  sum13 = sum13 + m34 * x14;
+
+  let col5 = lane + 640u;
+  let x05 = leaky_relu(input[inputBase0 + col5]);
+  var x15 = 0.0;
+  if (batch1 < params.batch) {
+    x15 = leaky_relu(input[inputBase1 + col5]);
+  }
+  let m05 = matrix[row0 * 1024u + col5];
+  let m15 = matrix[row1 * 1024u + col5];
+  let m25 = matrix[row2 * 1024u + col5];
+  let m35 = matrix[row3 * 1024u + col5];
+  sum00 = sum00 + m05 * x05;
+  sum01 = sum01 + m15 * x05;
+  sum02 = sum02 + m25 * x05;
+  sum03 = sum03 + m35 * x05;
+  sum10 = sum10 + m05 * x15;
+  sum11 = sum11 + m15 * x15;
+  sum12 = sum12 + m25 * x15;
+  sum13 = sum13 + m35 * x15;
+
+  let col6 = lane + 768u;
+  let x06 = leaky_relu(input[inputBase0 + col6]);
+  var x16 = 0.0;
+  if (batch1 < params.batch) {
+    x16 = leaky_relu(input[inputBase1 + col6]);
+  }
+  let m06 = matrix[row0 * 1024u + col6];
+  let m16 = matrix[row1 * 1024u + col6];
+  let m26 = matrix[row2 * 1024u + col6];
+  let m36 = matrix[row3 * 1024u + col6];
+  sum00 = sum00 + m06 * x06;
+  sum01 = sum01 + m16 * x06;
+  sum02 = sum02 + m26 * x06;
+  sum03 = sum03 + m36 * x06;
+  sum10 = sum10 + m06 * x16;
+  sum11 = sum11 + m16 * x16;
+  sum12 = sum12 + m26 * x16;
+  sum13 = sum13 + m36 * x16;
+
+  let col7 = lane + 896u;
+  let x07 = leaky_relu(input[inputBase0 + col7]);
+  var x17 = 0.0;
+  if (batch1 < params.batch) {
+    x17 = leaky_relu(input[inputBase1 + col7]);
+  }
+  let m07 = matrix[row0 * 1024u + col7];
+  let m17 = matrix[row1 * 1024u + col7];
+  let m27 = matrix[row2 * 1024u + col7];
+  let m37 = matrix[row3 * 1024u + col7];
+  sum00 = sum00 + m07 * x07;
+  sum01 = sum01 + m17 * x07;
+  sum02 = sum02 + m27 * x07;
+  sum03 = sum03 + m37 * x07;
+  sum10 = sum10 + m07 * x17;
+  sum11 = sum11 + m17 * x17;
+  sum12 = sum12 + m27 * x17;
+  sum13 = sum13 + m37 * x17;
 
   let reduced00 = subgroupAdd(sum00);
   let reduced01 = subgroupAdd(sum01);
@@ -1655,7 +1731,7 @@ fn main(
   workgroupBarrier();
 
   if (lane == 0u) {
-    let subgroupCount = (256u + subgroupSize - 1u) / subgroupSize;
+    let subgroupCount = (128u + subgroupSize - 1u) / subgroupSize;
     var out00 = 0.0;
     var out01 = 0.0;
     var out02 = 0.0;
