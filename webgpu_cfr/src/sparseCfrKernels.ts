@@ -256,7 +256,7 @@ struct Params {
 @group(0) @binding(6) var<storage, read_write> values: array<f32>;
 @group(0) @binding(7) var<uniform> params: Params;
 
-@compute @workgroup_size(128)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let linear = gid.x;
   let nodeCount = params.end - params.start;
@@ -1449,7 +1449,7 @@ export class SparseCfrGpuKernels {
       encoder,
       this.showdownValuesPipeline,
       bindGroup,
-      Math.ceil((batch * 2 * tree.numHands) / 128),
+      Math.ceil((batch * 2 * tree.numHands) / 256),
     );
     return params;
   }
