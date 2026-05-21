@@ -1895,7 +1895,7 @@ export class BetterFfnWebGpuModel {
       !biasPresent &&
       this.matVecBatchExactRowsCols1024Batch2SubgroupPipeline;
     const useSmallCols =
-      cols <= 16 &&
+      cols <= 128 &&
       inputOffset === 0 &&
       outputOffset === 0 &&
       !biasPresent;
