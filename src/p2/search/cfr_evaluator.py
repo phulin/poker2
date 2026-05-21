@@ -1196,6 +1196,30 @@ class CFREvaluator(ABC):
             local_exploitability=improvements, local_best_response_values=br_values_agg
         )
 
+    def _compute_policy_node_reach(self, top: int) -> torch.Tensor:
+        """Approximate public-node reach under the average policy.
+
+        This is the compatible private-hand-pair average of both players'
+        average self-reach probabilities at each public node. The normalization
+        keeps root nodes near 1.0 even when public board cards block combos.
+        """
+        allowed = self.allowed_hands[:top].to(dtype=self.float_dtype)
+        reach = self.self_reach_avg[:top].to(dtype=self.float_dtype)
+        opp_unblocked = calculate_unblocked_mass(reach[:, 1])
+        numer = (reach[:, 0] * opp_unblocked * allowed).sum(dim=-1)
+
+        allowed_unblocked = calculate_unblocked_mass(allowed)
+        denom = (allowed * allowed_unblocked).sum(dim=-1).clamp(min=1e-12)
+        return (numer / denom).clamp(min=0.0, max=1.0)
+
+    def _should_record_policy_node_reach(self) -> bool:
+        cfg = getattr(self, "cfg", None)
+        train_cfg = getattr(cfg, "train", None)
+        mode = getattr(train_cfg, "policy_node_weighting", None)
+        if mode is None:
+            return True
+        return getattr(mode, "value", mode) != "uniform"
+
     # ============================================================================
     # Core Logic Methods (in order called by cfr_iteration and evaluate_cfr)
     # ============================================================================
@@ -1875,6 +1899,10 @@ class CFREvaluator(ABC):
         policy_statistics = {
             key: statistics[key][:top][valid_top] for key in statistics
         }
+        if self._should_record_policy_node_reach():
+            policy_statistics["policy_node_reach"] = self._compute_policy_node_reach(top)[
+                valid_top
+            ]
 
         value_batch = RebelBatch(
             features=features[:N],

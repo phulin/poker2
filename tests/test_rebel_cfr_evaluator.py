@@ -1063,6 +1063,11 @@ def test_training_data_returns_root_batch() -> None:
         NUM_HANDS,
     )
     torch.testing.assert_close(policy_batch.policy_targets, expected_policy)
+    assert "policy_node_reach" in policy_batch.statistics
+    policy_node_reach = policy_batch.statistics["policy_node_reach"]
+    assert torch.isfinite(policy_node_reach).all()
+    assert torch.all(policy_node_reach > 0)
+    assert torch.all(policy_node_reach <= 1)
 
 
 def test_training_data_can_use_final_policy_values() -> None:

@@ -8,7 +8,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from p2.core.structured_config import KLType, PPOClipping, ValueLossType
+from p2.core.structured_config import (
+    KLType,
+    PPOClipping,
+    PolicyNodeWeighting,
+    ValueLossType,
+)
 from p2.env.card_utils import (
     NUM_HANDS,
     combo_suit_permutation_tensor,
@@ -735,6 +740,7 @@ class RebelSupervisedLoss(nn.Module):
         permutation_weight: float = 0.01,
         entropy_coef: float | None = None,
         num_players: int = 2,
+        policy_node_weighting: PolicyNodeWeighting | str = PolicyNodeWeighting.uniform,
     ) -> None:
         super().__init__()
         self.policy_weight = policy_weight
@@ -742,6 +748,11 @@ class RebelSupervisedLoss(nn.Module):
         self.entropy_coef = entropy_coef
         self.permutation_weight = permutation_weight
         self.num_players = num_players
+        self.policy_node_weighting = (
+            policy_node_weighting
+            if isinstance(policy_node_weighting, PolicyNodeWeighting)
+            else PolicyNodeWeighting(policy_node_weighting)
+        )
         combos = hand_combos_tensor()
         self.register_buffer("_combo_card_a", combos[:, 0].long(), persistent=False)
         self.register_buffer("_combo_card_b", combos[:, 1].long(), persistent=False)
@@ -854,6 +865,31 @@ class RebelSupervisedLoss(nn.Module):
     def _zero(self, device: torch.device) -> torch.Tensor:
         return torch.zeros((), device=device)
 
+    def _policy_node_weights(
+        self, batch: RebelBatch, dtype: torch.dtype
+    ) -> torch.Tensor | None:
+        if self.policy_node_weighting == PolicyNodeWeighting.uniform:
+            return None
+        reach = batch.statistics.get("policy_node_reach")
+        if reach is None:
+            return None
+        reach = reach.to(dtype=dtype).clamp(min=0.0)
+        if self.policy_node_weighting == PolicyNodeWeighting.reach:
+            return reach
+        if self.policy_node_weighting == PolicyNodeWeighting.sqrt_reach:
+            return reach.sqrt()
+        if self.policy_node_weighting == PolicyNodeWeighting.clipped_reach:
+            relative = reach / reach.mean().clamp(min=1e-8)
+            return relative.clamp(min=0.1, max=10.0)
+        raise ValueError(f"Unsupported policy node weighting: {self.policy_node_weighting}")
+
+    def _reduce_policy_node_metric(
+        self, per_node: torch.Tensor, node_weights: torch.Tensor | None
+    ) -> torch.Tensor:
+        if node_weights is None:
+            return per_node.mean()
+        return (per_node * node_weights).sum() / node_weights.sum().clamp(min=1e-8)
+
     def _permutation_loss(
         self,
         output: ModelOutput,
@@ -893,16 +929,22 @@ class RebelSupervisedLoss(nn.Module):
         )
         policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
         policy_loss_per_hand = policy_ce_per_hand * policy_weights
-        policy_loss = policy_loss_per_hand.sum(dim=-1).mean()
-        policy_loss_all = policy_loss_per_hand.sum(dim=-1).detach()
+        policy_loss_all = policy_loss_per_hand.sum(dim=-1)
+        node_weights = self._policy_node_weights(batch, policy_loss_all.dtype)
+        policy_loss = self._reduce_policy_node_metric(policy_loss_all, node_weights)
+        policy_loss_all = policy_loss_all.detach()
         target_entropy_per_sample = (target_entropy_per_hand * policy_weights).sum(
             dim=-1
         )
-        target_entropy = target_entropy_per_sample.mean()
+        target_entropy = self._reduce_policy_node_metric(
+            target_entropy_per_sample, node_weights
+        )
         target_model_kl_all = (
             (policy_ce_per_hand - target_entropy_per_hand) * policy_weights
         ).sum(dim=-1)
-        target_model_kl = target_model_kl_all.mean()
+        target_model_kl = self._reduce_policy_node_metric(
+            target_model_kl_all, node_weights
+        )
 
         entropy = -(probs * log_probs).sum(dim=-1).mean()
         total_loss = self.policy_weight * policy_loss
@@ -917,6 +959,7 @@ class RebelSupervisedLoss(nn.Module):
             "target_entropy": target_entropy,
             "target_model_kl": target_model_kl,
             "policy_weights": policy_weights,
+            "policy_node_weights": node_weights,
             "value_loss": zero,
             "value_loss_all": None,
             "value_weights": None,
@@ -986,16 +1029,22 @@ class RebelSupervisedLoss(nn.Module):
         )
         policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
         policy_loss_per_hand = policy_ce_per_hand * policy_weights
-        policy_loss = policy_loss_per_hand.sum(dim=-1).mean()
-        policy_loss_all = policy_loss_per_hand.sum(dim=-1).detach()
+        policy_loss_all = policy_loss_per_hand.sum(dim=-1)
+        node_weights = self._policy_node_weights(batch, policy_loss_all.dtype)
+        policy_loss = self._reduce_policy_node_metric(policy_loss_all, node_weights)
+        policy_loss_all = policy_loss_all.detach()
         target_entropy_per_sample = (target_entropy_per_hand * policy_weights).sum(
             dim=-1
         )
-        target_entropy = target_entropy_per_sample.mean()
+        target_entropy = self._reduce_policy_node_metric(
+            target_entropy_per_sample, node_weights
+        )
         target_model_kl_all = (
             (policy_ce_per_hand - target_entropy_per_hand) * policy_weights
         ).sum(dim=-1)
-        target_model_kl = target_model_kl_all.mean()
+        target_model_kl = self._reduce_policy_node_metric(
+            target_model_kl_all, node_weights
+        )
         entropy = -(probs * log_probs).sum(dim=-1).mean()
 
         value_weights = unblocked_mass.flip(dims=[1]) * allowed_hands_float[:, None]
@@ -1018,6 +1067,7 @@ class RebelSupervisedLoss(nn.Module):
             "target_entropy": target_entropy,
             "target_model_kl": target_model_kl,
             "policy_weights": policy_weights,
+            "policy_node_weights": node_weights,
             "value_loss": value_loss,
             "value_loss_all": value_loss_all,
             "value_weights": value_weights,

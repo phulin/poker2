@@ -1,6 +1,6 @@
 import torch
 
-from p2.core.structured_config import Config, ValueHeadType
+from p2.core.structured_config import Config, PolicyNodeWeighting, ValueHeadType
 from p2.env.card_utils import (
     NUM_HANDS,
     combo_suit_permutation_inverse_tensor,
@@ -164,6 +164,46 @@ def test_rebel_policy_loss_has_saturated_wrong_action_gradient():
     loss_dict["total_loss"].backward()
 
     assert logits.grad[..., 0].mean() > 1e-4
+
+
+def test_rebel_policy_loss_supports_node_reach_weighting_modes():
+    batch_size, num_actions = 2, 2
+    beliefs = torch.full((batch_size, 2, NUM_HANDS), 1.0 / NUM_HANDS)
+    logits = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    logits[0, :, 0] = 10.0
+    logits[1, :, 0] = 10.0
+    policy_targets = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    policy_targets[0, :, 0] = 1.0
+    policy_targets[1, :, 1] = 1.0
+    features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    batch = RebelBatch(
+        features=features,
+        policy_targets=policy_targets,
+        value_targets=None,
+        legal_masks=torch.ones(batch_size, num_actions, dtype=torch.bool),
+        statistics={"policy_node_reach": torch.tensor([1.0, 0.01])},
+    )
+    output = ModelOutput(policy_logits=logits, value=None, hand_values=None)
+
+    losses = {
+        mode: RebelSupervisedLoss(policy_node_weighting=mode).forward_policy(
+            output, batch
+        )["policy_loss"]
+        for mode in PolicyNodeWeighting
+    }
+
+    assert losses[PolicyNodeWeighting.reach] < losses[PolicyNodeWeighting.clipped_reach]
+    assert (
+        losses[PolicyNodeWeighting.clipped_reach]
+        < losses[PolicyNodeWeighting.sqrt_reach]
+    )
+    assert losses[PolicyNodeWeighting.sqrt_reach] < losses[PolicyNodeWeighting.uniform]
 
 
 def test_rebel_cfr_trainer_single_step_cpu():
