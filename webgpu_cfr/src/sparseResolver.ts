@@ -550,6 +550,10 @@ export class SparseCfrResolver {
     const reachBuffer = makeEmptyStorageBuffer(device, valueCount);
     const denomBuffer = makeEmptyStorageBuffer(device, totalNodes * 2);
     const opponentPolicyBuffer = makeEmptyStorageBuffer(device, policyCount);
+    const opponentPolicyAggregatesBuffer = makeEmptyStorageBuffer(
+      device,
+      totalNodes * 106,
+    );
     const regretWeightsBuffer = makeEmptyStorageBuffer(device, policyCount);
     const regretWeightAggregatesBuffer = makeEmptyStorageBuffer(device, totalNodes * 53);
     const modelLeafBeliefsBuffer = makeEmptyStorageBuffer(
@@ -600,6 +604,7 @@ export class SparseCfrResolver {
           policyBuffer,
           beliefsBuffer,
           opponentPolicyBuffer,
+          opponentPolicyAggregatesBuffer,
           valuesBuffer,
         );
       });
@@ -649,6 +654,7 @@ export class SparseCfrResolver {
               policyBuffer,
               beliefsBuffer,
               opponentPolicyBuffer,
+              opponentPolicyAggregatesBuffer,
               valuesBuffer,
             );
           });
@@ -688,6 +694,7 @@ export class SparseCfrResolver {
       reachBuffer.destroy();
       denomBuffer.destroy();
       opponentPolicyBuffer.destroy();
+      opponentPolicyAggregatesBuffer.destroy();
       regretWeightsBuffer.destroy();
       regretWeightAggregatesBuffer.destroy();
       modelLeafBeliefsBuffer.destroy();
@@ -813,16 +820,18 @@ export class SparseCfrResolver {
     policyBuffer: GPUBuffer,
     beliefsBuffer: GPUBuffer,
     opponentPolicyBuffer: GPUBuffer,
+    opponentPolicyAggregatesBuffer: GPUBuffer,
     valuesBuffer: GPUBuffer,
   ): void {
     if (!this.gpuKernels) return;
     const encoder = this.model.device.createCommandEncoder();
     const params: GPUBuffer[] = [
-      this.gpuKernels.encodeComputeOpponentPolicyRange(
+      ...this.gpuKernels.encodeComputeOpponentPolicyAggregateRange(
         encoder,
         treeBuffers,
         beliefsBuffer,
         policyBuffer,
+        opponentPolicyAggregatesBuffer,
         opponentPolicyBuffer,
         1,
         tree.nodes.length,
