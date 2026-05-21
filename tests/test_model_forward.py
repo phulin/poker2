@@ -81,7 +81,6 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
         num_players=num_players,
         policy_rank=8,
         policy_hand_bias_rank=4,
-        value_rank=8,
         policy_factor_scale=0.5,
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(0))
@@ -110,12 +109,8 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
         num_actions * HAND_DYNAMIC_FEATURE_DIM,
         model.hidden_dim,
     )
-    assert model.value_hand_proj.linear_out.weight.shape == (
-        model.value_rank,
-        model.hidden_dim,
-    )
-    assert model.value_player_head.linear_out.weight.shape == (
-        num_players * model.value_rank,
+    assert model.hand_value_head[-1].linear_out.weight.shape == (
+        num_players * NUM_HANDS,
         model.hidden_dim,
     )
     torch.testing.assert_close(model.policy_factor_scale.detach(), torch.tensor(0.5))

@@ -60,7 +60,6 @@ model:
   board_interaction_dim: 64
   policy_rank: 128
   policy_hand_bias_rank: 32
-  value_rank: 128
   policy_factor_scale: 1.0
 
   shared_trunk: true # DO NOT detach policy head from trunk

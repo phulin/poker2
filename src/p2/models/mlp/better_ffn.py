@@ -90,7 +90,6 @@ class BetterFFN(BaseMLPModel):
         board_interaction_dim: int = 0,
         policy_rank: int = 64,
         policy_hand_bias_rank: int = 32,
-        value_rank: int = 128,
         policy_factor_scale: float = 0.5,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
@@ -105,7 +104,6 @@ class BetterFFN(BaseMLPModel):
         self.board_interaction_dim = board_interaction_dim
         self.policy_rank = policy_rank
         self.policy_hand_bias_rank = policy_hand_bias_rank
-        self.value_rank = value_rank
 
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
@@ -115,8 +113,6 @@ class BetterFFN(BaseMLPModel):
             raise ValueError("policy_rank must be positive")
         if policy_hand_bias_rank <= 0:
             raise ValueError("policy_hand_bias_rank must be positive")
-        if value_rank <= 0:
-            raise ValueError("value_rank must be positive")
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
@@ -232,15 +228,8 @@ class BetterFFN(BaseMLPModel):
             )
             for _ in range(num_value_layers)
         ]
-        self.value_tower = nn.Sequential(*layers)
-        self.value_hand_proj = output_projection(hidden_dim, self.value_rank)
-        self.value_player_head = output_projection(
-            hidden_dim, num_players * self.value_rank
-        )
-        self.value_dynamic_coeff = output_projection(
-            hidden_dim, num_players * HAND_DYNAMIC_FEATURE_DIM
-        )
-        self.value_player_bias = output_projection(hidden_dim, num_players)
+        layers.append(output_projection(hidden_dim, num_players * NUM_HANDS))
+        self.hand_value_head = nn.Sequential(*layers)
 
     @staticmethod
     def _unordered_pair_index(
@@ -591,47 +580,8 @@ class BetterFFN(BaseMLPModel):
     def _hand_value_logits(
         self,
         value_input: torch.Tensor,
-        player_beliefs: torch.Tensor,
-        board: torch.Tensor,
-        hand_emb: torch.Tensor,
-        board_stats: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
-        value_state = self.value_tower(value_input)
-        hand_vec = self.value_hand_proj(hand_emb)
-        player_vec = self.value_player_head(value_state).view(
-            -1, self.num_players, self.value_rank
-        )
-        hand_values = torch.einsum("hr,bpr->bph", hand_vec, player_vec)
-        hand_values = hand_values / math.sqrt(self.value_rank)
-        dynamic_coeff = self.value_dynamic_coeff(value_state).view(
-            -1, self.num_players, HAND_DYNAMIC_FEATURE_DIM
-        )
-        card_mass, unblocked = self._card_mass_and_unblocked_mass(player_beliefs)
-        if torch.is_grad_enabled():
-            dynamic_features = self._dynamic_hand_features_from_stats(
-                player_beliefs,
-                card_mass,
-                card_mass.flip(dims=[1]),
-                unblocked.flip(dims=[1]),
-                board,
-                value_state.dtype,
-                board_stats,
-            )
-            hand_values = hand_values + torch.einsum(
-                "bphf,bpf->bph", dynamic_features, dynamic_coeff
-            )
-        else:
-            hand_values = hand_values + self._dynamic_hand_feature_dot_from_stats(
-                player_beliefs,
-                card_mass,
-                card_mass.flip(dims=[1]),
-                unblocked.flip(dims=[1]),
-                board,
-                dynamic_coeff,
-                board_stats,
-            )
-        hand_values = hand_values + self.value_player_bias(value_state)[:, :, None]
-        return hand_values
+        return self.hand_value_head(value_input).view(-1, self.num_players, NUM_HANDS)
 
     def _policy_logits(
         self,
@@ -800,9 +750,8 @@ class BetterFFN(BaseMLPModel):
         player_beliefs, _, x, hand_emb, board_stats = self._forward_base(
             features, static_base_features=static_base_features
         )
-        hand_values_raw = self._hand_value_logits(
-            x, player_beliefs, features.board, hand_emb, board_stats
-        )
+        del hand_emb, board_stats
+        hand_values_raw = self._hand_value_logits(x)
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
@@ -834,9 +783,7 @@ class BetterFFN(BaseMLPModel):
             hand_emb,
             board_stats,
         )
-        hand_values_raw = self._hand_value_logits(
-            x, player_beliefs, features.board, hand_emb, board_stats
-        )
+        hand_values_raw = self._hand_value_logits(x)
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
@@ -893,7 +840,7 @@ class BetterFFN(BaseMLPModel):
                 nn.init.ones_(module.weight)
 
         expansion_gain = math.sqrt(self.ffn_dim / self.hidden_dim)
-        for sequential in [self.trunk, self.policy_tower, self.value_tower]:
+        for sequential in [self.trunk, self.policy_tower, self.hand_value_head]:
             for block in sequential.modules():
                 if not isinstance(block, ResidualBlock):
                     continue
@@ -913,10 +860,7 @@ class BetterFFN(BaseMLPModel):
                     )
 
         # Guess hand values are around stddev 0.1.
-        self.value_hand_proj.get_submodule("linear_out").weight.data.mul_(0.1)
-        self.value_player_head.get_submodule("linear_out").weight.data.mul_(0.1)
-        self.value_dynamic_coeff.get_submodule("linear_out").weight.data.mul_(0.1)
-        self.value_player_bias.get_submodule("linear_out").weight.data.mul_(0.1)
+        self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
         if self.board_interaction_dim > 0:
             self.rank_board_interaction_out.weight.data.mul_(0.1)
             self.suit_board_interaction_out.weight.data.mul_(0.1)
