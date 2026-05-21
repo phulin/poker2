@@ -25,6 +25,7 @@ import {
   MAT_VEC_WGSL,
   PLAYER_BOARD_HADAMARD_WGSL,
   REPEAT_ROWS_WGSL,
+  RMS_NORM_BELIEF_EXACT_WGSL,
   RMS_NORM_BATCH_WGSL,
   RMS_NORM_BATCH_SMALL_WGSL,
   RMS_NORM_WGSL,
@@ -67,6 +68,11 @@ interface PredictOptions {
 }
 
 const BATCH_ROW_BLOCK = 4;
+
+export interface ExactBelief {
+  player: number;
+  hand: number;
+}
 
 export interface BetterFfnPrediction {
   handValues: Float32Array<ArrayBufferLike>;
@@ -143,6 +149,7 @@ export class BetterFfnWebGpuModel {
     | undefined;
   private readonly playerBoardHadamardPipeline: GPUComputePipeline;
   private readonly rmsNormPipeline: GPUComputePipeline;
+  private readonly rmsNormBeliefExactPipeline: GPUComputePipeline;
   private readonly rmsNormBatchPipeline: GPUComputePipeline;
   private readonly rmsNormBatchSmallPipeline: GPUComputePipeline;
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
@@ -310,6 +317,10 @@ export class BetterFfnWebGpuModel {
       RMS_NORM_WGSL,
       "better-ffn-rms-norm",
     );
+    this.rmsNormBeliefExactPipeline = this.pipeline(
+      RMS_NORM_BELIEF_EXACT_WGSL,
+      "better-ffn-rms-norm-belief-exact",
+    );
     this.rmsNormBatchPipeline = this.pipeline(
       RMS_NORM_BATCH_WGSL,
       "better-ffn-rms-norm-batch",
@@ -365,10 +376,11 @@ export class BetterFfnWebGpuModel {
     beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
     prepared?: PreparedBatchFeatures,
     beforeSubmit?: (encoder: GPUCommandEncoder, handValues: GPUBuffer) => void,
+    exactBelief?: ExactBelief,
   ): Promise<GpuHandValuePrediction> {
     const prediction = this.enqueuePredictBatch(envs, beliefs, {
       includePolicy: false,
-    }, prepared, beforeSubmit);
+    }, prepared, beforeSubmit, exactBelief);
     return {
       buffer: prediction.handValuesBuffer,
       batch: prediction.batch,
@@ -603,6 +615,7 @@ export class BetterFfnWebGpuModel {
     options: PredictOptions = {},
     prepared?: PreparedBatchFeatures,
     beforeSubmit?: (encoder: GPUCommandEncoder, handValues: GPUBuffer) => void,
+    exactBelief?: ExactBelief,
   ): {
     handValuesBuffer: GPUBuffer;
     policyLogitsBuffer?: GPUBuffer;
@@ -693,6 +706,7 @@ export class BetterFfnWebGpuModel {
       }
       const perPlayerBelief = empty(batch * numPlayers * hiddenDim);
       for (let player = 0; player < numPlayers; player += 1) {
+        if (exactBelief && exactBelief.player === player) continue;
         this.matVecBatch(
           this.handEmbeddingT,
           beliefBuffer,
@@ -719,6 +733,7 @@ export class BetterFfnWebGpuModel {
         hiddenDim,
         empty,
         uniform,
+        exactBelief,
       );
 
       const encodedFeatures = prepared
@@ -1688,9 +1703,25 @@ export class BetterFfnWebGpuModel {
     uniform: (
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
+    exactBelief?: ExactBelief,
   ): GPUBuffer {
     const normed = empty(batch * inDim);
-    this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+    if (exactBelief && prefix === "belief_proj" && inDim === 2 * hiddenDim) {
+      this.rmsNormBeliefExact(
+        prefix,
+        input,
+        normed,
+        batch,
+        inDim,
+        inDim,
+        inDim,
+        exactBelief,
+        hiddenDim,
+        uniform,
+      );
+    } else {
+      this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+    }
     const linear = empty(batch * hiddenDim);
     const linearInName = `${prefix}.linear_in.weight`;
     this.matVecBatch(
@@ -1816,6 +1847,45 @@ export class BetterFfnWebGpuModel {
           buffer: uniform(new Uint32Array([dim, batch, inputStride, outputStride])),
         },
       },
+    ]);
+  }
+
+  private rmsNormBeliefExact(
+    prefix: string,
+    input: GPUBuffer,
+    output: GPUBuffer,
+    batch: number,
+    dim: number,
+    inputStride: number,
+    outputStride: number,
+    exactBelief: ExactBelief,
+    hidden: number,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    this.submit(this.rmsNormBeliefExactPipeline, batch, [
+      { binding: 0, resource: { buffer: input } },
+      { binding: 1, resource: { buffer: this.tensor(`${prefix}.norm.weight`).buffer } },
+      { binding: 2, resource: { buffer: output } },
+      {
+        binding: 3,
+        resource: {
+          buffer: uniform(
+            new Uint32Array([
+              dim,
+              batch,
+              inputStride,
+              outputStride,
+              exactBelief.player * hidden,
+              exactBelief.hand,
+              NUM_HANDS,
+              hidden,
+            ]),
+          ),
+        },
+      },
+      { binding: 4, resource: { buffer: this.handEmbeddingT } },
     ]);
   }
 

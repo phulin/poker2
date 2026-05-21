@@ -1984,6 +1984,59 @@ ${REDUCE_PARTIAL_SQ_256_WGSL}
 }
 `;
 
+export const RMS_NORM_BELIEF_EXACT_WGSL = /* wgsl */ `
+struct Params {
+  dim: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+  exactOffset: u32,
+  exactHand: u32,
+  numHands: u32,
+  hidden: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read> weight: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var<storage, read> handEmbeddingT: array<f32>;
+
+var<workgroup> partialSq: array<f32, 256>;
+
+fn belief_input(inputBase: u32, i: u32) -> f32 {
+  if (i >= params.exactOffset && i < params.exactOffset + params.hidden) {
+    let dim = i - params.exactOffset;
+    return handEmbeddingT[dim * params.numHands + params.exactHand];
+  }
+  return input[inputBase + i];
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let batch = wid.x;
+  let lane = lid.x;
+  if (batch >= params.batch) {
+    return;
+  }
+  let inputBase = batch * params.inputStride;
+  let outputBase = batch * params.outputStride;
+  var sq = 0.0;
+  for (var i = lane; i < params.dim; i = i + 256u) {
+    let value = belief_input(inputBase, i);
+    sq = sq + value * value;
+  }
+  partialSq[lane] = sq;
+  workgroupBarrier();
+${REDUCE_PARTIAL_SQ_256_WGSL}
+
+  let invRms = inverseSqrt(partialSq[0] / f32(params.dim) + 1.0e-5);
+  for (var i = lane; i < params.dim; i = i + 256u) {
+    output[outputBase + i] = belief_input(inputBase, i) * invRms * weight[i];
+  }
+}
+`;
+
 export const RMS_NORM_BATCH_SMALL_WGSL = /* wgsl */ `
 struct Params {
   dim: u32,

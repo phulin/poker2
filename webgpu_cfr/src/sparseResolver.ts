@@ -1,5 +1,6 @@
 import type {
   BetterFfnWebGpuModel,
+  ExactBelief,
   PreparedBatchFeatures,
 } from "./betterFfnWebGpuModel.js";
 import { normalizeBeliefVector } from "./beliefs.js";
@@ -133,6 +134,7 @@ export class SparseCfrResolver {
     const beliefsAvg = new Float32Array(totalNodes * 2 * NUM_HANDS);
 
     const rootBeliefs = this.rootBeliefsForEnv(tree.nodes[0]!.env, inputBeliefs);
+    const exactBelief = this.exactBelief(rootBeliefs);
     this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
     this.copyBeliefsToNode(rootBeliefs, beliefsAvg, 0);
 
@@ -204,6 +206,7 @@ export class SparseCfrResolver {
         (options.readPolicy ?? true) ||
           (options.readActionProbs ?? true) ||
           (options.selectedAction !== undefined && (options.readBeliefs ?? true)),
+        exactBelief,
       );
     }
 
@@ -323,6 +326,28 @@ export class SparseCfrResolver {
     return Array.from(
       new Uint32Array(beliefs.buffer, beliefs.byteOffset, beliefs.length),
     ).join(",");
+  }
+
+  private exactBelief(beliefs: Float32Array<ArrayBuffer>): ExactBelief | undefined {
+    for (let player = 0; player < 2; player += 1) {
+      const offset = player * NUM_HANDS;
+      let hand = -1;
+      let mass = 0;
+      for (let i = 0; i < NUM_HANDS; i += 1) {
+        const value = beliefs[offset + i]!;
+        if (value <= EPS) continue;
+        if (hand >= 0) {
+          hand = -1;
+          break;
+        }
+        hand = i;
+        mass = value;
+      }
+      if (hand >= 0 && Math.abs(mass - 1) <= 1.0e-6) {
+        return { player, hand };
+      }
+    }
+    return undefined;
   }
 
   private buildTree(rootEnv: PublicHunlEnv, maxDepth: number): SparseTree {
@@ -526,6 +551,7 @@ export class SparseCfrResolver {
     iterations: number,
     cfrAvg: boolean,
     readPolicyAvg: boolean,
+    exactBelief?: ExactBelief,
   ): Promise<void> {
     if (!this.gpuKernels) {
       throw new Error("GPU sparse kernels are not initialized");
@@ -594,6 +620,7 @@ export class SparseCfrResolver {
           staticGpu.showdownRankBuffer,
           staticGpu.showdownPayoffBuffer,
           staticGpu.preparedLeafFeatures,
+          exactBelief,
         ),
       );
       pendingLeafDisposals.push(initialLeafDispose);
@@ -644,6 +671,7 @@ export class SparseCfrResolver {
               staticGpu.showdownRankBuffer,
               staticGpu.showdownPayoffBuffer,
               staticGpu.preparedLeafFeatures,
+              exactBelief,
             ),
           );
           pendingLeafDisposals.push(disposeLeafPrediction);
@@ -712,6 +740,7 @@ export class SparseCfrResolver {
     showdownRankBuffer: GPUBuffer,
     showdownPayoffBuffer: GPUBuffer,
     preparedLeafFeatures?: PreparedBatchFeatures,
+    exactBelief?: ExactBelief,
   ): Promise<() => void> {
     if (!this.gpuKernels) return () => undefined;
     const device = this.model.device;
@@ -761,6 +790,7 @@ export class SparseCfrResolver {
           leafBatch.modelNodeIndices.length,
         );
       },
+      exactBelief,
     );
     scatterParams?.destroy();
     return () => prediction.dispose();
