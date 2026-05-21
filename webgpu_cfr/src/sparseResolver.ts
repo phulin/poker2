@@ -551,6 +551,7 @@ export class SparseCfrResolver {
     const denomBuffer = makeEmptyStorageBuffer(device, totalNodes * 2);
     const opponentPolicyBuffer = makeEmptyStorageBuffer(device, policyCount);
     const regretWeightsBuffer = makeEmptyStorageBuffer(device, policyCount);
+    const regretWeightAggregatesBuffer = makeEmptyStorageBuffer(device, totalNodes * 53);
     const modelLeafBeliefsBuffer = makeEmptyStorageBuffer(
       device,
       leafBatch.modelNodeIndices.length * 2 * NUM_HANDS,
@@ -612,6 +613,7 @@ export class SparseCfrResolver {
             regretBeliefsBuffer,
             valuesBuffer,
             regretWeightsBuffer,
+            regretWeightAggregatesBuffer,
             regretsBuffer,
             policyBuffer,
             reachBuffer,
@@ -687,6 +689,7 @@ export class SparseCfrResolver {
       denomBuffer.destroy();
       opponentPolicyBuffer.destroy();
       regretWeightsBuffer.destroy();
+      regretWeightAggregatesBuffer.destroy();
       modelLeafBeliefsBuffer.destroy();
     }
   }
@@ -882,6 +885,7 @@ export class SparseCfrResolver {
     regretBeliefsBuffer: GPUBuffer,
     valuesBuffer: GPUBuffer,
     regretWeightsBuffer: GPUBuffer,
+    regretWeightAggregatesBuffer: GPUBuffer,
     regretsBuffer: GPUBuffer,
     policyBuffer: GPUBuffer,
     reachBuffer: GPUBuffer,
@@ -896,10 +900,11 @@ export class SparseCfrResolver {
     const encoder = this.model.device.createCommandEncoder();
     const regretWeightEnd = tree.depthOffsets[tree.treeDepth] ?? tree.nodes.length;
     const params: GPUBuffer[] = [
-      this.gpuKernels.encodeComputeRegretWeightsRange(
+      ...this.gpuKernels.encodeComputeRegretWeightsAggregateRange(
         encoder,
         treeBuffers,
         regretBeliefsBuffer,
+        regretWeightAggregatesBuffer,
         regretWeightsBuffer,
         0,
         regretWeightEnd,

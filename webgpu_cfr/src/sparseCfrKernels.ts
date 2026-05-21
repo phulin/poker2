@@ -454,6 +454,99 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_REGRET_WEIGHT_AGGREGATE_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  start: u32,
+  end: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> toAct: array<u32>;
+@group(0) @binding(1) var<storage, read> handCard0: array<u32>;
+@group(0) @binding(2) var<storage, read> handCard1: array<u32>;
+@group(0) @binding(3) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(4) var<storage, read_write> aggregates: array<f32>;
+@group(0) @binding(5) var<uniform> params: Params;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let node = params.start + gid.x;
+  if (node >= params.end) {
+    return;
+  }
+
+  var cardSums: array<f32, 52>;
+  for (var card = 0u; card < 52u; card = card + 1u) {
+    cardSums[card] = 0.0;
+  }
+
+  let actor = toAct[node];
+  let opp = 1u - actor;
+  let beliefBase = (node * 2u + opp) * params.numHands;
+  var total = 0.0;
+  for (var hand = 0u; hand < params.numHands; hand = hand + 1u) {
+    let value = beliefs[beliefBase + hand];
+    total = total + value;
+    cardSums[handCard0[hand]] = cardSums[handCard0[hand]] + value;
+    cardSums[handCard1[hand]] = cardSums[handCard1[hand]] + value;
+  }
+
+  let outBase = node * 53u;
+  aggregates[outBase] = total;
+  for (var card = 0u; card < 52u; card = card + 1u) {
+    aggregates[outBase + 1u + card] = cardSums[card];
+  }
+}
+`;
+
+export const SPARSE_REGRET_WEIGHT_FROM_AGGREGATE_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  start: u32,
+  end: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> toAct: array<u32>;
+@group(0) @binding(1) var<storage, read> allowedMask: array<u32>;
+@group(0) @binding(2) var<storage, read> handCard0: array<u32>;
+@group(0) @binding(3) var<storage, read> handCard1: array<u32>;
+@group(0) @binding(4) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(5) var<storage, read> aggregates: array<f32>;
+@group(0) @binding(6) var<storage, read_write> regretWeights: array<f32>;
+@group(0) @binding(7) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let nodeCount = params.end - params.start;
+  let total = nodeCount * params.numHands;
+  if (linear >= total) {
+    return;
+  }
+
+  let hand = linear % params.numHands;
+  let node = params.start + linear / params.numHands;
+  let outIdx = node * params.numHands + hand;
+  var weight = 0.0;
+  if (allowedMask[outIdx] != 0u) {
+    let actor = toAct[node];
+    let opp = 1u - actor;
+    let beliefBase = (node * 2u + opp) * params.numHands;
+    let aggregateBase = node * 53u;
+    let hand0 = handCard0[hand];
+    let hand1 = handCard1[hand];
+    weight =
+      aggregates[aggregateBase] -
+      aggregates[aggregateBase + 1u + hand0] -
+      aggregates[aggregateBase + 1u + hand1] +
+      beliefs[beliefBase + hand];
+  }
+  regretWeights[outIdx] = weight;
+}
+`;
+
 export const SPARSE_GATHER_NODE_BELIEFS_WGSL = /* wgsl */ `
 struct Params {
   numHands: u32,
@@ -632,6 +725,8 @@ export class SparseCfrGpuKernels {
   private readonly regretTailPipeline: GPUComputePipeline;
   private readonly opponentPolicyPipeline: GPUComputePipeline;
   private readonly regretWeightPipeline: GPUComputePipeline;
+  private readonly regretWeightAggregatePipeline: GPUComputePipeline;
+  private readonly regretWeightFromAggregatePipeline: GPUComputePipeline;
   private readonly gatherNodeBeliefsPipeline: GPUComputePipeline;
   private readonly scatterNodeValuesPipeline: GPUComputePipeline;
   private readonly showdownValuesPipeline: GPUComputePipeline;
@@ -677,6 +772,14 @@ export class SparseCfrGpuKernels {
     this.regretWeightPipeline = this.pipeline(
       SPARSE_REGRET_WEIGHT_WGSL,
       "sparse-cfr-regret-weight",
+    );
+    this.regretWeightAggregatePipeline = this.pipeline(
+      SPARSE_REGRET_WEIGHT_AGGREGATE_WGSL,
+      "sparse-cfr-regret-weight-aggregate",
+    );
+    this.regretWeightFromAggregatePipeline = this.pipeline(
+      SPARSE_REGRET_WEIGHT_FROM_AGGREGATE_WGSL,
+      "sparse-cfr-regret-weight-from-aggregate",
     );
     this.gatherNodeBeliefsPipeline = this.pipeline(
       SPARSE_GATHER_NODE_BELIEFS_WGSL,
@@ -1014,6 +1117,59 @@ export class SparseCfrGpuKernels {
       Math.ceil(((end - start) * tree.numHands) / 128),
     );
     return params;
+  }
+
+  encodeComputeRegretWeightsAggregateRange(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    beliefs: GPUBuffer,
+    aggregates: GPUBuffer,
+    regretWeights: GPUBuffer,
+    start: number,
+    end: number,
+  ): GPUBuffer[] {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, start, end, 0]),
+    );
+    const aggregateBindGroup = this.device.createBindGroup({
+      layout: this.regretWeightAggregatePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: tree.toAct } },
+        { binding: 1, resource: { buffer: tree.handCard0 } },
+        { binding: 2, resource: { buffer: tree.handCard1 } },
+        { binding: 3, resource: { buffer: beliefs } },
+        { binding: 4, resource: { buffer: aggregates } },
+        { binding: 5, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.regretWeightAggregatePipeline,
+      aggregateBindGroup,
+      Math.max(0, end - start),
+    );
+
+    const applyBindGroup = this.device.createBindGroup({
+      layout: this.regretWeightFromAggregatePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: tree.toAct } },
+        { binding: 1, resource: { buffer: tree.allowedMask } },
+        { binding: 2, resource: { buffer: tree.handCard0 } },
+        { binding: 3, resource: { buffer: tree.handCard1 } },
+        { binding: 4, resource: { buffer: beliefs } },
+        { binding: 5, resource: { buffer: aggregates } },
+        { binding: 6, resource: { buffer: regretWeights } },
+        { binding: 7, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.regretWeightFromAggregatePipeline,
+      applyBindGroup,
+      Math.ceil(((end - start) * tree.numHands) / 64),
+    );
+    return [params];
   }
 
   encodeGatherNodeBeliefs(
