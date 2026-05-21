@@ -454,6 +454,7 @@ class RebelCFRTrainer:
         policy_loss_all: torch.Tensor,
         fresh_value_loss: float | None = None,
         fresh_value_batch: RebelBatch | None = None,
+        fresh_policy_batch: RebelBatch | None = None,
     ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
         grad_norm_clipped = torch.nn.utils.get_total_norm(
             p.grad for p in self.model.parameters() if p.grad is not None
@@ -637,6 +638,27 @@ class RebelCFRTrainer:
                 .mean(dim=1),
                 batch=fresh_value_batch,
             )
+
+        if (
+            fresh_policy_batch is not None
+            and fresh_policy_batch.policy_targets is not None
+        ):
+            with torch.no_grad():
+                self.model.eval()
+                fresh_policy_batch = fresh_policy_batch.to(self.device)
+                with self._model_autocast():
+                    fresh_policy_output = self.model.repeat(
+                        fresh_policy_batch.features,
+                        count=self.cfg.model.num_supervisions,
+                        include_policy=True,
+                        include_value=False,
+                    )
+                fresh_policy_loss_dict = self.loss_fn.forward_policy(
+                    fresh_policy_output, fresh_policy_batch
+                )
+                metrics["fresh_policy_target_model_kl"] = fresh_policy_loss_dict[
+                    "target_model_kl"
+                ].item()
         return metrics
 
     def _get_stratify_streets(self, step: int) -> list[float] | None:
@@ -819,8 +841,8 @@ class RebelCFRTrainer:
         self, step: int
     ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
         with self._eval_swap():
-            fresh_value_batch, _ = self.data_generator.generate_data(
-                self.K_value, return_policy_batch=False
+            fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
+                self.K_value, return_policy_batch=True
             )
 
             # Warmup: make sure we have enough samples.
@@ -969,6 +991,7 @@ class RebelCFRTrainer:
             torch.cat(value_loss_update_all),
             torch.cat(policy_loss_update_all),
             fresh_value_batch=fresh_value_batch,
+            fresh_policy_batch=fresh_policy_batch,
         )
 
         return metrics
