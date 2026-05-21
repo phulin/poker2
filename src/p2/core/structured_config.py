@@ -234,6 +234,8 @@ class ModelConfig:
     enforce_zero_sum: bool = True
     board_interaction_dim: int = 0
     policy_rank: int = 64
+    policy_hand_bias_rank: int = 32
+    value_rank: int = 128
     policy_factor_scale: float = 0.5
 
     # Better TRM parameters

@@ -10,7 +10,7 @@ from p2.env.types import GameState, PlayerState
 from p2.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 from p2.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from p2.models.mlp.better_features import context_length
-from p2.models.mlp.better_ffn import BetterFFN
+from p2.models.mlp.better_ffn import HAND_DYNAMIC_FEATURE_DIM, BetterFFN
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.policy import CategoricalPolicyV1
 
@@ -80,6 +80,8 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
         num_value_layers=1,
         num_players=num_players,
         policy_rank=8,
+        policy_hand_bias_rank=4,
+        value_rank=8,
         policy_factor_scale=0.5,
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(0))
@@ -96,9 +98,24 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
         num_actions * model.policy_rank,
         model.hidden_dim,
     )
-    assert model.policy_hand_bias.linear_out.weight.shape == (1, model.hidden_dim)
+    assert model.policy_hand_bias.linear_out.weight.shape == (
+        model.policy_hand_bias_rank,
+        model.hidden_dim,
+    )
     assert model.policy_hand_bias_action.linear_out.weight.shape == (
-        num_actions,
+        num_actions * model.policy_hand_bias_rank,
+        model.hidden_dim,
+    )
+    assert model.policy_dynamic_coeff.linear_out.weight.shape == (
+        num_actions * HAND_DYNAMIC_FEATURE_DIM,
+        model.hidden_dim,
+    )
+    assert model.value_hand_proj.linear_out.weight.shape == (
+        model.value_rank,
+        model.hidden_dim,
+    )
+    assert model.value_player_head.linear_out.weight.shape == (
+        num_players * model.value_rank,
         model.hidden_dim,
     )
     torch.testing.assert_close(model.policy_factor_scale.detach(), torch.tensor(0.5))

@@ -164,6 +164,8 @@ class RebelCFRTrainer:
                 enforce_zero_sum=cfg.model.enforce_zero_sum,
                 board_interaction_dim=cfg.model.board_interaction_dim,
                 policy_rank=cfg.model.policy_rank,
+                policy_hand_bias_rank=cfg.model.policy_hand_bias_rank,
+                value_rank=cfg.model.value_rank,
                 policy_factor_scale=cfg.model.policy_factor_scale,
                 nonlinearity=cfg.model.nonlinearity,
             )
@@ -360,6 +362,8 @@ class RebelCFRTrainer:
                 enforce_zero_sum=cfg.model.enforce_zero_sum,
                 board_interaction_dim=cfg.model.board_interaction_dim,
                 policy_rank=cfg.model.policy_rank,
+                policy_hand_bias_rank=cfg.model.policy_hand_bias_rank,
+                value_rank=cfg.model.value_rank,
                 policy_factor_scale=cfg.model.policy_factor_scale,
                 nonlinearity=cfg.model.nonlinearity,
             )

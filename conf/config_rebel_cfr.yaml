@@ -58,12 +58,14 @@ model:
   range_hidden_dim: 256
   ffn_dim: 1024
   board_interaction_dim: 64
-  policy_rank: 64
-  policy_factor_scale: 0.5
+  policy_rank: 128
+  policy_hand_bias_rank: 32
+  value_rank: 128
+  policy_factor_scale: 1.0
 
   shared_trunk: true # DO NOT detach policy head from trunk
   num_hidden_layers: 4
-  num_value_layers: 2
+  num_value_layers: 1
   num_policy_layers: 2
 
   detach_value_head: false

@@ -17,6 +17,10 @@ from p2.models.model_output import ModelOutput
 from p2.utils.profiling import profile
 
 
+HAND_STATIC_FEATURE_DIM = 8
+HAND_DYNAMIC_FEATURE_DIM = 15
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, inner: nn.Module, alpha: float) -> None:
         super().__init__()
@@ -85,6 +89,8 @@ class BetterFFN(BaseMLPModel):
         enforce_zero_sum: bool = True,
         board_interaction_dim: int = 0,
         policy_rank: int = 64,
+        policy_hand_bias_rank: int = 32,
+        value_rank: int = 128,
         policy_factor_scale: float = 0.5,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
@@ -98,6 +104,8 @@ class BetterFFN(BaseMLPModel):
         self.enforce_zero_sum = enforce_zero_sum
         self.board_interaction_dim = board_interaction_dim
         self.policy_rank = policy_rank
+        self.policy_hand_bias_rank = policy_hand_bias_rank
+        self.value_rank = value_rank
 
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
@@ -105,6 +113,10 @@ class BetterFFN(BaseMLPModel):
             raise ValueError("board_interaction_dim must be non-negative")
         if policy_rank <= 0:
             raise ValueError("policy_rank must be positive")
+        if policy_hand_bias_rank <= 0:
+            raise ValueError("policy_hand_bias_rank must be positive")
+        if value_rank <= 0:
+            raise ValueError("value_rank must be positive")
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
@@ -120,6 +132,12 @@ class BetterFFN(BaseMLPModel):
         self.register_buffer("hand_card_b", combos[:, 1].long(), persistent=False)
         self.register_buffer("hand_ranks", combos % 13, persistent=False)
         self.register_buffer("hand_suits", combos // 13, persistent=False)
+        hand_static_features = self._build_hand_static_features(
+            self.hand_ranks, self.hand_suits
+        )
+        self.register_buffer(
+            "hand_static_features", hand_static_features, persistent=False
+        )
         hand_rank_pair_idx = self._unordered_pair_index(
             self.hand_ranks[:, 0], self.hand_ranks[:, 1], 13
         )
@@ -145,6 +163,9 @@ class BetterFFN(BaseMLPModel):
         )
         belief_in_dim = num_players * hidden_dim
         belief_hidden_dim = num_players * effective_range_hidden_dim
+        self.hand_feature_proj = nn.Linear(
+            HAND_STATIC_FEATURE_DIM, hidden_dim, bias=False
+        )
         self.belief_proj = ffn_block(
             belief_in_dim, belief_hidden_dim, hidden_dim, nonlinearity
         )
@@ -190,12 +211,20 @@ class BetterFFN(BaseMLPModel):
             hidden_dim, num_actions * self.policy_rank
         )
         self.policy_hand_gate = output_projection(hidden_dim, self.policy_rank)
-        self.policy_range_coeff = output_projection(hidden_dim, num_actions * 3)
+        self.policy_dynamic_coeff = output_projection(
+            hidden_dim, num_actions * HAND_DYNAMIC_FEATURE_DIM
+        )
         self.policy_action_bias = output_projection(hidden_dim, num_actions)
-        self.policy_hand_bias = output_projection(hidden_dim, 1)
-        self.policy_hand_bias_action = output_projection(hidden_dim, num_actions)
+        self.policy_hand_bias = output_projection(
+            hidden_dim, self.policy_hand_bias_rank
+        )
+        self.policy_hand_bias_action = output_projection(
+            hidden_dim, num_actions * self.policy_hand_bias_rank
+        )
         self.policy_hand_norm = nn.RMSNorm(hidden_dim, eps=1e-5)
-        self.policy_factor_scale = nn.Parameter(torch.tensor(float(policy_factor_scale)))
+        self.policy_factor_scale = nn.Parameter(
+            torch.tensor(float(policy_factor_scale))
+        )
 
         layers = [
             ResidualBlock(
@@ -203,8 +232,15 @@ class BetterFFN(BaseMLPModel):
             )
             for _ in range(num_value_layers)
         ]
-        layers.append(output_projection(hidden_dim, num_players * NUM_HANDS))
-        self.hand_value_head = nn.Sequential(*layers)
+        self.value_tower = nn.Sequential(*layers)
+        self.value_hand_proj = output_projection(hidden_dim, self.value_rank)
+        self.value_player_head = output_projection(
+            hidden_dim, num_players * self.value_rank
+        )
+        self.value_dynamic_coeff = output_projection(
+            hidden_dim, num_players * HAND_DYNAMIC_FEATURE_DIM
+        )
+        self.value_player_bias = output_projection(hidden_dim, num_players)
 
     @staticmethod
     def _unordered_pair_index(
@@ -230,10 +266,36 @@ class BetterFFN(BaseMLPModel):
         )
         return counts.scatter_add(1, safe_indices, valid.to(dtype))
 
+    @staticmethod
+    def _build_hand_static_features(
+        hand_ranks: torch.Tensor, hand_suits: torch.Tensor
+    ) -> torch.Tensor:
+        rank_a = hand_ranks[:, 0].to(torch.float32)
+        rank_b = hand_ranks[:, 1].to(torch.float32)
+        suit_a = hand_suits[:, 0]
+        suit_b = hand_suits[:, 1]
+        hi = torch.maximum(rank_a, rank_b)
+        lo = torch.minimum(rank_a, rank_b)
+        gap = (hi - lo).clamp(min=0.0)
+        return torch.stack(
+            [
+                (rank_a == rank_b).to(torch.float32),
+                (suit_a == suit_b).to(torch.float32),
+                gap / 12.0,
+                hi / 12.0,
+                lo / 12.0,
+                (hi == 12).to(torch.float32),
+                (lo >= 8).to(torch.float32),
+                (gap <= 1).to(torch.float32),
+            ],
+            dim=-1,
+        )
+
     def _hand_embedding(self) -> torch.Tensor:
         """Per-hand exact-card embedding — shape [NUM_HANDS, hidden_dim]."""
         card_emb = self.card_embedding(self.hand_combos)
-        return card_emb.sum(dim=1)
+        static = self.hand_static_features.to(dtype=card_emb.dtype)
+        return card_emb.sum(dim=1) + self.hand_feature_proj(static)
 
     def _calculate_unblocked_mass(self, target: torch.Tensor) -> torch.Tensor:
         target_batched = target.view(-1, NUM_HANDS).float()
@@ -257,35 +319,155 @@ class BetterFFN(BaseMLPModel):
         )
         return unblocked.clamp_min(0.0).view(target.shape)
 
-    def _policy_range_features(
-        self,
-        player_beliefs: torch.Tensor,
-        actor: torch.Tensor,
-    ) -> torch.Tensor:
-        actor_belief = player_beliefs.gather(
-            1, actor[:, None, None].expand(-1, 1, NUM_HANDS)
-        ).squeeze(1)
-        opp = 1 - actor
-        opp_belief = player_beliefs.gather(
-            1, opp[:, None, None].expand(-1, 1, NUM_HANDS)
-        ).squeeze(1)
-        opp_unblocked = self._calculate_unblocked_mass(opp_belief).to(
-            dtype=actor_belief.dtype
+    def _card_mass(self, belief: torch.Tensor) -> torch.Tensor:
+        belief_batched = belief.view(-1, NUM_HANDS).float()
+        card_mass = torch.zeros(
+            belief_batched.shape[0],
+            52,
+            dtype=belief_batched.dtype,
+            device=belief_batched.device,
         )
+        card_a_idx = self.hand_card_a[None, :].expand(belief_batched.shape[0], -1)
+        card_b_idx = self.hand_card_b[None, :].expand(belief_batched.shape[0], -1)
+        card_mass.scatter_add_(1, card_a_idx, belief_batched)
+        card_mass.scatter_add_(1, card_b_idx, belief_batched)
+        return card_mass.view(*belief.shape[:-1], 52)
+
+    def _board_hand_features(
+        self, board: torch.Tensor, dtype: torch.dtype
+    ) -> torch.Tensor:
+        valid = board >= 0
+        ranks = torch.where(valid, board % 13, torch.zeros_like(board))
+        suits = torch.where(valid, board // 13, torch.zeros_like(board))
+        rank_counts = self._index_counts(ranks, valid, 13, dtype)
+        suit_counts = self._index_counts(suits, valid, 4, dtype)
+
+        board_safe = torch.where(valid, board, torch.full_like(board, 52))
+        board_onehot = torch.zeros(
+            board.shape[0], 53, dtype=torch.bool, device=board.device
+        )
+        board_onehot.scatter_(1, board_safe, valid)
+        board_onehot = board_onehot[:, :52]
+
+        rank_a = rank_counts[:, self.hand_ranks[:, 0]]
+        rank_b = rank_counts[:, self.hand_ranks[:, 1]]
+        suit_a = suit_counts[:, self.hand_suits[:, 0]]
+        suit_b = suit_counts[:, self.hand_suits[:, 1]]
+        blocked = (
+            board_onehot[:, self.hand_card_a] | board_onehot[:, self.hand_card_b]
+        ).to(dtype)
+        rank_sum = rank_a + rank_b
+        suit_sum = suit_a + suit_b
         return torch.stack(
             [
-                actor_belief,
-                actor_belief.clamp_min(1e-8).log(),
-                opp_unblocked,
+                rank_a / 4.0,
+                rank_b / 4.0,
+                rank_sum / 4.0,
+                (rank_a * rank_b) / 16.0,
+                suit_a / 5.0,
+                suit_b / 5.0,
+                suit_sum / 5.0,
+                blocked,
             ],
             dim=-1,
         )
+
+    def _dynamic_hand_features_from_beliefs(
+        self,
+        own_belief: torch.Tensor,
+        opp_belief: torch.Tensor,
+        board: torch.Tensor,
+    ) -> torch.Tensor:
+        opp_unblocked = self._calculate_unblocked_mass(opp_belief)
+        own_card_mass = self._card_mass(own_belief)
+        opp_card_mass = self._card_mass(opp_belief)
+        own_card_a = own_card_mass[..., self.hand_card_a]
+        own_card_b = own_card_mass[..., self.hand_card_b]
+        opp_card_a = opp_card_mass[..., self.hand_card_a]
+        opp_card_b = opp_card_mass[..., self.hand_card_b]
+        board_features = self._board_hand_features(board, own_belief.dtype)
+        if own_belief.dim() == 3:
+            board_features = board_features[:, None].expand(
+                -1, own_belief.shape[1], -1, -1
+            )
+        range_features = torch.stack(
+            [
+                own_belief,
+                own_belief.clamp_min(1e-8).log(),
+                opp_unblocked,
+                own_card_a,
+                own_card_b,
+                opp_card_a,
+                opp_card_b,
+            ],
+            dim=-1,
+        )
+        return torch.cat([range_features, board_features], dim=-1)
+
+    def _dynamic_hand_features(
+        self,
+        player_beliefs: torch.Tensor,
+        board: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.num_players != 2:
+            raise ValueError("BetterFFN dynamic hand features require two players")
+        return self._dynamic_hand_features_from_beliefs(
+            player_beliefs,
+            player_beliefs.flip(dims=[1]),
+            board,
+        )
+
+    def _policy_dynamic_features(
+        self,
+        player_beliefs: torch.Tensor,
+        actor: torch.Tensor,
+        board: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.num_players != 2:
+            raise ValueError("BetterFFN dynamic hand features require two players")
+        actor_belief = player_beliefs.gather(
+            1,
+            actor[:, None, None].expand(-1, 1, NUM_HANDS),
+        ).squeeze(1)
+        opp = 1 - actor
+        opp_belief = player_beliefs.gather(
+            1,
+            opp[:, None, None].expand(-1, 1, NUM_HANDS),
+        ).squeeze(1)
+        return self._dynamic_hand_features_from_beliefs(actor_belief, opp_belief, board)
+
+    def _hand_value_logits(
+        self,
+        value_input: torch.Tensor,
+        player_beliefs: torch.Tensor,
+        board: torch.Tensor,
+    ) -> torch.Tensor:
+        value_state = self.value_tower(value_input)
+        hand_emb = self.policy_hand_norm(self._hand_embedding())
+        hand_vec = self.value_hand_proj(hand_emb)
+        player_vec = self.value_player_head(value_state).view(
+            -1, self.num_players, self.value_rank
+        )
+        hand_values = torch.einsum("hr,bpr->bph", hand_vec, player_vec)
+        hand_values = hand_values / math.sqrt(self.value_rank)
+        dynamic_features = self._dynamic_hand_features(player_beliefs, board).to(
+            dtype=value_state.dtype
+        )
+        dynamic_coeff = self.value_dynamic_coeff(value_state).view(
+            -1, self.num_players, HAND_DYNAMIC_FEATURE_DIM
+        )
+        hand_values = hand_values + torch.einsum(
+            "bphf,bpf->bph", dynamic_features, dynamic_coeff
+        )
+        hand_values = hand_values + self.value_player_bias(value_state)[:, :, None]
+        return hand_values
 
     def _policy_logits(
         self,
         policy_input: torch.Tensor,
         player_beliefs: torch.Tensor,
         actor: torch.Tensor,
+        board: torch.Tensor,
     ) -> torch.Tensor:
         policy_state = self.policy_tower(policy_input)
         action_emb = self.policy_action_head(policy_state).view(
@@ -297,17 +479,19 @@ class BetterFFN(BaseMLPModel):
         hand_vec = self.policy_hand_proj(hand_emb)
         logits = torch.einsum("hr,bar->bha", hand_vec, action_emb)
         logits = logits * (self.policy_factor_scale / math.sqrt(self.policy_rank))
-        hand_bias = self.policy_hand_bias(hand_emb).squeeze(-1)
-        hand_bias_action = self.policy_hand_bias_action(policy_state)
-        logits = logits + hand_bias[None, :, None] * hand_bias_action[:, None, :]
-
-        range_features = self._policy_range_features(
-            player_beliefs, actor
-        ).to(dtype=policy_state.dtype)
-        range_coeff = self.policy_range_coeff(policy_state).view(
-            -1, self.num_actions, 3
+        hand_bias = self.policy_hand_bias(hand_emb)
+        hand_bias_action = self.policy_hand_bias_action(policy_state).view(
+            -1, self.num_actions, self.policy_hand_bias_rank
         )
-        logits = logits + torch.einsum("bhf,baf->bha", range_features, range_coeff)
+        logits = logits + torch.einsum("hk,bak->bha", hand_bias, hand_bias_action)
+
+        dynamic_features = self._policy_dynamic_features(
+            player_beliefs, actor, board
+        ).to(dtype=policy_state.dtype)
+        dynamic_coeff = self.policy_dynamic_coeff(policy_state).view(
+            -1, self.num_actions, HAND_DYNAMIC_FEATURE_DIM
+        )
+        logits = logits + torch.einsum("bhf,baf->bha", dynamic_features, dynamic_coeff)
         logits = logits + self.policy_action_bias(policy_state)[:, None, :]
         return logits
 
@@ -392,7 +576,7 @@ class BetterFFN(BaseMLPModel):
         )
         policy_input = x if self.shared_trunk else flat_features.detach()
         policy_logits = self._policy_logits(
-            policy_input, player_beliefs, features.to_act
+            policy_input, player_beliefs, features.to_act, features.board
         )
         return ModelOutput(policy_logits=policy_logits)
 
@@ -414,7 +598,7 @@ class BetterFFN(BaseMLPModel):
         player_beliefs, _, x = self._forward_base(
             features, static_base_features=static_base_features
         )
-        hand_values_raw = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
+        hand_values_raw = self._hand_value_logits(x, player_beliefs, features.board)
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
@@ -439,9 +623,9 @@ class BetterFFN(BaseMLPModel):
         )
         policy_input = x if self.shared_trunk else flat_features.detach()
         policy_logits = self._policy_logits(
-            policy_input, player_beliefs, features.to_act
+            policy_input, player_beliefs, features.to_act, features.board
         )
-        hand_values_raw = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
+        hand_values_raw = self._hand_value_logits(x, player_beliefs, features.board)
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
@@ -498,7 +682,7 @@ class BetterFFN(BaseMLPModel):
                 nn.init.ones_(module.weight)
 
         expansion_gain = math.sqrt(self.ffn_dim / self.hidden_dim)
-        for sequential in [self.trunk, self.policy_tower, self.hand_value_head]:
+        for sequential in [self.trunk, self.policy_tower, self.value_tower]:
             for block in sequential.modules():
                 if not isinstance(block, ResidualBlock):
                     continue
@@ -518,7 +702,10 @@ class BetterFFN(BaseMLPModel):
                     )
 
         # Guess hand values are around stddev 0.1.
-        self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
+        self.value_hand_proj.get_submodule("linear_out").weight.data.mul_(0.1)
+        self.value_player_head.get_submodule("linear_out").weight.data.mul_(0.1)
+        self.value_dynamic_coeff.get_submodule("linear_out").weight.data.mul_(0.1)
+        self.value_player_bias.get_submodule("linear_out").weight.data.mul_(0.1)
         if self.board_interaction_dim > 0:
             self.rank_board_interaction_out.weight.data.mul_(0.1)
             self.suit_board_interaction_out.weight.data.mul_(0.1)
