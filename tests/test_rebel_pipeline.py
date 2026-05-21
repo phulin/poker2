@@ -1,6 +1,11 @@
 import torch
 
-from p2.core.structured_config import Config, PolicyNodeWeighting, ValueHeadType
+from p2.core.structured_config import (
+    Config,
+    PolicyLossType,
+    PolicyNodeWeighting,
+    ValueHeadType,
+)
 from p2.env.card_utils import (
     NUM_HANDS,
     combo_suit_permutation_inverse_tensor,
@@ -204,6 +209,38 @@ def test_rebel_policy_loss_supports_node_reach_weighting_modes():
         < losses[PolicyNodeWeighting.sqrt_reach]
     )
     assert losses[PolicyNodeWeighting.sqrt_reach] < losses[PolicyNodeWeighting.uniform]
+
+
+def test_rebel_policy_loss_type_switches_objective_without_changing_kl_metric():
+    batch_size, num_actions = 1, 2
+    beliefs = torch.full((batch_size, 2, NUM_HANDS), 1.0 / NUM_HANDS)
+    logits = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    policy_targets = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    policy_targets[..., 1] = 1.0
+    features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    batch = RebelBatch(
+        features=features,
+        policy_targets=policy_targets,
+        value_targets=None,
+        legal_masks=torch.ones(batch_size, num_actions, dtype=torch.bool),
+    )
+    output = ModelOutput(policy_logits=logits, value=None, hand_values=None)
+
+    ce_out = RebelSupervisedLoss(
+        policy_loss_type=PolicyLossType.cross_entropy
+    ).forward_policy(output, batch)
+    mse_out = RebelSupervisedLoss(policy_loss_type=PolicyLossType.mse).forward_policy(
+        output, batch
+    )
+
+    torch.testing.assert_close(ce_out["target_model_kl"], mse_out["target_model_kl"])
+    assert mse_out["policy_loss"] < ce_out["policy_loss"]
 
 
 def test_rebel_cfr_trainer_single_step_cpu():

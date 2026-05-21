@@ -211,6 +211,7 @@ class RebelCFRTrainer:
             permutation_weight=cfg.train.permutation_coef,
             num_players=self.num_players,
             policy_node_weighting=cfg.train.policy_node_weighting,
+            policy_loss_type=cfg.train.policy_loss_type,
         )
         self.loss_fn.to(self.device)
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":

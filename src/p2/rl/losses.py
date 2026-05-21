@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from p2.core.structured_config import (
     KLType,
     PPOClipping,
+    PolicyLossType,
     PolicyNodeWeighting,
     ValueLossType,
 )
@@ -741,6 +742,7 @@ class RebelSupervisedLoss(nn.Module):
         entropy_coef: float | None = None,
         num_players: int = 2,
         policy_node_weighting: PolicyNodeWeighting | str = PolicyNodeWeighting.uniform,
+        policy_loss_type: PolicyLossType | str = PolicyLossType.cross_entropy,
     ) -> None:
         super().__init__()
         self.policy_weight = policy_weight
@@ -752,6 +754,11 @@ class RebelSupervisedLoss(nn.Module):
             policy_node_weighting
             if isinstance(policy_node_weighting, PolicyNodeWeighting)
             else PolicyNodeWeighting(policy_node_weighting)
+        )
+        self.policy_loss_type = (
+            policy_loss_type
+            if isinstance(policy_loss_type, PolicyLossType)
+            else PolicyLossType(policy_loss_type)
         )
         combos = hand_combos_tensor()
         self.register_buffer("_combo_card_a", combos[:, 0].long(), persistent=False)
@@ -890,6 +897,18 @@ class RebelSupervisedLoss(nn.Module):
             return per_node.mean()
         return (per_node * node_weights).sum() / node_weights.sum().clamp(min=1e-8)
 
+    def _policy_objective_per_hand(
+        self,
+        probs: torch.Tensor,
+        targets: torch.Tensor,
+        policy_ce_per_hand: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.policy_loss_type == PolicyLossType.cross_entropy:
+            return policy_ce_per_hand
+        if self.policy_loss_type == PolicyLossType.mse:
+            return F.mse_loss(probs, targets, reduction="none").mean(dim=-1)
+        raise ValueError(f"Unsupported policy loss type: {self.policy_loss_type}")
+
     def _permutation_loss(
         self,
         output: ModelOutput,
@@ -928,7 +947,10 @@ class RebelSupervisedLoss(nn.Module):
             dim=-1
         )
         policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
-        policy_loss_per_hand = policy_ce_per_hand * policy_weights
+        policy_objective_per_hand = self._policy_objective_per_hand(
+            probs, batch.policy_targets, policy_ce_per_hand
+        )
+        policy_loss_per_hand = policy_objective_per_hand * policy_weights
         policy_loss_all = policy_loss_per_hand.sum(dim=-1)
         node_weights = self._policy_node_weights(batch, policy_loss_all.dtype)
         policy_loss = self._reduce_policy_node_metric(policy_loss_all, node_weights)
@@ -1028,7 +1050,10 @@ class RebelSupervisedLoss(nn.Module):
             dim=-1
         )
         policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
-        policy_loss_per_hand = policy_ce_per_hand * policy_weights
+        policy_objective_per_hand = self._policy_objective_per_hand(
+            probs, batch.policy_targets, policy_ce_per_hand
+        )
+        policy_loss_per_hand = policy_objective_per_hand * policy_weights
         policy_loss_all = policy_loss_per_hand.sum(dim=-1)
         node_weights = self._policy_node_weights(batch, policy_loss_all.dtype)
         policy_loss = self._reduce_policy_node_metric(policy_loss_all, node_weights)

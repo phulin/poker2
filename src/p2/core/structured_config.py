@@ -50,6 +50,11 @@ class PolicyNodeWeighting(str, Enum):
     clipped_reach = "clipped_reach"
 
 
+class PolicyLossType(str, Enum):
+    cross_entropy = "cross_entropy"
+    mse = "mse"
+
+
 class CFRType(str, Enum):
     standard = "standard"
     linear = "linear"
@@ -76,6 +81,7 @@ torch.serialization.add_safe_globals(ValueHeadType)
 torch.serialization.add_safe_globals(ModelType)
 torch.serialization.add_safe_globals(PPOClipping)
 torch.serialization.add_safe_globals(PolicyNodeWeighting)
+torch.serialization.add_safe_globals(PolicyLossType)
 torch.serialization.add_safe_globals(KLType)
 torch.serialization.add_safe_globals(CFRType)
 torch.serialization.add_safe_globals(WarmStartType)
@@ -106,6 +112,7 @@ class TrainingConfig:
     value_reuse_goal: int = 8
     policy_capacity_factor: int = 10
     policy_node_weighting: PolicyNodeWeighting = PolicyNodeWeighting.uniform
+    policy_loss_type: PolicyLossType = PolicyLossType.cross_entropy
 
     max_trajectory_length: int = 12  # Maximum steps per trajectory in replay buffer
     max_sequence_length: int = 50  # Maximum sequence length for transformer models
