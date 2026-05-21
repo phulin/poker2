@@ -2,6 +2,8 @@
 Debugging, repro, inspection, and profiling scripts for investigating training, CFR, tensor environments, and model behavior.
 
 ### Source files
+- `bench_better_ffn_step_hotpath.py`: Benchmarks BetterFFN forward and chance-node value hot paths.
+- `bench_rebel_train_step.py`: Benchmarks compiled ReBeL trainer `train_step` timing with run-like overrides and logging/eval side effects disabled.
 - `bench_envs.py`: Environment benchmark script.
 - `collect_rebel_values_and_exploit.py`: Collects ReBeL values and exploitability diagnostics.
 - `debug_cfr_iterations.py`: CFR iteration debugging.

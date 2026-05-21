@@ -79,12 +79,22 @@ class ChanceNodeHelper:
         model = self.model
         all_flops = self.all_flops
         num_flops = all_flops.shape[0]
+        static_feature_prefix = getattr(model, "static_feature_prefix", None)
+        static_feature_base_from_prefix = getattr(
+            model, "static_feature_base_from_prefix", None
+        )
 
         pre_beliefs_broadcast = pre_beliefs.expand(
             B, self.num_players, NUM_HANDS
         )  # [B, 2, NUM_HANDS]
 
         model.eval()
+        static_prefix_root = None
+        if callable(static_feature_prefix) and callable(
+            static_feature_base_from_prefix
+        ):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                static_prefix_root = static_feature_prefix(context_root, street_root)
 
         def eval_chunk(flop_chunk: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             chunk_len = flop_chunk.shape[0]
@@ -149,7 +159,21 @@ class ChanceNodeHelper:
                 beliefs=belief_features,
             )
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                hand_values = model(synthetic_features).hand_values
+                static_base_features = None
+                if static_prefix_root is not None:
+                    static_prefix = (
+                        static_prefix_root.unsqueeze(1)
+                        .expand(-1, chunk_len, -1)
+                        .reshape(-1, static_prefix_root.shape[-1])
+                    )
+                    static_base_features = static_feature_base_from_prefix(
+                        static_prefix, board_samples_flat
+                    )
+                hand_values = model(
+                    synthetic_features,
+                    include_policy=False,
+                    static_base_features=static_base_features,
+                ).hand_values
             hand_values = hand_values.to(dtype=dtype).view(
                 B, chunk_len, self.num_players, NUM_HANDS
             )
@@ -289,11 +313,27 @@ class ChanceNodeHelper:
 
         model = self.model
         model.eval()
+        static_feature_prefix = getattr(model, "static_feature_prefix", None)
+        static_feature_base_from_prefix = getattr(
+            model, "static_feature_base_from_prefix", None
+        )
+        static_base_features = None
 
         # The model returns per-hand EVs; convert the chance expectation into a
         # hand-conditional average with opponent compatible-mass weights.
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            hand_values = model(synthetic_features).hand_values
+            if callable(static_feature_prefix) and callable(
+                static_feature_base_from_prefix
+            ):
+                static_prefix_root = static_feature_prefix(context_root, street_root)
+                static_base_features = static_feature_base_from_prefix(
+                    static_prefix_root[root_lookup], board_samples
+                )
+            hand_values = model(
+                synthetic_features,
+                include_policy=False,
+                static_base_features=static_base_features,
+            ).hand_values
         hand_values = hand_values.to(dtype=dtype)
 
         weights = calculate_unblocked_mass(post_unnorm).flip(dims=[-2])

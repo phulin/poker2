@@ -22,7 +22,7 @@ class MockModel:
         self.device = device
         self.float_dtype = float_dtype
 
-    def __call__(self, features: MLPFeatures) -> ModelOutput:
+    def __call__(self, features: MLPFeatures, **_: object) -> ModelOutput:
         """Return mock hand values."""
         batch_size = features.context.shape[0]
         hand_values = torch.zeros(
@@ -52,7 +52,7 @@ class BoardBasedModel:
         self.device = device
         self.float_dtype = float_dtype
 
-    def __call__(self, features: MLPFeatures) -> ModelOutput:
+    def __call__(self, features: MLPFeatures, **_: object) -> ModelOutput:
         batch_size = features.context.shape[0]
         # Return hand values based on sum of board card ranks (not suits)
         # This commutes with suit permutations because it only depends on ranks
@@ -92,7 +92,7 @@ class LegalHandMaskModel:
         self.float_dtype = float_dtype
         self.combo_onehot = combo_to_onehot_tensor(device=device).float()
 
-    def __call__(self, features: MLPFeatures) -> ModelOutput:
+    def __call__(self, features: MLPFeatures, **_: object) -> ModelOutput:
         batch_size = features.context.shape[0]
         board = features.board
         board_onehot = torch.zeros(
@@ -304,9 +304,7 @@ class TestChanceNodeHelper:
                 .expand(B, chunk_len, helper.num_players, NUM_HANDS)
             )
 
-            post_unnorm = (
-                pre_beliefs.unsqueeze(1).expand(-1, chunk_len, -1, -1).clone()
-            )
+            post_unnorm = pre_beliefs.unsqueeze(1).expand(-1, chunk_len, -1, -1).clone()
             post_unnorm[..., ~allowed_broadcast] = 0.0
 
             sums = post_unnorm.sum(dim=-1, keepdim=True)
