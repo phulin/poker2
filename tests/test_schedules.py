@@ -2,6 +2,7 @@ import math
 
 from p2.core.structured_config import LrSchedule
 from p2.rl.exponential_controller import ExponentialController
+from p2.rl.cfr_trainer import _scheduled_learning_rate
 from p2.rl.self_play import SelfPlayTrainer
 from p2.utils.ema import EMA
 
@@ -186,6 +187,91 @@ def test_separate_learning_rates():
         trainer.value_head_optimizer.param_groups[0]["lr"],
         5e-6,
         rel_tol=1e-6,
+        abs_tol=1e-12,
+    )
+
+
+def test_rebel_linear_warmup_before_cosine_decay():
+    lr_start = 1e-3
+    lr_final = 1e-4
+    total_steps = 100
+    warmup_steps = 10
+
+    assert math.isclose(
+        _scheduled_learning_rate(
+            step=0,
+            total_steps=total_steps,
+            lr_start=lr_start,
+            lr_final=lr_final,
+            lr_schedule=LrSchedule.cosine,
+            warmup_steps=warmup_steps,
+        ),
+        1e-4,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    )
+    assert math.isclose(
+        _scheduled_learning_rate(
+            step=9,
+            total_steps=total_steps,
+            lr_start=lr_start,
+            lr_final=lr_final,
+            lr_schedule=LrSchedule.cosine,
+            warmup_steps=warmup_steps,
+        ),
+        lr_start,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    )
+    assert math.isclose(
+        _scheduled_learning_rate(
+            step=10,
+            total_steps=total_steps,
+            lr_start=lr_start,
+            lr_final=lr_final,
+            lr_schedule=LrSchedule.cosine,
+            warmup_steps=warmup_steps,
+        ),
+        lr_start,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    )
+    assert math.isclose(
+        _scheduled_learning_rate(
+            step=100,
+            total_steps=total_steps,
+            lr_start=lr_start,
+            lr_final=lr_final,
+            lr_schedule=LrSchedule.cosine,
+            warmup_steps=warmup_steps,
+        ),
+        lr_final,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    )
+
+
+def test_rebel_zero_warmup_matches_existing_schedule():
+    lr_start = 1e-3
+    lr_final = 1e-4
+    total_steps = 100
+    step = 25
+    t = step / total_steps
+    expected = lr_final + 0.5 * (lr_start - lr_final) * (
+        1.0 + math.cos(math.pi * t)
+    )
+
+    assert math.isclose(
+        _scheduled_learning_rate(
+            step=step,
+            total_steps=total_steps,
+            lr_start=lr_start,
+            lr_final=lr_final,
+            lr_schedule=LrSchedule.cosine,
+            warmup_steps=0,
+        ),
+        expected,
+        rel_tol=1e-9,
         abs_tol=1e-12,
     )
 

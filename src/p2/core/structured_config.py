@@ -100,6 +100,7 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     learning_rate_final: float = 1e-5
     lr_schedule: LrSchedule = LrSchedule.cosine
+    warmup_steps: int = 0
     batch_size: int = 1024
     episodes_per_step: int = 4
 

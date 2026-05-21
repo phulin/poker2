@@ -38,6 +38,33 @@ from p2.utils.profiling import profile
 
 STREETS = ["preflop", "flop", "turn", "river", "showdown"]
 
+def _scheduled_learning_rate(
+    step: int,
+    total_steps: int,
+    lr_start: float,
+    lr_final: float,
+    lr_schedule: LrSchedule,
+    warmup_steps: int = 0,
+) -> float:
+    warmup_steps = max(0, int(warmup_steps))
+    if warmup_steps > 0 and step < warmup_steps:
+        return lr_start * float(step + 1) / float(warmup_steps)
+
+    if warmup_steps > 0:
+        decay_steps = max(1, total_steps - warmup_steps)
+        t = min(1.0, max(0.0, (step - warmup_steps) / float(decay_steps)))
+    else:
+        t = min(1.0, max(0.0, step / float(max(1, total_steps))))
+
+    if lr_schedule == LrSchedule.cosine and lr_final != lr_start:
+        return lr_final + 0.5 * (lr_start - lr_final) * (
+            1.0 + math.cos(math.pi * t)
+        )
+    if lr_schedule == LrSchedule.linear and lr_final != lr_start:
+        return lr_start + (lr_final - lr_start) * t
+    return lr_start
+
+
 
 def _compile_setting(cfg: Config) -> str:
     value = str(cfg.model.compile).strip().lower()
@@ -380,14 +407,14 @@ class RebelCFRTrainer:
         # Learning rate schedule
         lr_start = float(self.cfg.train.learning_rate)
         lr_final = float(self.cfg.train.learning_rate_final)
-        if self.cfg.train.lr_schedule == LrSchedule.cosine and lr_final != lr_start:
-            lr_now = lr_final + 0.5 * (lr_start - lr_final) * (
-                1.0 + math.cos(math.pi * t)
-            )
-        elif self.cfg.train.lr_schedule == LrSchedule.linear and lr_final != lr_start:
-            lr_now = lr_start + (lr_final - lr_start) * t
-        else:
-            lr_now = lr_start
+        lr_now = _scheduled_learning_rate(
+            step=step,
+            total_steps=total_steps,
+            lr_start=lr_start,
+            lr_final=lr_final,
+            lr_schedule=self.cfg.train.lr_schedule,
+            warmup_steps=self.cfg.train.warmup_steps,
+        )
 
         # Update optimizer learning rate
         for param_group in self.optimizer.param_groups:

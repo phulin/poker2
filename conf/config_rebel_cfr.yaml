@@ -18,6 +18,7 @@ train:
   learning_rate: 1e-3
   learning_rate_final: 1e-4
   lr_schedule: cosine
+  warmup_steps: 0
 
   weight_decay: 0.01
   optimizer: adamw # override to muon for PyTorch Muon on 2D linear weights
