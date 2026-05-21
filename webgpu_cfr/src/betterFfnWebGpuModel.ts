@@ -10,6 +10,7 @@ import {
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   MAT_VEC_BATCH_WGSL,
@@ -94,6 +95,9 @@ export class BetterFfnWebGpuModel {
   private readonly matVecBatchPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
+  private readonly matVecBatchExactRowsCols512SubgroupPipeline:
+    | GPUComputePipeline
+    | undefined;
   private readonly matVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchPipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsPipeline: GPUComputePipeline;
@@ -162,6 +166,13 @@ export class BetterFfnWebGpuModel {
       MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
       "better-ffn-mat-vec-batch-exact-rows-cols-512",
     );
+    this.matVecBatchExactRowsCols512SubgroupPipeline =
+      device.features.has("subgroups" as GPUFeatureName)
+        ? this.pipeline(
+            MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
+            "better-ffn-mat-vec-batch-exact-rows-cols-512-subgroup",
+          )
+        : undefined;
     this.matVecBatchExactRowsCols1024Pipeline = this.pipeline(
       MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       "better-ffn-mat-vec-batch-exact-rows-cols-1024",
@@ -1770,7 +1781,8 @@ export class BetterFfnWebGpuModel {
     const pipeline =
       rows % BATCH_ROW_BLOCK === 0
         ? cols === 512
-          ? this.matVecBatchExactRowsCols512Pipeline
+          ? (this.matVecBatchExactRowsCols512SubgroupPipeline ??
+            this.matVecBatchExactRowsCols512Pipeline)
           : cols === 1024
             ? this.matVecBatchExactRowsCols1024Pipeline
             : this.matVecBatchExactRowsPipeline
