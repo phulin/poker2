@@ -1706,7 +1706,8 @@ export class BetterFfnWebGpuModel {
     exactBelief?: ExactBelief,
   ): GPUBuffer {
     const normed = empty(batch * inDim);
-    if (exactBelief && prefix === "belief_proj" && inDim === 2 * hiddenDim) {
+    const modelHiddenDim = this.manifest.architecture.hiddenDim;
+    if (exactBelief && prefix === "belief_proj" && inDim === 2 * modelHiddenDim) {
       this.rmsNormBeliefExact(
         prefix,
         input,
@@ -1716,7 +1717,7 @@ export class BetterFfnWebGpuModel {
         inDim,
         inDim,
         exactBelief,
-        hiddenDim,
+        modelHiddenDim,
         uniform,
       );
     } else {
