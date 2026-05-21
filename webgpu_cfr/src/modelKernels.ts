@@ -675,16 +675,16 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> output: array<f32>;
 @group(0) @binding(4) var<uniform> params: Params;
 
-var<workgroup> subgroupPartial00: array<f32, 256>;
-var<workgroup> subgroupPartial01: array<f32, 256>;
-var<workgroup> subgroupPartial02: array<f32, 256>;
-var<workgroup> subgroupPartial03: array<f32, 256>;
-var<workgroup> subgroupPartial10: array<f32, 256>;
-var<workgroup> subgroupPartial11: array<f32, 256>;
-var<workgroup> subgroupPartial12: array<f32, 256>;
-var<workgroup> subgroupPartial13: array<f32, 256>;
+var<workgroup> subgroupPartial00: array<f32, 128>;
+var<workgroup> subgroupPartial01: array<f32, 128>;
+var<workgroup> subgroupPartial02: array<f32, 128>;
+var<workgroup> subgroupPartial03: array<f32, 128>;
+var<workgroup> subgroupPartial10: array<f32, 128>;
+var<workgroup> subgroupPartial11: array<f32, 128>;
+var<workgroup> subgroupPartial12: array<f32, 128>;
+var<workgroup> subgroupPartial13: array<f32, 128>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(128)
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
@@ -720,7 +720,7 @@ fn main(
   var sum12 = m20 * x10;
   var sum13 = m30 * x10;
 
-  let col1 = lane + 256u;
+  let col1 = lane + 128u;
   let x01 = input[inputBase0 + col1];
   var x11 = 0.0;
   if (batch1 < params.batch) {
@@ -738,6 +738,44 @@ fn main(
   sum11 = sum11 + m11 * x11;
   sum12 = sum12 + m21 * x11;
   sum13 = sum13 + m31 * x11;
+
+  let col2 = lane + 256u;
+  let x02 = input[inputBase0 + col2];
+  var x12 = 0.0;
+  if (batch1 < params.batch) {
+    x12 = input[inputBase1 + col2];
+  }
+  let m02 = matrix[row0 * 512u + col2];
+  let m12 = matrix[row1 * 512u + col2];
+  let m22 = matrix[row2 * 512u + col2];
+  let m32 = matrix[row3 * 512u + col2];
+  sum00 = sum00 + m02 * x02;
+  sum01 = sum01 + m12 * x02;
+  sum02 = sum02 + m22 * x02;
+  sum03 = sum03 + m32 * x02;
+  sum10 = sum10 + m02 * x12;
+  sum11 = sum11 + m12 * x12;
+  sum12 = sum12 + m22 * x12;
+  sum13 = sum13 + m32 * x12;
+
+  let col3 = lane + 384u;
+  let x03 = input[inputBase0 + col3];
+  var x13 = 0.0;
+  if (batch1 < params.batch) {
+    x13 = input[inputBase1 + col3];
+  }
+  let m03 = matrix[row0 * 512u + col3];
+  let m13 = matrix[row1 * 512u + col3];
+  let m23 = matrix[row2 * 512u + col3];
+  let m33 = matrix[row3 * 512u + col3];
+  sum00 = sum00 + m03 * x03;
+  sum01 = sum01 + m13 * x03;
+  sum02 = sum02 + m23 * x03;
+  sum03 = sum03 + m33 * x03;
+  sum10 = sum10 + m03 * x13;
+  sum11 = sum11 + m13 * x13;
+  sum12 = sum12 + m23 * x13;
+  sum13 = sum13 + m33 * x13;
 
   let reduced00 = subgroupAdd(sum00);
   let reduced01 = subgroupAdd(sum01);
@@ -761,7 +799,7 @@ fn main(
   workgroupBarrier();
 
   if (lane == 0u) {
-    let subgroupCount = (256u + subgroupSize - 1u) / subgroupSize;
+    let subgroupCount = (128u + subgroupSize - 1u) / subgroupSize;
     var out00 = 0.0;
     var out01 = 0.0;
     var out02 = 0.0;
