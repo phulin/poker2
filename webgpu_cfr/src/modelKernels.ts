@@ -2014,7 +2014,7 @@ function makeLeakyReluResidualMatVecBatchExactRowsCols1024Batch2Subgroup(): stri
     rows.map((row) => ({ batch, row, name: `${batch}${row}` })),
   );
   const partials = cells
-    .map(({ name }) => `var<workgroup> subgroupPartial${name}: array<f32, 256>;`)
+    .map(({ name }) => `var<workgroup> subgroupPartial${name}: array<f32, 128>;`)
     .join("\n");
   const rowLets = rows
     .slice(1)
