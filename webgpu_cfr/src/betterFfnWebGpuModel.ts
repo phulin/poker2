@@ -1,6 +1,7 @@
 import {
   ADD3_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_WGSL,
@@ -103,6 +104,9 @@ export class BetterFfnWebGpuModel {
   private readonly leakyReluMatVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
+  private readonly leakyReluMatVecBatchExactRowsCols1024SubgroupPipeline:
+    | GPUComputePipeline
+    | undefined;
   private readonly leakyReluResidualMatVecBatchPipeline: GPUComputePipeline;
   private readonly leakyReluResidualMatVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly leakyReluResidualMatVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
@@ -193,6 +197,13 @@ export class BetterFfnWebGpuModel {
       LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-1024",
     );
+    this.leakyReluMatVecBatchExactRowsCols1024SubgroupPipeline =
+      device.features.has("subgroups" as GPUFeatureName)
+        ? this.pipeline(
+            LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
+            "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-1024-subgroup",
+          )
+        : undefined;
     this.leakyReluResidualMatVecBatchPipeline = this.pipeline(
       LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
       "better-ffn-leaky-relu-residual-mat-vec-batch",
@@ -1832,7 +1843,8 @@ export class BetterFfnWebGpuModel {
         ? cols === 512
           ? this.leakyReluMatVecBatchExactRowsCols512Pipeline
           : cols === 1024
-            ? this.leakyReluMatVecBatchExactRowsCols1024Pipeline
+            ? (this.leakyReluMatVecBatchExactRowsCols1024SubgroupPipeline ??
+              this.leakyReluMatVecBatchExactRowsCols1024Pipeline)
             : this.leakyReluMatVecBatchExactRowsPipeline
         : this.leakyReluMatVecBatchPipeline;
     this.submit2d(pipeline, this.batchRowGroups(rows), batch, [
