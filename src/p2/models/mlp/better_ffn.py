@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from p2.core.structured_config import NonlinearityType
-from p2.env.card_utils import NUM_HANDS, calculate_unblocked_mass, hand_combos_tensor
+from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
 from p2.models.activation_utils import get_activation, SwiGLU
 from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
@@ -116,6 +116,8 @@ class BetterFFN(BaseMLPModel):
         # num_players * range_hidden_dim.
         combos = hand_combos_tensor()  # [NUM_HANDS, 2]
         self.register_buffer("hand_combos", combos, persistent=False)
+        self.register_buffer("hand_card_a", combos[:, 0].long(), persistent=False)
+        self.register_buffer("hand_card_b", combos[:, 1].long(), persistent=False)
         self.register_buffer("hand_ranks", combos % 13, persistent=False)
         self.register_buffer("hand_suits", combos // 13, persistent=False)
         hand_rank_pair_idx = self._unordered_pair_index(
@@ -233,6 +235,28 @@ class BetterFFN(BaseMLPModel):
         card_emb = self.card_embedding(self.hand_combos)
         return card_emb.sum(dim=1)
 
+    def _calculate_unblocked_mass(self, target: torch.Tensor) -> torch.Tensor:
+        target_batched = target.view(-1, NUM_HANDS).float()
+        cardsum = torch.zeros(
+            target_batched.shape[0],
+            52,
+            dtype=target_batched.dtype,
+            device=target_batched.device,
+        )
+        card_a_idx = self.hand_card_a[None, :].expand(target_batched.shape[0], -1)
+        card_b_idx = self.hand_card_b[None, :].expand(target_batched.shape[0], -1)
+        cardsum.scatter_add_(1, card_a_idx, target_batched)
+        cardsum.scatter_add_(1, card_b_idx, target_batched)
+
+        total = target_batched.sum(dim=-1, keepdim=True)
+        unblocked = (
+            total
+            - cardsum[:, self.hand_card_a]
+            - cardsum[:, self.hand_card_b]
+            + target_batched
+        )
+        return unblocked.clamp_min(0.0).view(target.shape)
+
     def _policy_range_features(
         self,
         player_beliefs: torch.Tensor,
@@ -245,7 +269,7 @@ class BetterFFN(BaseMLPModel):
         opp_belief = player_beliefs.gather(
             1, opp[:, None, None].expand(-1, 1, NUM_HANDS)
         ).squeeze(1)
-        opp_unblocked = calculate_unblocked_mass(opp_belief).to(
+        opp_unblocked = self._calculate_unblocked_mass(opp_belief).to(
             dtype=actor_belief.dtype
         )
         return torch.stack(

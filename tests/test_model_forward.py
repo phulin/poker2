@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from p2.encoding.action_mapping import bin_to_action, get_legal_mask
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, calculate_unblocked_mass
 from p2.env.hunl_env import HUNLEnv
 from p2.env.types import GameState, PlayerState
 from p2.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
@@ -201,6 +201,25 @@ def test_better_ffn_hand_embedding_preserves_rank_suit_assignment():
     hand_emb = model._hand_embedding()
 
     assert not torch.allclose(hand_emb[ah_ks_idx], hand_emb[as_kh_idx])
+
+
+def test_better_ffn_unblocked_mass_uses_registered_buffers():
+    model = BetterFFN(
+        num_actions=4,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=2,
+    )
+    target = torch.rand(3, NUM_HANDS)
+
+    actual = model._calculate_unblocked_mass(target)
+    expected = calculate_unblocked_mass(target)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def test_better_ffn_rank_and_suit_board_bilinear_interactions():
