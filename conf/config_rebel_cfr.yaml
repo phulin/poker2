@@ -29,6 +29,9 @@ train:
   replay_buffer_device: cuda
   value_reuse_goal: 4
   policy_capacity_factor: 10
+  policy_depth_stratify_decimate: true
+  policy_depth_stratify_sample: true
+  policy_depth_stratify_probs: null
   policy_node_weighting: uniform
   policy_loss_type: cross_entropy
   value_coef: 1.0

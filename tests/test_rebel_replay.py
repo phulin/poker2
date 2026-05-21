@@ -4,7 +4,27 @@ import pytest
 from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
-from p2.rl.rebel_replay import RebelReplayBuffer
+from p2.rl.rebel_replay import RebelPolicyBuffer, RebelReplayBuffer
+
+
+def _make_policy_batch(batch_size: int, num_actions: int, depths: torch.Tensor):
+    return RebelBatch(
+        features=MLPFeatures(
+            context=torch.arange(batch_size, dtype=torch.float32)[:, None].expand(
+                -1, 4
+            ),
+            street=torch.zeros(batch_size, dtype=torch.long),
+            to_act=torch.zeros(batch_size, dtype=torch.long),
+            board=torch.zeros(batch_size, 5, dtype=torch.long),
+            beliefs=torch.randn(batch_size, 2 * NUM_HANDS),
+        ),
+        policy_targets=torch.softmax(
+            torch.randn(batch_size, NUM_HANDS, num_actions), dim=-1
+        ),
+        value_targets=None,
+        legal_masks=torch.ones(batch_size, num_actions, dtype=torch.bool),
+        statistics={"node_depth": depths},
+    )
 
 
 def test_rebel_replay_buffer_roundtrip():
@@ -143,9 +163,9 @@ def test_decimation():
     buffer.add_batch(batch2)
 
     # Buffer should still be at capacity
-    assert (
-        len(buffer) == capacity
-    ), f"Buffer should still be at capacity, got {len(buffer)}"
+    assert len(buffer) == capacity, (
+        f"Buffer should still be at capacity, got {len(buffer)}"
+    )
 
     # Verify that some of the new batch's data is in the buffer
     # (we can't easily verify exact count without knowing which entries were overwritten,
@@ -195,6 +215,70 @@ def test_no_decimation_when_not_full():
     buffer.add_batch(batch)
 
     # Buffer should have all 10 samples (no decimation)
-    assert (
-        len(buffer) == batch_size
-    ), f"Buffer should have {batch_size} samples, got {len(buffer)}"
+    assert len(buffer) == batch_size, (
+        f"Buffer should have {batch_size} samples, got {len(buffer)}"
+    )
+
+
+def test_policy_buffer_depth_stratified_decimation_keeps_roots():
+    device = torch.device("cpu")
+    generator = torch.Generator(device=device)
+    generator.manual_seed(0)
+    buffer = RebelPolicyBuffer(
+        capacity=100,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=device,
+        decimate=0.2,
+        generator=generator,
+        depth_stratify_decimate=True,
+        depth_stratify_buckets=4,
+    )
+
+    buffer.add_batch(_make_policy_batch(100, 5, torch.full((100,), 3)))
+    incoming_depths = torch.cat(
+        [
+            torch.zeros(2, dtype=torch.long),
+            torch.ones(2, dtype=torch.long),
+            torch.full((46,), 3, dtype=torch.long),
+        ]
+    )
+    buffer.add_batch(_make_policy_batch(50, 5, incoming_depths))
+
+    stored_depths = buffer.statistics["node_depth"][: len(buffer)]
+    assert (stored_depths == 0).sum() == 2
+    assert (stored_depths == 1).sum() >= 1
+
+
+def test_policy_buffer_depth_stratified_sampling_balances_depths():
+    device = torch.device("cpu")
+    generator = torch.Generator(device=device)
+    generator.manual_seed(1)
+    buffer = RebelPolicyBuffer(
+        capacity=100,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=device,
+        generator=generator,
+        depth_stratify_sample=True,
+        depth_stratify_buckets=4,
+    )
+    depths = torch.cat(
+        [
+            torch.zeros(5, dtype=torch.long),
+            torch.ones(5, dtype=torch.long),
+            torch.full((5,), 2, dtype=torch.long),
+            torch.full((85,), 3, dtype=torch.long),
+        ]
+    )
+    buffer.add_batch(_make_policy_batch(100, 5, depths))
+
+    sample = buffer.sample(80)
+    sampled_depths = sample.statistics["node_depth"]
+    counts = torch.bincount(sampled_depths, minlength=4).float()
+    proportions = counts / counts.sum()
+
+    assert torch.all(proportions[:3] > 0.15)
+    assert proportions[3] < 0.45

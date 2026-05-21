@@ -24,6 +24,10 @@ class RebelReplayBuffer:
         dtype: torch.dtype = torch.float32,
         decimate: float | None = None,
         generator: Optional[torch.Generator] = None,
+        depth_stratify_decimate: bool = False,
+        depth_stratify_sample: bool = False,
+        depth_stratify_probs: list[float] | None = None,
+        depth_stratify_buckets: int = 0,
     ) -> None:
         self.capacity = capacity
         self.num_actions = num_actions
@@ -32,6 +36,10 @@ class RebelReplayBuffer:
         self.dtype = dtype
         self.decimate = decimate
         self.generator = generator
+        self.depth_stratify_decimate = depth_stratify_decimate
+        self.depth_stratify_sample = depth_stratify_sample
+        self.depth_stratify_probs = depth_stratify_probs
+        self.depth_stratify_buckets = depth_stratify_buckets
 
         self.features = MLPFeatures(
             context=torch.zeros(
@@ -77,28 +85,171 @@ class RebelReplayBuffer:
     def __len__(self) -> int:
         return self.size
 
+    def _depth_stratified_probs(self, depths: torch.Tensor) -> torch.Tensor:
+        num_buckets = self.depth_stratify_buckets
+        if num_buckets <= 0:
+            raise ValueError("depth_stratify_buckets must be positive")
+
+        depths = depths.long()
+        safe_depths = depths.clamp(min=0, max=num_buckets - 1)
+        valid = (depths >= 0) & (depths < num_buckets)
+        counts = torch.bincount(safe_depths[valid], minlength=num_buckets).to(
+            torch.float32
+        )
+
+        if self.depth_stratify_probs is None:
+            bucket_probs = torch.ones(num_buckets, device=depths.device)
+        else:
+            bucket_probs = torch.tensor(
+                self.depth_stratify_probs,
+                dtype=torch.float32,
+                device=depths.device,
+            )
+            if bucket_probs.numel() != num_buckets:
+                raise ValueError(
+                    "depth_stratify_probs length must match depth_stratify_buckets"
+                )
+
+        bucket_probs = bucket_probs.clamp(min=0.0)
+        bucket_probs = torch.where(
+            counts > 0, bucket_probs, torch.zeros_like(bucket_probs)
+        )
+        bucket_probs = bucket_probs / bucket_probs.sum().clamp(min=1e-12)
+        item_probs = bucket_probs[safe_depths] / counts[safe_depths].clamp(min=1.0)
+        return torch.where(valid, item_probs, torch.zeros_like(item_probs))
+
+    def _depth_stratified_indices(
+        self,
+        depths: torch.Tensor,
+        sample_count: int,
+        replacement: bool,
+    ) -> torch.Tensor:
+        probs = self._depth_stratified_probs(depths)
+        return torch.multinomial(
+            probs,
+            sample_count,
+            replacement=replacement,
+            generator=self.generator,
+        )
+
+    def _depth_stratified_subset_indices(
+        self,
+        depths: torch.Tensor,
+        sample_count: int,
+    ) -> torch.Tensor:
+        num_buckets = self.depth_stratify_buckets
+        if num_buckets <= 0:
+            raise ValueError("depth_stratify_buckets must be positive")
+
+        depths = depths.long()
+        safe_depths = depths.clamp(min=0, max=num_buckets - 1)
+        valid = (depths >= 0) & (depths < num_buckets)
+        counts = torch.bincount(safe_depths[valid], minlength=num_buckets)[
+            :num_buckets
+        ].cpu()
+
+        if self.depth_stratify_probs is None:
+            bucket_probs = torch.ones(num_buckets)
+        else:
+            bucket_probs = torch.tensor(self.depth_stratify_probs, dtype=torch.float32)
+            if bucket_probs.numel() != num_buckets:
+                raise ValueError(
+                    "depth_stratify_probs length must match depth_stratify_buckets"
+                )
+
+        bucket_probs = bucket_probs.clamp(min=0.0)
+        bucket_probs = torch.where(
+            counts > 0, bucket_probs, torch.zeros_like(bucket_probs)
+        )
+        bucket_probs = bucket_probs / bucket_probs.sum().clamp(min=1e-12)
+        raw_quotas = bucket_probs * sample_count
+        quotas = torch.floor(raw_quotas).to(torch.long).clamp(max=counts)
+        remaining = sample_count - int(quotas.sum().item())
+        while remaining > 0:
+            capacity = counts - quotas
+            if not bool((capacity > 0).any().item()):
+                break
+            scores = torch.where(
+                capacity > 0,
+                raw_quotas - quotas.to(raw_quotas.dtype),
+                torch.full_like(raw_quotas, float("-inf")),
+            )
+            bucket = int(torch.argmax(scores).item())
+            quotas[bucket] += 1
+            remaining -= 1
+
+        selected = []
+        for bucket, quota in enumerate(quotas.tolist()):
+            if quota <= 0:
+                continue
+            bucket_indices = torch.where(depths == bucket)[0]
+            perm = torch.randperm(
+                bucket_indices.numel(), device=depths.device, generator=self.generator
+            )[:quota]
+            selected.append(bucket_indices[perm])
+
+        if not selected:
+            return torch.empty(0, dtype=torch.long, device=depths.device)
+
+        indices = torch.cat(selected)
+        shuffle = torch.randperm(
+            indices.numel(), device=depths.device, generator=self.generator
+        )
+        return indices[shuffle]
+
     def add_batch(self, batch: RebelBatch) -> None:
         """Append a batch of RebelBatch samples to the replay buffer."""
         batch_size = len(batch)
         if batch_size == 0:
             return
 
-        if batch_size >= self.capacity:
-            batch = batch[-self.capacity :]
-            batch_size = self.capacity
-
         assert (self.policy_targets is None) == (batch.policy_targets is None)
         assert (self.value_targets is None) == (batch.value_targets is None)
-        # Decimate if buffer is full and decimate is set
-        if self.decimate is not None and self.size == self.capacity and batch_size > 0:
-            keep_count = max(1, int(self.decimate * batch_size))
-            if keep_count < batch_size:
-                # Randomly sample indices to keep
-                indices = torch.randperm(
-                    batch_size, device=self.device, generator=self.generator
-                )[:keep_count]
+
+        decimating = (
+            self.decimate is not None and self.size == self.capacity and batch_size > 0
+        )
+        if batch_size >= self.capacity and not decimating:
+            if (
+                self.depth_stratify_decimate
+                and "node_depth" in batch.statistics
+                and self.depth_stratify_buckets > 0
+            ):
+                depths = batch.statistics["node_depth"]
+                if depths.device != self.device:
+                    depths = depths.to(self.device, non_blocking=True)
+                indices = self._depth_stratified_subset_indices(depths, self.capacity)
                 if batch.features.context.device != indices.device:
-                    indices = indices.to(batch.features.context.device, non_blocking=True)
+                    indices = indices.to(
+                        batch.features.context.device, non_blocking=True
+                    )
+                batch = batch[indices]
+            else:
+                batch = batch[-self.capacity :]
+            batch_size = self.capacity
+
+        # Decimate if buffer is full and decimate is set
+        if decimating:
+            keep_count = min(self.capacity, max(1, int(self.decimate * batch_size)))
+            if keep_count < batch_size:
+                if (
+                    self.depth_stratify_decimate
+                    and "node_depth" in batch.statistics
+                    and self.depth_stratify_buckets > 0
+                ):
+                    depths = batch.statistics["node_depth"]
+                    if depths.device != self.device:
+                        depths = depths.to(self.device, non_blocking=True)
+                    indices = self._depth_stratified_subset_indices(depths, keep_count)
+                else:
+                    # Randomly sample indices to keep
+                    indices = torch.randperm(
+                        batch_size, device=self.device, generator=self.generator
+                    )[:keep_count]
+                if batch.features.context.device != indices.device:
+                    indices = indices.to(
+                        batch.features.context.device, non_blocking=True
+                    )
                 batch = batch[indices]
                 batch_size = keep_count
 
@@ -147,13 +298,24 @@ class RebelReplayBuffer:
         assert batch_size <= self.size, "Can't take more samples than we have."
 
         if stratify_streets is None:
-            idxs = torch.randint(
-                0,
-                self.size,
-                (batch_size,),
-                generator=self.generator,
-                device=self.device,
-            )
+            if (
+                self.depth_stratify_sample
+                and "node_depth" in self.statistics
+                and self.depth_stratify_buckets > 0
+            ):
+                idxs = self._depth_stratified_indices(
+                    self.statistics["node_depth"][: self.size],
+                    batch_size,
+                    replacement=True,
+                )
+            else:
+                idxs = torch.randint(
+                    0,
+                    self.size,
+                    (batch_size,),
+                    generator=self.generator,
+                    device=self.device,
+                )
         else:
             streets = self.features.street[: self.size]
             stratify_tensor = torch.tensor(stratify_streets, device=self.device)
@@ -167,7 +329,7 @@ class RebelReplayBuffer:
             idxs = torch.multinomial(all_probs, batch_size, generator=self.generator)
 
         # Increment sample counters for sampled indices
-        self.sample_count[idxs] += 1
+        self.sample_count.scatter_add_(0, idxs, torch.ones_like(idxs))
 
         return RebelBatch(
             features=MLPFeatures(
@@ -213,6 +375,10 @@ class RebelPolicyBuffer(RebelReplayBuffer):
         dtype: torch.dtype = torch.float32,
         decimate: float | None = None,
         generator: Optional[torch.Generator] = None,
+        depth_stratify_decimate: bool = False,
+        depth_stratify_sample: bool = False,
+        depth_stratify_probs: list[float] | None = None,
+        depth_stratify_buckets: int = 0,
     ) -> None:
         super().__init__(
             capacity=capacity,
@@ -225,6 +391,10 @@ class RebelPolicyBuffer(RebelReplayBuffer):
             dtype=dtype,
             decimate=decimate,
             generator=generator,
+            depth_stratify_decimate=depth_stratify_decimate,
+            depth_stratify_sample=depth_stratify_sample,
+            depth_stratify_probs=depth_stratify_probs,
+            depth_stratify_buckets=depth_stratify_buckets,
         )
 
 

@@ -237,6 +237,10 @@ class RebelCFRTrainer:
             device=self.buffer_device,
             decimate=1.0 / policy_decimate,
             generator=self.buffer_rng,
+            depth_stratify_decimate=cfg.train.policy_depth_stratify_decimate,
+            depth_stratify_sample=cfg.train.policy_depth_stratify_sample,
+            depth_stratify_probs=cfg.train.policy_depth_stratify_probs,
+            depth_stratify_buckets=cfg.search.depth,
         )
 
         # Optimizer & loss
@@ -1017,8 +1021,11 @@ class RebelCFRTrainer:
             value_batch = self.value_buffer.sample(
                 self.batch_size, stratify_streets=stratify
             ).to(self.device)
+            policy_stratify = (
+                None if self.cfg.train.policy_depth_stratify_sample else stratify
+            )
             policy_batch = self.policy_buffer.sample(
-                self.batch_size, stratify_streets=stratify
+                self.batch_size, stratify_streets=policy_stratify
             ).to(self.device)
 
             # Sample suit permutations and apply to features/targets together.

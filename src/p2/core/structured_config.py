@@ -112,6 +112,9 @@ class TrainingConfig:
     # how many times do we want to reuse the same policy/value data?
     value_reuse_goal: float = 8.0
     policy_capacity_factor: int = 10
+    policy_depth_stratify_decimate: bool = True
+    policy_depth_stratify_sample: bool = True
+    policy_depth_stratify_probs: list[float] | None = None
     policy_node_weighting: PolicyNodeWeighting = PolicyNodeWeighting.uniform
     policy_loss_type: PolicyLossType = PolicyLossType.cross_entropy
 
