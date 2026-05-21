@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -140,6 +142,56 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
     torch.testing.assert_close(static_output.value, output.value)
     assert torch.isfinite(output.policy_logits).all()
     assert torch.isfinite(output.hand_values).all()
+
+
+def test_better_ffn_initial_policy_is_near_uniform():
+    batch_size = 4
+    num_actions = 5
+    num_players = 2
+    model = BetterFFN(
+        num_actions=num_actions,
+        hidden_dim=64,
+        range_hidden_dim=16,
+        ffn_dim=64,
+        num_hidden_layers=2,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        board_interaction_dim=16,
+        policy_rank=16,
+        policy_hand_bias_rank=8,
+        policy_factor_scale=1.0,
+        nonlinearity="leaky_relu",
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(0))
+    model.eval()
+
+    context = torch.zeros(batch_size, context_length(num_players))
+    context[:, 3] = 1.5
+    context[:, 4] = 1.0
+    context[:, 5] = 4.6
+    context[:, 6] = 0.7
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    features = MLPFeatures(
+        context=context,
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.arange(batch_size, dtype=torch.long) % num_players,
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+
+    with torch.no_grad():
+        output = model(features, include_policy=True, include_value=True)
+        logits = output.policy_logits
+        probs = torch.softmax(logits, dim=-1)
+        entropy = (-(probs * torch.log_softmax(logits, dim=-1)).sum(dim=-1)).mean()
+
+    assert logits.std() < 0.25
+    assert entropy > math.log(num_actions) - 0.03
+    assert output.hand_values is not None
+    assert 0.01 < output.hand_values.std() < 0.2
 
 
 def test_better_ffn_range_hidden_dim_zero_uses_hand_embedding_with_ffn_width():

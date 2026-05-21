@@ -865,6 +865,17 @@ class BetterFFN(BaseMLPModel):
             self.rank_board_interaction_out.weight.data.mul_(0.1)
             self.suit_board_interaction_out.weight.data.mul_(0.1)
 
+        # Start CFR warm-start policies close to uniform. The policy logits are
+        # assembled from several additive branches; leaving all policy output
+        # projections at orthogonal scale makes the random initial policy very
+        # sharp, especially through dynamic log-belief features.
+        self.policy_action_head.get_submodule("linear_out").weight.data.mul_(0.1)
+        self.policy_hand_bias_action.get_submodule("linear_out").weight.data.mul_(
+            0.01
+        )
+        self.policy_dynamic_coeff.get_submodule("linear_out").weight.data.mul_(0.01)
+        self.policy_action_bias.get_submodule("linear_out").weight.data.mul_(0.01)
+
     def create_feature_encoder(
         self,
         env,
