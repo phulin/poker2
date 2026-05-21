@@ -49,7 +49,11 @@ export async function createBrowserDevice(): Promise<GPUDevice> {
     );
   }
   try {
-    return await adapter.requestDevice();
+    const requiredFeatures: GPUFeatureName[] = [];
+    if (adapter.features.has("subgroups" as GPUFeatureName)) {
+      requiredFeatures.push("subgroups" as GPUFeatureName);
+    }
+    return await adapter.requestDevice({ requiredFeatures });
   } catch (error) {
     const detail = error instanceof Error ? `: ${error.message}` : "";
     throw new Error(`WebGPU adapter was found, but requestDevice failed${detail}`);

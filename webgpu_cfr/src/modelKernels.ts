@@ -569,6 +569,119 @@ export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
 export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL =
   addLeakyReluResidualOutput(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL);
 
+export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL = /* wgsl */ `
+enable subgroups;
+
+struct Params {
+  rows: u32,
+  cols: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+  biasPresent: u32,
+  alpha: f32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> matrix: array<f32>;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<storage, read> residual: array<f32>;
+@group(0) @binding(5) var<uniform> params: Params;
+
+var<workgroup> subgroupPartial0: array<f32, 256>;
+var<workgroup> subgroupPartial1: array<f32, 256>;
+var<workgroup> subgroupPartial2: array<f32, 256>;
+var<workgroup> subgroupPartial3: array<f32, 256>;
+
+fn leaky_relu(x: f32) -> f32 {
+  return select(0.01 * x, x, x >= 0.0);
+}
+
+@compute @workgroup_size(256)
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(subgroup_invocation_id) subgroupLane: u32,
+  @builtin(subgroup_size) subgroupSize: u32,
+) {
+  let row0 = wid.x * 4u;
+  let row1 = row0 + 1u;
+  let row2 = row0 + 2u;
+  let row3 = row0 + 3u;
+  let batch = wid.y;
+  let lane = lid.x;
+  let inputBase = batch * params.inputStride;
+
+  let col0 = lane;
+  let x0 = leaky_relu(input[inputBase + col0]);
+  var sum0 = matrix[row0 * 1024u + col0] * x0;
+  var sum1 = matrix[row1 * 1024u + col0] * x0;
+  var sum2 = matrix[row2 * 1024u + col0] * x0;
+  var sum3 = matrix[row3 * 1024u + col0] * x0;
+
+  let col1 = lane + 256u;
+  let x1 = leaky_relu(input[inputBase + col1]);
+  sum0 = sum0 + matrix[row0 * 1024u + col1] * x1;
+  sum1 = sum1 + matrix[row1 * 1024u + col1] * x1;
+  sum2 = sum2 + matrix[row2 * 1024u + col1] * x1;
+  sum3 = sum3 + matrix[row3 * 1024u + col1] * x1;
+
+  let col2 = lane + 512u;
+  let x2 = leaky_relu(input[inputBase + col2]);
+  sum0 = sum0 + matrix[row0 * 1024u + col2] * x2;
+  sum1 = sum1 + matrix[row1 * 1024u + col2] * x2;
+  sum2 = sum2 + matrix[row2 * 1024u + col2] * x2;
+  sum3 = sum3 + matrix[row3 * 1024u + col2] * x2;
+
+  let col3 = lane + 768u;
+  let x3 = leaky_relu(input[inputBase + col3]);
+  sum0 = sum0 + matrix[row0 * 1024u + col3] * x3;
+  sum1 = sum1 + matrix[row1 * 1024u + col3] * x3;
+  sum2 = sum2 + matrix[row2 * 1024u + col3] * x3;
+  sum3 = sum3 + matrix[row3 * 1024u + col3] * x3;
+
+  let reduced0 = subgroupAdd(sum0);
+  let reduced1 = subgroupAdd(sum1);
+  let reduced2 = subgroupAdd(sum2);
+  let reduced3 = subgroupAdd(sum3);
+  let subgroupIndex = lane / subgroupSize;
+  if (subgroupLane == 0u) {
+    subgroupPartial0[subgroupIndex] = reduced0;
+    subgroupPartial1[subgroupIndex] = reduced1;
+    subgroupPartial2[subgroupIndex] = reduced2;
+    subgroupPartial3[subgroupIndex] = reduced3;
+  }
+  workgroupBarrier();
+
+  if (lane == 0u) {
+    let subgroupCount = (256u + subgroupSize - 1u) / subgroupSize;
+    var out0 = 0.0;
+    var out1 = 0.0;
+    var out2 = 0.0;
+    var out3 = 0.0;
+    for (var i = 0u; i < subgroupCount; i = i + 1u) {
+      out0 = out0 + subgroupPartial0[i];
+      out1 = out1 + subgroupPartial1[i];
+      out2 = out2 + subgroupPartial2[i];
+      out3 = out3 + subgroupPartial3[i];
+    }
+    if (params.biasPresent != 0u) {
+      out0 = out0 + bias[row0];
+      out1 = out1 + bias[row1];
+      out2 = out2 + bias[row2];
+      out3 = out3 + bias[row3];
+    }
+    let outputBase = batch * params.outputStride;
+    output[outputBase + row0] = residual[outputBase + row0] + params.alpha * out0;
+    output[outputBase + row1] = residual[outputBase + row1] + params.alpha * out1;
+    output[outputBase + row2] = residual[outputBase + row2] + params.alpha * out2;
+    output[outputBase + row3] = residual[outputBase + row3] + params.alpha * out3;
+  }
+}
+`;
+
 export const RMS_NORM_WGSL = /* wgsl */ `
 struct Params {
   dim: u32,

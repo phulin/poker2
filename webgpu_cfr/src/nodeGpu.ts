@@ -16,7 +16,11 @@ export async function createDawnDevice(): Promise<GPUDevice> {
   if (!adapter) {
     throw new Error("Dawn WebGPU did not return an adapter.");
   }
-  const device = await adapter.requestDevice();
+  const requiredFeatures: GPUFeatureName[] = [];
+  if (adapter.features.has("subgroups" as GPUFeatureName)) {
+    requiredFeatures.push("subgroups" as GPUFeatureName);
+  }
+  const device = await adapter.requestDevice({ requiredFeatures });
   const root = globalThis as typeof globalThis & {
     __p2DawnKeepAlive?: unknown[];
   };

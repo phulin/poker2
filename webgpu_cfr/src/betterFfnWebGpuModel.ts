@@ -5,6 +5,7 @@ import {
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
@@ -102,6 +103,9 @@ export class BetterFfnWebGpuModel {
   private readonly leakyReluResidualMatVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly leakyReluResidualMatVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
   private readonly leakyReluResidualMatVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
+  private readonly leakyReluResidualMatVecBatchExactRowsCols1024SubgroupPipeline:
+    | GPUComputePipeline
+    | undefined;
   private readonly playerBoardHadamardPipeline: GPUComputePipeline;
   private readonly rmsNormPipeline: GPUComputePipeline;
   private readonly rmsNormBatchPipeline: GPUComputePipeline;
@@ -194,6 +198,13 @@ export class BetterFfnWebGpuModel {
       LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-1024",
     );
+    this.leakyReluResidualMatVecBatchExactRowsCols1024SubgroupPipeline =
+      device.features.has("subgroups" as GPUFeatureName)
+        ? this.pipeline(
+            LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
+            "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-1024-subgroup",
+          )
+        : undefined;
     this.playerBoardHadamardPipeline = this.pipeline(
       PLAYER_BOARD_HADAMARD_WGSL,
       "better-ffn-player-board-hadamard",
@@ -1859,7 +1870,8 @@ export class BetterFfnWebGpuModel {
         ? cols === 512
           ? this.leakyReluResidualMatVecBatchExactRowsCols512Pipeline
           : cols === 1024
-            ? this.leakyReluResidualMatVecBatchExactRowsCols1024Pipeline
+            ? (this.leakyReluResidualMatVecBatchExactRowsCols1024SubgroupPipeline ??
+              this.leakyReluResidualMatVecBatchExactRowsCols1024Pipeline)
             : this.leakyReluResidualMatVecBatchExactRowsPipeline
         : this.leakyReluResidualMatVecBatchPipeline;
     const alphaBits = new Uint32Array(new Float32Array([alpha]).buffer)[0]!;
