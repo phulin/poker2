@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from p2.core.structured_config import (
@@ -16,7 +17,7 @@ from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from p2.models.model_output import ModelOutput
-from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.rl.cfr_trainer import RebelCFRTrainer, _value_samples_per_step
 from p2.rl.losses import RebelSupervisedLoss
 from p2.rl.rebel_batch import RebelBatch
 
@@ -33,6 +34,14 @@ def make_env(num_envs: int = 4) -> HUNLTensorEnv:
     )
     env.reset()
     return env
+
+
+def test_value_samples_per_step_allows_fractional_reuse_goal():
+    assert _value_samples_per_step(batch_size=512, value_reuse_goal=0.5) == 1024
+    assert _value_samples_per_step(batch_size=2048, value_reuse_goal=2.0) == 1024
+
+    with pytest.raises(ValueError, match="value_reuse_goal"):
+        _value_samples_per_step(batch_size=512, value_reuse_goal=0.0)
 
 
 def test_rebel_feature_encoder_shapes():

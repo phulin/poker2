@@ -38,6 +38,15 @@ from p2.utils.profiling import profile
 
 STREETS = ["preflop", "flop", "turn", "river", "showdown"]
 
+
+def _value_samples_per_step(batch_size: int, value_reuse_goal: float) -> int:
+    if value_reuse_goal <= 0:
+        raise ValueError(
+            f"train.value_reuse_goal must be positive; got {value_reuse_goal}"
+        )
+    return max(1, int(round(batch_size / value_reuse_goal)))
+
+
 def _scheduled_learning_rate(
     step: int,
     total_steps: int,
@@ -63,7 +72,6 @@ def _scheduled_learning_rate(
     if lr_schedule == LrSchedule.linear and lr_final != lr_start:
         return lr_start + (lr_final - lr_start) * t
     return lr_start
-
 
 
 def _compile_setting(cfg: Config) -> str:
@@ -199,7 +207,9 @@ class RebelCFRTrainer:
             self.model.compile_forward_modes(**_compile_kwargs(cfg))
 
         # data generation rate per training step
-        self.K_value = max(1, self.batch_size // self.cfg.train.value_reuse_goal)
+        self.K_value = _value_samples_per_step(
+            self.batch_size, self.cfg.train.value_reuse_goal
+        )
         # approximate number of policy samples when collecting K_value value samples
         policy_decimate = (
             self.num_actions / 2

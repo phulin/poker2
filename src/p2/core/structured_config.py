@@ -110,7 +110,7 @@ class TrainingConfig:
     replay_buffer_device: str = "cpu"
 
     # how many times do we want to reuse the same policy/value data?
-    value_reuse_goal: int = 8
+    value_reuse_goal: float = 8.0
     policy_capacity_factor: int = 10
     policy_node_weighting: PolicyNodeWeighting = PolicyNodeWeighting.uniform
     policy_loss_type: PolicyLossType = PolicyLossType.cross_entropy
