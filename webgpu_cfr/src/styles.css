@@ -82,6 +82,32 @@ button:disabled {
   font-size: 14px;
 }
 
+.feature-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid #cbd6cf;
+  border-radius: 999px;
+  background: #f5f8f5;
+  color: #485457;
+  font-size: 11px;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.feature-badge.on {
+  border-color: #9bc9bf;
+  background: #e8f6f2;
+  color: #0f665a;
+}
+
+.feature-badge.off {
+  border-color: #d7c8b3;
+  background: #fbf4e8;
+  color: #7a551f;
+}
+
 .progress-track {
   height: 6px;
   overflow: hidden;

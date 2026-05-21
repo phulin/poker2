@@ -35,6 +35,7 @@ interface Runtime {
   evaluator: ReturnType<typeof createBrowserCfrEvaluator>;
   manifest: BetterFfnManifest;
   cached: boolean;
+  usingSubgroups: boolean;
 }
 
 interface ActionContext {
@@ -332,7 +333,14 @@ function App(): JSX.Element {
       setCfrAvg(cfrDefaults.cfrAvg);
       const model = BetterFfnWebGpuModel.fromBuffers(device, manifest, loaded.weights);
       const evaluator = createBrowserCfrEvaluator(device, model);
-      setRuntime({ device, model, evaluator, manifest, cached: loaded.cached });
+      setRuntime({
+        device,
+        model,
+        evaluator,
+        manifest,
+        cached: loaded.cached,
+        usingSubgroups: device.features.has("subgroups" as GPUFeatureName),
+      });
       setModelProgress({
         phase: loaded.cached ? "cache-hit" : "stored",
         message: loaded.cached ? "Model loaded from IndexedDB" : "Model loaded and cached",
@@ -547,6 +555,20 @@ function App(): JSX.Element {
         <div class="model-status">
           <Cpu size={18} />
           <span>{modelError() || modelProgress().message}</span>
+          <Show when={runtime()}>
+            {(current) => (
+              <span
+                class={`feature-badge ${current().usingSubgroups ? "on" : "off"}`}
+                title={
+                  current().usingSubgroups
+                    ? "BetterFFN subgroup kernels are enabled"
+                    : "Using non-subgroup fallback kernels"
+                }
+              >
+                Subgroups {current().usingSubgroups ? "on" : "off"}
+              </span>
+            )}
+          </Show>
         </div>
       </header>
 
@@ -837,6 +859,7 @@ function App(): JSX.Element {
                   <span>{solved().cfrAvg ? "cfr-avg beliefs" : "current beliefs"}</span>
                   <span>{solved().elapsedMs.toFixed(1)} ms</span>
                   <span>{runtime()?.cached ? "cached model" : "fresh model"}</span>
+                  <span>{runtime()?.usingSubgroups ? "subgroups on" : "subgroups off"}</span>
                   <span>actor P{solved().result.actor}</span>
                 </div>
 
