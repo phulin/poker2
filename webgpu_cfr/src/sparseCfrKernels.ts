@@ -380,10 +380,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let actor = prevActor[child];
   let beliefBase = (parent * 2u + actor) * params.numHands;
   let policyBase = child * params.numHands;
+  let hand0 = handCard0[hand];
+  let hand1 = handCard1[hand];
   var denom = 0.0;
   var numer = 0.0;
   for (var other = 0u; other < params.numHands; other = other + 1u) {
-    if (!overlaps(hand, other)) {
+    let other0 = handCard0[other];
+    let other1 = handCard1[other];
+    if (!(hand0 == other0 || hand0 == other1 || hand1 == other0 || hand1 == other1)) {
       let belief = beliefs[beliefBase + other];
       denom = denom + belief;
       numer = numer + belief * policy[policyBase + other];
@@ -434,10 +438,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let actor = toAct[node];
   let opp = 1u - actor;
   let beliefBase = (node * 2u + opp) * params.numHands;
+  let hand0 = handCard0[hand];
+  let hand1 = handCard1[hand];
   var weight = 0.0;
   if (allowedMask[node * params.numHands + hand] != 0u) {
     for (var other = 0u; other < params.numHands; other = other + 1u) {
-      if (!overlaps(hand, other)) {
+      let other0 = handCard0[other];
+      let other1 = handCard1[other];
+      if (!(hand0 == other0 || hand0 == other1 || hand1 == other0 || hand1 == other1)) {
         weight = weight + beliefs[beliefBase + other];
       }
     }
@@ -548,10 +556,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let winValue = payoffs[sample * 3u];
   let loseValue = payoffs[sample * 3u + 1u];
   let tieValue = payoffs[sample * 3u + 2u];
+  let hand0 = handCard0[hand];
+  let hand1 = handCard1[hand];
   var value = 0.0;
   var mass = 0.0;
   for (var opp = 0u; opp < params.numHands; opp = opp + 1u) {
-    if (allowedMask[node * params.numHands + opp] == 0u || overlaps(hand, opp)) {
+    let opp0 = handCard0[opp];
+    let opp1 = handCard1[opp];
+    if (
+      allowedMask[node * params.numHands + opp] == 0u ||
+      hand0 == opp0 ||
+      hand0 == opp1 ||
+      hand1 == opp0 ||
+      hand1 == opp1
+    ) {
       continue;
     }
     let oppRank = rankCodes[sample * params.numHands + opp];
