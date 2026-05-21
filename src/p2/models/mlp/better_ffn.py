@@ -104,10 +104,11 @@ class BetterFFN(BaseMLPModel):
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
         self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)
+        self.card_embedding = nn.Embedding(52, hidden_dim)
         # Hand-aware belief encoder: project per-player belief vectors through a
-        # hand embedding tied to the rank/suit embeddings, then fuse across
-        # players. range_hidden_dim=0 keeps this path and uses ffn_dim for the
-        # belief FFN width instead of num_players * range_hidden_dim.
+        # hand embedding, then fuse across players. range_hidden_dim=0 keeps
+        # this path and uses ffn_dim for the belief FFN width instead of
+        # num_players * range_hidden_dim.
         combos = hand_combos_tensor()  # [NUM_HANDS, 2]
         self.register_buffer("hand_combos", combos, persistent=False)
         self.register_buffer("hand_ranks", combos % 13, persistent=False)
@@ -178,6 +179,9 @@ class BetterFFN(BaseMLPModel):
         ]
         layers.append(output_projection(hidden_dim, num_actions * NUM_HANDS))
         self.policy_head = nn.Sequential(*layers)
+        self.policy_action_head = output_projection(hidden_dim, num_actions * hidden_dim)
+        self.policy_hand_norm = nn.RMSNorm(hidden_dim, eps=1e-5)
+        self.policy_factor_scale = 1.0
 
         layers = [
             ResidualBlock(
@@ -213,11 +217,23 @@ class BetterFFN(BaseMLPModel):
         return counts.scatter_add(1, safe_indices, valid.to(dtype))
 
     def _hand_embedding(self) -> torch.Tensor:
-        """Per-hand embedding tied to rank/suit embeddings — shape [NUM_HANDS, hidden_dim]."""
-        card_emb = self.rank_embedding(self.hand_ranks) + self.suit_embedding(
-            self.hand_suits
-        )
+        """Per-hand exact-card embedding — shape [NUM_HANDS, hidden_dim]."""
+        card_emb = self.card_embedding(self.hand_combos)
         return card_emb.sum(dim=1)
+
+    def _policy_logits(self, policy_input: torch.Tensor) -> torch.Tensor:
+        direct_logits = self.policy_head(policy_input).view(
+            -1, NUM_HANDS, self.num_actions
+        )
+        action_emb = self.policy_action_head(policy_input).view(
+            -1, self.num_actions, self.hidden_dim
+        )
+        hand_emb = self.policy_hand_norm(self._hand_embedding())
+        factor_logits = torch.einsum("hd,bad->bha", hand_emb, action_emb)
+        factor_logits = factor_logits * (
+            self.policy_factor_scale / math.sqrt(self.hidden_dim)
+        )
+        return direct_logits + factor_logits
 
     def _belief_board_interaction(
         self,
@@ -299,9 +315,7 @@ class BetterFFN(BaseMLPModel):
             features, static_base_features=static_base_features
         )
         policy_input = x if self.shared_trunk else flat_features.detach()
-        policy_logits = self.policy_head(policy_input).view(
-            -1, NUM_HANDS, self.num_actions
-        )
+        policy_logits = self._policy_logits(policy_input)
         return ModelOutput(policy_logits=policy_logits)
 
     def forward_value(
@@ -346,9 +360,7 @@ class BetterFFN(BaseMLPModel):
             features, static_base_features=static_base_features
         )
         policy_input = x if self.shared_trunk else flat_features.detach()
-        policy_logits = self.policy_head(policy_input).view(
-            -1, NUM_HANDS, self.num_actions
-        )
+        policy_logits = self._policy_logits(policy_input)
         hand_values_raw = self.hand_value_head(x).view(-1, self.num_players, NUM_HANDS)
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (

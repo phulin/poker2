@@ -158,6 +158,34 @@ def test_better_ffn_range_hidden_dim_zero_uses_hand_embedding_with_ffn_width():
     assert output.value.shape == (batch_size, num_players)
 
 
+def test_better_ffn_hand_embedding_preserves_rank_suit_assignment():
+    model = BetterFFN(
+        num_actions=4,
+        hidden_dim=4,
+        range_hidden_dim=4,
+        ffn_dim=8,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=2,
+    )
+    with torch.no_grad():
+        cards = torch.arange(52, dtype=model.card_embedding.weight.dtype)
+        model.card_embedding.weight.zero_()
+        model.card_embedding.weight[:, 0] = cards
+        model.card_embedding.weight[:, 1] = cards.square()
+
+    combos = model.hand_combos
+    ah_ks = torch.tensor([12, 24])
+    as_kh = torch.tensor([11, 25])
+    ah_ks_idx = torch.nonzero((combos == ah_ks).all(dim=1), as_tuple=False).item()
+    as_kh_idx = torch.nonzero((combos == as_kh).all(dim=1), as_tuple=False).item()
+
+    hand_emb = model._hand_embedding()
+
+    assert not torch.allclose(hand_emb[ah_ks_idx], hand_emb[as_kh_idx])
+
+
 def test_better_ffn_rank_and_suit_board_bilinear_interactions():
     batch_size = 2
     num_actions = 4
