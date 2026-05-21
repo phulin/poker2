@@ -4,6 +4,10 @@ import {
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_WGSL,
@@ -94,6 +98,10 @@ export class BetterFfnWebGpuModel {
   private readonly leakyReluMatVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
+  private readonly leakyReluResidualMatVecBatchPipeline: GPUComputePipeline;
+  private readonly leakyReluResidualMatVecBatchExactRowsPipeline: GPUComputePipeline;
+  private readonly leakyReluResidualMatVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
+  private readonly leakyReluResidualMatVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
   private readonly playerBoardHadamardPipeline: GPUComputePipeline;
   private readonly rmsNormPipeline: GPUComputePipeline;
   private readonly rmsNormBatchPipeline: GPUComputePipeline;
@@ -169,6 +177,22 @@ export class BetterFfnWebGpuModel {
     this.leakyReluMatVecBatchExactRowsCols1024Pipeline = this.pipeline(
       LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-1024",
+    );
+    this.leakyReluResidualMatVecBatchPipeline = this.pipeline(
+      LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
+      "better-ffn-leaky-relu-residual-mat-vec-batch",
+    );
+    this.leakyReluResidualMatVecBatchExactRowsPipeline = this.pipeline(
+      LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+      "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows",
+    );
+    this.leakyReluResidualMatVecBatchExactRowsCols512Pipeline = this.pipeline(
+      LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+      "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-512",
+    );
+    this.leakyReluResidualMatVecBatchExactRowsCols1024Pipeline = this.pipeline(
+      LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+      "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-1024",
     );
     this.playerBoardHadamardPipeline = this.pipeline(
       PLAYER_BOARD_HADAMARD_WGSL,
@@ -645,18 +669,16 @@ export class BetterFfnWebGpuModel {
           this.manifest.architecture.numValueLayers,
       );
       for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
-        const inner = this.leakyReluBlockBatch(
+        const out = this.leakyReluResidualBlockBatch(
           `trunk.${i}.inner`,
           x,
           batch,
           hiddenDim,
           ffnDim,
-          hiddenDim,
+          alpha,
           empty,
           uniform,
         );
-        const out = empty(batch * hiddenDim);
-        this.scaledResidualAdd(x, inner, out, batch * hiddenDim, alpha, uniform);
         x = out;
       }
 
@@ -895,18 +917,16 @@ export class BetterFfnWebGpuModel {
           this.manifest.architecture.numValueLayers,
       );
       for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
-        const inner = this.leakyReluBlockBatch(
+        const out = this.leakyReluResidualBlockBatch(
           `trunk.${i}.inner`,
           x,
           batch,
           hiddenDim,
           ffnDim,
-          hiddenDim,
+          alpha,
           empty,
           uniform,
         );
-        const out = empty(batch * hiddenDim);
-        this.scaledResidualAdd(x, inner, out, batch * hiddenDim, alpha, uniform);
         x = out;
       }
 
@@ -1461,18 +1481,16 @@ export class BetterFfnWebGpuModel {
     if (this.tensors.has(`${directOutputPrefix}.linear_out.weight`)) {
       let headInput = input;
       for (let i = 0; i < numLayers; i += 1) {
-        const inner = this.leakyReluBlockBatch(
+        const out = this.leakyReluResidualBlockBatch(
           `${head}.${i}.inner`,
           headInput,
           batch,
           hiddenDim,
           ffnDim,
-          hiddenDim,
+          alpha,
           empty,
           uniform,
         );
-        const out = empty(batch * hiddenDim);
-        this.scaledResidualAdd(headInput, inner, out, batch * hiddenDim, alpha, uniform);
         headInput = out;
       }
       return this.outputProjectionBatch(
@@ -1488,18 +1506,16 @@ export class BetterFfnWebGpuModel {
 
     let headInput = input;
     for (let i = 0; i < numLayers - 1; i += 1) {
-      const inner = this.leakyReluBlockBatch(
+      const out = this.leakyReluResidualBlockBatch(
         `${head}.${i}.inner`,
         headInput,
         batch,
         hiddenDim,
         ffnDim,
-        hiddenDim,
+        alpha,
         empty,
         uniform,
       );
-      const out = empty(batch * hiddenDim);
-      this.scaledResidualAdd(headInput, inner, out, batch * hiddenDim, alpha, uniform);
       headInput = out;
     }
     return this.leakyReluBlockBatch(
@@ -1588,6 +1604,55 @@ export class BetterFfnWebGpuModel {
       hiddenDim,
       outDim,
       true,
+      uniform,
+    );
+    return out;
+  }
+
+  private leakyReluResidualBlockBatch(
+    prefix: string,
+    input: GPUBuffer,
+    batch: number,
+    inDim: number,
+    hiddenDim: number,
+    alpha: number,
+    empty: (elements: number) => GPUBuffer,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): GPUBuffer {
+    const normed = empty(batch * inDim);
+    this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+    const linear = empty(batch * hiddenDim);
+    this.matVecBatch(
+      this.tensor(`${prefix}.linear_in.weight`).buffer,
+      normed,
+      this.dummyBias,
+      linear,
+      hiddenDim,
+      inDim,
+      batch,
+      inDim,
+      hiddenDim,
+      0,
+      0,
+      false,
+      uniform,
+    );
+    const out = empty(batch * inDim);
+    this.leakyReluResidualMatVecBatch(
+      this.tensor(`${prefix}.linear_out.weight`).buffer,
+      linear,
+      this.tensor(`${prefix}.linear_out.bias`).buffer,
+      input,
+      out,
+      inDim,
+      hiddenDim,
+      batch,
+      hiddenDim,
+      inDim,
+      true,
+      alpha,
       uniform,
     );
     return out;
@@ -1764,6 +1829,58 @@ export class BetterFfnWebGpuModel {
               outputStride,
               biasPresent ? 1 : 0,
               0,
+              0,
+            ]),
+          ),
+        },
+      },
+    ]);
+  }
+
+  private leakyReluResidualMatVecBatch(
+    matrix: GPUBuffer,
+    input: GPUBuffer,
+    bias: GPUBuffer,
+    residual: GPUBuffer,
+    output: GPUBuffer,
+    rows: number,
+    cols: number,
+    batch: number,
+    inputStride: number,
+    outputStride: number,
+    biasPresent: boolean,
+    alpha: number,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    const pipeline =
+      rows % BATCH_ROW_BLOCK === 0
+        ? cols === 512
+          ? this.leakyReluResidualMatVecBatchExactRowsCols512Pipeline
+          : cols === 1024
+            ? this.leakyReluResidualMatVecBatchExactRowsCols1024Pipeline
+            : this.leakyReluResidualMatVecBatchExactRowsPipeline
+        : this.leakyReluResidualMatVecBatchPipeline;
+    const alphaBits = new Uint32Array(new Float32Array([alpha]).buffer)[0]!;
+    this.submit2d(pipeline, this.batchRowGroups(rows), batch, [
+      { binding: 0, resource: { buffer: matrix } },
+      { binding: 1, resource: { buffer: input } },
+      { binding: 2, resource: { buffer: bias } },
+      { binding: 3, resource: { buffer: output } },
+      { binding: 4, resource: { buffer: residual } },
+      {
+        binding: 5,
+        resource: {
+          buffer: uniform(
+            new Uint32Array([
+              rows,
+              cols,
+              batch,
+              inputStride,
+              outputStride,
+              biasPresent ? 1 : 0,
+              alphaBits,
               0,
             ]),
           ),

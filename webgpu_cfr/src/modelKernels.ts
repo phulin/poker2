@@ -527,6 +527,48 @@ export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
 export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL =
   unrollMatVecBatchColumns(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL, 1024, true);
 
+function addLeakyReluResidualOutput(source: string): string {
+  return source
+    .replace(
+      `  biasPresent: u32,
+  _pad0: u32,
+  _pad1: u32,`,
+      `  biasPresent: u32,
+  alpha: f32,
+  _pad0: u32,`,
+    )
+    .replace(
+      "@group(0) @binding(4) var<uniform> params: Params;",
+      `@group(0) @binding(4) var<storage, read> residual: array<f32>;
+@group(0) @binding(5) var<uniform> params: Params;`,
+    )
+    .replaceAll(
+      "output[outputBase + row0] = out0;",
+      "output[outputBase + row0] = residual[outputBase + row0] + params.alpha * out0;",
+    )
+    .replaceAll(
+      "output[outputBase + row1] = out1;",
+      "output[outputBase + row1] = residual[outputBase + row1] + params.alpha * out1;",
+    )
+    .replaceAll(
+      "output[outputBase + row2] = out2;",
+      "output[outputBase + row2] = residual[outputBase + row2] + params.alpha * out2;",
+    )
+    .replaceAll(
+      "output[outputBase + row3] = out3;",
+      "output[outputBase + row3] = residual[outputBase + row3] + params.alpha * out3;",
+    );
+}
+
+export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL =
+  addLeakyReluResidualOutput(LEAKY_RELU_MAT_VEC_BATCH_WGSL);
+export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL =
+  addLeakyReluResidualOutput(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL);
+export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
+  addLeakyReluResidualOutput(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL);
+export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL =
+  addLeakyReluResidualOutput(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL);
+
 export const RMS_NORM_WGSL = /* wgsl */ `
 struct Params {
   dim: u32,
