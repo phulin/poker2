@@ -165,6 +165,8 @@ class RebelCFRTrainer:
                 shared_trunk=cfg.model.shared_trunk,
                 enforce_zero_sum=cfg.model.enforce_zero_sum,
                 board_interaction_dim=cfg.model.board_interaction_dim,
+                policy_rank=cfg.model.policy_rank,
+                policy_factor_scale=cfg.model.policy_factor_scale,
                 nonlinearity=cfg.model.nonlinearity,
             )
             num_context_features = context_length(self.num_players)
@@ -355,6 +357,8 @@ class RebelCFRTrainer:
                 shared_trunk=cfg.model.shared_trunk,
                 enforce_zero_sum=cfg.model.enforce_zero_sum,
                 board_interaction_dim=cfg.model.board_interaction_dim,
+                policy_rank=cfg.model.policy_rank,
+                policy_factor_scale=cfg.model.policy_factor_scale,
                 nonlinearity=cfg.model.nonlinearity,
             )
         elif cfg.model.name == ModelType.better_trm:

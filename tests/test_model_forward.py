@@ -79,12 +79,29 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
         num_policy_layers=1,
         num_value_layers=1,
         num_players=num_players,
+        policy_rank=8,
+        policy_factor_scale=0.5,
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(0))
 
     assert not any(isinstance(module, nn.LayerNorm) for module in model.modules())
     assert any(isinstance(module, nn.RMSNorm) for module in model.modules())
     assert not any(name.endswith(".norm.bias") for name in model.state_dict())
+    assert "policy_head.1.linear_out.weight" not in model.state_dict()
+    assert model.policy_hand_proj.linear_out.weight.shape == (
+        model.policy_rank,
+        model.hidden_dim,
+    )
+    assert model.policy_action_head.linear_out.weight.shape == (
+        num_actions * model.policy_rank,
+        model.hidden_dim,
+    )
+    assert model.policy_hand_bias.linear_out.weight.shape == (1, model.hidden_dim)
+    assert model.policy_hand_bias_action.linear_out.weight.shape == (
+        num_actions,
+        model.hidden_dim,
+    )
+    torch.testing.assert_close(model.policy_factor_scale.detach(), torch.tensor(0.5))
 
     beliefs = torch.full(
         (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32

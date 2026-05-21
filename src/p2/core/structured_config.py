@@ -229,6 +229,8 @@ class ModelConfig:
     shared_trunk: bool = True
     enforce_zero_sum: bool = True
     board_interaction_dim: int = 0
+    policy_rank: int = 64
+    policy_factor_scale: float = 0.5
 
     # Better TRM parameters
     num_recursions: int = 6
