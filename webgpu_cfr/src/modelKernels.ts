@@ -920,6 +920,140 @@ fn main(
 }
 `;
 
+function makeMatVecBatchExactRowsCols512Batch3Subgroup(): string {
+  const rows = [0, 1, 2, 3];
+  const batches = [0, 1, 2];
+  const cells = batches.flatMap((batch) =>
+    rows.map((row) => ({ batch, row, name: `${batch}${row}` })),
+  );
+  const partials = cells
+    .map(({ name }) => `var<workgroup> subgroupPartial${name}: array<f32, 64>;`)
+    .join("\n");
+  const rowLets = rows
+    .slice(1)
+    .map((row) => `  let row${row} = row0 + ${row}u;`)
+    .join("\n");
+  const chunkBlocks = Array.from({ length: 8 }, (_, chunk) => {
+    const inputs = batches
+      .map((batch) =>
+        batch === 0
+          ? `  let x${batch}${chunk} = input[inputBase${batch} + col${chunk}];`
+          : `  var x${batch}${chunk} = 0.0;
+  if (batch${batch} < params.batch) {
+    x${batch}${chunk} = input[inputBase${batch} + col${chunk}];
+  }`,
+      )
+      .join("\n");
+    const matrixLoads = rows
+      .map((row) => `  let m${row}${chunk} = matrix[row${row} * 512u + col${chunk}];`)
+      .join("\n");
+    const ops = cells
+      .map(({ batch, row, name }) =>
+        chunk === 0
+          ? `  var sum${name} = m${row}${chunk} * x${batch}${chunk};`
+          : `  sum${name} = sum${name} + m${row}${chunk} * x${batch}${chunk};`,
+      )
+      .join("\n");
+    return `  let col${chunk} = lane + ${chunk * 64}u;
+${inputs}
+${matrixLoads}
+${ops}`;
+  }).join("\n\n");
+  const reductions = cells
+    .map(({ name }) => `  let reduced${name} = subgroupAdd(sum${name});`)
+    .join("\n");
+  const partialWrites = cells
+    .map(({ name }) => `    subgroupPartial${name}[subgroupIndex] = reduced${name};`)
+    .join("\n");
+  const outDecls = cells.map(({ name }) => `    var out${name} = 0.0;`).join("\n");
+  const outAdds = cells
+    .map(({ name }) => `      out${name} = out${name} + subgroupPartial${name}[i];`)
+    .join("\n");
+  const biasAdds = cells
+    .map(({ row, name }) => `      out${name} = out${name} + bias[row${row}];`)
+    .join("\n");
+  const writes = batches
+    .map((batch) => {
+      const rowWrites = rows
+        .map((row) => `      output[outputBase${batch} + row${row}] = out${batch}${row};`)
+        .join("\n");
+      if (batch === 0) {
+        return `    let outputBase0 = batch0 * params.outputStride + params.outputOffset;
+${rowWrites}`;
+      }
+      return `    if (batch${batch} < params.batch) {
+      let outputBase${batch} = batch${batch} * params.outputStride + params.outputOffset;
+${rowWrites}
+    }`;
+    })
+    .join("\n");
+
+  return /* wgsl */ `
+enable subgroups;
+
+struct Params {
+  rows: u32,
+  cols: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+  inputOffset: u32,
+  outputOffset: u32,
+  biasPresent: u32,
+};
+
+@group(0) @binding(0) var<storage, read> matrix: array<f32>;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+${partials}
+
+@compute @workgroup_size(64)
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(subgroup_invocation_id) subgroupLane: u32,
+  @builtin(subgroup_size) subgroupSize: u32,
+) {
+  let row0 = wid.x * 4u;
+${rowLets}
+  let batch0 = wid.y * 3u;
+  let batch1 = batch0 + 1u;
+  let batch2 = batch0 + 2u;
+  let lane = lid.x;
+  let inputBase0 = batch0 * params.inputStride + params.inputOffset;
+  let inputBase1 = batch1 * params.inputStride + params.inputOffset;
+  let inputBase2 = batch2 * params.inputStride + params.inputOffset;
+
+${chunkBlocks}
+
+${reductions}
+  let subgroupIndex = lane / subgroupSize;
+  if (subgroupLane == 0u) {
+${partialWrites}
+  }
+  workgroupBarrier();
+
+  if (lane == 0u) {
+    let subgroupCount = (64u + subgroupSize - 1u) / subgroupSize;
+${outDecls}
+    for (var i = 0u; i < subgroupCount; i = i + 1u) {
+${outAdds}
+    }
+    if (params.biasPresent != 0u) {
+${biasAdds}
+    }
+${writes}
+  }
+}
+`;
+}
+
+export const MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH3_SUBGROUP_WGSL =
+  makeMatVecBatchExactRowsCols512Batch3Subgroup();
+
 export const MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL = /* wgsl */ `
 enable subgroups;
 
