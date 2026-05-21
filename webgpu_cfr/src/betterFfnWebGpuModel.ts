@@ -3,6 +3,7 @@ import {
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
@@ -103,6 +104,9 @@ export class BetterFfnWebGpuModel {
   private readonly leakyReluMatVecBatchPipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
+  private readonly leakyReluMatVecBatchExactRowsCols512SubgroupPipeline:
+    | GPUComputePipeline
+    | undefined;
   private readonly leakyReluMatVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsCols1024SubgroupPipeline:
     | GPUComputePipeline
@@ -193,6 +197,13 @@ export class BetterFfnWebGpuModel {
       LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-512",
     );
+    this.leakyReluMatVecBatchExactRowsCols512SubgroupPipeline =
+      device.features.has("subgroups" as GPUFeatureName)
+        ? this.pipeline(
+            LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
+            "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-512-subgroup",
+          )
+        : undefined;
     this.leakyReluMatVecBatchExactRowsCols1024Pipeline = this.pipeline(
       LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-1024",
@@ -1841,7 +1852,8 @@ export class BetterFfnWebGpuModel {
     const pipeline =
       rows % BATCH_ROW_BLOCK === 0
         ? cols === 512
-          ? this.leakyReluMatVecBatchExactRowsCols512Pipeline
+          ? (this.leakyReluMatVecBatchExactRowsCols512SubgroupPipeline ??
+            this.leakyReluMatVecBatchExactRowsCols512Pipeline)
           : cols === 1024
             ? (this.leakyReluMatVecBatchExactRowsCols1024SubgroupPipeline ??
               this.leakyReluMatVecBatchExactRowsCols1024Pipeline)
