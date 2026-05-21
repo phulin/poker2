@@ -1116,7 +1116,7 @@ function makeMatVecBatchExactRowsCols1326Batch2Subgroup(): string {
     rows.map((row) => ({ batch, row, name: `${batch}${row}` })),
   );
   const partials = cells
-    .map(({ name }) => `var<workgroup> subgroupPartial${name}: array<f32, 256>;`)
+    .map(({ name }) => `var<workgroup> subgroupPartial${name}: array<f32, 128>;`)
     .join("\n");
   const rowLets = rows
     .slice(1)
@@ -1959,7 +1959,7 @@ function makeLeakyReluResidualMatVecBatchExactRowsCols1024Batch2Subgroup(): stri
       rows.map((row) => `  var sum${batch}${row} = m${row}0 * x${batch}0;`),
     )
     .join("\n");
-  const chunks = [1, 2, 3]
+  const chunks = [1, 2, 3, 4, 5, 6, 7]
     .map((chunk) => {
       const inputs = batches
         .map((batch) =>
@@ -1982,7 +1982,7 @@ function makeLeakyReluResidualMatVecBatchExactRowsCols1024Batch2Subgroup(): stri
           ),
         )
         .join("\n");
-      return `  let col${chunk} = lane + ${chunk * 256}u;
+      return `  let col${chunk} = lane + ${chunk * 128}u;
 ${inputs}
 ${matrixLoads}
 ${adds}`;
@@ -2049,7 +2049,7 @@ fn leaky_relu(x: f32) -> f32 {
   return select(0.01 * x, x, x >= 0.0);
 }
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(128)
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
@@ -2082,7 +2082,7 @@ ${partialWrites}
   workgroupBarrier();
 
   if (lane == 0u) {
-    let subgroupCount = (256u + subgroupSize - 1u) / subgroupSize;
+    let subgroupCount = (128u + subgroupSize - 1u) / subgroupSize;
 ${outDecls}
     for (var i = 0u; i < subgroupCount; i = i + 1u) {
 ${outAdds}
