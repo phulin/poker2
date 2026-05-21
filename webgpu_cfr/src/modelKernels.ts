@@ -767,6 +767,189 @@ fn main(
 }
 `;
 
+function makeMatVecBatchExactRowsCols1326Batch2Subgroup(): string {
+  const rows = [0, 1, 2, 3];
+  const batches = [0, 1];
+  const cells = batches.flatMap((batch) =>
+    rows.map((row) => ({ batch, row, name: `${batch}${row}` })),
+  );
+  const partials = cells
+    .map(({ name }) => `var<workgroup> subgroupPartial${name}: array<f32, 256>;`)
+    .join("\n");
+  const rowLets = rows
+    .slice(1)
+    .map((row) => `  let row${row} = row0 + ${row}u;`)
+    .join("\n");
+  const firstInputs = batches
+    .map((batch) =>
+      batch === 0
+        ? `  let x${batch}0 = input[inputBase${batch} + col0];`
+        : `  var x${batch}0 = 0.0;
+  if (batch${batch} < params.batch) {
+    x${batch}0 = input[inputBase${batch} + col0];
+  }`,
+    )
+    .join("\n");
+  const firstSums = cells
+    .map(({ batch, row, name }) => `  var sum${name} = m${row}0 * x${batch}0;`)
+    .join("\n");
+  const chunks = [1, 2, 3, 4]
+    .map((chunk) => {
+      const inputs = batches
+        .map((batch) =>
+          batch === 0
+            ? `  let x${batch}${chunk} = input[inputBase${batch} + col${chunk}];`
+            : `  var x${batch}${chunk} = 0.0;
+  if (batch${batch} < params.batch) {
+    x${batch}${chunk} = input[inputBase${batch} + col${chunk}];
+  }`,
+        )
+        .join("\n");
+      const matrixLoads = rows
+        .map(
+          (row) =>
+            `  let m${row}${chunk} = matrix[row${row} * 1326u + col${chunk}];`,
+        )
+        .join("\n");
+      const adds = cells
+        .map(
+          ({ batch, row, name }) =>
+            `  sum${name} = sum${name} + m${row}${chunk} * x${batch}${chunk};`,
+        )
+        .join("\n");
+      return `  let col${chunk} = lane + ${chunk * 256}u;
+${inputs}
+${matrixLoads}
+${adds}`;
+    })
+    .join("\n\n");
+  const lastInputs = batches
+    .map((batch) =>
+      batch === 0
+        ? `    let x${batch}5 = input[inputBase${batch} + col5];`
+        : `    var x${batch}5 = 0.0;
+    if (batch${batch} < params.batch) {
+      x${batch}5 = input[inputBase${batch} + col5];
+    }`,
+    )
+    .join("\n");
+  const lastAdds = cells
+    .map(
+      ({ batch, row, name }) =>
+        `    sum${name} = sum${name} + m${row}5 * x${batch}5;`,
+    )
+    .join("\n");
+  const reductions = cells
+    .map(({ name }) => `  let reduced${name} = subgroupAdd(sum${name});`)
+    .join("\n");
+  const partialWrites = cells
+    .map(({ name }) => `    subgroupPartial${name}[subgroupIndex] = reduced${name};`)
+    .join("\n");
+  const outDecls = cells.map(({ name }) => `    var out${name} = 0.0;`).join("\n");
+  const outAdds = cells
+    .map(({ name }) => `      out${name} = out${name} + subgroupPartial${name}[i];`)
+    .join("\n");
+  const biasAdds = cells
+    .map(({ row, name }) => `      out${name} = out${name} + bias[row${row}];`)
+    .join("\n");
+  const writes = batches
+    .map((batch) => {
+      const rowWrites = rows
+        .map((row) => `      output[outputBase${batch} + row${row}] = out${batch}${row};`)
+        .join("\n");
+      if (batch === 0) {
+        return `    let outputBase0 = batch0 * params.outputStride + params.outputOffset;
+${rowWrites}`;
+      }
+      return `    if (batch1 < params.batch) {
+      let outputBase1 = batch1 * params.outputStride + params.outputOffset;
+${rowWrites}
+    }`;
+    })
+    .join("\n");
+
+  return /* wgsl */ `
+enable subgroups;
+
+struct Params {
+  rows: u32,
+  cols: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+  inputOffset: u32,
+  outputOffset: u32,
+  biasPresent: u32,
+};
+
+@group(0) @binding(0) var<storage, read> matrix: array<f32>;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+${partials}
+
+@compute @workgroup_size(256)
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(subgroup_invocation_id) subgroupLane: u32,
+  @builtin(subgroup_size) subgroupSize: u32,
+) {
+  let row0 = wid.x * 4u;
+${rowLets}
+  let batch0 = wid.y * 2u;
+  let batch1 = batch0 + 1u;
+  let lane = lid.x;
+  let inputBase0 = batch0 * params.inputStride + params.inputOffset;
+  let inputBase1 = batch1 * params.inputStride + params.inputOffset;
+
+  let col0 = lane;
+${firstInputs}
+  let m00 = matrix[row0 * 1326u + col0];
+  let m10 = matrix[row1 * 1326u + col0];
+  let m20 = matrix[row2 * 1326u + col0];
+  let m30 = matrix[row3 * 1326u + col0];
+${firstSums}
+
+${chunks}
+
+  let col5 = lane + 1280u;
+  if (col5 < 1326u) {
+${lastInputs}
+    let m05 = matrix[row0 * 1326u + col5];
+    let m15 = matrix[row1 * 1326u + col5];
+    let m25 = matrix[row2 * 1326u + col5];
+    let m35 = matrix[row3 * 1326u + col5];
+${lastAdds}
+  }
+
+${reductions}
+  let subgroupIndex = lane / subgroupSize;
+  if (subgroupLane == 0u) {
+${partialWrites}
+  }
+  workgroupBarrier();
+
+  if (lane == 0u) {
+    let subgroupCount = (256u + subgroupSize - 1u) / subgroupSize;
+${outDecls}
+    for (var i = 0u; i < subgroupCount; i = i + 1u) {
+${outAdds}
+    }
+    if (params.biasPresent != 0u) {
+${biasAdds}
+    }
+${writes}
+  }
+}
+`;
+}
+
+export const MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL =
+  makeMatVecBatchExactRowsCols1326Batch2Subgroup();
+
 export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
   unrollMatVecBatchColumns(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL, 512, true);
 export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL =
@@ -1329,6 +1512,174 @@ fn main(
   }
 }
 `;
+
+function makeLeakyReluResidualMatVecBatchExactRowsCols1024Batch2Subgroup(): string {
+  const rows = [0, 1, 2, 3];
+  const batches = [0, 1];
+  const cells = batches.flatMap((batch) =>
+    rows.map((row) => ({ batch, row, name: `${batch}${row}` })),
+  );
+  const partials = cells
+    .map(({ name }) => `var<workgroup> subgroupPartial${name}: array<f32, 256>;`)
+    .join("\n");
+  const rowLets = rows
+    .slice(1)
+    .map((row) => `  let row${row} = row0 + ${row}u;`)
+    .join("\n");
+  const firstInputs = batches
+    .map((batch) =>
+      batch === 0
+        ? `  let x${batch}0 = leaky_relu(input[inputBase${batch} + col0]);`
+        : `  var x${batch}0 = 0.0;
+  if (batch${batch} < params.batch) {
+    x${batch}0 = leaky_relu(input[inputBase${batch} + col0]);
+  }`,
+    )
+    .join("\n");
+  const firstSums = batches
+    .flatMap((batch) =>
+      rows.map((row) => `  var sum${batch}${row} = m${row}0 * x${batch}0;`),
+    )
+    .join("\n");
+  const chunks = [1, 2, 3]
+    .map((chunk) => {
+      const inputs = batches
+        .map((batch) =>
+          batch === 0
+            ? `  let x${batch}${chunk} = leaky_relu(input[inputBase${batch} + col${chunk}]);`
+            : `  var x${batch}${chunk} = 0.0;
+  if (batch${batch} < params.batch) {
+    x${batch}${chunk} = leaky_relu(input[inputBase${batch} + col${chunk}]);
+  }`,
+        )
+        .join("\n");
+      const matrixLoads = rows
+        .map((row) => `  let m${row}${chunk} = matrix[row${row} * 1024u + col${chunk}];`)
+        .join("\n");
+      const adds = batches
+        .flatMap((batch) =>
+          rows.map(
+            (row) =>
+              `  sum${batch}${row} = sum${batch}${row} + m${row}${chunk} * x${batch}${chunk};`,
+          ),
+        )
+        .join("\n");
+      return `  let col${chunk} = lane + ${chunk * 256}u;
+${inputs}
+${matrixLoads}
+${adds}`;
+    })
+    .join("\n\n");
+  const reductions = cells
+    .map(({ name }) => `  let reduced${name} = subgroupAdd(sum${name});`)
+    .join("\n");
+  const partialWrites = cells
+    .map(({ name }) => `    subgroupPartial${name}[subgroupIndex] = reduced${name};`)
+    .join("\n");
+  const outDecls = cells
+    .map(({ name }) => `    var out${name} = 0.0;`)
+    .join("\n");
+  const outAdds = cells
+    .map(({ name }) => `      out${name} = out${name} + subgroupPartial${name}[i];`)
+    .join("\n");
+  const biasAdds = cells
+    .map(({ row, name }) => `      out${name} = out${name} + bias[row${row}];`)
+    .join("\n");
+  const writes = batches
+    .map((batch) => {
+      const rowWrites = rows
+        .map(
+          (row) =>
+            `      output[outputBase${batch} + row${row}] = residual[outputBase${batch} + row${row}] + params.alpha * out${batch}${row};`,
+        )
+        .join("\n");
+      if (batch === 0) {
+        return `    let outputBase0 = batch0 * params.outputStride;
+${rowWrites}`;
+      }
+      return `    if (batch1 < params.batch) {
+      let outputBase1 = batch1 * params.outputStride;
+${rowWrites}
+    }`;
+    })
+    .join("\n");
+
+  return /* wgsl */ `
+enable subgroups;
+
+struct Params {
+  rows: u32,
+  cols: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+  biasPresent: u32,
+  alpha: f32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> matrix: array<f32>;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<storage, read> residual: array<f32>;
+@group(0) @binding(5) var<uniform> params: Params;
+
+${partials}
+
+fn leaky_relu(x: f32) -> f32 {
+  return select(0.01 * x, x, x >= 0.0);
+}
+
+@compute @workgroup_size(256)
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(subgroup_invocation_id) subgroupLane: u32,
+  @builtin(subgroup_size) subgroupSize: u32,
+) {
+  let row0 = wid.x * 4u;
+${rowLets}
+  let batch0 = wid.y * 2u;
+  let batch1 = batch0 + 1u;
+  let lane = lid.x;
+  let inputBase0 = batch0 * params.inputStride;
+  let inputBase1 = batch1 * params.inputStride;
+
+  let col0 = lane;
+${firstInputs}
+  let m00 = matrix[row0 * 1024u + col0];
+  let m10 = matrix[row1 * 1024u + col0];
+  let m20 = matrix[row2 * 1024u + col0];
+  let m30 = matrix[row3 * 1024u + col0];
+${firstSums}
+
+${chunks}
+
+${reductions}
+  let subgroupIndex = lane / subgroupSize;
+  if (subgroupLane == 0u) {
+${partialWrites}
+  }
+  workgroupBarrier();
+
+  if (lane == 0u) {
+    let subgroupCount = (256u + subgroupSize - 1u) / subgroupSize;
+${outDecls}
+    for (var i = 0u; i < subgroupCount; i = i + 1u) {
+${outAdds}
+    }
+    if (params.biasPresent != 0u) {
+${biasAdds}
+    }
+${writes}
+  }
+}
+`;
+}
+
+export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL =
+  makeLeakyReluResidualMatVecBatchExactRowsCols1024Batch2Subgroup();
 
 export const RMS_NORM_WGSL = /* wgsl */ `
 struct Params {

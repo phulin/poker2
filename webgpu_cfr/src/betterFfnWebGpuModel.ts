@@ -8,11 +8,13 @@ import {
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
@@ -106,6 +108,9 @@ export class BetterFfnWebGpuModel {
     | GPUComputePipeline
     | undefined;
   private readonly matVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
+  private readonly matVecBatchExactRowsCols1326Batch2SubgroupPipeline:
+    | GPUComputePipeline
+    | undefined;
   private readonly leakyReluMatVecBatchPipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly leakyReluMatVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
@@ -123,6 +128,9 @@ export class BetterFfnWebGpuModel {
   private readonly leakyReluResidualMatVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly leakyReluResidualMatVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
   private readonly leakyReluResidualMatVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
+  private readonly leakyReluResidualMatVecBatchExactRowsCols1024Batch2SubgroupPipeline:
+    | GPUComputePipeline
+    | undefined;
   private readonly leakyReluResidualMatVecBatchExactRowsCols1024SubgroupPipeline:
     | GPUComputePipeline
     | undefined;
@@ -149,10 +157,11 @@ export class BetterFfnWebGpuModel {
     const loaded = tensorsFromWeights(this.manifest, weights);
     this.validateRequiredTensors(loaded);
     for (const [name, tensor] of loaded) {
+      const buffer = makeStorageBuffer(device, tensor.data);
       this.tensors.set(name, {
         data: tensor.data,
         shape: tensor.manifest.shape,
-        buffer: makeStorageBuffer(device, tensor.data),
+        buffer,
       });
     }
     this.dummyBias = makeStorageBuffer(device, new Float32Array([0]));
@@ -200,6 +209,13 @@ export class BetterFfnWebGpuModel {
       MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       "better-ffn-mat-vec-batch-exact-rows-cols-1024",
     );
+    this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline =
+      device.features.has("subgroups" as GPUFeatureName)
+        ? this.pipeline(
+            MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
+            "better-ffn-mat-vec-batch-exact-rows-cols-1326-batch2-subgroup",
+          )
+        : undefined;
     this.leakyReluMatVecBatchPipeline = this.pipeline(
       LEAKY_RELU_MAT_VEC_BATCH_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch",
@@ -253,6 +269,13 @@ export class BetterFfnWebGpuModel {
       LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-1024",
     );
+    this.leakyReluResidualMatVecBatchExactRowsCols1024Batch2SubgroupPipeline =
+      device.features.has("subgroups" as GPUFeatureName)
+        ? this.pipeline(
+            LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+            "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-1024-batch2-subgroup",
+          )
+        : undefined;
     this.leakyReluResidualMatVecBatchExactRowsCols1024SubgroupPipeline =
       device.features.has("subgroups" as GPUFeatureName)
         ? this.pipeline(
@@ -1643,8 +1666,9 @@ export class BetterFfnWebGpuModel {
     const normed = empty(batch * inDim);
     this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
     const linear = empty(batch * hiddenDim);
+    const linearInName = `${prefix}.linear_in.weight`;
     this.matVecBatch(
-      this.tensor(`${prefix}.linear_in.weight`).buffer,
+      this.tensor(linearInName).buffer,
       normed,
       this.dummyBias,
       linear,
@@ -1659,8 +1683,9 @@ export class BetterFfnWebGpuModel {
       uniform,
     );
     const out = empty(batch * outDim);
+    const linearOutName = `${prefix}.linear_out.weight`;
     this.leakyReluMatVecBatch(
-      this.tensor(`${prefix}.linear_out.weight`).buffer,
+      this.tensor(linearOutName).buffer,
       linear,
       this.tensor(`${prefix}.linear_out.bias`).buffer,
       out,
@@ -1690,8 +1715,9 @@ export class BetterFfnWebGpuModel {
     const normed = empty(batch * inDim);
     this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
     const linear = empty(batch * hiddenDim);
+    const linearInName = `${prefix}.linear_in.weight`;
     this.matVecBatch(
-      this.tensor(`${prefix}.linear_in.weight`).buffer,
+      this.tensor(linearInName).buffer,
       normed,
       this.dummyBias,
       linear,
@@ -1706,8 +1732,9 @@ export class BetterFfnWebGpuModel {
       uniform,
     );
     const out = empty(batch * inDim);
+    const linearOutName = `${prefix}.linear_out.weight`;
     this.leakyReluResidualMatVecBatch(
-      this.tensor(`${prefix}.linear_out.weight`).buffer,
+      this.tensor(linearOutName).buffer,
       linear,
       this.tensor(`${prefix}.linear_out.bias`).buffer,
       input,
@@ -1831,8 +1858,17 @@ export class BetterFfnWebGpuModel {
       outputOffset === 0 &&
       !biasPresent &&
       this.matVecBatchExactRowsCols512Batch2SubgroupPipeline;
+    const useHandEmbeddingBatch2 =
+      rows === 512 &&
+      cols === NUM_HANDS &&
+      inputStride === 2 * NUM_HANDS &&
+      outputStride === 1024 &&
+      !biasPresent &&
+      this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline;
     const pipeline = useBatch2LinearIn
       ? this.matVecBatchExactRowsCols512Batch2SubgroupPipeline!
+      : useHandEmbeddingBatch2
+        ? this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline!
       : rows % BATCH_ROW_BLOCK === 0
         ? cols === 512
           ? (this.matVecBatchExactRowsCols512SubgroupPipeline ??
@@ -1844,7 +1880,7 @@ export class BetterFfnWebGpuModel {
     this.submit2d(
       pipeline,
       this.batchRowGroups(rows),
-      useBatch2LinearIn ? Math.ceil(batch / 2) : batch,
+      useBatch2LinearIn || useHandEmbeddingBatch2 ? Math.ceil(batch / 2) : batch,
       [
       { binding: 0, resource: { buffer: matrix } },
       { binding: 1, resource: { buffer: input } },
@@ -1951,8 +1987,16 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    const pipeline =
-      rows % BATCH_ROW_BLOCK === 0
+    const useBatch2Residual =
+      rows === 512 &&
+      cols === 1024 &&
+      inputStride === 1024 &&
+      outputStride === 512 &&
+      biasPresent &&
+      this.leakyReluResidualMatVecBatchExactRowsCols1024Batch2SubgroupPipeline;
+    const pipeline = useBatch2Residual
+      ? this.leakyReluResidualMatVecBatchExactRowsCols1024Batch2SubgroupPipeline!
+      : rows % BATCH_ROW_BLOCK === 0
         ? cols === 512
           ? this.leakyReluResidualMatVecBatchExactRowsCols512Pipeline
           : cols === 1024
@@ -1961,30 +2005,35 @@ export class BetterFfnWebGpuModel {
             : this.leakyReluResidualMatVecBatchExactRowsPipeline
         : this.leakyReluResidualMatVecBatchPipeline;
     const alphaBits = new Uint32Array(new Float32Array([alpha]).buffer)[0]!;
-    this.submit2d(pipeline, this.batchRowGroups(rows), batch, [
-      { binding: 0, resource: { buffer: matrix } },
-      { binding: 1, resource: { buffer: input } },
-      { binding: 2, resource: { buffer: bias } },
-      { binding: 3, resource: { buffer: output } },
-      { binding: 4, resource: { buffer: residual } },
-      {
-        binding: 5,
-        resource: {
-          buffer: uniform(
-            new Uint32Array([
-              rows,
-              cols,
-              batch,
-              inputStride,
-              outputStride,
-              biasPresent ? 1 : 0,
-              alphaBits,
-              0,
-            ]),
-          ),
+    this.submit2d(
+      pipeline,
+      this.batchRowGroups(rows),
+      useBatch2Residual ? Math.ceil(batch / 2) : batch,
+      [
+        { binding: 0, resource: { buffer: matrix } },
+        { binding: 1, resource: { buffer: input } },
+        { binding: 2, resource: { buffer: bias } },
+        { binding: 3, resource: { buffer: output } },
+        { binding: 4, resource: { buffer: residual } },
+        {
+          binding: 5,
+          resource: {
+            buffer: uniform(
+              new Uint32Array([
+                rows,
+                cols,
+                batch,
+                inputStride,
+                outputStride,
+                biasPresent ? 1 : 0,
+                alphaBits,
+                0,
+              ]),
+            ),
+          },
         },
-      },
-    ]);
+      ],
+    );
   }
 
   private batchRowGroups(rows: number): number {
