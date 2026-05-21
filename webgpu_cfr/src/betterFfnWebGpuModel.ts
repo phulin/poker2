@@ -13,6 +13,7 @@ import {
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
+  MAT_VEC_BATCH_EXACT_BELIEF_LINEAR_IN_512_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
@@ -26,6 +27,7 @@ import {
   PLAYER_BOARD_HADAMARD_WGSL,
   REPEAT_ROWS_WGSL,
   RMS_NORM_BELIEF_EXACT_WGSL,
+  RMS_NORM_BELIEF_EXACT_HALF_WGSL,
   RMS_NORM_BATCH_WGSL,
   RMS_NORM_BATCH_SMALL_WGSL,
   RMS_NORM_WGSL,
@@ -102,12 +104,19 @@ export class BetterFfnWebGpuModel {
   private readonly tensors = new Map<string, GpuTensor>();
   private readonly dummyBias: GPUBuffer;
   private readonly handEmbeddingT: GPUBuffer;
+  private readonly beliefProjLinearInHalf0: GPUBuffer;
+  private readonly beliefProjLinearInHalf1: GPUBuffer;
+  private readonly beliefProjExactContribution0: GPUBuffer;
+  private readonly beliefProjExactContribution1: GPUBuffer;
   private readonly rankPairOneHotT?: GPUBuffer;
   private readonly suitPairOneHotT?: GPUBuffer;
   private readonly rankPairLowT?: GPUBuffer;
   private readonly suitPairLowT?: GPUBuffer;
   private readonly matVecPipeline: GPUComputePipeline;
   private readonly matVecBatchPipeline: GPUComputePipeline;
+  private readonly matVecBatchExactBeliefLinearInPipeline:
+    | GPUComputePipeline
+    | undefined;
   private readonly matVecBatchSmallColsPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
@@ -150,6 +159,7 @@ export class BetterFfnWebGpuModel {
   private readonly playerBoardHadamardPipeline: GPUComputePipeline;
   private readonly rmsNormPipeline: GPUComputePipeline;
   private readonly rmsNormBeliefExactPipeline: GPUComputePipeline;
+  private readonly rmsNormBeliefExactHalfPipeline: GPUComputePipeline;
   private readonly rmsNormBatchPipeline: GPUComputePipeline;
   private readonly rmsNormBatchSmallPipeline: GPUComputePipeline;
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
@@ -181,6 +191,26 @@ export class BetterFfnWebGpuModel {
     }
     this.dummyBias = makeStorageBuffer(device, new Float32Array([0]));
     this.handEmbeddingT = makeStorageBuffer(device, this.buildHandEmbeddingT());
+    this.beliefProjLinearInHalf0 = makeStorageBuffer(
+      device,
+      this.sliceColumns("belief_proj.linear_in.weight", 0, this.manifest.architecture.hiddenDim),
+    );
+    this.beliefProjLinearInHalf1 = makeStorageBuffer(
+      device,
+      this.sliceColumns(
+        "belief_proj.linear_in.weight",
+        this.manifest.architecture.hiddenDim,
+        this.manifest.architecture.hiddenDim,
+      ),
+    );
+    this.beliefProjExactContribution0 = makeStorageBuffer(
+      device,
+      this.buildBeliefExactContribution(0),
+    );
+    this.beliefProjExactContribution1 = makeStorageBuffer(
+      device,
+      this.buildBeliefExactContribution(1),
+    );
     if (this.manifest.architecture.boardInteractionDim > 0) {
       this.rankPairOneHotT = makeStorageBuffer(device, this.buildPairOneHotT(13, 91));
       this.suitPairOneHotT = makeStorageBuffer(device, this.buildPairOneHotT(4, 10));
@@ -198,6 +228,14 @@ export class BetterFfnWebGpuModel {
       MAT_VEC_BATCH_WGSL,
       "better-ffn-mat-vec-batch",
     );
+    this.matVecBatchExactBeliefLinearInPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+        MAT_VEC_BATCH_EXACT_BELIEF_LINEAR_IN_512_BATCH2_SUBGROUP_WGSL,
+        "better-ffn-mat-vec-exact-belief-linear-in-512-batch2-subgroup",
+      )
+      : undefined;
     this.matVecBatchSmallColsPipeline = this.pipeline(
       MAT_VEC_BATCH_SMALL_COLS_WGSL,
       "better-ffn-mat-vec-batch-small-cols",
@@ -320,6 +358,10 @@ export class BetterFfnWebGpuModel {
     this.rmsNormBeliefExactPipeline = this.pipeline(
       RMS_NORM_BELIEF_EXACT_WGSL,
       "better-ffn-rms-norm-belief-exact",
+    );
+    this.rmsNormBeliefExactHalfPipeline = this.pipeline(
+      RMS_NORM_BELIEF_EXACT_HALF_WGSL,
+      "better-ffn-rms-norm-belief-exact-half",
     );
     this.rmsNormBatchPipeline = this.pipeline(
       RMS_NORM_BATCH_WGSL,
@@ -1123,6 +1165,10 @@ export class BetterFfnWebGpuModel {
     }
     this.dummyBias.destroy();
     this.handEmbeddingT.destroy();
+    this.beliefProjLinearInHalf0.destroy();
+    this.beliefProjLinearInHalf1.destroy();
+    this.beliefProjExactContribution0.destroy();
+    this.beliefProjExactContribution1.destroy();
     this.rankPairOneHotT?.destroy();
     this.suitPairOneHotT?.destroy();
     this.rankPairLowT?.destroy();
@@ -1566,6 +1612,52 @@ export class BetterFfnWebGpuModel {
     return out;
   }
 
+  private sliceColumns(
+    name: string,
+    startCol: number,
+    colCount: number,
+  ): Float32Array<ArrayBuffer> {
+    const tensor = this.tensor(name);
+    if (tensor.shape.length !== 2) {
+      throw new Error(`model tensor ${name} is not rank-2`);
+    }
+    const [rows, cols] = tensor.shape as [number, number];
+    const out = new Float32Array(rows * colCount);
+    for (let row = 0; row < rows; row += 1) {
+      const sourceBase = row * cols + startCol;
+      const targetBase = row * colCount;
+      for (let col = 0; col < colCount; col += 1) {
+        out[targetBase + col] = tensor.data[sourceBase + col]!;
+      }
+    }
+    return out;
+  }
+
+  private buildBeliefExactContribution(player: number): Float32Array<ArrayBuffer> {
+    const hidden = this.manifest.architecture.hiddenDim;
+    const ffnDim = this.manifest.architecture.ffnDim;
+    const offset = player * hidden;
+    const matrix = this.tensor("belief_proj.linear_in.weight");
+    const norm = this.tensor("belief_proj.norm.weight");
+    const handEmbeddingT = this.buildHandEmbeddingT();
+    const out = new Float32Array(ffnDim * NUM_HANDS);
+    for (let row = 0; row < ffnDim; row += 1) {
+      const matrixBase = row * 2 * hidden + offset;
+      const outBase = row * NUM_HANDS;
+      for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+        let sum = 0.0;
+        for (let dim = 0; dim < hidden; dim += 1) {
+          sum +=
+            matrix.data[matrixBase + dim]! *
+            handEmbeddingT[dim * NUM_HANDS + hand]! *
+            norm.data[offset + dim]!;
+        }
+        out[outBase + hand] = sum;
+      }
+    }
+    return out;
+  }
+
   private baseEmbedding(
     street: number,
     board: readonly number[],
@@ -1705,41 +1797,81 @@ export class BetterFfnWebGpuModel {
     ) => GPUBuffer,
     exactBelief?: ExactBelief,
   ): GPUBuffer {
-    const normed = empty(batch * inDim);
     const modelHiddenDim = this.manifest.architecture.hiddenDim;
-    if (exactBelief && prefix === "belief_proj" && inDim === 2 * modelHiddenDim) {
-      this.rmsNormBeliefExact(
+    const useExactBeliefLinearIn =
+      exactBelief !== undefined &&
+      this.matVecBatchExactBeliefLinearInPipeline !== undefined &&
+      prefix === "belief_proj" &&
+      inDim === 2 * modelHiddenDim &&
+      hiddenDim === this.manifest.architecture.ffnDim &&
+      outDim === modelHiddenDim;
+    const linear = empty(batch * hiddenDim);
+    if (useExactBeliefLinearIn) {
+      const normedOpponent = empty(batch * modelHiddenDim);
+      const invRms = empty(batch);
+      this.rmsNormBeliefExactHalf(
         prefix,
         input,
-        normed,
+        normedOpponent,
+        invRms,
         batch,
-        inDim,
         inDim,
         inDim,
         exactBelief,
         modelHiddenDim,
         uniform,
       );
+      this.matVecExactBeliefLinearIn(
+        exactBelief.player === 0
+          ? this.beliefProjLinearInHalf1
+          : this.beliefProjLinearInHalf0,
+        normedOpponent,
+        invRms,
+        exactBelief.player === 0
+          ? this.beliefProjExactContribution0
+          : this.beliefProjExactContribution1,
+        linear,
+        batch,
+        hiddenDim,
+        modelHiddenDim,
+        exactBelief,
+        uniform,
+      );
     } else {
-      this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+      const normed = empty(batch * inDim);
+      if (exactBelief && prefix === "belief_proj" && inDim === 2 * modelHiddenDim) {
+        this.rmsNormBeliefExact(
+          prefix,
+          input,
+          normed,
+          batch,
+          inDim,
+          inDim,
+          inDim,
+          exactBelief,
+          modelHiddenDim,
+          uniform,
+        );
+      } else {
+        this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
+      }
+      const linearInName = `${prefix}.linear_in.weight`;
+      this.matVecBatch(
+        this.tensor(linearInName).buffer,
+        normed,
+        this.dummyBias,
+        linear,
+        hiddenDim,
+        inDim,
+        batch,
+        inDim,
+        hiddenDim,
+        0,
+        0,
+        false,
+        uniform,
+      );
     }
-    const linear = empty(batch * hiddenDim);
-    const linearInName = `${prefix}.linear_in.weight`;
-    this.matVecBatch(
-      this.tensor(linearInName).buffer,
-      normed,
-      this.dummyBias,
-      linear,
-      hiddenDim,
-      inDim,
-      batch,
-      inDim,
-      hiddenDim,
-      0,
-      0,
-      false,
-      uniform,
-    );
     const out = empty(batch * outDim);
     const linearOutName = `${prefix}.linear_out.weight`;
     this.leakyReluMatVecBatch(
@@ -1888,6 +2020,91 @@ export class BetterFfnWebGpuModel {
       },
       { binding: 4, resource: { buffer: this.handEmbeddingT } },
     ]);
+  }
+
+  private rmsNormBeliefExactHalf(
+    prefix: string,
+    input: GPUBuffer,
+    opponentOutput: GPUBuffer,
+    invRmsOutput: GPUBuffer,
+    batch: number,
+    dim: number,
+    inputStride: number,
+    exactBelief: ExactBelief,
+    hidden: number,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    this.submit(this.rmsNormBeliefExactHalfPipeline, batch, [
+      { binding: 0, resource: { buffer: input } },
+      { binding: 1, resource: { buffer: this.tensor(`${prefix}.norm.weight`).buffer } },
+      { binding: 2, resource: { buffer: opponentOutput } },
+      { binding: 3, resource: { buffer: invRmsOutput } },
+      { binding: 4, resource: { buffer: this.handEmbeddingT } },
+      {
+        binding: 5,
+        resource: {
+          buffer: uniform(
+            new Uint32Array([
+              dim,
+              batch,
+              inputStride,
+              exactBelief.player * hidden,
+              exactBelief.hand,
+              NUM_HANDS,
+              hidden,
+              0,
+            ]),
+          ),
+        },
+      },
+    ]);
+  }
+
+  private matVecExactBeliefLinearIn(
+    matrix: GPUBuffer,
+    input: GPUBuffer,
+    invRms: GPUBuffer,
+    contribution: GPUBuffer,
+    output: GPUBuffer,
+    batch: number,
+    rows: number,
+    cols: number,
+    exactBelief: ExactBelief,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    this.submit2d(
+      this.matVecBatchExactBeliefLinearInPipeline!,
+      this.batchRowGroups(rows),
+      Math.ceil(batch / 2),
+      [
+        { binding: 0, resource: { buffer: matrix } },
+        { binding: 1, resource: { buffer: input } },
+        { binding: 2, resource: { buffer: invRms } },
+        { binding: 3, resource: { buffer: contribution } },
+        { binding: 4, resource: { buffer: output } },
+        {
+          binding: 5,
+          resource: {
+            buffer: uniform(
+              new Uint32Array([
+                rows,
+                cols,
+                batch,
+                cols,
+                rows,
+                exactBelief.hand,
+                NUM_HANDS,
+                0,
+              ]),
+            ),
+          },
+        },
+      ],
+    );
   }
 
   private matVec(
