@@ -2,7 +2,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from p2.core.structured_config import TrainingConfig
+from p2.core.structured_config import LrSchedule, TrainingConfig
+from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.optimizers import SplitOptimizer, build_optimizer
 
 
@@ -30,6 +31,72 @@ def test_muon_optimizer_splits_matrix_params_from_other_params():
         model[2].weight,
         model[2].bias,
     }
+
+
+def test_muon_optimizer_uses_separate_policy_head_lr():
+    if not hasattr(torch.optim, "Muon"):
+        pytest.skip("torch.optim.Muon is not available")
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.trunk = nn.Linear(4, 4)
+            self.policy_tower = nn.Linear(4, 4)
+            self.policy_head = nn.Sequential(nn.Linear(4, 3))
+            self.value_head = nn.Linear(4, 2)
+
+    model = Model()
+    cfg = TrainingConfig(
+        optimizer="muon",
+        learning_rate=1e-3,
+        policy_head_muon_learning_rate=0.05,
+        weight_decay=0.01,
+    )
+
+    optimizer = build_optimizer(model, cfg, torch.device("cpu"))
+
+    assert isinstance(optimizer, SplitOptimizer)
+    assert [name for name, _ in optimizer.optimizers] == [
+        "muon",
+        "policy_head_muon",
+        "adamw",
+    ]
+    assert set(optimizer.optimizers[0][1].param_groups[0]["params"]) == {
+        model.trunk.weight,
+        model.value_head.weight,
+    }
+    assert set(optimizer.optimizers[1][1].param_groups[0]["params"]) == {
+        model.policy_tower.weight,
+        model.policy_head[0].weight,
+    }
+    assert optimizer.optimizers[1][1].param_groups[0]["lr"] == 0.05
+    assert optimizer.optimizers[1][1].param_groups[0]["lr_role"] == "policy_head_muon"
+
+
+def test_cfr_schedule_preserves_policy_head_muon_lr():
+    trainer = RebelCFRTrainer.__new__(RebelCFRTrainer)
+    trainer.cfg = type("_Cfg", (), {})()
+    trainer.cfg.num_steps = 100
+    trainer.cfg.train = type("_Train", (), {})()
+    trainer.cfg.train.learning_rate = 1e-3
+    trainer.cfg.train.learning_rate_final = 1e-4
+    trainer.cfg.train.lr_schedule = LrSchedule.linear
+    trainer.cfg.train.warmup_steps = 0
+    trainer.cfg.train.policy_head_muon_learning_rate = 0.05
+    trainer.cfg.search = type("_Search", (), {})()
+    trainer.cfg.search.iterations = 100
+    trainer.cfg.search.iterations_final = None
+    trainer.optimizer = type("_Opt", (), {})()
+    trainer.optimizer.param_groups = [
+        {"lr": 1e-3},
+        {"lr": 0.05, "lr_role": "policy_head_muon"},
+    ]
+    trainer.cfr_evaluator = type("_Evaluator", (), {})()
+
+    trainer._apply_schedules(50)
+
+    assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(5.5e-4)
+    assert trainer.optimizer.param_groups[1]["lr"] == 0.05
 
 
 def test_muon_split_optimizer_steps_matrix_and_non_matrix_params():

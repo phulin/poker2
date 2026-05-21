@@ -66,9 +66,7 @@ def _scheduled_learning_rate(
         t = min(1.0, max(0.0, step / float(max(1, total_steps))))
 
     if lr_schedule == LrSchedule.cosine and lr_final != lr_start:
-        return lr_final + 0.5 * (lr_start - lr_final) * (
-            1.0 + math.cos(math.pi * t)
-        )
+        return lr_final + 0.5 * (lr_start - lr_final) * (1.0 + math.cos(math.pi * t))
     if lr_schedule == LrSchedule.linear and lr_final != lr_start:
         return lr_start + (lr_final - lr_start) * t
     return lr_start
@@ -432,7 +430,10 @@ class RebelCFRTrainer:
 
         # Update optimizer learning rate
         for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr_now
+            if param_group.get("lr_role") == "policy_head_muon":
+                param_group["lr"] = float(self.cfg.train.policy_head_muon_learning_rate)
+            else:
+                param_group["lr"] = lr_now
 
         # Iteration count schedule (linear interpolation)
         if self.cfg.search.iterations_final is not None:

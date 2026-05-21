@@ -77,6 +77,32 @@ def _adamw(
     )
 
 
+def _is_policy_head_param(name: str) -> bool:
+    return name.startswith("policy_") or name.startswith("policy_head.")
+
+
+def _muon(
+    params: Iterable[nn.Parameter],
+    train_cfg: TrainingConfig,
+    lr: float,
+) -> torch.optim.Optimizer:
+    muon_cls = getattr(torch.optim, "Muon", None)
+    if muon_cls is None:
+        raise RuntimeError(
+            "train.optimizer=muon requires a PyTorch build with torch.optim.Muon"
+        )
+    return muon_cls(
+        params,
+        lr=lr,
+        weight_decay=train_cfg.weight_decay,
+        momentum=train_cfg.muon_momentum,
+        nesterov=train_cfg.muon_nesterov,
+        eps=train_cfg.muon_eps,
+        ns_steps=train_cfg.muon_ns_steps,
+        adjust_lr_fn=train_cfg.muon_adjust_lr_fn,
+    )
+
+
 def build_optimizer(
     model: nn.Module,
     train_cfg: TrainingConfig,
@@ -90,21 +116,24 @@ def build_optimizer(
             f"train.optimizer must be one of: adamw, muon; got {train_cfg.optimizer!r}"
         )
 
-    muon_cls = getattr(torch.optim, "Muon", None)
-    if muon_cls is None:
-        raise RuntimeError(
-            "train.optimizer=muon requires a PyTorch build with torch.optim.Muon"
-        )
+    policy_head_muon_lr = float(train_cfg.policy_head_muon_learning_rate)
+    if policy_head_muon_lr <= 0.0:
+        raise ValueError("train.policy_head_muon_learning_rate must be positive")
 
     matrix_params: list[nn.Parameter] = []
+    policy_head_matrix_params: list[nn.Parameter] = []
     other_params: list[nn.Parameter] = []
     matrix_param_ids: set[int] = set()
-    for module in model.modules():
+    for module_prefix, module in model.named_modules():
         for name, param in module.named_parameters(recurse=False):
             if not param.requires_grad:
                 continue
             if isinstance(module, nn.Linear) and name == "weight" and param.ndim == 2:
-                matrix_params.append(param)
+                full_name = f"{module_prefix}.{name}" if module_prefix else name
+                if _is_policy_head_param(full_name):
+                    policy_head_matrix_params.append(param)
+                else:
+                    matrix_params.append(param)
                 matrix_param_ids.add(id(param))
 
     for param in model.parameters():
@@ -114,20 +143,17 @@ def build_optimizer(
     optimizers: list[tuple[str, torch.optim.Optimizer]] = []
     if matrix_params:
         optimizers.append(
-            (
-                "muon",
-                muon_cls(
-                    matrix_params,
-                    lr=train_cfg.learning_rate,
-                    weight_decay=train_cfg.weight_decay,
-                    momentum=train_cfg.muon_momentum,
-                    nesterov=train_cfg.muon_nesterov,
-                    eps=train_cfg.muon_eps,
-                    ns_steps=train_cfg.muon_ns_steps,
-                    adjust_lr_fn=train_cfg.muon_adjust_lr_fn,
-                ),
-            )
+            ("muon", _muon(matrix_params, train_cfg, train_cfg.learning_rate))
         )
+    if policy_head_matrix_params:
+        policy_head_optimizer = _muon(
+            policy_head_matrix_params,
+            train_cfg,
+            policy_head_muon_lr,
+        )
+        for param_group in policy_head_optimizer.param_groups:
+            param_group["lr_role"] = "policy_head_muon"
+        optimizers.append(("policy_head_muon", policy_head_optimizer))
     if other_params:
         optimizers.append(("adamw", _adamw(other_params, train_cfg, device)))
 

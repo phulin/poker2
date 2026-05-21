@@ -157,6 +157,7 @@ class TrainingConfig:
     muon_eps: float = 1e-7
     muon_ns_steps: int = 5
     muon_adjust_lr_fn: str | None = None
+    policy_head_muon_learning_rate: float = 0.05
 
     use_kv_cache: bool = False
 
