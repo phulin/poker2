@@ -435,11 +435,15 @@ class RebelCFRTrainer:
             lr_schedule=self.cfg.train.lr_schedule,
             warmup_steps=self.cfg.train.warmup_steps,
         )
+        lr_scale = lr_now / lr_start if lr_start > 0.0 else 1.0
+        policy_head_muon_lr = (
+            float(self.cfg.train.policy_head_muon_learning_rate) * lr_scale
+        )
 
         # Update optimizer learning rate
         for param_group in self.optimizer.param_groups:
             if param_group.get("lr_role") == "policy_head_muon":
-                param_group["lr"] = float(self.cfg.train.policy_head_muon_learning_rate)
+                param_group["lr"] = policy_head_muon_lr
             else:
                 param_group["lr"] = lr_now
 
@@ -1143,6 +1147,13 @@ class RebelCFRTrainer:
         update_info = self._update_model(step)
         update_info["step"] = step_public
         update_info["learning_rate"] = self.optimizer.param_groups[0]["lr"]
+        policy_head_lrs = [
+            group["lr"]
+            for group in self.optimizer.param_groups
+            if group.get("lr_role") == "policy_head_muon"
+        ]
+        if policy_head_lrs:
+            update_info["policy_head_muon_learning_rate"] = policy_head_lrs[0]
         update_info["cfr_iterations"] = self.cfr_evaluator.cfr_iterations
 
         return update_info

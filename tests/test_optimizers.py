@@ -73,7 +73,7 @@ def test_muon_optimizer_uses_separate_policy_head_lr():
     assert optimizer.optimizers[1][1].param_groups[0]["lr_role"] == "policy_head_muon"
 
 
-def test_cfr_schedule_preserves_policy_head_muon_lr():
+def test_cfr_schedule_scales_policy_head_muon_lr():
     trainer = RebelCFRTrainer.__new__(RebelCFRTrainer)
     trainer.cfg = type("_Cfg", (), {})()
     trainer.cfg.num_steps = 100
@@ -96,7 +96,7 @@ def test_cfr_schedule_preserves_policy_head_muon_lr():
     trainer._apply_schedules(50)
 
     assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(5.5e-4)
-    assert trainer.optimizer.param_groups[1]["lr"] == 0.05
+    assert trainer.optimizer.param_groups[1]["lr"] == pytest.approx(0.0275)
 
 
 def test_muon_split_optimizer_steps_matrix_and_non_matrix_params():
