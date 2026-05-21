@@ -13,6 +13,7 @@ import {
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_WGSL,
@@ -98,6 +99,9 @@ export class BetterFfnWebGpuModel {
   private readonly matVecBatchPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
+  private readonly matVecBatchExactRowsCols512Batch2SubgroupPipeline:
+    | GPUComputePipeline
+    | undefined;
   private readonly matVecBatchExactRowsCols512SubgroupPipeline:
     | GPUComputePipeline
     | undefined;
@@ -178,6 +182,13 @@ export class BetterFfnWebGpuModel {
       MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
       "better-ffn-mat-vec-batch-exact-rows-cols-512",
     );
+    this.matVecBatchExactRowsCols512Batch2SubgroupPipeline =
+      device.features.has("subgroups" as GPUFeatureName)
+        ? this.pipeline(
+            MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
+            "better-ffn-mat-vec-batch-exact-rows-cols-512-batch2-subgroup",
+          )
+        : undefined;
     this.matVecBatchExactRowsCols512SubgroupPipeline =
       device.features.has("subgroups" as GPUFeatureName)
         ? this.pipeline(
@@ -1811,8 +1822,18 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    const pipeline =
-      rows % BATCH_ROW_BLOCK === 0
+    const useBatch2LinearIn =
+      rows === 1024 &&
+      cols === 512 &&
+      inputStride === 512 &&
+      outputStride === 1024 &&
+      inputOffset === 0 &&
+      outputOffset === 0 &&
+      !biasPresent &&
+      this.matVecBatchExactRowsCols512Batch2SubgroupPipeline;
+    const pipeline = useBatch2LinearIn
+      ? this.matVecBatchExactRowsCols512Batch2SubgroupPipeline!
+      : rows % BATCH_ROW_BLOCK === 0
         ? cols === 512
           ? (this.matVecBatchExactRowsCols512SubgroupPipeline ??
             this.matVecBatchExactRowsCols512Pipeline)
@@ -1820,7 +1841,11 @@ export class BetterFfnWebGpuModel {
             ? this.matVecBatchExactRowsCols1024Pipeline
             : this.matVecBatchExactRowsPipeline
         : this.matVecBatchPipeline;
-    this.submit2d(pipeline, this.batchRowGroups(rows), batch, [
+    this.submit2d(
+      pipeline,
+      this.batchRowGroups(rows),
+      useBatch2LinearIn ? Math.ceil(batch / 2) : batch,
+      [
       { binding: 0, resource: { buffer: matrix } },
       { binding: 1, resource: { buffer: input } },
       { binding: 2, resource: { buffer: bias } },
@@ -1842,7 +1867,8 @@ export class BetterFfnWebGpuModel {
           ),
         },
       },
-    ]);
+      ],
+    );
   }
 
   private leakyReluMatVecBatch(

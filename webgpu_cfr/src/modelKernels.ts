@@ -616,6 +616,157 @@ fn main(
 }
 `;
 
+export const MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL = /* wgsl */ `
+enable subgroups;
+
+struct Params {
+  rows: u32,
+  cols: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+  inputOffset: u32,
+  outputOffset: u32,
+  biasPresent: u32,
+};
+
+@group(0) @binding(0) var<storage, read> matrix: array<f32>;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+var<workgroup> subgroupPartial00: array<f32, 256>;
+var<workgroup> subgroupPartial01: array<f32, 256>;
+var<workgroup> subgroupPartial02: array<f32, 256>;
+var<workgroup> subgroupPartial03: array<f32, 256>;
+var<workgroup> subgroupPartial10: array<f32, 256>;
+var<workgroup> subgroupPartial11: array<f32, 256>;
+var<workgroup> subgroupPartial12: array<f32, 256>;
+var<workgroup> subgroupPartial13: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(subgroup_invocation_id) subgroupLane: u32,
+  @builtin(subgroup_size) subgroupSize: u32,
+) {
+  let row0 = wid.x * 4u;
+  let row1 = row0 + 1u;
+  let row2 = row0 + 2u;
+  let row3 = row0 + 3u;
+  let batch0 = wid.y * 2u;
+  let batch1 = batch0 + 1u;
+  let lane = lid.x;
+  let inputBase0 = batch0 * params.inputStride + params.inputOffset;
+  let inputBase1 = batch1 * params.inputStride + params.inputOffset;
+
+  let col0 = lane;
+  let x00 = input[inputBase0 + col0];
+  var x10 = 0.0;
+  if (batch1 < params.batch) {
+    x10 = input[inputBase1 + col0];
+  }
+  let m00 = matrix[row0 * 512u + col0];
+  let m10 = matrix[row1 * 512u + col0];
+  let m20 = matrix[row2 * 512u + col0];
+  let m30 = matrix[row3 * 512u + col0];
+  var sum00 = m00 * x00;
+  var sum01 = m10 * x00;
+  var sum02 = m20 * x00;
+  var sum03 = m30 * x00;
+  var sum10 = m00 * x10;
+  var sum11 = m10 * x10;
+  var sum12 = m20 * x10;
+  var sum13 = m30 * x10;
+
+  let col1 = lane + 256u;
+  let x01 = input[inputBase0 + col1];
+  var x11 = 0.0;
+  if (batch1 < params.batch) {
+    x11 = input[inputBase1 + col1];
+  }
+  let m01 = matrix[row0 * 512u + col1];
+  let m11 = matrix[row1 * 512u + col1];
+  let m21 = matrix[row2 * 512u + col1];
+  let m31 = matrix[row3 * 512u + col1];
+  sum00 = sum00 + m01 * x01;
+  sum01 = sum01 + m11 * x01;
+  sum02 = sum02 + m21 * x01;
+  sum03 = sum03 + m31 * x01;
+  sum10 = sum10 + m01 * x11;
+  sum11 = sum11 + m11 * x11;
+  sum12 = sum12 + m21 * x11;
+  sum13 = sum13 + m31 * x11;
+
+  let reduced00 = subgroupAdd(sum00);
+  let reduced01 = subgroupAdd(sum01);
+  let reduced02 = subgroupAdd(sum02);
+  let reduced03 = subgroupAdd(sum03);
+  let reduced10 = subgroupAdd(sum10);
+  let reduced11 = subgroupAdd(sum11);
+  let reduced12 = subgroupAdd(sum12);
+  let reduced13 = subgroupAdd(sum13);
+  let subgroupIndex = lane / subgroupSize;
+  if (subgroupLane == 0u) {
+    subgroupPartial00[subgroupIndex] = reduced00;
+    subgroupPartial01[subgroupIndex] = reduced01;
+    subgroupPartial02[subgroupIndex] = reduced02;
+    subgroupPartial03[subgroupIndex] = reduced03;
+    subgroupPartial10[subgroupIndex] = reduced10;
+    subgroupPartial11[subgroupIndex] = reduced11;
+    subgroupPartial12[subgroupIndex] = reduced12;
+    subgroupPartial13[subgroupIndex] = reduced13;
+  }
+  workgroupBarrier();
+
+  if (lane == 0u) {
+    let subgroupCount = (256u + subgroupSize - 1u) / subgroupSize;
+    var out00 = 0.0;
+    var out01 = 0.0;
+    var out02 = 0.0;
+    var out03 = 0.0;
+    var out10 = 0.0;
+    var out11 = 0.0;
+    var out12 = 0.0;
+    var out13 = 0.0;
+    for (var i = 0u; i < subgroupCount; i = i + 1u) {
+      out00 = out00 + subgroupPartial00[i];
+      out01 = out01 + subgroupPartial01[i];
+      out02 = out02 + subgroupPartial02[i];
+      out03 = out03 + subgroupPartial03[i];
+      out10 = out10 + subgroupPartial10[i];
+      out11 = out11 + subgroupPartial11[i];
+      out12 = out12 + subgroupPartial12[i];
+      out13 = out13 + subgroupPartial13[i];
+    }
+    if (params.biasPresent != 0u) {
+      out00 = out00 + bias[row0];
+      out01 = out01 + bias[row1];
+      out02 = out02 + bias[row2];
+      out03 = out03 + bias[row3];
+      out10 = out10 + bias[row0];
+      out11 = out11 + bias[row1];
+      out12 = out12 + bias[row2];
+      out13 = out13 + bias[row3];
+    }
+    let outputBase0 = batch0 * params.outputStride + params.outputOffset;
+    output[outputBase0 + row0] = out00;
+    output[outputBase0 + row1] = out01;
+    output[outputBase0 + row2] = out02;
+    output[outputBase0 + row3] = out03;
+    if (batch1 < params.batch) {
+      let outputBase1 = batch1 * params.outputStride + params.outputOffset;
+      output[outputBase1 + row0] = out10;
+      output[outputBase1 + row1] = out11;
+      output[outputBase1 + row2] = out12;
+      output[outputBase1 + row3] = out13;
+    }
+  }
+}
+`;
+
 export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
   unrollMatVecBatchColumns(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL, 512, true);
 export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL =
