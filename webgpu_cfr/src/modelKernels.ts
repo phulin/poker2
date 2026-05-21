@@ -298,6 +298,45 @@ ${REDUCE_4X_256_WGSL}
 }
 `;
 
+export const MAT_VEC_BATCH_SMALL_COLS_WGSL = /* wgsl */ `
+struct Params {
+  rows: u32,
+  cols: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+  inputOffset: u32,
+  outputOffset: u32,
+  biasPresent: u32,
+};
+
+@group(0) @binding(0) var<storage, read> matrix: array<f32>;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> bias: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  let total = params.rows * params.batch;
+  if (idx >= total) {
+    return;
+  }
+  let row = idx % params.rows;
+  let batch = idx / params.rows;
+  let inputBase = batch * params.inputStride + params.inputOffset;
+  var sum = 0.0;
+  for (var col = 0u; col < params.cols; col = col + 1u) {
+    sum = sum + matrix[row * params.cols + col] * input[inputBase + col];
+  }
+  if (params.biasPresent != 0u) {
+    sum = sum + bias[row];
+  }
+  output[batch * params.outputStride + params.outputOffset + row] = sum;
+}
+`;
+
 export const LEAKY_RELU_MAT_VEC_BATCH_WGSL = /* wgsl */ `
 struct Params {
   rows: u32,

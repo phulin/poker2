@@ -20,6 +20,7 @@ import {
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+  MAT_VEC_BATCH_SMALL_COLS_WGSL,
   MAT_VEC_BATCH_WGSL,
   MAT_VEC_WGSL,
   PLAYER_BOARD_HADAMARD_WGSL,
@@ -100,6 +101,7 @@ export class BetterFfnWebGpuModel {
   private readonly suitPairLowT?: GPUBuffer;
   private readonly matVecPipeline: GPUComputePipeline;
   private readonly matVecBatchPipeline: GPUComputePipeline;
+  private readonly matVecBatchSmallColsPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsCols512Batch2SubgroupPipeline:
@@ -186,6 +188,10 @@ export class BetterFfnWebGpuModel {
     this.matVecBatchPipeline = this.pipeline(
       MAT_VEC_BATCH_WGSL,
       "better-ffn-mat-vec-batch",
+    );
+    this.matVecBatchSmallColsPipeline = this.pipeline(
+      MAT_VEC_BATCH_SMALL_COLS_WGSL,
+      "better-ffn-mat-vec-batch-small-cols",
     );
     this.matVecBatchExactRowsPipeline = this.pipeline(
       MAT_VEC_BATCH_EXACT_ROWS_WGSL,
@@ -1888,7 +1894,14 @@ export class BetterFfnWebGpuModel {
       outputOffset === 0 &&
       !biasPresent &&
       this.matVecBatchExactRowsCols1024Batch2SubgroupPipeline;
-    const pipeline = useBatch2LinearIn
+    const useSmallCols =
+      cols <= 16 &&
+      inputOffset === 0 &&
+      outputOffset === 0 &&
+      !biasPresent;
+    const pipeline = useSmallCols
+      ? this.matVecBatchSmallColsPipeline
+      : useBatch2LinearIn
       ? this.matVecBatchExactRowsCols512Batch2SubgroupPipeline!
       : useHandEmbeddingBatch2
         ? this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline!
@@ -1904,10 +1917,12 @@ export class BetterFfnWebGpuModel {
         : this.matVecBatchPipeline;
     this.submit2d(
       pipeline,
-      this.batchRowGroups(rows),
+      useSmallCols ? Math.ceil((rows * batch) / 64) : this.batchRowGroups(rows),
       useBatch2LinearIn || useHandEmbeddingBatch2 || useBatch2Cols1024
         ? Math.ceil(batch / 2)
-        : batch,
+        : useSmallCols
+          ? 1
+          : batch,
       [
       { binding: 0, resource: { buffer: matrix } },
       { binding: 1, resource: { buffer: input } },
