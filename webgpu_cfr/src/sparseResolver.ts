@@ -746,22 +746,23 @@ export class SparseCfrResolver {
     device.queue.submit([gatherEncoder.finish()]);
     gatherParams.destroy();
 
+    let scatterParams: GPUBuffer | undefined;
     const prediction = await this.model.predictBatchHandValuesGpu(
       leafBatch.modelEnvs,
       modelLeafBeliefsBuffer,
       preparedLeafFeatures,
+      (encoder, handValues) => {
+        scatterParams = this.gpuKernels!.encodeScatterNodeValues(
+          encoder,
+          treeBuffers,
+          modelLeafNodeBuffer,
+          handValues,
+          valuesBuffer,
+          leafBatch.modelNodeIndices.length,
+        );
+      },
     );
-    const scatterEncoder = device.createCommandEncoder();
-    const scatterParams = this.gpuKernels.encodeScatterNodeValues(
-      scatterEncoder,
-      treeBuffers,
-      modelLeafNodeBuffer,
-      prediction.buffer,
-      valuesBuffer,
-      leafBatch.modelNodeIndices.length,
-    );
-    device.queue.submit([scatterEncoder.finish()]);
-    scatterParams.destroy();
+    scatterParams?.destroy();
     return () => prediction.dispose();
   }
 

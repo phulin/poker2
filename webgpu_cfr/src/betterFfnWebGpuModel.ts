@@ -341,10 +341,11 @@ export class BetterFfnWebGpuModel {
     envs: readonly PublicHunlEnv[],
     beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
     prepared?: PreparedBatchFeatures,
+    beforeSubmit?: (encoder: GPUCommandEncoder, handValues: GPUBuffer) => void,
   ): Promise<GpuHandValuePrediction> {
     const prediction = this.enqueuePredictBatch(envs, beliefs, {
       includePolicy: false,
-    }, prepared);
+    }, prepared, beforeSubmit);
     return {
       buffer: prediction.handValuesBuffer,
       batch: prediction.batch,
@@ -578,6 +579,7 @@ export class BetterFfnWebGpuModel {
     beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
     options: PredictOptions = {},
     prepared?: PreparedBatchFeatures,
+    beforeSubmit?: (encoder: GPUCommandEncoder, handValues: GPUBuffer) => void,
   ): {
     handValuesBuffer: GPUBuffer;
     policyLogitsBuffer?: GPUBuffer;
@@ -806,6 +808,7 @@ export class BetterFfnWebGpuModel {
       if (this.manifest.architecture.enforceZeroSum) {
         this.zeroSumBatch(valueRawBuffer, beliefBuffer, batch, uniform);
       }
+      beforeSubmit?.(encoder, valueRawBuffer);
       submitPredictionCommands();
 
       let disposed = false;
