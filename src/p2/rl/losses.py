@@ -888,7 +888,9 @@ class RebelSupervisedLoss(nn.Module):
         if self.policy_node_weighting == PolicyNodeWeighting.clipped_reach:
             relative = reach / reach.mean().clamp(min=1e-8)
             return relative.clamp(min=0.1, max=10.0)
-        raise ValueError(f"Unsupported policy node weighting: {self.policy_node_weighting}")
+        raise ValueError(
+            f"Unsupported policy node weighting: {self.policy_node_weighting}"
+        )
 
     def _reduce_policy_node_metric(
         self, per_node: torch.Tensor, node_weights: torch.Tensor | None
@@ -943,9 +945,7 @@ class RebelSupervisedLoss(nn.Module):
         )
         policy_weights = policy_weights_unnormalized / policy_weight_sum
         target_log_probs = batch.policy_targets.clamp_min(1e-8).log()
-        target_entropy_per_hand = -(batch.policy_targets * target_log_probs).sum(
-            dim=-1
-        )
+        target_entropy_per_hand = -(batch.policy_targets * target_log_probs).sum(dim=-1)
         policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
         policy_objective_per_hand = self._policy_objective_per_hand(
             probs, batch.policy_targets, policy_ce_per_hand
@@ -980,6 +980,7 @@ class RebelSupervisedLoss(nn.Module):
             "policy_loss_all": policy_loss_all,
             "target_entropy": target_entropy,
             "target_model_kl": target_model_kl,
+            "target_model_kl_all": target_model_kl_all.detach(),
             "policy_weights": policy_weights,
             "policy_node_weights": node_weights,
             "value_loss": zero,
@@ -1046,9 +1047,7 @@ class RebelSupervisedLoss(nn.Module):
         )
         policy_weights = policy_weights_unnormalized / policy_weight_sum
         target_log_probs = batch.policy_targets.clamp_min(1e-8).log()
-        target_entropy_per_hand = -(batch.policy_targets * target_log_probs).sum(
-            dim=-1
-        )
+        target_entropy_per_hand = -(batch.policy_targets * target_log_probs).sum(dim=-1)
         policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
         policy_objective_per_hand = self._policy_objective_per_hand(
             probs, batch.policy_targets, policy_ce_per_hand
@@ -1091,6 +1090,7 @@ class RebelSupervisedLoss(nn.Module):
             "policy_loss_all": policy_loss_all,
             "target_entropy": target_entropy,
             "target_model_kl": target_model_kl,
+            "target_model_kl_all": target_model_kl_all.detach(),
             "policy_weights": policy_weights,
             "policy_node_weights": node_weights,
             "value_loss": value_loss,

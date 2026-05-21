@@ -496,6 +496,7 @@ class RebelCFRTrainer:
         policy_output: ModelOutput | None,
         value_loss_all: torch.Tensor,
         policy_loss_all: torch.Tensor,
+        policy_target_model_kl_all: torch.Tensor,
         fresh_value_loss: float | None = None,
         fresh_value_batch: RebelBatch | None = None,
         fresh_policy_batch: RebelBatch | None = None,
@@ -533,6 +534,65 @@ class RebelCFRTrainer:
             counts = torch.stack([(street == i).sum() for i, _ in enumerate(STREETS)])
             counts_cpu = counts.cpu().tolist()
             return {name: counts_cpu[i] for i, name in enumerate(STREETS)}
+
+        def policy_node_weights(
+            batch: RebelBatch, dtype: torch.dtype
+        ) -> torch.Tensor | None:
+            return self.loss_fn._policy_node_weights(batch, dtype)
+
+        def reduce_by_masks(
+            tensor: torch.Tensor,
+            masks: list[torch.Tensor],
+            names: list[str],
+            weights: torch.Tensor | None = None,
+        ) -> dict[str, float]:
+            mask_float = torch.stack([mask.to(dtype=tensor.dtype) for mask in masks])
+            if weights is not None:
+                reduce_weights = mask_float * weights.to(dtype=tensor.dtype)[None, :]
+            else:
+                reduce_weights = mask_float
+            denom = reduce_weights.sum(dim=1)
+            numer = (reduce_weights * tensor[None, :]).sum(dim=1)
+            nan = torch.full_like(denom, float("nan"))
+            vals = torch.where(denom > 0, numer / denom.clamp(min=1e-12), nan)
+            vals_cpu = vals.cpu().tolist()
+            return {k: v for k, v in zip(names, vals_cpu) if not math.isnan(v)}
+
+        def policy_metric_by_depth(
+            tensor: torch.Tensor, batch: RebelBatch
+        ) -> dict[str, float]:
+            depth = batch.statistics.get("node_depth")
+            if depth is None:
+                return {}
+            max_depth = int(getattr(self.cfg.search, "depth", 0))
+            names = [f"depth_{i}" for i in range(max_depth + 1)]
+            masks = [depth == i for i in range(max_depth + 1)]
+            weights = policy_node_weights(batch, tensor.dtype)
+            return reduce_by_masks(tensor, masks, names, weights=weights)
+
+        def policy_metric_by_reach_bucket(
+            tensor: torch.Tensor, batch: RebelBatch
+        ) -> dict[str, float]:
+            reach = batch.statistics.get("policy_node_reach")
+            if reach is None:
+                return {}
+            reach = reach.to(dtype=tensor.dtype)
+            names = [
+                "ge_1e-1",
+                "1e-2_to_1e-1",
+                "1e-3_to_1e-2",
+                "1e-4_to_1e-3",
+                "lt_1e-4",
+            ]
+            masks = [
+                reach >= 1e-1,
+                (reach < 1e-1) & (reach >= 1e-2),
+                (reach < 1e-2) & (reach >= 1e-3),
+                (reach < 1e-3) & (reach >= 1e-4),
+                reach < 1e-4,
+            ]
+            weights = policy_node_weights(batch, tensor.dtype)
+            return reduce_by_masks(tensor, masks, names, weights=weights)
 
         value_buffer_streets_stats = street_count(
             self.value_buffer.features.street[: len(self.value_buffer)]
@@ -602,6 +662,12 @@ class RebelCFRTrainer:
             "value_batch_street": street_count(value_batch.features.street),
             "value_loss_street": by_street(value_loss_all),
             "policy_loss_street": by_street(policy_loss_all, batch=policy_batch),
+            "policy_target_model_kl_depth": policy_metric_by_depth(
+                policy_target_model_kl_all, policy_batch
+            ),
+            "policy_target_model_kl_reach_bucket": policy_metric_by_reach_bucket(
+                policy_target_model_kl_all, policy_batch
+            ),
             "value_mean_std": value_output.value.std(dim=0).mean()
             if value_output.value is not None
             else 0.0,
@@ -703,6 +769,16 @@ class RebelCFRTrainer:
                 metrics["fresh_policy_target_model_kl"] = fresh_policy_loss_dict[
                     "target_model_kl"
                 ].item()
+                metrics["fresh_policy_target_model_kl_depth"] = policy_metric_by_depth(
+                    fresh_policy_loss_dict["target_model_kl_all"],
+                    fresh_policy_batch,
+                )
+                metrics["fresh_policy_target_model_kl_reach_bucket"] = (
+                    policy_metric_by_reach_bucket(
+                        fresh_policy_loss_dict["target_model_kl_all"],
+                        fresh_policy_batch,
+                    )
+                )
         return metrics
 
     def _get_stratify_streets(self, step: int) -> list[float] | None:
@@ -756,6 +832,7 @@ class RebelCFRTrainer:
         ModelOutput,
         ModelOutput,
         ModelOutput,
+        torch.Tensor,
         torch.Tensor,
         torch.Tensor,
     ]:
@@ -817,6 +894,7 @@ class RebelCFRTrainer:
         loss_dict = self.loss_fn._call_forward_policy(policy_output, policy_batch)
         policy_loss = loss_dict["policy_loss"]
         policy_loss_update = loss_dict["policy_loss_all"]
+        policy_kl_update = loss_dict["target_model_kl_all"]
         target_entropy = loss_dict["target_entropy"]
         target_model_kl = loss_dict["target_model_kl"]
         entropy_loss = loss_dict["entropy"]
@@ -878,6 +956,7 @@ class RebelCFRTrainer:
             policy_output,
             value_loss_update,
             policy_loss_update,
+            policy_kl_update,
         )
 
     @profile
@@ -910,6 +989,7 @@ class RebelCFRTrainer:
         value_output_all = []
         value_loss_update_all = []
         policy_loss_update_all = []
+        policy_kl_update_all = []
         step_stats: dict[str, float] = {}
         # Tensor-valued accumulators kept on device until end-of-step. The
         # original code did a host sync per supervision for each of these
@@ -966,6 +1046,7 @@ class RebelCFRTrainer:
                     policy_output,
                     value_loss_update,
                     policy_loss_update,
+                    policy_kl_update,
                 ) = self._supervise(
                     value_batch,
                     policy_batch,
@@ -1003,6 +1084,7 @@ class RebelCFRTrainer:
             value_output_all.append(permuted_value_output)
             value_loss_update_all.append(value_loss_update)
             policy_loss_update_all.append(policy_loss_update)
+            policy_kl_update_all.append(policy_kl_update)
 
         # Single host sync to fold the device-side accumulators into the
         # float-keyed step_stats dict that _compute_metrics expects.
@@ -1034,6 +1116,7 @@ class RebelCFRTrainer:
             None,
             torch.cat(value_loss_update_all),
             torch.cat(policy_loss_update_all),
+            torch.cat(policy_kl_update_all),
             fresh_value_batch=fresh_value_batch,
             fresh_policy_batch=fresh_policy_batch,
         )

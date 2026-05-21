@@ -1874,6 +1874,11 @@ class CFREvaluator(ABC):
             :top
         ]
         bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
+        node_depth = torch.zeros(top, dtype=torch.long, device=self.device)
+        for depth in range(self.tree_depth):
+            node_depth[self.depth_offsets[depth] : self.depth_offsets[depth + 1]] = (
+                depth
+            )
 
         statistics = {
             "to_act": self.env.to_act,
@@ -1882,6 +1887,7 @@ class CFREvaluator(ABC):
             "board": self.env.board_indices,
             "pot": self.env.pot,
             "bet_amounts": bin_amounts,
+            "node_depth": node_depth,
         }
 
         exploit_stats = self._compute_exploitability()
@@ -1899,10 +1905,9 @@ class CFREvaluator(ABC):
         policy_statistics = {
             key: statistics[key][:top][valid_top] for key in statistics
         }
-        if self._should_record_policy_node_reach():
-            policy_statistics["policy_node_reach"] = self._compute_policy_node_reach(top)[
-                valid_top
-            ]
+        policy_statistics["policy_node_reach"] = self._compute_policy_node_reach(top)[
+            valid_top
+        ]
 
         value_batch = RebelBatch(
             features=features[:N],

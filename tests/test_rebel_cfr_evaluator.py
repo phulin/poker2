@@ -1068,6 +1068,11 @@ def test_training_data_returns_root_batch() -> None:
     assert torch.isfinite(policy_node_reach).all()
     assert torch.all(policy_node_reach > 0)
     assert torch.all(policy_node_reach <= 1)
+    assert "node_depth" in policy_batch.statistics
+    torch.testing.assert_close(
+        policy_batch.statistics["node_depth"],
+        torch.zeros_like(policy_batch.statistics["node_depth"]),
+    )
 
 
 def test_training_data_can_use_final_policy_values() -> None:
