@@ -1984,6 +1984,39 @@ ${REDUCE_PARTIAL_SQ_256_WGSL}
 }
 `;
 
+export const RMS_NORM_BATCH_SMALL_WGSL = /* wgsl */ `
+struct Params {
+  dim: u32,
+  batch: u32,
+  inputStride: u32,
+  outputStride: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read> weight: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let batch = gid.x;
+  if (batch >= params.batch) {
+    return;
+  }
+  let inputBase = batch * params.inputStride;
+  let outputBase = batch * params.outputStride;
+  var sq = 0.0;
+  for (var i = 0u; i < params.dim; i = i + 1u) {
+    let value = input[inputBase + i];
+    sq = sq + value * value;
+  }
+  let invRms = inverseSqrt(sq / f32(params.dim) + 1.0e-5);
+  for (var i = 0u; i < params.dim; i = i + 1u) {
+    output[outputBase + i] = input[inputBase + i] * invRms * weight[i];
+  }
+}
+`;
+
 export const SCALED_RESIDUAL_ADD_WGSL = /* wgsl */ `
 struct Params {
   dim: u32,

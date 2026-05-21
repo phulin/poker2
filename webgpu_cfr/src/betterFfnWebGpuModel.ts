@@ -26,6 +26,7 @@ import {
   PLAYER_BOARD_HADAMARD_WGSL,
   REPEAT_ROWS_WGSL,
   RMS_NORM_BATCH_WGSL,
+  RMS_NORM_BATCH_SMALL_WGSL,
   RMS_NORM_WGSL,
   SCALED_RESIDUAL_ADD_WGSL,
   ZERO_SUM_BATCH_WGSL,
@@ -143,6 +144,7 @@ export class BetterFfnWebGpuModel {
   private readonly playerBoardHadamardPipeline: GPUComputePipeline;
   private readonly rmsNormPipeline: GPUComputePipeline;
   private readonly rmsNormBatchPipeline: GPUComputePipeline;
+  private readonly rmsNormBatchSmallPipeline: GPUComputePipeline;
   private readonly scaledResidualAddPipeline: GPUComputePipeline;
   private readonly add3Pipeline: GPUComputePipeline;
   private readonly repeatRowsPipeline: GPUComputePipeline;
@@ -311,6 +313,10 @@ export class BetterFfnWebGpuModel {
     this.rmsNormBatchPipeline = this.pipeline(
       RMS_NORM_BATCH_WGSL,
       "better-ffn-rms-norm-batch",
+    );
+    this.rmsNormBatchSmallPipeline = this.pipeline(
+      RMS_NORM_BATCH_SMALL_WGSL,
+      "better-ffn-rms-norm-batch-small",
     );
     this.scaledResidualAddPipeline = this.pipeline(
       SCALED_RESIDUAL_ADD_WGSL,
@@ -1800,7 +1806,7 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): void {
-    this.submit(this.rmsNormBatchPipeline, batch, [
+    this.submit(dim <= 16 ? this.rmsNormBatchSmallPipeline : this.rmsNormBatchPipeline, batch, [
       { binding: 0, resource: { buffer: input } },
       { binding: 1, resource: { buffer: this.tensor(`${prefix}.norm.weight`).buffer } },
       { binding: 2, resource: { buffer: output } },
