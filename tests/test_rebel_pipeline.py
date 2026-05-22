@@ -254,6 +254,47 @@ def test_rebel_policy_loss_type_switches_objective_without_changing_kl_metric():
     assert mse_out["policy_loss"] < ce_out["policy_loss"]
 
 
+def test_cfr_policy_argmax_metrics_split_correct_and_wrong_top1():
+    trainer = RebelCFRTrainer.__new__(RebelCFRTrainer)
+    trainer.loss_fn = RebelSupervisedLoss()
+    trainer.cfg = type("_Cfg", (), {})()
+    trainer.cfg.search = type("_Search", (), {})()
+    trainer.cfg.search.depth = 1
+
+    metrics_fn = trainer._policy_argmax_metrics
+    batch_size, num_actions = 2, 2
+    beliefs = torch.full((batch_size, 2, NUM_HANDS), 1.0 / NUM_HANDS)
+    features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
+    targets = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    targets[0, :, 0] = 1.0
+    targets[1, :, 1] = 1.0
+    batch = RebelBatch(
+        features=features,
+        policy_targets=targets,
+        legal_masks=legal_masks,
+    )
+    logits = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    logits[0, :, 0] = 2.0
+    logits[1, :, 0] = 2.0
+    output = ModelOutput(policy_logits=logits, value=None, hand_values=None)
+    kl_all = torch.tensor([0.25, 1.25])
+
+    metrics = metrics_fn(output, batch, kl_all)
+
+    assert metrics["weighted_argmax_accuracy"] == pytest.approx(0.5)
+    assert metrics["mass_correct_top1"] == pytest.approx(0.5)
+    assert metrics["mass_wrong_top1"] == pytest.approx(0.5)
+    assert metrics["kl_correct_top1"] == pytest.approx(0.25)
+    assert metrics["kl_wrong_top1"] == pytest.approx(1.25)
+
+
 def test_rebel_cfr_trainer_single_step_cpu():
     cfg = Config()
     cfg.num_steps = 1

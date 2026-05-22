@@ -503,6 +503,80 @@ class RebelCFRTrainer:
         return float(entropy.item())
 
     @torch.no_grad()
+    def _policy_argmax_metrics(
+        self,
+        output: ModelOutput,
+        batch: RebelBatch,
+        kl_all: torch.Tensor,
+    ) -> dict[str, float]:
+        if output.policy_logits is None or batch.policy_targets is None:
+            return {}
+        legal = batch.legal_masks[:, None, :]
+        logits = output.policy_logits.float()
+        masked_logits = torch.where(
+            legal, logits, torch.full_like(logits, float("-inf"))
+        )
+        model_top = masked_logits.argmax(dim=-1)
+        target_top = batch.policy_targets.argmax(dim=-1)
+        _, _, _, actor_belief, opp_matchup = self.loss_fn._policy_weights(batch)
+        hand_weights_unnormalized = actor_belief * opp_matchup
+        hand_weights = hand_weights_unnormalized / hand_weights_unnormalized.sum(
+            dim=-1, keepdim=True
+        ).clamp(min=1e-8)
+        node_correct_mass = (
+            (model_top == target_top).to(dtype=hand_weights.dtype) * hand_weights
+        ).sum(dim=-1)
+
+        node_weights = self.loss_fn._policy_node_weights(batch, kl_all.dtype)
+        if node_weights is None:
+            reduce_weights = torch.ones_like(kl_all, dtype=kl_all.dtype)
+        else:
+            reduce_weights = node_weights.to(dtype=kl_all.dtype)
+        denom = reduce_weights.sum().clamp(min=1e-12)
+        weighted_argmax_accuracy = (
+            node_correct_mass.to(dtype=kl_all.dtype) * reduce_weights
+        ).sum() / denom
+
+        correct_mask = node_correct_mass >= 0.5
+        wrong_mask = ~correct_mask
+        names = ["correct_top1", "wrong_top1"]
+        mask_float = torch.stack(
+            [
+                correct_mask.to(dtype=kl_all.dtype),
+                wrong_mask.to(dtype=kl_all.dtype),
+            ]
+        )
+        group_weights = mask_float * reduce_weights[None, :]
+        group_denoms = group_weights.sum(dim=1)
+        nan = torch.full_like(group_denoms, float("nan"))
+        group_kl = torch.where(
+            group_denoms > 0,
+            (group_weights * kl_all[None, :]).sum(dim=1)
+            / group_denoms.clamp(min=1e-12),
+            nan,
+        )
+        group_mass = group_denoms / denom
+
+        group_kl_cpu = group_kl.cpu().tolist()
+        group_mass_cpu = group_mass.cpu().tolist()
+        out = {"weighted_argmax_accuracy": weighted_argmax_accuracy.item()}
+        out.update(
+            {
+                f"kl_{key}": value
+                for key, value in zip(names, group_kl_cpu)
+                if not math.isnan(value)
+            }
+        )
+        out.update(
+            {
+                f"mass_{key}": value
+                for key, value in zip(names, group_mass_cpu)
+                if value > 0.0
+            }
+        )
+        return out
+
+    @torch.no_grad()
     def _compute_metrics(
         self,
         episodes: int,
@@ -686,6 +760,13 @@ class RebelCFRTrainer:
             "policy_target_model_kl_reach_bucket": policy_metric_by_reach_bucket(
                 policy_target_model_kl_all, policy_batch
             ),
+            "policy_argmax_metrics": (
+                self._policy_argmax_metrics(
+                    policy_output, policy_batch, policy_target_model_kl_all
+                )
+                if policy_output is not None
+                else {}
+            ),
             "value_mean_std": value_output.value.std(dim=0).mean()
             if value_output.value is not None
             else 0.0,
@@ -796,6 +877,11 @@ class RebelCFRTrainer:
                         fresh_policy_loss_dict["target_model_kl_all"],
                         fresh_policy_batch,
                     )
+                )
+                metrics["fresh_policy_argmax_metrics"] = self._policy_argmax_metrics(
+                    fresh_policy_output,
+                    fresh_policy_batch,
+                    fresh_policy_loss_dict["target_model_kl_all"],
                 )
         return metrics
 
@@ -1005,6 +1091,7 @@ class RebelCFRTrainer:
         value_batch_all = []
         policy_batch_all = []
         value_output_all = []
+        policy_output_all = []
         value_loss_update_all = []
         policy_loss_update_all = []
         policy_kl_update_all = []
@@ -1103,6 +1190,7 @@ class RebelCFRTrainer:
             value_batch_all.append(permuted_batch)
             policy_batch_all.append(policy_batch)
             value_output_all.append(permuted_value_output)
+            policy_output_all.append(policy_output)
             value_loss_update_all.append(value_loss_update)
             policy_loss_update_all.append(policy_loss_update)
             policy_kl_update_all.append(policy_kl_update)
@@ -1127,6 +1215,11 @@ class RebelCFRTrainer:
         value_metric_output = ModelOutput(
             value=torch.cat(value_metric_tensors) if value_metric_tensors else None
         )
+        policy_metric_output = ModelOutput(
+            policy_logits=torch.cat(
+                [output.policy_logits for output in policy_output_all], dim=0
+            )
+        )
         metrics = self._compute_metrics(
             episodes,
             updates,
@@ -1134,7 +1227,7 @@ class RebelCFRTrainer:
             RebelBatch.cat(value_batch_all),
             RebelBatch.cat(policy_batch_all),
             value_metric_output,
-            None,
+            policy_metric_output,
             torch.cat(value_loss_update_all),
             torch.cat(policy_loss_update_all),
             torch.cat(policy_kl_update_all),
