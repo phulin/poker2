@@ -961,6 +961,15 @@ class RebelSupervisedLoss(nn.Module):
         target_entropy = self._reduce_policy_node_metric(
             target_entropy_per_sample, node_weights
         )
+        model_entropy_per_hand = -(probs * log_probs).sum(dim=-1)
+        model_entropy_per_sample = (model_entropy_per_hand * policy_weights).sum(
+            dim=-1
+        )
+        model_entropy = self._reduce_policy_node_metric(
+            model_entropy_per_sample, node_weights
+        )
+        entropy_gap_all = model_entropy_per_sample - target_entropy_per_sample
+        entropy_gap = self._reduce_policy_node_metric(entropy_gap_all, node_weights)
         target_model_kl_all = (
             (policy_ce_per_hand - target_entropy_per_hand) * policy_weights
         ).sum(dim=-1)
@@ -979,6 +988,11 @@ class RebelSupervisedLoss(nn.Module):
             "policy_loss": policy_loss,
             "policy_loss_all": policy_loss_all,
             "target_entropy": target_entropy,
+            "target_entropy_all": target_entropy_per_sample.detach(),
+            "model_entropy": model_entropy,
+            "model_entropy_all": model_entropy_per_sample.detach(),
+            "entropy_gap": entropy_gap,
+            "entropy_gap_all": entropy_gap_all.detach(),
             "target_model_kl": target_model_kl,
             "target_model_kl_all": target_model_kl_all.detach(),
             "policy_weights": policy_weights,
@@ -1015,8 +1029,15 @@ class RebelSupervisedLoss(nn.Module):
             "policy_loss": zero,
             "policy_loss_all": None,
             "target_entropy": zero,
+            "target_entropy_all": None,
+            "model_entropy": zero,
+            "model_entropy_all": None,
+            "entropy_gap": zero,
+            "entropy_gap_all": None,
             "target_model_kl": zero,
+            "target_model_kl_all": None,
             "policy_weights": None,
+            "policy_node_weights": None,
             "value_loss": value_loss,
             "value_loss_all": value_loss_all,
             "value_weights": value_weights,
@@ -1063,6 +1084,15 @@ class RebelSupervisedLoss(nn.Module):
         target_entropy = self._reduce_policy_node_metric(
             target_entropy_per_sample, node_weights
         )
+        model_entropy_per_hand = -(probs * log_probs).sum(dim=-1)
+        model_entropy_per_sample = (model_entropy_per_hand * policy_weights).sum(
+            dim=-1
+        )
+        model_entropy = self._reduce_policy_node_metric(
+            model_entropy_per_sample, node_weights
+        )
+        entropy_gap_all = model_entropy_per_sample - target_entropy_per_sample
+        entropy_gap = self._reduce_policy_node_metric(entropy_gap_all, node_weights)
         target_model_kl_all = (
             (policy_ce_per_hand - target_entropy_per_hand) * policy_weights
         ).sum(dim=-1)
@@ -1089,6 +1119,11 @@ class RebelSupervisedLoss(nn.Module):
             "policy_loss": policy_loss,
             "policy_loss_all": policy_loss_all,
             "target_entropy": target_entropy,
+            "target_entropy_all": target_entropy_per_sample.detach(),
+            "model_entropy": model_entropy,
+            "model_entropy_all": model_entropy_per_sample.detach(),
+            "entropy_gap": entropy_gap,
+            "entropy_gap_all": entropy_gap_all.detach(),
             "target_model_kl": target_model_kl,
             "target_model_kl_all": target_model_kl_all.detach(),
             "policy_weights": policy_weights,

@@ -101,12 +101,21 @@ def test_rebel_supervised_loss_finite():
     loss_dict = loss_fn(output, batch)
     assert torch.isfinite(loss_dict["total_loss"]).all()
     assert torch.isfinite(loss_dict["target_entropy"]).all()
+    assert torch.isfinite(loss_dict["model_entropy"]).all()
+    assert torch.isfinite(loss_dict["entropy_gap"]).all()
+    assert loss_dict["target_entropy_all"].shape == (batch_size,)
+    assert loss_dict["model_entropy_all"].shape == (batch_size,)
+    assert loss_dict["entropy_gap_all"].shape == (batch_size,)
     assert torch.isfinite(loss_dict["target_model_kl"]).all()
     assert loss_dict["target_model_kl_all"].shape == (batch_size,)
     assert torch.isfinite(loss_dict["target_model_kl_all"]).all()
     torch.testing.assert_close(
         loss_dict["target_model_kl"],
         loss_dict["policy_loss"] - loss_dict["target_entropy"],
+    )
+    torch.testing.assert_close(
+        loss_dict["entropy_gap"],
+        loss_dict["model_entropy"] - loss_dict["target_entropy"],
     )
     loss_dict["total_loss"].backward()
 
@@ -371,6 +380,19 @@ def test_rebel_cfr_trainer_single_step_cpu():
     assert torch.isfinite(stats["value_loss"])
     assert torch.isfinite(stats["total_loss"])
     assert not torch.equal(before, next(trainer.model.parameters()).detach())
+
+    before_policy_only = next(trainer.model.parameters()).detach().clone()
+    policy_only_stats = trainer._supervise_policy_only(
+        policy_batch,
+        policy_latent=None,
+    )
+
+    assert torch.isfinite(policy_only_stats["policy_loss"])
+    assert torch.isfinite(policy_only_stats["policy_target_model_kl"])
+    assert torch.isfinite(policy_only_stats["total_loss"])
+    assert not torch.equal(
+        before_policy_only, next(trainer.model.parameters()).detach()
+    )
 
 
 def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):

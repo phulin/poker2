@@ -117,6 +117,8 @@ class TrainingConfig:
     policy_depth_stratify_probs: list[float] | None = None
     policy_node_weighting: PolicyNodeWeighting = PolicyNodeWeighting.uniform
     policy_loss_type: PolicyLossType = PolicyLossType.cross_entropy
+    policy_extra_updates_per_step: int = 0
+    policy_extra_batch_size: int | None = None
 
     max_trajectory_length: int = 12  # Maximum steps per trajectory in replay buffer
     max_sequence_length: int = 50  # Maximum sequence length for transformer models

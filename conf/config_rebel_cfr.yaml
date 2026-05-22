@@ -35,6 +35,8 @@ train:
   policy_depth_stratify_probs: null
   policy_node_weighting: uniform
   policy_loss_type: cross_entropy
+  policy_extra_updates_per_step: 0
+  policy_extra_batch_size: null # if null, uses train.batch_size
   value_coef: 1.0
   entropy_coef: 0.0
   permutation_coef: 0.1

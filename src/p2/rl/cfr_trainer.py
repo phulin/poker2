@@ -121,6 +121,16 @@ class RebelCFRTrainer:
             self.buffer_rng.manual_seed(int(cfg.seed))
         self.num_actions = len(self.bet_bins) + 3
         self.num_players = 2
+        self.policy_extra_updates_per_step = cfg.train.policy_extra_updates_per_step
+        if self.policy_extra_updates_per_step < 0:
+            raise ValueError("train.policy_extra_updates_per_step must be >= 0")
+        self.policy_extra_batch_size = (
+            cfg.train.policy_extra_batch_size
+            if cfg.train.policy_extra_batch_size is not None
+            else self.batch_size
+        )
+        if self.policy_extra_batch_size <= 0:
+            raise ValueError("train.policy_extra_batch_size must be positive")
 
         if cfg.model.num_actions != self.num_actions:
             print(
@@ -693,9 +703,12 @@ class RebelCFRTrainer:
         metrics: dict[str, int | float | torch.Tensor | dict[str, int | float]] = {
             "episodes": episodes,
             "updates": updates,
+            "optimizer_updates": updates + self.policy_extra_updates_per_step,
             "loss": step_stats["total_loss"] / episodes,
             "policy_loss": step_stats["policy_loss"] / episodes,
             "policy_target_entropy": step_stats["policy_target_entropy"] / episodes,
+            "policy_model_entropy": step_stats["policy_model_entropy"] / episodes,
+            "policy_entropy_gap": step_stats["policy_entropy_gap"] / episodes,
             "policy_target_model_kl": (step_stats["policy_target_model_kl"] / episodes),
             "value_loss": step_stats["value_loss"] / episodes,
             "entropy_loss": step_stats["entropy_loss"] / episodes,
@@ -772,6 +785,35 @@ class RebelCFRTrainer:
             else 0.0,
             **self.cfr_evaluator.stats,
         }
+        if self.policy_extra_updates_per_step > 0:
+            extra_updates = self.policy_extra_updates_per_step
+            metrics.update(
+                {
+                    "extra_policy_updates": extra_updates,
+                    "extra_policy_batch_size": self.policy_extra_batch_size,
+                    "extra_policy_loss": step_stats["extra_policy_loss"]
+                    / extra_updates,
+                    "extra_policy_target_entropy": step_stats[
+                        "extra_policy_target_entropy"
+                    ]
+                    / extra_updates,
+                    "extra_policy_model_entropy": step_stats[
+                        "extra_policy_model_entropy"
+                    ]
+                    / extra_updates,
+                    "extra_policy_entropy_gap": step_stats["extra_policy_entropy_gap"]
+                    / extra_updates,
+                    "extra_policy_target_model_kl": step_stats[
+                        "extra_policy_target_model_kl"
+                    ]
+                    / extra_updates,
+                    "extra_entropy_loss": step_stats["extra_entropy_loss"]
+                    / extra_updates,
+                    "extra_loss": step_stats["extra_total_loss"] / extra_updates,
+                    "extra_param_update_norm": step_stats["extra_update_norm"]
+                    / extra_updates,
+                }
+            )
 
         if value_batch.value_targets is not None:
             metrics["batch_value_target_mean_abs"] = (
@@ -868,6 +910,15 @@ class RebelCFRTrainer:
                 metrics["fresh_policy_target_model_kl"] = fresh_policy_loss_dict[
                     "target_model_kl"
                 ].item()
+                metrics["fresh_policy_target_entropy"] = fresh_policy_loss_dict[
+                    "target_entropy"
+                ].item()
+                metrics["fresh_policy_model_entropy"] = fresh_policy_loss_dict[
+                    "model_entropy"
+                ].item()
+                metrics["fresh_policy_entropy_gap"] = fresh_policy_loss_dict[
+                    "entropy_gap"
+                ].item()
                 metrics["fresh_policy_target_model_kl_depth"] = policy_metric_by_depth(
                     fresh_policy_loss_dict["target_model_kl_all"],
                     fresh_policy_batch,
@@ -875,6 +926,24 @@ class RebelCFRTrainer:
                 metrics["fresh_policy_target_model_kl_reach_bucket"] = (
                     policy_metric_by_reach_bucket(
                         fresh_policy_loss_dict["target_model_kl_all"],
+                        fresh_policy_batch,
+                    )
+                )
+                metrics["fresh_policy_target_entropy_reach_bucket"] = (
+                    policy_metric_by_reach_bucket(
+                        fresh_policy_loss_dict["target_entropy_all"],
+                        fresh_policy_batch,
+                    )
+                )
+                metrics["fresh_policy_model_entropy_reach_bucket"] = (
+                    policy_metric_by_reach_bucket(
+                        fresh_policy_loss_dict["model_entropy_all"],
+                        fresh_policy_batch,
+                    )
+                )
+                metrics["fresh_policy_entropy_gap_reach_bucket"] = (
+                    policy_metric_by_reach_bucket(
+                        fresh_policy_loss_dict["entropy_gap_all"],
                         fresh_policy_batch,
                     )
                 )
@@ -1001,6 +1070,8 @@ class RebelCFRTrainer:
         policy_kl_update = loss_dict["target_model_kl_all"]
         target_entropy = loss_dict["target_entropy"]
         target_model_kl = loss_dict["target_model_kl"]
+        model_entropy = loss_dict["model_entropy"]
+        entropy_gap = loss_dict["entropy_gap"]
         entropy_loss = loss_dict["entropy"]
         total_loss = total_loss + loss_dict["total_loss"]
 
@@ -1048,6 +1119,8 @@ class RebelCFRTrainer:
             {
                 "policy_loss": policy_loss.detach(),
                 "policy_target_entropy": target_entropy.detach(),
+                "policy_model_entropy": model_entropy.detach(),
+                "policy_entropy_gap": entropy_gap.detach(),
                 "policy_target_model_kl": target_model_kl.detach(),
                 "value_loss": value_loss.detach(),
                 "entropy_loss": entropy_loss.detach(),
@@ -1063,6 +1136,70 @@ class RebelCFRTrainer:
             policy_kl_update,
         )
 
+    def _supervise_policy_only(
+        self,
+        policy_batch: RebelBatch,
+        policy_latent: TRMLatent | None = None,
+    ) -> dict[str, torch.Tensor]:
+        self.optimizer.zero_grad(set_to_none=True)
+
+        with self._model_autocast():
+            if isinstance(self.model, BetterTRM):
+                policy_output = self.model(
+                    policy_batch.features,
+                    include_policy=True,
+                    include_value=False,
+                    latent=policy_latent,
+                )
+            else:
+                policy_output = self.model(
+                    policy_batch.features,
+                    include_policy=True,
+                    include_value=False,
+                )
+
+        loss_dict = self.loss_fn._call_forward_policy(policy_output, policy_batch)
+        total_loss = loss_dict["total_loss"]
+        total_loss.backward()
+
+        if self.CHECK_GRADS:
+            grad_finite = torch.stack(
+                [
+                    p.grad.isfinite().all()
+                    for p in self.model.parameters()
+                    if p.grad is not None
+                ]
+            ).all()
+            assert grad_finite.item(), "NaN/Inf in model gradients"
+
+        if self.grad_clip is not None and self.grad_clip > 0:
+            grad_norm = nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.grad_clip
+            )
+        else:
+            grad_norm = torch.nn.utils.get_total_norm(
+                p.grad for p in self.model.parameters() if p.grad is not None
+            )
+
+        self.optimizer.step()
+
+        if self.ema_helper is not None:
+            self.ema_helper.update(self.model)
+
+        current_lr = self.optimizer.param_groups[0]["lr"]
+        update_norm = current_lr * grad_norm
+
+        return {
+            "policy_loss": loss_dict["policy_loss"].detach(),
+            "policy_target_entropy": loss_dict["target_entropy"].detach(),
+            "policy_model_entropy": loss_dict["model_entropy"].detach(),
+            "policy_entropy_gap": loss_dict["entropy_gap"].detach(),
+            "policy_target_model_kl": loss_dict["target_model_kl"].detach(),
+            "entropy_loss": loss_dict["entropy"].detach(),
+            "total_loss": total_loss.detach(),
+            "update_norm": update_norm.detach(),
+        }
+
     @profile
     def _update_model(
         self, step: int
@@ -1073,8 +1210,17 @@ class RebelCFRTrainer:
             )
 
             # Warmup: make sure we have enough samples.
+            min_policy_samples = max(
+                self.batch_size,
+                (
+                    self.policy_extra_batch_size
+                    if self.policy_extra_updates_per_step > 0
+                    else self.batch_size
+                ),
+            )
             while (
-                min(len(self.value_buffer), len(self.policy_buffer)) < self.batch_size
+                len(self.value_buffer) < self.batch_size
+                or len(self.policy_buffer) < min_policy_samples
             ):
                 self.data_generator.generate_data(
                     self.K_value,
@@ -1105,10 +1251,22 @@ class RebelCFRTrainer:
         tensor_stats: dict[str, torch.Tensor | None] = {
             "policy_loss": None,
             "policy_target_entropy": None,
+            "policy_model_entropy": None,
+            "policy_entropy_gap": None,
             "policy_target_model_kl": None,
             "value_loss": None,
             "entropy_loss": None,
             "permutation_loss": None,
+            "total_loss": None,
+            "update_norm": None,
+        }
+        extra_tensor_stats: dict[str, torch.Tensor | None] = {
+            "policy_loss": None,
+            "policy_target_entropy": None,
+            "policy_model_entropy": None,
+            "policy_entropy_gap": None,
+            "policy_target_model_kl": None,
+            "entropy_loss": None,
             "total_loss": None,
             "update_norm": None,
         }
@@ -1195,6 +1353,19 @@ class RebelCFRTrainer:
             policy_loss_update_all.append(policy_loss_update)
             policy_kl_update_all.append(policy_kl_update)
 
+        policy_stratify = (
+            None if self.cfg.train.policy_depth_stratify_sample else stratify
+        )
+        for _ in range(self.policy_extra_updates_per_step):
+            extra_policy_batch = self.policy_buffer.sample(
+                self.policy_extra_batch_size,
+                stratify_streets=policy_stratify,
+            ).to(self.device)
+            extra_stats = self._supervise_policy_only(extra_policy_batch)
+            for k, acc in extra_tensor_stats.items():
+                v = extra_stats[k]
+                extra_tensor_stats[k] = v if acc is None else acc + v
+
         # Single host sync to fold the device-side accumulators into the
         # float-keyed step_stats dict that _compute_metrics expects.
         if any(v is not None for v in tensor_stats.values()):
@@ -1208,6 +1379,17 @@ class RebelCFRTrainer:
                 step_stats[k] = val
         for k in tensor_stats:
             step_stats.setdefault(k, 0.0)
+        if any(v is not None for v in extra_tensor_stats.values()):
+            keys = [k for k, v in extra_tensor_stats.items() if v is not None]
+            stacked = (
+                torch.stack(
+                    [extra_tensor_stats[k].reshape(()) for k in keys]
+                ).cpu().tolist()
+            )
+            for k, val in zip(keys, stacked):
+                step_stats[f"extra_{k}"] = val
+        for k in extra_tensor_stats:
+            step_stats.setdefault(f"extra_{k}", 0.0)
 
         value_metric_tensors = [
             output.value for output in value_output_all if output.value is not None
