@@ -345,6 +345,141 @@ if triton is not None:
                 mask=mask,
             )
 
+    @triton.jit
+    def _finalize_tree_masks_kernel(
+        actions_this_round,
+        done,
+        to_act,
+        parent_index,
+        allin_leaf,
+        legal_mask,
+        valid_mask,
+        root_mask,
+        new_street_mask,
+        leaf_mask,
+        child_mask,
+        child_counts,
+        prev_actor,
+        total_nodes: tl.constexpr,
+        root_nodes: tl.constexpr,
+        top_nodes: tl.constexpr,
+        num_actions: tl.constexpr,
+        block: tl.constexpr,
+    ):
+        offs = tl.program_id(0) * block + tl.arange(0, block)
+        mask = offs < total_nodes
+        is_root = offs < root_nodes
+        actions = tl.load(actions_this_round + offs, mask=mask, other=1)
+        row_done = tl.load(done + offs, mask=mask, other=1)
+        row_allin_leaf = tl.load(allin_leaf + offs, mask=mask, other=0)
+        new_street = (actions == 0) & (~is_root) & (~row_allin_leaf)
+        leaf = row_done | new_street | (offs >= top_nodes) | row_allin_leaf
+
+        parent = tl.load(parent_index + offs, mask=mask & (~is_root), other=0)
+        prev = tl.load(to_act + parent, mask=mask & (~is_root), other=-1)
+        prev = tl.where(is_root, -1, prev)
+
+        count = tl.zeros((block,), dtype=tl.int64)
+        for action in tl.static_range(0, num_actions):
+            legal = tl.load(
+                legal_mask + offs * num_actions + action,
+                mask=mask,
+                other=0,
+            )
+            child = legal & (~leaf)
+            tl.store(child_mask + offs * num_actions + action, child, mask=mask)
+            count += child.to(tl.int64)
+
+        tl.store(valid_mask + offs, True, mask=mask)
+        tl.store(root_mask + offs, is_root, mask=mask)
+        tl.store(new_street_mask + offs, new_street, mask=mask)
+        tl.store(leaf_mask + offs, leaf, mask=mask)
+        tl.store(child_counts + offs, count, mask=mask)
+        tl.store(prev_actor + offs, prev, mask=mask)
+
+    @triton.jit
+    def _root_allowed_from_board_indices_kernel(
+        board_indices,
+        combo_card_a,
+        combo_card_b,
+        out_allowed,
+        out_allowed_prob,
+        n_roots: tl.constexpr,
+        num_hands: tl.constexpr,
+        block_h: tl.constexpr,
+    ):
+        root = tl.program_id(0)
+        h = tl.arange(0, block_h)
+        hand_mask = h < num_hands
+        card_a = tl.load(combo_card_a + h, mask=hand_mask, other=-2)
+        card_b = tl.load(combo_card_b + h, mask=hand_mask, other=-3)
+        allowed = hand_mask
+
+        for col in tl.static_range(0, 5):
+            board_card = tl.load(board_indices + root * 5 + col)
+            blocks_hand = (board_card >= 0) & (
+                (card_a == board_card) | (card_b == board_card)
+            )
+            allowed = allowed & (~blocks_hand)
+
+        denom = tl.sum(allowed.to(tl.float32), axis=0)
+        prob = allowed.to(tl.float32) / tl.maximum(denom, 1.0)
+        tl.store(out_allowed + root * num_hands + h, allowed, mask=hand_mask)
+        tl.store(out_allowed_prob + root * num_hands + h, prob, mask=hand_mask)
+
+    @triton.jit
+    def _init_policy_tensors_kernel(
+        uniform_policy,
+        cumulative_regrets,
+        parent_index,
+        child_counts,
+        total_nodes: tl.constexpr,
+        root_nodes: tl.constexpr,
+        num_hands: tl.constexpr,
+        block: tl.constexpr,
+    ):
+        offs = tl.program_id(0) * block + tl.arange(0, block)
+        mask = offs < (total_nodes * num_hands)
+        node = offs // num_hands
+        is_root = node < root_nodes
+        parent = tl.load(parent_index + node, mask=mask & (~is_root), other=0)
+        denom = tl.load(child_counts + parent, mask=mask & (~is_root), other=1)
+        uniform = tl.where(is_root, 0.0, 1.0 / denom.to(tl.float32))
+        tl.store(uniform_policy + offs, uniform, mask=mask)
+        tl.store(cumulative_regrets + offs, 0.0, mask=mask)
+
+    @triton.jit
+    def _init_belief_value_tensors_kernel(
+        beliefs,
+        self_reach,
+        latest_values,
+        action_from_parent,
+        done,
+        rewards,
+        total_nodes: tl.constexpr,
+        root_nodes: tl.constexpr,
+        num_hands: tl.constexpr,
+        block: tl.constexpr,
+    ):
+        planes = 2
+        stride_node = planes * num_hands
+        offs = tl.program_id(0) * block + tl.arange(0, block)
+        mask = offs < (total_nodes * stride_node)
+        node = offs // stride_node
+        rem = offs - node * stride_node
+        player = rem // num_hands
+
+        is_root = node < root_nodes
+        tl.store(beliefs + offs, 0.0, mask=mask)
+        tl.store(self_reach + offs, tl.where(is_root, 1.0, 0.0), mask=mask)
+
+        action = tl.load(action_from_parent + node, mask=mask, other=-1)
+        row_done = tl.load(done + node, mask=mask, other=0)
+        folded = (action == 0) & row_done
+        reward = tl.load(rewards + node, mask=mask & folded, other=0.0)
+        value = tl.where(player == 0, reward, -reward)
+        tl.store(latest_values + offs, tl.where(folded, value, 0.0), mask=mask)
+
 
 def legal_counts_triton_(
     env,
@@ -476,5 +611,143 @@ def copy_child_cards_triton_(
         child_start,
         child_count,
         BLOCK=block,
+        num_warps=4,
+    )
+
+
+def finalize_tree_masks_triton_(
+    env,
+    legal_mask: torch.Tensor,
+    parent_index: torch.Tensor,
+    allin_leaf: torch.Tensor,
+    valid_mask: torch.Tensor,
+    root_mask: torch.Tensor,
+    new_street_mask: torch.Tensor,
+    leaf_mask: torch.Tensor,
+    child_mask: torch.Tensor,
+    child_counts: torch.Tensor,
+    prev_actor: torch.Tensor,
+    *,
+    total_nodes: int,
+    root_nodes: int,
+    top_nodes: int,
+    num_actions: int,
+    block: int = 128,
+) -> None:
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    if total_nodes == 0:
+        return
+    grid = (triton.cdiv(total_nodes, block),)
+    _finalize_tree_masks_kernel[grid](
+        env.actions_this_round,
+        env.done,
+        env.to_act,
+        parent_index,
+        allin_leaf,
+        legal_mask,
+        valid_mask,
+        root_mask,
+        new_street_mask,
+        leaf_mask,
+        child_mask,
+        child_counts,
+        prev_actor,
+        total_nodes,
+        root_nodes,
+        top_nodes,
+        num_actions,
+        block,
+        num_warps=4,
+    )
+
+
+def root_allowed_from_board_indices_triton_(
+    board_indices: torch.Tensor,
+    combo_card_a: torch.Tensor,
+    combo_card_b: torch.Tensor,
+    out_allowed: torch.Tensor,
+    out_allowed_prob: torch.Tensor,
+    *,
+    n_roots: int,
+    num_hands: int,
+    block_h: int = 2048,
+) -> None:
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    if n_roots == 0:
+        return
+    grid = (n_roots,)
+    _root_allowed_from_board_indices_kernel[grid](
+        board_indices,
+        combo_card_a,
+        combo_card_b,
+        out_allowed,
+        out_allowed_prob,
+        n_roots,
+        num_hands,
+        block_h,
+        num_warps=8,
+    )
+
+
+def init_policy_tensors_triton_(
+    uniform_policy: torch.Tensor,
+    cumulative_regrets: torch.Tensor,
+    parent_index: torch.Tensor,
+    child_counts: torch.Tensor,
+    *,
+    total_nodes: int,
+    root_nodes: int,
+    num_hands: int,
+    block: int = 256,
+) -> None:
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    if total_nodes == 0:
+        return
+    grid = (triton.cdiv(total_nodes * num_hands, block),)
+    _init_policy_tensors_kernel[grid](
+        uniform_policy,
+        cumulative_regrets,
+        parent_index,
+        child_counts,
+        total_nodes,
+        root_nodes,
+        num_hands,
+        block,
+        num_warps=4,
+    )
+
+
+def init_belief_value_tensors_triton_(
+    beliefs: torch.Tensor,
+    self_reach: torch.Tensor,
+    latest_values: torch.Tensor,
+    action_from_parent: torch.Tensor,
+    done: torch.Tensor,
+    rewards: torch.Tensor,
+    *,
+    total_nodes: int,
+    root_nodes: int,
+    num_hands: int,
+    block: int = 256,
+) -> None:
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    if total_nodes == 0:
+        return
+    grid = (triton.cdiv(total_nodes * 2 * num_hands, block),)
+    _init_belief_value_tensors_kernel[grid](
+        beliefs,
+        self_reach,
+        latest_values,
+        action_from_parent,
+        done,
+        rewards,
+        total_nodes,
+        root_nodes,
+        num_hands,
+        block,
         num_warps=4,
     )
