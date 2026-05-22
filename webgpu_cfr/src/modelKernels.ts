@@ -78,6 +78,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const FILL_EXACT_PAIR_MASS_WGSL = /* wgsl */ `
+struct Params {
+  rows: u32,
+  batch: u32,
+  numPlayers: u32,
+  player: u32,
+  hand: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> pairOneHotT: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let total = params.batch * params.rows;
+  if (linear >= total) {
+    return;
+  }
+  let row = linear % params.rows;
+  let batch = linear / params.rows;
+  let outputBase = (batch * params.numPlayers + params.player) * params.rows;
+  output[outputBase + row] = pairOneHotT[row * 1326u + params.hand];
+}
+`;
+
 const REDUCE_4X_256_WGSL = /* wgsl */ `
   if (lane < 128u) {
     partial0[lane] = partial0[lane] + partial0[lane + 128u];

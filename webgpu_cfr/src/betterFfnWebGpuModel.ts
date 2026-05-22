@@ -1,5 +1,6 @@
 import {
   ADD3_WGSL,
+  FILL_EXACT_PAIR_MASS_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
@@ -161,6 +162,7 @@ export class BetterFfnWebGpuModel {
     | GPUComputePipeline
     | undefined;
   private readonly playerBoardHadamardPipeline: GPUComputePipeline;
+  private readonly fillExactPairMassPipeline: GPUComputePipeline;
   private readonly rmsNormPipeline: GPUComputePipeline;
   private readonly rmsNormBeliefExactPipeline: GPUComputePipeline;
   private readonly rmsNormBeliefExactHalfPipeline: GPUComputePipeline;
@@ -361,6 +363,10 @@ export class BetterFfnWebGpuModel {
     this.playerBoardHadamardPipeline = this.pipeline(
       PLAYER_BOARD_HADAMARD_WGSL,
       "better-ffn-player-board-hadamard",
+    );
+    this.fillExactPairMassPipeline = this.pipeline(
+      FILL_EXACT_PAIR_MASS_WGSL,
+      "better-ffn-fill-exact-pair-mass",
     );
     this.rmsNormPipeline = this.pipeline(
       RMS_NORM_WGSL,
@@ -802,6 +808,7 @@ export class BetterFfnWebGpuModel {
         storage,
         uniform,
         prepared,
+        exactBelief,
       );
       const contextFeatures =
         prepared?.contextFeatures ??
@@ -1342,6 +1349,7 @@ export class BetterFfnWebGpuModel {
       boardRankLow?: GPUBuffer;
       boardSuitLow?: GPUBuffer;
     },
+    exactBelief?: ExactBelief,
   ): { rank: GPUBuffer; suit: GPUBuffer } | undefined {
     const interactionDim = this.manifest.architecture.boardInteractionDim;
     if (interactionDim <= 0) return undefined;
@@ -1357,36 +1365,59 @@ export class BetterFfnWebGpuModel {
     const rankMass = empty(batch * numPlayers * 91);
     const suitMass = empty(batch * numPlayers * 10);
     for (let player = 0; player < numPlayers; player += 1) {
-      this.matVecBatch(
-        this.rankPairOneHotT,
-        beliefBuffer,
-        this.dummyBias,
-        rankMass,
-        91,
-        NUM_HANDS,
-        batch,
-        precomputed?.sharedBeliefs ? 0 : numPlayers * NUM_HANDS,
-        numPlayers * 91,
-        player * NUM_HANDS,
-        player * 91,
-        false,
-        uniform,
-      );
-      this.matVecBatch(
-        this.suitPairOneHotT,
-        beliefBuffer,
-        this.dummyBias,
-        suitMass,
-        10,
-        NUM_HANDS,
-        batch,
-        precomputed?.sharedBeliefs ? 0 : numPlayers * NUM_HANDS,
-        numPlayers * 10,
-        player * NUM_HANDS,
-        player * 10,
-        false,
-        uniform,
-      );
+      if (exactBelief?.player === player) {
+        this.fillExactPairMass(
+          this.rankPairOneHotT,
+          rankMass,
+          91,
+          batch,
+          numPlayers,
+          player,
+          exactBelief.hand,
+          uniform,
+        );
+        this.fillExactPairMass(
+          this.suitPairOneHotT,
+          suitMass,
+          10,
+          batch,
+          numPlayers,
+          player,
+          exactBelief.hand,
+          uniform,
+        );
+      } else {
+        this.matVecBatch(
+          this.rankPairOneHotT,
+          beliefBuffer,
+          this.dummyBias,
+          rankMass,
+          91,
+          NUM_HANDS,
+          batch,
+          precomputed?.sharedBeliefs ? 0 : numPlayers * NUM_HANDS,
+          numPlayers * 91,
+          player * NUM_HANDS,
+          player * 91,
+          false,
+          uniform,
+        );
+        this.matVecBatch(
+          this.suitPairOneHotT,
+          beliefBuffer,
+          this.dummyBias,
+          suitMass,
+          10,
+          NUM_HANDS,
+          batch,
+          precomputed?.sharedBeliefs ? 0 : numPlayers * NUM_HANDS,
+          numPlayers * 10,
+          player * NUM_HANDS,
+          player * 10,
+          false,
+          uniform,
+        );
+      }
     }
 
     const rankPairLow = empty(batch * numPlayers * interactionDim);
@@ -2458,6 +2489,32 @@ export class BetterFfnWebGpuModel {
         resource: {
           buffer: uniform(
             new Uint32Array([elements, interactionDim, numPlayers, 0]),
+          ),
+        },
+      },
+    ]);
+  }
+
+  private fillExactPairMass(
+    pairOneHotT: GPUBuffer,
+    output: GPUBuffer,
+    rows: number,
+    batch: number,
+    numPlayers: number,
+    player: number,
+    hand: number,
+    uniform: (
+      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ) => GPUBuffer,
+  ): void {
+    this.submit(this.fillExactPairMassPipeline, Math.ceil((batch * rows) / 64), [
+      { binding: 0, resource: { buffer: pairOneHotT } },
+      { binding: 1, resource: { buffer: output } },
+      {
+        binding: 2,
+        resource: {
+          buffer: uniform(
+            new Uint32Array([rows, batch, numPlayers, player, hand, 0, 0, 0]),
           ),
         },
       },
