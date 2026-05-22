@@ -37,7 +37,7 @@ import torch
 
 from p2.core.structured_config import CFRType
 from p2.env import rules
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, combo_to_onehot_tensor, hand_combos_tensor
 from p2.env.env_gather_triton import gather_env_rows_into_triton
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.rules_triton import (
@@ -86,7 +86,7 @@ from p2.search.fused_cfr_triton import (
     select_actor_beliefs_triton_out_,
     select_opponent_beliefs_triton_out_,
 )
-from p2.search.cfr_evaluator import PublicBeliefState, padded_indices
+from p2.search.cfr_evaluator import HandRankData, PublicBeliefState, padded_indices
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 from p2.search.subgame_constructor_triton import (
     copy_child_cards_triton_,
@@ -255,11 +255,57 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._subgame_child_counts: torch.Tensor | None = None
         self._subgame_child_offsets: torch.Tensor | None = None
 
+    def _build_hand_rank_data_for_indices(self, indices: torch.Tensor) -> HandRankData:
+        device = self.device
+        board = self.env.board_indices[indices].int()
+        m = indices.numel()
+        k = torch.arange(NUM_HANDS, device=device).expand(m, -1)
+
+        import p2.search.cfr_evaluator as _ce
+
+        hand_ranks, sorted_indices = _ce.rank_hands(board)
+        ranks_sorted = torch.gather(hand_ranks, 1, sorted_indices)
+        is_start = torch.ones_like(ranks_sorted, dtype=torch.bool)
+        is_start[:, 1:] = ranks_sorted[:, 1:] != ranks_sorted[:, :-1]
+        group_id = is_start.cumsum(dim=1, dtype=torch.int) - 1
+
+        starts = torch.full((m, NUM_HANDS), NUM_HANDS, dtype=torch.int, device=device)
+        ends = torch.full((m, NUM_HANDS), -1, dtype=torch.int, device=device)
+        starts.scatter_reduce_(1, group_id, k.int(), reduce="amin", include_self=True)
+        ends.scatter_reduce_(1, group_id, k.int(), reduce="amax", include_self=True)
+
+        l_idx = torch.gather(starts, 1, group_id)
+        r_idx = (torch.gather(ends, 1, group_id) + 1).clamp(max=NUM_HANDS)
+        inv_sorted = torch.argsort(sorted_indices, dim=1)
+
+        combo_to_onehot = combo_to_onehot_tensor(device=device)
+        hands_c1c2 = hand_combos_tensor(device=device)
+        card_ok = torch.ones((m, 52), dtype=torch.bool, device=device)
+        card_ok.scatter_(1, board, False)
+        h = combo_to_onehot.unsqueeze(0).expand(m, -1, -1)
+        hand_ok_mask = self.allowed_hands[indices]
+        hand_ok_mask_sorted = torch.gather(hand_ok_mask, 1, sorted_indices)
+        hands_c1c2_sorted = torch.gather(
+            hands_c1c2.unsqueeze(0).expand(m, -1, -1),
+            1,
+            sorted_indices.unsqueeze(-1).expand(-1, -1, 2),
+        )
+        return HandRankData(
+            sorted_indices=sorted_indices,
+            inv_sorted=inv_sorted,
+            H=h,
+            card_ok=card_ok,
+            hand_ok_mask=hand_ok_mask,
+            hand_ok_mask_sorted=hand_ok_mask_sorted,
+            hands_c1c2_sorted=hands_c1c2_sorted,
+            L_idx=l_idx,
+            R_idx=r_idx,
+        )
+
     def _init_hand_rank_data(self) -> None:
-        """Build hand-rank data, then precompute the constant-per-subgame
-        showdown EV inputs and capture a CUDA graph for the EV pipeline.
-        The graph is keyed on (M=showdown_indices.numel(), NUM_HANDS) and
-        replays via persistent buffers."""
+        """Build rank data by unique river-root board, then map each showdown
+        leaf to that board's precompute row. Same-street construction never
+        deals cards below a root, so river descendants share the root board."""
         self.showdown_indices = torch.where(self.env.street == 4)[0].contiguous()
         self.showdown_actors = self.env.to_act[self.showdown_indices]
         self.showdown_potential = (
@@ -267,12 +313,19 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             + self.env.pot[self.showdown_indices, None]
             - self.env.starting_stacks[self.showdown_indices]
         )
-        super()._init_hand_rank_data()
-        if self.hand_rank_data is not None and self.showdown_indices.numel() > 0:
+        if self.showdown_indices.numel() > 0:
+            root_index = self._get_root_index()
+            showdown_roots = root_index[self.showdown_indices]
+            rank_indices, extra_indices = torch.unique(
+                showdown_roots, sorted=True, return_inverse=True
+            )
+            self.hand_rank_data = self._build_hand_rank_data_for_indices(rank_indices)
             self._showdown_extras = precompute_showdown_extras(
                 self.hand_rank_data,
                 self.env,
-                self.showdown_indices,
+                rank_indices,
+                scale_indices=self.showdown_indices,
+                extra_indices=extra_indices,
             )
             self._showdown_graph_runner = ShowdownGraphRunner(
                 extras=self._showdown_extras,
@@ -281,6 +334,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 device=self.device,
             )
         else:
+            self.hand_rank_data = None
             self._showdown_extras = None
             self._showdown_graph_runner = None
 
@@ -912,6 +966,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.env = self._active_subgame_env_view(cursor)
         self.parent_index = self._subgame_parent_index[:cursor]
         self.action_from_parent = self._subgame_action_from_parent[:cursor]
+        self._root_index = None
+        self._root_index_total = -1
         rewards_tensor = self._subgame_rewards[:cursor]
         allin_leaf_tensor = self._subgame_allin_leaf[:cursor]
 

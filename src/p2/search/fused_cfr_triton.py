@@ -4149,7 +4149,8 @@ if triton is not None:
     @triton.jit
     def _showdown_setup_b_P_kernel(
         beliefs_ptr,             # [M, 2, NUM_HANDS] fp32 (orig hand order)
-        sorted_indices_ptr,      # [M, H] int64
+        extra_index_ptr,         # [M] int64, maps showdown row -> board-extra row
+        sorted_indices_ptr,      # [E, H] int64
         b_opp_both_ptr,          # [M, 2, H] fp32 OUT
         P_padded_both_ptr,       # [M, 2, H+1] fp32 OUT (with leading 0)
         H,
@@ -4159,10 +4160,11 @@ if triton is not None:
         m = tl.program_id(0)
         hero = tl.program_id(1)
         villain = 1 - hero
+        extra = tl.load(extra_index_ptr + m)
         h_offs = tl.arange(0, BLOCK_H)
         mask_h = h_offs < H
         sorted_idx = tl.load(
-            sorted_indices_ptr + m * H + h_offs, mask=mask_h, other=0,
+            sorted_indices_ptr + extra * H + h_offs, mask=mask_h, other=0,
         )
         safe_idx = tl.where(mask_h, sorted_idx, 0)
         b_at = tl.load(
@@ -4182,7 +4184,8 @@ if triton is not None:
     @triton.jit
     def _showdown_build_cum_kernel(
         b_opp_sorted_ptr,        # [M, 2, H] fp32
-        card_positions_ptr,      # [M, NUM_CARDS, MC] int32 (positions; pad=H)
+        extra_index_ptr,         # [M] int64
+        card_positions_ptr,      # [E, NUM_CARDS, MC] int32 (positions; pad=H)
         cum_out_ptr,             # [M, 2, NUM_CARDS, MC] fp32 OUT
         H,
         NUM_CARDS: tl.constexpr,
@@ -4192,9 +4195,10 @@ if triton is not None:
         hc = tl.program_id(1)
         hero = hc // NUM_CARDS
         c = hc % NUM_CARDS
+        extra = tl.load(extra_index_ptr + m)
         slot_off = tl.arange(0, MC_K)
         positions = tl.load(
-            card_positions_ptr + m * NUM_CARDS * MC_K + c * MC_K + slot_off,
+            card_positions_ptr + extra * NUM_CARDS * MC_K + c * MC_K + slot_off,
         )
         in_range = positions < H
         safe_pos = tl.where(in_range, positions, 0)
@@ -4213,10 +4217,11 @@ if triton is not None:
         b_opp_sorted_ptr,        # [M, 2, H]
         P_padded_ptr,            # [M, 2, H+1]
         card_cumsum_ptr,         # [M, 2, 52, MC]
+        extra_index_ptr,         # [M] int64
         L_idx_ptr, R_idx_ptr,
         c1_sorted_ptr, c2_sorted_ptr,
-        sorted_indices_ptr,      # [M, H] — write target index
-        hand_ok_sorted_ptr,      # [M, H] uint8
+        sorted_indices_ptr,      # [E, H] — write target index
+        hand_ok_sorted_ptr,      # [E, H] uint8
         scale_factor_ptr,        # [M, 2] — potential / scale
         slot_L_c1_ptr, slot_L_c2_ptr, slot_R_c1_ptr, slot_R_c2_ptr,
         slot_last_c1_ptr, slot_last_c2_ptr,
@@ -4228,21 +4233,22 @@ if triton is not None:
     ):
         m = tl.program_id(0)
         k_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
         k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
         mask_k = k_offs < H
 
-        L = tl.load(L_idx_ptr + m * H + k_offs, mask=mask_k, other=0)
-        R = tl.load(R_idx_ptr + m * H + k_offs, mask=mask_k, other=0)
-        c1 = tl.load(c1_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
-        c2 = tl.load(c2_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
-        out_k = tl.load(sorted_indices_ptr + m * H + k_offs, mask=mask_k, other=0)
-        ok_int = tl.load(hand_ok_sorted_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sL1 = tl.load(slot_L_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sL2 = tl.load(slot_L_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sR1 = tl.load(slot_R_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sR2 = tl.load(slot_R_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sLast1 = tl.load(slot_last_c1_ptr + m * H + k_offs, mask=mask_k, other=0)
-        sLast2 = tl.load(slot_last_c2_ptr + m * H + k_offs, mask=mask_k, other=0)
+        L = tl.load(L_idx_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        R = tl.load(R_idx_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        c1 = tl.load(c1_sorted_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        c2 = tl.load(c2_sorted_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        out_k = tl.load(sorted_indices_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        ok_int = tl.load(hand_ok_sorted_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        sL1 = tl.load(slot_L_c1_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        sL2 = tl.load(slot_L_c2_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        sR1 = tl.load(slot_R_c1_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        sR2 = tl.load(slot_R_c2_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        sLast1 = tl.load(slot_last_c1_ptr + extra * H + k_offs, mask=mask_k, other=0)
+        sLast2 = tl.load(slot_last_c2_ptr + extra * H + k_offs, mask=mask_k, other=0)
 
         has_L1 = sL1 > 0
         has_L2 = sL2 > 0
@@ -4287,7 +4293,14 @@ if triton is not None:
             )
 
 
-def precompute_showdown_extras(hrd, env, showdown_indices):
+def precompute_showdown_extras(
+    hrd,
+    env,
+    showdown_indices,
+    *,
+    scale_indices=None,
+    extra_indices=None,
+):
     """Compute everything v15 needs that's a function of the subgame
     structure (i.e., constant across CFR iters within a subgame).
 
@@ -4302,12 +4315,18 @@ def precompute_showdown_extras(hrd, env, showdown_indices):
     hand_ok_sorted = (
         hrd.hand_ok_mask.gather(1, hrd.sorted_indices).to(torch.uint8).contiguous()
     )
+    if scale_indices is None:
+        scale_indices = showdown_indices
+    if extra_indices is None:
+        extra_indices = torch.arange(
+            int(scale_indices.numel()), device=scale_indices.device, dtype=torch.long
+        )
     showdown_potential = (
-        env.stacks[showdown_indices]
-        + env.pot[showdown_indices, None]
-        - env.starting_stacks[showdown_indices]
+        env.stacks[scale_indices]
+        + env.pot[scale_indices, None]
+        - env.starting_stacks[scale_indices]
     )  # [M, 2]
-    env_scale = env.scale[showdown_indices]  # [M]
+    env_scale = env.scale[scale_indices]  # [M]
     scale_factor = (showdown_potential / env_scale[:, None]).contiguous()
     c1 = hrd.hands_c1c2_sorted[..., 0].contiguous()
     c2 = hrd.hands_c1c2_sorted[..., 1].contiguous()
@@ -4326,6 +4345,7 @@ def precompute_showdown_extras(hrd, env, showdown_indices):
         "L_idx": hrd.L_idx.contiguous(),
         "R_idx": hrd.R_idx.contiguous(),
         "sorted_indices": hrd.sorted_indices.contiguous(),
+        "extra_indices": extra_indices.to(torch.long).contiguous(),
     }
 
 
@@ -4353,19 +4373,20 @@ def showdown_ev_v15(
     P_padded_both = torch.empty(M, 2, H + 1, device=device, dtype=dtype)
     cum_both = torch.empty(M, 2, 52, SHOWDOWN_MAX_PER_CARD, device=device, dtype=dtype)
     ev_unsorted = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+    extra_indices = extras["extra_indices"].contiguous()
 
     _showdown_setup_b_P_kernel[(M, 2)](
-        beliefs.contiguous(), extras["sorted_indices"],
+        beliefs.contiguous(), extra_indices, extras["sorted_indices"],
         b_opp_both, P_padded_both,
         H, NUM_HANDS, BLOCK_H=block_h,
     )
     _showdown_build_cum_kernel[(M, 2 * 52)](
-        b_opp_both, extras["card_positions"], cum_both,
+        b_opp_both, extra_indices, extras["card_positions"], cum_both,
         H, NUM_CARDS=52, MC_K=SHOWDOWN_MAX_PER_CARD,
     )
     grid = (M, triton.cdiv(NUM_HANDS, block_k))
     _showdown_ev_v15_kernel[grid](
-        b_opp_both, P_padded_both, cum_both,
+        b_opp_both, P_padded_both, cum_both, extra_indices,
         extras["L_idx"], extras["R_idx"],
         extras["c1"], extras["c2"],
         extras["sorted_indices"],
@@ -4449,18 +4470,19 @@ class ShowdownGraphRunner:
 
     def _launch_pipeline(self) -> None:
         e = self.extras
+        extra_indices = e["extra_indices"]
         _showdown_setup_b_P_kernel[(self.M, 2)](
-            self.beliefs_in, e["sorted_indices"],
+            self.beliefs_in, extra_indices, e["sorted_indices"],
             self.b_opp_both, self.P_padded,
             self.H, self.NUM_HANDS, BLOCK_H=self.block_h,
         )
         _showdown_build_cum_kernel[(self.M, 2 * 52)](
-            self.b_opp_both, e["card_positions"], self.cum_both,
+            self.b_opp_both, extra_indices, e["card_positions"], self.cum_both,
             self.H, NUM_CARDS=52, MC_K=SHOWDOWN_MAX_PER_CARD,
         )
         grid = (self.M, triton.cdiv(self.NUM_HANDS, self.block_k))
         _showdown_ev_v15_kernel[grid](
-            self.b_opp_both, self.P_padded, self.cum_both,
+            self.b_opp_both, self.P_padded, self.cum_both, extra_indices,
             e["L_idx"], e["R_idx"], e["c1"], e["c2"],
             e["sorted_indices"], e["hand_ok_sorted"], e["scale_factor"],
             e["slot_L_c1"], e["slot_L_c2"],
