@@ -727,7 +727,8 @@ class CFREvaluator(ABC):
         if self.cfr_type == CFRType.linear:
             return torch.full_like(t, 2.0)
         if self.cfr_type == CFRType.discounted:
-            return (t + 1.0).pow(float(self.dcfr_gamma))
+            gamma = self._get_dcfr_gamma_tensor(iterations)
+            return (t + 1.0).pow(gamma)
         if self.cfr_type == CFRType.discounted_plus:
             return torch.where(
                 t > float(self.dcfr_delay),
@@ -735,6 +736,19 @@ class CFREvaluator(ABC):
                 torch.ones_like(t),
             )
         raise ValueError(f"Unsupported CFR type: {self.cfr_type}")
+
+    def _get_dcfr_gamma_tensor(self, iterations: torch.Tensor) -> torch.Tensor:
+        """Return the gamma value that apply_schedules uses at each iteration."""
+        t = iterations.to(device=self.device, dtype=torch.float32)
+        if self.dcfr_gamma_final is None:
+            return torch.full_like(t, float(self.dcfr_gamma))
+
+        total_iterations = max(1, self.cfr_iterations - self.warm_start_iterations)
+        progress = (t - float(self.warm_start_iterations)).clamp(min=0.0)
+        t_normalized = (progress / float(total_iterations)).clamp(min=0.0, max=1.0)
+        return float(self.dcfr_gamma_initial) + (
+            float(self.dcfr_gamma_final) - float(self.dcfr_gamma_initial)
+        ) * t_normalized
 
     def _reset_average_policy_accumulators(self) -> None:
         """Clear true CFR average-strategy accumulators for a fresh subgame."""

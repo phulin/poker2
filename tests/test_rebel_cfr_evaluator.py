@@ -2854,8 +2854,28 @@ def test_average_policy_weight_tensor() -> None:
         torch.tensor([9.0, 36.0, 121.0], device=env.device),
     )
 
+    evaluator.warm_start_iterations = 2
+    evaluator.cfr_iterations = 12
+    evaluator.dcfr_gamma_initial = 4.0
+    evaluator.dcfr_gamma = 0.0
+    evaluator.dcfr_gamma_final = 0.0
+    scheduled_iterations = torch.tensor([2, 7, 12], device=env.device)
+    scheduled_gamma = torch.tensor([4.0, 2.0, 0.0], device=env.device)
+    torch.testing.assert_close(
+        evaluator._get_dcfr_gamma_tensor(scheduled_iterations),
+        scheduled_gamma,
+    )
+    torch.testing.assert_close(
+        evaluator._get_average_policy_weight_tensor(scheduled_iterations),
+        (scheduled_iterations.float() + 1.0).pow(scheduled_gamma),
+    )
+    evaluator.dcfr_gamma_final = None
+
     evaluator.cfr_type = CFRType.discounted_plus
     evaluator.dcfr_delay = 3
+    evaluator.dcfr_gamma_initial = 4.0
+    evaluator.dcfr_gamma = 0.0
+    evaluator.dcfr_gamma_final = 0.0
     torch.testing.assert_close(
         evaluator._get_average_policy_weight_tensor(iterations),
         torch.tensor([1.0, 2.0, 2.0], device=env.device),
