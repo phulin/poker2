@@ -58,7 +58,6 @@ from p2.search.fused_cfr_triton import (
     fused_deep_beliefs_,
     fused_model_values_writeback_,
     fused_parent_sum_divide_,
-    fused_policy_sample_update_,
     fused_policy_renorm_reach_depth_,
     fused_reach_beliefs_avg_depth_,
     fused_reach_beliefs_avg_scratch_depth_,
@@ -81,6 +80,7 @@ from p2.search.fused_cfr_triton import (
     select_actor_beliefs_triton_out_,
     select_opponent_beliefs_triton_out_,
 )
+from p2.search.cfr_evaluator import PublicBeliefState
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
@@ -178,9 +178,23 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._ev_marginal_policy_buf: torch.Tensor | None = None
         self._regret_src_target_buf: torch.Tensor | None = None
         self._regret_src_stats_buf: torch.Tensor | None = None
-        self._sample_update_rows: torch.Tensor | None = None
-        self._sample_update_counts: torch.Tensor | None = None
-        self._sample_update_key: tuple[int, int, int] | None = None
+        self._sample_root_rows: torch.Tensor | None = None
+        self._sample_root_counts: torch.Tensor | None = None
+        self._sample_root_key: tuple[int, int, int] | None = None
+        self._sample_leaf_enabled: bool = False
+        self._sample_leaf_training_mode: bool = True
+        self._sample_leaf_epsilon: float = 0.0
+        self._sample_leaf_players: torch.Tensor | None = None
+        self._sample_leaf_hands: torch.Tensor | None = None
+        self._sample_leaf_uniform_draws: torch.Tensor | None = None
+        self._sample_leaf_action_draws: torch.Tensor | None = None
+        self._sample_leaf_indices_padded: torch.Tensor | None = None
+        self._sample_leaf_beliefs_padded: torch.Tensor | None = None
+        self._sample_leaf_ready_padded: torch.Tensor | None = None
+        self._sample_leaf_effective_leaf_mask: torch.Tensor | None = None
+        self._sample_leaf_sampling_masks: torch.Tensor | None = None
+        self._sample_leaf_uniform_policy: torch.Tensor | None = None
+        self._sample_leaf_child_nodes_by_action: torch.Tensor | None = None
         self._static_model_base_key: tuple[int, int, int] | None = None
         self._static_model_base_features: torch.Tensor | None = None
         self._static_model_base_fn = None
@@ -283,12 +297,40 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._regret_src_target_buf = None
         if not hasattr(self, "_regret_src_stats_buf"):
             self._regret_src_stats_buf = None
-        if not hasattr(self, "_sample_update_rows"):
-            self._sample_update_rows = None
-        if not hasattr(self, "_sample_update_counts"):
-            self._sample_update_counts = None
-        if not hasattr(self, "_sample_update_key"):
-            self._sample_update_key = None
+        if not hasattr(self, "_sample_root_rows"):
+            self._sample_root_rows = None
+        if not hasattr(self, "_sample_root_counts"):
+            self._sample_root_counts = None
+        if not hasattr(self, "_sample_root_key"):
+            self._sample_root_key = None
+        if not hasattr(self, "_sample_leaf_enabled"):
+            self._sample_leaf_enabled = False
+        if not hasattr(self, "_sample_leaf_training_mode"):
+            self._sample_leaf_training_mode = True
+        if not hasattr(self, "_sample_leaf_epsilon"):
+            self._sample_leaf_epsilon = 0.0
+        if not hasattr(self, "_sample_leaf_players"):
+            self._sample_leaf_players = None
+        if not hasattr(self, "_sample_leaf_hands"):
+            self._sample_leaf_hands = None
+        if not hasattr(self, "_sample_leaf_uniform_draws"):
+            self._sample_leaf_uniform_draws = None
+        if not hasattr(self, "_sample_leaf_action_draws"):
+            self._sample_leaf_action_draws = None
+        if not hasattr(self, "_sample_leaf_indices_padded"):
+            self._sample_leaf_indices_padded = None
+        if not hasattr(self, "_sample_leaf_beliefs_padded"):
+            self._sample_leaf_beliefs_padded = None
+        if not hasattr(self, "_sample_leaf_ready_padded"):
+            self._sample_leaf_ready_padded = None
+        if not hasattr(self, "_sample_leaf_effective_leaf_mask"):
+            self._sample_leaf_effective_leaf_mask = None
+        if not hasattr(self, "_sample_leaf_sampling_masks"):
+            self._sample_leaf_sampling_masks = None
+        if not hasattr(self, "_sample_leaf_uniform_policy"):
+            self._sample_leaf_uniform_policy = None
+        if not hasattr(self, "_sample_leaf_child_nodes_by_action"):
+            self._sample_leaf_child_nodes_by_action = None
         if not hasattr(self, "_static_model_base_key"):
             self._static_model_base_key = None
         if not hasattr(self, "_static_model_base_features"):
@@ -330,6 +372,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._static_model_base_features = None
         self._leaf_belief_gather_indices = None
         self._leaf_belief_gather_key = None
+        self._sample_root_rows = None
+        self._sample_root_counts = None
+        self._sample_root_key = None
+        self._sample_leaf_enabled = False
+        self._sample_leaf_players = None
+        self._sample_leaf_hands = None
+        self._sample_leaf_uniform_draws = None
+        self._sample_leaf_action_draws = None
+        self._sample_leaf_indices_padded = None
+        self._sample_leaf_beliefs_padded = None
+        self._sample_leaf_ready_padded = None
+        self._sample_leaf_effective_leaf_mask = None
+        self._sample_leaf_sampling_masks = None
+        self._sample_leaf_uniform_policy = None
+        self._sample_leaf_child_nodes_by_action = None
         self._prepare_tree_slices()
         self._reset_average_policy_accumulators()
 
@@ -494,52 +551,181 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._regret_src_stats_buf = self.beliefs.new_empty(stats_shape)
         return self._regret_src_target_buf, self._regret_src_stats_buf
 
-    def _prepare_sample_update_table(self) -> None:
+    def _prepare_sample_root_table(self) -> None:
+        N = self.root_nodes
         key = (
             int(self.t_sample.data_ptr()),
-            int(self.total_nodes),
+            int(N),
             int(self.cfr_iterations),
         )
-        if self._sample_update_key == key:
+        if self._sample_root_key == key:
             return
 
-        t_sample = self.t_sample.to(device=self.device, dtype=torch.long)
-        valid_sample = t_sample < self.cfr_iterations
-        valid_rows = torch.nonzero(valid_sample, as_tuple=False).flatten()
-        t_sample_valid = t_sample.index_select(0, valid_rows)
+        t_sample_root = self.t_sample[:N].to(device=self.device, dtype=torch.long)
+        valid_sample = t_sample_root < self.cfr_iterations
+        valid_roots = torch.nonzero(valid_sample, as_tuple=False).flatten()
+        t_sample_valid = t_sample_root.index_select(0, valid_roots)
         counts = torch.bincount(
             t_sample_valid,
             minlength=self.cfr_iterations,
         )[: self.cfr_iterations].contiguous()
         max_updates = int(counts.max().item()) if counts.numel() else 0
-        if max_updates == 0:
-            rows = torch.empty(
-                self.cfr_iterations,
-                0,
-                dtype=torch.long,
-                device=self.device,
-            )
-        else:
+        rows = torch.full(
+            (self.cfr_iterations, max_updates),
+            N,
+            dtype=torch.long,
+            device=self.device,
+        )
+        if max_updates > 0:
             order = torch.argsort(t_sample_valid, stable=True)
             sorted_t = t_sample_valid.index_select(0, order)
-            sorted_rows = valid_rows.index_select(0, order)
+            sorted_roots = valid_roots.index_select(0, order)
             starts = torch.cumsum(counts, dim=0) - counts
             position = torch.arange(
                 order.numel(),
                 device=self.device,
                 dtype=torch.long,
             ) - starts.index_select(0, sorted_t)
-            rows = torch.empty(
-                self.cfr_iterations,
-                max_updates,
-                dtype=torch.long,
-                device=self.device,
-            )
-            rows[sorted_t, position] = sorted_rows
+            rows[sorted_t, position] = sorted_roots
 
-        self._sample_update_rows = rows.contiguous()
-        self._sample_update_counts = counts
-        self._sample_update_key = key
+        self._sample_root_rows = rows.contiguous()
+        self._sample_root_counts = counts
+        self._sample_root_key = key
+
+    def _prepare_compact_leaf_sampling(self, training_mode: bool) -> None:
+        self._prepare_sample_root_table()
+        N = self.root_nodes
+        top = self.depth_offsets[-2]
+        depth = max(0, int(self.tree_depth))
+        self._sample_leaf_enabled = True
+        self._sample_leaf_training_mode = training_mode
+        self._sample_leaf_epsilon = self.sample_epsilon if training_mode else 0.0
+        self._sample_leaf_players = torch.randint(
+            0, 2, (N,), generator=self.generator, device=self.device
+        )
+        self._sample_leaf_hands = self._sample_root_hands_by_player()
+        self._sample_leaf_uniform_draws = torch.rand(
+            depth, N, generator=self.generator, device=self.device
+        )
+        self._sample_leaf_action_draws = torch.rand(
+            depth, N, generator=self.generator, device=self.device
+        )
+        self._sample_leaf_indices_padded = torch.full(
+            (N + 1,), N, dtype=torch.long, device=self.device
+        )
+        self._sample_leaf_indices_padded[:N] = torch.arange(N, device=self.device)
+        self._sample_leaf_beliefs_padded = torch.zeros(
+            N + 1,
+            self.num_players,
+            NUM_HANDS,
+            dtype=self.float_dtype,
+            device=self.device,
+        )
+        self._sample_leaf_ready_padded = torch.zeros(
+            N + 1, dtype=torch.bool, device=self.device
+        )
+
+        done_src = self._pull_back(self.env.done)
+        sampling_masks = self.child_mask.clone()
+        sampling_masks[:top] &= ~done_src
+        sampling_counts = sampling_masks.float().sum(dim=-1, keepdim=True)
+        self._sample_leaf_sampling_masks = sampling_masks
+        self._sample_leaf_uniform_policy = torch.where(
+            sampling_masks,
+            sampling_counts.clamp(min=1.0).reciprocal(),
+            torch.zeros_like(sampling_counts),
+        )
+        self._sample_leaf_effective_leaf_mask = self.leaf_mask | (
+            sampling_counts.squeeze(1) == 0
+        )
+
+        child_nodes_by_action = torch.full(
+            (self.total_nodes, self.num_actions),
+            0,
+            dtype=torch.long,
+            device=self.device,
+        )
+        nonroot = torch.arange(
+            self.root_nodes, self.total_nodes, dtype=torch.long, device=self.device
+        )
+        child_nodes_by_action[
+            self.parent_index[nonroot],
+            self.action_from_parent[nonroot],
+        ] = nonroot
+        self._sample_leaf_child_nodes_by_action = child_nodes_by_action
+
+    def _sample_compact_leaves_for_current_t(self) -> None:
+        if not self._sample_leaf_enabled:
+            return
+        assert self._sample_root_rows is not None
+        assert self._sample_root_counts is not None
+        assert self._sample_leaf_players is not None
+        assert self._sample_leaf_hands is not None
+        assert self._sample_leaf_uniform_draws is not None
+        assert self._sample_leaf_action_draws is not None
+        assert self._sample_leaf_indices_padded is not None
+        assert self._sample_leaf_beliefs_padded is not None
+        assert self._sample_leaf_ready_padded is not None
+        assert self._sample_leaf_effective_leaf_mask is not None
+        assert self._sample_leaf_sampling_masks is not None
+        assert self._sample_leaf_uniform_policy is not None
+        assert self._sample_leaf_child_nodes_by_action is not None
+
+        N = self.root_nodes
+        B = self.num_actions
+        t_idx = self._t_scalars.t_tensor.view(1)
+        root_rows = self._sample_root_rows.index_select(0, t_idx).squeeze(0)
+        count = self._sample_root_counts.index_select(0, t_idx).squeeze(0)
+        slot = torch.arange(root_rows.numel(), device=self.device)
+        valid = slot < count
+        roots = torch.where(valid, root_rows, torch.full_like(root_rows, N))
+        safe_roots = roots.clamp(max=max(N - 1, 0))
+        sampled_nodes = safe_roots.clone()
+        active = valid & (~self._sample_leaf_effective_leaf_mask[sampled_nodes])
+
+        for depth in range(self.tree_depth):
+            to_act = self.env.to_act[sampled_nodes]
+            player_mask = self._sample_leaf_players[safe_roots]
+            sample_uniformly = (
+                self._sample_leaf_uniform_draws[depth, safe_roots]
+                < self._sample_leaf_epsilon
+            )
+            sample_uniformly &= to_act == player_mask
+            sample_uniformly &= active
+
+            selected_hands = self._sample_leaf_hands[safe_roots].gather(
+                1, to_act[:, None]
+            )
+            child_nodes = self._sample_leaf_child_nodes_by_action[sampled_nodes]
+            policy_probs = self.policy_probs[
+                child_nodes, selected_hands.expand(-1, B)
+            ]
+            policy_probs = torch.where(
+                self._sample_leaf_sampling_masks[sampled_nodes],
+                policy_probs,
+                torch.zeros_like(policy_probs),
+            )
+            denom = policy_probs.sum(dim=1, keepdim=True)
+            policy_probs = torch.where(
+                denom >= 1e-12,
+                policy_probs / denom.clamp(min=1e-12),
+                self._sample_leaf_uniform_policy[sampled_nodes],
+            )
+            action_probs = torch.where(
+                sample_uniformly[:, None],
+                self._sample_leaf_uniform_policy[sampled_nodes],
+                policy_probs,
+            )
+            cdf = torch.cumsum(action_probs, dim=1)
+            draws = self._sample_leaf_action_draws[depth, safe_roots]
+            actions = (draws[:, None] > cdf).sum(dim=1).clamp(max=B - 1)
+            next_nodes = child_nodes.gather(1, actions[:, None]).squeeze(1)
+            sampled_nodes = torch.where(active, next_nodes, sampled_nodes)
+            active = active & (~self._sample_leaf_effective_leaf_mask[sampled_nodes])
+
+        self._sample_leaf_indices_padded[roots] = sampled_nodes
+        self._sample_leaf_beliefs_padded[roots] = self.beliefs[sampled_nodes]
+        self._sample_leaf_ready_padded[roots] = valid
 
     def _model_features_for_beliefs(
         self, beliefs_at_model: torch.Tensor
@@ -1389,22 +1575,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 mix_new=float(mix_new),
             )
 
-        self._prepare_sample_update_table()
-        fused_policy_sample_update_(
-            self.policy_probs,
-            self.policy_probs_sample,
-            self._sample_update_rows,
-            self._sample_update_counts,
-            self._t_scalars.t_tensor,
-        )
-        fused_policy_sample_update_(
-            self.beliefs.view(self.total_nodes, -1),
-            self.beliefs_sample.view(self.total_nodes, -1),
-            self._sample_update_rows,
-            self._sample_update_counts,
-            self._t_scalars.t_tensor,
-            block_h=1024,
-        )
+        self._sample_compact_leaves_for_current_t()
 
         if self.cfr_type == CFRType.linear:
             # Linear CFR not supported by the fused kernel; use parent path.
@@ -1473,6 +1644,37 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if not self.use_final_policy_values:
             self.update_average_values(t)
 
+    def sample_leaves(self, training_mode: bool) -> PublicBeliefState:
+        if (
+            not self._sample_leaf_enabled
+            or self._sample_leaf_indices_padded is None
+            or self._sample_leaf_beliefs_padded is None
+            or self._sample_leaf_ready_padded is None
+            or self._sample_leaf_training_mode != training_mode
+        ):
+            return super().sample_leaves(training_mode)
+
+        N = self.root_nodes
+        sampled_nodes = self._sample_leaf_indices_padded[:N]
+        continue_mask = (
+            self._sample_leaf_ready_padded[:N]
+            & (sampled_nodes >= N)
+            & (~self.env.done[sampled_nodes])
+        )
+        root_indices = torch.where(continue_mask)[0]
+        sampled_continue = sampled_nodes[root_indices]
+        pbs = PublicBeliefState.from_proto(
+            env_proto=self.env,
+            beliefs=self._sample_leaf_beliefs_padded[root_indices],
+            num_envs=sampled_continue.numel(),
+        )
+        pbs.env.copy_state_from(
+            self.env,
+            sampled_continue,
+            torch.arange(sampled_continue.numel(), device=self.device),
+        )
+        return pbs
+
     def prepare_replay(self, t: int) -> None:
         """Host-side prep for a CUDA-graph replay at iteration ``t``.
 
@@ -1528,7 +1730,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.values_avg[:] = self.latest_values
 
         self.t_sample = self._get_sampling_schedule()
-        self._prepare_sample_update_table()
+        self._prepare_compact_leaf_sampling(training_mode)
 
         start = self.warm_start_iterations
         end = self.cfr_iterations

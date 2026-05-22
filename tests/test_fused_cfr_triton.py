@@ -912,7 +912,7 @@ def test_fused_sparse_evaluate_cfr_captures_pre_and_post_dcfr_delay(
     ev.warm_start_iterations = 1
     ev.dcfr_delay = 5
 
-    ev.evaluate_cfr(training_mode=False)
+    pbs = ev.evaluate_cfr(training_mode=False)
     torch.cuda.synchronize()
 
     assert [regime for _, _, regime in captures] == [
@@ -923,6 +923,17 @@ def test_fused_sparse_evaluate_cfr_captures_pre_and_post_dcfr_delay(
     assert captures[0][1] <= ev.dcfr_delay
     assert captures[1][0] > ev.dcfr_delay
     assert captures[1][1] > ev.dcfr_delay
+    sampled_nodes = ev._sample_leaf_indices_padded[: ev.root_nodes]
+    continue_mask = (
+        ev._sample_leaf_ready_padded[: ev.root_nodes]
+        & (sampled_nodes >= ev.root_nodes)
+        & (~ev.env.done[sampled_nodes])
+    )
+    root_indices = torch.where(continue_mask)[0]
+    torch.testing.assert_close(
+        pbs.beliefs,
+        ev._sample_leaf_beliefs_padded[root_indices],
+    )
 
 # ---------------------------------------------------------------------------
 # Kernel 12-14 correctness tests: reach weights and deep beliefs.
