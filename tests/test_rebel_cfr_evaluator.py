@@ -990,10 +990,16 @@ def test_sample_leaf_uses_acting_players_sampled_hand() -> None:
     evaluator.policy_probs_sample[root_child, p0_hand] = 1.0
     evaluator.policy_probs_sample[expected_node, p1_hand] = 1.0
     evaluator.policy_probs_sample[wrong_node, p0_hand] = 1.0
+    expected_beliefs = torch.zeros_like(evaluator.beliefs[expected_node])
+    expected_beliefs[0, 23] = 1.0
+    expected_beliefs[1, 29] = 1.0
+    evaluator.beliefs_sample.zero_()
+    evaluator.beliefs_sample[expected_node] = expected_beliefs
 
     pbs = evaluator.sample_leaves(training_mode=False)
 
     assert pbs.env.N == 1
+    torch.testing.assert_close(pbs.beliefs[0], expected_beliefs)
     torch.testing.assert_close(
         pbs.env.pot, evaluator.env.pot[expected_node : expected_node + 1]
     )
@@ -1005,6 +1011,42 @@ def test_sample_leaf_uses_acting_players_sampled_hand() -> None:
         pbs.env.committed,
         evaluator.env.committed[wrong_node : wrong_node + 1],
     )
+
+
+def test_cfr_iteration_samples_beliefs_with_policy() -> None:
+    device = torch.device("cpu")
+    env = make_env(1, device)
+    model = MockModel(
+        num_actions=len(env.default_bet_bins) + 3,
+        device=device,
+        dtype=torch.float32,
+    )
+    evaluator = RebelCFREvaluator(
+        search_batch_size=1,
+        env_proto=env,
+        model=model,  # type: ignore[arg-type]
+        bet_bins=env.default_bet_bins,
+        max_depth=1,
+        cfr_iterations=2,
+        device=device,
+        float_dtype=torch.float32,
+        warm_start_iterations=0,
+    )
+    evaluator.initialize_subgame(env, torch.arange(1, device=device))
+    evaluator.initialize_policy_and_beliefs()
+
+    expected_policy = evaluator.policy_probs.clone()
+    expected_beliefs = evaluator.beliefs.clone()
+    evaluator.policy_probs_sample.zero_()
+    evaluator.beliefs_sample.zero_()
+    evaluator.t_sample = torch.zeros(
+        evaluator.total_nodes, dtype=torch.long, device=device
+    )
+
+    evaluator.cfr_iteration(0)
+
+    torch.testing.assert_close(evaluator.policy_probs_sample, expected_policy)
+    torch.testing.assert_close(evaluator.beliefs_sample, expected_beliefs)
 
 
 def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2789,6 +2831,37 @@ def test_get_mixing_weights() -> None:
     assert new == 1
 
 
+def test_average_policy_weight_tensor() -> None:
+    evaluator, env = make_evaluator(batch_size=1, max_depth=0)
+    iterations = torch.tensor([2, 5, 10], device=env.device)
+
+    evaluator.cfr_type = CFRType.standard
+    torch.testing.assert_close(
+        evaluator._get_average_policy_weight_tensor(iterations),
+        torch.ones(3, device=env.device),
+    )
+
+    evaluator.cfr_type = CFRType.linear
+    torch.testing.assert_close(
+        evaluator._get_average_policy_weight_tensor(iterations),
+        torch.full((3,), 2.0, device=env.device),
+    )
+
+    evaluator.cfr_type = CFRType.discounted
+    evaluator.dcfr_gamma = 2.0
+    torch.testing.assert_close(
+        evaluator._get_average_policy_weight_tensor(iterations),
+        torch.tensor([9.0, 36.0, 121.0], device=env.device),
+    )
+
+    evaluator.cfr_type = CFRType.discounted_plus
+    evaluator.dcfr_delay = 3
+    torch.testing.assert_close(
+        evaluator._get_average_policy_weight_tensor(iterations),
+        torch.tensor([1.0, 2.0, 2.0], device=env.device),
+    )
+
+
 def test_get_sampling_schedule() -> None:
     """Test _get_sampling_schedule generates correct sampling schedule."""
     evaluator, env = make_evaluator(batch_size=4, max_depth=1)
@@ -2808,6 +2881,16 @@ def test_get_sampling_schedule() -> None:
     # Test with discounted_plus CFR
     evaluator.cfr_type = CFRType.discounted_plus
     evaluator.dcfr_delay = 10
+    schedule = evaluator._get_sampling_schedule()
+    assert schedule.min() >= max(
+        evaluator.warm_start_iterations + 1, evaluator.dcfr_delay + 1
+    )
+
+    # Discounted CFR skips the same pre-delay iterations that average-policy
+    # accumulation skips, and uses gamma-weighted sampling thereafter.
+    evaluator.cfr_type = CFRType.discounted
+    evaluator.dcfr_delay = 8
+    evaluator.dcfr_gamma = 2.0
     schedule = evaluator._get_sampling_schedule()
     assert schedule.min() >= max(
         evaluator.warm_start_iterations + 1, evaluator.dcfr_delay + 1

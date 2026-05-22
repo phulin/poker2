@@ -321,6 +321,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._exploitability_cache_key = None
         if not hasattr(self, "_exploitability_cache"):
             self._exploitability_cache = None
+        if not hasattr(self, "beliefs_sample"):
+            self.beliefs_sample = torch.zeros_like(self.beliefs)
 
     def initialize_subgame(self, *args, **kwargs) -> None:
         super().initialize_subgame(*args, **kwargs)
@@ -1394,6 +1396,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._sample_update_rows,
             self._sample_update_counts,
             self._t_scalars.t_tensor,
+        )
+        fused_policy_sample_update_(
+            self.beliefs.view(self.total_nodes, -1),
+            self.beliefs_sample.view(self.total_nodes, -1),
+            self._sample_update_rows,
+            self._sample_update_counts,
+            self._t_scalars.t_tensor,
+            block_h=1024,
         )
 
         if self.cfr_type == CFRType.linear:

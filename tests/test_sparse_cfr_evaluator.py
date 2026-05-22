@@ -552,10 +552,16 @@ def test_sparse_sample_leaf_uses_acting_players_sampled_hand() -> None:
     evaluator.policy_probs_sample[root_child, p0_hand] = 1.0
     evaluator.policy_probs_sample[expected_node, p1_hand] = 1.0
     evaluator.policy_probs_sample[wrong_node, p0_hand] = 1.0
+    expected_beliefs = torch.zeros_like(evaluator.beliefs[expected_node])
+    expected_beliefs[0, 23] = 1.0
+    expected_beliefs[1, 29] = 1.0
+    evaluator.beliefs_sample.zero_()
+    evaluator.beliefs_sample[expected_node] = expected_beliefs
 
     pbs = evaluator.sample_leaves(training_mode=False)
 
     assert pbs.env.N == 1
+    assert_close(pbs.beliefs[0], expected_beliefs)
     assert_close(pbs.env.pot, evaluator.env.pot[expected_node : expected_node + 1])
     assert_close(
         pbs.env.committed,

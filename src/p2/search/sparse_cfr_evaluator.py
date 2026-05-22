@@ -109,6 +109,7 @@ class SparseCFREvaluator(CFREvaluator):
             0, self.num_players, NUM_HANDS, dtype=self.float_dtype, device=self.device
         )
         self.beliefs_avg = torch.empty_like(self.beliefs)
+        self.beliefs_sample = torch.empty_like(self.beliefs)
         self.root_pre_chance_beliefs = torch.empty(
             0, self.num_players, NUM_HANDS, dtype=self.float_dtype, device=self.device
         )
@@ -310,6 +311,7 @@ class SparseCFREvaluator(CFREvaluator):
             device=self.device,
         )
         self.beliefs_avg = torch.zeros_like(self.beliefs)
+        self.beliefs_sample = torch.zeros_like(self.beliefs)
         self.root_pre_chance_beliefs = torch.zeros(
             num_roots,
             self.num_players,
@@ -441,7 +443,7 @@ class SparseCFREvaluator(CFREvaluator):
         sampled_continue = sampled_nodes[sampled_nodes >= N]
         pbs = PublicBeliefState.from_proto(
             env_proto=self.env,
-            beliefs=self.beliefs[sampled_continue],
+            beliefs=self.beliefs_sample[sampled_continue],
             num_envs=sampled_continue.numel(),
         )
         pbs.env.copy_state_from(

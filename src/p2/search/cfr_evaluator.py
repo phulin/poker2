@@ -168,6 +168,7 @@ class CFREvaluator(ABC):
     average_policy_denominator: torch.Tensor
     average_policy_initialized: bool
     policy_probs_sample: torch.Tensor
+    beliefs_sample: torch.Tensor
     uniform_policy: torch.Tensor
     cumulative_regrets: torch.Tensor
     latest_values: torch.Tensor
@@ -716,6 +717,25 @@ class CFREvaluator(ABC):
         _, new = self._get_mixing_weights(t)
         return float(new)
 
+    def _get_average_policy_weight_tensor(
+        self, iterations: torch.Tensor
+    ) -> torch.Tensor:
+        """Return current-iteration average-policy weights for many iterations."""
+        t = iterations.to(device=self.device, dtype=torch.float32)
+        if self.cfr_type == CFRType.standard:
+            return torch.ones_like(t)
+        if self.cfr_type == CFRType.linear:
+            return torch.full_like(t, 2.0)
+        if self.cfr_type == CFRType.discounted:
+            return (t + 1.0).pow(float(self.dcfr_gamma))
+        if self.cfr_type == CFRType.discounted_plus:
+            return torch.where(
+                t > float(self.dcfr_delay),
+                torch.full_like(t, 2.0),
+                torch.ones_like(t),
+            )
+        raise ValueError(f"Unsupported CFR type: {self.cfr_type}")
+
     def _reset_average_policy_accumulators(self) -> None:
         """Clear true CFR average-strategy accumulators for a fresh subgame."""
         if (
@@ -821,20 +841,16 @@ class CFREvaluator(ABC):
 
     def _get_sampling_schedule(self) -> torch.Tensor:
         N = self.root_nodes
-        if self.cfr_type == CFRType.discounted_plus:
+        if self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]:
             sample_low = max(self.warm_start_iterations, self.dcfr_delay) + 1
         else:
             sample_low = self.warm_start_iterations + 1
         sample_low = min(sample_low, self.cfr_iterations)
         sample_high = max(self.cfr_iterations, sample_low + 1)
-        distribution = (
-            torch.arange(
-                sample_low, sample_high, dtype=torch.float32, device=self.device
-            )
-            + 1
-            if self.cfr_type != CFRType.standard
-            else torch.ones(sample_high - sample_low, device=self.device)
+        iterations = torch.arange(
+            sample_low, sample_high, dtype=torch.long, device=self.device
         )
+        distribution = self._get_average_policy_weight_tensor(iterations)
         distribution /= distribution.sum()
         t_sample = torch.multinomial(
             distribution, N, replacement=True, generator=self.generator
@@ -1330,6 +1346,7 @@ class CFREvaluator(ABC):
             self.policy_probs_avg[:] = self.policy_probs
             self.self_reach_avg[:] = self.self_reach
             self.beliefs_avg[:] = self.beliefs
+            self.beliefs_sample[:] = self.beliefs
             self._reset_average_policy_accumulators()
             return
 
@@ -1371,6 +1388,7 @@ class CFREvaluator(ABC):
         self.policy_probs_avg[:] = self.policy_probs
         self.self_reach_avg[:] = self.self_reach
         self.beliefs_avg[:] = self.beliefs
+        self.beliefs_sample[:] = self.beliefs
         self._reset_average_policy_accumulators()
 
     def warm_start(self) -> None:
@@ -1816,11 +1834,18 @@ class CFREvaluator(ABC):
         # Apply schedules at the beginning of each iteration
         self.apply_schedules(t)
 
+        sample_mask = self.t_sample == t
         torch.where(
-            (self.t_sample == t)[:, None],
+            sample_mask[:, None],
             self.policy_probs,
             self.policy_probs_sample,
             out=self.policy_probs_sample,
+        )
+        torch.where(
+            sample_mask[:, None, None],
+            self.beliefs,
+            self.beliefs_sample,
+            out=self.beliefs_sample,
         )
 
         # Compute regrets

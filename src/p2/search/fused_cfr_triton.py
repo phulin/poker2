@@ -3706,6 +3706,7 @@ class _EvaluatorStateSnapshot:
             "average_policy_numerator",
             "average_policy_denominator",
             "policy_probs_sample",
+            "beliefs_sample",
             "cumulative_regrets",
             "self_reach",
             "self_reach_avg",

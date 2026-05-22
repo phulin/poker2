@@ -58,6 +58,7 @@ class RebelCFREvaluator(CFREvaluator):
     average_policy_denominator: torch.Tensor
     average_policy_initialized: bool
     policy_probs_sample: torch.Tensor
+    beliefs_sample: torch.Tensor
     self_reach: torch.Tensor
     self_reach_avg: torch.Tensor
     cumulative_regrets: torch.Tensor
@@ -219,6 +220,7 @@ class RebelCFREvaluator(CFREvaluator):
             dtype=self.float_dtype,
         )
         self.beliefs_avg = torch.zeros_like(self.beliefs)
+        self.beliefs_sample = torch.zeros_like(self.beliefs)
         self.self_reach = torch.zeros_like(self.beliefs)
         self.self_reach_avg = torch.zeros_like(self.beliefs)
         self.root_pre_chance_beliefs = torch.zeros(
@@ -326,6 +328,7 @@ class RebelCFREvaluator(CFREvaluator):
         self.values_avg.zero_()
         self.beliefs.zero_()
         self.beliefs_avg.zero_()
+        self.beliefs_sample.zero_()
         self.self_reach.zero_()
         self.self_reach_avg.zero_()
         self.hand_rank_data = None
@@ -564,7 +567,7 @@ class RebelCFREvaluator(CFREvaluator):
         sampled_continue = sampled_nodes[sampled_nodes >= N]
         pbs = PublicBeliefState.from_proto(
             env_proto=self.env,
-            beliefs=self.beliefs[sampled_continue],
+            beliefs=self.beliefs_sample[sampled_continue],
             num_envs=sampled_continue.numel(),
         )
         pbs.env.copy_state_from(
