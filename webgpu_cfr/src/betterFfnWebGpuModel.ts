@@ -114,6 +114,8 @@ export class BetterFfnWebGpuModel {
   private readonly suitPairOneHotT?: GPUBuffer;
   private readonly rankPairLowT?: GPUBuffer;
   private readonly suitPairLowT?: GPUBuffer;
+  private readonly rankPairLowByHandT?: GPUBuffer;
+  private readonly suitPairLowByHandT?: GPUBuffer;
   private readonly matVecPipeline: GPUComputePipeline;
   private readonly matVecBatchPipeline: GPUComputePipeline;
   private readonly matVecBatchExactBeliefLinearInPipeline:
@@ -227,6 +229,14 @@ export class BetterFfnWebGpuModel {
       this.suitPairLowT = makeStorageBuffer(
         device,
         this.transposeTensor("suit_pair_low_embedding.weight"),
+      );
+      this.rankPairLowByHandT = makeStorageBuffer(
+        device,
+        this.buildPairLowByHandT("rank_pair_low_embedding.weight", 13),
+      );
+      this.suitPairLowByHandT = makeStorageBuffer(
+        device,
+        this.buildPairLowByHandT("suit_pair_low_embedding.weight", 4),
       );
     }
     this.matVecPipeline = this.pipeline(MAT_VEC_WGSL, "better-ffn-mat-vec");
@@ -1191,6 +1201,8 @@ export class BetterFfnWebGpuModel {
     this.suitPairOneHotT?.destroy();
     this.rankPairLowT?.destroy();
     this.suitPairLowT?.destroy();
+    this.rankPairLowByHandT?.destroy();
+    this.suitPairLowByHandT?.destroy();
     for (const pool of [this.storagePool, this.uniformPool]) {
       for (const buffers of pool.values()) {
         for (const buffer of buffers) {
@@ -1357,7 +1369,9 @@ export class BetterFfnWebGpuModel {
       !this.rankPairOneHotT ||
       !this.suitPairOneHotT ||
       !this.rankPairLowT ||
-      !this.suitPairLowT
+      !this.suitPairLowT ||
+      !this.rankPairLowByHandT ||
+      !this.suitPairLowByHandT
     ) {
       throw new Error("board interaction buffers are not initialized");
     }
@@ -1365,28 +1379,7 @@ export class BetterFfnWebGpuModel {
     const rankMass = empty(batch * numPlayers * 91);
     const suitMass = empty(batch * numPlayers * 10);
     for (let player = 0; player < numPlayers; player += 1) {
-      if (exactBelief?.player === player) {
-        this.fillExactPairMass(
-          this.rankPairOneHotT,
-          rankMass,
-          91,
-          batch,
-          numPlayers,
-          player,
-          exactBelief.hand,
-          uniform,
-        );
-        this.fillExactPairMass(
-          this.suitPairOneHotT,
-          suitMass,
-          10,
-          batch,
-          numPlayers,
-          player,
-          exactBelief.hand,
-          uniform,
-        );
-      } else {
+      if (exactBelief?.player !== player) {
         this.matVecBatch(
           this.rankPairOneHotT,
           beliefBuffer,
@@ -1423,36 +1416,59 @@ export class BetterFfnWebGpuModel {
     const rankPairLow = empty(batch * numPlayers * interactionDim);
     const suitPairLow = empty(batch * numPlayers * interactionDim);
     for (let player = 0; player < numPlayers; player += 1) {
-      this.matVecBatch(
-        this.rankPairLowT,
-        rankMass,
-        this.dummyBias,
-        rankPairLow,
-        interactionDim,
-        91,
-        batch,
-        numPlayers * 91,
-        numPlayers * interactionDim,
-        player * 91,
-        player * interactionDim,
-        false,
-        uniform,
-      );
-      this.matVecBatch(
-        this.suitPairLowT,
-        suitMass,
-        this.dummyBias,
-        suitPairLow,
-        interactionDim,
-        10,
-        batch,
-        numPlayers * 10,
-        numPlayers * interactionDim,
-        player * 10,
-        player * interactionDim,
-        false,
-        uniform,
-      );
+      if (exactBelief?.player === player) {
+        this.fillExactPairMass(
+          this.rankPairLowByHandT,
+          rankPairLow,
+          interactionDim,
+          batch,
+          numPlayers,
+          player,
+          exactBelief.hand,
+          uniform,
+        );
+        this.fillExactPairMass(
+          this.suitPairLowByHandT,
+          suitPairLow,
+          interactionDim,
+          batch,
+          numPlayers,
+          player,
+          exactBelief.hand,
+          uniform,
+        );
+      } else {
+        this.matVecBatch(
+          this.rankPairLowT,
+          rankMass,
+          this.dummyBias,
+          rankPairLow,
+          interactionDim,
+          91,
+          batch,
+          numPlayers * 91,
+          numPlayers * interactionDim,
+          player * 91,
+          player * interactionDim,
+          false,
+          uniform,
+        );
+        this.matVecBatch(
+          this.suitPairLowT,
+          suitMass,
+          this.dummyBias,
+          suitPairLow,
+          interactionDim,
+          10,
+          batch,
+          numPlayers * 10,
+          numPlayers * interactionDim,
+          player * 10,
+          player * interactionDim,
+          false,
+          uniform,
+        );
+      }
     }
 
     let rankCounts = precomputed?.rankCounts;
@@ -1635,6 +1651,29 @@ export class BetterFfnWebGpuModel {
       const second = numItems === 13 ? c1 % 13 : Math.floor(c1 / 13);
       const pair = this.unorderedPairIndex(first, second, numItems);
       out[pair * NUM_HANDS + hand] = 1;
+    }
+    return out;
+  }
+
+  private buildPairLowByHandT(
+    name: string,
+    numItems: number,
+  ): Float32Array<ArrayBuffer> {
+    const tensor = this.tensor(name);
+    if (tensor.shape.length !== 2) {
+      throw new Error(`model tensor ${name} is not rank-2`);
+    }
+    const [, dim] = tensor.shape as [number, number];
+    const combos = handCombos();
+    const out = new Float32Array(dim * NUM_HANDS);
+    for (let hand = 0; hand < combos.length; hand += 1) {
+      const [c0, c1] = combos[hand]!;
+      const first = numItems === 13 ? c0 % 13 : Math.floor(c0 / 13);
+      const second = numItems === 13 ? c1 % 13 : Math.floor(c1 / 13);
+      const pair = this.unorderedPairIndex(first, second, numItems);
+      for (let d = 0; d < dim; d += 1) {
+        out[d * NUM_HANDS + hand] = tensor.data[pair * dim + d]!;
+      }
     }
     return out;
   }
