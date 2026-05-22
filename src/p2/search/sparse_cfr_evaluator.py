@@ -388,15 +388,9 @@ class SparseCFREvaluator(CFREvaluator):
         # If a node has no legal actions after filtering done nodes, it's a leaf.
         effective_leaf_mask = self.leaf_mask | (sampling_counts.squeeze(1) == 0)
 
-        # select a hand for every root node.
-        actor_beliefs = (
-            self.beliefs[:N]
-            .gather(1, self.env.to_act[:N, None, None].expand(-1, -1, NUM_HANDS))
-            .squeeze(1)
-        )
-        selected_hands = torch.multinomial(
-            actor_beliefs, 1, generator=self.generator
-        ).squeeze(1)
+        # Select a private hand for each player at every root. The sampled path
+        # uses the acting player's hand at each node.
+        selected_hands_by_player = self._sample_root_hands_by_player()
 
         # start with root nodes and descend to leaves
         sampled_nodes = torch.arange(N, device=self.device)
@@ -416,8 +410,11 @@ class SparseCFREvaluator(CFREvaluator):
             )
             sample_uniformly &= to_act == player_mask
 
+            selected_hands = selected_hands_by_player[active_mask].gather(
+                1, to_act[:, None]
+            )
             policy_probs_active = policy_probs_by_src[
-                active_nodes, :, selected_hands[active_mask]
+                active_nodes, :, selected_hands.squeeze(1)
             ]
             actions = torch.multinomial(
                 torch.where(

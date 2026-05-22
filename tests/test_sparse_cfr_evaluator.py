@@ -512,6 +512,61 @@ def test_leaf_mask() -> None:
     assert evaluator.leaf_mask.shape == (evaluator.total_nodes,)
 
 
+def test_sparse_sample_leaf_uses_acting_players_sampled_hand() -> None:
+    device = torch.device("cpu")
+    env = make_env(1, device)
+    cfg = make_config(env.default_bet_bins)
+    cfg.search.depth = 2
+    model = MockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        device=device,
+        dtype=torch.float32,
+    )
+    evaluator = SparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+    evaluator.initialize_subgame(env, torch.arange(1, device=device))
+    evaluator.initialize_policy_and_beliefs()
+
+    p0_hand = 3
+    p1_hand = 17
+    evaluator.beliefs.zero_()
+    evaluator.beliefs[:, 0, p0_hand] = 1.0
+    evaluator.beliefs[:, 1, p1_hand] = 1.0
+
+    root_action = 1
+    expected_action = 1
+    wrong_action = 2
+    root_child = evaluator.child_offsets[0] + 1
+    expected_node = evaluator.child_offsets[root_child]
+    wrong_node = evaluator.child_offsets[root_child] + 1
+    assert evaluator.action_from_parent[root_child] == root_action
+    assert evaluator.action_from_parent[expected_node] == expected_action
+    assert evaluator.action_from_parent[wrong_node] == wrong_action
+    assert evaluator.env.to_act[0] == 0
+    assert evaluator.env.to_act[root_child] == 1
+
+    evaluator.policy_probs_sample.zero_()
+    evaluator.policy_probs_sample[root_child, p0_hand] = 1.0
+    evaluator.policy_probs_sample[expected_node, p1_hand] = 1.0
+    evaluator.policy_probs_sample[wrong_node, p0_hand] = 1.0
+
+    pbs = evaluator.sample_leaves(training_mode=False)
+
+    assert pbs.env.N == 1
+    assert_close(pbs.env.pot, evaluator.env.pot[expected_node : expected_node + 1])
+    assert_close(
+        pbs.env.committed,
+        evaluator.env.committed[expected_node : expected_node + 1],
+    )
+    assert not torch.equal(
+        pbs.env.committed,
+        evaluator.env.committed[wrong_node : wrong_node + 1],
+    )
+
+
 def test_sparse_allin_call_leaf_does_not_create_descendants() -> None:
     device = get_device()
     env = make_env(1, device=device)

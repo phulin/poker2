@@ -228,6 +228,15 @@ class CFREvaluator(ABC):
         """
         raise NotImplementedError("Subclasses must implement sample_leaves.")
 
+    def _sample_root_hands_by_player(self) -> torch.Tensor:
+        """Sample one private hand per root and player from root beliefs."""
+        N = self.root_nodes
+        return torch.multinomial(
+            self.beliefs[:N].reshape(N * self.num_players, NUM_HANDS),
+            1,
+            generator=self.generator,
+        ).view(N, self.num_players)
+
     def _fan_out(self, data: torch.Tensor, level: int | None = None) -> torch.Tensor:
         """Fanout data to all children nodes."""
         raise NotImplementedError("Subclasses must implement _fan_out.")

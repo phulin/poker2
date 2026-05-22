@@ -938,6 +938,75 @@ def test_sample_leaf_handles_partial_masks() -> None:
         assert pbs.beliefs.shape == (pbs.env.N, evaluator.num_players, NUM_HANDS)
 
 
+def test_sample_leaf_uses_acting_players_sampled_hand() -> None:
+    device = torch.device("cpu")
+    env = make_env(1, device)
+    model = MockModel(
+        num_actions=len(env.default_bet_bins) + 3,
+        device=device,
+        dtype=torch.float32,
+    )
+    evaluator = RebelCFREvaluator(
+        search_batch_size=1,
+        env_proto=env,
+        model=model,  # type: ignore[arg-type]
+        bet_bins=env.default_bet_bins,
+        max_depth=2,
+        cfr_iterations=2,
+        device=device,
+        float_dtype=torch.float32,
+        warm_start_iterations=0,
+    )
+    evaluator.initialize_subgame(env, torch.arange(1, device=device))
+    evaluator.initialize_policy_and_beliefs()
+
+    p0_hand = 3
+    p1_hand = 17
+    evaluator.beliefs.zero_()
+    evaluator.beliefs[:, 0, p0_hand] = 1.0
+    evaluator.beliefs[:, 1, p1_hand] = 1.0
+
+    root_action = 1
+    expected_action = 1
+    wrong_action = 2
+    root_child = evaluator.depth_offsets[1] + root_action
+    expected_node = (
+        evaluator.depth_offsets[2]
+        + (root_child - evaluator.depth_offsets[1]) * evaluator.num_actions
+        + expected_action
+    )
+    wrong_node = (
+        evaluator.depth_offsets[2]
+        + (root_child - evaluator.depth_offsets[1]) * evaluator.num_actions
+        + wrong_action
+    )
+    assert evaluator.env.to_act[0] == 0
+    assert evaluator.env.to_act[root_child] == 1
+    assert evaluator.child_mask[0, root_action]
+    assert evaluator.child_mask[root_child, expected_action]
+    assert evaluator.child_mask[root_child, wrong_action]
+
+    evaluator.policy_probs_sample.zero_()
+    evaluator.policy_probs_sample[root_child, p0_hand] = 1.0
+    evaluator.policy_probs_sample[expected_node, p1_hand] = 1.0
+    evaluator.policy_probs_sample[wrong_node, p0_hand] = 1.0
+
+    pbs = evaluator.sample_leaves(training_mode=False)
+
+    assert pbs.env.N == 1
+    torch.testing.assert_close(
+        pbs.env.pot, evaluator.env.pot[expected_node : expected_node + 1]
+    )
+    torch.testing.assert_close(
+        pbs.env.committed,
+        evaluator.env.committed[expected_node : expected_node + 1],
+    )
+    assert not torch.equal(
+        pbs.env.committed,
+        evaluator.env.committed[wrong_node : wrong_node + 1],
+    )
+
+
 def test_update_policy_uses_positive_regrets(monkeypatch: pytest.MonkeyPatch) -> None:
     evaluator, env = make_evaluator(batch_size=1, max_depth=2, device=get_device())
     roots = torch.arange(evaluator.root_nodes, device=env.device)
