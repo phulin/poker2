@@ -437,11 +437,19 @@ class RebelCFRTrainer:
         policy_head_muon_lr = (
             float(self.cfg.train.policy_head_muon_learning_rate) * lr_scale
         )
+        adamw_lr_start = (
+            lr_start
+            if self.cfg.train.adamw_learning_rate is None
+            else float(self.cfg.train.adamw_learning_rate)
+        )
+        adamw_lr = adamw_lr_start * lr_scale
 
         # Update optimizer learning rate
         for param_group in self.optimizer.param_groups:
             if param_group.get("lr_role") == "policy_head_muon":
                 param_group["lr"] = policy_head_muon_lr
+            elif param_group.get("lr_role") == "adamw":
+                param_group["lr"] = adamw_lr
             else:
                 param_group["lr"] = lr_now
 
@@ -1152,6 +1160,13 @@ class RebelCFRTrainer:
         ]
         if policy_head_lrs:
             update_info["policy_head_muon_learning_rate"] = policy_head_lrs[0]
+        adamw_lrs = [
+            group["lr"]
+            for group in self.optimizer.param_groups
+            if group.get("lr_role") == "adamw"
+        ]
+        if adamw_lrs:
+            update_info["adamw_learning_rate"] = adamw_lrs[0]
         update_info["cfr_iterations"] = self.cfr_evaluator.cfr_iterations
 
         return update_info
@@ -1253,6 +1268,9 @@ class RebelCFRTrainer:
         # Only load optimizer if it exists in checkpoint
         if "optimizer" in ckpt:
             self.optimizer.load_state_dict(ckpt["optimizer"])
+            if isinstance(self.optimizer, torch.optim.AdamW):
+                for param_group in self.optimizer.param_groups:
+                    param_group["lr_role"] = "adamw"
 
         self.cfg.wandb_run_id = ckpt.get("wandb_run_id")
         # if "rng" in ckpt:

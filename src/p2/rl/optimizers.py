@@ -55,6 +55,10 @@ class SplitOptimizer:
             if name not in saved_optimizers:
                 raise ValueError(f"Missing optimizer state for {name!r}")
             optimizer.load_state_dict(saved_optimizers[name])
+            if name in {"adamw", "policy_head_muon"}:
+                lr_role = "adamw" if name == "adamw" else name
+                for param_group in optimizer.param_groups:
+                    param_group["lr_role"] = lr_role
 
 
 TrainOptimizer = torch.optim.Optimizer | SplitOptimizer
@@ -68,13 +72,17 @@ def _adamw(
     params: Iterable[nn.Parameter],
     train_cfg: TrainingConfig,
     device: torch.device,
+    lr: float | None = None,
 ) -> torch.optim.AdamW:
-    return torch.optim.AdamW(
+    optimizer = torch.optim.AdamW(
         params,
-        lr=train_cfg.learning_rate,
+        lr=train_cfg.learning_rate if lr is None else lr,
         weight_decay=train_cfg.weight_decay,
         fused=(device.type == "cuda"),
     )
+    for param_group in optimizer.param_groups:
+        param_group["lr_role"] = "adamw"
+    return optimizer
 
 
 def _is_policy_head_param(name: str) -> bool:
@@ -109,8 +117,15 @@ def build_optimizer(
     device: torch.device,
 ) -> TrainOptimizer:
     optimizer_name = _optimizer_name(train_cfg)
+    adamw_lr = (
+        train_cfg.learning_rate
+        if train_cfg.adamw_learning_rate is None
+        else float(train_cfg.adamw_learning_rate)
+    )
+    if adamw_lr <= 0.0:
+        raise ValueError("train.adamw_learning_rate must be positive when set")
     if optimizer_name == "adamw":
-        return _adamw(model.parameters(), train_cfg, device)
+        return _adamw(model.parameters(), train_cfg, device, lr=adamw_lr)
     if optimizer_name != "muon":
         raise ValueError(
             f"train.optimizer must be one of: adamw, muon; got {train_cfg.optimizer!r}"
@@ -155,7 +170,9 @@ def build_optimizer(
             param_group["lr_role"] = "policy_head_muon"
         optimizers.append(("policy_head_muon", policy_head_optimizer))
     if other_params:
-        optimizers.append(("adamw", _adamw(other_params, train_cfg, device)))
+        optimizers.append(
+            ("adamw", _adamw(other_params, train_cfg, device, lr=adamw_lr))
+        )
 
     if not optimizers:
         raise ValueError("No trainable parameters found for optimizer")

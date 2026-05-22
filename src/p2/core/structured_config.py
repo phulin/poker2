@@ -161,6 +161,7 @@ class TrainingConfig:
     muon_ns_steps: int = 5
     muon_adjust_lr_fn: str | None = None
     policy_head_muon_learning_rate: float = 0.05
+    adamw_learning_rate: float | None = None
 
     use_kv_cache: bool = False
 

@@ -124,6 +124,7 @@ python src/p2/cli/train_kbest.py --config-name=config_custom
 - `learning_rate`: Learning rate for optimizer
 - `warmup_steps`: Linear learning-rate warmup steps before the configured decay schedule; `0` disables warmup
 - `optimizer`: ReBeL trainer optimizer backend (`adamw`, or `muon` to use PyTorch Muon for 2D linear weights and AdamW for the remaining parameters)
+- `adamw_learning_rate`: Optional initial learning rate for all AdamW parameter groups; `null` uses `learning_rate`
 - `policy_head_muon_learning_rate`: Initial ReBeL `muon` mode learning rate for policy-head 2D linear weights; scaled by the main learning-rate schedule during training
 - `policy_depth_stratify_decimate`: Preserve policy replay depth mix during decimation using policy node depth
 - `policy_depth_stratify_sample`: Sample policy minibatches stratified by policy node depth
