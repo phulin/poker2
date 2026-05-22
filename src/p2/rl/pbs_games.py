@@ -96,6 +96,19 @@ def _showdown_rows_for_children(
     return rows, valid
 
 
+def _showdown_values_for_hero(ev, beliefs: torch.Tensor, hero: int) -> torch.Tensor:
+    """Return per-hand showdown values, respecting fused compact rank data."""
+    hand_rank_data = getattr(ev, "hand_rank_data", None)
+    sorted_indices = getattr(hand_rank_data, "sorted_indices", None)
+    if (
+        sorted_indices is not None
+        and sorted_indices.shape[0] != ev.showdown_indices.numel()
+        and hasattr(ev, "_showdown_value_both")
+    ):
+        return ev._showdown_value_both(beliefs)[:, hero]
+    return ev._showdown_value(beliefs, hero)
+
+
 def _showdown_range_payoffs(
     ev,
     children: torch.Tensor,
@@ -116,7 +129,7 @@ def _showdown_range_payoffs(
         device=ev.device,
     )
     showdown_beliefs[rows[valid]] = abs_beliefs[valid]
-    showdown_values = ev._showdown_value(showdown_beliefs, 0)
+    showdown_values = _showdown_values_for_hero(ev, showdown_beliefs, 0)
     raw_payoffs = (abs_beliefs[:, 0] * showdown_values[rows]).sum(dim=1)
     return torch.where(valid, raw_payoffs, payoffs)
 

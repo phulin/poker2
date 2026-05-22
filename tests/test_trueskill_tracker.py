@@ -222,6 +222,33 @@ class _FakeShowdownEvaluator:
         return row_scale[:, None] * hand_scale[None, :] + 0.01 * opp_mass[:, None]
 
 
+class _FakeCompactShowdownEvaluator(_FakeShowdownEvaluator):
+    def __init__(self, showdown_indices: list[int], scale: float) -> None:
+        super().__init__(showdown_indices, scale)
+        self.hand_rank_data = SimpleNamespace(
+            sorted_indices=torch.empty(1, NUM_HANDS, dtype=torch.long)
+        )
+        self.used_showdown_value_both = False
+
+    def _showdown_value(self, beliefs: torch.Tensor, hero: int) -> torch.Tensor:
+        raise AssertionError("compact showdown data must use _showdown_value_both")
+
+    def _showdown_value_both(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.used_showdown_value_both = True
+        row_scale = (
+            torch.arange(
+                beliefs.shape[0],
+                dtype=torch.float32,
+                device=beliefs.device,
+            )
+            + 1.0
+        ) * self.scale
+        hand_scale = torch.linspace(-0.5, 0.5, NUM_HANDS, device=beliefs.device)
+        opp_mass = beliefs[:, 1].sum(dim=1)
+        hero_values = row_scale[:, None] * hand_scale[None, :] + 0.01 * opp_mass[:, None]
+        return torch.stack((hero_values, -hero_values), dim=1)
+
+
 def _abs_belief(child_belief: torch.Tensor, last_actor: int) -> torch.Tensor:
     belief = torch.empty_like(child_belief)
     belief[1 - last_actor] = child_belief[0]
@@ -283,4 +310,61 @@ def test_two_prior_river_payoffs_batches_scalar_showdown_reference() -> None:
         ]
     )
 
+    assert_close(batched, expected)
+
+
+def _compact_fake_showdown_payoff(
+    ev: _FakeCompactShowdownEvaluator,
+    child: torch.Tensor,
+    abs_belief: torch.Tensor,
+) -> torch.Tensor:
+    row = (ev.showdown_indices == child).nonzero(as_tuple=True)[0][0]
+    hand_scale = torch.linspace(-0.5, 0.5, NUM_HANDS, device=abs_belief.device)
+    row_scale = (row.to(torch.float32) + 1.0) * ev.scale
+    hero_values = row_scale * hand_scale + 0.01 * abs_belief[1].sum()
+    return (abs_belief[0] * hero_values).sum()
+
+
+def test_two_prior_river_payoffs_uses_fused_compact_showdown_path() -> None:
+    ev_a = _FakeCompactShowdownEvaluator([2, 4, 7], scale=1.0)
+    ev_b = _FakeCompactShowdownEvaluator([3, 5, 8], scale=1.7)
+    a_children = torch.tensor([2, 7, 4], dtype=torch.long)
+    b_children = torch.tensor([8, 3, 5], dtype=torch.long)
+    last_actor = torch.tensor([0, 1, 0], dtype=torch.long)
+
+    raw = torch.arange(3 * 2 * NUM_HANDS, dtype=torch.float32).reshape(3, 2, NUM_HANDS)
+    bel_a_post = (raw.remainder(23) + 1.0) / 1000.0
+    bel_b_post = (raw.flip(0).remainder(29) + 1.0) / 1100.0
+
+    batched = _two_prior_river_payoffs(
+        ev_a,
+        ev_b,
+        a_children,
+        b_children,
+        bel_a_post,
+        bel_b_post,
+        last_actor,
+    )
+
+    expected = torch.stack(
+        [
+            0.5
+            * (
+                _compact_fake_showdown_payoff(
+                    ev_a,
+                    a_children[i],
+                    _abs_belief(bel_a_post[i], int(last_actor[i])),
+                )
+                + _compact_fake_showdown_payoff(
+                    ev_b,
+                    b_children[i],
+                    _abs_belief(bel_b_post[i], int(last_actor[i])),
+                )
+            )
+            for i in range(a_children.numel())
+        ]
+    )
+
+    assert ev_a.used_showdown_value_both
+    assert ev_b.used_showdown_value_both
     assert_close(batched, expected)
