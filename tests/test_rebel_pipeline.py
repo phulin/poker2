@@ -288,6 +288,7 @@ def test_cfr_policy_argmax_metrics_split_correct_and_wrong_top1():
         features=features,
         policy_targets=targets,
         legal_masks=legal_masks,
+        statistics={"policy_node_reach": torch.tensor([9.0, 1.0])},
     )
     logits = torch.zeros(batch_size, NUM_HANDS, num_actions)
     logits[0, :, 0] = 2.0
@@ -298,10 +299,65 @@ def test_cfr_policy_argmax_metrics_split_correct_and_wrong_top1():
     metrics = metrics_fn(output, batch, kl_all)
 
     assert metrics["weighted_argmax_accuracy"] == pytest.approx(0.5)
+    assert metrics["train_weighted_argmax_accuracy"] == pytest.approx(0.5)
+    assert metrics["node_argmax_accuracy"] == pytest.approx(0.5)
+    assert metrics["reach_weighted_argmax_accuracy"] == pytest.approx(0.9)
     assert metrics["mass_correct_top1"] == pytest.approx(0.5)
     assert metrics["mass_wrong_top1"] == pytest.approx(0.5)
+    assert metrics["train_weight_frac_correct_top1"] == pytest.approx(0.5)
+    assert metrics["train_weight_frac_wrong_top1"] == pytest.approx(0.5)
+    assert metrics["node_frac_correct_top1"] == pytest.approx(0.5)
+    assert metrics["node_frac_wrong_top1"] == pytest.approx(0.5)
+    assert metrics["reach_mass_correct_top1"] == pytest.approx(0.9)
+    assert metrics["reach_mass_wrong_top1"] == pytest.approx(0.1)
     assert metrics["kl_correct_top1"] == pytest.approx(0.25)
     assert metrics["kl_wrong_top1"] == pytest.approx(1.25)
+    assert metrics["reach_kl_correct_top1"] == pytest.approx(0.25)
+    assert metrics["reach_kl_wrong_top1"] == pytest.approx(1.25)
+
+
+def test_cfr_policy_argmax_metrics_use_plurality_node_top1():
+    trainer = RebelCFRTrainer.__new__(RebelCFRTrainer)
+    trainer.loss_fn = RebelSupervisedLoss()
+
+    batch_size, num_actions = 1, 3
+    beliefs = torch.zeros(batch_size, 2, NUM_HANDS)
+    # Actor hand weights are 0.45, 0.35, 0.20. Opponent is uniform, so
+    # matchup blocking applies the same multiplier to each actor combo.
+    beliefs[:, 0, 0] = 0.45
+    beliefs[:, 0, 1] = 0.35
+    beliefs[:, 0, 2] = 0.20
+    beliefs[:, 1, :] = 1.0 / NUM_HANDS
+    features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    targets = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    targets[:, 0, 0] = 1.0
+    targets[:, 1, 1] = 1.0
+    targets[:, 2, 2] = 1.0
+    targets[:, 3:, 0] = 1.0
+    logits = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    logits[:, 0, 0] = 2.0
+    logits[:, 1, 2] = 2.0
+    logits[:, 2, 1] = 2.0
+    logits[:, 3:, 0] = 2.0
+    batch = RebelBatch(
+        features=features,
+        policy_targets=targets,
+        legal_masks=torch.ones(batch_size, num_actions, dtype=torch.bool),
+    )
+    output = ModelOutput(policy_logits=logits, value=None, hand_values=None)
+
+    metrics = trainer._policy_argmax_metrics(output, batch, torch.tensor([1.0]))
+
+    assert metrics["weighted_argmax_accuracy"] == pytest.approx(0.45)
+    assert metrics["node_argmax_accuracy"] == pytest.approx(0.45)
+    assert metrics["node_frac_correct_top1"] == pytest.approx(1.0)
+    assert "node_frac_wrong_top1" not in metrics
 
 
 def test_rebel_cfr_trainer_single_step_cpu():

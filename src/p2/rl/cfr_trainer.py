@@ -536,6 +536,25 @@ class RebelCFRTrainer:
         node_correct_mass = (
             (model_top == target_top).to(dtype=hand_weights.dtype) * hand_weights
         ).sum(dim=-1)
+        action_bins = torch.arange(
+            batch.policy_targets.shape[-1],
+            device=kl_all.device,
+        )
+        hand_weights_expanded = hand_weights[:, :, None]
+        model_top_action_mass = (
+            (model_top[:, :, None] == action_bins[None, None, :]).to(
+                dtype=hand_weights.dtype
+            )
+            * hand_weights_expanded
+        ).sum(dim=1)
+        target_top_action_mass = (
+            (target_top[:, :, None] == action_bins[None, None, :]).to(
+                dtype=hand_weights.dtype
+            )
+            * hand_weights_expanded
+        ).sum(dim=1)
+        node_model_top = model_top_action_mass.argmax(dim=-1)
+        node_target_top = target_top_action_mass.argmax(dim=-1)
 
         node_weights = self.loss_fn._policy_node_weights(batch, kl_all.dtype)
         if node_weights is None:
@@ -547,7 +566,7 @@ class RebelCFRTrainer:
             node_correct_mass.to(dtype=kl_all.dtype) * reduce_weights
         ).sum() / denom
 
-        correct_mask = node_correct_mass >= 0.5
+        correct_mask = node_model_top == node_target_top
         wrong_mask = ~correct_mask
         names = ["correct_top1", "wrong_top1"]
         mask_float = torch.stack(
@@ -556,34 +575,84 @@ class RebelCFRTrainer:
                 wrong_mask.to(dtype=kl_all.dtype),
             ]
         )
-        group_weights = mask_float * reduce_weights[None, :]
-        group_denoms = group_weights.sum(dim=1)
-        nan = torch.full_like(group_denoms, float("nan"))
-        group_kl = torch.where(
-            group_denoms > 0,
-            (group_weights * kl_all[None, :]).sum(dim=1)
-            / group_denoms.clamp(min=1e-12),
-            nan,
-        )
-        group_mass = group_denoms / denom
 
-        group_kl_cpu = group_kl.cpu().tolist()
-        group_mass_cpu = group_mass.cpu().tolist()
-        out = {"weighted_argmax_accuracy": weighted_argmax_accuracy.item()}
+        def weighted_group_stats(
+            weights: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            group_weights = mask_float * weights[None, :]
+            group_denoms = group_weights.sum(dim=1)
+            nan = torch.full_like(group_denoms, float("nan"))
+            group_kl = torch.where(
+                group_denoms > 0,
+                (group_weights * kl_all[None, :]).sum(dim=1)
+                / group_denoms.clamp(min=1e-12),
+                nan,
+            )
+            total = weights.sum().clamp(min=1e-12)
+            group_frac = group_denoms / total
+            accuracy = (
+                node_correct_mass.to(dtype=kl_all.dtype) * weights
+            ).sum() / total
+            return accuracy, group_kl, group_frac
+
+        _, group_kl, group_mass = weighted_group_stats(reduce_weights)
+        node_accuracy, _, node_frac = weighted_group_stats(torch.ones_like(kl_all))
+
+        out = {
+            "weighted_argmax_accuracy": weighted_argmax_accuracy.item(),
+            "train_weighted_argmax_accuracy": weighted_argmax_accuracy.item(),
+            "node_argmax_accuracy": node_accuracy.item(),
+        }
         out.update(
             {
                 f"kl_{key}": value
-                for key, value in zip(names, group_kl_cpu)
+                for key, value in zip(names, group_kl.cpu().tolist())
                 if not math.isnan(value)
             }
         )
         out.update(
             {
                 f"mass_{key}": value
-                for key, value in zip(names, group_mass_cpu)
+                for key, value in zip(names, group_mass.cpu().tolist())
                 if value > 0.0
             }
         )
+        out.update(
+            {
+                f"train_weight_frac_{key}": value
+                for key, value in zip(names, group_mass.cpu().tolist())
+                if value > 0.0
+            }
+        )
+        out.update(
+            {
+                f"node_frac_{key}": value
+                for key, value in zip(names, node_frac.cpu().tolist())
+                if value > 0.0
+            }
+        )
+
+        reach = batch.statistics.get("policy_node_reach")
+        if reach is not None:
+            reach_weights = reach.to(device=kl_all.device, dtype=kl_all.dtype).clamp(
+                min=0.0
+            )
+            reach_accuracy, reach_kl, reach_mass = weighted_group_stats(reach_weights)
+            out["reach_weighted_argmax_accuracy"] = reach_accuracy.item()
+            out.update(
+                {
+                    f"reach_kl_{key}": value
+                    for key, value in zip(names, reach_kl.cpu().tolist())
+                    if not math.isnan(value)
+                }
+            )
+            out.update(
+                {
+                    f"reach_mass_{key}": value
+                    for key, value in zip(names, reach_mass.cpu().tolist())
+                    if value > 0.0
+                }
+            )
         return out
 
     @torch.no_grad()
