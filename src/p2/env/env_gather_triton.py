@@ -46,43 +46,45 @@ if triton is not None:
         dst_done,
         dst_scale,
         N,
+        DST_START,
         BLOCK: tl.constexpr,
     ):
         offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         mask = offs < N
         src = tl.load(idx + offs, mask=mask, other=0)
+        dst = DST_START + offs
 
-        tl.store(dst_button + offs, tl.load(src_button + src, mask=mask), mask=mask)
-        tl.store(dst_street + offs, tl.load(src_street + src, mask=mask), mask=mask)
-        tl.store(dst_to_act + offs, tl.load(src_to_act + src, mask=mask), mask=mask)
+        tl.store(dst_button + dst, tl.load(src_button + src, mask=mask), mask=mask)
+        tl.store(dst_street + dst, tl.load(src_street + src, mask=mask), mask=mask)
+        tl.store(dst_to_act + dst, tl.load(src_to_act + src, mask=mask), mask=mask)
         tl.store(
-            dst_last_to_act + offs, tl.load(src_last_to_act + src, mask=mask), mask=mask
+            dst_last_to_act + dst, tl.load(src_last_to_act + src, mask=mask), mask=mask
         )
-        tl.store(dst_pot + offs, tl.load(src_pot + src, mask=mask), mask=mask)
+        tl.store(dst_pot + dst, tl.load(src_pot + src, mask=mask), mask=mask)
         tl.store(
-            dst_min_raise + offs, tl.load(src_min_raise + src, mask=mask), mask=mask
+            dst_min_raise + dst, tl.load(src_min_raise + src, mask=mask), mask=mask
         )
         tl.store(
-            dst_actions_this_round + offs,
+            dst_actions_this_round + dst,
             tl.load(src_actions_this_round + src, mask=mask),
             mask=mask,
         )
         tl.store(
-            dst_actions_last_round + offs,
+            dst_actions_last_round + dst,
             tl.load(src_actions_last_round + src, mask=mask),
             mask=mask,
         )
         tl.store(
-            dst_deck_pos + offs, tl.load(src_deck_pos + src, mask=mask), mask=mask
+            dst_deck_pos + dst, tl.load(src_deck_pos + src, mask=mask), mask=mask
         )
-        tl.store(dst_winner + offs, tl.load(src_winner + src, mask=mask), mask=mask)
+        tl.store(dst_winner + dst, tl.load(src_winner + src, mask=mask), mask=mask)
         tl.store(
-            dst_acted_since_reset + offs,
+            dst_acted_since_reset + dst,
             tl.load(src_acted_since_reset + src, mask=mask),
             mask=mask,
         )
-        tl.store(dst_done + offs, tl.load(src_done + src, mask=mask), mask=mask)
-        tl.store(dst_scale + offs, tl.load(src_scale + src, mask=mask), mask=mask)
+        tl.store(dst_done + dst, tl.load(src_done + src, mask=mask), mask=mask)
+        tl.store(dst_scale + dst, tl.load(src_scale + src, mask=mask), mask=mask)
 
     @triton.jit
     def _gather_env_pair_kernel(
@@ -100,13 +102,15 @@ if triton is not None:
         dst_has_folded,
         dst_is_allin,
         N,
+        DST_START,
         BLOCK: tl.constexpr,
     ):
         rows = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         mask = rows < N
         src = tl.load(idx + rows, mask=mask, other=0)
+        dst_row = DST_START + rows
         for col in tl.static_range(0, 2):
-            dst_off = rows * 2 + col
+            dst_off = dst_row * 2 + col
             src_off = src * 2 + col
             tl.store(dst_stacks + dst_off, tl.load(src_stacks + src_off, mask=mask), mask=mask)
             tl.store(
@@ -147,32 +151,34 @@ if triton is not None:
         dst_last_board_indices,
         dst_hole_indices,
         N,
+        DST_START,
         BLOCK: tl.constexpr,
     ):
         rows = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         mask = rows < N
         src = tl.load(idx + rows, mask=mask, other=0)
+        dst_row = DST_START + rows
 
         for col in tl.static_range(0, 9):
             tl.store(
-                dst_deck + rows * 9 + col,
+                dst_deck + dst_row * 9 + col,
                 tl.load(src_deck + src * 9 + col, mask=mask),
                 mask=mask,
             )
         for col in tl.static_range(0, 5):
             tl.store(
-                dst_board_indices + rows * 5 + col,
+                dst_board_indices + dst_row * 5 + col,
                 tl.load(src_board_indices + src * 5 + col, mask=mask),
                 mask=mask,
             )
             tl.store(
-                dst_last_board_indices + rows * 5 + col,
+                dst_last_board_indices + dst_row * 5 + col,
                 tl.load(src_last_board_indices + src * 5 + col, mask=mask),
                 mask=mask,
             )
         for col in tl.static_range(0, 4):
             tl.store(
-                dst_hole_indices + rows * 4 + col,
+                dst_hole_indices + dst_row * 4 + col,
                 tl.load(src_hole_indices + src * 4 + col, mask=mask),
                 mask=mask,
             )
@@ -184,6 +190,7 @@ if triton is not None:
         dst_matrix,
         N,
         WIDTH: tl.constexpr,
+        DST_START,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
     ):
@@ -192,13 +199,14 @@ if triton is not None:
         row_mask = row < N
         col_mask = col < WIDTH
         src = tl.load(idx + row, mask=row_mask, other=0)
+        dst_row = DST_START + row
         vals = tl.load(
             src_matrix + src[:, None] * WIDTH + col[None, :],
             mask=row_mask[:, None] & col_mask[None, :],
             other=0,
         )
         tl.store(
-            dst_matrix + row[:, None] * WIDTH + col[None, :],
+            dst_matrix + dst_row[:, None] * WIDTH + col[None, :],
             vals,
             mask=row_mask[:, None] & col_mask[None, :],
         )
@@ -210,6 +218,17 @@ def gather_env_rows_triton(src_env, dst_env, indices: torch.Tensor) -> None:
     ``indices`` maps each destination row to a source row. The destination env
     must already be allocated with ``num_envs == len(indices)``.
     """
+    gather_env_rows_into_triton(src_env, dst_env, indices, dst_start=0)
+
+
+def gather_env_rows_into_triton(
+    src_env,
+    dst_env,
+    indices: torch.Tensor,
+    *,
+    dst_start: int,
+) -> None:
+    """Gather rows into ``dst_env[dst_start:dst_start + len(indices)]``."""
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
     if indices.device.type != "cuda":
@@ -250,6 +269,7 @@ def gather_env_rows_triton(src_env, dst_env, indices: torch.Tensor) -> None:
         dst_env.done,
         dst_env.scale,
         N=n,
+        DST_START=dst_start,
         BLOCK=block,
     )
     _gather_env_pair_kernel[grid](
@@ -267,6 +287,7 @@ def gather_env_rows_triton(src_env, dst_env, indices: torch.Tensor) -> None:
         dst_env.has_folded,
         dst_env.is_allin,
         N=n,
+        DST_START=dst_start,
         BLOCK=block,
     )
     _gather_env_small_cards_kernel[grid](
@@ -280,6 +301,7 @@ def gather_env_rows_triton(src_env, dst_env, indices: torch.Tensor) -> None:
         dst_env.last_board_indices,
         dst_env.hole_indices,
         N=n,
+        DST_START=dst_start,
         BLOCK=block,
     )
 
@@ -290,6 +312,7 @@ def gather_env_rows_triton(src_env, dst_env, indices: torch.Tensor) -> None:
         dst_env.board_onehot,
         N=n,
         WIDTH=260,
+        DST_START=dst_start,
         BLOCK_M=16,
         BLOCK_N=64,
     )
@@ -300,6 +323,7 @@ def gather_env_rows_triton(src_env, dst_env, indices: torch.Tensor) -> None:
         dst_env.hole_onehot,
         N=n,
         WIDTH=208,
+        DST_START=dst_start,
         BLOCK_M=16,
         BLOCK_N=64,
     )

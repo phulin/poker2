@@ -83,6 +83,7 @@ class HUNLTensorEnv:
         max_stack_bb: int = 400,
         high_stack_mass_ratio: float = 1.0 / 3.0,
         starting_stack: Optional[int] = None,
+        init_state: bool = True,
     ) -> None:
         assert num_envs >= 0
         self.device = device or torch.device(
@@ -136,62 +137,57 @@ class HUNLTensorEnv:
             self.rng = torch.Generator(device=self.device)
 
         # Per-env decks as tensor and draw positions
-        self.deck = torch.zeros(self.N, 9, dtype=torch.long, device=self.device)
-        self.deck_pos = torch.zeros(self.N, dtype=torch.long, device=self.device)
+        self.deck = torch.empty(self.N, 9, dtype=torch.long, device=self.device)
+        self.deck_pos = torch.empty(self.N, dtype=torch.long, device=self.device)
 
         # Tensors (initialized in reset)
-        self.button = torch.zeros(self.N, dtype=torch.long, device=self.device)
-        self.street = torch.zeros(self.N, dtype=torch.long, device=self.device)  # 0..4
-        self.to_act = torch.zeros(self.N, dtype=torch.long, device=self.device)
-        self.last_to_act = torch.zeros(self.N, dtype=torch.long, device=self.device)
-        self.pot = torch.zeros(self.N, dtype=torch.long, device=self.device)
-        self.min_raise = torch.zeros(self.N, dtype=torch.long, device=self.device)
-        self.actions_this_round = torch.zeros(
+        self.button = torch.empty(self.N, dtype=torch.long, device=self.device)
+        self.street = torch.empty(self.N, dtype=torch.long, device=self.device)  # 0..4
+        self.to_act = torch.empty(self.N, dtype=torch.long, device=self.device)
+        self.last_to_act = torch.empty(self.N, dtype=torch.long, device=self.device)
+        self.pot = torch.empty(self.N, dtype=torch.long, device=self.device)
+        self.min_raise = torch.empty(self.N, dtype=torch.long, device=self.device)
+        self.actions_this_round = torch.empty(
             self.N, dtype=torch.long, device=self.device
         )
-        self.actions_last_round = torch.zeros_like(self.actions_this_round)
-        self.acted_since_reset = torch.zeros(
+        self.actions_last_round = torch.empty_like(self.actions_this_round)
+        self.acted_since_reset = torch.empty(
             self.N, dtype=torch.bool, device=self.device
         )
 
-        self.stacks = torch.zeros(self.N, 2, dtype=torch.long, device=self.device)
-        self.committed = torch.zeros(self.N, 2, dtype=torch.long, device=self.device)
-        self.has_folded = torch.zeros(self.N, 2, dtype=torch.bool, device=self.device)
-        self.is_allin = torch.zeros(self.N, 2, dtype=torch.bool, device=self.device)
-        self.starting_stacks = torch.full(
-            (self.N, 2), self.mean_stack, dtype=torch.long, device=self.device
+        self.stacks = torch.empty(self.N, 2, dtype=torch.long, device=self.device)
+        self.committed = torch.empty(self.N, 2, dtype=torch.long, device=self.device)
+        self.has_folded = torch.empty(self.N, 2, dtype=torch.bool, device=self.device)
+        self.is_allin = torch.empty(self.N, 2, dtype=torch.bool, device=self.device)
+        self.starting_stacks = torch.empty(
+            self.N, 2, dtype=torch.long, device=self.device
         )
-        self.scale = torch.full(
-            (self.N,),
-            float(self.mean_stack),
-            dtype=self.float_dtype,
-            device=self.device,
-        )
+        self.scale = torch.empty(self.N, dtype=self.float_dtype, device=self.device)
 
         # Board and hole cards stored as one-hot [4,13] and as indices [0-51]
         # board_onehot: [N, 5, 4, 13], hole_onehot: [N, 2 players, 2 cards, 4, 13]
         # board_indices: [N, 5], hole_indices: [N, 2 players, 2 cards]
-        self.board_onehot = torch.zeros(
+        self.board_onehot = torch.empty(
             (self.N, 5, 4, 13), dtype=torch.bool, device=self.device
         )
-        self.hole_onehot = torch.zeros(
+        self.hole_onehot = torch.empty(
             (self.N, 2, 2, 4, 13), dtype=torch.bool, device=self.device
         )
-        self.board_indices = torch.full(
-            (self.N, 5), -1, dtype=torch.long, device=self.device
-        )  # -1 means no card
-        self.last_board_indices = self.board_indices.clone()
-        self.hole_indices = torch.full(
-            (self.N, 2, 2), -1, dtype=torch.long, device=self.device
-        )  # -1 means no card
+        self.board_indices = torch.empty(
+            self.N, 5, dtype=torch.long, device=self.device
+        )
+        self.last_board_indices = torch.empty_like(self.board_indices)
+        self.hole_indices = torch.empty(
+            self.N, 2, 2, dtype=torch.long, device=self.device
+        )
 
         # Chip tracking for delta calculations - single tensor for both players
         # chips_placed[env_idx, player] = total chips placed by that player in that environment
-        self.chips_placed = torch.zeros(self.N, 2, dtype=torch.long, device=self.device)
-        self.done = torch.zeros(self.N, dtype=torch.bool, device=self.device)
-        self.winner = torch.full(
-            (self.N,), -1, dtype=torch.long, device=self.device
-        )  # -1 split
+        self.chips_placed = torch.empty(
+            self.N, 2, dtype=torch.long, device=self.device
+        )
+        self.done = torch.empty(self.N, dtype=torch.bool, device=self.device)
+        self.winner = torch.empty(self.N, dtype=torch.long, device=self.device)
 
         # Cache one-hot card encodings for all 52 cards
         # Precompute full 4x13 one-hot matrices for all cards 0-51
@@ -205,9 +201,39 @@ class HUNLTensorEnv:
         )
         self.card_onehot_cache[all_cards, suits, ranks] = True
 
+        if init_state:
+            self.deck.zero_()
+            self.deck_pos.zero_()
+            self.button.zero_()
+            self.street.zero_()
+            self.to_act.zero_()
+            self.last_to_act.zero_()
+            self.pot.zero_()
+            self.min_raise.zero_()
+            self.actions_this_round.zero_()
+            self.actions_last_round.zero_()
+            self.acted_since_reset.zero_()
+            self.stacks.zero_()
+            self.committed.zero_()
+            self.has_folded.zero_()
+            self.is_allin.zero_()
+            self.starting_stacks.fill_(self.mean_stack)
+            self.scale.fill_(float(self.mean_stack))
+            self.board_onehot.zero_()
+            self.hole_onehot.zero_()
+            self.board_indices.fill_(-1)
+            self.last_board_indices.fill_(-1)
+            self.hole_indices.fill_(-1)
+            self.chips_placed.zero_()
+            self.done.zero_()
+            self.winner.fill_(-1)
+
     @classmethod
     def from_proto(
-        cls, proto: HUNLTensorEnv, num_envs: Optional[int] = None
+        cls,
+        proto: HUNLTensorEnv,
+        num_envs: Optional[int] = None,
+        init_state: bool = True,
     ) -> HUNLTensorEnv:
         if num_envs is None:
             num_envs = proto.N
@@ -228,6 +254,7 @@ class HUNLTensorEnv:
             mid_stack_bb=proto.mid_stack_bb,
             max_stack_bb=proto.max_stack_bb,
             high_stack_mass_ratio=proto.high_stack_mass_ratio,
+            init_state=init_state,
         )
 
     # --- Reset -----------------------------------------------------------------
@@ -464,13 +491,16 @@ class HUNLTensorEnv:
         amounts[:, B - 1] = me_stack
         mask[:, B - 1] = me_stack > 0
 
-        me_allin = torch.where(self.is_allin[self.arange_n, me])[0]
-        opp_allin = torch.where(self.is_allin[self.arange_n, opp])[0]
-        mask[opp_allin, 0:2] = True  # only fold/call are legal when opp is all-in
-        mask[opp_allin, 2:] = False
-        # if both allin, this will override the opp_allin path.
-        mask[me_allin, :] = False
-        mask[me_allin, 1] = True  # only call is legal when we are all-in
+        me_allin = self.is_allin[self.arange_n, me]
+        opp_allin = self.is_allin[self.arange_n, opp]
+        mask[:, 0] = torch.where(opp_allin, True, mask[:, 0])
+        mask[:, 2:-1] = torch.where(opp_allin[:, None], False, mask[:, 2:-1])
+        mask[:, B - 1] = torch.where(opp_allin, False, mask[:, B - 1])
+        # If both are all-in, this overrides the opp-all-in path.
+        mask[:, 0] = torch.where(me_allin, False, mask[:, 0])
+        mask[:, 1] = torch.where(me_allin, True, mask[:, 1])
+        mask[:, 2:-1] = torch.where(me_allin[:, None], False, mask[:, 2:-1])
+        mask[:, B - 1] = torch.where(me_allin, False, mask[:, B - 1])
 
         # If done, no actions are legal.
         mask &= (~self.done)[:, None]
@@ -833,7 +863,7 @@ class HUNLTensorEnv:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if bet_bins is None:
             bet_bins = self.default_bet_bins
-        if bin_amounts is None or legal_masks is None:
+        if bin_amounts is None:
             bin_amounts, legal_masks = self.legal_bins_amounts_and_mask(bet_bins)
 
         num_bins = len(bet_bins) + 3
@@ -847,9 +877,12 @@ class HUNLTensorEnv:
         bet_indices = torch.where(bet_mask)[0]
         bet_amounts = torch.zeros_like(bin_indices)
         if bet_indices.numel() > 0:
-            bet_amounts[bet_indices] = bin_amounts[
-                bet_indices, bin_indices[bet_indices]
-            ]
+            if bin_amounts.dim() == 1:
+                bet_amounts[bet_indices] = bin_amounts[bet_indices]
+            else:
+                bet_amounts[bet_indices] = bin_amounts[
+                    bet_indices, bin_indices[bet_indices]
+                ]
             action_indices[bet_indices] = 2
 
         action_indices[bin_indices == all_in_index] = 3  # all-in

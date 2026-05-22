@@ -30,12 +30,16 @@ Fusion points
 
 from __future__ import annotations
 
+import copy
 import os
 
 import torch
 
 from p2.core.structured_config import CFRType
+from p2.env import rules
 from p2.env.card_utils import NUM_HANDS
+from p2.env.env_gather_triton import gather_env_rows_into_triton
+from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.rules_triton import (
     rank_hands_triton,
     triton_is_available as _rules_triton_ok,
@@ -81,7 +85,7 @@ from p2.search.fused_cfr_triton import (
     select_actor_beliefs_triton_out_,
     select_opponent_beliefs_triton_out_,
 )
-from p2.search.cfr_evaluator import PublicBeliefState
+from p2.search.cfr_evaluator import PublicBeliefState, padded_indices
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
@@ -222,6 +226,19 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             tuple[tuple[int, int, tuple[int, ...]], ...] | None
         ) = None
         self._exploitability_cache = None
+        self._subgame_capacity: int = 0
+        self._subgame_env: HUNLTensorEnv | None = None
+        self._subgame_arange: torch.Tensor | None = None
+        self._subgame_parent_index: torch.Tensor | None = None
+        self._subgame_action_from_parent: torch.Tensor | None = None
+        self._subgame_rewards: torch.Tensor | None = None
+        self._subgame_allin_leaf: torch.Tensor | None = None
+        self._subgame_valid_mask: torch.Tensor | None = None
+        self._subgame_root_mask: torch.Tensor | None = None
+        self._subgame_legal_amounts: torch.Tensor | None = None
+        self._subgame_legal_mask: torch.Tensor | None = None
+        self._subgame_bet_bins_t: torch.Tensor | None = None
+        self._subgame_prev_actor: torch.Tensor | None = None
 
     def _init_hand_rank_data(self) -> None:
         """Build hand-rank data, then precompute the constant-per-subgame
@@ -366,6 +383,518 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._exploitability_cache = None
         if not hasattr(self, "beliefs_sample"):
             self.beliefs_sample = torch.zeros_like(self.beliefs)
+        if not hasattr(self, "_subgame_capacity"):
+            self._subgame_capacity = 0
+        if not hasattr(self, "_subgame_env"):
+            self._subgame_env = None
+        if not hasattr(self, "_subgame_arange"):
+            self._subgame_arange = None
+        if not hasattr(self, "_subgame_parent_index"):
+            self._subgame_parent_index = None
+        if not hasattr(self, "_subgame_action_from_parent"):
+            self._subgame_action_from_parent = None
+        if not hasattr(self, "_subgame_rewards"):
+            self._subgame_rewards = None
+        if not hasattr(self, "_subgame_allin_leaf"):
+            self._subgame_allin_leaf = None
+        if not hasattr(self, "_subgame_valid_mask"):
+            self._subgame_valid_mask = None
+        if not hasattr(self, "_subgame_root_mask"):
+            self._subgame_root_mask = None
+        if not hasattr(self, "_subgame_legal_amounts"):
+            self._subgame_legal_amounts = None
+        if not hasattr(self, "_subgame_legal_mask"):
+            self._subgame_legal_mask = None
+        if not hasattr(self, "_subgame_bet_bins_t"):
+            self._subgame_bet_bins_t = None
+        if not hasattr(self, "_subgame_prev_actor"):
+            self._subgame_prev_actor = None
+
+    def _ensure_subgame_capacity(self, capacity: int, proto: HUNLTensorEnv) -> None:
+        if self._subgame_env is not None and self._subgame_capacity >= capacity:
+            return
+
+        capacity = max(1, int(capacity))
+        self._subgame_capacity = capacity
+        self._subgame_env = HUNLTensorEnv.from_proto(
+            proto, num_envs=capacity, init_state=False
+        )
+        self._subgame_arange = torch.arange(capacity, device=self.device)
+        self._subgame_parent_index = torch.empty(
+            capacity, dtype=torch.long, device=self.device
+        )
+        self._subgame_action_from_parent = torch.empty(
+            capacity, dtype=torch.long, device=self.device
+        )
+        self._subgame_rewards = torch.empty(
+            capacity, dtype=self.float_dtype, device=self.device
+        )
+        self._subgame_allin_leaf = torch.empty(
+            capacity, dtype=torch.bool, device=self.device
+        )
+        self._subgame_valid_mask = torch.empty(
+            capacity, dtype=torch.bool, device=self.device
+        )
+        self._subgame_root_mask = torch.empty(
+            capacity, dtype=torch.bool, device=self.device
+        )
+        self._subgame_legal_amounts = torch.empty(
+            capacity, self.num_actions, dtype=torch.long, device=self.device
+        )
+        self._subgame_legal_mask = torch.empty(
+            capacity, self.num_actions, dtype=torch.bool, device=self.device
+        )
+        self._subgame_prev_actor = torch.empty(
+            capacity, dtype=torch.long, device=self.device
+        )
+        self._subgame_bet_bins_t = torch.tensor(
+            [0] * 2 + self.bet_bins + [0],
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+    def _active_subgame_env_view(self, total_nodes: int) -> HUNLTensorEnv:
+        assert self._subgame_env is not None
+        assert self._subgame_arange is not None
+        env = copy.copy(self._subgame_env)
+        env.N = total_nodes
+        env.arange_n = self._subgame_arange[:total_nodes]
+        for name in (
+            "deck",
+            "deck_pos",
+            "button",
+            "street",
+            "to_act",
+            "last_to_act",
+            "pot",
+            "min_raise",
+            "actions_this_round",
+            "actions_last_round",
+            "acted_since_reset",
+            "stacks",
+            "committed",
+            "has_folded",
+            "is_allin",
+            "starting_stacks",
+            "scale",
+            "board_onehot",
+            "hole_onehot",
+            "board_indices",
+            "last_board_indices",
+            "hole_indices",
+            "chips_placed",
+            "done",
+            "winner",
+        ):
+            setattr(env, name, getattr(self._subgame_env, name)[:total_nodes])
+        return env
+
+    def _legal_bins_amounts_and_mask_range(
+        self, start: int, end: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self._subgame_env is not None
+        assert self._subgame_arange is not None
+        assert self._subgame_legal_amounts is not None
+        assert self._subgame_legal_mask is not None
+        assert self._subgame_bet_bins_t is not None
+        env = self._subgame_env
+        rows = self._subgame_arange[start:end]
+        n = end - start
+        amounts = self._subgame_legal_amounts[:n]
+        mask = self._subgame_legal_mask[:n]
+        amounts.fill_(-1)
+        mask.zero_()
+
+        me = env.to_act[rows]
+        opp = 1 - me
+        me_stack = env.stacks[rows, me]
+        opp_stack = env.stacks[rows, opp]
+        me_committed = env.committed[rows, me]
+        opp_committed = env.committed[rows, opp]
+        to_call = opp_committed - me_committed
+
+        mask[:, 0] = to_call > 0
+        mask[:, 1] = True
+
+        can_bet_raise = (me_stack > 0) & (opp_stack > 0)
+        additional_amounts = (
+            self._subgame_bet_bins_t[2:-1].view(1, self.num_actions - 3)
+            * env.pot[rows].view(n, 1)
+        ).long()
+        bet_raise_amounts = to_call.view(n, 1) + additional_amounts
+        bet_raise_legal = (
+            can_bet_raise.view(n, 1)
+            & (bet_raise_amounts <= me_stack.view(n, 1))
+            & (additional_amounts >= env.min_raise[rows].view(n, 1))
+        )
+        amounts[:, 2:-1] = bet_raise_amounts
+        mask[:, 2:-1] = bet_raise_legal
+
+        amounts[:, self.num_actions - 1] = me_stack
+        mask[:, self.num_actions - 1] = me_stack > 0
+
+        me_allin = env.is_allin[rows, me]
+        opp_allin = env.is_allin[rows, opp]
+        mask[:, 0] = torch.where(opp_allin, True, mask[:, 0])
+        mask[:, 2:-1] = torch.where(opp_allin[:, None], False, mask[:, 2:-1])
+        mask[:, self.num_actions - 1] = torch.where(
+            opp_allin, False, mask[:, self.num_actions - 1]
+        )
+        mask[:, 0] = torch.where(me_allin, False, mask[:, 0])
+        mask[:, 1] = torch.where(me_allin, True, mask[:, 1])
+        mask[:, 2:-1] = torch.where(me_allin[:, None], False, mask[:, 2:-1])
+        mask[:, self.num_actions - 1] = torch.where(
+            me_allin, False, mask[:, self.num_actions - 1]
+        )
+        mask &= (~env.done[rows])[:, None]
+        return amounts, mask
+
+    def _allin_call_child_mask_rows(
+        self, parent_rows: torch.Tensor, action_bins: torch.Tensor
+    ) -> torch.Tensor:
+        assert self._subgame_env is not None
+        if not self._allin_abstraction_enabled() or action_bins.numel() == 0:
+            return torch.zeros_like(action_bins, dtype=torch.bool)
+        env = self._subgame_env
+        actor = env.to_act[parent_rows]
+        opp = 1 - actor
+        parent_to_call = env.committed[parent_rows, opp] - env.committed[
+            parent_rows, actor
+        ]
+        parent_street = env.street[parent_rows]
+        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
+        has_preflop_table = (
+            getattr(
+                search_cfg,
+                "preflop_allin_table_path",
+                getattr(self, "preflop_allin_table_path", None),
+            )
+            is not None
+        )
+        mask = (
+            (action_bins == 1)
+            & env.is_allin[parent_rows, opp]
+            & (parent_to_call > 0)
+            & (parent_street < 3)
+        )
+        if not has_preflop_table:
+            mask &= parent_street > 0
+        return mask
+
+    def _bet_rows(
+        self, rows: torch.Tensor, players: torch.Tensor, chips: torch.Tensor
+    ) -> None:
+        assert self._subgame_env is not None
+        env = self._subgame_env
+        env.stacks[rows, players] -= chips
+        env.committed[rows, players] += chips
+        env.pot[rows] += chips
+        env.chips_placed[rows, players] += chips
+
+    def _step_bins_range(
+        self,
+        start: int,
+        count: int,
+        action_bins: torch.Tensor,
+        selected_amounts: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self._subgame_env is not None
+        assert self._subgame_arange is not None
+        assert self._subgame_rewards is not None
+        env = self._subgame_env
+        rows = self._subgame_arange[start : start + count]
+        rewards = self._subgame_rewards[start : start + count]
+        rewards.zero_()
+
+        all_in_index = self.num_actions - 1
+        actor_idx = env.to_act[rows]
+        other_idx = 1 - actor_idx
+        actor_stack = env.stacks[rows, actor_idx]
+        actor_committed = env.committed[rows, actor_idx]
+        other_committed = env.committed[rows, other_idx]
+        to_call = other_committed - actor_committed
+
+        is_fold = action_bins == 0
+        is_check_call = action_bins == 1
+        is_bet_raise = (action_bins >= 2) & (action_bins < all_in_index)
+        is_allin = action_bins == all_in_index
+
+        fold_rows = rows[is_fold]
+        if fold_rows.numel() > 0:
+            rewards[is_fold] = env.finish_and_assign_rewards(
+                fold_rows, other_idx[is_fold]
+            )
+
+        call_rows = rows[is_check_call]
+        if call_rows.numel() > 0:
+            call_amount = torch.minimum(to_call[is_check_call], actor_stack[is_check_call])
+            self._bet_rows(call_rows, actor_idx[is_check_call], call_amount)
+
+        allin_rows = rows[is_allin]
+        if allin_rows.numel() > 0:
+            all_in_amount = actor_stack[is_allin]
+            allin_actor = actor_idx[is_allin]
+            self._bet_rows(allin_rows, allin_actor, all_in_amount)
+            env.is_allin[allin_rows, allin_actor] = True
+
+        bet_rows = rows[is_bet_raise]
+        if bet_rows.numel() > 0:
+            bet_raise_amount = selected_amounts[is_bet_raise]
+            self._bet_rows(bet_rows, actor_idx[is_bet_raise], bet_raise_amount)
+            env.min_raise[bet_rows] = torch.maximum(
+                env.min_raise[bet_rows], bet_raise_amount - to_call[is_bet_raise]
+            )
+
+        env.last_to_act[rows] = actor_idx
+        env.to_act[rows] = other_idx
+        env.actions_this_round[rows] += 1
+        env.acted_since_reset[rows] = True
+        env.last_board_indices[rows, :] = env.board_indices[rows, :]
+
+        equal_committed = env.committed[rows, 0] == env.committed[rows, 1]
+        all_in_committed = (
+            (env.is_allin[rows, 0] & env.is_allin[rows, 1])
+            | (env.is_allin[rows, 0] & (env.committed[rows, 0] <= env.committed[rows, 1]))
+            | (env.is_allin[rows, 1] & (env.committed[rows, 1] <= env.committed[rows, 0]))
+        )
+        round_closed = (
+            ~env.done[rows]
+            & (equal_committed | all_in_committed)
+            & (env.actions_this_round[rows] >= 2)
+        )
+        round_rows = rows[round_closed]
+        if round_rows.numel() == 0:
+            return rewards
+
+        env.committed[round_rows, :] = 0
+        env.actions_last_round[round_rows] = env.actions_this_round[round_rows]
+        env.actions_this_round[round_rows] = 0
+        env.to_act[round_rows] = 1 - env.button[round_rows]
+        env.min_raise[round_rows] = env.bb
+        street = env.street[round_rows]
+
+        showdown_mask = street == (0 if env.flop_showdown else 3)
+        showdown_rows = round_rows[showdown_mask]
+        if showdown_rows.numel() > 0:
+            ab_plane = env.hole_onehot[showdown_rows].any(dim=2) | env.board_onehot[
+                showdown_rows
+            ].any(dim=1).unsqueeze(1)
+            cmp = rules.compare_7_single_batch(ab_plane)
+            env.winner[showdown_rows[cmp > 0]] = 0
+            env.winner[showdown_rows[cmp < 0]] = 1
+            env.winner[showdown_rows[cmp == 0]] = 2
+            local = showdown_rows - start
+            rewards[local] = env.finish_and_assign_rewards(
+                showdown_rows, env.winner[showdown_rows]
+            )
+
+        flop_rows = round_rows[street == 0]
+        if flop_rows.numel() > 0:
+            pos = env.deck_pos[flop_rows]
+            c0 = env.deck[flop_rows, pos]
+            c1 = env.deck[flop_rows, pos + 1]
+            c2 = env.deck[flop_rows, pos + 2]
+            env.deck_pos[flop_rows] = pos + 3
+            env.board_onehot[flop_rows, 0] = env.card_onehot_cache[c0]
+            env.board_onehot[flop_rows, 1] = env.card_onehot_cache[c1]
+            env.board_onehot[flop_rows, 2] = env.card_onehot_cache[c2]
+            env.board_indices[flop_rows, 0] = c0
+            env.board_indices[flop_rows, 1] = c1
+            env.board_indices[flop_rows, 2] = c2
+
+        turn_rows = round_rows[street == 1]
+        if turn_rows.numel() > 0:
+            pos = env.deck_pos[turn_rows]
+            c = env.deck[turn_rows, pos]
+            env.deck_pos[turn_rows] = pos + 1
+            env.board_onehot[turn_rows, 3] = env.card_onehot_cache[c]
+            env.board_indices[turn_rows, 3] = c
+
+        river_rows = round_rows[street == 2]
+        if river_rows.numel() > 0:
+            pos = env.deck_pos[river_rows]
+            c = env.deck[river_rows, pos]
+            env.deck_pos[river_rows] = pos + 1
+            env.board_onehot[river_rows, 4] = env.card_onehot_cache[c]
+            env.board_indices[river_rows, 4] = c
+
+        env.street[round_rows] += 1
+        return rewards
+
+    def _construct_subgame(self, src_env: HUNLTensorEnv, src_indices: torch.Tensor) -> None:
+        self._ensure_fused_attrs()
+        assert src_indices.dim() == 1, "src_indices must be 1-D"
+        num_roots = src_indices.shape[0]
+        assert num_roots > 0, "must supply at least one root state"
+
+        capacity = max(
+            self._subgame_capacity,
+            int(num_roots) * max(2, self.num_actions),
+        )
+        while True:
+            self._ensure_subgame_capacity(capacity, src_env)
+            if self._construct_subgame_attempt(src_env, src_indices):
+                return
+            capacity *= 2
+
+    def _construct_subgame_attempt(
+        self, src_env: HUNLTensorEnv, src_indices: torch.Tensor
+    ) -> bool:
+        assert self._subgame_env is not None
+        assert self._subgame_arange is not None
+        assert self._subgame_parent_index is not None
+        assert self._subgame_action_from_parent is not None
+        assert self._subgame_rewards is not None
+        assert self._subgame_allin_leaf is not None
+        num_roots = int(src_indices.shape[0])
+        capacity = self._subgame_capacity
+        env = self._subgame_env
+
+        gather_env_rows_into_triton(src_env, env, src_indices, dst_start=0)
+        self._subgame_parent_index[:num_roots].fill_(-1)
+        self._subgame_action_from_parent[:num_roots].fill_(-1)
+        self._subgame_rewards[:num_roots].zero_()
+        self._subgame_allin_leaf[:num_roots].zero_()
+
+        depth_offsets = [0, num_roots]
+        cursor = num_roots
+        depth = 0
+        while depth < self.max_depth:
+            parent_start = depth_offsets[-2]
+            parent_end = depth_offsets[-1]
+            amounts, legal_mask = self._legal_bins_amounts_and_mask_range(
+                parent_start, parent_end
+            )
+            legal_mask &= (~self._subgame_allin_leaf[parent_start:parent_end])[:, None]
+            if depth > 0:
+                legal_mask &= (env.actions_this_round[parent_start:parent_end] != 0)[
+                    :, None
+                ]
+            parent_action_pairs = legal_mask.nonzero(as_tuple=False)
+            child_count = int(parent_action_pairs.shape[0])
+            if child_count == 0:
+                break
+            child_end = cursor + child_count
+            if child_end > capacity:
+                return False
+
+            parent_local = parent_action_pairs[:, 0]
+            action_bins = parent_action_pairs[:, 1]
+            parent_global = parent_start + parent_local
+            gather_env_rows_into_triton(env, env, parent_global, dst_start=cursor)
+
+            self._subgame_parent_index[cursor:child_end] = parent_global
+            self._subgame_action_from_parent[cursor:child_end] = action_bins
+            self._subgame_allin_leaf[cursor:child_end] = self._allin_call_child_mask_rows(
+                parent_global, action_bins
+            )
+            selected_amounts = amounts[parent_local, action_bins]
+            self._step_bins_range(cursor, child_count, action_bins, selected_amounts)
+
+            cursor = child_end
+            depth += 1
+            depth_offsets.append(cursor)
+
+        self.depth_offsets = depth_offsets
+        self.tree_depth = max(0, len(self.depth_offsets) - 2)
+        self.total_nodes = cursor
+        self.root_nodes = num_roots
+        self.top_nodes = (
+            self.depth_offsets[-2] if len(self.depth_offsets) > 1 else num_roots
+        )
+
+        self.env = self._active_subgame_env_view(cursor)
+        self.parent_index = self._subgame_parent_index[:cursor]
+        self.action_from_parent = self._subgame_action_from_parent[:cursor]
+        rewards_tensor = self._subgame_rewards[:cursor]
+        allin_leaf_tensor = self._subgame_allin_leaf[:cursor]
+
+        self.valid_mask = self._subgame_valid_mask[:cursor]
+        self.valid_mask.fill_(True)
+        _, self.legal_mask = self._legal_bins_amounts_and_mask_range(0, cursor)
+        self.legal_mask = self.legal_mask[:cursor]
+
+        root_mask = self._subgame_root_mask[:cursor]
+        root_mask.zero_()
+        root_mask[:num_roots] = True
+        self.new_street_mask = (self.env.actions_this_round[:cursor] == 0) & ~root_mask
+        self.leaf_mask = self.env.done[:cursor] | self.new_street_mask
+        self.leaf_mask[self.depth_offsets[-2] :] = True
+        self.leaf_mask |= allin_leaf_tensor
+        self.new_street_mask.masked_fill_(allin_leaf_tensor, False)
+        self._mark_allin_call_leaves()
+        self.model_indices = self._compute_model_indices()
+        self.child_mask = (
+            self.legal_mask & self.valid_mask[:, None] & (~self.leaf_mask)[:, None]
+        )
+        self.child_count = self.child_mask.sum(dim=-1)
+        bottom = self.depth_offsets[1]
+        self.child_offsets = (
+            bottom + torch.cumsum(self.child_count, dim=0) - self.child_count
+        )
+
+        showdown_padding = max(1, self.root_nodes // 2)
+        self.showdown_indices = padded_indices(self.env.street[:cursor] == 4, showdown_padding)
+        self.showdown_actors = self.env.to_act[self.showdown_indices]
+        self.showdown_potential = (
+            self.env.stacks[self.showdown_indices]
+            + self.env.pot[self.showdown_indices, None]
+            - self.env.starting_stacks[self.showdown_indices]
+        )
+
+        self.prev_actor = self._subgame_prev_actor[:cursor]
+        self.prev_actor.fill_(-1)
+        self.prev_actor[self.root_nodes :] = self.env.to_act[
+            self.parent_index[self.root_nodes :]
+        ]
+
+        self.policy_probs = torch.empty(
+            cursor, NUM_HANDS, dtype=self.float_dtype, device=self.device
+        )
+        self.policy_probs_avg = torch.empty_like(self.policy_probs)
+        self.average_policy_numerator = torch.empty_like(self.policy_probs)
+        self.average_policy_denominator = torch.empty_like(self.policy_probs)
+        self.average_policy_initialized = False
+        self.policy_probs_sample = torch.empty_like(self.policy_probs)
+        self.cumulative_regrets = torch.zeros_like(self.policy_probs)
+
+        child_count_dest = self.child_count[self.parent_index[self.root_nodes :]]
+        self.uniform_policy = torch.zeros_like(self.policy_probs)
+        self.uniform_policy[self.root_nodes :] = (1.0 / child_count_dest)[
+            :, None
+        ].expand(-1, NUM_HANDS)
+
+        self.beliefs = torch.zeros(
+            cursor,
+            self.num_players,
+            NUM_HANDS,
+            dtype=self.float_dtype,
+            device=self.device,
+        )
+        self.beliefs_avg = torch.empty_like(self.beliefs)
+        self.beliefs_sample = torch.empty_like(self.beliefs)
+        self.root_pre_chance_beliefs = torch.empty(
+            num_roots,
+            self.num_players,
+            NUM_HANDS,
+            dtype=self.float_dtype,
+            device=self.device,
+        )
+        self.self_reach = torch.zeros_like(self.beliefs)
+        self.self_reach[: self.root_nodes] = 1.0
+        self.self_reach_avg = torch.empty_like(self.beliefs)
+
+        self.latest_values = torch.zeros_like(self.beliefs)
+        folded_mask = (self.action_from_parent == 0) & self.env.done[:cursor]
+        self.latest_values[folded_mask, 0] = rewards_tensor[folded_mask][:, None]
+        self.latest_values[folded_mask, 1] = -rewards_tensor[folded_mask][:, None]
+        self.values_avg = torch.empty_like(self.latest_values)
+        self.last_model_values = None
+
+        self.feature_encoder = self.model.create_feature_encoder(
+            env=self.env, device=self.device, dtype=self.float_dtype
+        )
+        return True
 
     def initialize_subgame(self, *args, **kwargs) -> None:
         super().initialize_subgame(*args, **kwargs)
