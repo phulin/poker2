@@ -87,6 +87,11 @@ from p2.search.fused_cfr_triton import (
 )
 from p2.search.cfr_evaluator import PublicBeliefState, padded_indices
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+from p2.search.subgame_constructor_triton import (
+    copy_child_cards_triton_,
+    legal_counts_triton_,
+    write_children_same_street_triton_,
+)
 
 
 def _compile_setting_from_env(cfg=None) -> str:
@@ -239,6 +244,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._subgame_legal_mask: torch.Tensor | None = None
         self._subgame_bet_bins_t: torch.Tensor | None = None
         self._subgame_prev_actor: torch.Tensor | None = None
+        self._subgame_child_counts: torch.Tensor | None = None
+        self._subgame_child_offsets: torch.Tensor | None = None
 
     def _init_hand_rank_data(self) -> None:
         """Build hand-rank data, then precompute the constant-per-subgame
@@ -409,6 +416,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._subgame_bet_bins_t = None
         if not hasattr(self, "_subgame_prev_actor"):
             self._subgame_prev_actor = None
+        if not hasattr(self, "_subgame_child_counts"):
+            self._subgame_child_counts = None
+        if not hasattr(self, "_subgame_child_offsets"):
+            self._subgame_child_offsets = None
 
     def _ensure_subgame_capacity(self, capacity: int, proto: HUNLTensorEnv) -> None:
         if self._subgame_env is not None and self._subgame_capacity >= capacity:
@@ -445,6 +456,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             capacity, self.num_actions, dtype=torch.bool, device=self.device
         )
         self._subgame_prev_actor = torch.empty(
+            capacity, dtype=torch.long, device=self.device
+        )
+        self._subgame_child_counts = torch.empty(
+            capacity, dtype=torch.long, device=self.device
+        )
+        self._subgame_child_offsets = torch.empty(
             capacity, dtype=torch.long, device=self.device
         )
         self._subgame_bet_bins_t = torch.tensor(
@@ -721,6 +738,36 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         env.street[round_rows] += 1
         return rewards
 
+    def _mark_constructed_allin_call_leaves(
+        self, allin_leaf_tensor: torch.Tensor
+    ) -> None:
+        empty = torch.empty(0, dtype=torch.long, device=self.device)
+        self.allin_call_indices = empty
+        self.allin_call_parent_indices = empty
+        self.allin_call_indices_by_street = (empty, empty, empty)
+        self.allin_call_parent_indices_by_street = (empty, empty, empty)
+        empty_boards = torch.empty(0, 5, dtype=torch.long, device=self.device)
+        self.allin_call_boards_by_street = (empty_boards, empty_boards, empty_boards)
+        self.allin_call_mask = torch.zeros(
+            self.total_nodes, dtype=torch.bool, device=self.device
+        )
+        if not self._allin_abstraction_enabled() or self.total_nodes <= self.root_nodes:
+            self._cache_allin_call_street_partitions(empty)
+            return
+
+        indices = torch.nonzero(allin_leaf_tensor, as_tuple=False).flatten()
+        if indices.numel() == 0:
+            self._cache_allin_call_street_partitions(empty)
+            return
+
+        self.allin_call_indices = indices.contiguous()
+        self.allin_call_parent_indices = self.parent_index[indices].contiguous()
+        self.allin_call_mask[self.allin_call_indices] = True
+        self.leaf_mask[self.allin_call_indices] = True
+        self.new_street_mask[self.allin_call_indices] = False
+        parent_street = self.env.street[self.allin_call_parent_indices].contiguous()
+        self._cache_allin_call_street_partitions(parent_street)
+
     def _construct_subgame(self, src_env: HUNLTensorEnv, src_indices: torch.Tensor) -> None:
         self._ensure_fused_attrs()
         assert src_indices.dim() == 1, "src_indices must be 1-D"
@@ -746,6 +793,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         assert self._subgame_action_from_parent is not None
         assert self._subgame_rewards is not None
         assert self._subgame_allin_leaf is not None
+        assert self._subgame_child_counts is not None
+        assert self._subgame_child_offsets is not None
+        assert self._subgame_legal_mask is not None
+        assert self._subgame_bet_bins_t is not None
         num_roots = int(src_indices.shape[0])
         capacity = self._subgame_capacity
         env = self._subgame_env
@@ -755,6 +806,16 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._subgame_action_from_parent[:num_roots].fill_(-1)
         self._subgame_rewards[:num_roots].zero_()
         self._subgame_allin_leaf[:num_roots].zero_()
+        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
+        has_preflop_table = (
+            getattr(
+                search_cfg,
+                "preflop_allin_table_path",
+                getattr(self, "preflop_allin_table_path", None),
+            )
+            is not None
+        )
+        allin_abstraction = self._allin_abstraction_enabled()
 
         depth_offsets = [0, num_roots]
         cursor = num_roots
@@ -762,34 +823,50 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         while depth < self.max_depth:
             parent_start = depth_offsets[-2]
             parent_end = depth_offsets[-1]
-            amounts, legal_mask = self._legal_bins_amounts_and_mask_range(
-                parent_start, parent_end
+            parent_count = parent_end - parent_start
+            child_counts = self._subgame_child_counts[:parent_count]
+            child_offsets = self._subgame_child_offsets[:parent_count]
+            legal_counts_triton_(
+                env,
+                self._subgame_legal_mask,
+                child_counts,
+                self._subgame_allin_leaf,
+                self._subgame_bet_bins_t,
+                parent_start=parent_start,
+                parent_count=parent_count,
+                stop_new_street=depth > 0,
+                num_actions=self.num_actions,
             )
-            legal_mask &= (~self._subgame_allin_leaf[parent_start:parent_end])[:, None]
-            if depth > 0:
-                legal_mask &= (env.actions_this_round[parent_start:parent_end] != 0)[
-                    :, None
-                ]
-            parent_action_pairs = legal_mask.nonzero(as_tuple=False)
-            child_count = int(parent_action_pairs.shape[0])
+            torch.cumsum(child_counts, dim=0, out=child_offsets)
+            child_offsets -= child_counts
+            child_count = int(child_counts.sum().item())
             if child_count == 0:
                 break
             child_end = cursor + child_count
             if child_end > capacity:
                 return False
 
-            parent_local = parent_action_pairs[:, 0]
-            action_bins = parent_action_pairs[:, 1]
-            parent_global = parent_start + parent_local
-            gather_env_rows_into_triton(env, env, parent_global, dst_start=cursor)
-
-            self._subgame_parent_index[cursor:child_end] = parent_global
-            self._subgame_action_from_parent[cursor:child_end] = action_bins
-            self._subgame_allin_leaf[cursor:child_end] = self._allin_call_child_mask_rows(
-                parent_global, action_bins
+            write_children_same_street_triton_(
+                env,
+                self._subgame_legal_mask,
+                child_offsets,
+                self._subgame_parent_index,
+                self._subgame_action_from_parent,
+                self._subgame_rewards,
+                self._subgame_allin_leaf,
+                self._subgame_bet_bins_t,
+                parent_start=parent_start,
+                parent_count=parent_count,
+                dst_start=cursor,
+                has_preflop_table=has_preflop_table,
+                allin_abstraction=allin_abstraction,
             )
-            selected_amounts = amounts[parent_local, action_bins]
-            self._step_bins_range(cursor, child_count, action_bins, selected_amounts)
+            copy_child_cards_triton_(
+                env,
+                self._subgame_parent_index,
+                child_start=cursor,
+                child_count=child_count,
+            )
 
             cursor = child_end
             depth += 1
@@ -811,8 +888,18 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         self.valid_mask = self._subgame_valid_mask[:cursor]
         self.valid_mask.fill_(True)
-        _, self.legal_mask = self._legal_bins_amounts_and_mask_range(0, cursor)
-        self.legal_mask = self.legal_mask[:cursor]
+        legal_counts_triton_(
+            env,
+            self._subgame_legal_mask,
+            self._subgame_child_counts[:cursor],
+            self._subgame_allin_leaf,
+            self._subgame_bet_bins_t,
+            parent_start=0,
+            parent_count=cursor,
+            stop_new_street=False,
+            num_actions=self.num_actions,
+        )
+        self.legal_mask = self._subgame_legal_mask[:cursor]
 
         root_mask = self._subgame_root_mask[:cursor]
         root_mask.zero_()
@@ -822,7 +909,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.leaf_mask[self.depth_offsets[-2] :] = True
         self.leaf_mask |= allin_leaf_tensor
         self.new_street_mask.masked_fill_(allin_leaf_tensor, False)
-        self._mark_allin_call_leaves()
+        self._mark_constructed_allin_call_leaves(allin_leaf_tensor)
         self.model_indices = self._compute_model_indices()
         self.child_mask = (
             self.legal_mask & self.valid_mask[:, None] & (~self.leaf_mask)[:, None]
@@ -896,8 +983,70 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         )
         return True
 
-    def initialize_subgame(self, *args, **kwargs) -> None:
-        super().initialize_subgame(*args, **kwargs)
+    def _root_allowed_from_board_indices(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
+        board = self.env.board_indices[:n].long()
+        valid = board >= 0
+        board_safe = torch.where(valid, board, torch.full_like(board, 52))
+        board_mask = torch.zeros(
+            n, 53, dtype=self.float_dtype, device=self.device
+        )
+        board_mask.scatter_(1, board_safe, valid.to(self.float_dtype))
+        board_mask = board_mask[:, :52]
+        root_allowed = (self.combo_onehot_float @ board_mask.T).T < 0.5
+        root_allowed_prob = root_allowed.to(dtype=self.float_dtype)
+        root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1.0)
+        return root_allowed, root_allowed_prob
+
+    def initialize_subgame(
+        self,
+        src_env: HUNLTensorEnv,
+        src_indices: torch.Tensor,
+        initial_beliefs: torch.Tensor | None = None,
+    ) -> None:
+        self._construct_subgame(src_env, src_indices)
+        n = self.root_nodes
+
+        if initial_beliefs is None:
+            initial_beliefs = torch.full(
+                (n, self.num_players, NUM_HANDS),
+                1.0 / NUM_HANDS,
+                dtype=self.float_dtype,
+                device=self.device,
+            )
+        else:
+            initial_beliefs = initial_beliefs.to(
+                device=self.device, dtype=self.float_dtype
+            )
+
+        self.root_pre_chance_beliefs[:n] = initial_beliefs
+        self.self_reach[:n] = 1.0
+        self.self_reach_avg[:n] = 1.0
+
+        self.model_indices = self._compute_model_indices()
+        self.latent = None
+
+        root_allowed, root_allowed_prob = self._root_allowed_from_board_indices(n)
+        self.allowed_hands = self._fan_out_deep(root_allowed)
+        self.allowed_hands_prob = self._fan_out_deep(root_allowed_prob)
+
+        root_beliefs = self.beliefs[:n]
+        root_beliefs[:] = initial_beliefs
+        root_beliefs.masked_fill_((~root_allowed)[:, None, :], 0.0)
+        denom = root_beliefs.sum(dim=-1, keepdim=True)
+        torch.where(
+            denom > 1e-5,
+            root_beliefs / denom,
+            root_allowed_prob[:, None, :],
+            out=root_beliefs,
+        )
+        self.beliefs_avg[:n] = root_beliefs
+
+        self._init_hand_rank_data()
+        self.stats["evaluator_street"] = self.env.street[:n].float().mean().item()
+        self.stats["evaluator_total_nodes"] = float(self.total_nodes)
+        self.stats["evaluator_root_nodes"] = float(self.root_nodes)
+        self.stats["evaluator_tree_depth"] = float(self.tree_depth)
+
         self._static_model_base_key = None
         self._static_model_base_features = None
         self._leaf_belief_gather_indices = None
@@ -2148,7 +2297,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             or self._sample_leaf_ready_padded is None
             or self._sample_leaf_training_mode != training_mode
         ):
-            return super().sample_leaves(training_mode)
+            pbs = super().sample_leaves(training_mode)
+            self._deal_sampled_chance_roots(pbs.env)
+            return pbs
 
         N = self.root_nodes
         sampled_nodes = self._sample_leaf_indices_padded[:N]
@@ -2169,7 +2320,51 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             sampled_continue,
             torch.arange(sampled_continue.numel(), device=self.device),
         )
+        self._deal_sampled_chance_roots(pbs.env)
         return pbs
+
+    def _deal_sampled_chance_roots(self, env: HUNLTensorEnv) -> None:
+        if env.N == 0:
+            return
+        start_of_street = env.actions_this_round == 0
+
+        flop = start_of_street & (env.street == 1) & (env.board_indices[:, 0] < 0)
+        pos = env.deck_pos[flop]
+        c0 = env.deck[flop, pos]
+        c1 = env.deck[flop, pos + 1]
+        c2 = env.deck[flop, pos + 2]
+        env.deck_pos[flop] = pos + 3
+        env.board_indices[flop, 0] = c0
+        env.board_indices[flop, 1] = c1
+        env.board_indices[flop, 2] = c2
+
+        turn = start_of_street & (env.street == 2) & (env.board_indices[:, 3] < 0)
+        pos = env.deck_pos[turn]
+        c = env.deck[turn, pos]
+        env.deck_pos[turn] = pos + 1
+        env.board_indices[turn, 3] = c
+
+        river = start_of_street & (env.street == 3) & (env.board_indices[:, 4] < 0)
+        pos = env.deck_pos[river]
+        c = env.deck[river, pos]
+        env.deck_pos[river] = pos + 1
+        env.board_indices[river, 4] = c
+        self._refresh_card_onehots_from_indices(env)
+
+    def _refresh_card_onehots_from_indices(self, env: HUNLTensorEnv) -> None:
+        env.board_onehot.zero_()
+        env.hole_onehot.zero_()
+        for slot in range(5):
+            cards = env.board_indices[:, slot]
+            valid = cards >= 0
+            env.board_onehot[valid, slot] = env.card_onehot_cache[cards[valid]]
+        for player in range(2):
+            for slot in range(2):
+                cards = env.hole_indices[:, player, slot]
+                valid = cards >= 0
+                env.hole_onehot[valid, player, slot] = env.card_onehot_cache[
+                    cards[valid]
+                ]
 
     def prepare_replay(self, t: int) -> None:
         """Host-side prep for a CUDA-graph replay at iteration ``t``.

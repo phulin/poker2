@@ -12,6 +12,7 @@ CFR/DCFR search, public-belief state handling, ReBeL data generation, evaluator 
 - `sparse_cfr_evaluator.py`: Sparse CFR evaluator implementation used as the reference path.
 - `fused_sparse_cfr_evaluator.py`: Sparse evaluator with fused operations, persistent-buffer subgame construction, graph-friendly paths, BetterFFN static leaf-feature caching, combined leaf-belief gather paths, and fused all-in terminal payoff writeback.
 - `fused_cfr_triton.py`: Triton kernels and graph runner utilities for fused DCFR updates, reach/belief/average-policy propagation, showdown EV, and related reductions.
+- `subgame_constructor_triton.py`: Triton kernels for fused sparse same-street subgame expansion and child-row construction.
 
 ### Subdirectories
 There are no child source directories.
