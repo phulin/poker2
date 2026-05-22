@@ -63,6 +63,7 @@ from p2.search.fused_cfr_triton import (
     fused_reach_beliefs_avg_scratch_depth_,
     fused_reach_weights_depth_,
     fused_regret_tail_,
+    fused_sample_leaf_compact_,
     fused_unblocked_regret_dcfr_update_with_tensors_,
     fused_weighted_parent_sum_inline_opp_both,
     fused_weighted_parent_sum_inline_opp_both_noleaf,
@@ -671,61 +672,27 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         assert self._sample_leaf_uniform_policy is not None
         assert self._sample_leaf_child_nodes_by_action is not None
 
-        N = self.root_nodes
-        B = self.num_actions
-        t_idx = self._t_scalars.t_tensor.view(1)
-        root_rows = self._sample_root_rows.index_select(0, t_idx).squeeze(0)
-        count = self._sample_root_counts.index_select(0, t_idx).squeeze(0)
-        slot = torch.arange(root_rows.numel(), device=self.device)
-        valid = slot < count
-        roots = torch.where(valid, root_rows, torch.full_like(root_rows, N))
-        safe_roots = roots.clamp(max=max(N - 1, 0))
-        sampled_nodes = safe_roots.clone()
-        active = valid & (~self._sample_leaf_effective_leaf_mask[sampled_nodes])
-
-        for depth in range(self.tree_depth):
-            to_act = self.env.to_act[sampled_nodes]
-            player_mask = self._sample_leaf_players[safe_roots]
-            sample_uniformly = (
-                self._sample_leaf_uniform_draws[depth, safe_roots]
-                < self._sample_leaf_epsilon
-            )
-            sample_uniformly &= to_act == player_mask
-            sample_uniformly &= active
-
-            selected_hands = self._sample_leaf_hands[safe_roots].gather(
-                1, to_act[:, None]
-            )
-            child_nodes = self._sample_leaf_child_nodes_by_action[sampled_nodes]
-            policy_probs = self.policy_probs[
-                child_nodes, selected_hands.expand(-1, B)
-            ]
-            policy_probs = torch.where(
-                self._sample_leaf_sampling_masks[sampled_nodes],
-                policy_probs,
-                torch.zeros_like(policy_probs),
-            )
-            denom = policy_probs.sum(dim=1, keepdim=True)
-            policy_probs = torch.where(
-                denom >= 1e-12,
-                policy_probs / denom.clamp(min=1e-12),
-                self._sample_leaf_uniform_policy[sampled_nodes],
-            )
-            action_probs = torch.where(
-                sample_uniformly[:, None],
-                self._sample_leaf_uniform_policy[sampled_nodes],
-                policy_probs,
-            )
-            cdf = torch.cumsum(action_probs, dim=1)
-            draws = self._sample_leaf_action_draws[depth, safe_roots]
-            actions = (draws[:, None] > cdf).sum(dim=1).clamp(max=B - 1)
-            next_nodes = child_nodes.gather(1, actions[:, None]).squeeze(1)
-            sampled_nodes = torch.where(active, next_nodes, sampled_nodes)
-            active = active & (~self._sample_leaf_effective_leaf_mask[sampled_nodes])
-
-        self._sample_leaf_indices_padded[roots] = sampled_nodes
-        self._sample_leaf_beliefs_padded[roots] = self.beliefs[sampled_nodes]
-        self._sample_leaf_ready_padded[roots] = valid
+        fused_sample_leaf_compact_(
+            policy_probs=self.policy_probs.contiguous(),
+            beliefs=self.beliefs.contiguous(),
+            sample_root_rows=self._sample_root_rows,
+            sample_root_counts=self._sample_root_counts,
+            t=self._t_scalars.t_tensor,
+            players=self._sample_leaf_players.contiguous(),
+            hands=self._sample_leaf_hands.contiguous(),
+            uniform_draws=self._sample_leaf_uniform_draws.contiguous(),
+            action_draws=self._sample_leaf_action_draws.contiguous(),
+            effective_leaf_mask=self._sample_leaf_effective_leaf_mask.contiguous(),
+            sampling_masks=self._sample_leaf_sampling_masks.contiguous(),
+            uniform_policy=self._sample_leaf_uniform_policy.contiguous(),
+            child_nodes_by_action=self._sample_leaf_child_nodes_by_action.contiguous(),
+            to_act=self.env.to_act.contiguous(),
+            done=self.env.done.contiguous(),
+            out_nodes=self._sample_leaf_indices_padded,
+            out_beliefs=self._sample_leaf_beliefs_padded,
+            out_ready=self._sample_leaf_ready_padded,
+            sample_epsilon=self._sample_leaf_epsilon,
+        )
 
     def _model_features_for_beliefs(
         self, beliefs_at_model: torch.Tensor

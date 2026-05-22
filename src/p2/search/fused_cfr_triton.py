@@ -3547,7 +3547,7 @@ def fused_deep_beliefs_(
 
 
 # ---------------------------------------------------------------------------
-# Kernel 15: sparse policy sample snapshots.
+# Kernel 15: sparse policy sample snapshots and compact sampled leaves.
 # ---------------------------------------------------------------------------
 
 
@@ -3576,6 +3576,114 @@ if triton is not None:
         mask = offs < H
         vals = tl.load(policy_ptr + row * H + offs, mask=mask, other=0.0)
         tl.store(sample_ptr + row * H + offs, vals, mask=mask)
+
+    @triton.jit
+    def _fused_sample_leaf_compact_kernel(
+        policy_ptr,             # [total, H]
+        beliefs_ptr,            # [total, 2 * H]
+        rows_ptr,               # [num_iters, max_updates]
+        counts_ptr,             # [num_iters]
+        t_ptr,                  # scalar int64
+        players_ptr,            # [N]
+        hands_ptr,              # [N, 2]
+        uniform_draws_ptr,      # [D, N]
+        action_draws_ptr,       # [D, N]
+        effective_leaf_ptr,     # [total] bool
+        sampling_masks_ptr,     # [total, B] bool
+        uniform_policy_ptr,     # [total, B]
+        child_nodes_ptr,        # [total, B]
+        to_act_ptr,             # [total]
+        done_ptr,               # [total] bool
+        out_nodes_ptr,          # [N + 1]
+        out_beliefs_ptr,        # [N + 1, 2 * H]
+        out_ready_ptr,          # [N + 1]
+        max_updates,
+        N,
+        B: tl.constexpr,
+        H: tl.constexpr,
+        D: tl.constexpr,
+        SAMPLE_EPS: tl.constexpr,
+        BLOCK_BELIEF: tl.constexpr,
+        BELIEF_BLOCKS: tl.constexpr,
+    ):
+        slot = tl.program_id(0)
+        t = tl.load(t_ptr)
+        count = tl.load(counts_ptr + t)
+        valid = slot < count
+        root = tl.load(rows_ptr + t * max_updates + slot, mask=valid, other=N)
+        safe_root = tl.minimum(root, N - 1)
+        node = safe_root
+        active = valid & (~tl.load(effective_leaf_ptr + node, mask=valid, other=1))
+
+        for depth in tl.static_range(0, D):
+            to_act = tl.load(to_act_ptr + node, mask=valid, other=0)
+            player = tl.load(players_ptr + safe_root, mask=valid, other=0)
+            uniform_draw = tl.load(
+                uniform_draws_ptr + depth * N + safe_root,
+                mask=valid,
+                other=1.0,
+            )
+            sample_uniform = (uniform_draw < SAMPLE_EPS) & (to_act == player) & active
+            hand = tl.load(hands_ptr + safe_root * 2 + to_act, mask=valid, other=0)
+            action_draw = tl.load(
+                action_draws_ptr + depth * N + safe_root,
+                mask=valid,
+                other=1.0,
+            )
+
+            denom = 0.0
+            for a in tl.static_range(0, B):
+                child = tl.load(child_nodes_ptr + node * B + a, mask=valid, other=0)
+                legal = tl.load(
+                    sampling_masks_ptr + node * B + a,
+                    mask=valid,
+                    other=0,
+                )
+                p = tl.load(policy_ptr + child * H + hand, mask=valid & legal, other=0.0)
+                denom += p
+
+            cdf = 0.0
+            action = B - 1
+            chosen = False
+            for a in tl.static_range(0, B):
+                child = tl.load(child_nodes_ptr + node * B + a, mask=valid, other=0)
+                legal = tl.load(
+                    sampling_masks_ptr + node * B + a,
+                    mask=valid,
+                    other=0,
+                )
+                p = tl.load(policy_ptr + child * H + hand, mask=valid & legal, other=0.0)
+                uniform_p = tl.load(
+                    uniform_policy_ptr + node * B + a,
+                    mask=valid,
+                    other=0.0,
+                )
+                policy_p = tl.where(denom >= 1.0e-12, p / denom, uniform_p)
+                prob = tl.where(sample_uniform, uniform_p, policy_p)
+                cdf += prob
+                take = (~chosen) & (action_draw <= cdf)
+                action = tl.where(take, a, action)
+                chosen = chosen | take
+
+            next_node = tl.load(child_nodes_ptr + node * B + action, mask=valid, other=0)
+            node = tl.where(active, next_node, node)
+            active = active & (~tl.load(effective_leaf_ptr + node, mask=valid, other=1))
+
+        done = tl.load(done_ptr + node, mask=valid, other=1)
+        ready = valid & (node >= N) & (~done)
+        tl.store(out_nodes_ptr + root, node, mask=valid)
+        tl.store(out_ready_ptr + root, ready, mask=valid)
+
+        belief_h = 2 * H
+        for belief_block in tl.static_range(0, BELIEF_BLOCKS):
+            offs = belief_block * BLOCK_BELIEF + tl.arange(0, BLOCK_BELIEF)
+            belief_mask = ready & (offs < belief_h)
+            vals = tl.load(
+                beliefs_ptr + node * belief_h + offs,
+                mask=belief_mask,
+                other=0.0,
+            )
+            tl.store(out_beliefs_ptr + root * belief_h + offs, vals, mask=belief_mask)
 
 
 def fused_policy_sample_update_(
@@ -3613,6 +3721,92 @@ def fused_policy_sample_update_(
         max_updates,
         h,
         BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+def fused_sample_leaf_compact_(
+    policy_probs: torch.Tensor,
+    beliefs: torch.Tensor,
+    sample_root_rows: torch.Tensor,
+    sample_root_counts: torch.Tensor,
+    t: torch.Tensor,
+    players: torch.Tensor,
+    hands: torch.Tensor,
+    uniform_draws: torch.Tensor,
+    action_draws: torch.Tensor,
+    effective_leaf_mask: torch.Tensor,
+    sampling_masks: torch.Tensor,
+    uniform_policy: torch.Tensor,
+    child_nodes_by_action: torch.Tensor,
+    to_act: torch.Tensor,
+    done: torch.Tensor,
+    out_nodes: torch.Tensor,
+    out_beliefs: torch.Tensor,
+    out_ready: torch.Tensor,
+    *,
+    sample_epsilon: float,
+    block_belief: int = 1024,
+) -> None:
+    """Sample current-iteration leaves for roots assigned to ``t``."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert policy_probs.is_contiguous() and policy_probs.dim() == 2
+    assert beliefs.is_contiguous() and beliefs.dim() == 3
+    assert sample_root_rows.is_contiguous() and sample_root_rows.dim() == 2
+    assert sample_root_counts.is_contiguous() and sample_root_counts.dim() == 1
+    assert t.dim() == 0
+    assert players.is_contiguous() and players.dim() == 1
+    assert hands.is_contiguous() and hands.dim() == 2 and hands.shape[1] == 2
+    assert uniform_draws.is_contiguous() and uniform_draws.dim() == 2
+    assert action_draws.is_contiguous() and action_draws.shape == uniform_draws.shape
+    assert effective_leaf_mask.is_contiguous() and effective_leaf_mask.dim() == 1
+    assert sampling_masks.is_contiguous() and sampling_masks.dim() == 2
+    assert uniform_policy.is_contiguous() and uniform_policy.shape == sampling_masks.shape
+    assert child_nodes_by_action.is_contiguous() and child_nodes_by_action.shape == sampling_masks.shape
+    assert to_act.is_contiguous() and done.is_contiguous()
+    assert out_nodes.is_contiguous() and out_ready.is_contiguous()
+    assert out_beliefs.is_contiguous() and out_beliefs.dim() == 3
+
+    max_updates = sample_root_rows.shape[1]
+    if max_updates == 0:
+        return
+    n = players.shape[0]
+    h = policy_probs.shape[1]
+    b = sampling_masks.shape[1]
+    d = uniform_draws.shape[0]
+    assert beliefs.shape == (policy_probs.shape[0], 2, h)
+    assert out_beliefs.shape == (n + 1, 2, h)
+    assert out_nodes.shape[0] == n + 1 and out_ready.shape[0] == n + 1
+    belief_blocks = triton.cdiv(2 * h, block_belief)
+    grid = (max_updates,)
+    _fused_sample_leaf_compact_kernel[grid](
+        policy_probs,
+        beliefs,
+        sample_root_rows,
+        sample_root_counts,
+        t,
+        players,
+        hands,
+        uniform_draws,
+        action_draws,
+        effective_leaf_mask,
+        sampling_masks,
+        uniform_policy,
+        child_nodes_by_action,
+        to_act,
+        done,
+        out_nodes,
+        out_beliefs,
+        out_ready,
+        max_updates,
+        n,
+        B=b,
+        H=h,
+        D=d,
+        SAMPLE_EPS=float(sample_epsilon),
+        BLOCK_BELIEF=block_belief,
+        BELIEF_BLOCKS=belief_blocks,
         num_warps=4,
     )
 
