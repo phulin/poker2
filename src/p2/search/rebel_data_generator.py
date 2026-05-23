@@ -25,6 +25,45 @@ class RebelDataGenerator:
         self.current_pbs = initial_pbs
         self.last_extra = 0
 
+    @torch.no_grad()
+    def _record_batch_diag(self, refilled: bool) -> None:
+        """Record the just-solved subgame's root composition into the
+        evaluator's stats dict (under ``gen_batch/*``) so the trainer logs it to
+        wandb alongside ``action_mix``. Reads the evaluator's current subgame
+        env, whose first N rows are the roots that were just solved.
+
+        Used to characterize the bimodal ``action_mix/allin``: these fields let
+        us see, per step, whether HI-mode batches are short-SPR / big-pot /
+        shove-dominant compositions and whether they coincide with refills.
+        """
+        env = self.evaluator.env
+        N = self.evaluator.root_nodes
+        street = env.street[:N]
+        pot = env.pot[:N].float().clamp(min=1.0)
+        # Effective stack = min of the two stacks; SPR = eff_stack / pot.
+        eff_stack = env.stacks[:N].min(dim=1).values.float()
+        spr = eff_stack / pot
+        ar = torch.arange(N, device=env.device)
+        me = env.to_act[:N]
+        opp = 1 - me
+        me_allin = env.is_allin[ar, me]
+        opp_allin = env.is_allin[ar, opp]
+        committed = env.committed[:N].float().sum(dim=1)
+        commit_frac = committed / (committed + 2.0 * eff_stack + 1.0)
+        denom = float(N)
+        self.evaluator.stats["gen_batch"] = {
+            "refilled": float(refilled),
+            "street_preflop": float((street == 0).float().mean().item()),
+            "street_flop": float((street == 1).float().mean().item()),
+            "street_turn": float((street == 2).float().mean().item()),
+            "street_river": float((street == 3).float().mean().item()),
+            "spr_p50": float(spr.median().item()),
+            "spr_lt1_frac": float((spr < 1.0).float().mean().item()),
+            "commit_frac_mean": float(commit_frac.mean().item()),
+            "any_allin_frac": float((me_allin | opp_allin).float().sum().item() / denom),
+            "facing_allin_frac": float((opp_allin & ~me_allin).float().sum().item() / denom),
+        }
+
     def _new_pbs(self, target_batch_size: int) -> PublicBeliefState:
         beliefs = torch.full(
             (target_batch_size, self.evaluator.num_players, NUM_HANDS),
@@ -64,10 +103,13 @@ class RebelDataGenerator:
         policy_batches = []
 
         while collected < value_sample_count:
+            refilled = False
             if self.current_pbs is None:
                 self.current_pbs = self._new_pbs(N)
+                refilled = True
             elif self.current_pbs.env.N < N:
                 self.current_pbs = self._extend_pbs(self.current_pbs, N)
+                refilled = True
 
             self.evaluator.initialize_subgame(
                 self.current_pbs.env,
@@ -76,6 +118,7 @@ class RebelDataGenerator:
             )
 
             self.current_pbs = self.evaluator.evaluate_cfr()
+            self._record_batch_diag(refilled)
 
             value_batch, augmented_value_batch, policy_batch = (
                 self.evaluator.training_data()
