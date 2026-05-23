@@ -844,6 +844,8 @@ def _make_metrics_callable(trainer: RebelCFRTrainer) -> Callable[[], Any]:
         _policy_output,
         value_loss_update,
         policy_loss_update,
+        policy_kl_update,
+        *_extra_supervise_outputs,
     ) = trainer._supervise(
         value_batch,
         policy_batch,
@@ -870,6 +872,7 @@ def _make_metrics_callable(trainer: RebelCFRTrainer) -> Callable[[], Any]:
             policy_output=None,
             value_loss_all=value_loss_update,
             policy_loss_all=policy_loss_update,
+            policy_target_model_kl_all=policy_kl_update,
             fresh_value_batch=None,
         )
 
