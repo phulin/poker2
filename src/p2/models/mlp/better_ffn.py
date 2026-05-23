@@ -917,6 +917,8 @@ class BetterFFN(BaseMLPModel):
         if self.board_interaction_dim > 0:
             self.rank_board_interaction_out.weight.data.mul_(0.1)
             self.suit_board_interaction_out.weight.data.mul_(0.1)
+        if hasattr(self, "belief_phase_shift"):
+            nn.init.zeros_(self.belief_phase_shift.weight)
 
         # Start CFR warm-start policies close to uniform. The policy logits are
         # assembled from several additive branches; leaving all policy output

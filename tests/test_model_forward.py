@@ -380,6 +380,7 @@ def test_better_street_value_phase_conditioning_changes_output():
         num_players=num_players,
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(2))
+    assert torch.count_nonzero(model.belief_phase_shift.weight) == 0
     beliefs = torch.full(
         (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
     )
