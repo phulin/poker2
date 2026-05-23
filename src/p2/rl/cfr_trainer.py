@@ -37,6 +37,7 @@ from p2.utils.ema_helper import EMAHelper
 from p2.utils.profiling import profile
 
 STREETS = ["preflop", "flop", "turn", "river", "showdown"]
+REPLAY_BUFFER_CHECKPOINT = "rebel_replay_buffers.pt"
 
 
 def _value_samples_per_step(batch_size: int, value_reuse_goal: float) -> int:
@@ -1544,6 +1545,37 @@ class RebelCFRTrainer:
 
         return history
 
+    @staticmethod
+    def replay_buffer_checkpoint_path(checkpoint_path: str) -> str:
+        directory = os.path.dirname(checkpoint_path)
+        if not directory:
+            directory = "."
+        return os.path.join(directory, REPLAY_BUFFER_CHECKPOINT)
+
+    def save_replay_buffers(self, checkpoint_path: str, step: int) -> str:
+        path = self.replay_buffer_checkpoint_path(checkpoint_path)
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        payload = {
+            "step": step,
+            "value_buffer": self.value_buffer.state_dict(),
+            "policy_buffer": self.policy_buffer.state_dict(),
+        }
+        tmp_path = f"{path}.tmp"
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, path)
+        return path
+
+    def load_replay_buffers(self, checkpoint_path: str) -> bool:
+        path = self.replay_buffer_checkpoint_path(checkpoint_path)
+        if not os.path.exists(path):
+            return False
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        self.value_buffer.load_state_dict(payload["value_buffer"])
+        self.policy_buffer.load_state_dict(payload["policy_buffer"])
+        return True
+
     def save_checkpoint(
         self,
         path: str,
@@ -1570,6 +1602,7 @@ class RebelCFRTrainer:
             "step": step,
             "save_dtype": str(save_dtype) if save_dtype is not None else None,
             "config": asdict(self.cfg),
+            "replay_buffer_checkpoint": REPLAY_BUFFER_CHECKPOINT,
             # Store wandb run ID for resumption
             "wandb_run_id": wandb_run_id,
         }
@@ -1595,6 +1628,7 @@ class RebelCFRTrainer:
             state["batch"] = batch_cpu
 
         torch.save(state, path)
+        self.save_replay_buffers(path, step)
 
     def load_checkpoint(self, path: str) -> int:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
@@ -1639,4 +1673,10 @@ class RebelCFRTrainer:
         # if "rng" in ckpt:
         #     self.rng.set_state(ckpt["rng"].to(self.device))
         self._sync_inference_model()
+        replay_loaded = self.load_replay_buffers(path)
+        if replay_loaded:
+            print(
+                "Replay buffers restored from "
+                f"{self.replay_buffer_checkpoint_path(path)}"
+            )
         return int(ckpt["step"])

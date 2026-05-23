@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -84,6 +84,103 @@ class RebelReplayBuffer:
 
     def __len__(self) -> int:
         return self.size
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return replay-buffer contents for checkpoint sidecar storage."""
+        cpu = torch.device("cpu")
+        return {
+            "capacity": self.capacity,
+            "num_actions": self.num_actions,
+            "num_players": self.num_players,
+            "dtype": str(self.dtype),
+            "policy_targets_enabled": self.policy_targets is not None,
+            "value_targets_enabled": self.value_targets is not None,
+            "features": {
+                "context": self.features.context.detach().to(cpu).clone(),
+                "street": self.features.street.detach().to(cpu).clone(),
+                "to_act": self.features.to_act.detach().to(cpu).clone(),
+                "board": self.features.board.detach().to(cpu).clone(),
+                "beliefs": self.features.beliefs.detach().to(cpu).clone(),
+            },
+            "policy_targets": (
+                self.policy_targets.detach().to(cpu).clone()
+                if self.policy_targets is not None
+                else None
+            ),
+            "value_targets": (
+                self.value_targets.detach().to(cpu).clone()
+                if self.value_targets is not None
+                else None
+            ),
+            "legal_masks": self.legal_masks.detach().to(cpu).clone(),
+            "statistics": {
+                key: value.detach().to(cpu).clone()
+                for key, value in self.statistics.items()
+            },
+            "sample_count": self.sample_count.detach().to(cpu).clone(),
+            "position": self.position,
+            "size": self.size,
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore replay-buffer contents saved by :meth:`state_dict`."""
+        expected = {
+            "capacity": self.capacity,
+            "num_actions": self.num_actions,
+            "num_players": self.num_players,
+        }
+        for key, value in expected.items():
+            if int(state[key]) != value:
+                raise ValueError(
+                    f"Replay buffer {key} mismatch: checkpoint has "
+                    f"{state[key]}, current buffer has {value}"
+                )
+        if bool(state["policy_targets_enabled"]) != (self.policy_targets is not None):
+            raise ValueError("Replay buffer policy target layout mismatch")
+        if bool(state["value_targets_enabled"]) != (self.value_targets is not None):
+            raise ValueError("Replay buffer value target layout mismatch")
+
+        features = state["features"]
+        self.features.context.copy_(
+            features["context"].to(device=self.device, dtype=self.features.context.dtype)
+        )
+        self.features.street.copy_(
+            features["street"].to(device=self.device, dtype=self.features.street.dtype)
+        )
+        self.features.to_act.copy_(
+            features["to_act"].to(device=self.device, dtype=self.features.to_act.dtype)
+        )
+        self.features.board.copy_(
+            features["board"].to(device=self.device, dtype=self.features.board.dtype)
+        )
+        self.features.beliefs.copy_(
+            features["beliefs"].to(device=self.device, dtype=self.features.beliefs.dtype)
+        )
+
+        if self.policy_targets is not None:
+            self.policy_targets.copy_(
+                state["policy_targets"].to(
+                    device=self.device, dtype=self.policy_targets.dtype
+                )
+            )
+        if self.value_targets is not None:
+            self.value_targets.copy_(
+                state["value_targets"].to(
+                    device=self.device, dtype=self.value_targets.dtype
+                )
+            )
+        self.legal_masks.copy_(
+            state["legal_masks"].to(device=self.device, dtype=self.legal_masks.dtype)
+        )
+        self.sample_count.copy_(
+            state["sample_count"].to(device=self.device, dtype=self.sample_count.dtype)
+        )
+        self.statistics = {
+            key: value.to(device=self.device).clone()
+            for key, value in state["statistics"].items()
+        }
+        self.position = int(state["position"])
+        self.size = int(state["size"])
 
     def _depth_stratified_probs(self, depths: torch.Tensor) -> torch.Tensor:
         num_buckets = self.depth_stratify_buckets

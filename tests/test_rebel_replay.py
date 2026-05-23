@@ -61,6 +61,52 @@ def test_rebel_replay_buffer_roundtrip():
     assert sample.legal_masks.shape == (2, 5)
 
 
+def test_rebel_replay_buffer_state_dict_roundtrip():
+    device = torch.device("cpu")
+    source = RebelReplayBuffer(
+        capacity=8,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=device,
+    )
+    batch = RebelBatch(
+        features=MLPFeatures(
+            context=torch.arange(24, dtype=torch.float32).view(6, 4),
+            street=torch.arange(6, dtype=torch.long) % 4,
+            to_act=torch.arange(6, dtype=torch.long) % 2,
+            board=torch.arange(30, dtype=torch.long).view(6, 5),
+            beliefs=torch.randn(6, 2 * NUM_HANDS),
+        ),
+        policy_targets=torch.softmax(torch.randn(6, NUM_HANDS, 5), dim=-1),
+        value_targets=torch.randn(6, 2, NUM_HANDS),
+        legal_masks=torch.ones(6, 5, dtype=torch.bool),
+        statistics={"node_depth": torch.arange(6, dtype=torch.long)},
+    )
+    source.add_batch(batch)
+    source.sample(3)
+
+    restored = RebelReplayBuffer(
+        capacity=8,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=device,
+    )
+    restored.load_state_dict(source.state_dict())
+
+    assert restored.position == source.position
+    assert restored.size == source.size
+    torch.testing.assert_close(restored.features.context, source.features.context)
+    torch.testing.assert_close(restored.policy_targets, source.policy_targets)
+    torch.testing.assert_close(restored.value_targets, source.value_targets)
+    torch.testing.assert_close(restored.legal_masks, source.legal_masks)
+    torch.testing.assert_close(restored.sample_count, source.sample_count)
+    torch.testing.assert_close(
+        restored.statistics["node_depth"], source.statistics["node_depth"]
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_rebel_replay_buffer_cuda_roundtrip():
     device = torch.device("cuda")

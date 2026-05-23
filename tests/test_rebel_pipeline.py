@@ -470,6 +470,32 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
 
     ckpt_path = tmp_path / "rebel.pt"
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    value_batch = RebelBatch(
+        features=MLPFeatures(
+            context=torch.arange(8, dtype=torch.float32).view(2, 4),
+            street=torch.zeros(2, dtype=torch.long),
+            to_act=torch.zeros(2, dtype=torch.long),
+            board=torch.full((2, 5), -1, dtype=torch.long),
+            beliefs=torch.full((2, 2 * NUM_HANDS), 1.0 / NUM_HANDS),
+        ),
+        policy_targets=None,
+        value_targets=torch.arange(2 * 2 * NUM_HANDS, dtype=torch.float32).view(
+            2, 2, NUM_HANDS
+        ),
+        legal_masks=torch.ones(2, cfg.model.num_actions, dtype=torch.bool),
+    )
+    policy_batch = RebelBatch(
+        features=value_batch.features.clone(),
+        policy_targets=torch.full(
+            (2, NUM_HANDS, cfg.model.num_actions),
+            1.0 / cfg.model.num_actions,
+        ),
+        value_targets=None,
+        legal_masks=torch.ones(2, cfg.model.num_actions, dtype=torch.bool),
+        statistics={"node_depth": torch.arange(2, dtype=torch.long)},
+    )
+    trainer.value_buffer.add_batch(value_batch)
+    trainer.policy_buffer.add_batch(policy_batch)
     trainer.save_checkpoint(str(ckpt_path), step=3, save_optimizer=False)
 
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -480,6 +506,26 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
     loaded_step = new_trainer.load_checkpoint(str(ckpt_path))
 
     assert loaded_step == 3
+    replay_path = RebelCFRTrainer.replay_buffer_checkpoint_path(str(ckpt_path))
+    assert (tmp_path / "rebel_replay_buffers.pt").samefile(replay_path)
+    assert len(new_trainer.value_buffer) == len(trainer.value_buffer)
+    assert len(new_trainer.policy_buffer) == len(trainer.policy_buffer)
+    torch.testing.assert_close(
+        new_trainer.value_buffer.features.context,
+        trainer.value_buffer.features.context,
+    )
+    torch.testing.assert_close(
+        new_trainer.value_buffer.value_targets,
+        trainer.value_buffer.value_targets,
+    )
+    torch.testing.assert_close(
+        new_trainer.policy_buffer.policy_targets,
+        trainer.policy_buffer.policy_targets,
+    )
+    torch.testing.assert_close(
+        new_trainer.policy_buffer.statistics["node_depth"],
+        trainer.policy_buffer.statistics["node_depth"],
+    )
 
 
 def test_permutation_loss_echo_model():
