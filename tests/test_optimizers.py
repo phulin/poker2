@@ -7,6 +7,18 @@ from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.optimizers import SplitOptimizer, build_optimizer
 
 
+def _adamw_param_groups(optimizer: torch.optim.AdamW):
+    decay_groups = [
+        group for group in optimizer.param_groups if group.get("weight_decay", 0.0) > 0
+    ]
+    no_decay_groups = [
+        group
+        for group in optimizer.param_groups
+        if group.get("weight_decay", 0.0) == 0.0
+    ]
+    return decay_groups, no_decay_groups
+
+
 def test_muon_optimizer_splits_matrix_params_from_other_params():
     if not hasattr(torch.optim, "Muon"):
         pytest.skip("torch.optim.Muon is not available")
@@ -25,13 +37,17 @@ def test_muon_optimizer_splits_matrix_params_from_other_params():
     assert isinstance(optimizer.optimizers[0][1], torch.optim.Muon)
     assert isinstance(optimizer.optimizers[1][1], torch.optim.AdamW)
     assert optimizer.optimizers[0][1].param_groups[0]["params"][0] is model[1].weight
-    assert set(optimizer.optimizers[1][1].param_groups[0]["params"]) == {
+    adamw = optimizer.optimizers[1][1]
+    decay_groups, no_decay_groups = _adamw_param_groups(adamw)
+    assert set(decay_groups[0]["params"]) == {
         model[0].weight,
         model[1].bias,
+    }
+    assert set(no_decay_groups[0]["params"]) == {
         model[2].weight,
         model[2].bias,
     }
-    assert optimizer.optimizers[1][1].param_groups[0]["lr_role"] == "adamw"
+    assert all(group["lr_role"] == "adamw" for group in adamw.param_groups)
 
 
 def test_adamw_optimizer_uses_separate_adamw_lr():
@@ -48,6 +64,11 @@ def test_adamw_optimizer_uses_separate_adamw_lr():
     assert isinstance(optimizer, torch.optim.AdamW)
     assert optimizer.param_groups[0]["lr"] == 3e-4
     assert optimizer.param_groups[0]["lr_role"] == "adamw"
+    _, no_decay_groups = _adamw_param_groups(optimizer)
+    assert set(no_decay_groups[0]["params"]) == {
+        model[1].weight,
+        model[1].bias,
+    }
 
 
 def test_muon_optimizer_uses_separate_adamw_lr_for_all_adamw_params():
@@ -70,12 +91,15 @@ def test_muon_optimizer_uses_separate_adamw_lr_for_all_adamw_params():
 
     assert isinstance(optimizer, SplitOptimizer)
     assert [name for name, _ in optimizer.optimizers] == ["muon", "adamw"]
-    adamw_group = optimizer.optimizers[1][1].param_groups[0]
-    assert adamw_group["lr"] == 3e-4
-    assert adamw_group["lr_role"] == "adamw"
-    assert set(adamw_group["params"]) == {
+    adamw = optimizer.optimizers[1][1]
+    decay_groups, no_decay_groups = _adamw_param_groups(adamw)
+    assert all(group["lr"] == 3e-4 for group in adamw.param_groups)
+    assert all(group["lr_role"] == "adamw" for group in adamw.param_groups)
+    assert set(decay_groups[0]["params"]) == {
         model[0].weight,
         model[1].bias,
+    }
+    assert set(no_decay_groups[0]["params"]) == {
         model[2].weight,
         model[2].bias,
     }
@@ -119,6 +143,31 @@ def test_muon_optimizer_uses_separate_policy_head_lr():
     }
     assert optimizer.optimizers[1][1].param_groups[0]["lr"] == 0.05
     assert optimizer.optimizers[1][1].param_groups[0]["lr_role"] == "policy_head_muon"
+
+
+def test_adamw_excludes_policy_factor_scale_and_norm_params_from_weight_decay():
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(4, 4)
+            self.norm = nn.RMSNorm(4)
+            self.policy_factor_scale = nn.Parameter(torch.tensor(1.0))
+
+    model = Model()
+    cfg = TrainingConfig(optimizer="adamw", learning_rate=1e-3, weight_decay=0.01)
+
+    optimizer = build_optimizer(model, cfg, torch.device("cpu"))
+
+    assert isinstance(optimizer, torch.optim.AdamW)
+    decay_groups, no_decay_groups = _adamw_param_groups(optimizer)
+    assert set(decay_groups[0]["params"]) == {
+        model.linear.weight,
+        model.linear.bias,
+    }
+    assert set(no_decay_groups[0]["params"]) == {
+        model.norm.weight,
+        model.policy_factor_scale,
+    }
 
 
 def test_cfr_schedule_scales_policy_head_muon_lr():

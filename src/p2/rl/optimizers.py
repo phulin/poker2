@@ -64,6 +64,19 @@ class SplitOptimizer:
 TrainOptimizer = torch.optim.Optimizer | SplitOptimizer
 
 
+_NORM_MODULES = (
+    nn.BatchNorm1d,
+    nn.BatchNorm2d,
+    nn.BatchNorm3d,
+    nn.GroupNorm,
+    nn.InstanceNorm1d,
+    nn.InstanceNorm2d,
+    nn.InstanceNorm3d,
+    nn.LayerNorm,
+    nn.RMSNorm,
+)
+
+
 def _optimizer_name(train_cfg: TrainingConfig) -> str:
     return str(train_cfg.optimizer).strip().lower()
 
@@ -73,11 +86,31 @@ def _adamw(
     train_cfg: TrainingConfig,
     device: torch.device,
     lr: float | None = None,
+    no_decay_param_ids: set[int] | None = None,
 ) -> torch.optim.AdamW:
+    decay_params: list[nn.Parameter] = []
+    no_decay_params: list[nn.Parameter] = []
+    no_decay_param_ids = no_decay_param_ids or set()
+    for param in params:
+        if id(param) in no_decay_param_ids:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    param_groups: list[dict[str, Any]] = []
+    if decay_params:
+        param_groups.append(
+            {
+                "params": decay_params,
+                "weight_decay": train_cfg.weight_decay,
+            }
+        )
+    if no_decay_params:
+        param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
+
     optimizer = torch.optim.AdamW(
-        params,
+        param_groups,
         lr=train_cfg.learning_rate if lr is None else lr,
-        weight_decay=train_cfg.weight_decay,
         fused=(device.type == "cuda"),
     )
     for param_group in optimizer.param_groups:
@@ -87,6 +120,23 @@ def _adamw(
 
 def _is_policy_head_param(name: str) -> bool:
     return name.startswith("policy_") or name.startswith("policy_head.")
+
+
+def _no_weight_decay_param_ids(model: nn.Module) -> set[int]:
+    """Parameters that should not be pulled toward smaller logit/activation scale."""
+    no_decay: set[int] = set()
+    for name, param in model.named_parameters():
+        if name.rsplit(".", maxsplit=1)[-1] == "policy_factor_scale":
+            no_decay.add(id(param))
+
+    for module in model.modules():
+        if isinstance(module, _NORM_MODULES):
+            no_decay.update(
+                id(param)
+                for param in module.parameters(recurse=False)
+                if param.requires_grad
+            )
+    return no_decay
 
 
 def _muon(
@@ -124,8 +174,15 @@ def build_optimizer(
     )
     if adamw_lr <= 0.0:
         raise ValueError("train.adamw_learning_rate must be positive when set")
+    no_decay_param_ids = _no_weight_decay_param_ids(model)
     if optimizer_name == "adamw":
-        return _adamw(model.parameters(), train_cfg, device, lr=adamw_lr)
+        return _adamw(
+            model.parameters(),
+            train_cfg,
+            device,
+            lr=adamw_lr,
+            no_decay_param_ids=no_decay_param_ids,
+        )
     if optimizer_name != "muon":
         raise ValueError(
             f"train.optimizer must be one of: adamw, muon; got {train_cfg.optimizer!r}"
@@ -171,7 +228,16 @@ def build_optimizer(
         optimizers.append(("policy_head_muon", policy_head_optimizer))
     if other_params:
         optimizers.append(
-            ("adamw", _adamw(other_params, train_cfg, device, lr=adamw_lr))
+            (
+                "adamw",
+                _adamw(
+                    other_params,
+                    train_cfg,
+                    device,
+                    lr=adamw_lr,
+                    no_decay_param_ids=no_decay_param_ids,
+                ),
+            )
         )
 
     if not optimizers:
