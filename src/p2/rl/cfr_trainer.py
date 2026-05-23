@@ -1594,6 +1594,7 @@ class RebelCFRTrainer:
         if batch is not None:
             batch_cpu = batch.to(torch.device("cpu"))
             state["batch"] = batch_cpu
+        state["data_generator"] = self.data_generator.state_dict()
 
         torch.save(state, path)
         self.save_replay_buffers(path, step)
@@ -1641,6 +1642,8 @@ class RebelCFRTrainer:
         # if "rng" in ckpt:
         #     self.rng.set_state(ckpt["rng"].to(self.device))
         self._sync_inference_model()
+        if "data_generator" in ckpt:
+            self.data_generator.load_state_dict(ckpt["data_generator"])
         replay_loaded = self.load_replay_buffers(path)
         if replay_loaded:
             print(

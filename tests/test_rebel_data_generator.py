@@ -20,6 +20,7 @@ class DummyEnv:
         self.N = int(num_envs)
         self.num_actions = int(num_actions)
         self.states = torch.arange(base_state, base_state + self.N, dtype=torch.float32)
+        self.street = torch.zeros(self.N, dtype=torch.long)
         rows = torch.arange(self.N, dtype=torch.long).unsqueeze(1)
         cols = torch.arange(self.num_actions, dtype=torch.long).unsqueeze(0)
         self._legal_mask = (rows + cols) % 2 == 0
@@ -39,6 +40,7 @@ class DummyEnv:
             return
         self.copy_history.append((src.clone(), dest.clone()))
         self.states[dest] = src_env.states[src]
+        self.street[dest] = src_env.street[src]
 
     def reset(self, indices: torch.Tensor | None = None) -> None:
         if indices is None:
@@ -49,6 +51,7 @@ class DummyEnv:
             return
         self.reset_history.append(ids.clone())
         self.states[ids] = -1.0
+        self.street[ids] = 0
 
     def legal_bins_mask(self) -> torch.Tensor:
         return self._legal_mask.clone()
@@ -191,6 +194,19 @@ class DummyEvaluator:
         return value_batch, value_batch, policy_batch
 
 
+class WarmupEvaluator(DummyEvaluator):
+    def evaluate_cfr(self):
+        self.self_play_calls += 1
+        assert self.last_initialized_env is not None
+        env = DummyEnv(self.last_initialized_env.N, self.num_actions)
+        ids = torch.arange(env.N, dtype=torch.long)
+        env.copy_state_from(self.last_initialized_env, ids, ids)
+        env.street.clamp_(max=3)
+        env.street = (env.street + 1).clamp(max=3)
+        beliefs = self.last_beliefs.clone()
+        return PublicBeliefState(env=env, beliefs=beliefs)
+
+
 def fake_from_proto(proto: SimpleNamespace, num_envs: int | None = None) -> DummyEnv:
     count = num_envs or proto.num_envs
     return DummyEnv(count, proto.num_actions)
@@ -315,3 +331,64 @@ def test_rebel_data_generator_multiple_iterations(monkeypatch, env_proto):
     assert evaluator.self_play_calls >= 1
     # Should have added multiple batches to buffer
     assert len(buffer.batches) >= 1
+
+
+def test_rebel_data_generator_warmup_mixes_streets(monkeypatch):
+    monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
+    env_proto = SimpleNamespace(num_envs=8, num_actions=5)
+    evaluator = WarmupEvaluator(
+        env_proto=env_proto,
+        search_batch_size=8,
+        total_nodes=8,
+        num_players=2,
+        num_actions=env_proto.num_actions,
+    )
+    buffer = DummyBuffer()
+
+    generator = RebelDataGenerator(
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
+    )
+
+    assert evaluator.self_play_calls == 3
+    assert generator.current_pbs.env.N == 8
+    counts = torch.bincount(generator.current_pbs.env.street, minlength=4)
+    torch.testing.assert_close(counts, torch.tensor([2, 2, 2, 2]))
+
+
+def test_rebel_data_generator_state_dict_roundtrip(monkeypatch):
+    monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
+    env_proto = SimpleNamespace(num_envs=2, num_actions=5)
+    evaluator = DummyEvaluator(
+        env_proto=env_proto,
+        search_batch_size=2,
+        total_nodes=4,
+        num_players=2,
+        num_actions=env_proto.num_actions,
+    )
+    buffer = DummyBuffer()
+    generator = RebelDataGenerator(
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
+        warmup=False,
+    )
+    generator.current_pbs.env.street[:] = torch.tensor([1, 3])
+    generator.current_pbs.beliefs.fill_(0.25)
+    generator.last_extra = 7
+
+    restored = RebelDataGenerator(
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
+        warmup=False,
+    )
+    restored.load_state_dict(generator.state_dict())
+
+    assert restored.last_extra == 7
+    torch.testing.assert_close(restored.current_pbs.env.street, torch.tensor([1, 3]))
+    torch.testing.assert_close(restored.current_pbs.beliefs, generator.current_pbs.beliefs)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from abc import ABC
 from dataclasses import dataclass
 
@@ -2043,6 +2044,17 @@ class CFREvaluator(ABC):
 
         street_root = self.env.street[:N]
         actions_root = self.env.actions_this_round[:N]
+        mid_street_value_roots = (street_root < 4) & (actions_root > 0)
+        if mid_street_value_roots.any():
+            count = int(mid_street_value_roots.sum().item())
+            self.stats["mid_street_value_root_count"] = float(count)
+            warnings.warn(
+                "training_data() received mid-street roots for value targets; "
+                "value supervision is intended for street-boundary roots only. "
+                f"count={count}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         root_nodes = (street_root == 0) & (actions_root == 0)
         if exclude_start:
             value_batch = value_batch[~root_nodes]

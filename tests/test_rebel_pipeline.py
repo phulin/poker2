@@ -498,6 +498,9 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
     )
     trainer.value_buffer.add_batch(value_batch)
     trainer.policy_buffer.add_batch(policy_batch)
+    trainer.data_generator.current_pbs.env.street.fill_(2)
+    trainer.data_generator.current_pbs.beliefs.fill_(0.25)
+    trainer.data_generator.last_extra = 5
     trainer.save_checkpoint(str(ckpt_path), step=3, save_optimizer=False)
 
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -512,6 +515,15 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
     assert (tmp_path / "rebel_replay_buffers.pt").samefile(replay_path)
     assert len(new_trainer.value_buffer) == len(trainer.value_buffer)
     assert len(new_trainer.policy_buffer) == len(trainer.policy_buffer)
+    assert new_trainer.data_generator.last_extra == 5
+    torch.testing.assert_close(
+        new_trainer.data_generator.current_pbs.env.street,
+        trainer.data_generator.current_pbs.env.street,
+    )
+    torch.testing.assert_close(
+        new_trainer.data_generator.current_pbs.beliefs,
+        trainer.data_generator.current_pbs.beliefs,
+    )
     torch.testing.assert_close(
         new_trainer.value_buffer.features.context,
         trainer.value_buffer.features.context,

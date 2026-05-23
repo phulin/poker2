@@ -8,6 +8,35 @@ from p2.search.cfr_evaluator import CFREvaluator, PublicBeliefState
 from p2.utils.profiling import profile
 
 
+_ENV_STATE_FIELDS = (
+    "deck",
+    "deck_pos",
+    "button",
+    "street",
+    "to_act",
+    "last_to_act",
+    "pot",
+    "min_raise",
+    "actions_this_round",
+    "actions_last_round",
+    "acted_since_reset",
+    "stacks",
+    "committed",
+    "has_folded",
+    "is_allin",
+    "starting_stacks",
+    "scale",
+    "board_onehot",
+    "hole_onehot",
+    "board_indices",
+    "last_board_indices",
+    "hole_indices",
+    "chips_placed",
+    "done",
+    "winner",
+)
+
+
 class RebelDataGenerator:
     def __init__(
         self,
@@ -15,6 +44,7 @@ class RebelDataGenerator:
         evaluator: CFREvaluator,
         value_buffer: RebelReplayBuffer,
         policy_buffer: RebelReplayBuffer,
+        warmup: bool = True,
     ):
         self.env_proto = env_proto
         self.evaluator = evaluator
@@ -24,6 +54,8 @@ class RebelDataGenerator:
         initial_pbs = self._new_pbs(evaluator.root_nodes)
         self.current_pbs = initial_pbs
         self.last_extra = 0
+        if warmup:
+            self._warmup_current_pbs()
 
     @torch.no_grad()
     def _record_batch_diag(self, refilled: bool) -> None:
@@ -97,6 +129,83 @@ class RebelDataGenerator:
         new_pbs.env.copy_state_from(pbs.env, indices, indices)
         new_pbs.beliefs[:current_size] = pbs.beliefs
         return new_pbs
+
+    def _advance_current_pbs_once(self) -> None:
+        assert self.current_pbs is not None
+        n = self.current_pbs.env.N
+        if n == 0:
+            return
+        root_indices = torch.arange(n, device=self.device)
+        self.evaluator.initialize_subgame(
+            self.current_pbs.env,
+            root_indices,
+            self.current_pbs.beliefs,
+        )
+        self.current_pbs = self.evaluator.evaluate_cfr()
+
+    def _warmup_current_pbs(self) -> None:
+        target = int(self.evaluator.root_nodes)
+        quarter = target // 4
+        if quarter == 0:
+            return
+
+        counts = (quarter, quarter, quarter, target - 3 * quarter)
+        self.current_pbs = self._new_pbs(counts[0])
+        for next_count in counts[1:3]:
+            self._advance_current_pbs_once()
+            if self.current_pbs is None:
+                self.current_pbs = self._new_pbs(next_count)
+            else:
+                self.current_pbs = self._extend_pbs(
+                    self.current_pbs,
+                    self.current_pbs.env.N + next_count,
+                )
+
+        self._advance_current_pbs_once()
+        if self.current_pbs is None:
+            self.current_pbs = self._new_pbs(counts[3])
+        else:
+            self.current_pbs = self._extend_pbs(
+                self.current_pbs,
+                self.current_pbs.env.N + counts[3],
+            )
+
+    def _pbs_state_dict(self, pbs: PublicBeliefState | None) -> dict | None:
+        if pbs is None:
+            return None
+        return {
+            "beliefs": pbs.beliefs.detach().cpu(),
+            "env": {
+                name: getattr(pbs.env, name).detach().cpu()
+                for name in _ENV_STATE_FIELDS
+                if hasattr(pbs.env, name)
+            },
+        }
+
+    def _pbs_from_state_dict(self, state: dict | None) -> PublicBeliefState | None:
+        if state is None:
+            return None
+        beliefs = state["beliefs"].to(device=self.device)
+        n = int(beliefs.shape[0])
+        pbs = PublicBeliefState.from_proto(
+            env_proto=self.env_proto,
+            beliefs=beliefs,
+            num_envs=n,
+        )
+        env_state = state["env"]
+        for name in env_state:
+            getattr(pbs.env, name).copy_(env_state[name].to(device=self.device))
+        return pbs
+
+    def state_dict(self) -> dict:
+        return {
+            "last_extra": int(self.last_extra),
+            "current_pbs": self._pbs_state_dict(self.current_pbs),
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        self.last_extra = int(state.get("last_extra", 0))
+        self.current_pbs = self._pbs_from_state_dict(state.get("current_pbs"))
 
     @profile
     def generate_data(
