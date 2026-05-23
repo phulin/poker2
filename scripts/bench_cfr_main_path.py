@@ -86,6 +86,9 @@ COMPONENT_TAGS = [
     "cfr_leaf_showdown",
     "cfr_leaf_set_model_values",
     "cfr_model_fwd",
+    "cfr_graph_capture",
+    "cfr_graph_replay",
+    "cfr_prepare_replay",
     "cfr_sample_leaves",
     "cfr_training_data",
     "training_supervise",
@@ -108,6 +111,18 @@ CUDA_EVENT_TAGS = {
     "cfr_evaluate",
     "cfr_init_subgame",
     *INIT_SUBTAGS,
+    "cfr_warm_start",
+    "cfr_iter",
+    "cfr_iter_update_policy",
+    "cfr_iter_expected_values",
+    "cfr_iter_avg_values",
+    "cfr_iter_avg_policy",
+    "cfr_set_leaf",
+    "cfr_leaf_showdown",
+    "cfr_leaf_set_model_values",
+    "cfr_model_fwd",
+    "cfr_sample_leaves",
+    "cfr_training_data",
     "training_supervise",
     "training_model_fwd",
     "training_metrics",
@@ -121,13 +136,17 @@ CUDA_EVENT_TAGS = {
 class CudaEventTimer:
     """Collect CUDA event timings for tagged Python regions."""
 
-    def __init__(self, device: torch.device) -> None:
+    def __init__(self, device: torch.device, *, sync_attribution: bool = False) -> None:
         self.enabled = device.type == "cuda"
+        self.device = device
+        self.sync_attribution = sync_attribution
         self.events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] = {}
+        self.sync_regions: dict[str, list[dict[str, float]]] = {}
         self.init_depth = 0
 
     def clear(self) -> None:
         self.events.clear()
+        self.sync_regions.clear()
 
     @contextmanager
     def init_scope(self):
@@ -155,6 +174,17 @@ class CudaEventTimer:
 
     @contextmanager
     def region(self, tag: str):
+        sync_region = (
+            self.enabled and self.sync_attribution and tag in INIT_SUBTAGS
+        )
+        if sync_region:
+            pre_t0 = time.perf_counter()
+            torch.cuda.synchronize()
+            pre_sync_ms = 1e3 * (time.perf_counter() - pre_t0)
+            wall_t0 = time.perf_counter()
+        else:
+            pre_sync_ms = 0.0
+            wall_t0 = 0.0
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         if self.enabled and tag in CUDA_EVENT_TAGS:
@@ -165,6 +195,14 @@ class CudaEventTimer:
             if self.enabled and tag in CUDA_EVENT_TAGS:
                 end.record()
                 self.events.setdefault(tag, []).append((start, end))
+            if sync_region:
+                torch.cuda.synchronize()
+                self.sync_regions.setdefault(tag, []).append(
+                    {
+                        "pre_sync_ms": pre_sync_ms,
+                        "region_wall_ms": 1e3 * (time.perf_counter() - wall_t0),
+                    }
+                )
 
     def summary(
         self, active_steps: int, active_wall_s: list[float]
@@ -199,7 +237,30 @@ class CudaEventTimer:
                 }
             )
         rows.sort(key=lambda r: r["cuda_event_ms_per_step"], reverse=True)
-        return {"components": rows, "invalid_pairs": invalid_pairs}
+        sync_rows: list[dict[str, Any]] = []
+        if self.sync_regions:
+            for tag, timings in self.sync_regions.items():
+                pre_total = sum(row["pre_sync_ms"] for row in timings)
+                wall_total = sum(row["region_wall_ms"] for row in timings)
+                sync_rows.append(
+                    {
+                        "component": tag,
+                        "calls_per_step": len(timings) / max(1, active_steps),
+                        "pre_sync_ms_per_step": pre_total / max(1, active_steps),
+                        "region_wall_ms_per_step": wall_total / max(1, active_steps),
+                    }
+                )
+            sync_rows.sort(
+                key=lambda r: (
+                    r["pre_sync_ms_per_step"] + r["region_wall_ms_per_step"]
+                ),
+                reverse=True,
+            )
+        return {
+            "components": rows,
+            "invalid_pairs": invalid_pairs,
+            "sync_attribution": sync_rows,
+        }
 
 
 def _iter_processes() -> list[tuple[int, str]]:
@@ -428,12 +489,35 @@ def _patch_profiler_tags(
         ("update_average_policy", "cfr_iter_avg_policy"),
         ("sample_leaves", "cfr_sample_leaves"),
         ("training_data", "cfr_training_data"),
+        ("prepare_replay", "cfr_prepare_replay"),
     ):
         if hasattr(ev, attr):
             if attr == "initialize_subgame":
                 _wrap_init_method(ev, attr, tag, event_timer)
             else:
                 _wrap_method(ev, attr, tag, event_timer)
+
+    try:
+        import p2.search.fused_sparse_cfr_evaluator as fused_sparse_cfr_evaluator
+
+        graph_cls = fused_sparse_cfr_evaluator.GraphedCFRIteration
+    except Exception:
+        graph_cls = None
+    if graph_cls is not None:
+        _wrap_class_method(
+            graph_cls,
+            "capture",
+            "cfr_graph_capture",
+            patched_methods,
+            event_timer,
+        )
+        _wrap_class_method(
+            graph_cls,
+            "replay",
+            "cfr_graph_replay",
+            patched_methods,
+            event_timer,
+        )
 
 
 def _apply_realistic_overrides(cfg: Config, args: argparse.Namespace) -> None:
@@ -551,7 +635,11 @@ def run_source_benchmark(
     trainer: RebelCFRTrainer, args: argparse.Namespace
 ) -> dict[str, Any]:
     device = trainer.device
-    event_timer = CudaEventTimer(device) if args.cuda_events else None
+    event_timer = (
+        CudaEventTimer(device, sync_attribution=args.sync_attribution)
+        if args.cuda_events
+        else None
+    )
     fused_init_hook_prev = None
     if event_timer is not None:
         import p2.search.fused_sparse_cfr_evaluator as fused_sparse_cfr_evaluator
@@ -944,6 +1032,16 @@ def _print_source_summary(source: dict[str, Any]) -> None:
                 f" {row['cuda_event_pct_of_wall']:>6.1f}% wall"
                 f" calls/step={row['calls_per_step']:.1f}"
             )
+        sync_rows = source["cuda_events"].get("sync_attribution", [])
+        if sync_rows:
+            print("  sync attribution init regions:")
+            for row in sync_rows[:16]:
+                print(
+                    f"    {row['component']:<34}"
+                    f" pre_sync={row['pre_sync_ms_per_step']:>9.2f} ms"
+                    f" own_wall={row['region_wall_ms_per_step']:>9.2f} ms"
+                    f" calls/step={row['calls_per_step']:.1f}"
+                )
 
 
 def _print_micro_summary(micro: dict[str, Any]) -> None:
@@ -971,6 +1069,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--depth", type=int, default=None)
     parser.add_argument("--keep-hydra-model-config", action="store_true")
     parser.add_argument("--cuda-events", action="store_true")
+    parser.add_argument("--sync-attribution", action="store_true")
     parser.add_argument("--no-torch-profiler", action="store_true")
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--no-pause", action="store_true")
