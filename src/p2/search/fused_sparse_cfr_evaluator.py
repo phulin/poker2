@@ -1980,11 +1980,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
         actor_beliefs = beliefs.gather(1, actor_indices).squeeze(1)[:top]
 
-        marginal_policy = policy_src_all * actor_beliefs[:, None, :]
-        opponent_conditioned_policy = self._conditioned_action_ratio(
-            marginal_policy, actor_beliefs
-        )
-
         for depth in range(self.tree_depth - 1, -1, -1):
             offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
@@ -2006,6 +2001,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 mass_by_action,
                 actor_beliefs[offset:offset_next].contiguous(),
             )
+            marginal_policy = (
+                policy_src_all[offset:offset_next]
+                * actor_beliefs[offset:offset_next, None, :]
+            ).contiguous()
+            opponent_conditioned_policy = self._conditioned_action_ratio(
+                marginal_policy,
+                actor_beliefs[offset:offset_next].contiguous(),
+            )
             fused_br_finalize_depth_(
                 values=values_br,
                 policy=policy,
@@ -2020,6 +2023,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 parent_base=offset,
                 num_actions=B,
                 max_children=self.num_actions,
+                opponent_policy_base=offset,
             )
 
         return values_br

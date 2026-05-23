@@ -218,12 +218,14 @@ class RebelDataGenerator:
         value_sample_count: int,
         return_value_batch: bool = True,
         return_policy_batch: bool = True,
+        max_return_policy_samples: int | None = None,
     ) -> tuple[RebelBatch | None, RebelBatch | None]:
         target_batch_size = self.target_batch_size
         collected = self.last_extra
 
         value_batches = []
         policy_batches = []
+        returned_policy_samples = 0
 
         while collected < value_sample_count:
             refilled = False
@@ -255,7 +257,21 @@ class RebelDataGenerator:
             self.value_buffer.add_batch(augmented_value_batch)
 
             if return_policy_batch:
-                policy_batches.append(policy_batch)
+                remaining = (
+                    None
+                    if max_return_policy_samples is None
+                    else max_return_policy_samples - returned_policy_samples
+                )
+                if remaining is None or remaining > 0:
+                    if remaining is not None and len(policy_batch) > remaining:
+                        idx = torch.randperm(
+                            len(policy_batch),
+                            device=policy_batch.features.context.device,
+                            generator=self.evaluator.generator,
+                        )[:remaining]
+                        policy_batch = policy_batch[idx]
+                    policy_batches.append(policy_batch)
+                    returned_policy_samples += len(policy_batch)
             if return_value_batch:
                 value_batches.append(value_batch)
                 value_batches.append(augmented_value_batch)

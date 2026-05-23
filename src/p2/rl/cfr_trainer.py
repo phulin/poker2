@@ -648,6 +648,401 @@ class RebelCFRTrainer:
             )
         return out
 
+    @staticmethod
+    def _accumulate_ratio(
+        state: dict[str, tuple[torch.Tensor, torch.Tensor]],
+        key: str,
+        numer: torch.Tensor,
+        denom: torch.Tensor,
+    ) -> None:
+        numer = numer.detach()
+        denom = denom.detach()
+        if key in state:
+            prev_numer, prev_denom = state[key]
+            state[key] = (prev_numer + numer, prev_denom + denom)
+        else:
+            state[key] = (numer.clone(), denom.clone())
+
+    @staticmethod
+    def _bucket_sum_parts(
+        values: torch.Tensor,
+        buckets: torch.Tensor,
+        num_buckets: int,
+        weights: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        values = values.reshape(values.shape[0], -1).mean(dim=1)
+        buckets = buckets.reshape(-1).to(device=values.device, dtype=torch.long)
+        valid = (buckets >= 0) & (buckets < num_buckets)
+        buckets = buckets[valid]
+        values = values[valid]
+        if weights is None:
+            weights = torch.ones_like(values)
+        else:
+            weights = weights.reshape(-1).to(device=values.device, dtype=values.dtype)[
+                valid
+            ]
+        numer = torch.zeros(num_buckets, device=values.device, dtype=values.dtype)
+        denom = torch.zeros_like(numer)
+        numer.scatter_add_(0, buckets, values * weights)
+        denom.scatter_add_(0, buckets, weights)
+        return numer, denom
+
+    @staticmethod
+    def _bucket_counts(
+        buckets: torch.Tensor,
+        num_buckets: int,
+        *,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        buckets = buckets.reshape(-1).to(dtype=torch.long)
+        valid = (buckets >= 0) & (buckets < num_buckets)
+        return torch.bincount(buckets[valid], minlength=num_buckets)[:num_buckets].to(
+            device=buckets.device,
+            dtype=dtype,
+        )
+
+    def _new_train_metric_stream(self) -> dict[str, Any]:
+        dtype = torch.float32
+        device = self.device
+        return {
+            "value_batch_street": torch.zeros(len(STREETS), device=device, dtype=dtype),
+            "ratios": {},
+            "argmax_ratios": {},
+            "aggression_bet_sums": torch.zeros(
+                5, device=device, dtype=dtype
+            ),
+            "aggression_counts": torch.zeros(5, device=device, dtype=dtype),
+            "value_sum": None,
+            "value_sumsq": None,
+            "value_count": torch.zeros((), device=device, dtype=dtype),
+        }
+
+    @torch.no_grad()
+    def _accumulate_train_metrics(
+        self,
+        state: dict[str, Any],
+        value_batch: RebelBatch,
+        policy_batch: RebelBatch,
+        value_output: ModelOutput,
+        policy_output: ModelOutput,
+        value_loss_all: torch.Tensor,
+        policy_loss_all: torch.Tensor,
+        policy_target_model_kl_all: torch.Tensor,
+    ) -> None:
+        ratios = state["ratios"]
+        street_count = self._bucket_counts(
+            value_batch.features.street,
+            len(STREETS),
+            dtype=state["value_batch_street"].dtype,
+        )
+        state["value_batch_street"] += street_count
+
+        numer, denom = self._bucket_sum_parts(
+            value_loss_all,
+            value_batch.features.street,
+            len(STREETS),
+        )
+        self._accumulate_ratio(ratios, "value_loss_street", numer, denom)
+
+        numer, denom = self._bucket_sum_parts(
+            policy_loss_all,
+            policy_batch.features.street,
+            len(STREETS),
+        )
+        self._accumulate_ratio(ratios, "policy_loss_street", numer, denom)
+
+        node_weights = self.loss_fn._policy_node_weights(
+            policy_batch, policy_target_model_kl_all.dtype
+        )
+        depth = policy_batch.statistics.get("node_depth")
+        if depth is not None:
+            numer, denom = self._bucket_sum_parts(
+                policy_target_model_kl_all,
+                depth,
+                int(getattr(self.cfg.search, "depth", 0)) + 1,
+                weights=node_weights,
+            )
+            self._accumulate_ratio(
+                ratios,
+                "policy_target_model_kl_depth",
+                numer,
+                denom,
+            )
+
+        reach = policy_batch.statistics.get("policy_node_reach")
+        if reach is not None:
+            reach = reach.to(
+                device=policy_target_model_kl_all.device,
+                dtype=policy_target_model_kl_all.dtype,
+            )
+            reach_bucket = torch.full_like(reach, 4, dtype=torch.long)
+            reach_bucket = torch.where(reach >= 1e-4, 3, reach_bucket)
+            reach_bucket = torch.where(reach >= 1e-3, 2, reach_bucket)
+            reach_bucket = torch.where(reach >= 1e-2, 1, reach_bucket)
+            reach_bucket = torch.where(reach >= 1e-1, 0, reach_bucket)
+            numer, denom = self._bucket_sum_parts(
+                policy_target_model_kl_all,
+                reach_bucket,
+                5,
+                weights=node_weights,
+            )
+            self._accumulate_ratio(
+                ratios,
+                "policy_target_model_kl_reach_bucket",
+                numer,
+                denom,
+            )
+
+        self._accumulate_policy_argmax_metric_parts(
+            state["argmax_ratios"],
+            policy_output,
+            policy_batch,
+            policy_target_model_kl_all,
+        )
+
+        aggression = self.aggression_analyzer.analyze_batch(
+            policy_batch, max_batch_size=self.batch_size
+        )
+        if aggression:
+            counts = aggression["group_counts"].to(
+                device=state["aggression_counts"].device,
+                dtype=state["aggression_counts"].dtype,
+            )
+            avg_bets = aggression["group_avg_bets"].to(
+                device=state["aggression_bet_sums"].device,
+                dtype=state["aggression_bet_sums"].dtype,
+            )
+            state["aggression_counts"] += counts
+            state["aggression_bet_sums"] += avg_bets * counts
+
+        if value_output.value is not None:
+            value = value_output.value.detach().float()
+            value_sum = value.sum(dim=0)
+            value_sumsq = (value * value).sum(dim=0)
+            if state["value_sum"] is None:
+                state["value_sum"] = value_sum.clone()
+                state["value_sumsq"] = value_sumsq.clone()
+            else:
+                state["value_sum"] += value_sum
+                state["value_sumsq"] += value_sumsq
+            state["value_count"] += value.shape[0]
+
+    @torch.no_grad()
+    def _accumulate_policy_argmax_metric_parts(
+        self,
+        ratios: dict[str, tuple[torch.Tensor, torch.Tensor]],
+        output: ModelOutput,
+        batch: RebelBatch,
+        kl_all: torch.Tensor,
+    ) -> None:
+        if output.policy_logits is None or batch.policy_targets is None:
+            return
+        legal = batch.legal_masks[:, None, :]
+        logits = output.policy_logits.float()
+        masked_logits = torch.where(
+            legal, logits, torch.full_like(logits, float("-inf"))
+        )
+        model_top = masked_logits.argmax(dim=-1)
+        target_top = batch.policy_targets.argmax(dim=-1)
+        _, _, _, actor_belief, opp_matchup = self.loss_fn._policy_weights(batch)
+        hand_weights_unnormalized = actor_belief * opp_matchup
+        hand_weights = hand_weights_unnormalized / hand_weights_unnormalized.sum(
+            dim=-1, keepdim=True
+        ).clamp(min=1e-8)
+        metric_dtype = kl_all.dtype
+        node_correct_mass = (
+            (model_top == target_top).to(dtype=hand_weights.dtype) * hand_weights
+        ).sum(dim=-1)
+        action_bins = torch.arange(batch.policy_targets.shape[-1], device=kl_all.device)
+        hand_weights_expanded = hand_weights[:, :, None]
+        model_top_action_mass = (
+            (model_top[:, :, None] == action_bins[None, None, :]).to(
+                dtype=hand_weights.dtype
+            )
+            * hand_weights_expanded
+        ).sum(dim=1)
+        target_top_action_mass = (
+            (target_top[:, :, None] == action_bins[None, None, :]).to(
+                dtype=hand_weights.dtype
+            )
+            * hand_weights_expanded
+        ).sum(dim=1)
+        node_model_top = model_top_action_mass.argmax(dim=-1)
+        node_target_top = target_top_action_mass.argmax(dim=-1)
+
+        node_weights = self.loss_fn._policy_node_weights(batch, metric_dtype)
+        reduce_weights = (
+            torch.ones_like(kl_all, dtype=metric_dtype)
+            if node_weights is None
+            else node_weights.to(dtype=metric_dtype)
+        )
+        correct_mass = node_correct_mass.to(dtype=metric_dtype)
+        self._accumulate_ratio(
+            ratios,
+            "weighted_argmax_accuracy",
+            (correct_mass * reduce_weights).sum(),
+            reduce_weights.sum(),
+        )
+        self._accumulate_ratio(
+            ratios,
+            "train_weighted_argmax_accuracy",
+            (correct_mass * reduce_weights).sum(),
+            reduce_weights.sum(),
+        )
+        node_unit_weights = torch.ones_like(kl_all, dtype=metric_dtype)
+        self._accumulate_ratio(
+            ratios,
+            "node_argmax_accuracy",
+            correct_mass.sum(),
+            node_unit_weights.sum(),
+        )
+
+        correct_mask = node_model_top == node_target_top
+        group_ids = torch.where(
+            correct_mask,
+            torch.zeros_like(node_model_top, dtype=torch.long),
+            torch.ones_like(node_model_top, dtype=torch.long),
+        )
+        names = ["correct_top1", "wrong_top1"]
+
+        def add_group(prefix: str, weights: torch.Tensor, values: torch.Tensor) -> None:
+            group_den = torch.zeros(2, device=values.device, dtype=values.dtype)
+            group_num = torch.zeros_like(group_den)
+            group_den.scatter_add_(0, group_ids, weights)
+            group_num.scatter_add_(0, group_ids, weights * values)
+            total = weights.sum()
+            for idx, name in enumerate(names):
+                self._accumulate_ratio(
+                    ratios,
+                    f"{prefix}{name}",
+                    group_num[idx],
+                    group_den[idx],
+                )
+                if prefix == "kl_":
+                    self._accumulate_ratio(
+                        ratios,
+                        f"mass_{name}",
+                        group_den[idx],
+                        total,
+                    )
+                    self._accumulate_ratio(
+                        ratios,
+                        f"train_weight_frac_{name}",
+                        group_den[idx],
+                        total,
+                    )
+
+        add_group("kl_", reduce_weights, kl_all.to(dtype=metric_dtype))
+
+        node_group_den = torch.zeros(2, device=kl_all.device, dtype=metric_dtype)
+        node_group_den.scatter_add_(0, group_ids, node_unit_weights)
+        node_total = node_unit_weights.sum()
+        for idx, name in enumerate(names):
+            self._accumulate_ratio(
+                ratios,
+                f"node_frac_{name}",
+                node_group_den[idx],
+                node_total,
+            )
+
+        reach = batch.statistics.get("policy_node_reach")
+        if reach is not None:
+            reach_weights = reach.to(device=kl_all.device, dtype=metric_dtype).clamp(
+                min=0.0
+            )
+            self._accumulate_ratio(
+                ratios,
+                "reach_weighted_argmax_accuracy",
+                (correct_mass * reach_weights).sum(),
+                reach_weights.sum(),
+            )
+            group_den = torch.zeros(2, device=kl_all.device, dtype=metric_dtype)
+            group_num = torch.zeros_like(group_den)
+            group_den.scatter_add_(0, group_ids, reach_weights)
+            group_num.scatter_add_(0, group_ids, reach_weights * kl_all.to(metric_dtype))
+            total = reach_weights.sum()
+            for idx, name in enumerate(names):
+                self._accumulate_ratio(
+                    ratios,
+                    f"reach_kl_{name}",
+                    group_num[idx],
+                    group_den[idx],
+                )
+                self._accumulate_ratio(
+                    ratios,
+                    f"reach_mass_{name}",
+                    group_den[idx],
+                    total,
+                )
+
+    def _finalize_train_metric_stream(
+        self, state: dict[str, Any]
+    ) -> dict[str, float | dict[str, float]]:
+        def ratio_vector(key: str, names: list[str]) -> dict[str, float]:
+            if key not in state["ratios"]:
+                return {}
+            numer, denom = state["ratios"][key]
+            vals = torch.where(
+                denom > 0,
+                numer / denom.clamp(min=1e-12),
+                torch.full_like(denom, float("nan")),
+            )
+            vals_cpu = vals.cpu().tolist()
+            return {k: v for k, v in zip(names, vals_cpu) if not math.isnan(v)}
+
+        def ratio_scalars(
+            ratios: dict[str, tuple[torch.Tensor, torch.Tensor]]
+        ) -> dict[str, float]:
+            out: dict[str, float] = {}
+            for key, (numer, denom) in ratios.items():
+                if bool((denom > 0).item()):
+                    out[key] = (numer / denom.clamp(min=1e-12)).item()
+            return out
+
+        street_counts = state["value_batch_street"].cpu().tolist()
+        aggression_counts = state["aggression_counts"]
+        aggression_avg = torch.where(
+            aggression_counts > 0,
+            state["aggression_bet_sums"] / aggression_counts.clamp(min=1e-12),
+            torch.zeros_like(aggression_counts),
+        )
+        metrics: dict[str, float | dict[str, float]] = {
+            "value_batch_street": {
+                name: street_counts[i] for i, name in enumerate(STREETS)
+            },
+            "value_loss_street": ratio_vector("value_loss_street", list(STREETS)),
+            "policy_loss_street": ratio_vector("policy_loss_street", list(STREETS)),
+            "policy_target_model_kl_depth": ratio_vector(
+                "policy_target_model_kl_depth",
+                [f"depth_{i}" for i in range(int(getattr(self.cfg.search, "depth", 0)) + 1)],
+            ),
+            "policy_target_model_kl_reach_bucket": ratio_vector(
+                "policy_target_model_kl_reach_bucket",
+                [
+                    "ge_1e-1",
+                    "1e-2_to_1e-1",
+                    "1e-3_to_1e-2",
+                    "1e-4_to_1e-3",
+                    "lt_1e-4",
+                ],
+            ),
+            "policy_argmax_metrics": ratio_scalars(state["argmax_ratios"]),
+            "aggression_stats": {
+                f"chunk_{i}": v for i, v in enumerate(aggression_avg.cpu().tolist())
+            },
+        }
+
+        if state["value_sum"] is not None and bool((state["value_count"] > 1).item()):
+            count = state["value_count"]
+            value_sum = state["value_sum"]
+            value_sumsq = state["value_sumsq"]
+            var = (value_sumsq - (value_sum * value_sum) / count) / (count - 1)
+            metrics["value_mean_std"] = var.clamp_min(0.0).sqrt().mean().item()
+        else:
+            metrics["value_mean_std"] = 0.0
+
+        return metrics
+
     @torch.no_grad()
     def _compute_metrics(
         self,
@@ -664,6 +1059,7 @@ class RebelCFRTrainer:
         fresh_value_loss: float | None = None,
         fresh_value_batch: RebelBatch | None = None,
         fresh_policy_batch: RebelBatch | None = None,
+        streamed_train_metrics: dict[str, Any] | None = None,
     ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
         grad_norm_clipped = torch.nn.utils.get_total_norm(
             p.grad for p in self.model.parameters() if p.grad is not None
@@ -761,6 +1157,49 @@ class RebelCFRTrainer:
         value_buffer_streets_stats = street_count(
             self.value_buffer.features.street[: len(self.value_buffer)]
         )
+        if streamed_train_metrics is None:
+            aggression_stats = {
+                f"chunk_{i}": v
+                for i, v in enumerate(
+                    self.aggression_analyzer.analyze_batch(
+                        policy_batch, max_batch_size=self.batch_size
+                    )["group_avg_bets"].tolist()
+                )
+            }
+            value_batch_street = street_count(value_batch.features.street)
+            value_loss_street = by_street(value_loss_all)
+            policy_loss_street = by_street(policy_loss_all, batch=policy_batch)
+            policy_target_model_kl_depth = policy_metric_by_depth(
+                policy_target_model_kl_all, policy_batch
+            )
+            policy_target_model_kl_reach_bucket = policy_metric_by_reach_bucket(
+                policy_target_model_kl_all, policy_batch
+            )
+            policy_argmax_metrics = (
+                self._policy_argmax_metrics(
+                    policy_output, policy_batch, policy_target_model_kl_all
+                )
+                if policy_output is not None
+                else {}
+            )
+            value_mean_std = (
+                value_output.value.std(dim=0).mean()
+                if value_output.value is not None
+                else 0.0
+            )
+        else:
+            aggression_stats = streamed_train_metrics["aggression_stats"]
+            value_batch_street = streamed_train_metrics["value_batch_street"]
+            value_loss_street = streamed_train_metrics["value_loss_street"]
+            policy_loss_street = streamed_train_metrics["policy_loss_street"]
+            policy_target_model_kl_depth = streamed_train_metrics[
+                "policy_target_model_kl_depth"
+            ]
+            policy_target_model_kl_reach_bucket = streamed_train_metrics[
+                "policy_target_model_kl_reach_bucket"
+            ]
+            policy_argmax_metrics = streamed_train_metrics["policy_argmax_metrics"]
+            value_mean_std = streamed_train_metrics["value_mean_std"]
 
         metrics: dict[str, int | float | torch.Tensor | dict[str, int | float]] = {
             "episodes": episodes,
@@ -818,33 +1257,14 @@ class RebelCFRTrainer:
                 else 0.0
             ),
             "grad_norm_clipped": grad_norm_clipped,
-            "aggression_stats": {
-                f"chunk_{i}": v
-                for i, v in enumerate(
-                    self.aggression_analyzer.analyze_batch(
-                        policy_batch, max_batch_size=self.batch_size
-                    )["group_avg_bets"].tolist()
-                )
-            },
-            "value_batch_street": street_count(value_batch.features.street),
-            "value_loss_street": by_street(value_loss_all),
-            "policy_loss_street": by_street(policy_loss_all, batch=policy_batch),
-            "policy_target_model_kl_depth": policy_metric_by_depth(
-                policy_target_model_kl_all, policy_batch
-            ),
-            "policy_target_model_kl_reach_bucket": policy_metric_by_reach_bucket(
-                policy_target_model_kl_all, policy_batch
-            ),
-            "policy_argmax_metrics": (
-                self._policy_argmax_metrics(
-                    policy_output, policy_batch, policy_target_model_kl_all
-                )
-                if policy_output is not None
-                else {}
-            ),
-            "value_mean_std": value_output.value.std(dim=0).mean()
-            if value_output.value is not None
-            else 0.0,
+            "aggression_stats": aggression_stats,
+            "value_batch_street": value_batch_street,
+            "value_loss_street": value_loss_street,
+            "policy_loss_street": policy_loss_street,
+            "policy_target_model_kl_depth": policy_target_model_kl_depth,
+            "policy_target_model_kl_reach_bucket": policy_target_model_kl_reach_bucket,
+            "policy_argmax_metrics": policy_argmax_metrics,
+            "value_mean_std": value_mean_std,
             **self.cfr_evaluator.stats,
         }
         if self.policy_extra_updates_per_step > 0:
@@ -1256,7 +1676,9 @@ class RebelCFRTrainer:
         self, step: int
     ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
         fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
-            self.K_value, return_policy_batch=True
+            self.K_value,
+            return_policy_batch=True,
+            max_return_policy_samples=self.batch_size,
         )
 
         # Warmup: make sure we have enough samples.
@@ -1284,13 +1706,14 @@ class RebelCFRTrainer:
             self.cfg.model.num_supervisions if isinstance(self.model, BetterTRM) else 1
         )
         updates = episodes * supervisions
-        value_batch_all = []
-        policy_batch_all = []
-        value_output_all = []
-        policy_output_all = []
-        value_loss_update_all = []
-        policy_loss_update_all = []
-        policy_kl_update_all = []
+        metric_value_batch = None
+        metric_policy_batch = None
+        metric_value_output = None
+        metric_policy_output = None
+        metric_value_loss_all = None
+        metric_policy_loss_all = None
+        metric_policy_kl_all = None
+        streamed_metric_state = self._new_train_metric_stream()
         step_stats: dict[str, float] = {}
         # Tensor-valued accumulators kept on device until end-of-step. The
         # original code did a host sync per supervision for each of these
@@ -1394,14 +1817,25 @@ class RebelCFRTrainer:
                 v = episode_stats[k]
                 tensor_stats[k] = v if acc is None else acc + v
 
-            # Append last batch/output for metrics.
-            value_batch_all.append(permuted_batch)
-            policy_batch_all.append(policy_batch)
-            value_output_all.append(permuted_value_output)
-            policy_output_all.append(policy_output)
-            value_loss_update_all.append(value_loss_update)
-            policy_loss_update_all.append(policy_loss_update)
-            policy_kl_update_all.append(policy_kl_update)
+            # Keep the last bounded batch for metric paths that still need a
+            # concrete batch; aggregate diagnostics stream into small tensors.
+            metric_value_batch = permuted_batch
+            metric_policy_batch = policy_batch
+            metric_value_output = permuted_value_output
+            metric_policy_output = policy_output
+            metric_value_loss_all = value_loss_update
+            metric_policy_loss_all = policy_loss_update
+            metric_policy_kl_all = policy_kl_update
+            self._accumulate_train_metrics(
+                streamed_metric_state,
+                permuted_batch,
+                policy_batch,
+                permuted_value_output,
+                policy_output,
+                value_loss_update,
+                policy_loss_update,
+                policy_kl_update,
+            )
 
         policy_stratify = (
             None if self.cfg.train.policy_depth_stratify_sample else stratify
@@ -1443,30 +1877,32 @@ class RebelCFRTrainer:
 
         self._sync_inference_model()
 
-        value_metric_tensors = [
-            output.value for output in value_output_all if output.value is not None
-        ]
-        value_metric_output = ModelOutput(
-            value=torch.cat(value_metric_tensors) if value_metric_tensors else None
-        )
-        policy_metric_output = ModelOutput(
-            policy_logits=torch.cat(
-                [output.policy_logits for output in policy_output_all], dim=0
-            )
-        )
+        if (
+            metric_value_batch is None
+            or metric_policy_batch is None
+            or metric_value_output is None
+            or metric_policy_output is None
+            or metric_value_loss_all is None
+            or metric_policy_loss_all is None
+            or metric_policy_kl_all is None
+        ):
+            raise RuntimeError("No training batch was available for metric reporting.")
         metrics = self._compute_metrics(
             episodes,
             updates,
             step_stats,
-            RebelBatch.cat(value_batch_all),
-            RebelBatch.cat(policy_batch_all),
-            value_metric_output,
-            policy_metric_output,
-            torch.cat(value_loss_update_all),
-            torch.cat(policy_loss_update_all),
-            torch.cat(policy_kl_update_all),
+            metric_value_batch,
+            metric_policy_batch,
+            metric_value_output,
+            metric_policy_output,
+            metric_value_loss_all,
+            metric_policy_loss_all,
+            metric_policy_kl_all,
             fresh_value_batch=fresh_value_batch,
             fresh_policy_batch=fresh_policy_batch,
+            streamed_train_metrics=self._finalize_train_metric_stream(
+                streamed_metric_state
+            ),
         )
 
         return metrics

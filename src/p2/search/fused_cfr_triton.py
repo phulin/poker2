@@ -2833,6 +2833,7 @@ if triton is not None:
         child_count_ptr,         # [num_parents]
         action_from_parent_ptr,  # [total]
         parent_base,
+        opponent_policy_base,
         H,
         NUM_ACTIONS: tl.constexpr,
         MAX_CHILDREN: tl.constexpr,
@@ -2871,7 +2872,9 @@ if triton is not None:
                 )
                 pol = tl.load(policy_ptr + child * H + offs, mask=mask, other=0.0)
                 opp_pol = tl.load(
-                    opponent_policy_ptr + (row * NUM_ACTIONS + action) * H + offs,
+                    opponent_policy_ptr
+                    + ((row - opponent_policy_base) * NUM_ACTIONS + action) * H
+                    + offs,
                     mask=mask,
                     other=0.0,
                 )
@@ -2958,6 +2961,7 @@ def fused_br_finalize_depth_(
     parent_base: int,
     num_actions: int,
     max_children: int,
+    opponent_policy_base: int = 0,
     block_h: int = 2048,
 ) -> None:
     if not triton_is_available():
@@ -2974,6 +2978,8 @@ def fused_br_finalize_depth_(
     h = values.shape[-1]
     assert policy.shape == (values.shape[0], h)
     assert opponent_policy.shape[1:] == (num_actions, h)
+    assert opponent_policy_base <= parent_base
+    assert opponent_policy.shape[0] >= parent_base + num_parents - opponent_policy_base
     assert p_dev.shape == (num_parents, num_actions, h)
     assert best_values.shape == (num_parents, h)
     mc_pow2 = 1
@@ -2992,6 +2998,7 @@ def fused_br_finalize_depth_(
         child_count,
         action_from_parent,
         parent_base,
+        opponent_policy_base,
         h,
         NUM_ACTIONS=num_actions,
         MAX_CHILDREN=mc_pow2,
