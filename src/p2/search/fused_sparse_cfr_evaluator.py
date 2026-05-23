@@ -1150,9 +1150,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.last_model_values = None
 
         with _init_profile_region("cfr_init_attempt_feature_encoder"):
-            self.feature_encoder = self.model.create_feature_encoder(
+            self.policy_feature_encoder = self.policy_model.create_feature_encoder(
                 env=self.env, device=self.device, dtype=self.float_dtype
             )
+            self.value_feature_encoder = self.value_model.create_feature_encoder(
+                env=self.env, device=self.device, dtype=self.float_dtype
+            )
+            self.feature_encoder = self.policy_feature_encoder
         return True
 
     def _root_allowed_from_board_indices(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1548,7 +1552,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._static_model_feature_key != key
             or self._static_model_feature_fields is None
         ):
-            static_features = self.feature_encoder.encode(
+            value_encoder = getattr(self, "value_feature_encoder", self.feature_encoder)
+            static_features = value_encoder.encode(
                 self.beliefs,
                 pre_chance_node=self.new_street_mask,
                 indices=self.model_indices,
@@ -2147,9 +2152,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         model_applied_zero_sum = False
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            base_model = getattr(self.model, "_orig_mod", self.model)
+            model = getattr(self, "value_model", self.model)
+            base_model = getattr(model, "_orig_mod", model)
             if isinstance(base_model, BetterTRM):
-                model_output = self.model(
+                model_output = model(
                     features, include_policy=False, latent=self.latent
                 )
                 self.latent = model_output.latent
@@ -2161,7 +2167,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     or self._static_model_base_fn_key != model_key
                 ):
                     if (
-                        getattr(self.model, "_orig_mod", None) is not None
+                        getattr(model, "_orig_mod", None) is not None
                         or getattr(base_model, "_compiled_forward_value", None)
                         is not None
                     ):
@@ -2189,7 +2195,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         features
                     ).clone()
                     self._static_model_base_key = key
-                model_output = self.model(
+                model_output = model(
                     features,
                     include_policy=False,
                     apply_zero_sum=True,
@@ -2197,7 +2203,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 )
                 model_applied_zero_sum = bool(base_model.enforce_zero_sum)
             else:
-                model_output = self.model(features, include_policy=False)
+                model_output = model(features, include_policy=False)
         hand_values = model_output.hand_values.contiguous()
 
         do_mix = (

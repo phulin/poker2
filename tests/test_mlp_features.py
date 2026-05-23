@@ -9,10 +9,16 @@ from p2.env.card_utils import (
     hand_combos_tensor,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
-from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
+from p2.models.mlp.better_feature_encoder import (
+    BetterFeatureEncoder,
+    BetterPolicyFeatureEncoder,
+    BetterStreetValueFeatureEncoder,
+)
 from p2.models.mlp.better_features import (
+    ChancePhase,
     PlayerContext,
     ScalarContext,
+    ValueScalarContext,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
@@ -189,6 +195,43 @@ def test_better_feature_encoder_empty_indices():
     assert features.to_act.shape == (0,)
     assert features.board.shape == (0, 5)
     assert features.beliefs.shape == (0, 2 * NUM_HANDS)
+
+
+def test_better_policy_and_value_feature_context_slots():
+    env = make_env(2)
+    env.actions_this_round[:] = torch.tensor([3, 5], device=env.device)
+    policy_encoder = BetterPolicyFeatureEncoder(
+        env, device=env.device, dtype=torch.float32
+    )
+    value_encoder = BetterStreetValueFeatureEncoder(
+        env, device=env.device, dtype=torch.float32
+    )
+    beliefs = torch.full(
+        (2, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
+    )
+
+    policy_features = policy_encoder.encode(beliefs, pre_chance_node=False)
+    value_features = value_encoder.encode(beliefs, pre_chance_node=False)
+    value_pre_features = value_encoder.encode(beliefs, pre_chance_node=True)
+
+    torch.testing.assert_close(
+        policy_features.context[:, ScalarContext.ACTIONS_ROUND.value],
+        env.actions_this_round.to(torch.float32),
+    )
+    torch.testing.assert_close(
+        value_features.context[:, ValueScalarContext.CHANCE_PHASE.value],
+        torch.full((2,), float(ChancePhase.POST_CHANCE.value)),
+    )
+    torch.testing.assert_close(
+        value_pre_features.context[:, ValueScalarContext.CHANCE_PHASE.value],
+        torch.full((2,), float(ChancePhase.PRE_CHANCE.value)),
+    )
+
+    env.actions_this_round[:] = torch.tensor([0, 1], device=env.device)
+    value_features_changed_actions = value_encoder.encode(
+        beliefs, pre_chance_node=False
+    )
+    torch.testing.assert_close(value_features.context, value_features_changed_actions.context)
 
 
 def test_better_feature_encoder_normalizes_chip_context_by_effective_stack():

@@ -10,8 +10,16 @@ from p2.core.structured_config import NonlinearityType
 from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
 from p2.models.activation_utils import get_activation, SwiGLU
 from p2.models.base_mlp_model import BaseMLPModel
-from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
-from p2.models.mlp.better_features import context_length
+from p2.models.mlp.better_feature_encoder import (
+    BetterFeatureEncoder,
+    BetterPolicyFeatureEncoder,
+    BetterStreetValueFeatureEncoder,
+)
+from p2.models.mlp.better_features import (
+    ChancePhase,
+    ValueScalarContext,
+    context_length,
+)
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
 from p2.utils.profiling import profile
@@ -98,12 +106,14 @@ class BetterFFN(BaseMLPModel):
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim
         self.num_hidden_layers = num_hidden_layers
+        self.num_value_layers = num_value_layers
         self.num_players = num_players
         self.shared_trunk = shared_trunk
         self.enforce_zero_sum = enforce_zero_sum
         self.board_interaction_dim = board_interaction_dim
         self.policy_rank = policy_rank
         self.policy_hand_bias_rank = policy_hand_bias_rank
+        self.nonlinearity = nonlinearity
 
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
@@ -871,7 +881,16 @@ class BetterFFN(BaseMLPModel):
                 nn.init.ones_(module.weight)
 
         expansion_gain = math.sqrt(self.ffn_dim / self.hidden_dim)
-        for sequential in [self.trunk, self.policy_tower, self.hand_value_head]:
+        sequentials = [self.trunk]
+        if hasattr(self, "policy_tower"):
+            sequentials.append(self.policy_tower)
+        if hasattr(self, "hand_value_head"):
+            sequentials.append(self.hand_value_head)
+        if hasattr(self, "pre_value_head"):
+            sequentials.append(self.pre_value_head)
+        if hasattr(self, "post_value_head"):
+            sequentials.append(self.post_value_head)
+        for sequential in sequentials:
             for block in sequential.modules():
                 if not isinstance(block, ResidualBlock):
                     continue
@@ -891,7 +910,10 @@ class BetterFFN(BaseMLPModel):
                     )
 
         # Guess hand values are around stddev 0.1.
-        self.hand_value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
+        for head_name in ("hand_value_head", "pre_value_head", "post_value_head"):
+            head = getattr(self, head_name, None)
+            if head is not None:
+                head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
         if self.board_interaction_dim > 0:
             self.rank_board_interaction_out.weight.data.mul_(0.1)
             self.suit_board_interaction_out.weight.data.mul_(0.1)
@@ -900,12 +922,15 @@ class BetterFFN(BaseMLPModel):
         # assembled from several additive branches; leaving all policy output
         # projections at orthogonal scale makes the random initial policy very
         # sharp, especially through dynamic log-belief features.
-        self.policy_action_head.get_submodule("linear_out").weight.data.mul_(0.1)
-        self.policy_hand_bias_action.get_submodule("linear_out").weight.data.mul_(
-            0.01
-        )
-        self.policy_dynamic_coeff.get_submodule("linear_out").weight.data.mul_(0.01)
-        self.policy_action_bias.get_submodule("linear_out").weight.data.mul_(0.01)
+        if hasattr(self, "policy_action_head"):
+            self.policy_action_head.get_submodule("linear_out").weight.data.mul_(0.1)
+            self.policy_hand_bias_action.get_submodule("linear_out").weight.data.mul_(
+                0.01
+            )
+            self.policy_dynamic_coeff.get_submodule("linear_out").weight.data.mul_(
+                0.01
+            )
+            self.policy_action_bias.get_submodule("linear_out").weight.data.mul_(0.01)
 
     def create_feature_encoder(
         self,
@@ -914,6 +939,421 @@ class BetterFFN(BaseMLPModel):
         dtype: torch.dtype | None = None,
     ) -> BetterFeatureEncoder:
         return BetterFeatureEncoder(env=env, device=device, dtype=dtype)
+
+    def repeat(
+        self,
+        features: MLPFeatures,
+        count: int,
+        include_policy: bool = False,
+        include_value: bool = True,
+    ) -> ModelOutput:
+        return self(
+            features, include_policy=include_policy, include_value=include_value
+        )
+
+
+class BetterPolicyFFN(BetterFFN):
+    """BetterFFN policy path without value-head parameters."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        del self.hand_value_head
+
+    def forward_policy(
+        self,
+        features: MLPFeatures,
+        latent=None,
+    ) -> torch.Tensor:
+        player_beliefs, flat_features, x, hand_emb, board_stats = self._forward_base(
+            features
+        )
+        policy_input = x if self.shared_trunk else flat_features.detach()
+        return self._policy_logits(
+            policy_input,
+            player_beliefs,
+            features.to_act,
+            features.board,
+            hand_emb,
+            board_stats,
+        )
+
+    def forward_value(self, features: MLPFeatures, latent=None, **kwargs) -> ModelOutput:
+        raise RuntimeError("BetterPolicyFFN does not provide value outputs")
+
+    def forward_both(self, features: MLPFeatures, latent=None, **kwargs) -> ModelOutput:
+        return ModelOutput(policy_logits=self._call_forward_policy(features))
+
+    @profile
+    def forward(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = False,
+        **kwargs,
+    ) -> ModelOutput:
+        if include_value:
+            raise RuntimeError("BetterPolicyFFN does not provide value outputs")
+        if not include_policy:
+            raise ValueError("BetterPolicyFFN requires include_policy=True")
+        return ModelOutput(policy_logits=self._call_forward_policy(features))
+
+    def create_feature_encoder(
+        self,
+        env,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> BetterPolicyFeatureEncoder:
+        return BetterPolicyFeatureEncoder(env=env, device=device, dtype=dtype)
+
+
+class BetterStreetValueFFN(BetterFFN):
+    """BetterFFN value path with deployed pre-chance and auxiliary post-chance heads."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        if not args:
+            kwargs.setdefault("num_actions", 1)
+        super().__init__(*args, **kwargs)
+
+        del self.policy_tower
+        del self.policy_hand_proj
+        del self.policy_action_head
+        del self.policy_hand_gate
+        del self.policy_dynamic_coeff
+        del self.policy_action_bias
+        del self.policy_hand_bias
+        del self.policy_hand_bias_action
+        del self.policy_hand_norm
+        del self.policy_factor_scale
+
+        self.pre_value_head = self.hand_value_head
+        del self.hand_value_head
+
+        alpha = 1 / math.sqrt(self.num_hidden_layers + self.num_value_layers)
+        layers = [
+            ResidualBlock(
+                ffn_block(
+                    self.hidden_dim,
+                    self.ffn_dim,
+                    nonlinearity=self.nonlinearity,
+                ),
+                alpha,
+            )
+            for _ in range(self.num_value_layers)
+        ]
+        layers.append(output_projection(self.hidden_dim, self.num_players * NUM_HANDS))
+        self.post_value_head = nn.Sequential(*layers)
+
+        # Directly conditions per-player belief summaries before belief_proj.
+        self.belief_phase_shift = nn.Embedding(
+            5 * 2, self.num_players * self.hidden_dim
+        )
+
+    def _phase_key(self, features: MLPFeatures) -> torch.Tensor:
+        phase = features.context[:, ValueScalarContext.CHANCE_PHASE.value]
+        phase = phase.round().long().clamp(
+            min=ChancePhase.POST_CHANCE.value,
+            max=ChancePhase.PRE_CHANCE.value,
+        )
+        return (features.street.long().clamp(min=0, max=4) * 2 + phase).clamp(
+            min=0, max=9
+        )
+
+    def _forward_base_from_static(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
+        player_beliefs = features.beliefs.view(-1, self.num_players, NUM_HANDS)
+        hand_emb = self._hand_embedding()
+        per_player_belief = player_beliefs @ hand_emb
+        phase_shift = self.belief_phase_shift(self._phase_key(features)).view(
+            -1, self.num_players, self.hidden_dim
+        )
+        per_player_belief = per_player_belief + phase_shift
+        belief_features = self.belief_proj(per_player_belief.flatten(1))
+
+        flat_features = static_base_features + belief_features
+        board_stats = self._board_stats(features.board, player_beliefs.dtype)
+        interaction_features = self._belief_board_interaction(
+            player_beliefs, board_stats
+        )
+        if interaction_features is not None:
+            flat_features = flat_features + interaction_features
+
+        x = self.trunk(flat_features)
+        return player_beliefs, flat_features, x, hand_emb, board_stats
+
+    def _hand_value_logits_from_head(
+        self, value_input: torch.Tensor, head: nn.Module
+    ) -> torch.Tensor:
+        return head(value_input).view(-1, self.num_players, NUM_HANDS)
+
+    def _value_tensor_from_base(
+        self,
+        player_beliefs: torch.Tensor,
+        x: torch.Tensor,
+        head: nn.Module,
+        apply_zero_sum: bool = True,
+    ) -> torch.Tensor:
+        hand_values_raw = self._hand_value_logits_from_head(x, head)
+        if self.enforce_zero_sum and apply_zero_sum:
+            hand_value_sums = (
+                (hand_values_raw * player_beliefs)
+                .sum(dim=2, keepdim=True)
+                .mean(dim=1, keepdim=True)
+            )
+            return hand_values_raw - hand_value_sums
+        return hand_values_raw
+
+    def _forward_value_head(
+        self,
+        features: MLPFeatures,
+        head: nn.Module,
+        static_base_features: torch.Tensor | None = None,
+        apply_zero_sum: bool = True,
+    ) -> torch.Tensor:
+        if static_base_features is None:
+            player_beliefs, _, x, _, _ = self._forward_base(features)
+        else:
+            player_beliefs, _, x, _, _ = self._forward_base_from_static(
+                features, static_base_features=static_base_features
+            )
+        return self._value_tensor_from_base(
+            player_beliefs, x, head, apply_zero_sum=apply_zero_sum
+        )
+
+    def forward_pre(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor | None = None,
+        apply_zero_sum: bool = True,
+    ) -> torch.Tensor:
+        return self._forward_value_head(
+            features,
+            self.pre_value_head,
+            static_base_features=static_base_features,
+            apply_zero_sum=apply_zero_sum,
+        )
+
+    def forward_post(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor | None = None,
+        apply_zero_sum: bool = True,
+    ) -> torch.Tensor:
+        return self._forward_value_head(
+            features,
+            self.post_value_head,
+            static_base_features=static_base_features,
+            apply_zero_sum=apply_zero_sum,
+        )
+
+    def forward_policy(self, features: MLPFeatures, latent=None) -> torch.Tensor:
+        raise RuntimeError("BetterStreetValueFFN does not provide policy outputs")
+
+    def forward_value(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+    ) -> ModelOutput:
+        pre = self.forward_pre(
+            features,
+            static_base_features=static_base_features,
+            apply_zero_sum=apply_zero_sum,
+        )
+        post = self.forward_post(
+            features,
+            static_base_features=static_base_features,
+            apply_zero_sum=apply_zero_sum,
+        )
+        phase = features.context[:, ValueScalarContext.CHANCE_PHASE.value]
+        pre_mask = (phase >= 0.5).view(-1, 1, 1)
+        hand_values = torch.where(pre_mask, pre, post)
+        return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
+
+    def forward_value_static_base(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor,
+        latent=None,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
+        return self.forward_value(
+            features,
+            latent=latent,
+            apply_zero_sum=apply_zero_sum,
+            static_base_features=static_base_features,
+        )
+
+    def forward_both(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
+        return self.forward_value(
+            features, latent=latent, apply_zero_sum=apply_zero_sum
+        )
+
+    @profile
+    def forward(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = False,
+        include_value: bool = True,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+        latent=None,
+        value_head: str = "auto",
+    ) -> ModelOutput:
+        if include_policy:
+            raise RuntimeError("BetterStreetValueFFN does not provide policy outputs")
+        if not include_value:
+            raise ValueError("BetterStreetValueFFN requires include_value=True")
+        if value_head == "pre":
+            hand_values = self.forward_pre(
+                features,
+                static_base_features=static_base_features,
+                apply_zero_sum=apply_zero_sum,
+            )
+            return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
+        if value_head == "post":
+            hand_values = self.forward_post(
+                features,
+                static_base_features=static_base_features,
+                apply_zero_sum=apply_zero_sum,
+            )
+            return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
+        if value_head != "auto":
+            raise ValueError("value_head must be one of: auto, pre, post")
+        return self._call_forward_value(
+            features,
+            apply_zero_sum=apply_zero_sum,
+            static_base_features=static_base_features,
+        )
+
+    def create_feature_encoder(
+        self,
+        env,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> BetterStreetValueFeatureEncoder:
+        return BetterStreetValueFeatureEncoder(env=env, device=device, dtype=dtype)
+
+
+class BetterSplitFFN(BaseMLPModel):
+    """Container exposing separate Better policy and street-value modules."""
+
+    def __init__(
+        self,
+        policy_model: BetterPolicyFFN,
+        value_model: BetterStreetValueFFN,
+    ) -> None:
+        super().__init__()
+        self.policy_model = policy_model
+        self.value_model = value_model
+        self.hidden_dim = policy_model.hidden_dim
+        self.num_players = policy_model.num_players
+        self.num_actions = policy_model.num_actions
+        self.enforce_zero_sum = value_model.enforce_zero_sum
+
+    @property
+    def policy_factor_scale(self) -> nn.Parameter:
+        return self.policy_model.policy_factor_scale
+
+    def init_weights(self, rng: torch.Generator | None = None) -> None:
+        self.policy_model.init_weights(rng)
+        self.value_model.init_weights(rng)
+
+    def forward_policy(self, features: MLPFeatures, latent=None) -> ModelOutput:
+        return ModelOutput(policy_logits=self.policy_model.forward_policy(features))
+
+    def forward_value(self, features: MLPFeatures, latent=None, **kwargs) -> ModelOutput:
+        return self.value_model.forward_value(features, latent=latent, **kwargs)
+
+    def forward_both(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
+        return self(
+            features,
+            include_policy=True,
+            include_value=True,
+            apply_zero_sum=apply_zero_sum,
+            latent=latent,
+        )
+
+    def forward_pre(self, features: MLPFeatures, **kwargs) -> torch.Tensor:
+        return self.value_model.forward_pre(features, **kwargs)
+
+    def forward_post(self, features: MLPFeatures, **kwargs) -> torch.Tensor:
+        return self.value_model.forward_post(features, **kwargs)
+
+    def static_feature_base(self, features: MLPFeatures) -> torch.Tensor:
+        return self.value_model.static_feature_base(features)
+
+    def static_feature_prefix(
+        self, context: torch.Tensor, street: torch.Tensor
+    ) -> torch.Tensor:
+        return self.value_model.static_feature_prefix(context, street)
+
+    def static_feature_base_from_prefix(
+        self, prefix: torch.Tensor, board: torch.Tensor
+    ) -> torch.Tensor:
+        return self.value_model.static_feature_base_from_prefix(prefix, board)
+
+    @profile
+    def forward(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = True,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+        latent=None,
+        value_head: str = "auto",
+    ) -> ModelOutput:
+        policy_logits = None
+        value = None
+        hand_values = None
+        if include_policy:
+            policy_logits = self.policy_model.forward_policy(features)
+        if include_value:
+            value_output = self.value_model(
+                features,
+                include_policy=False,
+                include_value=True,
+                apply_zero_sum=apply_zero_sum,
+                static_base_features=static_base_features,
+                value_head=value_head,
+            )
+            value = value_output.value
+            hand_values = value_output.hand_values
+        if not include_policy and not include_value:
+            raise ValueError("At least one of include_policy/include_value must be true")
+        return ModelOutput(
+            policy_logits=policy_logits,
+            value=value,
+            hand_values=hand_values,
+        )
+
+    def create_feature_encoder(
+        self,
+        env,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> BetterPolicyFeatureEncoder:
+        return self.policy_model.create_feature_encoder(env, device=device, dtype=dtype)
 
     def repeat(
         self,

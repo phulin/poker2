@@ -807,12 +807,14 @@ class CFREvaluator(ABC):
     @torch.no_grad()
     def _get_model_policy_probs(self, indices: torch.Tensor) -> torch.Tensor:
         """Get policy probabilities from model for given indices."""
-        features = self.feature_encoder.encode(self.beliefs, indices=indices)
+        policy_encoder = getattr(self, "policy_feature_encoder", self.feature_encoder)
+        policy_model = getattr(self, "policy_model", self.model)
+        features = policy_encoder.encode(self.beliefs, indices=indices)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            if isinstance(self.model, BetterTRM):
+            if isinstance(policy_model, BetterTRM):
                 latent = None
                 for supervision in range(self.num_supervisions):
-                    model_output = self.model(
+                    model_output = policy_model(
                         features,
                         include_policy=supervision == self.num_supervisions - 1,
                         include_value=False,
@@ -820,7 +822,7 @@ class CFREvaluator(ABC):
                     )
                     latent = model_output.latent
             else:
-                model_output = self.model(features, include_policy=True)
+                model_output = policy_model(features, include_policy=True)
 
         logits = model_output.policy_logits.float()
         legal_masks = self.legal_mask[indices]
@@ -1536,16 +1538,17 @@ class CFREvaluator(ABC):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Set model values for non-terminal leaves
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            if isinstance(self.model, BetterTRM):
+            value_model = getattr(self, "value_model", self.model)
+            if isinstance(value_model, BetterTRM):
                 # Note self.latent gets reinitialized for each subgame.
-                model_output = self.model(
+                model_output = value_model(
                     features,
                     include_policy=False,
                     latent=self.latent,
                 )
                 self.latent = model_output.latent
             else:
-                model_output = self.model(features, include_policy=False)
+                model_output = value_model(features, include_policy=False)
         hand_values = model_output.hand_values.to(self.float_dtype)
 
         if (
@@ -1586,7 +1589,8 @@ class CFREvaluator(ABC):
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         if self.model_indices.numel() > 0:
-            features = self.feature_encoder.encode(
+            value_encoder = getattr(self, "value_feature_encoder", self.feature_encoder)
+            features = value_encoder.encode(
                 beliefs, pre_chance_node=self.new_street_mask
             )
 
@@ -1958,9 +1962,14 @@ class CFREvaluator(ABC):
         )
         value_targets = source_values[:N].clamp(-1.0, 1.0)
 
-        features = self.feature_encoder.encode(self.beliefs_avg, pre_chance_node=False)[
-            :top
-        ]
+        policy_encoder = getattr(self, "policy_feature_encoder", self.feature_encoder)
+        value_encoder = getattr(self, "value_feature_encoder", self.feature_encoder)
+        policy_features = policy_encoder.encode(
+            self.beliefs_avg, pre_chance_node=False
+        )[:top]
+        value_features = value_encoder.encode(
+            self.beliefs_avg, pre_chance_node=False
+        )[:top]
         bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
         node_depth = torch.zeros(top, dtype=torch.long, device=self.device)
         for depth in range(self.tree_depth):
@@ -1998,7 +2007,7 @@ class CFREvaluator(ABC):
         ]
 
         value_batch = RebelBatch(
-            features=features[:N],
+            features=value_features[:N],
             value_targets=value_targets,
             legal_masks=legal_masks[:N],
             statistics=value_statistics,
@@ -2011,13 +2020,13 @@ class CFREvaluator(ABC):
             value_batch = value_batch[~root_nodes]
 
         policy_batch = RebelBatch(
-            features=features[valid_top],
+            features=policy_features[valid_top],
             policy_targets=policy_targets[valid_top],
             legal_masks=legal_masks[:top][valid_top],
             statistics=policy_statistics,
         )
 
-        pre_features_all = self.feature_encoder.encode(
+        pre_features_all = value_encoder.encode(
             self.beliefs, pre_chance_node=True
         )
         pre_features_root = pre_features_all[:N].clone()
@@ -2043,7 +2052,7 @@ class CFREvaluator(ABC):
         if turn_river_mask.any():
             expected_turn_river = self.chance_helper.single_card_chance_values(
                 torch.where(turn_river_mask)[0],
-                features[:N],
+                value_features[:N],
                 self.root_pre_chance_beliefs,
                 self.env.last_board_indices,
             )
@@ -2053,7 +2062,7 @@ class CFREvaluator(ABC):
         if flop_mask.any():
             expected_flop = self.chance_helper.flop_chance_values(
                 torch.where(flop_mask)[0],
-                features[:N],
+                value_features[:N],
                 self.root_pre_chance_beliefs,
             )
             value_targets_pre[flop_mask] = expected_flop

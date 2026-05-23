@@ -26,10 +26,32 @@ def _action_labels(bet_bins: list[float]) -> list[str]:
     return labels
 
 
+def _normalize_export_state(
+    state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    clean_state = {
+        name.removeprefix("_orig_mod."): tensor for name, tensor in state.items()
+    }
+    if not any(name.startswith("policy_model.") for name in clean_state):
+        return clean_state
+
+    export_state: dict[str, torch.Tensor] = {}
+    for name, tensor in clean_state.items():
+        if name.startswith("policy_model."):
+            export_state[name.removeprefix("policy_model.")] = tensor
+        elif name.startswith("value_model.pre_value_head."):
+            suffix = name.removeprefix("value_model.pre_value_head.")
+            export_state[f"hand_value_head.{suffix}"] = tensor
+        elif name.startswith("value_model.post_value_head."):
+            continue
+    return export_state
+
+
 def _load_checkpoint(snapshot: Path) -> tuple[Config, dict[str, torch.Tensor], int | None]:
     checkpoint = torch.load(snapshot, map_location="cpu", weights_only=False)
     cfg = Config.from_dict(checkpoint["config"])
-    state = checkpoint["model"]
+    raw_state = checkpoint["model"]
+    state = _normalize_export_state(raw_state)
     if (
         cfg.model.name != ModelType.better_ffn
         and "street_embedding.weight" not in state

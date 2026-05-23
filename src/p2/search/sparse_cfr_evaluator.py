@@ -26,6 +26,8 @@ class SparseCFREvaluator(CFREvaluator):
         generator: torch.Generator | None = None,
     ) -> None:
         self.model = model
+        self.policy_model = getattr(model, "policy_model", model)
+        self.value_model = getattr(model, "value_model", model)
         self.device = device
         self.cfg = cfg
 
@@ -67,7 +69,7 @@ class SparseCFREvaluator(CFREvaluator):
             device=self.device,
             float_dtype=self.float_dtype,
             num_players=self.num_players,
-            model=self.model,
+            model=self.value_model,
             generator=self.generator,
         )
         self.stats: dict[str, float] = {}
@@ -135,6 +137,8 @@ class SparseCFREvaluator(CFREvaluator):
         self.cumulative_regrets = torch.empty_like(self.policy_probs)
 
         self.feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder | None = None
+        self.policy_feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder | None = None
+        self.value_feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder | None = None
 
         self.sampled_leaf_indices = torch.empty(0, dtype=torch.long, device=self.device)
         self.t_sample = torch.empty(0, dtype=torch.long, device=self.device)
@@ -332,9 +336,13 @@ class SparseCFREvaluator(CFREvaluator):
         self.last_model_values = None
 
         # Set up feature encoder (sparse-specific, done after tree construction)
-        self.feature_encoder = self.model.create_feature_encoder(
+        self.policy_feature_encoder = self.policy_model.create_feature_encoder(
             env=self.env, device=self.device, dtype=self.float_dtype
         )
+        self.value_feature_encoder = self.value_model.create_feature_encoder(
+            env=self.env, device=self.device, dtype=self.float_dtype
+        )
+        self.feature_encoder = self.policy_feature_encoder
 
     def _mask_invalid(self, tensor: torch.Tensor) -> None:
         """Mask invalid nodes in the tensor. Noop for sparse evaluator (all nodes are valid)."""

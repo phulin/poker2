@@ -169,11 +169,17 @@ class ChanceNodeHelper:
                     static_base_features = static_feature_base_from_prefix(
                         static_prefix, board_samples_flat
                     )
-                hand_values = model(
-                    synthetic_features,
-                    include_policy=False,
-                    static_base_features=static_base_features,
-                ).hand_values
+                if hasattr(model, "forward_post"):
+                    hand_values = model.forward_post(
+                        synthetic_features,
+                        static_base_features=static_base_features,
+                    )
+                else:
+                    hand_values = model(
+                        synthetic_features,
+                        include_policy=False,
+                        static_base_features=static_base_features,
+                    ).hand_values
             hand_values = hand_values.to(dtype=dtype).view(
                 B, chunk_len, self.num_players, NUM_HANDS
             )
@@ -329,11 +335,17 @@ class ChanceNodeHelper:
                 static_base_features = static_feature_base_from_prefix(
                     static_prefix_root[root_lookup], board_samples
                 )
-            hand_values = model(
-                synthetic_features,
-                include_policy=False,
-                static_base_features=static_base_features,
-            ).hand_values
+            if hasattr(model, "forward_post"):
+                hand_values = model.forward_post(
+                    synthetic_features,
+                    static_base_features=static_base_features,
+                )
+            else:
+                hand_values = model(
+                    synthetic_features,
+                    include_policy=False,
+                    static_base_features=static_base_features,
+                ).hand_values
         hand_values = hand_values.to(dtype=dtype)
 
         weights = calculate_unblocked_mass(post_unnorm).flip(dims=[-2])

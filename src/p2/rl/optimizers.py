@@ -119,7 +119,12 @@ def _adamw(
 
 
 def _is_policy_head_param(name: str) -> bool:
-    return name.startswith("policy_") or name.startswith("policy_head.")
+    return (
+        name.startswith("policy_")
+        or name.startswith("policy_head.")
+        or name.startswith("policy_model.policy_")
+        or name.startswith("policy_model.policy_head.")
+    )
 
 
 def _no_weight_decay_param_ids(model: nn.Module) -> set[int]:
@@ -166,6 +171,16 @@ def build_optimizer(
     train_cfg: TrainingConfig,
     device: torch.device,
 ) -> TrainOptimizer:
+    policy_model = getattr(model, "policy_model", None)
+    value_model = getattr(model, "value_model", None)
+    if isinstance(policy_model, nn.Module) and isinstance(value_model, nn.Module):
+        return SplitOptimizer(
+            [
+                ("policy", build_optimizer(policy_model, train_cfg, device)),
+                ("value", build_optimizer(value_model, train_cfg, device)),
+            ]
+        )
+
     optimizer_name = _optimizer_name(train_cfg)
     adamw_lr = (
         train_cfg.learning_rate

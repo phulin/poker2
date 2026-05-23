@@ -107,6 +107,8 @@ class RebelCFREvaluator(CFREvaluator):
 
         self.root_nodes = search_batch_size
         self.model = model
+        self.policy_model = getattr(model, "policy_model", model)
+        self.value_model = getattr(model, "value_model", model)
         self.max_depth = max_depth
         self.tree_depth = max_depth
         self.bet_bins = bet_bins
@@ -241,7 +243,7 @@ class RebelCFREvaluator(CFREvaluator):
             device=self.device,
             float_dtype=self.float_dtype,
             num_players=self.num_players,
-            model=self.model,
+            model=self.value_model,
             generator=self.generator,
         )
 
@@ -253,9 +255,13 @@ class RebelCFREvaluator(CFREvaluator):
         )
 
         # Feature encoder for belief computation
-        self.feature_encoder = self.model.create_feature_encoder(
+        self.policy_feature_encoder = self.policy_model.create_feature_encoder(
             env=self.env, device=self.device, dtype=self.float_dtype
         )
+        self.value_feature_encoder = self.value_model.create_feature_encoder(
+            env=self.env, device=self.device, dtype=self.float_dtype
+        )
+        self.feature_encoder = self.policy_feature_encoder
 
         self.hand_rank_data = None
         self.stats = {}

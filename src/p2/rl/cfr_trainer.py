@@ -20,7 +20,11 @@ from p2.env.card_utils import (
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp import RebelFFN
 from p2.models.mlp.better_features import context_length
-from p2.models.mlp.better_ffn import BetterFFN
+from p2.models.mlp.better_ffn import (
+    BetterPolicyFFN,
+    BetterSplitFFN,
+    BetterStreetValueFFN,
+)
 from p2.models.mlp.better_trm import BetterTRM
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput, TRMLatent
@@ -162,23 +166,7 @@ class RebelCFRTrainer:
 
         # Model
         if cfg.model.name == ModelType.better_ffn:
-            self.model = BetterFFN(
-                num_actions=self.num_actions,
-                hidden_dim=cfg.model.hidden_dim,
-                range_hidden_dim=cfg.model.range_hidden_dim,
-                ffn_dim=cfg.model.ffn_dim,
-                num_hidden_layers=cfg.model.num_hidden_layers,
-                num_policy_layers=cfg.model.num_policy_layers,
-                num_value_layers=cfg.model.num_value_layers,
-                num_players=self.num_players,
-                shared_trunk=cfg.model.shared_trunk,
-                enforce_zero_sum=cfg.model.enforce_zero_sum,
-                board_interaction_dim=cfg.model.board_interaction_dim,
-                policy_rank=cfg.model.policy_rank,
-                policy_hand_bias_rank=cfg.model.policy_hand_bias_rank,
-                policy_factor_scale=cfg.model.policy_factor_scale,
-                nonlinearity=cfg.model.nonlinearity,
-            )
+            self.model = self._make_better_split_ffn()
             num_context_features = context_length(self.num_players)
         elif cfg.model.name == ModelType.better_trm:
             self.model = BetterTRM(
@@ -356,28 +344,35 @@ class RebelCFRTrainer:
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         return nullcontext()
 
+    def _make_better_split_ffn(self) -> BetterSplitFFN:
+        cfg = self.cfg
+        common = dict(
+            hidden_dim=cfg.model.hidden_dim,
+            range_hidden_dim=cfg.model.range_hidden_dim,
+            ffn_dim=cfg.model.ffn_dim,
+            num_hidden_layers=cfg.model.num_hidden_layers,
+            num_policy_layers=cfg.model.num_policy_layers,
+            num_value_layers=cfg.model.num_value_layers,
+            num_players=self.num_players,
+            shared_trunk=cfg.model.shared_trunk,
+            enforce_zero_sum=cfg.model.enforce_zero_sum,
+            board_interaction_dim=cfg.model.board_interaction_dim,
+            policy_rank=cfg.model.policy_rank,
+            policy_hand_bias_rank=cfg.model.policy_hand_bias_rank,
+            policy_factor_scale=cfg.model.policy_factor_scale,
+            nonlinearity=cfg.model.nonlinearity,
+        )
+        return BetterSplitFFN(
+            policy_model=BetterPolicyFFN(num_actions=self.num_actions, **common),
+            value_model=BetterStreetValueFFN(num_actions=1, **common),
+        )
+
     def _make_eval_twin(self, compile_model: bool = True) -> nn.Module:
         """Create a second compiled model instance with the same architecture
         as ``self.model``, used as the opponent side for TrueSkill matchups."""
         cfg = self.cfg
         if cfg.model.name == ModelType.better_ffn:
-            twin: nn.Module = BetterFFN(
-                num_actions=self.num_actions,
-                hidden_dim=cfg.model.hidden_dim,
-                range_hidden_dim=cfg.model.range_hidden_dim,
-                ffn_dim=cfg.model.ffn_dim,
-                num_hidden_layers=cfg.model.num_hidden_layers,
-                num_policy_layers=cfg.model.num_policy_layers,
-                num_value_layers=cfg.model.num_value_layers,
-                num_players=self.num_players,
-                shared_trunk=cfg.model.shared_trunk,
-                enforce_zero_sum=cfg.model.enforce_zero_sum,
-                board_interaction_dim=cfg.model.board_interaction_dim,
-                policy_rank=cfg.model.policy_rank,
-                policy_hand_bias_rank=cfg.model.policy_hand_bias_rank,
-                policy_factor_scale=cfg.model.policy_factor_scale,
-                nonlinearity=cfg.model.nonlinearity,
-            )
+            twin: nn.Module = self._make_better_split_ffn()
         elif cfg.model.name == ModelType.better_trm:
             twin = BetterTRM(
                 num_actions=self.num_actions,

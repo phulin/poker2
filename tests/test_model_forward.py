@@ -11,8 +11,18 @@ from p2.env.hunl_env import HUNLEnv
 from p2.env.types import GameState, PlayerState
 from p2.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 from p2.models.cnn.cnn_embedding_data import CNNEmbeddingData
-from p2.models.mlp.better_features import context_length
-from p2.models.mlp.better_ffn import HAND_DYNAMIC_FEATURE_DIM, BetterFFN
+from p2.models.mlp.better_features import (
+    ChancePhase,
+    ValueScalarContext,
+    context_length,
+    value_context_length,
+)
+from p2.models.mlp.better_ffn import (
+    HAND_DYNAMIC_FEATURE_DIM,
+    BetterFFN,
+    BetterPolicyFFN,
+    BetterStreetValueFFN,
+)
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.policy import CategoricalPolicyV1
 
@@ -281,6 +291,115 @@ def test_better_ffn_range_hidden_dim_zero_uses_hand_embedding_with_ffn_width():
     assert output.policy_logits.shape == (batch_size, NUM_HANDS, num_actions)
     assert output.hand_values.shape == (batch_size, num_players, NUM_HANDS)
     assert output.value.shape == (batch_size, num_players)
+
+
+def test_better_split_ffn_policy_and_value_shapes_and_parameters():
+    batch_size = 2
+    num_actions = 4
+    num_players = 2
+    policy_model = BetterPolicyFFN(
+        num_actions=num_actions,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+    )
+    value_model = BetterStreetValueFFN(
+        num_actions=1,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+    )
+    policy_model.init_weights(torch.Generator(device="cpu").manual_seed(0))
+    value_model.init_weights(torch.Generator(device="cpu").manual_seed(1))
+
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    policy_features = MLPFeatures(
+        context=torch.zeros(batch_size, context_length(num_players)),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    value_context = torch.zeros(batch_size, value_context_length(num_players))
+    value_context[:, ValueScalarContext.CHANCE_PHASE.value] = torch.tensor(
+        [ChancePhase.PRE_CHANCE.value, ChancePhase.POST_CHANCE.value],
+        dtype=torch.float32,
+    )
+    value_features = MLPFeatures(
+        context=value_context,
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+
+    assert policy_model.forward_policy(policy_features).shape == (
+        batch_size,
+        NUM_HANDS,
+        num_actions,
+    )
+    assert value_model.forward_pre(value_features).shape == (
+        batch_size,
+        num_players,
+        NUM_HANDS,
+    )
+    assert value_model.forward_post(value_features).shape == (
+        batch_size,
+        num_players,
+        NUM_HANDS,
+    )
+    assert not any("value" in name for name, _ in policy_model.named_parameters())
+    assert not any("policy" in name for name, _ in value_model.named_parameters())
+
+
+def test_better_street_value_phase_conditioning_changes_output():
+    batch_size = 1
+    num_players = 2
+    model = BetterStreetValueFFN(
+        num_actions=1,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(2))
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    context = torch.zeros(batch_size, value_context_length(num_players))
+    features = MLPFeatures(
+        context=context.clone(),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    pre_features = features.clone()
+    pre_features.context[:, ValueScalarContext.CHANCE_PHASE.value] = float(
+        ChancePhase.PRE_CHANCE.value
+    )
+
+    post = model.forward_pre(features)
+    pre = model.forward_pre(pre_features)
+
+    assert not torch.allclose(post, pre)
 
 
 def test_better_ffn_hand_embedding_preserves_rank_suit_assignment():
