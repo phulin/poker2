@@ -45,6 +45,13 @@ def _format_triton_constants(constants: dict[Any, Any], *, max_items: int = 12) 
     return "{" + shown + "}"
 
 
+def _triton_fn_name(fn: Any) -> str:
+    module = getattr(fn, "module", "")
+    module_name = getattr(module, "__name__", module)
+    name = getattr(fn, "name", "<unknown>")
+    return f"{module_name}.{name}" if module_name else str(name)
+
+
 def install_triton_compile_logger_from_env() -> bool:
     """Install Triton JIT compile logging when ``P2_TRITON_COMPILE_LOG=1``.
 
@@ -83,7 +90,7 @@ def install_triton_compile_logger_from_env() -> bool:
         )
         print(
             "[triton jit miss] "
-            f"{fn.module.__name__}.{fn.name} "
+            f"{_triton_fn_name(fn)} "
             f"key={_short_hash(key)} "
             f"warmup={compile_info['is_warmup']} "
             f"device={compile_info['device']}"
