@@ -1525,6 +1525,11 @@ class RebelCFRTrainer:
         ]
         if adamw_lrs:
             update_info["adamw_learning_rate"] = adamw_lrs[0]
+        policy_factor_scale = getattr(self.model, "policy_factor_scale", None)
+        if policy_factor_scale is not None:
+            update_info["policy_factor_scale"] = float(
+                policy_factor_scale.detach().float().item()
+            )
         update_info["cfr_iterations"] = self.cfr_evaluator.cfr_iterations
 
         return update_info

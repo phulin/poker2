@@ -199,6 +199,23 @@ def test_cfr_schedule_scales_policy_head_muon_lr():
     assert trainer.optimizer.param_groups[2]["lr"] == pytest.approx(1.1e-4)
 
 
+def test_cfr_train_step_logs_policy_factor_scale():
+    trainer = RebelCFRTrainer.__new__(RebelCFRTrainer)
+    trainer._apply_schedules = lambda step: None
+    trainer._update_model = lambda step: {"loss": 0.0}
+    trainer.model = nn.Module()
+    trainer.model.policy_factor_scale = nn.Parameter(torch.tensor(1.25))
+    trainer.optimizer = type("_Opt", (), {})()
+    trainer.optimizer.param_groups = [{"lr": 1e-3}]
+    trainer.cfr_evaluator = type("_Evaluator", (), {"cfr_iterations": 400})()
+
+    metrics = trainer.train_step(7)
+
+    assert metrics["step"] == 8
+    assert metrics["policy_factor_scale"] == pytest.approx(1.25)
+    assert metrics["cfr_iterations"] == 400
+
+
 def test_muon_split_optimizer_steps_matrix_and_non_matrix_params():
     if not hasattr(torch.optim, "Muon"):
         pytest.skip("torch.optim.Muon is not available")
