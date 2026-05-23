@@ -194,6 +194,50 @@ def test_better_ffn_initial_policy_is_near_uniform():
     assert 0.01 < output.hand_values.std() < 0.2
 
 
+def test_better_ffn_policy_factor_scale_applies_to_final_logits():
+    batch_size = 3
+    num_actions = 5
+    num_players = 2
+    model = BetterFFN(
+        num_actions=num_actions,
+        hidden_dim=32,
+        range_hidden_dim=8,
+        ffn_dim=64,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        policy_factor_scale=1.0,
+        nonlinearity="leaky_relu",
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(1))
+    model.eval()
+
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    features = MLPFeatures(
+        context=torch.zeros(batch_size, context_length(num_players)),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.arange(batch_size, dtype=torch.long) % num_players,
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+
+    with torch.no_grad():
+        base_logits = model(
+            features, include_policy=True, include_value=False
+        ).policy_logits
+        model.policy_factor_scale.fill_(2.0)
+        scaled_logits = model(
+            features, include_policy=True, include_value=False
+        ).policy_logits
+
+    torch.testing.assert_close(scaled_logits, base_logits * 2.0)
+
+
 def test_better_ffn_range_hidden_dim_zero_uses_hand_embedding_with_ffn_width():
     batch_size = 2
     num_actions = 4

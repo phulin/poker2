@@ -600,7 +600,7 @@ class BetterFFN(BaseMLPModel):
         action_emb = action_emb * hand_gate[:, None, :]
         hand_vec = self.policy_hand_proj(hand_emb)
         logits = torch.einsum("hr,bar->bha", hand_vec, action_emb)
-        logits = logits * (self.policy_factor_scale / math.sqrt(self.policy_rank))
+        logits = logits / math.sqrt(self.policy_rank)
         hand_bias = self.policy_hand_bias(hand_emb)
         hand_bias_action = self.policy_hand_bias_action(policy_state).view(
             -1, self.num_actions, self.policy_hand_bias_rank
@@ -622,7 +622,7 @@ class BetterFFN(BaseMLPModel):
                 player_beliefs, actor, board, dynamic_coeff, board_stats
             )
         logits = logits + self.policy_action_bias(policy_state)[:, None, :]
-        return logits
+        return logits * self.policy_factor_scale
 
     def _belief_board_interaction(
         self,
