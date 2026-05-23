@@ -210,14 +210,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._sample_leaf_sampling_masks: torch.Tensor | None = None
         self._sample_leaf_uniform_policy: torch.Tensor | None = None
         self._sample_leaf_child_nodes_by_action: torch.Tensor | None = None
-        self._static_model_base_key: tuple[int, int, int] | None = None
+        self._static_model_base_key: tuple[int, int, int, int] | None = None
         self._static_model_base_features: torch.Tensor | None = None
         self._static_model_base_fn = None
         self._static_model_base_fn_key: int | None = None
-        self._static_model_feature_key: tuple[int, int, int] | None = None
+        self._static_model_feature_key: tuple[int, int, int, int] | None = None
         self._static_model_feature_fields: tuple[torch.Tensor, ...] | None = None
         self._leaf_belief_gather_indices: torch.Tensor | None = None
-        self._leaf_belief_gather_key: tuple[int, int, int, int] | None = None
+        self._leaf_belief_gather_key: tuple[int, int, int, int, int] | None = None
+        self._subgame_generation: int = 0
         self._br_action_parent_index_cache: dict[tuple[int, int], torch.Tensor] = {}
         self._tree_slice_key: tuple[int, ...] | None = None
         self._bottom: int = 0
@@ -434,6 +435,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._leaf_belief_gather_indices = None
         if not hasattr(self, "_leaf_belief_gather_key"):
             self._leaf_belief_gather_key = None
+        if not hasattr(self, "_subgame_generation"):
+            self._subgame_generation = 0
         if not hasattr(self, "_br_action_parent_index_cache"):
             self._br_action_parent_index_cache = {}
         if not hasattr(self, "_tree_slice_key"):
@@ -488,6 +491,42 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._subgame_child_counts = None
         if not hasattr(self, "_subgame_child_offsets"):
             self._subgame_child_offsets = None
+
+    def _invalidate_subgame_caches(self) -> None:
+        """Drop cached tensors whose contents depend on the current subgame.
+
+        Persistent subgame buffers intentionally reuse storage across data-generator
+        calls. Pointer-based cache keys alone are therefore not enough: a later
+        subgame can have the same addresses and shapes but different states.
+        """
+        self._subgame_generation += 1
+        self._root_index = None
+        self._root_index_total = -1
+        self._tree_slice_key = None
+        self._static_model_base_key = None
+        self._static_model_base_features = None
+        self._static_model_feature_key = None
+        self._static_model_feature_fields = None
+        self._leaf_belief_gather_indices = None
+        self._leaf_belief_gather_key = None
+        self._sample_root_rows = None
+        self._sample_root_counts = None
+        self._sample_root_key = None
+        self._sample_leaf_enabled = False
+        self._sample_leaf_players = None
+        self._sample_leaf_hands = None
+        self._sample_leaf_uniform_draws = None
+        self._sample_leaf_action_draws = None
+        self._sample_leaf_indices_padded = None
+        self._sample_leaf_beliefs_padded = None
+        self._sample_leaf_ready_padded = None
+        self._sample_leaf_effective_leaf_mask = None
+        self._sample_leaf_sampling_masks = None
+        self._sample_leaf_uniform_policy = None
+        self._sample_leaf_child_nodes_by_action = None
+        self._fused_positive_regrets_valid = False
+        self._exploitability_cache_key = None
+        self._exploitability_cache = None
 
     def _ensure_subgame_capacity(self, capacity: int, proto: HUNLTensorEnv) -> None:
         if self._subgame_env is not None and self._subgame_capacity >= capacity:
@@ -1107,6 +1146,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         initial_beliefs: torch.Tensor | None = None,
     ) -> None:
         self._construct_subgame(src_env, src_indices)
+        self._invalidate_subgame_caches()
         n = self.root_nodes
 
         if initial_beliefs is None:
@@ -1150,25 +1190,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.stats["evaluator_root_nodes"] = float(self.root_nodes)
         self.stats["evaluator_tree_depth"] = float(self.tree_depth)
 
-        self._static_model_base_key = None
-        self._static_model_base_features = None
-        self._leaf_belief_gather_indices = None
-        self._leaf_belief_gather_key = None
-        self._sample_root_rows = None
-        self._sample_root_counts = None
-        self._sample_root_key = None
-        self._sample_leaf_enabled = False
-        self._sample_leaf_players = None
-        self._sample_leaf_hands = None
-        self._sample_leaf_uniform_draws = None
-        self._sample_leaf_action_draws = None
-        self._sample_leaf_indices_padded = None
-        self._sample_leaf_beliefs_padded = None
-        self._sample_leaf_ready_padded = None
-        self._sample_leaf_effective_leaf_mask = None
-        self._sample_leaf_sampling_masks = None
-        self._sample_leaf_uniform_policy = None
-        self._sample_leaf_child_nodes_by_action = None
         self._prepare_tree_slices()
         self._reset_average_policy_accumulators()
 
@@ -1179,6 +1200,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         )
         top = self.depth_offsets[-2] if len(self.depth_offsets) > 1 else self.root_nodes
         key = (
+            int(self._subgame_generation),
             int(self.total_nodes),
             int(self.root_nodes),
             int(bottom),
@@ -1484,6 +1506,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self, beliefs_at_model: torch.Tensor
     ) -> MLPFeatures:
         key = (
+            int(self._subgame_generation),
             int(self.model_indices.data_ptr()),
             int(self.new_street_mask.data_ptr()),
             int(self.model_indices.numel()),
@@ -1520,6 +1543,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         m = int(self.model_indices.numel())
         s = int(self.showdown_indices.numel())
         key = (
+            int(self._subgame_generation),
             int(self.model_indices.data_ptr()),
             int(self.showdown_indices.data_ptr()),
             m,
@@ -2116,6 +2140,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         self._static_model_base_fn = base_model.static_feature_base
                     self._static_model_base_fn_key = model_key
                 key = (
+                    int(self._subgame_generation),
                     int(features.context.data_ptr()),
                     int(features.street.data_ptr()),
                     int(features.board.data_ptr()),
