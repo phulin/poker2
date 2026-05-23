@@ -1013,6 +1013,7 @@ def test_fused_sparse_evaluate_cfr_captures_pre_and_post_dcfr_delay(
         ev._sample_leaf_ready_padded[: ev.root_nodes]
         & (sampled_nodes >= ev.root_nodes)
         & (~ev.env.done[sampled_nodes])
+        & ev.new_street_mask[sampled_nodes]
     )
     root_indices = torch.where(continue_mask)[0]
     torch.testing.assert_close(

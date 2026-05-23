@@ -1542,6 +1542,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             child_nodes_by_action=self._sample_leaf_child_nodes_by_action.contiguous(),
             to_act=self.env.to_act.contiguous(),
             done=self.env.done.contiguous(),
+            new_street_mask=self.new_street_mask.contiguous(),
             out_nodes=self._sample_leaf_indices_padded,
             out_beliefs=self._sample_leaf_beliefs_padded,
             out_ready=self._sample_leaf_ready_padded,

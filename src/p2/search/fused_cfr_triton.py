@@ -3594,6 +3594,7 @@ if triton is not None:
         child_nodes_ptr,        # [total, B]
         to_act_ptr,             # [total]
         done_ptr,               # [total] bool
+        new_street_ptr,         # [total] bool
         out_nodes_ptr,          # [N + 1]
         out_beliefs_ptr,        # [N + 1, 2 * H]
         out_ready_ptr,          # [N + 1]
@@ -3670,7 +3671,9 @@ if triton is not None:
             active = active & (~tl.load(effective_leaf_ptr + node, mask=valid, other=1))
 
         done = tl.load(done_ptr + node, mask=valid, other=1)
-        ready = valid & (node >= N) & (~done)
+        effective_leaf = tl.load(effective_leaf_ptr + node, mask=valid, other=0)
+        new_street = tl.load(new_street_ptr + node, mask=valid, other=0)
+        ready = valid & (node >= N) & effective_leaf & new_street & (~done)
         tl.store(out_nodes_ptr + root, node, mask=valid)
         tl.store(out_ready_ptr + root, ready, mask=valid)
 
@@ -3741,6 +3744,7 @@ def fused_sample_leaf_compact_(
     child_nodes_by_action: torch.Tensor,
     to_act: torch.Tensor,
     done: torch.Tensor,
+    new_street_mask: torch.Tensor,
     out_nodes: torch.Tensor,
     out_beliefs: torch.Tensor,
     out_ready: torch.Tensor,
@@ -3765,6 +3769,7 @@ def fused_sample_leaf_compact_(
     assert uniform_policy.is_contiguous() and uniform_policy.shape == sampling_masks.shape
     assert child_nodes_by_action.is_contiguous() and child_nodes_by_action.shape == sampling_masks.shape
     assert to_act.is_contiguous() and done.is_contiguous()
+    assert new_street_mask.is_contiguous() and new_street_mask.dim() == 1
     assert out_nodes.is_contiguous() and out_ready.is_contiguous()
     assert out_beliefs.is_contiguous() and out_beliefs.dim() == 3
 
@@ -3796,6 +3801,7 @@ def fused_sample_leaf_compact_(
         child_nodes_by_action,
         to_act,
         done,
+        new_street_mask,
         out_nodes,
         out_beliefs,
         out_ready,
