@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 from typing import Callable
 
@@ -2815,14 +2816,19 @@ def test_get_mixing_weights() -> None:
     evaluator.dcfr_delay = 0
     evaluator.dcfr_gamma = 2.0
     old, new = evaluator._get_mixing_weights(5)
-    assert old == 54
-    assert new == 36
+    expected_old = sum((k / evaluator.cfr_iterations) ** 2 for k in range(1, 5))
+    expected_new = (5 / evaluator.cfr_iterations) ** 2
+    assert math.isclose(old, expected_old)
+    assert math.isclose(new, expected_new)
 
     # Test discounted CFR with delay
     evaluator.dcfr_delay = 3
     old, new = evaluator._get_mixing_weights(5)
-    assert old == 25
-    assert new == 36
+    window = evaluator.cfr_iterations - evaluator.dcfr_delay
+    expected_old = (1 / window) ** 2
+    expected_new = (2 / window) ** 2
+    assert math.isclose(old, expected_old)
+    assert math.isclose(new, expected_new)
 
     # Test discounted CFR before delay
     old, new = evaluator._get_mixing_weights(2)
@@ -2839,13 +2845,17 @@ def test_discounted_value_mixing_uses_gamma_weights_after_delay() -> None:
     evaluator.dcfr_gamma_final = None
 
     assert evaluator._get_mixing_weights(2) == (0.0, 0.0)
-    assert evaluator._get_mixing_weights(4) == (0.0, 25.0)
-    assert evaluator._get_mixing_weights(5) == (25.0, 36.0)
-    assert evaluator._get_mixing_weights(6) == (61.0, 49.0)
+    window = evaluator.cfr_iterations - evaluator.dcfr_delay
+    t4 = (1 / window) ** 2
+    t5 = (2 / window) ** 2
+    t6 = (3 / window) ** 2
+    assert evaluator._get_mixing_weights(4) == (0.0, t4)
+    assert evaluator._get_mixing_weights(5) == (t4, t5)
+    assert evaluator._get_mixing_weights(6) == (t4 + t5, t6)
 
     evaluator.warm_start_iterations = 5
-    assert evaluator._get_mixing_weights(5) == (0.0, 36.0)
-    assert evaluator._get_mixing_weights(6) == (36.0, 49.0)
+    assert evaluator._get_mixing_weights(5) == (0.0, t5)
+    assert evaluator._get_mixing_weights(6) == (t5, t6)
 
 
 def test_discounted_update_average_values_skips_then_gamma_averages() -> None:
@@ -2874,7 +2884,10 @@ def test_discounted_update_average_values_skips_then_gamma_averages() -> None:
 
     evaluator.latest_values.fill_(5.0)
     evaluator.update_average_values(5)
-    expected = (25.0 * 4.0 + 36.0 * 5.0) / 61.0
+    window = evaluator.cfr_iterations - evaluator.dcfr_delay
+    w4 = (1 / window) ** 2
+    w5 = (2 / window) ** 2
+    expected = (w4 * 4.0 + w5 * 5.0) / (w4 + w5)
     torch.testing.assert_close(
         evaluator.values_avg,
         torch.full_like(evaluator.values_avg, expected),
@@ -2901,7 +2914,7 @@ def test_average_policy_weight_tensor() -> None:
     evaluator.dcfr_gamma = 2.0
     torch.testing.assert_close(
         evaluator._get_average_policy_weight_tensor(iterations),
-        torch.tensor([9.0, 36.0, 121.0], device=env.device),
+        (iterations.float() / evaluator.cfr_iterations).pow(2.0),
     )
 
     evaluator.warm_start_iterations = 2
@@ -2917,7 +2930,7 @@ def test_average_policy_weight_tensor() -> None:
     )
     torch.testing.assert_close(
         evaluator._get_average_policy_weight_tensor(scheduled_iterations),
-        (scheduled_iterations.float() + 1.0).pow(scheduled_gamma),
+        (scheduled_iterations.float() / evaluator.cfr_iterations).pow(scheduled_gamma),
     )
     evaluator.dcfr_gamma_final = None
 

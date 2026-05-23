@@ -719,12 +719,18 @@ class CFREvaluator(ABC):
         if self.cfr_type == CFRType.discounted:
             if self._average_accumulation_delayed(t):
                 return 0.0
-            return float((t + 1) ** self._get_dcfr_gamma_for_iteration(t))
+            progress = max(0.0, float(t - self.dcfr_delay)) / float(
+                self._average_accumulation_window()
+            )
+            return float(progress ** self._get_dcfr_gamma_for_iteration(t))
         _, new = self._get_mixing_weights(t)
         return float(new)
 
     def _average_accumulation_delayed(self, t: int) -> bool:
         return self.cfr_type == CFRType.discounted and t <= self.dcfr_delay
+
+    def _average_accumulation_window(self) -> int:
+        return max(1, self.cfr_iterations - self.dcfr_delay)
 
     def _get_dcfr_gamma_for_iteration(self, t: int) -> float:
         """Return the scheduled gamma for one iteration without mutating state."""
@@ -749,7 +755,10 @@ class CFREvaluator(ABC):
             return torch.full_like(t, 2.0)
         if self.cfr_type == CFRType.discounted:
             gamma = self._get_dcfr_gamma_tensor(iterations)
-            weights = (t + 1.0).pow(gamma)
+            progress = (t - float(self.dcfr_delay)).clamp(min=0.0) / float(
+                self._average_accumulation_window()
+            )
+            weights = progress.pow(gamma)
             return torch.where(
                 t > float(self.dcfr_delay),
                 weights,
