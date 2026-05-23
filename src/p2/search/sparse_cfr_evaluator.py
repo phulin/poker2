@@ -364,19 +364,23 @@ class SparseCFREvaluator(CFREvaluator):
         )
         sample_epsilon = self.sample_epsilon if training_mode else 0.0
 
-        # Don't sample nodes that are done. No point in continuing search from there.
-        # This means we need a separate valid child mask for sampling.
+        # Don't sample nodes that are done or all-in-call leaves: there's no
+        # decision to continue from, and re-rooting at an all-in-call child
+        # would replace the resolver's exact runout EV with a model-based
+        # estimate at a state the model isn't trained on.
         done_src = self._pull_back(self.env.done)
+        allin_src = self._pull_back(self.allin_call_mask)
+        skip_src = done_src | allin_src
         sampling_masks = self.child_mask.clone()
-        sampling_masks[:top] &= ~done_src
+        sampling_masks[:top] &= ~skip_src
         sampling_counts = sampling_masks.float().sum(dim=-1, keepdim=True)
 
         # Calculate uniform sampling probabilities as backup.
         uniform = torch.where(sampling_masks, 1 / sampling_counts, 0)
 
-        # Calculate policy sampling probabilities, excluding done nodes.
+        # Calculate policy sampling probabilities, excluding skipped children.
         policy_probs_by_src = self._pull_back(self.policy_probs_sample).clone()
-        policy_probs_by_src.masked_fill_(done_src[:, :, None], 0.0)
+        policy_probs_by_src.masked_fill_(skip_src[:, :, None], 0.0)
         denom = policy_probs_by_src.sum(dim=1, keepdim=True)
         policy_probs_by_src = torch.where(
             denom >= 1e-12,
@@ -438,6 +442,7 @@ class SparseCFREvaluator(CFREvaluator):
 
         assert effective_leaf_mask[sampled_nodes].all()
         assert (~self.env.done[sampled_nodes]).all()
+        assert (~self.allin_call_mask[sampled_nodes]).all()
 
         # Don't sample root nodes.
         sampled_continue = sampled_nodes[sampled_nodes >= N]

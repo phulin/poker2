@@ -1407,9 +1407,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             N + 1, dtype=torch.bool, device=self.device
         )
 
+        # Mirror the sparse/rebel filters: skip done children and all-in-call
+        # leaves so the fused kernel never re-roots at one. See
+        # sparse_cfr_evaluator.sample_leaves for rationale.
         done_src = self._pull_back(self.env.done)
+        allin_src = self._pull_back(self.allin_call_mask)
+        skip_src = done_src | allin_src
         sampling_masks = self.child_mask.clone()
-        sampling_masks[:top] &= ~done_src
+        sampling_masks[:top] &= ~skip_src
         sampling_counts = sampling_masks.float().sum(dim=-1, keepdim=True)
         self._sample_leaf_sampling_masks = sampling_masks
         self._sample_leaf_uniform_policy = torch.where(
@@ -2410,6 +2415,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._sample_leaf_ready_padded[:N]
             & (sampled_nodes >= N)
             & (~self.env.done[sampled_nodes])
+            & (~self.allin_call_mask[sampled_nodes])
         )
         root_indices = torch.where(continue_mask)[0]
         sampled_continue = sampled_nodes[root_indices]
