@@ -1165,20 +1165,66 @@ class BetterStreetValueFFN(BetterFFN):
         latent=None,
         apply_zero_sum: bool = True,
         static_base_features: torch.Tensor | None = None,
+        value_head: str = "auto",
     ) -> ModelOutput:
-        pre = self.forward_pre(
-            features,
-            static_base_features=static_base_features,
-            apply_zero_sum=apply_zero_sum,
-        )
-        post = self.forward_post(
-            features,
-            static_base_features=static_base_features,
-            apply_zero_sum=apply_zero_sum,
-        )
+        if value_head == "pre":
+            hand_values = self.forward_pre(
+                features,
+                static_base_features=static_base_features,
+                apply_zero_sum=apply_zero_sum,
+            )
+            return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
+        if value_head == "post":
+            hand_values = self.forward_post(
+                features,
+                static_base_features=static_base_features,
+                apply_zero_sum=apply_zero_sum,
+            )
+            return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
+        if value_head != "auto":
+            raise ValueError("value_head must be one of: auto, pre, post")
+
         phase = features.context[:, ValueScalarContext.CHANCE_PHASE.value]
         pre_mask = (phase >= 0.5).view(-1, 1, 1)
-        hand_values = torch.where(pre_mask, pre, post)
+        if torch.compiler.is_compiling():
+            pre = self.forward_pre(
+                features,
+                static_base_features=static_base_features,
+                apply_zero_sum=apply_zero_sum,
+            )
+            post = self.forward_post(
+                features,
+                static_base_features=static_base_features,
+                apply_zero_sum=apply_zero_sum,
+            )
+            hand_values = torch.where(pre_mask, pre, post)
+            return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
+
+        if static_base_features is None:
+            player_beliefs, _, x, _, _ = self._forward_base(features)
+        else:
+            player_beliefs, _, x, _, _ = self._forward_base_from_static(
+                features, static_base_features=static_base_features
+            )
+        hand_values = features.beliefs.new_empty(
+            len(features), self.num_players, NUM_HANDS
+        )
+        pre_rows = torch.where(pre_mask[:, 0, 0])[0]
+        post_rows = torch.where(~pre_mask[:, 0, 0])[0]
+        if pre_rows.numel() > 0:
+            hand_values[pre_rows] = self._value_tensor_from_base(
+                player_beliefs[pre_rows],
+                x[pre_rows],
+                self.pre_value_head,
+                apply_zero_sum=apply_zero_sum,
+            )
+        if post_rows.numel() > 0:
+            hand_values[post_rows] = self._value_tensor_from_base(
+                player_beliefs[post_rows],
+                x[post_rows],
+                self.post_value_head,
+                apply_zero_sum=apply_zero_sum,
+            )
         return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
 
     def forward_value_static_base(
@@ -1187,12 +1233,14 @@ class BetterStreetValueFFN(BetterFFN):
         static_base_features: torch.Tensor,
         latent=None,
         apply_zero_sum: bool = True,
+        value_head: str = "auto",
     ) -> ModelOutput:
         return self.forward_value(
             features,
             latent=latent,
             apply_zero_sum=apply_zero_sum,
             static_base_features=static_base_features,
+            value_head=value_head,
         )
 
     def forward_both(
@@ -1220,26 +1268,11 @@ class BetterStreetValueFFN(BetterFFN):
             raise RuntimeError("BetterStreetValueFFN does not provide policy outputs")
         if not include_value:
             raise ValueError("BetterStreetValueFFN requires include_value=True")
-        if value_head == "pre":
-            hand_values = self.forward_pre(
-                features,
-                static_base_features=static_base_features,
-                apply_zero_sum=apply_zero_sum,
-            )
-            return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
-        if value_head == "post":
-            hand_values = self.forward_post(
-                features,
-                static_base_features=static_base_features,
-                apply_zero_sum=apply_zero_sum,
-            )
-            return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
-        if value_head != "auto":
-            raise ValueError("value_head must be one of: auto, pre, post")
         return self._call_forward_value(
             features,
             apply_zero_sum=apply_zero_sum,
             static_base_features=static_base_features,
+            value_head=value_head,
         )
 
     def create_feature_encoder(
@@ -1275,11 +1308,50 @@ class BetterSplitFFN(BaseMLPModel):
         self.policy_model.init_weights(rng)
         self.value_model.init_weights(rng)
 
+    def compile_forward_modes(self, **kwargs):
+        """Compile split child fixed-mode forwards used by the wrapper hot path."""
+        self.policy_model._compiled_forward_policy = torch.compile(
+            self.policy_model.forward_policy, **kwargs
+        )
+        self.value_model._compiled_forward_value = torch.compile(
+            self.value_model.forward_value, **kwargs
+        )
+        self.value_model._compiled_forward_both = torch.compile(
+            self.value_model.forward_both, **kwargs
+        )
+        self.value_model._compiled_forward_value_static_base = torch.compile(
+            self.value_model.forward_value_static_base, **kwargs
+        )
+        return super().compile_forward_modes(**kwargs)
+
     def forward_policy(self, features: MLPFeatures, latent=None) -> ModelOutput:
-        return ModelOutput(policy_logits=self.policy_model.forward_policy(features))
+        return ModelOutput(policy_logits=self.policy_model._call_forward_policy(features))
 
     def forward_value(self, features: MLPFeatures, latent=None, **kwargs) -> ModelOutput:
-        return self.value_model.forward_value(features, latent=latent, **kwargs)
+        if kwargs.get("value_head", "auto") == "auto":
+            return self._forward_value_auto_split(features, latent=latent, **kwargs)
+        return self.value_model._call_forward_value(features, latent=latent, **kwargs)
+
+    def forward_value_static_base(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor,
+        latent=None,
+        **kwargs,
+    ) -> ModelOutput:
+        if kwargs.get("value_head", "auto") == "auto":
+            return self._forward_value_auto_split(
+                features,
+                static_base_features=static_base_features,
+                latent=latent,
+                **kwargs,
+            )
+        return self.value_model._call_forward_value_static_base(
+            features,
+            static_base_features,
+            latent=latent,
+            **kwargs,
+        )
 
     def forward_both(
         self,
@@ -1300,6 +1372,30 @@ class BetterSplitFFN(BaseMLPModel):
 
     def forward_post(self, features: MLPFeatures, **kwargs) -> torch.Tensor:
         return self.value_model.forward_post(features, **kwargs)
+
+    def _forward_value_auto_split(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+        value_head: str = "auto",
+    ) -> ModelOutput:
+        if value_head == "auto":
+            return self.value_model.forward_value(
+                features,
+                latent=latent,
+                apply_zero_sum=apply_zero_sum,
+                static_base_features=static_base_features,
+                value_head=value_head,
+            )
+        return self.value_model._call_forward_value(
+            features,
+            latent=latent,
+            apply_zero_sum=apply_zero_sum,
+            static_base_features=static_base_features,
+            value_head=value_head,
+        )
 
     def static_feature_base(self, features: MLPFeatures) -> torch.Tensor:
         return self.value_model.static_feature_base(features)
@@ -1329,16 +1425,23 @@ class BetterSplitFFN(BaseMLPModel):
         value = None
         hand_values = None
         if include_policy:
-            policy_logits = self.policy_model.forward_policy(features)
+            policy_logits = self.policy_model._call_forward_policy(features)
         if include_value:
-            value_output = self.value_model(
-                features,
-                include_policy=False,
-                include_value=True,
-                apply_zero_sum=apply_zero_sum,
-                static_base_features=static_base_features,
-                value_head=value_head,
-            )
+            if value_head == "auto":
+                value_output = self._forward_value_auto_split(
+                    features,
+                    latent=latent,
+                    apply_zero_sum=apply_zero_sum,
+                    static_base_features=static_base_features,
+                )
+            else:
+                value_output = self.value_model._call_forward_value(
+                    features,
+                    latent=latent,
+                    apply_zero_sum=apply_zero_sum,
+                    static_base_features=static_base_features,
+                    value_head=value_head,
+                )
             value = value_output.value
             hand_values = value_output.hand_values
         if not include_policy and not include_value:

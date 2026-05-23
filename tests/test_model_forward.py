@@ -21,9 +21,11 @@ from p2.models.mlp.better_ffn import (
     HAND_DYNAMIC_FEATURE_DIM,
     BetterFFN,
     BetterPolicyFFN,
+    BetterSplitFFN,
     BetterStreetValueFFN,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
+from p2.models.model_output import ModelOutput
 from p2.models.policy import CategoricalPolicyV1
 
 
@@ -364,6 +366,137 @@ def test_better_split_ffn_policy_and_value_shapes_and_parameters():
     )
     assert not any("value" in name for name, _ in policy_model.named_parameters())
     assert not any("policy" in name for name, _ in value_model.named_parameters())
+
+
+def test_better_split_ffn_fixed_value_head_uses_compiled_value_forward():
+    batch_size = 3
+    num_actions = 4
+    num_players = 2
+    policy_model = BetterPolicyFFN(
+        num_actions=num_actions,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+    )
+    value_model = BetterStreetValueFFN(
+        num_actions=1,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+    )
+    model = BetterSplitFFN(policy_model=policy_model, value_model=value_model)
+
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    value_context = torch.zeros(batch_size, value_context_length(num_players))
+    value_context[:, ValueScalarContext.CHANCE_PHASE.value] = torch.tensor(
+        [
+            ChancePhase.PRE_CHANCE.value,
+            ChancePhase.POST_CHANCE.value,
+            ChancePhase.PRE_CHANCE.value,
+        ],
+        dtype=torch.float32,
+    )
+    features = MLPFeatures(
+        context=value_context,
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    static_base = torch.randn(batch_size, value_model.hidden_dim)
+    calls = []
+
+    def fake_forward_value(
+        sub_features,
+        latent=None,
+        apply_zero_sum=True,
+        static_base_features=None,
+        value_head="auto",
+    ):
+        del latent, apply_zero_sum
+        calls.append(
+            (
+                value_head,
+                len(sub_features),
+                None if static_base_features is None else tuple(static_base_features.shape),
+            )
+        )
+        fill = 1.0 if value_head == "pre" else 2.0
+        hand_values = sub_features.beliefs.new_full(
+            (len(sub_features), num_players, NUM_HANDS), fill
+        )
+        return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
+
+    value_model._compiled_forward_value = fake_forward_value
+
+    output = model(
+        features,
+        include_policy=False,
+        include_value=True,
+        static_base_features=static_base,
+        value_head="pre",
+    )
+
+    assert calls == [
+        ("pre", batch_size, (batch_size, value_model.hidden_dim)),
+    ]
+    assert output.hand_values is not None
+    torch.testing.assert_close(output.hand_values[0], torch.ones_like(output.hand_values[0]))
+    torch.testing.assert_close(output.hand_values[1], torch.ones_like(output.hand_values[1]))
+    torch.testing.assert_close(output.hand_values[2], torch.ones_like(output.hand_values[2]))
+
+
+def test_better_street_value_auto_matches_phase_heads():
+    batch_size = 2
+    num_players = 2
+    model = BetterStreetValueFFN(
+        num_actions=1,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(3))
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    context = torch.zeros(batch_size, value_context_length(num_players))
+    context[:, ValueScalarContext.CHANCE_PHASE.value] = torch.tensor(
+        [ChancePhase.PRE_CHANCE.value, ChancePhase.POST_CHANCE.value],
+        dtype=torch.float32,
+    )
+    features = MLPFeatures(
+        context=context,
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+
+    auto = model.forward_value(features).hand_values
+    pre = model.forward_value(features[:1], value_head="pre").hand_values
+    post = model.forward_value(features[1:], value_head="post").hand_values
+
+    assert auto is not None
+    torch.testing.assert_close(auto[:1], pre)
+    torch.testing.assert_close(auto[1:], post)
 
 
 def test_better_street_value_phase_conditioning_changes_output():
