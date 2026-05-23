@@ -137,7 +137,7 @@ class PrecisionProbe:
     def policy_average_stats(self, t: int) -> dict[str, Any] | None:
         ev = self.evaluator
         if (
-            ev.cfr_type in (CFRType.discounted, CFRType.discounted_plus)
+            ev.cfr_type == CFRType.discounted
             and t <= ev.dcfr_delay
         ):
             return {

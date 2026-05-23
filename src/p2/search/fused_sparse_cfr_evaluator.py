@@ -1629,8 +1629,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
         if defer_avg_reach and defer_avg_policy:
             skip_avg_update = (
-                self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
-                and t <= self.dcfr_delay
+                self.cfr_type == CFRType.discounted
+                and self._average_accumulation_delayed(t)
             )
             write_average_policy = not skip_avg_update
             avg_num, avg_den = self._ensure_average_policy_buffers()
@@ -2005,8 +2005,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     ) -> None:
         defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
         if (
-            self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
-            and t <= self.dcfr_delay
+            self.cfr_type == CFRType.discounted
+            and self._average_accumulation_delayed(t)
         ):
             if defer_avg_policy:
                 self.average_policy_initialized = False
@@ -2067,6 +2067,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     # ------------------------------------------------------------------
 
     def update_average_values(self, t: int) -> None:
+        old, new = self._get_mixing_weights(t)
+        if old + new == 0:
+            return
         fused_avg_values_zero_sum_(
             values_avg=self.values_avg,
             latest_values=self.latest_values,
@@ -2139,7 +2142,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 model_output = self.model(features, include_policy=False)
         hand_values = model_output.hand_values.contiguous()
 
-        do_mix = self.cfr_avg and t > 1 and self.last_model_values is not None
+        do_mix = (
+            self.cfr_avg
+            and t > 1
+            and self.last_model_values is not None
+            and not self._average_accumulation_delayed(t)
+        )
         store_last = bool(self.cfr_avg)
         if store_last:
             last_shape = (hand_values.shape[0], self.num_players, NUM_HANDS)
@@ -2336,7 +2344,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             regrets.masked_fill_(self.prev_actor[:, None] == t % self.num_players, 0.0)
             self.cumulative_regrets += regrets
         else:
-            apply_dcfr = self.cfr_type in (CFRType.discounted, CFRType.discounted_plus)
+            apply_dcfr = self.cfr_type == CFRType.discounted
             positive_regrets_out = self._ensure_positive_regrets_buf()
             self._prepare_tree_slices()
             top = self._top
@@ -2497,7 +2505,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if t < 2:
             return None
         if (
-            self.cfr_type in (CFRType.discounted, CFRType.discounted_plus)
+            self.cfr_type == CFRType.discounted
             and t <= self.dcfr_delay
         ):
             return "pre_dcfr_delay"

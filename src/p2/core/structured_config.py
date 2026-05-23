@@ -59,7 +59,6 @@ class CFRType(str, Enum):
     standard = "standard"
     linear = "linear"
     discounted = "discounted"
-    discounted_plus = "discounted_plus"
 
 
 class WarmStartType(str, Enum):

@@ -41,7 +41,7 @@ Scope / caveats
 * ``_record_stats`` is skipped during capture — it contains ``.item()`` which
   forces a CUDA sync incompatible with graph capture.
 * ``apply_schedules`` is also skipped; it only mutates Python floats.
-* Targets the default config path: ``cfr_type in {discounted, discounted_plus}``,
+* Targets the default config path: ``cfr_type == discounted``,
   ``cfr_plus=False``, no active DCFR parameter schedule (``dcfr_*_final`` all
   ``None``).
 """
@@ -128,7 +128,7 @@ def fused_dcfr_update_(
 
     Replicates this sequence from ``cfr_evaluator.cfr_iteration``::
 
-        if cfr_type in {discounted, discounted_plus}:
+        if cfr_type == discounted:
             num = where(c > 0, t**a, t**b)
             den = where(c > 0, t**a + 1, t**b + 1)
             c *= num; c /= den
@@ -148,14 +148,14 @@ def fused_dcfr_update_(
         raise ValueError("fused_dcfr_update_ requires CUDA tensors.")
     if cfr_type == CFRType.linear:
         raise NotImplementedError(
-            "Linear CFR path not supported; default config uses discounted_plus."
+            "Linear CFR path not supported; default config uses discounted."
         )
 
     assert cumulative_regrets.is_contiguous()
     assert regrets.is_contiguous()
     assert cumulative_regrets.shape == regrets.shape
 
-    apply_dcfr = cfr_type in (CFRType.discounted, CFRType.discounted_plus)
+    apply_dcfr = cfr_type == CFRType.discounted
     if apply_dcfr:
         t_alpha_num_v = float(t**dcfr_alpha)
         t_beta_num_v = float(t**dcfr_beta)

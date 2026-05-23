@@ -90,7 +90,7 @@ def create_instrumented_cfr_iteration(original_method):
                 regrets.masked_fill_(
                     self.prev_actor[:, None] == t % self.num_players, 0.0
                 )
-        elif self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]:
+        elif self.cfr_type == CFRType.discounted:
             with record_function("cfr_iteration.dcfr_numerator"):
                 numerator = torch.where(
                     self.cumulative_regrets > 0,

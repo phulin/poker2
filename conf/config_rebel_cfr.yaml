@@ -96,7 +96,7 @@ search:
   sparse_fused: true
   value_targets_from_final_policy: true
 
-  cfr_type: discounted_plus
+  cfr_type: discounted
   cfr_avg: false
   cfr_plus: false
 

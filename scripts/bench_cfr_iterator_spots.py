@@ -626,7 +626,7 @@ def _run_component_benchmarks(
                 t_beta_num=ev._t_scalars.t_beta_num,
                 t_alpha_den=ev._t_scalars.t_alpha_den,
                 t_beta_den=ev._t_scalars.t_beta_den,
-                apply_dcfr=ev.cfr_type in (CFRType.discounted, CFRType.discounted_plus),
+                apply_dcfr=ev.cfr_type == CFRType.discounted,
                 cfr_plus=ev.cfr_plus,
                 max_children=ev.num_actions,
                 positive_regrets_out=inline_regret_box["positive_regrets"],

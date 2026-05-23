@@ -93,7 +93,7 @@ def _make_cfg(args: argparse.Namespace) -> Config:
     cfg.search.warm_start_type = WarmStartType.model
     cfg.search.warm_start_multiplier = 10
     cfg.search.dcfr_plus_delay = args.dcfr_delay
-    cfg.search.cfr_type = CFRType.discounted_plus
+    cfg.search.cfr_type = CFRType.discounted
     cfg.search.cfr_avg = False
     cfg.search.cfr_plus = False
     cfg.search.value_targets_from_final_policy = True

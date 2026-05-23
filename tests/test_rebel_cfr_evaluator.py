@@ -1834,8 +1834,6 @@ def test_discounted_cfr_policy_averaging() -> None:
     )
     env.reset()
 
-    # Create evaluator with depth=0 for simplicity
-    # Note: discounted_plus uses delay-based weights, not discounted
     dcfr_delay = 10
     evaluator = RebelCFREvaluator(
         search_batch_size=1,
@@ -1848,7 +1846,7 @@ def test_discounted_cfr_policy_averaging() -> None:
         dcfr_delay=dcfr_delay,
         device=device,
         float_dtype=float_dtype,
-        cfr_type=CFRType.discounted_plus,
+        cfr_type=CFRType.discounted,
         cfr_avg=True,
     )
 
@@ -2813,22 +2811,74 @@ def test_get_mixing_weights() -> None:
 
     # Test discounted CFR
     evaluator.cfr_type = CFRType.discounted
+    evaluator.warm_start_iterations = 0
+    evaluator.dcfr_delay = 0
     evaluator.dcfr_gamma = 2.0
+    old, new = evaluator._get_mixing_weights(5)
+    assert old == 54
+    assert new == 36
+
+    # Test discounted CFR with delay
+    evaluator.dcfr_delay = 3
     old, new = evaluator._get_mixing_weights(5)
     assert old == 25
     assert new == 36
 
-    # Test discounted_plus CFR with delay
-    evaluator.cfr_type = CFRType.discounted_plus
-    evaluator.dcfr_delay = 3
-    old, new = evaluator._get_mixing_weights(5)
-    assert old == 2
-    assert new == 2
-
-    # Test discounted_plus CFR before delay
+    # Test discounted CFR before delay
     old, new = evaluator._get_mixing_weights(2)
     assert old == 0
-    assert new == 1
+    assert new == 0
+
+
+def test_discounted_value_mixing_uses_gamma_weights_after_delay() -> None:
+    evaluator, _ = make_evaluator(batch_size=1, max_depth=0)
+    evaluator.cfr_type = CFRType.discounted
+    evaluator.warm_start_iterations = 0
+    evaluator.dcfr_delay = 3
+    evaluator.dcfr_gamma = 2.0
+    evaluator.dcfr_gamma_final = None
+
+    assert evaluator._get_mixing_weights(2) == (0.0, 0.0)
+    assert evaluator._get_mixing_weights(4) == (0.0, 25.0)
+    assert evaluator._get_mixing_weights(5) == (25.0, 36.0)
+    assert evaluator._get_mixing_weights(6) == (61.0, 49.0)
+
+    evaluator.warm_start_iterations = 5
+    assert evaluator._get_mixing_weights(5) == (0.0, 36.0)
+    assert evaluator._get_mixing_weights(6) == (36.0, 49.0)
+
+
+def test_discounted_update_average_values_skips_then_gamma_averages() -> None:
+    evaluator, _ = make_evaluator(batch_size=1, max_depth=0)
+    evaluator.cfr_type = CFRType.discounted
+    evaluator.warm_start_iterations = 0
+    evaluator.dcfr_delay = 3
+    evaluator.dcfr_gamma = 2.0
+    evaluator.dcfr_gamma_final = None
+    evaluator.model.enforce_zero_sum = False
+
+    evaluator.values_avg.fill_(10.0)
+    evaluator.latest_values.fill_(100.0)
+    evaluator.update_average_values(2)
+    torch.testing.assert_close(
+        evaluator.values_avg,
+        torch.full_like(evaluator.values_avg, 10.0),
+    )
+
+    evaluator.latest_values.fill_(4.0)
+    evaluator.update_average_values(4)
+    torch.testing.assert_close(
+        evaluator.values_avg,
+        torch.full_like(evaluator.values_avg, 4.0),
+    )
+
+    evaluator.latest_values.fill_(5.0)
+    evaluator.update_average_values(5)
+    expected = (25.0 * 4.0 + 36.0 * 5.0) / 61.0
+    torch.testing.assert_close(
+        evaluator.values_avg,
+        torch.full_like(evaluator.values_avg, expected),
+    )
 
 
 def test_average_policy_weight_tensor() -> None:
@@ -2871,14 +2921,14 @@ def test_average_policy_weight_tensor() -> None:
     )
     evaluator.dcfr_gamma_final = None
 
-    evaluator.cfr_type = CFRType.discounted_plus
+    evaluator.cfr_type = CFRType.discounted
     evaluator.dcfr_delay = 3
     evaluator.dcfr_gamma_initial = 4.0
     evaluator.dcfr_gamma = 0.0
-    evaluator.dcfr_gamma_final = 0.0
+    evaluator.dcfr_gamma_final = None
     torch.testing.assert_close(
         evaluator._get_average_policy_weight_tensor(iterations),
-        torch.tensor([1.0, 2.0, 2.0], device=env.device),
+        torch.tensor([0.0, 1.0, 1.0], device=env.device),
     )
 
 
@@ -2898,8 +2948,8 @@ def test_get_sampling_schedule() -> None:
     assert schedule.min() >= evaluator.warm_start_iterations + 1
     assert schedule.max() < evaluator.cfr_iterations
 
-    # Test with discounted_plus CFR
-    evaluator.cfr_type = CFRType.discounted_plus
+    # Discounted CFR skips pre-delay iterations when sampling leaves.
+    evaluator.cfr_type = CFRType.discounted
     evaluator.dcfr_delay = 10
     schedule = evaluator._get_sampling_schedule()
     assert schedule.min() >= max(

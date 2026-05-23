@@ -15,8 +15,7 @@ from p2.core.structured_config import CFRType
     "cfr_type,cfr_plus",
     [
         (CFRType.discounted, False),
-        (CFRType.discounted_plus, False),
-        (CFRType.discounted_plus, True),
+        (CFRType.discounted, True),
     ],
 )
 @pytest.mark.parametrize("t", [1, 7, 42])
@@ -41,7 +40,7 @@ def test_fused_dcfr_update_matches_pytorch(
     cumul_ref = cumul.clone()
     r_ref = regrets.clone()
 
-    if cfr_type in (CFRType.discounted, CFRType.discounted_plus):
+    if cfr_type == CFRType.discounted:
         numerator = torch.where(cumul_ref > 0, t**alpha, t**beta)
         denominator = torch.where(cumul_ref > 0, t**alpha + 1, t**beta + 1)
         cumul_ref *= numerator
@@ -81,7 +80,7 @@ def test_fused_sparse_graph_capture_regime_splits_dcfr_delay() -> None:
     from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
     ev = FusedSparseCFREvaluator.__new__(FusedSparseCFREvaluator)
-    ev.cfr_type = CFRType.discounted_plus
+    ev.cfr_type = CFRType.discounted
     ev.dcfr_delay = 5
 
     assert ev._graph_capture_regime(0) is None
@@ -89,9 +88,6 @@ def test_fused_sparse_graph_capture_regime_splits_dcfr_delay() -> None:
     assert ev._graph_capture_regime(2) == "pre_dcfr_delay"
     assert ev._graph_capture_regime(5) == "pre_dcfr_delay"
     assert ev._graph_capture_regime(6) == "post_dcfr_delay"
-
-    ev.cfr_type = CFRType.discounted
-    assert ev._graph_capture_regime(5) == "pre_dcfr_delay"
 
     ev.cfr_type = CFRType.standard
     assert ev._graph_capture_regime(2) == "post_dcfr_delay"

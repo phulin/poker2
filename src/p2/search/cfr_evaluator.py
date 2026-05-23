@@ -704,18 +704,39 @@ class CFREvaluator(ABC):
         elif self.cfr_type == CFRType.linear:
             return t, 2
         elif self.cfr_type == CFRType.discounted:
-            return t**self.dcfr_gamma, (t + 1) ** self.dcfr_gamma
-        elif self.cfr_type == CFRType.discounted_plus:
-            if t > self.dcfr_delay:
-                t_delay = t - self.dcfr_delay
-                return t_delay, 2
-            else:
-                return 0, 1
+            new = self._get_average_policy_weight(t)
+            if new == 0:
+                return 0.0, 0.0
+            old = sum(
+                self._get_average_policy_weight(k)
+                for k in range(self.warm_start_iterations, t)
+            )
+            return float(old), float(new)
+        raise ValueError(f"Unsupported CFR type: {self.cfr_type}")
 
     def _get_average_policy_weight(self, t: int) -> float:
         """Return the current-iteration weight for CFR average strategy."""
+        if self.cfr_type == CFRType.discounted:
+            if self._average_accumulation_delayed(t):
+                return 0.0
+            return float((t + 1) ** self._get_dcfr_gamma_for_iteration(t))
         _, new = self._get_mixing_weights(t)
         return float(new)
+
+    def _average_accumulation_delayed(self, t: int) -> bool:
+        return self.cfr_type == CFRType.discounted and t <= self.dcfr_delay
+
+    def _get_dcfr_gamma_for_iteration(self, t: int) -> float:
+        """Return the scheduled gamma for one iteration without mutating state."""
+        if self.dcfr_gamma_final is None:
+            return float(self.dcfr_gamma)
+        total_iterations = max(1, self.cfr_iterations - self.warm_start_iterations)
+        iteration_progress = max(0, t - self.warm_start_iterations)
+        t_normalized = min(1.0, max(0.0, iteration_progress / float(total_iterations)))
+        return float(
+            self.dcfr_gamma_initial
+            + (self.dcfr_gamma_final - self.dcfr_gamma_initial) * t_normalized
+        )
 
     def _get_average_policy_weight_tensor(
         self, iterations: torch.Tensor
@@ -728,12 +749,11 @@ class CFREvaluator(ABC):
             return torch.full_like(t, 2.0)
         if self.cfr_type == CFRType.discounted:
             gamma = self._get_dcfr_gamma_tensor(iterations)
-            return (t + 1.0).pow(gamma)
-        if self.cfr_type == CFRType.discounted_plus:
+            weights = (t + 1.0).pow(gamma)
             return torch.where(
                 t > float(self.dcfr_delay),
-                torch.full_like(t, 2.0),
-                torch.ones_like(t),
+                weights,
+                torch.zeros_like(t),
             )
         raise ValueError(f"Unsupported CFR type: {self.cfr_type}")
 
@@ -855,7 +875,7 @@ class CFREvaluator(ABC):
 
     def _get_sampling_schedule(self) -> torch.Tensor:
         N = self.root_nodes
-        if self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]:
+        if self.cfr_type == CFRType.discounted:
             sample_low = max(self.warm_start_iterations, self.dcfr_delay) + 1
         else:
             sample_low = self.warm_start_iterations + 1
@@ -865,7 +885,11 @@ class CFREvaluator(ABC):
             sample_low, sample_high, dtype=torch.long, device=self.device
         )
         distribution = self._get_average_policy_weight_tensor(iterations)
-        distribution /= distribution.sum()
+        distribution_sum = distribution.sum()
+        if distribution_sum <= 0:
+            distribution.fill_(1.0)
+            distribution_sum = distribution.sum()
+        distribution /= distribution_sum
         t_sample = torch.multinomial(
             distribution, N, replacement=True, generator=self.generator
         )
@@ -1515,7 +1539,12 @@ class CFREvaluator(ABC):
                 model_output = self.model(features, include_policy=False)
         hand_values = model_output.hand_values.to(self.float_dtype)
 
-        if not self.cfr_avg or t <= 1 or self.last_model_values is None:
+        if (
+            not self.cfr_avg
+            or t <= 1
+            or self.last_model_values is None
+            or self._average_accumulation_delayed(t)
+        ):
             new_values = torch.index_copy(
                 self.latest_values,
                 0,
@@ -1723,8 +1752,7 @@ class CFREvaluator(ABC):
     def update_average_policy(self, t: int) -> None:
         """Update the average policy using true CFR reach-weighted sums."""
         if (
-            self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]
-            and t <= self.dcfr_delay
+            self.cfr_type == CFRType.discounted and self._average_accumulation_delayed(t)
         ):
             self.policy_probs_avg[:] = self.policy_probs
             self.average_policy_initialized = False
@@ -1781,9 +1809,12 @@ class CFREvaluator(ABC):
         """
 
         old, new = self._get_mixing_weights(t)
+        total = old + new
+        if total == 0:
+            return
         self.values_avg *= old
         self.values_avg += new * self.latest_values
-        self.values_avg /= old + new
+        self.values_avg /= total
         self.values_avg[:] = self._maybe_enforce_zero_sum(
             self.values_avg, self.beliefs_avg, ignore_mask=self.env.done
         )
@@ -1867,7 +1898,7 @@ class CFREvaluator(ABC):
 
         if self.cfr_type == CFRType.linear:  # Alternate updates.
             regrets.masked_fill_(self.prev_actor[:, None] == t % self.num_players, 0.0)
-        elif self.cfr_type in [CFRType.discounted, CFRType.discounted_plus]:
+        elif self.cfr_type == CFRType.discounted:
             numerator = torch.where(
                 self.cumulative_regrets > 0, t**self.dcfr_alpha, t**self.dcfr_beta
             )

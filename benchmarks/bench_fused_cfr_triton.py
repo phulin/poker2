@@ -18,8 +18,6 @@ Hydra overrides are accepted for the full-iteration benchmark, e.g.::
 
 from __future__ import annotations
 
-import time
-
 import hydra
 import torch
 from omegaconf import DictConfig
@@ -87,7 +85,7 @@ def bench_dcfr_kernel(total_nodes: int = 10_000, num_hands: int = 1326) -> None:
             regret_weight_sums=weight,
             regrets=regrets,
             t=t,
-            cfr_type=CFRType.discounted_plus,
+            cfr_type=CFRType.discounted,
             dcfr_alpha=alpha,
             dcfr_beta=beta,
             cfr_plus=False,
