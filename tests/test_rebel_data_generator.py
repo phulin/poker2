@@ -333,6 +333,34 @@ def test_rebel_data_generator_multiple_iterations(monkeypatch, env_proto):
     assert len(buffer.batches) >= 1
 
 
+def test_rebel_data_generator_uses_stable_target_after_evaluator_root_mutates(
+    monkeypatch, env_proto
+):
+    monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
+    evaluator = DummyEvaluator(
+        env_proto=env_proto,
+        search_batch_size=4,
+        total_nodes=4,
+        num_players=2,
+        num_actions=env_proto.num_actions,
+    )
+    buffer = DummyBuffer()
+    generator = RebelDataGenerator(
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
+        warmup=False,
+    )
+
+    evaluator.root_nodes = 2
+    generator.generate_data(2)
+
+    torch.testing.assert_close(evaluator.initialize_args[0], torch.arange(4))
+    assert evaluator.last_beliefs is not None
+    assert evaluator.last_beliefs.shape == (4, evaluator.num_players, NUM_HANDS)
+
+
 def test_rebel_data_generator_warmup_mixes_streets(monkeypatch):
     monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
     env_proto = SimpleNamespace(num_envs=8, num_actions=5)

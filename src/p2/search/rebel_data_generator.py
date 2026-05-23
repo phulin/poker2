@@ -51,7 +51,8 @@ class RebelDataGenerator:
         self.value_buffer = value_buffer
         self.policy_buffer = policy_buffer
         self.device = evaluator.device
-        initial_pbs = self._new_pbs(evaluator.root_nodes)
+        self.target_batch_size = int(evaluator.root_nodes)
+        initial_pbs = self._new_pbs(self.target_batch_size)
         self.current_pbs = initial_pbs
         self.last_extra = 0
         if warmup:
@@ -144,7 +145,7 @@ class RebelDataGenerator:
         self.current_pbs = self.evaluator.evaluate_cfr()
 
     def _warmup_current_pbs(self) -> None:
-        target = int(self.evaluator.root_nodes)
+        target = self.target_batch_size
         quarter = target // 4
         if quarter == 0:
             return
@@ -200,11 +201,15 @@ class RebelDataGenerator:
     def state_dict(self) -> dict:
         return {
             "last_extra": int(self.last_extra),
+            "target_batch_size": self.target_batch_size,
             "current_pbs": self._pbs_state_dict(self.current_pbs),
         }
 
     def load_state_dict(self, state: dict) -> None:
         self.last_extra = int(state.get("last_extra", 0))
+        self.target_batch_size = int(
+            state.get("target_batch_size", self.target_batch_size)
+        )
         self.current_pbs = self._pbs_from_state_dict(state.get("current_pbs"))
 
     @profile
@@ -214,8 +219,7 @@ class RebelDataGenerator:
         return_value_batch: bool = True,
         return_policy_batch: bool = True,
     ) -> tuple[RebelBatch | None, RebelBatch | None]:
-        N = self.evaluator.root_nodes
-        root_indices = torch.arange(N, device=self.device)
+        target_batch_size = self.target_batch_size
         collected = self.last_extra
 
         value_batches = []
@@ -224,16 +228,20 @@ class RebelDataGenerator:
         while collected < value_sample_count:
             refilled = False
             if self.current_pbs is None:
-                self.current_pbs = self._new_pbs(N)
+                self.current_pbs = self._new_pbs(target_batch_size)
                 refilled = True
-            elif self.current_pbs.env.N < N:
-                self.current_pbs = self._extend_pbs(self.current_pbs, N)
+            elif self.current_pbs.env.N < target_batch_size:
+                self.current_pbs = self._extend_pbs(
+                    self.current_pbs, target_batch_size
+                )
                 refilled = True
 
+            root_count = int(self.current_pbs.env.N)
+            root_indices = torch.arange(root_count, device=self.device)
             self.evaluator.initialize_subgame(
                 self.current_pbs.env,
                 root_indices,
-                self.current_pbs.beliefs,
+                self.current_pbs.beliefs[:root_count],
             )
 
             self.current_pbs = self.evaluator.evaluate_cfr()
