@@ -23,6 +23,7 @@ from omegaconf import DictConfig
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.utils.model_utils import count_model_parameters
+from p2.utils.profiling import install_triton_compile_logger_from_env
 from p2.utils.training_utils import print_preflop_range_grid
 
 
@@ -171,6 +172,9 @@ def _log_model_parameter_summary(model: torch.nn.Module, run: Any) -> None:
 
 
 def train_rebel(cfg: Config) -> None:
+    if install_triton_compile_logger_from_env():
+        print("Triton compile logging enabled via P2_TRITON_COMPILE_LOG=1")
+
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
     device = _device_from_config(cfg)
     print(f"Using device: {device}")
