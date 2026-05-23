@@ -571,7 +571,7 @@ if triton is not None:
         total = tl.sum(tl.where(card < NUM_CARDS, card_sum, 0.0), axis=0) * 0.5
         tl.store(stats_out + row * (NUM_CARDS + 1), total)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["M0", "M1"])
     def _allin_belief_card_stats_split_kernel(
         beliefs,
         node_indices0,
@@ -727,7 +727,7 @@ if triton is not None:
         tl.store(latest_values + (node * 2) * H + h, ev0, mask=hmask)
         tl.store(latest_values + (node * 2 + 1) * H + h, ev1, mask=hmask)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["M"])
     def _allin_table_values_card_denom_dot_kernel(
         table,
         beliefs,
