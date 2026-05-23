@@ -38,12 +38,44 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = REPO_ROOT / "outputs" / "cfr_main_path_benchmark.json"
 STEP_TAG = "train_step"
 
+INIT_SUBTAGS = [
+    "cfr_init_construct_subgame",
+    "cfr_init_ensure_capacity",
+    "cfr_init_construct_attempt",
+    "cfr_init_attempt_gather_env",
+    "cfr_init_attempt_root_init",
+    "cfr_init_attempt_legal_counts",
+    "cfr_init_attempt_cumsum_offsets",
+    "cfr_init_attempt_child_count_sync",
+    "cfr_init_attempt_write_children",
+    "cfr_init_attempt_copy_child_cards",
+    "cfr_init_attempt_final_legal_counts",
+    "cfr_init_attempt_finalize_masks",
+    "cfr_init_attempt_child_offsets",
+    "cfr_init_attempt_showdown_setup",
+    "cfr_init_attempt_policy_alloc",
+    "cfr_init_attempt_policy_init",
+    "cfr_init_attempt_belief_alloc",
+    "cfr_init_attempt_belief_init",
+    "cfr_init_attempt_values_avg_alloc",
+    "cfr_init_attempt_feature_encoder",
+    "cfr_init_active_env_view",
+    "cfr_init_mark_allin_leaves",
+    "cfr_init_model_indices",
+    "cfr_init_root_allowed",
+    "cfr_init_fan_out_deep",
+    "cfr_init_hand_rank",
+    "cfr_init_tree_slices",
+    "cfr_init_avg_policy_reset",
+]
+
 COMPONENT_TAGS = [
     STEP_TAG,
     "trainer_update_model",
     "data_generate",
     "cfr_evaluate",
     "cfr_init_subgame",
+    *INIT_SUBTAGS,
     "cfr_warm_start",
     "cfr_iter",
     "cfr_iter_update_policy",
@@ -67,6 +99,107 @@ COMPONENT_TAGS = [
     "batch_permute",
     "suit_permutation",
 ]
+
+
+CUDA_EVENT_TAGS = {
+    STEP_TAG,
+    "trainer_update_model",
+    "data_generate",
+    "cfr_evaluate",
+    "cfr_init_subgame",
+    *INIT_SUBTAGS,
+    "training_supervise",
+    "training_model_fwd",
+    "training_metrics",
+    "aggression_metrics",
+    "value_buffer_sample",
+    "policy_buffer_sample",
+    "batch_permute",
+}
+
+
+class CudaEventTimer:
+    """Collect CUDA event timings for tagged Python regions."""
+
+    def __init__(self, device: torch.device) -> None:
+        self.enabled = device.type == "cuda"
+        self.events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] = {}
+        self.init_depth = 0
+
+    def clear(self) -> None:
+        self.events.clear()
+
+    @contextmanager
+    def init_scope(self):
+        self.init_depth += 1
+        try:
+            yield
+        finally:
+            self.init_depth -= 1
+
+    def measure(
+        self, tag: str, fn: Callable[[], Any], *, init_only: bool = False
+    ) -> Any:
+        if init_only and self.init_depth <= 0:
+            return fn()
+        if not self.enabled or tag not in CUDA_EVENT_TAGS:
+            return fn()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        try:
+            return fn()
+        finally:
+            end.record()
+            self.events.setdefault(tag, []).append((start, end))
+
+    @contextmanager
+    def region(self, tag: str):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        if self.enabled and tag in CUDA_EVENT_TAGS:
+            start.record()
+        try:
+            yield
+        finally:
+            if self.enabled and tag in CUDA_EVENT_TAGS:
+                end.record()
+                self.events.setdefault(tag, []).append((start, end))
+
+    def summary(
+        self, active_steps: int, active_wall_s: list[float]
+    ) -> dict[str, Any]:
+        if self.enabled:
+            torch.cuda.synchronize()
+        wall_mean_ms = (
+            1e3 * sum(active_wall_s) / max(1, len(active_wall_s))
+            if active_wall_s
+            else 0.0
+        )
+        rows: list[dict[str, Any]] = []
+        invalid_pairs: dict[str, int] = {}
+        for tag in COMPONENT_TAGS:
+            pairs = self.events.get(tag, [])
+            total_ms = 0.0
+            if self.enabled:
+                for start, end in pairs:
+                    try:
+                        total_ms += float(start.elapsed_time(end))
+                    except Exception:
+                        invalid_pairs[tag] = invalid_pairs.get(tag, 0) + 1
+            per_step = total_ms / max(1, active_steps)
+            rows.append(
+                {
+                    "component": tag,
+                    "calls_per_step": len(pairs) / max(1, active_steps),
+                    "cuda_event_ms_per_step": per_step,
+                    "cuda_event_pct_of_wall": (
+                        (100.0 * per_step / wall_mean_ms) if wall_mean_ms else 0.0
+                    ),
+                }
+            )
+        rows.sort(key=lambda r: r["cuda_event_ms_per_step"], reverse=True)
+        return {"components": rows, "invalid_pairs": invalid_pairs}
 
 
 def _iter_processes() -> list[tuple[int, str]]:
@@ -137,30 +270,75 @@ def pause_train_rebel(enabled: bool, pattern: str):
             )
 
 
-def _wrap_class_call(cls: type, tag: str, patched: set[type]) -> None:
+def _wrap_class_call(
+    cls: type,
+    tag: str,
+    patched: set[type],
+    event_timer: CudaEventTimer | None = None,
+) -> None:
     if cls in patched:
         return
     patched.add(cls)
     orig_call = cls.__call__
 
     def wrapped(self, *args, **kwargs):
-        with record_function(tag):
-            return orig_call(self, *args, **kwargs)
+        def run():
+            with record_function(tag):
+                return orig_call(self, *args, **kwargs)
+
+        return event_timer.measure(tag, run) if event_timer is not None else run()
 
     cls.__call__ = wrapped
 
 
-def _wrap_method(obj: Any, attr: str, tag: str) -> None:
+def _wrap_method(
+    obj: Any,
+    attr: str,
+    tag: str,
+    event_timer: CudaEventTimer | None = None,
+    init_only: bool = False,
+) -> None:
     orig = getattr(obj, attr)
 
     def wrapped(*args, **kwargs):
-        with record_function(tag):
-            return orig(*args, **kwargs)
+        def run():
+            with record_function(tag):
+                return orig(*args, **kwargs)
+
+        return (
+            event_timer.measure(tag, run, init_only=init_only)
+            if event_timer is not None
+            else run()
+        )
 
     setattr(obj, attr, wrapped)
 
 
-def _wrap_class_method(cls: type, attr: str, tag: str, patched: set[tuple[type, str]]):
+def _wrap_init_method(
+    obj: Any, attr: str, tag: str, event_timer: CudaEventTimer | None = None
+) -> None:
+    orig = getattr(obj, attr)
+
+    def wrapped(*args, **kwargs):
+        def run():
+            with record_function(tag):
+                return orig(*args, **kwargs)
+
+        if event_timer is None:
+            return run()
+        with event_timer.init_scope():
+            return event_timer.measure(tag, run)
+
+    setattr(obj, attr, wrapped)
+
+
+def _wrap_class_method(
+    cls: type,
+    attr: str,
+    tag: str,
+    patched: set[tuple[type, str]],
+    event_timer: CudaEventTimer | None = None,
+):
     key = (cls, attr)
     if key in patched:
         return
@@ -168,40 +346,74 @@ def _wrap_class_method(cls: type, attr: str, tag: str, patched: set[tuple[type, 
     orig = getattr(cls, attr)
 
     def wrapped(self, *args, **kwargs):
-        with record_function(tag):
-            return orig(self, *args, **kwargs)
+        def run():
+            with record_function(tag):
+                return orig(self, *args, **kwargs)
+
+        return event_timer.measure(tag, run) if event_timer is not None else run()
 
     setattr(cls, attr, wrapped)
 
 
-def _patch_profiler_tags(trainer: RebelCFRTrainer) -> None:
+def _patch_profiler_tags(
+    trainer: RebelCFRTrainer, event_timer: CudaEventTimer | None = None
+) -> None:
     patched: set[type] = set()
     patched_methods: set[tuple[type, str]] = set()
-    _wrap_class_call(trainer.model.__class__, "training_model_fwd", patched)
-    _wrap_class_call(trainer.cfr_evaluator.model.__class__, "cfr_model_fwd", patched)
-
-    _wrap_method(trainer, "_update_model", "trainer_update_model")
-    _wrap_method(trainer, "_supervise", "training_supervise")
-    _wrap_method(trainer, "_compute_metrics", "training_metrics")
-    _wrap_method(trainer, "_compute_permutation_loss", "suit_permutation")
-    _wrap_method(
-        trainer.aggression_analyzer, "analyze_batch", "aggression_metrics"
+    _wrap_class_call(
+        trainer.model.__class__, "training_model_fwd", patched, event_timer
     )
-    _wrap_method(trainer.value_buffer, "sample", "value_buffer_sample")
-    _wrap_method(trainer.policy_buffer, "sample", "policy_buffer_sample")
-    _wrap_method(trainer.value_buffer, "add_batch", "value_buffer_add")
-    _wrap_method(trainer.policy_buffer, "add_batch", "policy_buffer_add")
+    _wrap_class_call(
+        trainer.cfr_evaluator.model.__class__, "cfr_model_fwd", patched, event_timer
+    )
+
+    _wrap_method(trainer, "_update_model", "trainer_update_model", event_timer)
+    _wrap_method(trainer, "_supervise", "training_supervise", event_timer)
+    _wrap_method(trainer, "_compute_metrics", "training_metrics", event_timer)
+    _wrap_method(
+        trainer, "_compute_permutation_loss", "suit_permutation", event_timer
+    )
+    _wrap_method(
+        trainer.aggression_analyzer,
+        "analyze_batch",
+        "aggression_metrics",
+        event_timer,
+    )
+    _wrap_method(trainer.value_buffer, "sample", "value_buffer_sample", event_timer)
+    _wrap_method(trainer.policy_buffer, "sample", "policy_buffer_sample", event_timer)
+    _wrap_method(trainer.value_buffer, "add_batch", "value_buffer_add", event_timer)
+    _wrap_method(trainer.policy_buffer, "add_batch", "policy_buffer_add", event_timer)
 
     from p2.rl.rebel_batch import RebelBatch
 
     _wrap_class_method(
-        RebelBatch, "with_permuted_targets", "batch_permute", patched_methods
+        RebelBatch,
+        "with_permuted_targets",
+        "batch_permute",
+        patched_methods,
+        event_timer,
     )
 
     generator = trainer.data_generator
-    _wrap_method(generator, "generate_data", "data_generate")
+    _wrap_method(generator, "generate_data", "data_generate", event_timer)
 
     ev = trainer.cfr_evaluator
+    for attr, tag in (
+        ("_construct_subgame", "cfr_init_construct_subgame"),
+        ("_ensure_subgame_capacity", "cfr_init_ensure_capacity"),
+        ("_construct_subgame_attempt", "cfr_init_construct_attempt"),
+        ("_active_subgame_env_view", "cfr_init_active_env_view"),
+        ("_mark_constructed_allin_call_leaves", "cfr_init_mark_allin_leaves"),
+        ("_compute_model_indices", "cfr_init_model_indices"),
+        ("_root_allowed_from_board_indices", "cfr_init_root_allowed"),
+        ("_fan_out_deep", "cfr_init_fan_out_deep"),
+        ("_init_hand_rank_data", "cfr_init_hand_rank"),
+        ("_prepare_tree_slices", "cfr_init_tree_slices"),
+        ("_reset_average_policy_accumulators", "cfr_init_avg_policy_reset"),
+    ):
+        if hasattr(ev, attr):
+            _wrap_method(ev, attr, tag, event_timer, init_only=True)
+
     for attr, tag in (
         ("evaluate_cfr", "cfr_evaluate"),
         ("initialize_subgame", "cfr_init_subgame"),
@@ -218,7 +430,10 @@ def _patch_profiler_tags(trainer: RebelCFRTrainer) -> None:
         ("training_data", "cfr_training_data"),
     ):
         if hasattr(ev, attr):
-            _wrap_method(ev, attr, tag)
+            if attr == "initialize_subgame":
+                _wrap_init_method(ev, attr, tag, event_timer)
+            else:
+                _wrap_method(ev, attr, tag, event_timer)
 
 
 def _apply_realistic_overrides(cfg: Config, args: argparse.Namespace) -> None:
@@ -226,12 +441,13 @@ def _apply_realistic_overrides(cfg: Config, args: argparse.Namespace) -> None:
     cfg.trueskill.enabled = False
     cfg.num_steps = max(cfg.num_steps, args.warmup_steps + args.active_steps + 1)
 
-    cfg.model.hidden_dim = 256
-    cfg.model.range_hidden_dim = 128
-    cfg.model.ffn_dim = 512
-    cfg.model.num_hidden_layers = 3
-    cfg.model.num_value_layers = 1
-    cfg.model.num_policy_layers = 1
+    if not args.keep_hydra_model_config:
+        cfg.model.hidden_dim = 256
+        cfg.model.range_hidden_dim = 128
+        cfg.model.ffn_dim = 512
+        cfg.model.num_hidden_layers = 3
+        cfg.model.num_value_layers = 1
+        cfg.model.num_policy_layers = 1
 
     if args.num_envs is not None:
         cfg.num_envs = args.num_envs
@@ -334,37 +550,90 @@ def _profiler_summary(
 def run_source_benchmark(
     trainer: RebelCFRTrainer, args: argparse.Namespace
 ) -> dict[str, Any]:
-    _patch_profiler_tags(trainer)
     device = trainer.device
+    event_timer = CudaEventTimer(device) if args.cuda_events else None
+    fused_init_hook_prev = None
+    if event_timer is not None:
+        import p2.search.fused_sparse_cfr_evaluator as fused_sparse_cfr_evaluator
 
-    warmup_wall: list[float] = []
-    for step in range(args.warmup_steps):
-        t0 = time.perf_counter()
-        trainer.train_step(step)
-        _sync(device)
-        warmup_wall.append(time.perf_counter() - t0)
-        print(f"[source warmup {step}] {warmup_wall[-1]:.3f}s", flush=True)
+        fused_init_hook_prev = fused_sparse_cfr_evaluator._INIT_PROFILE_HOOK
+        fused_sparse_cfr_evaluator._INIT_PROFILE_HOOK = event_timer.region
+    _patch_profiler_tags(trainer, event_timer)
 
-    activities = [ProfilerActivity.CPU]
-    if device.type == "cuda":
-        activities.append(ProfilerActivity.CUDA)
-
-    active_wall: list[float] = []
-    with profile(activities=activities, record_shapes=False) as prof:
-        for i in range(args.active_steps):
-            step = args.warmup_steps + i
+    try:
+        warmup_wall: list[float] = []
+        for step in range(args.warmup_steps):
             t0 = time.perf_counter()
-            with record_function(STEP_TAG):
-                trainer.train_step(step)
-                _sync(device)
-            active_wall.append(time.perf_counter() - t0)
-            print(f"[source active {step}] {active_wall[-1]:.3f}s", flush=True)
+            trainer.train_step(step)
+            _sync(device)
+            warmup_wall.append(time.perf_counter() - t0)
+            print(f"[source warmup {step}] {warmup_wall[-1]:.3f}s", flush=True)
 
-    summary = _profiler_summary(prof, args.active_steps, active_wall)
-    summary["warmup_wall_s"] = warmup_wall
-    summary["active_wall_s"] = active_wall
-    summary["active_wall_mean_s"] = sum(active_wall) / max(1, len(active_wall))
-    return summary
+        if event_timer is not None:
+            event_timer.clear()
+
+        activities = [ProfilerActivity.CPU]
+        if device.type == "cuda":
+            activities.append(ProfilerActivity.CUDA)
+
+        active_wall: list[float] = []
+
+        def active_step(step: int) -> None:
+            def run():
+                with record_function(STEP_TAG):
+                    trainer.train_step(step)
+                    _sync(device)
+
+            if event_timer is not None:
+                event_timer.measure(STEP_TAG, run)
+            else:
+                run()
+
+        if args.no_torch_profiler:
+            for i in range(args.active_steps):
+                step = args.warmup_steps + i
+                t0 = time.perf_counter()
+                active_step(step)
+                active_wall.append(time.perf_counter() - t0)
+                print(f"[source active {step}] {active_wall[-1]:.3f}s", flush=True)
+            summary = {
+                "step_annotated_cuda_ms": 0.0,
+                "step_cpu_ms": 1e3 * sum(active_wall) / max(1, len(active_wall)),
+                "components": [],
+            }
+        else:
+            with profile(activities=activities, record_shapes=False) as prof:
+                for i in range(args.active_steps):
+                    step = args.warmup_steps + i
+                    t0 = time.perf_counter()
+                    active_step(step)
+                    active_wall.append(time.perf_counter() - t0)
+                    print(
+                        f"[source active {step}] {active_wall[-1]:.3f}s",
+                        flush=True,
+                    )
+
+            summary = _profiler_summary(prof, args.active_steps, active_wall)
+
+        if event_timer is not None:
+            event_summary = event_timer.summary(args.active_steps, active_wall)
+            summary["cuda_events"] = event_summary
+            step_rows = [
+                row
+                for row in event_summary["components"]
+                if row["component"] == STEP_TAG
+            ]
+            if step_rows:
+                summary["step_cuda_event_ms"] = step_rows[0][
+                    "cuda_event_ms_per_step"
+                ]
+        summary["warmup_wall_s"] = warmup_wall
+        summary["active_wall_s"] = active_wall
+        summary["active_wall_mean_s"] = sum(active_wall) / max(1, len(active_wall))
+        return summary
+    finally:
+        if event_timer is not None:
+            fused_sparse_cfr_evaluator._INIT_PROFILE_HOOK = fused_init_hook_prev
 
 
 def _cuda_event_time(
@@ -654,15 +923,27 @@ def _print_source_summary(source: dict[str, Any]) -> None:
     print("\nSource-of-truth profile:")
     print(f"  wall mean: {source['active_wall_mean_s'] * 1e3:.2f} ms/step")
     print(f"  annotated CUDA range: {source['step_annotated_cuda_ms']:.2f} ms/step")
+    if "step_cuda_event_ms" in source:
+        print(f"  CUDA events step: {source['step_cuda_event_ms']:.2f} ms/step")
     print(f"  cpu:       {source['step_cpu_ms']:.2f} ms/step")
-    print("  top components:")
-    for row in source["components"][:12]:
-        print(
-            f"    {row['component']:<26}"
-            f" {row['cuda_ms_per_step']:>9.2f} ms cuda"
-            f" {row['cuda_pct_of_wall']:>6.1f}% wall"
-            f" calls/step={row['calls_per_step']:.1f}"
-        )
+    if source["components"]:
+        print("  top components:")
+        for row in source["components"][:12]:
+            print(
+                f"    {row['component']:<26}"
+                f" {row['cuda_ms_per_step']:>9.2f} ms cuda"
+                f" {row['cuda_pct_of_wall']:>6.1f}% wall"
+                f" calls/step={row['calls_per_step']:.1f}"
+            )
+    if "cuda_events" in source:
+        print("  top CUDA event components:")
+        for row in source["cuda_events"]["components"][:12]:
+            print(
+                f"    {row['component']:<26}"
+                f" {row['cuda_event_ms_per_step']:>9.2f} ms cuda-event"
+                f" {row['cuda_event_pct_of_wall']:>6.1f}% wall"
+                f" calls/step={row['calls_per_step']:.1f}"
+            )
 
 
 def _print_micro_summary(micro: dict[str, Any]) -> None:
@@ -688,6 +969,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--iterations", type=int, default=None)
     parser.add_argument("--depth", type=int, default=None)
+    parser.add_argument("--keep-hydra-model-config", action="store_true")
+    parser.add_argument("--cuda-events", action="store_true")
+    parser.add_argument("--no-torch-profiler", action="store_true")
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--no-pause", action="store_true")
     parser.add_argument("--pause-pattern", default="train_rebel")

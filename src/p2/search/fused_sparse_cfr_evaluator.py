@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import copy
 import os
+from contextlib import contextmanager
 
 import torch
 
@@ -97,6 +98,19 @@ from p2.search.subgame_constructor_triton import (
     root_allowed_from_board_indices_triton_,
     write_children_same_street_triton_,
 )
+
+
+_INIT_PROFILE_HOOK = None
+
+
+@contextmanager
+def _init_profile_region(tag: str):
+    hook = _INIT_PROFILE_HOOK
+    if hook is None:
+        yield
+    else:
+        with hook(tag):
+            yield
 
 
 def _compile_setting_from_env(cfg=None) -> str:
@@ -923,11 +937,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         capacity = self._subgame_capacity
         env = self._subgame_env
 
-        gather_env_rows_into_triton(src_env, env, src_indices, dst_start=0)
-        self._subgame_parent_index[:num_roots].fill_(-1)
-        self._subgame_action_from_parent[:num_roots].fill_(-1)
-        self._subgame_rewards[:num_roots].zero_()
-        self._subgame_allin_leaf[:num_roots].zero_()
+        with _init_profile_region("cfr_init_attempt_gather_env"):
+            gather_env_rows_into_triton(src_env, env, src_indices, dst_start=0)
+        with _init_profile_region("cfr_init_attempt_root_init"):
+            self._subgame_parent_index[:num_roots].fill_(-1)
+            self._subgame_action_from_parent[:num_roots].fill_(-1)
+            self._subgame_rewards[:num_roots].zero_()
+            self._subgame_allin_leaf[:num_roots].zero_()
         search_cfg = getattr(getattr(self, "cfg", None), "search", None)
         has_preflop_table = (
             getattr(
@@ -948,47 +964,52 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             parent_count = parent_end - parent_start
             child_counts = self._subgame_child_counts[:parent_count]
             child_offsets = self._subgame_child_offsets[:parent_count]
-            legal_counts_triton_(
-                env,
-                self._subgame_legal_mask,
-                child_counts,
-                self._subgame_allin_leaf,
-                self._subgame_bet_bins_t,
-                parent_start=parent_start,
-                parent_count=parent_count,
-                stop_new_street=depth > 0,
-                num_actions=self.num_actions,
-            )
-            torch.cumsum(child_counts, dim=0, out=child_offsets)
-            child_offsets -= child_counts
-            child_count = int(child_counts.sum().item())
+            with _init_profile_region("cfr_init_attempt_legal_counts"):
+                legal_counts_triton_(
+                    env,
+                    self._subgame_legal_mask,
+                    child_counts,
+                    self._subgame_allin_leaf,
+                    self._subgame_bet_bins_t,
+                    parent_start=parent_start,
+                    parent_count=parent_count,
+                    stop_new_street=depth > 0,
+                    num_actions=self.num_actions,
+                )
+            with _init_profile_region("cfr_init_attempt_cumsum_offsets"):
+                torch.cumsum(child_counts, dim=0, out=child_offsets)
+                child_offsets -= child_counts
+            with _init_profile_region("cfr_init_attempt_child_count_sync"):
+                child_count = int(child_counts.sum().item())
             if child_count == 0:
                 break
             child_end = cursor + child_count
             if child_end > capacity:
                 return False
 
-            write_children_same_street_triton_(
-                env,
-                self._subgame_legal_mask,
-                child_offsets,
-                self._subgame_parent_index,
-                self._subgame_action_from_parent,
-                self._subgame_rewards,
-                self._subgame_allin_leaf,
-                self._subgame_bet_bins_t,
-                parent_start=parent_start,
-                parent_count=parent_count,
-                dst_start=cursor,
-                has_preflop_table=has_preflop_table,
-                allin_abstraction=allin_abstraction,
-            )
-            copy_child_cards_triton_(
-                env,
-                self._subgame_parent_index,
-                child_start=cursor,
-                child_count=child_count,
-            )
+            with _init_profile_region("cfr_init_attempt_write_children"):
+                write_children_same_street_triton_(
+                    env,
+                    self._subgame_legal_mask,
+                    child_offsets,
+                    self._subgame_parent_index,
+                    self._subgame_action_from_parent,
+                    self._subgame_rewards,
+                    self._subgame_allin_leaf,
+                    self._subgame_bet_bins_t,
+                    parent_start=parent_start,
+                    parent_count=parent_count,
+                    dst_start=cursor,
+                    has_preflop_table=has_preflop_table,
+                    allin_abstraction=allin_abstraction,
+                )
+            with _init_profile_region("cfr_init_attempt_copy_child_cards"):
+                copy_child_cards_triton_(
+                    env,
+                    self._subgame_parent_index,
+                    child_start=cursor,
+                    child_count=child_count,
+                )
 
             cursor = child_end
             depth += 1
@@ -1011,17 +1032,18 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         allin_leaf_tensor = self._subgame_allin_leaf[:cursor]
 
         self.valid_mask = self._subgame_valid_mask[:cursor]
-        legal_counts_triton_(
-            env,
-            self._subgame_legal_mask,
-            self._subgame_child_counts[:cursor],
-            self._subgame_allin_leaf,
-            self._subgame_bet_bins_t,
-            parent_start=0,
-            parent_count=cursor,
-            stop_new_street=False,
-            num_actions=self.num_actions,
-        )
+        with _init_profile_region("cfr_init_attempt_final_legal_counts"):
+            legal_counts_triton_(
+                env,
+                self._subgame_legal_mask,
+                self._subgame_child_counts[:cursor],
+                self._subgame_allin_leaf,
+                self._subgame_bet_bins_t,
+                parent_start=0,
+                parent_count=cursor,
+                stop_new_street=False,
+                num_actions=self.num_actions,
+            )
         self.legal_mask = self._subgame_legal_mask[:cursor]
 
         root_mask = self._subgame_root_mask[:cursor]
@@ -1030,96 +1052,107 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.child_mask = self._subgame_child_mask[:cursor]
         self.child_count = self._subgame_child_counts[:cursor]
         self.prev_actor = self._subgame_prev_actor[:cursor]
-        finalize_tree_masks_triton_(
-            env,
-            self.legal_mask,
-            self.parent_index,
-            allin_leaf_tensor,
-            self.valid_mask,
-            root_mask,
-            self.new_street_mask,
-            self.leaf_mask,
-            self.child_mask,
-            self.child_count,
-            self.prev_actor,
-            total_nodes=cursor,
-            root_nodes=self.root_nodes,
-            top_nodes=self.top_nodes,
-            num_actions=self.num_actions,
-        )
+        with _init_profile_region("cfr_init_attempt_finalize_masks"):
+            finalize_tree_masks_triton_(
+                env,
+                self.legal_mask,
+                self.parent_index,
+                allin_leaf_tensor,
+                self.valid_mask,
+                root_mask,
+                self.new_street_mask,
+                self.leaf_mask,
+                self.child_mask,
+                self.child_count,
+                self.prev_actor,
+                total_nodes=cursor,
+                root_nodes=self.root_nodes,
+                top_nodes=self.top_nodes,
+                num_actions=self.num_actions,
+            )
         self._mark_constructed_allin_call_leaves(allin_leaf_tensor)
         self.model_indices = self._compute_model_indices()
         bottom = self.depth_offsets[1]
-        self.child_offsets = (
-            bottom + torch.cumsum(self.child_count, dim=0) - self.child_count
-        )
+        with _init_profile_region("cfr_init_attempt_child_offsets"):
+            self.child_offsets = (
+                bottom + torch.cumsum(self.child_count, dim=0) - self.child_count
+            )
 
-        showdown_padding = max(1, self.root_nodes // 2)
-        self.showdown_indices = padded_indices(self.env.street[:cursor] == 4, showdown_padding)
-        self.showdown_actors = self.env.to_act[self.showdown_indices]
-        self.showdown_potential = (
-            self.env.stacks[self.showdown_indices]
-            + self.env.pot[self.showdown_indices, None]
-            - self.env.starting_stacks[self.showdown_indices]
-        )
+        with _init_profile_region("cfr_init_attempt_showdown_setup"):
+            showdown_padding = max(1, self.root_nodes // 2)
+            self.showdown_indices = padded_indices(
+                self.env.street[:cursor] == 4, showdown_padding
+            )
+            self.showdown_actors = self.env.to_act[self.showdown_indices]
+            self.showdown_potential = (
+                self.env.stacks[self.showdown_indices]
+                + self.env.pot[self.showdown_indices, None]
+                - self.env.starting_stacks[self.showdown_indices]
+            )
 
-        self.policy_probs = torch.empty(
-            cursor, NUM_HANDS, dtype=self.float_dtype, device=self.device
-        )
-        self.policy_probs_avg = torch.empty_like(self.policy_probs)
-        self.average_policy_numerator = torch.empty_like(self.policy_probs)
-        self.average_policy_denominator = torch.empty_like(self.policy_probs)
-        self.average_policy_initialized = False
-        self.policy_probs_sample = torch.empty_like(self.policy_probs)
-        self.cumulative_regrets = torch.empty_like(self.policy_probs)
-        self.uniform_policy = torch.empty_like(self.policy_probs)
-        init_policy_tensors_triton_(
-            self.uniform_policy,
-            self.cumulative_regrets,
-            self.parent_index,
-            self.child_count,
-            total_nodes=cursor,
-            root_nodes=self.root_nodes,
-            num_hands=NUM_HANDS,
-        )
+        with _init_profile_region("cfr_init_attempt_policy_alloc"):
+            self.policy_probs = torch.empty(
+                cursor, NUM_HANDS, dtype=self.float_dtype, device=self.device
+            )
+            self.policy_probs_avg = torch.empty_like(self.policy_probs)
+            self.average_policy_numerator = torch.empty_like(self.policy_probs)
+            self.average_policy_denominator = torch.empty_like(self.policy_probs)
+            self.average_policy_initialized = False
+            self.policy_probs_sample = torch.empty_like(self.policy_probs)
+            self.cumulative_regrets = torch.empty_like(self.policy_probs)
+            self.uniform_policy = torch.empty_like(self.policy_probs)
+        with _init_profile_region("cfr_init_attempt_policy_init"):
+            init_policy_tensors_triton_(
+                self.uniform_policy,
+                self.cumulative_regrets,
+                self.parent_index,
+                self.child_count,
+                total_nodes=cursor,
+                root_nodes=self.root_nodes,
+                num_hands=NUM_HANDS,
+            )
 
-        self.beliefs = torch.empty(
-            cursor,
-            self.num_players,
-            NUM_HANDS,
-            dtype=self.float_dtype,
-            device=self.device,
-        )
-        self.beliefs_avg = torch.empty_like(self.beliefs)
-        self.beliefs_sample = torch.empty_like(self.beliefs)
-        self.root_pre_chance_beliefs = torch.empty(
-            num_roots,
-            self.num_players,
-            NUM_HANDS,
-            dtype=self.float_dtype,
-            device=self.device,
-        )
-        self.self_reach = torch.empty_like(self.beliefs)
-        self.self_reach_avg = torch.empty_like(self.beliefs)
+        with _init_profile_region("cfr_init_attempt_belief_alloc"):
+            self.beliefs = torch.empty(
+                cursor,
+                self.num_players,
+                NUM_HANDS,
+                dtype=self.float_dtype,
+                device=self.device,
+            )
+            self.beliefs_avg = torch.empty_like(self.beliefs)
+            self.beliefs_sample = torch.empty_like(self.beliefs)
+            self.root_pre_chance_beliefs = torch.empty(
+                num_roots,
+                self.num_players,
+                NUM_HANDS,
+                dtype=self.float_dtype,
+                device=self.device,
+            )
+            self.self_reach = torch.empty_like(self.beliefs)
+            self.self_reach_avg = torch.empty_like(self.beliefs)
 
-        self.latest_values = torch.empty_like(self.beliefs)
-        init_belief_value_tensors_triton_(
-            self.beliefs,
-            self.self_reach,
-            self.latest_values,
-            self.action_from_parent,
-            self.env.done,
-            rewards_tensor,
-            total_nodes=cursor,
-            root_nodes=self.root_nodes,
-            num_hands=NUM_HANDS,
-        )
-        self.values_avg = torch.empty_like(self.latest_values)
+            self.latest_values = torch.empty_like(self.beliefs)
+        with _init_profile_region("cfr_init_attempt_belief_init"):
+            init_belief_value_tensors_triton_(
+                self.beliefs,
+                self.self_reach,
+                self.latest_values,
+                self.action_from_parent,
+                self.env.done,
+                rewards_tensor,
+                total_nodes=cursor,
+                root_nodes=self.root_nodes,
+                num_hands=NUM_HANDS,
+            )
+        with _init_profile_region("cfr_init_attempt_values_avg_alloc"):
+            self.values_avg = torch.empty_like(self.latest_values)
         self.last_model_values = None
 
-        self.feature_encoder = self.model.create_feature_encoder(
-            env=self.env, device=self.device, dtype=self.float_dtype
-        )
+        with _init_profile_region("cfr_init_attempt_feature_encoder"):
+            self.feature_encoder = self.model.create_feature_encoder(
+                env=self.env, device=self.device, dtype=self.float_dtype
+            )
         return True
 
     def _root_allowed_from_board_indices(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2440,6 +2473,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         ):
             pbs = super().sample_leaves(training_mode)
             self._deal_sampled_chance_roots(pbs.env)
+            self._normalize_sampled_public_state(pbs.env)
             return pbs
 
         N = self.root_nodes
@@ -2463,6 +2497,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             torch.arange(sampled_continue.numel(), device=self.device),
         )
         self._deal_sampled_chance_roots(pbs.env)
+        self._normalize_sampled_public_state(pbs.env)
         return pbs
 
     def _deal_sampled_chance_roots(self, env: HUNLTensorEnv) -> None:
@@ -2507,6 +2542,17 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 env.hole_onehot[valid, player, slot] = env.card_onehot_cache[
                     cards[valid]
                 ]
+
+    def _normalize_sampled_public_state(self, env: HUNLTensorEnv) -> None:
+        """Repair fields intentionally skipped by fused construction.
+
+        Sampled leaves exclude folded terminal states, so every public state
+        exported for the next resolver has no folded player. Keeping this fixup
+        here avoids two bool stores per constructed child in the hot writer.
+        """
+        if env.N == 0:
+            return
+        env.has_folded.zero_()
 
     def prepare_replay(self, t: int) -> None:
         """Host-side prep for a CUDA-graph replay at iteration ``t``.

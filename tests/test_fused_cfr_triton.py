@@ -997,6 +997,8 @@ def test_fused_sparse_evaluate_cfr_captures_pre_and_post_dcfr_delay(
 
     pbs = ev.evaluate_cfr(training_mode=False)
     torch.cuda.synchronize()
+    pbs.env.sanity_check(label="sampled public state")
+    assert not bool(pbs.env.has_folded.any().item())
 
     assert [regime for _, _, regime in captures] == [
         "pre_dcfr_delay",
@@ -1017,6 +1019,10 @@ def test_fused_sparse_evaluate_cfr_captures_pre_and_post_dcfr_delay(
         pbs.beliefs,
         ev._sample_leaf_beliefs_padded[root_indices],
     )
+    if pbs.env.N > 0:
+        next_roots = torch.arange(pbs.env.N, dtype=torch.long, device=ev.device)
+        ev.initialize_subgame(pbs.env, next_roots, pbs.beliefs)
+        torch.cuda.synchronize()
 
 # ---------------------------------------------------------------------------
 # Kernel 12-14 correctness tests: reach weights and deep beliefs.
