@@ -315,6 +315,27 @@ class CFREvaluator(ABC):
             model_mask = model_mask & ~allin_mask
         return padded_indices(model_mask, self.root_nodes)
 
+    def _uses_street_cutoff_schedule(self) -> bool:
+        schedule = getattr(self, "action_schedule", None)
+        return bool(
+            schedule is not None and getattr(schedule, "bet_bins_by_depth", None) is not None
+        )
+
+    def _validate_model_leaf_phases(self) -> None:
+        if not self._uses_street_cutoff_schedule() or self.model_indices.numel() == 0:
+            return
+        model_leaf_mask = self.leaf_mask & ~self.env.done
+        allin_mask = getattr(self, "allin_call_mask", None)
+        if allin_mask is not None and allin_mask.shape == model_leaf_mask.shape:
+            model_leaf_mask &= ~allin_mask
+        same_street = model_leaf_mask & ~self.new_street_mask
+        if same_street.any():
+            raise RuntimeError(
+                "Street-cutoff search produced same-street non-terminal model "
+                "leaves. Increase search.bet_bins_by_depth coverage or restrict "
+                "the final depth to actions that close the street."
+            )
+
     def _allin_abstraction_enabled(self) -> bool:
         cfg = getattr(self, "cfg", None)
         search_cfg = getattr(cfg, "search", None)
@@ -1338,6 +1359,7 @@ class CFREvaluator(ABC):
 
         # latent always have shape [model_indices.numel(), model.hidden_dim]
         self.model_indices = self._compute_model_indices()
+        self._validate_model_leaf_phases()
         self.latent = None
 
         # Compute allowed hands from root board
@@ -1548,8 +1570,13 @@ class CFREvaluator(ABC):
                 )
                 self.latent = model_output.latent
             else:
-                model_output = value_model(features, include_policy=False)
-        hand_values = model_output.hand_values.to(self.float_dtype)
+                if self._uses_street_cutoff_schedule() and hasattr(
+                    value_model, "forward_pre"
+                ):
+                    hand_values = value_model.forward_pre(features).to(self.float_dtype)
+                else:
+                    model_output = value_model(features, include_policy=False)
+                    hand_values = model_output.hand_values.to(self.float_dtype)
 
         if (
             not self.cfr_avg
@@ -1970,7 +1997,8 @@ class CFREvaluator(ABC):
         value_features = value_encoder.encode(
             self.beliefs_avg, pre_chance_node=False
         )[:top]
-        bin_amounts, legal_masks = self.env.legal_bins_amounts_and_mask()
+        bin_amounts, _ = self.env.legal_bins_amounts_and_mask()
+        legal_masks = self.legal_mask
         node_depth = torch.zeros(top, dtype=torch.long, device=self.device)
         for depth in range(self.tree_depth):
             node_depth[self.depth_offsets[depth] : self.depth_offsets[depth + 1]] = (

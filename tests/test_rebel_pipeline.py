@@ -386,6 +386,7 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.model.value_head_type = ValueHeadType.scalar
     cfg.model.detach_value_head = True
     cfg.search.enabled = True
+    cfg.search.sparse = True
     cfg.search.depth = 0
     cfg.search.iterations = 1
     cfg.search.warm_start_iterations = 0
@@ -463,6 +464,7 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
     cfg.model.num_hidden_layers = 1
     cfg.model.value_head_type = ValueHeadType.scalar
     cfg.search.depth = 0
+    cfg.search.sparse = True
     cfg.search.iterations = 1
     cfg.search.warm_start_iterations = 0
     cfg.search.dcfr_plus_delay = 0

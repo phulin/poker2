@@ -26,7 +26,6 @@ import torch.nn as nn
 from p2.core.structured_config import Config
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.rl.pbs_games import play_public_belief_games
-from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
 
 
 _DTYPE_MAP = {
@@ -152,55 +151,27 @@ class TrueSkillTracker:
     def _build_eval(self, model: nn.Module):
         """Build a CFR evaluator that mirrors the trainer's class + config."""
         cfg = self.cfg
-        if cfg.search.sparse:
-            if cfg.search.sparse_fused:
-                from p2.search.fused_sparse_cfr_evaluator import (
-                    FusedSparseCFREvaluator,
-                )
+        if not cfg.search.sparse:
+            raise ValueError(
+                "Dense RebelCFREvaluator has been removed; set search.sparse=true."
+            )
+        if cfg.search.sparse_fused:
+            from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
-                ev = FusedSparseCFREvaluator(
-                    model=model,
-                    device=self.device,
-                    cfg=cfg,
-                    generator=self.generator,
-                )
-            else:
-                from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
-
-                ev = SparseCFREvaluator(
-                    model=model,
-                    device=self.device,
-                    cfg=cfg,
-                    generator=self.generator,
-                )
-        else:
-            from p2.search.rebel_cfr_evaluator import T_WARM
-
-            ev = RebelCFREvaluator(
-                search_batch_size=1,
-                env_proto=self.env_proto,
+            ev = FusedSparseCFREvaluator(
                 model=model,
-                bet_bins=cfg.env.bet_bins,
-                max_depth=max(1, cfg.search.depth),
-                cfr_iterations=max(T_WARM + 1, cfg.search.iterations),
                 device=self.device,
-                float_dtype=torch.float32,
+                cfg=cfg,
                 generator=self.generator,
-                num_supervisions=cfg.model.num_supervisions,
-                warm_start_iterations=cfg.search.warm_start_iterations,
-                warm_start_type=cfg.search.warm_start_type,
-                warm_start_multiplier=cfg.search.warm_start_multiplier,
-                cfr_type=cfg.search.cfr_type,
-                cfr_avg=cfg.search.cfr_avg,
-                cfr_plus=cfg.search.cfr_plus,
-                dcfr_alpha=cfg.search.dcfr_alpha,
-                dcfr_beta=cfg.search.dcfr_beta,
-                dcfr_gamma=cfg.search.dcfr_gamma,
-                dcfr_alpha_final=cfg.search.dcfr_alpha_final,
-                dcfr_beta_final=cfg.search.dcfr_beta_final,
-                dcfr_gamma_final=cfg.search.dcfr_gamma_final,
-                dcfr_delay=cfg.search.dcfr_plus_delay,
-                value_targets_from_final_policy=cfg.search.value_targets_from_final_policy,
+            )
+        else:
+            from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+
+            ev = SparseCFREvaluator(
+                model=model,
+                device=self.device,
+                cfg=cfg,
+                generator=self.generator,
             )
         return ev
 

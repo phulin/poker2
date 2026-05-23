@@ -16,8 +16,17 @@ from p2.env.card_utils import NUM_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
-from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+
+
+STREET_CUTOFF_SCHEDULE = [
+    [0.25, 0.5, 0.75, 1.0, 1.5],
+    [0.5, 1.0],
+    [1.0],
+    [1.0],
+    [1.0],
+    [],
+]
 
 
 def get_device() -> torch.device:
@@ -83,6 +92,23 @@ class MockModel:
 
     def eval(self) -> None:
         pass
+
+
+class PreOnlyMockModel(MockModel):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.forward_pre_calls = 0
+
+    def forward_pre(self, features: MLPFeatures) -> torch.Tensor:
+        self.forward_pre_calls += 1
+        batch = len(features)
+        return torch.zeros(
+            batch,
+            2,
+            NUM_HANDS,
+            device=features.context.device,
+            dtype=features.context.dtype,
+        )
 
 
 class DeterministicModel:
@@ -171,6 +197,15 @@ def make_config(bet_bins: list[float] | None = None) -> Config:
     return cfg
 
 
+def make_street_cutoff_config() -> Config:
+    cfg = make_config([0.25, 0.5, 0.75, 1.0, 1.5])
+    cfg.search.bet_bins_by_depth = STREET_CUTOFF_SCHEDULE
+    cfg.search.allin_by_depth = [True, True, True, True, True, False]
+    cfg.search.depth = len(STREET_CUTOFF_SCHEDULE)
+    cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+    return cfg
+
+
 def make_sparse_evaluator(
     model: MockModel | None = None,
     env: HUNLTensorEnv | None = None,
@@ -196,88 +231,6 @@ def make_sparse_evaluator(
     )
 
     return evaluator, env, cfg
-
-
-def make_rebel_evaluator(
-    env: HUNLTensorEnv,
-    cfg: Config,
-    model: DeterministicModel,
-    device: torch.device,
-) -> RebelCFREvaluator:
-    return RebelCFREvaluator(
-        search_batch_size=env.N,
-        env_proto=env,
-        model=model,  # type: ignore[arg-type]
-        bet_bins=cfg.env.bet_bins,
-        max_depth=cfg.search.depth,
-        cfr_iterations=cfg.search.iterations,
-        device=device,
-        float_dtype=env.float_dtype,
-        warm_start_iterations=cfg.search.warm_start_iterations,
-        cfr_type=cfg.search.cfr_type,
-        cfr_avg=cfg.search.cfr_avg,
-        sample_epsilon=cfg.search.sample_epsilon,
-        dcfr_alpha=cfg.search.dcfr_alpha,
-        dcfr_beta=cfg.search.dcfr_beta,
-        dcfr_gamma=cfg.search.dcfr_gamma,
-    )
-
-
-def setup_sparse_and_rebel(
-    *,
-    num_envs: int = 1,
-    depth: int = 1,
-    seed: int = 123,
-) -> tuple[SparseCFREvaluator, RebelCFREvaluator]:
-    device = torch.device("cpu")
-    env = make_env(num_envs=num_envs, device=device)
-    env.rng.manual_seed(seed)
-    env.reset()
-
-    cfg = make_config(env.default_bet_bins)
-    cfg.search.depth = depth
-    cfg.search.iterations = 2
-    cfg.search.warm_start_iterations = 0
-
-    model = DeterministicModel(
-        num_actions=len(cfg.env.bet_bins) + 3,
-        device=device,
-        dtype=env.float_dtype,
-    )
-    root_indices = torch.arange(env.N, device=device)
-    initial_beliefs = torch.full(
-        (env.N, 2, NUM_HANDS),
-        1.0 / NUM_HANDS,
-        dtype=env.float_dtype,
-        device=device,
-    )
-
-    sparse = SparseCFREvaluator(model=model, device=device, cfg=cfg)
-    sparse.initialize_subgame(env, root_indices, initial_beliefs=initial_beliefs)
-
-    rebel = make_rebel_evaluator(env, cfg, model, device)
-    rebel.initialize_subgame(env, root_indices, initial_beliefs=initial_beliefs)
-    return sparse, rebel
-
-
-def get_rebel_parent_index(rebel: RebelCFREvaluator) -> torch.Tensor:
-    parent = torch.full(
-        (rebel.total_nodes,),
-        -1,
-        dtype=torch.long,
-        device=rebel.device,
-    )
-    for depth in range(rebel.max_depth):
-        child_start = rebel.depth_offsets[depth + 1]
-        child_end = rebel.depth_offsets[depth + 2]
-        if child_end <= child_start:
-            continue
-        parent_start = rebel.depth_offsets[depth]
-        span = child_end - child_start
-        local = torch.arange(span, device=rebel.device)
-        parent_indices = parent_start + (local // rebel.num_actions)
-        parent[child_start:child_end] = parent_indices
-    return parent
 
 
 def test_sparse_evaluator_initialization() -> None:
@@ -675,73 +628,91 @@ def test_tree_structure_consistency() -> None:
         assert child_total == expected_children
 
 
-def test_sparse_rebel_tree_state_alignment() -> None:
-    """Sparse evaluator tree should mirror Rebel's valid nodes."""
-    sparse, rebel = setup_sparse_and_rebel()
-    valid_indices = torch.where(rebel.valid_mask)[0]
+def test_street_cutoff_action_masks_by_depth() -> None:
+    device = get_device()
+    cfg = make_street_cutoff_config()
+    evaluator, _, _ = make_sparse_evaluator(cfg=cfg, device=device)
 
-    assert sparse.total_nodes == valid_indices.numel()
+    counts = evaluator.action_masks_by_depth.sum(dim=1).tolist()
+    assert counts == [8, 5, 4, 4, 4, 2]
+    assert evaluator.action_masks_by_depth[0].tolist() == [
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+    ]
+    assert evaluator.action_masks_by_depth[1].tolist() == [
+        True,
+        True,
+        False,
+        True,
+        False,
+        True,
+        False,
+        True,
+    ]
+    assert evaluator.action_masks_by_depth[5].tolist() == [
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
 
-    for attr in ("street", "to_act", "actions_this_round", "pot"):
-        sparse_attr = getattr(sparse.env, attr)
-        rebel_attr = getattr(rebel.env, attr)[valid_indices]
-        assert_close(sparse_attr, rebel_attr)
 
-    assert_close(sparse.env.board_indices, rebel.env.board_indices[valid_indices])
-    assert_close(
-        sparse.env.last_board_indices, rebel.env.last_board_indices[valid_indices]
+def test_street_cutoff_depth_five_expands_fold_call_only() -> None:
+    device = get_device()
+    cfg = make_street_cutoff_config()
+    env = make_env(1, device=device)
+    env.default_bet_bins = cfg.env.bet_bins
+    env.num_bet_bins = cfg.model.num_actions
+    model = MockModel(num_actions=cfg.model.num_actions, device=device)
+    evaluator, _, _ = make_sparse_evaluator(model=model, env=env, cfg=cfg, device=device)
+
+    evaluator.initialize_subgame(env, torch.tensor([0], dtype=torch.long, device=device))
+
+    assert len(evaluator.depth_offsets) >= 8
+    depth5_start = evaluator.depth_offsets[5]
+    depth5_end = evaluator.depth_offsets[6]
+    depth6_start = evaluator.depth_offsets[6]
+    depth6_end = evaluator.depth_offsets[7]
+    depth6_children = torch.arange(depth6_start, depth6_end, device=device)
+
+    depth5_child_mask = (
+        (evaluator.parent_index[depth6_children] >= depth5_start)
+        & (evaluator.parent_index[depth6_children] < depth5_end)
     )
-    assert_close(sparse.new_street_mask, rebel.new_street_mask[valid_indices])
+    depth5_children = depth6_children[depth5_child_mask]
+    assert depth5_children.numel() > 0
+    assert (evaluator.action_from_parent[depth5_children] <= 1).all()
 
-    parent_dense = get_rebel_parent_index(rebel)
-    dense_to_sparse = torch.full(
-        (rebel.total_nodes,),
-        -1,
-        dtype=torch.long,
-        device=rebel.device,
-    )
-    dense_to_sparse[valid_indices] = torch.arange(
-        valid_indices.numel(), device=rebel.device
-    )
-    parent_sparse = torch.where(
-        parent_dense >= 0,
-        dense_to_sparse[parent_dense],
-        torch.full_like(parent_dense, -1),
-    )
-    rebel_parent_index = parent_sparse[valid_indices].to(sparse.parent_index.device)
-    assert_close(sparse.parent_index, rebel_parent_index)
+    call_children = depth5_children[evaluator.action_from_parent[depth5_children] == 1]
+    assert call_children.numel() > 0
+    assert evaluator.new_street_mask[call_children[~evaluator.env.done[call_children]]].all()
 
-    rebel_child_mask = (rebel.child_mask & (~rebel.leaf_mask)[:, None])[valid_indices]
-    non_leaf_sparse = ~sparse.leaf_mask
-    non_leaf_rebel = ~rebel.leaf_mask[valid_indices]
-    compare_mask = non_leaf_sparse & non_leaf_rebel
-    assert_close(
-        sparse.child_mask[compare_mask],
-        rebel_child_mask[compare_mask],
-    )
+    model_leaf_mask = evaluator.leaf_mask & ~evaluator.env.done
+    model_leaf_mask &= ~evaluator.allin_call_mask
+    assert evaluator.new_street_mask[model_leaf_mask].all()
 
 
-def test_sparse_rebel_initial_policy_and_beliefs_alignment() -> None:
-    """Sparse and Rebel initial policies/beliefs should match exactly."""
-    sparse, rebel = setup_sparse_and_rebel()
-    sparse.initialize_policy_and_beliefs()
-    rebel.initialize_policy_and_beliefs()
+def test_street_cutoff_model_leaves_use_forward_pre() -> None:
+    device = get_device()
+    cfg = make_street_cutoff_config()
+    env = make_env(1, device=device)
+    env.default_bet_bins = cfg.env.bet_bins
+    env.num_bet_bins = cfg.model.num_actions
+    model = PreOnlyMockModel(num_actions=cfg.model.num_actions, device=device)
+    evaluator, _, _ = make_sparse_evaluator(model=model, env=env, cfg=cfg, device=device)
 
-    valid_indices = torch.where(rebel.valid_mask)[0]
-    assert_close(sparse.beliefs, rebel.beliefs[valid_indices])
-    assert_close(sparse.beliefs_avg, rebel.beliefs_avg[valid_indices])
-    assert_close(sparse.allowed_hands, rebel.allowed_hands[valid_indices])
-    assert_close(sparse.allowed_hands_prob, rebel.allowed_hands_prob[valid_indices])
-    assert_close(sparse.self_reach, rebel.self_reach[valid_indices])
-    assert_close(sparse.self_reach_avg, rebel.self_reach_avg[valid_indices])
+    evaluator.initialize_subgame(env, torch.tensor([0], dtype=torch.long, device=device))
+    evaluator.set_leaf_values(0)
 
-    policy_sparse = sparse._pull_back(sparse.policy_probs)
-    policy_rebel = rebel._pull_back(rebel.policy_probs)
-    top_sparse = sparse.depth_offsets[-2]
-    top_rebel = rebel.depth_offsets[-2]
-    mask_sparse = ~sparse.leaf_mask[:top_sparse]
-    mask_rebel = rebel.valid_mask[:top_rebel] & ~rebel.leaf_mask[:top_rebel]
-    assert_close(
-        policy_sparse[:top_sparse][mask_sparse].permute(0, 2, 1),
-        policy_rebel[:top_rebel][mask_rebel].permute(0, 2, 1),
-    )
+    assert evaluator.model_indices.numel() > 0
+    assert model.forward_pre_calls == 1

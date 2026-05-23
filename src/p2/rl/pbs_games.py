@@ -19,7 +19,7 @@ import torch
 
 from p2.env.card_utils import NUM_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
-from p2.search.rebel_cfr_evaluator import RebelCFREvaluator
+from p2.search.cfr_evaluator import CFREvaluator
 
 
 MAX_GAME_ITERATIONS = 40
@@ -29,31 +29,20 @@ def _build_action_to_child(ev, num_roots: int) -> torch.Tensor:
     """Per-root mapping action_bin -> child node index, or -1 if absent.
 
     Returns a [num_roots, num_actions] long tensor on the evaluator's device.
-    Sparse and dense evaluators are handled uniformly by reading
-    ``parent_index`` / ``action_from_parent`` if available, otherwise falling
-    back to the dense layout where root r's children sit at consecutive
-    indices.
+    Sparse evaluators expose ``parent_index`` / ``action_from_parent`` for the
+    direct root-child mapping used here.
     """
     A = ev.num_actions
     device = ev.device
     a2c = torch.full((num_roots, A), -1, dtype=torch.long, device=device)
 
-    if hasattr(ev, "parent_index") and ev.parent_index.numel() > 0:
-        parent_idx = ev.parent_index
-        # Direct children of any root are nodes whose parent is in [0, num_roots).
-        is_root_child = (parent_idx >= 0) & (parent_idx < num_roots)
-        child_nodes = is_root_child.nonzero(as_tuple=True)[0]
-        if child_nodes.numel() > 0:
-            parent_of = parent_idx[child_nodes]
-            action_of = ev.action_from_parent[child_nodes]
-            a2c[parent_of, action_of] = child_nodes
-        return a2c
-
-    # Dense fallback: roots at 0..N-1, each root r's children at N + r*A + a.
-    base = num_roots
-    rows = torch.arange(num_roots, device=device)[:, None]
-    cols = torch.arange(A, device=device)[None, :]
-    a2c[:] = base + rows * A + cols
+    parent_idx = ev.parent_index
+    is_root_child = (parent_idx >= 0) & (parent_idx < num_roots)
+    child_nodes = is_root_child.nonzero(as_tuple=True)[0]
+    if child_nodes.numel() > 0:
+        parent_of = parent_idx[child_nodes]
+        action_of = ev.action_from_parent[child_nodes]
+        a2c[parent_of, action_of] = child_nodes
     return a2c
 
 
@@ -152,8 +141,8 @@ def _two_prior_river_payoffs(
 
 
 def play_public_belief_games(
-    evaluator_a: RebelCFREvaluator,
-    evaluator_b: RebelCFREvaluator,
+    evaluator_a: CFREvaluator,
+    evaluator_b: CFREvaluator,
     env_proto: HUNLTensorEnv,
     num_games: int,
     generator: torch.Generator,

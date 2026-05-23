@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from p2.core.action_schedule import apply_action_schedule_to_config
 from p2.core.structured_config import Config, LrSchedule, ModelType
 from p2.env.aggression_analyzer import AggressionAnalyzer
 from p2.env.card_utils import (
@@ -34,7 +35,6 @@ from p2.rl.rebel_batch import RebelBatch
 from p2.rl.trueskill_tracker import TrueSkillTracker
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
 from p2.search.cfr_evaluator import CFREvaluator
-from p2.search.rebel_cfr_evaluator import T_WARM, RebelCFREvaluator
 from p2.search.rebel_data_generator import RebelDataGenerator
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 from p2.utils.ema_helper import EMAHelper
@@ -106,6 +106,7 @@ class RebelCFRTrainer:
 
     def __init__(self, cfg: Config, device: torch.device) -> None:
         self.cfg = cfg
+        apply_action_schedule_to_config(cfg)
         self.device = device
         self.rng = torch.Generator(device=self.device)
         self.float_dtype = torch.float32
@@ -272,49 +273,21 @@ class RebelCFRTrainer:
             self.inference_model.compile_forward_modes(**_compile_kwargs(cfg))
         eval_model = self.inference_model
 
-        if cfg.search.sparse:
-            evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
-            if cfg.search.sparse_fused:
-                from p2.search.fused_sparse_cfr_evaluator import (
-                    FusedSparseCFREvaluator,
-                )
+        if not cfg.search.sparse:
+            raise ValueError(
+                "Dense RebelCFREvaluator has been removed; set search.sparse=true."
+            )
+        evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
+        if cfg.search.sparse_fused:
+            from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
-                evaluator_cls = FusedSparseCFREvaluator
-            self.cfr_evaluator = evaluator_cls(
-                model=eval_model,
-                device=self.device,
-                cfg=cfg,
-                generator=self.rng,
-            )
-        else:
-            self.cfr_evaluator = RebelCFREvaluator(
-                search_batch_size=self.cfg.num_envs,
-                env_proto=self.env,
-                model=eval_model,
-                bet_bins=self.bet_bins,
-                max_depth=max(1, self.cfg.search.depth),
-                cfr_iterations=max(T_WARM + 1, self.cfg.search.iterations),
-                device=self.device,
-                float_dtype=self.float_dtype,
-                generator=self.rng,
-                num_supervisions=self.cfg.model.num_supervisions,
-                warm_start_iterations=self.cfg.search.warm_start_iterations,
-                warm_start_type=self.cfg.search.warm_start_type,
-                warm_start_multiplier=self.cfg.search.warm_start_multiplier,
-                cfr_type=self.cfg.search.cfr_type,
-                cfr_avg=self.cfg.search.cfr_avg,
-                cfr_plus=self.cfg.search.cfr_plus,
-                dcfr_alpha=self.cfg.search.dcfr_alpha,
-                dcfr_beta=self.cfg.search.dcfr_beta,
-                dcfr_gamma=self.cfg.search.dcfr_gamma,
-                dcfr_alpha_final=self.cfg.search.dcfr_alpha_final,
-                dcfr_beta_final=self.cfg.search.dcfr_beta_final,
-                dcfr_gamma_final=self.cfg.search.dcfr_gamma_final,
-                dcfr_delay=self.cfg.search.dcfr_plus_delay,
-                value_targets_from_final_policy=self.cfg.search.value_targets_from_final_policy,
-                allin_call_terminal_abstraction=self.cfg.search.allin_call_terminal_abstraction,
-                preflop_allin_table_path=self.cfg.search.preflop_allin_table_path,
-            )
+            evaluator_cls = FusedSparseCFREvaluator
+        self.cfr_evaluator = evaluator_cls(
+            model=eval_model,
+            device=self.device,
+            cfg=cfg,
+            generator=self.rng,
+        )
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,
             evaluator=self.cfr_evaluator,

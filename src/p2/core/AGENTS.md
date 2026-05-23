@@ -3,6 +3,7 @@ Shared package contracts and typed configuration used across environments, model
 
 ### Source files
 - `__init__.py`: Package marker.
+- `action_schedule.py`: Shared derivation of global CFR action spaces and per-depth legal action masks from search bet-bin schedules.
 - `interfaces.py`: Abstract interfaces for environments, encoders, models, policies, leagues, and build context.
 - `structured_config.py`: Dataclass-based Hydra config schema and enums for training, model, environment, search, and rating options.
 

@@ -11,7 +11,6 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 - `bench_reach_weights.py`: Reach-weight computation benchmark.
 - `bench_rules_triton.py`: Triton hand-rules benchmark.
 - `bench_set_model_values_indexing.py`: Model-value indexing benchmark.
-- `bench_sparse_vs_rebel_cfr.py`: Sparse versus ReBeL CFR benchmark.
 - `cfr_optimizations_bench.py`: CFR optimization comparison benchmark.
 - `profile_chance_helper.py`: Chance-node helper profiler.
 

@@ -1,5 +1,11 @@
 import torch
 
+from p2.core.action_schedule import (
+    ActionSchedule,
+    legal_action_mask_for_depth,
+    legal_action_masks_by_depth,
+    make_action_schedule,
+)
 from p2.core.structured_config import Config
 from p2.env.card_utils import NUM_HANDS, combo_to_onehot_tensor
 from p2.env.hunl_tensor_env import HUNLTensorEnv
@@ -33,8 +39,20 @@ class SparseCFREvaluator(CFREvaluator):
 
         self.float_dtype = torch.float32
         self.num_players = 2
-        self.bet_bins = cfg.env.bet_bins
-        self.num_actions = len(self.bet_bins) + 3
+        self.action_schedule: ActionSchedule = make_action_schedule(
+            cfg.env.bet_bins,
+            cfg.search.bet_bins_by_depth,
+            cfg.search.allin_by_depth,
+        )
+        cfg.env.bet_bins = list(self.action_schedule.bet_bins)
+        cfg.model.num_actions = self.action_schedule.num_actions
+        if self.action_schedule.num_depths is not None:
+            cfg.search.depth = self.action_schedule.num_depths
+        self.bet_bins = list(self.action_schedule.bet_bins)
+        self.num_actions = self.action_schedule.num_actions
+        self.action_masks_by_depth = legal_action_masks_by_depth(
+            self.action_schedule, device=self.device
+        )
 
         self.num_supervisions = cfg.model.num_supervisions
 
@@ -187,6 +205,7 @@ class SparseCFREvaluator(CFREvaluator):
             parent_start = self.depth_offsets[-2]
             parent_env = env_levels[-1]
             legal_mask = parent_env.legal_bins_mask()
+            legal_mask &= self._action_mask_for_depth(depth)[None, :]
             legal_mask &= (~allin_leaf_levels[-1])[:, None]
             stop_mask = parent_env.actions_this_round == 0
             if depth > 0:
@@ -247,6 +266,7 @@ class SparseCFREvaluator(CFREvaluator):
         allin_leaf_tensor = torch.cat(allin_leaf_levels)
 
         self.legal_mask = self.env.legal_bins_mask()
+        self._apply_depth_action_masks(self.legal_mask)
 
         root_mask = torch.zeros(self.total_nodes, dtype=torch.bool, device=self.device)
         root_mask[:num_roots] = True
@@ -257,6 +277,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.new_street_mask.masked_fill_(allin_leaf_tensor, False)
         self._mark_allin_call_leaves()
         self.model_indices = self._compute_model_indices()
+        self._validate_model_leaf_phases()
         self.child_mask = (
             self.legal_mask & self.valid_mask[:, None] & (~self.leaf_mask)[:, None]
         )
@@ -343,6 +364,23 @@ class SparseCFREvaluator(CFREvaluator):
             env=self.env, device=self.device, dtype=self.float_dtype
         )
         self.feature_encoder = self.policy_feature_encoder
+
+    def _action_mask_for_depth(self, depth: int) -> torch.Tensor:
+        if self.action_masks_by_depth.shape[0] == 1:
+            return self.action_masks_by_depth[0]
+        return legal_action_mask_for_depth(
+            self.action_schedule,
+            depth,
+            device=self.device,
+        )
+
+    def _apply_depth_action_masks(self, legal_mask: torch.Tensor) -> None:
+        if self.action_schedule.bet_bins_by_depth is None:
+            return
+        for depth in range(min(self.max_depth, len(self.depth_offsets) - 1)):
+            start = self.depth_offsets[depth]
+            end = self.depth_offsets[depth + 1]
+            legal_mask[start:end] &= self._action_mask_for_depth(depth)[None, :]
 
     def _mask_invalid(self, tensor: torch.Tensor) -> None:
         """Mask invalid nodes in the tensor. Noop for sparse evaluator (all nodes are valid)."""

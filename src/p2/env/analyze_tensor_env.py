@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple, Union
 
 import torch
 
+from p2.core.action_schedule import apply_action_schedule_to_config
 from p2.env.card_utils import (
     NUM_HANDS,
     combo_lookup_tensor,
@@ -25,10 +26,6 @@ from p2.models.transformer.poker_transformer import PokerTransformerV1
 from p2.models.transformer.token_sequence_builder import TokenSequenceBuilder
 from p2.search.cfr_evaluator import PublicBeliefState
 from p2.core.structured_config import Config
-from p2.search.rebel_cfr_evaluator import (
-    T_WARM,
-    RebelCFREvaluator,
-)
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 GRID_RANKS = "AKQJT98765432"
@@ -462,6 +459,7 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             rng: Random number generator
             popart_normalizer: Optional PopArt normalizer for denormalizing values
         """
+        apply_action_schedule_to_config(cfg)
         # Extract all values from cfg
         bet_bins = cfg.env.bet_bins
         starting_stack = cfg.env.stack
@@ -470,19 +468,6 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         flop_showdown = getattr(cfg.env, "flop_showdown", False)
         cfr_iterations = cfg.search.iterations
         max_depth = cfg.search.depth
-        sparse = cfg.search.sparse
-        float_dtype = getattr(cfg, "float_dtype", torch.float32)
-        num_supervisions = cfg.model.num_supervisions
-        warm_start_iterations = getattr(cfg.search, "warm_start_iterations", T_WARM)
-        cfr_type = cfg.search.cfr_type
-        cfr_avg = cfg.search.cfr_avg
-        dcfr_alpha = cfg.search.dcfr_alpha
-        dcfr_beta = cfg.search.dcfr_beta
-        dcfr_gamma = cfg.search.dcfr_gamma
-        dcfr_delay = cfg.search.dcfr_plus_delay
-        value_targets_from_final_policy = getattr(
-            cfg.search, "value_targets_from_final_policy", False
-        )
 
         if device is None:
             device = torch.device("cpu")
@@ -490,14 +475,9 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         if rng is None:
             rng = torch.Generator(device=device)
 
-        # Normalize parameters to match trainer logic
-        max_depth = max(1, max_depth)
-        cfr_iterations = max(T_WARM + 1, cfr_iterations)
-
-        if cfr_iterations <= T_WARM:
+        if not cfg.search.sparse:
             raise ValueError(
-                f"RebelPreflopAnalyzer requires cfr_iterations > T_WARM ({T_WARM}); "
-                f"got {cfr_iterations}."
+                "Dense RebelCFREvaluator has been removed; set search.sparse=true."
             )
 
         super().__init__(
@@ -530,47 +510,19 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             flop_showdown=flop_showdown,
         )
 
-        # Create evaluator matching trainer's logic
-        if sparse:
-            # Create a copy of cfg with num_envs=1 for sparse evaluator
-            cfg_copy = copy.deepcopy(cfg)
-            cfg_copy.num_envs = 1
-            evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
-            if cfg.search.sparse_fused:
-                from p2.search.fused_sparse_cfr_evaluator import (
-                    FusedSparseCFREvaluator,
-                )
+        cfg_copy = copy.deepcopy(cfg)
+        cfg_copy.num_envs = 1
+        evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
+        if cfg.search.sparse_fused:
+            from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
-                evaluator_cls = FusedSparseCFREvaluator
-            self.cfr_evaluator = evaluator_cls(
-                model=self.model,
-                device=device,
-                cfg=cfg_copy,
-                generator=rng,
-            )
-        else:
-            self.cfr_evaluator = RebelCFREvaluator(
-                search_batch_size=1,  # Single environment
-                env_proto=self.cfr_env,
-                model=self.model,
-                bet_bins=bet_bins,
-                max_depth=max_depth,
-                cfr_iterations=cfr_iterations,
-                device=device,
-                float_dtype=float_dtype,
-                generator=rng,
-                num_supervisions=num_supervisions,
-                warm_start_iterations=warm_start_iterations,
-                cfr_type=cfr_type,
-                cfr_avg=cfr_avg,
-                dcfr_alpha=dcfr_alpha,
-                dcfr_beta=dcfr_beta,
-                dcfr_gamma=dcfr_gamma,
-                dcfr_delay=dcfr_delay,
-                value_targets_from_final_policy=value_targets_from_final_policy,
-                allin_call_terminal_abstraction=cfg_copy.search.allin_call_terminal_abstraction,
-                preflop_allin_table_path=cfg_copy.search.preflop_allin_table_path,
-            )
+            evaluator_cls = FusedSparseCFREvaluator
+        self.cfr_evaluator = evaluator_cls(
+            model=self.model,
+            device=device,
+            cfg=cfg_copy,
+            generator=rng,
+        )
         self.current_index = 1  # Root node is at index 0, so current_index = 1 for root_index = current_index - 1
 
         # Reinitialize both the base and CFR environments now that CFR state is set up.
@@ -632,12 +584,7 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         end = self.cfr_evaluator.depth_offsets[2]
         child_indices = torch.arange(start, end, device=self.device)
 
-        # action_from_parent only exists on SparseCFREvaluator; fall back to
-        # positional indexing for the dense evaluator.
-        if hasattr(self.cfr_evaluator, "action_from_parent"):
-            action_ids = self.cfr_evaluator.action_from_parent[child_indices]
-        else:
-            action_ids = child_indices - start
+        action_ids = self.cfr_evaluator.action_from_parent[child_indices]
 
         num_actions = self.cfr_evaluator.num_actions
         policy_dtype = self.cfr_evaluator.policy_probs_avg.dtype

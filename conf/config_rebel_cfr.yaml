@@ -63,7 +63,7 @@ model:
   board_interaction_dim: 64
   policy_rank: 128
   policy_hand_bias_rank: 32
-  policy_factor_scale: 1.0
+  policy_factor_scale: 0.05
 
   shared_trunk: true # DO NOT detach policy head from trunk
   num_hidden_layers: 4
@@ -87,11 +87,19 @@ env:
   high_stack_mass_ratio: 0.3333333333333333
   sb: 50
   bb: 100
-  bet_bins: [0.5, 1.0]
+  bet_bins: [0.25, 0.5, 0.75, 1.0, 1.5]
 
 search:
   enabled: true
-  depth: 4
+  depth: 6
+  bet_bins_by_depth:
+    - [0.25, 0.5, 0.75, 1.0, 1.5]
+    - [0.5, 1.0]
+    - [1.0]
+    - [1.0]
+    - [1.0]
+    - []
+  allin_by_depth: [true, true, true, true, true, false]
   sparse: true
   sparse_fused: true
   value_targets_from_final_policy: true

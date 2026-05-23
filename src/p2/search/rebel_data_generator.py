@@ -38,6 +38,16 @@ class RebelDataGenerator:
         """
         env = self.evaluator.env
         N = self.evaluator.root_nodes
+        required = (
+            "street",
+            "pot",
+            "stacks",
+            "to_act",
+            "is_allin",
+            "committed",
+        )
+        if not all(hasattr(env, name) for name in required):
+            return
         street = env.street[:N]
         pot = env.pot[:N].float().clamp(min=1.0)
         # Effective stack = min of the two stacks; SPR = eff_stack / pot.

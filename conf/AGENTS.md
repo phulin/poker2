@@ -9,7 +9,7 @@ Hydra configuration files for PPO/K-best training, transformer variants, and ReB
 - `config_transformer.yaml`: Transformer PPO training configuration.
 - `config_transformer_hp.yaml`: High-performance transformer configuration.
 - `config_transformer_cfr.yaml`: Transformer configuration with CFR-related settings.
-- `config_rebel_cfr.yaml`: Main ReBeL CFR training configuration.
+- `config_rebel_cfr.yaml`: Main ReBeL CFR training configuration, including the per-depth sparse search bet schedule.
 - `config_rebel_debug.yaml`: Faster ReBeL debug configuration.
 
 ### Subdirectories

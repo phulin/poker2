@@ -976,6 +976,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     stop_new_street=depth > 0,
                     num_actions=self.num_actions,
                 )
+                self._subgame_legal_mask[parent_start:parent_end] &= (
+                    self._action_mask_for_depth(depth)[None, :]
+                )
+                child_counts.copy_(
+                    self._subgame_legal_mask[parent_start:parent_end].sum(dim=-1)
+                )
             with _init_profile_region("cfr_init_attempt_cumsum_offsets"):
                 torch.cumsum(child_counts, dim=0, out=child_offsets)
                 child_offsets -= child_counts
@@ -1045,6 +1051,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 num_actions=self.num_actions,
             )
         self.legal_mask = self._subgame_legal_mask[:cursor]
+        self._apply_depth_action_masks(self.legal_mask)
 
         root_mask = self._subgame_root_mask[:cursor]
         self.new_street_mask = self._subgame_new_street_mask[:cursor]
@@ -1072,6 +1079,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             )
         self._mark_constructed_allin_call_leaves(allin_leaf_tensor)
         self.model_indices = self._compute_model_indices()
+        self._validate_model_leaf_phases()
         bottom = self.depth_offsets[1]
         with _init_profile_region("cfr_init_attempt_child_offsets"):
             self.child_offsets = (
@@ -1203,6 +1211,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.self_reach_avg[:n] = 1.0
 
         self.model_indices = self._compute_model_indices()
+        self._validate_model_leaf_phases()
         self.latent = None
 
         root_allowed, root_allowed_prob = self._root_allowed_from_board_indices(n)
@@ -2200,11 +2209,22 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     include_policy=False,
                     apply_zero_sum=True,
                     static_base_features=self._static_model_base_features,
+                    value_head="pre"
+                    if self._uses_street_cutoff_schedule()
+                    else "auto",
                 )
                 model_applied_zero_sum = bool(base_model.enforce_zero_sum)
             else:
-                model_output = model(features, include_policy=False)
-        hand_values = model_output.hand_values.contiguous()
+                if self._uses_street_cutoff_schedule() and hasattr(
+                    model, "forward_pre"
+                ):
+                    hand_values = model.forward_pre(features).contiguous()
+                    model_applied_zero_sum = bool(getattr(base_model, "enforce_zero_sum", False))
+                    model_output = None
+                else:
+                    model_output = model(features, include_policy=False)
+        if model_output is not None:
+            hand_values = model_output.hand_values.contiguous()
 
         do_mix = (
             self.cfr_avg

@@ -6,6 +6,8 @@ import torch
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 
+from p2.core.action_schedule import apply_action_schedule_to_config
+
 
 class ValueLossType(str, Enum):
     huber = "huber"
@@ -302,11 +304,13 @@ class SearchConfig:
     cfr_type: CFRType = CFRType.linear
     cfr_plus: bool = True
     cfr_avg: bool = True
-    sparse: bool = False
+    sparse: bool = True
     sparse_fused: bool = False
     value_targets_from_final_policy: bool = False
     allin_call_terminal_abstraction: bool = True
     preflop_allin_table_path: str | None = None
+    bet_bins_by_depth: list[list[float]] | None = None
+    allin_by_depth: list[bool] | None = None
 
 
 @dataclass
@@ -391,8 +395,9 @@ class Config:
     def __post_init__(self):
         if self.wandb_tags is None:
             self.wandb_tags = ["kbest", "poker", "ppo"]
-        # Derive action space size directly from bet bins so search/env/model stay aligned.
-        self.model.num_actions = len(self.env.bet_bins) + 3
+        # Derive action space size directly from the search schedule so search,
+        # env, and model stay aligned on one global action id space.
+        apply_action_schedule_to_config(self)
 
     @classmethod
     def from_dict_config(cls, dict_config: DictConfig) -> "Config":
