@@ -3602,7 +3602,7 @@ if triton is not None:
         B: tl.constexpr,
         H: tl.constexpr,
         D: tl.constexpr,
-        SAMPLE_EPS: tl.constexpr,
+        SAMPLE_EPS,
         BLOCK_BELIEF: tl.constexpr,
         BELIEF_BLOCKS: tl.constexpr,
     ):
