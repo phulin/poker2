@@ -1334,7 +1334,7 @@ def select_opponent_beliefs_triton_out_(
 
 if triton is not None:
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["bottom", "num_children"])
     def _marginal_policy_kernel(
         actor_beliefs_ptr,  # [top, H]
         policy_ptr,  # [total, H]
