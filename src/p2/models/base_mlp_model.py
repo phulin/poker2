@@ -14,6 +14,11 @@ class BaseMLPModel(nn.Module, ABC):
         self._compiled_forward_policy = torch.compile(self.forward_policy, **kwargs)
         self._compiled_forward_value = torch.compile(self.forward_value, **kwargs)
         self._compiled_forward_both = torch.compile(self.forward_both, **kwargs)
+        static_value_fn = getattr(self, "forward_value_static_base", None)
+        if static_value_fn is not None:
+            self._compiled_forward_value_static_base = torch.compile(
+                static_value_fn, **kwargs
+            )
         return self
 
     def _call_forward_policy(self, *args, **kwargs):
@@ -26,6 +31,12 @@ class BaseMLPModel(nn.Module, ABC):
         fn = getattr(self, "_compiled_forward_value", None)
         if fn is None:
             fn = self.forward_value
+        return fn(*args, **kwargs)
+
+    def _call_forward_value_static_base(self, *args, **kwargs):
+        fn = getattr(self, "_compiled_forward_value_static_base", None)
+        if fn is None:
+            fn = getattr(self, "forward_value_static_base")
         return fn(*args, **kwargs)
 
     def _call_forward_both(self, *args, **kwargs):

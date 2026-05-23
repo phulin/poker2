@@ -270,16 +270,18 @@ class RebelCFRTrainer:
             self.loss_fn.compile_forward_modes(**_compile_kwargs(cfg))
         self.grad_clip = cfg.train.grad_clip
 
-        # EMA setup. Shadow weights live in EMAHelper; at search/eval time we
-        # rebind self.model's parameter .data to the shadow tensors via a
-        # context manager. This keeps a single compiled module — no second
-        # torch.compile pass and no duplicated parameter memory.
+        # EMA setup. If enabled, the dedicated inference model is synced from
+        # these shadow weights after training updates.
         self.ema_helper: EMAHelper | None = None
         if cfg.train.model_ema is not None:
             self.ema_helper = EMAHelper(mu=cfg.train.model_ema)
             self.ema_helper.register(self.model)
 
-        eval_model = self.model
+        self.inference_model = self._make_eval_twin(compile_model=False)
+        self._sync_inference_model()
+        if self.device.type == "cuda" and _compile_setting(cfg) != "off":
+            self.inference_model.compile_forward_modes(**_compile_kwargs(cfg))
+        eval_model = self.inference_model
 
         if cfg.search.sparse:
             evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
@@ -333,15 +335,15 @@ class RebelCFRTrainer:
 
         self.aggression_analyzer = AggressionAnalyzer(device=self.device)
 
-        # TrueSkill tracker. Reuses the live ``self.model`` as the candidate-side
-        # compiled instance and creates a second compiled instance for the
-        # opponent. Both sides bind weights via .data rebinding (no recompile).
+        # TrueSkill tracker reuses the dedicated inference model as the
+        # candidate-side compiled instance and creates a second compiled
+        # instance for the opponent.
         self.trueskill_tracker: TrueSkillTracker | None = None
         if cfg.trueskill.enabled:
             opponent_model = self._make_eval_twin()
             self.trueskill_tracker = TrueSkillTracker(
                 cfg=cfg,
-                candidate_model=self.model,
+                candidate_model=self.inference_model,
                 opponent_model=opponent_model,
                 device=self.device,
                 generator=self.rng,
@@ -353,7 +355,7 @@ class RebelCFRTrainer:
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         return nullcontext()
 
-    def _make_eval_twin(self) -> nn.Module:
+    def _make_eval_twin(self, compile_model: bool = True) -> nn.Module:
         """Create a second compiled model instance with the same architecture
         as ``self.model``, used as the opponent side for TrueSkill matchups."""
         cfg = self.cfg
@@ -406,9 +408,37 @@ class RebelCFRTrainer:
         twin.eval()
         for p in twin.parameters():
             p.requires_grad = False
-        if self.device.type == "cuda" and _compile_setting(cfg) != "off":
+        if (
+            compile_model
+            and self.device.type == "cuda"
+            and _compile_setting(cfg) != "off"
+        ):
             twin.compile_forward_modes(**_compile_kwargs(cfg))
         return twin
+
+    @torch.no_grad()
+    def _sync_inference_model(self) -> None:
+        """Copy train or EMA weights into the dedicated inference model."""
+        source_params = dict(self.model.named_parameters())
+        source_buffers = dict(self.model.named_buffers())
+        ema_shadow = self.ema_helper.shadow if self.ema_helper is not None else {}
+
+        for name, param in self.inference_model.named_parameters():
+            src = ema_shadow.get(name)
+            if src is None:
+                src = source_params[name].data
+            if src.device != param.device or src.dtype != param.dtype:
+                src = src.to(device=param.device, dtype=param.dtype)
+            param.data.copy_(src)
+
+        for name, buf in self.inference_model.named_buffers():
+            src = source_buffers.get(name)
+            if src is None:
+                continue
+            if src.device != buf.device or src.dtype != buf.dtype:
+                src = src.to(device=buf.device, dtype=buf.dtype)
+            buf.copy_(src)
+        self.inference_model.eval()
 
     def trueskill_snapshot_weights(self) -> dict[str, torch.Tensor]:
         """Return the weights to snapshot for TrueSkill. Prefers EMA shadow
@@ -420,12 +450,6 @@ class RebelCFRTrainer:
             for name, param in self.model.named_parameters()
             if param.requires_grad
         }
-
-    def _eval_swap(self):
-        """Bind EMA shadow weights into self.model for the duration of the block."""
-        if self.ema_helper is None:
-            return nullcontext()
-        return self.ema_helper.swapped(self.model)
 
     def _apply_schedules(self, step: int) -> None:
         """Apply learning rate and iteration count schedules."""
@@ -893,10 +917,10 @@ class RebelCFRTrainer:
         # Calculate loss on fresh data
         if fresh_value_batch:
             with torch.no_grad():
-                self.model.eval()
+                self.inference_model.eval()
                 fresh_value_batch = fresh_value_batch.to(self.device)
                 with self._model_autocast():
-                    fresh_model_output = self.model.repeat(
+                    fresh_model_output = self.inference_model.repeat(
                         fresh_value_batch.features,
                         count=self.cfg.model.num_supervisions,
                         include_policy=False,
@@ -909,27 +933,16 @@ class RebelCFRTrainer:
                 metrics["fresh_value_loss"] = fresh_loss_dict["value_loss"].item()
 
                 if self.ema_helper is not None:
-                    with self._eval_swap():
-                        self.model.eval()
-                        with self._model_autocast():
-                            fresh_model_avg_output = self.model.repeat(
-                                fresh_value_batch.features,
-                                count=self.cfg.model.num_supervisions,
-                                include_policy=False,
-                            )
-                        metrics["fresh_value_loss_avg"] = self.loss_fn.forward_value(
-                            fresh_model_avg_output, fresh_value_batch
-                        )["value_loss"].item()
-
-                        with self._model_autocast():
-                            model_avg_output = self.model.repeat(
-                                value_batch.features,
-                                count=self.cfg.model.num_supervisions,
-                                include_policy=False,
-                            )
-                        metrics["value_loss_avg"] = self.loss_fn.forward_value(
-                            model_avg_output, value_batch
-                        )["value_loss"].item()
+                    metrics["fresh_value_loss_avg"] = metrics["fresh_value_loss"]
+                    with self._model_autocast():
+                        model_avg_output = self.inference_model.repeat(
+                            value_batch.features,
+                            count=self.cfg.model.num_supervisions,
+                            include_policy=False,
+                        )
+                    metrics["value_loss_avg"] = self.loss_fn.forward_value(
+                        model_avg_output, value_batch
+                    )["value_loss"].item()
 
         if (
             fresh_value_batch is not None
@@ -964,10 +977,10 @@ class RebelCFRTrainer:
             and fresh_policy_batch.policy_targets is not None
         ):
             with torch.no_grad():
-                self.model.eval()
+                self.inference_model.eval()
                 fresh_policy_batch = fresh_policy_batch.to(self.device)
                 with self._model_autocast():
-                    fresh_policy_output = self.model.repeat(
+                    fresh_policy_output = self.inference_model.repeat(
                         fresh_policy_batch.features,
                         count=self.cfg.model.num_supervisions,
                         include_policy=True,
@@ -1168,8 +1181,8 @@ class RebelCFRTrainer:
 
         self.optimizer.step()
 
-        # Update EMA if enabled. Shadow weights are the source of truth and
-        # are bound into self.model on demand via _eval_swap().
+        # Update EMA if enabled. The inference model is synced from shadow
+        # weights once all training updates for this step are done.
         if self.ema_helper is not None:
             self.ema_helper.update(self.model)
 
@@ -1273,29 +1286,28 @@ class RebelCFRTrainer:
     def _update_model(
         self, step: int
     ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
-        with self._eval_swap():
-            fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
-                self.K_value, return_policy_batch=True
-            )
+        fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
+            self.K_value, return_policy_batch=True
+        )
 
-            # Warmup: make sure we have enough samples.
-            min_policy_samples = max(
-                self.batch_size,
-                (
-                    self.policy_extra_batch_size
-                    if self.policy_extra_updates_per_step > 0
-                    else self.batch_size
-                ),
+        # Warmup: make sure we have enough samples.
+        min_policy_samples = max(
+            self.batch_size,
+            (
+                self.policy_extra_batch_size
+                if self.policy_extra_updates_per_step > 0
+                else self.batch_size
+            ),
+        )
+        while (
+            len(self.value_buffer) < self.batch_size
+            or len(self.policy_buffer) < min_policy_samples
+        ):
+            self.data_generator.generate_data(
+                self.K_value,
+                return_value_batch=False,
+                return_policy_batch=False,
             )
-            while (
-                len(self.value_buffer) < self.batch_size
-                or len(self.policy_buffer) < min_policy_samples
-            ):
-                self.data_generator.generate_data(
-                    self.K_value,
-                    return_value_batch=False,
-                    return_policy_batch=False,
-                )
 
         value_fullness = len(self.value_buffer) / self.value_buffer.capacity
         episodes = math.ceil(self.cfg.train.episodes_per_step * value_fullness)
@@ -1460,6 +1472,8 @@ class RebelCFRTrainer:
         for k in extra_tensor_stats:
             step_stats.setdefault(f"extra_{k}", 0.0)
 
+        self._sync_inference_model()
+
         value_metric_tensors = [
             output.value for output in value_output_all if output.value is not None
         ]
@@ -1619,4 +1633,5 @@ class RebelCFRTrainer:
         self.cfg.wandb_run_id = ckpt.get("wandb_run_id")
         # if "rng" in ckpt:
         #     self.rng.set_state(ckpt["rng"].to(self.device))
+        self._sync_inference_model()
         return int(ckpt["step"])

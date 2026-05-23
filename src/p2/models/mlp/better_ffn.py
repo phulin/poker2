@@ -675,10 +675,10 @@ class BetterFFN(BaseMLPModel):
         board_features = self.rank_embedding(ranks) + self.suit_embedding(suits)
         return board_features.sum(dim=1) + prefix
 
-    def _forward_base(
+    def _forward_base_from_static(
         self,
         features: MLPFeatures,
-        static_base_features: torch.Tensor | None = None,
+        static_base_features: torch.Tensor,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -691,8 +691,6 @@ class BetterFFN(BaseMLPModel):
         per_player_belief = player_beliefs @ hand_emb  # [B, P, H]
         belief_features = self.belief_proj(per_player_belief.flatten(1))
 
-        if static_base_features is None:
-            static_base_features = self.static_feature_base(features)
         flat_features = static_base_features + belief_features
         board_stats = self._board_stats(features.board, player_beliefs.dtype)
         interaction_features = self._belief_board_interaction(
@@ -712,14 +710,27 @@ class BetterFFN(BaseMLPModel):
             board_stats,
         )
 
+    def _forward_base(
+        self,
+        features: MLPFeatures,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
+        return self._forward_base_from_static(
+            features, static_base_features=self.static_feature_base(features)
+        )
+
     def forward_policy(
         self,
         features: MLPFeatures,
         latent=None,
-        static_base_features: torch.Tensor | None = None,
     ) -> ModelOutput:
         player_beliefs, flat_features, x, hand_emb, board_stats = self._forward_base(
-            features, static_base_features=static_base_features
+            features
         )
         policy_input = x if self.shared_trunk else flat_features.detach()
         policy_logits = self._policy_logits(
@@ -737,7 +748,6 @@ class BetterFFN(BaseMLPModel):
         features: MLPFeatures,
         latent=None,
         apply_zero_sum: bool = True,
-        static_base_features: torch.Tensor | None = None,
     ) -> ModelOutput:
         """
         Value-only pass.
@@ -747,10 +757,30 @@ class BetterFFN(BaseMLPModel):
         effect; if it is true and this flag is false, the caller must apply the
         projection after any value mixing.
         """
-        player_beliefs, _, x, hand_emb, board_stats = self._forward_base(
+        player_beliefs, _, x, hand_emb, board_stats = self._forward_base(features)
+        del hand_emb, board_stats
+        return self._value_from_base(player_beliefs, x, apply_zero_sum=apply_zero_sum)
+
+    def forward_value_static_base(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor,
+        latent=None,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
+        """Value-only pass for callers that precomputed static public features."""
+        player_beliefs, _, x, hand_emb, board_stats = self._forward_base_from_static(
             features, static_base_features=static_base_features
         )
         del hand_emb, board_stats
+        return self._value_from_base(player_beliefs, x, apply_zero_sum=apply_zero_sum)
+
+    def _value_from_base(
+        self,
+        player_beliefs: torch.Tensor,
+        x: torch.Tensor,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
         hand_values_raw = self._hand_value_logits(x)
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
@@ -769,10 +799,9 @@ class BetterFFN(BaseMLPModel):
         features: MLPFeatures,
         latent=None,
         apply_zero_sum: bool = True,
-        static_base_features: torch.Tensor | None = None,
     ) -> ModelOutput:
         player_beliefs, flat_features, x, hand_emb, board_stats = self._forward_base(
-            features, static_base_features=static_base_features
+            features
         )
         policy_input = x if self.shared_trunk else flat_features.detach()
         policy_logits = self._policy_logits(
@@ -815,17 +844,19 @@ class BetterFFN(BaseMLPModel):
             return self._call_forward_both(
                 features,
                 apply_zero_sum=apply_zero_sum,
-                static_base_features=static_base_features,
             )
         if include_policy:
-            return self._call_forward_policy(
-                features, static_base_features=static_base_features
-            )
+            return self._call_forward_policy(features)
         if include_value:
+            if static_base_features is not None:
+                return self._call_forward_value_static_base(
+                    features,
+                    static_base_features,
+                    apply_zero_sum=apply_zero_sum,
+                )
             return self._call_forward_value(
                 features,
                 apply_zero_sum=apply_zero_sum,
-                static_base_features=static_base_features,
             )
         raise ValueError("At least one of include_policy/include_value must be true")
 
