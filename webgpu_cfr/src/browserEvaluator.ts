@@ -33,6 +33,13 @@ export class BrowserCfrEvaluator {
     if (!Number.isInteger(depth) || depth <= 0) {
       throw new Error("depth must be a positive integer");
     }
+    if (
+      request.leafRefreshInterval !== undefined &&
+      (!Number.isInteger(request.leafRefreshInterval) ||
+        request.leafRefreshInterval <= 0)
+    ) {
+      throw new Error("leafRefreshInterval must be a positive integer");
+    }
     return await this.evaluateSpotSparse(
       request,
       depth,
@@ -92,7 +99,7 @@ export class BrowserCfrEvaluator {
       const action = request.spot[solveIndex]!;
       this.assertAction(action, numActions);
       this.assertLegalAction(env, action);
-      const solved = await this.sparseCfr.solve(env, beliefs, {
+      const prefixOptions: SparseResolveOptions = {
         depth,
         iterations,
         cfrAvg,
@@ -101,7 +108,11 @@ export class BrowserCfrEvaluator {
         readActionProbs: false,
         readBeliefs: true,
         onProgress: ({ iteration }) => emitProgress(solveIndex, "prefix", iteration),
-      });
+      };
+      if (request.leafRefreshInterval !== undefined) {
+        prefixOptions.leafRefreshInterval = request.leafRefreshInterval;
+      }
+      const solved = await this.sparseCfr.solve(env, beliefs, prefixOptions);
       if (!solved.beliefsAfter) {
         throw new Error("internal error: sparse prefix solve did not produce beliefs");
       }
@@ -116,6 +127,9 @@ export class BrowserCfrEvaluator {
       cfrAvg,
       onProgress: ({ iteration }) => emitProgress(finalSolveIndex, "final", iteration),
     };
+    if (request.leafRefreshInterval !== undefined) {
+      finalOptions.leafRefreshInterval = request.leafRefreshInterval;
+    }
     if (request.readPolicy !== undefined) finalOptions.readPolicy = request.readPolicy;
     if (request.readActionProbs !== undefined) {
       finalOptions.readActionProbs = request.readActionProbs;

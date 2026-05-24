@@ -263,6 +263,43 @@ test("sparse resolver can route CFR tensor operations through WGSL kernels", asy
   }
 });
 
+test("GPU sparse resolver can skip neural leaf refreshes between backups", async () => {
+  const device = await createDawnDevice();
+  try {
+    const betBins = [0.5];
+    const numActions = betBins.length + 3;
+    const env = new PublicHunlEnv({
+      stack: 20,
+      sb: 1,
+      bb: 2,
+      betBins,
+      button: 1,
+      forceDeck: DEFAULT_FORCE_DECK,
+    });
+    const counters: FakeModelCounters = {
+      singleLeafCalls: 0,
+      batchLeafSizes: [],
+    };
+    const resolver = new SparseCfrResolver(fakeModel(numActions, device, counters));
+    const progress: number[] = [];
+
+    await resolver.solve(env, uniformBeliefs(), {
+      depth: 3,
+      iterations: 4,
+      leafRefreshInterval: 2,
+      readPolicy: false,
+      readActionProbs: false,
+      onProgress: ({ iteration }) => progress.push(iteration),
+    });
+
+    assert.equal(counters.singleLeafCalls, 0);
+    assert.equal(counters.batchLeafSizes.length, 2);
+    assert.deepEqual(progress, [1, 2, 3, 4]);
+  } finally {
+    device.destroy();
+  }
+});
+
 test("sparse resolver batches nonterminal leaf value evaluation", async () => {
   const betBins = [0.5];
   const numActions = betBins.length + 3;

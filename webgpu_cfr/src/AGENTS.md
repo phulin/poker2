@@ -30,6 +30,7 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `pythonBridge.ts`: Python fixture bridge for Node parity tests.
 - `cli.ts`: Command-line evaluator entry point.
 - `bench.ts`: Command-line benchmark entry point.
+- `benchSpots.ts`: Command-line multi-spot benchmark entry point for street-grouped sparse solve timings.
 - `webgpu.d.ts`: WebGPU ambient type declarations.
 
 ### Subdirectories

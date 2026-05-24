@@ -145,6 +145,7 @@ export interface SparseResolveOptions {
   readPolicy?: boolean;
   readActionProbs?: boolean;
   readBeliefs?: boolean;
+  leafRefreshInterval?: number;
   onProgress?: (progress: SparseResolveProgress) => void;
 }
 
@@ -274,6 +275,7 @@ export class SparseCfrResolver {
           (options.readActionProbs ?? true) ||
           (options.selectedAction !== undefined && (options.readBeliefs ?? true)),
         exactBelief,
+        this.resolveLeafRefreshInterval(options.leafRefreshInterval),
         options.onProgress,
       );
     }
@@ -646,6 +648,15 @@ export class SparseCfrResolver {
     return globalThis.process?.env?.P2_SPARSE_INIT_POLICY === "model";
   }
 
+  private resolveLeafRefreshInterval(configured?: number): number {
+    const raw =
+      configured ?? Number.parseInt(
+        globalThis.process?.env?.P2_SPARSE_LEAF_REFRESH_INTERVAL ?? "",
+        10,
+      );
+    return Number.isInteger(raw) && raw > 0 ? raw : 1;
+  }
+
   private softmaxPolicy(
     logits: Float32Array<ArrayBufferLike>,
     legalMask: readonly number[],
@@ -715,7 +726,8 @@ export class SparseCfrResolver {
     iterations: number,
     cfrAvg: boolean,
     readPolicyAvg: boolean,
-    exactBelief?: ExactBelief,
+    exactBelief: ExactBelief | undefined,
+    leafRefreshInterval: number,
     onProgress?: (progress: SparseResolveProgress) => void,
   ): Promise<void> {
     if (!this.gpuKernels) {
@@ -847,53 +859,67 @@ export class SparseCfrResolver {
             reachBuffer,
             beliefsBuffer,
             denomBuffer,
-              avgNumeratorBuffer,
-              avgDenominatorBuffer,
-              policyAvgBuffer,
-              readPolicyAvg || cfrAvg,
-              cfrAvg ? beliefsAvgBuffer! : undefined,
-            );
-          });
+            avgNumeratorBuffer,
+            avgDenominatorBuffer,
+            policyAvgBuffer,
+            readPolicyAvg || cfrAvg,
+            cfrAvg ? beliefsAvgBuffer! : undefined,
+          );
+        });
 
         if (t + 1 < iterations) {
-          const disposeLeafPrediction = await time("leafValues", () =>
-            this.updateLeafValuesGpuBridge(
-              treeBuffers,
-              leafBatch,
-              cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
-              valuesBuffer,
-              staticGpu.modelLeafNodeBuffer,
-              modelLeafBeliefsBuffer,
-              staticGpu.showdownNodeBuffer,
-              staticGpu.showdownRankBuffer,
-              staticGpu.showdownRankOrdinalBuffer,
-              staticGpu.showdownRankCountBuffer,
-              staticGpu.showdownPayoffBuffer,
-              showdownRankMassBuffer,
-              showdownRankPrefixBuffer,
-              showdownRankTotalBuffer,
-              staticGpu.allInNodeBuffer,
-              staticGpu.allInScaleBuffer,
-              staticGpu.allInTableBuffer,
-              staticGpu.allInComboPermBuffer,
-              staticGpu.allInContext,
-              staticGpu.preparedLeafFeatures,
-              exactBelief,
-              undefined,
-              (encoder) =>
-                this.encodeExpectedValuesGpuResidentCommands(
-                  encoder,
-                  tree,
-                  treeBuffers,
-                  policyBuffer,
-                  beliefsBuffer,
-                  opponentPolicyBuffer,
-                  opponentPolicyAggregatesBuffer,
-                  valuesBuffer,
-                ),
-            ),
-          );
-          pendingLeafDisposals.push(disposeLeafPrediction);
+          if ((t + 1) % leafRefreshInterval === 0) {
+            const disposeLeafPrediction = await time("leafValues", () =>
+              this.updateLeafValuesGpuBridge(
+                treeBuffers,
+                leafBatch,
+                cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
+                valuesBuffer,
+                staticGpu.modelLeafNodeBuffer,
+                modelLeafBeliefsBuffer,
+                staticGpu.showdownNodeBuffer,
+                staticGpu.showdownRankBuffer,
+                staticGpu.showdownRankOrdinalBuffer,
+                staticGpu.showdownRankCountBuffer,
+                staticGpu.showdownPayoffBuffer,
+                showdownRankMassBuffer,
+                showdownRankPrefixBuffer,
+                showdownRankTotalBuffer,
+                staticGpu.allInNodeBuffer,
+                staticGpu.allInScaleBuffer,
+                staticGpu.allInTableBuffer,
+                staticGpu.allInComboPermBuffer,
+                staticGpu.allInContext,
+                staticGpu.preparedLeafFeatures,
+                exactBelief,
+                undefined,
+                (encoder) =>
+                  this.encodeExpectedValuesGpuResidentCommands(
+                    encoder,
+                    tree,
+                    treeBuffers,
+                    policyBuffer,
+                    beliefsBuffer,
+                    opponentPolicyBuffer,
+                    opponentPolicyAggregatesBuffer,
+                    valuesBuffer,
+                  ),
+              ),
+            );
+            pendingLeafDisposals.push(disposeLeafPrediction);
+          } else {
+            await time("backup", () => {
+              this.encodeExpectedValuesGpuResident(
+                tree,
+                treeBuffers,
+                policyBuffer,
+                beliefsBuffer,
+                opponentPolicyBuffer,
+                opponentPolicyAggregatesBuffer,
+                valuesBuffer,
+              );
+            });
+          }
         }
         onProgress?.({ iteration: t + 1, iterations });
       }

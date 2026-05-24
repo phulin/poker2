@@ -19,3 +19,22 @@ Street means from baseline:
 - flop_mean_ms: 667.87
 - turn_mean_ms: 657.40
 - river_mean_ms: 318.85
+
+Winning opt-in command:
+
+```bash
+/usr/bin/env WEBGPU_BACKEND=metal node --import tsx src/benchSpots.ts --manifest public/models/rebel_latest/model.json --spots bench_spots.json --depth 4 --iterations 100 --warmups 1 --runs 3 --no-cfr-avg --leaf-refresh-interval 8
+```
+
+Winning measurement:
+
+- optimized_mean_ms_all_streets: 192.41
+- speedup_vs_original: 3.02x
+- preflop_mean_ms: 205.78
+- flop_mean_ms: 194.78
+- turn_mean_ms: 208.31
+- river_mean_ms: 160.78
+
+Note: `--leaf-refresh-interval 8` refreshes neural leaf values every 8 CFR
+iterations while still running value backup each iteration. The default interval
+is 1, preserving exact existing solver behavior unless the option is enabled.
