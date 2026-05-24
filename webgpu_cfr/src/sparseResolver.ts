@@ -1404,16 +1404,28 @@ export class SparseCfrResolver {
         policyBuffer,
       ),
     ];
-    this.encodePropagateInto(
-      encoder,
-      params,
-      tree,
-      treeBuffers,
-      policyBuffer,
-      reachBuffer,
-      beliefsBuffer,
-      denomBuffer,
-    );
+    if (updatePolicyAvg) {
+      this.encodePropagateInto(
+        encoder,
+        params,
+        tree,
+        treeBuffers,
+        policyBuffer,
+        reachBuffer,
+        beliefsBuffer,
+        denomBuffer,
+      );
+    } else {
+      this.encodeBeliefsInto(
+        encoder,
+        params,
+        tree,
+        treeBuffers,
+        policyBuffer,
+        beliefsBuffer,
+        denomBuffer,
+      );
+    }
     if (updatePolicyAvg) {
       params.push(
         this.gpuKernels.encodeUpdateAveragePolicyRange(
@@ -1516,6 +1528,33 @@ export class SparseCfrResolver {
           end,
         ),
       );
+      params.push(
+        this.gpuKernels.encodePropagateBeliefsDepth(
+          encoder,
+          treeBuffers,
+          policyBuffer,
+          beliefsBuffer,
+          denomBuffer,
+          start,
+          end,
+        ),
+      );
+    }
+  }
+
+  private encodeBeliefsInto(
+    encoder: GPUCommandEncoder,
+    params: GPUBuffer[],
+    tree: SparseTree,
+    treeBuffers: SparseGpuTreeBuffers,
+    policyBuffer: GPUBuffer,
+    beliefsBuffer: GPUBuffer,
+    denomBuffer: GPUBuffer,
+  ): void {
+    if (!this.gpuKernels) return;
+    for (let depth = 0; depth < tree.treeDepth; depth += 1) {
+      const start = tree.depthOffsets[depth + 1]!;
+      const end = tree.depthOffsets[depth + 2]!;
       params.push(
         this.gpuKernels.encodePropagateBeliefsDepth(
           encoder,
