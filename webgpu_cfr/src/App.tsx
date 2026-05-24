@@ -19,6 +19,7 @@ import {
 import { parseBetterFfnManifest, resolveCfrDefaults } from "./modelFormat.js";
 import { loadModelBytesWithCache, type ModelCacheProgress } from "./modelCache.js";
 import { parseCard, parseCards, formatCard, handComboIndex, handComboCards } from "./cards.js";
+import { buildHeroOnlyBeliefs } from "./beliefs.js";
 import { PublicHunlEnv, NUM_HANDS, type LegalBins } from "./hunlEnv.js";
 import type {
   BetterFfnManifest,
@@ -29,6 +30,8 @@ import type {
 const MODEL_MANIFEST_URL = "/models/rebel_latest/model.json";
 const CARD_OPTIONS = Array.from({ length: 52 }, (_, index) => formatCard(index));
 const STREET_CARD_COUNTS = [0, 3, 4, 5] as const;
+const STREET_NAMES = ["Preflop", "Flop", "Turn", "River"] as const;
+const HERO_PLAYER: PlayerIndex = 0;
 
 interface Runtime {
   device: GPUDevice;
@@ -59,6 +62,7 @@ interface StateDescriptor {
   finalActor: PlayerIndex;
   finalLegalMask: number[];
   finalContext: ActionContext;
+  finalStreet: number;
 }
 
 interface SolveResult {
@@ -79,6 +83,10 @@ interface RangeSummary {
 
 function asPlayer(value: string): PlayerIndex {
   return value === "1" ? 1 : 0;
+}
+
+function playerLabel(player: PlayerIndex): string {
+  return player === HERO_PLAYER ? "Hero" : "Villain";
 }
 
 function contextFromEnv(env: PublicHunlEnv, legal: LegalBins): ActionContext {
@@ -495,15 +503,12 @@ function App(): JSX.Element {
     message: "Checking WebGPU",
   });
   const [modelError, setModelError] = createSignal("");
-  const [heroPlayer, setHeroPlayer] = createSignal<PlayerIndex>(1);
-  const [button, setButton] = createSignal<PlayerIndex>(1);
-  const [stack, setStack] = createSignal("200");
+  const [button, setButton] = createSignal<PlayerIndex>(HERO_PLAYER);
+  const [stack, setStack] = createSignal("400");
   const [sb, setSb] = createSignal("1");
   const [bb, setBb] = createSignal("2");
-  const [street, setStreet] = createSignal(0);
   const [iterations, setIterations] = createSignal("16");
   const [depth, setDepth] = createSignal("1");
-  const [cfrAvg, setCfrAvg] = createSignal(true);
   const [heroHandText, setHeroHandText] = createSignal("As Kd");
   const [selectedRangeKey, setSelectedRangeKey] = createSignal("AKo");
   const [boardCards, setBoardCards] = createSignal(["", "", "", "", ""]);
@@ -535,7 +540,6 @@ function App(): JSX.Element {
       const cfrDefaults = resolveCfrDefaults(manifest);
       setIterations(String(cfrDefaults.iterations));
       setDepth(String(cfrDefaults.depth));
-      setCfrAvg(cfrDefaults.cfrAvg);
       const model = BetterFfnWebGpuModel.fromBuffers(device, manifest, loaded.weights);
       const evaluator = createBrowserCfrEvaluator(device, model);
       setRuntime({
@@ -571,48 +575,26 @@ function App(): JSX.Element {
     return "error" in hero ? hero.error : "";
   });
 
-  const parsedInputs = createMemo(() => {
+  const descriptor = createMemo<StateDescriptor | { error: string }>(() => {
+    const current = runtime();
+    const hero = parsedHeroHand();
+    if (!current) return { error: "Model is not ready" };
+    if ("error" in hero) return { error: hero.error };
     try {
-      const hero = parsedHeroHand();
-      if ("error" in hero) throw new Error(hero.error);
-      const publicCount = STREET_CARD_COUNTS[street()] ?? 0;
-      const visibleBoard = boardCards().slice(0, publicCount);
-      if (visibleBoard.some((card) => card === "")) {
-        throw new Error("Select every board card for the chosen street");
-      }
       const heroHand = [
         CARD_OPTIONS.includes(hero.cards[0]) ? cardFromOption(hero.cards[0]) : -1,
         CARD_OPTIONS.includes(hero.cards[1]) ? cardFromOption(hero.cards[1]) : -1,
       ] as [number, number];
-      const publicCards = visibleBoard.map((card) => cardFromOption(card));
-      const seen = new Set<number>();
-      for (const card of [...heroHand, ...publicCards]) {
-        if (card < 0) throw new Error("Invalid card selection");
-        if (seen.has(card)) throw new Error(`Duplicate card ${formatCard(card)}`);
-        seen.add(card);
-      }
-      return { heroHand, publicCards };
-    } catch (error) {
-      return { error: error instanceof Error ? error.message : String(error) };
-    }
-  });
-
-  const descriptor = createMemo<StateDescriptor | { error: string }>(() => {
-    const current = runtime();
-    const cards = parsedInputs();
-    if (!current) return { error: "Model is not ready" };
-    if ("error" in cards) return { error: cards.error };
-    try {
       const env = PublicHunlEnv.fromManifest(current.manifest, {
         button: button(),
         stack: positiveNumber(stack(), current.manifest.env.stack),
         sb: positiveNumber(sb(), current.manifest.env.sb),
         bb: positiveNumber(bb(), current.manifest.env.bb),
+        forceDeck: buildForceDeck(heroHand, boardCards()),
       });
       env.configureKnownCards({
-        publicCards: cards.publicCards,
-        heroPlayer: heroPlayer(),
-        heroHand: cards.heroHand,
+        heroPlayer: HERO_PLAYER,
+        heroHand,
       });
 
       const rows: ActionRow[] = [];
@@ -635,6 +617,44 @@ function App(): JSX.Element {
         finalActor: env.toAct,
         finalLegalMask: finalLegal.mask,
         finalContext: contextFromEnv(env, finalLegal),
+        finalStreet: env.street,
+      };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  const inferredStreet = createMemo(() => {
+    const state = descriptor();
+    return "error" in state ? 0 : Math.min(3, Math.max(0, state.finalStreet));
+  });
+  const inferredPublicCount = createMemo(() => STREET_CARD_COUNTS[inferredStreet()] ?? 0);
+
+  const parsedInputs = createMemo(() => {
+    try {
+      const hero = parsedHeroHand();
+      if ("error" in hero) throw new Error(hero.error);
+      const publicCount = inferredPublicCount();
+      const visibleBoard = boardCards().slice(0, publicCount);
+      if (visibleBoard.some((card) => card === "")) {
+        const streetName = STREET_NAMES[inferredStreet()] ?? "current street";
+        throw new Error(`Select every ${streetName.toLowerCase()} board card`);
+      }
+      const heroHand = [
+        CARD_OPTIONS.includes(hero.cards[0]) ? cardFromOption(hero.cards[0]) : -1,
+        CARD_OPTIONS.includes(hero.cards[1]) ? cardFromOption(hero.cards[1]) : -1,
+      ] as [number, number];
+      const publicCards = visibleBoard.map((card) => cardFromOption(card));
+      const seen = new Set<number>();
+      for (const card of [...heroHand, ...publicCards]) {
+        if (card < 0) throw new Error("Invalid card selection");
+        if (seen.has(card)) throw new Error(`Duplicate card ${formatCard(card)}`);
+        seen.add(card);
+      }
+      return {
+        heroHand,
+        publicCards,
+        forceDeck: buildForceDeck(heroHand, visibleBoard),
       };
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
@@ -649,7 +669,7 @@ function App(): JSX.Element {
         used.add(card);
       }
     }
-    const publicCount = STREET_CARD_COUNTS[street()] ?? 0;
+    const publicCount = inferredPublicCount();
     for (let i = 0; i < publicCount; i += 1) {
       const card = boardCards()[i];
       if (card) used.add(card);
@@ -659,7 +679,7 @@ function App(): JSX.Element {
 
   const boardUsedCards = createMemo<Set<string>>(() => {
     const used = new Set<string>();
-    const publicCount = STREET_CARD_COUNTS[street()] ?? 0;
+    const publicCount = inferredPublicCount();
     for (let i = 0; i < publicCount; i += 1) {
       const card = boardCards()[i];
       if (card) used.add(card);
@@ -672,6 +692,12 @@ function App(): JSX.Element {
     const current = descriptor();
     return "error" in current ? current.error : "";
   });
+  const solveInputError = createMemo(() => {
+    const descriptorMessage = descriptorError();
+    if (descriptorMessage) return descriptorMessage;
+    const inputs = parsedInputs();
+    return "error" in inputs ? inputs.error : "";
+  });
   const modelProgressPercent = createMemo(() => {
     const progress = modelProgress();
     if (!progress.totalBytes || progress.loadedBytes === undefined) return undefined;
@@ -682,6 +708,43 @@ function App(): JSX.Element {
     const index = CARD_OPTIONS.indexOf(value);
     if (index < 0) throw new Error(`Invalid card ${value}`);
     return index;
+  }
+
+  function nextAvailableCard(used: Set<number>): number {
+    for (let card = 0; card < CARD_OPTIONS.length; card += 1) {
+      if (!used.has(card)) {
+        used.add(card);
+        return card;
+      }
+    }
+    throw new Error("No available card remains for force deck");
+  }
+
+  function buildForceDeck(
+    heroHand: readonly [number, number],
+    boardValues: readonly string[],
+  ): number[] {
+    const used = new Set<number>();
+    for (const card of heroHand) {
+      if (used.has(card)) throw new Error(`Duplicate card ${formatCard(card)}`);
+      used.add(card);
+    }
+
+    const board = new Array<number>(5).fill(-1);
+    for (let i = 0; i < Math.min(5, boardValues.length); i += 1) {
+      const value = boardValues[i];
+      if (!value) continue;
+      const card = cardFromOption(value);
+      if (used.has(card)) throw new Error(`Duplicate card ${formatCard(card)}`);
+      used.add(card);
+      board[i] = card;
+    }
+
+    const villainHand = [nextAvailableCard(used), nextAvailableCard(used)];
+    for (let i = 0; i < board.length; i += 1) {
+      if (board[i] === -1) board[i] = nextAvailableCard(used);
+    }
+    return [heroHand[0], heroHand[1], villainHand[0]!, villainHand[1]!, ...board];
   }
 
   function updateHeroHandText(value: string): void {
@@ -744,7 +807,7 @@ function App(): JSX.Element {
       setSolveError("");
       const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 16)));
       const solveDepth = Math.max(1, Math.trunc(positiveNumber(depth(), 1)));
-      const solveCfrAvg = cfrAvg();
+      const solveCfrAvg = false;
       setSolveStatus(`Solving depth ${solveDepth} for ${solveIterations} CFR iterations`);
       setSolveResult(undefined);
       const started = performance.now();
@@ -758,10 +821,15 @@ function App(): JSX.Element {
           stack: positiveNumber(stack(), current.manifest.env.stack),
           sb: positiveNumber(sb(), current.manifest.env.sb),
           bb: positiveNumber(bb(), current.manifest.env.bb),
+          forceDeck: cards.forceDeck,
         },
-        publicCards: cards.publicCards,
-        heroPlayer: heroPlayer(),
+        heroPlayer: HERO_PLAYER,
         heroHand: cards.heroHand,
+        initialBeliefs: buildHeroOnlyBeliefs({
+          heroPlayer: HERO_PLAYER,
+          heroHand: cards.heroHand,
+          publicCards: cards.publicCards,
+        }),
       });
       const elapsedMs = performance.now() - started;
       const heroHandIndex = handComboIndex(cards.heroHand[0], cards.heroHand[1]);
@@ -772,7 +840,7 @@ function App(): JSX.Element {
         depth: solveDepth,
         cfrAvg: solveCfrAvg,
         heroHandIndex,
-        villainSummary: summarizeVillainRange(result.beliefsAtSpot, heroPlayer()),
+        villainSummary: summarizeVillainRange(result.beliefsAtSpot, HERO_PLAYER),
       });
       setSolveStatus("Solve complete");
     } catch (error) {
@@ -857,20 +925,7 @@ function App(): JSX.Element {
             <span class="subgroup-title">Game</span>
             <div class="grid two">
               <label class="field">
-                <span>Hero seat</span>
-                <select
-                  value={String(heroPlayer())}
-                  onChange={(event) => {
-                    setHeroPlayer(asPlayer(event.currentTarget.value));
-                    setSolveResult(undefined);
-                  }}
-                >
-                  <option value="0">Player 0</option>
-                  <option value="1">Player 1</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>Button (small blind)</span>
+                <span>Button / small blind</span>
                 <select
                   value={String(button())}
                   onChange={(event) => {
@@ -879,8 +934,8 @@ function App(): JSX.Element {
                     setSolveResult(undefined);
                   }}
                 >
-                  <option value="0">Player 0</option>
-                  <option value="1">Player 1</option>
+                  <option value="0">Hero</option>
+                  <option value="1">Villain</option>
                 </select>
               </label>
             </div>
@@ -903,25 +958,7 @@ function App(): JSX.Element {
           <div class="card-section">
             <div class="card-section-head">
               <span class="card-section-title">Hero hand</span>
-              <div class="street-toggle" role="tablist">
-                <For each={["Preflop", "Flop", "Turn", "River"]}>
-                  {(name, index) => (
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={street() === index()}
-                      class={street() === index() ? "active" : ""}
-                      onClick={() => {
-                        setStreet(index());
-                        setActions([]);
-                        setSolveResult(undefined);
-                      }}
-                    >
-                      {name}
-                    </button>
-                  )}
-                </For>
-              </div>
+              <span class="feature-badge">{STREET_NAMES[inferredStreet()]}</span>
             </div>
             <HeroHandSelector
               value={heroHandText()}
@@ -937,10 +974,10 @@ function App(): JSX.Element {
               }}
               onComboChange={selectHeroCombo}
             />
-            <Show when={(STREET_CARD_COUNTS[street()] ?? 0) > 0}>
-              <span class="card-section-title">Board</span>
+            <Show when={inferredPublicCount() > 0}>
+              <span class="card-section-title">Board ({STREET_NAMES[inferredStreet()]})</span>
               <div class="card-row">
-                <For each={Array.from({ length: STREET_CARD_COUNTS[street()] ?? 0 }, (_, index) => index)}>
+                <For each={Array.from({ length: inferredPublicCount() }, (_, index) => index)}>
                   {(index) => (
                     <CardPicker
                       label={`Board ${index + 1}`}
@@ -979,8 +1016,8 @@ function App(): JSX.Element {
                 {(row, index) => (
                   <div class="action-row">
                     <span class="step-num">{index() + 1}</span>
-                    <span class={`actor-pill ${row.actor === heroPlayer() ? "hero" : "villain"}`}>
-                      {row.actor === heroPlayer() ? "Hero" : "Villain"}
+                    <span class={`actor-pill ${row.actor === HERO_PLAYER ? "hero" : "villain"}`}>
+                      {playerLabel(row.actor)}
                     </span>
                     <select
                       value={String(row.action)}
@@ -1005,8 +1042,8 @@ function App(): JSX.Element {
               </For>
               <Show when={legalActions((descriptor() as StateDescriptor).finalLegalMask).length > 0}>
                 <div class="next-to-act">
-                  <span class={`actor-pill ${(descriptor() as StateDescriptor).finalActor === heroPlayer() ? "hero" : "villain"}`}>
-                    {(descriptor() as StateDescriptor).finalActor === heroPlayer() ? "Hero" : "Villain"}
+                  <span class={`actor-pill ${(descriptor() as StateDescriptor).finalActor === HERO_PLAYER ? "hero" : "villain"}`}>
+                    {playerLabel((descriptor() as StateDescriptor).finalActor)}
                   </span>
                   <span class="next-to-act-label">to act</span>
                 </div>
@@ -1050,25 +1087,13 @@ function App(): JSX.Element {
                 }}
               />
             </div>
-            <label class="toggle-row">
-              <span>CFR average beliefs</span>
-              <button
-                type="button"
-                class={`toggle ${cfrAvg() ? "on" : "off"}`}
-                role="switch"
-                aria-checked={cfrAvg()}
-                onClick={() => {
-                  setCfrAvg(!cfrAvg());
-                  setSolveResult(undefined);
-                }}
-              >
-                <span class="toggle-thumb" />
-              </button>
-            </label>
+            <Show when={solveInputError() && !descriptorError()}>
+              <p class="inline-error">{solveInputError()}</p>
+            </Show>
             <button
               type="button"
               class="solve-button"
-              disabled={!runtime() || Boolean(descriptorError())}
+              disabled={!runtime() || Boolean(solveInputError())}
               onClick={() => void solve()}
             >
               <Play size={18} />
@@ -1111,7 +1136,7 @@ function App(): JSX.Element {
                   <span>{solved().elapsedMs.toFixed(1)} ms</span>
                   <span>{runtime()?.cached ? "cached model" : "fresh model"}</span>
                   <span>{runtime()?.usingSubgroups ? "subgroups on" : "subgroups off"}</span>
-                  <span>actor P{solved().result.actor}</span>
+                  <span>actor {playerLabel(solved().result.actor)}</span>
                 </div>
 
                 <section class="subsection no-border">
@@ -1131,7 +1156,7 @@ function App(): JSX.Element {
                   policy={solved().result.policy}
                   handIndex={solved().heroHandIndex}
                   actor={solved().result.actor}
-                  heroPlayer={heroPlayer()}
+                  heroPlayer={HERO_PLAYER}
                   context={(descriptor() as StateDescriptor).finalContext}
                 />
 
