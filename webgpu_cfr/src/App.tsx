@@ -275,6 +275,7 @@ function HeroHandSelector(props: {
   const [open, setOpen] = createSignal(false);
   const [editing, setEditing] = createSignal(false);
   let exactInput: HTMLInputElement | undefined;
+  let comboContainer: HTMLDivElement | undefined;
   const selectedOptions = createMemo(() => rangeOptions(props.selectedRangeKey, props.blockedCards));
   const exactStateClass = createMemo(() => (props.error ? "invalid" : "valid"));
 
@@ -293,6 +294,19 @@ function HeroHandSelector(props: {
   function finishEditing(): void {
     props.onNormalizeText();
     setEditing(false);
+  }
+
+  function scrollCombosIntoView(): void {
+    requestAnimationFrame(() => {
+      const rect = comboContainer?.getBoundingClientRect();
+      if (!rect) return;
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+      if (rect.top >= 0 && rect.bottom <= viewportHeight) return;
+      window.scrollBy({
+        top: rect.bottom - viewportHeight + 12,
+        behavior: "smooth",
+      });
+    });
   }
 
   return (
@@ -363,7 +377,10 @@ function HeroHandSelector(props: {
                       role="gridcell"
                       class={`range-cell ${cell.kind} ${props.selectedRangeKey === cell.key ? "selected" : ""}`}
                       disabled={blocked()}
-                      onClick={() => props.onRangeChange(cell.key)}
+                      onClick={() => {
+                        props.onRangeChange(cell.key);
+                        scrollCombosIntoView();
+                      }}
                       title={cell.label}
                     >
                       {cell.label}
@@ -377,7 +394,7 @@ function HeroHandSelector(props: {
         <div class="range-combo-head">
           <span>{selectedOptions().length} combos</span>
         </div>
-        <div class="range-combos">
+        <div class="range-combos" ref={comboContainer}>
           <For each={selectedOptions()}>
             {(option) => (
               <button
