@@ -883,14 +883,44 @@ function BoardEntry(props: {
   count: number;
   cards: readonly string[];
   disabled: ReadonlySet<string>;
-  onCardChange: (index: number, value: string) => void;
   onTextChange: (cards: string[]) => void;
 }): JSX.Element {
   const [text, setText] = createSignal(props.cards.slice(0, props.count).filter(Boolean).join(" "));
   const [error, setError] = createSignal("");
+  const [pickerOpen, setPickerOpen] = createSignal(false);
+  const [focusedKey, setFocusedKey] = createSignal("");
+  let inputRef: HTMLInputElement | undefined;
 
   createEffect(() => {
     setText(props.cards.slice(0, props.count).filter(Boolean).join(" "));
+  });
+
+  createEffect(() => {
+    const key = `${props.street}:${props.count}`;
+    const needsBoard = props.count > 0 && props.cards.slice(0, props.count).some((card) => !card);
+    if (!needsBoard || focusedKey() === key) return;
+    setFocusedKey(key);
+    queueMicrotask(() => {
+      inputRef?.focus();
+      inputRef?.select();
+      setPickerOpen(true);
+    });
+  });
+
+  const enteredCards = createMemo(() => {
+    try {
+      return parseBoardCardsText(text()).slice(0, props.count);
+    } catch {
+      return [];
+    }
+  });
+
+  const blockedCards = createMemo(() => {
+    const blocked = new Set(props.disabled);
+    for (const card of enteredCards()) {
+      if (card) blocked.add(card);
+    }
+    return blocked;
   });
 
   function commitText(): void {
@@ -907,11 +937,23 @@ function BoardEntry(props: {
     }
   }
 
+  function selectCard(card: string): void {
+    const current = enteredCards();
+    if (current.length >= props.count || blockedCards().has(card)) return;
+    const next = [...current, card];
+    setText(next.join(" "));
+    setError("");
+    if (next.length === props.count) {
+      props.onTextChange(next);
+    }
+  }
+
   return (
     <div class="board-entry-row">
       <span class="street-marker">{STREET_NAMES[props.street]}</span>
       <div class="board-entry">
         <input
+          ref={inputRef}
           class={`board-text-input ${error() ? "invalid" : ""}`}
           value={text()}
           placeholder={props.count === 3 ? "As Kd Qh" : "As Kd Qh Js"}
@@ -919,7 +961,12 @@ function BoardEntry(props: {
             setText(event.currentTarget.value);
             setError("");
           }}
-          onBlur={commitText}
+          onFocus={() => setPickerOpen(true)}
+          onClick={() => setPickerOpen(true)}
+          onBlur={() => {
+            commitText();
+            setPickerOpen(false);
+          }}
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
@@ -928,25 +975,34 @@ function BoardEntry(props: {
             }
           }}
         />
-        <div class="card-row">
-          <For each={Array.from({ length: props.count }, (_, index) => index)}>
-            {(index) => (
-              <CardPicker
-                label={`Board ${index + 1}`}
-                value={props.cards[index] ?? ""}
-                disabled={props.disabled}
-                allowEmpty
-                onChange={(value) => {
-                  props.onCardChange(index, value);
-                  setError("");
-                  const next = [...props.cards.slice(0, props.count)];
-                  next[index] = value;
-                  setText(next.filter(Boolean).join(" "));
-                }}
-              />
-            )}
-          </For>
-        </div>
+        <Show when={pickerOpen()}>
+          <div
+            class="board-card-picker"
+            onMouseDown={(event) => event.preventDefault()}
+          >
+            <For each={SUITS}>
+              {(suit) => (
+                <For each={RANKS}>
+                  {(rank) => {
+                    const card = `${rank}${suit}`;
+                    const taken = () => blockedCards().has(card);
+                    return (
+                      <button
+                        type="button"
+                        class={"card-cell " + suitClass(suit) + (taken() ? " taken" : "")}
+                        disabled={taken()}
+                        onClick={() => selectCard(card)}
+                      >
+                        <span class="card-rank">{rank}</span>
+                        <span class="card-suit">{SUIT_GLYPHS[suit]}</span>
+                      </button>
+                    );
+                  }}
+                </For>
+              )}
+            </For>
+          </div>
+        </Show>
         <Show when={error()}>
           <span class="inline-error">{error()}</span>
         </Show>
@@ -1235,15 +1291,6 @@ function App(): JSX.Element {
     setSolveResult(undefined);
   }
 
-  function updateBoardCard(index: number, value: string): void {
-    setBoardCards((cards) => {
-      const next = [...cards];
-      next[index] = value;
-      return next;
-    });
-    setSolveResult(undefined);
-  }
-
   function updateBoardCards(values: readonly string[]): void {
     setBoardCards((cards) => {
       const next = [...cards];
@@ -1505,7 +1552,6 @@ function App(): JSX.Element {
                   count={inferredPublicCount()}
                   cards={boardCards()}
                   disabled={usedCards()}
-                  onCardChange={updateBoardCard}
                   onTextChange={updateBoardCards}
                 />
               </Show>

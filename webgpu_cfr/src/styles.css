@@ -884,6 +884,14 @@ h3 {
   background: #fff7f3;
 }
 
+.board-card-picker {
+  display: grid;
+  grid-template-columns: repeat(13, 30px);
+  gap: 5px;
+  width: max-content;
+  max-width: 100%;
+}
+
 .street-marker {
   color: #5d686a;
   font-size: 12px;
