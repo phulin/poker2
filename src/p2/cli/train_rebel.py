@@ -143,6 +143,10 @@ def print_training_stats(
         if metrics["local_exploitability"] is not None
         else "N/A"
     )
+    exploitability_mbbg = metrics.get("local_exploitability_mbbg")
+    exploitability_mbbg_str = (
+        f"{exploitability_mbbg:.2f}" if exploitability_mbbg is not None else "N/A"
+    )
     street_str = (
         f"{metrics['evaluator_street']:.4f}"
         if metrics["evaluator_street"] is not None
@@ -155,6 +159,7 @@ def print_training_stats(
         f"policy={policy_str} "
         f"value={value_str} "
         f"exploit={exploitability_str} "
+        f"exploit_mbbg={exploitability_mbbg_str} "
         f"street={street_str} "
         f"time={step_elapsed:.2f}s total={total_elapsed / 60:.1f}m"
     )

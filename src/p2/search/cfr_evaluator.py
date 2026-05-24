@@ -1292,6 +1292,15 @@ class CFREvaluator(ABC):
             local_exploitability=improvements, local_best_response_values=br_values_agg
         )
 
+    def _local_exploitability_mbbg(
+        self, local_exploitability: torch.Tensor
+    ) -> torch.Tensor:
+        """Convert stack-normalized exploitability to milli-big-blinds/game."""
+        N = local_exploitability.shape[0]
+        scale = self.env.scale[:N].to(dtype=local_exploitability.dtype)
+        bb = max(float(self.env.bb), 1.0)
+        return local_exploitability * scale * (1000.0 / bb)
+
     def _compute_policy_node_reach(self, top: int) -> torch.Tensor:
         """Approximate public-node reach under the average policy.
 
@@ -2017,9 +2026,13 @@ class CFREvaluator(ABC):
         }
 
         exploit_stats = self._compute_exploitability()
+        exploit_mbbg = self._local_exploitability_mbbg(
+            exploit_stats.local_exploitability
+        )
 
         value_statistics = {key: statistics[key][:N] for key in statistics}
         value_statistics["local_exploitability"] = exploit_stats.local_exploitability
+        value_statistics["local_exploitability_mbbg"] = exploit_mbbg
         value_statistics["local_best_response_values"] = (
             exploit_stats.local_best_response_values
         )
@@ -2273,13 +2286,22 @@ class CFREvaluator(ABC):
         N = self.root_nodes
         root_streets = self.env.street[:N]
         exploit_stats = self._compute_exploitability()
+        exploit_mbbg = self._local_exploitability_mbbg(
+            exploit_stats.local_exploitability
+        )
         self.stats["local_exploitability_init"] = (
             exploit_stats.local_exploitability.mean().item()
         )
+        self.stats["local_exploitability_init_mbbg"] = exploit_mbbg.mean().item()
         self.stats["local_exploitability_init_street"] = {
             street_name: (
                 exploit_stats.local_exploitability[root_streets == i].mean().item()
             )
+            for i, street_name in enumerate(STREETS)
+            if (root_streets == i).any()
+        }
+        self.stats["local_exploitability_init_mbbg_street"] = {
+            street_name: exploit_mbbg[root_streets == i].mean().item()
             for i, street_name in enumerate(STREETS)
             if (root_streets == i).any()
         }
@@ -2291,9 +2313,13 @@ class CFREvaluator(ABC):
 
         # Compute and record exploitability as a generation-time statistic
         exploit_stats = self._compute_exploitability()
+        exploit_mbbg = self._local_exploitability_mbbg(
+            exploit_stats.local_exploitability
+        )
         self.stats["local_exploitability"] = (
             exploit_stats.local_exploitability.mean().item()
         )
+        self.stats["local_exploitability_mbbg"] = exploit_mbbg.mean().item()
 
         # Record exploitability by street
         N = self.root_nodes
@@ -2302,6 +2328,11 @@ class CFREvaluator(ABC):
             street_name: exploit_stats.local_exploitability[root_streets == i]
             .mean()
             .item()
+            for i, street_name in enumerate(STREETS)
+            if (root_streets == i).any()
+        }
+        self.stats["local_exploitability_mbbg_street"] = {
+            street_name: exploit_mbbg[root_streets == i].mean().item()
             for i, street_name in enumerate(STREETS)
             if (root_streets == i).any()
         }

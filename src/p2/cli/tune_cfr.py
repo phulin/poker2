@@ -143,7 +143,9 @@ def _aggregate_trial(
 
     out: dict[str, Any] = {
         "local_exploitability": wmean("local_exploitability"),
+        "local_exploitability_mbbg": wmean("local_exploitability_mbbg"),
         "local_exploitability_init": wmean("local_exploitability_init"),
+        "local_exploitability_init_mbbg": wmean("local_exploitability_init_mbbg"),
         "local_exploitability_max": max(
             (s.get("local_exploitability_max", float("-inf")) for s in per_batch_stats),
             default=None,
@@ -165,6 +167,23 @@ def _aggregate_trial(
                 street_counts[s] += cnt
     out["local_exploitability_street"] = {
         s: (street_sums[s] / street_counts[s]) if street_counts[s] else None
+        for s in STREETS
+    }
+
+    street_mbbg_sums: dict[str, float] = {s: 0.0 for s in STREETS}
+    street_mbbg_counts: dict[str, int] = {s: 0 for s in STREETS}
+    for stats in per_batch_stats:
+        per_street = stats.get("local_exploitability_mbbg_street", {}) or {}
+        per_street_counts = stats.get("_per_street_counts", {}) or {}
+        for s, v in per_street.items():
+            cnt = per_street_counts.get(s, 0)
+            if cnt > 0:
+                street_mbbg_sums[s] += float(v) * cnt
+                street_mbbg_counts[s] += cnt
+    out["local_exploitability_mbbg_street"] = {
+        s: (street_mbbg_sums[s] / street_mbbg_counts[s])
+        if street_mbbg_counts[s]
+        else None
         for s in STREETS
     }
     return out
@@ -290,9 +309,12 @@ def main() -> None:
                 results.append(agg)
 
                 expl = agg.get("local_exploitability") or float("nan")
+                expl_mbbg = agg.get("local_exploitability_mbbg") or float("nan")
                 print(
                     f"  local_exploitability={expl:.5f} "
+                    f"local_exploitability_mbbg={expl_mbbg:.2f} "
                     f"per_street={agg.get('local_exploitability_street')} "
+                    f"per_street_mbbg={agg.get('local_exploitability_mbbg_street')} "
                     f"time={trial_time:.1f}s"
                 )
 
@@ -316,6 +338,7 @@ def main() -> None:
     for r in rows:
         print(
             f"  {r['name']:<28s} expl={r['local_exploitability']:.5f}  "
+            f"expl_mbbg={r.get('local_exploitability_mbbg', float('nan')):.2f}  "
             f"time={r['wall_time_s_total']:.1f}s  "
             f"{r['overrides']}"
         )

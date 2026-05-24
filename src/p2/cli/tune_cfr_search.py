@@ -196,6 +196,7 @@ def main() -> None:
                     print(f"  baseline FAILED: {base_result['error']}")
                     continue
                 print(f"  baseline expl={best['local_exploitability']:.5f} "
+                      f"expl_mbbg={best.get('local_exploitability_mbbg', float('nan')):.2f} "
                       f"time={best['wall_time_s_total']:.1f}s")
                 locked: dict[str, Any] = {"iterations": iters, **seed}
 
@@ -206,7 +207,9 @@ def main() -> None:
                 for param, candidates in grid:
                     locked_view = {k: v for k, v in locked.items() if k != "iterations"}
                     print(f"\n  -- sweeping {param} (current best so far "
-                          f"expl={best['local_exploitability']:.5f}, locked={locked_view}) --")
+                          f"expl={best['local_exploitability']:.5f}, "
+                          f"expl_mbbg={best.get('local_exploitability_mbbg', float('nan')):.2f}, "
+                          f"locked={locked_view}) --")
                     # Effective current value: locked override if set, else evaluator baseline.
                     current_v = locked.get(param, base_snap.get(_canonical_attr(param)))
                     for v in candidates:
@@ -228,12 +231,14 @@ def main() -> None:
                         improved = result["local_exploitability"] < best["local_exploitability"]
                         marker = " *new best*" if improved else ""
                         print(f"    {param}={v}: expl={result['local_exploitability']:.5f}  "
+                              f"expl_mbbg={result.get('local_exploitability_mbbg', float('nan')):.2f}  "
                               f"time={result['wall_time_s_total']:.1f}s{marker}")
                         if improved:
                             best = result
                             locked = {**locked, param: v}
 
                 print(f"\n  >>> Best @ iter={iters}: expl={best['local_exploitability']:.5f} "
+                      f"expl_mbbg={best.get('local_exploitability_mbbg', float('nan')):.2f} "
                       f"overrides={best['overrides']}")
                 per_iter_best[iters] = best
 
@@ -261,6 +266,7 @@ def main() -> None:
             print(f"  iter={iters}: no result")
             continue
         print(f"  iter={iters}: expl={b['local_exploitability']:.5f}  "
+              f"expl_mbbg={b.get('local_exploitability_mbbg', float('nan')):.2f}  "
               f"overrides={b['overrides']}")
 
 

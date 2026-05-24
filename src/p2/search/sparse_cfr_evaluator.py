@@ -663,9 +663,13 @@ class SparseCFREvaluator(CFREvaluator):
         )
 
         exploit_stats = self._compute_exploitability()
+        exploit_mbbg = self._local_exploitability_mbbg(
+            exploit_stats.local_exploitability
+        )
         self.stats["local_exploitability"] = (
             exploit_stats.local_exploitability.mean().item()
         )
+        self.stats["local_exploitability_mbbg"] = exploit_mbbg.mean().item()
 
         N = self.root_nodes
         root_streets = self.env.street[:N]
@@ -673,6 +677,11 @@ class SparseCFREvaluator(CFREvaluator):
             street_name: exploit_stats.local_exploitability[root_streets == i]
             .mean()
             .item()
+            for i, street_name in enumerate(STREETS)
+            if (root_streets == i).any()
+        }
+        self.stats["local_exploitability_mbbg_street"] = {
+            street_name: exploit_mbbg[root_streets == i].mean().item()
             for i, street_name in enumerate(STREETS)
             if (root_streets == i).any()
         }
