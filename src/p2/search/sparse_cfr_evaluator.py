@@ -623,13 +623,12 @@ class SparseCFREvaluator(CFREvaluator):
         )
         action_mix_by_node[parent_index, action_from_parent] = child_mass
 
-        action_mix_by_node = action_mix_by_node[~self.leaf_mask[:top]]
-        self.stats["action_mix"] = {
-            "fold": action_mix_by_node[:, 0].mean().item(),
-            "call": action_mix_by_node[:, 1].mean().item(),
-            "bet": action_mix_by_node[:, 2:-1].mean(dim=1).mean().item(),
-            "allin": action_mix_by_node[:, -1].mean().item(),
-        }
+        self.stats["action_mix"] = self._summarize_action_mix(
+            action_mix_by_node[~self.leaf_mask[:top]]
+        )
+        self.stats["root_action_mix"] = self._summarize_action_mix(
+            action_mix_by_node[: self.root_nodes][~self.leaf_mask[: self.root_nodes]]
+        )
 
     def _record_cfr_entropy(self) -> None:
         """Record root policy entropy without full-tree action pullback."""

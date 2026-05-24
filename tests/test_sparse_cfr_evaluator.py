@@ -313,6 +313,72 @@ def test_initialize_policy_and_beliefs() -> None:
     assert (evaluator.beliefs >= 0).all()
 
 
+def test_action_mix_records_root_mix_and_total_bet_mass() -> None:
+    device = get_device()
+    evaluator = SparseCFREvaluator.__new__(SparseCFREvaluator)
+    evaluator.device = device
+    evaluator.root_nodes = 2
+    evaluator.num_actions = 6
+    evaluator.total_nodes = 20
+    evaluator.depth_offsets = [0, 2, 14, 20]
+    evaluator.stats = {}
+
+    evaluator.parent_index = torch.tensor(
+        [0, 0]
+        + [0] * 6
+        + [1] * 6
+        + [2] * 6,
+        dtype=torch.long,
+        device=device,
+    )
+    evaluator.action_from_parent = torch.tensor(
+        [0, 0]
+        + list(range(evaluator.num_actions))
+        + list(range(evaluator.num_actions))
+        + list(range(evaluator.num_actions)),
+        dtype=torch.long,
+        device=device,
+    )
+    evaluator.leaf_mask = torch.ones(evaluator.total_nodes, dtype=torch.bool, device=device)
+    evaluator.leaf_mask[:2] = False
+    evaluator.leaf_mask[2] = False
+
+    hands = 3
+    evaluator.allowed_hands = torch.ones(
+        evaluator.total_nodes, hands, dtype=torch.bool, device=device
+    )
+    evaluator.policy_probs_avg = torch.zeros(
+        evaluator.total_nodes, hands, dtype=torch.float32, device=device
+    )
+
+    parent_probs = torch.tensor(
+        [
+            [0.10, 0.20, 0.15, 0.25, 0.05, 0.25],
+            [0.20, 0.10, 0.05, 0.05, 0.20, 0.40],
+            [0.00, 0.50, 0.10, 0.10, 0.10, 0.20],
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    parent_rows = torch.tensor([0, 1, 2], dtype=torch.long, device=device)
+    for row, probs in zip(parent_rows, parent_probs):
+        child_rows = torch.where(evaluator.parent_index == row)[0]
+        child_actions = evaluator.action_from_parent[child_rows]
+        evaluator.policy_probs_avg[child_rows] = probs[child_actions, None]
+
+    evaluator._record_action_mix()
+
+    root_mix = evaluator.stats["root_action_mix"]
+    assert_close(torch.tensor(root_mix["fold"]), torch.tensor(0.15))
+    assert_close(torch.tensor(root_mix["call"]), torch.tensor(0.15))
+    assert_close(torch.tensor(root_mix["bet"]), torch.tensor(0.375))
+    assert_close(torch.tensor(root_mix["allin"]), torch.tensor(0.325))
+    assert_close(torch.tensor(sum(root_mix.values())), torch.tensor(1.0))
+
+    tree_mix = evaluator.stats["action_mix"]
+    assert_close(torch.tensor(tree_mix["bet"]), torch.tensor(0.35))
+
+
 def test_update_policy() -> None:
     """Test that policy can be updated."""
     device = get_device()

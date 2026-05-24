@@ -2404,9 +2404,22 @@ class CFREvaluator(ABC):
         action_mix_by_node = actions[mask].sum(dim=2) / allowed_hands.sum(
             dim=1, keepdim=True
         )
-        self.stats["action_mix"] = {
+        self.stats["action_mix"] = self._summarize_action_mix(action_mix_by_node)
+
+        N = self.root_nodes
+        root_mask = self.valid_mask[:N] & ~self.leaf_mask[:N]
+        root_allowed_hands = self.allowed_hands[:N][root_mask]
+        root_action_mix_by_node = actions[:N][root_mask].sum(
+            dim=2
+        ) / root_allowed_hands.sum(dim=1, keepdim=True)
+        self.stats["root_action_mix"] = self._summarize_action_mix(
+            root_action_mix_by_node
+        )
+
+    def _summarize_action_mix(self, action_mix_by_node: torch.Tensor) -> dict[str, float]:
+        return {
             "fold": action_mix_by_node[:, 0].mean().item(),
             "call": action_mix_by_node[:, 1].mean().item(),
-            "bet": action_mix_by_node[:, 2:-1].mean(dim=1).mean().item(),
+            "bet": action_mix_by_node[:, 2:-1].sum(dim=1).mean().item(),
             "allin": action_mix_by_node[:, -1].mean().item(),
         }
