@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import {
   AlertTriangle,
@@ -15,11 +15,11 @@ import {
   createBrowserCfrEvaluator,
   createBrowserDevice,
 } from "./browser.js";
-import { parseBetterFfnManifest, resolveCfrDefaults } from "./modelFormat.js";
+import { parseBetterFfnManifest } from "./modelFormat.js";
 import { loadModelBytesWithCache, type ModelCacheProgress } from "./modelCache.js";
 import { parseCard, parseCards, formatCard, handComboIndex, handComboCards } from "./cards.js";
 import { buildHeroOnlyBeliefs } from "./beliefs.js";
-import { PublicHunlEnv, NUM_HANDS, type LegalBins } from "./hunlEnv.js";
+import { PublicHunlEnv, NUM_HANDS, DEFAULT_FORCE_DECK, type LegalBins } from "./hunlEnv.js";
 import type {
   BetterFfnManifest,
   BrowserEvaluationResult,
@@ -31,6 +31,28 @@ const CARD_OPTIONS = Array.from({ length: 52 }, (_, index) => formatCard(index))
 const STREET_CARD_COUNTS = [0, 3, 4, 5] as const;
 const STREET_NAMES = ["Preflop", "Flop", "Turn", "River"] as const;
 const HERO_PLAYER: PlayerIndex = 0;
+
+interface PublicEnvDefaults {
+  stack: number;
+  sb: number;
+  bb: number;
+  betBins: number[];
+  flopShowdown: boolean;
+  maxStackBb?: number;
+  defaultButton: PlayerIndex;
+  defaultForceDeck: number[];
+}
+
+const LOCAL_ENV_DEFAULTS: PublicEnvDefaults = {
+  stack: 400,
+  sb: 1,
+  bb: 2,
+  betBins: [0.25, 0.5, 0.75, 1.0, 1.5],
+  flopShowdown: false,
+  maxStackBb: 400,
+  defaultButton: HERO_PLAYER,
+  defaultForceDeck: DEFAULT_FORCE_DECK,
+};
 
 interface Runtime {
   device: GPUDevice;
@@ -131,6 +153,28 @@ function positiveNumber(value: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function createPublicEnv(
+  envDefaults: PublicEnvDefaults,
+  options: {
+    button: PlayerIndex;
+    stack: string;
+    sb: string;
+    bb: string;
+    forceDeck?: number[];
+  },
+): PublicHunlEnv {
+  return new PublicHunlEnv({
+    button: options.button,
+    stack: positiveNumber(options.stack, envDefaults.stack),
+    sb: positiveNumber(options.sb, envDefaults.sb),
+    bb: positiveNumber(options.bb, envDefaults.bb),
+    betBins: envDefaults.betBins,
+    forceDeck: options.forceDeck ?? envDefaults.defaultForceDeck ?? DEFAULT_FORCE_DECK,
+    flopShowdown: envDefaults.flopShowdown,
+    ...(envDefaults.maxStackBb !== undefined ? { maxStackBb: envDefaults.maxStackBb } : {}),
+  });
+}
+
 const RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"];
 const SUITS = ["s", "h", "d", "c"] as const;
 const SUIT_GLYPHS: Record<string, string> = { s: "♠", h: "♥", d: "♦", c: "♣" };
@@ -187,6 +231,21 @@ function parseHeroHandText(input: string): HeroCards {
   if (cards.length !== 2) throw new Error("Enter exactly two hero cards");
   if (cards[0] === cards[1]) throw new Error(`Duplicate card ${cards[0]}`);
   return [cards[0]!, cards[1]!];
+}
+
+function parseBoardCardsText(input: string): string[] {
+  const text = input.trim();
+  if (!text) return [];
+  if (/[\s,]+/.test(text)) {
+    return parseCards(text).map((card) => formatCard(card));
+  }
+
+  const matches = Array.from(text.matchAll(/([2-9TJQKA]|10)([cdhs])/gi));
+  const consumed = matches.map((match) => match[0]).join("");
+  if (consumed.length !== text.length) {
+    return parseCards(text).map((card) => formatCard(card));
+  }
+  return matches.map((match) => formatCard(parseCard(`${match[1]}${match[2]}`)));
 }
 
 function rankIndex(rank: string): number {
@@ -789,6 +848,83 @@ function CardPicker(props: {
   );
 }
 
+function BoardEntry(props: {
+  street: number;
+  count: number;
+  cards: readonly string[];
+  disabled: ReadonlySet<string>;
+  onCardChange: (index: number, value: string) => void;
+  onTextChange: (cards: string[]) => void;
+}): JSX.Element {
+  const [text, setText] = createSignal(props.cards.slice(0, props.count).filter(Boolean).join(" "));
+  const [error, setError] = createSignal("");
+
+  createEffect(() => {
+    setText(props.cards.slice(0, props.count).filter(Boolean).join(" "));
+  });
+
+  function commitText(): void {
+    try {
+      const parsed = parseBoardCardsText(text());
+      if (parsed.length !== props.count) {
+        throw new Error(`Enter ${props.count} board cards`);
+      }
+      props.onTextChange(parsed);
+      setText(parsed.join(" "));
+      setError("");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return (
+    <div class="board-entry-row">
+      <span class="street-marker">{STREET_NAMES[props.street]}</span>
+      <div class="board-entry">
+        <input
+          class={`board-text-input ${error() ? "invalid" : ""}`}
+          value={text()}
+          placeholder={props.count === 3 ? "As Kd Qh" : "As Kd Qh Js"}
+          onInput={(event) => {
+            setText(event.currentTarget.value);
+            setError("");
+          }}
+          onBlur={commitText}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitText();
+              event.currentTarget.blur();
+            }
+          }}
+        />
+        <div class="card-row">
+          <For each={Array.from({ length: props.count }, (_, index) => index)}>
+            {(index) => (
+              <CardPicker
+                label={`Board ${index + 1}`}
+                value={props.cards[index] ?? ""}
+                disabled={props.disabled}
+                allowEmpty
+                onChange={(value) => {
+                  props.onCardChange(index, value);
+                  setError("");
+                  const next = [...props.cards.slice(0, props.count)];
+                  next[index] = value;
+                  setText(next.filter(Boolean).join(" "));
+                }}
+              />
+            )}
+          </For>
+        </div>
+        <Show when={error()}>
+          <span class="inline-error">{error()}</span>
+        </Show>
+      </div>
+    </div>
+  );
+}
+
 function App(): JSX.Element {
   const [runtime, setRuntime] = createSignal<Runtime>();
   const [modelProgress, setModelProgress] = createSignal<ModelCacheProgress>({
@@ -830,9 +966,6 @@ function App(): JSX.Element {
       });
       setModelProgress({ phase: "manifest", message: "Creating WebGPU model" });
       const manifest = parseBetterFfnManifest(loaded.manifest);
-      const cfrDefaults = resolveCfrDefaults(manifest);
-      setIterations(String(cfrDefaults.iterations));
-      setDepth(String(cfrDefaults.depth));
       const model = BetterFfnWebGpuModel.fromBuffers(device, manifest, loaded.weights);
       const evaluator = createBrowserCfrEvaluator(device, model);
       setRuntime({
@@ -869,9 +1002,7 @@ function App(): JSX.Element {
   });
 
   const descriptor = createMemo<StateDescriptor | { error: string }>(() => {
-    const current = runtime();
     const hero = parsedHeroHand();
-    if (!current) return { error: "Model is not ready" };
     try {
       const heroHand =
         "cards" in hero
@@ -880,11 +1011,11 @@ function App(): JSX.Element {
               CARD_OPTIONS.includes(hero.cards[1]) ? cardFromOption(hero.cards[1]) : -1,
             ] as [number, number])
           : undefined;
-      const env = PublicHunlEnv.fromManifest(current.manifest, {
+      const env = createPublicEnv(LOCAL_ENV_DEFAULTS, {
         button: button(),
-        stack: positiveNumber(stack(), current.manifest.env.stack),
-        sb: positiveNumber(sb(), current.manifest.env.sb),
-        bb: positiveNumber(bb(), current.manifest.env.bb),
+        stack: stack(),
+        sb: sb(),
+        bb: bb(),
         ...(heroHand ? { forceDeck: buildForceDeck(heroHand, boardCards()) } : {}),
       });
       if (heroHand) {
@@ -985,7 +1116,6 @@ function App(): JSX.Element {
     return used;
   });
 
-  const manifestActionLabels = createMemo(() => runtime()?.manifest.actionLabels ?? []);
   const descriptorError = createMemo(() => {
     const current = descriptor();
     return "error" in current ? current.error : "";
@@ -1080,6 +1210,17 @@ function App(): JSX.Element {
     setSolveResult(undefined);
   }
 
+  function updateBoardCards(values: readonly string[]): void {
+    setBoardCards((cards) => {
+      const next = [...cards];
+      for (let i = 0; i < Math.min(values.length, next.length); i += 1) {
+        next[i] = values[i] ?? "";
+      }
+      return next;
+    });
+    setSolveResult(undefined);
+  }
+
   function setActionAt(index: number, action: number): void {
     setActions((current) => current.map((value, i) => (i === index ? action : value)));
     setSolveResult(undefined);
@@ -1116,9 +1257,11 @@ function App(): JSX.Element {
         cfrAvg: solveCfrAvg,
         initialState: {
           button: button(),
-          stack: positiveNumber(stack(), current.manifest.env.stack),
-          sb: positiveNumber(sb(), current.manifest.env.sb),
-          bb: positiveNumber(bb(), current.manifest.env.bb),
+          stack: positiveNumber(stack(), LOCAL_ENV_DEFAULTS.stack),
+          sb: positiveNumber(sb(), LOCAL_ENV_DEFAULTS.sb),
+          bb: positiveNumber(bb(), LOCAL_ENV_DEFAULTS.bb),
+          betBins: LOCAL_ENV_DEFAULTS.betBins,
+          flopShowdown: LOCAL_ENV_DEFAULTS.flopShowdown,
           forceDeck: cards.forceDeck,
         },
         heroPlayer: HERO_PLAYER,
@@ -1145,13 +1288,6 @@ function App(): JSX.Element {
       setSolveError(error instanceof Error ? error.message : String(error));
       setSolveStatus("");
     }
-  }
-
-  function actionName(index: number, context?: ActionContext): string {
-    if (context) {
-      return formatActionLabel(index, context);
-    }
-    return manifestActionLabels()[index] ?? `action_${index}`;
   }
 
   function legalActions(mask: readonly number[]): number[] {
@@ -1286,22 +1422,6 @@ function App(): JSX.Element {
               }}
               onComboChange={selectHeroCombo}
             />
-            <Show when={inferredPublicCount() > 0}>
-              <span class="card-section-title">Board ({STREET_NAMES[inferredStreet()]})</span>
-              <div class="card-row">
-                <For each={Array.from({ length: inferredPublicCount() }, (_, index) => index)}>
-                  {(index) => (
-                    <CardPicker
-                      label={`Board ${index + 1}`}
-                      value={boardCards()[index] ?? ""}
-                      disabled={usedCards()}
-                      allowEmpty
-                      onChange={(value) => updateBoardCard(index, value)}
-                    />
-                  )}
-                </For>
-              </div>
-            </Show>
           </div>
 
           <div class="subgroup">
@@ -1345,13 +1465,27 @@ function App(): JSX.Element {
                   </div>
                 )}
               </For>
+              <Show when={inferredPublicCount() > 0}>
+                <BoardEntry
+                  street={inferredStreet()}
+                  count={inferredPublicCount()}
+                  cards={boardCards()}
+                  disabled={usedCards()}
+                  onCardChange={updateBoardCard}
+                  onTextChange={updateBoardCards}
+                />
+              </Show>
               <Show when={legalActions((descriptor() as StateDescriptor).finalLegalMask).length > 0}>
                 <ActionInput
                   actor={(descriptor() as StateDescriptor).finalActor}
-                  streetLabel={finalStreetMarker(
-                    (descriptor() as StateDescriptor).rows,
-                    (descriptor() as StateDescriptor).finalStreet,
-                  )}
+                  streetLabel={
+                    inferredPublicCount() > 0
+                      ? undefined
+                      : finalStreetMarker(
+                          (descriptor() as StateDescriptor).rows,
+                          (descriptor() as StateDescriptor).finalStreet,
+                        )
+                  }
                   legalActions={legalActions((descriptor() as StateDescriptor).finalLegalMask)}
                   context={(descriptor() as StateDescriptor).finalContext}
                   onAction={addAction}

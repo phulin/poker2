@@ -856,6 +856,35 @@ h3 {
   margin-top: 2px;
 }
 
+.board-entry-row {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.board-entry {
+  display: grid;
+  gap: 10px;
+}
+
+.board-text-input {
+  width: min(100%, 280px);
+  height: 38px;
+  border: 1px solid #b9c7c0;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #182224;
+  padding: 0 10px;
+  font-weight: 700;
+}
+
+.board-text-input.invalid {
+  border-color: #c75a35;
+  background: #fff7f3;
+}
+
 .street-marker {
   color: #5d686a;
   font-size: 12px;
