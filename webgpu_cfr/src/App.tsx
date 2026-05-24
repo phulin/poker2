@@ -3,6 +3,7 @@ import type { JSX } from "solid-js";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Cpu,
   Play,
   Plus,
@@ -17,7 +18,7 @@ import {
 } from "./browser.js";
 import { parseBetterFfnManifest, resolveCfrDefaults } from "./modelFormat.js";
 import { loadModelBytesWithCache, type ModelCacheProgress } from "./modelCache.js";
-import { formatCard, handComboIndex, handComboCards } from "./cards.js";
+import { parseCard, parseCards, formatCard, handComboIndex, handComboCards } from "./cards.js";
 import { PublicHunlEnv, NUM_HANDS, type LegalBins } from "./hunlEnv.js";
 import type {
   BetterFfnManifest,
@@ -123,6 +124,21 @@ function positiveNumber(value: string, fallback: number): number {
 const RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"];
 const SUITS = ["s", "h", "d", "c"] as const;
 const SUIT_GLYPHS: Record<string, string> = { s: "♠", h: "♥", d: "♦", c: "♣" };
+const RANK_INDEX = new Map(RANKS.map((rank, index) => [rank, index]));
+
+type HeroCards = [string, string];
+type HandRangeKind = "pair" | "suited" | "offsuit";
+
+interface RangeCell {
+  key: string;
+  label: string;
+  kind: HandRangeKind;
+}
+
+interface ComboOption {
+  cards: HeroCards;
+  blocked: boolean;
+}
 
 function suitClass(suit: string): string {
   if (suit === "h") return "suit-h";
@@ -142,6 +158,194 @@ function CardChip(props: { value: string; placeholder?: string }): JSX.Element {
         <span class="card-suit">{SUIT_GLYPHS[props.value[1] ?? "s"]}</span>
       </span>
     </Show>
+  );
+}
+
+function parseHeroHandText(input: string): HeroCards {
+  const text = input.trim();
+  if (!text) throw new Error("Enter both hero cards");
+
+  const compact = text.replace(/[\s,]+/g, "");
+  const compactMatch = /^([2-9TJQKA]|10)([cdhs])([2-9TJQKA]|10)([cdhs])$/i.exec(compact);
+  const cards = compactMatch
+    ? [
+        formatCard(parseCard(`${compactMatch[1]}${compactMatch[2]}`)),
+        formatCard(parseCard(`${compactMatch[3]}${compactMatch[4]}`)),
+      ]
+    : parseCards(text).map((card) => formatCard(card));
+
+  if (cards.length !== 2) throw new Error("Enter exactly two hero cards");
+  if (cards[0] === cards[1]) throw new Error(`Duplicate card ${cards[0]}`);
+  return [cards[0]!, cards[1]!];
+}
+
+function rankIndex(rank: string): number {
+  return RANK_INDEX.get(rank) ?? Number.POSITIVE_INFINITY;
+}
+
+function orderedRanks(rankA: string, rankB: string): [string, string] {
+  return rankIndex(rankA) <= rankIndex(rankB) ? [rankA, rankB] : [rankB, rankA];
+}
+
+function rangeKeyFromCards(cards: HeroCards): string {
+  const rankA = cards[0][0] ?? "";
+  const rankB = cards[1][0] ?? "";
+  if (rankA === rankB) return `${rankA}${rankA}`;
+  const [high, low] = orderedRanks(rankA, rankB);
+  return `${high}${low}${cards[0][1] === cards[1][1] ? "s" : "o"}`;
+}
+
+function rangeCell(rowRank: string, colRank: string): RangeCell {
+  if (rowRank === colRank) {
+    return {
+      key: `${rowRank}${colRank}`,
+      label: `${rowRank}${colRank}`,
+      kind: "pair",
+    };
+  }
+  if (rankIndex(rowRank) < rankIndex(colRank)) {
+    return {
+      key: `${rowRank}${colRank}s`,
+      label: `${rowRank}${colRank}s`,
+      kind: "suited",
+    };
+  }
+  return {
+    key: `${colRank}${rowRank}o`,
+    label: `${colRank}${rowRank}o`,
+    kind: "offsuit",
+  };
+}
+
+function rangeOptions(rangeKey: string, blockedCards: ReadonlySet<string>): ComboOption[] {
+  const ranks = rangeKey.slice(0, 2);
+  const modifier = rangeKey[2];
+  const rankA = ranks[0] ?? "";
+  const rankB = ranks[1] ?? "";
+  const options: HeroCards[] = [];
+
+  if (rankA === rankB) {
+    for (let i = 0; i < SUITS.length; i += 1) {
+      for (let j = i + 1; j < SUITS.length; j += 1) {
+        options.push([`${rankA}${SUITS[i]}`, `${rankB}${SUITS[j]}`]);
+      }
+    }
+  } else if (modifier === "s") {
+    for (const suit of SUITS) {
+      options.push([`${rankA}${suit}`, `${rankB}${suit}`]);
+    }
+  } else {
+    for (const suitA of SUITS) {
+      for (const suitB of SUITS) {
+        if (suitA !== suitB) options.push([`${rankA}${suitA}`, `${rankB}${suitB}`]);
+      }
+    }
+  }
+
+  return options.map((cards) => ({
+    cards,
+    blocked: blockedCards.has(cards[0]) || blockedCards.has(cards[1]),
+  }));
+}
+
+function comboMatchesHero(combo: HeroCards, hero?: HeroCards): boolean {
+  if (!hero) return false;
+  return combo.includes(hero[0]) && combo.includes(hero[1]);
+}
+
+function HeroHandSelector(props: {
+  value: string;
+  parsedCards?: HeroCards | undefined;
+  error?: string | undefined;
+  selectedRangeKey: string;
+  blockedCards: ReadonlySet<string>;
+  onTextChange: (value: string) => void;
+  onNormalizeText: () => void;
+  onRangeChange: (rangeKey: string) => void;
+  onComboChange: (cards: HeroCards) => void;
+}): JSX.Element {
+  const [open, setOpen] = createSignal(false);
+  const selectedOptions = createMemo(() => rangeOptions(props.selectedRangeKey, props.blockedCards));
+
+  function rangeIsBlocked(rangeKey: string): boolean {
+    return rangeOptions(rangeKey, props.blockedCards).every((option) => option.blocked);
+  }
+
+  return (
+    <div class="hero-hand-selector">
+      <label class="field">
+        <span>Exact hand</span>
+        <input
+          value={props.value}
+          class={props.error ? "invalid" : ""}
+          placeholder="As Kd"
+          onInput={(event) => props.onTextChange(event.currentTarget.value)}
+          onBlur={props.onNormalizeText}
+        />
+      </label>
+      <div class="hero-hand-preview">
+        <CardChip value={props.parsedCards?.[0] ?? ""} />
+        <CardChip value={props.parsedCards?.[1] ?? ""} />
+        <Show when={props.error}>
+          <span class="inline-error">{props.error}</span>
+        </Show>
+      </div>
+      <button
+        type="button"
+        class={`range-toggle ${open() ? "open" : ""}`}
+        aria-expanded={open()}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>Range grid</span>
+        <strong>{props.selectedRangeKey}</strong>
+        <ChevronDown size={16} />
+      </button>
+      <Show when={open()}>
+        <div class="range-grid" role="grid" aria-label="Starting hand range grid">
+          <For each={RANKS}>
+            {(rowRank) => (
+              <For each={RANKS}>
+                {(colRank) => {
+                  const cell = rangeCell(rowRank, colRank);
+                  const blocked = () => rangeIsBlocked(cell.key);
+                  return (
+                    <button
+                      type="button"
+                      role="gridcell"
+                      class={`range-cell ${cell.kind} ${props.selectedRangeKey === cell.key ? "selected" : ""}`}
+                      disabled={blocked()}
+                      onClick={() => props.onRangeChange(cell.key)}
+                      title={cell.label}
+                    >
+                      {cell.label}
+                    </button>
+                  );
+                }}
+              </For>
+            )}
+          </For>
+        </div>
+        <div class="range-combo-head">
+          <span>{props.selectedRangeKey}</span>
+          <span>{selectedOptions().length} combos</span>
+        </div>
+        <div class="range-combos">
+          <For each={selectedOptions()}>
+            {(option) => (
+              <button
+                type="button"
+                class={`range-combo ${comboMatchesHero(option.cards, props.parsedCards) ? "selected" : ""}`}
+                disabled={option.blocked}
+                onClick={() => props.onComboChange(option.cards)}
+              >
+                <CardChip value={option.cards[0]} />
+                <CardChip value={option.cards[1]} />
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+    </div>
   );
 }
 
@@ -300,7 +504,8 @@ function App(): JSX.Element {
   const [iterations, setIterations] = createSignal("16");
   const [depth, setDepth] = createSignal("1");
   const [cfrAvg, setCfrAvg] = createSignal(true);
-  const [heroCards, setHeroCards] = createSignal<[string, string]>(["As", "Kd"]);
+  const [heroHandText, setHeroHandText] = createSignal("As Kd");
+  const [selectedRangeKey, setSelectedRangeKey] = createSignal("AKo");
   const [boardCards, setBoardCards] = createSignal(["", "", "", "", ""]);
   const [actions, setActions] = createSignal<number[]>([]);
   const [solveStatus, setSolveStatus] = createSignal("");
@@ -350,18 +555,34 @@ function App(): JSX.Element {
     }
   }
 
+  const parsedHeroHand = createMemo<{ cards: HeroCards } | { error: string }>(() => {
+    try {
+      return { cards: parseHeroHandText(heroHandText()) };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  const parsedHeroCards = createMemo(() => {
+    const hero = parsedHeroHand();
+    return "cards" in hero ? hero.cards : undefined;
+  });
+  const heroHandError = createMemo(() => {
+    const hero = parsedHeroHand();
+    return "error" in hero ? hero.error : "";
+  });
+
   const parsedInputs = createMemo(() => {
     try {
-      const hero = heroCards();
-      if (!hero[0] || !hero[1]) throw new Error("Select both hero cards");
+      const hero = parsedHeroHand();
+      if ("error" in hero) throw new Error(hero.error);
       const publicCount = STREET_CARD_COUNTS[street()] ?? 0;
       const visibleBoard = boardCards().slice(0, publicCount);
       if (visibleBoard.some((card) => card === "")) {
         throw new Error("Select every board card for the chosen street");
       }
       const heroHand = [
-        CARD_OPTIONS.includes(hero[0]) ? cardFromOption(hero[0]) : -1,
-        CARD_OPTIONS.includes(hero[1]) ? cardFromOption(hero[1]) : -1,
+        CARD_OPTIONS.includes(hero.cards[0]) ? cardFromOption(hero.cards[0]) : -1,
+        CARD_OPTIONS.includes(hero.cards[1]) ? cardFromOption(hero.cards[1]) : -1,
       ] as [number, number];
       const publicCards = visibleBoard.map((card) => cardFromOption(card));
       const seen = new Set<number>();
@@ -422,9 +643,22 @@ function App(): JSX.Element {
 
   const usedCards = createMemo<Set<string>>(() => {
     const used = new Set<string>();
-    for (const card of heroCards()) {
+    const hero = parsedHeroHand();
+    if ("cards" in hero) {
+      for (const card of hero.cards) {
+        used.add(card);
+      }
+    }
+    const publicCount = STREET_CARD_COUNTS[street()] ?? 0;
+    for (let i = 0; i < publicCount; i += 1) {
+      const card = boardCards()[i];
       if (card) used.add(card);
     }
+    return used;
+  });
+
+  const boardUsedCards = createMemo<Set<string>>(() => {
+    const used = new Set<string>();
     const publicCount = STREET_CARD_COUNTS[street()] ?? 0;
     for (let i = 0; i < publicCount; i += 1) {
       const card = boardCards()[i];
@@ -450,12 +684,29 @@ function App(): JSX.Element {
     return index;
   }
 
-  function updateHeroCard(index: 0 | 1, value: string): void {
-    setHeroCards((cards) => {
-      const next: [string, string] = [...cards];
-      next[index] = value;
-      return next;
-    });
+  function updateHeroHandText(value: string): void {
+    setHeroHandText(value);
+    try {
+      setSelectedRangeKey(rangeKeyFromCards(parseHeroHandText(value)));
+    } catch {
+      // Keep the previously selected range visible while the user is typing.
+    }
+    setSolveResult(undefined);
+  }
+
+  function normalizeHeroHandText(): void {
+    try {
+      const cards = parseHeroHandText(heroHandText());
+      setHeroHandText(`${cards[0]} ${cards[1]}`);
+      setSelectedRangeKey(rangeKeyFromCards(cards));
+    } catch {
+      // Leave invalid text intact so the inline validation message stays actionable.
+    }
+  }
+
+  function selectHeroCombo(cards: HeroCards): void {
+    setHeroHandText(`${cards[0]} ${cards[1]}`);
+    setSelectedRangeKey(rangeKeyFromCards(cards));
     setSolveResult(undefined);
   }
 
@@ -672,20 +923,20 @@ function App(): JSX.Element {
                 </For>
               </div>
             </div>
-            <div class="card-row">
-              <CardPicker
-                label="Hero 1"
-                value={heroCards()[0]}
-                disabled={usedCards()}
-                onChange={(value) => updateHeroCard(0, value)}
-              />
-              <CardPicker
-                label="Hero 2"
-                value={heroCards()[1]}
-                disabled={usedCards()}
-                onChange={(value) => updateHeroCard(1, value)}
-              />
-            </div>
+            <HeroHandSelector
+              value={heroHandText()}
+              parsedCards={parsedHeroCards()}
+              error={heroHandError()}
+              selectedRangeKey={selectedRangeKey()}
+              blockedCards={boardUsedCards()}
+              onTextChange={updateHeroHandText}
+              onNormalizeText={normalizeHeroHandText}
+              onRangeChange={(rangeKey) => {
+                setSelectedRangeKey(rangeKey);
+                setSolveResult(undefined);
+              }}
+              onComboChange={selectHeroCombo}
+            />
             <Show when={(STREET_CARD_COUNTS[street()] ?? 0) > 0}>
               <span class="card-section-title">Board</span>
               <div class="card-row">
