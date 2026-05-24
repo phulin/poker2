@@ -14,6 +14,7 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `cards.ts`: Standard card notation parsing/formatting, duplicate validation, and 1326 hand-combo lookup helpers.
 - `beliefs.ts`: Initial belief normalization, hero-only exact-hand beliefs, and blocked-hand mask helpers.
 - `modelCache.ts`: Browser IndexedDB model cache, streamed weights download progress, and cache invalidation helpers.
+- `allInTables.ts`: Street-local all-in payoff table metadata loading, canonical flop lookup helpers, int16 table packing, and CPU reference value computation for sparse resolver all-in leaves.
 - `betterFfnWebGpuModel.ts`: WebGPU BetterFFN inference implementation, including batched inference with shared, per-sample, or GPU-buffer belief vectors, split policy/value checkpoint loading, and CPU sparse-policy initialization for the newer factorized policy head.
 - `hunlEnv.ts`: Browser-safe public HUNL environment, terminal showdown value/rank helpers, and legacy/new BetterFFN feature encoders.
 - `evaluator.ts`: Local GPU CFR evaluator for fixtures.

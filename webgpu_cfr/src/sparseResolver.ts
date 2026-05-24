@@ -3,6 +3,11 @@ import type {
   ExactBelief,
   PreparedBatchFeatures,
 } from "./betterFfnWebGpuModel.js";
+import {
+  computeAllInTableValues,
+  packInt16Table,
+  type AllInTableContext,
+} from "./allInTables.js";
 import { normalizeBeliefVector } from "./beliefs.js";
 import { HAND_COMBOS, handOverlapsCards } from "./cards.js";
 import {
@@ -60,6 +65,8 @@ interface SparseLeafGpuBatch {
   showdownNodeIndices: Uint32Array<ArrayBuffer>;
   showdownRankCodes: Uint32Array<ArrayBuffer>;
   showdownPayoffs: Float32Array<ArrayBuffer>;
+  allInNodeIndices: Uint32Array<ArrayBuffer>;
+  allInScaleFactors: Float32Array<ArrayBuffer>;
 }
 
 interface SparseStaticGpuData {
@@ -70,6 +77,11 @@ interface SparseStaticGpuData {
   showdownNodeBuffer: GPUBuffer;
   showdownRankBuffer: GPUBuffer;
   showdownPayoffBuffer: GPUBuffer;
+  allInNodeBuffer: GPUBuffer;
+  allInScaleBuffer: GPUBuffer;
+  allInTableBuffer?: GPUBuffer;
+  allInComboPermBuffer?: GPUBuffer;
+  allInContext?: AllInTableContext;
   preparedLeafFeatures?: PreparedBatchFeatures;
   dispose: () => void;
 }
@@ -124,6 +136,10 @@ export class SparseCfrResolver {
 
     const cachedTree = this.cachedTree(env, options.depth);
     const tree = cachedTree.tree;
+    const allInContext = await this.resolveAllInContext(tree);
+    if (this.gpuKernels && !cachedTree.gpu) {
+      cachedTree.gpu = this.createStaticGpuData(tree, allInContext);
+    }
     const totalNodes = tree.nodes.length;
     const policy = new Float32Array(totalNodes * NUM_HANDS);
     const policyAvg = new Float32Array(totalNodes * NUM_HANDS);
@@ -155,7 +171,12 @@ export class SparseCfrResolver {
 
     if (!(this.gpuKernels && cachedTree.gpu)) {
       const latestValues = new Float32Array(totalNodes * 2 * NUM_HANDS);
-      await this.setLeafValues(tree, cfrAvg ? beliefsAvg : beliefs, latestValues);
+      await this.setLeafValues(
+        tree,
+        cfrAvg ? beliefsAvg : beliefs,
+        latestValues,
+        allInContext,
+      );
       let values = this.computeExpectedValues(tree, policy, beliefs, latestValues);
 
       for (let t = 0; t < options.iterations; t += 1) {
@@ -186,6 +207,7 @@ export class SparseCfrResolver {
           tree,
           cfrAvg ? beliefsAvg : beliefs,
           latestValues,
+          allInContext,
         );
         values = this.computeExpectedValues(tree, policy, beliefs, latestValues);
       }
@@ -248,25 +270,35 @@ export class SparseCfrResolver {
     if (cached) return cached;
     const tree = this.buildTree(rootEnv, maxDepth);
     const entry: SparseTreeCacheEntry = { tree, initialStates: new Map() };
-    if (this.gpuKernels) {
-      entry.gpu = this.createStaticGpuData(tree);
-    }
     this.treeCache.set(key, entry);
     return entry;
   }
 
-  private createStaticGpuData(tree: SparseTree): SparseStaticGpuData {
+  private createStaticGpuData(
+    tree: SparseTree,
+    allInContext?: AllInTableContext,
+  ): SparseStaticGpuData {
     if (!this.gpuKernels) {
       throw new Error("GPU sparse kernels are not initialized");
     }
     const device = this.model.device;
     const treeBuffers = this.gpuKernels.createTreeBuffers(this.gpuTreeData(tree));
-    const leafBatch = this.leafGpuBatch(tree);
+    const leafBatch = this.leafGpuBatch(tree, allInContext);
     const foldTerminalValues = this.foldTerminalLeafValues(tree);
     const modelLeafNodeBuffer = makeStorageBuffer(device, leafBatch.modelNodeIndices);
     const showdownNodeBuffer = makeStorageBuffer(device, leafBatch.showdownNodeIndices);
     const showdownRankBuffer = makeStorageBuffer(device, leafBatch.showdownRankCodes);
     const showdownPayoffBuffer = makeStorageBuffer(device, leafBatch.showdownPayoffs);
+    const allInNodeBuffer = makeStorageBuffer(device, leafBatch.allInNodeIndices);
+    const allInScaleBuffer = makeStorageBuffer(device, leafBatch.allInScaleFactors);
+    const allInTableBuffer = allInContext
+      ? makeStorageBuffer(device, packInt16Table(allInContext.table))
+      : undefined;
+    const identityPerms = new Uint32Array(NUM_HANDS);
+    for (let hand = 0; hand < NUM_HANDS; hand += 1) identityPerms[hand] = hand;
+    const allInComboPermBuffer = allInContext
+      ? makeStorageBuffer(device, allInContext.comboPerms ?? identityPerms)
+      : undefined;
     const preparedLeafFeatures =
       leafBatch.modelEnvs.length > 0 && this.model.prepareBatchFeatures
         ? this.model.prepareBatchFeatures(leafBatch.modelEnvs)
@@ -279,6 +311,11 @@ export class SparseCfrResolver {
       showdownNodeBuffer,
       showdownRankBuffer,
       showdownPayoffBuffer,
+      allInNodeBuffer,
+      allInScaleBuffer,
+      ...(allInTableBuffer ? { allInTableBuffer } : {}),
+      ...(allInComboPermBuffer ? { allInComboPermBuffer } : {}),
+      ...(allInContext ? { allInContext } : {}),
       ...(preparedLeafFeatures ? { preparedLeafFeatures } : {}),
       dispose: () => {
         treeBuffers.dispose();
@@ -286,6 +323,10 @@ export class SparseCfrResolver {
         showdownNodeBuffer.destroy();
         showdownRankBuffer.destroy();
         showdownPayoffBuffer.destroy();
+        allInNodeBuffer.destroy();
+        allInScaleBuffer.destroy();
+        allInTableBuffer?.destroy();
+        allInComboPermBuffer?.destroy();
         preparedLeafFeatures?.dispose();
       },
     };
@@ -320,6 +361,26 @@ export class SparseCfrResolver {
       rootEnv.boardIndices,
       rootEnv.holeIndices,
     ]);
+  }
+
+  private async resolveAllInContext(
+    tree: SparseTree,
+  ): Promise<AllInTableContext | undefined> {
+    const provider = this.model.allInTableProvider;
+    if (!provider) return undefined;
+    const root = tree.nodes[0]!.env;
+    if (root.street > 2) return undefined;
+    return await provider.tableForRoot(root);
+  }
+
+  private isAllInCallLeaf(tree: SparseTree, nodeIndex: number): boolean {
+    const node = tree.nodes[nodeIndex]!;
+    if (!node.leaf || node.env.done || !node.newStreet || node.parent < 0) return false;
+    if (node.actionFromParent !== 1) return false;
+    const parent = tree.nodes[node.parent]!;
+    const actor = parent.env.toAct;
+    const opp = (1 - actor) as PlayerIndex;
+    return parent.env.isAllin[opp] && parent.env.committed[opp] > parent.env.committed[actor];
   }
 
   private beliefsCacheKey(beliefs: Float32Array<ArrayBuffer>): string {
@@ -619,6 +680,11 @@ export class SparseCfrResolver {
           staticGpu.showdownNodeBuffer,
           staticGpu.showdownRankBuffer,
           staticGpu.showdownPayoffBuffer,
+          staticGpu.allInNodeBuffer,
+          staticGpu.allInScaleBuffer,
+          staticGpu.allInTableBuffer,
+          staticGpu.allInComboPermBuffer,
+          staticGpu.allInContext,
           staticGpu.preparedLeafFeatures,
           exactBelief,
         ),
@@ -670,6 +736,11 @@ export class SparseCfrResolver {
               staticGpu.showdownNodeBuffer,
               staticGpu.showdownRankBuffer,
               staticGpu.showdownPayoffBuffer,
+              staticGpu.allInNodeBuffer,
+              staticGpu.allInScaleBuffer,
+              staticGpu.allInTableBuffer,
+              staticGpu.allInComboPermBuffer,
+              staticGpu.allInContext,
               staticGpu.preparedLeafFeatures,
               exactBelief,
             ),
@@ -699,6 +770,7 @@ export class SparseCfrResolver {
           totalNodes: tree.nodes.length,
           treeDepth: tree.treeDepth,
           showdownLeaves: leafBatch.showdownNodeIndices.length,
+          allInLeaves: leafBatch.allInNodeIndices.length,
           modelLeaves: leafBatch.modelNodeIndices.length,
           street: tree.nodes[0]!.env.street,
         };
@@ -739,6 +811,11 @@ export class SparseCfrResolver {
     showdownNodeBuffer: GPUBuffer,
     showdownRankBuffer: GPUBuffer,
     showdownPayoffBuffer: GPUBuffer,
+    allInNodeBuffer: GPUBuffer,
+    allInScaleBuffer: GPUBuffer,
+    allInTableBuffer?: GPUBuffer,
+    allInComboPermBuffer?: GPUBuffer,
+    allInContext?: AllInTableContext,
     preparedLeafFeatures?: PreparedBatchFeatures,
     exactBelief?: ExactBelief,
   ): Promise<() => void> {
@@ -759,6 +836,31 @@ export class SparseCfrResolver {
       );
       device.queue.submit([showdownEncoder.finish()]);
       showdownParams.destroy();
+    }
+
+    if (
+      leafBatch.allInNodeIndices.length > 0 &&
+      allInContext &&
+      allInTableBuffer &&
+      allInComboPermBuffer
+    ) {
+      const allInEncoder = device.createCommandEncoder();
+      const allInParams = this.gpuKernels.encodeAllInTableValues(
+        allInEncoder,
+        treeBuffers,
+        allInNodeBuffer,
+        allInTableBuffer,
+        allInComboPermBuffer,
+        allInScaleBuffer,
+        leafBeliefsBuffer,
+        valuesBuffer,
+        leafBatch.allInNodeIndices.length,
+        allInContext.scale,
+        allInContext.permId ?? 0,
+        allInContext.permId !== undefined && allInContext.comboPerms !== undefined,
+      );
+      device.queue.submit([allInEncoder.finish()]);
+      allInParams.destroy();
     }
 
     if (leafBatch.modelNodeIndices.length === 0) return () => undefined;
@@ -796,16 +898,29 @@ export class SparseCfrResolver {
     return () => prediction.dispose();
   }
 
-  private leafGpuBatch(tree: SparseTree): SparseLeafGpuBatch {
+  private leafGpuBatch(
+    tree: SparseTree,
+    allInContext?: AllInTableContext,
+  ): SparseLeafGpuBatch {
     const modelEnvs: PublicHunlEnv[] = [];
     const modelNodeIndices: number[] = [];
     const showdownNodeIndices: number[] = [];
     const showdownRankCodes: number[] = [];
     const showdownPayoffs: number[] = [];
+    const allInNodeIndices: number[] = [];
+    const allInScaleFactors: number[] = [];
     for (let nodeIndex = 0; nodeIndex < tree.nodes.length; nodeIndex += 1) {
       const node = tree.nodes[nodeIndex]!;
       if (!node.leaf) continue;
-      if (!node.env.done) {
+      if (allInContext && this.isAllInCallLeaf(tree, nodeIndex)) {
+        allInNodeIndices.push(nodeIndex);
+        allInScaleFactors.push(
+          (node.env.stacks[0] + node.env.pot - node.env.startingStacks[0]) /
+            Math.max(node.env.scale, 1.0e-8),
+          (node.env.stacks[1] + node.env.pot - node.env.startingStacks[1]) /
+            Math.max(node.env.scale, 1.0e-8),
+        );
+      } else if (!node.env.done) {
         modelEnvs.push(node.env);
         modelNodeIndices.push(nodeIndex);
       } else if (!node.env.hasFolded[0] && !node.env.hasFolded[1]) {
@@ -820,6 +935,8 @@ export class SparseCfrResolver {
       showdownNodeIndices: new Uint32Array(showdownNodeIndices),
       showdownRankCodes: new Uint32Array(showdownRankCodes),
       showdownPayoffs: new Float32Array(showdownPayoffs),
+      allInNodeIndices: new Uint32Array(allInNodeIndices),
+      allInScaleFactors: new Float32Array(allInScaleFactors),
     };
   }
 
@@ -1216,6 +1333,7 @@ export class SparseCfrResolver {
     tree: SparseTree,
     beliefs: Float32Array,
     latestValues: Float32Array,
+    allInContext?: AllInTableContext,
   ): Promise<void> {
     latestValues.fill(0);
     const modelEnvs: PublicHunlEnv[] = [];
@@ -1226,7 +1344,12 @@ export class SparseCfrResolver {
       if (!node.leaf) continue;
       const valueBase = nodeIndex * 2 * NUM_HANDS;
       const nodeBeliefs = this.nodeBeliefs(beliefs, nodeIndex);
-      if (node.env.done) {
+      if (allInContext && this.isAllInCallLeaf(tree, nodeIndex)) {
+        latestValues.set(
+          computeAllInTableValues(allInContext, nodeBeliefs, 0, node.env),
+          valueBase,
+        );
+      } else if (node.env.done) {
         if (node.env.hasFolded[0] || node.env.hasFolded[1]) {
           latestValues.fill(node.reward, valueBase, valueBase + NUM_HANDS);
           latestValues.fill(-node.reward, valueBase + NUM_HANDS, valueBase + 2 * NUM_HANDS);

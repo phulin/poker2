@@ -53,6 +53,7 @@ import {
   NUM_HANDS,
   type PublicHunlEnv,
 } from "./hunlEnv.js";
+import type { AllInTableProvider } from "./allInTables.js";
 import type { BetterFfnManifest } from "./types.js";
 
 interface GpuTensor {
@@ -103,6 +104,7 @@ export class BetterFfnWebGpuModel {
   readonly device: GPUDevice;
   readonly manifest: BetterFfnManifest;
   readonly actionLabels: string[];
+  allInTableProvider: AllInTableProvider | undefined;
   private readonly tensors = new Map<string, GpuTensor>();
   private readonly dummyBias: GPUBuffer;
   private readonly handEmbeddingT: GPUBuffer;

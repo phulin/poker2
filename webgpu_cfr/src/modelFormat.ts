@@ -27,6 +27,24 @@ function optionalNumber(value: unknown, label: string): void {
   }
 }
 
+function optionalAllInNumber(value: unknown, label: string): void {
+  if (value !== undefined && value !== null && typeof value !== "number") {
+    throw new Error(`model manifest allIn.${label} must be a number`);
+  }
+}
+
+function optionalInt16Dtype(value: unknown, label: string): void {
+  if (value !== undefined && value !== "int16") {
+    throw new Error(`model manifest allIn.${label}.dtype must be int16`);
+  }
+}
+
+function requiredString(value: unknown, label: string): void {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`model manifest allIn.${label} must be a non-empty string`);
+  }
+}
+
 function expectedWeightsByteLength(manifest: BetterFfnManifest): number {
   return manifest.tensors.reduce(
     (max, tensor) => Math.max(max, tensor.byteOffset + tensor.byteLength),
@@ -146,6 +164,45 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
     optionalNumber(manifest.cfr.dcfrBetaFinal, "dcfrBetaFinal");
     optionalNumber(manifest.cfr.dcfrGamma, "dcfrGamma");
     optionalNumber(manifest.cfr.dcfrGammaFinal, "dcfrGammaFinal");
+  }
+  if (manifest.allIn !== undefined) {
+    if (!isRecord(manifest.allIn)) {
+      throw new Error("model manifest allIn must be an object");
+    }
+    if (
+      manifest.allIn.enabled !== undefined &&
+      typeof manifest.allIn.enabled !== "boolean"
+    ) {
+      throw new Error("model manifest allIn.enabled must be a boolean");
+    }
+    optionalAllInNumber(manifest.allIn.scale, "scale");
+    if (manifest.allIn.preflop !== undefined) {
+      if (!isRecord(manifest.allIn.preflop)) {
+        throw new Error("model manifest allIn.preflop must be an object");
+      }
+      requiredString(manifest.allIn.preflop.file, "preflop.file");
+      optionalInt16Dtype(manifest.allIn.preflop.dtype, "preflop");
+      optionalAllInNumber(manifest.allIn.preflop.scale, "preflop.scale");
+    }
+    if (manifest.allIn.flop !== undefined) {
+      if (!isRecord(manifest.allIn.flop)) {
+        throw new Error("model manifest allIn.flop must be an object");
+      }
+      requiredString(manifest.allIn.flop.actualToCanonFile, "flop.actualToCanonFile");
+      requiredString(manifest.allIn.flop.actualPermFile, "flop.actualPermFile");
+      requiredString(manifest.allIn.flop.comboPermsFile, "flop.comboPermsFile");
+      requiredString(manifest.allIn.flop.tablePathTemplate, "flop.tablePathTemplate");
+      optionalInt16Dtype(manifest.allIn.flop.dtype, "flop");
+      optionalAllInNumber(manifest.allIn.flop.scale, "flop.scale");
+    }
+    if (manifest.allIn.turn !== undefined) {
+      if (!isRecord(manifest.allIn.turn)) {
+        throw new Error("model manifest allIn.turn must be an object");
+      }
+      requiredString(manifest.allIn.turn.tablePathTemplate, "turn.tablePathTemplate");
+      optionalInt16Dtype(manifest.allIn.turn.dtype, "turn");
+      optionalAllInNumber(manifest.allIn.turn.scale, "turn.scale");
+    }
   }
   manifest.weights.storageDtype ??= "float32";
   if (
