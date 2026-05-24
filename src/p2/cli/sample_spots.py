@@ -103,7 +103,9 @@ def sample_spots(
 
     trainer = RebelCFRTrainer(cfg=cfg, device=device)
     print(f"Loading checkpoint: {cfg.resume_from}")
-    trainer.load_checkpoint(cfg.resume_from)
+    # Sampling only runs inference/CFR; skip optimizer state, which can drift
+    # in format across checkpoints and is irrelevant here.
+    trainer.load_checkpoint(cfg.resume_from, load_optimizer=False)
     trainer.model.eval()
 
     if street_weights is None:
@@ -136,40 +138,45 @@ def sample_spots(
             collected_per_street[s].append(_select_rows(snap, take))
             counts[s] += take.numel()
 
-    N = trainer.cfr_evaluator.root_nodes
-    root_indices = torch.arange(N, device=device)
+    dg = trainer.data_generator
+    target_batch_size = dg.target_batch_size
     passes = 0
+    # The evaluator runs on trainer.inference_model, which load_checkpoint
+    # already synced from the (EMA) checkpoint weights, so no weight swap is
+    # needed here.
     with torch.no_grad():
-        with trainer._eval_swap():
-            while any(counts[i] < targets[i] for i in range(5)):
-                if passes >= max_passes:
-                    print(
-                        f"[warn] hit max_passes={max_passes} with counts={counts}; "
-                        f"saving what we have."
-                    )
-                    break
-
-                # Mirror RebelDataGenerator.generate_data, but snapshot the
-                # root PBS (what the trainer hands to CFR) *and* the leaves
-                # (current_pbs after evaluate_cfr).
-                dg = trainer.data_generator
-                if dg.current_pbs is None:
-                    dg.current_pbs = dg._new_pbs(N)
-                elif dg.current_pbs.env.N < N:
-                    dg.current_pbs = dg._extend_pbs(dg.current_pbs, N)
-
-                # Snapshot the root PBS — the actual input to CFR. We skip
-                # the post-evaluate leaves: those are pre-chance states and
-                # only become valid (post-chance) roots on the next pass.
-                _absorb(_snapshot_pbs(dg.current_pbs))
-
-                dg.evaluator.initialize_subgame(
-                    dg.current_pbs.env, root_indices, dg.current_pbs.beliefs
+        while any(counts[i] < targets[i] for i in range(5)):
+            if passes >= max_passes:
+                print(
+                    f"[warn] hit max_passes={max_passes} with counts={counts}; "
+                    f"saving what we have."
                 )
-                dg.current_pbs = dg.evaluator.evaluate_cfr()
-                passes += 1
-                if passes % 5 == 0:
-                    print(f"pass {passes}: counts={counts}")
+                break
+
+            # Mirror RebelDataGenerator.generate_data, but snapshot the
+            # root PBS (what the trainer hands to CFR) *and* the leaves
+            # (current_pbs after evaluate_cfr).
+            if dg.current_pbs is None:
+                dg.current_pbs = dg._new_pbs(target_batch_size)
+            elif dg.current_pbs.env.N < target_batch_size:
+                dg.current_pbs = dg._extend_pbs(dg.current_pbs, target_batch_size)
+
+            # Snapshot the root PBS — the actual input to CFR. We skip
+            # the post-evaluate leaves: those are pre-chance states and
+            # only become valid (post-chance) roots on the next pass.
+            _absorb(_snapshot_pbs(dg.current_pbs))
+
+            root_count = int(dg.current_pbs.env.N)
+            root_indices = torch.arange(root_count, device=device)
+            dg.evaluator.initialize_subgame(
+                dg.current_pbs.env,
+                root_indices,
+                dg.current_pbs.beliefs[:root_count],
+            )
+            dg.current_pbs = dg.evaluator.evaluate_cfr()
+            passes += 1
+            if passes % 5 == 0:
+                print(f"pass {passes}: counts={counts}")
 
     print(f"Done after {passes} passes. Final counts: {counts}")
 

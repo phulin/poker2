@@ -2035,7 +2035,7 @@ class RebelCFRTrainer:
         torch.save(state, path)
         self.save_replay_buffers(path, step)
 
-    def load_checkpoint(self, path: str) -> int:
+    def load_checkpoint(self, path: str, load_optimizer: bool = True) -> int:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
 
         # Convert model state back to host dtype if it was saved in bfloat16
@@ -2068,7 +2068,7 @@ class RebelCFRTrainer:
             }
 
         # Only load optimizer if it exists in checkpoint
-        if "optimizer" in ckpt:
+        if load_optimizer and "optimizer" in ckpt:
             self.optimizer.load_state_dict(ckpt["optimizer"])
             if isinstance(self.optimizer, torch.optim.AdamW):
                 for param_group in self.optimizer.param_groups:
