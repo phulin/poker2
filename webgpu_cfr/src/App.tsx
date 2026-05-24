@@ -1083,8 +1083,11 @@ function BoardEntry(props: {
 
   function selectCard(card: string): void {
     const current = enteredCards();
-    if (current.length >= editCount() || blockedCards().has(card)) return;
-    const next = [...current, card];
+    if (blockedCards().has(card)) return;
+    const next =
+      current.length >= editCount()
+        ? [...current.slice(0, Math.max(0, editCount() - 1)), card]
+        : [...current, card];
     setText(next.join(" "));
     setError("");
     if (next.length === editCount()) {
@@ -1600,10 +1603,22 @@ function App(): JSX.Element {
   function streetMarkerForRow(rows: readonly ActionRow[], index: number): string | undefined {
     const row = rows[index];
     if (!row) return undefined;
+    if (row.street > 0) return undefined;
     if (index === 0 || row.street !== rows[index - 1]?.street) {
       return STREET_NAMES[row.street] ?? undefined;
     }
     return undefined;
+  }
+
+  function shouldShowBoardBeforeRow(rows: readonly ActionRow[], index: number): boolean {
+    const row = rows[index];
+    if (!row || row.street <= 0) return false;
+    return index === 0 || row.street !== rows[index - 1]?.street;
+  }
+
+  function shouldShowBoardBeforeFinalAction(state: StateDescriptor): boolean {
+    if (state.finalStreet <= 0) return false;
+    return state.rows.every((row) => row.street !== state.finalStreet);
   }
 
   function finalStreetMarker(rows: readonly ActionRow[], finalStreet: number): string | undefined {
@@ -1742,29 +1757,40 @@ function App(): JSX.Element {
             <Show when={!descriptorError()} fallback={<p class="inline-error">{descriptorError()}</p>}>
               <For each={(descriptor() as StateDescriptor).rows}>
                 {(row, index) => (
-                  <div class="action-row">
-                    <span class="street-marker">{streetMarkerForRow((descriptor() as StateDescriptor).rows, index()) ?? ""}</span>
-                    <span class={`actor-pill ${row.actor === HERO_PLAYER ? "hero" : "villain"}`}>
-                      {playerLabel(row.actor)}
-                    </span>
-                    <ActionRowButtons
-                      action={row.action}
-                      legalActions={legalActions(row.legalMask)}
-                      context={row.context}
-                      onAction={(action) => setActionAt(index(), action)}
-                    />
-                    <button
-                      type="button"
-                      class="icon-button"
-                      title="Remove action"
-                      onClick={() => removeAction(index())}
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
+                  <>
+                    <Show when={shouldShowBoardBeforeRow((descriptor() as StateDescriptor).rows, index())}>
+                      <BoardEntry
+                        street={row.street}
+                        count={STREET_CARD_COUNTS[row.street] ?? 0}
+                        cards={boardCards()}
+                        disabled={usedCards()}
+                        onTextChange={updateBoardCards}
+                      />
+                    </Show>
+                    <div class="action-row">
+                      <span class="street-marker">{streetMarkerForRow((descriptor() as StateDescriptor).rows, index()) ?? ""}</span>
+                      <span class={`actor-pill ${row.actor === HERO_PLAYER ? "hero" : "villain"}`}>
+                        {playerLabel(row.actor)}
+                      </span>
+                      <ActionRowButtons
+                        action={row.action}
+                        legalActions={legalActions(row.legalMask)}
+                        context={row.context}
+                        onAction={(action) => setActionAt(index(), action)}
+                      />
+                      <button
+                        type="button"
+                        class="icon-button"
+                        title="Remove action"
+                        onClick={() => removeAction(index())}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  </>
                 )}
               </For>
-              <Show when={inferredPublicCount() > 0}>
+              <Show when={shouldShowBoardBeforeFinalAction(descriptor() as StateDescriptor)}>
                 <BoardEntry
                   street={inferredStreet()}
                   count={inferredPublicCount()}
