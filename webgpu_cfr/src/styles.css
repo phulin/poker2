@@ -367,35 +367,88 @@ h3 {
   gap: 10px;
 }
 
-.hero-hand-preview {
-  display: flex;
+.hero-hand-row {
+  display: grid;
+  grid-template-columns: minmax(148px, 184px) auto;
   align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.exact-hand-button,
+.exact-hand-input {
+  width: 184px;
+  height: 42px;
+  border: 1px solid #b9c7c0;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #182224;
+}
+
+.exact-hand-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   gap: 8px;
-  min-height: 28px;
+  padding: 0 10px;
+}
+
+.exact-hand-button:hover {
+  border-color: #168575;
+}
+
+.exact-hand-input {
+  padding: 0 10px;
+  font-weight: 700;
+}
+
+.exact-hand-button.invalid,
+.exact-hand-input.invalid {
+  border-color: #c75a35;
+  outline: 0;
+  box-shadow: 0 0 0 1px #c75a35;
+  background: #fff7f3;
+}
+
+.exact-hand-input.valid {
+  border-color: #168575;
+  outline: 0;
+  box-shadow: 0 0 0 1px #168575;
+}
+
+.exact-hand-input:focus {
+  outline: 0;
+}
+
+.exact-hand-raw {
+  min-width: 0;
+  color: #344144;
+  font-size: 15px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .range-toggle {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 18px;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  min-height: 38px;
+  justify-content: center;
+  justify-self: end;
+  gap: 6px;
+  min-width: 74px;
+  height: 38px;
   border: 1px solid #b9c7c0;
   border-radius: 6px;
   background: #ffffff;
   color: #344144;
   padding: 0 10px;
-  text-align: left;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .range-toggle:hover {
   border-color: #168575;
-}
-
-.range-toggle strong {
-  color: #0f665a;
-  font-size: 13px;
-  font-weight: 760;
 }
 
 .range-toggle svg {
@@ -456,7 +509,7 @@ h3 {
 .range-combo-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   color: #5d686a;
   font-size: 12px;
   font-weight: 700;

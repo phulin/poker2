@@ -273,41 +273,82 @@ function HeroHandSelector(props: {
   onComboChange: (cards: HeroCards) => void;
 }): JSX.Element {
   const [open, setOpen] = createSignal(false);
+  const [editing, setEditing] = createSignal(false);
+  let exactInput: HTMLInputElement | undefined;
   const selectedOptions = createMemo(() => rangeOptions(props.selectedRangeKey, props.blockedCards));
+  const exactStateClass = createMemo(() => (props.error ? "invalid" : "valid"));
 
   function rangeIsBlocked(rangeKey: string): boolean {
     return rangeOptions(rangeKey, props.blockedCards).every((option) => option.blocked);
   }
 
+  function editHand(): void {
+    setEditing(true);
+    queueMicrotask(() => {
+      exactInput?.focus();
+      exactInput?.select();
+    });
+  }
+
+  function finishEditing(): void {
+    props.onNormalizeText();
+    setEditing(false);
+  }
+
   return (
     <div class="hero-hand-selector">
-      <label class="field">
-        <span>Exact hand</span>
-        <input
-          value={props.value}
-          class={props.error ? "invalid" : ""}
-          placeholder="As Kd"
-          onInput={(event) => props.onTextChange(event.currentTarget.value)}
-          onBlur={props.onNormalizeText}
-        />
-      </label>
-      <div class="hero-hand-preview">
-        <CardChip value={props.parsedCards?.[0] ?? ""} />
-        <CardChip value={props.parsedCards?.[1] ?? ""} />
-        <Show when={props.error}>
-          <span class="inline-error">{props.error}</span>
+      <div class="hero-hand-row">
+        <Show
+          when={editing()}
+          fallback={
+            <button
+              type="button"
+              class={`exact-hand-button ${props.error ? "invalid" : ""}`}
+              onClick={editHand}
+            >
+              <Show
+                when={props.parsedCards}
+                fallback={<span class="exact-hand-raw">{props.value || "As Kd"}</span>}
+              >
+                {(cards) => (
+                  <>
+                    <CardChip value={cards()[0]} />
+                    <CardChip value={cards()[1]} />
+                  </>
+                )}
+              </Show>
+            </button>
+          }
+        >
+          <input
+            ref={exactInput}
+            class={`exact-hand-input ${exactStateClass()}`}
+            value={props.value}
+            placeholder="As Kd"
+            onInput={(event) => props.onTextChange(event.currentTarget.value)}
+            onBlur={finishEditing}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+              if (event.key === "Escape") setEditing(false);
+            }}
+          />
         </Show>
+        <button
+          type="button"
+          class={`range-toggle ${open() ? "open" : ""}`}
+          aria-expanded={open()}
+          onClick={() => {
+            if (editing()) finishEditing();
+            setOpen((current) => !current);
+          }}
+        >
+          <span>Grid</span>
+          <ChevronDown size={16} />
+        </button>
       </div>
-      <button
-        type="button"
-        class={`range-toggle ${open() ? "open" : ""}`}
-        aria-expanded={open()}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <span>Range grid</span>
-        <strong>{props.selectedRangeKey}</strong>
-        <ChevronDown size={16} />
-      </button>
+      <Show when={props.error}>
+        <span class="inline-error">{props.error}</span>
+      </Show>
       <Show when={open()}>
         <div class="range-grid" role="grid" aria-label="Starting hand range grid">
           <For each={RANKS}>
@@ -334,7 +375,6 @@ function HeroHandSelector(props: {
           </For>
         </div>
         <div class="range-combo-head">
-          <span>{props.selectedRangeKey}</span>
           <span>{selectedOptions().length} combos</span>
         </div>
         <div class="range-combos">
@@ -344,7 +384,10 @@ function HeroHandSelector(props: {
                 type="button"
                 class={`range-combo ${comboMatchesHero(option.cards, props.parsedCards) ? "selected" : ""}`}
                 disabled={option.blocked}
-                onClick={() => props.onComboChange(option.cards)}
+                onClick={() => {
+                  props.onComboChange(option.cards);
+                  setOpen(false);
+                }}
               >
                 <CardChip value={option.cards[0]} />
                 <CardChip value={option.cards[1]} />
@@ -579,23 +622,27 @@ function App(): JSX.Element {
     const current = runtime();
     const hero = parsedHeroHand();
     if (!current) return { error: "Model is not ready" };
-    if ("error" in hero) return { error: hero.error };
     try {
-      const heroHand = [
-        CARD_OPTIONS.includes(hero.cards[0]) ? cardFromOption(hero.cards[0]) : -1,
-        CARD_OPTIONS.includes(hero.cards[1]) ? cardFromOption(hero.cards[1]) : -1,
-      ] as [number, number];
+      const heroHand =
+        "cards" in hero
+          ? ([
+              CARD_OPTIONS.includes(hero.cards[0]) ? cardFromOption(hero.cards[0]) : -1,
+              CARD_OPTIONS.includes(hero.cards[1]) ? cardFromOption(hero.cards[1]) : -1,
+            ] as [number, number])
+          : undefined;
       const env = PublicHunlEnv.fromManifest(current.manifest, {
         button: button(),
         stack: positiveNumber(stack(), current.manifest.env.stack),
         sb: positiveNumber(sb(), current.manifest.env.sb),
         bb: positiveNumber(bb(), current.manifest.env.bb),
-        forceDeck: buildForceDeck(heroHand, boardCards()),
+        ...(heroHand ? { forceDeck: buildForceDeck(heroHand, boardCards()) } : {}),
       });
-      env.configureKnownCards({
-        heroPlayer: HERO_PLAYER,
-        heroHand,
-      });
+      if (heroHand) {
+        env.configureKnownCards({
+          heroPlayer: HERO_PLAYER,
+          heroHand,
+        });
+      }
 
       const rows: ActionRow[] = [];
       for (const action of actions()) {
