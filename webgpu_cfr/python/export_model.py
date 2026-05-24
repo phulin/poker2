@@ -156,6 +156,7 @@ def export_model(
     weights_name: str = "weights.bin.gz",
     storage_dtype: str = "float16",
     compression: str = "gzip",
+    allin_manifest: Path | None = None,
 ) -> dict[str, Any]:
     cfg, state, step = _load_checkpoint(snapshot)
     _validate_supported(cfg)
@@ -254,6 +255,8 @@ def export_model(
     }
     if compression_manifest is not None:
         manifest["weights"]["compression"] = compression_manifest
+    if allin_manifest is not None:
+        manifest["allIn"] = json.loads(allin_manifest.read_text())
     (out / "model.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
 
@@ -269,6 +272,12 @@ def main() -> None:
         default="float16",
     )
     parser.add_argument("--compression", choices=("gzip", "none"), default="gzip")
+    parser.add_argument(
+        "--allin-manifest",
+        type=Path,
+        default=None,
+        help="Optional all-in asset manifest JSON to embed as model.json allIn.",
+    )
     args = parser.parse_args()
 
     manifest = export_model(
@@ -277,6 +286,7 @@ def main() -> None:
         args.weights_name,
         args.storage_dtype,
         args.compression,
+        args.allin_manifest,
     )
     print(
         json.dumps(

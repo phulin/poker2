@@ -9,6 +9,7 @@ import {
   loadModelBytesWithCache,
   type ModelCacheProgress,
 } from "./modelCache.js";
+import { createManifestAllInTableProvider } from "./allInTables.js";
 import type { BetterFfnManifest } from "./types.js";
 
 function currentOrigin(): string {
@@ -84,11 +85,13 @@ export async function loadBrowserModel(
     await weightsResponse.arrayBuffer(),
     manifest,
   );
-  return BetterFfnWebGpuModel.fromBuffers(
+  const model = BetterFfnWebGpuModel.fromBuffers(
     device ?? (await createBrowserDevice()),
     manifest,
     weights,
   );
+  model.allInTableProvider = createManifestAllInTableProvider(manifest, manifestUrl);
+  return model;
 }
 
 export async function loadBrowserModelCached(
@@ -106,11 +109,16 @@ export async function loadBrowserModelCached(
   if (options.weightsUrl) cacheOptions.weightsUrl = options.weightsUrl;
   if (options.onProgress) cacheOptions.onProgress = options.onProgress;
   const loaded = await loadModelBytesWithCache(manifestUrl, cacheOptions);
-  return BetterFfnWebGpuModel.fromBuffers(
+  const model = BetterFfnWebGpuModel.fromBuffers(
     options.device ?? (await createBrowserDevice()),
     loaded.manifest,
     loaded.weights,
   );
+  model.allInTableProvider = createManifestAllInTableProvider(
+    loaded.manifest,
+    manifestUrl,
+  );
+  return model;
 }
 
 export function loadBrowserModelFromBuffers(
@@ -118,7 +126,15 @@ export function loadBrowserModelFromBuffers(
   manifest: BetterFfnManifest | unknown,
   weights: ArrayBuffer,
 ): BetterFfnWebGpuModel {
-  return BetterFfnWebGpuModel.fromBuffers(device, manifest, weights);
+  const model = BetterFfnWebGpuModel.fromBuffers(device, manifest, weights);
+  if (model.manifest.allIn) {
+    const baseUrl =
+      typeof globalThis.location === "undefined"
+        ? "http://localhost/"
+        : globalThis.location.href;
+    model.allInTableProvider = createManifestAllInTableProvider(model.manifest, baseUrl);
+  }
+  return model;
 }
 
 export {

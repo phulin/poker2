@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
+import { createManifestAllInTableProvider } from "./allInTables.js";
 import { BetterFfnWebGpuModel } from "./betterFfnWebGpuModel.js";
 import { parseBetterFfnManifest } from "./modelFormat.js";
 
@@ -26,5 +28,14 @@ export async function loadNodeModel(
       decoded.byteOffset + decoded.byteLength,
     );
   }
-  return BetterFfnWebGpuModel.fromBuffers(device, manifest, weights);
+  const model = BetterFfnWebGpuModel.fromBuffers(device, manifest, weights);
+  model.allInTableProvider = createManifestAllInTableProvider(
+    manifest,
+    pathToFileURL(manifestPath).toString(),
+    async (url) => {
+      const data = await readFile(fileURLToPath(url));
+      return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    },
+  );
+  return model;
 }

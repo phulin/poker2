@@ -9,6 +9,8 @@ import { makeEmptyStorageBuffer } from "../src/gpuBuffers.js";
 import { createDawnDevice } from "../src/gpu.js";
 import { DEFAULT_FORCE_DECK, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js";
 import { SparseCfrResolver } from "../src/sparseResolver.js";
+import { ALL_IN_I16_SCALE, type AllInTableProvider } from "../src/allInTables.js";
+import { HAND_COMBOS } from "../src/cards.js";
 
 interface FakeModelCounters {
   singleLeafCalls: number;
@@ -19,9 +21,11 @@ function fakeModel(
   numActions: number,
   device?: GPUDevice,
   counters?: FakeModelCounters,
+  allInTableProvider?: AllInTableProvider,
 ): BetterFfnWebGpuModel {
   return {
     ...(device ? { device } : {}),
+    ...(allInTableProvider ? { allInTableProvider } : {}),
     manifest: {
       architecture: { numActions },
     },
@@ -61,6 +65,25 @@ function fakeModel(
       };
     },
   } as unknown as BetterFfnWebGpuModel;
+}
+
+function positiveAllInProvider(): AllInTableProvider {
+  const table = new Int16Array(NUM_HANDS * NUM_HANDS);
+  for (let h = 0; h < NUM_HANDS; h += 1) {
+    const [h0, h1] = HAND_COMBOS[h]!;
+    for (let o = 0; o < NUM_HANDS; o += 1) {
+      const [o0, o1] = HAND_COMBOS[o]!;
+      table[h * NUM_HANDS + o] =
+        h0 === o0 || h0 === o1 || h1 === o0 || h1 === o1
+          ? 0
+          : ALL_IN_I16_SCALE - 1;
+    }
+  }
+  return {
+    async tableForRoot() {
+      return { street: 0, table, scale: ALL_IN_I16_SCALE };
+    },
+  };
 }
 
 function uniformBeliefs(): Float32Array<ArrayBuffer> {
@@ -183,4 +206,34 @@ test("sparse resolver batches nonterminal leaf value evaluation", async () => {
     counters.batchLeafSizes.some((size) => size > 1),
     `expected at least one multi-leaf batch, saw ${counters.batchLeafSizes.join(",")}`,
   );
+});
+
+test("sparse resolver table-values all-in call leaves without model inference", async () => {
+  const betBins: number[] = [];
+  const numActions = betBins.length + 3;
+  const env = new PublicHunlEnv({
+    stack: 20,
+    sb: 1,
+    bb: 2,
+    betBins,
+    button: 1,
+    forceDeck: DEFAULT_FORCE_DECK,
+  });
+  env.stepBin(numActions - 1);
+  const counters: FakeModelCounters = {
+    singleLeafCalls: 0,
+    batchLeafSizes: [],
+  };
+  const resolver = new SparseCfrResolver(
+    fakeModel(numActions, undefined, counters, positiveAllInProvider()),
+  );
+
+  const result = await resolver.solve(env, uniformBeliefs(), {
+    depth: 1,
+    iterations: 3,
+  });
+
+  assert.equal(counters.singleLeafCalls, 0);
+  assert.deepEqual(counters.batchLeafSizes, []);
+  assert.equal(result.actionProbs[0]! < result.actionProbs[1]!, true);
 });

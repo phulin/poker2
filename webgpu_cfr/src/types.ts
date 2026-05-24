@@ -79,6 +79,35 @@ export interface BetterFfnCfrManifest {
   valueTargetsFromFinalPolicy?: boolean;
 }
 
+export interface BetterFfnAllInTableAssetManifest {
+  file: string;
+  dtype?: "int16";
+  scale?: number;
+}
+
+export interface BetterFfnFlopAllInManifest {
+  actualToCanonFile: string;
+  actualPermFile: string;
+  comboPermsFile: string;
+  tablePathTemplate: string;
+  dtype?: "int16";
+  scale?: number;
+}
+
+export interface BetterFfnTurnAllInManifest {
+  tablePathTemplate: string;
+  dtype?: "int16";
+  scale?: number;
+}
+
+export interface BetterFfnAllInManifest {
+  enabled?: boolean;
+  scale?: number;
+  preflop?: BetterFfnAllInTableAssetManifest;
+  flop?: BetterFfnFlopAllInManifest;
+  turn?: BetterFfnTurnAllInManifest;
+}
+
 export interface BetterFfnManifest {
   schemaVersion: 1;
   format: "p2.better_ffn.webgpu";
@@ -117,6 +146,7 @@ export interface BetterFfnManifest {
     defaultForceDeck: number[];
   };
   cfr?: BetterFfnCfrManifest;
+  allIn?: BetterFfnAllInManifest;
   actionLabels: string[];
   tensors: BetterFfnTensorManifest[];
   weights: {

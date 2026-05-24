@@ -7,6 +7,7 @@ import {
 } from "../src/gpuBuffers.js";
 import { createDawnDevice } from "../src/gpu.js";
 import { SparseCfrGpuKernels } from "../src/sparseCfrKernels.js";
+import { packInt16Table } from "../src/allInTables.js";
 
 function assertCloseArray(
   actual: Float32Array<ArrayBufferLike>,
@@ -368,6 +369,110 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     showdownRanks.destroy();
     showdownPayoffs.destroy();
     showdownValues.destroy();
+  } finally {
+    device.destroy();
+  }
+});
+
+test("sparse WGSL all-in table values match blocker-aware CPU reference", async () => {
+  const device = await createDawnDevice();
+  try {
+    const kernels = new SparseCfrGpuKernels(device);
+    const handCard0 = new Uint32Array([0, 0, 3, 5]);
+    const handCard1 = new Uint32Array([1, 2, 4, 6]);
+    const tree = kernels.createTreeBuffers({
+      nodeCount: 2,
+      numHands: 4,
+      childOffsets: new Uint32Array([0, 0]),
+      childCount: new Uint32Array([0, 0]),
+      childIndices: new Uint32Array([]),
+      parentIndex: new Uint32Array([0, 0]),
+      prevActor: new Uint32Array([0, 0]),
+      toAct: new Uint32Array([0, 1]),
+      allowedMask: new Uint32Array([
+        1, 1, 1, 1,
+        1, 1, 1, 1,
+      ]),
+      allowedProb: new Float32Array([
+        0.25, 0.25, 0.25, 0.25,
+        0.25, 0.25, 0.25, 0.25,
+      ]),
+      handCard0,
+      handCard1,
+    });
+    const scale = 100;
+    const table = new Int16Array(16);
+    for (let h = 0; h < 4; h += 1) {
+      for (let o = 0; o < 4; o += 1) {
+        const overlaps =
+          handCard0[h] === handCard0[o] ||
+          handCard0[h] === handCard1[o] ||
+          handCard1[h] === handCard0[o] ||
+          handCard1[h] === handCard1[o];
+        table[h * 4 + o] = overlaps ? 0 : (h + 1) * 10 - (o + 1);
+      }
+    }
+    const beliefsData = new Float32Array([
+      0, 0, 0, 0,
+      0, 0, 0, 0,
+      0.1, 0.2, 0.3, 0.4,
+      0.4, 0.3, 0.2, 0.1,
+    ]);
+    const nodeIndices = makeStorageBuffer(device, new Uint32Array([1]));
+    const tableBuffer = makeStorageBuffer(device, packInt16Table(table));
+    const comboPerms = makeStorageBuffer(device, new Uint32Array([0, 1, 2, 3]));
+    const scaleFactors = makeStorageBuffer(device, new Float32Array([2, 3]));
+    const beliefs = makeStorageBuffer(device, beliefsData);
+    const values = makeEmptyStorageBuffer(device, 16);
+
+    const encoder = device.createCommandEncoder();
+    const params = kernels.encodeAllInTableValues(
+      encoder,
+      tree,
+      nodeIndices,
+      tableBuffer,
+      comboPerms,
+      scaleFactors,
+      beliefs,
+      values,
+      1,
+      scale,
+      0,
+      false,
+    );
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    params.destroy();
+
+    const expected = new Array(16).fill(0);
+    for (let player = 0; player < 2; player += 1) {
+      const oppBase = (2 + (1 - player)) * 4;
+      for (let hand = 0; hand < 4; hand += 1) {
+        let denom = 0;
+        let numer = 0;
+        for (let opp = 0; opp < 4; opp += 1) {
+          const b = beliefsData[oppBase + opp]!;
+          numer += (table[hand * 4 + opp]! / scale) * b;
+          const overlaps =
+            handCard0[hand] === handCard0[opp] ||
+            handCard0[hand] === handCard1[opp] ||
+            handCard1[hand] === handCard0[opp] ||
+            handCard1[hand] === handCard1[opp];
+          if (!overlaps) denom += b;
+        }
+        expected[8 + player * 4 + hand] =
+          denom > 1.0e-8 ? (numer / denom) * (player === 0 ? 2 : 3) : 0;
+      }
+    }
+    assertCloseArray(await readFloatBuffer(device, values, 16), expected, 1e-6, "allInValues");
+
+    tree.dispose();
+    nodeIndices.destroy();
+    tableBuffer.destroy();
+    comboPerms.destroy();
+    scaleFactors.destroy();
+    beliefs.destroy();
+    values.destroy();
   } finally {
     device.destroy();
   }

@@ -800,6 +800,87 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_ALLIN_TABLE_VALUES_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  batch: u32,
+  permId: u32,
+  hasPerm: u32,
+  tableScale: f32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> nodeIndices: array<u32>;
+@group(0) @binding(1) var<storage, read> allowedMask: array<u32>;
+@group(0) @binding(2) var<storage, read> handCard0: array<u32>;
+@group(0) @binding(3) var<storage, read> handCard1: array<u32>;
+@group(0) @binding(4) var<storage, read> tablePacked: array<u32>;
+@group(0) @binding(5) var<storage, read> comboPerms: array<u32>;
+@group(0) @binding(6) var<storage, read> scaleFactors: array<f32>;
+@group(0) @binding(7) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(8) var<storage, read_write> values: array<f32>;
+@group(0) @binding(9) var<uniform> params: Params;
+
+fn overlaps(a: u32, b: u32) -> bool {
+  return handCard0[a] == handCard0[b] ||
+    handCard0[a] == handCard1[b] ||
+    handCard1[a] == handCard0[b] ||
+    handCard1[a] == handCard1[b];
+}
+
+fn table_hand(hand: u32) -> u32 {
+  if (params.hasPerm != 0u) {
+    return comboPerms[params.permId * params.numHands + hand];
+  }
+  return hand;
+}
+
+fn table_value(hero: u32, opp: u32) -> f32 {
+  let idx = table_hand(hero) * params.numHands + table_hand(opp);
+  let word = tablePacked[idx / 2u];
+  let raw = select(word >> 16u, word & 0xffffu, (idx & 1u) == 0u);
+  let signed = select(i32(raw), i32(raw) - 65536, raw >= 32768u);
+  return f32(signed) / params.tableScale;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let total = params.batch * 2u * params.numHands;
+  if (linear >= total) {
+    return;
+  }
+  let hand = linear % params.numHands;
+  let player = (linear / params.numHands) % 2u;
+  let sample = linear / (2u * params.numHands);
+  let node = nodeIndices[sample];
+  let valueIdx = (node * 2u + player) * params.numHands + hand;
+  if (allowedMask[node * params.numHands + hand] == 0u) {
+    values[valueIdx] = 0.0;
+    return;
+  }
+
+  let oppPlayer = 1u - player;
+  let oppBase = (node * 2u + oppPlayer) * params.numHands;
+  var numer = 0.0;
+  var denom = 0.0;
+  for (var opp = 0u; opp < params.numHands; opp = opp + 1u) {
+    let belief = beliefs[oppBase + opp];
+    numer = numer + table_value(hand, opp) * belief;
+    if (
+      allowedMask[node * params.numHands + opp] != 0u &&
+      !overlaps(hand, opp)
+    ) {
+      denom = denom + belief;
+    }
+  }
+  let rawEv = select(0.0, numer / denom, denom > 1.0e-8);
+  values[valueIdx] = rawEv * scaleFactors[sample * 2u + player];
+}
+`;
+
 export interface SparseGpuTreeData {
   nodeCount: number;
   numHands: number;
@@ -850,6 +931,7 @@ export class SparseCfrGpuKernels {
   private readonly gatherNodeBeliefsPipeline: GPUComputePipeline;
   private readonly scatterNodeValuesPipeline: GPUComputePipeline;
   private readonly showdownValuesPipeline: GPUComputePipeline;
+  private readonly allInTableValuesPipeline: GPUComputePipeline;
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -920,6 +1002,10 @@ export class SparseCfrGpuKernels {
     this.showdownValuesPipeline = this.pipeline(
       SPARSE_SHOWDOWN_VALUES_WGSL,
       "sparse-cfr-showdown-values",
+    );
+    this.allInTableValuesPipeline = this.pipeline(
+      SPARSE_ALLIN_TABLE_VALUES_WGSL,
+      "sparse-cfr-allin-table-values",
     );
   }
 
@@ -1450,6 +1536,53 @@ export class SparseCfrGpuKernels {
       this.showdownValuesPipeline,
       bindGroup,
       Math.ceil((batch * 2 * tree.numHands) / 128),
+    );
+    return params;
+  }
+
+  encodeAllInTableValues(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    tablePacked: GPUBuffer,
+    comboPerms: GPUBuffer,
+    scaleFactors: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    batch: number,
+    tableScale: number,
+    permId: number,
+    hasPerm: boolean,
+  ): GPUBuffer {
+    const words = new ArrayBuffer(32);
+    const u32 = new Uint32Array(words);
+    const f32 = new Float32Array(words);
+    u32[0] = tree.numHands;
+    u32[1] = batch;
+    u32[2] = permId;
+    u32[3] = hasPerm ? 1 : 0;
+    f32[4] = tableScale;
+    const params = makeUniformBuffer(this.device, u32);
+    const bindGroup = this.device.createBindGroup({
+      layout: this.allInTableValuesPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices } },
+        { binding: 1, resource: { buffer: tree.allowedMask } },
+        { binding: 2, resource: { buffer: tree.handCard0 } },
+        { binding: 3, resource: { buffer: tree.handCard1 } },
+        { binding: 4, resource: { buffer: tablePacked } },
+        { binding: 5, resource: { buffer: comboPerms } },
+        { binding: 6, resource: { buffer: scaleFactors } },
+        { binding: 7, resource: { buffer: beliefs } },
+        { binding: 8, resource: { buffer: values } },
+        { binding: 9, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.allInTableValuesPipeline,
+      bindGroup,
+      Math.ceil((batch * 2 * tree.numHands) / 64),
     );
     return params;
   }
