@@ -73,6 +73,7 @@ interface PredictOptions {
 }
 
 const BATCH_ROW_BLOCK = 4;
+const DISABLE_BATCH2_VALUE_ENV = "P2_DISABLE_BATCH2_VALUE_512";
 
 export interface ExactBelief {
   player: number;
@@ -2826,6 +2827,16 @@ export class BetterFfnWebGpuModel {
       outputOffset === 0 &&
       !biasPresent &&
       this.matVecBatchExactRowsCols1024Batch2SubgroupPipeline;
+    const useBatch2ValueHead =
+      globalThis.process?.env?.[DISABLE_BATCH2_VALUE_ENV] !== "1" &&
+      rows === 2 * NUM_HANDS &&
+      cols === 512 &&
+      inputStride === 512 &&
+      outputStride === 2 * NUM_HANDS &&
+      inputOffset === 0 &&
+      outputOffset === 0 &&
+      biasPresent &&
+      this.matVecBatchExactRowsCols512Batch2SubgroupPipeline;
     const useSmallCols =
       cols <= 128 &&
       inputOffset === 0 &&
@@ -2835,7 +2846,7 @@ export class BetterFfnWebGpuModel {
       ? this.matVecBatchSmallColsPipeline
       : useBatch3LinearIn
       ? this.matVecBatchExactRowsCols512Batch3SubgroupPipeline!
-      : useBatch2LinearIn
+      : useBatch2LinearIn || useBatch2ValueHead
       ? this.matVecBatchExactRowsCols512Batch2SubgroupPipeline!
       : useHandEmbeddingBatch2
         ? this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline!
@@ -2854,7 +2865,10 @@ export class BetterFfnWebGpuModel {
       useSmallCols ? Math.ceil((rows * batch) / 64) : this.batchRowGroups(rows),
       useBatch3LinearIn
         ? Math.ceil(batch / 3)
-        : useBatch2LinearIn || useHandEmbeddingBatch2 || useBatch2Cols1024
+        : useBatch2LinearIn ||
+            useBatch2ValueHead ||
+            useHandEmbeddingBatch2 ||
+            useBatch2Cols1024
         ? Math.ceil(batch / 2)
         : useSmallCols
           ? 1
