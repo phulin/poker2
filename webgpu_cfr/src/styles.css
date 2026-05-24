@@ -868,6 +868,20 @@ h3 {
   gap: 10px;
 }
 
+.board-entry-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.board-context {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 38px;
+}
+
 .board-text-input {
   width: min(100%, 280px);
   height: 38px;
@@ -879,8 +893,29 @@ h3 {
   font-weight: 700;
 }
 
+.board-entry-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 38px;
+  border: 1px solid #b9c7c0;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #182224;
+  padding: 0 10px;
+  font-weight: 700;
+}
+
+.board-entry-button:hover {
+  border-color: #168575;
+}
+
+.board-entry-button.invalid,
 .board-text-input.invalid {
   border-color: #c75a35;
+  outline: 0;
+  box-shadow: 0 0 0 1px #c75a35;
   background: #fff7f3;
 }
 

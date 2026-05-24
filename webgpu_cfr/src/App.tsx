@@ -1012,21 +1012,28 @@ function BoardEntry(props: {
   disabled: ReadonlySet<string>;
   onTextChange: (cards: string[]) => void;
 }): JSX.Element {
-  const [text, setText] = createSignal(props.cards.slice(0, props.count).filter(Boolean).join(" "));
+  const priorCount = createMemo(() => STREET_CARD_COUNTS[Math.max(0, props.street - 1)] ?? 0);
+  const editCount = createMemo(() => props.count - priorCount());
+  const priorCards = createMemo(() => props.cards.slice(0, priorCount()).filter(Boolean));
+  const editableCards = createMemo(() => props.cards.slice(priorCount(), props.count).filter(Boolean));
+  const [text, setText] = createSignal(editableCards().join(" "));
   const [error, setError] = createSignal("");
+  const [editing, setEditing] = createSignal(false);
   const [pickerOpen, setPickerOpen] = createSignal(false);
   const [focusedKey, setFocusedKey] = createSignal("");
   let inputRef: HTMLInputElement | undefined;
 
   createEffect(() => {
-    setText(props.cards.slice(0, props.count).filter(Boolean).join(" "));
+    setText(editableCards().join(" "));
   });
 
   createEffect(() => {
     const key = `${props.street}:${props.count}`;
-    const needsBoard = props.count > 0 && props.cards.slice(0, props.count).some((card) => !card);
+    const needsBoard =
+      editCount() > 0 && props.cards.slice(priorCount(), props.count).some((card) => !card);
     if (!needsBoard || focusedKey() === key) return;
     setFocusedKey(key);
+    setEditing(true);
     queueMicrotask(() => {
       inputRef?.focus();
       inputRef?.select();
@@ -1036,7 +1043,7 @@ function BoardEntry(props: {
 
   const enteredCards = createMemo(() => {
     try {
-      return parseBoardCardsText(text()).slice(0, props.count);
+      return parseBoardCardsText(text()).slice(0, editCount());
     } catch {
       return [];
     }
@@ -1053,25 +1060,37 @@ function BoardEntry(props: {
   function commitText(): void {
     try {
       const parsed = parseBoardCardsText(text());
-      if (parsed.length !== props.count) {
-        throw new Error(`Enter ${props.count} board cards`);
+      if (parsed.length !== editCount()) {
+        throw new Error(`Enter ${editCount()} board card${editCount() === 1 ? "" : "s"}`);
       }
-      props.onTextChange(parsed);
+      props.onTextChange([...props.cards.slice(0, priorCount()), ...parsed]);
       setText(parsed.join(" "));
       setError("");
+      setEditing(false);
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
     }
   }
 
+  function editBoard(): void {
+    setEditing(true);
+    queueMicrotask(() => {
+      inputRef?.focus();
+      inputRef?.select();
+      setPickerOpen(true);
+    });
+  }
+
   function selectCard(card: string): void {
     const current = enteredCards();
-    if (current.length >= props.count || blockedCards().has(card)) return;
+    if (current.length >= editCount() || blockedCards().has(card)) return;
     const next = [...current, card];
     setText(next.join(" "));
     setError("");
-    if (next.length === props.count) {
-      props.onTextChange(next);
+    if (next.length === editCount()) {
+      props.onTextChange([...props.cards.slice(0, priorCount()), ...next]);
+      setEditing(false);
+      setPickerOpen(false);
     }
   }
 
@@ -1079,30 +1098,59 @@ function BoardEntry(props: {
     <div class="board-entry-row">
       <span class="street-marker">{STREET_NAMES[props.street]}</span>
       <div class="board-entry">
-        <input
-          ref={inputRef}
-          class={`board-text-input ${error() ? "invalid" : ""}`}
-          value={text()}
-          placeholder={props.count === 3 ? "As Kd Qh" : "As Kd Qh Js"}
-          onInput={(event) => {
-            setText(event.currentTarget.value);
-            setError("");
-          }}
-          onFocus={() => setPickerOpen(true)}
-          onClick={() => setPickerOpen(true)}
-          onBlur={() => {
-            commitText();
-            setPickerOpen(false);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              commitText();
-              event.currentTarget.blur();
+        <div class="board-entry-main">
+          <Show when={priorCards().length > 0}>
+            <div class="board-context">
+              <For each={priorCards()}>{(card) => <CardChip value={card} />}</For>
+            </div>
+          </Show>
+          <Show
+            when={editing()}
+            fallback={
+              <button
+                type="button"
+                class={`board-entry-button ${error() ? "invalid" : ""}`}
+                onClick={editBoard}
+              >
+                <Show
+                  when={editableCards().length > 0}
+                  fallback={<span class="exact-hand-raw">{text() || (editCount() === 3 ? "As Kd Qh" : "Js")}</span>}
+                >
+                  <For each={editableCards()}>{(card) => <CardChip value={card} />}</For>
+                </Show>
+              </button>
             }
-          }}
-        />
-        <Show when={pickerOpen()}>
+          >
+            <input
+              ref={inputRef}
+              class={`board-text-input ${error() ? "invalid" : ""}`}
+              value={text()}
+              placeholder={editCount() === 3 ? "As Kd Qh" : "Js"}
+              onInput={(event) => {
+                setText(event.currentTarget.value);
+                setError("");
+              }}
+              onFocus={() => setPickerOpen(true)}
+              onClick={() => setPickerOpen(true)}
+              onBlur={() => {
+                commitText();
+                setPickerOpen(false);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitText();
+                  event.currentTarget.blur();
+                }
+                if (event.key === "Escape") {
+                  setEditing(false);
+                  setPickerOpen(false);
+                }
+              }}
+            />
+          </Show>
+        </div>
+        <Show when={editing() && pickerOpen()}>
           <div
             class="board-card-picker"
             onMouseDown={(event) => event.preventDefault()}
