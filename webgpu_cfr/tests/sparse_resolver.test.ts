@@ -11,6 +11,8 @@ import { DEFAULT_FORCE_DECK, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js"
 import { SparseCfrResolver } from "../src/sparseResolver.js";
 import { ALL_IN_I16_SCALE, type AllInTableProvider } from "../src/allInTables.js";
 import { HAND_COMBOS } from "../src/cards.js";
+import { BrowserCfrEvaluator } from "../src/browserEvaluator.js";
+import type { SolveProgress } from "../src/types.js";
 
 interface FakeModelCounters {
   singleLeafCalls: number;
@@ -28,7 +30,17 @@ function fakeModel(
     ...(allInTableProvider ? { allInTableProvider } : {}),
     manifest: {
       architecture: { numActions },
+      env: {
+        stack: 20,
+        sb: 1,
+        bb: 2,
+        betBins: [0.5],
+        flopShowdown: false,
+        defaultButton: 1,
+        defaultForceDeck: DEFAULT_FORCE_DECK,
+      },
     },
+    actionLabels: Array.from({ length: numActions }, (_, index) => String(index)),
     async predict(): Promise<BetterFfnPrediction> {
       return {
         handValues: new Float32Array(2 * NUM_HANDS),
@@ -126,6 +138,70 @@ test("sparse resolver supports depth greater than one", async () => {
     }
     assert.ok(Math.abs(beliefMass - 1) < 1e-5, `belief mass ${beliefMass}`);
   }
+});
+
+test("sparse resolver reports progress once per CFR iteration", async () => {
+  const betBins = [0.5];
+  const numActions = betBins.length + 3;
+  const env = new PublicHunlEnv({
+    stack: 20,
+    sb: 1,
+    bb: 2,
+    betBins,
+    button: 1,
+    forceDeck: DEFAULT_FORCE_DECK,
+  });
+  const resolver = new SparseCfrResolver(fakeModel(numActions));
+  const progress: number[] = [];
+
+  await resolver.solve(env, uniformBeliefs(), {
+    depth: 3,
+    iterations: 4,
+    readPolicy: false,
+    readActionProbs: false,
+    onProgress: ({ iteration, iterations }) => {
+      assert.equal(iterations, 4);
+      progress.push(iteration);
+    },
+  });
+
+  assert.deepEqual(progress, [1, 2, 3, 4]);
+});
+
+test("browser evaluator aggregates sparse progress across prefix and final solves", async () => {
+  const betBins = [0.5];
+  const numActions = betBins.length + 3;
+  const evaluator = new BrowserCfrEvaluator(
+    undefined as unknown as GPUDevice,
+    fakeModel(numActions),
+  );
+  const progress: SolveProgress[] = [];
+
+  await evaluator.evaluateSpot({
+    spot: [3, 1],
+    iterations: 3,
+    depth: 3,
+    initialState: {
+      stack: 20,
+      sb: 1,
+      bb: 2,
+      betBins,
+      button: 1,
+      forceDeck: DEFAULT_FORCE_DECK,
+      flopShowdown: false,
+    },
+    onProgress: (event) => progress.push(event),
+  });
+
+  assert.equal(progress.length, 9);
+  assert.equal(progress[0]?.completedIterations, 1);
+  assert.equal(progress[0]?.totalIterations, 9);
+  assert.equal(progress[0]?.phase, "prefix");
+  assert.equal(progress[3]?.solveIndex, 1);
+  assert.equal(progress[3]?.completedIterations, 4);
+  assert.equal(progress.at(-1)?.phase, "final");
+  assert.equal(progress.at(-1)?.completedIterations, 9);
+  assert.equal(progress.at(-1)?.percent, 100);
 });
 
 test("sparse resolver can route CFR tensor operations through WGSL kernels", async () => {

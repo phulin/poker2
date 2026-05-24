@@ -1008,6 +1008,11 @@ h3 {
   margin-top: 16px;
 }
 
+.solve-progress-track {
+  margin-top: 10px;
+  margin-bottom: 0;
+}
+
 .icon-button {
   display: inline-grid;
   place-items: center;

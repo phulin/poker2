@@ -97,6 +97,11 @@ interface SparseInitialState {
   beliefs: Float32Array;
 }
 
+export interface SparseResolveProgress {
+  iteration: number;
+  iterations: number;
+}
+
 export interface SparseResolveOptions {
   depth: number;
   iterations: number;
@@ -105,6 +110,7 @@ export interface SparseResolveOptions {
   readPolicy?: boolean;
   readActionProbs?: boolean;
   readBeliefs?: boolean;
+  onProgress?: (progress: SparseResolveProgress) => void;
 }
 
 export class SparseCfrResolver {
@@ -210,6 +216,10 @@ export class SparseCfrResolver {
           allInContext,
         );
         values = this.computeExpectedValues(tree, policy, beliefs, latestValues);
+        options.onProgress?.({
+          iteration: t + 1,
+          iterations: options.iterations,
+        });
       }
     } else {
       await this.solveIterationsGpuResident(
@@ -229,6 +239,7 @@ export class SparseCfrResolver {
           (options.readActionProbs ?? true) ||
           (options.selectedAction !== undefined && (options.readBeliefs ?? true)),
         exactBelief,
+        options.onProgress,
       );
     }
 
@@ -615,6 +626,7 @@ export class SparseCfrResolver {
     cfrAvg: boolean,
     readPolicyAvg: boolean,
     exactBelief?: ExactBelief,
+    onProgress?: (progress: SparseResolveProgress) => void,
   ): Promise<void> {
     if (!this.gpuKernels) {
       throw new Error("GPU sparse kernels are not initialized");
@@ -760,6 +772,7 @@ export class SparseCfrResolver {
             );
           });
         }
+        onProgress?.({ iteration: t + 1, iterations });
       }
       if (profile) {
         const stats = Array.from(phaseTotals.entries()).map(([label, total]) => ({

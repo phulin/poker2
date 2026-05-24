@@ -172,6 +172,17 @@ export interface BrowserCfrInitialState {
   flopShowdown?: boolean;
 }
 
+export interface SolveProgress {
+  completedIterations: number;
+  totalIterations: number;
+  percent: number;
+  phase: "prefix" | "final";
+  solveIndex: number;
+  solveCount: number;
+  iteration: number;
+  iterations: number;
+}
+
 export interface EvaluateSpotRequest {
   spot: number[];
   iterations?: number;
@@ -185,6 +196,7 @@ export interface EvaluateSpotRequest {
   readPolicy?: boolean;
   readActionProbs?: boolean;
   readBeliefs?: boolean;
+  onProgress?: (progress: SolveProgress) => void;
 }
 
 export interface BrowserEvaluationResult extends EvaluationResult {

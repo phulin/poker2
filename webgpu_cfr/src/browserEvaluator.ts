@@ -1,4 +1,4 @@
-import { SparseCfrResolver } from "./sparseResolver.js";
+import { SparseCfrResolver, type SparseResolveOptions } from "./sparseResolver.js";
 import {
   initialUniformBeliefs,
   PublicHunlEnv,
@@ -9,6 +9,7 @@ import type { BetterFfnWebGpuModel } from "./betterFfnWebGpuModel.js";
 import type {
   BrowserEvaluationResult,
   EvaluateSpotRequest,
+  SolveProgress,
 } from "./types.js";
 
 export class BrowserCfrEvaluator {
@@ -67,7 +68,28 @@ export class BrowserCfrEvaluator {
     env.configureKnownCards(knownCards);
 
     let beliefs = this.initialBeliefs(request);
-    for (const action of request.spot) {
+    const solveCount = request.spot.length + 1;
+    const totalIterations = solveCount * iterations;
+    const emitProgress = (
+      solveIndex: number,
+      phase: SolveProgress["phase"],
+      iteration: number,
+    ): void => {
+      const completedIterations = solveIndex * iterations + iteration;
+      request.onProgress?.({
+        completedIterations,
+        totalIterations,
+        percent: Math.min(100, (completedIterations / totalIterations) * 100),
+        phase,
+        solveIndex,
+        solveCount,
+        iteration,
+        iterations,
+      });
+    };
+
+    for (let solveIndex = 0; solveIndex < request.spot.length; solveIndex += 1) {
+      const action = request.spot[solveIndex]!;
       this.assertAction(action, numActions);
       this.assertLegalAction(env, action);
       const solved = await this.sparseCfr.solve(env, beliefs, {
@@ -78,6 +100,7 @@ export class BrowserCfrEvaluator {
         readPolicy: false,
         readActionProbs: false,
         readBeliefs: true,
+        onProgress: ({ iteration }) => emitProgress(solveIndex, "prefix", iteration),
       });
       if (!solved.beliefsAfter) {
         throw new Error("internal error: sparse prefix solve did not produce beliefs");
@@ -86,16 +109,12 @@ export class BrowserCfrEvaluator {
       beliefs = solved.beliefsAfter;
     }
 
-    const finalOptions: {
-      depth: number;
-      iterations: number;
-      cfrAvg: boolean;
-      readPolicy?: boolean;
-      readActionProbs?: boolean;
-    } = {
+    const finalSolveIndex = request.spot.length;
+    const finalOptions: SparseResolveOptions = {
       depth,
       iterations,
       cfrAvg,
+      onProgress: ({ iteration }) => emitProgress(finalSolveIndex, "final", iteration),
     };
     if (request.readPolicy !== undefined) finalOptions.readPolicy = request.readPolicy;
     if (request.readActionProbs !== undefined) {

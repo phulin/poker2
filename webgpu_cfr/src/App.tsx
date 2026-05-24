@@ -24,6 +24,7 @@ import type {
   BetterFfnManifest,
   BrowserEvaluationResult,
   PlayerIndex,
+  SolveProgress,
 } from "./types.js";
 
 const MODEL_MANIFEST_URL = "/models/rebel_latest/model.json";
@@ -1209,9 +1210,18 @@ function App(): JSX.Element {
   const [solveStatus, setSolveStatus] = createSignal("");
   const [solveError, setSolveError] = createSignal("");
   const [solveResult, setSolveResult] = createSignal<SolveResult>();
+  const [isSolving, setIsSolving] = createSignal(false);
+  const [solveProgress, setSolveProgress] = createSignal<number | undefined>();
   const [hashHydrated, setHashHydrated] = createSignal(false);
   let applyingHash = false;
   let lastWrittenHash = "";
+
+  function clearSolveOutput(): void {
+    setSolveResult(undefined);
+    setSolveProgress(undefined);
+    setSolveStatus("");
+    setSolveError("");
+  }
 
   function applyHashFromLocation(): void {
     applyingHash = true;
@@ -1224,7 +1234,7 @@ function App(): JSX.Element {
       }
       setBoardCards(input.boardCards);
       setActions(actionsFromHash(input.actions));
-      setSolveResult(undefined);
+      clearSolveOutput();
       setSolveError("");
       setSolveStatus("");
     } catch (error) {
@@ -1493,7 +1503,7 @@ function App(): JSX.Element {
     } catch {
       // Keep the previously selected range visible while the user is typing.
     }
-    setSolveResult(undefined);
+    clearSolveOutput();
   }
 
   function normalizeHeroHandText(): void {
@@ -1509,7 +1519,7 @@ function App(): JSX.Element {
   function selectHeroCombo(cards: HeroCards): void {
     setHeroHandText(`${cards[0]} ${cards[1]}`);
     setSelectedRangeKey(rangeKeyFromCards(cards));
-    setSolveResult(undefined);
+    clearSolveOutput();
   }
 
   function updateBoardCards(values: readonly string[]): void {
@@ -1520,22 +1530,22 @@ function App(): JSX.Element {
       }
       return next;
     });
-    setSolveResult(undefined);
+    clearSolveOutput();
   }
 
   function setActionAt(index: number, action: number): void {
     setActions((current) => current.map((value, i) => (i === index ? action : value)));
-    setSolveResult(undefined);
+    clearSolveOutput();
   }
 
   function removeAction(index: number): void {
     setActions((current) => current.filter((_, i) => i !== index));
-    setSolveResult(undefined);
+    clearSolveOutput();
   }
 
   function addAction(action: number): void {
     setActions((current) => [...current, action]);
-    setSolveResult(undefined);
+    clearSolveOutput();
   }
 
   async function solve(): Promise<void> {
@@ -1549,7 +1559,9 @@ function App(): JSX.Element {
       const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 16)));
       const solveDepth = Math.max(2, Math.trunc(positiveNumber(depth(), 6)));
       const solveCfrAvg = false;
-      setSolveStatus(`Solving depth ${solveDepth} for ${solveIterations} CFR iterations`);
+      setIsSolving(true);
+      setSolveProgress(0);
+      setSolveStatus(`Solving depth ${solveDepth}, 0%`);
       setSolveResult(undefined);
       const started = performance.now();
       const result = await current.evaluator.evaluateSpot({
@@ -1573,6 +1585,10 @@ function App(): JSX.Element {
           heroHand: cards.heroHand,
           publicCards: cards.publicCards,
         }),
+        onProgress: (progress: SolveProgress) => {
+          setSolveProgress(progress.percent);
+          setSolveStatus(`Solving depth ${solveDepth}, ${Math.floor(progress.percent)}%`);
+        },
       });
       const elapsedMs = performance.now() - started;
       const heroHandIndex = handComboIndex(cards.heroHand[0], cards.heroHand[1]);
@@ -1585,10 +1601,14 @@ function App(): JSX.Element {
         heroHandIndex,
         villainSummary: summarizeVillainRange(result.beliefsAtSpot, HERO_PLAYER),
       });
+      setSolveProgress(100);
       setSolveStatus("Solve complete");
     } catch (error) {
       setSolveError(error instanceof Error ? error.message : String(error));
       setSolveStatus("");
+      setSolveProgress(undefined);
+    } finally {
+      setIsSolving(false);
     }
   }
 
@@ -1677,7 +1697,7 @@ function App(): JSX.Element {
               title="Reset actions"
               onClick={() => {
                 setActions([]);
-                setSolveResult(undefined);
+                clearSolveOutput();
               }}
             >
               <RotateCcw size={16} />
@@ -1694,7 +1714,7 @@ function App(): JSX.Element {
                   onChange={(event) => {
                     setButton(asPlayer(event.currentTarget.value));
                     setActions([]);
-                    setSolveResult(undefined);
+                    clearSolveOutput();
                   }}
                 >
                   <option value="0">Hero</option>
@@ -1705,15 +1725,36 @@ function App(): JSX.Element {
             <div class="grid three">
               <label class="field">
                 <span>Stack</span>
-                <input value={stack()} inputmode="decimal" onInput={(event) => setStack(event.currentTarget.value)} />
+                <input
+                  value={stack()}
+                  inputmode="decimal"
+                  onInput={(event) => {
+                    setStack(event.currentTarget.value);
+                    clearSolveOutput();
+                  }}
+                />
               </label>
               <label class="field">
                 <span>Small blind</span>
-                <input value={sb()} inputmode="decimal" onInput={(event) => setSb(event.currentTarget.value)} />
+                <input
+                  value={sb()}
+                  inputmode="decimal"
+                  onInput={(event) => {
+                    setSb(event.currentTarget.value);
+                    clearSolveOutput();
+                  }}
+                />
               </label>
               <label class="field">
                 <span>Big blind</span>
-                <input value={bb()} inputmode="decimal" onInput={(event) => setBb(event.currentTarget.value)} />
+                <input
+                  value={bb()}
+                  inputmode="decimal"
+                  onInput={(event) => {
+                    setBb(event.currentTarget.value);
+                    clearSolveOutput();
+                  }}
+                />
               </label>
             </div>
           </div>
@@ -1732,7 +1773,7 @@ function App(): JSX.Element {
               onNormalizeText={normalizeHeroHandText}
               onRangeChange={(rangeKey) => {
                 setSelectedRangeKey(rangeKey);
-                setSolveResult(undefined);
+                clearSolveOutput();
               }}
               onComboChange={selectHeroCombo}
             />
@@ -1747,7 +1788,7 @@ function App(): JSX.Element {
                   class="link-button"
                   onClick={() => {
                     setActions(actions().slice(0, -1));
-                    setSolveResult(undefined);
+                    clearSolveOutput();
                   }}
                 >
                   Undo last
@@ -1833,7 +1874,7 @@ function App(): JSX.Element {
                 min={1}
                 onChange={(value) => {
                   setIterations(value);
-                  setSolveResult(undefined);
+                  clearSolveOutput();
                 }}
               />
             </div>
@@ -1845,7 +1886,7 @@ function App(): JSX.Element {
                 min={2}
                 onChange={(value) => {
                   setDepth(value);
-                  setSolveResult(undefined);
+                  clearSolveOutput();
                 }}
               />
             </div>
@@ -1855,12 +1896,17 @@ function App(): JSX.Element {
             <button
               type="button"
               class="solve-button"
-              disabled={!runtime() || Boolean(solveInputError())}
+              disabled={isSolving() || !runtime() || Boolean(solveInputError())}
               onClick={() => void solve()}
             >
               <Play size={18} />
-              <span>Solve Spot</span>
+              <span>{isSolving() ? `Solving ${Math.floor(solveProgress() ?? 0)}%` : "Solve Spot"}</span>
             </button>
+            <Show when={solveProgress() !== undefined}>
+              <div class="progress-track solve-progress-track" aria-label="Solve progress">
+                <div style={{ width: `${solveProgress() ?? 0}%` }} />
+              </div>
+            </Show>
           </div>
         </form>
 
