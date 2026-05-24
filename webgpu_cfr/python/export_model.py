@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -80,12 +81,19 @@ def _validate_supported(cfg: Config) -> None:
         raise ValueError("num_actions must equal len(env.bet_bins) + 3")
 
 
-def _tensor_bytes(tensor: torch.Tensor) -> bytes:
+def _tensor_bytes(tensor: torch.Tensor, storage_dtype: str) -> bytes:
     if not tensor.dtype.is_floating_point:
         raise ValueError(f"cannot export non-floating tensor with dtype {tensor.dtype}")
-    arr = tensor.detach().cpu().to(torch.float32).contiguous().numpy()
-    if arr.dtype.byteorder not in ("<", "="):
-        arr = arr.astype("<f4", copy=False)
+    if storage_dtype == "float16":
+        arr = tensor.detach().cpu().to(torch.float16).contiguous().numpy()
+        if arr.dtype.byteorder not in ("<", "="):
+            arr = arr.astype("<f2", copy=False)
+    elif storage_dtype == "float32":
+        arr = tensor.detach().cpu().to(torch.float32).contiguous().numpy()
+        if arr.dtype.byteorder not in ("<", "="):
+            arr = arr.astype("<f4", copy=False)
+    else:
+        raise ValueError(f"unsupported storage dtype {storage_dtype!r}")
     return arr.tobytes(order="C")
 
 
@@ -143,7 +151,11 @@ def _scheduled_cfr_config(cfg: Config, step: int | None) -> dict[str, Any]:
 
 
 def export_model(
-    snapshot: Path, out: Path, weights_name: str = "weights.bin"
+    snapshot: Path,
+    out: Path,
+    weights_name: str = "weights.bin.gz",
+    storage_dtype: str = "float16",
+    compression: str = "gzip",
 ) -> dict[str, Any]:
     cfg, state, step = _load_checkpoint(snapshot)
     _validate_supported(cfg)
@@ -153,25 +165,41 @@ def export_model(
     tensors: list[dict[str, Any]] = []
     offset = 0
     weights_hash = hashlib.sha256()
+    raw_weights = bytearray()
+
+    for name, tensor in state.items():
+        clean_name = name.removeprefix("_orig_mod.")
+        data = _tensor_bytes(tensor, storage_dtype)
+        tensor_hash = hashlib.sha256(data).hexdigest()
+        raw_weights.extend(data)
+        weights_hash.update(data)
+        tensors.append(
+            {
+                "name": clean_name,
+                "shape": list(tensor.shape),
+                "dtype": storage_dtype,
+                "byteOffset": offset,
+                "byteLength": len(data),
+                "sha256": tensor_hash,
+            }
+        )
+        offset += len(data)
+
+    if compression == "gzip":
+        payload = gzip.compress(bytes(raw_weights), compresslevel=9, mtime=0)
+        compression_manifest: dict[str, Any] | None = {
+            "format": "gzip",
+            "byteLength": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+    elif compression == "none":
+        payload = bytes(raw_weights)
+        compression_manifest = None
+    else:
+        raise ValueError(f"unsupported compression {compression!r}")
 
     with weights_path.open("wb") as fh:
-        for name, tensor in state.items():
-            clean_name = name.removeprefix("_orig_mod.")
-            data = _tensor_bytes(tensor)
-            tensor_hash = hashlib.sha256(data).hexdigest()
-            fh.write(data)
-            weights_hash.update(data)
-            tensors.append(
-                {
-                    "name": clean_name,
-                    "shape": list(tensor.shape),
-                    "dtype": "float32",
-                    "byteOffset": offset,
-                    "byteLength": len(data),
-                    "sha256": tensor_hash,
-                }
-            )
-            offset += len(data)
+        fh.write(payload)
 
     split_policy_value = any(name.startswith("policy_model.") for name in state)
     context_dim = int(state["context_encoder.norm.weight"].shape[0])
@@ -221,8 +249,11 @@ def export_model(
             "file": weights_name,
             "byteLength": offset,
             "sha256": weights_hash.hexdigest(),
+            "storageDtype": storage_dtype,
         },
     }
+    if compression_manifest is not None:
+        manifest["weights"]["compression"] = compression_manifest
     (out / "model.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
 
@@ -231,10 +262,22 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--weights-name", default="weights.bin")
+    parser.add_argument("--weights-name", default="weights.bin.gz")
+    parser.add_argument(
+        "--storage-dtype",
+        choices=("float16", "float32"),
+        default="float16",
+    )
+    parser.add_argument("--compression", choices=("gzip", "none"), default="gzip")
     args = parser.parse_args()
 
-    manifest = export_model(args.snapshot, args.out, args.weights_name)
+    manifest = export_model(
+        args.snapshot,
+        args.out,
+        args.weights_name,
+        args.storage_dtype,
+        args.compression,
+    )
     print(
         json.dumps(
             {

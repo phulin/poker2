@@ -4,7 +4,8 @@ This folder contains an isolated TypeScript/WebGPU harness for evaluating a
 BetterFFN-backed local CFR problem. It supports two paths:
 
 - A Node/Dawn parity path that can still ask Python to produce CFR fixtures.
-- A browser-safe exported-model path that loads `model.json` and `weights.bin`,
+- A browser-safe exported-model path that loads `model.json` and compressed
+  fp16 `weights.bin.gz`,
   builds child values with BetterFFN inference in WebGPU, and runs CFR without
   Python at runtime.
 - A Vite/Solid spot-solver UI that caches the exported model in IndexedDB,
@@ -13,7 +14,7 @@ BetterFFN-backed local CFR problem. It supports two paths:
 ## Shape
 
 - `python/export_model.py` converts a PyTorch `BetterFFN` checkpoint into
-  `model.json` plus row-major float32 `weights.bin`.
+  `model.json` plus gzip-compressed row-major fp16 `weights.bin.gz`.
 - `python/reference.py` loads a PyTorch `BetterFFN` checkpoint, replays a
   heads-up action-bin sequence, emits model-derived local CFR fixtures, and
   computes the Python reference result.
@@ -69,7 +70,7 @@ This writes:
 
 ```text
 webgpu_cfr/public/models/rebel_latest/model.json
-webgpu_cfr/public/models/rebel_latest/weights.bin
+webgpu_cfr/public/models/rebel_latest/weights.bin.gz
 ```
 
 For custom snapshots or output paths, call the exporter directly from the repo
@@ -82,13 +83,13 @@ uv run python webgpu_cfr/python/export_model.py --snapshot checkpoints-rebel/reb
 Run the exported-model evaluator directly:
 
 ```bash
-npm run eval -- --manifest public/models/rebel_latest/model.json --weights public/models/rebel_latest/weights.bin --spot 1
+npm run eval -- --manifest public/models/rebel_latest/model.json --spot 1
 ```
 
 Benchmark the exported-model evaluator on Node/Dawn:
 
 ```bash
-npm run bench -- --manifest public/models/rebel_latest/model.json --weights public/models/rebel_latest/weights.bin --spot 1 --warmups 1 --runs 5
+npm run bench -- --manifest public/models/rebel_latest/model.json --spot 1 --warmups 1 --runs 5
 ```
 
 Exported manifests include the checkpoint `search:` CFR configuration. The
@@ -107,8 +108,9 @@ npm run eval -- --snapshot checkpoints-rebel/rebel_latest.pt --spot 1 --iteratio
 For the browser spot solver, export the model into
 `webgpu_cfr/public/models/rebel_latest` and run `npm run dev` or
 `npm run build && npm run preview`. The app loads `/models/rebel_latest/model.json`
-and `/models/rebel_latest/weights.bin`, caching the weights in IndexedDB until the
-manifest weight hash or byte length changes.
+and the manifest-referenced `/models/rebel_latest/weights.bin.gz`, decompressing
+and caching the decoded weights in IndexedDB until the manifest weight hash or
+byte length changes.
 
 The same build/export flow also enables `webgpu_cfr/public/benchmark.html`,
 which times repeated browser evaluations with configurable spots, CFR settings,

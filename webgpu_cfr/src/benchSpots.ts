@@ -1,5 +1,4 @@
 import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { BrowserCfrEvaluator } from "./browserEvaluator.js";
 import { createDawnDevice } from "./gpu.js";
@@ -92,15 +91,12 @@ function stats(samples: number[]): {
 }
 
 const options = readOptions();
-const weightsPath =
-  options.weights ?? resolve(dirname(options.manifest), "weights.bin");
-
 const spots: BenchSpot[] = JSON.parse(
   await readFile(options.spotsFile, "utf8"),
 );
 
 const device = await createDawnDevice();
-const model = await loadNodeModel(device, options.manifest, weightsPath);
+const model = await loadNodeModel(device, options.manifest, options.weights);
 const evaluator = new BrowserCfrEvaluator(device, model);
 const cfrDefaults = resolveCfrDefaults(model.manifest);
 const iterations = options.iterations ?? cfrDefaults.iterations;

@@ -1,4 +1,3 @@
-import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { BrowserCfrEvaluator } from "./browserEvaluator.js";
 import { createDawnDevice } from "./gpu.js";
@@ -90,10 +89,8 @@ function stats(samples: number[]): {
 }
 
 const options = readArgs();
-const weightsPath =
-  options.weights ?? resolve(dirname(options.manifest), "weights.bin");
 const device = await createDawnDevice();
-const model = await loadNodeModel(device, options.manifest, weightsPath);
+const model = await loadNodeModel(device, options.manifest, options.weights);
 const evaluator = new BrowserCfrEvaluator(device, model);
 const cfrDefaults = resolveCfrDefaults(model.manifest);
 const iterations = options.iterations ?? cfrDefaults.iterations;

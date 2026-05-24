@@ -1,4 +1,3 @@
-import { dirname, resolve } from "node:path";
 import { createDawnDevice } from "./gpu.js";
 import { BrowserCfrEvaluator } from "./browserEvaluator.js";
 import { evaluateFixture } from "./evaluator.js";
@@ -51,9 +50,7 @@ let output: unknown;
 try {
   if (options.manifest) {
     const manifestPath = options.manifest;
-    const weightsPath =
-      options.weights ?? resolve(dirname(manifestPath), "weights.bin");
-    const model = await loadNodeModel(device, manifestPath, weightsPath);
+    const model = await loadNodeModel(device, manifestPath, options.weights);
     const evaluator = new BrowserCfrEvaluator(device, model);
     try {
       const cfrDefaults = resolveCfrDefaults(model.manifest);

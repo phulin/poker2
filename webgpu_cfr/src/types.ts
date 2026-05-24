@@ -42,7 +42,7 @@ export interface EvaluationResult {
 export interface BetterFfnTensorManifest {
   name: string;
   shape: number[];
-  dtype: "float32";
+  dtype: "float16" | "float32";
   byteOffset: number;
   byteLength: number;
   sha256: string;
@@ -123,6 +123,12 @@ export interface BetterFfnManifest {
     file: string;
     byteLength: number;
     sha256: string;
+    storageDtype?: "float16" | "float32";
+    compression?: {
+      format: "gzip";
+      byteLength: number;
+      sha256: string;
+    };
   };
 }
 

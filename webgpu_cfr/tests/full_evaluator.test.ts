@@ -69,7 +69,7 @@ function exportModel(t: TestContext): { manifest: string; weights: string } | un
   }
   cachedExport = {
     manifest: join(out, "model.json"),
-    weights: join(out, "weights.bin"),
+    weights: join(out, "weights.bin.gz"),
   };
   return cachedExport;
 }

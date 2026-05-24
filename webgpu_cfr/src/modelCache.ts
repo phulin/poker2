@@ -108,9 +108,11 @@ async function fetchWeights(
     throw new Error(`failed to fetch ${weightsUrl}: ${response.status}`);
   }
   const contentLength = Number.parseInt(response.headers.get("Content-Length") ?? "", 10);
+  const expectedDownloadBytes =
+    manifest.weights.compression?.byteLength ?? manifest.weights.byteLength;
   const totalBytes = Number.isFinite(contentLength)
     ? contentLength
-    : manifest.weights.byteLength;
+    : expectedDownloadBytes;
 
   if (!response.body) {
     onProgress?.({
@@ -119,8 +121,7 @@ async function fetchWeights(
       totalBytes,
     });
     const buffer = await response.arrayBuffer();
-    assertWeightsLength(buffer, manifest);
-    return buffer;
+    return await decodeModelWeights(buffer, manifest);
   }
 
   const reader = response.body.getReader();
@@ -152,17 +153,41 @@ async function fetchWeights(
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  assertWeightsLength(bytes.buffer, manifest);
-  return bytes.buffer;
+  return await decodeModelWeights(bytes.buffer, manifest);
+}
+
+export async function decodeModelWeights(
+  payload: ArrayBuffer,
+  manifest: BetterFfnManifest,
+): Promise<ArrayBuffer> {
+  const compression = manifest.weights.compression;
+  if (!compression) {
+    assertWeightsLength(payload, manifest.weights.byteLength, "weights.bin");
+    return payload;
+  }
+  assertWeightsLength(payload, compression.byteLength, manifest.weights.file);
+  if (compression.format !== "gzip") {
+    throw new Error(`unsupported weights compression ${compression.format}`);
+  }
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("this browser does not support DecompressionStream for gzip weights");
+  }
+  const stream = new Blob([payload]).stream().pipeThrough(
+    new DecompressionStream("gzip"),
+  );
+  const decoded = await new Response(stream).arrayBuffer();
+  assertWeightsLength(decoded, manifest.weights.byteLength, "decoded weights");
+  return decoded;
 }
 
 function assertWeightsLength(
   weights: ArrayBuffer,
-  manifest: BetterFfnManifest,
+  expectedBytes: number,
+  label: string,
 ): void {
-  if (weights.byteLength !== manifest.weights.byteLength) {
+  if (weights.byteLength !== expectedBytes) {
     throw new Error(
-      `weights.bin has ${weights.byteLength} bytes, expected ${manifest.weights.byteLength}`,
+      `${label} has ${weights.byteLength} bytes, expected ${expectedBytes}`,
     );
   }
 }

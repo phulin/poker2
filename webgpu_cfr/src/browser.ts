@@ -4,7 +4,11 @@ import {
   createBrowserCfrEvaluator,
 } from "./browserEvaluator.js";
 import { parseBetterFfnManifest } from "./modelFormat.js";
-import { loadModelBytesWithCache, type ModelCacheProgress } from "./modelCache.js";
+import {
+  decodeModelWeights,
+  loadModelBytesWithCache,
+  type ModelCacheProgress,
+} from "./modelCache.js";
 import type { BetterFfnManifest } from "./types.js";
 
 function currentOrigin(): string {
@@ -76,7 +80,10 @@ export async function loadBrowserModel(
     throw new Error(`failed to fetch ${weightsUrl}: ${weightsResponse.status}`);
   }
   const manifest = parseBetterFfnManifest(await manifestResponse.json());
-  const weights = await weightsResponse.arrayBuffer();
+  const weights = await decodeModelWeights(
+    await weightsResponse.arrayBuffer(),
+    manifest,
+  );
   return BetterFfnWebGpuModel.fromBuffers(
     device ?? (await createBrowserDevice()),
     manifest,

@@ -27,6 +27,51 @@ function optionalNumber(value: unknown, label: string): void {
   }
 }
 
+function expectedWeightsByteLength(manifest: BetterFfnManifest): number {
+  return manifest.tensors.reduce(
+    (max, tensor) => Math.max(max, tensor.byteOffset + tensor.byteLength),
+    0,
+  );
+}
+
+function float16ToFloat32(value: number): number {
+  const sign = (value & 0x8000) ? -1 : 1;
+  const exponent = (value >> 10) & 0x1f;
+  const fraction = value & 0x03ff;
+  if (exponent === 0) {
+    return sign * (fraction === 0 ? 0 : 2 ** -14 * (fraction / 1024));
+  }
+  if (exponent === 0x1f) {
+    return fraction === 0 ? sign * Infinity : NaN;
+  }
+  return sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
+}
+
+function tensorDataFromWeights(
+  tensor: BetterFfnTensorManifest,
+  weights: ArrayBuffer,
+  expectedElements: number,
+): Float32Array<ArrayBuffer> | Float32Array<ArrayBufferLike> {
+  if (tensor.dtype === "float32") {
+    if (tensor.byteOffset % Float32Array.BYTES_PER_ELEMENT !== 0) {
+      throw new Error(`unaligned tensor offset for ${tensor.name}`);
+    }
+    return new Float32Array(weights, tensor.byteOffset, expectedElements);
+  }
+  if (tensor.dtype === "float16") {
+    if (tensor.byteOffset % Uint16Array.BYTES_PER_ELEMENT !== 0) {
+      throw new Error(`unaligned fp16 tensor offset for ${tensor.name}`);
+    }
+    const fp16 = new Uint16Array(weights, tensor.byteOffset, expectedElements);
+    const out = new Float32Array(expectedElements);
+    for (let i = 0; i < expectedElements; i += 1) {
+      out[i] = float16ToFloat32(fp16[i]!);
+    }
+    return out;
+  }
+  throw new Error(`unsupported dtype for ${tensor.name}: ${tensor.dtype}`);
+}
+
 export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
   if (!isRecord(value)) {
     throw new Error("model manifest must be an object");
@@ -102,6 +147,26 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
     optionalNumber(manifest.cfr.dcfrGamma, "dcfrGamma");
     optionalNumber(manifest.cfr.dcfrGammaFinal, "dcfrGammaFinal");
   }
+  manifest.weights.storageDtype ??= "float32";
+  if (
+    manifest.weights.storageDtype !== "float16" &&
+    manifest.weights.storageDtype !== "float32"
+  ) {
+    throw new Error(`unsupported weights.storageDtype ${manifest.weights.storageDtype}`);
+  }
+  if (manifest.weights.compression !== undefined) {
+    if (!isRecord(manifest.weights.compression)) {
+      throw new Error("model manifest weights.compression must be an object");
+    }
+    if (manifest.weights.compression.format !== "gzip") {
+      throw new Error(
+        `unsupported weights compression ${manifest.weights.compression.format}`,
+      );
+    }
+    if (!isPositiveInteger(manifest.weights.compression.byteLength)) {
+      throw new Error("model manifest weights.compression.byteLength must be positive");
+    }
+  }
   return manifest;
 }
 
@@ -120,30 +185,34 @@ export function tensorsFromWeights(
   manifest: BetterFfnManifest,
   weights: ArrayBuffer,
 ): TensorMap {
-  if (weights.byteLength !== manifest.weights.byteLength) {
+  const expectedByteLength = expectedWeightsByteLength(manifest);
+  if (weights.byteLength !== expectedByteLength) {
     throw new Error(
-      `weights.bin has ${weights.byteLength} bytes, expected ${manifest.weights.byteLength}`,
+      `decoded weights have ${weights.byteLength} bytes, expected ${expectedByteLength}`,
     );
   }
   const out: TensorMap = new Map();
   for (const tensor of manifest.tensors) {
-    if (tensor.dtype !== "float32") {
-      throw new Error(`unsupported dtype for ${tensor.name}: ${tensor.dtype}`);
-    }
-    if (tensor.byteOffset % Float32Array.BYTES_PER_ELEMENT !== 0) {
-      throw new Error(`unaligned tensor offset for ${tensor.name}`);
-    }
     const end = tensor.byteOffset + tensor.byteLength;
     if (end > weights.byteLength) {
-      throw new Error(`tensor ${tensor.name} extends past weights.bin`);
+      throw new Error(`tensor ${tensor.name} extends past decoded weights`);
     }
     const expectedElements = tensor.shape.reduce((acc, dim) => acc * dim, 1);
-    if (expectedElements * Float32Array.BYTES_PER_ELEMENT !== tensor.byteLength) {
+    const bytesPerElement =
+      tensor.dtype === "float32"
+        ? Float32Array.BYTES_PER_ELEMENT
+        : tensor.dtype === "float16"
+          ? Uint16Array.BYTES_PER_ELEMENT
+          : undefined;
+    if (bytesPerElement === undefined) {
+      throw new Error(`unsupported dtype for ${tensor.name}: ${tensor.dtype}`);
+    }
+    if (expectedElements * bytesPerElement !== tensor.byteLength) {
       throw new Error(`tensor ${tensor.name} shape does not match byteLength`);
     }
     out.set(tensor.name, {
       manifest: tensor,
-      data: new Float32Array(weights, tensor.byteOffset, expectedElements),
+      data: tensorDataFromWeights(tensor, weights, expectedElements),
     });
   }
   return out;
