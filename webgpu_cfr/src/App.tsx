@@ -6,7 +6,6 @@ import {
   ChevronDown,
   Cpu,
   Play,
-  Plus,
   RotateCcw,
   Trash2,
   X,
@@ -48,6 +47,7 @@ interface ActionContext {
   meCommitted: number;
   stack: number;
   allInIndex: number;
+  pot: number;
 }
 
 interface ActionRow {
@@ -55,6 +55,7 @@ interface ActionRow {
   actor: PlayerIndex;
   legalMask: number[];
   context: ActionContext;
+  street: number;
 }
 
 interface StateDescriptor {
@@ -98,6 +99,7 @@ function contextFromEnv(env: PublicHunlEnv, legal: LegalBins): ActionContext {
     meCommitted: env.committed[me],
     stack: env.stacks[me],
     allInIndex: legal.amounts.length - 1,
+    pot: env.pot,
   };
 }
 
@@ -417,6 +419,237 @@ function HeroHandSelector(props: {
   );
 }
 
+function ActionInput(props: {
+  actor: PlayerIndex;
+  streetLabel?: string | undefined;
+  legalActions: number[];
+  context: ActionContext;
+  onAction: (action: number) => void;
+}): JSX.Element {
+  const [editingRaise, setEditingRaise] = createSignal(false);
+  const [raiseValue, setRaiseValue] = createSignal("");
+  let raiseInput: HTMLInputElement | undefined;
+  const raiseActions = createMemo(() =>
+    props.legalActions.filter((action) => action >= 2 && action < props.context.allInIndex),
+  );
+  const directActions = createMemo(() =>
+    props.legalActions.filter((action) => action < 2),
+  );
+  const allInAction = createMemo(() =>
+    props.legalActions.includes(props.context.allInIndex) ? props.context.allInIndex : undefined,
+  );
+  const raiseLabel = createMemo(() => (props.context.toCall > 0 ? "Raise" : "Bet"));
+  const raisePlaceholder = createMemo(() => {
+    const first = raiseActions()[0];
+    if (first === undefined) return "";
+    const amount = props.context.amounts[first] ?? 0;
+    return formatChips(props.context.toCall > 0 ? props.context.meCommitted + amount : amount);
+  });
+
+  function openRaiseInput(): void {
+    setRaiseValue("");
+    setEditingRaise(true);
+    queueMicrotask(() => {
+      raiseInput?.focus();
+      raiseInput?.select();
+    });
+  }
+
+  function commitRaise(): void {
+    const target = Number(raiseValue());
+    if (!Number.isFinite(target) || target <= 0) {
+      setEditingRaise(false);
+      return;
+    }
+    let bestAction = raiseActions()[0];
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const action of raiseActions()) {
+      const amount = props.context.amounts[action] ?? 0;
+      const displayAmount =
+        props.context.toCall > 0 ? props.context.meCommitted + amount : amount;
+      const distance = Math.abs(displayAmount - target);
+      if (distance < bestDistance) {
+        bestAction = action;
+        bestDistance = distance;
+      }
+    }
+    setEditingRaise(false);
+    if (bestAction !== undefined) props.onAction(bestAction);
+  }
+
+  return (
+    <div class="action-input-row">
+      <span class="street-marker">{props.streetLabel ?? ""}</span>
+      <span class={`actor-pill ${props.actor === HERO_PLAYER ? "hero" : "villain"}`}>
+        {playerLabel(props.actor)}
+      </span>
+      <div class="action-buttons">
+        <For each={directActions()}>
+          {(action) => (
+            <button type="button" onClick={() => props.onAction(action)}>
+              {formatActionLabel(action, props.context)}
+            </button>
+          )}
+        </For>
+        <Show when={raiseActions().length > 0}>
+          <Show
+            when={editingRaise()}
+            fallback={
+              <button type="button" onClick={openRaiseInput}>
+                {raiseLabel()}
+              </button>
+            }
+          >
+            <input
+              ref={raiseInput}
+              class="raise-input"
+              value={raiseValue()}
+              inputmode="decimal"
+              placeholder={raisePlaceholder()}
+              onInput={(event) => setRaiseValue(event.currentTarget.value)}
+              onBlur={() => {
+                if (raiseValue()) commitRaise();
+                else setEditingRaise(false);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") commitRaise();
+                if (event.key === "Escape") setEditingRaise(false);
+              }}
+            />
+          </Show>
+        </Show>
+        <Show when={allInAction()}>
+          {(action) => (
+            <button type="button" onClick={() => props.onAction(action())}>
+              {formatActionLabel(action(), props.context)}
+            </button>
+          )}
+        </Show>
+      </div>
+      <span class="pot-size">Pot {formatChips(props.context.pot)}</span>
+    </div>
+  );
+}
+
+function raiseActionOptions(
+  legalActionsIn: readonly number[],
+  context: ActionContext,
+): number[] {
+  return legalActionsIn.filter((action) => action >= 2 && action < context.allInIndex);
+}
+
+function displayAmountForRaise(action: number, context: ActionContext): number {
+  const amount = context.amounts[action] ?? 0;
+  return context.toCall > 0 ? context.meCommitted + amount : amount;
+}
+
+function closestRaiseAction(
+  value: string,
+  legalActionsIn: readonly number[],
+  context: ActionContext,
+): number | undefined {
+  const target = Number(value);
+  if (!Number.isFinite(target) || target <= 0) return undefined;
+  let bestAction = raiseActionOptions(legalActionsIn, context)[0];
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const action of raiseActionOptions(legalActionsIn, context)) {
+    const distance = Math.abs(displayAmountForRaise(action, context) - target);
+    if (distance < bestDistance) {
+      bestAction = action;
+      bestDistance = distance;
+    }
+  }
+  return bestAction;
+}
+
+function ActionSelect(props: {
+  action: number;
+  legalActions: number[];
+  context: ActionContext;
+  onAction: (action: number) => void;
+}): JSX.Element {
+  const [editingRaise, setEditingRaise] = createSignal(false);
+  const [raiseValue, setRaiseValue] = createSignal("");
+  let raiseInput: HTMLInputElement | undefined;
+  const raiseActions = createMemo(() => raiseActionOptions(props.legalActions, props.context));
+  const isRaiseAction = createMemo(() => props.action >= 2 && props.action < props.context.allInIndex);
+  const directActions = createMemo(() => props.legalActions.filter((action) => action < 2));
+  const allInAction = createMemo(() =>
+    props.legalActions.includes(props.context.allInIndex) ? props.context.allInIndex : undefined,
+  );
+  const raiseLabel = createMemo(() =>
+    isRaiseAction()
+      ? formatActionLabel(props.action, props.context)
+      : props.context.toCall > 0 ? "Raise" : "Bet",
+  );
+
+  function openRaiseInput(): void {
+    setRaiseValue(isRaiseAction() ? formatChips(displayAmountForRaise(props.action, props.context)) : "");
+    setEditingRaise(true);
+    queueMicrotask(() => {
+      raiseInput?.focus();
+      raiseInput?.select();
+    });
+  }
+
+  function commitRaise(): void {
+    const action = closestRaiseAction(raiseValue(), props.legalActions, props.context);
+    setEditingRaise(false);
+    if (action !== undefined) props.onAction(action);
+  }
+
+  return (
+    <Show
+      when={editingRaise()}
+      fallback={
+        <select
+          value={isRaiseAction() ? "raise" : String(props.action)}
+          onChange={(event) => {
+            const value = event.currentTarget.value;
+            if (value === "raise") {
+              openRaiseInput();
+            } else {
+              props.onAction(Number(value));
+            }
+          }}
+        >
+          <For each={directActions()}>
+            {(action) => (
+              <option value={String(action)}>{formatActionLabel(action, props.context)}</option>
+            )}
+          </For>
+          <Show when={raiseActions().length > 0}>
+            <option value="raise">{raiseLabel()}</option>
+          </Show>
+          <Show when={allInAction()}>
+            {(action) => (
+              <option value={String(action())}>
+                {formatActionLabel(action(), props.context)}
+              </option>
+            )}
+          </Show>
+        </select>
+      }
+    >
+      <input
+        ref={raiseInput}
+        class="raise-input action-raise-input"
+        value={raiseValue()}
+        inputmode="decimal"
+        onInput={(event) => setRaiseValue(event.currentTarget.value)}
+        onBlur={() => {
+          if (raiseValue()) commitRaise();
+          else setEditingRaise(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") commitRaise();
+          if (event.key === "Escape") setEditingRaise(false);
+        }}
+      />
+    </Show>
+  );
+}
+
 function NumberStepper(props: {
   value: string;
   presets: number[];
@@ -669,6 +902,7 @@ function App(): JSX.Element {
           actor: env.toAct,
           legalMask: legal.mask,
           context: contextFromEnv(env, legal),
+          street: env.street,
         });
         if (!legal.mask[action]) {
           throw new Error(`Action ${action} is no longer legal`);
@@ -928,6 +1162,21 @@ function App(): JSX.Element {
     return actionsOut;
   }
 
+  function streetMarkerForRow(rows: readonly ActionRow[], index: number): string | undefined {
+    const row = rows[index];
+    if (!row) return undefined;
+    if (index === 0 || row.street !== rows[index - 1]?.street) {
+      return STREET_NAMES[row.street] ?? undefined;
+    }
+    return undefined;
+  }
+
+  function finalStreetMarker(rows: readonly ActionRow[], finalStreet: number): string | undefined {
+    const last = rows[rows.length - 1];
+    if (!last || last.street !== finalStreet) return STREET_NAMES[finalStreet] ?? undefined;
+    return undefined;
+  }
+
   return (
     <main class="app-shell">
       <header class="topbar">
@@ -1022,7 +1271,6 @@ function App(): JSX.Element {
           <div class="card-section">
             <div class="card-section-head">
               <span class="card-section-title">Hero hand</span>
-              <span class="feature-badge">{STREET_NAMES[inferredStreet()]}</span>
             </div>
             <HeroHandSelector
               value={heroHandText()}
@@ -1073,26 +1321,19 @@ function App(): JSX.Element {
               </Show>
             </div>
             <Show when={!descriptorError()} fallback={<p class="inline-error">{descriptorError()}</p>}>
-              <Show when={(descriptor() as StateDescriptor).rows.length === 0}>
-                <p class="subtle">Choose an action below to start building the spot.</p>
-              </Show>
               <For each={(descriptor() as StateDescriptor).rows}>
                 {(row, index) => (
                   <div class="action-row">
-                    <span class="step-num">{index() + 1}</span>
+                    <span class="street-marker">{streetMarkerForRow((descriptor() as StateDescriptor).rows, index()) ?? ""}</span>
                     <span class={`actor-pill ${row.actor === HERO_PLAYER ? "hero" : "villain"}`}>
                       {playerLabel(row.actor)}
                     </span>
-                    <select
-                      value={String(row.action)}
-                      onChange={(event) => setActionAt(index(), Number(event.currentTarget.value))}
-                    >
-                      <For each={legalActions(row.legalMask)}>
-                        {(action) => (
-                          <option value={String(action)}>{actionName(action, row.context)}</option>
-                        )}
-                      </For>
-                    </select>
+                    <ActionSelect
+                      action={row.action}
+                      legalActions={legalActions(row.legalMask)}
+                      context={row.context}
+                      onAction={(action) => setActionAt(index(), action)}
+                    />
                     <button
                       type="button"
                       class="icon-button"
@@ -1105,22 +1346,16 @@ function App(): JSX.Element {
                 )}
               </For>
               <Show when={legalActions((descriptor() as StateDescriptor).finalLegalMask).length > 0}>
-                <div class="next-to-act">
-                  <span class={`actor-pill ${(descriptor() as StateDescriptor).finalActor === HERO_PLAYER ? "hero" : "villain"}`}>
-                    {playerLabel((descriptor() as StateDescriptor).finalActor)}
-                  </span>
-                  <span class="next-to-act-label">to act</span>
-                </div>
-                <div class="add-actions">
-                  <For each={legalActions((descriptor() as StateDescriptor).finalLegalMask)}>
-                    {(action) => (
-                      <button type="button" onClick={() => addAction(action)}>
-                        <Plus size={15} />
-                        <span>{actionName(action, (descriptor() as StateDescriptor).finalContext)}</span>
-                      </button>
-                    )}
-                  </For>
-                </div>
+                <ActionInput
+                  actor={(descriptor() as StateDescriptor).finalActor}
+                  streetLabel={finalStreetMarker(
+                    (descriptor() as StateDescriptor).rows,
+                    (descriptor() as StateDescriptor).finalStreet,
+                  )}
+                  legalActions={legalActions((descriptor() as StateDescriptor).finalLegalMask)}
+                  context={(descriptor() as StateDescriptor).finalContext}
+                  onAction={addAction}
+                />
               </Show>
             </Show>
           </div>

@@ -775,7 +775,7 @@ h3 {
 
 .action-row {
   display: grid;
-  grid-template-columns: 28px auto minmax(0, 1fr) 36px;
+  grid-template-columns: 68px 76px minmax(0, 1fr) 36px;
   gap: 8px;
   align-items: center;
 }
@@ -807,9 +807,9 @@ h3 {
 .actor-pill {
   display: inline-grid;
   place-items: center;
-  height: 26px;
+  height: 38px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: 6px;
   font-size: 11px;
   font-weight: 720;
   text-transform: uppercase;
@@ -848,33 +848,37 @@ h3 {
   text-decoration: underline;
 }
 
-.next-to-act {
-  display: flex;
+.action-input-row {
+  display: grid;
+  grid-template-columns: 68px 76px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.next-to-act-label {
-  color: #5d686a;
-  font-size: 12px;
-  font-weight: 660;
-}
-
-.add-actions {
-  display: flex;
-  flex-wrap: wrap;
   gap: 8px;
   margin-top: 2px;
 }
 
-.add-actions button,
+.street-marker {
+  color: #5d686a;
+  font-size: 12px;
+  font-weight: 760;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.action-buttons button,
+.raise-input,
 .solve-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  min-height: 38px;
+  height: 38px;
   border: 1px solid #137365;
   border-radius: 6px;
   background: #168575;
@@ -883,9 +887,30 @@ h3 {
   font-weight: 720;
 }
 
-.add-actions button {
+.action-buttons button {
   background: #eef8f4;
   color: #0f665a;
+}
+
+.raise-input {
+  width: 96px;
+  background: #ffffff;
+  color: #182224;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.action-raise-input {
+  width: 100%;
+  text-align: left;
+}
+
+.pot-size {
+  color: #435052;
+  font-size: 12px;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .solve-button {
