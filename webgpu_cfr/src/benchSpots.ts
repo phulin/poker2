@@ -24,7 +24,6 @@ interface CliOptions {
   iterations?: number;
   depth: number;
   cfrAvg?: boolean;
-  leafRefreshInterval?: number;
   warmups: number;
   runs: number;
 }
@@ -70,13 +69,6 @@ function readOptions(): CliOptions {
   if (iterations) opts.iterations = parsePositiveInt(iterations, "iterations");
   if (args.includes("--cfr-avg")) opts.cfrAvg = true;
   if (args.includes("--no-cfr-avg")) opts.cfrAvg = false;
-  const leafRefreshInterval = getArg(args, "--leaf-refresh-interval", "");
-  if (leafRefreshInterval) {
-    opts.leafRefreshInterval = parsePositiveInt(
-      leafRefreshInterval,
-      "leaf refresh interval",
-    );
-  }
   const weights = getArg(args, "--weights", "");
   if (weights) opts.weights = weights;
   return opts;
@@ -123,9 +115,6 @@ function makeRequest(spot: BenchSpot): EvaluateSpotRequest {
     readActionProbs: false,
     readBeliefs: false,
   };
-  if (options.leafRefreshInterval !== undefined) {
-    req.leafRefreshInterval = options.leafRefreshInterval;
-  }
   if (spot.public_cards.length > 0) {
     req.publicCards = spot.public_cards;
   }
@@ -147,7 +136,6 @@ try {
   console.error(
     `running ${spots.length} spots at depth=${options.depth}, ` +
       `iterations=${iterations}, cfrAvg=${cfrAvg}, ` +
-      `leafRefreshInterval=${options.leafRefreshInterval ?? 1}, ` +
       `warmups=${options.warmups}, runs=${options.runs}`,
   );
   for (const spot of spots) {
@@ -194,7 +182,6 @@ try {
         depth: options.depth,
         iterations,
         cfrAvg,
-        leafRefreshInterval: options.leafRefreshInterval ?? 1,
         warmups: options.warmups,
         runs: options.runs,
         spotsFile: options.spotsFile,

@@ -196,7 +196,6 @@ export interface EvaluateSpotRequest {
   readPolicy?: boolean;
   readActionProbs?: boolean;
   readBeliefs?: boolean;
-  leafRefreshInterval?: number;
   onProgress?: (progress: SolveProgress) => void;
 }
 
