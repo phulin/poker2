@@ -88,6 +88,12 @@ interface StateDescriptor {
   finalStreet: number;
 }
 
+interface HashInputs {
+  hand?: string;
+  actions?: string;
+  boardCards: string[];
+}
+
 interface SolveResult {
   result: BrowserEvaluationResult;
   elapsedMs: number;
@@ -160,6 +166,12 @@ function positiveNumber(value: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function cardFromOption(value: string): number {
+  const index = CARD_OPTIONS.indexOf(value);
+  if (index < 0) throw new Error(`Invalid card ${value}`);
+  return index;
+}
+
 function createPublicEnv(
   envDefaults: PublicEnvDefaults,
   options: {
@@ -180,6 +192,121 @@ function createPublicEnv(
     flopShowdown: envDefaults.flopShowdown,
     ...(envDefaults.maxStackBb !== undefined ? { maxStackBb: envDefaults.maxStackBb } : {}),
   });
+}
+
+function legalActionList(mask: readonly number[]): number[] {
+  const actionsOut: number[] = [];
+  for (let i = 0; i < mask.length; i += 1) {
+    if (mask[i]) actionsOut.push(i);
+  }
+  return actionsOut;
+}
+
+function parseBoardHashParam(value: string | null, expectedCount: number): string[] {
+  if (!value) return [];
+  const cards = parseBoardCardsText(value);
+  if (cards.length !== expectedCount) return [];
+  return cards;
+}
+
+function buildBoardCardsFromHash(params: URLSearchParams): string[] {
+  const board = ["", "", "", "", ""];
+  const flop = parseBoardHashParam(params.get("flop"), 3);
+  const turn = parseBoardHashParam(params.get("turn"), 1);
+  const river = parseBoardHashParam(params.get("river"), 1);
+  for (let i = 0; i < flop.length; i += 1) board[i] = flop[i]!;
+  if (turn[0]) board[3] = turn[0];
+  if (river[0]) board[4] = river[0];
+  return board;
+}
+
+function actionTokenFor(action: number, context: ActionContext): string {
+  if (action === 0) return "f";
+  if (action === 1) return "c";
+  if (action === context.allInIndex) return "a";
+  return `r${formatChips(displayAmountForRaise(action, context))}`;
+}
+
+function actionFromHashToken(
+  token: string,
+  legalActionsIn: readonly number[],
+  context: ActionContext,
+): number | undefined {
+  const normalized = token.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if ((normalized === "f" || normalized === "fold") && legalActionsIn.includes(0)) return 0;
+  if (
+    (normalized === "c" ||
+      normalized === "call" ||
+      normalized === "check" ||
+      normalized === "x") &&
+    legalActionsIn.includes(1)
+  ) {
+    return 1;
+  }
+  if (
+    (normalized === "a" || normalized === "allin" || normalized === "all-in") &&
+    legalActionsIn.includes(context.allInIndex)
+  ) {
+    return context.allInIndex;
+  }
+  if (normalized.startsWith("r") || normalized.startsWith("b")) {
+    const value = normalized.slice(1);
+    if (!value) return raiseActionOptions(legalActionsIn, context)[0];
+    return closestRaiseAction(value, legalActionsIn, context);
+  }
+  return undefined;
+}
+
+function actionsFromHash(value: string | undefined): number[] {
+  if (!value) return [];
+  const env = createPublicEnv(LOCAL_ENV_DEFAULTS, {
+    button: HERO_PLAYER,
+    stack: String(LOCAL_ENV_DEFAULTS.stack),
+    sb: String(LOCAL_ENV_DEFAULTS.sb),
+    bb: String(LOCAL_ENV_DEFAULTS.bb),
+  });
+  const parsed: number[] = [];
+  for (const token of value.split("-")) {
+    const legal = env.legalBinsAmountAndMask();
+    const action = actionFromHashToken(token, legalActionList(legal.mask), contextFromEnv(env, legal));
+    if (action === undefined || !legal.mask[action]) break;
+    parsed.push(action);
+    env.stepBin(action, legal);
+    if (env.done) break;
+  }
+  return parsed;
+}
+
+function actionTokensForActions(actionsIn: readonly number[]): string {
+  const env = createPublicEnv(LOCAL_ENV_DEFAULTS, {
+    button: HERO_PLAYER,
+    stack: String(LOCAL_ENV_DEFAULTS.stack),
+    sb: String(LOCAL_ENV_DEFAULTS.sb),
+    bb: String(LOCAL_ENV_DEFAULTS.bb),
+  });
+  const tokens: string[] = [];
+  for (const action of actionsIn) {
+    const legal = env.legalBinsAmountAndMask();
+    if (!legal.mask[action]) break;
+    tokens.push(actionTokenFor(action, contextFromEnv(env, legal)));
+    env.stepBin(action, legal);
+    if (env.done) break;
+  }
+  return tokens.join("-");
+}
+
+function compactCardText(cards: readonly string[]): string {
+  return cards.join("").replace(/\s+/g, "");
+}
+
+function parseHashInputs(hash: string): HashInputs {
+  const params = new URLSearchParams(hash.startsWith("#") ? hash.slice(1) : hash);
+  return {
+    hand: params.get("hand") ?? undefined,
+    actions: params.get("actions") ?? undefined,
+    boardCards: buildBoardCardsFromHash(params),
+  };
 }
 
 const RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"];
@@ -1031,12 +1158,40 @@ function App(): JSX.Element {
   const [solveStatus, setSolveStatus] = createSignal("");
   const [solveError, setSolveError] = createSignal("");
   const [solveResult, setSolveResult] = createSignal<SolveResult>();
+  const [hashHydrated, setHashHydrated] = createSignal(false);
+  let applyingHash = false;
+  let lastWrittenHash = "";
+
+  function applyHashFromLocation(): void {
+    applyingHash = true;
+    try {
+      const input = parseHashInputs(window.location.hash);
+      if (input.hand) {
+        const cards = parseHeroHandText(input.hand);
+        setHeroHandText(`${cards[0]} ${cards[1]}`);
+        setSelectedRangeKey(rangeKeyFromCards(cards));
+      }
+      setBoardCards(input.boardCards);
+      setActions(actionsFromHash(input.actions));
+      setSolveResult(undefined);
+      setSolveError("");
+      setSolveStatus("");
+    } catch (error) {
+      setSolveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      applyingHash = false;
+      setHashHydrated(true);
+    }
+  }
 
   onMount(() => {
+    applyHashFromLocation();
+    window.addEventListener("hashchange", applyHashFromLocation);
     void loadRuntime();
   });
 
   onCleanup(() => {
+    window.removeEventListener("hashchange", applyHashFromLocation);
     const current = runtime();
     current?.evaluator.dispose();
     current?.model.dispose();
@@ -1210,6 +1365,27 @@ function App(): JSX.Element {
     const current = descriptor();
     return "error" in current ? current.error : "";
   });
+  const serializedHash = createMemo(() => {
+    const params = new URLSearchParams();
+    try {
+      params.set("hand", compactCardText(parseHeroHandText(heroHandText())));
+    } catch {
+      params.set("hand", heroHandText().replace(/[\s,]+/g, ""));
+    }
+    params.set("actions", actionTokensForActions(actions()));
+    const board = boardCards();
+    params.set("flop", board.slice(0, 3).every(Boolean) ? compactCardText(board.slice(0, 3)) : "");
+    params.set("turn", board[3] ? compactCardText([board[3]]) : "");
+    params.set("river", board[4] ? compactCardText([board[4]]) : "");
+    return `#${params.toString()}`;
+  });
+  createEffect(() => {
+    const nextHash = serializedHash();
+    if (!hashHydrated() || applyingHash) return;
+    if (nextHash === lastWrittenHash || nextHash === window.location.hash) return;
+    lastWrittenHash = nextHash;
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${nextHash}`);
+  });
   const solveInputError = createMemo(() => {
     const descriptorMessage = descriptorError();
     if (descriptorMessage) return descriptorMessage;
@@ -1221,12 +1397,6 @@ function App(): JSX.Element {
     if (!progress.totalBytes || progress.loadedBytes === undefined) return undefined;
     return Math.min(100, (progress.loadedBytes / progress.totalBytes) * 100);
   });
-
-  function cardFromOption(value: string): number {
-    const index = CARD_OPTIONS.indexOf(value);
-    if (index < 0) throw new Error(`Invalid card ${value}`);
-    return index;
-  }
 
   function nextAvailableCard(used: Set<number>): number {
     for (let card = 0; card < CARD_OPTIONS.length; card += 1) {
