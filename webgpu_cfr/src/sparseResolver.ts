@@ -29,6 +29,7 @@ import {
 import type { LocalSolveResult, PlayerIndex } from "./types.js";
 
 const EPS = 1.0e-8;
+const OVERLAP_HAND_SLOTS = 101;
 
 const HAND_CARD0 = new Uint8Array(NUM_HANDS);
 const HAND_CARD1 = new Uint8Array(NUM_HANDS);
@@ -64,6 +65,9 @@ interface SparseLeafGpuBatch {
   modelNodeIndices: Uint32Array<ArrayBuffer>;
   showdownNodeIndices: Uint32Array<ArrayBuffer>;
   showdownRankCodes: Uint32Array<ArrayBuffer>;
+  showdownRankOrdinals: Uint32Array<ArrayBuffer>;
+  showdownRankCounts: Uint32Array<ArrayBuffer>;
+  showdownMaxRankCount: number;
   showdownPayoffs: Float32Array<ArrayBuffer>;
   allInNodeIndices: Uint32Array<ArrayBuffer>;
   allInScaleFactors: Float32Array<ArrayBuffer>;
@@ -76,6 +80,8 @@ interface SparseStaticGpuData {
   modelLeafNodeBuffer: GPUBuffer;
   showdownNodeBuffer: GPUBuffer;
   showdownRankBuffer: GPUBuffer;
+  showdownRankOrdinalBuffer: GPUBuffer;
+  showdownRankCountBuffer: GPUBuffer;
   showdownPayoffBuffer: GPUBuffer;
   allInNodeBuffer: GPUBuffer;
   allInScaleBuffer: GPUBuffer;
@@ -299,6 +305,14 @@ export class SparseCfrResolver {
     const modelLeafNodeBuffer = makeStorageBuffer(device, leafBatch.modelNodeIndices);
     const showdownNodeBuffer = makeStorageBuffer(device, leafBatch.showdownNodeIndices);
     const showdownRankBuffer = makeStorageBuffer(device, leafBatch.showdownRankCodes);
+    const showdownRankOrdinalBuffer = makeStorageBuffer(
+      device,
+      leafBatch.showdownRankOrdinals,
+    );
+    const showdownRankCountBuffer = makeStorageBuffer(
+      device,
+      leafBatch.showdownRankCounts,
+    );
     const showdownPayoffBuffer = makeStorageBuffer(device, leafBatch.showdownPayoffs);
     const allInNodeBuffer = makeStorageBuffer(device, leafBatch.allInNodeIndices);
     const allInScaleBuffer = makeStorageBuffer(device, leafBatch.allInScaleFactors);
@@ -321,6 +335,8 @@ export class SparseCfrResolver {
       modelLeafNodeBuffer,
       showdownNodeBuffer,
       showdownRankBuffer,
+      showdownRankOrdinalBuffer,
+      showdownRankCountBuffer,
       showdownPayoffBuffer,
       allInNodeBuffer,
       allInScaleBuffer,
@@ -333,6 +349,8 @@ export class SparseCfrResolver {
         modelLeafNodeBuffer.destroy();
         showdownNodeBuffer.destroy();
         showdownRankBuffer.destroy();
+        showdownRankOrdinalBuffer.destroy();
+        showdownRankCountBuffer.destroy();
         showdownPayoffBuffer.destroy();
         allInNodeBuffer.destroy();
         allInScaleBuffer.destroy();
@@ -503,6 +521,11 @@ export class SparseCfrResolver {
     policy: Float32Array,
     beliefs: Float32Array,
   ): Promise<void> {
+    if (!this.shouldUseModelPolicyInitialization()) {
+      this.initializeUniformPolicyAndBeliefs(tree, rootBeliefs, policy, beliefs);
+      return;
+    }
+
     const beliefSize = 2 * NUM_HANDS;
     for (let depth = 0; depth < tree.treeDepth; depth += 1) {
       const start = tree.depthOffsets[depth]!;
@@ -554,6 +577,42 @@ export class SparseCfrResolver {
     }
 
     this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
+  }
+
+  private initializeUniformPolicyAndBeliefs(
+    tree: SparseTree,
+    rootBeliefs: Float32Array<ArrayBuffer>,
+    policy: Float32Array,
+    beliefs: Float32Array,
+  ): void {
+    for (let depth = 0; depth < tree.treeDepth; depth += 1) {
+      const start = tree.depthOffsets[depth]!;
+      const end = tree.depthOffsets[depth + 1]!;
+      for (let nodeIndex = start; nodeIndex < end; nodeIndex += 1) {
+        const node = tree.nodes[nodeIndex]!;
+        if (node.leaf || node.children.length === 0) continue;
+        const probability = 1 / node.children.length;
+        for (const childIndex of node.children) {
+          policy.fill(probability, childIndex * NUM_HANDS, (childIndex + 1) * NUM_HANDS);
+        }
+        for (const childIndex of node.children) {
+          this.propagateChildBelief(
+            tree.nodes[childIndex]!,
+            node.env.toAct,
+            nodeIndex,
+            childIndex,
+            policy,
+            beliefs,
+          );
+        }
+      }
+    }
+
+    this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
+  }
+
+  private shouldUseModelPolicyInitialization(): boolean {
+    return globalThis.process?.env?.P2_SPARSE_INIT_POLICY === "model";
   }
 
   private softmaxPolicy(
@@ -661,6 +720,14 @@ export class SparseCfrResolver {
       device,
       leafBatch.modelNodeIndices.length * 2 * NUM_HANDS,
     );
+    const showdownAggregateCount =
+      leafBatch.showdownNodeIndices.length * 2 * Math.max(1, leafBatch.showdownMaxRankCount);
+    const showdownRankMassBuffer = makeEmptyStorageBuffer(device, showdownAggregateCount);
+    const showdownRankPrefixBuffer = makeEmptyStorageBuffer(device, showdownAggregateCount);
+    const showdownRankTotalBuffer = makeEmptyStorageBuffer(
+      device,
+      leafBatch.showdownNodeIndices.length * 2,
+    );
     const pendingLeafDisposals: Array<() => void> = [];
     device.queue.writeBuffer(reachBuffer, 0, rootReach);
     device.queue.writeBuffer(beliefsBuffer, 0, rootBeliefs);
@@ -693,7 +760,12 @@ export class SparseCfrResolver {
           modelLeafBeliefsBuffer,
           staticGpu.showdownNodeBuffer,
           staticGpu.showdownRankBuffer,
+          staticGpu.showdownRankOrdinalBuffer,
+          staticGpu.showdownRankCountBuffer,
           staticGpu.showdownPayoffBuffer,
+          showdownRankMassBuffer,
+          showdownRankPrefixBuffer,
+          showdownRankTotalBuffer,
           staticGpu.allInNodeBuffer,
           staticGpu.allInScaleBuffer,
           staticGpu.allInTableBuffer,
@@ -701,20 +773,21 @@ export class SparseCfrResolver {
           staticGpu.allInContext,
           staticGpu.preparedLeafFeatures,
           exactBelief,
+          undefined,
+          (encoder) =>
+            this.encodeExpectedValuesGpuResidentCommands(
+              encoder,
+              tree,
+              treeBuffers,
+              policyBuffer,
+              beliefsBuffer,
+              opponentPolicyBuffer,
+              opponentPolicyAggregatesBuffer,
+              valuesBuffer,
+            ),
         ),
       );
       pendingLeafDisposals.push(initialLeafDispose);
-      await time("backup0", () => {
-        this.encodeExpectedValuesGpuResident(
-          tree,
-          treeBuffers,
-          policyBuffer,
-          beliefsBuffer,
-          opponentPolicyBuffer,
-          opponentPolicyAggregatesBuffer,
-          valuesBuffer,
-        );
-      });
 
       for (let t = 0; t < iterations; t += 1) {
         const regretBeliefsBuffer = cfrAvg ? beliefsAvgBuffer! : beliefsBuffer;
@@ -749,7 +822,12 @@ export class SparseCfrResolver {
               modelLeafBeliefsBuffer,
               staticGpu.showdownNodeBuffer,
               staticGpu.showdownRankBuffer,
+              staticGpu.showdownRankOrdinalBuffer,
+              staticGpu.showdownRankCountBuffer,
               staticGpu.showdownPayoffBuffer,
+              showdownRankMassBuffer,
+              showdownRankPrefixBuffer,
+              showdownRankTotalBuffer,
               staticGpu.allInNodeBuffer,
               staticGpu.allInScaleBuffer,
               staticGpu.allInTableBuffer,
@@ -757,20 +835,21 @@ export class SparseCfrResolver {
               staticGpu.allInContext,
               staticGpu.preparedLeafFeatures,
               exactBelief,
+              undefined,
+              (encoder) =>
+                this.encodeExpectedValuesGpuResidentCommands(
+                  encoder,
+                  tree,
+                  treeBuffers,
+                  policyBuffer,
+                  beliefsBuffer,
+                  opponentPolicyBuffer,
+                  opponentPolicyAggregatesBuffer,
+                  valuesBuffer,
+                ),
             ),
           );
           pendingLeafDisposals.push(disposeLeafPrediction);
-          await time("backup", () => {
-            this.encodeExpectedValuesGpuResident(
-              tree,
-              treeBuffers,
-              policyBuffer,
-              beliefsBuffer,
-              opponentPolicyBuffer,
-              opponentPolicyAggregatesBuffer,
-              valuesBuffer,
-            );
-          });
         }
         onProgress?.({ iteration: t + 1, iterations });
       }
@@ -813,6 +892,9 @@ export class SparseCfrResolver {
       regretWeightsBuffer.destroy();
       regretWeightAggregatesBuffer.destroy();
       modelLeafBeliefsBuffer.destroy();
+      showdownRankMassBuffer.destroy();
+      showdownRankPrefixBuffer.destroy();
+      showdownRankTotalBuffer.destroy();
     }
   }
 
@@ -825,7 +907,12 @@ export class SparseCfrResolver {
     modelLeafBeliefsBuffer: GPUBuffer,
     showdownNodeBuffer: GPUBuffer,
     showdownRankBuffer: GPUBuffer,
+    showdownRankOrdinalBuffer: GPUBuffer,
+    showdownRankCountBuffer: GPUBuffer,
     showdownPayoffBuffer: GPUBuffer,
+    showdownRankMassBuffer: GPUBuffer,
+    showdownRankPrefixBuffer: GPUBuffer,
+    showdownRankTotalBuffer: GPUBuffer,
     allInNodeBuffer: GPUBuffer,
     allInScaleBuffer: GPUBuffer,
     allInTableBuffer?: GPUBuffer,
@@ -833,35 +920,56 @@ export class SparseCfrResolver {
     allInContext?: AllInTableContext,
     preparedLeafFeatures?: PreparedBatchFeatures,
     exactBelief?: ExactBelief,
+    beforeLeafValues?: (encoder: GPUCommandEncoder) => GPUBuffer[],
+    afterLeafValues?: (encoder: GPUCommandEncoder) => GPUBuffer[],
   ): Promise<() => void> {
     if (!this.gpuKernels) return () => undefined;
     const device = this.model.device;
+    const deferredParams: GPUBuffer[] = [];
 
-    if (leafBatch.showdownNodeIndices.length > 0) {
-      const showdownEncoder = device.createCommandEncoder();
-      const showdownParams = this.gpuKernels.encodeShowdownValues(
-        showdownEncoder,
-        treeBuffers,
-        showdownNodeBuffer,
-        showdownRankBuffer,
-        showdownPayoffBuffer,
-        leafBeliefsBuffer,
-        valuesBuffer,
-        leafBatch.showdownNodeIndices.length,
-      );
-      device.queue.submit([showdownEncoder.finish()]);
-      showdownParams.destroy();
-    }
+    const encodeShowdown = (encoder: GPUCommandEncoder): void => {
+      if (leafBatch.showdownNodeIndices.length === 0) return;
+      if (leafBatch.showdownMaxRankCount > 0) {
+        deferredParams.push(this.gpuKernels!.encodeShowdownValuesFromRankAggregates(
+          encoder,
+          treeBuffers,
+          showdownNodeBuffer,
+          showdownRankOrdinalBuffer,
+          showdownRankCountBuffer,
+          showdownPayoffBuffer,
+          leafBeliefsBuffer,
+          valuesBuffer,
+          showdownRankMassBuffer,
+          showdownRankPrefixBuffer,
+          showdownRankTotalBuffer,
+          leafBatch.showdownNodeIndices.length,
+          leafBatch.showdownMaxRankCount,
+        ));
+      } else {
+        deferredParams.push(this.gpuKernels!.encodeShowdownValues(
+          encoder,
+          treeBuffers,
+          showdownNodeBuffer,
+          showdownRankBuffer,
+          showdownPayoffBuffer,
+          leafBeliefsBuffer,
+          valuesBuffer,
+          leafBatch.showdownNodeIndices.length,
+        ));
+      }
+    };
 
-    if (
-      leafBatch.allInNodeIndices.length > 0 &&
-      allInContext &&
-      allInTableBuffer &&
-      allInComboPermBuffer
-    ) {
-      const allInEncoder = device.createCommandEncoder();
-      const allInParams = this.gpuKernels.encodeAllInTableValues(
-        allInEncoder,
+    const encodeAllIn = (encoder: GPUCommandEncoder): void => {
+      if (
+        leafBatch.allInNodeIndices.length === 0 ||
+        !allInContext ||
+        !allInTableBuffer ||
+        !allInComboPermBuffer
+      ) {
+        return;
+      }
+      deferredParams.push(this.gpuKernels!.encodeAllInTableValues(
+        encoder,
         treeBuffers,
         allInNodeBuffer,
         allInTableBuffer,
@@ -873,24 +981,21 @@ export class SparseCfrResolver {
         allInContext.scale,
         allInContext.permId ?? 0,
         allInContext.permId !== undefined && allInContext.comboPerms !== undefined,
-      );
-      device.queue.submit([allInEncoder.finish()]);
-      allInParams.destroy();
+      ));
+    };
+
+    if (leafBatch.modelNodeIndices.length === 0) {
+      const terminalEncoder = device.createCommandEncoder();
+      deferredParams.push(...(beforeLeafValues?.(terminalEncoder) ?? []));
+      encodeShowdown(terminalEncoder);
+      encodeAllIn(terminalEncoder);
+      deferredParams.push(...(afterLeafValues?.(terminalEncoder) ?? []));
+      if (deferredParams.length > 0) {
+        device.queue.submit([terminalEncoder.finish()]);
+        for (const params of deferredParams.splice(0)) params.destroy();
+      }
+      return () => undefined;
     }
-
-    if (leafBatch.modelNodeIndices.length === 0) return () => undefined;
-
-    const gatherEncoder = device.createCommandEncoder();
-    const gatherParams = this.gpuKernels.encodeGatherNodeBeliefs(
-      gatherEncoder,
-      treeBuffers,
-      modelLeafNodeBuffer,
-      leafBeliefsBuffer,
-      modelLeafBeliefsBuffer,
-      leafBatch.modelNodeIndices.length,
-    );
-    device.queue.submit([gatherEncoder.finish()]);
-    gatherParams.destroy();
 
     let scatterParams: GPUBuffer | undefined;
     const prediction = await this.model.predictBatchHandValuesGpu(
@@ -906,10 +1011,25 @@ export class SparseCfrResolver {
           valuesBuffer,
           leafBatch.modelNodeIndices.length,
         );
+        deferredParams.push(...(afterLeafValues?.(encoder) ?? []));
       },
       exactBelief,
+      (encoder) => {
+        deferredParams.push(...(beforeLeafValues?.(encoder) ?? []));
+        encodeShowdown(encoder);
+        encodeAllIn(encoder);
+        deferredParams.push(this.gpuKernels!.encodeGatherNodeBeliefs(
+          encoder,
+          treeBuffers,
+          modelLeafNodeBuffer,
+          leafBeliefsBuffer,
+          modelLeafBeliefsBuffer,
+          leafBatch.modelNodeIndices.length,
+        ));
+      },
     );
     scatterParams?.destroy();
+    for (const params of deferredParams.splice(0)) params.destroy();
     return () => prediction.dispose();
   }
 
@@ -921,6 +1041,9 @@ export class SparseCfrResolver {
     const modelNodeIndices: number[] = [];
     const showdownNodeIndices: number[] = [];
     const showdownRankCodes: number[] = [];
+    const showdownRankOrdinals: number[] = [];
+    const showdownRankCounts: number[] = [];
+    let showdownMaxRankCount = 0;
     const showdownPayoffs: number[] = [];
     const allInNodeIndices: number[] = [];
     const allInScaleFactors: number[] = [];
@@ -940,7 +1063,17 @@ export class SparseCfrResolver {
         modelNodeIndices.push(nodeIndex);
       } else if (!node.env.hasFolded[0] && !node.env.hasFolded[1]) {
         showdownNodeIndices.push(nodeIndex);
-        showdownRankCodes.push(...showdownTerminalRankCodes(node.env));
+        const rankCodes = showdownTerminalRankCodes(node.env);
+        showdownRankCodes.push(...rankCodes);
+        const ranks = Array.from(new Set(Array.from(rankCodes).filter((rank) => rank > 0)))
+          .sort((a, b) => a - b);
+        const rankToOrdinal = new Map<number, number>();
+        ranks.forEach((rank, ordinal) => rankToOrdinal.set(rank, ordinal));
+        showdownRankCounts.push(ranks.length);
+        showdownMaxRankCount = Math.max(showdownMaxRankCount, ranks.length);
+        for (const rank of rankCodes) {
+          showdownRankOrdinals.push(rank > 0 ? rankToOrdinal.get(rank)! : 0xffffffff);
+        }
         showdownPayoffs.push(...this.showdownPayoffs(node.env));
       }
     }
@@ -949,6 +1082,9 @@ export class SparseCfrResolver {
       modelNodeIndices: new Uint32Array(modelNodeIndices),
       showdownNodeIndices: new Uint32Array(showdownNodeIndices),
       showdownRankCodes: new Uint32Array(showdownRankCodes),
+      showdownRankOrdinals: new Uint32Array(showdownRankOrdinals),
+      showdownRankCounts: new Uint32Array(showdownRankCounts),
+      showdownMaxRankCount,
       showdownPayoffs: new Float32Array(showdownPayoffs),
       allInNodeIndices: new Uint32Array(allInNodeIndices),
       allInScaleFactors: new Float32Array(allInScaleFactors),
@@ -988,6 +1124,31 @@ export class SparseCfrResolver {
   ): void {
     if (!this.gpuKernels) return;
     const encoder = this.model.device.createCommandEncoder();
+    const params = this.encodeExpectedValuesGpuResidentCommands(
+      encoder,
+      tree,
+      treeBuffers,
+      policyBuffer,
+      beliefsBuffer,
+      opponentPolicyBuffer,
+      opponentPolicyAggregatesBuffer,
+      valuesBuffer,
+    );
+    this.model.device.queue.submit([encoder.finish()]);
+    for (const param of params) param.destroy();
+  }
+
+  private encodeExpectedValuesGpuResidentCommands(
+    encoder: GPUCommandEncoder,
+    tree: SparseTree,
+    treeBuffers: SparseGpuTreeBuffers,
+    policyBuffer: GPUBuffer,
+    beliefsBuffer: GPUBuffer,
+    opponentPolicyBuffer: GPUBuffer,
+    opponentPolicyAggregatesBuffer: GPUBuffer,
+    valuesBuffer: GPUBuffer,
+  ): GPUBuffer[] {
+    if (!this.gpuKernels) return [];
     const params: GPUBuffer[] = [
       ...this.gpuKernels.encodeComputeOpponentPolicyAggregateRange(
         encoder,
@@ -1013,8 +1174,7 @@ export class SparseCfrResolver {
         ),
       );
     }
-    this.model.device.queue.submit([encoder.finish()]);
-    for (const param of params) param.destroy();
+    return params;
   }
 
   private encodeAccumulateRegretsGpuResident(
@@ -1070,6 +1230,47 @@ export class SparseCfrResolver {
   ): void {
     if (!this.gpuKernels) return;
     const encoder = this.model.device.createCommandEncoder();
+    const params = this.encodeIterationPrefixGpuResidentCommands(
+      encoder,
+      tree,
+      treeBuffers,
+      regretBeliefsBuffer,
+      valuesBuffer,
+      regretWeightsBuffer,
+      regretWeightAggregatesBuffer,
+      regretsBuffer,
+      policyBuffer,
+      reachBuffer,
+      beliefsBuffer,
+      denomBuffer,
+      numeratorBuffer,
+      denominatorBuffer,
+      policyAvgBuffer,
+      beliefsAvgBuffer,
+    );
+    this.model.device.queue.submit([encoder.finish()]);
+    for (const param of params) param.destroy();
+  }
+
+  private encodeIterationPrefixGpuResidentCommands(
+    encoder: GPUCommandEncoder,
+    tree: SparseTree,
+    treeBuffers: SparseGpuTreeBuffers,
+    regretBeliefsBuffer: GPUBuffer,
+    valuesBuffer: GPUBuffer,
+    regretWeightsBuffer: GPUBuffer,
+    regretWeightAggregatesBuffer: GPUBuffer,
+    regretsBuffer: GPUBuffer,
+    policyBuffer: GPUBuffer,
+    reachBuffer: GPUBuffer,
+    beliefsBuffer: GPUBuffer,
+    denomBuffer: GPUBuffer,
+    numeratorBuffer: GPUBuffer,
+    denominatorBuffer: GPUBuffer,
+    policyAvgBuffer: GPUBuffer,
+    beliefsAvgBuffer: GPUBuffer | undefined,
+  ): GPUBuffer[] {
+    if (!this.gpuKernels) return [];
     const regretWeightEnd = tree.depthOffsets[tree.treeDepth] ?? tree.nodes.length;
     const params: GPUBuffer[] = [
       ...this.gpuKernels.encodeComputeRegretWeightsAggregateRange(
@@ -1132,8 +1333,7 @@ export class SparseCfrResolver {
         denomBuffer,
       );
     }
-    this.model.device.queue.submit([encoder.finish()]);
-    for (const param of params) param.destroy();
+    return params;
   }
 
   private encodeRegretMatchGpuResident(
@@ -1640,9 +1840,24 @@ export class SparseCfrResolver {
     const allowedProb = new Float32Array(nodeCount * NUM_HANDS);
     const handCard0 = new Uint32Array(NUM_HANDS);
     const handCard1 = new Uint32Array(NUM_HANDS);
+    const overlapHands = new Uint32Array(NUM_HANDS * OVERLAP_HAND_SLOTS);
+    const overlapCounts = new Uint32Array(NUM_HANDS);
     for (let hand = 0; hand < NUM_HANDS; hand += 1) {
       handCard0[hand] = HAND_CARD0[hand]!;
       handCard1[hand] = HAND_CARD1[hand]!;
+      let overlapCount = 0;
+      for (let other = 0; other < NUM_HANDS; other += 1) {
+        if (
+          HAND_CARD0[hand] === HAND_CARD0[other] ||
+          HAND_CARD0[hand] === HAND_CARD1[other] ||
+          HAND_CARD1[hand] === HAND_CARD0[other] ||
+          HAND_CARD1[hand] === HAND_CARD1[other]
+        ) {
+          overlapHands[hand * OVERLAP_HAND_SLOTS + overlapCount] = other;
+          overlapCount += 1;
+        }
+      }
+      overlapCounts[hand] = overlapCount;
     }
 
     let cursor = 0;
@@ -1684,6 +1899,9 @@ export class SparseCfrResolver {
       allowedProb,
       handCard0,
       handCard1,
+      overlapHands,
+      overlapCounts,
+      overlapSlots: OVERLAP_HAND_SLOTS,
     };
   }
 

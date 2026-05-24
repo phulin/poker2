@@ -448,10 +448,11 @@ export class BetterFfnWebGpuModel {
     prepared?: PreparedBatchFeatures,
     beforeSubmit?: (encoder: GPUCommandEncoder, handValues: GPUBuffer) => void,
     exactBelief?: ExactBelief,
+    beforeEncode?: (encoder: GPUCommandEncoder) => void,
   ): Promise<GpuHandValuePrediction> {
     const prediction = this.enqueuePredictBatch(envs, beliefs, {
       includePolicy: false,
-    }, prepared, beforeSubmit, exactBelief);
+    }, prepared, beforeSubmit, exactBelief, beforeEncode);
     return {
       buffer: prediction.handValuesBuffer,
       batch: prediction.batch,
@@ -693,6 +694,7 @@ export class BetterFfnWebGpuModel {
     prepared?: PreparedBatchFeatures,
     beforeSubmit?: (encoder: GPUCommandEncoder, handValues: GPUBuffer) => void,
     exactBelief?: ExactBelief,
+    beforeEncode?: (encoder: GPUCommandEncoder) => void,
   ): {
     handValuesBuffer: GPUBuffer;
     policyLogitsBuffer?: GPUBuffer;
@@ -766,6 +768,7 @@ export class BetterFfnWebGpuModel {
         this.device.queue.submit([encoder.finish()]);
         submitted = true;
       };
+      beforeEncode?.(encoder);
       let beliefBuffer: GPUBuffer;
       if (beliefs instanceof Float32Array) {
         const batchedBeliefs =

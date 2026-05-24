@@ -65,10 +65,21 @@ function fakeModel(
     },
     async predictBatchHandValuesGpu(
       envs: readonly PublicHunlEnv[],
+      _beliefs: Float32Array<ArrayBufferLike> | GPUBuffer,
+      _prepared?: unknown,
+      beforeSubmit?: (encoder: GPUCommandEncoder, handValues: GPUBuffer) => void,
+      _exactBelief?: unknown,
+      beforeEncode?: (encoder: GPUCommandEncoder) => void,
     ): Promise<GpuHandValuePrediction> {
       if (!device) throw new Error("fake GPU model has no device");
       if (counters) counters.batchLeafSizes.push(envs.length);
       const buffer = makeEmptyStorageBuffer(device, envs.length * 2 * NUM_HANDS);
+      if (beforeEncode || beforeSubmit) {
+        const encoder = device.createCommandEncoder();
+        beforeEncode?.(encoder);
+        beforeSubmit?.(encoder, buffer);
+        device.queue.submit([encoder.finish()]);
+      }
       return {
         buffer,
         batch: envs.length,

@@ -800,6 +800,186 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_SHOWDOWN_RANK_MASS_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  batch: u32,
+  maxRanks: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> nodeIndices: array<u32>;
+@group(0) @binding(1) var<storage, read> allowedMask: array<u32>;
+@group(0) @binding(2) var<storage, read> rankOrdinals: array<u32>;
+@group(0) @binding(3) var<storage, read> rankCounts: array<u32>;
+@group(0) @binding(4) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(5) var<storage, read_write> rankMass: array<f32>;
+@group(0) @binding(6) var<uniform> params: Params;
+
+var<workgroup> partial: array<f32, 128>;
+
+@compute @workgroup_size(128)
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let rank = wid.x;
+  let samplePlayer = wid.y;
+  let lane = lid.x;
+  if (rank >= params.maxRanks || samplePlayer >= params.batch * 2u) {
+    return;
+  }
+
+  let sample = samplePlayer / 2u;
+  let player = samplePlayer % 2u;
+  let node = nodeIndices[sample];
+  let rankCount = rankCounts[sample];
+  var sum = 0.0;
+  if (rank < rankCount) {
+  for (var hand = lane; hand < params.numHands; hand = hand + 128u) {
+    let handIdx = node * params.numHands + hand;
+    if (
+      allowedMask[handIdx] != 0u &&
+      rankOrdinals[sample * params.numHands + hand] == rank
+    ) {
+      sum = sum + beliefs[(node * 2u + player) * params.numHands + hand];
+    }
+  }
+  }
+
+  partial[lane] = sum;
+  workgroupBarrier();
+
+  var stride = 64u;
+  loop {
+    if (lane < stride) {
+      partial[lane] = partial[lane] + partial[lane + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  if (lane == 0u) {
+    rankMass[samplePlayer * params.maxRanks + rank] = partial[0];
+  }
+}
+`;
+
+export const SPARSE_SHOWDOWN_RANK_PREFIX_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  batch: u32,
+  maxRanks: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> rankCounts: array<u32>;
+@group(0) @binding(1) var<storage, read> rankMass: array<f32>;
+@group(0) @binding(2) var<storage, read_write> rankPrefixLess: array<f32>;
+@group(0) @binding(3) var<storage, read_write> rankTotal: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let samplePlayer = gid.x;
+  if (samplePlayer >= params.batch * 2u) {
+    return;
+  }
+  let sample = samplePlayer / 2u;
+  let rankCount = rankCounts[sample];
+  let base = samplePlayer * params.maxRanks;
+  var sum = 0.0;
+  for (var rank = 0u; rank < params.maxRanks; rank = rank + 1u) {
+    rankPrefixLess[base + rank] = sum;
+    if (rank < rankCount) {
+      sum = sum + rankMass[base + rank];
+    }
+  }
+  rankTotal[samplePlayer] = sum;
+}
+`;
+
+export const SPARSE_SHOWDOWN_VALUES_FROM_RANKS_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  batch: u32,
+  maxRanks: u32,
+  overlapSlots: u32,
+};
+
+@group(0) @binding(0) var<storage, read> nodeIndices: array<u32>;
+@group(0) @binding(1) var<storage, read> rankOrdinals: array<u32>;
+@group(0) @binding(2) var<storage, read> overlapHands: array<u32>;
+@group(0) @binding(3) var<storage, read> overlapCounts: array<u32>;
+@group(0) @binding(4) var<storage, read> payoffs: array<f32>;
+@group(0) @binding(5) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(6) var<storage, read> rankMass: array<f32>;
+@group(0) @binding(7) var<storage, read> rankPrefixLess: array<f32>;
+@group(0) @binding(8) var<storage, read> rankTotal: array<f32>;
+@group(0) @binding(9) var<storage, read_write> values: array<f32>;
+@group(0) @binding(10) var<uniform> params: Params;
+
+@compute @workgroup_size(128)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let total = params.batch * 2u * params.numHands;
+  if (linear >= total) {
+    return;
+  }
+
+  let hand = linear % params.numHands;
+  let player = (linear / params.numHands) % 2u;
+  let sample = linear / (2u * params.numHands);
+  let node = nodeIndices[sample];
+  let valueIdx = (node * 2u + player) * params.numHands + hand;
+  let rank = rankOrdinals[sample * params.numHands + hand];
+  if (rank >= params.maxRanks) {
+    values[valueIdx] = 0.0;
+    return;
+  }
+
+  let opponent = 1u - player;
+  let aggregateBase = (sample * 2u + opponent) * params.maxRanks;
+  var lower = rankPrefixLess[aggregateBase + rank];
+  var equal = rankMass[aggregateBase + rank];
+  var higher = rankTotal[sample * 2u + opponent] - lower - equal;
+
+  let beliefBase = (node * 2u + opponent) * params.numHands;
+  let overlapBase = hand * params.overlapSlots;
+  let overlapCount = overlapCounts[hand];
+  for (var i = 0u; i < overlapCount; i = i + 1u) {
+    let opp = overlapHands[overlapBase + i];
+    let oppRank = rankOrdinals[sample * params.numHands + opp];
+    if (oppRank >= params.maxRanks) {
+      continue;
+    }
+    let oppBelief = beliefs[beliefBase + opp];
+    if (oppRank < rank) {
+      lower = lower - oppBelief;
+    } else if (oppRank > rank) {
+      higher = higher - oppBelief;
+    } else {
+      equal = equal - oppBelief;
+    }
+  }
+
+  let winValue = payoffs[sample * 3u];
+  let loseValue = payoffs[sample * 3u + 1u];
+  let tieValue = payoffs[sample * 3u + 2u];
+  let mass = lower + equal + higher;
+  var value: f32;
+  if (player == 0u) {
+    value = lower * winValue + equal * tieValue + higher * loseValue;
+  } else {
+    value = lower * -loseValue + equal * -tieValue + higher * -winValue;
+  }
+  values[valueIdx] = select(0.0, value / mass, mass > 1.0e-12);
+}
+`;
+
 export const SPARSE_ALLIN_TABLE_VALUES_WGSL = /* wgsl */ `
 struct Params {
   numHands: u32,
@@ -894,6 +1074,9 @@ export interface SparseGpuTreeData {
   allowedProb: Float32Array<ArrayBufferLike>;
   handCard0: Uint32Array<ArrayBufferLike>;
   handCard1: Uint32Array<ArrayBufferLike>;
+  overlapHands: Uint32Array<ArrayBufferLike>;
+  overlapCounts: Uint32Array<ArrayBufferLike>;
+  overlapSlots: number;
 }
 
 export interface SparseGpuTreeBuffers {
@@ -909,6 +1092,9 @@ export interface SparseGpuTreeBuffers {
   allowedProb: GPUBuffer;
   handCard0: GPUBuffer;
   handCard1: GPUBuffer;
+  overlapHands: GPUBuffer;
+  overlapCounts: GPUBuffer;
+  overlapSlots: number;
   dispose: () => void;
 }
 
@@ -931,6 +1117,9 @@ export class SparseCfrGpuKernels {
   private readonly gatherNodeBeliefsPipeline: GPUComputePipeline;
   private readonly scatterNodeValuesPipeline: GPUComputePipeline;
   private readonly showdownValuesPipeline: GPUComputePipeline;
+  private readonly showdownRankMassPipeline: GPUComputePipeline;
+  private readonly showdownRankPrefixPipeline: GPUComputePipeline;
+  private readonly showdownValuesFromRanksPipeline: GPUComputePipeline;
   private readonly allInTableValuesPipeline: GPUComputePipeline;
 
   constructor(device: GPUDevice) {
@@ -1003,6 +1192,18 @@ export class SparseCfrGpuKernels {
       SPARSE_SHOWDOWN_VALUES_WGSL,
       "sparse-cfr-showdown-values",
     );
+    this.showdownRankMassPipeline = this.pipeline(
+      SPARSE_SHOWDOWN_RANK_MASS_WGSL,
+      "sparse-cfr-showdown-rank-mass",
+    );
+    this.showdownRankPrefixPipeline = this.pipeline(
+      SPARSE_SHOWDOWN_RANK_PREFIX_WGSL,
+      "sparse-cfr-showdown-rank-prefix",
+    );
+    this.showdownValuesFromRanksPipeline = this.pipeline(
+      SPARSE_SHOWDOWN_VALUES_FROM_RANKS_WGSL,
+      "sparse-cfr-showdown-values-from-ranks",
+    );
     this.allInTableValuesPipeline = this.pipeline(
       SPARSE_ALLIN_TABLE_VALUES_WGSL,
       "sparse-cfr-allin-table-values",
@@ -1021,6 +1222,8 @@ export class SparseCfrGpuKernels {
       makeStorageBuffer(this.device, data.allowedProb),
       makeStorageBuffer(this.device, data.handCard0),
       makeStorageBuffer(this.device, data.handCard1),
+      makeStorageBuffer(this.device, data.overlapHands),
+      makeStorageBuffer(this.device, data.overlapCounts),
     ] as const;
     return {
       nodeCount: data.nodeCount,
@@ -1035,6 +1238,9 @@ export class SparseCfrGpuKernels {
       allowedProb: buffers[7],
       handCard0: buffers[8],
       handCard1: buffers[9],
+      overlapHands: buffers[10],
+      overlapCounts: buffers[11],
+      overlapSlots: data.overlapSlots,
       dispose: () => {
         for (const buffer of buffers) {
           buffer.destroy();
@@ -1535,6 +1741,87 @@ export class SparseCfrGpuKernels {
       encoder,
       this.showdownValuesPipeline,
       bindGroup,
+      Math.ceil((batch * 2 * tree.numHands) / 128),
+    );
+    return params;
+  }
+
+  encodeShowdownValuesFromRankAggregates(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    rankOrdinals: GPUBuffer,
+    rankCounts: GPUBuffer,
+    payoffs: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    rankMass: GPUBuffer,
+    rankPrefixLess: GPUBuffer,
+    rankTotal: GPUBuffer,
+    batch: number,
+    maxRanks: number,
+  ): GPUBuffer {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
+    );
+    const massBindGroup = this.device.createBindGroup({
+      layout: this.showdownRankMassPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices } },
+        { binding: 1, resource: { buffer: tree.allowedMask } },
+        { binding: 2, resource: { buffer: rankOrdinals } },
+        { binding: 3, resource: { buffer: rankCounts } },
+        { binding: 4, resource: { buffer: beliefs } },
+        { binding: 5, resource: { buffer: rankMass } },
+        { binding: 6, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.showdownRankMassPipeline,
+      massBindGroup,
+      maxRanks,
+      batch * 2,
+    );
+
+    const prefixBindGroup = this.device.createBindGroup({
+      layout: this.showdownRankPrefixPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: rankCounts } },
+        { binding: 1, resource: { buffer: rankMass } },
+        { binding: 2, resource: { buffer: rankPrefixLess } },
+        { binding: 3, resource: { buffer: rankTotal } },
+        { binding: 4, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.showdownRankPrefixPipeline,
+      prefixBindGroup,
+      batch * 2,
+    );
+
+    const valuesBindGroup = this.device.createBindGroup({
+      layout: this.showdownValuesFromRanksPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices } },
+        { binding: 1, resource: { buffer: rankOrdinals } },
+        { binding: 2, resource: { buffer: tree.overlapHands } },
+        { binding: 3, resource: { buffer: tree.overlapCounts } },
+        { binding: 4, resource: { buffer: payoffs } },
+        { binding: 5, resource: { buffer: beliefs } },
+        { binding: 6, resource: { buffer: rankMass } },
+        { binding: 7, resource: { buffer: rankPrefixLess } },
+        { binding: 8, resource: { buffer: rankTotal } },
+        { binding: 9, resource: { buffer: values } },
+        { binding: 10, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.showdownValuesFromRanksPipeline,
+      valuesBindGroup,
       Math.ceil((batch * 2 * tree.numHands) / 128),
     );
     return params;

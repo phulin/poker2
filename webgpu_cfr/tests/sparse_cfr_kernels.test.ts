@@ -48,6 +48,14 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
       ]),
       handCard0: new Uint32Array([0, 0, 3, 5]),
       handCard1: new Uint32Array([1, 2, 4, 6]),
+      overlapHands: new Uint32Array([
+        0, 1, 0, 0,
+        0, 1, 0, 0,
+        2, 0, 0, 0,
+        3, 0, 0, 0,
+      ]),
+      overlapCounts: new Uint32Array([2, 2, 1, 1]),
+      overlapSlots: 4,
     });
 
     const regrets = makeStorageBuffer(
@@ -399,6 +407,14 @@ test("sparse WGSL all-in table values match blocker-aware CPU reference", async 
       ]),
       handCard0,
       handCard1,
+      overlapHands: new Uint32Array([
+        0, 1, 0, 0,
+        0, 1, 0, 0,
+        2, 0, 0, 0,
+        3, 0, 0, 0,
+      ]),
+      overlapCounts: new Uint32Array([2, 2, 1, 1]),
+      overlapSlots: 4,
     });
     const scale = 100;
     const table = new Int16Array(16);
