@@ -1,13 +1,12 @@
 # WebGPU CFR Evaluator
 
 This folder contains an isolated TypeScript/WebGPU harness for evaluating a
-BetterFFN-backed local CFR problem. It supports two paths:
+BetterFFN-backed local CFR problem. It supports:
 
 - A Node/Dawn parity path that can still ask Python to produce CFR fixtures.
 - A browser-safe exported-model path that loads `model.json` and compressed
-  fp16 `weights.bin.gz`,
-  builds child values with BetterFFN inference in WebGPU, and runs CFR without
-  Python at runtime.
+  fp16 `weights.bin.gz`, evaluates sparse public-tree leaves with BetterFFN
+  inference in WebGPU, and runs CFR without Python at runtime.
 - A Vite/Solid spot-solver UI that caches the exported model in IndexedDB,
   guides hero-card/board/action entry, and runs local WebGPU CFR solves.
 
@@ -21,11 +20,10 @@ BetterFFN-backed local CFR problem. It supports two paths:
 - `src/betterFfnWebGpuModel.ts` runs the supported `leaky_relu` BetterFFN family
   with WebGPU dense-vector kernels.
 - `src/hunlEnv.ts` ports the single-state public HUNL action-bin environment.
-- `src/browserEvaluator.ts` replays prefixes, builds child values, solves local
-  CFR, and returns beliefs/action probabilities. It also has a sparse
-  arbitrary-depth resolver path enabled by `depth > 1`; sparse CFR tensor
-  updates run through WGSL kernels while model leaf evaluation remains on the
-  exported BetterFFN WebGPU runtime.
+- `src/browserEvaluator.ts` replays prefixes through the sparse public-tree CFR
+  resolver and returns beliefs/action probabilities. Sparse CFR tensor updates
+  run through WGSL kernels while model leaf evaluation remains on the exported
+  BetterFFN WebGPU runtime.
 - `src/cards.ts`, `src/beliefs.ts`, and `src/modelCache.ts` provide browser-safe
   card parsing, hero-only belief initialization, blocked combo masks, streamed
   model download progress, and IndexedDB cache invalidation.

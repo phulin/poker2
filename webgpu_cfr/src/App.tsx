@@ -89,8 +89,8 @@ interface StateDescriptor {
 }
 
 interface HashInputs {
-  hand?: string;
-  actions?: string;
+  hand?: string | undefined;
+  actions?: string | undefined;
   boardCards: string[];
 }
 
@@ -1547,7 +1547,7 @@ function App(): JSX.Element {
     try {
       setSolveError("");
       const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 16)));
-      const solveDepth = Math.max(1, Math.trunc(positiveNumber(depth(), 6)));
+      const solveDepth = Math.max(2, Math.trunc(positiveNumber(depth(), 6)));
       const solveCfrAvg = false;
       setSolveStatus(`Solving depth ${solveDepth} for ${solveIterations} CFR iterations`);
       setSolveResult(undefined);
@@ -1842,7 +1842,7 @@ function App(): JSX.Element {
               <NumberStepper
                 value={depth()}
                 presets={[4, 5, 6, 7]}
-                min={1}
+                min={2}
                 onChange={(value) => {
                   setDepth(value);
                   setSolveResult(undefined);
