@@ -392,6 +392,45 @@ def test_cfr_iteration() -> None:
     assert evaluator.values_avg.isfinite().all()
 
 
+def test_record_stats_aggregates_child_delta_like_pull_back() -> None:
+    device = get_device()
+    evaluator, env, _cfg = make_sparse_evaluator(device=device)
+
+    root_indices = torch.tensor([0], dtype=torch.long, device=device)
+    evaluator.initialize_subgame(env, root_indices)
+
+    torch.manual_seed(17)
+    old_policy_probs = torch.rand_like(evaluator.policy_probs)
+    evaluator.policy_probs = torch.rand_like(evaluator.policy_probs)
+    evaluator.self_reach.zero_()
+
+    parent_count = evaluator.depth_offsets[-2]
+    reachable = torch.rand(parent_count, NUM_HANDS, device=device) > 0.2
+    reachable[0, 0] = True
+    evaluator.self_reach[:parent_count, 0] = reachable.to(evaluator.float_dtype)
+
+    diff = evaluator._pull_back(evaluator.policy_probs) - evaluator._pull_back(
+        old_policy_probs
+    )
+    diff.masked_fill_(~reachable[:, None, :], 0.0)
+    reachable_hand_count = reachable.sum(dim=-1)
+    reachable_nodes = reachable_hand_count > 0
+    diff_sum_nodes = diff.abs().sum(dim=1).sum(dim=1)
+    expected = (
+        torch.where(reachable_nodes, diff_sum_nodes / reachable_hand_count, 0.0).sum()
+        / reachable_nodes.sum()
+    )
+
+    evaluator.warm_start_iterations = 0
+    evaluator.cfr_iterations = 5
+    evaluator._record_stats(2, old_policy_probs)
+
+    assert_close(
+        torch.tensor(evaluator.stats["cfr_delta.50"], device=device),
+        expected,
+    )
+
+
 def test_evaluate_cfr_basic() -> None:
     """Test that evaluate_cfr runs without errors."""
     device = get_device()

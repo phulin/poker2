@@ -71,6 +71,57 @@ def test_fused_dcfr_update_matches_pytorch(
     torch.testing.assert_close(pos_out, pos_ref, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_cfr_delta_stats_matches_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import fused_cfr_delta_stats
+
+    device = torch.device("cuda")
+    torch.manual_seed(0xC0DE)
+
+    h = 1326
+    child_counts = torch.tensor([3, 0, 5, 2, 4], device=device, dtype=torch.long)
+    parent_count = child_counts.numel()
+    child_offsets = torch.empty_like(child_counts)
+    child_offsets[0] = parent_count
+    child_offsets[1:] = parent_count + child_counts[:-1].cumsum(dim=0)
+    total = int(parent_count + child_counts.sum().item())
+
+    policy = torch.rand(total, h, device=device)
+    old_policy = torch.rand_like(policy)
+    self_reach = torch.zeros(total, 2, h, device=device)
+    reachable = torch.rand(parent_count, h, device=device) > 0.2
+    reachable[1, :7] = True
+    self_reach[:parent_count, 0] = reachable.to(self_reach.dtype)
+
+    expected_num = torch.zeros((), device=device)
+    expected_den = torch.zeros((), device=device)
+    for parent in range(parent_count):
+        first = int(child_offsets[parent].item())
+        count = int(child_counts[parent].item())
+        node_reachable = reachable[parent]
+        reachable_count = node_reachable.sum()
+        if reachable_count > 0:
+            child_delta = (
+                policy[first : first + count] - old_policy[first : first + count]
+            ).abs()
+            delta_sum = child_delta[:, node_reachable].sum()
+            expected_num += delta_sum / reachable_count
+            expected_den += 1
+
+    actual = fused_cfr_delta_stats(
+        policy=policy,
+        old_policy=old_policy,
+        self_reach=self_reach,
+        child_offsets=child_offsets,
+        child_count=child_counts,
+        max_children=8,
+    )
+
+    torch.testing.assert_close(actual[0], expected_num, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(actual[1], expected_den, rtol=0, atol=0)
+
+
 # ---------------------------------------------------------------------------
 # CUDA-graph capture correctness.
 # ---------------------------------------------------------------------------

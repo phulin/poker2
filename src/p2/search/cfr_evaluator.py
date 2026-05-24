@@ -2224,17 +2224,33 @@ class CFREvaluator(ABC):
             percentile_idx = percentile_ts.index(t)
             percentile = percentiles[percentile_idx]
 
-            diff = self._pull_back(self.policy_probs) - self._pull_back(
-                old_policy_probs
-            )
             # Can either player get to this node with a given hand?
             reachable = (self.self_reach > 0).any(dim=1)[: self.depth_offsets[-2]]
-            diff.masked_fill_(~reachable[:, None, :], 0.0)
             reachable_hand_count = reachable.sum(dim=-1)
             reachable_nodes = reachable_hand_count > 0
 
-            # Sum over action probabilities and hands - will divide by reachable hand count.
-            diff_sum_nodes = diff.abs().sum(dim=1).sum(dim=1)
+            child_start = self.depth_offsets[1]
+            child_end = self.total_nodes
+            parent_count = self.depth_offsets[-2]
+            child_delta = (
+                self.policy_probs[child_start:child_end]
+                - old_policy_probs[child_start:child_end]
+            ).abs()
+            delta_by_parent_hand = torch.zeros(
+                (parent_count, child_delta.shape[-1]),
+                dtype=child_delta.dtype,
+                device=child_delta.device,
+            )
+            parent_indices = self.parent_index[child_start:child_end]
+            delta_by_parent_hand.scatter_add_(
+                0,
+                parent_indices[:, None].expand(-1, child_delta.shape[-1]),
+                child_delta,
+            )
+            delta_by_parent_hand.masked_fill_(~reachable, 0.0)
+
+            # Sum over action probabilities and hands, then divide by reachable hand count.
+            diff_sum_nodes = delta_by_parent_hand.sum(dim=1)
             node_delta = torch.where(
                 reachable_nodes, diff_sum_nodes / reachable_hand_count, 0.0
             )

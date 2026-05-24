@@ -24,6 +24,9 @@ Plus:
    into a CUDA graph and exposes ``.replay()`` for benchmarking launch
    overhead.
 
+6. ``fused_cfr_delta_stats`` — direct parent/hand reduction for the CFR policy
+   delta metric, avoiding dense child→action pullback temporaries.
+
 The fused variant of ``SparseCFREvaluator`` lives in
 ``fused_sparse_cfr_evaluator.py`` as ``FusedSparseCFREvaluator`` — a subclass
 that overrides only the methods affected by fusion.
@@ -1731,6 +1734,118 @@ def fused_parent_sum_divide_(
         BLOCK_H=block_h,
         num_warps=4,
     )
+
+
+# ---------------------------------------------------------------------------
+# Kernel 9b: CFR delta metric without dense pullback/scatter temporaries.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_cfr_delta_stats_kernel(
+        policy_ptr,         # [total, H]
+        old_policy_ptr,     # [total, H]
+        self_reach_ptr,     # [total, 2, H]
+        child_offsets_ptr,  # [num_parents]
+        child_count_ptr,    # [num_parents]
+        out_ptr,            # [2], numerator sum and reachable-node count
+        H,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        parent = tl.program_id(0)
+
+        first = tl.load(child_offsets_ptr + parent)
+        count = tl.load(child_count_ptr + parent)
+
+        child_offsets = tl.arange(0, MAX_CHILDREN)
+        hand_offsets = tl.arange(0, BLOCK_H)
+        hand_mask = hand_offsets < H
+        child_mask = child_offsets < count
+
+        child_rows = first + child_offsets
+        ptrs = policy_ptr + child_rows[:, None] * H + hand_offsets[None, :]
+        old_ptrs = old_policy_ptr + child_rows[:, None] * H + hand_offsets[None, :]
+        mask = child_mask[:, None] & hand_mask[None, :]
+        policy = tl.load(ptrs, mask=mask, other=0.0)
+        old_policy = tl.load(old_ptrs, mask=mask, other=0.0)
+        delta_by_hand = tl.sum(tl.abs(policy - old_policy), axis=0)
+
+        reach0 = tl.load(
+            self_reach_ptr + (parent * 2) * H + hand_offsets,
+            mask=hand_mask,
+            other=0.0,
+        )
+        reach1 = tl.load(
+            self_reach_ptr + (parent * 2 + 1) * H + hand_offsets,
+            mask=hand_mask,
+            other=0.0,
+        )
+        reachable = (reach0 > 0.0) | (reach1 > 0.0)
+
+        reachable_count = tl.sum(tl.where(reachable, 1.0, 0.0), axis=0)
+        delta_sum = tl.sum(tl.where(reachable, delta_by_hand, 0.0), axis=0)
+        has_reachable = reachable_count > 0.0
+        node_delta = tl.where(has_reachable, delta_sum / reachable_count, 0.0)
+        node_count = tl.where(has_reachable, 1.0, 0.0)
+
+        tl.atomic_add(out_ptr, node_delta, sem="relaxed")
+        tl.atomic_add(out_ptr + 1, node_count, sem="relaxed")
+
+
+def fused_cfr_delta_stats(
+    policy: torch.Tensor,
+    old_policy: torch.Tensor,
+    self_reach: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    max_children: int,
+    block_h: int = 2048,
+) -> torch.Tensor:
+    """Return ``[sum_node_delta, reachable_node_count]`` for CFR delta stats.
+
+    This matches ``CFREvaluator._record_stats`` for sparse child-contiguous
+    trees, but computes directly from child rows. It avoids materializing
+    ``_pull_back(policy)``, ``_pull_back(old_policy)``, child deltas, or a
+    parent-by-hand scatter buffer.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    if policy.device.type != "cuda":
+        raise ValueError("fused_cfr_delta_stats requires CUDA tensors.")
+    assert policy.is_contiguous() and old_policy.is_contiguous()
+    assert self_reach.is_contiguous() and self_reach.dim() == 3
+    assert child_offsets.is_contiguous() and child_offsets.dim() == 1
+    assert child_count.is_contiguous() and child_count.shape == child_offsets.shape
+    assert policy.shape == old_policy.shape
+    assert self_reach.shape[0] >= child_offsets.shape[0]
+    assert self_reach.shape[1] == 2
+    assert self_reach.shape[2] == policy.shape[1]
+
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+
+    out = torch.empty((2,), device=policy.device, dtype=torch.float32)
+    out.zero_()
+    h = policy.shape[1]
+    if block_h < h:
+        raise ValueError(f"block_h={block_h} must cover all {h} hands.")
+    _fused_cfr_delta_stats_kernel[(child_offsets.shape[0],)](
+        policy,
+        old_policy,
+        self_reach,
+        child_offsets,
+        child_count,
+        out,
+        h,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=8,
+    )
+    return out
 
 
 # ---------------------------------------------------------------------------

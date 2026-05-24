@@ -61,6 +61,7 @@ from p2.search.fused_cfr_triton import (
     fused_br_best_action_mass,
     fused_br_finalize_depth_,
     fused_block_and_normalize_beliefs_,
+    fused_cfr_delta_stats,
     fused_deep_beliefs_,
     fused_model_values_writeback_,
     fused_parent_sum_divide_,
@@ -366,6 +367,42 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if extras is None:
             return super()._showdown_value_both(beliefs)
         return showdown_ev_v15(beliefs, extras)
+
+    def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
+        """Record policy-update stats with a fused CFR-delta reduction."""
+        percentile_ts = (
+            torch.linspace(self.warm_start_iterations, self.cfr_iterations - 1, 5)
+            .round()
+            .int()
+            .tolist()
+        )
+        percentiles = [0, 25, 50, 75, 100]
+        if t not in percentile_ts:
+            return
+
+        percentile = percentiles[percentile_ts.index(t)]
+        top = self.depth_offsets[-2]
+        if top == 0:
+            return
+        self._prepare_tree_slices()
+        child_offsets_top = self._child_offsets_top
+        child_count_top = self._child_count_top
+        assert child_offsets_top is not None
+        assert child_count_top is not None
+
+        stats = fused_cfr_delta_stats(
+            policy=self.policy_probs.contiguous(),
+            old_policy=old_policy_probs.contiguous(),
+            self_reach=self.self_reach.contiguous(),
+            child_offsets=child_offsets_top,
+            child_count=child_count_top,
+            max_children=self.num_actions,
+        )
+        node_count = stats[1]
+        node_delta_mean = torch.where(
+            node_count > 0, stats[0] / node_count.clamp_min(1.0), 0.0
+        )
+        self.stats[f"cfr_delta.{percentile}"] = node_delta_mean.item()
 
     def _ensure_fused_attrs(self) -> None:
         """Populate optional fused-only attributes if the object was constructed
