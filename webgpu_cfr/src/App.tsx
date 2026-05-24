@@ -148,6 +148,13 @@ function formatActionLabel(bin: number, ctx: ActionContext): string {
   return `Bet ${formatChips(amount)}`;
 }
 
+function shortActionLabel(bin: number, ctx: ActionContext): string {
+  if (bin === 0) return "F";
+  if (bin === 1) return "C";
+  if (bin === ctx.allInIndex) return "A";
+  return ctx.toCall > 0 ? "R" : "B";
+}
+
 function positiveNumber(value: string, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -621,7 +628,7 @@ function closestRaiseAction(
   return bestAction;
 }
 
-function ActionSelect(props: {
+function ActionRowButtons(props: {
   action: number;
   legalActions: number[];
   context: ActionContext;
@@ -657,55 +664,78 @@ function ActionSelect(props: {
     if (action !== undefined) props.onAction(action);
   }
 
+  function historyButtonClass(action: number): string {
+    return `history-action-button ${action === props.action ? "selected" : "muted"}`;
+  }
+
+  function historyButtonLabel(action: number): string {
+    return action === props.action
+      ? formatActionLabel(action, props.context)
+      : shortActionLabel(action, props.context);
+  }
+
   return (
-    <Show
-      when={editingRaise()}
-      fallback={
-        <select
-          value={isRaiseAction() ? "raise" : String(props.action)}
-          onChange={(event) => {
-            const value = event.currentTarget.value;
-            if (value === "raise") {
-              openRaiseInput();
-            } else {
-              props.onAction(Number(value));
-            }
+    <div class="action-buttons history-actions">
+      <Show
+        when={editingRaise()}
+        fallback={
+          <>
+            <For each={directActions()}>
+              {(action) => (
+                <button
+                  type="button"
+                  class={historyButtonClass(action)}
+                  onClick={() => props.onAction(action)}
+                  title={formatActionLabel(action, props.context)}
+                >
+                  {historyButtonLabel(action)}
+                </button>
+              )}
+            </For>
+            <Show when={raiseActions().length > 0}>
+              <button
+                type="button"
+                class={`history-action-button ${isRaiseAction() ? "selected" : "muted"}`}
+                onClick={openRaiseInput}
+                title={raiseLabel()}
+              >
+                {isRaiseAction()
+                  ? formatActionLabel(props.action, props.context)
+                  : shortActionLabel(raiseActions()[0]!, props.context)}
+              </button>
+            </Show>
+            <Show when={allInAction()}>
+              {(action) => (
+                <button
+                  type="button"
+                  class={historyButtonClass(action())}
+                  onClick={() => props.onAction(action())}
+                  title={formatActionLabel(action(), props.context)}
+                >
+                  {historyButtonLabel(action())}
+                </button>
+              )}
+            </Show>
+          </>
+        }
+      >
+        <input
+          ref={raiseInput}
+          class="raise-input action-raise-input"
+          value={raiseValue()}
+          inputmode="decimal"
+          onInput={(event) => setRaiseValue(event.currentTarget.value)}
+          onBlur={() => {
+            if (raiseValue()) commitRaise();
+            else setEditingRaise(false);
           }}
-        >
-          <For each={directActions()}>
-            {(action) => (
-              <option value={String(action)}>{formatActionLabel(action, props.context)}</option>
-            )}
-          </For>
-          <Show when={raiseActions().length > 0}>
-            <option value="raise">{raiseLabel()}</option>
-          </Show>
-          <Show when={allInAction()}>
-            {(action) => (
-              <option value={String(action())}>
-                {formatActionLabel(action(), props.context)}
-              </option>
-            )}
-          </Show>
-        </select>
-      }
-    >
-      <input
-        ref={raiseInput}
-        class="raise-input action-raise-input"
-        value={raiseValue()}
-        inputmode="decimal"
-        onInput={(event) => setRaiseValue(event.currentTarget.value)}
-        onBlur={() => {
-          if (raiseValue()) commitRaise();
-          else setEditingRaise(false);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") commitRaise();
-          if (event.key === "Escape") setEditingRaise(false);
-        }}
-      />
-    </Show>
+          onKeyDown={(event) => {
+            if (event.key === "Enter") commitRaise();
+            if (event.key === "Escape") setEditingRaise(false);
+          }}
+        />
+      </Show>
+    </div>
   );
 }
 
@@ -1058,6 +1088,10 @@ function App(): JSX.Element {
     return "error" in state ? 0 : Math.min(3, Math.max(0, state.finalStreet));
   });
   const inferredPublicCount = createMemo(() => STREET_CARD_COUNTS[inferredStreet()] ?? 0);
+  const visibleBoardComplete = createMemo(() => {
+    const publicCount = inferredPublicCount();
+    return publicCount === 0 || boardCards().slice(0, publicCount).every(Boolean);
+  });
 
   const parsedInputs = createMemo(() => {
     try {
@@ -1448,7 +1482,7 @@ function App(): JSX.Element {
                     <span class={`actor-pill ${row.actor === HERO_PLAYER ? "hero" : "villain"}`}>
                       {playerLabel(row.actor)}
                     </span>
-                    <ActionSelect
+                    <ActionRowButtons
                       action={row.action}
                       legalActions={legalActions(row.legalMask)}
                       context={row.context}
@@ -1475,7 +1509,12 @@ function App(): JSX.Element {
                   onTextChange={updateBoardCards}
                 />
               </Show>
-              <Show when={legalActions((descriptor() as StateDescriptor).finalLegalMask).length > 0}>
+              <Show
+                when={
+                  visibleBoardComplete() &&
+                  legalActions((descriptor() as StateDescriptor).finalLegalMask).length > 0
+                }
+              >
                 <ActionInput
                   actor={(descriptor() as StateDescriptor).finalActor}
                   streetLabel={

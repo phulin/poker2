@@ -739,8 +739,7 @@ h3 {
 }
 
 .field input,
-.field select,
-.action-row select {
+.field select {
   width: 100%;
   min-width: 0;
   height: 38px;
@@ -900,6 +899,10 @@ h3 {
   gap: 8px;
 }
 
+.history-actions {
+  align-items: center;
+}
+
 .action-buttons button,
 .raise-input,
 .solve-button {
@@ -919,6 +922,21 @@ h3 {
 .action-buttons button {
   background: #eef8f4;
   color: #0f665a;
+}
+
+.action-buttons .history-action-button {
+  min-width: 38px;
+  padding: 0 11px;
+  border-color: #c7d0cc;
+  background: #edf1ef;
+  color: #687477;
+}
+
+.action-buttons .history-action-button.selected {
+  min-width: 62px;
+  border-color: #8fb6e8;
+  background: #e8f1ff;
+  color: #1d4f91;
 }
 
 .raise-input {
