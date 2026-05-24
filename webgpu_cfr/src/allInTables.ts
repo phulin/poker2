@@ -201,7 +201,9 @@ class ManifestAllInTableProvider implements AllInTableProvider {
 function templatePath(template: string, canonical: number, cards: readonly number[]): string {
   return template
     .replaceAll("{id}", String(canonical))
+    .replaceAll("{id4}", canonical.toString().padStart(4, "0"))
     .replaceAll("{canonical}", String(canonical))
+    .replaceAll("{canonical4}", canonical.toString().padStart(4, "0"))
     .replaceAll("{cards}", cards.join("-"));
 }
 

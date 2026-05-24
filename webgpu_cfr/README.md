@@ -80,6 +80,23 @@ root:
 uv run python webgpu_cfr/python/export_model.py --snapshot checkpoints-rebel/rebel_latest.pt --out webgpu_cfr/public/models/rebel_latest
 ```
 
+Generate optional WebGPU all-in payoff assets for the exported model:
+
+```bash
+uv run python webgpu_cfr/python/precompute_allin_assets.py \
+  --out webgpu_cfr/public/models/rebel_latest/allin \
+  --device cuda \
+  --batch-size 1
+uv run python webgpu_cfr/python/export_model.py \
+  --snapshot checkpoints-rebel/rebel_latest.pt \
+  --out webgpu_cfr/public/models/rebel_latest \
+  --allin-manifest webgpu_cfr/public/models/rebel_latest/allin/allin_manifest.json
+```
+
+The flop asset generator writes canonical int16 table shards plus lookup files.
+The browser loads only the one canonical flop table needed for the current
+street-local solve.
+
 Run the exported-model evaluator directly:
 
 ```bash
