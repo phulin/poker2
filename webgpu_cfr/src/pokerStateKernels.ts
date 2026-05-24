@@ -534,10 +534,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 export const POKER_ENCODE_FEATURES_WGSL = /* wgsl */ `
 ${STATE_WGSL}
 struct EncodeParams {
-  hidden: u32,
-  batch: u32,
-  _pad0: u32,
-  _pad1: u32,
+  hidden: f32,
+  batch: f32,
+  contextDim: f32,
+  bb: f32,
+  maxStackBb: f32,
+  _pad0: f32,
+  _pad1: f32,
+  _pad2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> states: array<f32>;
@@ -554,20 +558,45 @@ struct EncodeParams {
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let sample = wid.x;
   let lane = lid.x;
-  if (sample >= params.batch) { return; }
+  let batch = u32(params.batch);
+  let hidden = u32(params.hidden);
+  let contextDim = u32(params.contextDim);
+  if (sample >= batch) { return; }
   let base = sample * STATE_STRIDE;
   if (lane == 0u) {
-    context[sample * 11u + 0u] = states[base + TO_ACT];
-    context[sample * 11u + 1u] = f32((as_u(states[base + TO_ACT]) + 2u - as_u(states[base + BUTTON])) % 2u);
-    context[sample * 11u + 2u] = states[base + ACTIONS_THIS_ROUND];
-    context[sample * 11u + 3u] = states[base + POT];
-    context[sample * 11u + 4u] = states[base + MIN_RAISE];
-    context[sample * 11u + 5u] = states[base + STACK0];
-    context[sample * 11u + 6u] = states[base + STACK1];
-    context[sample * 11u + 7u] = states[base + COMMITTED0];
-    context[sample * 11u + 8u] = states[base + COMMITTED1];
-    context[sample * 11u + 9u] = states[base + STACK0] / states[base + POT];
-    context[sample * 11u + 10u] = states[base + STACK1] / states[base + POT];
+    let contextBase = sample * contextDim;
+    if (contextDim == 15u) {
+      let scale = max(states[base + SCALE], 1.0);
+      let bb = max(params.bb, 1.0);
+      let pot = states[base + POT];
+      context[contextBase + 0u] = states[base + TO_ACT];
+      context[contextBase + 1u] = f32((as_u(states[base + TO_ACT]) + 2u - as_u(states[base + BUTTON])) % 2u);
+      context[contextBase + 2u] = 0.0;
+      context[contextBase + 3u] = pot / scale;
+      context[contextBase + 4u] = states[base + MIN_RAISE] / scale;
+      context[contextBase + 5u] = log(max(scale / bb, 1.0)) / log(max(params.maxStackBb, 2.0));
+      context[contextBase + 6u] = log(1.0 + pot / bb);
+      context[contextBase + 7u] = states[base + STACK0] / scale;
+      context[contextBase + 8u] = states[base + STACK1] / scale;
+      context[contextBase + 9u] = states[base + COMMITTED0] / scale;
+      context[contextBase + 10u] = states[base + COMMITTED1] / scale;
+      context[contextBase + 11u] = states[base + STACK0] / max(pot, 1.0);
+      context[contextBase + 12u] = states[base + STACK1] / max(pot, 1.0);
+      context[contextBase + 13u] = log(1.0 + states[base + COMMITTED0] / bb);
+      context[contextBase + 14u] = log(1.0 + states[base + COMMITTED1] / bb);
+    } else {
+      context[contextBase + 0u] = states[base + TO_ACT];
+      context[contextBase + 1u] = f32((as_u(states[base + TO_ACT]) + 2u - as_u(states[base + BUTTON])) % 2u);
+      context[contextBase + 2u] = states[base + ACTIONS_THIS_ROUND];
+      context[contextBase + 3u] = states[base + POT];
+      context[contextBase + 4u] = states[base + MIN_RAISE];
+      context[contextBase + 5u] = states[base + STACK0];
+      context[contextBase + 6u] = states[base + STACK1];
+      context[contextBase + 7u] = states[base + COMMITTED0];
+      context[contextBase + 8u] = states[base + COMMITTED1];
+      context[contextBase + 9u] = states[base + STACK0] / states[base + POT];
+      context[contextBase + 10u] = states[base + STACK1] / states[base + POT];
+    }
   }
   if (lane < 13u) {
     var count = 0.0;
@@ -586,15 +615,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     suitCounts[sample * 4u + lane] = count;
   }
   let street = min(as_u(states[base + STREET]), 4u);
-  for (var d = lane; d < params.hidden; d = d + 256u) {
-    var out = streetEmbedding[street * params.hidden + d];
+  for (var d = lane; d < hidden; d = d + 256u) {
+    var out = streetEmbedding[street * hidden + d];
     for (var i = 0u; i < 5u; i = i + 1u) {
       let card = states[base + BOARD0 + i];
       let rank = select(13u, as_u(card) % 13u, card >= 0.0);
       let suit = select(4u, as_u(card) / 13u, card >= 0.0);
-      out = out + rankEmbedding[rank * params.hidden + d] + suitEmbedding[suit * params.hidden + d];
+      out = out + rankEmbedding[rank * hidden + d] + suitEmbedding[suit * hidden + d];
     }
-    baseEmbedding[sample * params.hidden + d] = out;
+    baseEmbedding[sample * hidden + d] = out;
   }
 }
 `;

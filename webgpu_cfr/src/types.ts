@@ -101,6 +101,10 @@ export interface BetterFfnManifest {
     enforceZeroSum: boolean;
     nonlinearity: "leaky_relu";
     normalization: "rmsnorm";
+    contextDim?: number;
+    policyRank?: number;
+    policyHandBiasRank?: number;
+    splitPolicyValue?: boolean;
   };
   env: {
     stack: number;
@@ -108,6 +112,7 @@ export interface BetterFfnManifest {
     bb: number;
     betBins: number[];
     flopShowdown: boolean;
+    maxStackBb?: number;
     defaultButton: PlayerIndex;
     defaultForceDeck: number[];
   };

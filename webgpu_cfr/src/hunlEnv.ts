@@ -56,6 +56,7 @@ export class PublicHunlEnv {
   readonly sb: number;
   readonly bb: number;
   readonly flopShowdown: boolean;
+  readonly maxStackBb: number;
 
   button: PlayerIndex;
   street = 0;
@@ -88,11 +89,13 @@ export class PublicHunlEnv {
     button: PlayerIndex;
     forceDeck: number[];
     flopShowdown?: boolean;
+    maxStackBb?: number;
   }) {
     this.betBins = [...options.betBins];
     this.sb = options.sb;
     this.bb = options.bb;
     this.flopShowdown = options.flopShowdown ?? false;
+    this.maxStackBb = options.maxStackBb ?? 400;
     this.button = options.button;
     this.toAct = options.button;
     this.lastToAct = options.button;
@@ -131,6 +134,9 @@ export class PublicHunlEnv {
         manifest.env.defaultForceDeck ??
         DEFAULT_FORCE_DECK,
       flopShowdown: initialState?.flopShowdown ?? manifest.env.flopShowdown,
+      ...(manifest.env.maxStackBb !== undefined
+        ? { maxStackBb: manifest.env.maxStackBb }
+        : {}),
     });
   }
 
@@ -141,6 +147,7 @@ export class PublicHunlEnv {
       sb: this.sb,
       bb: this.bb,
       flopShowdown: this.flopShowdown,
+      maxStackBb: this.maxStackBb,
       button: this.button,
       street: this.street,
       toAct: this.toAct,
@@ -513,23 +520,52 @@ function encodeRankCode(rank: RankVector): number {
 
 export function encodeBetterFeatures(env: PublicHunlEnv): {
   context: Float32Array<ArrayBuffer>;
+  policyContext: Float32Array<ArrayBuffer>;
+  valueContext: Float32Array<ArrayBuffer>;
   street: number;
   board: number[];
 } {
-  const context = new Float32Array(11);
-  context[0] = env.toAct;
-  context[1] = (env.toAct - env.button + 2) % 2;
-  context[2] = env.actionsThisRound;
-  context[3] = env.pot;
-  context[4] = env.minRaise;
-  context[5] = env.stacks[0];
-  context[6] = env.stacks[1];
-  context[7] = env.committed[0];
-  context[8] = env.committed[1];
-  context[9] = env.stacks[0] / env.pot;
-  context[10] = env.stacks[1] / env.pot;
+  const legacyContext = new Float32Array(11);
+  legacyContext[0] = env.toAct;
+  legacyContext[1] = (env.toAct - env.button + 2) % 2;
+  legacyContext[2] = env.actionsThisRound;
+  legacyContext[3] = env.pot;
+  legacyContext[4] = env.minRaise;
+  legacyContext[5] = env.stacks[0];
+  legacyContext[6] = env.stacks[1];
+  legacyContext[7] = env.committed[0];
+  legacyContext[8] = env.committed[1];
+  legacyContext[9] = env.stacks[0] / env.pot;
+  legacyContext[10] = env.stacks[1] / env.pot;
+
+  const scale = Math.max(env.scale, 1);
+  const bb = Math.max(env.bb, 1);
+  const stackDepthBb = scale / bb;
+  const maxStackBb = Math.max(env.maxStackBb, 2);
+  const potBb = env.pot / bb;
+  const shared = new Float32Array(15);
+  shared[0] = env.toAct;
+  shared[1] = (env.toAct - env.button + 2) % 2;
+  shared[3] = env.pot / scale;
+  shared[4] = env.minRaise / scale;
+  shared[5] = Math.log(Math.max(stackDepthBb, 1)) / Math.log(maxStackBb);
+  shared[6] = Math.log1p(potBb);
+  shared[7] = env.stacks[0] / scale;
+  shared[8] = env.stacks[1] / scale;
+  shared[9] = env.committed[0] / scale;
+  shared[10] = env.committed[1] / scale;
+  shared[11] = env.stacks[0] / Math.max(env.pot, 1);
+  shared[12] = env.stacks[1] / Math.max(env.pot, 1);
+  shared[13] = Math.log1p(env.committed[0] / bb);
+  shared[14] = Math.log1p(env.committed[1] / bb);
+  const policyContext = new Float32Array(shared);
+  policyContext[2] = env.actionsThisRound;
+  const valueContext = new Float32Array(shared);
+  valueContext[2] = 0;
   return {
-    context,
+    context: legacyContext,
+    policyContext,
+    valueContext,
     street: env.street,
     board: [...env.boardIndices],
   };

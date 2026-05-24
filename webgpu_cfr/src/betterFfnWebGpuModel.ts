@@ -513,18 +513,22 @@ export class BetterFfnWebGpuModel {
     this.recordingEncoder = encoder;
     try {
       const encodedFeatures = envs.map((env) => encodeBetterFeatures(env));
-      const context = new Float32Array(batch * 11);
+      const contextDim = this.manifest.architecture.contextDim ?? 11;
+      const context = new Float32Array(batch * contextDim);
       const base = new Float32Array(batch * hiddenDim);
       for (let i = 0; i < batch; i += 1) {
         const features = encodedFeatures[i]!;
-        context.set(features.context, i * 11);
+        context.set(
+          contextDim === 15 ? features.valueContext : features.context,
+          i * contextDim,
+        );
         base.set(this.baseEmbedding(features.street, features.board), i * hiddenDim);
       }
       const contextFeatures = this.leakyReluBlockBatch(
         "context_encoder",
         storage(context),
         batch,
-        11,
+        contextDim,
         hiddenDim,
         hiddenDim,
         empty,
@@ -671,6 +675,8 @@ export class BetterFfnWebGpuModel {
           gpuPrediction.policyLogitsBuffer,
           gpuPrediction.batch * this.manifest.architecture.numActions * NUM_HANDS,
         );
+      } else if (options.includePolicy && this.manifest.architecture.splitPolicyValue) {
+        prediction.policyLogits = this.predictSplitPolicyCpu(envs, beliefs);
       }
       return prediction;
     } finally {
@@ -896,7 +902,7 @@ export class BetterFfnWebGpuModel {
       );
 
       let policyBuffer: GPUBuffer | undefined;
-      if (options.includePolicy) {
+      if (options.includePolicy && !this.manifest.architecture.splitPolicyValue) {
         let policyInput = x;
         const policyAlpha = alpha;
         policyBuffer = this.headBatch(
@@ -1011,7 +1017,8 @@ export class BetterFfnWebGpuModel {
       };
 
       const beliefBuffer = beliefs instanceof Float32Array ? storage(beliefs) : beliefs;
-      const context = empty(batch * 11);
+      const contextDim = this.manifest.architecture.contextDim ?? 11;
+      const context = empty(batch * contextDim);
       const baseEmbedding = empty(batch * hiddenDim);
       const rankCounts = empty(batch * 13);
       const suitCounts = empty(batch * 4);
@@ -1023,6 +1030,7 @@ export class BetterFfnWebGpuModel {
         suitCounts,
         batch,
         hiddenDim,
+        contextDim,
         uniform,
       );
 
@@ -1075,7 +1083,7 @@ export class BetterFfnWebGpuModel {
         "context_encoder",
         context,
         batch,
-        11,
+        contextDim,
         hiddenDim,
         hiddenDim,
         empty,
@@ -1145,7 +1153,7 @@ export class BetterFfnWebGpuModel {
       );
 
       let policyBuffer: GPUBuffer | undefined;
-      if (options.includePolicy) {
+      if (options.includePolicy && !this.manifest.architecture.splitPolicyValue) {
         policyBuffer = this.headBatch(
           "policy_head",
           x,
@@ -1243,7 +1251,8 @@ export class BetterFfnWebGpuModel {
       rangeHidden === 0 ? ffn : 2 * rangeHidden,
       hidden,
     );
-    this.requireLinearBlock(tensors, "context_encoder", 11, hidden, hidden);
+    const contextDim = this.manifest.architecture.contextDim ?? 11;
+    this.requireLinearBlock(tensors, "context_encoder", contextDim, hidden, hidden);
     for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
       this.requireLinearBlock(tensors, `trunk.${i}.inner`, hidden, ffn, hidden);
     }
@@ -1255,14 +1264,231 @@ export class BetterFfnWebGpuModel {
       ffn,
       2 * NUM_HANDS,
     );
-    this.requireHead(
-      tensors,
-      "policy_head",
-      this.manifest.architecture.numPolicyLayers,
+    if (this.manifest.architecture.splitPolicyValue) {
+      this.validateSplitPolicyTensors(tensors, hidden, ffn, actions);
+    } else {
+      this.requireHead(
+        tensors,
+        "policy_head",
+        this.manifest.architecture.numPolicyLayers,
+        hidden,
+        ffn,
+        actions * NUM_HANDS,
+      );
+    }
+  }
+
+  private predictSplitPolicyCpu(
+    envs: readonly PublicHunlEnv[],
+    beliefs: Float32Array<ArrayBufferLike>,
+  ): Float32Array<ArrayBuffer> {
+    const batch = envs.length;
+    const hidden = this.manifest.architecture.hiddenDim;
+    const ffn = this.manifest.architecture.ffnDim;
+    const actions = this.manifest.architecture.numActions;
+    const policyRank = this.manifest.architecture.policyRank ?? 64;
+    const biasRank = this.manifest.architecture.policyHandBiasRank ?? 32;
+    const singleBeliefSize = 2 * NUM_HANDS;
+    const batchedBeliefs =
+      beliefs.length === batch * singleBeliefSize
+        ? beliefs
+        : (() => {
+            const out = new Float32Array(batch * singleBeliefSize);
+            for (let i = 0; i < batch; i += 1) out.set(beliefs, i * singleBeliefSize);
+            return out;
+          })();
+    const handEmb = this.buildExactCardHandEmbeddingRows("policy_model.");
+    const handEmbNorm = this.rmsNormRowsCpu(
+      handEmb,
+      NUM_HANDS,
       hidden,
-      ffn,
-      actions * NUM_HANDS,
+      "policy_model.policy_hand_norm",
     );
+    const handVec = this.outputProjectionRowsCpu(
+      handEmbNorm,
+      NUM_HANDS,
+      hidden,
+      policyRank,
+      "policy_model.policy_hand_proj",
+    );
+    const handBias = this.outputProjectionRowsCpu(
+      handEmbNorm,
+      NUM_HANDS,
+      hidden,
+      biasRank,
+      "policy_model.policy_hand_bias",
+    );
+    const out = new Float32Array(batch * NUM_HANDS * actions);
+    const combos = handCombos();
+    const alpha = 1 / Math.sqrt(
+      this.manifest.architecture.numHiddenLayers +
+        this.manifest.architecture.numValueLayers,
+    );
+    for (let b = 0; b < batch; b += 1) {
+      const env = envs[b]!;
+      const features = encodeBetterFeatures(env);
+      const beliefBase = b * singleBeliefSize;
+      const perPlayer = new Float32Array(2 * hidden);
+      for (let player = 0; player < 2; player += 1) {
+        for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+          const belief = batchedBeliefs[beliefBase + player * NUM_HANDS + hand]!;
+          if (belief === 0) continue;
+          const embBase = hand * hidden;
+          const outBase = player * hidden;
+          for (let d = 0; d < hidden; d += 1) {
+            const idx = outBase + d;
+            perPlayer[idx] = perPlayer[idx]! + belief * handEmb[embBase + d]!;
+          }
+        }
+      }
+      const beliefFeatures = this.leakyBlockCpu(
+        perPlayer,
+        2 * hidden,
+        this.manifest.architecture.rangeHiddenDim === 0
+          ? ffn
+          : 2 * this.manifest.architecture.rangeHiddenDim,
+        hidden,
+        "policy_model.belief_proj",
+      );
+      const contextFeatures = this.leakyBlockCpu(
+        features.policyContext,
+        this.manifest.architecture.contextDim ?? 15,
+        hidden,
+        hidden,
+        "policy_model.context_encoder",
+      );
+      let x = this.baseEmbeddingCpu("policy_model.", features.street, features.board);
+      const interaction = this.boardInteractionCpu(
+        "policy_model.",
+        batchedBeliefs,
+        beliefBase,
+        features.board,
+      );
+      for (let d = 0; d < hidden; d += 1) {
+        x[d] = x[d]! + contextFeatures[d]! + beliefFeatures[d]! + interaction[d]!;
+      }
+      for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
+        x = this.residualBlockCpu(
+          x,
+          hidden,
+          ffn,
+          `policy_model.trunk.${i}.inner`,
+          alpha,
+        );
+      }
+      let policyState = x;
+      for (let i = 0; i < this.manifest.architecture.numPolicyLayers; i += 1) {
+        policyState = this.residualBlockCpu(
+          policyState,
+          hidden,
+          ffn,
+          `policy_model.policy_tower.${i}.inner`,
+          alpha,
+        );
+      }
+      const actionEmb = this.outputProjectionCpu(
+        policyState,
+        hidden,
+        actions * policyRank,
+        "policy_model.policy_action_head",
+      );
+      const handGate = this.outputProjectionCpu(
+        policyState,
+        hidden,
+        policyRank,
+        "policy_model.policy_hand_gate",
+      );
+      for (let r = 0; r < policyRank; r += 1) handGate[r] = 1 + Math.tanh(handGate[r]!);
+      for (let a = 0; a < actions; a += 1) {
+        const actionBase = a * policyRank;
+        for (let r = 0; r < policyRank; r += 1) {
+          const idx = actionBase + r;
+          actionEmb[idx] = actionEmb[idx]! * handGate[r]!;
+        }
+      }
+      const dynamicCoeff = this.outputProjectionCpu(
+        policyState,
+        hidden,
+        actions * 15,
+        "policy_model.policy_dynamic_coeff",
+      );
+      const actionBias = this.outputProjectionCpu(
+        policyState,
+        hidden,
+        actions,
+        "policy_model.policy_action_bias",
+      );
+      const handBiasAction = this.outputProjectionCpu(
+        policyState,
+        hidden,
+        actions * biasRank,
+        "policy_model.policy_hand_bias_action",
+      );
+      const policyScale = this.tensor("policy_model.policy_factor_scale").data[0]!;
+      const cardMass = this.cardMasses(batchedBeliefs, beliefBase);
+      const actor = env.toAct;
+      const opp = 1 - actor;
+      const boardStats = this.boardStats(features.board);
+      for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+        const [c0, c1] = combos[hand]!;
+        const ownBelief = batchedBeliefs[beliefBase + actor * NUM_HANDS + hand]!;
+        const oppBelief = batchedBeliefs[beliefBase + opp * NUM_HANDS + hand]!;
+        const ownCardMass = cardMass[actor]!;
+        const oppCardMass = cardMass[opp]!;
+        const oppUnblocked = Math.max(
+          0,
+          1 - oppCardMass[c0]! - oppCardMass[c1]! + oppBelief,
+        );
+        const dyn = this.dynamicHandFeatures(
+          ownBelief,
+          ownCardMass,
+          oppCardMass,
+          oppUnblocked,
+          c0,
+          c1,
+          boardStats,
+        );
+        for (let a = 0; a < actions; a += 1) {
+          let logit = actionBias[a]!;
+          for (let r = 0; r < policyRank; r += 1) {
+            logit +=
+              (handVec[hand * policyRank + r]! * actionEmb[a * policyRank + r]!) /
+              Math.sqrt(policyRank);
+          }
+          for (let r = 0; r < biasRank; r += 1) {
+            logit += handBias[hand * biasRank + r]! * handBiasAction[a * biasRank + r]!;
+          }
+          for (let f = 0; f < 15; f += 1) {
+            logit += dyn[f]! * dynamicCoeff[a * 15 + f]!;
+          }
+          out[(b * NUM_HANDS + hand) * actions + a] = logit * policyScale;
+        }
+      }
+    }
+    return out;
+  }
+
+  private validateSplitPolicyTensors(
+    tensors: TensorMap,
+    hidden: number,
+    ffn: number,
+    actions: number,
+  ): void {
+    const prefix = "policy_model.";
+    requireTensor(tensors, `${prefix}policy_factor_scale`, []);
+    for (let i = 0; i < this.manifest.architecture.numPolicyLayers; i += 1) {
+      this.requireLinearBlock(tensors, `${prefix}policy_tower.${i}.inner`, hidden, ffn, hidden);
+    }
+    const policyRank = this.manifest.architecture.policyRank ?? 64;
+    const biasRank = this.manifest.architecture.policyHandBiasRank ?? 32;
+    this.requireOutputProjection(tensors, `${prefix}policy_hand_proj`, hidden, policyRank);
+    this.requireOutputProjection(tensors, `${prefix}policy_action_head`, hidden, actions * policyRank);
+    this.requireOutputProjection(tensors, `${prefix}policy_hand_gate`, hidden, policyRank);
+    this.requireOutputProjection(tensors, `${prefix}policy_dynamic_coeff`, hidden, actions * 15);
+    this.requireOutputProjection(tensors, `${prefix}policy_action_bias`, hidden, actions);
+    this.requireOutputProjection(tensors, `${prefix}policy_hand_bias`, hidden, biasRank);
+    this.requireOutputProjection(tensors, `${prefix}policy_hand_bias_action`, hidden, actions * biasRank);
+    requireTensor(tensors, `${prefix}policy_hand_norm.weight`, [hidden]);
   }
 
   private requireHead(
@@ -1318,8 +1544,280 @@ export class BetterFfnWebGpuModel {
     requireTensor(tensors, `${prefix}.linear_out.bias`, [outDim]);
   }
 
+  private rmsNormVectorCpu(input: Float32Array<ArrayBufferLike>, prefix: string): Float32Array<ArrayBuffer> {
+    const weight = this.tensors.has(`${prefix}.norm.weight`)
+      ? this.tensor(`${prefix}.norm.weight`).data
+      : this.tensor(`${prefix}.weight`).data;
+    let sq = 0;
+    for (let i = 0; i < input.length; i += 1) sq += input[i]! * input[i]!;
+    const inv = 1 / Math.sqrt(sq / input.length + 1e-5);
+    const out = new Float32Array(input.length);
+    for (let i = 0; i < input.length; i += 1) out[i] = input[i]! * inv * weight[i]!;
+    return out;
+  }
+
+  private rmsNormRowsCpu(
+    input: Float32Array<ArrayBufferLike>,
+    rows: number,
+    cols: number,
+    prefix: string,
+  ): Float32Array<ArrayBuffer> {
+    const out = new Float32Array(rows * cols);
+    for (let row = 0; row < rows; row += 1) {
+      out.set(
+        this.rmsNormVectorCpu(input.subarray(row * cols, (row + 1) * cols), prefix),
+        row * cols,
+      );
+    }
+    return out;
+  }
+
+  private linearCpu(
+    input: Float32Array<ArrayBufferLike>,
+    inDim: number,
+    outDim: number,
+    prefix: string,
+    bias = true,
+  ): Float32Array<ArrayBuffer> {
+    const weight = this.tensor(`${prefix}.weight`).data;
+    const biasData = bias ? this.tensor(`${prefix}.bias`).data : undefined;
+    const out = new Float32Array(outDim);
+    for (let row = 0; row < outDim; row += 1) {
+      let sum = biasData?.[row] ?? 0;
+      const weightBase = row * inDim;
+      for (let col = 0; col < inDim; col += 1) {
+        sum += weight[weightBase + col]! * input[col]!;
+      }
+      out[row] = sum;
+    }
+    return out;
+  }
+
+  private leakyBlockCpu(
+    input: Float32Array<ArrayBufferLike>,
+    inDim: number,
+    hiddenDim: number,
+    outDim: number,
+    prefix: string,
+  ): Float32Array<ArrayBuffer> {
+    const normed = this.rmsNormVectorCpu(input, prefix);
+    const linear = this.linearCpu(normed, inDim, hiddenDim, `${prefix}.linear_in`, false);
+    for (let i = 0; i < linear.length; i += 1) {
+      if (linear[i]! < 0) linear[i] = linear[i]! * 0.01;
+    }
+    return this.linearCpu(linear, hiddenDim, outDim, `${prefix}.linear_out`, true);
+  }
+
+  private residualBlockCpu(
+    input: Float32Array<ArrayBufferLike>,
+    inDim: number,
+    hiddenDim: number,
+    prefix: string,
+    alpha: number,
+  ): Float32Array<ArrayBuffer> {
+    const inner = this.leakyBlockCpu(input, inDim, hiddenDim, inDim, prefix);
+    const out = new Float32Array(inDim);
+    for (let i = 0; i < inDim; i += 1) out[i] = input[i]! + alpha * inner[i]!;
+    return out;
+  }
+
+  private outputProjectionCpu(
+    input: Float32Array<ArrayBufferLike>,
+    inDim: number,
+    outDim: number,
+    prefix: string,
+  ): Float32Array<ArrayBuffer> {
+    const normed = this.rmsNormVectorCpu(input, prefix);
+    return this.linearCpu(normed, inDim, outDim, `${prefix}.linear_out`, true);
+  }
+
+  private outputProjectionRowsCpu(
+    input: Float32Array<ArrayBufferLike>,
+    rows: number,
+    inDim: number,
+    outDim: number,
+    prefix: string,
+  ): Float32Array<ArrayBuffer> {
+    const out = new Float32Array(rows * outDim);
+    for (let row = 0; row < rows; row += 1) {
+      out.set(
+        this.outputProjectionCpu(
+          input.subarray(row * inDim, (row + 1) * inDim),
+          inDim,
+          outDim,
+          prefix,
+        ),
+        row * outDim,
+      );
+    }
+    return out;
+  }
+
+  private buildExactCardHandEmbeddingRows(prefix: string): Float32Array<ArrayBuffer> {
+    const hidden = this.manifest.architecture.hiddenDim;
+    const cards = this.tensor(`${prefix}card_embedding.weight`);
+    const featureProj = this.tensor(`${prefix}hand_feature_proj.weight`);
+    const combos = handCombos();
+    const out = new Float32Array(NUM_HANDS * hidden);
+    for (let hand = 0; hand < combos.length; hand += 1) {
+      const [c0, c1] = combos[hand]!;
+      const staticFeatures = this.handStaticFeatures(c0, c1);
+      for (let d = 0; d < hidden; d += 1) {
+        let value = cards.data[c0 * hidden + d]! + cards.data[c1 * hidden + d]!;
+        const projBase = d * 8;
+        for (let f = 0; f < 8; f += 1) value += featureProj.data[projBase + f]! * staticFeatures[f]!;
+        out[hand * hidden + d] = value;
+      }
+    }
+    return out;
+  }
+
+  private baseEmbeddingCpu(prefix: string, street: number, board: readonly number[]): Float32Array<ArrayBuffer> {
+    const hidden = this.manifest.architecture.hiddenDim;
+    const streetEmbedding = this.tensor(`${prefix}street_embedding.weight`).data;
+    const rank = this.tensor(`${prefix}rank_embedding.weight`).data;
+    const suit = this.tensor(`${prefix}suit_embedding.weight`).data;
+    const out = new Float32Array(hidden);
+    const streetIndex = Math.max(0, Math.min(4, Math.trunc(street)));
+    for (let d = 0; d < hidden; d += 1) out[d] = streetEmbedding[streetIndex * hidden + d]!;
+    for (let i = 0; i < 5; i += 1) {
+      const card = board[i] ?? -1;
+      const rankIndex = card >= 0 ? card % 13 : 13;
+      const suitIndex = card >= 0 ? Math.floor(card / 13) : 4;
+      for (let d = 0; d < hidden; d += 1) {
+        out[d] = out[d]! + rank[rankIndex * hidden + d]! + suit[suitIndex * hidden + d]!;
+      }
+    }
+    return out;
+  }
+
+  private boardStats(board: readonly number[]): {
+    ranks: Float32Array<ArrayBuffer>;
+    suits: Float32Array<ArrayBuffer>;
+    blocked: Uint8Array<ArrayBuffer>;
+  } {
+    const ranks = new Float32Array(13);
+    const suits = new Float32Array(4);
+    const blocked = new Uint8Array(52);
+    for (let i = 0; i < 5; i += 1) {
+      const card = board[i] ?? -1;
+      if (card < 0) continue;
+      const rank = card % 13;
+      const suit = Math.floor(card / 13);
+      ranks[rank] = ranks[rank]! + 1;
+      suits[suit] = suits[suit]! + 1;
+      blocked[card] = 1;
+    }
+    return { ranks, suits, blocked };
+  }
+
+  private boardInteractionCpu(
+    prefix: string,
+    beliefs: Float32Array<ArrayBufferLike>,
+    beliefBase: number,
+    board: readonly number[],
+  ): Float32Array<ArrayBuffer> {
+    const hidden = this.manifest.architecture.hiddenDim;
+    const dim = this.manifest.architecture.boardInteractionDim;
+    const out = new Float32Array(hidden);
+    if (dim <= 0) return out;
+    const stats = this.boardStats(board);
+    const rankPair = this.tensor(`${prefix}rank_pair_low_embedding.weight`).data;
+    const suitPair = this.tensor(`${prefix}suit_pair_low_embedding.weight`).data;
+    const rankLow = this.linearCpu(stats.ranks, 13, dim, `${prefix}board_rank_low`, false);
+    const suitLow = this.linearCpu(stats.suits, 4, dim, `${prefix}board_suit_low`, false);
+    const rankGated = new Float32Array(2 * dim);
+    const suitGated = new Float32Array(2 * dim);
+    const combos = handCombos();
+    for (let player = 0; player < 2; player += 1) {
+      const rankMass = new Float32Array(91);
+      const suitMass = new Float32Array(10);
+      for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+        const belief = beliefs[beliefBase + player * NUM_HANDS + hand]!;
+        if (belief === 0) continue;
+        const [c0, c1] = combos[hand]!;
+        const rankIdx = this.unorderedPairIndex(c0 % 13, c1 % 13, 13);
+        const suitIdx = this.unorderedPairIndex(Math.floor(c0 / 13), Math.floor(c1 / 13), 4);
+        rankMass[rankIdx] = rankMass[rankIdx]! + belief;
+        suitMass[suitIdx] = suitMass[suitIdx]! + belief;
+      }
+      for (let d = 0; d < dim; d += 1) {
+        let r = 0;
+        for (let pair = 0; pair < 91; pair += 1) r += rankMass[pair]! * rankPair[pair * dim + d]!;
+        rankGated[player * dim + d] = r * rankLow[d]!;
+        let s = 0;
+        for (let pair = 0; pair < 10; pair += 1) s += suitMass[pair]! * suitPair[pair * dim + d]!;
+        suitGated[player * dim + d] = s * suitLow[d]!;
+      }
+    }
+    const rankOut = this.linearCpu(rankGated, 2 * dim, hidden, `${prefix}rank_board_interaction_out`, false);
+    const suitOut = this.linearCpu(suitGated, 2 * dim, hidden, `${prefix}suit_board_interaction_out`, false);
+    for (let d = 0; d < hidden; d += 1) out[d] = rankOut[d]! + suitOut[d]!;
+    return out;
+  }
+
+  private cardMasses(
+    beliefs: Float32Array<ArrayBufferLike>,
+    beliefBase: number,
+  ): [Float32Array<ArrayBuffer>, Float32Array<ArrayBuffer>] {
+    const combos = handCombos();
+    const out: [Float32Array<ArrayBuffer>, Float32Array<ArrayBuffer>] = [
+      new Float32Array(52),
+      new Float32Array(52),
+    ];
+    for (let player = 0; player < 2; player += 1) {
+      for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+        const belief = beliefs[beliefBase + player * NUM_HANDS + hand]!;
+        const [c0, c1] = combos[hand]!;
+        const playerOut = out[player]!;
+        playerOut[c0] = playerOut[c0]! + belief;
+        playerOut[c1] = playerOut[c1]! + belief;
+      }
+    }
+    return out;
+  }
+
+  private dynamicHandFeatures(
+    ownBelief: number,
+    ownCardMass: Float32Array<ArrayBufferLike>,
+    oppCardMass: Float32Array<ArrayBufferLike>,
+    oppUnblocked: number,
+    c0: number,
+    c1: number,
+    stats: ReturnType<BetterFfnWebGpuModel["boardStats"]>,
+  ): Float32Array<ArrayBuffer> {
+    const r0 = c0 % 13;
+    const r1 = c1 % 13;
+    const s0 = Math.floor(c0 / 13);
+    const s1 = Math.floor(c1 / 13);
+    const rankA = stats.ranks[r0]!;
+    const rankB = stats.ranks[r1]!;
+    const suitA = stats.suits[s0]!;
+    const suitB = stats.suits[s1]!;
+    return new Float32Array([
+      ownBelief,
+      Math.log(Math.max(ownBelief, 1e-8)),
+      oppUnblocked,
+      ownCardMass[c0]!,
+      ownCardMass[c1]!,
+      oppCardMass[c0]!,
+      oppCardMass[c1]!,
+      rankA / 4,
+      rankB / 4,
+      (rankA + rankB) / 4,
+      (rankA * rankB) / 16,
+      suitA / 5,
+      suitB / 5,
+      (suitA + suitB) / 5,
+      stats.blocked[c0] || stats.blocked[c1] ? 1 : 0,
+    ]);
+  }
+
   private buildHandEmbeddingT(): Float32Array<ArrayBuffer> {
     const hidden = this.manifest.architecture.hiddenDim;
+    if (this.tensors.has("card_embedding.weight") && this.tensors.has("hand_feature_proj.weight")) {
+      return this.buildExactCardHandEmbeddingT("");
+    }
     const rank = this.tensor("rank_embedding.weight");
     const suit = this.tensor("suit_embedding.weight");
     const combos = handCombos();
@@ -1339,6 +1837,47 @@ export class BetterFfnWebGpuModel {
       }
     }
     return out;
+  }
+
+  private buildExactCardHandEmbeddingT(prefix: string): Float32Array<ArrayBuffer> {
+    const hidden = this.manifest.architecture.hiddenDim;
+    const cards = this.tensor(`${prefix}card_embedding.weight`);
+    const featureProj = this.tensor(`${prefix}hand_feature_proj.weight`);
+    const combos = handCombos();
+    const out = new Float32Array(hidden * NUM_HANDS);
+    for (let hand = 0; hand < combos.length; hand += 1) {
+      const [c0, c1] = combos[hand]!;
+      const staticFeatures = this.handStaticFeatures(c0, c1);
+      for (let d = 0; d < hidden; d += 1) {
+        let value = cards.data[c0 * hidden + d]! + cards.data[c1 * hidden + d]!;
+        const projBase = d * 8;
+        for (let f = 0; f < 8; f += 1) {
+          value += featureProj.data[projBase + f]! * staticFeatures[f]!;
+        }
+        out[d * NUM_HANDS + hand] = value;
+      }
+    }
+    return out;
+  }
+
+  private handStaticFeatures(c0: number, c1: number): Float32Array<ArrayBuffer> {
+    const r0 = c0 % 13;
+    const r1 = c1 % 13;
+    const s0 = Math.floor(c0 / 13);
+    const s1 = Math.floor(c1 / 13);
+    const hi = Math.max(r0, r1);
+    const lo = Math.min(r0, r1);
+    const gap = Math.max(hi - lo, 0);
+    return new Float32Array([
+      r0 === r1 ? 1 : 0,
+      s0 === s1 ? 1 : 0,
+      gap / 12,
+      hi / 12,
+      lo / 12,
+      hi === 12 ? 1 : 0,
+      lo >= 8 ? 1 : 0,
+      gap <= 1 ? 1 : 0,
+    ]);
   }
 
   private buildBeliefBoardInteractionGpu(
@@ -1601,15 +2140,19 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
   ): GPUBuffer {
-    const context = new Float32Array(batch * 11);
+    const contextDim = this.manifest.architecture.contextDim ?? 11;
+    const context = new Float32Array(batch * contextDim);
     for (let i = 0; i < batch; i += 1) {
-      context.set(encodedFeatures[i]!.context, i * 11);
+      context.set(
+        contextDim === 15 ? encodedFeatures[i]!.valueContext : encodedFeatures[i]!.context,
+        i * contextDim,
+      );
     }
     return this.leakyReluBlockBatch(
       "context_encoder",
       storage(context),
       batch,
-      11,
+      contextDim,
       hiddenDim,
       hiddenDim,
       empty,
@@ -2568,6 +3111,7 @@ export class BetterFfnWebGpuModel {
     suitCounts: GPUBuffer,
     batch: number,
     hidden: number,
+    contextDim: number,
     uniform: (
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
@@ -2581,7 +3125,23 @@ export class BetterFfnWebGpuModel {
       { binding: 5, resource: { buffer: baseEmbedding } },
       { binding: 6, resource: { buffer: rankCounts } },
       { binding: 7, resource: { buffer: suitCounts } },
-      { binding: 8, resource: { buffer: uniform(new Uint32Array([hidden, batch, 0, 0])) } },
+      {
+        binding: 8,
+        resource: {
+          buffer: uniform(
+            new Float32Array([
+              hidden,
+              batch,
+              contextDim,
+              this.manifest.env.bb,
+              this.manifest.env.maxStackBb ?? 400,
+              0,
+              0,
+              0,
+            ]),
+          ),
+        },
+      },
     ]);
   }
 

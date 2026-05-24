@@ -38,12 +38,14 @@ def _normalize_export_state(
     export_state: dict[str, torch.Tensor] = {}
     for name, tensor in clean_state.items():
         if name.startswith("policy_model."):
-            export_state[name.removeprefix("policy_model.")] = tensor
+            export_state[name] = tensor
         elif name.startswith("value_model.pre_value_head."):
             suffix = name.removeprefix("value_model.pre_value_head.")
             export_state[f"hand_value_head.{suffix}"] = tensor
         elif name.startswith("value_model.post_value_head."):
             continue
+        elif name.startswith("value_model."):
+            export_state[name.removeprefix("value_model.")] = tensor
     return export_state
 
 
@@ -171,6 +173,8 @@ def export_model(
             )
             offset += len(data)
 
+    split_policy_value = any(name.startswith("policy_model.") for name in state)
+    context_dim = int(state["context_encoder.norm.weight"].shape[0])
     manifest = {
         "schemaVersion": 1,
         "format": "p2.better_ffn.webgpu",
@@ -193,6 +197,12 @@ def export_model(
             "enforceZeroSum": bool(cfg.model.enforce_zero_sum),
             "nonlinearity": _enum_value(cfg.model.nonlinearity),
             "normalization": "rmsnorm",
+            "contextDim": context_dim,
+            "policyRank": int(getattr(cfg.model, "policy_rank", 64)),
+            "policyHandBiasRank": int(
+                getattr(cfg.model, "policy_hand_bias_rank", 32)
+            ),
+            "splitPolicyValue": split_policy_value,
         },
         "env": {
             "stack": cfg.env.stack,
@@ -200,6 +210,7 @@ def export_model(
             "bb": cfg.env.bb,
             "betBins": list(cfg.env.bet_bins),
             "flopShowdown": bool(cfg.env.flop_showdown),
+            "maxStackBb": cfg.env.max_stack_bb,
             "defaultButton": 1,
             "defaultForceDeck": DEFAULT_FORCE_DECK,
         },

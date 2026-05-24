@@ -56,6 +56,16 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
   if (!manifest.architecture.sharedTrunk) {
     throw new Error("BetterFFN checkpoints with shared_trunk=false are not supported");
   }
+  manifest.architecture.contextDim ??= 11;
+  if (
+    !Number.isInteger(manifest.architecture.contextDim) ||
+    manifest.architecture.contextDim <= 0
+  ) {
+    throw new Error(`unsupported contextDim ${manifest.architecture.contextDim}`);
+  }
+  manifest.architecture.policyRank ??= 64;
+  manifest.architecture.policyHandBiasRank ??= 32;
+  manifest.architecture.splitPolicyValue ??= false;
   manifest.architecture.boardInteractionDim ??= 0;
   if (
     !Number.isInteger(manifest.architecture.boardInteractionDim) ||
