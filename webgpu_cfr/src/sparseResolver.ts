@@ -89,6 +89,35 @@ interface SparseStaticGpuData {
   allInComboPermBuffer?: GPUBuffer;
   allInContext?: AllInTableContext;
   preparedLeafFeatures?: PreparedBatchFeatures;
+  workspace?: SparseGpuWorkspace;
+  dispose: () => void;
+}
+
+interface SparseGpuWorkspace {
+  valueCount: number;
+  policyCount: number;
+  totalNodes: number;
+  modelLeafBeliefCount: number;
+  showdownAggregateCount: number;
+  showdownTotalCount: number;
+  policyBuffer: GPUBuffer;
+  policyAvgBuffer: GPUBuffer;
+  regretsBuffer: GPUBuffer;
+  avgNumeratorBuffer: GPUBuffer;
+  avgDenominatorBuffer: GPUBuffer;
+  beliefsBuffer: GPUBuffer;
+  beliefsAvgBuffer: GPUBuffer;
+  valuesBuffer: GPUBuffer;
+  reachBuffer: GPUBuffer;
+  denomBuffer: GPUBuffer;
+  opponentPolicyBuffer: GPUBuffer;
+  opponentPolicyAggregatesBuffer: GPUBuffer;
+  regretWeightsBuffer: GPUBuffer;
+  regretWeightAggregatesBuffer: GPUBuffer;
+  modelLeafBeliefsBuffer: GPUBuffer;
+  showdownRankMassBuffer: GPUBuffer;
+  showdownRankPrefixBuffer: GPUBuffer;
+  showdownRankTotalBuffer: GPUBuffer;
   dispose: () => void;
 }
 
@@ -328,7 +357,7 @@ export class SparseCfrResolver {
       leafBatch.modelEnvs.length > 0 && this.model.prepareBatchFeatures
         ? this.model.prepareBatchFeatures(leafBatch.modelEnvs)
         : undefined;
-    return {
+    const staticData: SparseStaticGpuData = {
       treeBuffers,
       leafBatch,
       foldTerminalValues,
@@ -357,8 +386,10 @@ export class SparseCfrResolver {
         allInTableBuffer?.destroy();
         allInComboPermBuffer?.destroy();
         preparedLeafFeatures?.dispose();
+        staticData.workspace?.dispose();
       },
     };
+    return staticData;
   }
 
   private treeCacheKey(rootEnv: PublicHunlEnv, maxDepth: number): string {
@@ -697,43 +728,55 @@ export class SparseCfrResolver {
     const policyCount = totalNodes * NUM_HANDS;
     const { treeBuffers, leafBatch } = staticGpu;
     const rootReach = this.rootReach();
-    const policyBuffer = makeStorageBuffer(device, policy);
-    const policyAvgBuffer = makeStorageBuffer(device, policyAvg);
-    const regretsBuffer = makeEmptyStorageBuffer(device, cumulativeRegrets.length);
-    const avgNumeratorBuffer = makeEmptyStorageBuffer(device, avgNumerator.length);
-    const avgDenominatorBuffer = makeEmptyStorageBuffer(device, avgDenominator.length);
-    const beliefsBuffer = makeStorageBuffer(device, beliefs);
-    const beliefsAvgBuffer = cfrAvg
-      ? makeStorageBuffer(device, beliefsAvg)
-      : undefined;
-    const valuesBuffer = makeStorageBuffer(device, staticGpu.foldTerminalValues);
-    const reachBuffer = makeEmptyStorageBuffer(device, valueCount);
-    const denomBuffer = makeEmptyStorageBuffer(device, totalNodes * 2);
-    const opponentPolicyBuffer = makeEmptyStorageBuffer(device, policyCount);
-    const opponentPolicyAggregatesBuffer = makeEmptyStorageBuffer(
-      device,
-      totalNodes * 106,
-    );
-    const regretWeightsBuffer = makeEmptyStorageBuffer(device, policyCount);
-    const regretWeightAggregatesBuffer = makeEmptyStorageBuffer(device, totalNodes * 53);
-    const modelLeafBeliefsBuffer = makeEmptyStorageBuffer(
-      device,
-      leafBatch.modelNodeIndices.length * 2 * NUM_HANDS,
-    );
     const showdownAggregateCount =
       leafBatch.showdownNodeIndices.length * 2 * Math.max(1, leafBatch.showdownMaxRankCount);
-    const showdownRankMassBuffer = makeEmptyStorageBuffer(device, showdownAggregateCount);
-    const showdownRankPrefixBuffer = makeEmptyStorageBuffer(device, showdownAggregateCount);
-    const showdownRankTotalBuffer = makeEmptyStorageBuffer(
-      device,
+    const workspace = this.sparseGpuWorkspace(
+      staticGpu,
+      valueCount,
+      policyCount,
+      totalNodes,
+      leafBatch.modelNodeIndices.length * 2 * NUM_HANDS,
+      showdownAggregateCount,
       leafBatch.showdownNodeIndices.length * 2,
     );
+    const {
+      policyBuffer,
+      policyAvgBuffer,
+      regretsBuffer,
+      avgNumeratorBuffer,
+      avgDenominatorBuffer,
+      beliefsBuffer,
+      beliefsAvgBuffer,
+      valuesBuffer,
+      reachBuffer,
+      denomBuffer,
+      opponentPolicyBuffer,
+      opponentPolicyAggregatesBuffer,
+      regretWeightsBuffer,
+      regretWeightAggregatesBuffer,
+      modelLeafBeliefsBuffer,
+      showdownRankMassBuffer,
+      showdownRankPrefixBuffer,
+      showdownRankTotalBuffer,
+    } = workspace;
     const pendingLeafDisposals: Array<() => void> = [];
+    const writeFloatBuffer = (
+      buffer: GPUBuffer,
+      data: Float32Array<ArrayBufferLike>,
+    ): void => {
+      device.queue.writeBuffer(buffer, 0, data as Float32Array<ArrayBuffer>);
+    };
+    writeFloatBuffer(policyBuffer, policy);
+    writeFloatBuffer(policyAvgBuffer, policyAvg);
+    writeFloatBuffer(regretsBuffer, cumulativeRegrets);
+    writeFloatBuffer(avgNumeratorBuffer, avgNumerator);
+    writeFloatBuffer(avgDenominatorBuffer, avgDenominator);
+    writeFloatBuffer(beliefsBuffer, beliefs);
+    writeFloatBuffer(beliefsAvgBuffer, beliefsAvg);
+    writeFloatBuffer(valuesBuffer, staticGpu.foldTerminalValues);
     device.queue.writeBuffer(reachBuffer, 0, rootReach);
     device.queue.writeBuffer(beliefsBuffer, 0, rootBeliefs);
-    if (beliefsAvgBuffer) {
-      device.queue.writeBuffer(beliefsAvgBuffer, 0, rootBeliefs);
-    }
+    device.queue.writeBuffer(beliefsAvgBuffer, 0, rootBeliefs);
 
     const profile = Boolean(globalThis.process?.env?.P2_PROFILE);
     const phaseTotals = new Map<string, number>();
@@ -804,12 +847,13 @@ export class SparseCfrResolver {
             reachBuffer,
             beliefsBuffer,
             denomBuffer,
-            avgNumeratorBuffer,
-            avgDenominatorBuffer,
-            policyAvgBuffer,
-            cfrAvg ? beliefsAvgBuffer! : undefined,
-          );
-        });
+              avgNumeratorBuffer,
+              avgDenominatorBuffer,
+              policyAvgBuffer,
+              readPolicyAvg || cfrAvg,
+              cfrAvg ? beliefsAvgBuffer! : undefined,
+            );
+          });
 
         if (t + 1 < iterations) {
           const disposeLeafPrediction = await time("leafValues", () =>
@@ -877,24 +921,6 @@ export class SparseCfrResolver {
       for (const dispose of pendingLeafDisposals.splice(0)) dispose();
     } finally {
       for (const dispose of pendingLeafDisposals.splice(0)) dispose();
-      policyBuffer.destroy();
-      policyAvgBuffer.destroy();
-      regretsBuffer.destroy();
-      avgNumeratorBuffer.destroy();
-      avgDenominatorBuffer.destroy();
-      beliefsBuffer.destroy();
-      beliefsAvgBuffer?.destroy();
-      valuesBuffer.destroy();
-      reachBuffer.destroy();
-      denomBuffer.destroy();
-      opponentPolicyBuffer.destroy();
-      opponentPolicyAggregatesBuffer.destroy();
-      regretWeightsBuffer.destroy();
-      regretWeightAggregatesBuffer.destroy();
-      modelLeafBeliefsBuffer.destroy();
-      showdownRankMassBuffer.destroy();
-      showdownRankPrefixBuffer.destroy();
-      showdownRankTotalBuffer.destroy();
     }
   }
 
@@ -1031,6 +1057,83 @@ export class SparseCfrResolver {
     scatterParams?.destroy();
     for (const params of deferredParams.splice(0)) params.destroy();
     return () => prediction.dispose();
+  }
+
+  private sparseGpuWorkspace(
+    staticGpu: SparseStaticGpuData,
+    valueCount: number,
+    policyCount: number,
+    totalNodes: number,
+    modelLeafBeliefCount: number,
+    showdownAggregateCount: number,
+    showdownTotalCount: number,
+  ): SparseGpuWorkspace {
+    const existing = staticGpu.workspace;
+    if (
+      existing &&
+      existing.valueCount === valueCount &&
+      existing.policyCount === policyCount &&
+      existing.totalNodes === totalNodes &&
+      existing.modelLeafBeliefCount === modelLeafBeliefCount &&
+      existing.showdownAggregateCount === showdownAggregateCount &&
+      existing.showdownTotalCount === showdownTotalCount
+    ) {
+      return existing;
+    }
+    existing?.dispose();
+
+    const device = this.model.device;
+    const buffers = [
+      makeEmptyStorageBuffer(device, policyCount),
+      makeEmptyStorageBuffer(device, policyCount),
+      makeEmptyStorageBuffer(device, policyCount),
+      makeEmptyStorageBuffer(device, policyCount),
+      makeEmptyStorageBuffer(device, policyCount),
+      makeEmptyStorageBuffer(device, valueCount),
+      makeEmptyStorageBuffer(device, valueCount),
+      makeEmptyStorageBuffer(device, valueCount),
+      makeEmptyStorageBuffer(device, valueCount),
+      makeEmptyStorageBuffer(device, totalNodes * 2),
+      makeEmptyStorageBuffer(device, policyCount),
+      makeEmptyStorageBuffer(device, totalNodes * 106),
+      makeEmptyStorageBuffer(device, policyCount),
+      makeEmptyStorageBuffer(device, totalNodes * 53),
+      makeEmptyStorageBuffer(device, modelLeafBeliefCount),
+      makeEmptyStorageBuffer(device, showdownAggregateCount),
+      makeEmptyStorageBuffer(device, showdownAggregateCount),
+      makeEmptyStorageBuffer(device, showdownTotalCount),
+    ] as const;
+    const workspace: SparseGpuWorkspace = {
+      valueCount,
+      policyCount,
+      totalNodes,
+      modelLeafBeliefCount,
+      showdownAggregateCount,
+      showdownTotalCount,
+      policyBuffer: buffers[0],
+      policyAvgBuffer: buffers[1],
+      regretsBuffer: buffers[2],
+      avgNumeratorBuffer: buffers[3],
+      avgDenominatorBuffer: buffers[4],
+      beliefsBuffer: buffers[5],
+      beliefsAvgBuffer: buffers[6],
+      valuesBuffer: buffers[7],
+      reachBuffer: buffers[8],
+      denomBuffer: buffers[9],
+      opponentPolicyBuffer: buffers[10],
+      opponentPolicyAggregatesBuffer: buffers[11],
+      regretWeightsBuffer: buffers[12],
+      regretWeightAggregatesBuffer: buffers[13],
+      modelLeafBeliefsBuffer: buffers[14],
+      showdownRankMassBuffer: buffers[15],
+      showdownRankPrefixBuffer: buffers[16],
+      showdownRankTotalBuffer: buffers[17],
+      dispose: () => {
+        for (const buffer of buffers) buffer.destroy();
+      },
+    };
+    staticGpu.workspace = workspace;
+    return workspace;
   }
 
   private leafGpuBatch(
@@ -1226,6 +1329,7 @@ export class SparseCfrResolver {
     numeratorBuffer: GPUBuffer,
     denominatorBuffer: GPUBuffer,
     policyAvgBuffer: GPUBuffer,
+    updatePolicyAvg: boolean,
     beliefsAvgBuffer: GPUBuffer | undefined,
   ): void {
     if (!this.gpuKernels) return;
@@ -1246,6 +1350,7 @@ export class SparseCfrResolver {
       numeratorBuffer,
       denominatorBuffer,
       policyAvgBuffer,
+      updatePolicyAvg,
       beliefsAvgBuffer,
     );
     this.model.device.queue.submit([encoder.finish()]);
@@ -1268,6 +1373,7 @@ export class SparseCfrResolver {
     numeratorBuffer: GPUBuffer,
     denominatorBuffer: GPUBuffer,
     policyAvgBuffer: GPUBuffer,
+    updatePolicyAvg: boolean,
     beliefsAvgBuffer: GPUBuffer | undefined,
   ): GPUBuffer[] {
     if (!this.gpuKernels) return [];
@@ -1308,20 +1414,22 @@ export class SparseCfrResolver {
       beliefsBuffer,
       denomBuffer,
     );
-    params.push(
-      this.gpuKernels.encodeUpdateAveragePolicyRange(
-        encoder,
-        treeBuffers,
-        reachBuffer,
-        policyBuffer,
-        numeratorBuffer,
-        denominatorBuffer,
-        policyAvgBuffer,
-        1,
-        tree.nodes.length,
-      ),
-    );
-    if (beliefsAvgBuffer) {
+    if (updatePolicyAvg) {
+      params.push(
+        this.gpuKernels.encodeUpdateAveragePolicyRange(
+          encoder,
+          treeBuffers,
+          reachBuffer,
+          policyBuffer,
+          numeratorBuffer,
+          denominatorBuffer,
+          policyAvgBuffer,
+          1,
+          tree.nodes.length,
+        ),
+      );
+    }
+    if (beliefsAvgBuffer && updatePolicyAvg) {
       this.encodePropagateInto(
         encoder,
         params,
