@@ -1201,7 +1201,7 @@ function App(): JSX.Element {
   const [sb, setSb] = createSignal("1");
   const [bb, setBb] = createSignal("2");
   const [iterations, setIterations] = createSignal("16");
-  const [depth, setDepth] = createSignal("1");
+  const [depth, setDepth] = createSignal("6");
   const [heroHandText, setHeroHandText] = createSignal("As Kd");
   const [selectedRangeKey, setSelectedRangeKey] = createSignal("AKo");
   const [boardCards, setBoardCards] = createSignal(["", "", "", "", ""]);
@@ -1547,7 +1547,7 @@ function App(): JSX.Element {
     try {
       setSolveError("");
       const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 16)));
-      const solveDepth = Math.max(1, Math.trunc(positiveNumber(depth(), 1)));
+      const solveDepth = Math.max(1, Math.trunc(positiveNumber(depth(), 6)));
       const solveCfrAvg = false;
       setSolveStatus(`Solving depth ${solveDepth} for ${solveIterations} CFR iterations`);
       setSolveResult(undefined);
@@ -1841,7 +1841,7 @@ function App(): JSX.Element {
               <span class="stepper-label">Depth</span>
               <NumberStepper
                 value={depth()}
-                presets={[1, 2, 3, 4]}
+                presets={[4, 5, 6, 7]}
                 min={1}
                 onChange={(value) => {
                   setDepth(value);

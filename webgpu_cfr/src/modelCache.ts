@@ -165,6 +165,9 @@ export async function decodeModelWeights(
     assertWeightsLength(payload, manifest.weights.byteLength, "weights.bin");
     return payload;
   }
+  if (payload.byteLength === manifest.weights.byteLength) {
+    return payload;
+  }
   assertWeightsLength(payload, compression.byteLength, manifest.weights.file);
   if (compression.format !== "gzip") {
     throw new Error(`unsupported weights compression ${compression.format}`);

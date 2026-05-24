@@ -364,7 +364,9 @@ export class SparseCfrResolver {
         if (this.shouldStop(node, maxDepth)) {
           continue;
         }
+        const callFoldOnly = depth >= maxDepth - 1;
         for (let action = 0; action < this.numActions; action += 1) {
+          if (callFoldOnly && action > 1) continue;
           if (!node.legalMask[action]) continue;
           const childEnv = node.env.clone();
           const step = childEnv.stepBin(action, {
