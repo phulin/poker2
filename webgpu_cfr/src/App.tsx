@@ -2,7 +2,6 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 import type { JSX } from "solid-js";
 import {
   AlertTriangle,
-  CheckCircle2,
   ChevronDown,
   Cpu,
   Play,
@@ -17,7 +16,6 @@ import {
   formatCard,
   handComboIndex,
   handComboCards,
-  handOverlapsCards,
 } from "./cards.js";
 import { buildPublicBeliefs } from "./beliefs.js";
 import { PublicHunlEnv, NUM_HANDS, DEFAULT_FORCE_DECK, type LegalBins } from "./hunlEnv.js";
@@ -113,13 +111,6 @@ interface SolveResult {
   depth: number;
   cfrAvg: boolean;
   heroHandIndex: number;
-  villainSummary: RangeSummary;
-}
-
-interface RangeSummary {
-  mass: number;
-  combos: number;
-  top: Array<{ hand: string; weight: number }>;
 }
 
 function asPlayer(value: string): PlayerIndex {
@@ -325,6 +316,7 @@ const RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"];
 const SUITS = ["s", "h", "d", "c"] as const;
 const SUIT_GLYPHS: Record<string, string> = { s: "♠", h: "♥", d: "♦", c: "♣" };
 const RANK_INDEX = new Map(RANKS.map((rank, index) => [rank, index]));
+const UNBLOCKED_CARDS: ReadonlySet<string> = new Set<string>();
 
 type HeroCards = [string, string];
 type HandRangeKind = "pair" | "suited" | "offsuit";
@@ -338,6 +330,24 @@ interface RangeCell {
 interface ComboOption {
   cards: HeroCards;
   blocked: boolean;
+}
+
+interface RangeGridCombo {
+  hand: string;
+  weight: number;
+}
+
+interface RangeGridCell extends RangeCell {
+  total: number;
+  alpha: number;
+  title: string;
+}
+
+interface RangeGridModel {
+  label: string;
+  mass: number;
+  combos: number;
+  rows: RangeGridCell[][];
 }
 
 function suitClass(suit: string): string {
@@ -1213,13 +1223,12 @@ function App(): JSX.Element {
   const [stack, setStack] = createSignal("400");
   const [sb, setSb] = createSignal("1");
   const [bb, setBb] = createSignal("2");
-  const [iterations, setIterations] = createSignal("16");
-  const [depth, setDepth] = createSignal("6");
+  const [iterations, setIterations] = createSignal("400");
+  const [depth, setDepth] = createSignal("5");
   const [heroHandText, setHeroHandText] = createSignal("As Kd");
   const [selectedRangeKey, setSelectedRangeKey] = createSignal("AKo");
   const [boardCards, setBoardCards] = createSignal(["", "", "", "", ""]);
   const [actions, setActions] = createSignal<number[]>([]);
-  const [solveStatus, setSolveStatus] = createSignal("");
   const [solveError, setSolveError] = createSignal("");
   const [solveResult, setSolveResult] = createSignal<SolveResult>();
   const [isSolving, setIsSolving] = createSignal(false);
@@ -1241,7 +1250,6 @@ function App(): JSX.Element {
   function clearSolveOutput(): void {
     setSolveResult(undefined);
     setSolveProgress(undefined);
-    setSolveStatus("");
     setSolveError("");
   }
 
@@ -1249,7 +1257,6 @@ function App(): JSX.Element {
     setWebGpuError(message);
     if (isSolving()) {
       setSolveError(message);
-      setSolveStatus("");
       setSolveProgress(undefined);
       setIsSolving(false);
       activeSolve?.reject(new Error(message));
@@ -1262,7 +1269,6 @@ function App(): JSX.Element {
     activeSolve = undefined;
     if (isSolving()) {
       setSolveError(message);
-      setSolveStatus("");
       setSolveProgress(undefined);
       setIsSolving(false);
     }
@@ -1281,9 +1287,6 @@ function App(): JSX.Element {
     } else if (message.type === "solve-progress") {
       if (activeSolve?.id !== message.id) return;
       setSolveProgress(message.progress.percent);
-      setSolveStatus(
-        `Solving depth ${activeSolve.depth}, ${Math.floor(message.progress.percent)}%`,
-      );
     } else if (message.type === "solve-result") {
       if (activeSolve?.id !== message.id) return;
       activeSolve.resolve(message.result);
@@ -1348,7 +1351,6 @@ function App(): JSX.Element {
       setActions(actionsFromHash(input.actions));
       clearSolveOutput();
       setSolveError("");
-      setSolveStatus("");
     } catch (error) {
       setSolveError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1649,12 +1651,11 @@ function App(): JSX.Element {
     try {
       setSolveError("");
       setWebGpuError("");
-      const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 16)));
-      const solveDepth = Math.max(2, Math.trunc(positiveNumber(depth(), 6)));
+      const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 400)));
+      const solveDepth = Math.max(2, Math.trunc(positiveNumber(depth(), 5)));
       const solveCfrAvg = false;
       setIsSolving(true);
       setSolveProgress(0);
-      setSolveStatus(`Solving depth ${solveDepth}, 0%`);
       setSolveResult(undefined);
       const request: SolverEvaluateSpotRequest = {
         spot: [...actions()],
@@ -1686,17 +1687,10 @@ function App(): JSX.Element {
         depth: solveDepth,
         cfrAvg: solveCfrAvg,
         heroHandIndex,
-        villainSummary: summarizeVillainRange(
-          result.beliefsAtSpot,
-          HERO_PLAYER,
-          cards.heroHand,
-        ),
       });
       setSolveProgress(100);
-      setSolveStatus("Solve complete");
     } catch (error) {
       setSolveError(error instanceof Error ? error.message : String(error));
-      setSolveStatus("");
       setSolveProgress(undefined);
     } finally {
       setIsSolving(false);
@@ -1965,7 +1959,7 @@ function App(): JSX.Element {
               <span class="stepper-label">Iterations</span>
               <NumberStepper
                 value={iterations()}
-                presets={[8, 32, 128, 512, 2048]}
+                presets={[200, 400, 600, 1000]}
                 min={1}
                 onChange={(value) => {
                   setIterations(value);
@@ -2013,12 +2007,6 @@ function App(): JSX.Element {
             </Show>
           </div>
 
-          <Show when={solveStatus()}>
-            <div class="notice ok">
-              <CheckCircle2 size={18} />
-              <span>{solveStatus()}</span>
-            </div>
-          </Show>
           <Show when={solveError()}>
             <div class="notice error">
               <AlertTriangle size={18} />
@@ -2028,7 +2016,16 @@ function App(): JSX.Element {
 
           <Show
             when={solveResult()}
-            fallback={<div class="empty-state">Run a solve to populate strategy and range output.</div>}
+            fallback={
+              <Show
+                when={isSolving()}
+                fallback={<div class="empty-state">Run a solve to populate strategy and range output.</div>}
+              >
+                <div class="empty-state solving-state" aria-label="Solving">
+                  <div class="spinner" />
+                </div>
+              </Show>
+            }
           >
             {(solved) => (
               <>
@@ -2041,17 +2038,6 @@ function App(): JSX.Element {
                   <span>{runtime()?.usingSubgroups ? "subgroups on" : "subgroups off"}</span>
                   <span>actor {playerLabel(solved().result.actor)}</span>
                 </div>
-
-                <section class="subsection no-border">
-                  <h3>Aggregated strategy</h3>
-                  <p class="subtle">Probability of each action across the actor's range</p>
-                  <StrategyTable
-                    labels={solved().result.actionLabels}
-                    legalMask={solved().result.legalMask}
-                    actionProbs={solved().result.actionProbs}
-                    context={(descriptor() as StateDescriptor).finalContext}
-                  />
-                </section>
 
                 <Show
                   when={solved().result.actor === HERO_PLAYER}
@@ -2074,42 +2060,13 @@ function App(): JSX.Element {
                   />
                 </Show>
 
-                <RangeSummaryView summary={solved().villainSummary} />
+                <RangeGridCollapses beliefs={solved().result.beliefsAtSpot} />
               </>
             )}
           </Show>
         </section>
       </section>
     </main>
-  );
-}
-
-function StrategyTable(props: {
-  labels: readonly string[];
-  legalMask: readonly number[];
-  actionProbs: Float32Array<ArrayBufferLike>;
-  context?: ActionContext;
-}): JSX.Element {
-  return (
-    <div class="strategy-bars">
-      <For each={props.labels}>
-        {(label, index) => {
-          const legal = props.legalMask[index()] === 1;
-          const value = props.actionProbs[index()] ?? 0;
-          if (!legal && value <= 0) return null;
-          const name = props.context ? formatActionLabel(index(), props.context) : label;
-          return (
-            <div class={`bar-row ${legal ? "" : "muted"}`}>
-              <span class="bar-label">{name}</span>
-              <div class="bar-track">
-                <div class="bar-fill" style={{ width: `${Math.min(100, value * 100)}%` }} />
-              </div>
-              <span class="bar-value">{formatPercent(value)}</span>
-            </div>
-          );
-        }}
-      </For>
-    </div>
   );
 }
 
@@ -2152,61 +2109,119 @@ function HeroPolicy(props: {
   );
 }
 
-function RangeSummaryView(props: { summary: RangeSummary }): JSX.Element {
+function RangeGridCollapses(props: {
+  beliefs: Float32Array<ArrayBufferLike>;
+}): JSX.Element {
+  const grids = createMemo(() => [
+    buildRangeGrid(props.beliefs, HERO_PLAYER),
+    buildRangeGrid(props.beliefs, 1),
+  ]);
   return (
-    <section class="subsection">
-      <h3>Villain range</h3>
-      <div class="metadata">
-        <span>{props.summary.combos} combos</span>
-        <span>mass {props.summary.mass.toFixed(4)}</span>
-      </div>
-      <div class="range-list">
-        <For each={props.summary.top}>
-          {(item) => {
-            const cards = item.hand.split(" ");
-            return (
-              <div class="range-row">
-                <span class="range-cards">
-                  <CardChip value={cards[0] ?? ""} />
-                  <CardChip value={cards[1] ?? ""} />
-                </span>
-                <strong>{formatPercent(item.weight)}</strong>
-              </div>
-            );
-          }}
-        </For>
-      </div>
+    <section class="subsection range-matrices">
+      <For each={grids()}>{(grid) => <RangeGridCollapse grid={grid} />}</For>
     </section>
   );
 }
 
-function summarizeVillainRange(
+function RangeGridCollapse(props: { grid: RangeGridModel }): JSX.Element {
+  const [open, setOpen] = createSignal(true);
+  return (
+    <div class="range-collapse">
+      <button
+        type="button"
+        class={`range-collapse-trigger ${open() ? "open" : ""}`}
+        onClick={() => setOpen(!open())}
+      >
+        <span>{props.grid.label} range</span>
+        <span>{props.grid.combos} combos</span>
+        <span>mass {props.grid.mass.toFixed(4)}</span>
+        <ChevronDown size={16} />
+      </button>
+      <Show when={open()}>
+        <div class="range-matrix" role="grid" aria-label={`${props.grid.label} range grid`}>
+          <For each={props.grid.rows}>
+            {(row) => (
+              <For each={row}>
+                {(cell) => (
+                  <button
+                    type="button"
+                    class={`range-matrix-cell ${cell.kind}`}
+                    title={cell.title}
+                    style={`--range-alpha: ${cell.alpha};`}
+                  >
+                    <span>{cell.label}</span>
+                    <strong>{formatCellPercent(cell.total)}</strong>
+                  </button>
+                )}
+              </For>
+            )}
+          </For>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+function buildRangeGrid(
   beliefs: Float32Array<ArrayBufferLike>,
-  heroPlayer: PlayerIndex,
-  heroHand?: readonly [number, number],
-): RangeSummary {
-  const villain = (1 - heroPlayer) as PlayerIndex;
-  const offset = villain * NUM_HANDS;
-  const entries: Array<{ hand: string; weight: number }> = [];
-  const blocked = heroHand ? new Set<number>(heroHand) : undefined;
+  player: PlayerIndex,
+): RangeGridModel {
+  const offset = player * NUM_HANDS;
+  const draftRows: Array<Array<RangeCell & { total: number; top: RangeGridCombo[] }>> = [];
   let mass = 0;
   let combos = 0;
-  for (let hand = 0; hand < NUM_HANDS; hand += 1) {
-    if (blocked && handOverlapsCards(hand, blocked)) continue;
-    const weight = beliefs[offset + hand] ?? 0;
-    mass += weight;
-    if (weight > 1.0e-7) {
-      combos += 1;
-      const [c0, c1] = handComboCards(hand);
-      entries.push({ hand: `${formatCard(c0)} ${formatCard(c1)}`, weight });
+  let maxTotal = 0;
+
+  for (const rowRank of RANKS) {
+    const row: Array<RangeCell & { total: number; top: RangeGridCombo[] }> = [];
+    for (const colRank of RANKS) {
+      const cell = rangeCell(rowRank, colRank);
+      const exactCombos = rangeOptions(cell.key, UNBLOCKED_CARDS);
+      const weightedCombos: RangeGridCombo[] = exactCombos.map((option) => {
+        const c0 = parseCard(option.cards[0]);
+        const c1 = parseCard(option.cards[1]);
+        const weight = beliefs[offset + handComboIndex(c0, c1)] ?? 0;
+        return { hand: `${option.cards[0]} ${option.cards[1]}`, weight };
+      });
+      const total = weightedCombos.reduce((sum, combo) => sum + combo.weight, 0);
+      mass += total;
+      maxTotal = Math.max(maxTotal, total);
+      combos += weightedCombos.filter((combo) => combo.weight > 1.0e-7).length;
+      weightedCombos.sort((a, b) => b.weight - a.weight);
+      row.push({ ...cell, total, top: weightedCombos.slice(0, 3) });
     }
+    draftRows.push(row);
   }
-  if (mass > 1.0e-8) {
-    for (const entry of entries) entry.weight /= mass;
-    mass = 1;
+
+  const rows = draftRows.map((row) =>
+    row.map((cell) => ({
+      ...cell,
+      alpha: maxTotal > 0 ? Math.max(0.08, cell.total / maxTotal) : 0,
+      title: rangeGridCellTitle(cell),
+    })),
+  );
+  return { label: playerLabel(player), mass, combos, rows };
+}
+
+function rangeGridCellTitle(cell: RangeCell & {
+  total: number;
+  top: RangeGridCombo[];
+}): string {
+  const comboCount = rangeOptions(cell.key, UNBLOCKED_CARDS).length;
+  const lines = [
+    `${cell.label}: ${formatPercent(cell.total)} of range`,
+    `Top 3 of ${comboCount} combos`,
+  ];
+  for (const combo of cell.top) {
+    lines.push(`${combo.hand}: ${formatPercent(combo.weight)}`);
   }
-  entries.sort((a, b) => b.weight - a.weight);
-  return { mass, combos, top: entries.slice(0, 8) };
+  return lines.join("\n");
+}
+
+function formatCellPercent(value: number): string {
+  if (value < 0.00005) return "0";
+  if (value < 0.01) return `${(value * 100).toFixed(1)}%`;
+  return `${Math.round(value * 100)}%`;
 }
 
 function formatPercent(value: number): string {
