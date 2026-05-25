@@ -1588,7 +1588,7 @@ function App(): JSX.Element {
           bb: positiveNumber(bb(), LOCAL_ENV_DEFAULTS.bb),
           betBins: LOCAL_ENV_DEFAULTS.betBins,
           flopShowdown: LOCAL_ENV_DEFAULTS.flopShowdown,
-          forceDeck: cards.forceDeck,
+          ...(cards.publicCards.length > 0 ? { forceDeck: cards.forceDeck } : {}),
         },
         heroPlayer: HERO_PLAYER,
         heroHand: cards.heroHand,
@@ -1976,15 +1976,26 @@ function App(): JSX.Element {
                   />
                 </section>
 
-                <HeroPolicy
-                  labels={solved().result.actionLabels}
-                  legalMask={solved().result.legalMask}
-                  policy={solved().result.policy}
-                  handIndex={solved().heroHandIndex}
-                  actor={solved().result.actor}
-                  heroPlayer={HERO_PLAYER}
-                  context={(descriptor() as StateDescriptor).finalContext}
-                />
+                <Show
+                  when={solved().result.actor === HERO_PLAYER}
+                  fallback={
+                    <div class="notice">
+                      <AlertTriangle size={18} />
+                      <span>
+                        Villain is to act, so the selected hero hand is a blocker,
+                        not an exact-hand policy row.
+                      </span>
+                    </div>
+                  }
+                >
+                  <HeroPolicy
+                    labels={solved().result.actionLabels}
+                    legalMask={solved().result.legalMask}
+                    policy={solved().result.policy}
+                    handIndex={solved().heroHandIndex}
+                    context={(descriptor() as StateDescriptor).finalContext}
+                  />
+                </Show>
 
                 <RangeSummaryView summary={solved().villainSummary} />
               </>
@@ -2030,8 +2041,6 @@ function HeroPolicy(props: {
   legalMask: readonly number[];
   policy: Float32Array<ArrayBufferLike>;
   handIndex: number;
-  actor: PlayerIndex;
-  heroPlayer: PlayerIndex;
   context?: ActionContext;
 }): JSX.Element {
   const row = createMemo(() => {
@@ -2045,11 +2054,7 @@ function HeroPolicy(props: {
   return (
     <section class="subsection">
       <h3>Hero hand policy</h3>
-      <p class="subtle">
-        {props.actor === props.heroPlayer
-          ? `Action distribution for this exact hand`
-          : `Villain (P${props.actor}) is to act; this is hero's hypothetical response`}
-      </p>
+      <p class="subtle">Action distribution for this exact hand</p>
       <div class="strategy-bars">
         <For each={row()}>
           {(item) => {
