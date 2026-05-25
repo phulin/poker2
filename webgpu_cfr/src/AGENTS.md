@@ -17,6 +17,8 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `hunlEnv.ts`: Browser-safe public HUNL environment, terminal showdown value/rank helpers, and legacy/new BetterFFN feature encoders.
 - `evaluator.ts`: Local GPU CFR evaluator for fixtures.
 - `browserEvaluator.ts`: Browser-facing evaluator that replays prefixes through the sparse public-tree CFR resolver, aggregates solve-progress callbacks, and returns beliefs/action probabilities for browser, CLI, and benchmark callers.
+- `solverWorker.ts`: Browser module-worker entry point that owns the WebGPU device/model/evaluator, loads cached model bytes, runs solves off the UI thread, and posts progress/results back to the app.
+- `solverWorkerMessages.ts`: Typed message contract shared between the Solid app and solver worker.
 - `sparseResolver.ts`: Arbitrary-depth sparse public-tree CFR resolver that batches nonterminal leaf model evaluation, optionally evaluates regrets/leaves on CFR-average beliefs, uses the WebGPU BetterFFN runtime for policy/value inference, and keeps mutable CFR tensors GPU-resident across WGSL sparse-kernel iterations when a GPU device is available.
 - `browser.ts`: Browser device/model loading exports.
 - `main.tsx`: Vite/Solid application mount entry point.

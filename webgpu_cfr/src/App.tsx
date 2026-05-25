@@ -10,13 +10,7 @@ import {
   Trash2,
   X,
 } from "lucide-solid";
-import {
-  BetterFfnWebGpuModel,
-  createBrowserCfrEvaluator,
-  createBrowserDevice,
-} from "./browser.js";
-import { parseBetterFfnManifest } from "./modelFormat.js";
-import { loadModelBytesWithCache, type ModelCacheProgress } from "./modelCache.js";
+import type { ModelCacheProgress } from "./modelCache.js";
 import { parseCard, parseCards, formatCard, handComboIndex, handComboCards } from "./cards.js";
 import { buildHeroOnlyBeliefs } from "./beliefs.js";
 import { PublicHunlEnv, NUM_HANDS, DEFAULT_FORCE_DECK, type LegalBins } from "./hunlEnv.js";
@@ -24,8 +18,12 @@ import type {
   BetterFfnManifest,
   BrowserEvaluationResult,
   PlayerIndex,
-  SolveProgress,
 } from "./types.js";
+import type {
+  SolverEvaluateSpotRequest,
+  SolverWorkerRequest,
+  SolverWorkerResponse,
+} from "./solverWorkerMessages.js";
 
 const MODEL_MANIFEST_URL = "/models/rebel_latest/model.json";
 const CARD_OPTIONS = Array.from({ length: 52 }, (_, index) => formatCard(index));
@@ -55,10 +53,16 @@ const LOCAL_ENV_DEFAULTS: PublicEnvDefaults = {
   defaultForceDeck: DEFAULT_FORCE_DECK,
 };
 
+function waitForBrowserPaint(): Promise<void> {
+  if (typeof requestAnimationFrame === "undefined") return Promise.resolve();
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      setTimeout(resolve, 0);
+    });
+  });
+}
+
 interface Runtime {
-  device: GPUDevice;
-  model: BetterFfnWebGpuModel;
-  evaluator: ReturnType<typeof createBrowserCfrEvaluator>;
   manifest: BetterFfnManifest;
   cached: boolean;
   usingSubgroups: boolean;
@@ -1214,6 +1218,16 @@ function App(): JSX.Element {
   const [isSolving, setIsSolving] = createSignal(false);
   const [solveProgress, setSolveProgress] = createSignal<number | undefined>();
   const [hashHydrated, setHashHydrated] = createSignal(false);
+  let solverWorker: Worker | undefined;
+  let nextSolveId = 0;
+  let activeSolve:
+    | {
+        id: number;
+        depth: number;
+        resolve: (result: BrowserEvaluationResult) => void;
+        reject: (error: Error) => void;
+      }
+    | undefined;
   let applyingHash = false;
   let lastWrittenHash = "";
 
@@ -1231,7 +1245,87 @@ function App(): JSX.Element {
       setSolveStatus("");
       setSolveProgress(undefined);
       setIsSolving(false);
+      activeSolve?.reject(new Error(message));
+      activeSolve = undefined;
     }
+  }
+
+  function rejectActiveSolve(message: string): void {
+    activeSolve?.reject(new Error(message));
+    activeSolve = undefined;
+    if (isSolving()) {
+      setSolveError(message);
+      setSolveStatus("");
+      setSolveProgress(undefined);
+      setIsSolving(false);
+    }
+  }
+
+  function handleWorkerMessage(message: SolverWorkerResponse): void {
+    if (message.type === "model-progress") {
+      setModelProgress(message.progress);
+    } else if (message.type === "ready") {
+      setRuntime(message.runtime);
+    } else if (message.type === "webgpu-error") {
+      reportWebGpuError(message.message);
+    } else if (message.type === "error") {
+      setModelError(message.message);
+      rejectActiveSolve(message.message);
+    } else if (message.type === "solve-progress") {
+      if (activeSolve?.id !== message.id) return;
+      setSolveProgress(message.progress.percent);
+      setSolveStatus(
+        `Solving depth ${activeSolve.depth}, ${Math.floor(message.progress.percent)}%`,
+      );
+    } else if (message.type === "solve-result") {
+      if (activeSolve?.id !== message.id) return;
+      activeSolve.resolve(message.result);
+      activeSolve = undefined;
+    } else {
+      if (activeSolve?.id !== message.id) return;
+      activeSolve.reject(new Error(message.message));
+      activeSolve = undefined;
+    }
+  }
+
+  function ensureSolverWorker(): Worker {
+    if (solverWorker) return solverWorker;
+    const worker = new Worker(new URL("./solverWorker.ts", import.meta.url), {
+      type: "module",
+    });
+    worker.addEventListener("message", (event: MessageEvent<SolverWorkerResponse>) => {
+      handleWorkerMessage(event.data);
+    });
+    worker.addEventListener("error", (event) => {
+      const message = event.message || "Solver worker failed";
+      setModelError(message);
+      rejectActiveSolve(message);
+    });
+    worker.addEventListener("messageerror", () => {
+      const message = "Solver worker sent an unreadable message";
+      setModelError(message);
+      rejectActiveSolve(message);
+    });
+    solverWorker = worker;
+    return worker;
+  }
+
+  function postWorkerMessage(message: SolverWorkerRequest): void {
+    ensureSolverWorker().postMessage(message);
+  }
+
+  function evaluateSpotInWorker(
+    request: SolverEvaluateSpotRequest,
+    solveDepth: number,
+  ): Promise<BrowserEvaluationResult> {
+    if (!runtime()) throw new Error("solver worker is not ready");
+    if (activeSolve) throw new Error("a solve is already running");
+    const id = nextSolveId + 1;
+    nextSolveId = id;
+    return new Promise((resolve, reject) => {
+      activeSolve = { id, depth: solveDepth, resolve, reject };
+      postWorkerMessage({ type: "solve", id, request });
+    });
   }
 
   function applyHashFromLocation(): void {
@@ -1264,35 +1358,15 @@ function App(): JSX.Element {
 
   onCleanup(() => {
     window.removeEventListener("hashchange", applyHashFromLocation);
-    const current = runtime();
-    current?.evaluator.dispose();
-    current?.model.dispose();
-    current?.device.destroy();
+    solverWorker?.postMessage({ type: "dispose" } satisfies SolverWorkerRequest);
+    solverWorker?.terminate();
+    solverWorker = undefined;
   });
 
-  async function loadRuntime(): Promise<void> {
+  function loadRuntime(): void {
     try {
-      setModelProgress({ phase: "manifest", message: "Requesting WebGPU device" });
-      const device = await createBrowserDevice({ onError: reportWebGpuError });
-      const loaded = await loadModelBytesWithCache(MODEL_MANIFEST_URL, {
-        onProgress: setModelProgress,
-      });
-      setModelProgress({ phase: "manifest", message: "Creating WebGPU model" });
-      const manifest = parseBetterFfnManifest(loaded.manifest);
-      const model = BetterFfnWebGpuModel.fromBuffers(device, manifest, loaded.weights);
-      const evaluator = createBrowserCfrEvaluator(device, model);
-      setRuntime({
-        device,
-        model,
-        evaluator,
-        manifest,
-        cached: loaded.cached,
-        usingSubgroups: device.features.has("subgroups" as GPUFeatureName),
-      });
-      setModelProgress({
-        phase: loaded.cached ? "cache-hit" : "stored",
-        message: loaded.cached ? "Model loaded from IndexedDB" : "Model loaded and cached",
-      });
+      setModelProgress({ phase: "manifest", message: "Starting solver worker" });
+      postWorkerMessage({ type: "init", manifestUrl: MODEL_MANIFEST_URL });
     } catch (error) {
       setModelError(error instanceof Error ? error.message : String(error));
     }
@@ -1575,9 +1649,8 @@ function App(): JSX.Element {
       setSolveProgress(0);
       setSolveStatus(`Solving depth ${solveDepth}, 0%`);
       setSolveResult(undefined);
-      const started = performance.now();
-      const result = await current.evaluator.evaluateSpot({
-        spot: actions(),
+      const request: SolverEvaluateSpotRequest = {
+        spot: [...actions()],
         iterations: solveIterations,
         depth: solveDepth,
         cfrAvg: solveCfrAvg,
@@ -1597,11 +1670,10 @@ function App(): JSX.Element {
           heroHand: cards.heroHand,
           publicCards: cards.publicCards,
         }),
-        onProgress: (progress: SolveProgress) => {
-          setSolveProgress(progress.percent);
-          setSolveStatus(`Solving depth ${solveDepth}, ${Math.floor(progress.percent)}%`);
-        },
-      });
+      };
+      await waitForBrowserPaint();
+      const started = performance.now();
+      const result = await evaluateSpotInWorker(request, solveDepth);
       const elapsedMs = performance.now() - started;
       const heroHandIndex = handComboIndex(cards.heroHand[0], cards.heroHand[1]);
       setSolveResult({
