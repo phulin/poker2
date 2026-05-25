@@ -162,100 +162,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     numer1 = numer1 + tableEv * belief1;
     let opp0 = handCard0[opp];
     let opp1 = handCard1[opp];
-    if (
-      allowedMask[allowedBase + opp] != 0u &&
-      !(hand0 == opp0 || hand0 == opp1 || hand1 == opp0 || hand1 == opp1)
-    ) {
+    if (!(hand0 == opp0 || hand0 == opp1 || hand1 == opp0 || hand1 == opp1)) {
       denom0 = denom0 + belief0;
       denom1 = denom1 + belief1;
     }
   }
-  let rawEv0 = select(0.0, numer0 / denom0, denom0 > 1.0e-8);
-  let rawEv1 = select(0.0, numer1 / denom1, denom1 > 1.0e-8);
-  values[valueBase + hand] = rawEv0 * scaleFactors[sample * 2u];
-  values[valueBase + 1326u + hand] = rawEv1 * scaleFactors[sample * 2u + 1u];
-}
-`;
-
-export const SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_WGSL =
-  SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL.replace(
-    `      allowedMask[allowedBase + opp] != 0u &&
-      !(hand0 == opp0 || hand0 == opp1 || hand1 == opp0 || hand1 == opp1)`,
-    "      !(hand0 == opp0 || hand0 == opp1 || hand1 == opp0 || hand1 == opp1)",
-  );
-
-export const SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_OVERLAP_LIST_WGSL = /* wgsl */ `
-struct Params {
-  _numHands: u32,
-  batch: u32,
-  _permId: u32,
-  _hasPerm: u32,
-  tableScale: f32,
-  _pad0: u32,
-  _pad1: u32,
-  _pad2: u32,
-};
-
-@group(0) @binding(0) var<storage, read> nodeIndices: array<u32>;
-@group(0) @binding(1) var<storage, read> allowedMask: array<u32>;
-@group(0) @binding(2) var<storage, read> overlapHands: array<u32>;
-@group(0) @binding(3) var<storage, read> overlapCounts: array<u32>;
-@group(0) @binding(4) var<storage, read> tablePacked: array<u32>;
-@group(0) @binding(6) var<storage, read> scaleFactors: array<f32>;
-@group(0) @binding(7) var<storage, read> beliefs: array<f32>;
-@group(0) @binding(8) var<storage, read_write> values: array<f32>;
-@group(0) @binding(9) var<uniform> params: Params;
-
-fn table_value(hero: u32, opp: u32) -> f32 {
-  let idx = hero * 1326u + opp;
-  let word = tablePacked[idx / 2u];
-  let raw = select(word >> 16u, word & 0xffffu, (idx & 1u) == 0u);
-  let signed = select(i32(raw), i32(raw) - 65536, raw >= 32768u);
-  return f32(signed) / params.tableScale;
-}
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let linear = gid.x;
-  let total = params.batch * 1326u;
-  if (linear >= total) {
-    return;
-  }
-  let hand = linear % 1326u;
-  let sample = linear / 1326u;
-  let node = nodeIndices[sample];
-  let allowedBase = node * 1326u;
-  let valueBase = node * 2652u;
-  if (allowedMask[allowedBase + hand] == 0u) {
-    values[valueBase + hand] = 0.0;
-    values[valueBase + 1326u + hand] = 0.0;
-    return;
-  }
-
-  let p0OppBase = valueBase + 1326u;
-  let p1OppBase = valueBase;
-  var numer0 = 0.0;
-  var denom0 = 0.0;
-  var numer1 = 0.0;
-  var denom1 = 0.0;
-  for (var opp = 0u; opp < 1326u; opp = opp + 1u) {
-    let tableEv = table_value(hand, opp);
-    let belief0 = beliefs[p0OppBase + opp];
-    let belief1 = beliefs[p1OppBase + opp];
-    numer0 = numer0 + tableEv * belief0;
-    numer1 = numer1 + tableEv * belief1;
-    denom0 = denom0 + belief0;
-    denom1 = denom1 + belief1;
-  }
-
-  let overlapBase = hand * 101u;
-  let overlapCount = overlapCounts[hand];
-  for (var i = 0u; i < overlapCount; i = i + 1u) {
-    let opp = overlapHands[overlapBase + i];
-    denom0 = denom0 - beliefs[p0OppBase + opp];
-    denom1 = denom1 - beliefs[p1OppBase + opp];
-  }
-
   let rawEv0 = select(0.0, numer0 / denom0, denom0 > 1.0e-8);
   let rawEv1 = select(0.0, numer1 / denom1, denom1 > 1.0e-8);
   values[valueBase + hand] = rawEv0 * scaleFactors[sample * 2u];

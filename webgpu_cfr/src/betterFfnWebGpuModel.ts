@@ -84,8 +84,6 @@ interface PredictOptions {
 }
 
 const BATCH_ROW_BLOCK = 4;
-const DISABLE_BATCH2_VALUE_ENV = "P2_DISABLE_BATCH2_VALUE_512";
-const DISABLE_BATCH4_ENV = "P2_DISABLE_BATCH4_SUBGROUP";
 
 export interface ExactBelief {
   player: number;
@@ -2844,7 +2842,6 @@ export class BetterFfnWebGpuModel {
       !biasPresent &&
       this.matVecBatchExactRowsCols512Batch3SubgroupPipeline;
     const useBatch4LinearIn =
-      globalThis.process?.env?.[DISABLE_BATCH4_ENV] !== "1" &&
       batch >= 4 &&
       rows === 1024 &&
       cols === 512 &&
@@ -2862,7 +2859,6 @@ export class BetterFfnWebGpuModel {
       !biasPresent &&
       this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline;
     const useHandEmbeddingBatch4 =
-      globalThis.process?.env?.[DISABLE_BATCH4_ENV] !== "1" &&
       batch >= 4 &&
       rows === 512 &&
       cols === NUM_HANDS &&
@@ -2880,7 +2876,6 @@ export class BetterFfnWebGpuModel {
       !biasPresent &&
       this.matVecBatchExactRowsCols1024Batch2SubgroupPipeline;
     const useBatch2ValueHead =
-      globalThis.process?.env?.[DISABLE_BATCH2_VALUE_ENV] !== "1" &&
       rows === 2 * NUM_HANDS &&
       cols === 512 &&
       inputStride === 512 &&

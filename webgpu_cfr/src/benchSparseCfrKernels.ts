@@ -741,21 +741,6 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         ),
     },
     {
-      name: "belief_propagate_leaf_depth_split",
-      output: data.beliefs,
-      outputElements: data.valueCount,
-      encode: (encoder) =>
-        kernels.encodePropagateBeliefsDepthSplit(
-          encoder,
-          data.tree,
-          data.policy,
-          data.beliefs,
-          data.denom,
-          leafStart,
-          leafEnd,
-        ),
-    },
-    {
       name: "belief_propagate_leaf_depth_fused",
       output: data.beliefs,
       outputElements: data.valueCount,
@@ -769,40 +754,6 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           leafStart,
           leafEnd,
         ),
-      validate: async () => {
-        const splitBeliefs = makeStorageBuffer(device, normalizeBeliefs(data.treeData));
-        const fusedBeliefs = makeStorageBuffer(device, normalizeBeliefs(data.treeData));
-        const splitDenom = makeEmptyStorageBuffer(device, data.nodeCount * 2);
-        const fusedDenom = makeEmptyStorageBuffer(device, data.nodeCount * 2);
-        await runOnce(device, (encoder) =>
-          kernels.encodePropagateBeliefsDepthSplit(
-            encoder,
-            data.tree,
-            data.policy,
-            splitBeliefs,
-            splitDenom,
-            leafStart,
-            leafEnd,
-          ),
-        );
-        await runOnce(device, (encoder) =>
-          kernels.encodePropagateBeliefsDepthFused(
-            encoder,
-            data.tree,
-            data.policy,
-            fusedBeliefs,
-            fusedDenom,
-            leafStart,
-            leafEnd,
-          ),
-        );
-        return validatePair(
-          splitBeliefs,
-          fusedBeliefs,
-          data.valueCount,
-          "belief_propagate_leaf_depth_split",
-        );
-      },
     },
     {
       name: "reach_propagate_leaf_depth",
@@ -1524,125 +1475,6 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           ),
         );
         return validatePair(reference, candidate, data.valueCount, "allin_table_values");
-      },
-    },
-    {
-      name: "allin_table_values_both_players_no_opp_allowed",
-      output: data.values,
-      outputElements: data.valueCount,
-      encode: (encoder) =>
-        kernels.encodeAllInTableValues1326NoPermBothPlayersNoOppAllowed(
-          encoder,
-          data.tree,
-          data.nodeIndices,
-          data.tablePacked,
-          data.comboPerms,
-          data.scaleFactors,
-          data.beliefs,
-          data.values,
-          Math.min(4, data.leafBatch),
-          data.tableScale,
-          0,
-          false,
-        ),
-      validate: async () => {
-        const reference = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
-        const candidate = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
-        await runOnce(device, (encoder) =>
-          kernels.encodeAllInTableValues1326NoPermBothPlayers(
-            encoder,
-            data.tree,
-            data.nodeIndices,
-            data.tablePacked,
-            data.comboPerms,
-            data.scaleFactors,
-            data.beliefs,
-            reference,
-            Math.min(4, data.leafBatch),
-            data.tableScale,
-            0,
-            false,
-          ),
-        );
-        await runOnce(device, (encoder) =>
-          kernels.encodeAllInTableValues1326NoPermBothPlayersNoOppAllowed(
-            encoder,
-            data.tree,
-            data.nodeIndices,
-            data.tablePacked,
-            data.comboPerms,
-            data.scaleFactors,
-            data.beliefs,
-            candidate,
-            Math.min(4, data.leafBatch),
-            data.tableScale,
-            0,
-            false,
-          ),
-        );
-        return validatePair(reference, candidate, data.valueCount, "allin_table_values_both_players");
-      },
-    },
-    {
-      name: "allin_table_values_both_players_overlap_list",
-      output: data.values,
-      outputElements: data.valueCount,
-      encode: (encoder) =>
-        kernels.encodeAllInTableValues1326NoPermBothPlayersOverlapList(
-          encoder,
-          data.tree,
-          data.nodeIndices,
-          data.tablePacked,
-          data.comboPerms,
-          data.scaleFactors,
-          data.beliefs,
-          data.values,
-          Math.min(4, data.leafBatch),
-          data.tableScale,
-          0,
-          false,
-        ),
-      validate: async () => {
-        const reference = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
-        const candidate = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
-        await runOnce(device, (encoder) =>
-          kernels.encodeAllInTableValues1326NoPermBothPlayersNoOppAllowed(
-            encoder,
-            data.tree,
-            data.nodeIndices,
-            data.tablePacked,
-            data.comboPerms,
-            data.scaleFactors,
-            data.beliefs,
-            reference,
-            Math.min(4, data.leafBatch),
-            data.tableScale,
-            0,
-            false,
-          ),
-        );
-        await runOnce(device, (encoder) =>
-          kernels.encodeAllInTableValues1326NoPermBothPlayersOverlapList(
-            encoder,
-            data.tree,
-            data.nodeIndices,
-            data.tablePacked,
-            data.comboPerms,
-            data.scaleFactors,
-            data.beliefs,
-            candidate,
-            Math.min(4, data.leafBatch),
-            data.tableScale,
-            0,
-            false,
-          ),
-        );
-        return validatePair(
-          reference,
-          candidate,
-          data.valueCount,
-          "allin_table_values_both_players_no_opp_allowed",
-        );
       },
     },
   ];

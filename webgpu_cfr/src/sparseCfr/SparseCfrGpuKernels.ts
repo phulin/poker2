@@ -10,16 +10,12 @@ import {
   rangeChunks,
 } from "./dispatch.js";
 import {
-  useAllInNoOpponentAllowed,
-  useAllInOverlapList,
-  useFusedBeliefPropagate,
-} from "./flags.js";
-import type { SparseGpuTreeBuffers, SparseGpuTreeData } from "./treeBuffers.js";
+  type SparseGpuTreeBuffers,
+  type SparseGpuTreeData,
+} from "./treeBuffers.js";
 import {
   SPARSE_AVERAGE_POLICY_WGSL,
   SPARSE_BACKUP_DEPTH_WGSL,
-  SPARSE_BELIEF_APPLY_WGSL,
-  SPARSE_BELIEF_NORMALIZE_WGSL,
   SPARSE_BELIEF_PROPAGATE_FUSED_WGSL,
   SPARSE_REACH_APPLY_WGSL,
   SPARSE_REGRET_MATCH_WGSL,
@@ -50,8 +46,6 @@ import {
   SPARSE_SHOWDOWN_VALUES_WGSL,
 } from "./shaders/terminal.js";
 import {
-  SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_WGSL,
-  SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_OVERLAP_LIST_WGSL,
   SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL,
   SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL,
   SPARSE_ALLIN_TABLE_VALUES_WGSL,
@@ -60,8 +54,6 @@ import {
 export class SparseCfrGpuKernels {
   readonly device: GPUDevice;
   private readonly regretMatchPipeline: GPUComputePipeline;
-  private readonly beliefApplyPipeline: GPUComputePipeline;
-  private readonly beliefNormalizePipeline: GPUComputePipeline;
   private readonly beliefPropagateFusedPipeline: GPUComputePipeline;
   private readonly reachApplyPipeline: GPUComputePipeline;
   private readonly averagePolicyPipeline: GPUComputePipeline;
@@ -90,8 +82,6 @@ export class SparseCfrGpuKernels {
   private readonly allInTableValuesPipeline?: GPUComputePipeline;
   private readonly allInTableValues1326NoPermPipeline: GPUComputePipeline;
   private readonly allInTableValues1326NoPermBothPlayersPipeline: GPUComputePipeline;
-  private readonly allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline: GPUComputePipeline;
-  private readonly allInTableValues1326NoPermBothPlayersOverlapListPipeline: GPUComputePipeline;
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -99,14 +89,6 @@ export class SparseCfrGpuKernels {
     this.regretMatchPipeline = this.pipeline(
       SPARSE_REGRET_MATCH_WGSL,
       "sparse-cfr-regret-match",
-    );
-    this.beliefApplyPipeline = this.pipeline(
-      SPARSE_BELIEF_APPLY_WGSL,
-      "sparse-cfr-belief-apply",
-    );
-    this.beliefNormalizePipeline = this.pipeline(
-      SPARSE_BELIEF_NORMALIZE_WGSL,
-      "sparse-cfr-belief-normalize",
     );
     this.beliefPropagateFusedPipeline = this.pipeline(
       SPARSE_BELIEF_PROPAGATE_FUSED_WGSL,
@@ -224,14 +206,6 @@ export class SparseCfrGpuKernels {
       SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL,
       "sparse-cfr-allin-table-values-1326-noperm-both-players",
     );
-    this.allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline = this.pipeline(
-      SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_WGSL,
-      "sparse-cfr-allin-table-values-1326-noperm-both-players-no-opp-allowed",
-    );
-    this.allInTableValues1326NoPermBothPlayersOverlapListPipeline = this.pipeline(
-      SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_OVERLAP_LIST_WGSL,
-      "sparse-cfr-allin-table-values-1326-noperm-both-players-overlap-list",
-    );
   }
 
   createTreeBuffers(data: SparseGpuTreeData): SparseGpuTreeBuffers {
@@ -318,18 +292,7 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer[] {
-    if (useFusedBeliefPropagate()) {
-      return this.encodePropagateBeliefsDepthFused(
-        encoder,
-        tree,
-        policy,
-        beliefs,
-        denom,
-        start,
-        end,
-      );
-    }
-    return this.encodePropagateBeliefsDepthSplit(
+    return this.encodePropagateBeliefsDepthFused(
       encoder,
       tree,
       policy,
@@ -338,65 +301,6 @@ export class SparseCfrGpuKernels {
       start,
       end,
     );
-  }
-
-  encodePropagateBeliefsDepthSplit(
-    encoder: GPUCommandEncoder,
-    tree: SparseGpuTreeBuffers,
-    policy: GPUBuffer,
-    beliefs: GPUBuffer,
-    denom: GPUBuffer,
-    start: number,
-    end: number,
-  ): GPUBuffer[] {
-    const paramsList: GPUBuffer[] = [];
-    for (const [chunkStart, chunkEnd] of rangeChunks(
-      start,
-      end,
-      dispatchLimitedCount(2 * tree.numHands, 64),
-    )) {
-      const params = makeUniformBuffer(
-        this.device,
-        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
-      );
-      const applyBindGroup = this.device.createBindGroup({
-        layout: this.beliefApplyPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: tree.parentIndex } },
-          { binding: 1, resource: { buffer: tree.prevActor } },
-          { binding: 2, resource: { buffer: tree.allowedMask } },
-          { binding: 3, resource: { buffer: policy } },
-          { binding: 4, resource: { buffer: beliefs } },
-          { binding: 5, resource: { buffer: denom } },
-          { binding: 6, resource: { buffer: params } },
-        ],
-      });
-      this.encode(
-        encoder,
-        this.beliefApplyPipeline,
-        applyBindGroup,
-        Math.max(0, chunkEnd - chunkStart),
-        2,
-      );
-
-      const normalizeBindGroup = this.device.createBindGroup({
-        layout: this.beliefNormalizePipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: tree.allowedProb } },
-          { binding: 1, resource: { buffer: denom } },
-          { binding: 2, resource: { buffer: beliefs } },
-          { binding: 3, resource: { buffer: params } },
-        ],
-      });
-      this.encode(
-        encoder,
-        this.beliefNormalizePipeline,
-        normalizeBindGroup,
-        Math.ceil(((chunkEnd - chunkStart) * 2 * tree.numHands) / 64),
-      );
-      paramsList.push(params);
-    }
-    return paramsList;
   }
 
   encodePropagateBeliefsDepthFused(
@@ -1720,33 +1624,19 @@ export class SparseCfrGpuKernels {
     }
     void comboPerms;
     void permId;
-    let pipeline = this.allInTableValues1326NoPermBothPlayersOverlapListPipeline;
-    let aux0 = tree.overlapHands;
-    let aux1 = tree.overlapCounts;
-    if (useAllInOverlapList()) {
-      // keep the default overlap-list kernel selected
-    } else if (useAllInNoOpponentAllowed()) {
-      pipeline = this.allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline;
-      aux0 = tree.handCard0;
-      aux1 = tree.handCard1;
-    } else {
-      pipeline = this.allInTableValues1326NoPermBothPlayersPipeline;
-      aux0 = tree.handCard0;
-      aux1 = tree.handCard1;
-    }
     const paramsList: GPUBuffer[] = [];
     for (let start = 0; start < batch; start += TERMINAL_SAMPLE_CHUNK) {
       paramsList.push(this.encodeAllInTableValues1326NoPermBothPlayersChunk(
         encoder,
-        pipeline,
+        this.allInTableValues1326NoPermBothPlayersPipeline,
         tree,
         nodeIndices,
         tablePacked,
         scaleFactors,
         beliefs,
         values,
-        aux0,
-        aux1,
+        tree.handCard0,
+        tree.handCard1,
         Math.min(TERMINAL_SAMPLE_CHUNK, batch - start),
         tableScale,
         start,
@@ -1945,104 +1835,6 @@ export class SparseCfrGpuKernels {
     this.encode(
       encoder,
       this.allInTableValues1326NoPermBothPlayersPipeline,
-      bindGroup,
-      Math.ceil((batch * 1326) / 64),
-    );
-    return params;
-  }
-
-  encodeAllInTableValues1326NoPermBothPlayersNoOppAllowed(
-    encoder: GPUCommandEncoder,
-    tree: SparseGpuTreeBuffers,
-    nodeIndices: GPUBuffer,
-    tablePacked: GPUBuffer,
-    comboPerms: GPUBuffer,
-    scaleFactors: GPUBuffer,
-    beliefs: GPUBuffer,
-    values: GPUBuffer,
-    batch: number,
-    tableScale: number,
-    permId: number,
-    hasPerm: boolean,
-  ): GPUBuffer {
-    if (tree.numHands !== 1326 || hasPerm) {
-      throw new Error("no-opponent-allowed all-in values require 1326 hands without permutations");
-    }
-    const words = new ArrayBuffer(32);
-    const u32 = new Uint32Array(words);
-    const f32 = new Float32Array(words);
-    u32[0] = tree.numHands;
-    u32[1] = batch;
-    u32[2] = permId;
-    u32[3] = hasPerm ? 1 : 0;
-    f32[4] = tableScale;
-    const params = makeUniformBuffer(this.device, u32);
-    const bindGroup = this.device.createBindGroup({
-      layout: this.allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: nodeIndices } },
-        { binding: 1, resource: { buffer: tree.allowedMask } },
-        { binding: 2, resource: { buffer: tree.handCard0 } },
-        { binding: 3, resource: { buffer: tree.handCard1 } },
-        { binding: 4, resource: { buffer: tablePacked } },
-        { binding: 6, resource: { buffer: scaleFactors } },
-        { binding: 7, resource: { buffer: beliefs } },
-        { binding: 8, resource: { buffer: values } },
-        { binding: 9, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline,
-      bindGroup,
-      Math.ceil((batch * 1326) / 64),
-    );
-    return params;
-  }
-
-  encodeAllInTableValues1326NoPermBothPlayersOverlapList(
-    encoder: GPUCommandEncoder,
-    tree: SparseGpuTreeBuffers,
-    nodeIndices: GPUBuffer,
-    tablePacked: GPUBuffer,
-    comboPerms: GPUBuffer,
-    scaleFactors: GPUBuffer,
-    beliefs: GPUBuffer,
-    values: GPUBuffer,
-    batch: number,
-    tableScale: number,
-    permId: number,
-    hasPerm: boolean,
-  ): GPUBuffer {
-    if (tree.numHands !== 1326 || tree.overlapSlots !== 101 || hasPerm) {
-      throw new Error("overlap-list all-in values require 1326 HUNL hands without permutations");
-    }
-    const words = new ArrayBuffer(32);
-    const u32 = new Uint32Array(words);
-    const f32 = new Float32Array(words);
-    u32[0] = tree.numHands;
-    u32[1] = batch;
-    u32[2] = permId;
-    u32[3] = hasPerm ? 1 : 0;
-    f32[4] = tableScale;
-    const params = makeUniformBuffer(this.device, u32);
-    const bindGroup = this.device.createBindGroup({
-      layout: this.allInTableValues1326NoPermBothPlayersOverlapListPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: nodeIndices } },
-        { binding: 1, resource: { buffer: tree.allowedMask } },
-        { binding: 2, resource: { buffer: tree.overlapHands } },
-        { binding: 3, resource: { buffer: tree.overlapCounts } },
-        { binding: 4, resource: { buffer: tablePacked } },
-        { binding: 6, resource: { buffer: scaleFactors } },
-        { binding: 7, resource: { buffer: beliefs } },
-        { binding: 8, resource: { buffer: values } },
-        { binding: 9, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.allInTableValues1326NoPermBothPlayersOverlapListPipeline,
       bindGroup,
       Math.ceil((batch * 1326) / 64),
     );

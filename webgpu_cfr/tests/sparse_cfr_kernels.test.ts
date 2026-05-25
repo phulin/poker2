@@ -7,8 +7,6 @@ import {
 } from "../src/gpuBuffers.js";
 import { createDawnDevice } from "../src/gpu.js";
 import {
-  SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_WGSL,
-  SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_OVERLAP_LIST_WGSL,
   SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL,
   SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL,
 } from "../src/sparseCfr/shaders/allIn.js";
@@ -51,14 +49,6 @@ test("production sparse WGSL kernels fit baseline browser storage-buffer limits"
     ],
     ["all-in-1326-noperm", SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL],
     ["all-in-1326-noperm-both", SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL],
-    [
-      "all-in-1326-noperm-no-opp-allowed",
-      SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_WGSL,
-    ],
-    [
-      "all-in-1326-noperm-overlap-list",
-      SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_OVERLAP_LIST_WGSL,
-    ],
   ] as const) {
     assert.ok(
       storageBindingCount(wgsl) <= baselineStorageBufferLimit,
