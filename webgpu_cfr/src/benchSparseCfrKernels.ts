@@ -1099,6 +1099,68 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
       },
     },
     {
+      name: "showdown_values_from_rank_aggregates_1326_both_players",
+      output: data.values,
+      outputElements: data.valueCount,
+      encode: (encoder) =>
+        kernels.encodeShowdownValuesFromRanks1326BothPlayers(
+          encoder,
+          data.tree,
+          data.nodeIndices,
+          data.rankOrdinals,
+          data.payoffs,
+          data.beliefs,
+          data.values,
+          data.rankMass,
+          data.rankPrefixLess,
+          data.rankTotal,
+          data.leafBatch,
+          data.maxRanks,
+        ),
+      validate: async () => {
+        const reference = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
+        const candidate = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
+        await runOnce(device, (encoder) =>
+          kernels.encodeShowdownValuesFromRanks1326(
+            encoder,
+            data.tree,
+            data.nodeIndices,
+            data.rankOrdinals,
+            data.payoffs,
+            data.beliefs,
+            reference,
+            data.rankMass,
+            data.rankPrefixLess,
+            data.rankTotal,
+            data.leafBatch,
+            data.maxRanks,
+          ),
+        );
+        await runOnce(device, (encoder) =>
+          kernels.encodeShowdownValuesFromRanks1326BothPlayers(
+            encoder,
+            data.tree,
+            data.nodeIndices,
+            data.rankOrdinals,
+            data.payoffs,
+            data.beliefs,
+            candidate,
+            data.rankMass,
+            data.rankPrefixLess,
+            data.rankTotal,
+            data.leafBatch,
+            data.maxRanks,
+          ),
+        );
+        return validatePair(
+          reference,
+          candidate,
+          data.valueCount,
+          "showdown_values_from_rank_aggregates_1326",
+        );
+      },
+    },
+    {
       name: "showdown_values_from_ranks",
       output: data.values,
       outputElements: data.valueCount,

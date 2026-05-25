@@ -1303,6 +1303,92 @@ export const SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_WGSL =
     .replaceAll("hand * params.overlapSlots", "hand * 101u")
     .replaceAll("batch * 2 * tree.numHands", "batch * 2652");
 
+export const SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_WGSL = /* wgsl */ `
+struct Params {
+  _numHands: u32,
+  batch: u32,
+  maxRanks: u32,
+  _overlapSlots: u32,
+};
+
+@group(0) @binding(0) var<storage, read> nodeIndices: array<u32>;
+@group(0) @binding(1) var<storage, read> rankOrdinals: array<u32>;
+@group(0) @binding(2) var<storage, read> overlapHands: array<u32>;
+@group(0) @binding(3) var<storage, read> overlapCounts: array<u32>;
+@group(0) @binding(4) var<storage, read> payoffs: array<f32>;
+@group(0) @binding(5) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(6) var<storage, read> rankMass: array<f32>;
+@group(0) @binding(7) var<storage, read> rankPrefixLess: array<f32>;
+@group(0) @binding(8) var<storage, read> rankTotal: array<f32>;
+@group(0) @binding(9) var<storage, read_write> values: array<f32>;
+@group(0) @binding(10) var<uniform> params: Params;
+
+@compute @workgroup_size(128)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let total = params.batch * 1326u;
+  if (linear >= total) {
+    return;
+  }
+
+  let hand = linear % 1326u;
+  let sample = linear / 1326u;
+  let node = nodeIndices[sample];
+  let valueBase = node * 2652u;
+  let rank = rankOrdinals[sample * 1326u + hand];
+  if (rank >= params.maxRanks) {
+    values[valueBase + hand] = 0.0;
+    values[valueBase + 1326u + hand] = 0.0;
+    return;
+  }
+
+  let aggregateBase0 = (sample * 2u + 1u) * params.maxRanks;
+  var lower0 = rankPrefixLess[aggregateBase0 + rank];
+  var equal0 = rankMass[aggregateBase0 + rank];
+  var higher0 = rankTotal[sample * 2u + 1u] - lower0 - equal0;
+
+  let aggregateBase1 = (sample * 2u) * params.maxRanks;
+  var lower1 = rankPrefixLess[aggregateBase1 + rank];
+  var equal1 = rankMass[aggregateBase1 + rank];
+  var higher1 = rankTotal[sample * 2u] - lower1 - equal1;
+
+  let beliefBase0 = valueBase + 1326u;
+  let beliefBase1 = valueBase;
+  let overlapBase = hand * 101u;
+  let overlapCount = overlapCounts[hand];
+  for (var i = 0u; i < overlapCount; i = i + 1u) {
+    let opp = overlapHands[overlapBase + i];
+    let oppRank = rankOrdinals[sample * 1326u + opp];
+    if (oppRank >= params.maxRanks) {
+      continue;
+    }
+    let oppBelief0 = beliefs[beliefBase0 + opp];
+    let oppBelief1 = beliefs[beliefBase1 + opp];
+    if (oppRank < rank) {
+      lower0 = lower0 - oppBelief0;
+      lower1 = lower1 - oppBelief1;
+    } else if (oppRank > rank) {
+      higher0 = higher0 - oppBelief0;
+      higher1 = higher1 - oppBelief1;
+    } else {
+      equal0 = equal0 - oppBelief0;
+      equal1 = equal1 - oppBelief1;
+    }
+  }
+
+  let winValue = payoffs[sample * 3u];
+  let loseValue = payoffs[sample * 3u + 1u];
+  let tieValue = payoffs[sample * 3u + 2u];
+  let mass0 = lower0 + equal0 + higher0;
+  let value0 = lower0 * winValue + equal0 * tieValue + higher0 * loseValue;
+  values[valueBase + hand] = select(0.0, value0 / mass0, mass0 > 1.0e-12);
+
+  let mass1 = lower1 + equal1 + higher1;
+  let value1 = lower1 * -loseValue + equal1 * -tieValue + higher1 * -winValue;
+  values[valueBase + 1326u + hand] = select(0.0, value1 / mass1, mass1 > 1.0e-12);
+}
+`;
+
 export const SPARSE_ALLIN_TABLE_VALUES_WGSL = /* wgsl */ `
 struct Params {
   numHands: u32,
@@ -1545,6 +1631,7 @@ export class SparseCfrGpuKernels {
   private readonly showdownRankPrefixPipeline: GPUComputePipeline;
   private readonly showdownValuesFromRanksPipeline: GPUComputePipeline;
   private readonly showdownValuesFromRanks1326Pipeline: GPUComputePipeline;
+  private readonly showdownValuesFromRanks1326BothPlayersPipeline: GPUComputePipeline;
   private readonly allInTableValuesPipeline: GPUComputePipeline;
   private readonly allInTableValues1326NoPermPipeline: GPUComputePipeline;
   private readonly allInTableValues1326NoPermBothPlayersPipeline: GPUComputePipeline;
@@ -1650,6 +1737,10 @@ export class SparseCfrGpuKernels {
     this.showdownValuesFromRanks1326Pipeline = this.pipeline(
       SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_WGSL,
       "sparse-cfr-showdown-values-from-ranks-1326",
+    );
+    this.showdownValuesFromRanks1326BothPlayersPipeline = this.pipeline(
+      SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_WGSL,
+      "sparse-cfr-showdown-values-from-ranks-1326-both-players",
     );
     this.allInTableValuesPipeline = this.pipeline(
       SPARSE_ALLIN_TABLE_VALUES_WGSL,
@@ -2474,8 +2565,26 @@ export class SparseCfrGpuKernels {
         maxRanks,
         params,
       );
-    } else {
+    } else if (
+      globalThis.process?.env?.P2_DISABLE_SHOWDOWN_VALUES_1326_BOTH_PLAYERS === "1"
+    ) {
       this.encodeShowdownValuesFromRanks1326(
+        encoder,
+        tree,
+        nodeIndices,
+        rankOrdinals,
+        payoffs,
+        beliefs,
+        values,
+        rankMass,
+        rankPrefixLess,
+        rankTotal,
+        batch,
+        maxRanks,
+        params,
+      );
+    } else {
+      this.encodeShowdownValuesFromRanks1326BothPlayers(
         encoder,
         tree,
         nodeIndices,
@@ -2718,6 +2827,69 @@ export class SparseCfrGpuKernels {
       this.showdownValuesFromRanks1326Pipeline,
       valuesBindGroup,
       Math.ceil((batch * 2652) / 128),
+    );
+    return params;
+  }
+
+  encodeShowdownValuesFromRanks1326BothPlayers(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    rankOrdinals: GPUBuffer,
+    payoffs: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    rankMass: GPUBuffer,
+    rankPrefixLess: GPUBuffer,
+    rankTotal: GPUBuffer,
+    batch: number,
+    maxRanks: number,
+    existingParams?: GPUBuffer,
+  ): GPUBuffer {
+    if (tree.numHands !== 1326 || tree.overlapSlots !== 101) {
+      return this.encodeShowdownValuesFromRanks(
+        encoder,
+        tree,
+        nodeIndices,
+        rankOrdinals,
+        payoffs,
+        beliefs,
+        values,
+        rankMass,
+        rankPrefixLess,
+        rankTotal,
+        batch,
+        maxRanks,
+        existingParams,
+      );
+    }
+    const params =
+      existingParams ??
+      makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
+      );
+    const valuesBindGroup = this.device.createBindGroup({
+      layout: this.showdownValuesFromRanks1326BothPlayersPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices } },
+        { binding: 1, resource: { buffer: rankOrdinals } },
+        { binding: 2, resource: { buffer: tree.overlapHands } },
+        { binding: 3, resource: { buffer: tree.overlapCounts } },
+        { binding: 4, resource: { buffer: payoffs } },
+        { binding: 5, resource: { buffer: beliefs } },
+        { binding: 6, resource: { buffer: rankMass } },
+        { binding: 7, resource: { buffer: rankPrefixLess } },
+        { binding: 8, resource: { buffer: rankTotal } },
+        { binding: 9, resource: { buffer: values } },
+        { binding: 10, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.showdownValuesFromRanks1326BothPlayersPipeline,
+      valuesBindGroup,
+      Math.ceil((batch * 1326) / 128),
     );
     return params;
   }
