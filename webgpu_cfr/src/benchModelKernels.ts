@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 import {
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
@@ -227,6 +228,20 @@ function modelSuiteShapes(batch: number): Array<{ name: string; kind: Kind; shap
         cols: 512,
         batch,
         inputStride: 512,
+        outputStride: 2 * NUM_HANDS,
+        inputOffset: 0,
+        outputOffset: 0,
+        bias: true,
+      },
+    },
+    {
+      name: "value_head_leaky_2652x1024",
+      kind: "leaky",
+      shape: {
+        rows: 2 * NUM_HANDS,
+        cols: 1024,
+        batch,
+        inputStride: 1024,
         outputStride: 2 * NUM_HANDS,
         inputOffset: 0,
         outputOffset: 0,
@@ -498,6 +513,19 @@ function variants(): Variant[] {
       name: "leaky.1024.subgroup",
       shader: LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
       supports: (s, d) => hasSubgroups(d) && s.rows % ROW_BLOCK === 0 && s.cols === 1024,
+    },
+    {
+      ...leakyGeneric,
+      name: "leaky.1024.batch2.subgroup",
+      shader: LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+      dispatchY: (s) => Math.ceil(s.batch / 2),
+      supports: (s, d) =>
+        hasSubgroups(d) &&
+        s.rows === 2 * NUM_HANDS &&
+        s.cols === 1024 &&
+        s.inputStride === 1024 &&
+        s.outputStride === 2 * NUM_HANDS &&
+        s.bias,
     },
     {
       ...leakyGeneric,
