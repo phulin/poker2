@@ -15,6 +15,7 @@
     "export:model": "cd .. && uv run python webgpu_cfr/python/export_model.py --snapshot checkpoints-rebel/rebel_latest.pt --out webgpu_cfr/public/models/rebel_latest",
     "eval": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/cli.ts",
     "bench": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/bench.ts",
+    "bench:model-kernels": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchModelKernels.ts",
     "bench:spots": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchSpots.ts",
     "bench:spots:extract": "cd .. && uv run python webgpu_cfr/python/extract_bench_spots.py"
   },
