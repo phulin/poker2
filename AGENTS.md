@@ -23,7 +23,6 @@ This repository trains and evaluates neural-network-based heads-up no-limit Texa
 - `tests/`: Python unit and integration tests.
 - `scripts/`: Reusable benchmark and profiling scripts.
 - `benchmarks/`: Focused performance microbenchmarks for tensor/CFR kernels.
-- `debugging/`: One-off repro, inspection, and profiling scripts.
 - `webgpu_cfr/`: TypeScript/WebGPU evaluator and browser demo for exported BetterFFN CFR inference.
 - `outputs/`, `wandb/`: Hydra and Weights & Biases run artifacts; do not edit as source.
 - `.agents/`, `.codex/`: Local agent/tooling metadata.
