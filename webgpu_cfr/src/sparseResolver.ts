@@ -50,7 +50,6 @@ interface SparseNode {
   legalMask: number[];
   allowedMask: Uint8Array;
   children: number[];
-  actionToChild: Int32Array;
   leaf: boolean;
   terminal: boolean;
   newStreet: boolean;
@@ -60,6 +59,7 @@ interface SparseTree {
   nodes: SparseNode[];
   depthOffsets: number[];
   treeDepth: number;
+  rootActionToChild: Int32Array;
 }
 
 interface SparseLeafGpuBatch {
@@ -191,6 +191,8 @@ export class SparseCfrResolver {
       cachedTree.gpu = this.createStaticGpuData(tree, allInContext);
     }
     const totalNodes = tree.nodes.length;
+    // Sparse CFR tensors are destination-child aligned: row N stores the
+    // action probability/regret for taking node N's action from its parent.
     const policy = new Float32Array(totalNodes * NUM_HANDS);
     const policyAvg = new Float32Array(totalNodes * NUM_HANDS);
     const cumulativeRegrets = new Float32Array(totalNodes * NUM_HANDS);
@@ -691,7 +693,6 @@ export class SparseCfrResolver {
           });
           const childIndex = nodes.length;
           node.children.push(childIndex);
-          node.actionToChild[action] = childIndex;
           nodes.push(
             this.makeNode(
               childEnv,
@@ -714,7 +715,24 @@ export class SparseCfrResolver {
     for (const node of nodes) {
       node.leaf = node.children.length === 0 || this.shouldStop(node, maxDepth);
     }
-    return { nodes, depthOffsets, treeDepth };
+    return {
+      nodes,
+      depthOffsets,
+      treeDepth,
+      rootActionToChild: this.rootActionLookup(nodes),
+    };
+  }
+
+  private rootActionLookup(nodes: SparseNode[]): Int32Array {
+    const out = new Int32Array(this.numActions);
+    out.fill(-1);
+    const root = nodes[0];
+    if (!root) return out;
+    for (const childIndex of root.children) {
+      const child = nodes[childIndex]!;
+      out[child.actionFromParent] = childIndex;
+    }
+    return out;
   }
 
   private makeNode(
@@ -732,8 +750,6 @@ export class SparseCfrResolver {
         legal.mask[action] = legal.mask[action] && scheduledMask[action] ? 1 : 0;
       }
     }
-    const actionToChild = new Int32Array(this.numActions);
-    actionToChild.fill(-1);
     const newStreet = depth > 0 && env.actionsThisRound === 0 && !env.done;
     return {
       env,
@@ -744,7 +760,6 @@ export class SparseCfrResolver {
       legalMask: legal.mask,
       allowedMask,
       children: [],
-      actionToChild,
       leaf: false,
       terminal: env.done,
       newStreet,
@@ -803,7 +818,7 @@ export class SparseCfrResolver {
         const node = tree.nodes[nodeIndex]!;
         const slice = prediction.policyLogits.subarray(i * stride, (i + 1) * stride);
         const modelPolicy = this.softmaxPolicy(slice, node.legalMask);
-        this.writeChildPolicy(node, modelPolicy, policy);
+        this.writeChildPolicy(tree, node, modelPolicy, policy);
         for (const childIndex of node.children) {
           this.propagateChildBelief(
             tree.nodes[childIndex]!,
@@ -931,13 +946,14 @@ export class SparseCfrResolver {
   }
 
   private writeChildPolicy(
+    tree: SparseTree,
     node: SparseNode,
     modelPolicy: Float32Array<ArrayBuffer>,
     policy: Float32Array,
   ): void {
-    for (let action = 0; action < this.numActions; action += 1) {
-      const childIndex = node.actionToChild[action]!;
-      if (childIndex < 0) continue;
+    for (const childIndex of node.children) {
+      const child = tree.nodes[childIndex]!;
+      const action = child.actionFromParent;
       const childBase = childIndex * NUM_HANDS;
       for (let hand = 0; hand < NUM_HANDS; hand += 1) {
         policy[childBase + hand] = modelPolicy[hand * this.numActions + action]!;
@@ -2163,10 +2179,8 @@ export class SparseCfrResolver {
 
   private rootPolicy(tree: SparseTree, policy: Float32Array): Float32Array<ArrayBuffer> {
     const out = new Float32Array(NUM_HANDS * this.numActions);
-    const root = tree.nodes[0]!;
-    for (let action = 0; action < this.numActions; action += 1) {
-      const childIndex = root.actionToChild[action]!;
-      if (childIndex < 0) continue;
+    for (const childIndex of tree.nodes[0]!.children) {
+      const action = tree.nodes[childIndex]!.actionFromParent;
       for (let hand = 0; hand < NUM_HANDS; hand += 1) {
         out[hand * this.numActions + action] = policy[childIndex * NUM_HANDS + hand]!;
       }
@@ -2183,9 +2197,8 @@ export class SparseCfrResolver {
     const root = tree.nodes[0]!;
     const actor = root.env.toAct;
     const beliefBase = actor * NUM_HANDS;
-    for (let action = 0; action < this.numActions; action += 1) {
-      const childIndex = root.actionToChild[action]!;
-      if (childIndex < 0) continue;
+    for (const childIndex of root.children) {
+      const action = tree.nodes[childIndex]!.actionFromParent;
       let sum = 0;
       for (let hand = 0; hand < NUM_HANDS; hand += 1) {
         sum += rootBeliefs[beliefBase + hand]! * policy[childIndex * NUM_HANDS + hand]!;
@@ -2205,7 +2218,7 @@ export class SparseCfrResolver {
     if (!Number.isInteger(selectedAction) || selectedAction < 0 || selectedAction >= this.numActions) {
       throw new Error(`action ${selectedAction} is outside [0, ${this.numActions})`);
     }
-    const childIndex = root.actionToChild[selectedAction]!;
+    const childIndex = tree.rootActionToChild[selectedAction]!;
     if (childIndex < 0) {
       throw new Error(`action ${selectedAction} is not legal for the current public state`);
     }

@@ -151,6 +151,82 @@ test("sparse resolver supports depth greater than one", async () => {
   }
 });
 
+test("sparse resolver reconstructs dense root policy from child rows", async () => {
+  const betBins = [0.5];
+  const numActions = betBins.length + 3;
+  const env = new PublicHunlEnv({
+    stack: 20,
+    sb: 1,
+    bb: 2,
+    betBins,
+    button: 1,
+    forceDeck: DEFAULT_FORCE_DECK,
+  });
+  const resolver = new SparseCfrResolver(fakeModel(numActions));
+
+  const result = await resolver.solve(env, uniformBeliefs(), {
+    depth: 1,
+    iterations: 1,
+  });
+
+  const legalActions = [0, 1, numActions - 1];
+  const illegalActions = [2];
+  let hand = -1;
+  for (let candidate = 0; candidate < NUM_HANDS; candidate += 1) {
+    let mass = 0;
+    for (const action of legalActions) {
+      mass += result.policy[candidate * numActions + action]!;
+    }
+    if (mass > 0) {
+      hand = candidate;
+      break;
+    }
+  }
+  assert.notEqual(hand, -1, "expected at least one unblocked hand policy");
+  let legalMass = 0;
+  for (let action = 0; action < numActions; action += 1) {
+    const probability = result.policy[hand * numActions + action]!;
+    if (legalActions.includes(action)) {
+      legalMass += probability;
+    } else if (illegalActions.includes(action)) {
+      assert.equal(probability, 0, `expected illegal action ${action} to be zero`);
+    }
+  }
+  assert.ok(Math.abs(legalMass - 1) < 1e-6, `root policy hand mass ${legalMass}`);
+});
+
+test("sparse resolver selected action uses root action lookup", async () => {
+  const betBins = [0.5];
+  const numActions = betBins.length + 3;
+  const env = new PublicHunlEnv({
+    stack: 20,
+    sb: 1,
+    bb: 2,
+    betBins,
+    button: 1,
+    forceDeck: DEFAULT_FORCE_DECK,
+  });
+  const resolver = new SparseCfrResolver(fakeModel(numActions));
+
+  const result = await resolver.solve(env, uniformBeliefs(), {
+    depth: 2,
+    iterations: 1,
+    selectedAction: numActions - 1,
+    readPolicy: false,
+    readActionProbs: false,
+  });
+
+  assert.equal(result.beliefsAfter?.length, 2 * NUM_HANDS);
+  for (let player = 0; player < 2; player += 1) {
+    const offset = player * NUM_HANDS;
+    let mass = 0;
+    for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+      mass += result.beliefsAfter![offset + hand]!;
+    }
+    assert.ok(Math.abs(mass - 1) < 1e-5, `belief mass ${mass}`);
+  }
+});
+
 test("sparse resolver reports progress once per CFR iteration", async () => {
   const betBins = [0.5];
   const numActions = betBins.length + 3;
