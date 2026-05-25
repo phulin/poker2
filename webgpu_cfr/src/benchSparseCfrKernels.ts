@@ -591,14 +591,12 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
       validate: async () => {
         const reference = makeEmptyStorageBuffer(device, data.policyCount);
         const candidate = makeEmptyStorageBuffer(device, data.policyCount);
-        const referenceAggregates = makeEmptyStorageBuffer(device, data.nodeCount * 53);
         const candidateAggregates = makeEmptyStorageBuffer(device, data.nodeCount * 53);
         await runOnce(device, (encoder) =>
-          kernels.encodeComputeRegretWeightsAggregateRange(
+          kernels.encodeComputeRegretWeightsRange(
             encoder,
             data.tree,
             data.beliefs,
-            referenceAggregates,
             reference,
             start,
             end,
@@ -619,7 +617,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           reference,
           candidate,
           data.policyCount,
-          "regret_weight_aggregate",
+          "regret_weight_direct",
         );
       },
     },
@@ -841,7 +839,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           reference,
           candidate,
           data.policyCount,
-          "opponent_policy_aggregate",
+          "opponent_policy_direct",
         );
       },
     },
