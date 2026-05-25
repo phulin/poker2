@@ -395,8 +395,6 @@ interface RangeGridCell extends RangeCell {
 
 interface RangeGridModel {
   label: string;
-  mass: number;
-  combos: number;
   rows: RangeGridCell[][];
 }
 
@@ -2065,8 +2063,14 @@ function App(): JSX.Element {
         <section class="panel results">
           <div class="section-head">
             <h2>Results</h2>
-            <Show when={runtime()}>
-              <span class="hash">sha {runtime()!.manifest.weights.sha256.slice(0, 12)}</span>
+            <Show when={solveResult()}>
+              {(solved) => (
+                <div class="metadata result-metadata">
+                  <span>{solved().iterations} iterations</span>
+                  <span>depth {solved().depth}</span>
+                  <span>{solved().elapsedMs.toFixed(1)} ms</span>
+                </div>
+              )}
             </Show>
           </div>
 
@@ -2092,12 +2096,6 @@ function App(): JSX.Element {
           >
             {(solved) => (
               <>
-                <div class="metadata">
-                  <span>{solved().iterations} iterations</span>
-                  <span>depth {solved().depth}</span>
-                  <span>{solved().elapsedMs.toFixed(1)} ms</span>
-                </div>
-
                 <Show
                   when={solved().result.actor === HERO_PLAYER}
                   fallback={
@@ -2145,9 +2143,8 @@ function HeroPolicy(props: {
     }));
   });
   return (
-    <section class="subsection">
-      <h3>Hero hand policy</h3>
-      <p class="subtle">Action distribution for this exact hand</p>
+    <section class="subsection no-border hero-strategy">
+      <h3>Hero strategy</h3>
       <div class="strategy-bars">
         <For each={row()}>
           {(item) => {
@@ -2183,7 +2180,7 @@ function RangeGridCollapses(props: {
 }
 
 function RangeGridCollapse(props: { grid: RangeGridModel }): JSX.Element {
-  const [open, setOpen] = createSignal(true);
+  const [open, setOpen] = createSignal(false);
   return (
     <div class="range-collapse">
       <button
@@ -2192,8 +2189,6 @@ function RangeGridCollapse(props: { grid: RangeGridModel }): JSX.Element {
         onClick={() => setOpen(!open())}
       >
         <span>{props.grid.label} range</span>
-        <span>{props.grid.combos} combos</span>
-        <span>mass {props.grid.mass.toFixed(4)}</span>
         <ChevronDown size={16} />
       </button>
       <Show when={open()}>
@@ -2205,12 +2200,10 @@ function RangeGridCollapse(props: { grid: RangeGridModel }): JSX.Element {
                   <button
                     type="button"
                     class={`range-matrix-cell ${cell.kind}`}
+                    aria-label={cell.label}
                     title={cell.title}
                     style={`--range-alpha: ${cell.alpha};`}
-                  >
-                    <span>{cell.label}</span>
-                    <strong>{formatCellPercent(cell.total)}</strong>
-                  </button>
+                  />
                 )}
               </For>
             )}
@@ -2226,13 +2219,13 @@ function buildRangeGrid(
   player: PlayerIndex,
 ): RangeGridModel {
   const offset = player * NUM_HANDS;
-  const draftRows: Array<Array<RangeCell & { total: number; top: RangeGridCombo[] }>> = [];
-  let mass = 0;
-  let combos = 0;
-  let maxTotal = 0;
+  const draftRows: Array<
+    Array<RangeCell & { total: number; mean: number; top: RangeGridCombo[] }>
+  > = [];
+  let maxComboWeight = 0;
 
   for (const rowRank of RANKS) {
-    const row: Array<RangeCell & { total: number; top: RangeGridCombo[] }> = [];
+    const row: Array<RangeCell & { total: number; mean: number; top: RangeGridCombo[] }> = [];
     for (const colRank of RANKS) {
       const cell = rangeCell(rowRank, colRank);
       const exactCombos = rangeOptions(cell.key, UNBLOCKED_CARDS);
@@ -2240,14 +2233,13 @@ function buildRangeGrid(
         const c0 = parseCard(option.cards[0]);
         const c1 = parseCard(option.cards[1]);
         const weight = beliefs[offset + handComboIndex(c0, c1)] ?? 0;
+        maxComboWeight = Math.max(maxComboWeight, weight);
         return { hand: `${option.cards[0]} ${option.cards[1]}`, weight };
       });
       const total = weightedCombos.reduce((sum, combo) => sum + combo.weight, 0);
-      mass += total;
-      maxTotal = Math.max(maxTotal, total);
-      combos += weightedCombos.filter((combo) => combo.weight > 1.0e-7).length;
+      const mean = exactCombos.length > 0 ? total / exactCombos.length : 0;
       weightedCombos.sort((a, b) => b.weight - a.weight);
-      row.push({ ...cell, total, top: weightedCombos.slice(0, 3) });
+      row.push({ ...cell, total, mean, top: weightedCombos.slice(0, 3) });
     }
     draftRows.push(row);
   }
@@ -2255,11 +2247,11 @@ function buildRangeGrid(
   const rows = draftRows.map((row) =>
     row.map((cell) => ({
       ...cell,
-      alpha: maxTotal > 0 ? Math.max(0.08, cell.total / maxTotal) : 0,
+      alpha: maxComboWeight > 0 ? cell.mean / maxComboWeight : 0,
       title: rangeGridCellTitle(cell),
     })),
   );
-  return { label: playerLabel(player), mass, combos, rows };
+  return { label: playerLabel(player), rows };
 }
 
 function rangeGridCellTitle(cell: RangeCell & {
@@ -2275,12 +2267,6 @@ function rangeGridCellTitle(cell: RangeCell & {
     lines.push(`${combo.hand}: ${formatPercent(combo.weight)}`);
   }
   return lines.join("\n");
-}
-
-function formatCellPercent(value: number): string {
-  if (value < 0.00005) return "0";
-  if (value < 0.01) return `${(value * 100).toFixed(1)}%`;
-  return `${Math.round(value * 100)}%`;
 }
 
 function formatPercent(value: number): string {

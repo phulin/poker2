@@ -1094,17 +1094,16 @@ h3 {
   }
 }
 
-.hash {
-  color: #667275;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-}
-
 .metadata {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 14px;
+}
+
+.result-metadata {
+  justify-content: flex-end;
+  margin-bottom: 0;
 }
 
 .metadata span {
@@ -1171,6 +1170,10 @@ h3 {
   border-top: 0;
   padding-top: 0;
   margin-top: 0;
+}
+
+.hero-strategy h3 {
+  margin-bottom: 10px;
 }
 
 .range-row {
@@ -1246,7 +1249,7 @@ h3 {
 
 .range-collapse-trigger {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto 16px;
+  grid-template-columns: minmax(0, 1fr) 16px;
   gap: 8px;
   align-items: center;
   width: 100%;
@@ -1291,25 +1294,24 @@ h3 {
 
 .range-matrix-cell {
   position: relative;
-  display: grid;
-  grid-template-rows: 1fr auto;
-  place-items: center;
+  display: block;
   min-width: 30px;
   aspect-ratio: 1;
   overflow: hidden;
   border: 1px solid #d8e2dc;
   border-radius: 5px;
   background: #ffffff;
-  color: #203033;
-  padding: 3px 2px;
+  padding: 0;
 }
 
 .range-matrix-cell::before {
   content: "";
   position: absolute;
-  inset: 0;
+  inset: auto 0 0;
+  height: calc(var(--range-alpha, 0) * 100%);
   background: #168575;
-  opacity: calc(var(--range-alpha, 0) * 0.55);
+  opacity: calc(0.22 + var(--range-alpha, 0) * 0.66);
+  transition: height 160ms ease, opacity 160ms ease;
 }
 
 .range-matrix-cell.pair::before {
@@ -1323,27 +1325,6 @@ h3 {
 .range-matrix-cell:hover {
   border-color: #137365;
   box-shadow: inset 0 0 0 1px #137365;
-}
-
-.range-matrix-cell span,
-.range-matrix-cell strong {
-  position: relative;
-  z-index: 1;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.range-matrix-cell span {
-  font-size: 10px;
-  font-weight: 760;
-}
-
-.range-matrix-cell strong {
-  color: #263234;
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
 }
 
 .policy-row,
