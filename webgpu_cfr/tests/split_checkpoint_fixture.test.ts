@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { handComboIndex, parseCard } from "../src/cards.js";
+import { buildPublicBeliefs } from "../src/beliefs.js";
+import { BrowserCfrEvaluator } from "../src/browserEvaluator.js";
 import { createDawnDevice } from "../src/gpu.js";
 import { initialUniformBeliefs, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js";
 import { loadNodeModel } from "../src/nodeModel.js";
@@ -123,6 +125,46 @@ test("rebel_296_4000 WebGPU export matches PyTorch split checkpoint on root PBS"
       );
     }
   } finally {
+    model.dispose();
+    device.destroy();
+  }
+});
+
+test("rebel_296_4000 sparse solve keeps AsKd mostly betting on root PBS", async () => {
+  const device = await createDawnDevice();
+  const model = await loadNodeModel(device, MANIFEST, WEIGHTS);
+  const evaluator = new BrowserCfrEvaluator(device, model);
+  const heroHand = [parseCard("As"), parseCard("Kd")] as [number, number];
+  const heroIndex = handComboIndex(heroHand[0], heroHand[1]);
+  const numActions = model.manifest.architecture.numActions;
+  try {
+    const result = await evaluator.evaluateSpot({
+      spot: [],
+      iterations: 16,
+      depth: 6,
+      cfrAvg: false,
+      initialState: {
+        button: 0,
+        stack: 400,
+        sb: 1,
+        bb: 2,
+        betBins: model.manifest.env.betBins,
+        flopShowdown: model.manifest.env.flopShowdown,
+      },
+      heroPlayer: 0,
+      heroHand,
+      initialBeliefs: buildPublicBeliefs(),
+      readPolicy: true,
+    });
+    const policy = result.policy.subarray(
+      heroIndex * numActions,
+      (heroIndex + 1) * numActions,
+    );
+    const betMass = policy[4]! + policy[5]! + policy[6]! + policy[7]!;
+    assert.ok(policy[1]! < 0.05, `AsKd call ${policy[1]} should stay low`);
+    assert.ok(betMass > 0.95, `AsKd bet mass ${betMass} should stay high`);
+  } finally {
+    evaluator.dispose();
     model.dispose();
     device.destroy();
   }

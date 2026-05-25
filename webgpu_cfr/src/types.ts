@@ -77,6 +77,8 @@ export interface BetterFfnCfrManifest {
   sparse?: boolean;
   sparseFused?: boolean;
   valueTargetsFromFinalPolicy?: boolean;
+  betBinsByDepth?: number[][];
+  allInByDepth?: boolean[];
 }
 
 export interface BetterFfnAllInTableAssetManifest {

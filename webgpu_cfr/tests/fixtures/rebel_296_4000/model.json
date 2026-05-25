@@ -59,7 +59,7 @@
     "iterationsStart": 300,
     "iterationsFinal": 300,
     "scheduleProgress": 0.7998,
-    "warmStartIterations": 15,
+    "warmStartIterations": 10,
     "warmStartType": "model",
     "warmStartMultiplier": 10.0,
     "branching": 4,
@@ -71,7 +71,7 @@
     "dcfrBetaFinal": -2.0,
     "dcfrGamma": 5.0,
     "dcfrGammaFinal": 0.0,
-    "dcfrPlusDelay": 120,
+    "dcfrPlusDelay": 80,
     "dcfrPlusDelayConfigured": 80,
     "includeAveragePolicy": true,
     "cfrType": "discounted",
@@ -79,7 +79,38 @@
     "cfrAvg": false,
     "sparse": true,
     "sparseFused": true,
-    "valueTargetsFromFinalPolicy": false
+    "valueTargetsFromFinalPolicy": false,
+    "betBinsByDepth": [
+      [
+        0.25,
+        0.5,
+        0.75,
+        1.0,
+        1.5
+      ],
+      [
+        0.5,
+        1.0
+      ],
+      [
+        1.0
+      ],
+      [
+        1.0
+      ],
+      [
+        1.0
+      ],
+      []
+    ],
+    "allInByDepth": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
   },
   "actionLabels": [
     "fold",

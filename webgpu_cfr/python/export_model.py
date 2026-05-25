@@ -50,7 +50,9 @@ def _normalize_export_state(
     return export_state
 
 
-def _load_checkpoint(snapshot: Path) -> tuple[Config, dict[str, torch.Tensor], int | None]:
+def _load_checkpoint(
+    snapshot: Path,
+) -> tuple[Config, dict[str, torch.Tensor], int | None]:
     checkpoint = torch.load(snapshot, map_location="cpu", weights_only=False)
     cfg = Config.from_dict(checkpoint["config"])
     raw_state = checkpoint["model"]
@@ -114,8 +116,8 @@ def _scheduled_cfr_config(cfg: Config, step: int | None) -> dict[str, Any]:
         progress = None
         iterations = int(search.iterations)
 
-    warm_start_iterations = max(1, iterations // 20)
-    dcfr_plus_delay = int(round(iterations * 0.4))
+    warm_start_iterations = int(search.warm_start_iterations)
+    dcfr_plus_delay = int(search.dcfr_plus_delay)
     iterations = max(warm_start_iterations + 1, iterations)
 
     return {
@@ -147,6 +149,16 @@ def _scheduled_cfr_config(cfg: Config, step: int | None) -> dict[str, Any]:
         "sparse": bool(search.sparse),
         "sparseFused": bool(search.sparse_fused),
         "valueTargetsFromFinalPolicy": bool(search.value_targets_from_final_policy),
+        "betBinsByDepth": (
+            [list(depth_bins) for depth_bins in search.bet_bins_by_depth]
+            if search.bet_bins_by_depth is not None
+            else None
+        ),
+        "allInByDepth": (
+            [bool(value) for value in search.allin_by_depth]
+            if search.allin_by_depth is not None
+            else None
+        ),
     }
 
 
@@ -228,9 +240,7 @@ def export_model(
             "normalization": "rmsnorm",
             "contextDim": context_dim,
             "policyRank": int(getattr(cfg.model, "policy_rank", 64)),
-            "policyHandBiasRank": int(
-                getattr(cfg.model, "policy_hand_bias_rank", 32)
-            ),
+            "policyHandBiasRank": int(getattr(cfg.model, "policy_hand_bias_rank", 32)),
             "splitPolicyValue": split_policy_value,
         },
         "env": {
