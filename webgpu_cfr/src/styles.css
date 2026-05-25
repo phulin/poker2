@@ -389,8 +389,8 @@ h3 {
   gap: 10px;
 }
 
-.exact-hand-button,
-.exact-hand-input {
+.card-sequence-button,
+.card-sequence-input {
   width: 184px;
   height: 42px;
   border: 1px solid #b9c7c0;
@@ -399,7 +399,7 @@ h3 {
   color: #182224;
 }
 
-.exact-hand-button {
+.card-sequence-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -407,30 +407,24 @@ h3 {
   padding: 0 10px;
 }
 
-.exact-hand-button:hover {
+.card-sequence-button:hover {
   border-color: #168575;
 }
 
-.exact-hand-input {
+.card-sequence-input {
   padding: 0 10px;
   font-weight: 700;
 }
 
-.exact-hand-button.invalid,
-.exact-hand-input.invalid {
+.card-sequence-button.invalid,
+.card-sequence-input.invalid {
   border-color: #c75a35;
   outline: 0;
   box-shadow: 0 0 0 1px #c75a35;
   background: #fff7f3;
 }
 
-.exact-hand-input.valid {
-  border-color: #168575;
-  outline: 0;
-  box-shadow: 0 0 0 1px #168575;
-}
-
-.exact-hand-input:focus {
+.card-sequence-input:focus {
   outline: 0;
 }
 
@@ -896,44 +890,16 @@ h3 {
   min-height: 38px;
 }
 
-.board-text-input {
+.board-entry .card-sequence-input {
   width: min(100%, 280px);
   height: 38px;
-  border: 1px solid #b9c7c0;
-  border-radius: 6px;
-  background: #ffffff;
-  color: #182224;
-  padding: 0 10px;
-  font-weight: 700;
 }
 
-.board-entry-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
+.board-entry .card-sequence-button {
   height: 38px;
-  border: 1px solid #b9c7c0;
-  border-radius: 6px;
-  background: #ffffff;
-  color: #182224;
-  padding: 0 10px;
-  font-weight: 700;
 }
 
-.board-entry-button:hover {
-  border-color: #168575;
-}
-
-.board-entry-button.invalid,
-.board-text-input.invalid {
-  border-color: #c75a35;
-  outline: 0;
-  box-shadow: 0 0 0 1px #c75a35;
-  background: #fff7f3;
-}
-
-.board-card-picker {
+.card-sequence-grid {
   display: grid;
   grid-template-columns: repeat(13, 30px);
   gap: 5px;

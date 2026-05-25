@@ -526,39 +526,193 @@ function comboMatchesHero(combo: HeroCards, hero?: HeroCards): boolean {
   return combo.includes(hero[0]) && combo.includes(hero[1]);
 }
 
+function CardSequencePicker(props: {
+  cards: readonly string[];
+  count: number;
+  disabled: ReadonlySet<string>;
+  placeholder: string;
+  invalid?: boolean;
+  autoOpenKey?: string | undefined;
+  onChange: (cards: string[]) => void;
+}): JSX.Element {
+  const visibleCards = createMemo(() => props.cards.slice(0, props.count).filter(Boolean));
+  const [text, setText] = createSignal(visibleCards().join(" "));
+  const [error, setError] = createSignal("");
+  const [editing, setEditing] = createSignal(false);
+  const [pickerOpen, setPickerOpen] = createSignal(false);
+  const [focusedKey, setFocusedKey] = createSignal("");
+  let inputRef: HTMLInputElement | undefined;
+
+  createEffect(() => {
+    setText(visibleCards().join(" "));
+  });
+
+  createEffect(() => {
+    const key = props.autoOpenKey;
+    const needsCards = Boolean(key) && props.cards.slice(0, props.count).some((card) => !card);
+    if (!key || !needsCards || focusedKey() === key) return;
+    setFocusedKey(key);
+    setEditing(true);
+    queueMicrotask(() => {
+      inputRef?.focus();
+      inputRef?.select();
+      setPickerOpen(true);
+    });
+  });
+
+  const enteredCards = createMemo(() => {
+    try {
+      return parseBoardCardsText(text()).slice(0, props.count);
+    } catch {
+      return [];
+    }
+  });
+
+  const blockedCards = createMemo(() => {
+    const blocked = new Set(props.disabled);
+    for (const card of enteredCards()) {
+      if (card) blocked.add(card);
+    }
+    return blocked;
+  });
+
+  function commitText(): void {
+    try {
+      const parsed = parseBoardCardsText(text());
+      if (parsed.length !== props.count) {
+        throw new Error(`Enter ${props.count} card${props.count === 1 ? "" : "s"}`);
+      }
+      props.onChange(parsed);
+      setText(parsed.join(" "));
+      setError("");
+      setEditing(false);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function editCards(): void {
+    setEditing(true);
+    queueMicrotask(() => {
+      inputRef?.focus();
+      inputRef?.select();
+      setPickerOpen(true);
+    });
+  }
+
+  function selectCard(card: string): void {
+    const current = enteredCards();
+    if (blockedCards().has(card)) return;
+    const next =
+      current.length >= props.count
+        ? [...current.slice(0, Math.max(0, props.count - 1)), card]
+        : [...current, card];
+    setText(next.join(" "));
+    setError("");
+    if (next.length === props.count) {
+      props.onChange(next);
+      setEditing(false);
+      setPickerOpen(false);
+    }
+  }
+
+  return (
+    <div class="card-sequence-picker">
+      <Show
+        when={editing()}
+        fallback={
+          <button
+            type="button"
+            class={`card-sequence-button ${props.invalid || error() ? "invalid" : ""}`}
+            onClick={editCards}
+          >
+            <Show
+              when={visibleCards().length > 0}
+              fallback={<span class="exact-hand-raw">{text() || props.placeholder}</span>}
+            >
+              <For each={visibleCards()}>{(card) => <CardChip value={card} />}</For>
+            </Show>
+          </button>
+        }
+      >
+        <input
+          ref={inputRef}
+          class={`card-sequence-input ${props.invalid || error() ? "invalid" : ""}`}
+          value={text()}
+          placeholder={props.placeholder}
+          onInput={(event) => {
+            setText(event.currentTarget.value);
+            setError("");
+          }}
+          onFocus={() => setPickerOpen(true)}
+          onClick={() => setPickerOpen(true)}
+          onBlur={() => {
+            commitText();
+            setPickerOpen(false);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitText();
+              event.currentTarget.blur();
+            }
+            if (event.key === "Escape") {
+              setEditing(false);
+              setPickerOpen(false);
+            }
+          }}
+        />
+      </Show>
+      <Show when={editing() && pickerOpen()}>
+        <div
+          class="card-sequence-grid"
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          <For each={SUITS}>
+            {(suit) => (
+              <For each={RANKS}>
+                {(rank) => {
+                  const card = `${rank}${suit}`;
+                  const taken = () => blockedCards().has(card);
+                  return (
+                    <button
+                      type="button"
+                      class={"card-cell " + suitClass(suit) + (taken() ? " taken" : "")}
+                      disabled={taken()}
+                      onClick={() => selectCard(card)}
+                    >
+                      <span class="card-rank">{rank}</span>
+                      <span class="card-suit">{SUIT_GLYPHS[suit]}</span>
+                    </button>
+                  );
+                }}
+              </For>
+            )}
+          </For>
+        </div>
+      </Show>
+      <Show when={error()}>
+        <span class="inline-error">{error()}</span>
+      </Show>
+    </div>
+  );
+}
+
 function HeroHandSelector(props: {
   value: string;
   parsedCards?: HeroCards | undefined;
   error?: string | undefined;
   selectedRangeKey: string;
   blockedCards: ReadonlySet<string>;
-  onTextChange: (value: string) => void;
-  onNormalizeText: () => void;
   onRangeChange: (rangeKey: string) => void;
   onComboChange: (cards: HeroCards) => void;
 }): JSX.Element {
   const [open, setOpen] = createSignal(false);
-  const [editing, setEditing] = createSignal(false);
-  let exactInput: HTMLInputElement | undefined;
   let comboContainer: HTMLDivElement | undefined;
   const selectedOptions = createMemo(() => rangeOptions(props.selectedRangeKey, props.blockedCards));
-  const exactStateClass = createMemo(() => (props.error ? "invalid" : "valid"));
 
   function rangeIsBlocked(rangeKey: string): boolean {
     return rangeOptions(rangeKey, props.blockedCards).every((option) => option.blocked);
-  }
-
-  function editHand(): void {
-    setEditing(true);
-    queueMicrotask(() => {
-      exactInput?.focus();
-      exactInput?.select();
-    });
-  }
-
-  function finishEditing(): void {
-    props.onNormalizeText();
-    setEditing(false);
   }
 
   function scrollCombosIntoView(): void {
@@ -577,49 +731,19 @@ function HeroHandSelector(props: {
   return (
     <div class="hero-hand-selector">
       <div class="hero-hand-row">
-        <Show
-          when={editing()}
-          fallback={
-            <button
-              type="button"
-              class={`exact-hand-button ${props.error ? "invalid" : ""}`}
-              onClick={editHand}
-            >
-              <Show
-                when={props.parsedCards}
-                fallback={<span class="exact-hand-raw">{props.value || "As Kd"}</span>}
-              >
-                {(cards) => (
-                  <>
-                    <CardChip value={cards()[0]} />
-                    <CardChip value={cards()[1]} />
-                  </>
-                )}
-              </Show>
-            </button>
-          }
-        >
-          <input
-            ref={exactInput}
-            class={`exact-hand-input ${exactStateClass()}`}
-            value={props.value}
-            placeholder="As Kd"
-            onInput={(event) => props.onTextChange(event.currentTarget.value)}
-            onBlur={finishEditing}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") event.currentTarget.blur();
-              if (event.key === "Escape") setEditing(false);
-            }}
-          />
-        </Show>
+        <CardSequencePicker
+          cards={props.parsedCards ?? []}
+          count={2}
+          disabled={props.blockedCards}
+          placeholder={props.value || "As Kd"}
+          invalid={Boolean(props.error)}
+          onChange={(cards) => props.onComboChange([cards[0]!, cards[1]!] as HeroCards)}
+        />
         <button
           type="button"
           class={`range-toggle ${open() ? "open" : ""}`}
           aria-expanded={open()}
-          onClick={() => {
-            if (editing()) finishEditing();
-            setOpen((current) => !current);
-          }}
+          onClick={() => setOpen((current) => !current)}
         >
           <span>Grid</span>
           <ChevronDown size={16} />
@@ -836,7 +960,7 @@ function ActionRowButtons(props: {
   let raiseInput: HTMLInputElement | undefined;
   const raiseActions = createMemo(() => raiseActionOptions(props.legalActions, props.context));
   const isRaiseAction = createMemo(() => props.action >= 2 && props.action < props.context.allInIndex);
-  const directActions = createMemo(() => props.legalActions.filter((action) => action < 2));
+  const directActions = createMemo(() => props.legalActions.filter((action) => action === 1));
   const allInAction = createMemo(() =>
     props.legalActions.includes(props.context.allInIndex) ? props.context.allInIndex : undefined,
   );
@@ -1086,86 +1210,6 @@ function BoardEntry(props: {
   const editCount = createMemo(() => props.count - priorCount());
   const priorCards = createMemo(() => props.cards.slice(0, priorCount()).filter(Boolean));
   const editableCards = createMemo(() => props.cards.slice(priorCount(), props.count).filter(Boolean));
-  const [text, setText] = createSignal(editableCards().join(" "));
-  const [error, setError] = createSignal("");
-  const [editing, setEditing] = createSignal(false);
-  const [pickerOpen, setPickerOpen] = createSignal(false);
-  const [focusedKey, setFocusedKey] = createSignal("");
-  let inputRef: HTMLInputElement | undefined;
-
-  createEffect(() => {
-    setText(editableCards().join(" "));
-  });
-
-  createEffect(() => {
-    const key = `${props.street}:${props.count}`;
-    const needsBoard =
-      editCount() > 0 && props.cards.slice(priorCount(), props.count).some((card) => !card);
-    if (!needsBoard || focusedKey() === key) return;
-    setFocusedKey(key);
-    setEditing(true);
-    queueMicrotask(() => {
-      inputRef?.focus();
-      inputRef?.select();
-      setPickerOpen(true);
-    });
-  });
-
-  const enteredCards = createMemo(() => {
-    try {
-      return parseBoardCardsText(text()).slice(0, editCount());
-    } catch {
-      return [];
-    }
-  });
-
-  const blockedCards = createMemo(() => {
-    const blocked = new Set(props.disabled);
-    for (const card of enteredCards()) {
-      if (card) blocked.add(card);
-    }
-    return blocked;
-  });
-
-  function commitText(): void {
-    try {
-      const parsed = parseBoardCardsText(text());
-      if (parsed.length !== editCount()) {
-        throw new Error(`Enter ${editCount()} board card${editCount() === 1 ? "" : "s"}`);
-      }
-      props.onTextChange([...props.cards.slice(0, priorCount()), ...parsed]);
-      setText(parsed.join(" "));
-      setError("");
-      setEditing(false);
-    } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  function editBoard(): void {
-    setEditing(true);
-    queueMicrotask(() => {
-      inputRef?.focus();
-      inputRef?.select();
-      setPickerOpen(true);
-    });
-  }
-
-  function selectCard(card: string): void {
-    const current = enteredCards();
-    if (blockedCards().has(card)) return;
-    const next =
-      current.length >= editCount()
-        ? [...current.slice(0, Math.max(0, editCount() - 1)), card]
-        : [...current, card];
-    setText(next.join(" "));
-    setError("");
-    if (next.length === editCount()) {
-      props.onTextChange([...props.cards.slice(0, priorCount()), ...next]);
-      setEditing(false);
-      setPickerOpen(false);
-    }
-  }
 
   return (
     <div class="board-entry-row">
@@ -1177,83 +1221,15 @@ function BoardEntry(props: {
               <For each={priorCards()}>{(card) => <CardChip value={card} />}</For>
             </div>
           </Show>
-          <Show
-            when={editing()}
-            fallback={
-              <button
-                type="button"
-                class={`board-entry-button ${error() ? "invalid" : ""}`}
-                onClick={editBoard}
-              >
-                <Show
-                  when={editableCards().length > 0}
-                  fallback={<span class="exact-hand-raw">{text() || (editCount() === 3 ? "As Kd Qh" : "Js")}</span>}
-                >
-                  <For each={editableCards()}>{(card) => <CardChip value={card} />}</For>
-                </Show>
-              </button>
-            }
-          >
-            <input
-              ref={inputRef}
-              class={`board-text-input ${error() ? "invalid" : ""}`}
-              value={text()}
-              placeholder={editCount() === 3 ? "As Kd Qh" : "Js"}
-              onInput={(event) => {
-                setText(event.currentTarget.value);
-                setError("");
-              }}
-              onFocus={() => setPickerOpen(true)}
-              onClick={() => setPickerOpen(true)}
-              onBlur={() => {
-                commitText();
-                setPickerOpen(false);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  commitText();
-                  event.currentTarget.blur();
-                }
-                if (event.key === "Escape") {
-                  setEditing(false);
-                  setPickerOpen(false);
-                }
-              }}
-            />
-          </Show>
+          <CardSequencePicker
+            cards={editableCards()}
+            count={editCount()}
+            disabled={props.disabled}
+            placeholder={editCount() === 3 ? "As Kd Qh" : "Js"}
+            autoOpenKey={`${props.street}:${props.count}`}
+            onChange={(cards) => props.onTextChange([...props.cards.slice(0, priorCount()), ...cards])}
+          />
         </div>
-        <Show when={editing() && pickerOpen()}>
-          <div
-            class="board-card-picker"
-            onMouseDown={(event) => event.preventDefault()}
-          >
-            <For each={SUITS}>
-              {(suit) => (
-                <For each={RANKS}>
-                  {(rank) => {
-                    const card = `${rank}${suit}`;
-                    const taken = () => blockedCards().has(card);
-                    return (
-                      <button
-                        type="button"
-                        class={"card-cell " + suitClass(suit) + (taken() ? " taken" : "")}
-                        disabled={taken()}
-                        onClick={() => selectCard(card)}
-                      >
-                        <span class="card-rank">{rank}</span>
-                        <span class="card-suit">{SUIT_GLYPHS[suit]}</span>
-                      </button>
-                    );
-                  }}
-                </For>
-              )}
-            </For>
-          </div>
-        </Show>
-        <Show when={error()}>
-          <span class="inline-error">{error()}</span>
-        </Show>
       </div>
     </div>
   );
@@ -1652,26 +1628,6 @@ function App(): JSX.Element {
     return [heroHand[0], heroHand[1], villainHand[0]!, villainHand[1]!, ...board];
   }
 
-  function updateHeroHandText(value: string): void {
-    setHeroHandText(value);
-    try {
-      setSelectedRangeKey(rangeKeyFromCards(parseHeroHandText(value)));
-    } catch {
-      // Keep the previously selected range visible while the user is typing.
-    }
-    clearSolveOutput();
-  }
-
-  function normalizeHeroHandText(): void {
-    try {
-      const cards = parseHeroHandText(heroHandText());
-      setHeroHandText(`${cards[0]} ${cards[1]}`);
-      setSelectedRangeKey(rangeKeyFromCards(cards));
-    } catch {
-      // Leave invalid text intact so the inline validation message stays actionable.
-    }
-  }
-
   function selectHeroCombo(cards: HeroCards): void {
     setHeroHandText(`${cards[0]} ${cards[1]}`);
     setSelectedRangeKey(rangeKeyFromCards(cards));
@@ -1919,8 +1875,6 @@ function App(): JSX.Element {
               error={heroHandError()}
               selectedRangeKey={selectedRangeKey()}
               blockedCards={boardUsedCards()}
-              onTextChange={updateHeroHandText}
-              onNormalizeText={normalizeHeroHandText}
               onRangeChange={(rangeKey) => {
                 setSelectedRangeKey(rangeKey);
                 clearSolveOutput();
