@@ -66,7 +66,7 @@ struct Params {
   outputStride: u32,
   exactHand: u32,
   numHands: u32,
-  _pad0: u32,
+  contributionRows: u32,
 };
 
 @group(0) @binding(0) var<storage, read> matrix: array<f32>;
@@ -84,6 +84,13 @@ var<workgroup> subgroupPartial10: array<f32, 256>;
 var<workgroup> subgroupPartial11: array<f32, 256>;
 var<workgroup> subgroupPartial12: array<f32, 256>;
 var<workgroup> subgroupPartial13: array<f32, 256>;
+
+fn exact_contribution(batch: u32, row: u32) -> f32 {
+  if (params.contributionRows != 0u) {
+    return contribution[batch * params.rows + row];
+  }
+  return contribution[row * params.numHands + params.exactHand];
+}
 
 @compute @workgroup_size(256)
 fn main(
@@ -184,24 +191,24 @@ fn main(
     let contrib0 = invRms[batch0];
     let outputBase0 = batch0 * params.outputStride;
     output[outputBase0 + row0] =
-      out00 + contrib0 * contribution[row0 * params.numHands + params.exactHand];
+      out00 + contrib0 * exact_contribution(batch0, row0);
     output[outputBase0 + row1] =
-      out01 + contrib0 * contribution[row1 * params.numHands + params.exactHand];
+      out01 + contrib0 * exact_contribution(batch0, row1);
     output[outputBase0 + row2] =
-      out02 + contrib0 * contribution[row2 * params.numHands + params.exactHand];
+      out02 + contrib0 * exact_contribution(batch0, row2);
     output[outputBase0 + row3] =
-      out03 + contrib0 * contribution[row3 * params.numHands + params.exactHand];
+      out03 + contrib0 * exact_contribution(batch0, row3);
     if (batch1 < params.batch) {
       let contrib1 = invRms[batch1];
       let outputBase1 = batch1 * params.outputStride;
       output[outputBase1 + row0] =
-        out10 + contrib1 * contribution[row0 * params.numHands + params.exactHand];
+        out10 + contrib1 * exact_contribution(batch1, row0);
       output[outputBase1 + row1] =
-        out11 + contrib1 * contribution[row1 * params.numHands + params.exactHand];
+        out11 + contrib1 * exact_contribution(batch1, row1);
       output[outputBase1 + row2] =
-        out12 + contrib1 * contribution[row2 * params.numHands + params.exactHand];
+        out12 + contrib1 * exact_contribution(batch1, row2);
       output[outputBase1 + row3] =
-        out13 + contrib1 * contribution[row3 * params.numHands + params.exactHand];
+        out13 + contrib1 * exact_contribution(batch1, row3);
     }
   }
 }

@@ -108,9 +108,15 @@ export interface PreparedBatchFeatures {
   baseEmbedding: GPUBuffer;
   contextFeatures: GPUBuffer;
   beliefPhaseShift?: GPUBuffer;
+  beliefPhaseKeys?: Uint32Array<ArrayBuffer>;
   boardRankLow?: GPUBuffer;
   boardSuitLow?: GPUBuffer;
   dispose: () => void;
+}
+
+interface ExactBeliefPhaseShiftBuffers {
+  embeddingRows: GPUBuffer;
+  contributionRows: GPUBuffer;
 }
 
 export class BetterFfnWebGpuModel {
@@ -120,6 +126,7 @@ export class BetterFfnWebGpuModel {
   allInTableProvider: AllInTableProvider | undefined;
   private readonly tensors = new Map<string, GpuTensor>();
   private readonly dummyBias: GPUBuffer;
+  private readonly handEmbeddingCpu: Float32Array<ArrayBuffer>;
   private readonly handEmbeddingT: GPUBuffer;
   private readonly beliefProjLinearInHalf0: GPUBuffer;
   private readonly beliefProjLinearInHalf1: GPUBuffer;
@@ -219,7 +226,8 @@ export class BetterFfnWebGpuModel {
       });
     }
     this.dummyBias = makeStorageBuffer(device, new Float32Array([0]));
-    this.handEmbeddingT = makeStorageBuffer(device, this.buildHandEmbeddingT());
+    this.handEmbeddingCpu = this.buildHandEmbeddingT();
+    this.handEmbeddingT = makeStorageBuffer(device, this.handEmbeddingCpu);
     this.beliefProjLinearInHalf0 = makeStorageBuffer(
       device,
       this.sliceColumns("belief_proj.linear_in.weight", 0, this.manifest.architecture.hiddenDim),
@@ -559,6 +567,7 @@ export class BetterFfnWebGpuModel {
       const encodedFeatures = envs.map((env, i) =>
         encodeBetterFeatures(env, valuePreChance?.[i] ?? false),
       );
+      const beliefPhaseKeys = this.beliefPhaseKeysForFeatures(encodedFeatures);
       const contextDim = this.manifest.architecture.contextDim ?? 11;
       const context = new Float32Array(batch * contextDim);
       const base = new Float32Array(batch * hiddenDim);
@@ -650,6 +659,7 @@ export class BetterFfnWebGpuModel {
         baseEmbedding,
         contextFeatures,
         ...(beliefPhaseShiftBuffer ? { beliefPhaseShift: beliefPhaseShiftBuffer } : {}),
+        beliefPhaseKeys,
         ...(boardRankLow ? { boardRankLow } : {}),
         ...(boardSuitLow ? { boardSuitLow } : {}),
         dispose: () => {
@@ -838,6 +848,27 @@ export class BetterFfnWebGpuModel {
         : envs.map((env, i) =>
             encodeBetterFeatures(env, options.valuePreChance?.[i] ?? false),
           );
+      const computedBeliefPhaseKeys = encodedFeatures
+        ? this.beliefPhaseKeysForFeatures(encodedFeatures)
+        : undefined;
+      const computedBeliefPhaseShift = encodedFeatures
+        ? this.beliefPhaseShiftForFeatures(encodedFeatures)
+        : undefined;
+      const beliefPhaseShift =
+        prepared?.beliefPhaseShift ??
+        (computedBeliefPhaseShift ? storage(computedBeliefPhaseShift) : undefined);
+      const exactPhaseShift = exactBelief && beliefPhaseShift
+        ? this.exactBeliefPhaseShiftForKeys(
+            prepared?.beliefPhaseKeys ?? computedBeliefPhaseKeys,
+            exactBelief,
+          )
+        : undefined;
+      const exactPhaseShiftBuffers = exactPhaseShift
+        ? {
+            embeddingRows: storage(exactPhaseShift.embeddingRows),
+            contributionRows: storage(exactPhaseShift.contributionRows),
+          }
+        : undefined;
 
       const perPlayerBelief = empty(batch * numPlayers * hiddenDim);
       for (let player = 0; player < numPlayers; player += 1) {
@@ -858,12 +889,6 @@ export class BetterFfnWebGpuModel {
           uniform,
         );
       }
-      const computedBeliefPhaseShift = encodedFeatures
-        ? this.beliefPhaseShiftForFeatures(encodedFeatures)
-        : undefined;
-      const beliefPhaseShift =
-        prepared?.beliefPhaseShift ??
-        (computedBeliefPhaseShift ? storage(computedBeliefPhaseShift) : undefined);
       let beliefInput = perPlayerBelief;
       if (beliefPhaseShift) {
         const shiftedBelief = empty(batch * numPlayers * hiddenDim);
@@ -888,6 +913,7 @@ export class BetterFfnWebGpuModel {
         empty,
         uniform,
         exactBelief,
+        exactPhaseShiftBuffers,
       );
 
       const interactionFeatures = this.buildBeliefBoardInteractionGpu(
@@ -1128,7 +1154,6 @@ export class BetterFfnWebGpuModel {
           uniform,
         );
       }
-
       const singleBeliefFeatures = this.leakyReluBlockBatch(
         "belief_proj",
         perPlayerBelief,
@@ -2260,6 +2285,78 @@ export class BetterFfnWebGpuModel {
     return out;
   }
 
+  private beliefPhaseKeysForFeatures(
+    encodedFeatures: readonly ReturnType<typeof encodeBetterFeatures>[],
+  ): Uint32Array<ArrayBuffer> {
+    const out = new Uint32Array(encodedFeatures.length);
+    for (let row = 0; row < encodedFeatures.length; row += 1) {
+      const features = encodedFeatures[row]!;
+      const street = Math.max(0, Math.min(4, Math.trunc(features.street)));
+      const phase = Math.max(0, Math.min(1, Math.round(features.valueContext[2]!)));
+      out[row] = Math.max(0, Math.min(9, street * 2 + phase));
+    }
+    return out;
+  }
+
+  private exactBeliefPhaseShiftForKeys(
+    phaseKeys: Uint32Array<ArrayBufferLike> | undefined,
+    exactBelief: ExactBelief,
+  ): { embeddingRows: Float32Array<ArrayBuffer>; contributionRows: Float32Array<ArrayBuffer> } | undefined {
+    if (!phaseKeys || !this.tensors.has("belief_phase_shift.weight")) return undefined;
+    const batch = phaseKeys.length;
+    const hidden = this.manifest.architecture.hiddenDim;
+    const ffnDim = this.manifest.architecture.ffnDim;
+    const playerOffset = exactBelief.player * hidden;
+    const shift = this.tensor("belief_phase_shift.weight");
+    const matrix = this.tensor("belief_proj.linear_in.weight");
+    const norm = this.tensor("belief_proj.norm.weight");
+    const embeddingRows = new Float32Array(batch * hidden);
+    const contributionRows = new Float32Array(batch * ffnDim);
+    const vectorsByKey = new Map<number, Float32Array<ArrayBuffer>>();
+    const contributionsByKey = new Map<number, Float32Array<ArrayBuffer>>();
+
+    const buildForKey = (phaseKey: number): {
+      vector: Float32Array<ArrayBuffer>;
+      contribution: Float32Array<ArrayBuffer>;
+    } => {
+      const key = Math.max(0, Math.min(9, phaseKey));
+      let vector = vectorsByKey.get(key);
+      let contribution = contributionsByKey.get(key);
+      if (vector && contribution) return { vector, contribution };
+
+      vector = new Float32Array(hidden);
+      const shiftBase = key * 2 * hidden + playerOffset;
+      for (let d = 0; d < hidden; d += 1) {
+        vector[d] =
+          this.handEmbeddingCpu[d * NUM_HANDS + exactBelief.hand]! +
+          shift.data[shiftBase + d]!;
+      }
+
+      contribution = new Float32Array(ffnDim);
+      for (let row = 0; row < ffnDim; row += 1) {
+        const matrixBase = row * 2 * hidden + playerOffset;
+        let sum = 0;
+        for (let d = 0; d < hidden; d += 1) {
+          sum +=
+            matrix.data[matrixBase + d]! *
+            vector[d]! *
+            norm.data[playerOffset + d]!;
+        }
+        contribution[row] = sum;
+      }
+      vectorsByKey.set(key, vector);
+      contributionsByKey.set(key, contribution);
+      return { vector, contribution };
+    };
+
+    for (let row = 0; row < batch; row += 1) {
+      const { vector, contribution } = buildForKey(phaseKeys[row]!);
+      embeddingRows.set(vector, row * hidden);
+      contributionRows.set(contribution, row * ffnDim);
+    }
+    return { embeddingRows, contributionRows };
+  }
+
   private baseEmbeddingForBatch(
     encodedFeatures: readonly ReturnType<typeof encodeBetterFeatures>[],
     batch: number,
@@ -2363,7 +2460,6 @@ export class BetterFfnWebGpuModel {
     const offset = player * hidden;
     const matrix = this.tensor("belief_proj.linear_in.weight");
     const norm = this.tensor("belief_proj.norm.weight");
-    const handEmbeddingT = this.buildHandEmbeddingT();
     const out = new Float32Array(ffnDim * NUM_HANDS);
     for (let row = 0; row < ffnDim; row += 1) {
       const matrixBase = row * 2 * hidden + offset;
@@ -2373,7 +2469,7 @@ export class BetterFfnWebGpuModel {
         for (let dim = 0; dim < hidden; dim += 1) {
           sum +=
             matrix.data[matrixBase + dim]! *
-            handEmbeddingT[dim * NUM_HANDS + hand]! *
+            this.handEmbeddingCpu[dim * NUM_HANDS + hand]! *
             norm.data[offset + dim]!;
         }
         out[outBase + hand] = sum;
@@ -2520,6 +2616,7 @@ export class BetterFfnWebGpuModel {
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
     exactBelief?: ExactBelief,
+    exactPhaseShift?: ExactBeliefPhaseShiftBuffers,
   ): GPUBuffer {
     const modelHiddenDim = this.manifest.architecture.hiddenDim;
     const useExactBeliefLinearIn =
@@ -2543,6 +2640,7 @@ export class BetterFfnWebGpuModel {
         inDim,
         exactBelief,
         modelHiddenDim,
+        exactPhaseShift?.embeddingRows,
         uniform,
       );
       this.matVecExactBeliefLinearIn(
@@ -2559,6 +2657,7 @@ export class BetterFfnWebGpuModel {
         hiddenDim,
         modelHiddenDim,
         exactBelief,
+        exactPhaseShift?.contributionRows,
         uniform,
       );
     } else {
@@ -2574,6 +2673,7 @@ export class BetterFfnWebGpuModel {
           inDim,
           exactBelief,
           modelHiddenDim,
+          exactPhaseShift?.embeddingRows,
           uniform,
         );
       } else {
@@ -2717,6 +2817,7 @@ export class BetterFfnWebGpuModel {
     outputStride: number,
     exactBelief: ExactBelief,
     hidden: number,
+    exactEmbeddingRows: GPUBuffer | undefined,
     uniform: (
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
@@ -2738,11 +2839,15 @@ export class BetterFfnWebGpuModel {
               exactBelief.hand,
               NUM_HANDS,
               hidden,
+              exactEmbeddingRows ? 1 : 0,
+              0,
+              0,
+              0,
             ]),
           ),
         },
       },
-      { binding: 4, resource: { buffer: this.handEmbeddingT } },
+      { binding: 4, resource: { buffer: exactEmbeddingRows ?? this.handEmbeddingT } },
     ]);
   }
 
@@ -2756,6 +2861,7 @@ export class BetterFfnWebGpuModel {
     inputStride: number,
     exactBelief: ExactBelief,
     hidden: number,
+    exactEmbeddingRows: GPUBuffer | undefined,
     uniform: (
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
@@ -2765,7 +2871,7 @@ export class BetterFfnWebGpuModel {
       { binding: 1, resource: { buffer: this.tensor(`${prefix}.norm.weight`).buffer } },
       { binding: 2, resource: { buffer: opponentOutput } },
       { binding: 3, resource: { buffer: invRmsOutput } },
-      { binding: 4, resource: { buffer: this.handEmbeddingT } },
+      { binding: 4, resource: { buffer: exactEmbeddingRows ?? this.handEmbeddingT } },
       {
         binding: 5,
         resource: {
@@ -2778,6 +2884,10 @@ export class BetterFfnWebGpuModel {
               exactBelief.hand,
               NUM_HANDS,
               hidden,
+              exactEmbeddingRows ? 1 : 0,
+              0,
+              0,
+              0,
               0,
             ]),
           ),
@@ -2796,6 +2906,7 @@ export class BetterFfnWebGpuModel {
     rows: number,
     cols: number,
     exactBelief: ExactBelief,
+    exactContributionRows: GPUBuffer | undefined,
     uniform: (
       data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
     ) => GPUBuffer,
@@ -2808,7 +2919,7 @@ export class BetterFfnWebGpuModel {
         { binding: 0, resource: { buffer: matrix } },
         { binding: 1, resource: { buffer: input } },
         { binding: 2, resource: { buffer: invRms } },
-        { binding: 3, resource: { buffer: contribution } },
+        { binding: 3, resource: { buffer: exactContributionRows ?? contribution } },
         { binding: 4, resource: { buffer: output } },
         {
           binding: 5,
@@ -2822,7 +2933,7 @@ export class BetterFfnWebGpuModel {
                 rows,
                 exactBelief.hand,
                 NUM_HANDS,
-                0,
+                exactContributionRows ? 1 : 0,
               ]),
             ),
           },

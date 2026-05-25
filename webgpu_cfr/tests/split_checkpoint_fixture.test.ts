@@ -7,6 +7,7 @@ import { handComboIndex, parseCard } from "../src/cards.js";
 import { buildPublicBeliefs } from "../src/beliefs.js";
 import { BrowserCfrEvaluator } from "../src/browserEvaluator.js";
 import { createDawnDevice } from "../src/gpu.js";
+import { readFloatBuffer } from "../src/gpuBuffers.js";
 import { initialUniformBeliefs, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js";
 import { loadNodeModel } from "../src/nodeModel.js";
 
@@ -250,6 +251,53 @@ test("rebel_296_4000 pre-chance value leaves use PyTorch street-boundary feature
       );
     }
   } finally {
+    model.dispose();
+    device.destroy();
+  }
+});
+
+test("rebel_296_4000 shifted exact-belief value path matches dense pre-chance inference", async () => {
+  const device = await createDawnDevice();
+  const model = await loadNodeModel(device, MANIFEST, WEIGHTS);
+  const heroHand = [parseCard("As"), parseCard("Kd")] as [number, number];
+  const heroIndex = handComboIndex(heroHand[0], heroHand[1]);
+  const env = PublicHunlEnv.fromManifest(model.manifest, {
+    button: 0,
+    stack: 400,
+    sb: 1,
+    bb: 2,
+    betBins: model.manifest.env.betBins,
+    flopShowdown: model.manifest.env.flopShowdown,
+    forceDeck: [51, 24, 38, 12, 25, 0, 13, 26, 1],
+  });
+  env.stepBin(1);
+  env.stepBin(1);
+
+  const beliefs = buildPublicBeliefs();
+  beliefs.fill(0, 0, NUM_HANDS);
+  beliefs[heroIndex] = 1;
+  const prepared = model.prepareBatchFeatures([env], [true]);
+  try {
+    const dense = await model.predictBatchHandValues([env], beliefs, [true]);
+    const exact = await model.predictBatchHandValuesGpu(
+      [env],
+      beliefs,
+      prepared,
+      undefined,
+      { player: 0, hand: heroIndex },
+    );
+    try {
+      const exactValues = await readFloatBuffer(
+        device,
+        exact.buffer,
+        exact.batch * exact.valuesPerSample,
+      );
+      assertCloseArray(exactValues, dense, 3e-5, "shifted exact pre-chance values");
+    } finally {
+      exact.dispose();
+    }
+  } finally {
+    prepared.dispose();
     model.dispose();
     device.destroy();
   }
