@@ -2047,5 +2047,3 @@ assumes that the warm start policy was played for the first 15 iterations of CFR
 as if 15 iterations have already occurred.
 
 25
-
-

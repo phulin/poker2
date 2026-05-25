@@ -2462,5 +2462,3 @@ return rt2 , RG
 . Update regrets
 
 37
-
-

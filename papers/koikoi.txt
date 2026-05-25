@@ -2509,5 +2509,3 @@ professor of electronic and information engineering
 at Tongji University, Shanghai, China. He has served
 as a technical program committee chair/member for
 various international flagship conferences. His research interests include multiple-input and multipleoutput systems, physical layer security, and anonymous communication designs.
-
-

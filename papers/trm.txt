@@ -1298,5 +1298,3 @@ Figure 5. Pseudocode of TRM using multi-scale z with deep
 supervision training in PyTorch.
 
 12
-
-
