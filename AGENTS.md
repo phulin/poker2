@@ -15,11 +15,7 @@ This repository trains and evaluates neural-network-based heads-up no-limit Texa
 ### Top-level source files
 - `README.md`: Project overview, model families, training entry points, and links to additional docs.
 - `pyproject.toml`: Python package metadata, dependencies, uv/PyTorch indexes, setuptools package discovery, and tool configuration.
-- `requirements.txt`: Compatibility dependency list for non-uv workflows.
-- `Dockerfile`: Container setup for running the project.
 - `uv.lock`: Locked Python dependency graph for `uv`.
-- `alphaholdem.txt`, `deepstack.txt`, `koikoi.txt`, `rebel.txt`, `supremus.txt`, `trm.txt`: Research notes and references for poker agents, ReBeL/CFR, and model directions.
-- `tune_run.log`, `tune_search.log`, `tune_search_pass1.log`, `tune_search_pass2.log`: Local tuning logs; treat as run artifacts unless intentionally updating experiment records.
 
 ### Top-level directories
 - `src/`: Python source root for the `p2` package.
@@ -29,7 +25,5 @@ This repository trains and evaluates neural-network-based heads-up no-limit Texa
 - `benchmarks/`: Focused performance microbenchmarks for tensor/CFR kernels.
 - `debugging/`: One-off repro, inspection, and profiling scripts.
 - `webgpu_cfr/`: TypeScript/WebGPU evaluator and browser demo for exported BetterFFN CFR inference.
-- `checkpoints-rebel/`: Local ReBeL checkpoint artifacts; usually not source.
 - `outputs/`, `wandb/`: Hydra and Weights & Biases run artifacts; do not edit as source.
 - `.agents/`, `.codex/`: Local agent/tooling metadata.
-- `.pytest_cache/`, `.ruff_cache/`, `.uv-cache/`, `.venv/`: Generated caches and environments.
