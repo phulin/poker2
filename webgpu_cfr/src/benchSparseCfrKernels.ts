@@ -1209,6 +1209,26 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
       },
     },
     {
+      name: "allin_table_values_generic",
+      output: data.values,
+      outputElements: data.valueCount,
+      encode: (encoder) =>
+        kernels.encodeAllInTableValuesGeneric(
+          encoder,
+          data.tree,
+          data.nodeIndices,
+          data.tablePacked,
+          data.comboPerms,
+          data.scaleFactors,
+          data.beliefs,
+          data.values,
+          Math.min(4, data.leafBatch),
+          data.tableScale,
+          0,
+          false,
+        ),
+    },
+    {
       name: "allin_table_values",
       output: data.values,
       outputElements: data.valueCount,
@@ -1227,6 +1247,43 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           0,
           false,
         ),
+      validate: async () => {
+        const reference = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
+        const candidate = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
+        await runOnce(device, (encoder) =>
+          kernels.encodeAllInTableValuesGeneric(
+            encoder,
+            data.tree,
+            data.nodeIndices,
+            data.tablePacked,
+            data.comboPerms,
+            data.scaleFactors,
+            data.beliefs,
+            reference,
+            Math.min(4, data.leafBatch),
+            data.tableScale,
+            0,
+            false,
+          ),
+        );
+        await runOnce(device, (encoder) =>
+          kernels.encodeAllInTableValues1326NoPerm(
+            encoder,
+            data.tree,
+            data.nodeIndices,
+            data.tablePacked,
+            data.comboPerms,
+            data.scaleFactors,
+            data.beliefs,
+            candidate,
+            Math.min(4, data.leafBatch),
+            data.tableScale,
+            0,
+            false,
+          ),
+        );
+        return validatePair(reference, candidate, data.valueCount, "allin_table_values_generic");
+      },
     },
   ];
 }

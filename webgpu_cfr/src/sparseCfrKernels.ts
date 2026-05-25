@@ -1384,6 +1384,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL =
+  SPARSE_ALLIN_TABLE_VALUES_WGSL
+    .replace("numHands: u32,", "_numHands: u32,")
+    .replace("permId: u32,", "_permId: u32,")
+    .replace("hasPerm: u32,", "_hasPerm: u32,")
+    .replace(
+      `fn table_hand(hand: u32) -> u32 {
+  if (params.hasPerm != 0u) {
+    return comboPerms[params.permId * params.numHands + hand];
+  }
+  return hand;
+}`,
+      `fn table_hand(hand: u32) -> u32 {
+  return hand;
+}`,
+    )
+    .replaceAll("params.numHands", "1326u");
+
 export interface SparseGpuTreeData {
   nodeCount: number;
   numHands: number;
@@ -1449,6 +1467,7 @@ export class SparseCfrGpuKernels {
   private readonly showdownValuesFromRanksPipeline: GPUComputePipeline;
   private readonly showdownValuesFromRanks1326Pipeline: GPUComputePipeline;
   private readonly allInTableValuesPipeline: GPUComputePipeline;
+  private readonly allInTableValues1326NoPermPipeline: GPUComputePipeline;
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -1555,6 +1574,10 @@ export class SparseCfrGpuKernels {
     this.allInTableValuesPipeline = this.pipeline(
       SPARSE_ALLIN_TABLE_VALUES_WGSL,
       "sparse-cfr-allin-table-values",
+    );
+    this.allInTableValues1326NoPermPipeline = this.pipeline(
+      SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL,
+      "sparse-cfr-allin-table-values-1326-noperm",
     );
   }
 
@@ -2629,6 +2652,56 @@ export class SparseCfrGpuKernels {
     permId: number,
     hasPerm: boolean,
   ): GPUBuffer {
+    if (
+      tree.numHands === 1326 &&
+      !hasPerm &&
+      globalThis.process?.env?.P2_DISABLE_ALLIN_1326_NOPERM !== "1"
+    ) {
+      return this.encodeAllInTableValues1326NoPerm(
+        encoder,
+        tree,
+        nodeIndices,
+        tablePacked,
+        comboPerms,
+        scaleFactors,
+        beliefs,
+        values,
+        batch,
+        tableScale,
+        permId,
+        hasPerm,
+      );
+    }
+    return this.encodeAllInTableValuesGeneric(
+      encoder,
+      tree,
+      nodeIndices,
+      tablePacked,
+      comboPerms,
+      scaleFactors,
+      beliefs,
+      values,
+      batch,
+      tableScale,
+      permId,
+      hasPerm,
+    );
+  }
+
+  encodeAllInTableValuesGeneric(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    tablePacked: GPUBuffer,
+    comboPerms: GPUBuffer,
+    scaleFactors: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    batch: number,
+    tableScale: number,
+    permId: number,
+    hasPerm: boolean,
+  ): GPUBuffer {
     const words = new ArrayBuffer(32);
     const u32 = new Uint32Array(words);
     const f32 = new Float32Array(words);
@@ -2658,6 +2731,68 @@ export class SparseCfrGpuKernels {
       this.allInTableValuesPipeline,
       bindGroup,
       Math.ceil((batch * 2 * tree.numHands) / 64),
+    );
+    return params;
+  }
+
+  encodeAllInTableValues1326NoPerm(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    tablePacked: GPUBuffer,
+    comboPerms: GPUBuffer,
+    scaleFactors: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    batch: number,
+    tableScale: number,
+    permId: number,
+    hasPerm: boolean,
+  ): GPUBuffer {
+    if (tree.numHands !== 1326 || hasPerm) {
+      return this.encodeAllInTableValuesGeneric(
+        encoder,
+        tree,
+        nodeIndices,
+        tablePacked,
+        comboPerms,
+        scaleFactors,
+        beliefs,
+        values,
+        batch,
+        tableScale,
+        permId,
+        hasPerm,
+      );
+    }
+    const words = new ArrayBuffer(32);
+    const u32 = new Uint32Array(words);
+    const f32 = new Float32Array(words);
+    u32[0] = tree.numHands;
+    u32[1] = batch;
+    u32[2] = permId;
+    u32[3] = hasPerm ? 1 : 0;
+    f32[4] = tableScale;
+    const params = makeUniformBuffer(this.device, u32);
+    const bindGroup = this.device.createBindGroup({
+      layout: this.allInTableValues1326NoPermPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices } },
+        { binding: 1, resource: { buffer: tree.allowedMask } },
+        { binding: 2, resource: { buffer: tree.handCard0 } },
+        { binding: 3, resource: { buffer: tree.handCard1 } },
+        { binding: 4, resource: { buffer: tablePacked } },
+        { binding: 6, resource: { buffer: scaleFactors } },
+        { binding: 7, resource: { buffer: beliefs } },
+        { binding: 8, resource: { buffer: values } },
+        { binding: 9, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.allInTableValues1326NoPermPipeline,
+      bindGroup,
+      Math.ceil((batch * 2652) / 64),
     );
     return params;
   }
