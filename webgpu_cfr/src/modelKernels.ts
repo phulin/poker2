@@ -392,16 +392,16 @@ var<workgroup> weightTile: array<f32, 256>;
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(local_invocation_index) localIndex: u32,
 ) {
   let row = wid.x * 8u + lid.x;
   let batch = wid.y * 8u + lid.y;
-  let localLinear = lid.y * 8u + lid.x;
   let kTiles = (params.cols + 31u) / 32u;
   var sum = 0.0;
 
   for (var kTile = 0u; kTile < kTiles; kTile = kTile + 1u) {
     let kBase = kTile * 32u;
-    for (var i = localLinear; i < 256u; i = i + 64u) {
+    for (var i = localIndex; i < 256u; i = i + 64u) {
       let batchLocal = i / 32u;
       let kLocal = i % 32u;
       let sourceBatch = wid.y * 8u + batchLocal;
@@ -412,7 +412,7 @@ fn main(
       }
       inputTile[i] = x;
     }
-    for (var i = localLinear; i < 256u; i = i + 64u) {
+    for (var i = localIndex; i < 256u; i = i + 64u) {
       let kLocal = i / 8u;
       let rowLocal = i % 8u;
       weightTile[i] = packedMatrix[((wid.x * kTiles + kTile) * 32u + kLocal) * 8u + rowLocal];
@@ -464,16 +464,16 @@ fn leaky_relu(x: f32) -> f32 {
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(local_invocation_index) localIndex: u32,
 ) {
   let row = wid.x * 8u + lid.x;
   let batch = wid.y * 8u + lid.y;
-  let localLinear = lid.y * 8u + lid.x;
   let kTiles = (params.cols + 31u) / 32u;
   var sum = 0.0;
 
   for (var kTile = 0u; kTile < kTiles; kTile = kTile + 1u) {
     let kBase = kTile * 32u;
-    for (var i = localLinear; i < 256u; i = i + 64u) {
+    for (var i = localIndex; i < 256u; i = i + 64u) {
       let batchLocal = i / 32u;
       let kLocal = i % 32u;
       let sourceBatch = wid.y * 8u + batchLocal;
@@ -484,7 +484,7 @@ fn main(
       }
       inputTile[i] = x;
     }
-    for (var i = localLinear; i < 256u; i = i + 64u) {
+    for (var i = localIndex; i < 256u; i = i + 64u) {
       let kLocal = i / 8u;
       let rowLocal = i % 8u;
       weightTile[i] = packedMatrix[((wid.x * kTiles + kTile) * 32u + kLocal) * 8u + rowLocal];
@@ -537,16 +537,16 @@ fn leaky_relu(x: f32) -> f32 {
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(local_invocation_index) localIndex: u32,
 ) {
   let row = wid.x * 8u + lid.x;
   let batch = wid.y * 8u + lid.y;
-  let localLinear = lid.y * 8u + lid.x;
   let kTiles = (params.cols + 31u) / 32u;
   var sum = 0.0;
 
   for (var kTile = 0u; kTile < kTiles; kTile = kTile + 1u) {
     let kBase = kTile * 32u;
-    for (var i = localLinear; i < 256u; i = i + 64u) {
+    for (var i = localIndex; i < 256u; i = i + 64u) {
       let batchLocal = i / 32u;
       let kLocal = i % 32u;
       let sourceBatch = wid.y * 8u + batchLocal;
@@ -557,7 +557,7 @@ fn main(
       }
       inputTile[i] = x;
     }
-    for (var i = localLinear; i < 256u; i = i + 64u) {
+    for (var i = localIndex; i < 256u; i = i + 64u) {
       let kLocal = i / 8u;
       let rowLocal = i % 8u;
       weightTile[i] = packedMatrix[((wid.x * kTiles + kTile) * 32u + kLocal) * 8u + rowLocal];

@@ -65,6 +65,15 @@ interface Variant {
   supports: (shape: Shape, device: GPUDevice) => boolean;
 }
 
+interface PreparedVariant {
+  variant: Variant;
+  pipeline: GPUComputePipeline;
+  output: GPUBuffer;
+  uniform: GPUBuffer;
+  bindGroup: GPUBindGroup;
+  samples: number[];
+}
+
 interface Shape {
   rows: number;
   cols: number;
@@ -270,6 +279,27 @@ function packMatrixTiled(
     }
   }
   return out;
+}
+
+function tiledLayoutDescription(shape: Shape): {
+  outputTile: string;
+  reductionTile: number;
+  packedWeightLayout: string;
+  inputGlobalLoads: string;
+  weightGlobalLoads: string;
+  workgroupReuse: string;
+} {
+  return {
+    outputTile: `${TILED_ROW_TILE} batches x ${TILED_ROW_TILE} rows`,
+    reductionTile: TILED_COL_TILE,
+    packedWeightLayout: "[rowTile][kTile][kLocal][rowLocal]",
+    inputGlobalLoads:
+      "coalesced per source batch: local_invocation_index loads contiguous kLocal spans",
+    weightGlobalLoads:
+      "coalesced per kLocal: local_invocation_index loads contiguous rowLocal packed weights",
+    workgroupReuse:
+      `${Math.min(TILED_ROW_TILE, shape.batch)} batch rows reuse each loaded ${TILED_COL_TILE}x${TILED_ROW_TILE} weight tile; ${TILED_ROW_TILE} output rows reuse each loaded input tile`,
+  };
 }
 
 function rowGroups(rows: number): number {
@@ -625,11 +655,10 @@ async function runOnce(
   return result;
 }
 
-async function timeVariant(
+function prepareVariant(
   device: GPUDevice,
   variant: Variant,
   shape: Shape,
-  options: Options,
   buffers: {
     rowMajorMatrix: GPUBuffer;
     tiledMatrix: GPUBuffer;
@@ -637,7 +666,7 @@ async function timeVariant(
     bias: GPUBuffer;
     residual: GPUBuffer;
   },
-): Promise<number[]> {
+): PreparedVariant {
   const pipeline = createPipeline(device, variant);
   const output = makeEmptyStorageBuffer(device, shape.batch * shape.outputStride);
   const uniform = makeUniformBuffer(device, uniformWords(variant.kind, shape));
@@ -652,21 +681,51 @@ async function timeVariant(
     buffers.residual,
     uniform,
   );
-  const samples: number[] = [];
-  for (let i = 0; i < options.warmups + options.runs; i += 1) {
-    const encoder = device.createCommandEncoder();
-    encodeDispatches(encoder, pipeline, group, variant, shape, options.dispatches);
-    const start = performance.now();
-    device.queue.submit([encoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
-    const elapsed = performance.now() - start;
-    if (i >= options.warmups) {
-      samples.push(elapsed / options.dispatches);
+  return {
+    variant,
+    pipeline,
+    output,
+    uniform,
+    bindGroup: group,
+    samples: [],
+  };
+}
+
+async function timeVariantsInterleaved(
+  device: GPUDevice,
+  prepared: PreparedVariant[],
+  shape: Shape,
+  options: Options,
+): Promise<void> {
+  const rounds = options.warmups + options.runs;
+  for (let round = 0; round < rounds; round += 1) {
+    for (let offset = 0; offset < prepared.length; offset += 1) {
+      const index = (round + offset) % prepared.length;
+      const item = prepared[index]!;
+      const encoder = device.createCommandEncoder();
+      encodeDispatches(
+        encoder,
+        item.pipeline,
+        item.bindGroup,
+        item.variant,
+        shape,
+        options.dispatches,
+      );
+      const start = performance.now();
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      if (round >= options.warmups) {
+        item.samples.push((performance.now() - start) / options.dispatches);
+      }
     }
   }
-  output.destroy();
-  uniform.destroy();
-  return samples;
+}
+
+function disposePrepared(prepared: PreparedVariant[]): void {
+  for (const item of prepared) {
+    item.output.destroy();
+    item.uniform.destroy();
+  }
 }
 
 function maxDiff(
@@ -715,9 +774,11 @@ async function benchmarkShape(
   };
   try {
     const references = new Map<Kind, Float32Array<ArrayBufferLike>>();
-    const results = [];
+    const prepared = allVariants.map((variant) =>
+      prepareVariant(device, variant, shape, buffers),
+    );
+    const driftByName = new Map<string, number>();
     for (const variant of allVariants) {
-      let drift: number | undefined;
       if (options.validate) {
         const refKey = variant.kind;
         let reference = references.get(refKey);
@@ -728,23 +789,30 @@ async function benchmarkShape(
           references.set(refKey, reference);
         }
         const candidate = await runOnce(device, variant, shape, buffers);
-        drift = maxDiff(reference, candidate);
+        driftByName.set(variant.name, maxDiff(reference, candidate));
       }
-      const samples = await timeVariant(device, variant, shape, options, buffers);
-      results.push({
-        name: variant.name,
-        kind: variant.kind,
-        matrix: variant.matrix,
+    }
+    await timeVariantsInterleaved(device, prepared, shape, options);
+    const results = prepared.map((item) => {
+      const drift = driftByName.get(item.variant.name);
+      return {
+        name: item.variant.name,
+        kind: item.variant.kind,
+        matrix: item.variant.matrix,
+        ...(item.variant.matrix === "tiled"
+          ? { tileLayout: tiledLayoutDescription(shape) }
+          : {}),
         dispatch: {
-          x: variant.dispatchX(shape),
-          y: variant.dispatchY(shape),
+          x: item.variant.dispatchX(shape),
+          y: item.variant.dispatchY(shape),
           repeated: options.dispatches,
         },
         ...(drift === undefined ? {} : { maxDiff: drift }),
-        ...stats(samples),
-        samplesMs: samples,
-      });
-    }
+        ...stats(item.samples),
+        samplesMs: item.samples,
+      };
+    });
+    disposePrepared(prepared);
     return { name, shape, variants: results };
   } finally {
     for (const buffer of Object.values(buffers)) {
