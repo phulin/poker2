@@ -43,7 +43,26 @@ function webGpuUnavailableMessage(): string {
   return "WebGPU is not exposed by this browser. Use a browser with WebGPU enabled and hardware acceleration available.";
 }
 
-export async function createBrowserDevice(): Promise<GPUDevice> {
+export interface BrowserDeviceOptions {
+  onError?: (message: string) => void;
+}
+
+function webGpuErrorKind(error: GPUError): string {
+  if (typeof GPUValidationError !== "undefined" && error instanceof GPUValidationError) {
+    return "validation";
+  }
+  if (typeof GPUOutOfMemoryError !== "undefined" && error instanceof GPUOutOfMemoryError) {
+    return "out-of-memory";
+  }
+  if (typeof GPUInternalError !== "undefined" && error instanceof GPUInternalError) {
+    return "internal";
+  }
+  return "unknown";
+}
+
+export async function createBrowserDevice(
+  options: BrowserDeviceOptions = {},
+): Promise<GPUDevice> {
   if (typeof navigator === "undefined" || !navigator.gpu) {
     throw new Error(webGpuUnavailableMessage());
   }
@@ -58,7 +77,19 @@ export async function createBrowserDevice(): Promise<GPUDevice> {
     if (adapter.features.has("subgroups" as GPUFeatureName)) {
       requiredFeatures.push("subgroups" as GPUFeatureName);
     }
-    return await adapter.requestDevice({ requiredFeatures });
+    const device = await adapter.requestDevice({ requiredFeatures });
+    if (options.onError) {
+      device.addEventListener("uncapturederror", (event) => {
+        options.onError!(
+          `Uncaptured WebGPU ${webGpuErrorKind(event.error)} error: ${event.error.message}`,
+        );
+      });
+      void device.lost.then((info) => {
+        const detail = info.message ? `: ${info.message}` : "";
+        options.onError!(`WebGPU device lost: ${info.reason || "unknown"}${detail}`);
+      });
+    }
+    return device;
   } catch (error) {
     const detail = error instanceof Error ? `: ${error.message}` : "";
     throw new Error(`WebGPU adapter was found, but requestDevice failed${detail}`);

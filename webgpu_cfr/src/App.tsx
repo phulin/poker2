@@ -1197,6 +1197,7 @@ function App(): JSX.Element {
     message: "Checking WebGPU",
   });
   const [modelError, setModelError] = createSignal("");
+  const [webGpuError, setWebGpuError] = createSignal("");
   const [button, setButton] = createSignal<PlayerIndex>(HERO_PLAYER);
   const [stack, setStack] = createSignal("400");
   const [sb, setSb] = createSignal("1");
@@ -1221,6 +1222,16 @@ function App(): JSX.Element {
     setSolveProgress(undefined);
     setSolveStatus("");
     setSolveError("");
+  }
+
+  function reportWebGpuError(message: string): void {
+    setWebGpuError(message);
+    if (isSolving()) {
+      setSolveError(message);
+      setSolveStatus("");
+      setSolveProgress(undefined);
+      setIsSolving(false);
+    }
   }
 
   function applyHashFromLocation(): void {
@@ -1262,7 +1273,7 @@ function App(): JSX.Element {
   async function loadRuntime(): Promise<void> {
     try {
       setModelProgress({ phase: "manifest", message: "Requesting WebGPU device" });
-      const device = await createBrowserDevice();
+      const device = await createBrowserDevice({ onError: reportWebGpuError });
       const loaded = await loadModelBytesWithCache(MODEL_MANIFEST_URL, {
         onProgress: setModelProgress,
       });
@@ -1556,6 +1567,7 @@ function App(): JSX.Element {
 
     try {
       setSolveError("");
+      setWebGpuError("");
       const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 16)));
       const solveDepth = Math.max(2, Math.trunc(positiveNumber(depth(), 6)));
       const solveCfrAvg = false;
@@ -1684,6 +1696,12 @@ function App(): JSX.Element {
         <div class="notice error">
           <AlertTriangle size={18} />
           <span>{modelError()}</span>
+        </div>
+      </Show>
+      <Show when={webGpuError()}>
+        <div class="notice error">
+          <AlertTriangle size={18} />
+          <span>{webGpuError()}</span>
         </div>
       </Show>
 
