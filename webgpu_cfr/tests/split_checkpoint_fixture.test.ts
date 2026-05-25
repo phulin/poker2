@@ -4,12 +4,13 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { handComboIndex, parseCard } from "../src/cards.js";
-import { buildPublicBeliefs } from "../src/beliefs.js";
+import { buildPublicBeliefs, normalizeBeliefVector } from "../src/beliefs.js";
 import { BrowserCfrEvaluator } from "../src/browserEvaluator.js";
 import { createDawnDevice } from "../src/gpu.js";
 import { readFloatBuffer } from "../src/gpuBuffers.js";
 import { initialUniformBeliefs, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js";
 import { loadNodeModel } from "../src/nodeModel.js";
+import { SparseCfrResolver } from "../src/sparseResolver.js";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 const FIXTURE_DIR = join(
@@ -47,7 +48,9 @@ interface SplitCfrReference {
   schemaVersion: number;
   numHands: number;
   numActions: number;
+  selectedAction: number;
   actionProbs: number[];
+  beliefsAfter?: number[] | null;
   hands: Record<
     string,
     {
@@ -82,7 +85,10 @@ function loadPythonReference(extraArgs: string[] = []): SplitReference {
   return JSON.parse(result.stdout) as SplitReference;
 }
 
-function loadPythonCfrReference(iterations: number): SplitCfrReference {
+function loadPythonCfrReference(
+  iterations: number,
+  extraArgs: string[] = [],
+): SplitCfrReference {
   const result = spawnSync(
     "uv",
     [
@@ -111,6 +117,7 @@ function loadPythonCfrReference(iterations: number): SplitCfrReference {
       "51",
       "--hero-card1",
       "24",
+      ...extraArgs,
     ],
     {
       cwd: ROOT,
@@ -122,6 +129,52 @@ function loadPythonCfrReference(iterations: number): SplitCfrReference {
     throw new Error(result.stderr || `split_cfr_reference.py exited ${result.status}`);
   }
   return JSON.parse(result.stdout) as SplitCfrReference;
+}
+
+function publicBeliefsForMode(
+  publicCards: readonly number[],
+  mode: "uniform" | "skewed",
+): Float32Array<ArrayBuffer> {
+  const beliefs = buildPublicBeliefs({ publicCards });
+  if (mode === "uniform") return beliefs;
+  for (let player = 0; player < 2; player += 1) {
+    const offset = player * NUM_HANDS;
+    const modulus = player === 0 ? 17 : 23;
+    for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+      if (beliefs[offset + hand]! === 0) continue;
+      beliefs[offset + hand] = 1 + (hand % modulus) / modulus;
+    }
+    normalizeBeliefVector(beliefs, player as 0 | 1);
+  }
+  return beliefs;
+}
+
+function assertCloseSelectedBeliefs(
+  actual: ArrayLike<number> | undefined,
+  expected: ArrayLike<number> | null | undefined,
+  handIndices: readonly number[],
+  atol: number,
+  label: string,
+): void {
+  assert.ok(actual, `${label} actual beliefs`);
+  assert.ok(expected, `${label} expected beliefs`);
+  assert.equal(actual.length, 2 * NUM_HANDS, `${label} actual length`);
+  assert.equal(expected.length, 2 * NUM_HANDS, `${label} expected length`);
+  for (let player = 0; player < 2; player += 1) {
+    let mass = 0;
+    for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+      mass += actual[player * NUM_HANDS + hand]!;
+    }
+    assert.ok(Math.abs(mass - 1) < 1e-5, `${label} player ${player} mass ${mass}`);
+    for (const hand of handIndices) {
+      const index = player * NUM_HANDS + hand;
+      const diff = Math.abs(actual[index]! - expected[index]!);
+      assert.ok(
+        diff <= atol,
+        `${label} player ${player} hand ${hand} belief diff ${diff} > ${atol}`,
+      );
+    }
+  }
 }
 
 function assertCloseArray(
@@ -259,45 +312,170 @@ test("rebel_296_4000 pre-chance value leaves use PyTorch street-boundary feature
 test("rebel_296_4000 shifted exact-belief value path matches dense pre-chance inference", async () => {
   const device = await createDawnDevice();
   const model = await loadNodeModel(device, MANIFEST, WEIGHTS);
-  const heroHand = [parseCard("As"), parseCard("Kd")] as [number, number];
-  const heroIndex = handComboIndex(heroHand[0], heroHand[1]);
-  const env = PublicHunlEnv.fromManifest(model.manifest, {
-    button: 0,
-    stack: 400,
-    sb: 1,
-    bb: 2,
-    betBins: model.manifest.env.betBins,
-    flopShowdown: model.manifest.env.flopShowdown,
-    forceDeck: [51, 24, 38, 12, 25, 0, 13, 26, 1],
-  });
-  env.stepBin(1);
-  env.stepBin(1);
-
-  const beliefs = buildPublicBeliefs();
-  beliefs.fill(0, 0, NUM_HANDS);
-  beliefs[heroIndex] = 1;
-  const prepared = model.prepareBatchFeatures([env], [true]);
   try {
-    const dense = await model.predictBatchHandValues([env], beliefs, [true]);
-    const exact = await model.predictBatchHandValuesGpu(
-      [env],
-      beliefs,
-      prepared,
-      undefined,
-      { player: 0, hand: heroIndex },
-    );
-    try {
-      const exactValues = await readFloatBuffer(
-        device,
-        exact.buffer,
-        exact.batch * exact.valuesPerSample,
+    const cases = [
+      {
+        label: "flop pre-chance player 0",
+        actions: [1, 1],
+        exactPlayer: 0 as const,
+        hand: [parseCard("As"), parseCard("Kd")] as [number, number],
+      },
+      {
+        label: "turn pre-chance player 1",
+        actions: [1, 1, 1, 1],
+        exactPlayer: 1 as const,
+        hand: [parseCard("Qs"), parseCard("Jh")] as [number, number],
+      },
+    ];
+    for (const testCase of cases) {
+      const handIndex = handComboIndex(testCase.hand[0], testCase.hand[1]);
+      const env = PublicHunlEnv.fromManifest(model.manifest, {
+        button: 0,
+        stack: 400,
+        sb: 1,
+        bb: 2,
+        betBins: model.manifest.env.betBins,
+        flopShowdown: model.manifest.env.flopShowdown,
+        forceDeck: [51, 24, 38, 12, 25, 0, 13, 26, 1],
+      });
+      for (const action of testCase.actions) env.stepBin(action);
+
+      const publicCards = env.boardIndices.filter((card) => card >= 0);
+      const beliefs = buildPublicBeliefs({ publicCards });
+      beliefs.fill(
+        0,
+        testCase.exactPlayer * NUM_HANDS,
+        (testCase.exactPlayer + 1) * NUM_HANDS,
       );
-      assertCloseArray(exactValues, dense, 3e-5, "shifted exact pre-chance values");
-    } finally {
-      exact.dispose();
+      beliefs[testCase.exactPlayer * NUM_HANDS + handIndex] = 1;
+      const prepared = model.prepareBatchFeatures([env], [true]);
+      try {
+        const dense = await model.predictBatchHandValues([env], beliefs, [true]);
+        const exact = await model.predictBatchHandValuesGpu(
+          [env],
+          beliefs,
+          prepared,
+          undefined,
+          { player: testCase.exactPlayer, hand: handIndex },
+        );
+        try {
+          const exactValues = await readFloatBuffer(
+            device,
+            exact.buffer,
+            exact.batch * exact.valuesPerSample,
+          );
+          assertCloseArray(
+            exactValues,
+            dense,
+            3e-5,
+            `${testCase.label} shifted exact pre-chance values`,
+          );
+        } finally {
+          exact.dispose();
+        }
+      } finally {
+        prepared.dispose();
+      }
     }
   } finally {
-    prepared.dispose();
+    model.dispose();
+    device.destroy();
+  }
+});
+
+test("rebel_296_4000 sparse solve matches PyTorch across public PBS spots", async () => {
+  const forceDeck = [51, 24, 38, 12, 25, 0, 13, 26, 1];
+  const cases = [
+    {
+      label: "flop boundary public uniform",
+      actions: [1, 1],
+      beliefMode: "uniform" as const,
+      selectedAction: 1,
+      depth: 4,
+      iterations: 8,
+    },
+    {
+      label: "turn boundary skewed public",
+      actions: [1, 1, 1, 1],
+      beliefMode: "skewed" as const,
+      selectedAction: 1,
+      depth: 4,
+      iterations: 8,
+    },
+  ];
+
+  const device = await createDawnDevice();
+  const model = await loadNodeModel(device, MANIFEST, WEIGHTS);
+  if (model.manifest.cfr?.allInByDepth) {
+    model.manifest.cfr.allInByDepth = model.manifest.cfr.allInByDepth.map(() => false);
+  }
+  model.allInTableProvider = undefined;
+  const resolver = new SparseCfrResolver(model);
+  try {
+    for (const testCase of cases) {
+      const reference = loadPythonCfrReference(testCase.iterations, [
+        "--depth",
+        String(testCase.depth),
+        "--force-deck",
+        forceDeck.join(","),
+        "--actions",
+        testCase.actions.join(","),
+        "--belief-mode",
+        testCase.beliefMode,
+        "--selected-action",
+        String(testCase.selectedAction),
+        "--disable-allin",
+      ]);
+      const env = PublicHunlEnv.fromManifest(model.manifest, {
+        button: 0,
+        stack: 400,
+        sb: 1,
+        bb: 2,
+        betBins: model.manifest.env.betBins,
+        flopShowdown: model.manifest.env.flopShowdown,
+        forceDeck,
+      });
+      for (const action of testCase.actions) env.stepBin(action);
+      const publicCards = env.boardIndices.filter((card) => card >= 0);
+      const result = await resolver.solve(
+        env,
+        publicBeliefsForMode(publicCards, testCase.beliefMode),
+        {
+          depth: testCase.depth,
+          iterations: testCase.iterations,
+          cfrAvg: false,
+          selectedAction: testCase.selectedAction,
+          readPolicy: true,
+          readActionProbs: true,
+          readBeliefs: true,
+        },
+      );
+      assertCloseArray(
+        result.actionProbs,
+        reference.actionProbs,
+        8e-2,
+        `${testCase.label} action probs`,
+      );
+      const handIndices = Object.values(reference.hands).map((hand) => hand.index);
+      for (const [label, expected] of Object.entries(reference.hands)) {
+        const policyStart = expected.index * reference.numActions;
+        assertCloseArray(
+          result.policy.subarray(policyStart, policyStart + reference.numActions),
+          expected.policy,
+          1.2e-1,
+          `${testCase.label} ${label} policy`,
+        );
+      }
+      assertCloseSelectedBeliefs(
+        result.beliefsAfter,
+        reference.beliefsAfter,
+        handIndices,
+        8e-2,
+        `${testCase.label} beliefsAfter`,
+      );
+    }
+  } finally {
+    resolver.dispose();
     model.dispose();
     device.destroy();
   }
