@@ -1800,8 +1800,7 @@ function App(): JSX.Element {
     <main class="app-shell">
       <header class="topbar">
         <div>
-          <h1>WebGPU CFR Spot Solver</h1>
-          <p>BetterFFN local re-solve for heads-up no-limit Hold 'Em</p>
+          <h1>holdem.computer</h1>
         </div>
         <div class="model-status">
           <Cpu size={18} />
@@ -2096,11 +2095,7 @@ function App(): JSX.Element {
                 <div class="metadata">
                   <span>{solved().iterations} iterations</span>
                   <span>depth {solved().depth}</span>
-                  <span>{solved().cfrAvg ? "cfr-avg beliefs" : "current beliefs"}</span>
                   <span>{solved().elapsedMs.toFixed(1)} ms</span>
-                  <span>{runtime()?.cached ? "cached model" : "fresh model"}</span>
-                  <span>{runtime()?.usingSubgroups ? "subgroups on" : "subgroups off"}</span>
-                  <span>actor {playerLabel(solved().result.actor)}</span>
                 </div>
 
                 <Show

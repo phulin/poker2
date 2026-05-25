@@ -44,16 +44,23 @@ button:disabled {
 }
 
 .topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
   padding: 10px 0 18px;
+}
+
+.topbar > div:first-child {
+  text-align: center;
+}
+
+.topbar .model-status {
+  justify-self: center;
 }
 
 .topbar h1 {
   margin: 0;
-  font-size: clamp(24px, 4vw, 42px);
+  font-size: clamp(32px, 6vw, 64px);
   line-height: 1.02;
   font-weight: 760;
   letter-spacing: 0;
@@ -1391,8 +1398,7 @@ h3 {
   }
 
   .topbar {
-    align-items: stretch;
-    flex-direction: column;
+    justify-items: stretch;
   }
 
   .grid.two,
