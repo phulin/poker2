@@ -1776,6 +1776,21 @@ function alignedSampleChunk(lanesPerSample: number, workgroupSize: number): numb
   return Math.floor(maxSamples / 64) * 64;
 }
 
+function dispatchLimitedCount(lanesPerItem: number, workgroupSize: number): number {
+  return Math.max(
+    1,
+    Math.floor((MAX_DISPATCH_WORKGROUPS_PER_DIMENSION * workgroupSize) / lanesPerItem),
+  );
+}
+
+function rangeChunks(start: number, end: number, chunkSize: number): Array<readonly [number, number]> {
+  const chunks: Array<readonly [number, number]> = [];
+  for (let chunkStart = start; chunkStart < end; chunkStart += chunkSize) {
+    chunks.push([chunkStart, Math.min(end, chunkStart + chunkSize)]);
+  }
+  return chunks;
+}
+
 const LEAF_SAMPLE_CHUNK = alignedSampleChunk(2 * 1326, 64);
 const TERMINAL_SAMPLE_CHUNK = alignedSampleChunk(1326, 64);
 const SHOWDOWN_BOTH_PLAYER_SAMPLE_CHUNK = alignedSampleChunk(1326, 128);
@@ -1991,29 +2006,35 @@ export class SparseCfrGpuKernels {
     tree: SparseGpuTreeBuffers,
     regrets: GPUBuffer,
     policy: GPUBuffer,
-  ): GPUBuffer {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.nodeCount, tree.numHands, 0, 0]),
-    );
-    const bindGroup = this.device.createBindGroup({
-      layout: this.regretMatchPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.childOffsets } },
-        { binding: 1, resource: { buffer: tree.childCount } },
-        { binding: 2, resource: { buffer: tree.childIndices } },
-        { binding: 3, resource: { buffer: regrets } },
-        { binding: 4, resource: { buffer: policy } },
-        { binding: 5, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.regretMatchPipeline,
-      bindGroup,
-      Math.ceil((tree.nodeCount * tree.numHands) / 64),
-    );
-    return params;
+  ): GPUBuffer[] {
+    const paramsList: GPUBuffer[] = [];
+    const nodeChunk = alignedSampleChunk(tree.numHands, 64);
+    for (let start = 0; start < tree.nodeCount; start += nodeChunk) {
+      const nodeCount = Math.min(nodeChunk, tree.nodeCount - start);
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([nodeCount, tree.numHands, 0, 0]),
+      );
+      const bindGroup = this.device.createBindGroup({
+        layout: this.regretMatchPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.childOffsets, offset: start * 4 } },
+          { binding: 1, resource: { buffer: tree.childCount, offset: start * 4 } },
+          { binding: 2, resource: { buffer: tree.childIndices } },
+          { binding: 3, resource: { buffer: regrets } },
+          { binding: 4, resource: { buffer: policy } },
+          { binding: 5, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.regretMatchPipeline,
+        bindGroup,
+        Math.ceil((nodeCount * tree.numHands) / 64),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodePropagateBeliefsDepth(
@@ -2024,7 +2045,7 @@ export class SparseCfrGpuKernels {
     denom: GPUBuffer,
     start: number,
     end: number,
-  ): GPUBuffer {
+  ): GPUBuffer[] {
     if (globalThis.process?.env?.P2_DISABLE_FUSED_BELIEF_PROPAGATE !== "1") {
       return this.encodePropagateBeliefsDepthFused(
         encoder,
@@ -2055,47 +2076,55 @@ export class SparseCfrGpuKernels {
     denom: GPUBuffer,
     start: number,
     end: number,
-  ): GPUBuffer {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, start, end, 0]),
-    );
-    const applyBindGroup = this.device.createBindGroup({
-      layout: this.beliefApplyPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.parentIndex } },
-        { binding: 1, resource: { buffer: tree.prevActor } },
-        { binding: 2, resource: { buffer: tree.allowedMask } },
-        { binding: 3, resource: { buffer: policy } },
-        { binding: 4, resource: { buffer: beliefs } },
-        { binding: 5, resource: { buffer: denom } },
-        { binding: 6, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.beliefApplyPipeline,
-      applyBindGroup,
-      Math.max(0, end - start),
-      2,
-    );
+  ): GPUBuffer[] {
+    const paramsList: GPUBuffer[] = [];
+    for (const [chunkStart, chunkEnd] of rangeChunks(
+      start,
+      end,
+      dispatchLimitedCount(2 * tree.numHands, 64),
+    )) {
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
+      );
+      const applyBindGroup = this.device.createBindGroup({
+        layout: this.beliefApplyPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.parentIndex } },
+          { binding: 1, resource: { buffer: tree.prevActor } },
+          { binding: 2, resource: { buffer: tree.allowedMask } },
+          { binding: 3, resource: { buffer: policy } },
+          { binding: 4, resource: { buffer: beliefs } },
+          { binding: 5, resource: { buffer: denom } },
+          { binding: 6, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.beliefApplyPipeline,
+        applyBindGroup,
+        Math.max(0, chunkEnd - chunkStart),
+        2,
+      );
 
-    const normalizeBindGroup = this.device.createBindGroup({
-      layout: this.beliefNormalizePipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.allowedProb } },
-        { binding: 1, resource: { buffer: denom } },
-        { binding: 2, resource: { buffer: beliefs } },
-        { binding: 3, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.beliefNormalizePipeline,
-      normalizeBindGroup,
-      Math.ceil(((end - start) * 2 * tree.numHands) / 64),
-    );
-    return params;
+      const normalizeBindGroup = this.device.createBindGroup({
+        layout: this.beliefNormalizePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.allowedProb } },
+          { binding: 1, resource: { buffer: denom } },
+          { binding: 2, resource: { buffer: beliefs } },
+          { binding: 3, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.beliefNormalizePipeline,
+        normalizeBindGroup,
+        Math.ceil(((chunkEnd - chunkStart) * 2 * tree.numHands) / 64),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodePropagateBeliefsDepthFused(
@@ -2106,32 +2135,40 @@ export class SparseCfrGpuKernels {
     denom: GPUBuffer,
     start: number,
     end: number,
-  ): GPUBuffer {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, start, end, 0]),
-    );
-    const bindGroup = this.device.createBindGroup({
-      layout: this.beliefPropagateFusedPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.parentIndex } },
-        { binding: 1, resource: { buffer: tree.prevActor } },
-        { binding: 2, resource: { buffer: tree.allowedMask } },
-        { binding: 3, resource: { buffer: tree.allowedProb } },
-        { binding: 4, resource: { buffer: policy } },
-        { binding: 5, resource: { buffer: beliefs } },
-        { binding: 6, resource: { buffer: denom } },
-        { binding: 7, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.beliefPropagateFusedPipeline,
-      bindGroup,
-      Math.max(0, end - start),
-      2,
-    );
-    return params;
+  ): GPUBuffer[] {
+    const paramsList: GPUBuffer[] = [];
+    for (const [chunkStart, chunkEnd] of rangeChunks(
+      start,
+      end,
+      MAX_DISPATCH_WORKGROUPS_PER_DIMENSION,
+    )) {
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
+      );
+      const bindGroup = this.device.createBindGroup({
+        layout: this.beliefPropagateFusedPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.parentIndex } },
+          { binding: 1, resource: { buffer: tree.prevActor } },
+          { binding: 2, resource: { buffer: tree.allowedMask } },
+          { binding: 3, resource: { buffer: tree.allowedProb } },
+          { binding: 4, resource: { buffer: policy } },
+          { binding: 5, resource: { buffer: beliefs } },
+          { binding: 6, resource: { buffer: denom } },
+          { binding: 7, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.beliefPropagateFusedPipeline,
+        bindGroup,
+        Math.max(0, chunkEnd - chunkStart),
+        2,
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodePropagateReachDepth(
@@ -2141,29 +2178,37 @@ export class SparseCfrGpuKernels {
     reach: GPUBuffer,
     start: number,
     end: number,
-  ): GPUBuffer {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, start, end, 0]),
-    );
-    const bindGroup = this.device.createBindGroup({
-      layout: this.reachApplyPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.parentIndex } },
-        { binding: 1, resource: { buffer: tree.prevActor } },
-        { binding: 2, resource: { buffer: tree.allowedMask } },
-        { binding: 3, resource: { buffer: policy } },
-        { binding: 4, resource: { buffer: reach } },
-        { binding: 5, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.reachApplyPipeline,
-      bindGroup,
-      Math.ceil(((end - start) * 2 * tree.numHands) / 64),
-    );
-    return params;
+  ): GPUBuffer[] {
+    const paramsList: GPUBuffer[] = [];
+    for (const [chunkStart, chunkEnd] of rangeChunks(
+      start,
+      end,
+      dispatchLimitedCount(2 * tree.numHands, 64),
+    )) {
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
+      );
+      const bindGroup = this.device.createBindGroup({
+        layout: this.reachApplyPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.parentIndex } },
+          { binding: 1, resource: { buffer: tree.prevActor } },
+          { binding: 2, resource: { buffer: tree.allowedMask } },
+          { binding: 3, resource: { buffer: policy } },
+          { binding: 4, resource: { buffer: reach } },
+          { binding: 5, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.reachApplyPipeline,
+        bindGroup,
+        Math.ceil(((chunkEnd - chunkStart) * 2 * tree.numHands) / 64),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodeUpdateAveragePolicyRange(
@@ -2176,31 +2221,39 @@ export class SparseCfrGpuKernels {
     policyAvg: GPUBuffer,
     start: number,
     end: number,
-  ): GPUBuffer {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, start, end, 0]),
-    );
-    const bindGroup = this.device.createBindGroup({
-      layout: this.averagePolicyPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.parentIndex } },
-        { binding: 1, resource: { buffer: tree.prevActor } },
-        { binding: 2, resource: { buffer: reach } },
-        { binding: 3, resource: { buffer: policy } },
-        { binding: 4, resource: { buffer: numerator } },
-        { binding: 5, resource: { buffer: denominator } },
-        { binding: 6, resource: { buffer: policyAvg } },
-        { binding: 7, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.averagePolicyPipeline,
-      bindGroup,
-      Math.ceil(((end - start) * tree.numHands) / 64),
-    );
-    return params;
+  ): GPUBuffer[] {
+    const paramsList: GPUBuffer[] = [];
+    for (const [chunkStart, chunkEnd] of rangeChunks(
+      start,
+      end,
+      dispatchLimitedCount(tree.numHands, 64),
+    )) {
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
+      );
+      const bindGroup = this.device.createBindGroup({
+        layout: this.averagePolicyPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.parentIndex } },
+          { binding: 1, resource: { buffer: tree.prevActor } },
+          { binding: 2, resource: { buffer: reach } },
+          { binding: 3, resource: { buffer: policy } },
+          { binding: 4, resource: { buffer: numerator } },
+          { binding: 5, resource: { buffer: denominator } },
+          { binding: 6, resource: { buffer: policyAvg } },
+          { binding: 7, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.averagePolicyPipeline,
+        bindGroup,
+        Math.ceil(((chunkEnd - chunkStart) * tree.numHands) / 64),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodeBackupDepth(
@@ -2211,35 +2264,43 @@ export class SparseCfrGpuKernels {
     values: GPUBuffer,
     start: number,
     end: number,
-  ): GPUBuffer {
+  ): GPUBuffer[] {
     const pipeline =
       tree.numHands === 1326
         ? this.backupDepth1326Pipeline
         : this.backupDepthPipeline;
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, start, end, 0]),
-    );
-    const bindGroup = this.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.childOffsets } },
-        { binding: 1, resource: { buffer: tree.childCount } },
-        { binding: 2, resource: { buffer: tree.childIndices } },
-        { binding: 3, resource: { buffer: tree.toAct } },
-        { binding: 4, resource: { buffer: policy } },
-        { binding: 5, resource: { buffer: opponentPolicy } },
-        { binding: 6, resource: { buffer: values } },
-        { binding: 7, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      pipeline,
-      bindGroup,
-      Math.ceil(((end - start) * 2 * tree.numHands) / 128),
-    );
-    return params;
+    const paramsList: GPUBuffer[] = [];
+    for (const [chunkStart, chunkEnd] of rangeChunks(
+      start,
+      end,
+      dispatchLimitedCount(2 * tree.numHands, 128),
+    )) {
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
+      );
+      const bindGroup = this.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.childOffsets } },
+          { binding: 1, resource: { buffer: tree.childCount } },
+          { binding: 2, resource: { buffer: tree.childIndices } },
+          { binding: 3, resource: { buffer: tree.toAct } },
+          { binding: 4, resource: { buffer: policy } },
+          { binding: 5, resource: { buffer: opponentPolicy } },
+          { binding: 6, resource: { buffer: values } },
+          { binding: 7, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        pipeline,
+        bindGroup,
+        Math.ceil(((chunkEnd - chunkStart) * 2 * tree.numHands) / 128),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodeAccumulateRegretsRange(
@@ -2250,29 +2311,37 @@ export class SparseCfrGpuKernels {
     regrets: GPUBuffer,
     start: number,
     end: number,
-  ): GPUBuffer {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, start, end, 0]),
-    );
-    const bindGroup = this.device.createBindGroup({
-      layout: this.regretTailPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.parentIndex } },
-        { binding: 1, resource: { buffer: tree.prevActor } },
-        { binding: 2, resource: { buffer: regretWeights } },
-        { binding: 3, resource: { buffer: values } },
-        { binding: 4, resource: { buffer: regrets } },
-        { binding: 5, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.regretTailPipeline,
-      bindGroup,
-      Math.ceil(((end - start) * tree.numHands) / 64),
-    );
-    return params;
+  ): GPUBuffer[] {
+    const paramsList: GPUBuffer[] = [];
+    for (const [chunkStart, chunkEnd] of rangeChunks(
+      start,
+      end,
+      dispatchLimitedCount(tree.numHands, 64),
+    )) {
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
+      );
+      const bindGroup = this.device.createBindGroup({
+        layout: this.regretTailPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.parentIndex } },
+          { binding: 1, resource: { buffer: tree.prevActor } },
+          { binding: 2, resource: { buffer: regretWeights } },
+          { binding: 3, resource: { buffer: values } },
+          { binding: 4, resource: { buffer: regrets } },
+          { binding: 5, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.regretTailPipeline,
+        bindGroup,
+        Math.ceil(((chunkEnd - chunkStart) * tree.numHands) / 64),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodeComputeOpponentPolicyReferenceRange(
@@ -2399,51 +2468,59 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer[] {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, start, end, 0]),
-    );
-    const aggregateBindGroup = this.device.createBindGroup({
-      layout: this.opponentPolicyAggregateParallelPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.parentIndex } },
-        { binding: 1, resource: { buffer: tree.prevActor } },
-        { binding: 2, resource: { buffer: tree.handCard0 } },
-        { binding: 3, resource: { buffer: tree.handCard1 } },
-        { binding: 4, resource: { buffer: beliefs } },
-        { binding: 5, resource: { buffer: policy } },
-        { binding: 6, resource: { buffer: aggregates } },
-        { binding: 7, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.opponentPolicyAggregateParallelPipeline,
-      aggregateBindGroup,
-      Math.max(0, end - start),
-    );
+    const paramsList: GPUBuffer[] = [];
+    for (const [chunkStart, chunkEnd] of rangeChunks(
+      start,
+      end,
+      dispatchLimitedCount(tree.numHands, 64),
+    )) {
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
+      );
+      const aggregateBindGroup = this.device.createBindGroup({
+        layout: this.opponentPolicyAggregateParallelPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.parentIndex } },
+          { binding: 1, resource: { buffer: tree.prevActor } },
+          { binding: 2, resource: { buffer: tree.handCard0 } },
+          { binding: 3, resource: { buffer: tree.handCard1 } },
+          { binding: 4, resource: { buffer: beliefs } },
+          { binding: 5, resource: { buffer: policy } },
+          { binding: 6, resource: { buffer: aggregates } },
+          { binding: 7, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.opponentPolicyAggregateParallelPipeline,
+        aggregateBindGroup,
+        Math.max(0, chunkEnd - chunkStart),
+      );
 
-    const applyBindGroup = this.device.createBindGroup({
-      layout: this.opponentPolicyFromAggregatePipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.parentIndex } },
-        { binding: 1, resource: { buffer: tree.prevActor } },
-        { binding: 2, resource: { buffer: tree.handCard0 } },
-        { binding: 3, resource: { buffer: tree.handCard1 } },
-        { binding: 4, resource: { buffer: beliefs } },
-        { binding: 5, resource: { buffer: policy } },
-        { binding: 6, resource: { buffer: aggregates } },
-        { binding: 7, resource: { buffer: opponentPolicy } },
-        { binding: 8, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.opponentPolicyFromAggregatePipeline,
-      applyBindGroup,
-      Math.ceil(((end - start) * tree.numHands) / 64),
-    );
-    return [params];
+      const applyBindGroup = this.device.createBindGroup({
+        layout: this.opponentPolicyFromAggregatePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.parentIndex } },
+          { binding: 1, resource: { buffer: tree.prevActor } },
+          { binding: 2, resource: { buffer: tree.handCard0 } },
+          { binding: 3, resource: { buffer: tree.handCard1 } },
+          { binding: 4, resource: { buffer: beliefs } },
+          { binding: 5, resource: { buffer: policy } },
+          { binding: 6, resource: { buffer: aggregates } },
+          { binding: 7, resource: { buffer: opponentPolicy } },
+          { binding: 8, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.opponentPolicyFromAggregatePipeline,
+        applyBindGroup,
+        Math.ceil(((chunkEnd - chunkStart) * tree.numHands) / 64),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodeComputeRegretWeightsReferenceRange(
@@ -2561,48 +2638,56 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer[] {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, start, end, 0]),
-    );
-    const aggregateBindGroup = this.device.createBindGroup({
-      layout: this.regretWeightAggregateParallelPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.toAct } },
-        { binding: 1, resource: { buffer: tree.handCard0 } },
-        { binding: 2, resource: { buffer: tree.handCard1 } },
-        { binding: 3, resource: { buffer: beliefs } },
-        { binding: 4, resource: { buffer: aggregates } },
-        { binding: 5, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.regretWeightAggregateParallelPipeline,
-      aggregateBindGroup,
-      Math.max(0, end - start),
-    );
+    const paramsList: GPUBuffer[] = [];
+    for (const [chunkStart, chunkEnd] of rangeChunks(
+      start,
+      end,
+      dispatchLimitedCount(tree.numHands, 64),
+    )) {
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
+      );
+      const aggregateBindGroup = this.device.createBindGroup({
+        layout: this.regretWeightAggregateParallelPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.toAct } },
+          { binding: 1, resource: { buffer: tree.handCard0 } },
+          { binding: 2, resource: { buffer: tree.handCard1 } },
+          { binding: 3, resource: { buffer: beliefs } },
+          { binding: 4, resource: { buffer: aggregates } },
+          { binding: 5, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.regretWeightAggregateParallelPipeline,
+        aggregateBindGroup,
+        Math.max(0, chunkEnd - chunkStart),
+      );
 
-    const applyBindGroup = this.device.createBindGroup({
-      layout: this.regretWeightFromAggregatePipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: tree.toAct } },
-        { binding: 1, resource: { buffer: tree.allowedMask } },
-        { binding: 2, resource: { buffer: tree.handCard0 } },
-        { binding: 3, resource: { buffer: tree.handCard1 } },
-        { binding: 4, resource: { buffer: beliefs } },
-        { binding: 5, resource: { buffer: aggregates } },
-        { binding: 6, resource: { buffer: regretWeights } },
-        { binding: 7, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.regretWeightFromAggregatePipeline,
-      applyBindGroup,
-      Math.ceil(((end - start) * tree.numHands) / 64),
-    );
-    return [params];
+      const applyBindGroup = this.device.createBindGroup({
+        layout: this.regretWeightFromAggregatePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: tree.toAct } },
+          { binding: 1, resource: { buffer: tree.allowedMask } },
+          { binding: 2, resource: { buffer: tree.handCard0 } },
+          { binding: 3, resource: { buffer: tree.handCard1 } },
+          { binding: 4, resource: { buffer: beliefs } },
+          { binding: 5, resource: { buffer: aggregates } },
+          { binding: 6, resource: { buffer: regretWeights } },
+          { binding: 7, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.regretWeightFromAggregatePipeline,
+        applyBindGroup,
+        Math.ceil(((chunkEnd - chunkStart) * tree.numHands) / 64),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodeGatherNodeBeliefs(

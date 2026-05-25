@@ -208,17 +208,17 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     );
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
-    paramsA.destroy();
-    paramsReach.destroy();
-    paramsAvg.destroy();
-    paramsB.destroy();
+    for (const params of paramsA) params.destroy();
+    for (const params of paramsReach) params.destroy();
+    for (const params of paramsAvg) params.destroy();
+    for (const params of paramsB) params.destroy();
     for (const params of paramsGather) params.destroy();
     for (const params of paramsScatter) params.destroy();
     for (const params of paramsShowdown) params.destroy();
     paramsOpponent.destroy();
-    paramsBackup.destroy();
+    for (const params of paramsBackup) params.destroy();
     paramsWeights.destroy();
-    paramsRegret.destroy();
+    for (const params of paramsRegret) params.destroy();
 
     assertCloseArray(
       await readFloatBuffer(device, policy, 12),

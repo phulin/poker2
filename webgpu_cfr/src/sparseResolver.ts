@@ -1326,7 +1326,7 @@ export class SparseCfrResolver {
     ];
     for (let depth = tree.treeDepth - 1; depth >= 0; depth -= 1) {
       params.push(
-        this.gpuKernels.encodeBackupDepth(
+        ...this.gpuKernels.encodeBackupDepth(
           encoder,
           treeBuffers,
           policyBuffer,
@@ -1414,7 +1414,7 @@ export class SparseCfrResolver {
         0,
         regretWeightEnd,
       ),
-      this.gpuKernels.encodeAccumulateRegretsRange(
+      ...this.gpuKernels.encodeAccumulateRegretsRange(
         encoder,
         treeBuffers,
         regretWeightsBuffer,
@@ -1423,7 +1423,7 @@ export class SparseCfrResolver {
         1,
         tree.nodes.length,
       ),
-      this.gpuKernels.encodeRegretMatch(
+      ...this.gpuKernels.encodeRegretMatch(
         encoder,
         treeBuffers,
         regretsBuffer,
@@ -1454,7 +1454,7 @@ export class SparseCfrResolver {
     }
     if (updatePolicyAvg) {
       params.push(
-        this.gpuKernels.encodeUpdateAveragePolicyRange(
+        ...this.gpuKernels.encodeUpdateAveragePolicyRange(
           encoder,
           treeBuffers,
           reachBuffer,
@@ -1497,7 +1497,7 @@ export class SparseCfrResolver {
       policyBuffer,
     );
     this.model.device.queue.submit([encoder.finish()]);
-    params.destroy();
+    for (const param of params) param.destroy();
   }
 
   private encodePropagateGpuResident(
@@ -1545,7 +1545,7 @@ export class SparseCfrResolver {
       const start = tree.depthOffsets[depth + 1]!;
       const end = tree.depthOffsets[depth + 2]!;
       params.push(
-        this.gpuKernels.encodePropagateReachDepth(
+        ...this.gpuKernels.encodePropagateReachDepth(
           encoder,
           treeBuffers,
           policyBuffer,
@@ -1555,7 +1555,7 @@ export class SparseCfrResolver {
         ),
       );
       params.push(
-        this.gpuKernels.encodePropagateBeliefsDepth(
+        ...this.gpuKernels.encodePropagateBeliefsDepth(
           encoder,
           treeBuffers,
           policyBuffer,
@@ -1582,7 +1582,7 @@ export class SparseCfrResolver {
       const start = tree.depthOffsets[depth + 1]!;
       const end = tree.depthOffsets[depth + 2]!;
       params.push(
-        this.gpuKernels.encodePropagateBeliefsDepth(
+        ...this.gpuKernels.encodePropagateBeliefsDepth(
           encoder,
           treeBuffers,
           policyBuffer,
@@ -1618,7 +1618,7 @@ export class SparseCfrResolver {
       tree.nodes.length,
     );
     this.model.device.queue.submit([encoder.finish()]);
-    params.destroy();
+    for (const param of params) param.destroy();
   }
 
   private updatePolicy(

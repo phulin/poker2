@@ -77,7 +77,14 @@ export async function createBrowserDevice(
     if (adapter.features.has("subgroups" as GPUFeatureName)) {
       requiredFeatures.push("subgroups" as GPUFeatureName);
     }
-    const device = await adapter.requestDevice({ requiredFeatures });
+    const requiredLimits: Record<string, number> = {};
+    if (adapter.limits.maxStorageBuffersPerShaderStage >= 10) {
+      requiredLimits.maxStorageBuffersPerShaderStage = 10;
+    }
+    const device = await adapter.requestDevice({
+      requiredFeatures,
+      ...(Object.keys(requiredLimits).length > 0 ? { requiredLimits } : {}),
+    });
     if (options.onError) {
       device.addEventListener("uncapturederror", (event) => {
         options.onError!(
