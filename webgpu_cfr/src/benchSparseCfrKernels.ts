@@ -18,6 +18,9 @@ interface Options {
   dispatches: number;
   variant?: string;
   compare?: [string, string];
+  variantEnv?: string;
+  baselineValue?: string;
+  candidateValue?: string;
   validate: boolean;
 }
 
@@ -108,6 +111,9 @@ function readOptions(): Options {
   const args = process.argv.slice(2);
   const variant = getArg(args, "--variant", "");
   const compareArg = getArg(args, "--compare", "");
+  const variantEnv = getArg(args, "--variant-env", "");
+  const baselineValue = getArg(args, "--baseline-value", "");
+  const candidateValue = getArg(args, "--candidate-value", "");
   const compare = compareArg ? compareArg.split(",") : [];
   if (variant && compareArg) {
     throw new Error("Use either --variant or --compare, not both");
@@ -115,12 +121,21 @@ function readOptions(): Options {
   if (compareArg && compare.length !== 2) {
     throw new Error("--compare must be two operation names separated by a comma");
   }
+  if (variantEnv && !variant) {
+    throw new Error("--variant-env requires --variant");
+  }
+  if (variantEnv && !candidateValue) {
+    throw new Error("--variant-env requires --candidate-value");
+  }
   return {
     warmups: intArg(args, "--warmups", 5),
     runs: intArg(args, "--runs", 20),
     dispatches: intArg(args, "--dispatches", 20),
     ...(variant ? { variant } : {}),
     ...(compare.length === 2 ? { compare: [compare[0]!, compare[1]!] } : {}),
+    ...(variantEnv ? { variantEnv } : {}),
+    ...(baselineValue ? { baselineValue } : {}),
+    ...(candidateValue ? { candidateValue } : {}),
     validate: !hasArg(args, "--no-validate"),
   };
 }
@@ -526,6 +541,52 @@ async function timeOpsInterleaved(
       for (const param of params) param.destroy();
       if (round >= warmups) {
         samples.get(op.name)!.push(elapsed / dispatches);
+      }
+    }
+  }
+  return samples;
+}
+
+function setVariantEnv(name: string, value: string | undefined): void {
+  if (!value) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
+
+async function timeOpEnvInterleaved(
+  device: GPUDevice,
+  op: BenchOp,
+  envName: string,
+  baselineValue: string | undefined,
+  candidateValue: string,
+  warmups: number,
+  runs: number,
+  dispatches: number,
+): Promise<{ baseline: number[]; candidate: number[] }> {
+  const samples = { baseline: [] as number[], candidate: [] as number[] };
+  const rounds = warmups + runs;
+  for (let round = 0; round < rounds; round += 1) {
+    const baselineFirst = round % 2 === 0;
+    for (const item of baselineFirst
+      ? ([["baseline", baselineValue], ["candidate", candidateValue]] as const)
+      : ([["candidate", candidateValue], ["baseline", baselineValue]] as const)) {
+      const [name, value] = item;
+      setVariantEnv(envName, value);
+      const encoder = device.createCommandEncoder();
+      const params: GPUBuffer[] = [];
+      for (let i = 0; i < dispatches; i += 1) {
+        const encoded = op.encode(encoder);
+        if (encoded) params.push(...(Array.isArray(encoded) ? encoded : [encoded]));
+      }
+      const start = performance.now();
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      const elapsed = performance.now() - start;
+      for (const param of params) param.destroy();
+      if (round >= warmups) {
+        samples[name].push(elapsed / dispatches);
       }
     }
   }
@@ -1002,6 +1063,65 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
       },
     },
     {
+      name: "showdown_rank_mass_by_hands_both_players",
+      output: data.rankMass,
+      outputElements: data.leafBatch * 2 * data.maxRanks,
+      encode: (encoder) =>
+        kernels.encodeShowdownRankMassByHandsBothPlayers(
+          encoder,
+          data.tree,
+          data.nodeIndices,
+          data.rankHandOffsets,
+          data.rankHandCounts,
+          data.rankHands,
+          data.rankCounts,
+          data.beliefs,
+          data.rankMass,
+          data.leafBatch,
+          data.maxRanks,
+        ),
+      validate: async () => {
+        const reference = makeEmptyStorageBuffer(device, data.leafBatch * 2 * data.maxRanks);
+        const candidate = makeEmptyStorageBuffer(device, data.leafBatch * 2 * data.maxRanks);
+        await runOnce(device, (encoder) =>
+          kernels.encodeShowdownRankMassByHands(
+            encoder,
+            data.tree,
+            data.nodeIndices,
+            data.rankHandOffsets,
+            data.rankHandCounts,
+            data.rankHands,
+            data.rankCounts,
+            data.beliefs,
+            reference,
+            data.leafBatch,
+            data.maxRanks,
+          ),
+        );
+        await runOnce(device, (encoder) =>
+          kernels.encodeShowdownRankMassByHandsBothPlayers(
+            encoder,
+            data.tree,
+            data.nodeIndices,
+            data.rankHandOffsets,
+            data.rankHandCounts,
+            data.rankHands,
+            data.rankCounts,
+            data.beliefs,
+            candidate,
+            data.leafBatch,
+            data.maxRanks,
+          ),
+        );
+        return validatePair(
+          reference,
+          candidate,
+          data.leafBatch * 2 * data.maxRanks,
+          "showdown_rank_mass_by_hands",
+        );
+      },
+    },
+    {
       name: "showdown_rank_prefix",
       output: data.rankPrefixLess,
       outputElements: data.leafBatch * 2 * data.maxRanks,
@@ -1420,6 +1540,70 @@ async function main(): Promise<void> {
   });
   if (ops.length === 0) {
     throw new Error(`No sparse CFR operation matched ${options.variant}`);
+  }
+  if (options.variantEnv) {
+    if (ops.length !== 1) {
+      throw new Error("--variant-env requires exactly one --variant operation");
+    }
+    const op = ops[0]!;
+    const originalEnv = process.env[options.variantEnv];
+    try {
+      const validation = options.validate && op.validate ? await op.validate() : undefined;
+      const samples = await timeOpEnvInterleaved(
+        device,
+        op,
+        options.variantEnv,
+        options.baselineValue,
+        options.candidateValue!,
+        options.warmups,
+        options.runs,
+        options.dispatches,
+      );
+      const baselineStats = stats(samples.baseline);
+      const candidateStats = stats(samples.candidate);
+      console.log(
+        JSON.stringify(
+          {
+            backend: process.env.WEBGPU_BACKEND ?? "auto",
+            nodeCount: data.nodeCount,
+            numHands: NUM_HANDS,
+            leafBatch: data.leafBatch,
+            warmups: options.warmups,
+            runs: options.runs,
+            dispatches: options.dispatches,
+            variantEnv: options.variantEnv,
+            baselineValue: options.baselineValue ?? "",
+            candidateValue: options.candidateValue,
+            compare: {
+              baseline: op.name,
+              candidate: op.name,
+              meanSpeedup: baselineStats.meanMs / candidateStats.meanMs,
+              medianSpeedup: baselineStats.medianMs / candidateStats.medianMs,
+            },
+            results: [
+              {
+                name: `${op.name}:baseline`,
+                outputElements: op.outputElements,
+                ...(validation ? { validation } : {}),
+                ...baselineStats,
+                samplesMs: samples.baseline,
+              },
+              {
+                name: `${op.name}:candidate`,
+                outputElements: op.outputElements,
+                ...candidateStats,
+                samplesMs: samples.candidate,
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+      );
+    } finally {
+      setVariantEnv(options.variantEnv, originalEnv);
+    }
+    return;
   }
   if (options.compare) {
     const [baseline, candidate] = options.compare;
