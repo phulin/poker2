@@ -48,7 +48,7 @@ This directory contains Hydra configuration files for P2 training. Each file is 
 - **Batch Size**: 512
 - **Device**: CUDA
 - **Environments**: 192 (tensorized)
-- **Search**: DCFR with warm-starting
+- **Search**: DCFR with warm-starting and preflop all-in terminal table lookup
 
 ### `config_rebel_debug.yaml` - ReBeL CFR Debug Configuration
 - **Purpose**: Faster iteration/debugging for ReBeL training

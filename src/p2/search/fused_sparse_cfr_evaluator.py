@@ -52,8 +52,8 @@ from p2.search.allin_payoff import (
     I16_SCALE,
     combo_cards_i32_tensor,
     write_allin_belief_card_stats_split_triton_,
+    write_allin_table_values_card_denom_dot_triton_,
     write_allin_table_values_card_denom_dot_values_triton_,
-    write_allin_table_values_triton_,
 )
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_with_tensors_,
@@ -2357,7 +2357,22 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         node_idx = indices_by_street[0]
         if node_idx.numel() > 0:
             table, scale = resolver.payoff_for_board(boards_by_street[0].new_empty(0), 0)
-            write_allin_table_values_triton_(
+            preflop_stats = getattr(self, "allin_preflop_stats_buffer", None)
+            if (
+                preflop_stats is None
+                or preflop_stats.shape != (node_idx.numel(), 2, 53)
+                or preflop_stats.dtype != torch.float32
+                or preflop_stats.device != self.device
+            ):
+                preflop_stats = torch.empty(
+                    node_idx.numel(),
+                    2,
+                    53,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                self.allin_preflop_stats_buffer = preflop_stats
+            write_allin_table_values_card_denom_dot_triton_(
                 table=table,
                 beliefs=beliefs,
                 node_indices=node_idx,
@@ -2367,6 +2382,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 starting_stacks=self.env.starting_stacks,
                 env_scale=self.env.scale,
                 table_scale=scale,
+                stats_buffer=preflop_stats,
+                block_h=64,
+                block_k=128,
+                block_p=8,
             )
 
         flop_node_idx = indices_by_street[1]

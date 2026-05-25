@@ -100,6 +100,7 @@ search:
     - [1.0]
     - []
   allin_by_depth: [true, true, true, true, true, false]
+  preflop_allin_table_path: outputs/preflop_allin_table.pt.zst
   sparse: true
   sparse_fused: true
   value_targets_from_final_policy: true

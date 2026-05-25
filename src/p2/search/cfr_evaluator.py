@@ -394,6 +394,9 @@ class CFREvaluator(ABC):
         self.allin_flop_stats_buffer = torch.empty(
             0, 2, 53, dtype=torch.float32, device=self.device
         )
+        self.allin_preflop_stats_buffer = torch.empty(
+            0, 2, 53, dtype=torch.float32, device=self.device
+        )
         self.allin_call_mask = torch.zeros(
             self.total_nodes, dtype=torch.bool, device=self.device
         )
@@ -458,6 +461,9 @@ class CFREvaluator(ABC):
             self.allin_flop_stats_buffer = torch.empty(
                 0, 2, 53, dtype=torch.float32, device=self.device
             )
+            self.allin_preflop_stats_buffer = torch.empty(
+                0, 2, 53, dtype=torch.float32, device=self.device
+            )
             return
 
         boards = self.env.board_indices[self.allin_call_parent_indices].long()
@@ -478,6 +484,13 @@ class CFREvaluator(ABC):
             boards[street0].contiguous(),
             boards[street1].contiguous(),
             boards[street2].contiguous(),
+        )
+        self.allin_preflop_stats_buffer = torch.empty(
+            self.allin_call_indices_by_street[0].shape[0],
+            2,
+            53,
+            dtype=torch.float32,
+            device=self.device,
         )
         self._cache_allin_flop_tables()
         self._cache_allin_turn_tables()
