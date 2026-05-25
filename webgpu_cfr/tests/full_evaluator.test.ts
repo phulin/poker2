@@ -65,6 +65,13 @@ function exportModel(t: TestContext): { manifest: string; weights: string } | un
       t.skip(skipReason);
       return undefined;
     }
+    if (result.stderr.includes("No module named 'alphaholdem'")) {
+      const skipReason =
+        "checkpoints-rebel/rebel_latest.pt requires the unavailable alphaholdem pickle module";
+      cachedExport = { skipReason };
+      t.skip(skipReason);
+      return undefined;
+    }
     throw new Error(result.stderr || `export_model.py exited ${result.status}`);
   }
   cachedExport = {
@@ -144,7 +151,7 @@ test("exported BetterFFN WebGPU evaluator handles a raise/call prefix", async (t
   }
 });
 
-test("exported BetterFFN WebGPU evaluator supports hero-only exact hand beliefs", async (t) => {
+test("exported BetterFFN WebGPU evaluator keeps private cards out of PBS beliefs", async (t) => {
   const exported = exportModel(t);
   if (!exported) return;
   const device = await createDawnDevice();
@@ -161,12 +168,14 @@ test("exported BetterFFN WebGPU evaluator supports hero-only exact hand beliefs"
       publicCards,
     });
     const heroIndex = handComboIndex(heroHand[0], heroHand[1]);
-    const villainBlockedByHero = handComboIndex(parseCard("As"), parseCard("Ac"));
+    const overlapsHeroPrivate = handComboIndex(parseCard("As"), parseCard("Ac"));
     const villainBlockedByBoard = handComboIndex(parseCard("2c"), parseCard("3c"));
 
-    assert.equal(result.beliefsAtSpot[NUM_HANDS + heroIndex], 1);
-    assert.equal(result.beliefsAtSpot[villainBlockedByHero], 0);
+    assert.ok(result.beliefsAtSpot[NUM_HANDS + heroIndex]! > 0);
+    assert.ok(result.beliefsAtSpot[overlapsHeroPrivate]! > 0);
+    assert.ok(result.beliefsAtSpot[NUM_HANDS + overlapsHeroPrivate]! > 0);
     assert.equal(result.beliefsAtSpot[villainBlockedByBoard], 0);
+    assert.equal(result.beliefsAtSpot[NUM_HANDS + villainBlockedByBoard], 0);
     assert.equal(result.legalMask.length, model.manifest.architecture.numActions);
   } finally {
     evaluator.dispose();

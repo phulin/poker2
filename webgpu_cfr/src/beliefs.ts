@@ -1,6 +1,5 @@
 import {
   assertUniqueCards,
-  handComboIndex,
   handOverlapsCards,
   NUM_HAND_COMBOS,
 } from "./cards.js";
@@ -43,28 +42,6 @@ export function normalizeBeliefs(
   }
   normalizeBeliefVector(beliefs, 0);
   normalizeBeliefVector(beliefs, 1);
-  return beliefs;
-}
-
-export function buildHeroOnlyBeliefs(options: {
-  heroPlayer: PlayerIndex;
-  heroHand: readonly [number, number];
-  publicCards?: readonly number[];
-}): Float32Array<ArrayBuffer> {
-  const publicCards = options.publicCards ?? [];
-  assertUniqueCards([...options.heroHand, ...publicCards]);
-
-  const beliefs = new Float32Array(2 * NUM_HAND_COMBOS);
-  const heroIndex = handComboIndex(options.heroHand[0], options.heroHand[1]);
-  beliefs[options.heroPlayer * NUM_HAND_COMBOS + heroIndex] = 1;
-
-  const villain = (1 - options.heroPlayer) as PlayerIndex;
-  const blocked = new Set<number>([...options.heroHand, ...publicCards]);
-  const villainOffset = villain * NUM_HAND_COMBOS;
-  for (let hand = 0; hand < NUM_HAND_COMBOS; hand += 1) {
-    beliefs[villainOffset + hand] = handOverlapsCards(hand, blocked) ? 0 : 1;
-  }
-  normalizeBeliefVector(beliefs, villain);
   return beliefs;
 }
 

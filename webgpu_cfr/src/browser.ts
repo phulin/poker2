@@ -17,6 +17,13 @@ function currentOrigin(): string {
   return location.origin === "null" ? location.href : location.origin;
 }
 
+function absoluteBrowserUrl(url: string): string {
+  if (typeof globalThis.location === "undefined") {
+    return new URL(url, "http://localhost/").toString();
+  }
+  return new URL(url, globalThis.location.href).toString();
+}
+
 function isLoopbackHost(hostname: string): boolean {
   return (
     hostname === "localhost" ||
@@ -128,7 +135,10 @@ export async function loadBrowserModel(
     manifest,
     weights,
   );
-  model.allInTableProvider = createManifestAllInTableProvider(manifest, manifestUrl);
+  model.allInTableProvider = createManifestAllInTableProvider(
+    manifest,
+    absoluteBrowserUrl(manifestUrl),
+  );
   return model;
 }
 
@@ -154,7 +164,7 @@ export async function loadBrowserModelCached(
   );
   model.allInTableProvider = createManifestAllInTableProvider(
     loaded.manifest,
-    manifestUrl,
+    absoluteBrowserUrl(manifestUrl),
   );
   return model;
 }

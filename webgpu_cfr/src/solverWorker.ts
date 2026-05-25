@@ -16,6 +16,7 @@ const workerScope = globalThis as unknown as {
     type: "message",
     listener: (event: MessageEvent<SolverWorkerRequest>) => void,
   ) => void;
+  location: Location;
   postMessage: (message: SolverWorkerResponse) => void;
   close: () => void;
 };
@@ -36,6 +37,7 @@ function errorMessage(error: unknown): string {
 async function initRuntime(manifestUrl: string): Promise<void> {
   if (initPromise) return await initPromise;
   initPromise = (async () => {
+    const absoluteManifestUrl = new URL(manifestUrl, workerScope.location.href).toString();
     post({
       type: "model-progress",
       progress: { phase: "manifest", message: "Requesting WebGPU device" },
@@ -57,7 +59,7 @@ async function initRuntime(manifestUrl: string): Promise<void> {
     );
     nextModel.allInTableProvider = createManifestAllInTableProvider(
       nextModel.manifest,
-      manifestUrl,
+      absoluteManifestUrl,
     );
     const nextEvaluator = createBrowserCfrEvaluator(nextDevice, nextModel);
     device = nextDevice;

@@ -10,7 +10,6 @@ import {
 } from "../src/cards.js";
 import {
   buildPublicBeliefs,
-  buildHeroOnlyBeliefs,
   compatibleHandMask,
 } from "../src/beliefs.js";
 import { isCachedModelFresh } from "../src/modelCache.js";
@@ -40,35 +39,19 @@ test("hand combo index round-trips sorted and unsorted cards", () => {
   assert.equal(formatCard(handComboCards(NUM_HAND_COMBOS - 1)[1]), "As");
 });
 
-test("hero-only beliefs set exact hero hand and mask villain blockers", () => {
-  const heroHand = [parseCard("As"), parseCard("Kd")] as [number, number];
-  const publicCards = [parseCard("2c"), parseCard("7d"), parseCard("Th")];
-  const beliefs = buildHeroOnlyBeliefs({
-    heroPlayer: 1,
-    heroHand,
-    publicCards,
-  });
-  const heroIndex = handComboIndex(heroHand[0], heroHand[1]);
-  assert.equal(beliefs[NUM_HAND_COMBOS + heroIndex], 1);
-  assert.ok(Math.abs(sum(beliefs, NUM_HAND_COMBOS, NUM_HAND_COMBOS) - 1) < 1e-6);
-  assert.ok(Math.abs(sum(beliefs, 0, NUM_HAND_COMBOS) - 1) < 1e-6);
-
-  const blockedByHero = handComboIndex(parseCard("As"), parseCard("Ac"));
-  const blockedByBoard = handComboIndex(parseCard("2c"), parseCard("3c"));
-  assert.equal(beliefs[blockedByHero], 0);
-  assert.equal(beliefs[blockedByBoard], 0);
-});
-
 test("public beliefs mask only public cards", () => {
   const publicCards = [parseCard("2c"), parseCard("7d"), parseCard("Th")];
   const beliefs = buildPublicBeliefs({ publicCards });
   const blockedByBoard = handComboIndex(parseCard("2c"), parseCard("3c"));
   const heroPrivate = handComboIndex(parseCard("As"), parseCard("Kd"));
+  const overlapsPrivate = handComboIndex(parseCard("As"), parseCard("Ac"));
 
   assert.equal(beliefs[blockedByBoard], 0);
   assert.equal(beliefs[NUM_HAND_COMBOS + blockedByBoard], 0);
   assert.ok(beliefs[heroPrivate]! > 0);
   assert.ok(beliefs[NUM_HAND_COMBOS + heroPrivate]! > 0);
+  assert.ok(beliefs[overlapsPrivate]! > 0);
+  assert.ok(beliefs[NUM_HAND_COMBOS + overlapsPrivate]! > 0);
   assert.ok(Math.abs(sum(beliefs, 0, NUM_HAND_COMBOS) - 1) < 1e-6);
   assert.ok(Math.abs(sum(beliefs, NUM_HAND_COMBOS, NUM_HAND_COMBOS) - 1) < 1e-6);
 });

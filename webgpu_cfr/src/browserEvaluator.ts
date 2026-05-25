@@ -1,9 +1,6 @@
 import { SparseCfrResolver, type SparseResolveOptions } from "./sparseResolver.js";
-import {
-  initialUniformBeliefs,
-  PublicHunlEnv,
-} from "./hunlEnv.js";
-import { buildHeroOnlyBeliefs, normalizeBeliefs } from "./beliefs.js";
+import { PublicHunlEnv } from "./hunlEnv.js";
+import { buildPublicBeliefs, normalizeBeliefs } from "./beliefs.js";
 import { resolveCfrDefaults } from "./modelFormat.js";
 import type { BetterFfnWebGpuModel } from "./betterFfnWebGpuModel.js";
 import type {
@@ -144,19 +141,9 @@ export class BrowserCfrEvaluator {
     if (request.initialBeliefs) {
       return normalizeBeliefs(request.initialBeliefs);
     }
-    if (request.heroHand) {
-      const options: {
-        heroPlayer: 0 | 1;
-        heroHand: readonly [number, number];
-        publicCards?: readonly number[];
-      } = {
-        heroPlayer: request.heroPlayer ?? 0,
-        heroHand: request.heroHand,
-      };
-      if (request.publicCards) options.publicCards = request.publicCards;
-      return buildHeroOnlyBeliefs(options);
-    }
-    return initialUniformBeliefs();
+    return request.publicCards
+      ? buildPublicBeliefs({ publicCards: request.publicCards })
+      : buildPublicBeliefs();
   }
 
   private assertLegalAction(env: PublicHunlEnv, action: number): void {

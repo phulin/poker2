@@ -25,7 +25,7 @@ BetterFFN-backed local CFR problem. It supports:
   run through WGSL kernels while model leaf evaluation remains on the exported
   BetterFFN WebGPU runtime.
 - `src/cards.ts`, `src/beliefs.ts`, and `src/modelCache.ts` provide browser-safe
-  card parsing, hero-only belief initialization, blocked combo masks, streamed
+  card parsing, public-card belief initialization, blocked combo masks, streamed
   model download progress, and IndexedDB cache invalidation.
 - `src/App.tsx` and `src/main.tsx` implement the Vite/Solid spot-solver UI.
 - `src/modelKernels/`, `src/sparseCfr/`, and `src/pokerStateKernels/` contain
@@ -34,7 +34,7 @@ BetterFFN-backed local CFR problem. It supports:
 - `tests/cfr_parity.test.ts` and `tests/full_evaluator.test.ts` compare Dawn
   output against Python references from `checkpoints-rebel/rebel_latest.pt`.
 - `tests/cards_beliefs_cache.test.ts` covers card parsing, combo lookup,
-  hero-only beliefs, and model cache invalidation.
+  public-card beliefs, and model cache invalidation.
 
 ## Commands
 
