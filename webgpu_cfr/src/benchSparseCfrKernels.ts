@@ -575,6 +575,55 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
       },
     },
     {
+      name: "regret_weight_aggregate_parallel",
+      output: data.regretWeights,
+      outputElements: data.policyCount,
+      encode: (encoder) =>
+        kernels.encodeComputeRegretWeightsAggregateParallelRange(
+          encoder,
+          data.tree,
+          data.beliefs,
+          data.regretWeightAggregates,
+          data.regretWeights,
+          start,
+          end,
+        ),
+      validate: async () => {
+        const reference = makeEmptyStorageBuffer(device, data.policyCount);
+        const candidate = makeEmptyStorageBuffer(device, data.policyCount);
+        const referenceAggregates = makeEmptyStorageBuffer(device, data.nodeCount * 53);
+        const candidateAggregates = makeEmptyStorageBuffer(device, data.nodeCount * 53);
+        await runOnce(device, (encoder) =>
+          kernels.encodeComputeRegretWeightsAggregateRange(
+            encoder,
+            data.tree,
+            data.beliefs,
+            referenceAggregates,
+            reference,
+            start,
+            end,
+          ),
+        );
+        await runOnce(device, (encoder) =>
+          kernels.encodeComputeRegretWeightsAggregateParallelRange(
+            encoder,
+            data.tree,
+            data.beliefs,
+            candidateAggregates,
+            candidate,
+            start,
+            end,
+          ),
+        );
+        return validatePair(
+          reference,
+          candidate,
+          data.policyCount,
+          "regret_weight_aggregate",
+        );
+      },
+    },
+    {
       name: "accumulate_regrets",
       output: data.regrets,
       outputElements: data.policyCount,
