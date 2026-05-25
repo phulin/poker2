@@ -1651,6 +1651,85 @@ export const SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_W
     "      !(hand0 == opp0 || hand0 == opp1 || hand1 == opp0 || hand1 == opp1)",
   );
 
+export const SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_OVERLAP_LIST_WGSL = /* wgsl */ `
+struct Params {
+  _numHands: u32,
+  batch: u32,
+  _permId: u32,
+  _hasPerm: u32,
+  tableScale: f32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> nodeIndices: array<u32>;
+@group(0) @binding(1) var<storage, read> allowedMask: array<u32>;
+@group(0) @binding(2) var<storage, read> overlapHands: array<u32>;
+@group(0) @binding(3) var<storage, read> overlapCounts: array<u32>;
+@group(0) @binding(4) var<storage, read> tablePacked: array<u32>;
+@group(0) @binding(6) var<storage, read> scaleFactors: array<f32>;
+@group(0) @binding(7) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(8) var<storage, read_write> values: array<f32>;
+@group(0) @binding(9) var<uniform> params: Params;
+
+fn table_value(hero: u32, opp: u32) -> f32 {
+  let idx = hero * 1326u + opp;
+  let word = tablePacked[idx / 2u];
+  let raw = select(word >> 16u, word & 0xffffu, (idx & 1u) == 0u);
+  let signed = select(i32(raw), i32(raw) - 65536, raw >= 32768u);
+  return f32(signed) / params.tableScale;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let linear = gid.x;
+  let total = params.batch * 1326u;
+  if (linear >= total) {
+    return;
+  }
+  let hand = linear % 1326u;
+  let sample = linear / 1326u;
+  let node = nodeIndices[sample];
+  let allowedBase = node * 1326u;
+  let valueBase = node * 2652u;
+  if (allowedMask[allowedBase + hand] == 0u) {
+    values[valueBase + hand] = 0.0;
+    values[valueBase + 1326u + hand] = 0.0;
+    return;
+  }
+
+  let p0OppBase = valueBase + 1326u;
+  let p1OppBase = valueBase;
+  var numer0 = 0.0;
+  var denom0 = 0.0;
+  var numer1 = 0.0;
+  var denom1 = 0.0;
+  for (var opp = 0u; opp < 1326u; opp = opp + 1u) {
+    let tableEv = table_value(hand, opp);
+    let belief0 = beliefs[p0OppBase + opp];
+    let belief1 = beliefs[p1OppBase + opp];
+    numer0 = numer0 + tableEv * belief0;
+    numer1 = numer1 + tableEv * belief1;
+    denom0 = denom0 + belief0;
+    denom1 = denom1 + belief1;
+  }
+
+  let overlapBase = hand * 101u;
+  let overlapCount = overlapCounts[hand];
+  for (var i = 0u; i < overlapCount; i = i + 1u) {
+    let opp = overlapHands[overlapBase + i];
+    denom0 = denom0 - beliefs[p0OppBase + opp];
+    denom1 = denom1 - beliefs[p1OppBase + opp];
+  }
+
+  let rawEv0 = select(0.0, numer0 / denom0, denom0 > 1.0e-8);
+  let rawEv1 = select(0.0, numer1 / denom1, denom1 > 1.0e-8);
+  values[valueBase + hand] = rawEv0 * scaleFactors[sample * 2u];
+  values[valueBase + 1326u + hand] = rawEv1 * scaleFactors[sample * 2u + 1u];
+}
+`;
+
 export interface SparseGpuTreeData {
   nodeCount: number;
   numHands: number;
@@ -1721,6 +1800,7 @@ export class SparseCfrGpuKernels {
   private readonly allInTableValues1326NoPermPipeline: GPUComputePipeline;
   private readonly allInTableValues1326NoPermBothPlayersPipeline: GPUComputePipeline;
   private readonly allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline: GPUComputePipeline;
+  private readonly allInTableValues1326NoPermBothPlayersOverlapListPipeline: GPUComputePipeline;
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -1847,6 +1927,10 @@ export class SparseCfrGpuKernels {
     this.allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline = this.pipeline(
       SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_WGSL,
       "sparse-cfr-allin-table-values-1326-noperm-both-players-no-opp-allowed",
+    );
+    this.allInTableValues1326NoPermBothPlayersOverlapListPipeline = this.pipeline(
+      SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_OVERLAP_LIST_WGSL,
+      "sparse-cfr-allin-table-values-1326-noperm-both-players-overlap-list",
     );
   }
 
@@ -3065,6 +3149,22 @@ export class SparseCfrGpuKernels {
       !hasPerm &&
       globalThis.process?.env?.P2_DISABLE_ALLIN_1326_NOPERM !== "1"
     ) {
+      if (globalThis.process?.env?.P2_DISABLE_ALLIN_OVERLAP_LIST !== "1") {
+        return this.encodeAllInTableValues1326NoPermBothPlayersOverlapList(
+          encoder,
+          tree,
+          nodeIndices,
+          tablePacked,
+          comboPerms,
+          scaleFactors,
+          beliefs,
+          values,
+          batch,
+          tableScale,
+          permId,
+          hasPerm,
+        );
+      }
       if (globalThis.process?.env?.P2_DISABLE_ALLIN_NO_OPP_ALLOWED !== "1") {
         return this.encodeAllInTableValues1326NoPermBothPlayersNoOppAllowed(
           encoder,
@@ -3339,6 +3439,68 @@ export class SparseCfrGpuKernels {
     this.encode(
       encoder,
       this.allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline,
+      bindGroup,
+      Math.ceil((batch * 1326) / 64),
+    );
+    return params;
+  }
+
+  encodeAllInTableValues1326NoPermBothPlayersOverlapList(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    tablePacked: GPUBuffer,
+    comboPerms: GPUBuffer,
+    scaleFactors: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    batch: number,
+    tableScale: number,
+    permId: number,
+    hasPerm: boolean,
+  ): GPUBuffer {
+    if (tree.numHands !== 1326 || tree.overlapSlots !== 101 || hasPerm) {
+      return this.encodeAllInTableValuesGeneric(
+        encoder,
+        tree,
+        nodeIndices,
+        tablePacked,
+        comboPerms,
+        scaleFactors,
+        beliefs,
+        values,
+        batch,
+        tableScale,
+        permId,
+        hasPerm,
+      );
+    }
+    const words = new ArrayBuffer(32);
+    const u32 = new Uint32Array(words);
+    const f32 = new Float32Array(words);
+    u32[0] = tree.numHands;
+    u32[1] = batch;
+    u32[2] = permId;
+    u32[3] = hasPerm ? 1 : 0;
+    f32[4] = tableScale;
+    const params = makeUniformBuffer(this.device, u32);
+    const bindGroup = this.device.createBindGroup({
+      layout: this.allInTableValues1326NoPermBothPlayersOverlapListPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices } },
+        { binding: 1, resource: { buffer: tree.allowedMask } },
+        { binding: 2, resource: { buffer: tree.overlapHands } },
+        { binding: 3, resource: { buffer: tree.overlapCounts } },
+        { binding: 4, resource: { buffer: tablePacked } },
+        { binding: 6, resource: { buffer: scaleFactors } },
+        { binding: 7, resource: { buffer: beliefs } },
+        { binding: 8, resource: { buffer: values } },
+        { binding: 9, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.allInTableValues1326NoPermBothPlayersOverlapListPipeline,
       bindGroup,
       Math.ceil((batch * 1326) / 64),
     );
