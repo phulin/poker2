@@ -2262,7 +2262,7 @@ export class SparseCfrGpuKernels {
     return params;
   }
 
-  encodeComputeOpponentPolicyRange(
+  encodeComputeOpponentPolicyReferenceRange(
     encoder: GPUCommandEncoder,
     tree: SparseGpuTreeBuffers,
     beliefs: GPUBuffer,
@@ -2307,18 +2307,28 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer[] {
-    if (globalThis.process?.env?.P2_DISABLE_PARALLEL_OPPONENT_POLICY_AGGREGATE !== "1") {
-      return this.encodeComputeOpponentPolicyAggregateParallelRange(
-        encoder,
-        tree,
-        beliefs,
-        policy,
-        aggregates,
-        opponentPolicy,
-        start,
-        end,
-      );
-    }
+    return this.encodeComputeOpponentPolicyAggregateParallelRange(
+      encoder,
+      tree,
+      beliefs,
+      policy,
+      aggregates,
+      opponentPolicy,
+      start,
+      end,
+    );
+  }
+
+  encodeComputeOpponentPolicyAggregateReferenceRange(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    beliefs: GPUBuffer,
+    policy: GPUBuffer,
+    aggregates: GPUBuffer,
+    opponentPolicy: GPUBuffer,
+    start: number,
+    end: number,
+  ): GPUBuffer[] {
     const params = makeUniformBuffer(
       this.device,
       new Uint32Array([tree.numHands, start, end, 0]),
@@ -2423,7 +2433,7 @@ export class SparseCfrGpuKernels {
     return [params];
   }
 
-  encodeComputeRegretWeightsRange(
+  encodeComputeRegretWeightsReferenceRange(
     encoder: GPUCommandEncoder,
     tree: SparseGpuTreeBuffers,
     beliefs: GPUBuffer,
@@ -2465,17 +2475,26 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer[] {
-    if (globalThis.process?.env?.P2_DISABLE_PARALLEL_REGRET_WEIGHT_AGGREGATE !== "1") {
-      return this.encodeComputeRegretWeightsAggregateParallelRange(
-        encoder,
-        tree,
-        beliefs,
-        aggregates,
-        regretWeights,
-        start,
-        end,
-      );
-    }
+    return this.encodeComputeRegretWeightsAggregateParallelRange(
+      encoder,
+      tree,
+      beliefs,
+      aggregates,
+      regretWeights,
+      start,
+      end,
+    );
+  }
+
+  encodeComputeRegretWeightsAggregateReferenceRange(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    beliefs: GPUBuffer,
+    aggregates: GPUBuffer,
+    regretWeights: GPUBuffer,
+    start: number,
+    end: number,
+  ): GPUBuffer[] {
     const params = makeUniformBuffer(
       this.device,
       new Uint32Array([tree.numHands, start, end, 0]),
@@ -2688,49 +2707,25 @@ export class SparseCfrGpuKernels {
     rankHandCounts?: GPUBuffer,
     rankHands?: GPUBuffer,
   ): GPUBuffer {
-    const params =
-      rankHandOffsets &&
-      rankHandCounts &&
-      rankHands &&
-      globalThis.process?.env?.P2_DISABLE_SHOWDOWN_RANK_HANDS !== "1"
-        ? globalThis.process?.env?.P2_DISABLE_SHOWDOWN_RANK_MASS_BOTH_PLAYERS === "1"
-          ? this.encodeShowdownRankMassByHands(
-              encoder,
-              tree,
-              nodeIndices,
-              rankHandOffsets,
-              rankHandCounts,
-              rankHands,
-              rankCounts,
-              beliefs,
-              rankMass,
-              batch,
-              maxRanks,
-            )
-          : this.encodeShowdownRankMassByHandsBothPlayers(
-            encoder,
-            tree,
-            nodeIndices,
-            rankHandOffsets,
-            rankHandCounts,
-            rankHands,
-            rankCounts,
-            beliefs,
-            rankMass,
-            batch,
-            maxRanks,
-          )
-        : this.encodeShowdownRankMass(
-            encoder,
-            tree,
-            nodeIndices,
-            rankOrdinals,
-            rankCounts,
-            beliefs,
-            rankMass,
-            batch,
-            maxRanks,
-          );
+    if (!rankHandOffsets || !rankHandCounts || !rankHands) {
+      throw new Error("production showdown rank aggregates require rank-hand buffers");
+    }
+    if (tree.numHands !== 1326 || tree.overlapSlots !== 101) {
+      throw new Error("production showdown rank aggregates require 1326 HUNL hands");
+    }
+    const params = this.encodeShowdownRankMassByHandsBothPlayers(
+      encoder,
+      tree,
+      nodeIndices,
+      rankHandOffsets,
+      rankHandCounts,
+      rankHands,
+      rankCounts,
+      beliefs,
+      rankMass,
+      batch,
+      maxRanks,
+    );
     this.encodeShowdownRankPrefix(
       encoder,
       rankCounts,
@@ -2741,57 +2736,75 @@ export class SparseCfrGpuKernels {
       maxRanks,
       params,
     );
-    if (globalThis.process?.env?.P2_DISABLE_SHOWDOWN_VALUES_1326 === "1") {
-      this.encodeShowdownValuesFromRanks(
-        encoder,
-        tree,
-        nodeIndices,
-        rankOrdinals,
-        payoffs,
-        beliefs,
-        values,
-        rankMass,
-        rankPrefixLess,
-        rankTotal,
-        batch,
-        maxRanks,
-        params,
-      );
-    } else if (
-      globalThis.process?.env?.P2_DISABLE_SHOWDOWN_VALUES_1326_BOTH_PLAYERS === "1"
-    ) {
-      this.encodeShowdownValuesFromRanks1326(
-        encoder,
-        tree,
-        nodeIndices,
-        rankOrdinals,
-        payoffs,
-        beliefs,
-        values,
-        rankMass,
-        rankPrefixLess,
-        rankTotal,
-        batch,
-        maxRanks,
-        params,
-      );
-    } else {
-      this.encodeShowdownValuesFromRanks1326BothPlayers(
-        encoder,
-        tree,
-        nodeIndices,
-        rankOrdinals,
-        payoffs,
-        beliefs,
-        values,
-        rankMass,
-        rankPrefixLess,
-        rankTotal,
-        batch,
-        maxRanks,
-        params,
-      );
-    }
+    this.encodeShowdownValuesFromRanks1326BothPlayers(
+      encoder,
+      tree,
+      nodeIndices,
+      rankOrdinals,
+      payoffs,
+      beliefs,
+      values,
+      rankMass,
+      rankPrefixLess,
+      rankTotal,
+      batch,
+      maxRanks,
+      params,
+    );
+    return params;
+  }
+
+  encodeShowdownValuesFromRankAggregatesReference(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    rankOrdinals: GPUBuffer,
+    rankCounts: GPUBuffer,
+    payoffs: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    rankMass: GPUBuffer,
+    rankPrefixLess: GPUBuffer,
+    rankTotal: GPUBuffer,
+    batch: number,
+    maxRanks: number,
+  ): GPUBuffer {
+    const params = this.encodeShowdownRankMass(
+      encoder,
+      tree,
+      nodeIndices,
+      rankOrdinals,
+      rankCounts,
+      beliefs,
+      rankMass,
+      batch,
+      maxRanks,
+    );
+    this.encodeShowdownRankPrefix(
+      encoder,
+      rankCounts,
+      rankMass,
+      rankPrefixLess,
+      rankTotal,
+      batch,
+      maxRanks,
+      params,
+    );
+    this.encodeShowdownValuesFromRanksReference(
+      encoder,
+      tree,
+      nodeIndices,
+      rankOrdinals,
+      payoffs,
+      beliefs,
+      values,
+      rankMass,
+      rankPrefixLess,
+      rankTotal,
+      batch,
+      maxRanks,
+      params,
+    );
     return params;
   }
 
@@ -2958,7 +2971,7 @@ export class SparseCfrGpuKernels {
     return params;
   }
 
-  encodeShowdownValuesFromRanks(
+  encodeShowdownValuesFromRanksReference(
     encoder: GPUCommandEncoder,
     tree: SparseGpuTreeBuffers,
     nodeIndices: GPUBuffer,
@@ -3020,21 +3033,7 @@ export class SparseCfrGpuKernels {
     existingParams?: GPUBuffer,
   ): GPUBuffer {
     if (tree.numHands !== 1326 || tree.overlapSlots !== 101) {
-      return this.encodeShowdownValuesFromRanks(
-        encoder,
-        tree,
-        nodeIndices,
-        rankOrdinals,
-        payoffs,
-        beliefs,
-        values,
-        rankMass,
-        rankPrefixLess,
-        rankTotal,
-        batch,
-        maxRanks,
-        existingParams,
-      );
+      throw new Error("1326 showdown values require 1326 HUNL hands");
     }
     const params =
       existingParams ??
@@ -3083,21 +3082,7 @@ export class SparseCfrGpuKernels {
     existingParams?: GPUBuffer,
   ): GPUBuffer {
     if (tree.numHands !== 1326 || tree.overlapSlots !== 101) {
-      return this.encodeShowdownValuesFromRanks(
-        encoder,
-        tree,
-        nodeIndices,
-        rankOrdinals,
-        payoffs,
-        beliefs,
-        values,
-        rankMass,
-        rankPrefixLess,
-        rankTotal,
-        batch,
-        maxRanks,
-        existingParams,
-      );
+      throw new Error("both-player showdown values require 1326 HUNL hands");
     }
     const params =
       existingParams ??
@@ -3144,44 +3129,11 @@ export class SparseCfrGpuKernels {
     permId: number,
     hasPerm: boolean,
   ): GPUBuffer {
-    if (
-      tree.numHands === 1326 &&
-      !hasPerm &&
-      globalThis.process?.env?.P2_DISABLE_ALLIN_1326_NOPERM !== "1"
-    ) {
-      if (globalThis.process?.env?.P2_DISABLE_ALLIN_OVERLAP_LIST !== "1") {
-        return this.encodeAllInTableValues1326NoPermBothPlayersOverlapList(
-          encoder,
-          tree,
-          nodeIndices,
-          tablePacked,
-          comboPerms,
-          scaleFactors,
-          beliefs,
-          values,
-          batch,
-          tableScale,
-          permId,
-          hasPerm,
-        );
-      }
-      if (globalThis.process?.env?.P2_DISABLE_ALLIN_NO_OPP_ALLOWED !== "1") {
-        return this.encodeAllInTableValues1326NoPermBothPlayersNoOppAllowed(
-          encoder,
-          tree,
-          nodeIndices,
-          tablePacked,
-          comboPerms,
-          scaleFactors,
-          beliefs,
-          values,
-          batch,
-          tableScale,
-          permId,
-          hasPerm,
-        );
-      }
-      return this.encodeAllInTableValues1326NoPermBothPlayers(
+    if (tree.numHands !== 1326 || tree.overlapSlots !== 101 || hasPerm) {
+      throw new Error("production all-in table values require 1326 HUNL hands without permutations");
+    }
+    if (globalThis.process?.env?.P2_DISABLE_ALLIN_OVERLAP_LIST !== "1") {
+      return this.encodeAllInTableValues1326NoPermBothPlayersOverlapList(
         encoder,
         tree,
         nodeIndices,
@@ -3196,23 +3148,39 @@ export class SparseCfrGpuKernels {
         hasPerm,
       );
     }
-    return this.encodeAllInTableValuesGeneric(
-      encoder,
-      tree,
-      nodeIndices,
-      tablePacked,
-      comboPerms,
-      scaleFactors,
-      beliefs,
-      values,
-      batch,
-      tableScale,
-      permId,
-      hasPerm,
-    );
+    if (globalThis.process?.env?.P2_DISABLE_ALLIN_NO_OPP_ALLOWED !== "1") {
+      return this.encodeAllInTableValues1326NoPermBothPlayersNoOppAllowed(
+        encoder,
+        tree,
+        nodeIndices,
+        tablePacked,
+        comboPerms,
+        scaleFactors,
+        beliefs,
+        values,
+        batch,
+        tableScale,
+        permId,
+        hasPerm,
+      );
+    }
+      return this.encodeAllInTableValues1326NoPermBothPlayers(
+        encoder,
+        tree,
+        nodeIndices,
+        tablePacked,
+        comboPerms,
+        scaleFactors,
+        beliefs,
+        values,
+        batch,
+        tableScale,
+        permId,
+        hasPerm,
+      );
   }
 
-  encodeAllInTableValuesGeneric(
+  encodeAllInTableValuesReference(
     encoder: GPUCommandEncoder,
     tree: SparseGpuTreeBuffers,
     nodeIndices: GPUBuffer,
@@ -3274,20 +3242,7 @@ export class SparseCfrGpuKernels {
     hasPerm: boolean,
   ): GPUBuffer {
     if (tree.numHands !== 1326 || hasPerm) {
-      return this.encodeAllInTableValuesGeneric(
-        encoder,
-        tree,
-        nodeIndices,
-        tablePacked,
-        comboPerms,
-        scaleFactors,
-        beliefs,
-        values,
-        batch,
-        tableScale,
-        permId,
-        hasPerm,
-      );
+      throw new Error("1326 no-permutation all-in values require 1326 hands without permutations");
     }
     const words = new ArrayBuffer(32);
     const u32 = new Uint32Array(words);
@@ -3336,20 +3291,7 @@ export class SparseCfrGpuKernels {
     hasPerm: boolean,
   ): GPUBuffer {
     if (tree.numHands !== 1326 || hasPerm) {
-      return this.encodeAllInTableValuesGeneric(
-        encoder,
-        tree,
-        nodeIndices,
-        tablePacked,
-        comboPerms,
-        scaleFactors,
-        beliefs,
-        values,
-        batch,
-        tableScale,
-        permId,
-        hasPerm,
-      );
+      throw new Error("both-player all-in values require 1326 hands without permutations");
     }
     const words = new ArrayBuffer(32);
     const u32 = new Uint32Array(words);
@@ -3398,20 +3340,7 @@ export class SparseCfrGpuKernels {
     hasPerm: boolean,
   ): GPUBuffer {
     if (tree.numHands !== 1326 || hasPerm) {
-      return this.encodeAllInTableValuesGeneric(
-        encoder,
-        tree,
-        nodeIndices,
-        tablePacked,
-        comboPerms,
-        scaleFactors,
-        beliefs,
-        values,
-        batch,
-        tableScale,
-        permId,
-        hasPerm,
-      );
+      throw new Error("no-opponent-allowed all-in values require 1326 hands without permutations");
     }
     const words = new ArrayBuffer(32);
     const u32 = new Uint32Array(words);
@@ -3460,20 +3389,7 @@ export class SparseCfrGpuKernels {
     hasPerm: boolean,
   ): GPUBuffer {
     if (tree.numHands !== 1326 || tree.overlapSlots !== 101 || hasPerm) {
-      return this.encodeAllInTableValuesGeneric(
-        encoder,
-        tree,
-        nodeIndices,
-        tablePacked,
-        comboPerms,
-        scaleFactors,
-        beliefs,
-        values,
-        batch,
-        tableScale,
-        permId,
-        hasPerm,
-      );
+      throw new Error("overlap-list all-in values require 1326 HUNL hands without permutations");
     }
     const words = new ArrayBuffer(32);
     const u32 = new Uint32Array(words);

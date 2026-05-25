@@ -54,10 +54,10 @@ interface SparseBenchData {
   avgNumerator: GPUBuffer;
   avgDenominator: GPUBuffer;
   opponentPolicy: GPUBuffer;
-  opponentPolicyDirect: GPUBuffer;
+  opponentPolicyReference: GPUBuffer;
   opponentAggregates: GPUBuffer;
   regretWeights: GPUBuffer;
-  regretWeightsDirect: GPUBuffer;
+  regretWeightsReference: GPUBuffer;
   regretWeightAggregates: GPUBuffer;
   nodeIndices: GPUBuffer;
   leafValues: GPUBuffer;
@@ -418,10 +418,10 @@ function makeBenchData(device: GPUDevice): SparseBenchData {
     avgNumerator: makeStorageBuffer(device, fillFloat(policyCount, 0.0001, 5)),
     avgDenominator: makeStorageBuffer(device, fillFloat(policyCount, 0.0001, 6)),
     opponentPolicy: makeEmptyStorageBuffer(device, policyCount),
-    opponentPolicyDirect: makeEmptyStorageBuffer(device, policyCount),
+    opponentPolicyReference: makeEmptyStorageBuffer(device, policyCount),
     opponentAggregates: makeEmptyStorageBuffer(device, nodeCount * 106),
     regretWeights: makeEmptyStorageBuffer(device, policyCount),
-    regretWeightsDirect: makeEmptyStorageBuffer(device, policyCount),
+    regretWeightsReference: makeEmptyStorageBuffer(device, policyCount),
     regretWeightAggregates: makeEmptyStorageBuffer(device, nodeCount * 53),
     nodeIndices: makeStorageBuffer(device, leafNodes),
     leafValues: makeStorageBuffer(device, fillFloat(LEAF_BATCH * 2 * NUM_HANDS, 0.003, 7)),
@@ -619,25 +619,25 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         kernels.encodeRegretMatch(encoder, data.tree, data.regrets, data.policy),
     },
     {
-      name: "regret_weight_direct",
-      output: data.regretWeightsDirect,
+      name: "regret_weight_reference",
+      output: data.regretWeightsReference,
       outputElements: data.policyCount,
       encode: (encoder) =>
-        kernels.encodeComputeRegretWeightsRange(
+        kernels.encodeComputeRegretWeightsReferenceRange(
           encoder,
           data.tree,
           data.beliefs,
-          data.regretWeightsDirect,
+          data.regretWeightsReference,
           start,
           end,
         ),
     },
     {
-      name: "regret_weight_aggregate",
+      name: "regret_weight_aggregate_reference",
       output: data.regretWeights,
       outputElements: data.policyCount,
       encode: (encoder) =>
-        kernels.encodeComputeRegretWeightsAggregateRange(
+        kernels.encodeComputeRegretWeightsAggregateReferenceRange(
           encoder,
           data.tree,
           data.beliefs,
@@ -648,17 +648,17 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         ),
       validate: async () => {
         await runOnce(device, (encoder) =>
-          kernels.encodeComputeRegretWeightsRange(
+          kernels.encodeComputeRegretWeightsReferenceRange(
             encoder,
             data.tree,
             data.beliefs,
-            data.regretWeightsDirect,
+            data.regretWeightsReference,
             start,
             end,
           ),
         );
         await runOnce(device, (encoder) =>
-          kernels.encodeComputeRegretWeightsAggregateRange(
+          kernels.encodeComputeRegretWeightsAggregateReferenceRange(
             encoder,
             data.tree,
             data.beliefs,
@@ -669,10 +669,10 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           ),
         );
         return validatePair(
-          data.regretWeightsDirect,
+          data.regretWeightsReference,
           data.regretWeights,
           data.policyCount,
-          "regret_weight_direct",
+          "regret_weight_reference",
         );
       },
     },
@@ -695,7 +695,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         const candidate = makeEmptyStorageBuffer(device, data.policyCount);
         const candidateAggregates = makeEmptyStorageBuffer(device, data.nodeCount * 53);
         await runOnce(device, (encoder) =>
-          kernels.encodeComputeRegretWeightsRange(
+          kernels.encodeComputeRegretWeightsReferenceRange(
             encoder,
             data.tree,
             data.beliefs,
@@ -719,7 +719,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           reference,
           candidate,
           data.policyCount,
-          "regret_weight_direct",
+          "regret_weight_reference",
         );
       },
     },
@@ -834,26 +834,26 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         ),
     },
     {
-      name: "opponent_policy_direct",
-      output: data.opponentPolicyDirect,
+      name: "opponent_policy_reference",
+      output: data.opponentPolicyReference,
       outputElements: data.policyCount,
       encode: (encoder) =>
-        kernels.encodeComputeOpponentPolicyRange(
+        kernels.encodeComputeOpponentPolicyReferenceRange(
           encoder,
           data.tree,
           data.beliefs,
           data.policy,
-          data.opponentPolicyDirect,
+          data.opponentPolicyReference,
           start,
           end,
         ),
     },
     {
-      name: "opponent_policy_aggregate",
+      name: "opponent_policy_aggregate_reference",
       output: data.opponentPolicy,
       outputElements: data.policyCount,
       encode: (encoder) =>
-        kernels.encodeComputeOpponentPolicyAggregateRange(
+        kernels.encodeComputeOpponentPolicyAggregateReferenceRange(
           encoder,
           data.tree,
           data.beliefs,
@@ -865,18 +865,18 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         ),
       validate: async () => {
         await runOnce(device, (encoder) =>
-          kernels.encodeComputeOpponentPolicyRange(
+          kernels.encodeComputeOpponentPolicyReferenceRange(
             encoder,
             data.tree,
             data.beliefs,
             data.policy,
-            data.opponentPolicyDirect,
+            data.opponentPolicyReference,
             start,
             end,
           ),
         );
         await runOnce(device, (encoder) =>
-          kernels.encodeComputeOpponentPolicyAggregateRange(
+          kernels.encodeComputeOpponentPolicyAggregateReferenceRange(
             encoder,
             data.tree,
             data.beliefs,
@@ -888,10 +888,10 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           ),
         );
         return validatePair(
-          data.opponentPolicyDirect,
+          data.opponentPolicyReference,
           data.opponentPolicy,
           data.policyCount,
-          "opponent_policy_direct",
+          "opponent_policy_reference",
         );
       },
     },
@@ -915,7 +915,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         const candidate = makeEmptyStorageBuffer(device, data.policyCount);
         const candidateAggregates = makeEmptyStorageBuffer(device, data.nodeCount * 106);
         await runOnce(device, (encoder) =>
-          kernels.encodeComputeOpponentPolicyRange(
+          kernels.encodeComputeOpponentPolicyReferenceRange(
             encoder,
             data.tree,
             data.beliefs,
@@ -941,7 +941,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           reference,
           candidate,
           data.policyCount,
-          "opponent_policy_direct",
+          "opponent_policy_reference",
         );
       },
     },
@@ -1137,11 +1137,11 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         ),
     },
     {
-      name: "showdown_values_from_rank_aggregates",
+      name: "showdown_values_from_rank_aggregates_reference",
       output: data.values,
       outputElements: data.valueCount,
       encode: (encoder) =>
-        kernels.encodeShowdownValuesFromRanks(
+        kernels.encodeShowdownValuesFromRanksReference(
           encoder,
           data.tree,
           data.nodeIndices,
@@ -1179,7 +1179,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         const reference = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
         const candidate = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
         await runOnce(device, (encoder) =>
-          kernels.encodeShowdownValuesFromRanks(
+          kernels.encodeShowdownValuesFromRanksReference(
             encoder,
             data.tree,
             data.nodeIndices,
@@ -1214,7 +1214,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           reference,
           candidate,
           data.valueCount,
-          "showdown_values_from_rank_aggregates",
+          "showdown_values_from_rank_aggregates_reference",
         );
       },
     },
@@ -1281,11 +1281,11 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
       },
     },
     {
-      name: "showdown_values_from_ranks",
+      name: "showdown_values_from_ranks_reference",
       output: data.values,
       outputElements: data.valueCount,
       encode: (encoder) =>
-        kernels.encodeShowdownValuesFromRankAggregates(
+        kernels.encodeShowdownValuesFromRankAggregatesReference(
           encoder,
           data.tree,
           data.nodeIndices,
@@ -1346,7 +1346,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         );
         const candidateRankTotal = makeEmptyStorageBuffer(device, data.leafBatch * 2);
         await runOnce(device, (encoder) =>
-          kernels.encodeShowdownValuesFromRankAggregates(
+          kernels.encodeShowdownValuesFromRankAggregatesReference(
             encoder,
             data.tree,
             data.nodeIndices,
@@ -1386,16 +1386,16 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           reference,
           candidate,
           data.valueCount,
-          "showdown_values_from_ranks",
+          "showdown_values_from_ranks_reference",
         );
       },
     },
     {
-      name: "allin_table_values_generic",
+      name: "allin_table_values_reference",
       output: data.values,
       outputElements: data.valueCount,
       encode: (encoder) =>
-        kernels.encodeAllInTableValuesGeneric(
+        kernels.encodeAllInTableValuesReference(
           encoder,
           data.tree,
           data.nodeIndices,
@@ -1433,7 +1433,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         const reference = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
         const candidate = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
         await runOnce(device, (encoder) =>
-          kernels.encodeAllInTableValuesGeneric(
+          kernels.encodeAllInTableValuesReference(
             encoder,
             data.tree,
             data.nodeIndices,
@@ -1464,7 +1464,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
             false,
           ),
         );
-        return validatePair(reference, candidate, data.valueCount, "allin_table_values_generic");
+        return validatePair(reference, candidate, data.valueCount, "allin_table_values_reference");
       },
     },
     {

@@ -171,7 +171,7 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
       showdownValues,
       1,
     );
-    const paramsOpponent = kernels.encodeComputeOpponentPolicyRange(
+    const paramsOpponent = kernels.encodeComputeOpponentPolicyReferenceRange(
       encoder,
       tree,
       beliefs,
@@ -189,7 +189,7 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
       0,
       1,
     );
-    const paramsWeights = kernels.encodeComputeRegretWeightsRange(
+    const paramsWeights = kernels.encodeComputeRegretWeightsReferenceRange(
       encoder,
       tree,
       beliefs,
@@ -442,7 +442,7 @@ test("sparse WGSL all-in table values match blocker-aware CPU reference", async 
     const values = makeEmptyStorageBuffer(device, 16);
 
     const encoder = device.createCommandEncoder();
-    const params = kernels.encodeAllInTableValues(
+    const params = kernels.encodeAllInTableValuesReference(
       encoder,
       tree,
       nodeIndices,
