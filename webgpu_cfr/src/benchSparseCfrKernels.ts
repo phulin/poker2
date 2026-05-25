@@ -60,6 +60,9 @@ interface SparseBenchData {
   gatheredBeliefs: GPUBuffer;
   rankOrdinals: GPUBuffer;
   rankCounts: GPUBuffer;
+  rankHandOffsets: GPUBuffer;
+  rankHandCounts: GPUBuffer;
+  rankHands: GPUBuffer;
   payoffs: GPUBuffer;
   rankMass: GPUBuffer;
   rankPrefixLess: GPUBuffer;
@@ -308,17 +311,38 @@ function makePolicy(data: SparseGpuTreeData): Float32Array<ArrayBuffer> {
 function makeRankOrdinals(batch: number, maxRanks: number): {
   ordinals: Uint32Array<ArrayBuffer>;
   counts: Uint32Array<ArrayBuffer>;
+  handOffsets: Uint32Array<ArrayBuffer>;
+  handCounts: Uint32Array<ArrayBuffer>;
+  hands: Uint32Array<ArrayBuffer>;
 } {
   const ordinals = new Uint32Array(batch * NUM_HANDS);
   const counts = new Uint32Array(batch);
+  const rankHandsBySample: number[][][] = [];
   for (let sample = 0; sample < batch; sample += 1) {
     const rankCount = maxRanks - (sample % 7);
     counts[sample] = rankCount;
+    const rankHands = Array.from({ length: rankCount }, () => [] as number[]);
     for (let hand = 0; hand < NUM_HANDS; hand += 1) {
-      ordinals[sample * NUM_HANDS + hand] = (hand * 29 + sample * 11) % rankCount;
+      const rank = (hand * 29 + sample * 11) % rankCount;
+      ordinals[sample * NUM_HANDS + hand] = rank;
+      rankHands[rank]!.push(hand);
+    }
+    rankHandsBySample.push(rankHands);
+  }
+  const handOffsets = new Uint32Array(batch * maxRanks);
+  const handCounts = new Uint32Array(batch * maxRanks);
+  const hands: number[] = [];
+  for (let sample = 0; sample < batch; sample += 1) {
+    const rankHands = rankHandsBySample[sample]!;
+    for (let rank = 0; rank < maxRanks; rank += 1) {
+      const outIdx = sample * maxRanks + rank;
+      const list = rankHands[rank] ?? [];
+      handOffsets[outIdx] = hands.length;
+      handCounts[outIdx] = list.length;
+      hands.push(...list);
     }
   }
-  return { ordinals, counts };
+  return { ordinals, counts, handOffsets, handCounts, hands: new Uint32Array(hands) };
 }
 
 function makePackedTable(): Uint32Array<ArrayBuffer> {
@@ -349,7 +373,10 @@ function makeBenchData(device: GPUDevice): SparseBenchData {
   for (let i = 0; i < LEAF_BATCH; i += 1) {
     leafNodes[i] = leafStart + ((i * 7) % (nodeCount - leafStart));
   }
-  const { ordinals, counts } = makeRankOrdinals(LEAF_BATCH, MAX_RANKS);
+  const { ordinals, counts, handOffsets, handCounts, hands } = makeRankOrdinals(
+    LEAF_BATCH,
+    MAX_RANKS,
+  );
   const comboPerms = new Uint32Array(NUM_HANDS);
   for (let hand = 0; hand < NUM_HANDS; hand += 1) comboPerms[hand] = hand;
   return {
@@ -376,6 +403,9 @@ function makeBenchData(device: GPUDevice): SparseBenchData {
     gatheredBeliefs: makeEmptyStorageBuffer(device, LEAF_BATCH * 2 * NUM_HANDS),
     rankOrdinals: makeStorageBuffer(device, ordinals),
     rankCounts: makeStorageBuffer(device, counts),
+    rankHandOffsets: makeStorageBuffer(device, handOffsets),
+    rankHandCounts: makeStorageBuffer(device, handCounts),
+    rankHands: makeStorageBuffer(device, hands),
     payoffs: makeStorageBuffer(device, fillFloat(LEAF_BATCH * 3, 0.01, 8)),
     rankMass: makeEmptyStorageBuffer(device, LEAF_BATCH * 2 * MAX_RANKS),
     rankPrefixLess: makeEmptyStorageBuffer(device, LEAF_BATCH * 2 * MAX_RANKS),
@@ -777,6 +807,63 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         ),
     },
     {
+      name: "showdown_rank_mass_by_hands",
+      output: data.rankMass,
+      outputElements: data.leafBatch * 2 * data.maxRanks,
+      encode: (encoder) =>
+        kernels.encodeShowdownRankMassByHands(
+          encoder,
+          data.tree,
+          data.nodeIndices,
+          data.rankHandOffsets,
+          data.rankHandCounts,
+          data.rankHands,
+          data.rankCounts,
+          data.beliefs,
+          data.rankMass,
+          data.leafBatch,
+          data.maxRanks,
+        ),
+      validate: async () => {
+        const reference = makeEmptyStorageBuffer(device, data.leafBatch * 2 * data.maxRanks);
+        const candidate = makeEmptyStorageBuffer(device, data.leafBatch * 2 * data.maxRanks);
+        await runOnce(device, (encoder) =>
+          kernels.encodeShowdownRankMass(
+            encoder,
+            data.tree,
+            data.nodeIndices,
+            data.rankOrdinals,
+            data.rankCounts,
+            data.beliefs,
+            reference,
+            data.leafBatch,
+            data.maxRanks,
+          ),
+        );
+        await runOnce(device, (encoder) =>
+          kernels.encodeShowdownRankMassByHands(
+            encoder,
+            data.tree,
+            data.nodeIndices,
+            data.rankHandOffsets,
+            data.rankHandCounts,
+            data.rankHands,
+            data.rankCounts,
+            data.beliefs,
+            candidate,
+            data.leafBatch,
+            data.maxRanks,
+          ),
+        );
+        return validatePair(
+          reference,
+          candidate,
+          data.leafBatch * 2 * data.maxRanks,
+          "showdown_rank_mass",
+        );
+      },
+    },
+    {
       name: "showdown_rank_prefix",
       output: data.rankPrefixLess,
       outputElements: data.leafBatch * 2 * data.maxRanks,
@@ -831,6 +918,95 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           data.leafBatch,
           data.maxRanks,
         ),
+    },
+    {
+      name: "showdown_values_from_ranks_by_hands",
+      output: data.values,
+      outputElements: data.valueCount,
+      encode: (encoder) =>
+        kernels.encodeShowdownValuesFromRankAggregates(
+          encoder,
+          data.tree,
+          data.nodeIndices,
+          data.rankOrdinals,
+          data.rankCounts,
+          data.payoffs,
+          data.beliefs,
+          data.values,
+          data.rankMass,
+          data.rankPrefixLess,
+          data.rankTotal,
+          data.leafBatch,
+          data.maxRanks,
+          data.rankHandOffsets,
+          data.rankHandCounts,
+          data.rankHands,
+        ),
+      validate: async () => {
+        const reference = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
+        const candidate = makeStorageBuffer(device, fillFloat(data.valueCount, 0.002, 4));
+        const referenceRankMass = makeEmptyStorageBuffer(
+          device,
+          data.leafBatch * 2 * data.maxRanks,
+        );
+        const referenceRankPrefix = makeEmptyStorageBuffer(
+          device,
+          data.leafBatch * 2 * data.maxRanks,
+        );
+        const referenceRankTotal = makeEmptyStorageBuffer(device, data.leafBatch * 2);
+        const candidateRankMass = makeEmptyStorageBuffer(
+          device,
+          data.leafBatch * 2 * data.maxRanks,
+        );
+        const candidateRankPrefix = makeEmptyStorageBuffer(
+          device,
+          data.leafBatch * 2 * data.maxRanks,
+        );
+        const candidateRankTotal = makeEmptyStorageBuffer(device, data.leafBatch * 2);
+        await runOnce(device, (encoder) =>
+          kernels.encodeShowdownValuesFromRankAggregates(
+            encoder,
+            data.tree,
+            data.nodeIndices,
+            data.rankOrdinals,
+            data.rankCounts,
+            data.payoffs,
+            data.beliefs,
+            reference,
+            referenceRankMass,
+            referenceRankPrefix,
+            referenceRankTotal,
+            data.leafBatch,
+            data.maxRanks,
+          ),
+        );
+        await runOnce(device, (encoder) =>
+          kernels.encodeShowdownValuesFromRankAggregates(
+            encoder,
+            data.tree,
+            data.nodeIndices,
+            data.rankOrdinals,
+            data.rankCounts,
+            data.payoffs,
+            data.beliefs,
+            candidate,
+            candidateRankMass,
+            candidateRankPrefix,
+            candidateRankTotal,
+            data.leafBatch,
+            data.maxRanks,
+            data.rankHandOffsets,
+            data.rankHandCounts,
+            data.rankHands,
+          ),
+        );
+        return validatePair(
+          reference,
+          candidate,
+          data.valueCount,
+          "showdown_values_from_ranks",
+        );
+      },
     },
     {
       name: "allin_table_values",

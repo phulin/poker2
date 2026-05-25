@@ -67,6 +67,9 @@ interface SparseLeafGpuBatch {
   showdownRankCodes: Uint32Array<ArrayBuffer>;
   showdownRankOrdinals: Uint32Array<ArrayBuffer>;
   showdownRankCounts: Uint32Array<ArrayBuffer>;
+  showdownRankHandOffsets: Uint32Array<ArrayBuffer>;
+  showdownRankHandCounts: Uint32Array<ArrayBuffer>;
+  showdownRankHands: Uint32Array<ArrayBuffer>;
   showdownMaxRankCount: number;
   showdownPayoffs: Float32Array<ArrayBuffer>;
   allInNodeIndices: Uint32Array<ArrayBuffer>;
@@ -82,6 +85,9 @@ interface SparseStaticGpuData {
   showdownRankBuffer: GPUBuffer;
   showdownRankOrdinalBuffer: GPUBuffer;
   showdownRankCountBuffer: GPUBuffer;
+  showdownRankHandOffsetBuffer: GPUBuffer;
+  showdownRankHandCountBuffer: GPUBuffer;
+  showdownRankHandsBuffer: GPUBuffer;
   showdownPayoffBuffer: GPUBuffer;
   allInNodeBuffer: GPUBuffer;
   allInScaleBuffer: GPUBuffer;
@@ -342,6 +348,15 @@ export class SparseCfrResolver {
       device,
       leafBatch.showdownRankCounts,
     );
+    const showdownRankHandOffsetBuffer = makeStorageBuffer(
+      device,
+      leafBatch.showdownRankHandOffsets,
+    );
+    const showdownRankHandCountBuffer = makeStorageBuffer(
+      device,
+      leafBatch.showdownRankHandCounts,
+    );
+    const showdownRankHandsBuffer = makeStorageBuffer(device, leafBatch.showdownRankHands);
     const showdownPayoffBuffer = makeStorageBuffer(device, leafBatch.showdownPayoffs);
     const allInNodeBuffer = makeStorageBuffer(device, leafBatch.allInNodeIndices);
     const allInScaleBuffer = makeStorageBuffer(device, leafBatch.allInScaleFactors);
@@ -366,6 +381,9 @@ export class SparseCfrResolver {
       showdownRankBuffer,
       showdownRankOrdinalBuffer,
       showdownRankCountBuffer,
+      showdownRankHandOffsetBuffer,
+      showdownRankHandCountBuffer,
+      showdownRankHandsBuffer,
       showdownPayoffBuffer,
       allInNodeBuffer,
       allInScaleBuffer,
@@ -380,6 +398,9 @@ export class SparseCfrResolver {
         showdownRankBuffer.destroy();
         showdownRankOrdinalBuffer.destroy();
         showdownRankCountBuffer.destroy();
+        showdownRankHandOffsetBuffer.destroy();
+        showdownRankHandCountBuffer.destroy();
+        showdownRankHandsBuffer.destroy();
         showdownPayoffBuffer.destroy();
         allInNodeBuffer.destroy();
         allInScaleBuffer.destroy();
@@ -805,6 +826,9 @@ export class SparseCfrResolver {
           staticGpu.showdownRankBuffer,
           staticGpu.showdownRankOrdinalBuffer,
           staticGpu.showdownRankCountBuffer,
+          staticGpu.showdownRankHandOffsetBuffer,
+          staticGpu.showdownRankHandCountBuffer,
+          staticGpu.showdownRankHandsBuffer,
           staticGpu.showdownPayoffBuffer,
           showdownRankMassBuffer,
           showdownRankPrefixBuffer,
@@ -868,6 +892,9 @@ export class SparseCfrResolver {
               staticGpu.showdownRankBuffer,
               staticGpu.showdownRankOrdinalBuffer,
               staticGpu.showdownRankCountBuffer,
+              staticGpu.showdownRankHandOffsetBuffer,
+              staticGpu.showdownRankHandCountBuffer,
+              staticGpu.showdownRankHandsBuffer,
               staticGpu.showdownPayoffBuffer,
               showdownRankMassBuffer,
               showdownRankPrefixBuffer,
@@ -935,6 +962,9 @@ export class SparseCfrResolver {
     showdownRankBuffer: GPUBuffer,
     showdownRankOrdinalBuffer: GPUBuffer,
     showdownRankCountBuffer: GPUBuffer,
+    showdownRankHandOffsetBuffer: GPUBuffer,
+    showdownRankHandCountBuffer: GPUBuffer,
+    showdownRankHandsBuffer: GPUBuffer,
     showdownPayoffBuffer: GPUBuffer,
     showdownRankMassBuffer: GPUBuffer,
     showdownRankPrefixBuffer: GPUBuffer,
@@ -970,6 +1000,9 @@ export class SparseCfrResolver {
           showdownRankTotalBuffer,
           leafBatch.showdownNodeIndices.length,
           leafBatch.showdownMaxRankCount,
+          showdownRankHandOffsetBuffer,
+          showdownRankHandCountBuffer,
+          showdownRankHandsBuffer,
         ));
       } else {
         deferredParams.push(this.gpuKernels!.encodeShowdownValues(
@@ -1146,6 +1179,7 @@ export class SparseCfrResolver {
     const showdownRankCodes: number[] = [];
     const showdownRankOrdinals: number[] = [];
     const showdownRankCounts: number[] = [];
+    const showdownRankHandsBySample: number[][][] = [];
     let showdownMaxRankCount = 0;
     const showdownPayoffs: number[] = [];
     const allInNodeIndices: number[] = [];
@@ -1174,10 +1208,33 @@ export class SparseCfrResolver {
         ranks.forEach((rank, ordinal) => rankToOrdinal.set(rank, ordinal));
         showdownRankCounts.push(ranks.length);
         showdownMaxRankCount = Math.max(showdownMaxRankCount, ranks.length);
+        const rankHands = Array.from({ length: ranks.length }, () => [] as number[]);
+        let handIndex = 0;
         for (const rank of rankCodes) {
-          showdownRankOrdinals.push(rank > 0 ? rankToOrdinal.get(rank)! : 0xffffffff);
+          const ordinal = rank > 0 ? rankToOrdinal.get(rank)! : 0xffffffff;
+          showdownRankOrdinals.push(ordinal);
+          if (ordinal !== 0xffffffff) {
+            rankHands[ordinal]!.push(handIndex);
+          }
+          handIndex += 1;
         }
+        showdownRankHandsBySample.push(rankHands);
         showdownPayoffs.push(...this.showdownPayoffs(node.env));
+      }
+    }
+    const showdownRankHandOffsets = new Uint32Array(
+      showdownRankHandsBySample.length * Math.max(1, showdownMaxRankCount),
+    );
+    const showdownRankHandCounts = new Uint32Array(showdownRankHandOffsets.length);
+    const showdownRankHands: number[] = [];
+    for (let sample = 0; sample < showdownRankHandsBySample.length; sample += 1) {
+      const rankHands = showdownRankHandsBySample[sample]!;
+      for (let rank = 0; rank < showdownMaxRankCount; rank += 1) {
+        const outIdx = sample * showdownMaxRankCount + rank;
+        const hands = rankHands[rank] ?? [];
+        showdownRankHandOffsets[outIdx] = showdownRankHands.length;
+        showdownRankHandCounts[outIdx] = hands.length;
+        showdownRankHands.push(...hands);
       }
     }
     return {
@@ -1187,6 +1244,9 @@ export class SparseCfrResolver {
       showdownRankCodes: new Uint32Array(showdownRankCodes),
       showdownRankOrdinals: new Uint32Array(showdownRankOrdinals),
       showdownRankCounts: new Uint32Array(showdownRankCounts),
+      showdownRankHandOffsets,
+      showdownRankHandCounts,
+      showdownRankHands: new Uint32Array(showdownRankHands),
       showdownMaxRankCount,
       showdownPayoffs: new Float32Array(showdownPayoffs),
       allInNodeIndices: new Uint32Array(allInNodeIndices),
