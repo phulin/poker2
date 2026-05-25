@@ -1922,10 +1922,63 @@ export class SparseCfrGpuKernels {
     batch: number,
     maxRanks: number,
   ): GPUBuffer {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
+    const params = this.encodeShowdownRankMass(
+      encoder,
+      tree,
+      nodeIndices,
+      rankOrdinals,
+      rankCounts,
+      beliefs,
+      rankMass,
+      batch,
+      maxRanks,
     );
+    this.encodeShowdownRankPrefix(
+      encoder,
+      rankCounts,
+      rankMass,
+      rankPrefixLess,
+      rankTotal,
+      batch,
+      maxRanks,
+      params,
+    );
+    this.encodeShowdownValuesFromRanks(
+      encoder,
+      tree,
+      nodeIndices,
+      rankOrdinals,
+      payoffs,
+      beliefs,
+      values,
+      rankMass,
+      rankPrefixLess,
+      rankTotal,
+      batch,
+      maxRanks,
+      params,
+    );
+    return params;
+  }
+
+  encodeShowdownRankMass(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    rankOrdinals: GPUBuffer,
+    rankCounts: GPUBuffer,
+    beliefs: GPUBuffer,
+    rankMass: GPUBuffer,
+    batch: number,
+    maxRanks: number,
+    existingParams?: GPUBuffer,
+  ): GPUBuffer {
+    const params =
+      existingParams ??
+      makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
+      );
     const massBindGroup = this.device.createBindGroup({
       layout: this.showdownRankMassPipeline.getBindGroupLayout(0),
       entries: [
@@ -1945,7 +1998,25 @@ export class SparseCfrGpuKernels {
       maxRanks,
       batch * 2,
     );
+    return params;
+  }
 
+  encodeShowdownRankPrefix(
+    encoder: GPUCommandEncoder,
+    rankCounts: GPUBuffer,
+    rankMass: GPUBuffer,
+    rankPrefixLess: GPUBuffer,
+    rankTotal: GPUBuffer,
+    batch: number,
+    maxRanks: number,
+    existingParams?: GPUBuffer,
+  ): GPUBuffer {
+    const params =
+      existingParams ??
+      makeUniformBuffer(
+        this.device,
+        new Uint32Array([0, batch, maxRanks, 0]),
+      );
     const prefixBindGroup = this.device.createBindGroup({
       layout: this.showdownRankPrefixPipeline.getBindGroupLayout(0),
       entries: [
@@ -1962,7 +2033,30 @@ export class SparseCfrGpuKernels {
       prefixBindGroup,
       batch * 2,
     );
+    return params;
+  }
 
+  encodeShowdownValuesFromRanks(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    rankOrdinals: GPUBuffer,
+    payoffs: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    rankMass: GPUBuffer,
+    rankPrefixLess: GPUBuffer,
+    rankTotal: GPUBuffer,
+    batch: number,
+    maxRanks: number,
+    existingParams?: GPUBuffer,
+  ): GPUBuffer {
+    const params =
+      existingParams ??
+      makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
+      );
     const valuesBindGroup = this.device.createBindGroup({
       layout: this.showdownValuesFromRanksPipeline.getBindGroupLayout(0),
       entries: [

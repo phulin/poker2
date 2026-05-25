@@ -760,6 +760,58 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         ),
     },
     {
+      name: "showdown_rank_mass",
+      output: data.rankMass,
+      outputElements: data.leafBatch * 2 * data.maxRanks,
+      encode: (encoder) =>
+        kernels.encodeShowdownRankMass(
+          encoder,
+          data.tree,
+          data.nodeIndices,
+          data.rankOrdinals,
+          data.rankCounts,
+          data.beliefs,
+          data.rankMass,
+          data.leafBatch,
+          data.maxRanks,
+        ),
+    },
+    {
+      name: "showdown_rank_prefix",
+      output: data.rankPrefixLess,
+      outputElements: data.leafBatch * 2 * data.maxRanks,
+      encode: (encoder) =>
+        kernels.encodeShowdownRankPrefix(
+          encoder,
+          data.rankCounts,
+          data.rankMass,
+          data.rankPrefixLess,
+          data.rankTotal,
+          data.leafBatch,
+          data.maxRanks,
+        ),
+    },
+    {
+      name: "showdown_values_from_rank_aggregates",
+      output: data.values,
+      outputElements: data.valueCount,
+      encode: (encoder) =>
+        kernels.encodeShowdownValuesFromRanks(
+          encoder,
+          data.tree,
+          data.nodeIndices,
+          data.rankOrdinals,
+          data.payoffs,
+          data.beliefs,
+          data.values,
+          data.rankMass,
+          data.rankPrefixLess,
+          data.rankTotal,
+          data.leafBatch,
+          data.maxRanks,
+        ),
+    },
+    {
       name: "showdown_values_from_ranks",
       output: data.values,
       outputElements: data.valueCount,
