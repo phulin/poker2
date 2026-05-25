@@ -121,9 +121,7 @@ interface SparseGpuWorkspace {
   regretWeightsBuffer: GPUBuffer;
   regretWeightAggregatesBuffer: GPUBuffer;
   modelLeafBeliefsBuffer: GPUBuffer;
-  showdownRankMassBuffer: GPUBuffer;
-  showdownRankPrefixBuffer: GPUBuffer;
-  showdownRankTotalBuffer: GPUBuffer;
+  showdownRankScratchBuffer: GPUBuffer;
   dispose: () => void;
 }
 
@@ -776,9 +774,7 @@ export class SparseCfrResolver {
       regretWeightsBuffer,
       regretWeightAggregatesBuffer,
       modelLeafBeliefsBuffer,
-      showdownRankMassBuffer,
-      showdownRankPrefixBuffer,
-      showdownRankTotalBuffer,
+      showdownRankScratchBuffer,
     } = workspace;
     const pendingLeafDisposals: Array<() => void> = [];
     const writeFloatBuffer = (
@@ -830,9 +826,7 @@ export class SparseCfrResolver {
           staticGpu.showdownRankHandCountBuffer,
           staticGpu.showdownRankHandsBuffer,
           staticGpu.showdownPayoffBuffer,
-          showdownRankMassBuffer,
-          showdownRankPrefixBuffer,
-          showdownRankTotalBuffer,
+          showdownRankScratchBuffer,
           staticGpu.allInNodeBuffer,
           staticGpu.allInScaleBuffer,
           staticGpu.allInTableBuffer,
@@ -896,9 +890,7 @@ export class SparseCfrResolver {
               staticGpu.showdownRankHandCountBuffer,
               staticGpu.showdownRankHandsBuffer,
               staticGpu.showdownPayoffBuffer,
-              showdownRankMassBuffer,
-              showdownRankPrefixBuffer,
-              showdownRankTotalBuffer,
+              showdownRankScratchBuffer,
               staticGpu.allInNodeBuffer,
               staticGpu.allInScaleBuffer,
               staticGpu.allInTableBuffer,
@@ -966,9 +958,7 @@ export class SparseCfrResolver {
     showdownRankHandCountBuffer: GPUBuffer,
     showdownRankHandsBuffer: GPUBuffer,
     showdownPayoffBuffer: GPUBuffer,
-    showdownRankMassBuffer: GPUBuffer,
-    showdownRankPrefixBuffer: GPUBuffer,
-    showdownRankTotalBuffer: GPUBuffer,
+    showdownRankScratchBuffer: GPUBuffer,
     allInNodeBuffer: GPUBuffer,
     allInScaleBuffer: GPUBuffer,
     allInTableBuffer?: GPUBuffer,
@@ -986,7 +976,7 @@ export class SparseCfrResolver {
     const encodeShowdown = (encoder: GPUCommandEncoder): void => {
       if (leafBatch.showdownNodeIndices.length === 0) return;
       if (leafBatch.showdownMaxRankCount > 0) {
-        deferredParams.push(...this.gpuKernels!.encodeShowdownValuesFromRankAggregates(
+        deferredParams.push(...this.gpuKernels!.encodeShowdownValuesFromRankAggregatesPacked(
           encoder,
           treeBuffers,
           showdownNodeBuffer,
@@ -995,9 +985,7 @@ export class SparseCfrResolver {
           showdownPayoffBuffer,
           leafBeliefsBuffer,
           valuesBuffer,
-          showdownRankMassBuffer,
-          showdownRankPrefixBuffer,
-          showdownRankTotalBuffer,
+          showdownRankScratchBuffer,
           leafBatch.showdownNodeIndices.length,
           leafBatch.showdownMaxRankCount,
           showdownRankHandOffsetBuffer,
@@ -1132,9 +1120,7 @@ export class SparseCfrResolver {
       makeEmptyStorageBuffer(device, policyCount),
       makeEmptyStorageBuffer(device, totalNodes * 53),
       makeEmptyStorageBuffer(device, modelLeafBeliefCount),
-      makeEmptyStorageBuffer(device, showdownAggregateCount),
-      makeEmptyStorageBuffer(device, showdownAggregateCount),
-      makeEmptyStorageBuffer(device, showdownTotalCount),
+      makeEmptyStorageBuffer(device, showdownAggregateCount * 2 + showdownTotalCount),
     ] as const;
     const workspace: SparseGpuWorkspace = {
       valueCount,
@@ -1158,9 +1144,7 @@ export class SparseCfrResolver {
       regretWeightsBuffer: buffers[12],
       regretWeightAggregatesBuffer: buffers[13],
       modelLeafBeliefsBuffer: buffers[14],
-      showdownRankMassBuffer: buffers[15],
-      showdownRankPrefixBuffer: buffers[16],
-      showdownRankTotalBuffer: buffers[17],
+      showdownRankScratchBuffer: buffers[15],
       dispose: () => {
         for (const buffer of buffers) buffer.destroy();
       },

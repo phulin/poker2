@@ -6,7 +6,16 @@ import {
   readFloatBuffer,
 } from "../src/gpuBuffers.js";
 import { createDawnDevice } from "../src/gpu.js";
-import { SparseCfrGpuKernels } from "../src/sparseCfrKernels.js";
+import {
+  SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_WGSL,
+  SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_OVERLAP_LIST_WGSL,
+  SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL,
+  SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL,
+  SPARSE_SHOWDOWN_RANK_PREFIX_PACKED_WGSL,
+  SPARSE_SHOWDOWN_VALUES_WGSL,
+  SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_PACKED_WGSL,
+  SparseCfrGpuKernels,
+} from "../src/sparseCfrKernels.js";
 import { packInt16Table } from "../src/allInTables.js";
 
 function assertCloseArray(
@@ -22,6 +31,37 @@ function assertCloseArray(
   }
   assert.ok(maxDiff <= atol, `${label} max diff ${maxDiff} > ${atol}`);
 }
+
+function storageBindingCount(wgsl: string): number {
+  return wgsl.match(/var<storage/g)?.length ?? 0;
+}
+
+test("production sparse WGSL kernels fit baseline browser storage-buffer limits", () => {
+  const baselineStorageBufferLimit = 8;
+  for (const [label, wgsl] of [
+    ["showdown-values", SPARSE_SHOWDOWN_VALUES_WGSL],
+    ["showdown-rank-prefix-packed", SPARSE_SHOWDOWN_RANK_PREFIX_PACKED_WGSL],
+    [
+      "showdown-values-from-ranks-1326-both-packed",
+      SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_PACKED_WGSL,
+    ],
+    ["all-in-1326-noperm", SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL],
+    ["all-in-1326-noperm-both", SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL],
+    [
+      "all-in-1326-noperm-no-opp-allowed",
+      SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_WGSL,
+    ],
+    [
+      "all-in-1326-noperm-overlap-list",
+      SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_OVERLAP_LIST_WGSL,
+    ],
+  ] as const) {
+    assert.ok(
+      storageBindingCount(wgsl) <= baselineStorageBufferLimit,
+      `${label} uses ${storageBindingCount(wgsl)} storage buffers`,
+    );
+  }
+});
 
 test("sparse WGSL kernels regret-match and propagate beliefs by depth", async () => {
   const device = await createDawnDevice();

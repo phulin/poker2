@@ -1140,6 +1140,42 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_SHOWDOWN_RANK_PREFIX_PACKED_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  batch: u32,
+  maxRanks: u32,
+  _pad0: u32,
+  rankMassOffset: u32,
+  rankPrefixOffset: u32,
+  rankTotalOffset: u32,
+  _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> rankCounts: array<u32>;
+@group(0) @binding(1) var<storage, read_write> rankScratch: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let samplePlayer = gid.x;
+  if (samplePlayer >= params.batch * 2u) {
+    return;
+  }
+  let sample = samplePlayer / 2u;
+  let rankCount = rankCounts[sample];
+  let base = samplePlayer * params.maxRanks;
+  var sum = 0.0;
+  for (var rank = 0u; rank < params.maxRanks; rank = rank + 1u) {
+    rankScratch[params.rankPrefixOffset + base + rank] = sum;
+    if (rank < rankCount) {
+      sum = sum + rankScratch[params.rankMassOffset + base + rank];
+    }
+  }
+  rankScratch[params.rankTotalOffset + samplePlayer] = sum;
+}
+`;
+
 export const SPARSE_SHOWDOWN_RANK_MASS_BY_HANDS_WGSL = /* wgsl */ `
 struct Params {
   numHands: u32,
@@ -1466,6 +1502,33 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_PACKED_WGSL =
+  SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_WGSL
+    .replace(
+      `  _overlapSlots: u32,
+};`,
+      `  _overlapSlots: u32,
+  rankMassOffset: u32,
+  rankPrefixOffset: u32,
+  rankTotalOffset: u32,
+  _pad0: u32,
+};`,
+    )
+    .replace("@group(0) @binding(6) var<storage, read> rankMass: array<f32>;\n", "")
+    .replace("@group(0) @binding(7) var<storage, read> rankPrefixLess: array<f32>;\n", "")
+    .replace("@group(0) @binding(8) var<storage, read> rankTotal: array<f32>;\n", "")
+    .replace(
+      "@group(0) @binding(9) var<storage, read_write> values: array<f32>;",
+      "@group(0) @binding(6) var<storage, read> rankScratch: array<f32>;\n@group(0) @binding(7) var<storage, read_write> values: array<f32>;",
+    )
+    .replace(
+      "@group(0) @binding(10) var<uniform> params: Params;",
+      "@group(0) @binding(8) var<uniform> params: Params;",
+    )
+    .replaceAll("rankPrefixLess[", "rankScratch[params.rankPrefixOffset + ")
+    .replaceAll("rankMass[", "rankScratch[params.rankMassOffset + ")
+    .replaceAll("rankTotal[", "rankScratch[params.rankTotalOffset + ");
+
 export const SPARSE_ALLIN_TABLE_VALUES_WGSL = /* wgsl */ `
 struct Params {
   numHands: u32,
@@ -1552,6 +1615,7 @@ export const SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL =
     .replace("numHands: u32,", "_numHands: u32,")
     .replace("permId: u32,", "_permId: u32,")
     .replace("hasPerm: u32,", "_hasPerm: u32,")
+    .replace("@group(0) @binding(5) var<storage, read> comboPerms: array<u32>;\n", "")
     .replace(
       `fn table_hand(hand: u32) -> u32 {
   if (params.hasPerm != 0u) {
@@ -1821,10 +1885,12 @@ export class SparseCfrGpuKernels {
   private readonly showdownRankMassByHandsPipeline: GPUComputePipeline;
   private readonly showdownRankMassByHandsBothPlayersPipeline: GPUComputePipeline;
   private readonly showdownRankPrefixPipeline: GPUComputePipeline;
-  private readonly showdownValuesFromRanksPipeline: GPUComputePipeline;
-  private readonly showdownValuesFromRanks1326Pipeline: GPUComputePipeline;
-  private readonly showdownValuesFromRanks1326BothPlayersPipeline: GPUComputePipeline;
-  private readonly allInTableValuesPipeline: GPUComputePipeline;
+  private readonly showdownRankPrefixPackedPipeline: GPUComputePipeline;
+  private readonly showdownValuesFromRanksPipeline?: GPUComputePipeline;
+  private readonly showdownValuesFromRanks1326Pipeline?: GPUComputePipeline;
+  private readonly showdownValuesFromRanks1326BothPlayersPipeline?: GPUComputePipeline;
+  private readonly showdownValuesFromRanks1326BothPlayersPackedPipeline: GPUComputePipeline;
+  private readonly allInTableValuesPipeline?: GPUComputePipeline;
   private readonly allInTableValues1326NoPermPipeline: GPUComputePipeline;
   private readonly allInTableValues1326NoPermBothPlayersPipeline: GPUComputePipeline;
   private readonly allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline: GPUComputePipeline;
@@ -1832,6 +1898,7 @@ export class SparseCfrGpuKernels {
 
   constructor(device: GPUDevice) {
     this.device = device;
+    const maxStorageBuffers = device.limits.maxStorageBuffersPerShaderStage;
     this.regretMatchPipeline = this.pipeline(
       SPARSE_REGRET_MATCH_WGSL,
       "sparse-cfr-regret-match",
@@ -1928,22 +1995,34 @@ export class SparseCfrGpuKernels {
       SPARSE_SHOWDOWN_RANK_PREFIX_WGSL,
       "sparse-cfr-showdown-rank-prefix",
     );
-    this.showdownValuesFromRanksPipeline = this.pipeline(
-      SPARSE_SHOWDOWN_VALUES_FROM_RANKS_WGSL,
-      "sparse-cfr-showdown-values-from-ranks",
+    this.showdownRankPrefixPackedPipeline = this.pipeline(
+      SPARSE_SHOWDOWN_RANK_PREFIX_PACKED_WGSL,
+      "sparse-cfr-showdown-rank-prefix-packed",
     );
-    this.showdownValuesFromRanks1326Pipeline = this.pipeline(
-      SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_WGSL,
-      "sparse-cfr-showdown-values-from-ranks-1326",
+    this.showdownValuesFromRanks1326BothPlayersPackedPipeline = this.pipeline(
+      SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_PACKED_WGSL,
+      "sparse-cfr-showdown-values-from-ranks-1326-both-players-packed",
     );
-    this.showdownValuesFromRanks1326BothPlayersPipeline = this.pipeline(
-      SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_WGSL,
-      "sparse-cfr-showdown-values-from-ranks-1326-both-players",
-    );
-    this.allInTableValuesPipeline = this.pipeline(
-      SPARSE_ALLIN_TABLE_VALUES_WGSL,
-      "sparse-cfr-allin-table-values",
-    );
+    if (maxStorageBuffers >= 10) {
+      this.showdownValuesFromRanksPipeline = this.pipeline(
+        SPARSE_SHOWDOWN_VALUES_FROM_RANKS_WGSL,
+        "sparse-cfr-showdown-values-from-ranks",
+      );
+      this.showdownValuesFromRanks1326Pipeline = this.pipeline(
+        SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_WGSL,
+        "sparse-cfr-showdown-values-from-ranks-1326",
+      );
+      this.showdownValuesFromRanks1326BothPlayersPipeline = this.pipeline(
+        SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_WGSL,
+        "sparse-cfr-showdown-values-from-ranks-1326-both-players",
+      );
+    }
+    if (maxStorageBuffers >= 9) {
+      this.allInTableValuesPipeline = this.pipeline(
+        SPARSE_ALLIN_TABLE_VALUES_WGSL,
+        "sparse-cfr-allin-table-values",
+      );
+    }
     this.allInTableValues1326NoPermPipeline = this.pipeline(
       SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL,
       "sparse-cfr-allin-table-values-1326-noperm",
@@ -2871,6 +2950,89 @@ export class SparseCfrGpuKernels {
     return paramsList;
   }
 
+  encodeShowdownValuesFromRankAggregatesPacked(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    rankOrdinals: GPUBuffer,
+    rankCounts: GPUBuffer,
+    payoffs: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    rankScratch: GPUBuffer,
+    batch: number,
+    maxRanks: number,
+    rankHandOffsets: GPUBuffer,
+    rankHandCounts: GPUBuffer,
+    rankHands: GPUBuffer,
+  ): GPUBuffer[] {
+    if (tree.numHands !== 1326 || tree.overlapSlots !== 101) {
+      throw new Error("packed showdown rank aggregates require 1326 HUNL hands");
+    }
+    const aggregateCount = batch * 2 * maxRanks;
+    const rankMassOffset = 0;
+    const rankPrefixOffset = aggregateCount;
+    const rankTotalOffset = aggregateCount * 2;
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([
+        tree.numHands,
+        batch,
+        maxRanks,
+        tree.overlapSlots,
+        rankMassOffset,
+        rankPrefixOffset,
+        rankTotalOffset,
+        0,
+      ]),
+    );
+    const paramsList = [params];
+    this.encodeShowdownRankMassByHandsBothPlayers(
+      encoder,
+      tree,
+      nodeIndices,
+      rankHandOffsets,
+      rankHandCounts,
+      rankHands,
+      rankCounts,
+      beliefs,
+      rankScratch,
+      batch,
+      maxRanks,
+      params,
+    );
+    this.encodeShowdownRankPrefixPacked(
+      encoder,
+      rankCounts,
+      rankScratch,
+      batch,
+      maxRanks,
+      rankMassOffset,
+      rankPrefixOffset,
+      rankTotalOffset,
+      params,
+    );
+    for (let start = 0; start < batch; start += SHOWDOWN_BOTH_PLAYER_SAMPLE_CHUNK) {
+      paramsList.push(this.encodeShowdownValuesFromRanks1326BothPlayersPacked(
+        encoder,
+        tree,
+        nodeIndices,
+        rankOrdinals,
+        payoffs,
+        beliefs,
+        values,
+        rankScratch,
+        Math.min(SHOWDOWN_BOTH_PLAYER_SAMPLE_CHUNK, batch - start),
+        maxRanks,
+        rankMassOffset + start * 2 * maxRanks,
+        rankPrefixOffset + start * 2 * maxRanks,
+        rankTotalOffset + start * 2,
+        start,
+      ));
+    }
+    return paramsList;
+  }
+
   encodeShowdownValuesFromRankAggregatesReference(
     encoder: GPUCommandEncoder,
     tree: SparseGpuTreeBuffers,
@@ -3088,6 +3250,49 @@ export class SparseCfrGpuKernels {
     return params;
   }
 
+  encodeShowdownRankPrefixPacked(
+    encoder: GPUCommandEncoder,
+    rankCounts: GPUBuffer,
+    rankScratch: GPUBuffer,
+    batch: number,
+    maxRanks: number,
+    rankMassOffset: number,
+    rankPrefixOffset: number,
+    rankTotalOffset: number,
+    existingParams?: GPUBuffer,
+  ): GPUBuffer {
+    const params =
+      existingParams ??
+      makeUniformBuffer(
+        this.device,
+        new Uint32Array([
+          0,
+          batch,
+          maxRanks,
+          0,
+          rankMassOffset,
+          rankPrefixOffset,
+          rankTotalOffset,
+          0,
+        ]),
+      );
+    const prefixBindGroup = this.device.createBindGroup({
+      layout: this.showdownRankPrefixPackedPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: rankCounts } },
+        { binding: 1, resource: { buffer: rankScratch } },
+        { binding: 2, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.showdownRankPrefixPackedPipeline,
+      prefixBindGroup,
+      batch * 2,
+    );
+    return params;
+  }
+
   encodeShowdownValuesFromRanksReference(
     encoder: GPUCommandEncoder,
     tree: SparseGpuTreeBuffers,
@@ -3103,6 +3308,12 @@ export class SparseCfrGpuKernels {
     maxRanks: number,
     existingParams?: GPUBuffer,
   ): GPUBuffer {
+    const pipeline = this.showdownValuesFromRanksPipeline;
+    if (!pipeline) {
+      throw new Error(
+        "reference showdown rank values require maxStorageBuffersPerShaderStage >= 10",
+      );
+    }
     const params =
       existingParams ??
       makeUniformBuffer(
@@ -3110,7 +3321,7 @@ export class SparseCfrGpuKernels {
         new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
       );
     const valuesBindGroup = this.device.createBindGroup({
-      layout: this.showdownValuesFromRanksPipeline.getBindGroupLayout(0),
+      layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: nodeIndices } },
         { binding: 1, resource: { buffer: rankOrdinals } },
@@ -3127,7 +3338,7 @@ export class SparseCfrGpuKernels {
     });
     this.encode(
       encoder,
-      this.showdownValuesFromRanksPipeline,
+      pipeline,
       valuesBindGroup,
       Math.ceil((batch * 2 * tree.numHands) / 128),
     );
@@ -3152,6 +3363,12 @@ export class SparseCfrGpuKernels {
     if (tree.numHands !== 1326 || tree.overlapSlots !== 101) {
       throw new Error("1326 showdown values require 1326 HUNL hands");
     }
+    const pipeline = this.showdownValuesFromRanks1326Pipeline;
+    if (!pipeline) {
+      throw new Error(
+        "1326 showdown rank values require maxStorageBuffersPerShaderStage >= 10",
+      );
+    }
     const params =
       existingParams ??
       makeUniformBuffer(
@@ -3159,7 +3376,7 @@ export class SparseCfrGpuKernels {
         new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
       );
     const valuesBindGroup = this.device.createBindGroup({
-      layout: this.showdownValuesFromRanks1326Pipeline.getBindGroupLayout(0),
+      layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: nodeIndices } },
         { binding: 1, resource: { buffer: rankOrdinals } },
@@ -3176,7 +3393,7 @@ export class SparseCfrGpuKernels {
     });
     this.encode(
       encoder,
-      this.showdownValuesFromRanks1326Pipeline,
+      pipeline,
       valuesBindGroup,
       Math.ceil((batch * 2652) / 128),
     );
@@ -3202,6 +3419,12 @@ export class SparseCfrGpuKernels {
     if (tree.numHands !== 1326 || tree.overlapSlots !== 101) {
       throw new Error("both-player showdown values require 1326 HUNL hands");
     }
+    const pipeline = this.showdownValuesFromRanks1326BothPlayersPipeline;
+    if (!pipeline) {
+      throw new Error(
+        "both-player showdown rank values require maxStorageBuffersPerShaderStage >= 10",
+      );
+    }
     const params =
       existingParams ??
       makeUniformBuffer(
@@ -3209,7 +3432,7 @@ export class SparseCfrGpuKernels {
         new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
       );
     const valuesBindGroup = this.device.createBindGroup({
-      layout: this.showdownValuesFromRanks1326BothPlayersPipeline.getBindGroupLayout(0),
+      layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: nodeIndices, offset: sampleStart * 4 } },
         { binding: 1, resource: { buffer: rankOrdinals, offset: sampleStart * 1326 * 4 } },
@@ -3226,7 +3449,62 @@ export class SparseCfrGpuKernels {
     });
     this.encode(
       encoder,
-      this.showdownValuesFromRanks1326BothPlayersPipeline,
+      pipeline,
+      valuesBindGroup,
+      Math.ceil((batch * 1326) / 128),
+    );
+    return params;
+  }
+
+  encodeShowdownValuesFromRanks1326BothPlayersPacked(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    rankOrdinals: GPUBuffer,
+    payoffs: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    rankScratch: GPUBuffer,
+    batch: number,
+    maxRanks: number,
+    rankMassOffset: number,
+    rankPrefixOffset: number,
+    rankTotalOffset: number,
+    sampleStart = 0,
+  ): GPUBuffer {
+    if (tree.numHands !== 1326 || tree.overlapSlots !== 101) {
+      throw new Error("packed both-player showdown values require 1326 HUNL hands");
+    }
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([
+        tree.numHands,
+        batch,
+        maxRanks,
+        tree.overlapSlots,
+        rankMassOffset,
+        rankPrefixOffset,
+        rankTotalOffset,
+        0,
+      ]),
+    );
+    const valuesBindGroup = this.device.createBindGroup({
+      layout: this.showdownValuesFromRanks1326BothPlayersPackedPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices, offset: sampleStart * 4 } },
+        { binding: 1, resource: { buffer: rankOrdinals, offset: sampleStart * 1326 * 4 } },
+        { binding: 2, resource: { buffer: tree.overlapHands } },
+        { binding: 3, resource: { buffer: tree.overlapCounts } },
+        { binding: 4, resource: { buffer: payoffs, offset: sampleStart * 3 * 4 } },
+        { binding: 5, resource: { buffer: beliefs } },
+        { binding: 6, resource: { buffer: rankScratch } },
+        { binding: 7, resource: { buffer: values } },
+        { binding: 8, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.showdownValuesFromRanks1326BothPlayersPackedPipeline,
       valuesBindGroup,
       Math.ceil((batch * 1326) / 128),
     );
@@ -3346,6 +3624,12 @@ export class SparseCfrGpuKernels {
     permId: number,
     hasPerm: boolean,
   ): GPUBuffer {
+    const pipeline = this.allInTableValuesPipeline;
+    if (!pipeline) {
+      throw new Error(
+        "reference all-in table values require maxStorageBuffersPerShaderStage >= 9",
+      );
+    }
     const words = new ArrayBuffer(32);
     const u32 = new Uint32Array(words);
     const f32 = new Float32Array(words);
@@ -3356,7 +3640,7 @@ export class SparseCfrGpuKernels {
     f32[4] = tableScale;
     const params = makeUniformBuffer(this.device, u32);
     const bindGroup = this.device.createBindGroup({
-      layout: this.allInTableValuesPipeline.getBindGroupLayout(0),
+      layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: nodeIndices } },
         { binding: 1, resource: { buffer: tree.allowedMask } },
@@ -3372,7 +3656,7 @@ export class SparseCfrGpuKernels {
     });
     this.encode(
       encoder,
-      this.allInTableValuesPipeline,
+      pipeline,
       bindGroup,
       Math.ceil((batch * 2 * tree.numHands) / 64),
     );
