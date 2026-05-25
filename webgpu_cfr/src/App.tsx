@@ -1761,22 +1761,9 @@ function App(): JSX.Element {
             </div>
           </div>
 
-          <div class="card-section">
-            <div class="card-section-head">
-              <span class="card-section-title">Hero hand</span>
-            </div>
-            <HeroHandSelector
-              value={heroHandText()}
-              parsedCards={parsedHeroCards()}
-              error={heroHandError()}
-              blockedCards={boardUsedCards()}
-              onComboChange={selectHeroCombo}
-            />
-          </div>
-
           <div class="subgroup">
             <div class="subgroup-head">
-              <span class="subgroup-title">Action sequence</span>
+              <span class="subgroup-title">Sequence</span>
               <Show when={actions().length > 0}>
                 <button
                   type="button"
@@ -1789,6 +1776,16 @@ function App(): JSX.Element {
                   Undo last
                 </button>
               </Show>
+            </div>
+            <div class="sequence-hand-row">
+              <span class="street-marker">Hand</span>
+              <HeroHandSelector
+                value={heroHandText()}
+                parsedCards={parsedHeroCards()}
+                error={heroHandError()}
+                blockedCards={boardUsedCards()}
+                onComboChange={selectHeroCombo}
+              />
             </div>
             <Show when={!descriptorError()} fallback={<p class="inline-error">{descriptorError()}</p>}>
               <For each={(descriptor() as StateDescriptor).rows}>
