@@ -102,6 +102,10 @@ interface HashInputs {
   hand?: string | undefined;
   actions?: string | undefined;
   boardCards: string[];
+  button: PlayerIndex;
+  stack: string;
+  sb: string;
+  bb: string;
 }
 
 interface SolveResult {
@@ -167,6 +171,37 @@ function shortActionLabel(bin: number, ctx: ActionContext): string {
 function positiveNumber(value: string, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function defaultNumberText(value: number): string {
+  return String(value);
+}
+
+function hashNumberParam(
+  params: URLSearchParams,
+  key: string,
+  fallback: number,
+): string {
+  const value = params.get(key);
+  if (value === null) return defaultNumberText(fallback);
+  const parsed = positiveNumber(value, fallback);
+  return parsed === fallback ? defaultNumberText(fallback) : value.trim();
+}
+
+function hashHeroParam(value: string | null): PlayerIndex {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "bb" || normalized === "1") return 1;
+  return HERO_PLAYER;
+}
+
+function setHashNumberParam(
+  params: URLSearchParams,
+  key: string,
+  value: string,
+  fallback: number,
+): void {
+  const parsed = positiveNumber(value, fallback);
+  if (parsed !== fallback) params.set(key, value.trim());
 }
 
 function cardFromOption(value: string): number {
@@ -261,13 +296,16 @@ function actionFromHashToken(
   return undefined;
 }
 
-function actionsFromHash(value: string | undefined): number[] {
+function actionsFromHash(
+  value: string | undefined,
+  options: Pick<HashInputs, "button" | "stack" | "sb" | "bb">,
+): number[] {
   if (!value) return [];
   const env = createPublicEnv(LOCAL_ENV_DEFAULTS, {
-    button: HERO_PLAYER,
-    stack: String(LOCAL_ENV_DEFAULTS.stack),
-    sb: String(LOCAL_ENV_DEFAULTS.sb),
-    bb: String(LOCAL_ENV_DEFAULTS.bb),
+    button: options.button,
+    stack: options.stack,
+    sb: options.sb,
+    bb: options.bb,
   });
   const parsed: number[] = [];
   for (const token of value.split("-")) {
@@ -281,12 +319,20 @@ function actionsFromHash(value: string | undefined): number[] {
   return parsed;
 }
 
-function actionTokensForActions(actionsIn: readonly number[]): string {
+function actionTokensForActions(
+  actionsIn: readonly number[],
+  options: {
+    button: PlayerIndex;
+    stack: string;
+    sb: string;
+    bb: string;
+  },
+): string {
   const env = createPublicEnv(LOCAL_ENV_DEFAULTS, {
-    button: HERO_PLAYER,
-    stack: String(LOCAL_ENV_DEFAULTS.stack),
-    sb: String(LOCAL_ENV_DEFAULTS.sb),
-    bb: String(LOCAL_ENV_DEFAULTS.bb),
+    button: options.button,
+    stack: options.stack,
+    sb: options.sb,
+    bb: options.bb,
   });
   const tokens: string[] = [];
   for (const action of actionsIn) {
@@ -309,6 +355,10 @@ function parseHashInputs(hash: string): HashInputs {
     hand: params.get("hand") ?? undefined,
     actions: params.get("actions") ?? undefined,
     boardCards: buildBoardCardsFromHash(params),
+    button: hashHeroParam(params.get("hero")),
+    stack: hashNumberParam(params, "stack", LOCAL_ENV_DEFAULTS.stack),
+    sb: hashNumberParam(params, "sb", LOCAL_ENV_DEFAULTS.sb),
+    bb: hashNumberParam(params, "bb", LOCAL_ENV_DEFAULTS.bb),
   };
 }
 
@@ -1245,7 +1295,6 @@ function App(): JSX.Element {
       }
     | undefined;
   let applyingHash = false;
-  let lastWrittenHash = "";
 
   function clearSolveOutput(): void {
     setSolveResult(undefined);
@@ -1347,8 +1396,12 @@ function App(): JSX.Element {
         setHeroHandText(`${cards[0]} ${cards[1]}`);
         setSelectedRangeKey(rangeKeyFromCards(cards));
       }
+      setButton(input.button);
+      setStack(input.stack);
+      setSb(input.sb);
+      setBb(input.bb);
       setBoardCards(input.boardCards);
-      setActions(actionsFromHash(input.actions));
+      setActions(actionsFromHash(input.actions, input));
       clearSolveOutput();
       setSolveError("");
     } catch (error) {
@@ -1527,18 +1580,29 @@ function App(): JSX.Element {
     } catch {
       params.set("hand", heroHandText().replace(/[\s,]+/g, ""));
     }
-    params.set("actions", actionTokensForActions(actions()));
+    if (button() !== HERO_PLAYER) params.set("hero", "bb");
+    setHashNumberParam(params, "stack", stack(), LOCAL_ENV_DEFAULTS.stack);
+    setHashNumberParam(params, "sb", sb(), LOCAL_ENV_DEFAULTS.sb);
+    setHashNumberParam(params, "bb", bb(), LOCAL_ENV_DEFAULTS.bb);
+    const actionTokens = actionTokensForActions(actions(), {
+      button: button(),
+      stack: stack(),
+      sb: sb(),
+      bb: bb(),
+    });
+    if (actionTokens) params.set("actions", actionTokens);
     const board = boardCards();
-    params.set("flop", board.slice(0, 3).every(Boolean) ? compactCardText(board.slice(0, 3)) : "");
-    params.set("turn", board[3] ? compactCardText([board[3]]) : "");
-    params.set("river", board[4] ? compactCardText([board[4]]) : "");
+    if (board.slice(0, 3).every(Boolean)) {
+      params.set("flop", compactCardText(board.slice(0, 3)));
+    }
+    if (board[3]) params.set("turn", compactCardText([board[3]]));
+    if (board[4]) params.set("river", compactCardText([board[4]]));
     return `#${params.toString()}`;
   });
   createEffect(() => {
     const nextHash = serializedHash();
     if (!hashHydrated() || applyingHash) return;
-    if (nextHash === lastWrittenHash || nextHash === window.location.hash) return;
-    lastWrittenHash = nextHash;
+    if (nextHash === window.location.hash) return;
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${nextHash}`);
   });
   const solveInputError = createMemo(() => {
