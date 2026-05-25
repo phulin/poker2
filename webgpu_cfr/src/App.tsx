@@ -456,18 +456,6 @@ function rankIndex(rank: string): number {
   return RANK_INDEX.get(rank) ?? Number.POSITIVE_INFINITY;
 }
 
-function orderedRanks(rankA: string, rankB: string): [string, string] {
-  return rankIndex(rankA) <= rankIndex(rankB) ? [rankA, rankB] : [rankB, rankA];
-}
-
-function rangeKeyFromCards(cards: HeroCards): string {
-  const rankA = cards[0][0] ?? "";
-  const rankB = cards[1][0] ?? "";
-  if (rankA === rankB) return `${rankA}${rankA}`;
-  const [high, low] = orderedRanks(rankA, rankB);
-  return `${high}${low}${cards[0][1] === cards[1][1] ? "s" : "o"}`;
-}
-
 function rangeCell(rowRank: string, colRank: string): RangeCell {
   if (rowRank === colRank) {
     return {
@@ -519,11 +507,6 @@ function rangeOptions(rangeKey: string, blockedCards: ReadonlySet<string>): Comb
     cards,
     blocked: blockedCards.has(cards[0]) || blockedCards.has(cards[1]),
   }));
-}
-
-function comboMatchesHero(combo: HeroCards, hero?: HeroCards): boolean {
-  if (!hero) return false;
-  return combo.includes(hero[0]) && combo.includes(hero[1]);
 }
 
 function CardSequencePicker(props: {
@@ -702,105 +685,21 @@ function HeroHandSelector(props: {
   value: string;
   parsedCards?: HeroCards | undefined;
   error?: string | undefined;
-  selectedRangeKey: string;
   blockedCards: ReadonlySet<string>;
-  onRangeChange: (rangeKey: string) => void;
   onComboChange: (cards: HeroCards) => void;
 }): JSX.Element {
-  const [open, setOpen] = createSignal(false);
-  let comboContainer: HTMLDivElement | undefined;
-  const selectedOptions = createMemo(() => rangeOptions(props.selectedRangeKey, props.blockedCards));
-
-  function rangeIsBlocked(rangeKey: string): boolean {
-    return rangeOptions(rangeKey, props.blockedCards).every((option) => option.blocked);
-  }
-
-  function scrollCombosIntoView(): void {
-    requestAnimationFrame(() => {
-      const rect = comboContainer?.getBoundingClientRect();
-      if (!rect) return;
-      const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-      if (rect.top >= 0 && rect.bottom <= viewportHeight) return;
-      window.scrollBy({
-        top: rect.bottom - viewportHeight + 12,
-        behavior: "smooth",
-      });
-    });
-  }
-
   return (
     <div class="hero-hand-selector">
-      <div class="hero-hand-row">
-        <CardSequencePicker
-          cards={props.parsedCards ?? []}
-          count={2}
-          disabled={props.blockedCards}
-          placeholder={props.value || "As Kd"}
-          invalid={Boolean(props.error)}
-          onChange={(cards) => props.onComboChange([cards[0]!, cards[1]!] as HeroCards)}
-        />
-        <button
-          type="button"
-          class={`range-toggle ${open() ? "open" : ""}`}
-          aria-expanded={open()}
-          onClick={() => setOpen((current) => !current)}
-        >
-          <span>Grid</span>
-          <ChevronDown size={16} />
-        </button>
-      </div>
+      <CardSequencePicker
+        cards={props.parsedCards ?? []}
+        count={2}
+        disabled={props.blockedCards}
+        placeholder={props.value || "As Kd"}
+        invalid={Boolean(props.error)}
+        onChange={(cards) => props.onComboChange([cards[0]!, cards[1]!] as HeroCards)}
+      />
       <Show when={props.error}>
         <span class="inline-error">{props.error}</span>
-      </Show>
-      <Show when={open()}>
-        <div class="range-grid" role="grid" aria-label="Starting hand range grid">
-          <For each={RANKS}>
-            {(rowRank) => (
-              <For each={RANKS}>
-                {(colRank) => {
-                  const cell = rangeCell(rowRank, colRank);
-                  const blocked = () => rangeIsBlocked(cell.key);
-                  return (
-                    <button
-                      type="button"
-                      role="gridcell"
-                      class={`range-cell ${cell.kind} ${props.selectedRangeKey === cell.key ? "selected" : ""}`}
-                      disabled={blocked()}
-                      onClick={() => {
-                        props.onRangeChange(cell.key);
-                        scrollCombosIntoView();
-                      }}
-                      title={cell.label}
-                    >
-                      {cell.label}
-                    </button>
-                  );
-                }}
-              </For>
-            )}
-          </For>
-        </div>
-        <div class="range-combo-head">
-          <span>{selectedOptions().length} combos</span>
-        </div>
-        <div class="range-combos" ref={comboContainer}>
-          <For each={selectedOptions()}>
-            {(option) => (
-              <button
-                type="button"
-                class={`range-combo ${comboMatchesHero(option.cards, props.parsedCards) ? "selected" : ""}`}
-                disabled={option.blocked}
-                onClick={() => {
-                  props.onComboChange(option.cards);
-                  setOpen(false);
-                }}
-              >
-                <CardChip value={option.cards[0]} />
-                <CardChip value={option.cards[1]} />
-              </button>
-            )}
-          </For>
-        </div>
       </Show>
     </div>
   );
@@ -1250,7 +1149,6 @@ function App(): JSX.Element {
   const [iterations, setIterations] = createSignal("600");
   const [depth, setDepth] = createSignal("5");
   const [heroHandText, setHeroHandText] = createSignal("As Kd");
-  const [selectedRangeKey, setSelectedRangeKey] = createSignal("AKo");
   const [boardCards, setBoardCards] = createSignal(["", "", "", "", ""]);
   const [actions, setActions] = createSignal<number[]>([]);
   const [solveError, setSolveError] = createSignal("");
@@ -1368,7 +1266,6 @@ function App(): JSX.Element {
       if (input.hand) {
         const cards = parseHeroHandText(input.hand);
         setHeroHandText(`${cards[0]} ${cards[1]}`);
-        setSelectedRangeKey(rangeKeyFromCards(cards));
       }
       setButton(input.button);
       setStack(input.stack);
@@ -1630,7 +1527,6 @@ function App(): JSX.Element {
 
   function selectHeroCombo(cards: HeroCards): void {
     setHeroHandText(`${cards[0]} ${cards[1]}`);
-    setSelectedRangeKey(rangeKeyFromCards(cards));
     clearSolveOutput();
   }
 
@@ -1873,12 +1769,7 @@ function App(): JSX.Element {
               value={heroHandText()}
               parsedCards={parsedHeroCards()}
               error={heroHandError()}
-              selectedRangeKey={selectedRangeKey()}
               blockedCards={boardUsedCards()}
-              onRangeChange={(rangeKey) => {
-                setSelectedRangeKey(rangeKey);
-                clearSolveOutput();
-              }}
               onComboChange={selectHeroCombo}
             />
           </div>
