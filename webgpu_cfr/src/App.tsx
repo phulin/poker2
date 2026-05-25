@@ -390,7 +390,7 @@ interface RangeGridCombo {
 interface RangeGridCell extends RangeCell {
   total: number;
   alpha: number;
-  title: string;
+  top: RangeGridCombo[];
 }
 
 interface RangeGridModel {
@@ -2201,9 +2201,24 @@ function RangeGridCollapse(props: { grid: RangeGridModel }): JSX.Element {
                     type="button"
                     class={`range-matrix-cell ${cell.kind}`}
                     aria-label={cell.label}
-                    title={cell.title}
                     style={`--range-alpha: ${cell.alpha};`}
-                  />
+                  >
+                    <span class="range-popover" role="tooltip">
+                      <span class="range-popover-title">{cell.label}</span>
+                      <span class="range-popover-row">
+                        <span>Bucket</span>
+                        <strong>{formatPercent(cell.total)}</strong>
+                      </span>
+                      <For each={cell.top}>
+                        {(combo) => (
+                          <span class="range-popover-row">
+                            <span>{combo.hand}</span>
+                            <strong>{formatPercent(combo.weight)}</strong>
+                          </span>
+                        )}
+                      </For>
+                    </span>
+                  </button>
                 )}
               </For>
             )}
@@ -2248,25 +2263,9 @@ function buildRangeGrid(
     row.map((cell) => ({
       ...cell,
       alpha: maxComboWeight > 0 ? cell.mean / maxComboWeight : 0,
-      title: rangeGridCellTitle(cell),
     })),
   );
   return { label: playerLabel(player), rows };
-}
-
-function rangeGridCellTitle(cell: RangeCell & {
-  total: number;
-  top: RangeGridCombo[];
-}): string {
-  const comboCount = rangeOptions(cell.key, UNBLOCKED_CARDS).length;
-  const lines = [
-    `${cell.label}: ${formatPercent(cell.total)} of range`,
-    `Top 3 of ${comboCount} combos`,
-  ];
-  for (const combo of cell.top) {
-    lines.push(`${combo.hand}: ${formatPercent(combo.weight)}`);
-  }
-  return lines.join("\n");
 }
 
 function formatPercent(value: number): string {
