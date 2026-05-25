@@ -258,7 +258,13 @@ export class SparseCfrResolver {
           values,
           instantRegrets,
         );
-        this.updateCumulativeRegrets(tree, cumulativeRegrets, instantRegrets, t);
+        this.updateCumulativeRegrets(
+          tree,
+          cumulativeRegrets,
+          instantRegrets,
+          t,
+          options.iterations,
+        );
         this.updatePolicy(tree, cumulativeRegrets, policy);
 
         const current = this.propagateReachAndBeliefs(tree, rootBeliefs, policy);
@@ -273,7 +279,7 @@ export class SparseCfrResolver {
             avgNumerator,
             avgDenominator,
             policyAvg,
-            this.averagePolicyWeight(t),
+            this.averagePolicyWeight(t, options.iterations),
           );
         }
         if (cfrAvg) {
@@ -491,15 +497,14 @@ export class SparseCfrResolver {
     return cfr?.cfrType === "discounted" && t <= (cfr.dcfrPlusDelay ?? 0);
   }
 
-  private averagePolicyWeight(t: number): number {
+  private averagePolicyWeight(t: number, iterations: number): number {
     const cfr = this.model.manifest.cfr;
     if (cfr?.cfrType === "linear") return 2;
     if (cfr?.cfrType !== "discounted") return 1;
     if (this.averageAccumulationDelayed(t)) return 0;
     const delay = cfr.dcfrPlusDelay ?? 0;
-    const iterations = Math.max(1, cfr.iterations ?? 1);
     const window = Math.max(1, iterations - delay);
-    const gamma = this.scheduledDcfrParam("dcfrGamma", "dcfrGammaFinal", t);
+    const gamma = this.scheduledDcfrParam("dcfrGamma", "dcfrGammaFinal", t, iterations);
     const progress = Math.max(0, t - delay) / window;
     return progress ** gamma;
   }
@@ -508,19 +513,20 @@ export class SparseCfrResolver {
     startKey: "dcfrAlpha" | "dcfrBeta" | "dcfrGamma",
     finalKey: "dcfrAlphaFinal" | "dcfrBetaFinal" | "dcfrGammaFinal",
     t: number,
+    iterations: number,
   ): number {
     const cfr = this.model.manifest.cfr;
     const initial = cfr?.[startKey] ?? 0;
     const final = cfr?.[finalKey];
     if (final === undefined || final === null) return initial;
-    const warmStart = this.effectiveWarmStartIterations(cfr?.iterations ?? t + 1);
-    const totalIterations = Math.max(1, (cfr?.iterations ?? t + 1) - warmStart);
+    const warmStart = this.effectiveWarmStartIterations(iterations);
+    const totalIterations = Math.max(1, iterations - warmStart);
     const progress = Math.max(0, t - warmStart) / totalIterations;
     const normalized = Math.min(1, Math.max(0, progress));
     return initial + (final - initial) * normalized;
   }
 
-  private regretUpdateOptions(iteration: number): {
+  private regretUpdateOptions(iteration: number, iterations: number): {
     discountPositive: number;
     discountNegative: number;
     linearSkipActor: number;
@@ -530,8 +536,18 @@ export class SparseCfrResolver {
     let discountPositive = 1;
     let discountNegative = 1;
     if (cfr?.cfrType === "discounted") {
-      const alpha = this.scheduledDcfrParam("dcfrAlpha", "dcfrAlphaFinal", iteration);
-      const beta = this.scheduledDcfrParam("dcfrBeta", "dcfrBetaFinal", iteration);
+      const alpha = this.scheduledDcfrParam(
+        "dcfrAlpha",
+        "dcfrAlphaFinal",
+        iteration,
+        iterations,
+      );
+      const beta = this.scheduledDcfrParam(
+        "dcfrBeta",
+        "dcfrBetaFinal",
+        iteration,
+        iterations,
+      );
       const positivePower = iteration ** alpha;
       const negativePower = iteration ** beta;
       discountPositive = positivePower / (positivePower + 1);
@@ -550,9 +566,10 @@ export class SparseCfrResolver {
     cumulativeRegrets: Float32Array,
     instantRegrets: Float32Array,
     iteration: number,
+    iterations: number,
   ): void {
     const { discountPositive, discountNegative, linearSkipActor, cfrPlus } =
-      this.regretUpdateOptions(iteration);
+      this.regretUpdateOptions(iteration, iterations);
     for (let nodeIndex = 1; nodeIndex < tree.nodes.length; nodeIndex += 1) {
       const node = tree.nodes[nodeIndex]!;
       const skipLinear = linearSkipActor < 2 && node.actionFromParent >= 0
@@ -1141,6 +1158,7 @@ export class SparseCfrResolver {
             cfrAvg ? beliefsAvgBuffer! : undefined,
             averageDelayed && readPolicyAvg,
             t,
+            iterations,
           );
         });
 
@@ -1617,6 +1635,7 @@ export class SparseCfrResolver {
     beliefsAvgBuffer: GPUBuffer | undefined,
     copyPolicyToAverage: boolean,
     iteration: number,
+    iterations: number,
   ): void {
     if (!this.gpuKernels) return;
     const encoder = this.model.device.createCommandEncoder();
@@ -1640,6 +1659,7 @@ export class SparseCfrResolver {
       beliefsAvgBuffer,
       copyPolicyToAverage,
       iteration,
+      iterations,
     );
     this.model.device.queue.submit([encoder.finish()]);
     for (const param of params) param.destroy();
@@ -1665,6 +1685,7 @@ export class SparseCfrResolver {
     beliefsAvgBuffer: GPUBuffer | undefined,
     copyPolicyToAverage: boolean,
     iteration: number,
+    iterations: number,
   ): GPUBuffer[] {
     if (!this.gpuKernels) return [];
     const regretWeightEnd = tree.depthOffsets[tree.treeDepth] ?? tree.nodes.length;
@@ -1686,7 +1707,7 @@ export class SparseCfrResolver {
         regretsBuffer,
         1,
         tree.nodes.length,
-        this.regretUpdateOptions(iteration),
+        this.regretUpdateOptions(iteration, iterations),
       ),
       ...this.gpuKernels.encodeRegretMatch(
         encoder,
@@ -1729,7 +1750,7 @@ export class SparseCfrResolver {
           policyAvgBuffer,
           1,
           tree.nodes.length,
-          this.averagePolicyWeight(iteration),
+          this.averagePolicyWeight(iteration, iterations),
         ),
       );
     }

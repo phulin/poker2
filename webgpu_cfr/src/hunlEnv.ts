@@ -562,12 +562,16 @@ export function encodeBetterFeatures(env: PublicHunlEnv, valuePreChance = false)
   policyContext[2] = env.actionsThisRound;
   const valueContext = new Float32Array(shared);
   valueContext[2] = valuePreChance ? 1 : 0;
+  const street =
+    valuePreChance && env.actionsThisRound === 0
+      ? Math.max(0, env.street - 1)
+      : env.street;
   return {
     context: legacyContext,
     policyContext,
     valueContext,
-    street: env.street,
-    board: [...env.boardIndices],
+    street,
+    board: valuePreChance ? [...env.lastBoardIndices] : [...env.boardIndices],
   };
 }
 

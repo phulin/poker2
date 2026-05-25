@@ -60,12 +60,23 @@ def _load_split_model(
     return model, cfg
 
 
-def _make_env(cfg: Config, device: torch.device, force_button: int) -> HUNLTensorEnv:
+def _make_env(
+    cfg: Config,
+    device: torch.device,
+    force_button: int,
+    stack: int | None = None,
+    sb: int | None = None,
+    bb: int | None = None,
+    force_deck: list[int] | None = None,
+) -> HUNLTensorEnv:
+    stack = cfg.env.stack if stack is None else stack
+    sb = cfg.env.sb if sb is None else sb
+    bb = cfg.env.bb if bb is None else bb
     env = HUNLTensorEnv(
         num_envs=1,
-        starting_stack=cfg.env.stack,
-        sb=cfg.env.sb,
-        bb=cfg.env.bb,
+        starting_stack=stack,
+        sb=sb,
+        bb=bb,
         default_bet_bins=cfg.env.bet_bins,
         device=device,
         float_dtype=torch.float32,
@@ -73,7 +84,11 @@ def _make_env(cfg: Config, device: torch.device, force_button: int) -> HUNLTenso
     )
     env.reset(
         force_button=torch.tensor([force_button], dtype=torch.long, device=device),
-        force_deck=torch.tensor([DEFAULT_FORCE_DECK], dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [force_deck or DEFAULT_FORCE_DECK],
+            dtype=torch.long,
+            device=device,
+        ),
     )
     return env
 
@@ -82,10 +97,26 @@ def _combo_index(card_a: int, card_b: int) -> int:
     return int(combo_lookup_tensor()[card_a, card_b].item())
 
 
-def build_fixture(snapshot: Path, force_button: int) -> dict[str, Any]:
+def _parse_int_list(value: str | None) -> list[int]:
+    if not value:
+        return []
+    return [int(part) for part in value.split(",") if part]
+
+
+def build_fixture(args: argparse.Namespace) -> dict[str, Any]:
     device = torch.device("cpu")
-    model, cfg = _load_split_model(snapshot, device)
-    env = _make_env(cfg, device, force_button)
+    model, cfg = _load_split_model(args.snapshot, device)
+    env = _make_env(
+        cfg,
+        device,
+        args.force_button,
+        stack=args.stack,
+        sb=args.sb,
+        bb=args.bb,
+        force_deck=_parse_int_list(args.force_deck) or None,
+    )
+    for action in _parse_int_list(args.actions):
+        env.step_bins(torch.tensor([action], dtype=torch.long, device=device))
     beliefs = torch.full((1, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32)
 
     policy_encoder = model.policy_model.create_feature_encoder(
@@ -98,12 +129,11 @@ def build_fixture(snapshot: Path, force_button: int) -> dict[str, Any]:
         policy = model.policy_model(
             policy_encoder.encode(beliefs), include_policy=True, include_value=False
         ).policy_logits[0]
-        values = model.value_model(
-            value_encoder.encode(beliefs),
-            include_policy=False,
-            include_value=True,
-            value_head="pre",
-        ).hand_values[0]
+        value_features = value_encoder.encode(
+            beliefs,
+            pre_chance_node=args.value_pre_chance,
+        )
+        values = model.value_model.forward_pre(value_features)[0]
 
     hands = {
         "AsKd": _combo_index(51, 24),
@@ -114,10 +144,12 @@ def build_fixture(snapshot: Path, force_button: int) -> dict[str, Any]:
     return {
         "schemaVersion": 1,
         "source": "p2.webgpu_cfr.split_reference",
-        "snapshot": str(snapshot),
+        "snapshot": str(args.snapshot),
         "numHands": NUM_HANDS,
         "numActions": cfg.model.num_actions,
-        "forceButton": force_button,
+        "forceButton": args.force_button,
+        "valueStreet": int(value_features.street[0].item()),
+        "valueBoard": value_features.board[0].long().tolist(),
         "hands": {
             label: {
                 "index": index,
@@ -133,10 +165,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--force-button", type=int, default=1)
+    parser.add_argument("--force-deck", type=str)
+    parser.add_argument("--actions", type=str)
+    parser.add_argument("--stack", type=int)
+    parser.add_argument("--sb", type=int)
+    parser.add_argument("--bb", type=int)
+    parser.add_argument("--value-pre-chance", action="store_true")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
-    fixture = build_fixture(args.snapshot, args.force_button)
+    fixture = build_fixture(args)
     text = json.dumps(fixture, separators=(",", ":"))
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

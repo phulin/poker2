@@ -30,6 +30,8 @@ interface SplitReference {
   schemaVersion: number;
   numHands: number;
   numActions: number;
+  valueStreet?: number;
+  valueBoard?: number[];
   hands: Record<
     string,
     {
@@ -54,7 +56,7 @@ interface SplitCfrReference {
   >;
 }
 
-function loadPythonReference(): SplitReference {
+function loadPythonReference(extraArgs: string[] = []): SplitReference {
   const result = spawnSync(
     "uv",
     [
@@ -65,6 +67,7 @@ function loadPythonReference(): SplitReference {
       CHECKPOINT,
       "--force-button",
       "1",
+      ...extraArgs,
     ],
     {
       cwd: ROOT,
@@ -78,7 +81,7 @@ function loadPythonReference(): SplitReference {
   return JSON.parse(result.stdout) as SplitReference;
 }
 
-function loadPythonCfrReference(): SplitCfrReference {
+function loadPythonCfrReference(iterations: number): SplitCfrReference {
   const result = spawnSync(
     "uv",
     [
@@ -90,7 +93,7 @@ function loadPythonCfrReference(): SplitCfrReference {
       "--preflop-allin-table",
       PYTORCH_PREFLOP_ALL_IN,
       "--iterations",
-      "1",
+      String(iterations),
       "--depth",
       "6",
       "--force-button",
@@ -192,6 +195,66 @@ test("rebel_296_4000 WebGPU export matches PyTorch split checkpoint on root PBS"
   }
 });
 
+test("rebel_296_4000 pre-chance value leaves use PyTorch street-boundary features", async () => {
+  const reference = loadPythonReference([
+    "--force-button",
+    "0",
+    "--force-deck",
+    "51,24,38,12,25,0,13,26,1",
+    "--actions",
+    "1,1",
+    "--stack",
+    "400",
+    "--sb",
+    "1",
+    "--bb",
+    "2",
+    "--value-pre-chance",
+  ]);
+  assert.equal(reference.valueStreet, 0);
+  assert.deepEqual(reference.valueBoard, [-1, -1, -1, -1, -1]);
+
+  const device = await createDawnDevice();
+  const model = await loadNodeModel(device, MANIFEST, WEIGHTS);
+  const env = PublicHunlEnv.fromManifest(model.manifest, {
+    button: 0,
+    stack: 400,
+    sb: 1,
+    bb: 2,
+    betBins: model.manifest.env.betBins,
+    flopShowdown: model.manifest.env.flopShowdown,
+    forceDeck: [51, 24, 38, 12, 25, 0, 13, 26, 1],
+  });
+  env.stepBin(1);
+  env.stepBin(1);
+  try {
+    const values = await model.predictBatchHandValues(
+      [env],
+      buildPublicBeliefs(),
+      [true],
+    );
+    for (const [label, expected] of Object.entries(reference.hands)) {
+      assert.equal(
+        expected.index,
+        handComboIndex(parseCard(label.slice(0, 2)), parseCard(label.slice(2, 4))),
+        `${label} combo index`,
+      );
+      assertCloseArray(
+        [
+          values[expected.index]!,
+          values[NUM_HANDS + expected.index]!,
+        ],
+        expected.handValues,
+        3e-5,
+        `${label} pre-chance hand values`,
+      );
+    }
+  } finally {
+    model.dispose();
+    device.destroy();
+  }
+});
+
 test("rebel_296_4000 sparse solve keeps AsKd mostly betting on root PBS", async () => {
   const device = await createDawnDevice();
   const model = await loadNodeModel(device, MANIFEST, WEIGHTS);
@@ -202,7 +265,7 @@ test("rebel_296_4000 sparse solve keeps AsKd mostly betting on root PBS", async 
   try {
     const result = await evaluator.evaluateSpot({
       spot: [],
-      iterations: 1,
+      iterations: 512,
       depth: 6,
       cfrAvg: false,
       initialState: {
@@ -233,7 +296,7 @@ test("rebel_296_4000 sparse solve keeps AsKd mostly betting on root PBS", async 
 });
 
 test("rebel_296_4000 sparse solve matches PyTorch CFR on root PBS", async () => {
-  const reference = loadPythonCfrReference();
+  const reference = loadPythonCfrReference(128);
   assert.equal(reference.schemaVersion, 1);
   assert.equal(reference.numHands, NUM_HANDS);
 
@@ -245,7 +308,7 @@ test("rebel_296_4000 sparse solve matches PyTorch CFR on root PBS", async () => 
   try {
     const result = await evaluator.evaluateSpot({
       spot: [],
-      iterations: 16,
+      iterations: 128,
       depth: 6,
       cfrAvg: false,
       initialState: {
@@ -263,10 +326,10 @@ test("rebel_296_4000 sparse solve matches PyTorch CFR on root PBS", async () => 
       readActionProbs: true,
     });
     assert.equal(reference.numActions, numActions);
-    assertCloseArray(result.actionProbs, reference.actionProbs, 22e-2, "root action probs");
+    assertCloseArray(result.actionProbs, reference.actionProbs, 6e-2, "root action probs");
 
     for (const [label, expected] of Object.entries(reference.hands)) {
-      if (label !== "AsKd") continue;
+      if (label === "AsAh") continue;
       assert.equal(
         expected.index,
         handComboIndex(parseCard(label.slice(0, 2)), parseCard(label.slice(2, 4))),
@@ -276,10 +339,63 @@ test("rebel_296_4000 sparse solve matches PyTorch CFR on root PBS", async () => 
       assertCloseArray(
         result.policy.subarray(policyStart, policyStart + numActions),
         expected.policy,
-        22e-2,
+        8e-2,
         `${label} CFR policy`,
       );
     }
+
+    const aces = reference.hands.AsAh!;
+    const acesPolicyStart = aces.index * numActions;
+    const acesPolicy = result.policy.subarray(
+      acesPolicyStart,
+      acesPolicyStart + numActions,
+    );
+    const acesBetMass = acesPolicy[4]! + acesPolicy[5]! + acesPolicy[6]! + acesPolicy[7]!;
+    assert.ok(acesBetMass > 0.95, `AsAh bet mass ${acesBetMass} should stay high`);
+  } finally {
+    evaluator.dispose();
+    model.dispose();
+    device.destroy();
+  }
+});
+
+test("rebel_296_4000 sparse solve matches PyTorch CFR for AsKd after DCFR convergence", async () => {
+  const reference = loadPythonCfrReference(512);
+  const expected = reference.hands.AsKd!;
+
+  const device = await createDawnDevice();
+  const model = await loadNodeModel(device, MANIFEST, WEIGHTS);
+  const evaluator = new BrowserCfrEvaluator(device, model);
+  const heroHand = [parseCard("As"), parseCard("Kd")] as [number, number];
+  const numActions = model.manifest.architecture.numActions;
+  try {
+    const result = await evaluator.evaluateSpot({
+      spot: [],
+      iterations: 512,
+      depth: 6,
+      cfrAvg: false,
+      initialState: {
+        button: 0,
+        stack: 400,
+        sb: 1,
+        bb: 2,
+        betBins: model.manifest.env.betBins,
+        flopShowdown: model.manifest.env.flopShowdown,
+      },
+      heroPlayer: 0,
+      heroHand,
+      initialBeliefs: buildPublicBeliefs(),
+      readPolicy: true,
+      readActionProbs: true,
+    });
+    assertCloseArray(result.actionProbs, reference.actionProbs, 6e-2, "512 root action probs");
+    const policyStart = expected.index * numActions;
+    assertCloseArray(
+      result.policy.subarray(policyStart, policyStart + numActions),
+      expected.policy,
+      6e-2,
+      "AsKd 512 CFR policy",
+    );
   } finally {
     evaluator.dispose();
     model.dispose();

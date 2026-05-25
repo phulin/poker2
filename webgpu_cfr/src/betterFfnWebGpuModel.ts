@@ -107,6 +107,7 @@ export interface PreparedBatchFeatures {
   batch: number;
   baseEmbedding: GPUBuffer;
   contextFeatures: GPUBuffer;
+  beliefPhaseShift?: GPUBuffer;
   boardRankLow?: GPUBuffer;
   boardSuitLow?: GPUBuffer;
   dispose: () => void;
@@ -561,6 +562,7 @@ export class BetterFfnWebGpuModel {
       const contextDim = this.manifest.architecture.contextDim ?? 11;
       const context = new Float32Array(batch * contextDim);
       const base = new Float32Array(batch * hiddenDim);
+      const beliefPhaseShift = this.beliefPhaseShiftForFeatures(encodedFeatures);
       for (let i = 0; i < batch; i += 1) {
         const features = encodedFeatures[i]!;
         context.set(
@@ -580,6 +582,9 @@ export class BetterFfnWebGpuModel {
         uniform,
       );
       const baseEmbedding = storage(base);
+      const beliefPhaseShiftBuffer = beliefPhaseShift
+        ? storage(beliefPhaseShift)
+        : undefined;
 
       let boardRankLow: GPUBuffer | undefined;
       let boardSuitLow: GPUBuffer | undefined;
@@ -636,6 +641,7 @@ export class BetterFfnWebGpuModel {
       this.device.queue.submit([encoder.finish()]);
       detach(baseEmbedding);
       detach(contextFeatures);
+      if (beliefPhaseShiftBuffer) detach(beliefPhaseShiftBuffer);
       if (boardRankLow) detach(boardRankLow);
       if (boardSuitLow) detach(boardSuitLow);
       let disposed = false;
@@ -643,6 +649,7 @@ export class BetterFfnWebGpuModel {
         batch,
         baseEmbedding,
         contextFeatures,
+        ...(beliefPhaseShiftBuffer ? { beliefPhaseShift: beliefPhaseShiftBuffer } : {}),
         ...(boardRankLow ? { boardRankLow } : {}),
         ...(boardSuitLow ? { boardSuitLow } : {}),
         dispose: () => {
@@ -826,6 +833,12 @@ export class BetterFfnWebGpuModel {
       } else {
         beliefBuffer = beliefs;
       }
+      const encodedFeatures = prepared
+        ? undefined
+        : envs.map((env, i) =>
+            encodeBetterFeatures(env, options.valuePreChance?.[i] ?? false),
+          );
+
       const perPlayerBelief = empty(batch * numPlayers * hiddenDim);
       for (let player = 0; player < numPlayers; player += 1) {
         if (exactBelief && exactBelief.player === player) continue;
@@ -845,10 +858,29 @@ export class BetterFfnWebGpuModel {
           uniform,
         );
       }
+      const computedBeliefPhaseShift = encodedFeatures
+        ? this.beliefPhaseShiftForFeatures(encodedFeatures)
+        : undefined;
+      const beliefPhaseShift =
+        prepared?.beliefPhaseShift ??
+        (computedBeliefPhaseShift ? storage(computedBeliefPhaseShift) : undefined);
+      let beliefInput = perPlayerBelief;
+      if (beliefPhaseShift) {
+        const shiftedBelief = empty(batch * numPlayers * hiddenDim);
+        this.add3(
+          perPlayerBelief,
+          beliefPhaseShift,
+          storage(new Float32Array(batch * numPlayers * hiddenDim)),
+          shiftedBelief,
+          batch * numPlayers * hiddenDim,
+          uniform,
+        );
+        beliefInput = shiftedBelief;
+      }
 
       const beliefFeatures = this.leakyReluBlockBatch(
         "belief_proj",
-        perPlayerBelief,
+        beliefInput,
         batch,
         numPlayers * hiddenDim,
         rangeHiddenDim === 0 ? ffnDim : numPlayers * rangeHiddenDim,
@@ -858,11 +890,6 @@ export class BetterFfnWebGpuModel {
         exactBelief,
       );
 
-      const encodedFeatures = prepared
-        ? undefined
-        : envs.map((env, i) =>
-            encodeBetterFeatures(env, options.valuePreChance?.[i] ?? false),
-          );
       const interactionFeatures = this.buildBeliefBoardInteractionGpu(
         beliefBuffer,
         encodedFeatures?.map((features) => features.board),
@@ -2207,6 +2234,30 @@ export class BetterFfnWebGpuModel {
       empty,
       uniform,
     );
+  }
+
+  private beliefPhaseShiftForFeatures(
+    encodedFeatures: readonly ReturnType<typeof encodeBetterFeatures>[],
+  ): Float32Array<ArrayBuffer> | undefined {
+    if (!this.tensors.has("belief_phase_shift.weight")) return undefined;
+    const shift = this.tensor("belief_phase_shift.weight");
+    const hiddenDim = this.manifest.architecture.hiddenDim;
+    const numPlayers = this.manifest.architecture.numPlayers;
+    const rowSize = numPlayers * hiddenDim;
+    if (shift.shape[1] !== rowSize) {
+      throw new Error(
+        `belief_phase_shift width ${shift.shape[1]} does not match ${rowSize}`,
+      );
+    }
+    const out = new Float32Array(encodedFeatures.length * rowSize);
+    for (let row = 0; row < encodedFeatures.length; row += 1) {
+      const features = encodedFeatures[row]!;
+      const street = Math.max(0, Math.min(4, Math.trunc(features.street)));
+      const phase = Math.max(0, Math.min(1, Math.round(features.valueContext[2]!)));
+      const key = Math.max(0, Math.min(9, street * 2 + phase));
+      out.set(shift.data.subarray(key * rowSize, (key + 1) * rowSize), row * rowSize);
+    }
+    return out;
   }
 
   private baseEmbeddingForBatch(
