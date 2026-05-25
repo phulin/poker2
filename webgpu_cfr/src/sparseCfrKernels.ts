@@ -157,6 +157,95 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_BELIEF_PROPAGATE_FUSED_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  start: u32,
+  end: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> parentIndex: array<u32>;
+@group(0) @binding(1) var<storage, read> prevActor: array<u32>;
+@group(0) @binding(2) var<storage, read> allowedMask: array<u32>;
+@group(0) @binding(3) var<storage, read> allowedProb: array<f32>;
+@group(0) @binding(4) var<storage, read> policy: array<f32>;
+@group(0) @binding(5) var<storage, read_write> beliefs: array<f32>;
+@group(0) @binding(6) var<storage, read_write> denom: array<f32>;
+@group(0) @binding(7) var<uniform> params: Params;
+
+var<workgroup> partial: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let child = params.start + wid.x;
+  let player = wid.y;
+  let lane = lid.x;
+  if (child >= params.end || player >= 2u) {
+    return;
+  }
+
+  let parent = parentIndex[child];
+  let actor = prevActor[child];
+  var sum = 0.0;
+  for (var hand = lane; hand < params.numHands; hand = hand + 256u) {
+    let allowed = allowedMask[child * params.numHands + hand] != 0u;
+    let parentIdx = (parent * 2u + player) * params.numHands + hand;
+    let childIdx = (child * 2u + player) * params.numHands + hand;
+    var value = beliefs[parentIdx];
+    if (player == actor) {
+      value = value * policy[child * params.numHands + hand];
+    }
+    if (!allowed) {
+      value = 0.0;
+    }
+    beliefs[childIdx] = value;
+    sum = sum + value;
+  }
+
+  partial[lane] = sum;
+  workgroupBarrier();
+
+  var stride = 128u;
+  loop {
+    if (lane < stride) {
+      partial[lane] = partial[lane] + partial[lane + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  let d = partial[0];
+  if (lane == 0u) {
+    denom[child * 2u + player] = d;
+  }
+
+  for (var hand = lane; hand < params.numHands; hand = hand + 256u) {
+    let childIdx = (child * 2u + player) * params.numHands + hand;
+    let allowed = allowedMask[child * params.numHands + hand] != 0u;
+    let parentIdx = (parent * 2u + player) * params.numHands + hand;
+    var value = beliefs[parentIdx];
+    if (player == actor) {
+      value = value * policy[child * params.numHands + hand];
+    }
+    if (!allowed) {
+      value = 0.0;
+    }
+    if (d > 1.0e-8) {
+      beliefs[childIdx] = value / d;
+    } else {
+      beliefs[childIdx] = allowedProb[child * params.numHands + hand];
+    }
+  }
+}
+`;
+
 export const SPARSE_REACH_APPLY_WGSL = /* wgsl */ `
 struct Params {
   numHands: u32,
@@ -1103,6 +1192,7 @@ export class SparseCfrGpuKernels {
   private readonly regretMatchPipeline: GPUComputePipeline;
   private readonly beliefApplyPipeline: GPUComputePipeline;
   private readonly beliefNormalizePipeline: GPUComputePipeline;
+  private readonly beliefPropagateFusedPipeline: GPUComputePipeline;
   private readonly reachApplyPipeline: GPUComputePipeline;
   private readonly averagePolicyPipeline: GPUComputePipeline;
   private readonly backupDepthPipeline: GPUComputePipeline;
@@ -1135,6 +1225,10 @@ export class SparseCfrGpuKernels {
     this.beliefNormalizePipeline = this.pipeline(
       SPARSE_BELIEF_NORMALIZE_WGSL,
       "sparse-cfr-belief-normalize",
+    );
+    this.beliefPropagateFusedPipeline = this.pipeline(
+      SPARSE_BELIEF_PROPAGATE_FUSED_WGSL,
+      "sparse-cfr-belief-propagate-fused",
     );
     this.reachApplyPipeline = this.pipeline(
       SPARSE_REACH_APPLY_WGSL,
@@ -1288,6 +1382,37 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer {
+    if (globalThis.process?.env?.P2_DISABLE_FUSED_BELIEF_PROPAGATE !== "1") {
+      return this.encodePropagateBeliefsDepthFused(
+        encoder,
+        tree,
+        policy,
+        beliefs,
+        denom,
+        start,
+        end,
+      );
+    }
+    return this.encodePropagateBeliefsDepthSplit(
+      encoder,
+      tree,
+      policy,
+      beliefs,
+      denom,
+      start,
+      end,
+    );
+  }
+
+  encodePropagateBeliefsDepthSplit(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    policy: GPUBuffer,
+    beliefs: GPUBuffer,
+    denom: GPUBuffer,
+    start: number,
+    end: number,
+  ): GPUBuffer {
     const params = makeUniformBuffer(
       this.device,
       new Uint32Array([tree.numHands, start, end, 0]),
@@ -1326,6 +1451,42 @@ export class SparseCfrGpuKernels {
       this.beliefNormalizePipeline,
       normalizeBindGroup,
       Math.ceil(((end - start) * 2 * tree.numHands) / 64),
+    );
+    return params;
+  }
+
+  encodePropagateBeliefsDepthFused(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    policy: GPUBuffer,
+    beliefs: GPUBuffer,
+    denom: GPUBuffer,
+    start: number,
+    end: number,
+  ): GPUBuffer {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, start, end, 0]),
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.beliefPropagateFusedPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: tree.parentIndex } },
+        { binding: 1, resource: { buffer: tree.prevActor } },
+        { binding: 2, resource: { buffer: tree.allowedMask } },
+        { binding: 3, resource: { buffer: tree.allowedProb } },
+        { binding: 4, resource: { buffer: policy } },
+        { binding: 5, resource: { buffer: beliefs } },
+        { binding: 6, resource: { buffer: denom } },
+        { binding: 7, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.beliefPropagateFusedPipeline,
+      bindGroup,
+      Math.max(0, end - start),
+      2,
     );
     return params;
   }

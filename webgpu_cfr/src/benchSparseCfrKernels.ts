@@ -31,6 +31,9 @@ interface BenchOp {
 interface ValidationResult {
   reference: string;
   maxDiff: number;
+  maxIndex?: number;
+  referenceValue?: number;
+  candidateValue?: number;
 }
 
 interface SparseBenchData {
@@ -281,6 +284,27 @@ function normalizeBeliefs(data: SparseGpuTreeData): Float32Array<ArrayBuffer> {
   return out;
 }
 
+function makePolicy(data: SparseGpuTreeData): Float32Array<ArrayBuffer> {
+  const out = new Float32Array(data.nodeCount * NUM_HANDS);
+  for (let parent = 0; parent < data.nodeCount; parent += 1) {
+    const count = data.childCount[parent]!;
+    if (count === 0) continue;
+    const offset = data.childOffsets[parent]!;
+    for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+      let total = 0;
+      for (let i = 0; i < count; i += 1) {
+        total += 1 + ((hand * 17 + parent * 13 + i * 7) % 11);
+      }
+      for (let i = 0; i < count; i += 1) {
+        const child = data.childIndices[offset + i]!;
+        const weight = 1 + ((hand * 17 + parent * 13 + i * 7) % 11);
+        out[child * NUM_HANDS + hand] = Math.fround(weight / total);
+      }
+    }
+  }
+  return out;
+}
+
 function makeRankOrdinals(batch: number, maxRanks: number): {
   ordinals: Uint32Array<ArrayBuffer>;
   counts: Uint32Array<ArrayBuffer>;
@@ -332,8 +356,8 @@ function makeBenchData(device: GPUDevice): SparseBenchData {
     depthOffsets,
     treeData,
     tree,
-    policy: makeStorageBuffer(device, fillFloat(policyCount, 0.0003, 1)),
-    policyAvg: makeStorageBuffer(device, fillFloat(policyCount, 0.0002, 2)),
+    policy: makeStorageBuffer(device, makePolicy(treeData)),
+    policyAvg: makeStorageBuffer(device, makePolicy(treeData)),
     regrets: makeStorageBuffer(device, fillFloat(policyCount, 0.01, 3)),
     values: makeStorageBuffer(device, fillFloat(valueCount, 0.002, 4)),
     beliefs: makeStorageBuffer(device, normalizeBeliefs(treeData)),
@@ -368,12 +392,27 @@ function makeBenchData(device: GPUDevice): SparseBenchData {
   };
 }
 
-function maxDiff(a: Float32Array<ArrayBufferLike>, b: Float32Array<ArrayBufferLike>): number {
+function diffStats(a: Float32Array<ArrayBufferLike>, b: Float32Array<ArrayBufferLike>): {
+  maxDiff: number;
+  maxIndex: number;
+  referenceValue: number;
+  candidateValue: number;
+} {
   let diff = 0;
+  let maxIndex = 0;
   for (let i = 0; i < a.length; i += 1) {
-    diff = Math.max(diff, Math.abs(a[i]! - b[i]!));
+    const current = Math.abs(a[i]! - b[i]!);
+    if (current > diff) {
+      diff = current;
+      maxIndex = i;
+    }
   }
-  return diff;
+  return {
+    maxDiff: diff,
+    maxIndex,
+    referenceValue: a[maxIndex]!,
+    candidateValue: b[maxIndex]!,
+  };
 }
 
 function destroyParams(params: GPUBuffer | GPUBuffer[] | undefined): void {
@@ -437,7 +476,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
   ): Promise<ValidationResult> => {
     const referenceValues = await readFloatBuffer(device, referenceBuffer, elements);
     const candidateValues = await readFloatBuffer(device, candidateBuffer, elements);
-    return { reference, maxDiff: maxDiff(referenceValues, candidateValues) };
+    return { reference, ...diffStats(referenceValues, candidateValues) };
   };
   return [
     {
@@ -521,11 +560,11 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
         ),
     },
     {
-      name: "belief_propagate_leaf_depth",
+      name: "belief_propagate_leaf_depth_split",
       output: data.beliefs,
       outputElements: data.valueCount,
       encode: (encoder) =>
-        kernels.encodePropagateBeliefsDepth(
+        kernels.encodePropagateBeliefsDepthSplit(
           encoder,
           data.tree,
           data.policy,
@@ -534,6 +573,55 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
           leafStart,
           leafEnd,
         ),
+    },
+    {
+      name: "belief_propagate_leaf_depth_fused",
+      output: data.beliefs,
+      outputElements: data.valueCount,
+      encode: (encoder) =>
+        kernels.encodePropagateBeliefsDepthFused(
+          encoder,
+          data.tree,
+          data.policy,
+          data.beliefs,
+          data.denom,
+          leafStart,
+          leafEnd,
+        ),
+      validate: async () => {
+        const splitBeliefs = makeStorageBuffer(device, normalizeBeliefs(data.treeData));
+        const fusedBeliefs = makeStorageBuffer(device, normalizeBeliefs(data.treeData));
+        const splitDenom = makeEmptyStorageBuffer(device, data.nodeCount * 2);
+        const fusedDenom = makeEmptyStorageBuffer(device, data.nodeCount * 2);
+        await runOnce(device, (encoder) =>
+          kernels.encodePropagateBeliefsDepthSplit(
+            encoder,
+            data.tree,
+            data.policy,
+            splitBeliefs,
+            splitDenom,
+            leafStart,
+            leafEnd,
+          ),
+        );
+        await runOnce(device, (encoder) =>
+          kernels.encodePropagateBeliefsDepthFused(
+            encoder,
+            data.tree,
+            data.policy,
+            fusedBeliefs,
+            fusedDenom,
+            leafStart,
+            leafEnd,
+          ),
+        );
+        return validatePair(
+          splitBeliefs,
+          fusedBeliefs,
+          data.valueCount,
+          "belief_propagate_leaf_depth_split",
+        );
+      },
     },
     {
       name: "reach_propagate_leaf_depth",
