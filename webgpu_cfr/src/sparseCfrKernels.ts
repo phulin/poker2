@@ -1767,6 +1767,19 @@ export interface SparseGpuTreeBuffers {
   dispose: () => void;
 }
 
+const MAX_DISPATCH_WORKGROUPS_PER_DIMENSION = 65535;
+
+function alignedSampleChunk(lanesPerSample: number, workgroupSize: number): number {
+  const maxSamples = Math.floor(
+    (MAX_DISPATCH_WORKGROUPS_PER_DIMENSION * workgroupSize) / lanesPerSample,
+  );
+  return Math.floor(maxSamples / 64) * 64;
+}
+
+const LEAF_SAMPLE_CHUNK = alignedSampleChunk(2 * 1326, 64);
+const TERMINAL_SAMPLE_CHUNK = alignedSampleChunk(1326, 64);
+const SHOWDOWN_BOTH_PLAYER_SAMPLE_CHUNK = alignedSampleChunk(1326, 128);
+
 export class SparseCfrGpuKernels {
   readonly device: GPUDevice;
   private readonly regretMatchPipeline: GPUComputePipeline;
@@ -2599,27 +2612,32 @@ export class SparseCfrGpuKernels {
     beliefs: GPUBuffer,
     out: GPUBuffer,
     batch: number,
-  ): GPUBuffer {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, batch, 0, 0]),
-    );
-    const bindGroup = this.device.createBindGroup({
-      layout: this.gatherNodeBeliefsPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: nodeIndices } },
-        { binding: 1, resource: { buffer: beliefs } },
-        { binding: 2, resource: { buffer: out } },
-        { binding: 3, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.gatherNodeBeliefsPipeline,
-      bindGroup,
-      Math.ceil((batch * 2 * tree.numHands) / 64),
-    );
-    return params;
+  ): GPUBuffer[] {
+    const paramsList: GPUBuffer[] = [];
+    for (let start = 0; start < batch; start += LEAF_SAMPLE_CHUNK) {
+      const chunkBatch = Math.min(LEAF_SAMPLE_CHUNK, batch - start);
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkBatch, 0, 0]),
+      );
+      const bindGroup = this.device.createBindGroup({
+        layout: this.gatherNodeBeliefsPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: nodeIndices, offset: start * 4 } },
+          { binding: 1, resource: { buffer: beliefs } },
+          { binding: 2, resource: { buffer: out, offset: start * 2 * tree.numHands * 4 } },
+          { binding: 3, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.gatherNodeBeliefsPipeline,
+        bindGroup,
+        Math.ceil((chunkBatch * 2 * tree.numHands) / 64),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodeScatterNodeValues(
@@ -2629,27 +2647,32 @@ export class SparseCfrGpuKernels {
     sourceValues: GPUBuffer,
     values: GPUBuffer,
     batch: number,
-  ): GPUBuffer {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, batch, 0, 0]),
-    );
-    const bindGroup = this.device.createBindGroup({
-      layout: this.scatterNodeValuesPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: nodeIndices } },
-        { binding: 1, resource: { buffer: sourceValues } },
-        { binding: 2, resource: { buffer: values } },
-        { binding: 3, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.scatterNodeValuesPipeline,
-      bindGroup,
-      Math.ceil((batch * 2 * tree.numHands) / 64),
-    );
-    return params;
+  ): GPUBuffer[] {
+    const paramsList: GPUBuffer[] = [];
+    for (let start = 0; start < batch; start += LEAF_SAMPLE_CHUNK) {
+      const chunkBatch = Math.min(LEAF_SAMPLE_CHUNK, batch - start);
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkBatch, 0, 0]),
+      );
+      const bindGroup = this.device.createBindGroup({
+        layout: this.scatterNodeValuesPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: nodeIndices, offset: start * 4 } },
+          { binding: 1, resource: { buffer: sourceValues, offset: start * 2 * tree.numHands * 4 } },
+          { binding: 2, resource: { buffer: values } },
+          { binding: 3, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.scatterNodeValuesPipeline,
+        bindGroup,
+        Math.ceil((chunkBatch * 2 * tree.numHands) / 64),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodeShowdownValues(
@@ -2661,32 +2684,37 @@ export class SparseCfrGpuKernels {
     beliefs: GPUBuffer,
     values: GPUBuffer,
     batch: number,
-  ): GPUBuffer {
-    const params = makeUniformBuffer(
-      this.device,
-      new Uint32Array([tree.numHands, batch, 0, 0]),
-    );
-    const bindGroup = this.device.createBindGroup({
-      layout: this.showdownValuesPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: nodeIndices } },
-        { binding: 1, resource: { buffer: tree.allowedMask } },
-        { binding: 2, resource: { buffer: tree.handCard0 } },
-        { binding: 3, resource: { buffer: tree.handCard1 } },
-        { binding: 4, resource: { buffer: rankCodes } },
-        { binding: 5, resource: { buffer: payoffs } },
-        { binding: 6, resource: { buffer: beliefs } },
-        { binding: 7, resource: { buffer: values } },
-        { binding: 8, resource: { buffer: params } },
-      ],
-    });
-    this.encode(
-      encoder,
-      this.showdownValuesPipeline,
-      bindGroup,
-      Math.ceil((batch * 2 * tree.numHands) / 128),
-    );
-    return params;
+  ): GPUBuffer[] {
+    const paramsList: GPUBuffer[] = [];
+    for (let start = 0; start < batch; start += TERMINAL_SAMPLE_CHUNK) {
+      const chunkBatch = Math.min(TERMINAL_SAMPLE_CHUNK, batch - start);
+      const params = makeUniformBuffer(
+        this.device,
+        new Uint32Array([tree.numHands, chunkBatch, 0, 0]),
+      );
+      const bindGroup = this.device.createBindGroup({
+        layout: this.showdownValuesPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: nodeIndices, offset: start * 4 } },
+          { binding: 1, resource: { buffer: tree.allowedMask } },
+          { binding: 2, resource: { buffer: tree.handCard0 } },
+          { binding: 3, resource: { buffer: tree.handCard1 } },
+          { binding: 4, resource: { buffer: rankCodes, offset: start * tree.numHands * 4 } },
+          { binding: 5, resource: { buffer: payoffs, offset: start * 3 * 4 } },
+          { binding: 6, resource: { buffer: beliefs } },
+          { binding: 7, resource: { buffer: values } },
+          { binding: 8, resource: { buffer: params } },
+        ],
+      });
+      this.encode(
+        encoder,
+        this.showdownValuesPipeline,
+        bindGroup,
+        Math.ceil((chunkBatch * 2 * tree.numHands) / 128),
+      );
+      paramsList.push(params);
+    }
+    return paramsList;
   }
 
   encodeShowdownValuesFromRankAggregates(
@@ -2706,7 +2734,7 @@ export class SparseCfrGpuKernels {
     rankHandOffsets?: GPUBuffer,
     rankHandCounts?: GPUBuffer,
     rankHands?: GPUBuffer,
-  ): GPUBuffer {
+  ): GPUBuffer[] {
     if (!rankHandOffsets || !rankHandCounts || !rankHands) {
       throw new Error("production showdown rank aggregates require rank-hand buffers");
     }
@@ -2726,6 +2754,7 @@ export class SparseCfrGpuKernels {
       batch,
       maxRanks,
     );
+    const paramsList = [params];
     this.encodeShowdownRankPrefix(
       encoder,
       rankCounts,
@@ -2736,22 +2765,25 @@ export class SparseCfrGpuKernels {
       maxRanks,
       params,
     );
-    this.encodeShowdownValuesFromRanks1326BothPlayers(
-      encoder,
-      tree,
-      nodeIndices,
-      rankOrdinals,
-      payoffs,
-      beliefs,
-      values,
-      rankMass,
-      rankPrefixLess,
-      rankTotal,
-      batch,
-      maxRanks,
-      params,
-    );
-    return params;
+    for (let start = 0; start < batch; start += SHOWDOWN_BOTH_PLAYER_SAMPLE_CHUNK) {
+      paramsList.push(this.encodeShowdownValuesFromRanks1326BothPlayers(
+        encoder,
+        tree,
+        nodeIndices,
+        rankOrdinals,
+        payoffs,
+        beliefs,
+        values,
+        rankMass,
+        rankPrefixLess,
+        rankTotal,
+        Math.min(SHOWDOWN_BOTH_PLAYER_SAMPLE_CHUNK, batch - start),
+        maxRanks,
+        undefined,
+        start,
+      ));
+    }
+    return paramsList;
   }
 
   encodeShowdownValuesFromRankAggregatesReference(
@@ -3080,6 +3112,7 @@ export class SparseCfrGpuKernels {
     batch: number,
     maxRanks: number,
     existingParams?: GPUBuffer,
+    sampleStart = 0,
   ): GPUBuffer {
     if (tree.numHands !== 1326 || tree.overlapSlots !== 101) {
       throw new Error("both-player showdown values require 1326 HUNL hands");
@@ -3093,15 +3126,15 @@ export class SparseCfrGpuKernels {
     const valuesBindGroup = this.device.createBindGroup({
       layout: this.showdownValuesFromRanks1326BothPlayersPipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: { buffer: nodeIndices } },
-        { binding: 1, resource: { buffer: rankOrdinals } },
+        { binding: 0, resource: { buffer: nodeIndices, offset: sampleStart * 4 } },
+        { binding: 1, resource: { buffer: rankOrdinals, offset: sampleStart * 1326 * 4 } },
         { binding: 2, resource: { buffer: tree.overlapHands } },
         { binding: 3, resource: { buffer: tree.overlapCounts } },
-        { binding: 4, resource: { buffer: payoffs } },
+        { binding: 4, resource: { buffer: payoffs, offset: sampleStart * 3 * 4 } },
         { binding: 5, resource: { buffer: beliefs } },
-        { binding: 6, resource: { buffer: rankMass } },
-        { binding: 7, resource: { buffer: rankPrefixLess } },
-        { binding: 8, resource: { buffer: rankTotal } },
+        { binding: 6, resource: { buffer: rankMass, offset: sampleStart * 2 * maxRanks * 4 } },
+        { binding: 7, resource: { buffer: rankPrefixLess, offset: sampleStart * 2 * maxRanks * 4 } },
+        { binding: 8, resource: { buffer: rankTotal, offset: sampleStart * 2 * 4 } },
         { binding: 9, resource: { buffer: values } },
         { binding: 10, resource: { buffer: params } },
       ],
@@ -3128,56 +3161,90 @@ export class SparseCfrGpuKernels {
     tableScale: number,
     permId: number,
     hasPerm: boolean,
-  ): GPUBuffer {
+  ): GPUBuffer[] {
     if (tree.numHands !== 1326 || tree.overlapSlots !== 101 || hasPerm) {
       throw new Error("production all-in table values require 1326 HUNL hands without permutations");
     }
+    void comboPerms;
+    void permId;
+    let pipeline = this.allInTableValues1326NoPermBothPlayersOverlapListPipeline;
+    let aux0 = tree.overlapHands;
+    let aux1 = tree.overlapCounts;
     if (globalThis.process?.env?.P2_DISABLE_ALLIN_OVERLAP_LIST !== "1") {
-      return this.encodeAllInTableValues1326NoPermBothPlayersOverlapList(
-        encoder,
-        tree,
-        nodeIndices,
-        tablePacked,
-        comboPerms,
-        scaleFactors,
-        beliefs,
-        values,
-        batch,
-        tableScale,
-        permId,
-        hasPerm,
-      );
+      // keep the default overlap-list kernel selected
+    } else if (globalThis.process?.env?.P2_DISABLE_ALLIN_NO_OPP_ALLOWED !== "1") {
+      pipeline = this.allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline;
+      aux0 = tree.handCard0;
+      aux1 = tree.handCard1;
+    } else {
+      pipeline = this.allInTableValues1326NoPermBothPlayersPipeline;
+      aux0 = tree.handCard0;
+      aux1 = tree.handCard1;
     }
-    if (globalThis.process?.env?.P2_DISABLE_ALLIN_NO_OPP_ALLOWED !== "1") {
-      return this.encodeAllInTableValues1326NoPermBothPlayersNoOppAllowed(
+    const paramsList: GPUBuffer[] = [];
+    for (let start = 0; start < batch; start += TERMINAL_SAMPLE_CHUNK) {
+      paramsList.push(this.encodeAllInTableValues1326NoPermBothPlayersChunk(
         encoder,
+        pipeline,
         tree,
         nodeIndices,
         tablePacked,
-        comboPerms,
         scaleFactors,
         beliefs,
         values,
-        batch,
+        aux0,
+        aux1,
+        Math.min(TERMINAL_SAMPLE_CHUNK, batch - start),
         tableScale,
-        permId,
-        hasPerm,
-      );
+        start,
+      ));
     }
-      return this.encodeAllInTableValues1326NoPermBothPlayers(
-        encoder,
-        tree,
-        nodeIndices,
-        tablePacked,
-        comboPerms,
-        scaleFactors,
-        beliefs,
-        values,
-        batch,
-        tableScale,
-        permId,
-        hasPerm,
-      );
+    return paramsList;
+  }
+
+  private encodeAllInTableValues1326NoPermBothPlayersChunk(
+    encoder: GPUCommandEncoder,
+    pipeline: GPUComputePipeline,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    tablePacked: GPUBuffer,
+    scaleFactors: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    aux0: GPUBuffer,
+    aux1: GPUBuffer,
+    batch: number,
+    tableScale: number,
+    sampleStart: number,
+  ): GPUBuffer {
+    const words = new ArrayBuffer(32);
+    const u32 = new Uint32Array(words);
+    const f32 = new Float32Array(words);
+    u32[0] = tree.numHands;
+    u32[1] = batch;
+    f32[4] = tableScale;
+    const params = makeUniformBuffer(this.device, u32);
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices, offset: sampleStart * 4 } },
+        { binding: 1, resource: { buffer: tree.allowedMask } },
+        { binding: 2, resource: { buffer: aux0 } },
+        { binding: 3, resource: { buffer: aux1 } },
+        { binding: 4, resource: { buffer: tablePacked } },
+        { binding: 6, resource: { buffer: scaleFactors, offset: sampleStart * 2 * 4 } },
+        { binding: 7, resource: { buffer: beliefs } },
+        { binding: 8, resource: { buffer: values } },
+        { binding: 9, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      pipeline,
+      bindGroup,
+      Math.ceil((batch * 1326) / 64),
+    );
+    return params;
   }
 
   encodeAllInTableValuesReference(

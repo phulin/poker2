@@ -212,9 +212,9 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     paramsReach.destroy();
     paramsAvg.destroy();
     paramsB.destroy();
-    paramsGather.destroy();
-    paramsScatter.destroy();
-    paramsShowdown.destroy();
+    for (const params of paramsGather) params.destroy();
+    for (const params of paramsScatter) params.destroy();
+    for (const params of paramsShowdown) params.destroy();
     paramsOpponent.destroy();
     paramsBackup.destroy();
     paramsWeights.destroy();
@@ -377,6 +377,67 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     showdownRanks.destroy();
     showdownPayoffs.destroy();
     showdownValues.destroy();
+  } finally {
+    device.destroy();
+  }
+});
+
+test("sparse gather chunks leaf batches beyond WebGPU dispatch limits", async () => {
+  const device = await createDawnDevice();
+  try {
+    const kernels = new SparseCfrGpuKernels(device);
+    const numHands = 1326;
+    const tree = kernels.createTreeBuffers({
+      nodeCount: 1,
+      numHands,
+      childOffsets: new Uint32Array([0]),
+      childCount: new Uint32Array([0]),
+      childIndices: new Uint32Array([]),
+      parentIndex: new Uint32Array([0]),
+      prevActor: new Uint32Array([0]),
+      toAct: new Uint32Array([0]),
+      allowedMask: new Uint32Array(numHands).fill(1),
+      allowedProb: new Float32Array(numHands).fill(1 / numHands),
+      handCard0: new Uint32Array(numHands),
+      handCard1: new Uint32Array(numHands),
+      overlapHands: new Uint32Array(numHands),
+      overlapCounts: new Uint32Array(numHands),
+      overlapSlots: 1,
+    });
+    const batch = 1600;
+    const nodeIndices = makeStorageBuffer(device, new Uint32Array(batch));
+    const beliefData = new Float32Array(2 * numHands);
+    for (let hand = 0; hand < numHands; hand += 1) {
+      beliefData[hand] = hand;
+      beliefData[numHands + hand] = 10000 + hand;
+    }
+    const beliefs = makeStorageBuffer(device, beliefData);
+    const out = makeEmptyStorageBuffer(device, batch * 2 * numHands);
+
+    const encoder = device.createCommandEncoder();
+    const params = kernels.encodeGatherNodeBeliefs(
+      encoder,
+      tree,
+      nodeIndices,
+      beliefs,
+      out,
+      batch,
+    );
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    for (const param of params) param.destroy();
+
+    const actual = await readFloatBuffer(device, out, batch * 2 * numHands);
+    const boundary = 1536 * 2 * numHands;
+    assert.equal(actual[0], 0);
+    assert.equal(actual[numHands], 10000);
+    assert.equal(actual[boundary], 0);
+    assert.equal(actual[boundary + numHands], 10000);
+
+    tree.dispose();
+    nodeIndices.destroy();
+    beliefs.destroy();
+    out.destroy();
   } finally {
     device.destroy();
   }

@@ -986,7 +986,7 @@ export class SparseCfrResolver {
     const encodeShowdown = (encoder: GPUCommandEncoder): void => {
       if (leafBatch.showdownNodeIndices.length === 0) return;
       if (leafBatch.showdownMaxRankCount > 0) {
-        deferredParams.push(this.gpuKernels!.encodeShowdownValuesFromRankAggregates(
+        deferredParams.push(...this.gpuKernels!.encodeShowdownValuesFromRankAggregates(
           encoder,
           treeBuffers,
           showdownNodeBuffer,
@@ -1005,7 +1005,7 @@ export class SparseCfrResolver {
           showdownRankHandsBuffer,
         ));
       } else {
-        deferredParams.push(this.gpuKernels!.encodeShowdownValues(
+        deferredParams.push(...this.gpuKernels!.encodeShowdownValues(
           encoder,
           treeBuffers,
           showdownNodeBuffer,
@@ -1027,7 +1027,7 @@ export class SparseCfrResolver {
       ) {
         return;
       }
-      deferredParams.push(this.gpuKernels!.encodeAllInTableValues(
+      deferredParams.push(...this.gpuKernels!.encodeAllInTableValues(
         encoder,
         treeBuffers,
         allInNodeBuffer,
@@ -1056,7 +1056,7 @@ export class SparseCfrResolver {
       return () => undefined;
     }
 
-    let scatterParams: GPUBuffer | undefined;
+    let scatterParams: GPUBuffer[] | undefined;
     const prediction = await this.model.predictBatchHandValuesGpu(
       leafBatch.modelEnvs,
       modelLeafBeliefsBuffer,
@@ -1077,7 +1077,7 @@ export class SparseCfrResolver {
         deferredParams.push(...(beforeLeafValues?.(encoder) ?? []));
         encodeShowdown(encoder);
         encodeAllIn(encoder);
-        deferredParams.push(this.gpuKernels!.encodeGatherNodeBeliefs(
+        deferredParams.push(...this.gpuKernels!.encodeGatherNodeBeliefs(
           encoder,
           treeBuffers,
           modelLeafNodeBuffer,
@@ -1087,7 +1087,7 @@ export class SparseCfrResolver {
         ));
       },
     );
-    scatterParams?.destroy();
+    for (const params of scatterParams ?? []) params.destroy();
     for (const params of deferredParams.splice(0)) params.destroy();
     return () => prediction.dispose();
   }
