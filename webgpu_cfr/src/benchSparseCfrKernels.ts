@@ -17,6 +17,7 @@ interface Options {
   runs: number;
   dispatches: number;
   variant?: string;
+  compare?: [string, string];
   validate: boolean;
 }
 
@@ -106,11 +107,20 @@ function intArg(args: string[], name: string, fallback: number): number {
 function readOptions(): Options {
   const args = process.argv.slice(2);
   const variant = getArg(args, "--variant", "");
+  const compareArg = getArg(args, "--compare", "");
+  const compare = compareArg ? compareArg.split(",") : [];
+  if (variant && compareArg) {
+    throw new Error("Use either --variant or --compare, not both");
+  }
+  if (compareArg && compare.length !== 2) {
+    throw new Error("--compare must be two operation names separated by a comma");
+  }
   return {
     warmups: intArg(args, "--warmups", 5),
     runs: intArg(args, "--runs", 20),
     dispatches: intArg(args, "--dispatches", 20),
     ...(variant ? { variant } : {}),
+    ...(compare.length === 2 ? { compare: [compare[0]!, compare[1]!] } : {}),
     validate: !hasArg(args, "--no-validate"),
   };
 }
@@ -487,6 +497,37 @@ async function timeOp(
     const elapsed = performance.now() - start;
     for (const param of params) param.destroy();
     samples.push(elapsed / dispatches);
+  }
+  return samples;
+}
+
+async function timeOpsInterleaved(
+  device: GPUDevice,
+  ops: BenchOp[],
+  warmups: number,
+  runs: number,
+  dispatches: number,
+): Promise<Map<string, number[]>> {
+  const samples = new Map(ops.map((op) => [op.name, [] as number[]]));
+  const rounds = warmups + runs;
+  for (let round = 0; round < rounds; round += 1) {
+    for (let offset = 0; offset < ops.length; offset += 1) {
+      const op = ops[(round + offset) % ops.length]!;
+      const encoder = device.createCommandEncoder();
+      const params: GPUBuffer[] = [];
+      for (let i = 0; i < dispatches; i += 1) {
+        const encoded = op.encode(encoder);
+        if (encoded) params.push(...(Array.isArray(encoded) ? encoded : [encoded]));
+      }
+      const start = performance.now();
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      const elapsed = performance.now() - start;
+      for (const param of params) param.destroy();
+      if (round >= warmups) {
+        samples.get(op.name)!.push(elapsed / dispatches);
+      }
+    }
   }
   return samples;
 }
@@ -1195,11 +1236,66 @@ async function main(): Promise<void> {
   const device = await createDawnDevice();
   const kernels = new SparseCfrGpuKernels(device);
   const data = makeBenchData(device);
-  const ops = buildOps(device, kernels, data).filter((op) =>
-    options.variant ? op.name === options.variant : true,
-  );
+  const allOps = buildOps(device, kernels, data);
+  const ops = allOps.filter((op) => {
+    if (options.variant) return op.name === options.variant;
+    if (options.compare) return options.compare.includes(op.name);
+    return true;
+  });
   if (ops.length === 0) {
     throw new Error(`No sparse CFR operation matched ${options.variant}`);
+  }
+  if (options.compare) {
+    const [baseline, candidate] = options.compare;
+    if (ops.length !== 2) {
+      const names = ops.map((op) => op.name).join(", ") || "none";
+      throw new Error(`Expected both compare operations, matched: ${names}`);
+    }
+    ops.sort((a, b) => options.compare!.indexOf(a.name) - options.compare!.indexOf(b.name));
+    const samples = await timeOpsInterleaved(
+      device,
+      ops,
+      options.warmups,
+      options.runs,
+      options.dispatches,
+    );
+    const results = [];
+    for (const op of ops) {
+      const validation = options.validate && op.validate ? await op.validate() : undefined;
+      const opSamples = samples.get(op.name)!;
+      results.push({
+        name: op.name,
+        outputElements: op.outputElements,
+        ...(validation ? { validation } : {}),
+        ...stats(opSamples),
+        samplesMs: opSamples,
+      });
+    }
+    const baseStats = stats(samples.get(baseline)!);
+    const candidateStats = stats(samples.get(candidate)!);
+    console.log(
+      JSON.stringify(
+        {
+          backend: process.env.WEBGPU_BACKEND ?? "auto",
+          nodeCount: data.nodeCount,
+          numHands: NUM_HANDS,
+          leafBatch: data.leafBatch,
+          warmups: options.warmups,
+          runs: options.runs,
+          dispatches: options.dispatches,
+          compare: {
+            baseline,
+            candidate,
+            meanSpeedup: baseStats.meanMs / candidateStats.meanMs,
+            medianSpeedup: baseStats.medianMs / candidateStats.medianMs,
+          },
+          results,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
   }
   const results = [];
   for (const op of ops) {
