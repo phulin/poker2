@@ -64,6 +64,7 @@ interface SparseTree {
 
 interface SparseLeafGpuBatch {
   modelEnvs: PublicHunlEnv[];
+  modelValuePreChance: boolean[];
   modelNodeIndices: Uint32Array<ArrayBuffer>;
   showdownNodeIndices: Uint32Array<ArrayBuffer>;
   showdownRankCodes: Uint32Array<ArrayBuffer>;
@@ -250,12 +251,14 @@ export class SparseCfrResolver {
       }
 
       for (let t = warmStartIterations; t < options.iterations; t += 1) {
+        const instantRegrets = new Float32Array(cumulativeRegrets.length);
         this.accumulateRegrets(
           tree,
           cfrAvg ? beliefsAvg : beliefs,
           values,
-          cumulativeRegrets,
+          instantRegrets,
         );
+        this.updateCumulativeRegrets(tree, cumulativeRegrets, instantRegrets, t);
         this.updatePolicy(tree, cumulativeRegrets, policy);
 
         const current = this.propagateReachAndBeliefs(tree, rootBeliefs, policy);
@@ -399,7 +402,10 @@ export class SparseCfrResolver {
       : undefined;
     const preparedLeafFeatures =
       leafBatch.modelEnvs.length > 0 && this.model.prepareBatchFeatures
-        ? this.model.prepareBatchFeatures(leafBatch.modelEnvs)
+        ? this.model.prepareBatchFeatures(
+            leafBatch.modelEnvs,
+            leafBatch.modelValuePreChance,
+          )
         : undefined;
     const staticData: SparseStaticGpuData = {
       treeBuffers,
@@ -487,14 +493,81 @@ export class SparseCfrResolver {
 
   private averagePolicyWeight(t: number): number {
     const cfr = this.model.manifest.cfr;
+    if (cfr?.cfrType === "linear") return 2;
     if (cfr?.cfrType !== "discounted") return 1;
     if (this.averageAccumulationDelayed(t)) return 0;
     const delay = cfr.dcfrPlusDelay ?? 0;
     const iterations = Math.max(1, cfr.iterations ?? 1);
     const window = Math.max(1, iterations - delay);
-    const gamma = cfr.dcfrGamma ?? 1;
+    const gamma = this.scheduledDcfrParam("dcfrGamma", "dcfrGammaFinal", t);
     const progress = Math.max(0, t - delay) / window;
     return progress ** gamma;
+  }
+
+  private scheduledDcfrParam(
+    startKey: "dcfrAlpha" | "dcfrBeta" | "dcfrGamma",
+    finalKey: "dcfrAlphaFinal" | "dcfrBetaFinal" | "dcfrGammaFinal",
+    t: number,
+  ): number {
+    const cfr = this.model.manifest.cfr;
+    const initial = cfr?.[startKey] ?? 0;
+    const final = cfr?.[finalKey];
+    if (final === undefined || final === null) return initial;
+    const warmStart = this.effectiveWarmStartIterations(cfr?.iterations ?? t + 1);
+    const totalIterations = Math.max(1, (cfr?.iterations ?? t + 1) - warmStart);
+    const progress = Math.max(0, t - warmStart) / totalIterations;
+    const normalized = Math.min(1, Math.max(0, progress));
+    return initial + (final - initial) * normalized;
+  }
+
+  private regretUpdateOptions(iteration: number): {
+    discountPositive: number;
+    discountNegative: number;
+    linearSkipActor: number;
+    cfrPlus: boolean;
+  } {
+    const cfr = this.model.manifest.cfr;
+    let discountPositive = 1;
+    let discountNegative = 1;
+    if (cfr?.cfrType === "discounted") {
+      const alpha = this.scheduledDcfrParam("dcfrAlpha", "dcfrAlphaFinal", iteration);
+      const beta = this.scheduledDcfrParam("dcfrBeta", "dcfrBetaFinal", iteration);
+      const positivePower = iteration ** alpha;
+      const negativePower = iteration ** beta;
+      discountPositive = positivePower / (positivePower + 1);
+      discountNegative = negativePower / (negativePower + 1);
+    }
+    return {
+      discountPositive,
+      discountNegative,
+      linearSkipActor: cfr?.cfrType === "linear" ? iteration % 2 : 2,
+      cfrPlus: Boolean(cfr?.cfrPlus),
+    };
+  }
+
+  private updateCumulativeRegrets(
+    tree: SparseTree,
+    cumulativeRegrets: Float32Array,
+    instantRegrets: Float32Array,
+    iteration: number,
+  ): void {
+    const { discountPositive, discountNegative, linearSkipActor, cfrPlus } =
+      this.regretUpdateOptions(iteration);
+    for (let nodeIndex = 1; nodeIndex < tree.nodes.length; nodeIndex += 1) {
+      const node = tree.nodes[nodeIndex]!;
+      const skipLinear = linearSkipActor < 2 && node.actionFromParent >= 0
+        ? tree.nodes[node.parent]!.env.toAct === linearSkipActor
+        : false;
+      const base = nodeIndex * NUM_HANDS;
+      for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+        const idx = base + hand;
+        const previous = cumulativeRegrets[idx]!;
+        const discount = previous > 0 ? discountPositive : discountNegative;
+        let next = previous * discount + (skipLinear ? 0 : instantRegrets[idx]!);
+        if (cfrPlus && next < 0) next = 0;
+        cumulativeRegrets[idx] = next;
+      }
+    }
   }
 
   private treeCacheKey(rootEnv: PublicHunlEnv, maxDepth: number): string {
@@ -577,8 +650,9 @@ export class SparseCfrResolver {
   }
 
   private buildTree(rootEnv: PublicHunlEnv, maxDepth: number): SparseTree {
+    const rootAllowedMask = this.allowedMask(rootEnv);
     const nodes: SparseNode[] = [
-      this.makeNode(rootEnv.clone(), -1, -1, 0, 0),
+      this.makeNode(rootEnv.clone(), -1, -1, 0, 0, rootAllowedMask),
     ];
     const depthOffsets = [0, 1];
 
@@ -602,7 +676,14 @@ export class SparseCfrResolver {
           node.children.push(childIndex);
           node.actionToChild[action] = childIndex;
           nodes.push(
-            this.makeNode(childEnv, nodeIndex, action, step.reward, depth + 1),
+            this.makeNode(
+              childEnv,
+              nodeIndex,
+              action,
+              step.reward,
+              depth + 1,
+              rootAllowedMask,
+            ),
           );
         }
       }
@@ -625,6 +706,7 @@ export class SparseCfrResolver {
     actionFromParent: number,
     reward: number,
     depth: number,
+    allowedMask: Uint8Array,
   ): SparseNode {
     const legal = env.legalBinsAmountAndMask();
     const scheduledMask = this.actionMaskForDepth(depth);
@@ -643,7 +725,7 @@ export class SparseCfrResolver {
       reward,
       depth,
       legalMask: legal.mask,
-      allowedMask: this.allowedMask(env),
+      allowedMask,
       children: [],
       actionToChild,
       leaf: false,
@@ -662,6 +744,7 @@ export class SparseCfrResolver {
     policy: Float32Array,
     beliefs: Float32Array,
   ): Promise<void> {
+    this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
     if (!this.shouldUseModelPolicyInitialization()) {
       this.initializeUniformPolicyAndBeliefs(tree, rootBeliefs, policy, beliefs);
       return;
@@ -716,8 +799,6 @@ export class SparseCfrResolver {
         }
       }
     }
-
-    this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
   }
 
   private initializeUniformPolicyAndBeliefs(
@@ -726,6 +807,7 @@ export class SparseCfrResolver {
     policy: Float32Array,
     beliefs: Float32Array,
   ): void {
+    this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
     for (let depth = 0; depth < tree.treeDepth; depth += 1) {
       const start = tree.depthOffsets[depth]!;
       const end = tree.depthOffsets[depth + 1]!;
@@ -748,8 +830,6 @@ export class SparseCfrResolver {
         }
       }
     }
-
-    this.copyBeliefsToNode(rootBeliefs, beliefs, 0);
   }
 
   private shouldUseModelPolicyInitialization(): boolean {
@@ -758,7 +838,7 @@ export class SparseCfrResolver {
 
   private effectiveWarmStartIterations(iterations: number): number {
     const configured = this.model.manifest.cfr?.warmStartIterations ?? 0;
-    return Math.max(0, Math.min(configured, Math.max(0, iterations - 1)));
+    return Math.max(0, Math.min(configured, Math.max(1, iterations - 1)));
   }
 
   private applyModelWarmStart(
@@ -1060,6 +1140,7 @@ export class SparseCfrResolver {
             (readPolicyAvg || cfrAvg) && !averageDelayed,
             cfrAvg ? beliefsAvgBuffer! : undefined,
             averageDelayed && readPolicyAvg,
+            t,
           );
         });
 
@@ -1348,6 +1429,7 @@ export class SparseCfrResolver {
     allInContext?: AllInTableContext,
   ): SparseLeafGpuBatch {
     const modelEnvs: PublicHunlEnv[] = [];
+    const modelValuePreChance: boolean[] = [];
     const modelNodeIndices: number[] = [];
     const showdownNodeIndices: number[] = [];
     const showdownRankCodes: number[] = [];
@@ -1371,6 +1453,7 @@ export class SparseCfrResolver {
         );
       } else if (!node.env.done) {
         modelEnvs.push(node.env);
+        modelValuePreChance.push(node.newStreet);
         modelNodeIndices.push(nodeIndex);
       } else if (!node.env.hasFolded[0] && !node.env.hasFolded[1]) {
         showdownNodeIndices.push(nodeIndex);
@@ -1413,6 +1496,7 @@ export class SparseCfrResolver {
     }
     return {
       modelEnvs,
+      modelValuePreChance,
       modelNodeIndices: new Uint32Array(modelNodeIndices),
       showdownNodeIndices: new Uint32Array(showdownNodeIndices),
       showdownRankCodes: new Uint32Array(showdownRankCodes),
@@ -1532,6 +1616,7 @@ export class SparseCfrResolver {
     updatePolicyAvg: boolean,
     beliefsAvgBuffer: GPUBuffer | undefined,
     copyPolicyToAverage: boolean,
+    iteration: number,
   ): void {
     if (!this.gpuKernels) return;
     const encoder = this.model.device.createCommandEncoder();
@@ -1554,6 +1639,7 @@ export class SparseCfrResolver {
       updatePolicyAvg,
       beliefsAvgBuffer,
       copyPolicyToAverage,
+      iteration,
     );
     this.model.device.queue.submit([encoder.finish()]);
     for (const param of params) param.destroy();
@@ -1578,6 +1664,7 @@ export class SparseCfrResolver {
     updatePolicyAvg: boolean,
     beliefsAvgBuffer: GPUBuffer | undefined,
     copyPolicyToAverage: boolean,
+    iteration: number,
   ): GPUBuffer[] {
     if (!this.gpuKernels) return [];
     const regretWeightEnd = tree.depthOffsets[tree.treeDepth] ?? tree.nodes.length;
@@ -1599,6 +1686,7 @@ export class SparseCfrResolver {
         regretsBuffer,
         1,
         tree.nodes.length,
+        this.regretUpdateOptions(iteration),
       ),
       ...this.gpuKernels.encodeRegretMatch(
         encoder,
@@ -1641,6 +1729,7 @@ export class SparseCfrResolver {
           policyAvgBuffer,
           1,
           tree.nodes.length,
+          this.averagePolicyWeight(iteration),
         ),
       );
     }
@@ -1913,6 +2002,7 @@ export class SparseCfrResolver {
   ): Promise<void> {
     latestValues.fill(0);
     const modelEnvs: PublicHunlEnv[] = [];
+    const modelValuePreChance: boolean[] = [];
     const modelBeliefs: Float32Array<ArrayBuffer>[] = [];
     const modelValueBases: number[] = [];
     for (let nodeIndex = 0; nodeIndex < tree.nodes.length; nodeIndex += 1) {
@@ -1934,6 +2024,7 @@ export class SparseCfrResolver {
         }
       } else {
         modelEnvs.push(node.env);
+        modelValuePreChance.push(node.newStreet);
         modelBeliefs.push(nodeBeliefs);
         modelValueBases.push(valueBase);
       }
@@ -1948,6 +2039,7 @@ export class SparseCfrResolver {
       const handValues = await this.model.predictBatchHandValues(
         modelEnvs,
         batchedBeliefs,
+        modelValuePreChance,
       );
       for (let i = 0; i < modelValueBases.length; i += 1) {
         latestValues.set(

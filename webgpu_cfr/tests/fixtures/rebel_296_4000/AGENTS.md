@@ -7,4 +7,4 @@ Committed fixture for the `checkpoints-rebel/rebel_296_4000.pt` split BetterFFN 
 - `weights.bin.gz`: Gzipped fp16 WebGPU model weights referenced by `model.json`.
 
 ### Subdirectories
-- `allin/`: Preflop all-in payoff asset referenced by the export manifest.
+- `allin/`: Preflop all-in payoff assets used by the WebGPU export and Python sparse CFR reference.

@@ -81,6 +81,7 @@ interface TempBuffer {
 
 interface PredictOptions {
   includePolicy?: boolean;
+  valuePreChance?: readonly boolean[];
 }
 
 const BATCH_ROW_BLOCK = 4;
@@ -468,9 +469,14 @@ export class BetterFfnWebGpuModel {
   async predictBatchHandValues(
     envs: readonly PublicHunlEnv[],
     beliefs: Float32Array<ArrayBufferLike>,
+    valuePreChance?: readonly boolean[],
   ): Promise<Float32Array<ArrayBufferLike>> {
-    return (await this.predictBatch(envs, beliefs, { includePolicy: false }))
-      .handValues;
+    return (
+      await this.predictBatch(envs, beliefs, {
+        includePolicy: false,
+        ...(valuePreChance ? { valuePreChance } : {}),
+      })
+    ).handValues;
   }
 
   async predictBatchHandValuesGpu(
@@ -492,7 +498,10 @@ export class BetterFfnWebGpuModel {
     };
   }
 
-  prepareBatchFeatures(envs: readonly PublicHunlEnv[]): PreparedBatchFeatures {
+  prepareBatchFeatures(
+    envs: readonly PublicHunlEnv[],
+    valuePreChance?: readonly boolean[],
+  ): PreparedBatchFeatures {
     if (envs.length === 0) {
       const empty = this.device.createBuffer({
         size: 4,
@@ -546,7 +555,9 @@ export class BetterFfnWebGpuModel {
     const encoder = this.device.createCommandEncoder();
     this.recordingEncoder = encoder;
     try {
-      const encodedFeatures = envs.map((env) => encodeBetterFeatures(env));
+      const encodedFeatures = envs.map((env, i) =>
+        encodeBetterFeatures(env, valuePreChance?.[i] ?? false),
+      );
       const contextDim = this.manifest.architecture.contextDim ?? 11;
       const context = new Float32Array(batch * contextDim);
       const base = new Float32Array(batch * hiddenDim);
@@ -849,7 +860,9 @@ export class BetterFfnWebGpuModel {
 
       const encodedFeatures = prepared
         ? undefined
-        : envs.map((env) => encodeBetterFeatures(env));
+        : envs.map((env, i) =>
+            encodeBetterFeatures(env, options.valuePreChance?.[i] ?? false),
+          );
       const interactionFeatures = this.buildBeliefBoardInteractionGpu(
         beliefBuffer,
         encodedFeatures?.map((features) => features.board),

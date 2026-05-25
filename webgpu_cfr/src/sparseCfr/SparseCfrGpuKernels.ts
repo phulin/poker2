@@ -51,6 +51,20 @@ import {
   SPARSE_ALLIN_TABLE_VALUES_WGSL,
 } from "./shaders/allIn.js";
 
+type UniformWord = ["u32" | "f32", number];
+
+function mixedUniform(words: UniformWord[]): Uint32Array<ArrayBuffer> {
+  const buffer = new ArrayBuffer(words.length * Uint32Array.BYTES_PER_ELEMENT);
+  const view = new DataView(buffer);
+  for (let i = 0; i < words.length; i += 1) {
+    const [kind, value] = words[i]!;
+    const offset = i * Uint32Array.BYTES_PER_ELEMENT;
+    if (kind === "f32") view.setFloat32(offset, value, true);
+    else view.setUint32(offset, value, true);
+  }
+  return new Uint32Array(buffer);
+}
+
 export class SparseCfrGpuKernels {
   readonly device: GPUDevice;
   private readonly regretMatchPipeline: GPUComputePipeline;
@@ -397,6 +411,7 @@ export class SparseCfrGpuKernels {
     policyAvg: GPUBuffer,
     start: number,
     end: number,
+    weight = 1,
   ): GPUBuffer[] {
     const paramsList: GPUBuffer[] = [];
     for (const [chunkStart, chunkEnd] of rangeChunks(
@@ -406,7 +421,12 @@ export class SparseCfrGpuKernels {
     )) {
       const params = makeUniformBuffer(
         this.device,
-        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
+        mixedUniform([
+          ["u32", tree.numHands],
+          ["u32", chunkStart],
+          ["u32", chunkEnd],
+          ["f32", weight],
+        ]),
       );
       const bindGroup = this.device.createBindGroup({
         layout: this.averagePolicyPipeline.getBindGroupLayout(0),
@@ -484,6 +504,12 @@ export class SparseCfrGpuKernels {
     regrets: GPUBuffer,
     start: number,
     end: number,
+    options: {
+      discountPositive?: number;
+      discountNegative?: number;
+      linearSkipActor?: number;
+      cfrPlus?: boolean;
+    } = {},
   ): GPUBuffer[] {
     const paramsList: GPUBuffer[] = [];
     for (const [chunkStart, chunkEnd] of rangeChunks(
@@ -493,7 +519,16 @@ export class SparseCfrGpuKernels {
     )) {
       const params = makeUniformBuffer(
         this.device,
-        new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
+        mixedUniform([
+          ["u32", tree.numHands],
+          ["u32", chunkStart],
+          ["u32", chunkEnd],
+          ["f32", options.discountPositive ?? 1],
+          ["f32", options.discountNegative ?? 1],
+          ["u32", options.linearSkipActor ?? 2],
+          ["u32", options.cfrPlus ? 1 : 0],
+          ["u32", 0],
+        ]),
       );
       const bindGroup = this.device.createBindGroup({
         layout: this.regretTailPipeline.getBindGroupLayout(0),

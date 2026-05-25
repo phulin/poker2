@@ -416,6 +416,207 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
   }
 });
 
+test("sparse WGSL kernels apply CFR average weights and DCFR regret updates", async () => {
+  const device = await createDawnDevice();
+  try {
+    const kernels = new SparseCfrGpuKernels(device);
+    const tree = kernels.createTreeBuffers({
+      nodeCount: 3,
+      numHands: 4,
+      childOffsets: new Uint32Array([0, 2, 2]),
+      childCount: new Uint32Array([2, 0, 0]),
+      childIndices: new Uint32Array([1, 2]),
+      parentIndex: new Uint32Array([0, 0, 0]),
+      prevActor: new Uint32Array([0, 0, 0]),
+      toAct: new Uint32Array([0, 1, 1]),
+      allowedMask: new Uint32Array([
+        1, 1, 1, 1,
+        1, 1, 1, 1,
+        1, 1, 1, 1,
+      ]),
+      allowedProb: new Float32Array([
+        0.25, 0.25, 0.25, 0.25,
+        0.25, 0.25, 0.25, 0.25,
+        0.25, 0.25, 0.25, 0.25,
+      ]),
+      handCard0: new Uint32Array([0, 0, 3, 5]),
+      handCard1: new Uint32Array([1, 2, 4, 6]),
+      overlapHands: new Uint32Array([
+        0, 1, 0, 0,
+        0, 1, 0, 0,
+        2, 0, 0, 0,
+        3, 0, 0, 0,
+      ]),
+      overlapCounts: new Uint32Array([2, 2, 1, 1]),
+      overlapSlots: 4,
+    });
+
+    const reach = makeStorageBuffer(
+      device,
+      new Float32Array([
+        1, 2, 3, 4,
+        1, 1, 1, 1,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+      ]),
+    );
+    const policy = makeStorageBuffer(
+      device,
+      new Float32Array([
+        0, 0, 0, 0,
+        0.25, 0.5, 0.75, 0.5,
+        0.75, 0.5, 0.25, 0.5,
+      ]),
+    );
+    const numerator = makeStorageBuffer(
+      device,
+      new Float32Array([
+        0, 0, 0, 0,
+        0.2, 0.2, 0.2, 0.2,
+        0.4, 0.4, 0.4, 0.4,
+      ]),
+    );
+    const denominator = makeStorageBuffer(
+      device,
+      new Float32Array([
+        0, 0, 0, 0,
+        1, 1, 1, 1,
+        1, 1, 1, 1,
+      ]),
+    );
+    const policyAvg = makeEmptyStorageBuffer(device, 12);
+
+    const regretWeights = makeStorageBuffer(
+      device,
+      new Float32Array([
+        0.5, 0.5, 0.75, 0.75,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+      ]),
+    );
+    const values = makeStorageBuffer(
+      device,
+      new Float32Array([
+        4, 4, 4, 6,
+        0, 0, 0, 0,
+        1, 2, 3, 4,
+        0, 0, 0, 0,
+        5, 6, 7, 8,
+        0, 0, 0, 0,
+      ]),
+    );
+    const discountedRegrets = makeStorageBuffer(
+      device,
+      new Float32Array([
+        0, 0, 0, 0,
+        2, -4, 0, 1,
+        -3, 5, -1, 0,
+      ]),
+    );
+    const linearSkippedRegrets = makeStorageBuffer(
+      device,
+      new Float32Array([
+        0, 0, 0, 0,
+        2, -4, 0, 1,
+        -3, 5, -1, 0,
+      ]),
+    );
+
+    const encoder = device.createCommandEncoder();
+    const avgParams = kernels.encodeUpdateAveragePolicyRange(
+      encoder,
+      tree,
+      reach,
+      policy,
+      numerator,
+      denominator,
+      policyAvg,
+      1,
+      3,
+      0.5,
+    );
+    const dcfrParams = kernels.encodeAccumulateRegretsRange(
+      encoder,
+      tree,
+      regretWeights,
+      values,
+      discountedRegrets,
+      1,
+      3,
+      {
+        discountPositive: 0.25,
+        discountNegative: 0.5,
+        cfrPlus: true,
+      },
+    );
+    const linearParams = kernels.encodeAccumulateRegretsRange(
+      encoder,
+      tree,
+      regretWeights,
+      values,
+      linearSkippedRegrets,
+      1,
+      3,
+      {
+        discountPositive: 0.25,
+        discountNegative: 0.5,
+        linearSkipActor: 0,
+      },
+    );
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    for (const param of avgParams) param.destroy();
+    for (const param of dcfrParams) param.destroy();
+    for (const param of linearParams) param.destroy();
+
+    assertCloseArray(
+      await readFloatBuffer(device, policyAvg, 12),
+      [
+        0, 0, 0, 0,
+        0.2166667, 0.35, 0.53, 0.4,
+        0.5166667, 0.45, 0.31, 0.4666667,
+      ],
+      1e-6,
+      "weighted policyAvg",
+    );
+    assertCloseArray(
+      await readFloatBuffer(device, discountedRegrets, 12),
+      [
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 2.25, 1.75, 1.5,
+      ],
+      1e-6,
+      "discounted regrets",
+    );
+    assertCloseArray(
+      await readFloatBuffer(device, linearSkippedRegrets, 12),
+      [
+        0, 0, 0, 0,
+        0.5, -2, 0, 0.25,
+        -1.5, 1.25, -0.5, 0,
+      ],
+      1e-6,
+      "linear skipped regrets",
+    );
+
+    tree.dispose();
+    reach.destroy();
+    policy.destroy();
+    numerator.destroy();
+    denominator.destroy();
+    policyAvg.destroy();
+    regretWeights.destroy();
+    values.destroy();
+    discountedRegrets.destroy();
+    linearSkippedRegrets.destroy();
+  } finally {
+    device.destroy();
+  }
+});
+
 test("sparse gather chunks leaf batches beyond WebGPU dispatch limits", async () => {
   const device = await createDawnDevice();
   try {

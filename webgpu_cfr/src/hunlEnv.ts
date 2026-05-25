@@ -518,7 +518,7 @@ function encodeRankCode(rank: RankVector): number {
   return out;
 }
 
-export function encodeBetterFeatures(env: PublicHunlEnv): {
+export function encodeBetterFeatures(env: PublicHunlEnv, valuePreChance = false): {
   context: Float32Array<ArrayBuffer>;
   policyContext: Float32Array<ArrayBuffer>;
   valueContext: Float32Array<ArrayBuffer>;
@@ -561,7 +561,7 @@ export function encodeBetterFeatures(env: PublicHunlEnv): {
   const policyContext = new Float32Array(shared);
   policyContext[2] = env.actionsThisRound;
   const valueContext = new Float32Array(shared);
-  valueContext[2] = 0;
+  valueContext[2] = valuePreChance ? 1 : 0;
   return {
     context: legacyContext,
     policyContext,

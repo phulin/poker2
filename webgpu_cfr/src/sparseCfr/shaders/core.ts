@@ -182,7 +182,7 @@ struct Params {
   numHands: u32,
   start: u32,
   end: u32,
-  _pad0: u32,
+  weight: f32,
 };
 
 @group(0) @binding(0) var<storage, read> parentIndex: array<u32>;
@@ -206,7 +206,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let child = params.start + linear / params.numHands;
   let parent = parentIndex[child];
   let actor = prevActor[child];
-  let weight = reach[(parent * 2u + actor) * params.numHands + hand];
+  let weight = reach[(parent * 2u + actor) * params.numHands + hand] * params.weight;
   let idx = child * params.numHands + hand;
   numerator[idx] = numerator[idx] + weight * policy[idx];
   denominator[idx] = denominator[idx] + weight;
@@ -273,6 +273,10 @@ struct Params {
   numHands: u32,
   start: u32,
   end: u32,
+  discountPositive: f32,
+  discountNegative: f32,
+  linearSkipActor: u32,
+  cfrPlus: u32,
   _pad0: u32,
 };
 
@@ -300,6 +304,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let childValue = values[(child * 2u + actor) * params.numHands + hand];
   let parentValue = values[(parent * 2u + actor) * params.numHands + hand];
   let idx = child * params.numHands + hand;
-  regrets[idx] = regrets[idx] + weight * (childValue - parentValue);
+  let skipLinear = params.linearSkipActor < 2u && actor == params.linearSkipActor;
+  let instant = select(weight * (childValue - parentValue), 0.0, skipLinear);
+  var previous = regrets[idx];
+  previous = previous * select(params.discountNegative, params.discountPositive, previous > 0.0);
+  var next = previous + instant;
+  if (params.cfrPlus != 0u) {
+    next = max(next, 0.0);
+  }
+  regrets[idx] = next;
 }
 `;

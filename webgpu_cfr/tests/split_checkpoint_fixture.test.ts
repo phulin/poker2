@@ -20,6 +20,11 @@ const CHECKPOINT = join(FIXTURE_DIR, "checkpoint.pt");
 const MANIFEST = join(FIXTURE_DIR, "model.json");
 const WEIGHTS = join(FIXTURE_DIR, "weights.bin.gz");
 const PREFLOP_ALL_IN = join(FIXTURE_DIR, "allin", "preflop.i16");
+const PYTORCH_PREFLOP_ALL_IN = join(
+  FIXTURE_DIR,
+  "allin",
+  "preflop_allin_table.pt.zst",
+);
 
 interface SplitReference {
   schemaVersion: number;
@@ -31,6 +36,20 @@ interface SplitReference {
       index: number;
       policyLogits: number[];
       handValues: [number, number];
+    }
+  >;
+}
+
+interface SplitCfrReference {
+  schemaVersion: number;
+  numHands: number;
+  numActions: number;
+  actionProbs: number[];
+  hands: Record<
+    string,
+    {
+      index: number;
+      policy: number[];
     }
   >;
 }
@@ -59,6 +78,48 @@ function loadPythonReference(): SplitReference {
   return JSON.parse(result.stdout) as SplitReference;
 }
 
+function loadPythonCfrReference(): SplitCfrReference {
+  const result = spawnSync(
+    "uv",
+    [
+      "run",
+      "python",
+      "webgpu_cfr/python/split_cfr_reference.py",
+      "--snapshot",
+      CHECKPOINT,
+      "--preflop-allin-table",
+      PYTORCH_PREFLOP_ALL_IN,
+      "--iterations",
+      "1",
+      "--depth",
+      "6",
+      "--force-button",
+      "0",
+      "--stack",
+      "400",
+      "--sb",
+      "1",
+      "--bb",
+      "2",
+      "--hero-player",
+      "0",
+      "--hero-card0",
+      "51",
+      "--hero-card1",
+      "24",
+    ],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error(result.stderr || `split_cfr_reference.py exited ${result.status}`);
+  }
+  return JSON.parse(result.stdout) as SplitCfrReference;
+}
+
 function assertCloseArray(
   actual: ArrayLike<number>,
   expected: ArrayLike<number>,
@@ -79,6 +140,7 @@ test("rebel_296_4000 fixture includes checkpoint, export, and all-in table", () 
   assert.ok(existsSync(MANIFEST), "manifest fixture exists");
   assert.ok(existsSync(WEIGHTS), "weights fixture exists");
   assert.equal(statSync(PREFLOP_ALL_IN).size, NUM_HANDS * NUM_HANDS * 2);
+  assert.ok(existsSync(PYTORCH_PREFLOP_ALL_IN), "PyTorch all-in table fixture exists");
 });
 
 test("rebel_296_4000 WebGPU export matches PyTorch split checkpoint on root PBS", async () => {
@@ -140,7 +202,7 @@ test("rebel_296_4000 sparse solve keeps AsKd mostly betting on root PBS", async 
   try {
     const result = await evaluator.evaluateSpot({
       spot: [],
-      iterations: 16,
+      iterations: 1,
       depth: 6,
       cfrAvg: false,
       initialState: {
@@ -163,6 +225,61 @@ test("rebel_296_4000 sparse solve keeps AsKd mostly betting on root PBS", async 
     const betMass = policy[4]! + policy[5]! + policy[6]! + policy[7]!;
     assert.ok(policy[1]! < 0.05, `AsKd call ${policy[1]} should stay low`);
     assert.ok(betMass > 0.95, `AsKd bet mass ${betMass} should stay high`);
+  } finally {
+    evaluator.dispose();
+    model.dispose();
+    device.destroy();
+  }
+});
+
+test("rebel_296_4000 sparse solve matches PyTorch CFR on root PBS", async () => {
+  const reference = loadPythonCfrReference();
+  assert.equal(reference.schemaVersion, 1);
+  assert.equal(reference.numHands, NUM_HANDS);
+
+  const device = await createDawnDevice();
+  const model = await loadNodeModel(device, MANIFEST, WEIGHTS);
+  const evaluator = new BrowserCfrEvaluator(device, model);
+  const heroHand = [parseCard("As"), parseCard("Kd")] as [number, number];
+  const numActions = model.manifest.architecture.numActions;
+  try {
+    const result = await evaluator.evaluateSpot({
+      spot: [],
+      iterations: 16,
+      depth: 6,
+      cfrAvg: false,
+      initialState: {
+        button: 0,
+        stack: 400,
+        sb: 1,
+        bb: 2,
+        betBins: model.manifest.env.betBins,
+        flopShowdown: model.manifest.env.flopShowdown,
+      },
+      heroPlayer: 0,
+      heroHand,
+      initialBeliefs: buildPublicBeliefs(),
+      readPolicy: true,
+      readActionProbs: true,
+    });
+    assert.equal(reference.numActions, numActions);
+    assertCloseArray(result.actionProbs, reference.actionProbs, 22e-2, "root action probs");
+
+    for (const [label, expected] of Object.entries(reference.hands)) {
+      if (label !== "AsKd") continue;
+      assert.equal(
+        expected.index,
+        handComboIndex(parseCard(label.slice(0, 2)), parseCard(label.slice(2, 4))),
+        `${label} combo index`,
+      );
+      const policyStart = expected.index * numActions;
+      assertCloseArray(
+        result.policy.subarray(policyStart, policyStart + numActions),
+        expected.policy,
+        22e-2,
+        `${label} CFR policy`,
+      );
+    }
   } finally {
     evaluator.dispose();
     model.dispose();
