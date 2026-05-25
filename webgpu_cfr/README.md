@@ -28,9 +28,9 @@ BetterFFN-backed local CFR problem. It supports:
   card parsing, hero-only belief initialization, blocked combo masks, streamed
   model download progress, and IndexedDB cache invalidation.
 - `src/App.tsx` and `src/main.tsx` implement the Vite/Solid spot-solver UI.
-- `src/kernels.ts` contains WGSL kernels for regret matching, regret
-  accumulation, average-policy finalization, belief updates, and action
-  probability reduction.
+- `src/modelKernels/`, `src/sparseCfr/`, and `src/pokerStateKernels/` contain
+  grouped WGSL modules for BetterFFN inference, sparse public-tree CFR, and
+  GPU-resident HUNL public-state replay.
 - `tests/cfr_parity.test.ts` and `tests/full_evaluator.test.ts` compare Dawn
   output against Python references from `checkpoints-rebel/rebel_latest.pt`.
 - `tests/cards_beliefs_cache.test.ts` covers card parsing, combo lookup,

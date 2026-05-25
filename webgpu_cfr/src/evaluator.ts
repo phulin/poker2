@@ -7,6 +7,7 @@ import {
   REGRET_MATCH_WGSL,
 } from "./kernels.js";
 import { readFloatBuffer } from "./gpuBuffers.js";
+import { createComputePipeline, dispatchCompute } from "./gpuPipeline.js";
 import type {
   EvaluationResult,
   LocalCfrProblem,
@@ -448,14 +449,7 @@ export class GpuCfrEvaluator {
   }
 
   private pipeline(source: string, label: string): GPUComputePipeline {
-    return this.device.createComputePipeline({
-      label,
-      layout: "auto",
-      compute: {
-        module: this.device.createShaderModule({ label: `${label}.wgsl`, code: source }),
-        entryPoint: "main",
-      },
-    });
+    return createComputePipeline(this.device, source, label);
   }
 
   private async runCompute(
@@ -466,11 +460,7 @@ export class GpuCfrEvaluator {
   ): Promise<void> {
     if (label) console.error(`solve:run:${label}`);
     const encoder = this.device.createCommandEncoder();
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(x);
-    pass.end();
+    dispatchCompute(encoder, pipeline, bindGroup, x);
     if (label) console.error(`solve:submit:${label}`);
     this.device.queue.submit([encoder.finish()]);
     if (label) console.error(`solve:wait:${label}`);
@@ -486,11 +476,7 @@ export class GpuCfrEvaluator {
     label?: string,
   ): void {
     if (label) console.error(`solve:encode:${label}`);
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(x);
-    pass.end();
+    dispatchCompute(encoder, pipeline, bindGroup, x);
   }
 
   private acquireStorageFromData(

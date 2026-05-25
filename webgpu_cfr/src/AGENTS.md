@@ -5,10 +5,8 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `types.ts`: Shared request, fixture, exported manifest, CFR config, solve-progress, and result types.
 - `gpu.ts`: Barrel exports for GPU helpers.
 - `gpuBuffers.ts`: WebGPU storage/uniform buffer creation and readback helpers.
+- `gpuPipeline.ts`: Shared compute-pipeline creation and single-dispatch helpers.
 - `kernels.ts`: WGSL kernels for regret matching, belief updates, and action probability reductions.
-- `sparseCfrKernels.ts`: WGSL sparse-tree CFR kernels and buffer helpers for regret matching, per-depth belief/reach propagation, opponent-conditioned policy and regret-weight construction, node belief/value gather-scatter, terminal showdown values, value backup, average-policy accumulation, and regret accumulation.
-- `modelKernels.ts`: WGSL kernels for BetterFFN matvec, activations, normalization, residuals, and batching.
-- `pokerStateKernels.ts`: WGSL kernels and state-layout constants for GPU-resident HUNL public state, legal masks, stepping, child-state construction, terminal values, and state feature encoding.
 - `gpuPokerState.ts`: TypeScript wrapper for packed GPU poker state buffers and the poker-state kernels used by browser solving.
 - `modelFormat.ts`: Manifest parsing, CFR default resolution, tensor loading, and action-label helpers.
 - `cards.ts`: Standard card notation parsing/formatting, duplicate validation, and 1326 hand-combo lookup helpers.
@@ -36,4 +34,6 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `webgpu.d.ts`: WebGPU ambient type declarations.
 
 ### Subdirectories
-There are no child source directories.
+- `modelKernels/`: BetterFFN WebGPU WGSL kernels split into production matvec, generated/specialized variants, normalization, pointwise, belief-feature, and benchmark-only modules.
+- `sparseCfr/`: Sparse public-tree CFR WebGPU runtime, tree buffer types, dispatch helpers, runtime flags, and grouped WGSL shader modules.
+- `pokerStateKernels/`: GPU HUNL public-state layout constants and WGSL kernels for state transitions, terminal values, and model feature encoding.

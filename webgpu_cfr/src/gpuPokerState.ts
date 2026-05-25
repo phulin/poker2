@@ -1,13 +1,7 @@
 import { makeEmptyStorageBuffer, makeStorageBuffer, readUintBuffer } from "./gpuBuffers.js";
+import { createComputePipeline, dispatchCompute } from "./gpuPipeline.js";
 import { PublicHunlEnv } from "./hunlEnv.js";
 import {
-  POKER_BUILD_CHILD_STATES_WGSL,
-  POKER_COMPACT_MODEL_STATES_WGSL,
-  POKER_LEGAL_WGSL,
-  POKER_SCATTER_MODEL_VALUES_WGSL,
-  POKER_STEP_WGSL,
-  POKER_TERMINAL_RANKS_WGSL,
-  POKER_TERMINAL_VALUES_WGSL,
   STATE_ACTIONS_LAST_ROUND,
   STATE_ACTIONS_THIS_ROUND,
   STATE_ACTED_SINCE_RESET,
@@ -34,7 +28,18 @@ import {
   STATE_STRIDE,
   STATE_TO_ACT,
   STATE_WINNER,
-} from "./pokerStateKernels.js";
+} from "./pokerStateKernels/layout.js";
+import {
+  POKER_BUILD_CHILD_STATES_WGSL,
+  POKER_COMPACT_MODEL_STATES_WGSL,
+  POKER_LEGAL_WGSL,
+  POKER_SCATTER_MODEL_VALUES_WGSL,
+  POKER_STEP_WGSL,
+} from "./pokerStateKernels/stateMachine.js";
+import {
+  POKER_TERMINAL_RANKS_WGSL,
+  POKER_TERMINAL_VALUES_WGSL,
+} from "./pokerStateKernels/terminal.js";
 import type { BetterFfnManifest, BrowserCfrInitialState, PlayerIndex } from "./types.js";
 
 export interface GpuChildStateBatch {
@@ -321,17 +326,11 @@ export class GpuPokerState {
     workgroups: number,
     entries: GPUBindGroupEntry[],
   ): void {
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(
-      0,
-      this.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries,
-      }),
-    );
-    pass.dispatchWorkgroups(workgroups);
-    pass.end();
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries,
+    });
+    dispatchCompute(encoder, pipeline, bindGroup, workgroups);
   }
 
   private encode3d(
@@ -342,17 +341,11 @@ export class GpuPokerState {
     z: number,
     entries: GPUBindGroupEntry[],
   ): void {
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(
-      0,
-      this.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries,
-      }),
-    );
-    pass.dispatchWorkgroups(x, y, z);
-    pass.end();
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries,
+    });
+    dispatchCompute(encoder, pipeline, bindGroup, x, y, z);
   }
 }
 
@@ -399,14 +392,7 @@ function pipeline(
   source: string,
   label: string,
 ): GPUComputePipeline {
-  return device.createComputePipeline({
-    label,
-    layout: "auto",
-    compute: {
-      module: device.createShaderModule({ label: `${label}.wgsl`, code: source }),
-      entryPoint: "main",
-    },
-  });
+  return createComputePipeline(device, source, label);
 }
 
 function buildHandCards(): Uint32Array<ArrayBuffer> {

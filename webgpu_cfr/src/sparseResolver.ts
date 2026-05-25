@@ -23,9 +23,11 @@ import {
 } from "./hunlEnv.js";
 import {
   SparseCfrGpuKernels,
-  type SparseGpuTreeData,
-  type SparseGpuTreeBuffers,
-} from "./sparseCfrKernels.js";
+} from "./sparseCfr/SparseCfrGpuKernels.js";
+import type {
+  SparseGpuTreeData,
+  SparseGpuTreeBuffers,
+} from "./sparseCfr/treeBuffers.js";
 import type { LocalSolveResult, PlayerIndex } from "./types.js";
 
 const EPS = 1.0e-8;

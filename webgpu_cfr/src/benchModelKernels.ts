@@ -1,20 +1,22 @@
 import { performance } from "node:perf_hooks";
 import {
+  LEAKY_RELU_MAT_VEC_BATCH_TILED_GEMM_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_TILED_GEMM_WGSL,
+  MAT_VEC_BATCH_TILED_GEMM_WGSL,
+} from "./modelKernels/benchVariants.js";
+import {
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_TILED_GEMM_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH4_SUBGROUP_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_TILED_GEMM_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
@@ -26,16 +28,19 @@ import {
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+} from "./modelKernels/matVecGenerated.js";
+import {
+  LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   MAT_VEC_BATCH_SMALL_COLS_WGSL,
-  MAT_VEC_BATCH_TILED_GEMM_WGSL,
   MAT_VEC_BATCH_WGSL,
-} from "./modelKernels.js";
+} from "./modelKernels/matVec.js";
 import {
   makeEmptyStorageBuffer,
   makeStorageBuffer,
   makeUniformBuffer,
   readFloatBuffer,
 } from "./gpuBuffers.js";
+import { createComputePipeline } from "./gpuPipeline.js";
 import { createDawnDevice } from "./gpu.js";
 import { NUM_HANDS } from "./hunlEnv.js";
 
@@ -600,13 +605,7 @@ function variants(): Variant[] {
 }
 
 function createPipeline(device: GPUDevice, variant: Variant): GPUComputePipeline {
-  return device.createComputePipeline({
-    layout: "auto",
-    compute: {
-      module: device.createShaderModule({ code: variant.shader }),
-      entryPoint: "main",
-    },
-  });
+  return createComputePipeline(device, variant.shader, `bench-model-${variant.name}`);
 }
 
 function uniformWords(kind: Kind, shape: Shape): Uint32Array<ArrayBuffer> {

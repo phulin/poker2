@@ -11,11 +11,15 @@ import {
   SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_OVERLAP_LIST_WGSL,
   SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL,
   SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL,
+} from "../src/sparseCfr/shaders/allIn.js";
+import {
   SPARSE_SHOWDOWN_RANK_PREFIX_PACKED_WGSL,
   SPARSE_SHOWDOWN_VALUES_WGSL,
   SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_PACKED_WGSL,
+} from "../src/sparseCfr/shaders/terminal.js";
+import {
   SparseCfrGpuKernels,
-} from "../src/sparseCfrKernels.js";
+} from "../src/sparseCfr/SparseCfrGpuKernels.js";
 import { packInt16Table } from "../src/allInTables.js";
 
 function assertCloseArray(

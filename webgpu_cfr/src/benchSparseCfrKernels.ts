@@ -7,9 +7,11 @@ import {
 import { createDawnDevice } from "./gpu.js";
 import {
   SparseCfrGpuKernels,
-  type SparseGpuTreeBuffers,
-  type SparseGpuTreeData,
-} from "./sparseCfrKernels.js";
+} from "./sparseCfr/SparseCfrGpuKernels.js";
+import type {
+  SparseGpuTreeBuffers,
+  SparseGpuTreeData,
+} from "./sparseCfr/treeBuffers.js";
 import { NUM_HANDS } from "./hunlEnv.js";
 
 interface Options {

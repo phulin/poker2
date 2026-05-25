@@ -1,20 +1,21 @@
 import {
-  ADD3_WGSL,
   FILL_EXACT_PAIR_MASS_WGSL,
+  MAT_VEC_BATCH_EXACT_BELIEF_LINEAR_IN_512_BATCH2_SUBGROUP_WGSL,
+  PLAYER_BOARD_HADAMARD_WGSL,
+} from "./modelKernels/beliefFeatures.js";
+import {
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
-  MAT_VEC_BATCH_EXACT_BELIEF_LINEAR_IN_512_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
@@ -25,24 +26,32 @@ import {
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+} from "./modelKernels/matVecGenerated.js";
+import {
+  LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   MAT_VEC_BATCH_SMALL_COLS_WGSL,
   MAT_VEC_BATCH_WGSL,
   MAT_VEC_WGSL,
-  PLAYER_BOARD_HADAMARD_WGSL,
-  REPEAT_ROWS_WGSL,
+} from "./modelKernels/matVec.js";
+import {
   RMS_NORM_BELIEF_EXACT_WGSL,
   RMS_NORM_BELIEF_EXACT_HALF_WGSL,
   RMS_NORM_BATCH_WGSL,
   RMS_NORM_BATCH_SMALL_WGSL,
   RMS_NORM_WGSL,
+} from "./modelKernels/norm.js";
+import {
+  ADD3_WGSL,
+  REPEAT_ROWS_WGSL,
   SCALED_RESIDUAL_ADD_WGSL,
   ZERO_SUM_BATCH_WGSL,
-} from "./modelKernels.js";
-import { POKER_ENCODE_FEATURES_WGSL } from "./pokerStateKernels.js";
+} from "./modelKernels/pointwise.js";
+import { POKER_ENCODE_FEATURES_WGSL } from "./pokerStateKernels/modelFeatures.js";
 import {
   makeStorageBuffer,
   readFloatBuffer,
 } from "./gpuBuffers.js";
+import { createComputePipeline, dispatchCompute } from "./gpuPipeline.js";
 import {
   parseBetterFfnManifest,
   requireTensor,
@@ -3306,14 +3315,7 @@ export class BetterFfnWebGpuModel {
   }
 
   private pipeline(source: string, label: string): GPUComputePipeline {
-    return this.device.createComputePipeline({
-      label,
-      layout: "auto",
-      compute: {
-        module: this.device.createShaderModule({ label: `${label}.wgsl`, code: source }),
-        entryPoint: "main",
-      },
-    });
+    return createComputePipeline(this.device, source, label);
   }
 
   private submit(
@@ -3322,17 +3324,11 @@ export class BetterFfnWebGpuModel {
     entries: GPUBindGroupEntry[],
   ): void {
     const encoder = this.recordingEncoder ?? this.device.createCommandEncoder();
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(
-      0,
-      this.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries,
-      }),
-    );
-    pass.dispatchWorkgroups(workgroups);
-    pass.end();
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries,
+    });
+    dispatchCompute(encoder, pipeline, bindGroup, workgroups);
     if (!this.recordingEncoder) {
       this.device.queue.submit([encoder.finish()]);
     }
@@ -3345,17 +3341,11 @@ export class BetterFfnWebGpuModel {
     entries: GPUBindGroupEntry[],
   ): void {
     const encoder = this.recordingEncoder ?? this.device.createCommandEncoder();
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(
-      0,
-      this.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries,
-      }),
-    );
-    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
-    pass.end();
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries,
+    });
+    dispatchCompute(encoder, pipeline, bindGroup, workgroupsX, workgroupsY);
     if (!this.recordingEncoder) {
       this.device.queue.submit([encoder.finish()]);
     }
