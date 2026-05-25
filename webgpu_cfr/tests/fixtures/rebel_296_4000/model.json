@@ -1,0 +1,1333 @@
+{
+  "schemaVersion": 1,
+  "format": "p2.better_ffn.webgpu",
+  "source": {
+    "snapshot": "checkpoints-rebel/rebel_296_4000.pt",
+    "exporter": "webgpu_cfr.python.export_model"
+  },
+  "architecture": {
+    "numHands": 1326,
+    "numPlayers": 2,
+    "numActions": 8,
+    "hiddenDim": 512,
+    "rangeHiddenDim": 256,
+    "boardInteractionDim": 64,
+    "ffnDim": 1024,
+    "numHiddenLayers": 3,
+    "numPolicyLayers": 3,
+    "numValueLayers": 3,
+    "sharedTrunk": true,
+    "enforceZeroSum": true,
+    "nonlinearity": "leaky_relu",
+    "normalization": "rmsnorm",
+    "contextDim": 15,
+    "policyRank": 128,
+    "policyHandBiasRank": 32,
+    "splitPolicyValue": true
+  },
+  "env": {
+    "stack": 10000,
+    "sb": 50,
+    "bb": 100,
+    "betBins": [
+      0.25,
+      0.5,
+      0.75,
+      1.0,
+      1.5
+    ],
+    "flopShowdown": false,
+    "maxStackBb": 400,
+    "defaultButton": 1,
+    "defaultForceDeck": [
+      12,
+      25,
+      38,
+      51,
+      0,
+      13,
+      26,
+      1,
+      14
+    ]
+  },
+  "cfr": {
+    "source": "checkpoint.config.search",
+    "enabled": true,
+    "depth": 6,
+    "iterations": 300,
+    "iterationsStart": 300,
+    "iterationsFinal": 300,
+    "scheduleProgress": 0.7998,
+    "warmStartIterations": 15,
+    "warmStartType": "model",
+    "warmStartMultiplier": 10.0,
+    "branching": 4,
+    "beliefSamples": 16,
+    "sampleEpsilon": 0.25,
+    "dcfrAlpha": 3.0,
+    "dcfrAlphaFinal": 4.0,
+    "dcfrBeta": -1.0,
+    "dcfrBetaFinal": -2.0,
+    "dcfrGamma": 5.0,
+    "dcfrGammaFinal": 0.0,
+    "dcfrPlusDelay": 120,
+    "dcfrPlusDelayConfigured": 80,
+    "includeAveragePolicy": true,
+    "cfrType": "discounted",
+    "cfrPlus": false,
+    "cfrAvg": false,
+    "sparse": true,
+    "sparseFused": true,
+    "valueTargetsFromFinalPolicy": false
+  },
+  "actionLabels": [
+    "fold",
+    "check_call",
+    "bet_0.25x_pot",
+    "bet_0.5x_pot",
+    "bet_0.75x_pot",
+    "bet_1x_pot",
+    "bet_1.5x_pot",
+    "all_in"
+  ],
+  "tensors": [
+    {
+      "name": "policy_model.policy_factor_scale",
+      "shape": [],
+      "dtype": "float16",
+      "byteOffset": 0,
+      "byteLength": 2,
+      "sha256": "f95f97d173ffb68068acc478359260241d5670dbce9e1f9463bdbda2c7d4b143"
+    },
+    {
+      "name": "policy_model.street_embedding.weight",
+      "shape": [
+        5,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 2,
+      "byteLength": 5120,
+      "sha256": "4bfbc911a8f167c89d6a6579d562b4be46483e686bfd1287ee3dce0df2e74419"
+    },
+    {
+      "name": "policy_model.rank_embedding.weight",
+      "shape": [
+        14,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 5122,
+      "byteLength": 14336,
+      "sha256": "93226704209328d670bf0a50852227d540699068339e4aacfd5f5f67a366eb25"
+    },
+    {
+      "name": "policy_model.suit_embedding.weight",
+      "shape": [
+        5,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 19458,
+      "byteLength": 5120,
+      "sha256": "5bd6477584427faf3f02ffcd4ce7b86aa420a0c8e4add2cda0cbaffb2c2cc0cb"
+    },
+    {
+      "name": "policy_model.card_embedding.weight",
+      "shape": [
+        52,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 24578,
+      "byteLength": 53248,
+      "sha256": "62c34f40bd4171aaa3ec7569061745c75fba67655ea71743f09d5767a930e62c"
+    },
+    {
+      "name": "policy_model.hand_feature_proj.weight",
+      "shape": [
+        512,
+        8
+      ],
+      "dtype": "float16",
+      "byteOffset": 77826,
+      "byteLength": 8192,
+      "sha256": "e33ab3461d7fd9e612130f301f0d8399a77c6f2a33b9412c49b82dee10b7acc0"
+    },
+    {
+      "name": "policy_model.belief_proj.norm.weight",
+      "shape": [
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 86018,
+      "byteLength": 2048,
+      "sha256": "d554a2882fdb52cde9fb1bdbd2d3e10058d48ed6dfcf924dc2949c423151899c"
+    },
+    {
+      "name": "policy_model.belief_proj.linear_in.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 88066,
+      "byteLength": 1048576,
+      "sha256": "4096d9f8762b198d1d4fabe65a7c1d6cc2f615c7ed9b70fd9196257d6aae8f22"
+    },
+    {
+      "name": "policy_model.belief_proj.linear_out.weight",
+      "shape": [
+        512,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 1136642,
+      "byteLength": 524288,
+      "sha256": "f809f49b8f32ec09fe42c214ace5c8a8130b8c95dbf1aaec6569683a029cde24"
+    },
+    {
+      "name": "policy_model.belief_proj.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 1660930,
+      "byteLength": 1024,
+      "sha256": "526200ba8082f0e559f0a87e5a08516efe1a56111193e256c878131cda1951ef"
+    },
+    {
+      "name": "policy_model.context_encoder.norm.weight",
+      "shape": [
+        15
+      ],
+      "dtype": "float16",
+      "byteOffset": 1661954,
+      "byteLength": 30,
+      "sha256": "5879de5fad7aa9358960738036c59c502df032a74726917f328127d3413d62be"
+    },
+    {
+      "name": "policy_model.context_encoder.linear_in.weight",
+      "shape": [
+        512,
+        15
+      ],
+      "dtype": "float16",
+      "byteOffset": 1661984,
+      "byteLength": 15360,
+      "sha256": "8393838e9124e7e4954ec2a800b62a55f6e4318d5e6a8c5fa3abe8364cc957c8"
+    },
+    {
+      "name": "policy_model.context_encoder.linear_out.weight",
+      "shape": [
+        512,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 1677344,
+      "byteLength": 524288,
+      "sha256": "e8a02e87098231c3ad8e2b7ed6c17595bfb4e4d35a2008642a30635d6b101aeb"
+    },
+    {
+      "name": "policy_model.context_encoder.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 2201632,
+      "byteLength": 1024,
+      "sha256": "526200ba8082f0e559f0a87e5a08516efe1a56111193e256c878131cda1951ef"
+    },
+    {
+      "name": "policy_model.rank_pair_low_embedding.weight",
+      "shape": [
+        91,
+        64
+      ],
+      "dtype": "float16",
+      "byteOffset": 2202656,
+      "byteLength": 11648,
+      "sha256": "71475d83824b65e2ff931e8468c236e3833e24cdc29028cd3102bacc31c1b77b"
+    },
+    {
+      "name": "policy_model.board_rank_low.weight",
+      "shape": [
+        64,
+        13
+      ],
+      "dtype": "float16",
+      "byteOffset": 2214304,
+      "byteLength": 1664,
+      "sha256": "a234071296754099bbbd0f35220af6e155acea2f290d6440049121372c8c053c"
+    },
+    {
+      "name": "policy_model.rank_board_interaction_out.weight",
+      "shape": [
+        512,
+        128
+      ],
+      "dtype": "float16",
+      "byteOffset": 2215968,
+      "byteLength": 131072,
+      "sha256": "a7ed58d10c78879e5d354c5356a81cd1fa866afcbdee94582f3c2984340b0eb5"
+    },
+    {
+      "name": "policy_model.suit_pair_low_embedding.weight",
+      "shape": [
+        10,
+        64
+      ],
+      "dtype": "float16",
+      "byteOffset": 2347040,
+      "byteLength": 1280,
+      "sha256": "6a3cc0004f0ddad54fcbfec12edab0467e0590c22a49e97e834087a81e970b49"
+    },
+    {
+      "name": "policy_model.board_suit_low.weight",
+      "shape": [
+        64,
+        4
+      ],
+      "dtype": "float16",
+      "byteOffset": 2348320,
+      "byteLength": 512,
+      "sha256": "19d0796d48c67ecfed8b478f8aaf680093826aaced7a9b02ad0058b102438871"
+    },
+    {
+      "name": "policy_model.suit_board_interaction_out.weight",
+      "shape": [
+        512,
+        128
+      ],
+      "dtype": "float16",
+      "byteOffset": 2348832,
+      "byteLength": 131072,
+      "sha256": "012b10158e692da8a328cc6e87986baa832f1612210db8cc0e10fddca2241a73"
+    },
+    {
+      "name": "policy_model.trunk.0.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 2479904,
+      "byteLength": 1024,
+      "sha256": "511fbbd5913ff4c8d58a94fc6290aa76067d7ca8d25c567605e79b73ba5aa622"
+    },
+    {
+      "name": "policy_model.trunk.0.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 2480928,
+      "byteLength": 1048576,
+      "sha256": "a30ab25b4425108656d1d5f8127ef2c141d512ee40f08120ae54447bc7dd9027"
+    },
+    {
+      "name": "policy_model.trunk.0.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 3529504,
+      "byteLength": 1048576,
+      "sha256": "2f191b018452e0493d17157abe2a96c1c7bef3704e7105ef2acc8ea7af17ea45"
+    },
+    {
+      "name": "policy_model.trunk.0.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 4578080,
+      "byteLength": 1024,
+      "sha256": "54f4c4249534292a7b335d864c5a9bbd20a4760ed3ba58452e36dad4c8d45f09"
+    },
+    {
+      "name": "policy_model.trunk.1.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 4579104,
+      "byteLength": 1024,
+      "sha256": "5ba52feb9748d0a28d8ab34487e3fa60c0e79700b8e99b9e0878db5f86fbb0f4"
+    },
+    {
+      "name": "policy_model.trunk.1.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 4580128,
+      "byteLength": 1048576,
+      "sha256": "2c24a1ec758d57c9582414f7261a54b9bfeb4b42153a3f8e9b479db61d5850fa"
+    },
+    {
+      "name": "policy_model.trunk.1.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 5628704,
+      "byteLength": 1048576,
+      "sha256": "a477df79cd687237ae10b5d0c209d857151fc631e7f31300ce7ccb3d6a07f084"
+    },
+    {
+      "name": "policy_model.trunk.1.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 6677280,
+      "byteLength": 1024,
+      "sha256": "64b1624ae36db9194a2169b2cdd97412e5fba75fb5949091974da716030a3318"
+    },
+    {
+      "name": "policy_model.trunk.2.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 6678304,
+      "byteLength": 1024,
+      "sha256": "b26a8b70bdddfb3300fdda8afd72e39a488a5c47f3ef6ca2a06ab575c7a5a1ab"
+    },
+    {
+      "name": "policy_model.trunk.2.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 6679328,
+      "byteLength": 1048576,
+      "sha256": "38cfef4339cfa61d0b9cd035ea06247e40f5ed4a10cbd24c14bba577d83f7943"
+    },
+    {
+      "name": "policy_model.trunk.2.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 7727904,
+      "byteLength": 1048576,
+      "sha256": "129c93cb9cbdcc2346f313e20f420f5b584223e9eaccada8ae7b9e48270dfaca"
+    },
+    {
+      "name": "policy_model.trunk.2.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 8776480,
+      "byteLength": 1024,
+      "sha256": "8a06e601115da1048e225efbc1ddc96ac4d86c93386430f88151fe413004e184"
+    },
+    {
+      "name": "policy_model.policy_tower.0.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 8777504,
+      "byteLength": 1024,
+      "sha256": "94db0818a694b9ecca9019ee8fb2d42f4fc87f6cfa8208a9d337f7f0391e2155"
+    },
+    {
+      "name": "policy_model.policy_tower.0.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 8778528,
+      "byteLength": 1048576,
+      "sha256": "89eba7f08d1d40264a0a6c447b56e26d40c9e4b619aa5f268aabe951c4de7a66"
+    },
+    {
+      "name": "policy_model.policy_tower.0.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 9827104,
+      "byteLength": 1048576,
+      "sha256": "cacfceee5a2eb8ce9d5271c1b0975beb3e05cff308ca3ee334a53ed546d10c3c"
+    },
+    {
+      "name": "policy_model.policy_tower.0.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 10875680,
+      "byteLength": 1024,
+      "sha256": "e399177f61c6cf62bca08c734930912399ed1d5a9c2f1cba0e9dff5ca7ea5c36"
+    },
+    {
+      "name": "policy_model.policy_tower.1.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 10876704,
+      "byteLength": 1024,
+      "sha256": "32498d88b6f67d3a4cddcae98460acd104a522f95ca22fdd0c1da108b0198daf"
+    },
+    {
+      "name": "policy_model.policy_tower.1.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 10877728,
+      "byteLength": 1048576,
+      "sha256": "0d766d5f8a64b47316b6f0992a7c9a96938b8a5b6b06e9487a4c92f3b5b0a2b2"
+    },
+    {
+      "name": "policy_model.policy_tower.1.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 11926304,
+      "byteLength": 1048576,
+      "sha256": "981f05915790be69231b38d9b2e3c7d6226381393e1457fd70e8a155649ec04f"
+    },
+    {
+      "name": "policy_model.policy_tower.1.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 12974880,
+      "byteLength": 1024,
+      "sha256": "97d434eb068ba0e0bb15601bc901aa5cd5f887f88f6f01af5f09232eb01e5e4a"
+    },
+    {
+      "name": "policy_model.policy_tower.2.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 12975904,
+      "byteLength": 1024,
+      "sha256": "9fd5d8d4732ba365bf1a13ba9f1e242c6de721900615065666e8dd2959a0a8b2"
+    },
+    {
+      "name": "policy_model.policy_tower.2.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 12976928,
+      "byteLength": 1048576,
+      "sha256": "1ab4bde91083cbc88d496ae1ec6e847344d55f170f0aa20c7d2210589ab2f079"
+    },
+    {
+      "name": "policy_model.policy_tower.2.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 14025504,
+      "byteLength": 1048576,
+      "sha256": "96a2b3fb8f44613afd88e7d7028f154dc4a91dffbf069eae78f338045795d319"
+    },
+    {
+      "name": "policy_model.policy_tower.2.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 15074080,
+      "byteLength": 1024,
+      "sha256": "f171227a05e2ae229a7f9ecf63a6666647a6520f835bc5cd6fc49f21cdeb9cc8"
+    },
+    {
+      "name": "policy_model.policy_hand_proj.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 15075104,
+      "byteLength": 1024,
+      "sha256": "c9417cd42e77a6d6a5f71f814f4638c33c975535796a85665f6d0b61df42f9d1"
+    },
+    {
+      "name": "policy_model.policy_hand_proj.linear_out.weight",
+      "shape": [
+        128,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 15076128,
+      "byteLength": 131072,
+      "sha256": "5f7947790fdd556866620f40cf073e2d9d53ed02eed0c1ca96e127bb3bf0b31a"
+    },
+    {
+      "name": "policy_model.policy_hand_proj.linear_out.bias",
+      "shape": [
+        128
+      ],
+      "dtype": "float16",
+      "byteOffset": 15207200,
+      "byteLength": 256,
+      "sha256": "76ed4742381a7f7d7a635f3e0b4e9d6c9f9887b8c77f31fc20f5c4ba73d26d61"
+    },
+    {
+      "name": "policy_model.policy_action_head.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 15207456,
+      "byteLength": 1024,
+      "sha256": "1b325538a1bf945d1c6bbfdb7ecae1ea54d2edace0c141586a25b3ba5c828a21"
+    },
+    {
+      "name": "policy_model.policy_action_head.linear_out.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 15208480,
+      "byteLength": 1048576,
+      "sha256": "17b306464ce385764b33d7d2cf9dea9d41a49bbb87e5e98c5cd4be6fec6d7832"
+    },
+    {
+      "name": "policy_model.policy_action_head.linear_out.bias",
+      "shape": [
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 16257056,
+      "byteLength": 2048,
+      "sha256": "08674887a2feea54ff9df77b69e6a2cc5a7c810cc770f9d1aec56d722d8de2f5"
+    },
+    {
+      "name": "policy_model.policy_hand_gate.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16259104,
+      "byteLength": 1024,
+      "sha256": "69b0d6575222178094745f301d6920d0a445ddc980bfc5ffa611396818068105"
+    },
+    {
+      "name": "policy_model.policy_hand_gate.linear_out.weight",
+      "shape": [
+        128,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16260128,
+      "byteLength": 131072,
+      "sha256": "486b80a800955d77abc5845a118ba46d8b4a87311b484426d2f61ee6dfb7c482"
+    },
+    {
+      "name": "policy_model.policy_hand_gate.linear_out.bias",
+      "shape": [
+        128
+      ],
+      "dtype": "float16",
+      "byteOffset": 16391200,
+      "byteLength": 256,
+      "sha256": "b364617e1e241a41a203fb89be415983413c463a777ae507bb47b96b2c13a426"
+    },
+    {
+      "name": "policy_model.policy_dynamic_coeff.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16391456,
+      "byteLength": 1024,
+      "sha256": "fbeeabecb7cc207e8c50dfc8ec8ffb1bab5fb7ed08eaea62227fd46256d6411a"
+    },
+    {
+      "name": "policy_model.policy_dynamic_coeff.linear_out.weight",
+      "shape": [
+        120,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16392480,
+      "byteLength": 122880,
+      "sha256": "82c97d3bec49ca6b9de2f0cb570836a27360e1c4d3b247eb6225fa5b337cf363"
+    },
+    {
+      "name": "policy_model.policy_dynamic_coeff.linear_out.bias",
+      "shape": [
+        120
+      ],
+      "dtype": "float16",
+      "byteOffset": 16515360,
+      "byteLength": 240,
+      "sha256": "0447938ec6a1c8bc77e05f53baa9d207a00964d6f77958dea1ed26ff7472f490"
+    },
+    {
+      "name": "policy_model.policy_action_bias.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16515600,
+      "byteLength": 1024,
+      "sha256": "6c61433e7a7ee96697a46ab18b6b28033df380e03ba587bd782703f82dbd88cf"
+    },
+    {
+      "name": "policy_model.policy_action_bias.linear_out.weight",
+      "shape": [
+        8,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16516624,
+      "byteLength": 8192,
+      "sha256": "78f9f827058298a59c04087d89d75f6233b241c81fee9d81d6df2066083c3a86"
+    },
+    {
+      "name": "policy_model.policy_action_bias.linear_out.bias",
+      "shape": [
+        8
+      ],
+      "dtype": "float16",
+      "byteOffset": 16524816,
+      "byteLength": 16,
+      "sha256": "8f4676234082c8ba16aa815d025ad8bc2df4d3fd627892ed12b5755ae85409b2"
+    },
+    {
+      "name": "policy_model.policy_hand_bias.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16524832,
+      "byteLength": 1024,
+      "sha256": "9e5c8cacc34579afecac9d8c651ca500b5b1aeb1b8c1c60a8e527d63a4c51050"
+    },
+    {
+      "name": "policy_model.policy_hand_bias.linear_out.weight",
+      "shape": [
+        32,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16525856,
+      "byteLength": 32768,
+      "sha256": "114c95903a3f21c75cb9146a1e81abd84eee0e0e826c0fb9a9235434af7b373d"
+    },
+    {
+      "name": "policy_model.policy_hand_bias.linear_out.bias",
+      "shape": [
+        32
+      ],
+      "dtype": "float16",
+      "byteOffset": 16558624,
+      "byteLength": 64,
+      "sha256": "77c8939826024f1dc0895af47727d8efd1cbe6bad269390092e6b6640b4f6cfc"
+    },
+    {
+      "name": "policy_model.policy_hand_bias_action.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16558688,
+      "byteLength": 1024,
+      "sha256": "706982a91197b332fb8698b73317797ae3114a09f16d653c21c6f60ea6381621"
+    },
+    {
+      "name": "policy_model.policy_hand_bias_action.linear_out.weight",
+      "shape": [
+        256,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16559712,
+      "byteLength": 262144,
+      "sha256": "ca99447f3176aa9386ce3a5693f5068ed44e74d1c8c4a9c1c646f3b5260f5360"
+    },
+    {
+      "name": "policy_model.policy_hand_bias_action.linear_out.bias",
+      "shape": [
+        256
+      ],
+      "dtype": "float16",
+      "byteOffset": 16821856,
+      "byteLength": 512,
+      "sha256": "6466fe8713e3e5b13ecb3ba774928b1fbd3166709410d0edc33e55ad635382d8"
+    },
+    {
+      "name": "policy_model.policy_hand_norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16822368,
+      "byteLength": 1024,
+      "sha256": "043ae3c005e309a2b679721eed8823ca577d7a1bed28ff310738dcfc64195ff3"
+    },
+    {
+      "name": "street_embedding.weight",
+      "shape": [
+        5,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16823392,
+      "byteLength": 5120,
+      "sha256": "698cf0ec31c94cec400a3412b715dea5a35c3aaa3acfab497969740f3d71d430"
+    },
+    {
+      "name": "rank_embedding.weight",
+      "shape": [
+        14,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16828512,
+      "byteLength": 14336,
+      "sha256": "149583e9b68343c0e77f660fe15a532253e3c814a8073e80d2c9317d2a381c05"
+    },
+    {
+      "name": "suit_embedding.weight",
+      "shape": [
+        5,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16842848,
+      "byteLength": 5120,
+      "sha256": "64cfcaff47373b3183a096cef2e6f995d56cb3d4658dbb154444a69a1b506514"
+    },
+    {
+      "name": "card_embedding.weight",
+      "shape": [
+        52,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 16847968,
+      "byteLength": 53248,
+      "sha256": "ba668a58183dfb56d77a7bd635759231622ea2a7e3bbc460999a050fc5295c90"
+    },
+    {
+      "name": "hand_feature_proj.weight",
+      "shape": [
+        512,
+        8
+      ],
+      "dtype": "float16",
+      "byteOffset": 16901216,
+      "byteLength": 8192,
+      "sha256": "d56945bb254dd17f1acf96ae79364f7669bfa8fca545f65cc9b00691f899e5ff"
+    },
+    {
+      "name": "belief_proj.norm.weight",
+      "shape": [
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 16909408,
+      "byteLength": 2048,
+      "sha256": "deb9bbfe682abd794141a955727fd4fe599ac687b4b510815c122b1094293124"
+    },
+    {
+      "name": "belief_proj.linear_in.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 16911456,
+      "byteLength": 1048576,
+      "sha256": "c34c307a7431efd26ee99be3d3c9e1c1cce4b26d880ebf05a89cac50daf3591f"
+    },
+    {
+      "name": "belief_proj.linear_out.weight",
+      "shape": [
+        512,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 17960032,
+      "byteLength": 524288,
+      "sha256": "f767fbeb93b5b838b6c23b90713b735a4ec130096030786b668522e8e411d587"
+    },
+    {
+      "name": "belief_proj.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 18484320,
+      "byteLength": 1024,
+      "sha256": "8e5c1c0bd0d1219a2e3f21815dd10ef477553729258aa8b9295929d2be0a69a0"
+    },
+    {
+      "name": "context_encoder.norm.weight",
+      "shape": [
+        15
+      ],
+      "dtype": "float16",
+      "byteOffset": 18485344,
+      "byteLength": 30,
+      "sha256": "013319b862906486e95ec971c7918a6d3dd67905f2674342cea43ad5e57177b8"
+    },
+    {
+      "name": "context_encoder.linear_in.weight",
+      "shape": [
+        512,
+        15
+      ],
+      "dtype": "float16",
+      "byteOffset": 18485374,
+      "byteLength": 15360,
+      "sha256": "2722aed590adecc3cd8b359274296f728e302af61bc7a4a56eb764d2790e2e60"
+    },
+    {
+      "name": "context_encoder.linear_out.weight",
+      "shape": [
+        512,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 18500734,
+      "byteLength": 524288,
+      "sha256": "5df3a6f0846801cfc00a2229147e2fde12cfab0dc41d2884788a410329105c67"
+    },
+    {
+      "name": "context_encoder.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 19025022,
+      "byteLength": 1024,
+      "sha256": "8e5c1c0bd0d1219a2e3f21815dd10ef477553729258aa8b9295929d2be0a69a0"
+    },
+    {
+      "name": "rank_pair_low_embedding.weight",
+      "shape": [
+        91,
+        64
+      ],
+      "dtype": "float16",
+      "byteOffset": 19026046,
+      "byteLength": 11648,
+      "sha256": "72b2c6a9e10f9442702493b6928a21fc4c9582b73ea87a94d8e9e42db2ecdeca"
+    },
+    {
+      "name": "board_rank_low.weight",
+      "shape": [
+        64,
+        13
+      ],
+      "dtype": "float16",
+      "byteOffset": 19037694,
+      "byteLength": 1664,
+      "sha256": "de1734a42b53999c98d6ded57cf80339c1cd21453227769977b000f103fb8b53"
+    },
+    {
+      "name": "rank_board_interaction_out.weight",
+      "shape": [
+        512,
+        128
+      ],
+      "dtype": "float16",
+      "byteOffset": 19039358,
+      "byteLength": 131072,
+      "sha256": "c13790bdfd7c69e00bbd864473aff7ce57b74d9438fea93bdf0e4db0fb4e52e9"
+    },
+    {
+      "name": "suit_pair_low_embedding.weight",
+      "shape": [
+        10,
+        64
+      ],
+      "dtype": "float16",
+      "byteOffset": 19170430,
+      "byteLength": 1280,
+      "sha256": "d86b306e069f7e4f067ad8f328ddf385a3c939f40a27e33cb8f92364bf98b890"
+    },
+    {
+      "name": "board_suit_low.weight",
+      "shape": [
+        64,
+        4
+      ],
+      "dtype": "float16",
+      "byteOffset": 19171710,
+      "byteLength": 512,
+      "sha256": "191c87436edb8171146285ce3a87b0656b9dde05f32b150e243bd4549b6a15c3"
+    },
+    {
+      "name": "suit_board_interaction_out.weight",
+      "shape": [
+        512,
+        128
+      ],
+      "dtype": "float16",
+      "byteOffset": 19172222,
+      "byteLength": 131072,
+      "sha256": "663ce885f594b12c3ee263bcf2b60aae8a1f9e9724eeed4c791880cdf6eb192e"
+    },
+    {
+      "name": "trunk.0.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 19303294,
+      "byteLength": 1024,
+      "sha256": "fe96bdb545ba35bf092cbf9a087109b8805df8a4051a713896f9800741fd527b"
+    },
+    {
+      "name": "trunk.0.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 19304318,
+      "byteLength": 1048576,
+      "sha256": "d0f19f15174573f4ca4305f1837af730c05ac60d778ef2f01825d93837ce2936"
+    },
+    {
+      "name": "trunk.0.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 20352894,
+      "byteLength": 1048576,
+      "sha256": "898b192639ac23dc7a9125d1ead0a179bda1220c9b74e2fcb074aa61c7f0c733"
+    },
+    {
+      "name": "trunk.0.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 21401470,
+      "byteLength": 1024,
+      "sha256": "f21348347218c276ad9206f6d0e6f6f8ba7bdfc060106278020643c7d80565e5"
+    },
+    {
+      "name": "trunk.1.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 21402494,
+      "byteLength": 1024,
+      "sha256": "3f501a1268030d1e7a278ce17e218f2b67a65902ddd7f762253928673131531c"
+    },
+    {
+      "name": "trunk.1.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 21403518,
+      "byteLength": 1048576,
+      "sha256": "f650b6e3741cd4650d8f89832bcc8223e109df3beb02b504cefad2eb756a15c9"
+    },
+    {
+      "name": "trunk.1.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 22452094,
+      "byteLength": 1048576,
+      "sha256": "10d2b3908b511a0846543ccdeb92a502c270286bd0d66ce4827ed650d4a6857c"
+    },
+    {
+      "name": "trunk.1.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 23500670,
+      "byteLength": 1024,
+      "sha256": "4576fcc02c80fc0198f0889f6c46578954c585c0ea82a2943237f4f6648e89ec"
+    },
+    {
+      "name": "trunk.2.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 23501694,
+      "byteLength": 1024,
+      "sha256": "cd7f574964347f3766187ed8c5bced542a02caac3a423003d2af32a0835371a9"
+    },
+    {
+      "name": "trunk.2.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 23502718,
+      "byteLength": 1048576,
+      "sha256": "ddb5785de5067955e0777369674880a4fc3659c9fcaee778515d4e59aea1e281"
+    },
+    {
+      "name": "trunk.2.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 24551294,
+      "byteLength": 1048576,
+      "sha256": "523203401d4e364850686c0508eeebbf70b113f0532a7ebb51f2fc7440636d09"
+    },
+    {
+      "name": "trunk.2.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 25599870,
+      "byteLength": 1024,
+      "sha256": "30ed85943b775310417fa7e0d72f625743ba9893dace26a03a61e021a700d0fd"
+    },
+    {
+      "name": "hand_value_head.0.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 25600894,
+      "byteLength": 1024,
+      "sha256": "7053ba8a4b8d114421c513cfedd76320b75e52391b72848a1551adf729b54198"
+    },
+    {
+      "name": "hand_value_head.0.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 25601918,
+      "byteLength": 1048576,
+      "sha256": "3ced477974889a69f2cdf0cad493855552104580856ad07b3bc56b864d9cf96a"
+    },
+    {
+      "name": "hand_value_head.0.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 26650494,
+      "byteLength": 1048576,
+      "sha256": "79b233f31d46e616264cf549d2de2ce66ad7349ec2d4e3315248eaef2f398dc8"
+    },
+    {
+      "name": "hand_value_head.0.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 27699070,
+      "byteLength": 1024,
+      "sha256": "9d439650daa7a7cb0323cf02ecd336110bb04c5f7157ce9da9160987edfea48e"
+    },
+    {
+      "name": "hand_value_head.1.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 27700094,
+      "byteLength": 1024,
+      "sha256": "fc989744815ad1df7d2d995db0cd2019d7aa7fb9d857ee41a1a6512307ac46c1"
+    },
+    {
+      "name": "hand_value_head.1.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 27701118,
+      "byteLength": 1048576,
+      "sha256": "c7a774d15708eaac50dd3799af63c0702b174f4fa0656f8498d8b7d99e94f0a3"
+    },
+    {
+      "name": "hand_value_head.1.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 28749694,
+      "byteLength": 1048576,
+      "sha256": "d5a7c270911c695c26753642486212d303fa7359579cfc18b220e395a85af278"
+    },
+    {
+      "name": "hand_value_head.1.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 29798270,
+      "byteLength": 1024,
+      "sha256": "9d0ef7a2c93a7f6bbd3f9baf9071ab07a0b0f3b0c06751b0fad70eeba3f2f1b9"
+    },
+    {
+      "name": "hand_value_head.2.inner.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 29799294,
+      "byteLength": 1024,
+      "sha256": "c4e1ec86166935f9d10d1c522c726b67dfddbc3360c6cdd2d8cfbc39913a105e"
+    },
+    {
+      "name": "hand_value_head.2.inner.linear_in.weight",
+      "shape": [
+        1024,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 29800318,
+      "byteLength": 1048576,
+      "sha256": "416c50557e6fbf326b8096d9230449538e5ec33f06cd0572f1722a5b0a84778c"
+    },
+    {
+      "name": "hand_value_head.2.inner.linear_out.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 30848894,
+      "byteLength": 1048576,
+      "sha256": "d68d8329da3acec5557ff6828547122f779f7d90902bd8ea3b6b7b995cb23dd7"
+    },
+    {
+      "name": "hand_value_head.2.inner.linear_out.bias",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 31897470,
+      "byteLength": 1024,
+      "sha256": "43eb5e3bad9eda4b2c79872d79c1209e80958f3332b0e965abe8eb65c35ad14d"
+    },
+    {
+      "name": "hand_value_head.3.norm.weight",
+      "shape": [
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 31898494,
+      "byteLength": 1024,
+      "sha256": "e90c9aeea80f3dcf17a5588ca3be666f61b55f92ebfe99241400f6f9328412e5"
+    },
+    {
+      "name": "hand_value_head.3.linear_out.weight",
+      "shape": [
+        2652,
+        512
+      ],
+      "dtype": "float16",
+      "byteOffset": 31899518,
+      "byteLength": 2715648,
+      "sha256": "a22f13393aa9ac113e201f83b5677845b46704ca7c5998cccc8a1c4c6517c6d6"
+    },
+    {
+      "name": "hand_value_head.3.linear_out.bias",
+      "shape": [
+        2652
+      ],
+      "dtype": "float16",
+      "byteOffset": 34615166,
+      "byteLength": 5304,
+      "sha256": "090a5ff13e9c6544135f88fbb563e36cffc886a4b98581badaa5b1441b52ffca"
+    },
+    {
+      "name": "belief_phase_shift.weight",
+      "shape": [
+        10,
+        1024
+      ],
+      "dtype": "float16",
+      "byteOffset": 34620470,
+      "byteLength": 20480,
+      "sha256": "d2ed7f679ba9201ea965872abbaf293222a3876c2ed376a4f475eb5676f32ccc"
+    }
+  ],
+  "weights": {
+    "file": "weights.bin.gz",
+    "byteLength": 34640950,
+    "sha256": "2f8ac67e9b0537283727c365c1167d00ba751a3fd5ef366131b55f44ebaea63a",
+    "storageDtype": "float16",
+    "compression": {
+      "format": "gzip",
+      "byteLength": 26874847,
+      "sha256": "75b591ee03207796abbe75b82f125c773e61d422c746a9b1432555e9eaa3b4fe"
+    }
+  },
+  "allIn": {
+    "enabled": true,
+    "scale": 32768,
+    "preflop": {
+      "file": "allin/preflop.i16",
+      "dtype": "int16",
+      "scale": 32768
+    },
+    "metadata": {
+      "format": "p2.webgpu_allin_assets",
+      "numHands": 1326,
+      "source": "outputs/preflop_allin_table.pt.zst",
+      "sourceMetadata": {
+        "semantics": "row hero combo, column opponent combo; +1 win, 0 tie, -1 loss averaged over valid boards",
+        "combo_order": "p2.env.card_utils.hand_combos_tensor",
+        "num_hands": 1326,
+        "num_boards": 2598960,
+        "exact": true,
+        "exact_denominator": 1712304,
+        "sample_seed": 0,
+        "board_chunk": 256,
+        "hero_block": 64,
+        "device": "cuda",
+        "ranker": "triton",
+        "stored_table": {
+          "name": "payoff_i16",
+          "dtype": "int16",
+          "quantization": "round(clamp(payoff * 32768, -32768, 32767)).to(int16)",
+          "dequantization": "payoff_i16.float() / 32768"
+        },
+        "compression": "zstd",
+        "zstd_level": 10
+      }
+    }
+  }
+}

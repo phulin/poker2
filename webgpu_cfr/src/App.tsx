@@ -11,8 +11,15 @@ import {
   X,
 } from "lucide-solid";
 import type { ModelCacheProgress } from "./modelCache.js";
-import { parseCard, parseCards, formatCard, handComboIndex, handComboCards } from "./cards.js";
-import { buildHeroOnlyBeliefs } from "./beliefs.js";
+import {
+  parseCard,
+  parseCards,
+  formatCard,
+  handComboIndex,
+  handComboCards,
+  handOverlapsCards,
+} from "./cards.js";
+import { buildPublicBeliefs } from "./beliefs.js";
 import { PublicHunlEnv, NUM_HANDS, DEFAULT_FORCE_DECK, type LegalBins } from "./hunlEnv.js";
 import type {
   BetterFfnManifest,
@@ -1665,11 +1672,7 @@ function App(): JSX.Element {
         },
         heroPlayer: HERO_PLAYER,
         heroHand: cards.heroHand,
-        initialBeliefs: buildHeroOnlyBeliefs({
-          heroPlayer: HERO_PLAYER,
-          heroHand: cards.heroHand,
-          publicCards: cards.publicCards,
-        }),
+        initialBeliefs: buildPublicBeliefs({ publicCards: cards.publicCards }),
       };
       await waitForBrowserPaint();
       const started = performance.now();
@@ -1683,7 +1686,11 @@ function App(): JSX.Element {
         depth: solveDepth,
         cfrAvg: solveCfrAvg,
         heroHandIndex,
-        villainSummary: summarizeVillainRange(result.beliefsAtSpot, HERO_PLAYER),
+        villainSummary: summarizeVillainRange(
+          result.beliefsAtSpot,
+          HERO_PLAYER,
+          cards.heroHand,
+        ),
       });
       setSolveProgress(100);
       setSolveStatus("Solve complete");
@@ -2176,13 +2183,16 @@ function RangeSummaryView(props: { summary: RangeSummary }): JSX.Element {
 function summarizeVillainRange(
   beliefs: Float32Array<ArrayBufferLike>,
   heroPlayer: PlayerIndex,
+  heroHand?: readonly [number, number],
 ): RangeSummary {
   const villain = (1 - heroPlayer) as PlayerIndex;
   const offset = villain * NUM_HANDS;
   const entries: Array<{ hand: string; weight: number }> = [];
+  const blocked = heroHand ? new Set<number>(heroHand) : undefined;
   let mass = 0;
   let combos = 0;
   for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+    if (blocked && handOverlapsCards(hand, blocked)) continue;
     const weight = beliefs[offset + hand] ?? 0;
     mass += weight;
     if (weight > 1.0e-7) {
@@ -2190,6 +2200,10 @@ function summarizeVillainRange(
       const [c0, c1] = handComboCards(hand);
       entries.push({ hand: `${formatCard(c0)} ${formatCard(c1)}`, weight });
     }
+  }
+  if (mass > 1.0e-8) {
+    for (const entry of entries) entry.weight /= mass;
+    mass = 1;
   }
   entries.sort((a, b) => b.weight - a.weight);
   return { mass, combos, top: entries.slice(0, 8) };

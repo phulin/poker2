@@ -68,6 +68,24 @@ export function buildHeroOnlyBeliefs(options: {
   return beliefs;
 }
 
+export function buildPublicBeliefs(options: {
+  publicCards?: readonly number[];
+} = {}): Float32Array<ArrayBuffer> {
+  const publicCards = options.publicCards ?? [];
+  assertUniqueCards(publicCards);
+
+  const beliefs = new Float32Array(2 * NUM_HAND_COMBOS);
+  const blocked = new Set<number>(publicCards);
+  for (let player = 0; player < 2; player += 1) {
+    const offset = player * NUM_HAND_COMBOS;
+    for (let hand = 0; hand < NUM_HAND_COMBOS; hand += 1) {
+      beliefs[offset + hand] = handOverlapsCards(hand, blocked) ? 0 : 1;
+    }
+    normalizeBeliefVector(beliefs, player as PlayerIndex);
+  }
+  return beliefs;
+}
+
 export function compatibleHandMask(blockedCards: readonly number[]): Uint8Array {
   assertUniqueCards(blockedCards);
   const blocked = new Set(blockedCards);

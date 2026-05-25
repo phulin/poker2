@@ -9,6 +9,7 @@ import {
   parseCards,
 } from "../src/cards.js";
 import {
+  buildPublicBeliefs,
   buildHeroOnlyBeliefs,
   compatibleHandMask,
 } from "../src/beliefs.js";
@@ -56,6 +57,20 @@ test("hero-only beliefs set exact hero hand and mask villain blockers", () => {
   const blockedByBoard = handComboIndex(parseCard("2c"), parseCard("3c"));
   assert.equal(beliefs[blockedByHero], 0);
   assert.equal(beliefs[blockedByBoard], 0);
+});
+
+test("public beliefs mask only public cards", () => {
+  const publicCards = [parseCard("2c"), parseCard("7d"), parseCard("Th")];
+  const beliefs = buildPublicBeliefs({ publicCards });
+  const blockedByBoard = handComboIndex(parseCard("2c"), parseCard("3c"));
+  const heroPrivate = handComboIndex(parseCard("As"), parseCard("Kd"));
+
+  assert.equal(beliefs[blockedByBoard], 0);
+  assert.equal(beliefs[NUM_HAND_COMBOS + blockedByBoard], 0);
+  assert.ok(beliefs[heroPrivate]! > 0);
+  assert.ok(beliefs[NUM_HAND_COMBOS + heroPrivate]! > 0);
+  assert.ok(Math.abs(sum(beliefs, 0, NUM_HAND_COMBOS) - 1) < 1e-6);
+  assert.ok(Math.abs(sum(beliefs, NUM_HAND_COMBOS, NUM_HAND_COMBOS) - 1) < 1e-6);
 });
 
 test("compatible hand mask blocks public cards", () => {

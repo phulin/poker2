@@ -1,0 +1,35 @@
+{
+  "enabled": true,
+  "scale": 32768,
+  "preflop": {
+    "file": "allin/preflop.i16",
+    "dtype": "int16",
+    "scale": 32768
+  },
+  "metadata": {
+    "format": "p2.webgpu_allin_assets",
+    "numHands": 1326,
+    "source": "outputs/preflop_allin_table.pt.zst",
+    "sourceMetadata": {
+      "semantics": "row hero combo, column opponent combo; +1 win, 0 tie, -1 loss averaged over valid boards",
+      "combo_order": "p2.env.card_utils.hand_combos_tensor",
+      "num_hands": 1326,
+      "num_boards": 2598960,
+      "exact": true,
+      "exact_denominator": 1712304,
+      "sample_seed": 0,
+      "board_chunk": 256,
+      "hero_block": 64,
+      "device": "cuda",
+      "ranker": "triton",
+      "stored_table": {
+        "name": "payoff_i16",
+        "dtype": "int16",
+        "quantization": "round(clamp(payoff * 32768, -32768, 32767)).to(int16)",
+        "dequantization": "payoff_i16.float() / 32768"
+      },
+      "compression": "zstd",
+      "zstd_level": 10
+    }
+  }
+}
