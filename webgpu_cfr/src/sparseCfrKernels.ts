@@ -1644,6 +1644,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_WGSL =
+  SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL.replace(
+    `      allowedMask[allowedBase + opp] != 0u &&
+      !(hand0 == opp0 || hand0 == opp1 || hand1 == opp0 || hand1 == opp1)`,
+    "      !(hand0 == opp0 || hand0 == opp1 || hand1 == opp0 || hand1 == opp1)",
+  );
+
 export interface SparseGpuTreeData {
   nodeCount: number;
   numHands: number;
@@ -1713,6 +1720,7 @@ export class SparseCfrGpuKernels {
   private readonly allInTableValuesPipeline: GPUComputePipeline;
   private readonly allInTableValues1326NoPermPipeline: GPUComputePipeline;
   private readonly allInTableValues1326NoPermBothPlayersPipeline: GPUComputePipeline;
+  private readonly allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline: GPUComputePipeline;
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -1835,6 +1843,10 @@ export class SparseCfrGpuKernels {
     this.allInTableValues1326NoPermBothPlayersPipeline = this.pipeline(
       SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL,
       "sparse-cfr-allin-table-values-1326-noperm-both-players",
+    );
+    this.allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline = this.pipeline(
+      SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_NO_OPP_ALLOWED_WGSL,
+      "sparse-cfr-allin-table-values-1326-noperm-both-players-no-opp-allowed",
     );
   }
 
@@ -3053,6 +3065,22 @@ export class SparseCfrGpuKernels {
       !hasPerm &&
       globalThis.process?.env?.P2_DISABLE_ALLIN_1326_NOPERM !== "1"
     ) {
+      if (globalThis.process?.env?.P2_DISABLE_ALLIN_NO_OPP_ALLOWED !== "1") {
+        return this.encodeAllInTableValues1326NoPermBothPlayersNoOppAllowed(
+          encoder,
+          tree,
+          nodeIndices,
+          tablePacked,
+          comboPerms,
+          scaleFactors,
+          beliefs,
+          values,
+          batch,
+          tableScale,
+          permId,
+          hasPerm,
+        );
+      }
       return this.encodeAllInTableValues1326NoPermBothPlayers(
         encoder,
         tree,
@@ -3249,6 +3277,68 @@ export class SparseCfrGpuKernels {
     this.encode(
       encoder,
       this.allInTableValues1326NoPermBothPlayersPipeline,
+      bindGroup,
+      Math.ceil((batch * 1326) / 64),
+    );
+    return params;
+  }
+
+  encodeAllInTableValues1326NoPermBothPlayersNoOppAllowed(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    nodeIndices: GPUBuffer,
+    tablePacked: GPUBuffer,
+    comboPerms: GPUBuffer,
+    scaleFactors: GPUBuffer,
+    beliefs: GPUBuffer,
+    values: GPUBuffer,
+    batch: number,
+    tableScale: number,
+    permId: number,
+    hasPerm: boolean,
+  ): GPUBuffer {
+    if (tree.numHands !== 1326 || hasPerm) {
+      return this.encodeAllInTableValuesGeneric(
+        encoder,
+        tree,
+        nodeIndices,
+        tablePacked,
+        comboPerms,
+        scaleFactors,
+        beliefs,
+        values,
+        batch,
+        tableScale,
+        permId,
+        hasPerm,
+      );
+    }
+    const words = new ArrayBuffer(32);
+    const u32 = new Uint32Array(words);
+    const f32 = new Float32Array(words);
+    u32[0] = tree.numHands;
+    u32[1] = batch;
+    u32[2] = permId;
+    u32[3] = hasPerm ? 1 : 0;
+    f32[4] = tableScale;
+    const params = makeUniformBuffer(this.device, u32);
+    const bindGroup = this.device.createBindGroup({
+      layout: this.allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: nodeIndices } },
+        { binding: 1, resource: { buffer: tree.allowedMask } },
+        { binding: 2, resource: { buffer: tree.handCard0 } },
+        { binding: 3, resource: { buffer: tree.handCard1 } },
+        { binding: 4, resource: { buffer: tablePacked } },
+        { binding: 6, resource: { buffer: scaleFactors } },
+        { binding: 7, resource: { buffer: beliefs } },
+        { binding: 8, resource: { buffer: values } },
+        { binding: 9, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.allInTableValues1326NoPermBothPlayersNoOppAllowedPipeline,
       bindGroup,
       Math.ceil((batch * 1326) / 64),
     );
