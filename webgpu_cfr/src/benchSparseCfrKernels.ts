@@ -796,6 +796,56 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
       },
     },
     {
+      name: "opponent_policy_aggregate_parallel",
+      output: data.opponentPolicy,
+      outputElements: data.policyCount,
+      encode: (encoder) =>
+        kernels.encodeComputeOpponentPolicyAggregateParallelRange(
+          encoder,
+          data.tree,
+          data.beliefs,
+          data.policy,
+          data.opponentAggregates,
+          data.opponentPolicy,
+          start,
+          end,
+        ),
+      validate: async () => {
+        const reference = makeEmptyStorageBuffer(device, data.policyCount);
+        const candidate = makeEmptyStorageBuffer(device, data.policyCount);
+        const candidateAggregates = makeEmptyStorageBuffer(device, data.nodeCount * 106);
+        await runOnce(device, (encoder) =>
+          kernels.encodeComputeOpponentPolicyRange(
+            encoder,
+            data.tree,
+            data.beliefs,
+            data.policy,
+            reference,
+            start,
+            end,
+          ),
+        );
+        await runOnce(device, (encoder) =>
+          kernels.encodeComputeOpponentPolicyAggregateParallelRange(
+            encoder,
+            data.tree,
+            data.beliefs,
+            data.policy,
+            candidateAggregates,
+            candidate,
+            start,
+            end,
+          ),
+        );
+        return validatePair(
+          reference,
+          candidate,
+          data.policyCount,
+          "opponent_policy_aggregate",
+        );
+      },
+    },
+    {
       name: "backup_depth",
       output: data.values,
       outputElements: data.valueCount,

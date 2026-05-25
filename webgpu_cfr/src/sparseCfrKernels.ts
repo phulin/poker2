@@ -552,6 +552,84 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+export const SPARSE_OPPONENT_POLICY_AGGREGATE_PARALLEL_WGSL = /* wgsl */ `
+struct Params {
+  numHands: u32,
+  start: u32,
+  end: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> parentIndex: array<u32>;
+@group(0) @binding(1) var<storage, read> prevActor: array<u32>;
+@group(0) @binding(2) var<storage, read> handCard0: array<u32>;
+@group(0) @binding(3) var<storage, read> handCard1: array<u32>;
+@group(0) @binding(4) var<storage, read> beliefs: array<f32>;
+@group(0) @binding(5) var<storage, read> policy: array<f32>;
+@group(0) @binding(6) var<storage, read_write> aggregates: array<f32>;
+@group(0) @binding(7) var<uniform> params: Params;
+
+var<workgroup> partial: array<f32, 3392>;
+
+@compute @workgroup_size(32)
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let child = params.start + wid.x;
+  let lane = lid.x;
+  if (child >= params.end) {
+    return;
+  }
+
+  let localBase = lane * 106u;
+  for (var slot = 0u; slot < 106u; slot = slot + 1u) {
+    partial[localBase + slot] = 0.0;
+  }
+  workgroupBarrier();
+
+  let parent = parentIndex[child];
+  let actor = prevActor[child];
+  let beliefBase = (parent * 2u + actor) * params.numHands;
+  let policyBase = child * params.numHands;
+  for (var hand = lane; hand < params.numHands; hand = hand + 32u) {
+    let belief = beliefs[beliefBase + hand];
+    let numer = belief * policy[policyBase + hand];
+    let card0 = handCard0[hand];
+    let card1 = handCard1[hand];
+    partial[localBase] = partial[localBase] + belief;
+    partial[localBase + 1u + card0] = partial[localBase + 1u + card0] + belief;
+    partial[localBase + 1u + card1] = partial[localBase + 1u + card1] + belief;
+    partial[localBase + 53u] = partial[localBase + 53u] + numer;
+    partial[localBase + 54u + card0] = partial[localBase + 54u + card0] + numer;
+    partial[localBase + 54u + card1] = partial[localBase + 54u + card1] + numer;
+  }
+  workgroupBarrier();
+
+  var stride = 16u;
+  loop {
+    if (lane < stride) {
+      let otherBase = (lane + stride) * 106u;
+      for (var slot = 0u; slot < 106u; slot = slot + 1u) {
+        partial[localBase + slot] = partial[localBase + slot] + partial[otherBase + slot];
+      }
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  if (lane == 0u) {
+    let outBase = child * 106u;
+    for (var slot = 0u; slot < 106u; slot = slot + 1u) {
+      aggregates[outBase + slot] = partial[slot];
+    }
+  }
+}
+`;
+
 export const SPARSE_OPPONENT_POLICY_FROM_AGGREGATE_WGSL = /* wgsl */ `
 struct Params {
   numHands: u32,
@@ -1341,6 +1419,7 @@ export class SparseCfrGpuKernels {
   private readonly regretTailPipeline: GPUComputePipeline;
   private readonly opponentPolicyPipeline: GPUComputePipeline;
   private readonly opponentPolicyAggregatePipeline: GPUComputePipeline;
+  private readonly opponentPolicyAggregateParallelPipeline: GPUComputePipeline;
   private readonly opponentPolicyFromAggregatePipeline: GPUComputePipeline;
   private readonly regretWeightPipeline: GPUComputePipeline;
   private readonly regretWeightAggregatePipeline: GPUComputePipeline;
@@ -1400,6 +1479,10 @@ export class SparseCfrGpuKernels {
     this.opponentPolicyAggregatePipeline = this.pipeline(
       SPARSE_OPPONENT_POLICY_AGGREGATE_WGSL,
       "sparse-cfr-opponent-policy-aggregate",
+    );
+    this.opponentPolicyAggregateParallelPipeline = this.pipeline(
+      SPARSE_OPPONENT_POLICY_AGGREGATE_PARALLEL_WGSL,
+      "sparse-cfr-opponent-policy-aggregate-parallel",
     );
     this.opponentPolicyFromAggregatePipeline = this.pipeline(
       SPARSE_OPPONENT_POLICY_FROM_AGGREGATE_WGSL,
@@ -1828,6 +1911,18 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer[] {
+    if (globalThis.process?.env?.P2_DISABLE_PARALLEL_OPPONENT_POLICY_AGGREGATE !== "1") {
+      return this.encodeComputeOpponentPolicyAggregateParallelRange(
+        encoder,
+        tree,
+        beliefs,
+        policy,
+        aggregates,
+        opponentPolicy,
+        start,
+        end,
+      );
+    }
     const params = makeUniformBuffer(
       this.device,
       new Uint32Array([tree.numHands, start, end, 0]),
@@ -1848,6 +1943,63 @@ export class SparseCfrGpuKernels {
     this.encode(
       encoder,
       this.opponentPolicyAggregatePipeline,
+      aggregateBindGroup,
+      Math.max(0, end - start),
+    );
+
+    const applyBindGroup = this.device.createBindGroup({
+      layout: this.opponentPolicyFromAggregatePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: tree.parentIndex } },
+        { binding: 1, resource: { buffer: tree.prevActor } },
+        { binding: 2, resource: { buffer: tree.handCard0 } },
+        { binding: 3, resource: { buffer: tree.handCard1 } },
+        { binding: 4, resource: { buffer: beliefs } },
+        { binding: 5, resource: { buffer: policy } },
+        { binding: 6, resource: { buffer: aggregates } },
+        { binding: 7, resource: { buffer: opponentPolicy } },
+        { binding: 8, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.opponentPolicyFromAggregatePipeline,
+      applyBindGroup,
+      Math.ceil(((end - start) * tree.numHands) / 64),
+    );
+    return [params];
+  }
+
+  encodeComputeOpponentPolicyAggregateParallelRange(
+    encoder: GPUCommandEncoder,
+    tree: SparseGpuTreeBuffers,
+    beliefs: GPUBuffer,
+    policy: GPUBuffer,
+    aggregates: GPUBuffer,
+    opponentPolicy: GPUBuffer,
+    start: number,
+    end: number,
+  ): GPUBuffer[] {
+    const params = makeUniformBuffer(
+      this.device,
+      new Uint32Array([tree.numHands, start, end, 0]),
+    );
+    const aggregateBindGroup = this.device.createBindGroup({
+      layout: this.opponentPolicyAggregateParallelPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: tree.parentIndex } },
+        { binding: 1, resource: { buffer: tree.prevActor } },
+        { binding: 2, resource: { buffer: tree.handCard0 } },
+        { binding: 3, resource: { buffer: tree.handCard1 } },
+        { binding: 4, resource: { buffer: beliefs } },
+        { binding: 5, resource: { buffer: policy } },
+        { binding: 6, resource: { buffer: aggregates } },
+        { binding: 7, resource: { buffer: params } },
+      ],
+    });
+    this.encode(
+      encoder,
+      this.opponentPolicyAggregateParallelPipeline,
       aggregateBindGroup,
       Math.max(0, end - start),
     );
