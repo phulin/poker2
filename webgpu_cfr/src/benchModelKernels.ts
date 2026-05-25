@@ -8,6 +8,7 @@ import {
   LEAKY_RELU_MAT_VEC_BATCH_TILED_GEMM_WGSL,
   LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH4_SUBGROUP_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
@@ -17,8 +18,10 @@ import {
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH3_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_WGSL,
@@ -397,6 +400,20 @@ function variants(): Variant[] {
     },
     {
       ...plainGeneric,
+      name: "plain.512.batch4.subgroup",
+      shader: MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL,
+      dispatchY: (s) => Math.ceil(s.batch / 4),
+      supports: (s, d) =>
+        hasSubgroups(d) &&
+        s.rows % ROW_BLOCK === 0 &&
+        s.cols === 512 &&
+        s.inputStride === 512 &&
+        s.outputStride === s.rows &&
+        s.inputOffset === 0 &&
+        s.outputOffset === 0,
+    },
+    {
+      ...plainGeneric,
       name: "plain.1024",
       shader: MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       supports: (s) => s.rows % ROW_BLOCK === 0 && s.cols === 1024,
@@ -421,6 +438,19 @@ function variants(): Variant[] {
       name: "plain.1326.batch2.subgroup",
       shader: MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
       dispatchY: (s) => Math.ceil(s.batch / 2),
+      supports: (s, d) =>
+        hasSubgroups(d) &&
+        s.rows === 512 &&
+        s.cols === NUM_HANDS &&
+        s.inputStride === 2 * NUM_HANDS &&
+        s.outputStride === 1024 &&
+        !s.bias,
+    },
+    {
+      ...plainGeneric,
+      name: "plain.1326.batch4.subgroup",
+      shader: MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL,
+      dispatchY: (s) => Math.ceil(s.batch / 4),
       supports: (s, d) =>
         hasSubgroups(d) &&
         s.rows === 512 &&
@@ -508,6 +538,19 @@ function variants(): Variant[] {
       name: "residual.1024.batch2.subgroup",
       shader: LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
       dispatchY: (s) => Math.ceil(s.batch / 2),
+      supports: (s, d) =>
+        hasSubgroups(d) &&
+        s.rows === 512 &&
+        s.cols === 1024 &&
+        s.inputStride === 1024 &&
+        s.outputStride === 512 &&
+        s.bias,
+    },
+    {
+      ...residualGeneric,
+      name: "residual.1024.batch4.subgroup",
+      shader: LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH4_SUBGROUP_WGSL,
+      dispatchY: (s) => Math.ceil(s.batch / 4),
       supports: (s, d) =>
         hasSubgroups(d) &&
         s.rows === 512 &&

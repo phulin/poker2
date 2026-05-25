@@ -18,7 +18,9 @@ import {
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH3_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
   MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
@@ -74,6 +76,7 @@ interface PredictOptions {
 
 const BATCH_ROW_BLOCK = 4;
 const DISABLE_BATCH2_VALUE_ENV = "P2_DISABLE_BATCH2_VALUE_512";
+const DISABLE_BATCH4_ENV = "P2_DISABLE_BATCH4_SUBGROUP";
 
 export interface ExactBelief {
   player: number;
@@ -133,6 +136,9 @@ export class BetterFfnWebGpuModel {
   private readonly matVecBatchExactRowsCols512Batch3SubgroupPipeline:
     | GPUComputePipeline
     | undefined;
+  private readonly matVecBatchExactRowsCols512Batch4SubgroupPipeline:
+    | GPUComputePipeline
+    | undefined;
   private readonly matVecBatchExactRowsCols512SubgroupPipeline:
     | GPUComputePipeline
     | undefined;
@@ -141,6 +147,9 @@ export class BetterFfnWebGpuModel {
     | GPUComputePipeline
     | undefined;
   private readonly matVecBatchExactRowsCols1326Batch2SubgroupPipeline:
+    | GPUComputePipeline
+    | undefined;
+  private readonly matVecBatchExactRowsCols1326Batch4SubgroupPipeline:
     | GPUComputePipeline
     | undefined;
   private readonly leakyReluMatVecBatchPipeline: GPUComputePipeline;
@@ -281,6 +290,13 @@ export class BetterFfnWebGpuModel {
             "better-ffn-mat-vec-batch-exact-rows-cols-512-batch3-subgroup",
           )
         : undefined;
+    this.matVecBatchExactRowsCols512Batch4SubgroupPipeline =
+      device.features.has("subgroups" as GPUFeatureName)
+        ? this.pipeline(
+            MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL,
+            "better-ffn-mat-vec-batch-exact-rows-cols-512-batch4-subgroup",
+          )
+        : undefined;
     this.matVecBatchExactRowsCols512SubgroupPipeline =
       device.features.has("subgroups" as GPUFeatureName)
         ? this.pipeline(
@@ -304,6 +320,13 @@ export class BetterFfnWebGpuModel {
         ? this.pipeline(
             MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
             "better-ffn-mat-vec-batch-exact-rows-cols-1326-batch2-subgroup",
+          )
+        : undefined;
+    this.matVecBatchExactRowsCols1326Batch4SubgroupPipeline =
+      device.features.has("subgroups" as GPUFeatureName)
+        ? this.pipeline(
+            MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL,
+            "better-ffn-mat-vec-batch-exact-rows-cols-1326-batch4-subgroup",
           )
         : undefined;
     this.leakyReluMatVecBatchPipeline = this.pipeline(
@@ -2811,6 +2834,17 @@ export class BetterFfnWebGpuModel {
       outputOffset === 0 &&
       !biasPresent &&
       this.matVecBatchExactRowsCols512Batch3SubgroupPipeline;
+    const useBatch4LinearIn =
+      globalThis.process?.env?.[DISABLE_BATCH4_ENV] !== "1" &&
+      batch >= 4 &&
+      rows === 1024 &&
+      cols === 512 &&
+      inputStride === 512 &&
+      outputStride === 1024 &&
+      inputOffset === 0 &&
+      outputOffset === 0 &&
+      !biasPresent &&
+      this.matVecBatchExactRowsCols512Batch4SubgroupPipeline;
     const useHandEmbeddingBatch2 =
       rows === 512 &&
       cols === NUM_HANDS &&
@@ -2818,6 +2852,15 @@ export class BetterFfnWebGpuModel {
       outputStride === 1024 &&
       !biasPresent &&
       this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline;
+    const useHandEmbeddingBatch4 =
+      globalThis.process?.env?.[DISABLE_BATCH4_ENV] !== "1" &&
+      batch >= 4 &&
+      rows === 512 &&
+      cols === NUM_HANDS &&
+      inputStride === 2 * NUM_HANDS &&
+      outputStride === 1024 &&
+      !biasPresent &&
+      this.matVecBatchExactRowsCols1326Batch4SubgroupPipeline;
     const useBatch2Cols1024 =
       rows === 1024 &&
       cols === 1024 &&
@@ -2844,10 +2887,14 @@ export class BetterFfnWebGpuModel {
       !biasPresent;
     const pipeline = useSmallCols
       ? this.matVecBatchSmallColsPipeline
+      : useBatch4LinearIn
+      ? this.matVecBatchExactRowsCols512Batch4SubgroupPipeline!
       : useBatch3LinearIn
       ? this.matVecBatchExactRowsCols512Batch3SubgroupPipeline!
       : useBatch2LinearIn || useBatch2ValueHead
       ? this.matVecBatchExactRowsCols512Batch2SubgroupPipeline!
+      : useHandEmbeddingBatch4
+        ? this.matVecBatchExactRowsCols1326Batch4SubgroupPipeline!
       : useHandEmbeddingBatch2
         ? this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline!
       : useBatch2Cols1024
@@ -2863,7 +2910,9 @@ export class BetterFfnWebGpuModel {
     this.submit2d(
       pipeline,
       useSmallCols ? Math.ceil((rows * batch) / 64) : this.batchRowGroups(rows),
-      useBatch3LinearIn
+      useBatch4LinearIn || useHandEmbeddingBatch4
+        ? Math.ceil(batch / 4)
+        : useBatch3LinearIn
         ? Math.ceil(batch / 3)
         : useBatch2LinearIn ||
             useBatch2ValueHead ||

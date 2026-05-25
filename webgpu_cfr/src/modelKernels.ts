@@ -1164,9 +1164,9 @@ fn main(
 }
 `;
 
-function makeMatVecBatchExactRowsCols512Batch3Subgroup(): string {
+function makeMatVecBatchExactRowsCols512BatchSubgroup(batchCount: number): string {
   const rows = [0, 1, 2, 3];
-  const batches = [0, 1, 2];
+  const batches = Array.from({ length: batchCount }, (_, batch) => batch);
   const cells = batches.flatMap((batch) =>
     rows.map((row) => ({ batch, row, name: `${batch}${row}` })),
   );
@@ -1176,6 +1176,19 @@ function makeMatVecBatchExactRowsCols512Batch3Subgroup(): string {
   const rowLets = rows
     .slice(1)
     .map((row) => `  let row${row} = row0 + ${row}u;`)
+    .join("\n");
+  const batchLets = batches
+    .map((batch) =>
+      batch === 0
+        ? `  let batch0 = wid.y * ${batchCount}u;`
+        : `  let batch${batch} = batch0 + ${batch}u;`,
+    )
+    .join("\n");
+  const inputBaseLets = batches
+    .map(
+      (batch) =>
+        `  let inputBase${batch} = batch${batch} * params.inputStride + params.inputOffset;`,
+    )
     .join("\n");
   const chunkBlocks = Array.from({ length: 8 }, (_, chunk) => {
     const inputs = batches
@@ -1263,13 +1276,9 @@ fn main(
 ) {
   let row0 = wid.x * 4u;
 ${rowLets}
-  let batch0 = wid.y * 3u;
-  let batch1 = batch0 + 1u;
-  let batch2 = batch0 + 2u;
+${batchLets}
   let lane = lid.x;
-  let inputBase0 = batch0 * params.inputStride + params.inputOffset;
-  let inputBase1 = batch1 * params.inputStride + params.inputOffset;
-  let inputBase2 = batch2 * params.inputStride + params.inputOffset;
+${inputBaseLets}
 
 ${chunkBlocks}
 
@@ -1296,7 +1305,9 @@ ${writes}
 }
 
 export const MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH3_SUBGROUP_WGSL =
-  makeMatVecBatchExactRowsCols512Batch3Subgroup();
+  makeMatVecBatchExactRowsCols512BatchSubgroup(3);
+export const MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL =
+  makeMatVecBatchExactRowsCols512BatchSubgroup(4);
 
 export const MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL = /* wgsl */ `
 enable subgroups;
@@ -1563,9 +1574,9 @@ fn main(
 }
 `;
 
-function makeMatVecBatchExactRowsCols1326Batch2Subgroup(): string {
+function makeMatVecBatchExactRowsCols1326BatchSubgroup(batchCount: number): string {
   const rows = [0, 1, 2, 3];
-  const batches = [0, 1];
+  const batches = Array.from({ length: batchCount }, (_, batch) => batch);
   const cells = batches.flatMap((batch) =>
     rows.map((row) => ({ batch, row, name: `${batch}${row}` })),
   );
@@ -1575,6 +1586,19 @@ function makeMatVecBatchExactRowsCols1326Batch2Subgroup(): string {
   const rowLets = rows
     .slice(1)
     .map((row) => `  let row${row} = row0 + ${row}u;`)
+    .join("\n");
+  const batchLets = batches
+    .map((batch) =>
+      batch === 0
+        ? `  let batch0 = wid.y * ${batchCount}u;`
+        : `  let batch${batch} = batch0 + ${batch}u;`,
+    )
+    .join("\n");
+  const inputBaseLets = batches
+    .map(
+      (batch) =>
+        `  let inputBase${batch} = batch${batch} * params.inputStride + params.inputOffset;`,
+    )
     .join("\n");
   const firstInputs = batches
     .map((batch) =>
@@ -1657,8 +1681,8 @@ ${adds}`;
         return `    let outputBase0 = batch0 * params.outputStride + params.outputOffset;
 ${rowWrites}`;
       }
-      return `    if (batch1 < params.batch) {
-      let outputBase1 = batch1 * params.outputStride + params.outputOffset;
+      return `    if (batch${batch} < params.batch) {
+      let outputBase${batch} = batch${batch} * params.outputStride + params.outputOffset;
 ${rowWrites}
     }`;
     })
@@ -1695,11 +1719,9 @@ fn main(
 ) {
   let row0 = wid.x * 4u;
 ${rowLets}
-  let batch0 = wid.y * 2u;
-  let batch1 = batch0 + 1u;
+${batchLets}
   let lane = lid.x;
-  let inputBase0 = batch0 * params.inputStride + params.inputOffset;
-  let inputBase1 = batch1 * params.inputStride + params.inputOffset;
+${inputBaseLets}
 
   let col0 = lane;
 ${firstInputs}
@@ -1744,7 +1766,9 @@ ${writes}
 }
 
 export const MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL =
-  makeMatVecBatchExactRowsCols1326Batch2Subgroup();
+  makeMatVecBatchExactRowsCols1326BatchSubgroup(2);
+export const MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL =
+  makeMatVecBatchExactRowsCols1326BatchSubgroup(4);
 
 export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
   unrollMatVecBatchColumns(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL, 512, true);
@@ -2385,9 +2409,11 @@ fn main(
 }
 `;
 
-function makeLeakyReluResidualMatVecBatchExactRowsCols1024Batch2Subgroup(): string {
+function makeLeakyReluResidualMatVecBatchExactRowsCols1024BatchSubgroup(
+  batchCount: number,
+): string {
   const rows = [0, 1, 2, 3];
-  const batches = [0, 1];
+  const batches = Array.from({ length: batchCount }, (_, batch) => batch);
   const cells = batches.flatMap((batch) =>
     rows.map((row) => ({ batch, row, name: `${batch}${row}` })),
   );
@@ -2397,6 +2423,16 @@ function makeLeakyReluResidualMatVecBatchExactRowsCols1024Batch2Subgroup(): stri
   const rowLets = rows
     .slice(1)
     .map((row) => `  let row${row} = row0 + ${row}u;`)
+    .join("\n");
+  const batchLets = batches
+    .map((batch) =>
+      batch === 0
+        ? `  let batch0 = wid.y * ${batchCount}u;`
+        : `  let batch${batch} = batch0 + ${batch}u;`,
+    )
+    .join("\n");
+  const inputBaseLets = batches
+    .map((batch) => `  let inputBase${batch} = batch${batch} * params.inputStride;`)
     .join("\n");
   const firstInputs = batches
     .map((batch) =>
@@ -2469,8 +2505,8 @@ ${adds}`;
         return `    let outputBase0 = batch0 * params.outputStride;
 ${rowWrites}`;
       }
-      return `    if (batch1 < params.batch) {
-      let outputBase1 = batch1 * params.outputStride;
+      return `    if (batch${batch} < params.batch) {
+      let outputBase${batch} = batch${batch} * params.outputStride;
 ${rowWrites}
     }`;
     })
@@ -2512,11 +2548,9 @@ fn main(
 ) {
   let row0 = wid.x * 4u;
 ${rowLets}
-  let batch0 = wid.y * 2u;
-  let batch1 = batch0 + 1u;
+${batchLets}
   let lane = lid.x;
-  let inputBase0 = batch0 * params.inputStride;
-  let inputBase1 = batch1 * params.inputStride;
+${inputBaseLets}
 
   let col0 = lane;
 ${firstInputs}
@@ -2551,7 +2585,9 @@ ${writes}
 }
 
 export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL =
-  makeLeakyReluResidualMatVecBatchExactRowsCols1024Batch2Subgroup();
+  makeLeakyReluResidualMatVecBatchExactRowsCols1024BatchSubgroup(2);
+export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH4_SUBGROUP_WGSL =
+  makeLeakyReluResidualMatVecBatchExactRowsCols1024BatchSubgroup(4);
 
 export const RMS_NORM_WGSL = /* wgsl */ `
 struct Params {
