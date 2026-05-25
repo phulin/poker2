@@ -205,6 +205,13 @@ h3 {
   margin-bottom: 0;
 }
 
+.game-config-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 0;
+}
+
 .toggle-field {
   align-items: start;
 }

@@ -1796,9 +1796,9 @@ function App(): JSX.Element {
 
           <div class="subgroup">
             <span class="subgroup-title">Game</span>
-            <div class="grid two">
+            <div class="game-config-row">
               <label class="field">
-                <span>Button / small blind</span>
+                <span>Hero</span>
                 <select
                   value={String(button())}
                   onChange={(event) => {
@@ -1807,12 +1807,10 @@ function App(): JSX.Element {
                     clearSolveOutput();
                   }}
                 >
-                  <option value="0">Hero</option>
-                  <option value="1">Villain</option>
+                  <option value="0">SB</option>
+                  <option value="1">BB</option>
                 </select>
               </label>
-            </div>
-            <div class="grid three">
               <label class="field">
                 <span>Stack</span>
                 <input
