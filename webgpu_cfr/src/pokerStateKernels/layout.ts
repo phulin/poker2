@@ -25,7 +25,7 @@ export const STATE_DECK_POS = 22;
 export const STATE_BOARD0 = 23;
 export const STATE_DECK0 = 28;
 
-export const STATE_WGSL = /* wgsl */ `
+export const STATE_LAYOUT_WGSL = /* wgsl */ `
 const STATE_STRIDE = ${STATE_STRIDE}u;
 const BUTTON = ${STATE_BUTTON}u;
 const STREET = ${STATE_STREET}u;
@@ -68,6 +68,10 @@ fn idx(base: u32, slot: u32) -> u32 {
 fn as_u(v: f32) -> u32 {
   return u32(max(v, 0.0));
 }
+`;
+
+export const STATE_WGSL = /* wgsl */ `
+${STATE_LAYOUT_WGSL}
 
 fn stack_slot(player: u32) -> u32 {
   return select(STACK0, STACK1, player == 1u);

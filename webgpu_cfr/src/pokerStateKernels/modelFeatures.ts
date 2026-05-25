@@ -1,7 +1,7 @@
-import { STATE_WGSL } from "./layout.js";
+import { STATE_LAYOUT_WGSL } from "./layout.js";
 
 export const POKER_ENCODE_FEATURES_WGSL = /* wgsl */ `
-${STATE_WGSL}
+${STATE_LAYOUT_WGSL}
 struct EncodeParams {
   hidden: f32,
   batch: f32,
