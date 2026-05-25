@@ -231,7 +231,7 @@ export function resolveCfrDefaults(manifest: BetterFfnManifest): ResolvedCfrDefa
   return {
     iterations: isPositiveInteger(manifest.cfr?.iterations)
       ? manifest.cfr.iterations
-      : 400,
+      : 600,
     depth: isPositiveInteger(manifest.cfr?.depth) ? manifest.cfr.depth : 5,
     cfrAvg:
       typeof manifest.cfr?.cfrAvg === "boolean" ? manifest.cfr.cfrAvg : true,

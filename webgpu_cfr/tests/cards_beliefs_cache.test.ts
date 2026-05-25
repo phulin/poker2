@@ -90,7 +90,7 @@ test("CFR defaults resolve from manifest configuration", () => {
     cfrAvg: false,
   });
   assert.deepEqual(resolveCfrDefaults({} as BetterFfnManifest), {
-    iterations: 400,
+    iterations: 600,
     depth: 5,
     cfrAvg: true,
   });

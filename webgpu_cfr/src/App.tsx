@@ -1247,7 +1247,7 @@ function App(): JSX.Element {
   const [stack, setStack] = createSignal("400");
   const [sb, setSb] = createSignal("1");
   const [bb, setBb] = createSignal("2");
-  const [iterations, setIterations] = createSignal("400");
+  const [iterations, setIterations] = createSignal("600");
   const [depth, setDepth] = createSignal("5");
   const [heroHandText, setHeroHandText] = createSignal("As Kd");
   const [selectedRangeKey, setSelectedRangeKey] = createSignal("AKo");
@@ -1669,7 +1669,7 @@ function App(): JSX.Element {
     try {
       setSolveError("");
       setWebGpuError("");
-      const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 400)));
+      const solveIterations = Math.max(1, Math.trunc(positiveNumber(iterations(), 600)));
       const solveDepth = Math.max(2, Math.trunc(positiveNumber(depth(), 5)));
       const solveCfrAvg = false;
       setIsSolving(true);
