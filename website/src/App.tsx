@@ -747,7 +747,7 @@ function ActionInput(props: {
   const raiseActions = createMemo(() =>
     props.legalActions.filter((action) => action >= 2 && action < props.context.allInIndex),
   );
-  const directActions = createMemo(() => props.legalActions.filter((action) => action < 2));
+  const directActions = createMemo(() => props.legalActions.filter((action) => action === 1));
   const allInAction = createMemo(() =>
     props.legalActions.includes(props.context.allInIndex) ? props.context.allInIndex : undefined,
   );
