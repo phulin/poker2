@@ -89,9 +89,10 @@ class RebelDataGenerator:
         spr = eff_stack / pot
         ar = torch.arange(N, device=env.device)
         me = env.to_act[:N]
-        opp = 1 - me
         me_allin = env.is_allin[ar, me]
-        opp_allin = env.is_allin[ar, opp]
+        player_ids = torch.arange(env.num_players, device=env.device)
+        other_players = player_ids[None, :] != me[:, None]
+        opp_allin = (env.is_allin[:N] & other_players).any(dim=1)
         committed = env.committed[:N].float().sum(dim=1)
         commit_frac = committed / (committed + 2.0 * eff_stack + 1.0)
         denom = float(N)

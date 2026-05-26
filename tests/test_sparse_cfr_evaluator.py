@@ -14,6 +14,7 @@ from p2.core.structured_config import (
 )
 from p2.env.card_utils import NUM_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.pbs_env import PBSEnv
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
@@ -56,10 +57,12 @@ class MockModel:
     def __init__(
         self,
         num_actions: int = 5,
+        num_players: int = 2,
         device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         self.num_actions = num_actions
+        self.num_players = num_players
         self.device = device
         self.dtype = dtype
         self.enforce_zero_sum = True
@@ -82,7 +85,13 @@ class MockModel:
             batch, NUM_HANDS, self.num_actions, device=device, dtype=dtype
         )
         # Default zero hand values
-        hand_values = torch.zeros(batch, 2, NUM_HANDS, device=device, dtype=dtype)
+        hand_values = torch.zeros(
+            batch,
+            self.num_players,
+            NUM_HANDS,
+            device=device,
+            dtype=dtype,
+        )
 
         return ModelOutput(
             policy_logits=logits,
@@ -279,6 +288,49 @@ def test_initialize_subgame() -> None:
     assert evaluator.latest_values.shape == (evaluator.total_nodes, 2, NUM_HANDS)
     assert evaluator.leaf_mask.shape == (evaluator.total_nodes,)
     assert evaluator.child_mask.shape == (evaluator.total_nodes, evaluator.num_actions)
+
+
+def test_initialize_pbs_multiway_subgame() -> None:
+    device = get_device()
+    num_players = 3
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.allin_call_terminal_abstraction = False
+    env = PBSEnv(
+        num_envs=2,
+        num_players=num_players,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(2, dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14], [15, 16, 17, 18, 19]],
+            dtype=torch.long,
+            device=device,
+        ),
+    )
+    model = MockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = SparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+    beliefs = torch.full((2, num_players, NUM_HANDS), 1.0 / NUM_HANDS)
+
+    evaluator.initialize_subgame(env, torch.arange(2, device=device), beliefs)
+
+    assert evaluator.num_players == num_players
+    assert isinstance(evaluator.env, PBSEnv)
+    assert evaluator.beliefs.shape == (evaluator.total_nodes, num_players, NUM_HANDS)
+    assert evaluator.latest_values.shape == evaluator.beliefs.shape
 
 
 def test_initialize_policy_and_beliefs() -> None:

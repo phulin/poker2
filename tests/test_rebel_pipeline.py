@@ -120,6 +120,45 @@ def test_rebel_supervised_loss_finite():
     loss_dict["total_loss"].backward()
 
 
+def test_rebel_supervised_loss_multiway_finite():
+    num_players = 3
+    loss_fn = RebelSupervisedLoss(num_players=num_players)
+    batch_size, num_actions = 2, 5
+    logits = torch.randn(batch_size, NUM_HANDS, num_actions, requires_grad=True)
+    policy_targets = torch.softmax(
+        torch.randn(batch_size, NUM_HANDS, num_actions), dim=-1
+    )
+    legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
+    value_targets = torch.randn(batch_size, num_players, NUM_HANDS)
+    beliefs = torch.rand(batch_size, num_players, NUM_HANDS)
+    beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True)
+    mlp_features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.arange(batch_size, dtype=torch.long) % num_players,
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.reshape(batch_size, -1),
+    )
+    batch = RebelBatch(
+        features=mlp_features,
+        policy_targets=policy_targets,
+        value_targets=value_targets,
+        legal_masks=legal_masks,
+    )
+    output = ModelOutput(
+        policy_logits=logits,
+        value=torch.zeros(batch_size, num_players),
+        hand_values=torch.randn(batch_size, num_players, NUM_HANDS),
+    )
+
+    loss_dict = loss_fn(output, batch)
+
+    assert torch.isfinite(loss_dict["total_loss"])
+    assert loss_dict["policy_weights"].shape == (batch_size, NUM_HANDS)
+    assert loss_dict["value_weights"].shape == (batch_size, num_players, NUM_HANDS)
+    loss_dict["total_loss"].backward()
+
+
 def test_rebel_supervised_loss_zeros_board_blocked_weights():
     loss_fn = RebelSupervisedLoss()
     batch_size, num_actions = 1, 5

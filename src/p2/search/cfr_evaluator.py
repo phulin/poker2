@@ -1572,7 +1572,7 @@ class CFREvaluator(ABC):
             hand_values: Tensor of shape (batch, num_players, NUM_HANDS)
             player_beliefs: Tensor of shape (batch, num_players, NUM_HANDS)
         """
-        if self.model.enforce_zero_sum:
+        if self.model.enforce_zero_sum and self.num_players == 2:
             hand_value_sums = (
                 (hand_values * player_beliefs)
                 .sum(dim=2, keepdim=True)
@@ -1663,10 +1663,24 @@ class CFREvaluator(ABC):
                 (0, self.num_players, NUM_HANDS)
             )
 
-        # Set showdown values
-        showdown_beliefs = beliefs[self.showdown_indices]
-        showdown_values = self._showdown_value_both(showdown_beliefs)
-        self.latest_values[self.showdown_indices] = showdown_values
+        # Set showdown values. Heads-up keeps the exact per-hand river resolver;
+        # multiway PBS currently falls back to the side-pot-aware marginal EV
+        # helper and broadcasts the seat EV over private hands.
+        if self.showdown_indices.numel() > 0:
+            showdown_beliefs = beliefs[self.showdown_indices]
+            if self.num_players == 2:
+                showdown_values = self._showdown_value_both(showdown_beliefs)
+                self.latest_values[self.showdown_indices] = showdown_values
+            elif isinstance(self.env, PBSEnv):
+                showdown_rewards = self.env.expected_showdown_rewards(
+                    showdown_beliefs,
+                    env_indices=self.showdown_indices,
+                )
+                self.latest_values[self.showdown_indices] = showdown_rewards[:, :, None]
+            else:
+                raise NotImplementedError(
+                    "Multiway showdown values require a PBSEnv-backed public state."
+                )
         set_allin = getattr(self, "_set_allin_call_values", None)
         if set_allin is not None:
             set_allin(beliefs)
@@ -1718,24 +1732,19 @@ class CFREvaluator(ABC):
         )
 
         for depth in range(self.tree_depth - 1, -1, -1):
-            offset = self.depth_offsets[depth]
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
 
-            actor_indices = self.env.to_act[offset:offset_next]
-            actor_indices_expanded = actor_indices[:, None, None].expand(
-                -1, -1, NUM_HANDS
-            )
-
-            indices = torch.arange(offset_next_next - offset_next, device=self.device)
             prev_actor_indices = self.prev_actor[offset_next:offset_next_next]
             weighted_child_values = values[offset_next:offset_next_next].clone()
-            weighted_child_values[indices, prev_actor_indices, :] *= policy[
-                offset_next:offset_next_next
-            ]
-            weighted_child_values[indices, 1 - prev_actor_indices, :] *= (
-                opponent_conditioned_policy[offset_next:offset_next_next]
+            player_ids = torch.arange(self.num_players, device=self.device)
+            is_actor = player_ids[None, :, None] == prev_actor_indices[:, None, None]
+            action_weights = torch.where(
+                is_actor,
+                policy[offset_next:offset_next_next, None, :],
+                opponent_conditioned_policy[offset_next:offset_next_next, None, :],
             )
+            weighted_child_values *= action_weights
 
             self._pull_back_sum(weighted_child_values, values, level=depth)
 
@@ -1764,11 +1773,18 @@ class CFREvaluator(ABC):
             -1, -1, NUM_HANDS
         )
 
-        # This represents the opponent's reach prob at the src node.
-        # Then actor acts at the transition src -> dest node.
-        # Unblocked mass translates opponent-hand space to hero-hand space.
-        opponent_global_reach = calculate_unblocked_mass(beliefs.flip(dims=[1]))
-        src_weights = opponent_global_reach.gather(1, src_actor_indices).squeeze(1)
+        # This represents other players' reach mass at the source node, projected
+        # into the acting player's hand space by blocker compatibility.
+        unblocked_reach = calculate_unblocked_mass(beliefs)
+        player_ids = torch.arange(self.num_players, device=self.device)
+        other_live = player_ids[None, :, None] != self.env.to_act[:, None, None]
+        if hasattr(self.env, "has_folded"):
+            other_live &= ~self.env.has_folded[:, :, None]
+        src_weights = torch.where(
+            other_live,
+            unblocked_reach.clamp_min(1e-12),
+            torch.ones_like(unblocked_reach),
+        ).prod(dim=1)
         src_weights *= self.allowed_hands.to(dtype=src_weights.dtype)
 
         # Weight advantages by our mass unblocked by the opponent hands.

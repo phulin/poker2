@@ -19,6 +19,7 @@ from p2.env.card_utils import (
     suit_permutations_tensor,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.pbs_env import PBSEnv
 from p2.models.mlp import RebelFFN
 from p2.models.mlp.better_features import context_length
 from p2.models.mlp.better_ffn import (
@@ -127,11 +128,14 @@ class RebelCFRTrainer:
             self.buffer_rng.manual_seed(int(cfg.seed))
         self.num_actions = len(self.bet_bins) + 3
         self.num_players = int(cfg.env.num_players)
-        if self.num_players != 2:
-            raise ValueError(
-                "RebelCFRTrainer multiway search is not enabled yet; "
-                "use env.num_players=2 until the PBSEnv-backed sparse path lands."
+        if self.num_players < 2:
+            raise ValueError("env.num_players must be at least 2")
+        if self.num_players != 2 and cfg.model.enforce_zero_sum:
+            print(
+                "[RebelCFRTrainer] Disabling model.enforce_zero_sum for multiway "
+                "training; multiway constant-sum projection needs joint blockers."
             )
+            cfg.model.enforce_zero_sum = False
         self.policy_extra_updates_per_step = cfg.train.policy_extra_updates_per_step
         if self.policy_extra_updates_per_step < 0:
             raise ValueError("train.policy_extra_updates_per_step must be >= 0")
@@ -151,23 +155,45 @@ class RebelCFRTrainer:
             )
             cfg.model.num_actions = self.num_actions
 
-        # Environment used to provide root states for CFR search
-        self.env = HUNLTensorEnv(
-            num_envs=self.cfg.num_envs,
-            starting_stack=cfg.env.stack,
-            sb=cfg.env.sb,
-            bb=cfg.env.bb,
-            default_bet_bins=self.bet_bins,
-            device=self.device,
-            float_dtype=self.float_dtype,
-            flop_showdown=cfg.env.flop_showdown,
-            randomize_stacks=cfg.env.randomize_stacks,
-            stack_mode=cfg.env.stack_mode,
-            min_stack_bb=cfg.env.min_stack_bb,
-            mid_stack_bb=cfg.env.mid_stack_bb,
-            max_stack_bb=cfg.env.max_stack_bb,
-            high_stack_mass_ratio=cfg.env.high_stack_mass_ratio,
-        )
+        # Environment used to provide root states for CFR search. Heads-up keeps
+        # the private-card tensor env as the fast regression path; multiway uses
+        # the public-state env because private deals are represented by beliefs.
+        if self.num_players == 2:
+            self.env = HUNLTensorEnv(
+                num_envs=self.cfg.num_envs,
+                starting_stack=cfg.env.stack,
+                sb=cfg.env.sb,
+                bb=cfg.env.bb,
+                default_bet_bins=self.bet_bins,
+                device=self.device,
+                float_dtype=self.float_dtype,
+                flop_showdown=cfg.env.flop_showdown,
+                randomize_stacks=cfg.env.randomize_stacks,
+                stack_mode=cfg.env.stack_mode,
+                min_stack_bb=cfg.env.min_stack_bb,
+                mid_stack_bb=cfg.env.mid_stack_bb,
+                max_stack_bb=cfg.env.max_stack_bb,
+                high_stack_mass_ratio=cfg.env.high_stack_mass_ratio,
+            )
+        else:
+            if cfg.search.sparse_fused:
+                raise ValueError("Fused sparse CFR is still heads-up only.")
+            self.env = PBSEnv(
+                num_envs=self.cfg.num_envs,
+                num_players=self.num_players,
+                starting_stack=cfg.env.stack,
+                sb=cfg.env.sb,
+                bb=cfg.env.bb,
+                default_bet_bins=self.bet_bins,
+                device=self.device,
+                float_dtype=self.float_dtype,
+                randomize_stacks=cfg.env.randomize_stacks,
+                stack_mode=cfg.env.stack_mode,
+                min_stack_bb=cfg.env.min_stack_bb,
+                mid_stack_bb=cfg.env.mid_stack_bb,
+                max_stack_bb=cfg.env.max_stack_bb,
+                high_stack_mass_ratio=cfg.env.high_stack_mass_ratio,
+            )
         self.env.reset()
 
         # Model

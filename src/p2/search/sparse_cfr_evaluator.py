@@ -415,7 +415,11 @@ class SparseCFREvaluator(CFREvaluator):
         top = self.depth_offsets[-2]
 
         players = torch.randint(
-            0, 2, (N,), generator=self.generator, device=self.device
+            0,
+            self.num_players,
+            (N,),
+            generator=self.generator,
+            device=self.device,
         )
         sample_epsilon = self.sample_epsilon if training_mode else 0.0
 

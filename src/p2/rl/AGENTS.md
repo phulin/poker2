@@ -4,7 +4,7 @@ Reinforcement learning and ReBeL training support: PPO losses, replay buffers, o
 ### Source files
 - `__init__.py`: Package marker.
 - `agent_snapshot.py`: Snapshot wrapper for frozen agents.
-- `cfr_trainer.py`: ReBeL CFR supervised trainer, including split BetterFFN policy/value ownership, model checkpointing, and replay-buffer sidecar save/load.
+- `cfr_trainer.py`: ReBeL CFR supervised trainer, including split BetterFFN policy/value ownership, PBSEnv-backed multiway setup, model checkpointing, and replay-buffer sidecar save/load.
 - `losses.py`: PPO variants, CFR distillation loss, and ReBeL supervised loss.
 - `optimizers.py`: Optimizer construction helpers, including optional Muon/AdamW splitting for ReBeL training and split BetterFFN policy-head grouping.
 - `self_play.py`: SelfPlayTrainer and model-history support.

@@ -849,30 +849,40 @@ class RebelSupervisedLoss(nn.Module):
     def _policy_weights(
         self, batch: RebelBatch
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.num_players != 2:
-            raise NotImplementedError(
-                "Multiway policy weighting needs aggregate blocker-compatible "
-                "opponent reach; this path is currently heads-up only."
-            )
         actor = batch.features.to_act
-        opp = 1 - actor
         player_beliefs, allowed_hands_float, unblocked_mass = self._base_weights(batch)
         actor_belief = player_beliefs.gather(
             1, actor[:, None, None].expand(-1, 1, NUM_HANDS)
         ).squeeze(1)
-        opp_matchup = (
-            unblocked_mass.gather(
-                1, opp[:, None, None].expand(-1, 1, NUM_HANDS)
-            ).squeeze(1)
-            * allowed_hands_float
-        )
+        player_ids = torch.arange(self.num_players, device=actor.device)
+        non_actor = player_ids[None, :, None] != actor[:, None, None]
+        other_matchup = torch.where(
+            non_actor,
+            unblocked_mass,
+            torch.ones_like(unblocked_mass),
+        ).prod(dim=1)
+        other_matchup = other_matchup * allowed_hands_float
         return (
             player_beliefs,
             allowed_hands_float,
             unblocked_mass,
             actor_belief,
-            opp_matchup,
+            other_matchup,
         )
+
+    def _value_weights(
+        self,
+        unblocked_mass: torch.Tensor,
+        allowed_hands_float: torch.Tensor,
+    ) -> torch.Tensor:
+        player_ids = torch.arange(self.num_players, device=unblocked_mass.device)
+        non_focal = player_ids[None, :, None, None] != player_ids[None, None, :, None]
+        weights = torch.where(
+            non_focal,
+            unblocked_mass[:, None],
+            torch.ones_like(unblocked_mass[:, None]),
+        ).prod(dim=2)
+        return weights * allowed_hands_float[:, None]
 
     def _zero(self, device: torch.device) -> torch.Tensor:
         return torch.zeros((), device=device)
@@ -1014,15 +1024,11 @@ class RebelSupervisedLoss(nn.Module):
         output: ModelOutput,
         batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
-        if self.num_players != 2:
-            raise NotImplementedError(
-                "Multiway value weighting is not implemented in RebelSupervisedLoss yet."
-            )
         hand_values = output.hand_values
         device = hand_values.device
         _, allowed_hands_float, unblocked_mass = self._base_weights(batch)
 
-        value_weights = unblocked_mass.flip(dims=[1]) * allowed_hands_float[:, None]
+        value_weights = self._value_weights(unblocked_mass, allowed_hands_float)
         value_loss = F.mse_loss(hand_values, batch.value_targets, weight=value_weights)
         value_loss_all = F.mse_loss(
             hand_values.detach(),
@@ -1059,10 +1065,6 @@ class RebelSupervisedLoss(nn.Module):
         output: ModelOutput,
         batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
-        if self.num_players != 2:
-            raise NotImplementedError(
-                "Multiway supervised loss is not implemented yet."
-            )
         logits = output.policy_logits
         hand_values = output.hand_values
         device = logits.device
@@ -1114,7 +1116,7 @@ class RebelSupervisedLoss(nn.Module):
         )
         entropy = -(probs * log_probs).sum(dim=-1).mean()
 
-        value_weights = unblocked_mass.flip(dims=[1]) * allowed_hands_float[:, None]
+        value_weights = self._value_weights(unblocked_mass, allowed_hands_float)
         value_loss = F.mse_loss(hand_values, batch.value_targets, weight=value_weights)
         value_loss_all = F.mse_loss(
             hand_values.detach(),
