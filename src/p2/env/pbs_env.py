@@ -301,6 +301,12 @@ class PBSEnv:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if action_indices.shape[0] != self.N:
             raise ValueError("action_indices must have shape [N]")
+        acting, actor = self._apply_action_effects(action_indices, bet_amounts)
+        return self._finish_step_after_action_effects(acting, actor)
+
+    def _apply_action_effects(
+        self, action_indices: torch.Tensor, bet_amounts: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         actor = self.to_act
         rows = self.arange_n
         actor_stack = self.stacks.gather(1, actor[:, None]).squeeze(1)
@@ -347,7 +353,11 @@ class PBSEnv:
         self.acted_this_round = torch.where(aggressive[:, None], reset_acted, acted_after)
         self.actions_this_round += acting.to(torch.long)
         self.last_board_indices[acting] = self.board_indices[acting]
+        return acting, actor
 
+    def _finish_step_after_action_effects(
+        self, acting: torch.Tensor, actor: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         live = ~self.has_folded
         live_count = live.sum(dim=1)
         terminal_fold = acting & (live_count <= 1)
@@ -453,7 +463,7 @@ class PBSEnv:
         return self.gather_rows(indices)
 
     def gather_rows(self, indices: torch.Tensor) -> PBSEnv:
-        dst = PBSEnv.from_proto(self, num_envs=indices.numel())
+        dst = type(self).from_proto(self, num_envs=indices.numel())
         dst.copy_state_from(self, indices, torch.arange(indices.numel(), device=self.device))
         return dst
 
