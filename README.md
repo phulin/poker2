@@ -33,9 +33,11 @@ python src/p2/cli/train_rebel.py --config-name=config_rebel_cfr
 ## Repository Structure
 - `src/p2/`: Core library (envs, models, RL trainers, CFR/search, CLI).
 - `conf/`: Hydra configs for training and model variants.
+- `docs/`: Architecture plans and design notes.
 - `scripts/`: Benchmarks, profiling, and conversion utilities.
 - `tests/`: Unit/integration tests.
 
 ## Additional Docs
 - `src/p2/K_BEST_README.md`: K-Best self-play design and usage.
 - `conf/README.md`: Config catalog and override examples.
+- `docs/multiway_rebel_plan.md`: Plan for multiway ReBeL/CFR training, sampled-depth value targets, and model changes.
