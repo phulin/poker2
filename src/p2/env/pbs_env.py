@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import torch
 
+from p2.env.card_utils import NUM_HANDS, board_allowed_hands, hand_combos_tensor
 from p2.env.hunl_tensor_env import DEFAULT_BET_BINS
+from p2.env.rules import rank_hands
 
 
 class PBSEnv:
@@ -32,6 +34,12 @@ class PBSEnv:
         device: torch.device | str | None = None,
         rng: torch.Generator | None = None,
         float_dtype: torch.dtype = torch.float32,
+        randomize_stacks: bool = False,
+        stack_mode: str = "fixed",
+        min_stack_bb: int = 10,
+        mid_stack_bb: int = 200,
+        max_stack_bb: int = 400,
+        high_stack_mass_ratio: float = 1.0 / 3.0,
         init_state: bool = True,
     ) -> None:
         if num_envs < 0:
@@ -46,10 +54,26 @@ class PBSEnv:
             raise ValueError("mean_stack and starting_stack must match when both set")
         if mean_stack < bb:
             raise ValueError("mean_stack must cover the big blind")
+        if randomize_stacks and stack_mode == "fixed":
+            stack_mode = "weighted_uniform_bb"
+        if stack_mode not in {"fixed", "weighted_uniform_bb"}:
+            raise ValueError(f"Unsupported stack_mode: {stack_mode!r}")
+        if min_stack_bb <= 0 or mid_stack_bb <= 0 or max_stack_bb <= 0:
+            raise ValueError("stack depth bounds must be positive")
+        if min_stack_bb > mid_stack_bb or mid_stack_bb > max_stack_bb:
+            raise ValueError("Require min_stack_bb <= mid_stack_bb <= max_stack_bb")
+        if high_stack_mass_ratio < 0:
+            raise ValueError("high_stack_mass_ratio must be non-negative")
 
         self.N = int(num_envs)
         self.num_players = int(num_players)
         self.mean_stack = int(mean_stack)
+        self.stack_mode = stack_mode
+        self.min_stack_bb = int(min_stack_bb)
+        self.mid_stack_bb = int(mid_stack_bb)
+        self.max_stack_bb = int(max_stack_bb)
+        self.high_stack_mass_ratio = float(high_stack_mass_ratio)
+        self.randomize_stacks = stack_mode != "fixed"
         self.sb = int(sb)
         self.bb = int(bb)
         self.default_bet_bins = default_bet_bins or DEFAULT_BET_BINS
@@ -133,14 +157,58 @@ class PBSEnv:
             device=proto.device,
             rng=proto.rng,
             float_dtype=proto.float_dtype,
+            stack_mode=proto.stack_mode,
+            min_stack_bb=proto.min_stack_bb,
+            mid_stack_bb=proto.mid_stack_bb,
+            max_stack_bb=proto.max_stack_bb,
+            high_stack_mass_ratio=proto.high_stack_mass_ratio,
             init_state=init_state,
         )
+
+    def _sample_starting_stacks(self, num_reset: int) -> torch.Tensor:
+        if num_reset == 0:
+            return torch.zeros(
+                0, self.num_players, dtype=torch.long, device=self.device
+            )
+        if self.stack_mode == "fixed":
+            return torch.full(
+                (num_reset, self.num_players),
+                self.mean_stack,
+                dtype=torch.long,
+                device=self.device,
+            )
+
+        min_chips = max(int(round(self.min_stack_bb * self.bb)), self.bb)
+        mid_chips = max(int(round(self.mid_stack_bb * self.bb)), min_chips)
+        max_chips = max(int(round(self.max_stack_bb * self.bb)), mid_chips)
+        high_prob = self.high_stack_mass_ratio / (1.0 + self.high_stack_mass_ratio)
+        choose_high = (
+            torch.rand(
+                num_reset,
+                self.num_players,
+                generator=self.rng,
+                device=self.device,
+            )
+            < high_prob
+        )
+        rand = torch.rand(
+            num_reset,
+            self.num_players,
+            generator=self.rng,
+            device=self.device,
+        )
+        low_width = mid_chips - min_chips + 1
+        high_width = max_chips - mid_chips + 1
+        low_sample = (min_chips + torch.floor(rand * low_width)).long()
+        high_sample = (mid_chips + torch.floor(rand * high_width)).long()
+        return torch.where(choose_high, high_sample, low_sample)
 
     def reset(
         self,
         env_indices: torch.Tensor | None = None,
         force_button: torch.Tensor | None = None,
         force_deck: torch.Tensor | None = None,
+        force_starting_stacks: torch.Tensor | None = None,
     ) -> None:
         ids = self.arange_n if env_indices is None else env_indices
         if ids.numel() == 0:
@@ -161,29 +229,43 @@ class PBSEnv:
         sb_player = self._small_blind_player(button)
         bb_player = self._big_blind_player(button)
         rows = torch.arange(num_reset, device=self.device)
+        if force_starting_stacks is None:
+            starting_stacks = self._sample_starting_stacks(num_reset)
+        else:
+            starting_stacks = force_starting_stacks.to(self.device)
+            if starting_stacks.shape != (num_reset, self.num_players):
+                raise ValueError(
+                    "force_starting_stacks must have shape [num_reset, num_players]"
+                )
 
         self.button[ids] = button
         self.street[ids] = 0
         self.to_act[ids] = self._preflop_first_actor(button)
         self.last_to_act[ids] = self.to_act[ids]
-        self.pot[ids] = self.sb + self.bb
+        sb_post = starting_stacks[rows, sb_player].minimum(
+            torch.full((num_reset,), self.sb, dtype=torch.long, device=self.device)
+        )
+        bb_post = starting_stacks[rows, bb_player].minimum(
+            torch.full((num_reset,), self.bb, dtype=torch.long, device=self.device)
+        )
+        self.pot[ids] = sb_post + bb_post
         self.min_raise[ids] = self.bb
         self.last_aggressive_amount[ids] = self.bb
         self.actions_this_round[ids] = 0
         self.actions_last_round[ids] = 0
         self.deck_pos[ids] = 0
 
-        self.starting_stacks[ids] = self.mean_stack
-        self.scale[ids] = float(self.mean_stack)
-        self.stacks[ids] = self.mean_stack
+        self.starting_stacks[ids] = starting_stacks
+        self.scale[ids] = starting_stacks.min(dim=1).values.to(self.float_dtype)
+        self.stacks[ids] = starting_stacks
         self.committed[ids] = 0
         self.chips_placed[ids] = 0
-        self.stacks[ids[rows], sb_player] -= self.sb
-        self.stacks[ids[rows], bb_player] -= self.bb
-        self.committed[ids[rows], sb_player] = self.sb
-        self.committed[ids[rows], bb_player] = self.bb
-        self.chips_placed[ids[rows], sb_player] = self.sb
-        self.chips_placed[ids[rows], bb_player] = self.bb
+        self.stacks[ids[rows], sb_player] -= sb_post
+        self.stacks[ids[rows], bb_player] -= bb_post
+        self.committed[ids[rows], sb_player] = sb_post
+        self.committed[ids[rows], bb_player] = bb_post
+        self.chips_placed[ids[rows], sb_player] = sb_post
+        self.chips_placed[ids[rows], bb_player] = bb_post
         self.has_folded[ids] = False
         self.is_allin[ids] = self.stacks[ids] == 0
         self.acted_this_round[ids] = False
@@ -417,6 +499,49 @@ class PBSEnv:
         rewards = torch.zeros(self.N, self.num_players, dtype=self.float_dtype, device=self.device)
         return self._reward_rows(env_indices, winners_mask, rewards)[env_indices]
 
+    def expected_showdown_rewards(
+        self,
+        beliefs: torch.Tensor,
+        env_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return side-pot-aware showdown rewards from private-hand marginals.
+
+        ``beliefs`` must have shape ``[M, P, 1326]`` where each player axis is a
+        marginal distribution over private two-card combos for the matching env
+        row. The joint private-hand distribution is approximated as the product
+        of those marginals after conditioning each opponent on the hero's two
+        cards and the public board. Opponent-opponent card collisions are not
+        enumerated.
+        """
+        if env_indices is None:
+            ids = self.arange_n
+        else:
+            ids = env_indices.to(self.device)
+        if beliefs.shape != (ids.numel(), self.num_players, NUM_HANDS):
+            raise ValueError(
+                "beliefs must have shape "
+                f"{(ids.numel(), self.num_players, NUM_HANDS)}"
+            )
+        if ids.numel() == 0:
+            return torch.zeros(
+                0, self.num_players, dtype=self.float_dtype, device=self.device
+            )
+        if bool((self.board_indices[ids] < 0).any().item()):
+            raise ValueError("expected_showdown_rewards requires a full public board")
+
+        beliefs_f = beliefs.to(device=self.device, dtype=torch.float32)
+        rewards = torch.empty(
+            ids.numel(), self.num_players, dtype=torch.float32, device=self.device
+        )
+        combos = hand_combos_tensor(device=self.device)
+        for out_row in range(ids.numel()):
+            rewards[out_row] = self._expected_showdown_reward_row(
+                ids[out_row],
+                beliefs_f[out_row],
+                combos,
+            )
+        return rewards.to(self.float_dtype)
+
     def reset_done(self) -> None:
         self.reset(torch.where(self.done)[0])
 
@@ -505,14 +630,230 @@ class PBSEnv:
     def _reward_rows(
         self, ids: torch.Tensor, winners: torch.Tensor, rewards: torch.Tensor
     ) -> torch.Tensor:
-        winner_count = winners.sum(dim=1).clamp_min(1).to(self.float_dtype)
-        pot_share = self.pot[ids, None].to(self.float_dtype) / winner_count[:, None]
+        payouts = self._side_pot_payouts(ids, winners)
         rewards[ids] = (
             self.stacks[ids].to(self.float_dtype)
-            + torch.where(winners, pot_share, torch.zeros_like(pot_share))
+            + payouts
             - self.starting_stacks[ids].to(self.float_dtype)
-        ) / self.scale[ids, None]
+        ) / self.starting_stacks[ids].clamp_min(1).to(self.float_dtype)
         return rewards
+
+    def _side_pot_payouts(
+        self, ids: torch.Tensor, winners: torch.Tensor
+    ) -> torch.Tensor:
+        if ids.numel() == 0:
+            return torch.zeros(
+                0, self.num_players, dtype=self.float_dtype, device=self.device
+            )
+        contrib = self.chips_placed[ids].to(self.float_dtype)
+        sorted_levels = contrib.sort(dim=1).values
+        previous = torch.cat(
+            (
+                torch.zeros(
+                    ids.numel(), 1, dtype=self.float_dtype, device=self.device
+                ),
+                sorted_levels[:, :-1],
+            ),
+            dim=1,
+        )
+        widths = (sorted_levels - previous).clamp_min(0)
+        participants = contrib[:, None, :] >= sorted_levels[:, :, None]
+        layer_amounts = widths * participants.to(self.float_dtype).sum(dim=2)
+        eligible_winners = participants & winners[:, None, :]
+        winner_counts = eligible_winners.sum(dim=2)
+        live_eligible = participants & (~self.has_folded[ids])[:, None, :]
+        live_counts = live_eligible.sum(dim=2)
+        use_live = winner_counts == 0
+        payout_masks = torch.where(use_live[:, :, None], live_eligible, eligible_winners)
+        payout_counts = torch.where(use_live, live_counts, winner_counts).clamp_min(1)
+        shares = (
+            layer_amounts[:, :, None]
+            * payout_masks.to(self.float_dtype)
+            / payout_counts[:, :, None].to(self.float_dtype)
+        )
+        return shares.sum(dim=1)
+
+    def _expected_showdown_reward_row(
+        self,
+        env_id: torch.Tensor,
+        beliefs: torch.Tensor,
+        combos: torch.Tensor,
+    ) -> torch.Tensor:
+        board = self.board_indices[env_id].unsqueeze(0)
+        ranks = rank_hands(board)[0].squeeze(0).to(torch.long)
+        allowed = board_allowed_hands(board).squeeze(0)
+        beliefs = torch.where(allowed[None, :], beliefs.clamp_min(0.0), 0.0)
+        live = ~self.has_folded[env_id]
+        contrib = self.chips_placed[env_id].to(torch.float32)
+        stacks = self.stacks[env_id].to(torch.float32)
+        starting = self.starting_stacks[env_id].to(torch.float32)
+        payouts = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
+
+        lower_masses: list[torch.Tensor] = []
+        tie_masses: list[torch.Tensor] = []
+        valid_masses: list[torch.Tensor] = []
+        for player in range(self.num_players):
+            lower, tie, valid = self._opponent_rank_masses(
+                beliefs[player],
+                ranks,
+                combos,
+            )
+            lower_masses.append(lower)
+            tie_masses.append(tie)
+            valid_masses.append(valid.clamp_min(1.0e-12))
+
+        levels = contrib.sort().values
+        previous = torch.zeros((), dtype=torch.float32, device=self.device)
+        for level in levels:
+            width = level - previous
+            previous = level
+            contributors = contrib >= level
+            layer_amount = width * contributors.to(torch.float32).sum()
+            eligible = live & contributors
+            for hero in range(self.num_players):
+                hero_belief = beliefs[hero]
+                hero_mass = hero_belief.sum().clamp_min(1.0e-12)
+                lower_probs = []
+                tie_probs = []
+                for opp in range(self.num_players):
+                    if opp == hero:
+                        continue
+                    opp_eligible = eligible[opp]
+                    lower_probs.append(
+                        torch.where(
+                            opp_eligible,
+                            lower_masses[opp] / valid_masses[opp],
+                            torch.ones_like(lower_masses[opp]),
+                        )
+                    )
+                    tie_probs.append(
+                        torch.where(
+                            opp_eligible,
+                            tie_masses[opp] / valid_masses[opp],
+                            torch.zeros_like(tie_masses[opp]),
+                        )
+                    )
+                share = self._hero_tie_split_share(
+                    lower_probs,
+                    tie_probs,
+                    hero_belief.shape[0],
+                )
+                hero_eligible = eligible[hero].to(torch.float32)
+                payouts[hero] += (
+                    hero_eligible
+                    * layer_amount
+                    * (hero_belief * share).sum()
+                    / hero_mass
+                )
+
+        denom = starting.clamp_min(1.0).to(torch.float32)
+        return (stacks + payouts - starting) / denom
+
+    def _opponent_rank_masses(
+        self,
+        weights: torch.Tensor,
+        ranks: torch.Tensor,
+        combos: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        order = torch.argsort(ranks, stable=True)
+        sorted_ranks = ranks[order]
+        sorted_weights = weights[order]
+        sorted_combos = combos[order]
+        hand_count = weights.shape[0]
+        positions = torch.arange(hand_count, device=self.device)
+
+        card_increments = torch.zeros(
+            hand_count, 52, dtype=torch.float32, device=self.device
+        )
+        card_increments[positions, sorted_combos[:, 0]] += sorted_weights
+        card_increments[positions, sorted_combos[:, 1]] += sorted_weights
+        prefix_cards = torch.cat(
+            (
+                torch.zeros(1, 52, dtype=torch.float32, device=self.device),
+                card_increments.cumsum(dim=0),
+            ),
+            dim=0,
+        )
+        prefix_total = torch.cat(
+            (
+                torch.zeros(1, dtype=torch.float32, device=self.device),
+                sorted_weights.cumsum(dim=0),
+            )
+        )
+
+        lower_pos = torch.searchsorted(sorted_ranks, ranks, right=False)
+        upper_pos = torch.searchsorted(sorted_ranks, ranks, right=True)
+        card_a = combos[:, 0]
+        card_b = combos[:, 1]
+        lower = self._blocked_prefix_mass(
+            lower_pos,
+            prefix_total,
+            prefix_cards,
+            card_a,
+            card_b,
+            torch.zeros_like(weights),
+        )
+        upper = self._blocked_prefix_mass(
+            upper_pos,
+            prefix_total,
+            prefix_cards,
+            card_a,
+            card_b,
+            weights,
+        )
+        valid = self._blocked_prefix_mass(
+            torch.full_like(lower_pos, hand_count),
+            prefix_total,
+            prefix_cards,
+            card_a,
+            card_b,
+            weights,
+        )
+        tie = (upper - lower).clamp_min(0.0)
+        return lower.clamp_min(0.0), tie, valid.clamp_min(0.0)
+
+    def _blocked_prefix_mass(
+        self,
+        prefix_pos: torch.Tensor,
+        prefix_total: torch.Tensor,
+        prefix_cards: torch.Tensor,
+        card_a: torch.Tensor,
+        card_b: torch.Tensor,
+        intersection: torch.Tensor,
+    ) -> torch.Tensor:
+        rows = torch.arange(prefix_pos.numel(), device=self.device)
+        mass = prefix_total[prefix_pos]
+        card_mass = prefix_cards[prefix_pos]
+        return (
+            mass
+            - card_mass[rows, card_a]
+            - card_mass[rows, card_b]
+            + intersection
+        )
+
+    def _hero_tie_split_share(
+        self,
+        lower_probs: list[torch.Tensor],
+        tie_probs: list[torch.Tensor],
+        hand_count: int,
+    ) -> torch.Tensor:
+        if not lower_probs:
+            return torch.ones(hand_count, dtype=torch.float32, device=self.device)
+
+        coeff = torch.zeros(
+            hand_count, len(lower_probs) + 1, dtype=torch.float32, device=self.device
+        )
+        coeff[:, 0] = 1.0
+        degree = 0
+        for lower, tie in zip(lower_probs, tie_probs, strict=True):
+            nxt = torch.zeros_like(coeff)
+            active = coeff[:, : degree + 1]
+            nxt[:, : degree + 1] += active * lower[:, None]
+            nxt[:, 1 : degree + 2] += active * tie[:, None]
+            coeff = nxt
+            degree += 1
+        denom = torch.arange(1, degree + 2, dtype=torch.float32, device=self.device)
+        return (coeff[:, : degree + 1] / denom[None, :]).sum(dim=1)
 
     def _finish_no_more_betting(
         self,

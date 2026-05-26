@@ -176,6 +176,44 @@ def test_triton_pbs_env_reset_subset_matches_pbs_env() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_triton_pbs_env_force_starting_stacks_and_side_pots_match_pbs_env() -> None:
+    pytest.importorskip("triton")
+    from p2.env.triton_pbs_env import TritonPBSEnv
+
+    base = PBSEnv(
+        num_envs=1, num_players=3, starting_stack=100, sb=0, bb=0, device="cuda"
+    )
+    triton_env = TritonPBSEnv(
+        num_envs=1, num_players=3, starting_stack=100, sb=0, bb=0, device="cuda"
+    )
+    button = torch.tensor([0], dtype=torch.long, device="cuda")
+    deck = torch.tensor([[0, 14, 28, 42, 7]], dtype=torch.long, device="cuda")
+    starting_stacks = torch.tensor([[40, 100, 100]], dtype=torch.long, device="cuda")
+    base.reset(
+        force_button=button,
+        force_deck=deck,
+        force_starting_stacks=starting_stacks,
+    )
+    triton_env.reset(
+        force_button=button,
+        force_deck=deck,
+        force_starting_stacks=starting_stacks,
+    )
+    _assert_envs_equal(base, triton_env)
+
+    allin = torch.tensor([base.num_bet_bins - 1], dtype=torch.long, device="cuda")
+    rewards = torch.zeros(1, 3, device="cuda")
+    triton_rewards = torch.zeros_like(rewards)
+    for _ in range(3):
+        rewards, _, _ = base.step_bins(allin)
+        triton_rewards, _, _ = triton_env.step_bins(allin)
+        _assert_envs_equal(base, triton_env)
+
+    torch.testing.assert_close(triton_rewards, rewards)
+    torch.testing.assert_close(rewards.cpu(), torch.zeros(1, 3))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_triton_pbs_env_copy_state_from_and_repeat_match_pbs_env() -> None:
     pytest.importorskip("triton")
     base, triton_env = _make_envs()

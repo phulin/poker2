@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+from p2.env.card_utils import combo_index
 from p2.env.nl_env import NLEnv
 from p2.env.pbs_env import PBSEnv
 
@@ -139,6 +140,27 @@ def test_nl_env_reset_deals_multiway_hole_cards_and_showdown_winner():
     assert rewards[0] > rewards[2]
 
 
+def test_nl_env_private_showdown_rewards_side_pots():
+    env = NLEnv(num_players=3, starting_stack=100, sb=0, bb=0, deal_hole_cards=True)
+    state = env.reset(
+        force_button=0,
+        force_starting_stacks=[40, 100, 100],
+        force_deck=[12, 25, 11, 24, 10, 23, 0, 14, 28, 42, 7],
+    )
+    assert [player.starting_stack for player in state.players] == [40, 100, 100]
+
+    allin = env.num_bet_bins - 1
+    rewards = [0.0, 0.0, 0.0]
+    for _ in range(3):
+        state, rewards, done, _ = env.step_bins(allin)
+        if done:
+            break
+
+    assert state.terminal is True
+    assert state.winner == 0
+    assert rewards == [2.0, 0.2, -1.0]
+
+
 def test_pbs_env_reset_is_public_only_and_multiway():
     env = _make_pbs(num_envs=4, num_players=4)
 
@@ -151,6 +173,29 @@ def test_pbs_env_reset_is_public_only_and_multiway():
     torch.testing.assert_close(env.to_act, torch.full((4,), 3, dtype=torch.long))
     torch.testing.assert_close(env.committed[:, 1], torch.full((4,), 5))
     torch.testing.assert_close(env.committed[:, 2], torch.full((4,), 10))
+
+
+def test_pbs_env_reset_samples_each_player_stack_independently():
+    rng = torch.Generator(device="cpu").manual_seed(7)
+    env = PBSEnv(
+        num_envs=128,
+        num_players=4,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        stack_mode="weighted_uniform_bb",
+        min_stack_bb=4,
+        mid_stack_bb=8,
+        max_stack_bb=12,
+        rng=rng,
+        device="cpu",
+    )
+    env.reset(force_button=torch.zeros(128, dtype=torch.long))
+
+    assert env.starting_stacks.shape == (128, 4)
+    assert torch.all(env.starting_stacks >= 40)
+    assert torch.all(env.starting_stacks <= 120)
+    assert (env.starting_stacks[:, 0] != env.starting_stacks[:, 1]).any()
 
 
 def test_pbs_env_matches_nl_env_call_down_to_turn():
@@ -230,3 +275,36 @@ def test_pbs_env_vectorized_mixed_rows_match_independent_references():
         for env_idx, ref in enumerate(refs):
             ref.step_bins(scripts[env_idx][step_idx])
             _assert_public_state_matches(ref, pbs, env_idx)
+
+
+def test_pbs_expected_showdown_rewards_use_marginal_beliefs_and_side_pots():
+    env = PBSEnv(
+        num_envs=1,
+        num_players=3,
+        starting_stack=100,
+        sb=0,
+        bb=0,
+        device="cpu",
+    )
+    env.reset(
+        force_button=torch.tensor([0]),
+        force_deck=torch.tensor([[0, 14, 28, 42, 7]], dtype=torch.long),
+    )
+    env.board_indices[0] = torch.tensor([0, 14, 28, 42, 7])
+    env.starting_stacks[0] = torch.tensor([40, 100, 100])
+    env.stacks[0] = 0
+    env.chips_placed[0] = torch.tensor([40, 100, 100])
+    env.pot[0] = 240
+    env.has_folded[0] = False
+
+    beliefs = torch.zeros(1, 3, 1326)
+    beliefs[0, 0, combo_index(12, 25)] = 1.0  # AA
+    beliefs[0, 1, combo_index(11, 24)] = 1.0  # KK
+    beliefs[0, 2, combo_index(10, 23)] = 1.0  # QQ
+
+    rewards = env.expected_showdown_rewards(beliefs)
+
+    torch.testing.assert_close(
+        rewards[0],
+        torch.tensor([2.0, 0.2, -1.0]),
+    )

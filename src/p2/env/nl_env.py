@@ -14,8 +14,10 @@ STREETS = ("preflop", "flop", "turn", "river", "showdown")
 @dataclass
 class NLPlayerState:
     stack: int
+    starting_stack: int = 0
     stack_after_posting: int = 0
     committed: int = 0
+    chips_placed: int = 0
     hole_cards: list[int] = field(default_factory=list)
     has_folded: bool = False
     is_allin: bool = False
@@ -60,15 +62,30 @@ class NLEnv:
         default_bet_bins: list[float] | None = None,
         seed: int | None = None,
         deal_hole_cards: bool = True,
+        randomize_stacks: bool = False,
+        stack_mode: str = "fixed",
+        min_stack_bb: int = 10,
+        mid_stack_bb: int = 200,
+        max_stack_bb: int = 400,
+        high_stack_mass_ratio: float = 1.0 / 3.0,
     ) -> None:
         if num_players < 2:
             raise ValueError("num_players must be at least 2")
         if starting_stack < bb:
             raise ValueError("starting_stack must cover the big blind")
+        if randomize_stacks and stack_mode == "fixed":
+            stack_mode = "weighted_uniform_bb"
+        if stack_mode not in {"fixed", "weighted_uniform_bb"}:
+            raise ValueError(f"Unsupported stack_mode: {stack_mode!r}")
         self.starting_stack = int(starting_stack)
         self.num_players = int(num_players)
         self.sb = int(sb)
         self.bb = int(bb)
+        self.stack_mode = stack_mode
+        self.min_stack_bb = int(min_stack_bb)
+        self.mid_stack_bb = int(mid_stack_bb)
+        self.max_stack_bb = int(max_stack_bb)
+        self.high_stack_mass_ratio = float(high_stack_mass_ratio)
         self.default_bet_bins = default_bet_bins or DEFAULT_BET_BINS
         self.num_bet_bins = len(self.default_bet_bins) + 3
         self.deal_hole_cards = bool(deal_hole_cards)
@@ -80,6 +97,7 @@ class NLEnv:
         seed: int | None = None,
         force_button: int | None = None,
         force_deck: list[int] | None = None,
+        force_starting_stacks: list[int] | None = None,
     ) -> NLGameState:
         if seed is not None:
             self.rng.seed(seed)
@@ -91,7 +109,17 @@ class NLEnv:
             deck = forced + remaining
 
         button = self.rng.randrange(self.num_players) if force_button is None else force_button
-        players = [NLPlayerState(stack=self.starting_stack) for _ in range(self.num_players)]
+        starting_stacks = (
+            self._sample_starting_stacks()
+            if force_starting_stacks is None
+            else list(force_starting_stacks)
+        )
+        if len(starting_stacks) != self.num_players:
+            raise ValueError("force_starting_stacks must have num_players entries")
+        players = [
+            NLPlayerState(stack=stack, starting_stack=stack)
+            for stack in starting_stacks
+        ]
 
         if self.deal_hole_cards:
             for player in players:
@@ -104,7 +132,9 @@ class NLEnv:
             players[player_idx].stack -= posted
             players[player_idx].stack_after_posting = players[player_idx].stack
             players[player_idx].committed += posted
+            players[player_idx].chips_placed += posted
             players[player_idx].is_allin = players[player_idx].stack == 0
+        pot = sum(player.chips_placed for player in players)
 
         to_act = self._preflop_first_actor(button)
         state = NLGameState(
@@ -112,7 +142,7 @@ class NLEnv:
             street="preflop",
             deck=deck,
             board=[],
-            pot=self.sb + self.bb,
+            pot=pot,
             to_act=to_act,
             small_blind=self.sb,
             big_blind=self.bb,
@@ -298,6 +328,21 @@ class NLEnv:
     def _small_blind_player(self, button: int) -> int:
         return button if self.num_players == 2 else (button + 1) % self.num_players
 
+    def _sample_starting_stacks(self) -> list[int]:
+        if self.stack_mode == "fixed":
+            return [self.starting_stack] * self.num_players
+        min_chips = max(int(round(self.min_stack_bb * self.bb)), self.bb)
+        mid_chips = max(int(round(self.mid_stack_bb * self.bb)), min_chips)
+        max_chips = max(int(round(self.max_stack_bb * self.bb)), mid_chips)
+        high_prob = self.high_stack_mass_ratio / (1.0 + self.high_stack_mass_ratio)
+        stacks = []
+        for _ in range(self.num_players):
+            if self.rng.random() < high_prob:
+                stacks.append(self.rng.randint(mid_chips, max_chips))
+            else:
+                stacks.append(self.rng.randint(min_chips, mid_chips))
+        return stacks
+
     def _big_blind_player(self, button: int) -> int:
         return (button + 1) % self.num_players if self.num_players == 2 else (button + 2) % self.num_players
 
@@ -340,12 +385,19 @@ class NLEnv:
         self, players: list[NLPlayerState], board: list[int]
     ) -> tuple[int, ...]:
         live = [idx for idx, player in enumerate(players) if not player.has_folded]
-        if not self.deal_hole_cards or len(board) < 5:
-            return tuple(live)
+        return self._showdown_winners_among(players, board, live)
 
-        best = live[0]
+    def _showdown_winners_among(
+        self, players: list[NLPlayerState], board: list[int], eligible: list[int]
+    ) -> tuple[int, ...]:
+        if not eligible:
+            return ()
+        if not self.deal_hole_cards or len(board) < 5:
+            return tuple(eligible)
+
+        best = eligible[0]
         winners = [best]
-        for idx in live[1:]:
+        for idx in eligible[1:]:
             cmp = rules.compare_7(players[idx].hole_cards + board, players[best].hole_cards + board)
             if cmp > 0:
                 best = idx
@@ -388,21 +440,50 @@ class NLEnv:
         amount = min(max(amount, 0), player.stack)
         player.stack -= amount
         player.committed += amount
+        player.chips_placed += amount
         player.is_allin = player.stack == 0
 
     def _rewards(self, state: NLGameState) -> list[float]:
+        payouts = self._side_pot_payouts(state)
         rewards = []
-        split_count = max(len(state.winners), 1)
         for idx, player in enumerate(state.players):
-            share = state.pot / split_count if idx in state.winners else 0.0
-            rewards.append((player.stack + share - self.starting_stack) / self.starting_stack)
+            denom = max(player.starting_stack, 1)
+            rewards.append((player.stack + payouts[idx] - player.starting_stack) / denom)
         return rewards
+
+    def _side_pot_payouts(self, state: NLGameState) -> list[float]:
+        players = state.players
+        contributions = [player.chips_placed for player in players]
+        payouts = [0.0] * self.num_players
+        previous = 0
+        for level in sorted(set(contributions)):
+            width = level - previous
+            previous = level
+            if width <= 0:
+                continue
+            participants = [idx for idx, chips in enumerate(contributions) if chips >= level]
+            amount = width * len(participants)
+            eligible = [idx for idx in participants if not players[idx].has_folded]
+            if not eligible:
+                continue
+            if self.deal_hole_cards and len(state.board) == 5:
+                winners = self._showdown_winners_among(list(players), state.board, eligible)
+            else:
+                winners = tuple(idx for idx in state.winners if idx in eligible)
+                if not winners:
+                    winners = tuple(eligible)
+            share = amount / max(len(winners), 1)
+            for winner in winners:
+                payouts[winner] += share
+        return payouts
 
     def _copy_player(self, player: NLPlayerState) -> NLPlayerState:
         return NLPlayerState(
             stack=player.stack,
+            starting_stack=player.starting_stack,
             stack_after_posting=player.stack_after_posting,
             committed=player.committed,
+            chips_placed=player.chips_placed,
             hole_cards=list(player.hole_cards),
             has_folded=player.has_folded,
             is_allin=player.is_allin,
