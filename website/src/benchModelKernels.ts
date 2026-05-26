@@ -1,39 +1,5 @@
 import { performance } from "node:perf_hooks";
-import {
-  LEAKY_RELU_MAT_VEC_BATCH_TILED_GEMM_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_TILED_GEMM_WGSL,
-  MAT_VEC_BATCH_TILED_GEMM_WGSL,
-} from "./modelKernels/benchVariants.js";
-import {
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH4_SUBGROUP_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH3_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_WGSL,
-} from "./modelKernels/matVecGenerated.js";
-import {
-  LEAKY_RELU_MAT_VEC_BATCH_WGSL,
-  MAT_VEC_BATCH_SMALL_COLS_WGSL,
-  MAT_VEC_BATCH_WGSL,
-} from "./modelKernels/matVec.js";
+import { createDawnDevice } from "./gpu.js";
 import {
   makeEmptyStorageBuffer,
   makeStorageBuffer,
@@ -41,8 +7,42 @@ import {
   readFloatBuffer,
 } from "./gpuBuffers.js";
 import { createComputePipeline } from "./gpuPipeline.js";
-import { createDawnDevice } from "./gpu.js";
 import { NUM_HANDS } from "./hunlEnv.js";
+import {
+  LEAKY_RELU_MAT_VEC_BATCH_TILED_GEMM_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_TILED_GEMM_WGSL,
+  MAT_VEC_BATCH_TILED_GEMM_WGSL,
+} from "./modelKernels/benchVariants.js";
+import {
+  LEAKY_RELU_MAT_VEC_BATCH_WGSL,
+  MAT_VEC_BATCH_SMALL_COLS_WGSL,
+  MAT_VEC_BATCH_WGSL,
+} from "./modelKernels/matVec.js";
+import {
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH4_SUBGROUP_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH3_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+} from "./modelKernels/matVecGenerated.js";
 
 type Kind = "plain" | "leaky" | "residual";
 
@@ -274,7 +274,7 @@ function stats(samples: number[]): {
 function fillDeterministic(length: number, scale: number): Float32Array<ArrayBuffer> {
   const out = new Float32Array(length);
   for (let i = 0; i < length; i += 1) {
-    out[i] = Math.fround((((i * 1664525 + 1013904223) >>> 0) % 2001 - 1000) * scale);
+    out[i] = Math.fround(((((i * 1664525 + 1013904223) >>> 0) % 2001) - 1000) * scale);
   }
   return out;
 }
@@ -320,8 +320,7 @@ function tiledLayoutDescription(shape: Shape): {
       "coalesced per source batch: local_invocation_index loads contiguous kLocal spans",
     weightGlobalLoads:
       "coalesced per kLocal: local_invocation_index loads contiguous rowLocal packed weights",
-    workgroupReuse:
-      `${Math.min(TILED_ROW_TILE, shape.batch)} batch rows reuse each loaded ${TILED_COL_TILE}x${TILED_ROW_TILE} weight tile; ${TILED_ROW_TILE} output rows reuse each loaded input tile`,
+    workgroupReuse: `${Math.min(TILED_ROW_TILE, shape.batch)} batch rows reuse each loaded ${TILED_COL_TILE}x${TILED_ROW_TILE} weight tile; ${TILED_ROW_TILE} output rows reuse each loaded input tile`,
   };
 }
 
@@ -798,10 +797,7 @@ function disposePrepared(prepared: PreparedVariant[]): void {
   }
 }
 
-function maxDiff(
-  a: Float32Array<ArrayBufferLike>,
-  b: Float32Array<ArrayBufferLike>,
-): number {
+function maxDiff(a: Float32Array<ArrayBufferLike>, b: Float32Array<ArrayBufferLike>): number {
   let out = 0;
   for (let i = 0; i < a.length; i += 1) {
     const diff = Math.abs(a[i]! - b[i]!);
@@ -844,16 +840,16 @@ async function benchmarkShape(
   };
   try {
     const references = new Map<Kind, Float32Array<ArrayBufferLike>>();
-    const prepared = allVariants.map((variant) =>
-      prepareVariant(device, variant, shape, buffers),
-    );
+    const prepared = allVariants.map((variant) => prepareVariant(device, variant, shape, buffers));
     const driftByName = new Map<string, number>();
     for (const variant of allVariants) {
       if (options.validate) {
         const refKey = variant.kind;
         let reference = references.get(refKey);
         if (!reference) {
-          const referenceVariant = variants().find((item) => item.name === referenceName(variant.kind));
+          const referenceVariant = variants().find(
+            (item) => item.name === referenceName(variant.kind),
+          );
           if (!referenceVariant) throw new Error(`missing reference for ${variant.kind}`);
           reference = await runOnce(device, referenceVariant, shape, buffers);
           references.set(refKey, reference);
@@ -869,9 +865,7 @@ async function benchmarkShape(
         name: item.variant.name,
         kind: item.variant.kind,
         matrix: item.variant.matrix,
-        ...(item.variant.matrix === "tiled"
-          ? { tileLayout: tiledLayoutDescription(shape) }
-          : {}),
+        ...(item.variant.matrix === "tiled" ? { tileLayout: tiledLayoutDescription(shape) } : {}),
         dispatch: {
           x: item.variant.dispatchX(shape),
           y: item.variant.dispatchY(shape),

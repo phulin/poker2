@@ -120,8 +120,7 @@ export function handOverlapsCards(
   blockedCards: ReadonlySet<number> | readonly number[],
 ): boolean {
   const [c0, c1] = handComboCards(handIndex);
-  const blocked =
-    blockedCards instanceof Set ? blockedCards : new Set<number>(blockedCards);
+  const blocked = blockedCards instanceof Set ? blockedCards : new Set<number>(blockedCards);
   return blocked.has(c0) || blocked.has(c1);
 }
 

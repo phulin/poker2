@@ -7,10 +7,9 @@ export async function createDawnDevice(): Promise<GPUDevice> {
   try {
     mod = await import("webgpu");
   } catch (error) {
-    throw new Error(
-      "Dawn WebGPU bindings are unavailable. Run `npm install` in website first.",
-      { cause: error },
-    );
+    throw new Error("Dawn WebGPU bindings are unavailable. Run `npm install` in website first.", {
+      cause: error,
+    });
   }
 
   Object.assign(globalThis, mod.globals);

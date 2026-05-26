@@ -1,32 +1,18 @@
+import type { AllInTableProvider } from "./allInTables.js";
+import { makeStorageBuffer, readFloatBuffer } from "./gpuBuffers.js";
+import { createComputePipeline, dispatchCompute } from "./gpuPipeline.js";
+import { encodeBetterFeatures, handCombos, NUM_HANDS, type PublicHunlEnv } from "./hunlEnv.js";
+import {
+  parseBetterFfnManifest,
+  requireTensor,
+  type TensorMap,
+  tensorsFromWeights,
+} from "./modelFormat.js";
 import {
   FILL_EXACT_PAIR_MASS_WGSL,
   MAT_VEC_BATCH_EXACT_BELIEF_LINEAR_IN_512_BATCH2_SUBGROUP_WGSL,
   PLAYER_BOARD_HADAMARD_WGSL,
 } from "./modelKernels/beliefFeatures.js";
-import {
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
-  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
-  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH3_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
-  MAT_VEC_BATCH_EXACT_ROWS_WGSL,
-} from "./modelKernels/matVecGenerated.js";
 import {
   LEAKY_RELU_MAT_VEC_BATCH_WGSL,
   MAT_VEC_BATCH_SMALL_COLS_WGSL,
@@ -34,10 +20,34 @@ import {
   MAT_VEC_WGSL,
 } from "./modelKernels/matVec.js";
 import {
-  RMS_NORM_BELIEF_EXACT_WGSL,
-  RMS_NORM_BELIEF_EXACT_HALF_WGSL,
-  RMS_NORM_BATCH_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+  LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH3_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL,
+  MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+} from "./modelKernels/matVecGenerated.js";
+import {
   RMS_NORM_BATCH_SMALL_WGSL,
+  RMS_NORM_BATCH_WGSL,
+  RMS_NORM_BELIEF_EXACT_HALF_WGSL,
+  RMS_NORM_BELIEF_EXACT_WGSL,
   RMS_NORM_WGSL,
 } from "./modelKernels/norm.js";
 import {
@@ -47,24 +57,6 @@ import {
   ZERO_SUM_BATCH_WGSL,
 } from "./modelKernels/pointwise.js";
 import { POKER_ENCODE_FEATURES_WGSL } from "./pokerStateKernels/modelFeatures.js";
-import {
-  makeStorageBuffer,
-  readFloatBuffer,
-} from "./gpuBuffers.js";
-import { createComputePipeline, dispatchCompute } from "./gpuPipeline.js";
-import {
-  parseBetterFfnManifest,
-  requireTensor,
-  tensorsFromWeights,
-  type TensorMap,
-} from "./modelFormat.js";
-import {
-  encodeBetterFeatures,
-  handCombos,
-  NUM_HANDS,
-  type PublicHunlEnv,
-} from "./hunlEnv.js";
-import type { AllInTableProvider } from "./allInTables.js";
 import type { BetterFfnManifest } from "./types.js";
 
 interface GpuTensor {
@@ -140,9 +132,7 @@ export class BetterFfnWebGpuModel {
   private readonly suitPairLowByHandT?: GPUBuffer;
   private readonly matVecPipeline: GPUComputePipeline;
   private readonly matVecBatchPipeline: GPUComputePipeline;
-  private readonly matVecBatchExactBeliefLinearInPipeline:
-    | GPUComputePipeline
-    | undefined;
+  private readonly matVecBatchExactBeliefLinearInPipeline: GPUComputePipeline | undefined;
   private readonly matVecBatchSmallColsPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsPipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsCols512Pipeline: GPUComputePipeline;
@@ -155,9 +145,7 @@ export class BetterFfnWebGpuModel {
   private readonly matVecBatchExactRowsCols512Batch4SubgroupPipeline:
     | GPUComputePipeline
     | undefined;
-  private readonly matVecBatchExactRowsCols512SubgroupPipeline:
-    | GPUComputePipeline
-    | undefined;
+  private readonly matVecBatchExactRowsCols512SubgroupPipeline: GPUComputePipeline | undefined;
   private readonly matVecBatchExactRowsCols1024Pipeline: GPUComputePipeline;
   private readonly matVecBatchExactRowsCols1024Batch2SubgroupPipeline:
     | GPUComputePipeline
@@ -207,11 +195,7 @@ export class BetterFfnWebGpuModel {
   private readonly uniformPool = new Map<number, GPUBuffer[]>();
   private recordingEncoder: GPUCommandEncoder | undefined;
 
-  constructor(
-    device: GPUDevice,
-    manifestInput: BetterFfnManifest | unknown,
-    weights: ArrayBuffer,
-  ) {
+  constructor(device: GPUDevice, manifestInput: BetterFfnManifest | unknown, weights: ArrayBuffer) {
     this.device = device;
     this.manifest = parseBetterFfnManifest(manifestInput);
     this.actionLabels = [...this.manifest.actionLabels];
@@ -269,17 +253,12 @@ export class BetterFfnWebGpuModel {
       );
     }
     this.matVecPipeline = this.pipeline(MAT_VEC_WGSL, "better-ffn-mat-vec");
-    this.matVecBatchPipeline = this.pipeline(
-      MAT_VEC_BATCH_WGSL,
-      "better-ffn-mat-vec-batch",
-    );
-    this.matVecBatchExactBeliefLinearInPipeline = device.features.has(
-      "subgroups" as GPUFeatureName,
-    )
+    this.matVecBatchPipeline = this.pipeline(MAT_VEC_BATCH_WGSL, "better-ffn-mat-vec-batch");
+    this.matVecBatchExactBeliefLinearInPipeline = device.features.has("subgroups" as GPUFeatureName)
       ? this.pipeline(
-        MAT_VEC_BATCH_EXACT_BELIEF_LINEAR_IN_512_BATCH2_SUBGROUP_WGSL,
-        "better-ffn-mat-vec-exact-belief-linear-in-512-batch2-subgroup",
-      )
+          MAT_VEC_BATCH_EXACT_BELIEF_LINEAR_IN_512_BATCH2_SUBGROUP_WGSL,
+          "better-ffn-mat-vec-exact-belief-linear-in-512-batch2-subgroup",
+        )
       : undefined;
     this.matVecBatchSmallColsPipeline = this.pipeline(
       MAT_VEC_BATCH_SMALL_COLS_WGSL,
@@ -293,59 +272,66 @@ export class BetterFfnWebGpuModel {
       MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
       "better-ffn-mat-vec-batch-exact-rows-cols-512",
     );
-    this.matVecBatchExactRowsCols512Batch2SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
-            "better-ffn-mat-vec-batch-exact-rows-cols-512-batch2-subgroup",
-          )
-        : undefined;
-    this.matVecBatchExactRowsCols512Batch3SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH3_SUBGROUP_WGSL,
-            "better-ffn-mat-vec-batch-exact-rows-cols-512-batch3-subgroup",
-          )
-        : undefined;
-    this.matVecBatchExactRowsCols512Batch4SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL,
-            "better-ffn-mat-vec-batch-exact-rows-cols-512-batch4-subgroup",
-          )
-        : undefined;
-    this.matVecBatchExactRowsCols512SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
-            "better-ffn-mat-vec-batch-exact-rows-cols-512-subgroup",
-          )
-        : undefined;
+    this.matVecBatchExactRowsCols512Batch2SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH2_SUBGROUP_WGSL,
+          "better-ffn-mat-vec-batch-exact-rows-cols-512-batch2-subgroup",
+        )
+      : undefined;
+    this.matVecBatchExactRowsCols512Batch3SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH3_SUBGROUP_WGSL,
+          "better-ffn-mat-vec-batch-exact-rows-cols-512-batch3-subgroup",
+        )
+      : undefined;
+    this.matVecBatchExactRowsCols512Batch4SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          MAT_VEC_BATCH_EXACT_ROWS_COLS_512_BATCH4_SUBGROUP_WGSL,
+          "better-ffn-mat-vec-batch-exact-rows-cols-512-batch4-subgroup",
+        )
+      : undefined;
+    this.matVecBatchExactRowsCols512SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
+          "better-ffn-mat-vec-batch-exact-rows-cols-512-subgroup",
+        )
+      : undefined;
     this.matVecBatchExactRowsCols1024Pipeline = this.pipeline(
       MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       "better-ffn-mat-vec-batch-exact-rows-cols-1024",
     );
-    this.matVecBatchExactRowsCols1024Batch2SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
-            "better-ffn-mat-vec-batch-exact-rows-cols-1024-batch2-subgroup",
-          )
-        : undefined;
-    this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
-            "better-ffn-mat-vec-batch-exact-rows-cols-1326-batch2-subgroup",
-          )
-        : undefined;
-    this.matVecBatchExactRowsCols1326Batch4SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL,
-            "better-ffn-mat-vec-batch-exact-rows-cols-1326-batch4-subgroup",
-          )
-        : undefined;
+    this.matVecBatchExactRowsCols1024Batch2SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+          "better-ffn-mat-vec-batch-exact-rows-cols-1024-batch2-subgroup",
+        )
+      : undefined;
+    this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL,
+          "better-ffn-mat-vec-batch-exact-rows-cols-1326-batch2-subgroup",
+        )
+      : undefined;
+    this.matVecBatchExactRowsCols1326Batch4SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL,
+          "better-ffn-mat-vec-batch-exact-rows-cols-1326-batch4-subgroup",
+        )
+      : undefined;
     this.leakyReluMatVecBatchPipeline = this.pipeline(
       LEAKY_RELU_MAT_VEC_BATCH_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch",
@@ -358,31 +344,34 @@ export class BetterFfnWebGpuModel {
       LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-512",
     );
-    this.leakyReluMatVecBatchExactRowsCols512SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
-            "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-512-subgroup",
-          )
-        : undefined;
+    this.leakyReluMatVecBatchExactRowsCols512SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL,
+          "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-512-subgroup",
+        )
+      : undefined;
     this.leakyReluMatVecBatchExactRowsCols1024Pipeline = this.pipeline(
       LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-1024",
     );
-    this.leakyReluMatVecBatchExactRowsCols1024Batch2SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
-            "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-1024-batch2-subgroup",
-          )
-        : undefined;
-    this.leakyReluMatVecBatchExactRowsCols1024SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
-            "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-1024-subgroup",
-          )
-        : undefined;
+    this.leakyReluMatVecBatchExactRowsCols1024Batch2SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+          "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-1024-batch2-subgroup",
+        )
+      : undefined;
+    this.leakyReluMatVecBatchExactRowsCols1024SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
+          "better-ffn-leaky-relu-mat-vec-batch-exact-rows-cols-1024-subgroup",
+        )
+      : undefined;
     this.leakyReluResidualMatVecBatchPipeline = this.pipeline(
       LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL,
       "better-ffn-leaky-relu-residual-mat-vec-batch",
@@ -399,20 +388,22 @@ export class BetterFfnWebGpuModel {
       LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL,
       "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-1024",
     );
-    this.leakyReluResidualMatVecBatchExactRowsCols1024Batch2SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
-            "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-1024-batch2-subgroup",
-          )
-        : undefined;
-    this.leakyReluResidualMatVecBatchExactRowsCols1024SubgroupPipeline =
-      device.features.has("subgroups" as GPUFeatureName)
-        ? this.pipeline(
-            LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
-            "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-1024-subgroup",
-          )
-        : undefined;
+    this.leakyReluResidualMatVecBatchExactRowsCols1024Batch2SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_BATCH2_SUBGROUP_WGSL,
+          "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-1024-batch2-subgroup",
+        )
+      : undefined;
+    this.leakyReluResidualMatVecBatchExactRowsCols1024SubgroupPipeline = device.features.has(
+      "subgroups" as GPUFeatureName,
+    )
+      ? this.pipeline(
+          LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_SUBGROUP_WGSL,
+          "better-ffn-leaky-relu-residual-mat-vec-batch-exact-rows-cols-1024-subgroup",
+        )
+      : undefined;
     this.playerBoardHadamardPipeline = this.pipeline(
       PLAYER_BOARD_HADAMARD_WGSL,
       "better-ffn-player-board-hadamard",
@@ -421,10 +412,7 @@ export class BetterFfnWebGpuModel {
       FILL_EXACT_PAIR_MASS_WGSL,
       "better-ffn-fill-exact-pair-mass",
     );
-    this.rmsNormPipeline = this.pipeline(
-      RMS_NORM_WGSL,
-      "better-ffn-rms-norm",
-    );
+    this.rmsNormPipeline = this.pipeline(RMS_NORM_WGSL, "better-ffn-rms-norm");
     this.rmsNormBeliefExactPipeline = this.pipeline(
       RMS_NORM_BELIEF_EXACT_WGSL,
       "better-ffn-rms-norm-belief-exact",
@@ -433,10 +421,7 @@ export class BetterFfnWebGpuModel {
       RMS_NORM_BELIEF_EXACT_HALF_WGSL,
       "better-ffn-rms-norm-belief-exact-half",
     );
-    this.rmsNormBatchPipeline = this.pipeline(
-      RMS_NORM_BATCH_WGSL,
-      "better-ffn-rms-norm-batch",
-    );
+    this.rmsNormBatchPipeline = this.pipeline(RMS_NORM_BATCH_WGSL, "better-ffn-rms-norm-batch");
     this.rmsNormBatchSmallPipeline = this.pipeline(
       RMS_NORM_BATCH_SMALL_WGSL,
       "better-ffn-rms-norm-batch-small",
@@ -446,14 +431,8 @@ export class BetterFfnWebGpuModel {
       "better-ffn-scaled-residual-add",
     );
     this.add3Pipeline = this.pipeline(ADD3_WGSL, "better-ffn-add3");
-    this.repeatRowsPipeline = this.pipeline(
-      REPEAT_ROWS_WGSL,
-      "better-ffn-repeat-rows",
-    );
-    this.zeroSumBatchPipeline = this.pipeline(
-      ZERO_SUM_BATCH_WGSL,
-      "better-ffn-zero-sum-batch",
-    );
+    this.repeatRowsPipeline = this.pipeline(REPEAT_ROWS_WGSL, "better-ffn-repeat-rows");
+    this.zeroSumBatchPipeline = this.pipeline(ZERO_SUM_BATCH_WGSL, "better-ffn-zero-sum-batch");
     this.stateFeaturePipeline = this.pipeline(
       POKER_ENCODE_FEATURES_WGSL,
       "better-ffn-state-features",
@@ -496,9 +475,17 @@ export class BetterFfnWebGpuModel {
     exactBelief?: ExactBelief,
     beforeEncode?: (encoder: GPUCommandEncoder) => void,
   ): Promise<GpuHandValuePrediction> {
-    const prediction = this.enqueuePredictBatch(envs, beliefs, {
-      includePolicy: false,
-    }, prepared, beforeSubmit, exactBelief, beforeEncode);
+    const prediction = this.enqueuePredictBatch(
+      envs,
+      beliefs,
+      {
+        includePolicy: false,
+      },
+      prepared,
+      beforeSubmit,
+      exactBelief,
+      beforeEncode,
+    );
     return {
       buffer: prediction.handValuesBuffer,
       batch: prediction.batch,
@@ -552,9 +539,7 @@ export class BetterFfnWebGpuModel {
       temps.push(temp);
       return temp.buffer;
     };
-    const uniform = (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ): GPUBuffer => {
+    const uniform = (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>): GPUBuffer => {
       const temp = this.acquireUniform(data.byteLength);
       this.device.queue.writeBuffer(temp.buffer, 0, data);
       temps.push(temp);
@@ -574,10 +559,7 @@ export class BetterFfnWebGpuModel {
       const beliefPhaseShift = this.beliefPhaseShiftForFeatures(encodedFeatures);
       for (let i = 0; i < batch; i += 1) {
         const features = encodedFeatures[i]!;
-        context.set(
-          contextDim === 15 ? features.valueContext : features.context,
-          i * contextDim,
-        );
+        context.set(contextDim === 15 ? features.valueContext : features.context, i * contextDim);
         base.set(this.baseEmbedding(features.street, features.board), i * hiddenDim);
       }
       const contextFeatures = this.leakyReluBlockBatch(
@@ -591,9 +573,7 @@ export class BetterFfnWebGpuModel {
         uniform,
       );
       const baseEmbedding = storage(base);
-      const beliefPhaseShiftBuffer = beliefPhaseShift
-        ? storage(beliefPhaseShift)
-        : undefined;
+      const beliefPhaseShiftBuffer = beliefPhaseShift ? storage(beliefPhaseShift) : undefined;
 
       let boardRankLow: GPUBuffer | undefined;
       let boardSuitLow: GPUBuffer | undefined;
@@ -807,9 +787,7 @@ export class BetterFfnWebGpuModel {
       temps.push(temp);
       return temp.buffer;
     };
-    const uniform = (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ): GPUBuffer => {
+    const uniform = (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>): GPUBuffer => {
       const temp = this.acquireUniform(data.byteLength);
       this.device.queue.writeBuffer(temp.buffer, 0, data);
       temps.push(temp);
@@ -831,9 +809,7 @@ export class BetterFfnWebGpuModel {
       let beliefBuffer: GPUBuffer;
       if (beliefs instanceof Float32Array) {
         const batchedBeliefs =
-          beliefs.length === batchBeliefSize
-            ? beliefs
-            : new Float32Array(batchBeliefSize);
+          beliefs.length === batchBeliefSize ? beliefs : new Float32Array(batchBeliefSize);
         if (beliefs.length === singleBeliefSize) {
           for (let i = 0; i < batch; i += 1) {
             batchedBeliefs.set(beliefs, i * singleBeliefSize);
@@ -845,9 +821,7 @@ export class BetterFfnWebGpuModel {
       }
       const encodedFeatures = prepared
         ? undefined
-        : envs.map((env, i) =>
-            encodeBetterFeatures(env, options.valuePreChance?.[i] ?? false),
-          );
+        : envs.map((env, i) => encodeBetterFeatures(env, options.valuePreChance?.[i] ?? false));
       const computedBeliefPhaseKeys = encodedFeatures
         ? this.beliefPhaseKeysForFeatures(encodedFeatures)
         : undefined;
@@ -857,12 +831,13 @@ export class BetterFfnWebGpuModel {
       const beliefPhaseShift =
         prepared?.beliefPhaseShift ??
         (computedBeliefPhaseShift ? storage(computedBeliefPhaseShift) : undefined);
-      const exactPhaseShift = exactBelief && beliefPhaseShift
-        ? this.exactBeliefPhaseShiftForKeys(
-            prepared?.beliefPhaseKeys ?? computedBeliefPhaseKeys,
-            exactBelief,
-          )
-        : undefined;
+      const exactPhaseShift =
+        exactBelief && beliefPhaseShift
+          ? this.exactBeliefPhaseShiftForKeys(
+              prepared?.beliefPhaseKeys ?? computedBeliefPhaseKeys,
+              exactBelief,
+            )
+          : undefined;
       const exactPhaseShiftBuffers = exactPhaseShift
         ? {
             embeddingRows: storage(exactPhaseShift.embeddingRows),
@@ -930,14 +905,7 @@ export class BetterFfnWebGpuModel {
       );
       const contextFeatures =
         prepared?.contextFeatures ??
-        this.contextFeaturesForBatch(
-          encodedFeatures!,
-          batch,
-          hiddenDim,
-          empty,
-          storage,
-          uniform,
-        );
+        this.contextFeaturesForBatch(encodedFeatures!, batch, hiddenDim, empty, storage, uniform);
       const baseEmbedding =
         prepared?.baseEmbedding ??
         this.baseEmbeddingForBatch(encodedFeatures!, batch, hiddenDim, storage);
@@ -952,29 +920,16 @@ export class BetterFfnWebGpuModel {
           batch * hiddenDim,
           uniform,
         );
-        this.add3(
-          interactedBase,
-          contextFeatures,
-          beliefFeatures,
-          x,
-          batch * hiddenDim,
-          uniform,
-        );
+        this.add3(interactedBase, contextFeatures, beliefFeatures, x, batch * hiddenDim, uniform);
       } else {
-        this.add3(
-          baseEmbedding,
-          contextFeatures,
-          beliefFeatures,
-          x,
-          batch * hiddenDim,
-          uniform,
-        );
+        this.add3(baseEmbedding, contextFeatures, beliefFeatures, x, batch * hiddenDim, uniform);
       }
 
-      const alpha = 1 / Math.sqrt(
-        this.manifest.architecture.numHiddenLayers +
-          this.manifest.architecture.numValueLayers,
-      );
+      const alpha =
+        1 /
+        Math.sqrt(
+          this.manifest.architecture.numHiddenLayers + this.manifest.architecture.numValueLayers,
+        );
       for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
         const out = this.leakyReluResidualBlockBatch(
           `trunk.${i}.inner`,
@@ -1097,9 +1052,7 @@ export class BetterFfnWebGpuModel {
       temps.push(temp);
       return temp.buffer;
     };
-    const uniform = (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ): GPUBuffer => {
+    const uniform = (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>): GPUBuffer => {
       const temp = this.acquireUniform(data.byteLength);
       this.device.queue.writeBuffer(temp.buffer, 0, data);
       temps.push(temp);
@@ -1202,29 +1155,16 @@ export class BetterFfnWebGpuModel {
           batch * hiddenDim,
           uniform,
         );
-        this.add3(
-          interactedBase,
-          contextFeatures,
-          beliefFeatures,
-          x,
-          batch * hiddenDim,
-          uniform,
-        );
+        this.add3(interactedBase, contextFeatures, beliefFeatures, x, batch * hiddenDim, uniform);
       } else {
-        this.add3(
-          baseEmbedding,
-          contextFeatures,
-          beliefFeatures,
-          x,
-          batch * hiddenDim,
-          uniform,
-        );
+        this.add3(baseEmbedding, contextFeatures, beliefFeatures, x, batch * hiddenDim, uniform);
       }
 
-      const alpha = 1 / Math.sqrt(
-        this.manifest.architecture.numHiddenLayers +
-          this.manifest.architecture.numValueLayers,
-      );
+      const alpha =
+        1 /
+        Math.sqrt(
+          this.manifest.architecture.numHiddenLayers + this.manifest.architecture.numValueLayers,
+        );
       for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
         const out = this.leakyReluResidualBlockBatch(
           `trunk.${i}.inner`,
@@ -1334,16 +1274,10 @@ export class BetterFfnWebGpuModel {
     if (boardInteraction > 0) {
       requireTensor(tensors, "rank_pair_low_embedding.weight", [91, boardInteraction]);
       requireTensor(tensors, "board_rank_low.weight", [boardInteraction, 13]);
-      requireTensor(tensors, "rank_board_interaction_out.weight", [
-        hidden,
-        2 * boardInteraction,
-      ]);
+      requireTensor(tensors, "rank_board_interaction_out.weight", [hidden, 2 * boardInteraction]);
       requireTensor(tensors, "suit_pair_low_embedding.weight", [10, boardInteraction]);
       requireTensor(tensors, "board_suit_low.weight", [boardInteraction, 4]);
-      requireTensor(tensors, "suit_board_interaction_out.weight", [
-        hidden,
-        2 * boardInteraction,
-      ]);
+      requireTensor(tensors, "suit_board_interaction_out.weight", [hidden, 2 * boardInteraction]);
     }
     this.requireLinearBlock(
       tensors,
@@ -1421,10 +1355,11 @@ export class BetterFfnWebGpuModel {
     );
     const out = new Float32Array(batch * NUM_HANDS * actions);
     const combos = handCombos();
-    const alpha = 1 / Math.sqrt(
-      this.manifest.architecture.numHiddenLayers +
-        this.manifest.architecture.numValueLayers,
-    );
+    const alpha =
+      1 /
+      Math.sqrt(
+        this.manifest.architecture.numHiddenLayers + this.manifest.architecture.numValueLayers,
+      );
     for (let b = 0; b < batch; b += 1) {
       const env = envs[b]!;
       const features = encodeBetterFeatures(env);
@@ -1469,13 +1404,7 @@ export class BetterFfnWebGpuModel {
         x[d] = x[d]! + contextFeatures[d]! + beliefFeatures[d]! + interaction[d]!;
       }
       for (let i = 0; i < this.manifest.architecture.numHiddenLayers; i += 1) {
-        x = this.residualBlockCpu(
-          x,
-          hidden,
-          ffn,
-          `policy_model.trunk.${i}.inner`,
-          alpha,
-        );
+        x = this.residualBlockCpu(x, hidden, ffn, `policy_model.trunk.${i}.inner`, alpha);
       }
       let policyState = x;
       for (let i = 0; i < this.manifest.architecture.numPolicyLayers; i += 1) {
@@ -1535,10 +1464,7 @@ export class BetterFfnWebGpuModel {
         const oppBelief = batchedBeliefs[beliefBase + opp * NUM_HANDS + hand]!;
         const ownCardMass = cardMass[actor]!;
         const oppCardMass = cardMass[opp]!;
-        const oppUnblocked = Math.max(
-          0,
-          1 - oppCardMass[c0]! - oppCardMass[c1]! + oppBelief,
-        );
+        const oppUnblocked = Math.max(0, 1 - oppCardMass[c0]! - oppCardMass[c1]! + oppBelief);
         const dyn = this.dynamicHandFeatures(
           ownBelief,
           ownCardMass,
@@ -1581,12 +1507,22 @@ export class BetterFfnWebGpuModel {
     const policyRank = this.manifest.architecture.policyRank ?? 64;
     const biasRank = this.manifest.architecture.policyHandBiasRank ?? 32;
     this.requireOutputProjection(tensors, `${prefix}policy_hand_proj`, hidden, policyRank);
-    this.requireOutputProjection(tensors, `${prefix}policy_action_head`, hidden, actions * policyRank);
+    this.requireOutputProjection(
+      tensors,
+      `${prefix}policy_action_head`,
+      hidden,
+      actions * policyRank,
+    );
     this.requireOutputProjection(tensors, `${prefix}policy_hand_gate`, hidden, policyRank);
     this.requireOutputProjection(tensors, `${prefix}policy_dynamic_coeff`, hidden, actions * 15);
     this.requireOutputProjection(tensors, `${prefix}policy_action_bias`, hidden, actions);
     this.requireOutputProjection(tensors, `${prefix}policy_hand_bias`, hidden, biasRank);
-    this.requireOutputProjection(tensors, `${prefix}policy_hand_bias_action`, hidden, actions * biasRank);
+    this.requireOutputProjection(
+      tensors,
+      `${prefix}policy_hand_bias_action`,
+      hidden,
+      actions * biasRank,
+    );
     requireTensor(tensors, `${prefix}policy_hand_norm.weight`, [hidden]);
   }
 
@@ -1610,13 +1546,7 @@ export class BetterFfnWebGpuModel {
     for (let i = 0; i < numLayers - 1; i += 1) {
       this.requireLinearBlock(tensors, `${head}.${i}.inner`, hiddenDim, ffnDim, hiddenDim);
     }
-    this.requireLinearBlock(
-      tensors,
-      `${head}.${numLayers - 1}`,
-      hiddenDim,
-      ffnDim,
-      outDim,
-    );
+    this.requireLinearBlock(tensors, `${head}.${numLayers - 1}`, hiddenDim, ffnDim, outDim);
   }
 
   private requireLinearBlock(
@@ -1643,7 +1573,10 @@ export class BetterFfnWebGpuModel {
     requireTensor(tensors, `${prefix}.linear_out.bias`, [outDim]);
   }
 
-  private rmsNormVectorCpu(input: Float32Array<ArrayBufferLike>, prefix: string): Float32Array<ArrayBuffer> {
+  private rmsNormVectorCpu(
+    input: Float32Array<ArrayBufferLike>,
+    prefix: string,
+  ): Float32Array<ArrayBuffer> {
     const weight = this.tensors.has(`${prefix}.norm.weight`)
       ? this.tensor(`${prefix}.norm.weight`).data
       : this.tensor(`${prefix}.weight`).data;
@@ -1764,14 +1697,19 @@ export class BetterFfnWebGpuModel {
       for (let d = 0; d < hidden; d += 1) {
         let value = cards.data[c0 * hidden + d]! + cards.data[c1 * hidden + d]!;
         const projBase = d * 8;
-        for (let f = 0; f < 8; f += 1) value += featureProj.data[projBase + f]! * staticFeatures[f]!;
+        for (let f = 0; f < 8; f += 1)
+          value += featureProj.data[projBase + f]! * staticFeatures[f]!;
         out[hand * hidden + d] = value;
       }
     }
     return out;
   }
 
-  private baseEmbeddingCpu(prefix: string, street: number, board: readonly number[]): Float32Array<ArrayBuffer> {
+  private baseEmbeddingCpu(
+    prefix: string,
+    street: number,
+    board: readonly number[],
+  ): Float32Array<ArrayBuffer> {
     const hidden = this.manifest.architecture.hiddenDim;
     const streetEmbedding = this.tensor(`${prefix}street_embedding.weight`).data;
     const rank = this.tensor(`${prefix}rank_embedding.weight`).data;
@@ -1849,8 +1787,20 @@ export class BetterFfnWebGpuModel {
         suitGated[player * dim + d] = s * suitLow[d]!;
       }
     }
-    const rankOut = this.linearCpu(rankGated, 2 * dim, hidden, `${prefix}rank_board_interaction_out`, false);
-    const suitOut = this.linearCpu(suitGated, 2 * dim, hidden, `${prefix}suit_board_interaction_out`, false);
+    const rankOut = this.linearCpu(
+      rankGated,
+      2 * dim,
+      hidden,
+      `${prefix}rank_board_interaction_out`,
+      false,
+    );
+    const suitOut = this.linearCpu(
+      suitGated,
+      2 * dim,
+      hidden,
+      `${prefix}suit_board_interaction_out`,
+      false,
+    );
     for (let d = 0; d < hidden; d += 1) out[d] = rankOut[d]! + suitOut[d]!;
     return out;
   }
@@ -1986,12 +1936,8 @@ export class BetterFfnWebGpuModel {
     numPlayers: number,
     hidden: number,
     empty: (elements: number) => GPUBuffer,
-    storage: (
-      data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
-    ) => GPUBuffer,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    storage: (data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
     precomputed?: {
       rankCounts?: GPUBuffer;
       suitCounts?: GPUBuffer;
@@ -2232,12 +2178,8 @@ export class BetterFfnWebGpuModel {
     batch: number,
     hiddenDim: number,
     empty: (elements: number) => GPUBuffer,
-    storage: (
-      data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
-    ) => GPUBuffer,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    storage: (data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): GPUBuffer {
     const contextDim = this.manifest.architecture.contextDim ?? 11;
     const context = new Float32Array(batch * contextDim);
@@ -2268,9 +2210,7 @@ export class BetterFfnWebGpuModel {
     const numPlayers = this.manifest.architecture.numPlayers;
     const rowSize = numPlayers * hiddenDim;
     if (shift.shape[1] !== rowSize) {
-      throw new Error(
-        `belief_phase_shift width ${shift.shape[1]} does not match ${rowSize}`,
-      );
+      throw new Error(`belief_phase_shift width ${shift.shape[1]} does not match ${rowSize}`);
     }
     const out = new Float32Array(encodedFeatures.length * rowSize);
     for (let row = 0; row < encodedFeatures.length; row += 1) {
@@ -2299,7 +2239,9 @@ export class BetterFfnWebGpuModel {
   private exactBeliefPhaseShiftForKeys(
     phaseKeys: Uint32Array<ArrayBufferLike> | undefined,
     exactBelief: ExactBelief,
-  ): { embeddingRows: Float32Array<ArrayBuffer>; contributionRows: Float32Array<ArrayBuffer> } | undefined {
+  ):
+    | { embeddingRows: Float32Array<ArrayBuffer>; contributionRows: Float32Array<ArrayBuffer> }
+    | undefined {
     if (!phaseKeys || !this.tensors.has("belief_phase_shift.weight")) return undefined;
     const batch = phaseKeys.length;
     const hidden = this.manifest.architecture.hiddenDim;
@@ -2313,7 +2255,9 @@ export class BetterFfnWebGpuModel {
     const vectorsByKey = new Map<number, Float32Array<ArrayBuffer>>();
     const contributionsByKey = new Map<number, Float32Array<ArrayBuffer>>();
 
-    const buildForKey = (phaseKey: number): {
+    const buildForKey = (
+      phaseKey: number,
+    ): {
       vector: Float32Array<ArrayBuffer>;
       contribution: Float32Array<ArrayBuffer>;
     } => {
@@ -2326,8 +2270,7 @@ export class BetterFfnWebGpuModel {
       const shiftBase = key * 2 * hidden + playerOffset;
       for (let d = 0; d < hidden; d += 1) {
         vector[d] =
-          this.handEmbeddingCpu[d * NUM_HANDS + exactBelief.hand]! +
-          shift.data[shiftBase + d]!;
+          this.handEmbeddingCpu[d * NUM_HANDS + exactBelief.hand]! + shift.data[shiftBase + d]!;
       }
 
       contribution = new Float32Array(ffnDim);
@@ -2335,10 +2278,7 @@ export class BetterFfnWebGpuModel {
         const matrixBase = row * 2 * hidden + playerOffset;
         let sum = 0;
         for (let d = 0; d < hidden; d += 1) {
-          sum +=
-            matrix.data[matrixBase + d]! *
-            vector[d]! *
-            norm.data[playerOffset + d]!;
+          sum += matrix.data[matrixBase + d]! * vector[d]! * norm.data[playerOffset + d]!;
         }
         contribution[row] = sum;
       }
@@ -2359,9 +2299,7 @@ export class BetterFfnWebGpuModel {
     encodedFeatures: readonly ReturnType<typeof encodeBetterFeatures>[],
     batch: number,
     hiddenDim: number,
-    storage: (
-      data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>,
-    ) => GPUBuffer,
+    storage: (data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>) => GPUBuffer,
   ): GPUBuffer {
     const base = new Float32Array(batch * hiddenDim);
     for (let i = 0; i < batch; i += 1) {
@@ -2377,10 +2315,7 @@ export class BetterFfnWebGpuModel {
     return lo * numItems - Math.floor((lo * (lo - 1)) / 2) + (hi - lo);
   }
 
-  private buildPairOneHotT(
-    numItems: number,
-    numPairs: number,
-  ): Float32Array<ArrayBuffer> {
+  private buildPairOneHotT(numItems: number, numPairs: number): Float32Array<ArrayBuffer> {
     const combos = handCombos();
     const out = new Float32Array(numPairs * NUM_HANDS);
     for (let hand = 0; hand < combos.length; hand += 1) {
@@ -2393,10 +2328,7 @@ export class BetterFfnWebGpuModel {
     return out;
   }
 
-  private buildPairLowByHandT(
-    name: string,
-    numItems: number,
-  ): Float32Array<ArrayBuffer> {
+  private buildPairLowByHandT(name: string, numItems: number): Float32Array<ArrayBuffer> {
     const tensor = this.tensor(name);
     if (tensor.shape.length !== 2) {
       throw new Error(`model tensor ${name} is not rank-2`);
@@ -2476,10 +2408,7 @@ export class BetterFfnWebGpuModel {
     return out;
   }
 
-  private baseEmbedding(
-    street: number,
-    board: readonly number[],
-  ): Float32Array<ArrayBuffer> {
+  private baseEmbedding(street: number, board: readonly number[]): Float32Array<ArrayBuffer> {
     const hidden = this.manifest.architecture.hiddenDim;
     const streetEmbedding = this.tensor("street_embedding.weight");
     const rank = this.tensor("rank_embedding.weight");
@@ -2494,10 +2423,7 @@ export class BetterFfnWebGpuModel {
       const rankIndex = card >= 0 ? card % 13 : 13;
       const suitIndex = card >= 0 ? Math.floor(card / 13) : 4;
       for (let d = 0; d < hidden; d += 1) {
-        out[d] =
-          out[d]! +
-          rank.data[rankIndex * hidden + d]! +
-          suit.data[suitIndex * hidden + d]!;
+        out[d] = out[d]! + rank.data[rankIndex * hidden + d]! + suit.data[suitIndex * hidden + d]!;
       }
     }
     return out;
@@ -2513,9 +2439,7 @@ export class BetterFfnWebGpuModel {
     outDim: number,
     alpha: number,
     empty: (elements: number) => GPUBuffer,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): GPUBuffer {
     const directOutputPrefix = `${head}.${numLayers}`;
     if (this.tensors.has(`${directOutputPrefix}.linear_out.weight`)) {
@@ -2577,9 +2501,7 @@ export class BetterFfnWebGpuModel {
     inDim: number,
     outDim: number,
     empty: (elements: number) => GPUBuffer,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): GPUBuffer {
     const normed = empty(batch * inDim);
     this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
@@ -2610,9 +2532,7 @@ export class BetterFfnWebGpuModel {
     hiddenDim: number,
     outDim: number,
     empty: (elements: number) => GPUBuffer,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
     exactBelief?: ExactBelief,
     exactPhaseShift?: ExactBeliefPhaseShiftBuffers,
   ): GPUBuffer {
@@ -2642,9 +2562,7 @@ export class BetterFfnWebGpuModel {
         uniform,
       );
       this.matVecExactBeliefLinearIn(
-        exactBelief.player === 0
-          ? this.beliefProjLinearInHalf1
-          : this.beliefProjLinearInHalf0,
+        exactBelief.player === 0 ? this.beliefProjLinearInHalf1 : this.beliefProjLinearInHalf0,
         normedOpponent,
         invRms,
         exactBelief.player === 0
@@ -2720,9 +2638,7 @@ export class BetterFfnWebGpuModel {
     hiddenDim: number,
     alpha: number,
     empty: (elements: number) => GPUBuffer,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): GPUBuffer {
     const normed = empty(batch * inDim);
     this.rmsNormBatch(prefix, input, normed, batch, inDim, inDim, inDim, uniform);
@@ -2768,9 +2684,7 @@ export class BetterFfnWebGpuModel {
     input: GPUBuffer,
     output: GPUBuffer,
     dim: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     this.submit(this.rmsNormPipeline, 1, [
       { binding: 0, resource: { buffer: input } },
@@ -2788,9 +2702,7 @@ export class BetterFfnWebGpuModel {
     dim: number,
     inputStride: number,
     outputStride: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     this.submit(dim <= 16 ? this.rmsNormBatchSmallPipeline : this.rmsNormBatchPipeline, batch, [
       { binding: 0, resource: { buffer: input } },
@@ -2816,9 +2728,7 @@ export class BetterFfnWebGpuModel {
     exactBelief: ExactBelief,
     hidden: number,
     exactEmbeddingRows: GPUBuffer | undefined,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     this.submit(this.rmsNormBeliefExactPipeline, batch, [
       { binding: 0, resource: { buffer: input } },
@@ -2860,9 +2770,7 @@ export class BetterFfnWebGpuModel {
     exactBelief: ExactBelief,
     hidden: number,
     exactEmbeddingRows: GPUBuffer | undefined,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     this.submit(this.rmsNormBeliefExactHalfPipeline, batch, [
       { binding: 0, resource: { buffer: input } },
@@ -2905,9 +2813,7 @@ export class BetterFfnWebGpuModel {
     cols: number,
     exactBelief: ExactBelief,
     exactContributionRows: GPUBuffer | undefined,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     this.submit2d(
       this.matVecBatchExactBeliefLinearInPipeline!,
@@ -2950,9 +2856,7 @@ export class BetterFfnWebGpuModel {
     inputOffset: number,
     outputOffset: number,
     biasPresent: boolean,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     this.submit(this.matVecPipeline, rows, [
       { binding: 0, resource: { buffer: matrix } },
@@ -2963,16 +2867,7 @@ export class BetterFfnWebGpuModel {
         binding: 4,
         resource: {
           buffer: uniform(
-            new Uint32Array([
-              rows,
-              cols,
-              inputOffset,
-              outputOffset,
-              biasPresent ? 1 : 0,
-              0,
-              0,
-              0,
-            ]),
+            new Uint32Array([rows, cols, inputOffset, outputOffset, biasPresent ? 1 : 0, 0, 0, 0]),
           ),
         },
       },
@@ -2992,9 +2887,7 @@ export class BetterFfnWebGpuModel {
     inputOffset: number,
     outputOffset: number,
     biasPresent: boolean,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     const useBatch2LinearIn =
       rows === 1024 &&
@@ -3057,70 +2950,63 @@ export class BetterFfnWebGpuModel {
       outputOffset === 0 &&
       biasPresent &&
       this.matVecBatchExactRowsCols512Batch2SubgroupPipeline;
-    const useSmallCols =
-      cols <= 128 &&
-      inputOffset === 0 &&
-      outputOffset === 0 &&
-      !biasPresent;
+    const useSmallCols = cols <= 128 && inputOffset === 0 && outputOffset === 0 && !biasPresent;
     const pipeline = useSmallCols
       ? this.matVecBatchSmallColsPipeline
       : useBatch4LinearIn
-      ? this.matVecBatchExactRowsCols512Batch4SubgroupPipeline!
-      : useBatch3LinearIn
-      ? this.matVecBatchExactRowsCols512Batch3SubgroupPipeline!
-      : useBatch2LinearIn || useBatch2ValueHead
-      ? this.matVecBatchExactRowsCols512Batch2SubgroupPipeline!
-      : useHandEmbeddingBatch4
-        ? this.matVecBatchExactRowsCols1326Batch4SubgroupPipeline!
-      : useHandEmbeddingBatch2
-        ? this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline!
-      : useBatch2Cols1024
-        ? this.matVecBatchExactRowsCols1024Batch2SubgroupPipeline!
-      : rows % BATCH_ROW_BLOCK === 0
-        ? cols === 512
-          ? (this.matVecBatchExactRowsCols512SubgroupPipeline ??
-            this.matVecBatchExactRowsCols512Pipeline)
-          : cols === 1024
-            ? this.matVecBatchExactRowsCols1024Pipeline
-            : this.matVecBatchExactRowsPipeline
-        : this.matVecBatchPipeline;
+        ? this.matVecBatchExactRowsCols512Batch4SubgroupPipeline!
+        : useBatch3LinearIn
+          ? this.matVecBatchExactRowsCols512Batch3SubgroupPipeline!
+          : useBatch2LinearIn || useBatch2ValueHead
+            ? this.matVecBatchExactRowsCols512Batch2SubgroupPipeline!
+            : useHandEmbeddingBatch4
+              ? this.matVecBatchExactRowsCols1326Batch4SubgroupPipeline!
+              : useHandEmbeddingBatch2
+                ? this.matVecBatchExactRowsCols1326Batch2SubgroupPipeline!
+                : useBatch2Cols1024
+                  ? this.matVecBatchExactRowsCols1024Batch2SubgroupPipeline!
+                  : rows % BATCH_ROW_BLOCK === 0
+                    ? cols === 512
+                      ? (this.matVecBatchExactRowsCols512SubgroupPipeline ??
+                        this.matVecBatchExactRowsCols512Pipeline)
+                      : cols === 1024
+                        ? this.matVecBatchExactRowsCols1024Pipeline
+                        : this.matVecBatchExactRowsPipeline
+                    : this.matVecBatchPipeline;
     this.submit2d(
       pipeline,
       useSmallCols ? Math.ceil((rows * batch) / 64) : this.batchRowGroups(rows),
       useBatch4LinearIn || useHandEmbeddingBatch4
         ? Math.ceil(batch / 4)
         : useBatch3LinearIn
-        ? Math.ceil(batch / 3)
-        : useBatch2LinearIn ||
-            useBatch2ValueHead ||
-            useHandEmbeddingBatch2 ||
-            useBatch2Cols1024
-        ? Math.ceil(batch / 2)
-        : useSmallCols
-          ? 1
-          : batch,
+          ? Math.ceil(batch / 3)
+          : useBatch2LinearIn || useBatch2ValueHead || useHandEmbeddingBatch2 || useBatch2Cols1024
+            ? Math.ceil(batch / 2)
+            : useSmallCols
+              ? 1
+              : batch,
       [
-      { binding: 0, resource: { buffer: matrix } },
-      { binding: 1, resource: { buffer: input } },
-      { binding: 2, resource: { buffer: bias } },
-      { binding: 3, resource: { buffer: output } },
-      {
-        binding: 4,
-        resource: {
-          buffer: uniform(
-            new Uint32Array([
-              rows,
-              cols,
-              batch,
-              inputStride,
-              outputStride,
-              inputOffset,
-              outputOffset,
-              biasPresent ? 1 : 0,
-            ]),
-          ),
+        { binding: 0, resource: { buffer: matrix } },
+        { binding: 1, resource: { buffer: input } },
+        { binding: 2, resource: { buffer: bias } },
+        { binding: 3, resource: { buffer: output } },
+        {
+          binding: 4,
+          resource: {
+            buffer: uniform(
+              new Uint32Array([
+                rows,
+                cols,
+                batch,
+                inputStride,
+                outputStride,
+                inputOffset,
+                outputOffset,
+                biasPresent ? 1 : 0,
+              ]),
+            ),
+          },
         },
-      },
       ],
     );
   }
@@ -3136,9 +3022,7 @@ export class BetterFfnWebGpuModel {
     inputStride: number,
     outputStride: number,
     biasPresent: boolean,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     const useBatch2ValueHead =
       rows === 2 * NUM_HANDS &&
@@ -3163,27 +3047,27 @@ export class BetterFfnWebGpuModel {
       this.batchRowGroups(rows),
       useBatch2ValueHead ? Math.ceil(batch / 2) : batch,
       [
-      { binding: 0, resource: { buffer: matrix } },
-      { binding: 1, resource: { buffer: input } },
-      { binding: 2, resource: { buffer: bias } },
-      { binding: 3, resource: { buffer: output } },
-      {
-        binding: 4,
-        resource: {
-          buffer: uniform(
-            new Uint32Array([
-              rows,
-              cols,
-              batch,
-              inputStride,
-              outputStride,
-              biasPresent ? 1 : 0,
-              0,
-              0,
-            ]),
-          ),
+        { binding: 0, resource: { buffer: matrix } },
+        { binding: 1, resource: { buffer: input } },
+        { binding: 2, resource: { buffer: bias } },
+        { binding: 3, resource: { buffer: output } },
+        {
+          binding: 4,
+          resource: {
+            buffer: uniform(
+              new Uint32Array([
+                rows,
+                cols,
+                batch,
+                inputStride,
+                outputStride,
+                biasPresent ? 1 : 0,
+                0,
+                0,
+              ]),
+            ),
+          },
         },
-      },
       ],
     );
   }
@@ -3201,9 +3085,7 @@ export class BetterFfnWebGpuModel {
     outputStride: number,
     biasPresent: boolean,
     alpha: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     const useBatch2Residual =
       rows === 512 &&
@@ -3264,9 +3146,7 @@ export class BetterFfnWebGpuModel {
     c: GPUBuffer,
     output: GPUBuffer,
     dim: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     this.submit(this.add3Pipeline, Math.ceil(dim / 64), [
       { binding: 0, resource: { buffer: a } },
@@ -3282,9 +3162,7 @@ export class BetterFfnWebGpuModel {
     batch: number,
     dim: number,
     empty: (elements: number) => GPUBuffer,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): GPUBuffer {
     const output = empty(batch * dim);
     this.submit(this.repeatRowsPipeline, Math.ceil((batch * dim) / 64), [
@@ -3302,9 +3180,7 @@ export class BetterFfnWebGpuModel {
     batch: number,
     numPlayers: number,
     interactionDim: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     const elements = batch * numPlayers * interactionDim;
     this.submit(this.playerBoardHadamardPipeline, Math.ceil(elements / 64), [
@@ -3314,9 +3190,7 @@ export class BetterFfnWebGpuModel {
       {
         binding: 3,
         resource: {
-          buffer: uniform(
-            new Uint32Array([elements, interactionDim, numPlayers, 0]),
-          ),
+          buffer: uniform(new Uint32Array([elements, interactionDim, numPlayers, 0])),
         },
       },
     ]);
@@ -3330,9 +3204,7 @@ export class BetterFfnWebGpuModel {
     numPlayers: number,
     player: number,
     hand: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     this.submit(this.fillExactPairMassPipeline, Math.ceil((batch * rows) / 64), [
       { binding: 0, resource: { buffer: pairOneHotT } },
@@ -3340,9 +3212,7 @@ export class BetterFfnWebGpuModel {
       {
         binding: 2,
         resource: {
-          buffer: uniform(
-            new Uint32Array([rows, batch, numPlayers, player, hand, 0, 0, 0]),
-          ),
+          buffer: uniform(new Uint32Array([rows, batch, numPlayers, player, hand, 0, 0, 0])),
         },
       },
     ]);
@@ -3357,9 +3227,7 @@ export class BetterFfnWebGpuModel {
     batch: number,
     hidden: number,
     contextDim: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     this.submit(this.stateFeaturePipeline, batch, [
       { binding: 0, resource: { buffer: states } },
@@ -3396,9 +3264,7 @@ export class BetterFfnWebGpuModel {
     output: GPUBuffer,
     dim: number,
     alpha: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
   ): void {
     const alphaBits = new Uint32Array(new Float32Array([alpha]).buffer)[0]!;
     this.submit(this.scaledResidualAddPipeline, Math.ceil(dim / 64), [
@@ -3416,9 +3282,7 @@ export class BetterFfnWebGpuModel {
     values: GPUBuffer,
     beliefs: GPUBuffer,
     batch: number,
-    uniform: (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ) => GPUBuffer,
+    uniform: (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) => GPUBuffer,
     beliefStride = 2 * NUM_HANDS,
   ): void {
     this.submit(this.zeroSumBatchPipeline, batch, [
@@ -3439,10 +3303,7 @@ export class BetterFfnWebGpuModel {
         buffer ??
         this.device.createBuffer({
           size: key,
-          usage:
-            GPUBufferUsage.STORAGE |
-            GPUBufferUsage.COPY_SRC |
-            GPUBufferUsage.COPY_DST,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
         }),
       key,
       kind: "storage",

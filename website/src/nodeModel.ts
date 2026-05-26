@@ -13,8 +13,7 @@ export async function loadNodeModel(
 ): Promise<BetterFfnWebGpuModel> {
   const manifestText = await readFile(manifestPath, "utf8");
   const manifest = parseBetterFfnManifest(JSON.parse(manifestText));
-  const resolvedWeightsPath =
-    weightsPath ?? resolve(dirname(manifestPath), manifest.weights.file);
+  const resolvedWeightsPath = weightsPath ?? resolve(dirname(manifestPath), manifest.weights.file);
   const weightsBuffer = await readFile(resolvedWeightsPath);
   const payload = weightsBuffer.buffer.slice(
     weightsBuffer.byteOffset,
@@ -23,10 +22,7 @@ export async function loadNodeModel(
   let weights = payload;
   if (manifest.weights.compression?.format === "gzip") {
     const decoded = gunzipSync(new Uint8Array(payload));
-    weights = decoded.buffer.slice(
-      decoded.byteOffset,
-      decoded.byteOffset + decoded.byteLength,
-    );
+    weights = decoded.buffer.slice(decoded.byteOffset, decoded.byteOffset + decoded.byteLength);
   }
   const model = BetterFfnWebGpuModel.fromBuffers(device, manifest, weights);
   model.allInTableProvider = createManifestAllInTableProvider(

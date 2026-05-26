@@ -1,24 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  makeEmptyStorageBuffer,
-  makeStorageBuffer,
-  readFloatBuffer,
-} from "../src/gpuBuffers.js";
+import { packInt16Table } from "../src/allInTables.js";
 import { createDawnDevice } from "../src/gpu.js";
+import { makeEmptyStorageBuffer, makeStorageBuffer, readFloatBuffer } from "../src/gpuBuffers.js";
+import { SparseCfrGpuKernels } from "../src/sparseCfr/SparseCfrGpuKernels.js";
 import {
   SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL,
   SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL,
 } from "../src/sparseCfr/shaders/allIn.js";
 import {
   SPARSE_SHOWDOWN_RANK_PREFIX_PACKED_WGSL,
-  SPARSE_SHOWDOWN_VALUES_WGSL,
   SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_PACKED_WGSL,
+  SPARSE_SHOWDOWN_VALUES_WGSL,
 } from "../src/sparseCfr/shaders/terminal.js";
-import {
-  SparseCfrGpuKernels,
-} from "../src/sparseCfr/SparseCfrGpuKernels.js";
-import { packInt16Table } from "../src/allInTables.js";
 
 function assertCloseArray(
   actual: Float32Array<ArrayBufferLike>,
@@ -70,58 +64,32 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
       parentIndex: new Uint32Array([0, 0, 0]),
       prevActor: new Uint32Array([0, 0, 0]),
       toAct: new Uint32Array([0, 1, 1]),
-      allowedMask: new Uint32Array([
-        1, 1, 1, 1,
-        1, 1, 1, 1,
-        1, 1, 1, 1,
-      ]),
+      allowedMask: new Uint32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]),
       allowedProb: new Float32Array([
-        0.25, 0.25, 0.25, 0.25,
-        0.25, 0.25, 0.25, 0.25,
-        0.25, 0.25, 0.25, 0.25,
+        0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25,
       ]),
       handCard0: new Uint32Array([0, 0, 3, 5]),
       handCard1: new Uint32Array([1, 2, 4, 6]),
-      overlapHands: new Uint32Array([
-        0, 1, 0, 0,
-        0, 1, 0, 0,
-        2, 0, 0, 0,
-        3, 0, 0, 0,
-      ]),
+      overlapHands: new Uint32Array([0, 1, 0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]),
       overlapCounts: new Uint32Array([2, 2, 1, 1]),
       overlapSlots: 4,
     });
 
     const regrets = makeStorageBuffer(
       device,
-      new Float32Array([
-        0, 0, 0, 0,
-        1, 0, 3, 0,
-        3, 0, 1, 0,
-      ]),
+      new Float32Array([0, 0, 0, 0, 1, 0, 3, 0, 3, 0, 1, 0]),
     );
     const policy = makeEmptyStorageBuffer(device, 12);
     const beliefs = makeStorageBuffer(
       device,
       new Float32Array([
-        0.25, 0.25, 0.25, 0.25,
-        0.25, 0.25, 0.25, 0.25,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
+        0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
       ]),
     );
     const reach = makeStorageBuffer(
       device,
-      new Float32Array([
-        1, 1, 1, 1,
-        1, 1, 1, 1,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-      ]),
+      new Float32Array([1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
     );
     const numerator = makeEmptyStorageBuffer(device, 12);
     const denominator = makeEmptyStorageBuffer(device, 12);
@@ -131,12 +99,7 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     const values = makeStorageBuffer(
       device,
       new Float32Array([
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        1, 2, 3, 4,
-        -1, -2, -3, -4,
-        5, 6, 7, 8,
-        -5, -6, -7, -8,
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, -1, -2, -3, -4, 5, 6, 7, 8, -5, -6, -7, -8,
       ]),
     );
     const regretWeights = makeEmptyStorageBuffer(device, 12);
@@ -151,14 +114,7 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
 
     const encoder = device.createCommandEncoder();
     const paramsA = kernels.encodeRegretMatch(encoder, tree, regrets, policy);
-    const paramsReach = kernels.encodePropagateReachDepth(
-      encoder,
-      tree,
-      policy,
-      reach,
-      1,
-      3,
-    );
+    const paramsReach = kernels.encodePropagateReachDepth(encoder, tree, policy, reach, 1, 3);
     const paramsAvg = kernels.encodeUpdateAveragePolicyRange(
       encoder,
       tree,
@@ -256,57 +212,36 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
 
     assertCloseArray(
       await readFloatBuffer(device, policy, 12),
-      [
-        0, 0, 0, 0,
-        0.25, 0.5, 0.75, 0.5,
-        0.75, 0.5, 0.25, 0.5,
-      ],
+      [0, 0, 0, 0, 0.25, 0.5, 0.75, 0.5, 0.75, 0.5, 0.25, 0.5],
       1e-6,
       "policy",
     );
     assertCloseArray(
       await readFloatBuffer(device, beliefs, 24),
       [
-        0.25, 0.25, 0.25, 0.25,
-        0.25, 0.25, 0.25, 0.25,
-        0.125, 0.25, 0.375, 0.25,
-        0.25, 0.25, 0.25, 0.25,
-        0.375, 0.25, 0.125, 0.25,
-        0.25, 0.25, 0.25, 0.25,
+        0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.125, 0.25, 0.375, 0.25, 0.25, 0.25, 0.25,
+        0.25, 0.375, 0.25, 0.125, 0.25, 0.25, 0.25, 0.25, 0.25,
       ],
       1e-6,
       "beliefs",
     );
     assertCloseArray(
       await readFloatBuffer(device, reach, 24),
-      [
-        1, 1, 1, 1,
-        1, 1, 1, 1,
-        0.25, 0.5, 0.75, 0.5,
-        1, 1, 1, 1,
-        0.75, 0.5, 0.25, 0.5,
-        1, 1, 1, 1,
-      ],
+      [1, 1, 1, 1, 1, 1, 1, 1, 0.25, 0.5, 0.75, 0.5, 1, 1, 1, 1, 0.75, 0.5, 0.25, 0.5, 1, 1, 1, 1],
       1e-6,
       "reach",
     );
     assertCloseArray(
       await readFloatBuffer(device, policyAvg, 12),
-      [
-        0, 0, 0, 0,
-        0.25, 0.5, 0.75, 0.5,
-        0.75, 0.5, 0.25, 0.5,
-      ],
+      [0, 0, 0, 0, 0.25, 0.5, 0.75, 0.5, 0.75, 0.5, 0.25, 0.5],
       1e-6,
       "policyAvg",
     );
     assertCloseArray(
       await readFloatBuffer(device, gatheredBeliefs, 16),
       [
-        0.125, 0.25, 0.375, 0.25,
-        0.25, 0.25, 0.25, 0.25,
-        0.375, 0.25, 0.125, 0.25,
-        0.25, 0.25, 0.25, 0.25,
+        0.125, 0.25, 0.375, 0.25, 0.25, 0.25, 0.25, 0.25, 0.375, 0.25, 0.125, 0.25, 0.25, 0.25,
+        0.25, 0.25,
       ],
       1e-6,
       "gatheredBeliefs",
@@ -314,79 +249,48 @@ test("sparse WGSL kernels regret-match and propagate beliefs by depth", async ()
     assertCloseArray(
       await readFloatBuffer(device, scatteredValues, 24),
       [
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        0.125, 0.25, 0.375, 0.25,
-        0.25, 0.25, 0.25, 0.25,
-        0.375, 0.25, 0.125, 0.25,
-        0.25, 0.25, 0.25, 0.25,
+        0, 0, 0, 0, 0, 0, 0, 0, 0.125, 0.25, 0.375, 0.25, 0.25, 0.25, 0.25, 0.25, 0.375, 0.25,
+        0.125, 0.25, 0.25, 0.25, 0.25, 0.25,
       ],
       1e-6,
       "scatteredValues",
     );
     assertCloseArray(
       await readFloatBuffer(device, showdownValues, 24),
-      [
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        10, 10, 0, -5,
-        5, 5, -4, -10,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-      ],
+      [0, 0, 0, 0, 0, 0, 0, 0, 10, 10, 0, -5, 5, 5, -4, -10, 0, 0, 0, 0, 0, 0, 0, 0],
       1e-6,
       "showdownValues",
     );
     assertCloseArray(
       await readFloatBuffer(device, opponentPolicy, 12),
-      [
-        0, 0, 0, 0,
-        0.625, 0.625, 0.4166667, 0.5,
-        0.375, 0.375, 0.5833333, 0.5,
-      ],
+      [0, 0, 0, 0, 0.625, 0.625, 0.4166667, 0.5, 0.375, 0.375, 0.5833333, 0.5],
       1e-6,
       "opponentPolicy",
     );
     assertCloseArray(
       await readFloatBuffer(device, regretWeights, 12),
-      [
-        0.5, 0.5, 0.75, 0.75,
-        0.625, 0.625, 0.625, 0.75,
-        0.375, 0.375, 0.875, 0.75,
-      ],
+      [0.5, 0.5, 0.75, 0.75, 0.625, 0.625, 0.625, 0.75, 0.375, 0.375, 0.875, 0.75],
       1e-6,
       "regretWeights",
     );
     assertCloseArray(
       await readFloatBuffer(device, values, 24),
       [
-        4, 4, 4, 6,
-        -2.5, -3.5, -5.3333335, -6,
-        1, 2, 3, 4,
-        -1, -2, -3, -4,
-        5, 6, 7, 8,
-        -5, -6, -7, -8,
+        4, 4, 4, 6, -2.5, -3.5, -5.3333335, -6, 1, 2, 3, 4, -1, -2, -3, -4, 5, 6, 7, 8, -5, -6, -7,
+        -8,
       ],
       1e-6,
       "values",
     );
     assertCloseArray(
       await readFloatBuffer(device, regrets, 12),
-      [
-        0, 0, 0, 0,
-        1, 0, 3, 0,
-        3, 0, 1, 0,
-      ],
+      [0, 0, 0, 0, 1, 0, 3, 0, 3, 0, 1, 0],
       1e-6,
       "source regrets",
     );
     assertCloseArray(
       await readFloatBuffer(device, tailRegrets, 12),
-      [
-        0, 0, 0, 0,
-        -1.5, -1, -0.75, -1.5,
-        0.5, 1, 2.25, 1.5,
-      ],
+      [0, 0, 0, 0, -1.5, -1, -0.75, -1.5, 0.5, 1, 2.25, 1.5],
       1e-6,
       "tailRegrets",
     );
@@ -429,99 +333,50 @@ test("sparse WGSL kernels apply CFR average weights and DCFR regret updates", as
       parentIndex: new Uint32Array([0, 0, 0]),
       prevActor: new Uint32Array([0, 0, 0]),
       toAct: new Uint32Array([0, 1, 1]),
-      allowedMask: new Uint32Array([
-        1, 1, 1, 1,
-        1, 1, 1, 1,
-        1, 1, 1, 1,
-      ]),
+      allowedMask: new Uint32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]),
       allowedProb: new Float32Array([
-        0.25, 0.25, 0.25, 0.25,
-        0.25, 0.25, 0.25, 0.25,
-        0.25, 0.25, 0.25, 0.25,
+        0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25,
       ]),
       handCard0: new Uint32Array([0, 0, 3, 5]),
       handCard1: new Uint32Array([1, 2, 4, 6]),
-      overlapHands: new Uint32Array([
-        0, 1, 0, 0,
-        0, 1, 0, 0,
-        2, 0, 0, 0,
-        3, 0, 0, 0,
-      ]),
+      overlapHands: new Uint32Array([0, 1, 0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]),
       overlapCounts: new Uint32Array([2, 2, 1, 1]),
       overlapSlots: 4,
     });
 
     const reach = makeStorageBuffer(
       device,
-      new Float32Array([
-        1, 2, 3, 4,
-        1, 1, 1, 1,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-      ]),
+      new Float32Array([1, 2, 3, 4, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
     );
     const policy = makeStorageBuffer(
       device,
-      new Float32Array([
-        0, 0, 0, 0,
-        0.25, 0.5, 0.75, 0.5,
-        0.75, 0.5, 0.25, 0.5,
-      ]),
+      new Float32Array([0, 0, 0, 0, 0.25, 0.5, 0.75, 0.5, 0.75, 0.5, 0.25, 0.5]),
     );
     const numerator = makeStorageBuffer(
       device,
-      new Float32Array([
-        0, 0, 0, 0,
-        0.2, 0.2, 0.2, 0.2,
-        0.4, 0.4, 0.4, 0.4,
-      ]),
+      new Float32Array([0, 0, 0, 0, 0.2, 0.2, 0.2, 0.2, 0.4, 0.4, 0.4, 0.4]),
     );
     const denominator = makeStorageBuffer(
       device,
-      new Float32Array([
-        0, 0, 0, 0,
-        1, 1, 1, 1,
-        1, 1, 1, 1,
-      ]),
+      new Float32Array([0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]),
     );
     const policyAvg = makeEmptyStorageBuffer(device, 12);
 
     const regretWeights = makeStorageBuffer(
       device,
-      new Float32Array([
-        0.5, 0.5, 0.75, 0.75,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-      ]),
+      new Float32Array([0.5, 0.5, 0.75, 0.75, 0, 0, 0, 0, 0, 0, 0, 0]),
     );
     const values = makeStorageBuffer(
       device,
-      new Float32Array([
-        4, 4, 4, 6,
-        0, 0, 0, 0,
-        1, 2, 3, 4,
-        0, 0, 0, 0,
-        5, 6, 7, 8,
-        0, 0, 0, 0,
-      ]),
+      new Float32Array([4, 4, 4, 6, 0, 0, 0, 0, 1, 2, 3, 4, 0, 0, 0, 0, 5, 6, 7, 8, 0, 0, 0, 0]),
     );
     const discountedRegrets = makeStorageBuffer(
       device,
-      new Float32Array([
-        0, 0, 0, 0,
-        2, -4, 0, 1,
-        -3, 5, -1, 0,
-      ]),
+      new Float32Array([0, 0, 0, 0, 2, -4, 0, 1, -3, 5, -1, 0]),
     );
     const linearSkippedRegrets = makeStorageBuffer(
       device,
-      new Float32Array([
-        0, 0, 0, 0,
-        2, -4, 0, 1,
-        -3, 5, -1, 0,
-      ]),
+      new Float32Array([0, 0, 0, 0, 2, -4, 0, 1, -3, 5, -1, 0]),
     );
 
     const encoder = device.createCommandEncoder();
@@ -573,31 +428,19 @@ test("sparse WGSL kernels apply CFR average weights and DCFR regret updates", as
 
     assertCloseArray(
       await readFloatBuffer(device, policyAvg, 12),
-      [
-        0, 0, 0, 0,
-        0.2166667, 0.35, 0.53, 0.4,
-        0.5166667, 0.45, 0.31, 0.4666667,
-      ],
+      [0, 0, 0, 0, 0.2166667, 0.35, 0.53, 0.4, 0.5166667, 0.45, 0.31, 0.4666667],
       1e-6,
       "weighted policyAvg",
     );
     assertCloseArray(
       await readFloatBuffer(device, discountedRegrets, 12),
-      [
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        0, 2.25, 1.75, 1.5,
-      ],
+      [0, 0, 0, 0, 0, 0, 0, 0, 0, 2.25, 1.75, 1.5],
       1e-6,
       "discounted regrets",
     );
     assertCloseArray(
       await readFloatBuffer(device, linearSkippedRegrets, 12),
-      [
-        0, 0, 0, 0,
-        0.5, -2, 0, 0.25,
-        -1.5, 1.25, -0.5, 0,
-      ],
+      [0, 0, 0, 0, 0.5, -2, 0, 0.25, -1.5, 1.25, -0.5, 0],
       1e-6,
       "linear skipped regrets",
     );
@@ -650,14 +493,7 @@ test("sparse gather chunks leaf batches beyond WebGPU dispatch limits", async ()
     const out = makeEmptyStorageBuffer(device, batch * 2 * numHands);
 
     const encoder = device.createCommandEncoder();
-    const params = kernels.encodeGatherNodeBeliefs(
-      encoder,
-      tree,
-      nodeIndices,
-      beliefs,
-      out,
-      batch,
-    );
+    const params = kernels.encodeGatherNodeBeliefs(encoder, tree, nodeIndices, beliefs, out, batch);
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
     for (const param of params) param.destroy();
@@ -693,22 +529,11 @@ test("sparse WGSL all-in table values match blocker-aware CPU reference", async 
       parentIndex: new Uint32Array([0, 0]),
       prevActor: new Uint32Array([0, 0]),
       toAct: new Uint32Array([0, 1]),
-      allowedMask: new Uint32Array([
-        1, 1, 1, 1,
-        1, 1, 1, 1,
-      ]),
-      allowedProb: new Float32Array([
-        0.25, 0.25, 0.25, 0.25,
-        0.25, 0.25, 0.25, 0.25,
-      ]),
+      allowedMask: new Uint32Array([1, 1, 1, 1, 1, 1, 1, 1]),
+      allowedProb: new Float32Array([0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]),
       handCard0,
       handCard1,
-      overlapHands: new Uint32Array([
-        0, 1, 0, 0,
-        0, 1, 0, 0,
-        2, 0, 0, 0,
-        3, 0, 0, 0,
-      ]),
+      overlapHands: new Uint32Array([0, 1, 0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]),
       overlapCounts: new Uint32Array([2, 2, 1, 1]),
       overlapSlots: 4,
     });
@@ -725,10 +550,7 @@ test("sparse WGSL all-in table values match blocker-aware CPU reference", async 
       }
     }
     const beliefsData = new Float32Array([
-      0, 0, 0, 0,
-      0, 0, 0, 0,
-      0.1, 0.2, 0.3, 0.4,
-      0.4, 0.3, 0.2, 0.1,
+      0, 0, 0, 0, 0, 0, 0, 0, 0.1, 0.2, 0.3, 0.4, 0.4, 0.3, 0.2, 0.1,
     ]);
     const nodeIndices = makeStorageBuffer(device, new Uint32Array([1]));
     const tableBuffer = makeStorageBuffer(device, packInt16Table(table));

@@ -56,11 +56,7 @@ function readOptions(): CliOptions {
   const args = process.argv.slice(2);
   const iterations = getArg(args, "--iterations", "");
   const opts: CliOptions = {
-    manifest: getArg(
-      args,
-      "--manifest",
-      "public/models/rebel_latest/model.json",
-    ),
+    manifest: getArg(args, "--manifest", "public/models/rebel_latest/model.json"),
     spotsFile: getArg(args, "--spots", "bench_spots.json"),
     depth: parsePositiveInt(getArg(args, "--depth", "4"), "depth"),
     warmups: parseNonNegativeInt(getArg(args, "--warmups", "1"), "warmups"),
@@ -91,9 +87,7 @@ function stats(samples: number[]): {
 }
 
 const options = readOptions();
-const spots: BenchSpot[] = JSON.parse(
-  await readFile(options.spotsFile, "utf8"),
-);
+const spots: BenchSpot[] = JSON.parse(await readFile(options.spotsFile, "utf8"));
 
 const device = await createDawnDevice();
 const model = await loadNodeModel(device, options.manifest, options.weights);

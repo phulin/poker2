@@ -497,8 +497,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 export const SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_WGSL =
-  SPARSE_SHOWDOWN_VALUES_FROM_RANKS_WGSL
-    .replace("numHands: u32,", "_numHands: u32,")
+  SPARSE_SHOWDOWN_VALUES_FROM_RANKS_WGSL.replace("numHands: u32,", "_numHands: u32,")
     .replace("overlapSlots: u32,", "_overlapSlots: u32,")
     .replaceAll("params.batch * 2u * params.numHands", "params.batch * 2652u")
     .replaceAll("linear % params.numHands", "linear % 1326u")
@@ -506,7 +505,10 @@ export const SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_WGSL =
     .replaceAll("linear / (2u * params.numHands)", "linear / 2652u")
     .replaceAll("sample * params.numHands + hand", "sample * 1326u + hand")
     .replaceAll("sample * params.numHands + opp", "sample * 1326u + opp")
-    .replaceAll("(node * 2u + player) * params.numHands + hand", "node * 2652u + player * 1326u + hand")
+    .replaceAll(
+      "(node * 2u + player) * params.numHands + hand",
+      "node * 2652u + player * 1326u + hand",
+    )
     .replaceAll("(node * 2u + opponent) * params.numHands", "node * 2652u + opponent * 1326u")
     .replaceAll("hand * params.overlapSlots", "hand * 101u")
     .replaceAll("batch * 2 * tree.numHands", "batch * 2652");
@@ -598,17 +600,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 export const SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_PACKED_WGSL =
-  SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_WGSL
-    .replace(
-      `  _overlapSlots: u32,
+  SPARSE_SHOWDOWN_VALUES_FROM_RANKS_1326_BOTH_PLAYERS_WGSL.replace(
+    `  _overlapSlots: u32,
 };`,
-      `  _overlapSlots: u32,
+    `  _overlapSlots: u32,
   rankMassOffset: u32,
   rankPrefixOffset: u32,
   rankTotalOffset: u32,
   _pad0: u32,
 };`,
-    )
+  )
     .replace("@group(0) @binding(6) var<storage, read> rankMass: array<f32>;\n", "")
     .replace("@group(0) @binding(7) var<storage, read> rankPrefixLess: array<f32>;\n", "")
     .replace("@group(0) @binding(8) var<storage, read> rankTotal: array<f32>;\n", "")

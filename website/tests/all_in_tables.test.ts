@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import {
-  ALL_IN_I16_SCALE,
-  createManifestAllInTableProvider,
-} from "../src/allInTables.js";
 import { WebGpuAllInTableGenerator } from "../src/allInTableGenerator.js";
+import { ALL_IN_I16_SCALE, createManifestAllInTableProvider } from "../src/allInTables.js";
 import { createDawnDevice } from "../src/gpu.js";
 import { DEFAULT_FORCE_DECK, PublicHunlEnv } from "../src/hunlEnv.js";
 
@@ -78,7 +75,6 @@ test("manifest all-in provider does not generate missing flop metadata while onl
   }
 });
 
-
 function pythonGeneratedTable(board: readonly number[]): Int16Array<ArrayBuffer> {
   const result = spawnSync(
     "uv",
@@ -134,10 +130,7 @@ test("WebGPU all-in table generator matches Python turn table", async (t) => {
   try {
     const board = [0, 13, 26, 39];
     const generator = new WebGpuAllInTableGenerator(device);
-    assertSameTable(
-      await generator.tableForBoard(board),
-      pythonGeneratedTable(board),
-    );
+    assertSameTable(await generator.tableForBoard(board), pythonGeneratedTable(board));
   } finally {
     device.destroy();
   }

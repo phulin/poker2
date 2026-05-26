@@ -79,24 +79,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-export const SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL =
-  SPARSE_ALLIN_TABLE_VALUES_WGSL
-    .replace("numHands: u32,", "_numHands: u32,")
-    .replace("permId: u32,", "_permId: u32,")
-    .replace("hasPerm: u32,", "_hasPerm: u32,")
-    .replace("@group(0) @binding(5) var<storage, read> comboPerms: array<u32>;\n", "")
-    .replace(
-      `fn table_hand(hand: u32) -> u32 {
+export const SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_WGSL = SPARSE_ALLIN_TABLE_VALUES_WGSL.replace(
+  "numHands: u32,",
+  "_numHands: u32,",
+)
+  .replace("permId: u32,", "_permId: u32,")
+  .replace("hasPerm: u32,", "_hasPerm: u32,")
+  .replace("@group(0) @binding(5) var<storage, read> comboPerms: array<u32>;\n", "")
+  .replace(
+    `fn table_hand(hand: u32) -> u32 {
   if (params.hasPerm != 0u) {
     return comboPerms[params.permId * params.numHands + hand];
   }
   return hand;
 }`,
-      `fn table_hand(hand: u32) -> u32 {
+    `fn table_hand(hand: u32) -> u32 {
   return hand;
 }`,
-    )
-    .replaceAll("params.numHands", "1326u");
+  )
+  .replaceAll("params.numHands", "1326u");
 
 export const SPARSE_ALLIN_TABLE_VALUES_1326_NOPERM_BOTH_PLAYERS_WGSL = /* wgsl */ `
 struct Params {

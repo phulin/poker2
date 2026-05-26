@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { buildPublicBeliefs, compatibleHandMask } from "../src/beliefs.js";
 import {
   formatCard,
   handComboCards,
@@ -8,10 +9,6 @@ import {
   parseCard,
   parseCards,
 } from "../src/cards.js";
-import {
-  buildPublicBeliefs,
-  compatibleHandMask,
-} from "../src/beliefs.js";
 import { isCachedModelFresh } from "../src/modelCache.js";
 import { resolveCfrDefaults } from "../src/modelFormat.js";
 import type { BetterFfnManifest } from "../src/types.js";
@@ -66,18 +63,9 @@ test("cached model metadata invalidates on size or sha mismatch", () => {
   const manifest = {
     weights: { byteLength: 1234, sha256: "abc" },
   } as BetterFfnManifest;
-  assert.equal(
-    isCachedModelFresh({ byteLength: 1234, sha256: "abc" }, manifest),
-    true,
-  );
-  assert.equal(
-    isCachedModelFresh({ byteLength: 1235, sha256: "abc" }, manifest),
-    false,
-  );
-  assert.equal(
-    isCachedModelFresh({ byteLength: 1234, sha256: "def" }, manifest),
-    false,
-  );
+  assert.equal(isCachedModelFresh({ byteLength: 1234, sha256: "abc" }, manifest), true);
+  assert.equal(isCachedModelFresh({ byteLength: 1235, sha256: "abc" }, manifest), false);
+  assert.equal(isCachedModelFresh({ byteLength: 1234, sha256: "def" }, manifest), false);
 });
 
 test("CFR defaults resolve from manifest configuration", () => {

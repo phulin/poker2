@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
-import { test, type TestContext } from "node:test";
+import { type TestContext, test } from "node:test";
 import { BrowserCfrEvaluator } from "../src/browserEvaluator.js";
 import { handComboIndex, parseCard } from "../src/cards.js";
 import { createDawnDevice } from "../src/gpu.js";
@@ -26,10 +26,7 @@ function assertCloseArray(
   assert.ok(maxDiff <= atol, `${label} max diff ${maxDiff} > ${atol}`);
 }
 
-let cachedExport:
-  | { manifest: string; weights: string }
-  | { skipReason: string }
-  | undefined;
+let cachedExport: { manifest: string; weights: string } | { skipReason: string } | undefined;
 
 function exportModel(t: TestContext): { manifest: string; weights: string } | undefined {
   if (cachedExport) {
@@ -100,18 +97,8 @@ test("exported BetterFFN WebGPU evaluator matches Python fixture for call spot",
       iterations: 2,
       depth: 1,
     });
-    assertCloseArray(
-      result.beliefsAtSpot,
-      fixture.expected.beliefsAtSpot,
-      2e-3,
-      "beliefsAtSpot",
-    );
-    assertCloseArray(
-      result.actionProbs,
-      fixture.expected.actionProbs,
-      2e-3,
-      "actionProbs",
-    );
+    assertCloseArray(result.beliefsAtSpot, fixture.expected.beliefsAtSpot, 2e-3, "beliefsAtSpot");
+    assertCloseArray(result.actionProbs, fixture.expected.actionProbs, 2e-3, "actionProbs");
   } finally {
     evaluator.dispose();
     model.dispose();
@@ -138,12 +125,7 @@ test("exported BetterFFN WebGPU evaluator handles a raise/call prefix", async (t
       iterations: 2,
       depth: 1,
     });
-    assertCloseArray(
-      result.actionProbs,
-      fixture.expected.actionProbs,
-      2e-3,
-      "actionProbs",
-    );
+    assertCloseArray(result.actionProbs, fixture.expected.actionProbs, 2e-3, "actionProbs");
   } finally {
     evaluator.dispose();
     model.dispose();

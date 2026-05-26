@@ -1,13 +1,9 @@
-import { SparseCfrResolver, type SparseResolveOptions } from "./sparseResolver.js";
-import { PublicHunlEnv } from "./hunlEnv.js";
 import { buildPublicBeliefs, normalizeBeliefs } from "./beliefs.js";
-import { resolveCfrDefaults } from "./modelFormat.js";
 import type { BetterFfnWebGpuModel } from "./betterFfnWebGpuModel.js";
-import type {
-  BrowserEvaluationResult,
-  EvaluateSpotRequest,
-  SolveProgress,
-} from "./types.js";
+import { PublicHunlEnv } from "./hunlEnv.js";
+import { resolveCfrDefaults } from "./modelFormat.js";
+import { SparseCfrResolver, type SparseResolveOptions } from "./sparseResolver.js";
+import type { BrowserEvaluationResult, EvaluateSpotRequest, SolveProgress } from "./types.js";
 
 export class BrowserCfrEvaluator {
   readonly device: GPUDevice;
@@ -30,12 +26,7 @@ export class BrowserCfrEvaluator {
     if (!Number.isInteger(depth) || depth <= 0) {
       throw new Error("depth must be a positive integer");
     }
-    return await this.evaluateSpotSparse(
-      request,
-      depth,
-      iterations,
-      cfrDefaults.cfrAvg,
-    );
+    return await this.evaluateSpotSparse(request, depth, iterations, cfrDefaults.cfrAvg);
   }
 
   dispose(): void {
@@ -50,10 +41,7 @@ export class BrowserCfrEvaluator {
   ): Promise<BrowserEvaluationResult> {
     const cfrAvg = request.cfrAvg ?? defaultCfrAvg;
     const numActions = this.model.manifest.architecture.numActions;
-    const env = PublicHunlEnv.fromManifest(
-      this.model.manifest,
-      request.initialState,
-    );
+    const env = PublicHunlEnv.fromManifest(this.model.manifest, request.initialState);
     const knownCards: {
       publicCards?: readonly number[];
       heroPlayer?: 0 | 1;
@@ -88,9 +76,7 @@ export class BrowserCfrEvaluator {
     for (let solveIndex = 0; solveIndex < request.spot.length; solveIndex += 1) {
       const action = request.spot[solveIndex]!;
       const customFirstRaise =
-        solveIndex === 0 && action === numActions
-          ? request.customFirstRaiseTo
-          : undefined;
+        solveIndex === 0 && action === numActions ? request.customFirstRaiseTo : undefined;
       if (customFirstRaise === undefined) {
         this.assertAction(action, numActions);
         this.assertLegalAction(env, action);
@@ -102,9 +88,7 @@ export class BrowserCfrEvaluator {
         iterations,
         cfrAvg,
         selectedAction: action,
-        ...(customFirstRaise !== undefined
-          ? { rootCustomRaiseTo: customFirstRaise }
-          : {}),
+        ...(customFirstRaise !== undefined ? { rootCustomRaiseTo: customFirstRaise } : {}),
         readPolicy: false,
         readActionProbs: false,
         readBeliefs: true,
@@ -150,9 +134,7 @@ export class BrowserCfrEvaluator {
     }
   }
 
-  private initialBeliefs(
-    request: EvaluateSpotRequest,
-  ): Float32Array<ArrayBufferLike> {
+  private initialBeliefs(request: EvaluateSpotRequest): Float32Array<ArrayBufferLike> {
     if (request.initialBeliefs) {
       return normalizeBeliefs(request.initialBeliefs);
     }

@@ -54,7 +54,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 }
 `;
 
-
 export const MAT_VEC_BATCH_WGSL = /* wgsl */ `
 struct Params {
   rows: u32,
@@ -185,7 +184,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   output[batch * params.outputStride + params.outputOffset + row] = sum;
 }
 `;
-
 
 export const LEAKY_RELU_MAT_VEC_BATCH_WGSL = /* wgsl */ `
 struct Params {

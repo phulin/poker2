@@ -309,14 +309,18 @@ function runoutsForBoard(board: readonly number[]): Uint32Array<ArrayBuffer> {
   } else if (board.length === 4) {
     for (const card of cards) values.push(card, 0);
   } else {
-    throw new Error(`all-in table generation requires flop or turn board, got ${board.length} cards`);
+    throw new Error(
+      `all-in table generation requires flop or turn board, got ${board.length} cards`,
+    );
   }
   return new Uint32Array(values);
 }
 
 function paramsForBoard(board: readonly number[], runoutCount: number): Uint32Array<ArrayBuffer> {
   if (board.length !== 3 && board.length !== 4) {
-    throw new Error(`all-in table generation requires flop or turn board, got ${board.length} cards`);
+    throw new Error(
+      `all-in table generation requires flop or turn board, got ${board.length} cards`,
+    );
   }
   return new Uint32Array([
     NUM_HANDS,
@@ -348,16 +352,8 @@ export class WebGpuAllInTableGenerator {
   private readonly cache = new Map<string, Promise<Int16Array<ArrayBuffer>>>();
 
   constructor(private readonly device: GPUDevice) {
-    this.rankPipeline = createComputePipeline(
-      device,
-      RANK_CODES_WGSL,
-      "allin-table-rank-codes",
-    );
-    this.payoffPipeline = createComputePipeline(
-      device,
-      PAYOFF_TABLE_WGSL,
-      "allin-table-payoff",
-    );
+    this.rankPipeline = createComputePipeline(device, RANK_CODES_WGSL, "allin-table-rank-codes");
+    this.payoffPipeline = createComputePipeline(device, PAYOFF_TABLE_WGSL, "allin-table-payoff");
     this.handCard0 = makeStorageBuffer(device, HAND_CARD0_U32);
     this.handCard1 = makeStorageBuffer(device, HAND_CARD1_U32);
   }

@@ -1,3 +1,5 @@
+import { readFloatBuffer } from "./gpuBuffers.js";
+import { createComputePipeline, dispatchCompute } from "./gpuPipeline.js";
 import {
   ACCUMULATE_REGRET_WGSL,
   ACTION_PROBS_WGSL,
@@ -6,8 +8,6 @@ import {
   FINALIZE_POLICY_WGSL,
   REGRET_MATCH_WGSL,
 } from "./kernels.js";
-import { readFloatBuffer } from "./gpuBuffers.js";
-import { createComputePipeline, dispatchCompute } from "./gpuPipeline.js";
 import type {
   EvaluationResult,
   LocalCfrProblem,
@@ -36,16 +36,7 @@ function u32Params(
   selectedAction: number,
   iterations: number,
 ): Uint32Array<ArrayBuffer> {
-  return new Uint32Array([
-    numHands,
-    numActions,
-    actor,
-    selectedAction,
-    iterations,
-    0,
-    0,
-    0,
-  ]);
+  return new Uint32Array([numHands, numActions, actor, selectedAction, iterations, 0, 0, 0]);
 }
 
 function asU32(values: number[]): Uint32Array {
@@ -54,9 +45,7 @@ function asU32(values: number[]): Uint32Array {
 
 function assertProblem(problem: LocalCfrProblem, numHands: number, numActions: number) {
   if (problem.legalMask.length !== numActions) {
-    throw new Error(
-      `legalMask has ${problem.legalMask.length} entries, expected ${numActions}`,
-    );
+    throw new Error(`legalMask has ${problem.legalMask.length} entries, expected ${numActions}`);
   }
   const expectedValues = numActions * 2 * numHands;
   if (problem.childValues.length !== expectedValues) {
@@ -99,9 +88,7 @@ export class GpuCfrEvaluator {
       throw new Error("fixture must contain at least one CFR problem");
     }
 
-    let beliefs: Float32Array<ArrayBufferLike> = new Float32Array(
-      fixture.initialBeliefs,
-    );
+    let beliefs: Float32Array<ArrayBufferLike> = new Float32Array(fixture.initialBeliefs);
     let final: LocalSolveResult | undefined;
 
     for (const problem of fixture.problems) {
@@ -112,9 +99,7 @@ export class GpuCfrEvaluator {
         numHands,
         numActions,
         fixture.iterations,
-        problem.action === undefined
-          ? undefined
-          : { readPolicy: false, readActionProbs: false },
+        problem.action === undefined ? undefined : { readPolicy: false, readActionProbs: false },
       );
       if (problem.action !== undefined) {
         if (!final.beliefsAfter) {
@@ -143,9 +128,7 @@ export class GpuCfrEvaluator {
     readOptions: SolveReadOptions = {},
   ): Promise<LocalSolveResult> {
     assertProblem(problem, numHands, numActions);
-    const childValues = this.acquireStorageFromData(
-      new Float32Array(problem.childValues),
-    );
+    const childValues = this.acquireStorageFromData(new Float32Array(problem.childValues));
     return await this.solvePrepared(
       problem,
       beliefs,
@@ -169,9 +152,7 @@ export class GpuCfrEvaluator {
     readOptions: SolveReadOptions = {},
   ): Promise<LocalSolveResult> {
     if (problem.legalMask.length !== numActions) {
-      throw new Error(
-        `legalMask has ${problem.legalMask.length} entries, expected ${numActions}`,
-      );
+      throw new Error(`legalMask has ${problem.legalMask.length} entries, expected ${numActions}`);
     }
     return await this.solvePrepared(
       problem,
@@ -225,8 +206,7 @@ export class GpuCfrEvaluator {
     const readActionProbs = readOptions.readActionProbs ?? true;
     const readBeliefs = readOptions.readBeliefs ?? true;
     const returnGpuBeliefs = readOptions.returnGpuBeliefs ?? false;
-    const debug =
-      typeof process !== "undefined" && process.env?.WEBGPU_CFR_DEBUG === "1";
+    const debug = typeof process !== "undefined" && process.env?.WEBGPU_CFR_DEBUG === "1";
     if (debug) console.error("solve:start");
     const totalPolicy = numHands * numActions;
     const workgroupsHands = Math.ceil(numHands / 64);
@@ -248,9 +228,7 @@ export class GpuCfrEvaluator {
       temps.push(temp);
       return temp.buffer;
     };
-    const uniform = (
-      data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-    ): GPUBuffer => {
+    const uniform = (data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>): GPUBuffer => {
       const temp = this.acquireUniform(data);
       temps.push(temp);
       return temp.buffer;
@@ -275,18 +253,9 @@ export class GpuCfrEvaluator {
       const policy = zeroed(totalPolicy);
       const avgPolicy = zeroed(totalPolicy);
       const params = uniform(
-        u32Params(
-          numHands,
-          numActions,
-          problem.actor,
-          problem.action ?? 0,
-          iterations,
-        ),
+        u32Params(numHands, numActions, problem.actor, problem.action ?? 0, iterations),
       );
-      const bindGroup = (
-        pipeline: GPUComputePipeline,
-        entries: GPUBindGroupEntry[],
-      ) =>
+      const bindGroup = (pipeline: GPUComputePipeline, entries: GPUBindGroupEntry[]) =>
         this.device.createBindGroup({
           layout: pipeline.getBindGroupLayout(0),
           entries,
@@ -423,9 +392,10 @@ export class GpuCfrEvaluator {
           ? await readFloatBuffer(this.device, actionProbs, numActions)
           : new Float32Array(0);
       if (debug) console.error("solve:read-beliefs");
-      const beliefsAfter = beliefsOut && readBeliefs
-        ? await readFloatBuffer(this.device, beliefsOut, 2 * numHands)
-        : undefined;
+      const beliefsAfter =
+        beliefsOut && readBeliefs
+          ? await readFloatBuffer(this.device, beliefsOut, 2 * numHands)
+          : undefined;
 
       const result: LocalSolveResult = {
         policy: policyData,
@@ -505,19 +475,14 @@ export class GpuCfrEvaluator {
         buffer ??
         this.device.createBuffer({
           size: key,
-          usage:
-            GPUBufferUsage.STORAGE |
-            GPUBufferUsage.COPY_SRC |
-            GPUBufferUsage.COPY_DST,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
         }),
       key,
       kind: "storage",
     };
   }
 
-  private acquireUniform(
-    data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
-  ): TempBuffer {
+  private acquireUniform(data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>): TempBuffer {
     const key = Math.max(16, Math.ceil(data.byteLength / 16) * 16);
     const buffer = this.uniformPool.get(key)?.pop();
     const temp: TempBuffer = {

@@ -72,11 +72,7 @@ function readOptions(): CliOptions {
   const baselineValue = getArg(args, "--baseline-value", "");
   const weights = getArg(args, "--weights", "");
   const opts: CliOptions = {
-    manifest: getArg(
-      args,
-      "--manifest",
-      "public/models/rebel_latest/model.json",
-    ),
+    manifest: getArg(args, "--manifest", "public/models/rebel_latest/model.json"),
     spotsFile: getArg(args, "--spots", "bench_spots.json"),
     depth: parsePositiveInt(getArg(args, "--depth", "4"), "depth"),
     warmups: parseNonNegativeInt(getArg(args, "--warmups", "1"), "warmups"),
@@ -120,9 +116,7 @@ function variantLabel(value: string | undefined): string {
 }
 
 const options = readOptions();
-const spots: BenchSpot[] = JSON.parse(
-  await readFile(options.spotsFile, "utf8"),
-);
+const spots: BenchSpot[] = JSON.parse(await readFile(options.spotsFile, "utf8"));
 
 const originalVariant = process.env[options.variantEnv];
 const device = await createDawnDevice();
@@ -225,13 +219,10 @@ try {
     );
   }
 
-  const perStreet: Record<
-    string,
-    { baseline: number[]; candidate: number[]; speedup: number[] }
-  > = {};
+  const perStreet: Record<string, { baseline: number[]; candidate: number[]; speedup: number[] }> =
+    {};
   for (const r of results) {
-    const bucket =
-      perStreet[r.street] ??= { baseline: [], candidate: [], speedup: [] };
+    const bucket = (perStreet[r.street] ??= { baseline: [], candidate: [], speedup: [] });
     bucket.baseline.push(r.baseline.meanMs);
     bucket.candidate.push(r.candidate.meanMs);
     bucket.speedup.push(r.speedup);
@@ -243,8 +234,7 @@ try {
         baseline: { ...stats(bucket.baseline), spots: bucket.baseline.length },
         candidate: { ...stats(bucket.candidate), spots: bucket.candidate.length },
         speedup: stats(bucket.speedup).meanMs,
-        deltaMs:
-          stats(bucket.candidate).meanMs - stats(bucket.baseline).meanMs,
+        deltaMs: stats(bucket.candidate).meanMs - stats(bucket.baseline).meanMs,
       },
     ]),
   );

@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ALL_IN_I16_SCALE, type AllInTableProvider } from "../src/allInTables.js";
 import type {
-  BetterFfnWebGpuModel,
   BetterFfnPrediction,
+  BetterFfnWebGpuModel,
   GpuHandValuePrediction,
 } from "../src/betterFfnWebGpuModel.js";
-import { makeEmptyStorageBuffer } from "../src/gpuBuffers.js";
+import { BrowserCfrEvaluator } from "../src/browserEvaluator.js";
+import { HAND_COMBOS } from "../src/cards.js";
 import { createDawnDevice } from "../src/gpu.js";
+import { makeEmptyStorageBuffer } from "../src/gpuBuffers.js";
 import { DEFAULT_FORCE_DECK, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js";
 import { SparseCfrResolver } from "../src/sparseResolver.js";
-import { ALL_IN_I16_SCALE, type AllInTableProvider } from "../src/allInTables.js";
-import { HAND_COMBOS } from "../src/cards.js";
-import { BrowserCfrEvaluator } from "../src/browserEvaluator.js";
 import type { SolveProgress } from "../src/types.js";
 
 interface FakeModelCounters {
@@ -97,9 +97,7 @@ function positiveAllInProvider(): AllInTableProvider {
     for (let o = 0; o < NUM_HANDS; o += 1) {
       const [o0, o1] = HAND_COMBOS[o]!;
       table[h * NUM_HANDS + o] =
-        h0 === o0 || h0 === o1 || h1 === o0 || h1 === o1
-          ? 0
-          : ALL_IN_I16_SCALE - 1;
+        h0 === o0 || h0 === o1 || h1 === o0 || h1 === o1 ? 0 : ALL_IN_I16_SCALE - 1;
     }
   }
   return {

@@ -14,7 +14,11 @@ export function dispatchLimitedCount(lanesPerItem: number, workgroupSize: number
   );
 }
 
-export function rangeChunks(start: number, end: number, chunkSize: number): Array<readonly [number, number]> {
+export function rangeChunks(
+  start: number,
+  end: number,
+  chunkSize: number,
+): Array<readonly [number, number]> {
   const chunks: Array<readonly [number, number]> = [];
   for (let chunkStart = start; chunkStart < end; chunkStart += chunkSize) {
     chunks.push([chunkStart, Math.min(end, chunkStart + chunkSize)]);

@@ -1,9 +1,9 @@
-import { createDawnDevice } from "./gpu.js";
 import { BrowserCfrEvaluator } from "./browserEvaluator.js";
 import { evaluateFixture } from "./evaluator.js";
+import { createDawnDevice } from "./gpu.js";
+import { resolveCfrDefaults } from "./modelFormat.js";
 import { loadNodeModel } from "./nodeModel.js";
 import { loadPythonReference } from "./pythonBridge.js";
-import { resolveCfrDefaults } from "./modelFormat.js";
 
 interface CliOptions {
   snapshot: string;

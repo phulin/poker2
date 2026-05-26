@@ -54,7 +54,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-
 export const MAT_VEC_BATCH_EXACT_BELIEF_LINEAR_IN_512_BATCH2_SUBGROUP_WGSL = /* wgsl */ `
 enable subgroups;
 

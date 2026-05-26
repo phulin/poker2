@@ -53,7 +53,7 @@ function expectedWeightsByteLength(manifest: BetterFfnManifest): number {
 }
 
 function float16ToFloat32(value: number): number {
-  const sign = (value & 0x8000) ? -1 : 1;
+  const sign = value & 0x8000 ? -1 : 1;
   const exponent = (value >> 10) & 0x1f;
   const fraction = value & 0x03ff;
   if (exponent === 0) {
@@ -99,19 +99,13 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
   }
   const manifest = value as unknown as BetterFfnManifest;
   if (manifest.architecture.nonlinearity !== "leaky_relu") {
-    throw new Error(
-      `unsupported BetterFFN nonlinearity ${manifest.architecture.nonlinearity}`,
-    );
+    throw new Error(`unsupported BetterFFN nonlinearity ${manifest.architecture.nonlinearity}`);
   }
   if (manifest.architecture.normalization !== "rmsnorm") {
-    throw new Error(
-      `unsupported BetterFFN normalization ${manifest.architecture.normalization}`,
-    );
+    throw new Error(`unsupported BetterFFN normalization ${manifest.architecture.normalization}`);
   }
   if (manifest.architecture.numHands !== 1326) {
-    throw new Error(
-      `unsupported hand count ${manifest.architecture.numHands}; expected 1326`,
-    );
+    throw new Error(`unsupported hand count ${manifest.architecture.numHands}; expected 1326`);
   }
   if (manifest.architecture.numPlayers !== 2) {
     throw new Error("only two-player BetterFFN checkpoints are supported");
@@ -134,27 +128,19 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
     !Number.isInteger(manifest.architecture.boardInteractionDim) ||
     manifest.architecture.boardInteractionDim < 0
   ) {
-    throw new Error(
-      `unsupported boardInteractionDim ${manifest.architecture.boardInteractionDim}`,
-    );
+    throw new Error(`unsupported boardInteractionDim ${manifest.architecture.boardInteractionDim}`);
   }
   if (manifest.cfr !== undefined) {
     if (!isRecord(manifest.cfr)) {
       throw new Error("model manifest cfr must be an object");
     }
-    if (
-      manifest.cfr.iterations !== undefined &&
-      !isPositiveInteger(manifest.cfr.iterations)
-    ) {
+    if (manifest.cfr.iterations !== undefined && !isPositiveInteger(manifest.cfr.iterations)) {
       throw new Error("model manifest cfr.iterations must be a positive integer");
     }
     if (manifest.cfr.depth !== undefined && !isPositiveInteger(manifest.cfr.depth)) {
       throw new Error("model manifest cfr.depth must be a positive integer");
     }
-    if (
-      manifest.cfr.cfrAvg !== undefined &&
-      typeof manifest.cfr.cfrAvg !== "boolean"
-    ) {
+    if (manifest.cfr.cfrAvg !== undefined && typeof manifest.cfr.cfrAvg !== "boolean") {
       throw new Error("model manifest cfr.cfrAvg must be a boolean");
     }
     optionalNumber(manifest.cfr.scheduleProgress, "scheduleProgress");
@@ -169,10 +155,7 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
     if (!isRecord(manifest.allIn)) {
       throw new Error("model manifest allIn must be an object");
     }
-    if (
-      manifest.allIn.enabled !== undefined &&
-      typeof manifest.allIn.enabled !== "boolean"
-    ) {
+    if (manifest.allIn.enabled !== undefined && typeof manifest.allIn.enabled !== "boolean") {
       throw new Error("model manifest allIn.enabled must be a boolean");
     }
     optionalAllInNumber(manifest.allIn.scale, "scale");
@@ -205,10 +188,7 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
     }
   }
   manifest.weights.storageDtype ??= "float32";
-  if (
-    manifest.weights.storageDtype !== "float16" &&
-    manifest.weights.storageDtype !== "float32"
-  ) {
+  if (manifest.weights.storageDtype !== "float16" && manifest.weights.storageDtype !== "float32") {
     throw new Error(`unsupported weights.storageDtype ${manifest.weights.storageDtype}`);
   }
   if (manifest.weights.compression !== undefined) {
@@ -216,9 +196,7 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
       throw new Error("model manifest weights.compression must be an object");
     }
     if (manifest.weights.compression.format !== "gzip") {
-      throw new Error(
-        `unsupported weights compression ${manifest.weights.compression.format}`,
-      );
+      throw new Error(`unsupported weights compression ${manifest.weights.compression.format}`);
     }
     if (!isPositiveInteger(manifest.weights.compression.byteLength)) {
       throw new Error("model manifest weights.compression.byteLength must be positive");
@@ -229,19 +207,13 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
 
 export function resolveCfrDefaults(manifest: BetterFfnManifest): ResolvedCfrDefaults {
   return {
-    iterations: isPositiveInteger(manifest.cfr?.iterations)
-      ? manifest.cfr.iterations
-      : 600,
+    iterations: isPositiveInteger(manifest.cfr?.iterations) ? manifest.cfr.iterations : 600,
     depth: isPositiveInteger(manifest.cfr?.depth) ? manifest.cfr.depth : 5,
-    cfrAvg:
-      typeof manifest.cfr?.cfrAvg === "boolean" ? manifest.cfr.cfrAvg : true,
+    cfrAvg: typeof manifest.cfr?.cfrAvg === "boolean" ? manifest.cfr.cfrAvg : true,
   };
 }
 
-export function tensorsFromWeights(
-  manifest: BetterFfnManifest,
-  weights: ArrayBuffer,
-): TensorMap {
+export function tensorsFromWeights(manifest: BetterFfnManifest, weights: ArrayBuffer): TensorMap {
   const expectedByteLength = expectedWeightsByteLength(manifest);
   if (weights.byteLength !== expectedByteLength) {
     throw new Error(
@@ -287,8 +259,7 @@ export function requireTensor(
   if (shape) {
     const actual = tensor.manifest.shape;
     const same =
-      actual.length === shape.length &&
-      actual.every((value, index) => value === shape[index]);
+      actual.length === shape.length && actual.every((value, index) => value === shape[index]);
     if (!same) {
       throw new Error(
         `model tensor ${name} has shape [${actual.join(",")}], expected [${shape.join(",")}]`,

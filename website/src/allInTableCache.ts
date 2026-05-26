@@ -12,9 +12,7 @@ interface CachedAllInTableRecord {
   updatedAt: number;
 }
 
-export async function readCachedAllInTable(
-  key: string,
-): Promise<ArrayBuffer | undefined> {
+export async function readCachedAllInTable(key: string): Promise<ArrayBuffer | undefined> {
   const db = await openAllInCacheDb();
   if (!db) return undefined;
   try {
@@ -62,10 +60,7 @@ function openAllInCacheDb(): Promise<IDBDatabase | undefined> {
   });
 }
 
-function getRecord(
-  db: IDBDatabase,
-  key: string,
-): Promise<CachedAllInTableRecord | undefined> {
+function getRecord(db: IDBDatabase, key: string): Promise<CachedAllInTableRecord | undefined> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readonly");
     const request = tx.objectStore(STORE_NAME).get(key);
@@ -74,10 +69,7 @@ function getRecord(
   });
 }
 
-function putRecord(
-  db: IDBDatabase,
-  record: CachedAllInTableRecord,
-): Promise<void> {
+function putRecord(db: IDBDatabase, record: CachedAllInTableRecord): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readwrite");
     tx.onerror = () => reject(tx.error ?? new Error("failed to write all-in table cache"));

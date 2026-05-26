@@ -1,15 +1,12 @@
+import { createManifestAllInTableProvider } from "./allInTables.js";
 import { BetterFfnWebGpuModel } from "./betterFfnWebGpuModel.js";
-import {
-  BrowserCfrEvaluator,
-  createBrowserCfrEvaluator,
-} from "./browserEvaluator.js";
-import { parseBetterFfnManifest } from "./modelFormat.js";
+import { BrowserCfrEvaluator, createBrowserCfrEvaluator } from "./browserEvaluator.js";
 import {
   decodeModelWeights,
   loadModelBytesWithCache,
   type ModelCacheProgress,
 } from "./modelCache.js";
-import { createManifestAllInTableProvider } from "./allInTables.js";
+import { parseBetterFfnManifest } from "./modelFormat.js";
 import type { BetterFfnManifest } from "./types.js";
 
 function currentOrigin(): string {
@@ -67,9 +64,7 @@ function webGpuErrorKind(error: GPUError): string {
   return "unknown";
 }
 
-export async function createBrowserDevice(
-  options: BrowserDeviceOptions = {},
-): Promise<GPUDevice> {
+export async function createBrowserDevice(options: BrowserDeviceOptions = {}): Promise<GPUDevice> {
   if (typeof navigator === "undefined" || !navigator.gpu) {
     throw new Error(webGpuUnavailableMessage());
   }
@@ -126,16 +121,9 @@ export async function loadBrowserModel(
     throw new Error(`failed to fetch ${weightsUrl}: ${weightsResponse.status}`);
   }
   const manifest = parseBetterFfnManifest(await manifestResponse.json());
-  const weights = await decodeModelWeights(
-    await weightsResponse.arrayBuffer(),
-    manifest,
-  );
+  const weights = await decodeModelWeights(await weightsResponse.arrayBuffer(), manifest);
   const modelDevice = device ?? (await createBrowserDevice());
-  const model = BetterFfnWebGpuModel.fromBuffers(
-    modelDevice,
-    manifest,
-    weights,
-  );
+  const model = BetterFfnWebGpuModel.fromBuffers(modelDevice, manifest, weights);
   model.allInTableProvider = createManifestAllInTableProvider(
     manifest,
     absoluteBrowserUrl(manifestUrl),
@@ -161,11 +149,7 @@ export async function loadBrowserModelCached(
   if (options.onProgress) cacheOptions.onProgress = options.onProgress;
   const loaded = await loadModelBytesWithCache(manifestUrl, cacheOptions);
   const modelDevice = options.device ?? (await createBrowserDevice());
-  const model = BetterFfnWebGpuModel.fromBuffers(
-    modelDevice,
-    loaded.manifest,
-    loaded.weights,
-  );
+  const model = BetterFfnWebGpuModel.fromBuffers(modelDevice, loaded.manifest, loaded.weights);
   model.allInTableProvider = createManifestAllInTableProvider(
     loaded.manifest,
     absoluteBrowserUrl(manifestUrl),
@@ -183,9 +167,7 @@ export function loadBrowserModelFromBuffers(
   const model = BetterFfnWebGpuModel.fromBuffers(device, manifest, weights);
   if (model.manifest.allIn) {
     const baseUrl =
-      typeof globalThis.location === "undefined"
-        ? "http://localhost/"
-        : globalThis.location.href;
+      typeof globalThis.location === "undefined" ? "http://localhost/" : globalThis.location.href;
     model.allInTableProvider = createManifestAllInTableProvider(
       model.manifest,
       baseUrl,

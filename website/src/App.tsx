@@ -1,34 +1,16 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { AlertTriangle, ChevronDown, Cpu, Play, RotateCcw, Trash2, X } from "lucide-solid";
 import type { JSX } from "solid-js";
-import {
-  AlertTriangle,
-  ChevronDown,
-  Cpu,
-  Play,
-  RotateCcw,
-  Trash2,
-  X,
-} from "lucide-solid";
-import type { ModelCacheProgress } from "./modelCache.js";
-import {
-  parseCard,
-  parseCards,
-  formatCard,
-  handComboIndex,
-  handComboCards,
-} from "./cards.js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { buildPublicBeliefs } from "./beliefs.js";
-import { PublicHunlEnv, NUM_HANDS, DEFAULT_FORCE_DECK, type LegalBins } from "./hunlEnv.js";
-import type {
-  BetterFfnManifest,
-  BrowserEvaluationResult,
-  PlayerIndex,
-} from "./types.js";
+import { formatCard, handComboCards, handComboIndex, parseCard, parseCards } from "./cards.js";
+import { DEFAULT_FORCE_DECK, type LegalBins, NUM_HANDS, PublicHunlEnv } from "./hunlEnv.js";
+import type { ModelCacheProgress } from "./modelCache.js";
 import type {
   SolverEvaluateSpotRequest,
   SolverWorkerRequest,
   SolverWorkerResponse,
 } from "./solverWorkerMessages.js";
+import type { BetterFfnManifest, BrowserEvaluationResult, PlayerIndex } from "./types.js";
 
 const MODEL_MANIFEST_URL =
   import.meta.env.VITE_MODEL_MANIFEST_URL ?? "/models/rebel_latest/model.json";
@@ -195,11 +177,7 @@ function defaultNumberText(value: number): string {
   return String(value);
 }
 
-function hashNumberParam(
-  params: URLSearchParams,
-  key: string,
-  fallback: number,
-): string {
+function hashNumberParam(params: URLSearchParams, key: string, fallback: number): string {
   const value = params.get(key);
   if (value === null) return defaultNumberText(fallback);
   const parsed = positiveNumber(value, fallback);
@@ -292,10 +270,7 @@ function actionFromHashToken(
   if (!normalized) return undefined;
   if ((normalized === "f" || normalized === "fold") && legalActionsIn.includes(0)) return 0;
   if (
-    (normalized === "c" ||
-      normalized === "call" ||
-      normalized === "check" ||
-      normalized === "x") &&
+    (normalized === "c" || normalized === "call" || normalized === "check" || normalized === "x") &&
     legalActionsIn.includes(1)
   ) {
     return 1;
@@ -343,11 +318,7 @@ function actionsFromHash(
       const exact = Number.isFinite(amount)
         ? exactStandardRaiseAction(amount, legalActionList(legal.mask), context)
         : undefined;
-      if (
-        Number.isFinite(amount) &&
-        exact === undefined &&
-        customRaiseToIsLegal(amount, context)
-      ) {
+      if (Number.isFinite(amount) && exact === undefined && customRaiseToIsLegal(amount, context)) {
         action = CUSTOM_FIRST_RAISE_ACTION;
         customFirstRaiseTo = amount;
       }
@@ -706,10 +677,7 @@ function CardSequencePicker(props: {
         />
       </Show>
       <Show when={editing() && pickerOpen()}>
-        <div
-          class="card-sequence-grid"
-          onMouseDown={(event) => event.preventDefault()}
-        >
+        <div class="card-sequence-grid" onMouseDown={(event) => event.preventDefault()}>
           <For each={SUITS}>
             {(suit) => (
               <For each={RANKS}>
@@ -779,9 +747,7 @@ function ActionInput(props: {
   const raiseActions = createMemo(() =>
     props.legalActions.filter((action) => action >= 2 && action < props.context.allInIndex),
   );
-  const directActions = createMemo(() =>
-    props.legalActions.filter((action) => action < 2),
-  );
+  const directActions = createMemo(() => props.legalActions.filter((action) => action < 2));
   const allInAction = createMemo(() =>
     props.legalActions.includes(props.context.allInIndex) ? props.context.allInIndex : undefined,
   );
@@ -822,8 +788,7 @@ function ActionInput(props: {
     let bestDistance = Number.POSITIVE_INFINITY;
     for (const action of raiseActions()) {
       const amount = props.context.amounts[action] ?? 0;
-      const displayAmount =
-        props.context.toCall > 0 ? props.context.meCommitted + amount : amount;
+      const displayAmount = props.context.toCall > 0 ? props.context.meCommitted + amount : amount;
       const distance = Math.abs(displayAmount - target);
       if (distance < bestDistance) {
         bestAction = action;
@@ -888,10 +853,7 @@ function ActionInput(props: {
   );
 }
 
-function raiseActionOptions(
-  legalActionsIn: readonly number[],
-  context: ActionContext,
-): number[] {
+function raiseActionOptions(legalActionsIn: readonly number[], context: ActionContext): number[] {
   return legalActionsIn.filter((action) => action >= 2 && action < context.allInIndex);
 }
 
@@ -935,8 +897,7 @@ function exactStandardRaiseAction(
 function customRaiseToIsLegal(target: number, context: ActionContext): boolean {
   if (!Number.isFinite(target) || target <= 0) return false;
   if (Math.trunc(target) !== target) return false;
-  const amount =
-    context.toCall > 0 ? Math.trunc(target - context.meCommitted) : Math.trunc(target);
+  const amount = context.toCall > 0 ? Math.trunc(target - context.meCommitted) : Math.trunc(target);
   const additional = amount - context.toCall;
   return (
     context.stack > 0 &&
@@ -959,9 +920,10 @@ function ActionRowButtons(props: {
   const [raiseValue, setRaiseValue] = createSignal("");
   let raiseInput: HTMLInputElement | undefined;
   const raiseActions = createMemo(() => raiseActionOptions(props.legalActions, props.context));
-  const isRaiseAction = createMemo(() =>
-    props.action === CUSTOM_FIRST_RAISE_ACTION ||
-    (props.action >= 2 && props.action < props.context.allInIndex),
+  const isRaiseAction = createMemo(
+    () =>
+      props.action === CUSTOM_FIRST_RAISE_ACTION ||
+      (props.action >= 2 && props.action < props.context.allInIndex),
   );
   const directActions = createMemo(() => props.legalActions.filter((action) => action === 1));
   const allInAction = createMemo(() =>
@@ -970,7 +932,9 @@ function ActionRowButtons(props: {
   const raiseLabel = createMemo(() =>
     isRaiseAction()
       ? formatActionLabel(props.action, props.context)
-      : props.context.toCall > 0 ? "Raise" : "Bet",
+      : props.context.toCall > 0
+        ? "Raise"
+        : "Bet",
   );
 
   function openRaiseInput(): void {
@@ -994,11 +958,7 @@ function ActionRowButtons(props: {
       ? exactStandardRaiseAction(target, props.legalActions, props.context)
       : undefined;
     setEditingRaise(false);
-    if (
-      exact === undefined &&
-      props.onCustomRaise &&
-      customRaiseToIsLegal(target, props.context)
-    ) {
+    if (exact === undefined && props.onCustomRaise && customRaiseToIsLegal(target, props.context)) {
       props.onCustomRaise(target);
       return;
     }
@@ -1049,8 +1009,8 @@ function ActionRowButtons(props: {
                 {props.action === CUSTOM_FIRST_RAISE_ACTION && props.customRaiseTo !== undefined
                   ? formatCustomRaiseLabel(props.customRaiseTo, props.context)
                   : isRaiseAction()
-                  ? formatActionLabel(props.action, props.context)
-                  : shortActionLabel(raiseActions()[0]!, props.context)}
+                    ? formatActionLabel(props.action, props.context)
+                    : shortActionLabel(raiseActions()[0]!, props.context)}
               </button>
             </Show>
             <Show when={allInAction()}>
@@ -1098,18 +1058,16 @@ function NumberStepper(props: {
   const minValue = () => props.min ?? 1;
 
   function nudge(delta: number) {
-    const next = Math.max(minValue(), Math.trunc((Number.isFinite(current()) ? current() : minValue()) + delta));
+    const next = Math.max(
+      minValue(),
+      Math.trunc((Number.isFinite(current()) ? current() : minValue()) + delta),
+    );
     props.onChange(String(next));
   }
 
   return (
     <div class="stepper">
-      <button
-        type="button"
-        class="stepper-btn"
-        onClick={() => nudge(-1)}
-        title="Decrement"
-      >
+      <button type="button" class="stepper-btn" onClick={() => nudge(-1)} title="Decrement">
         −
       </button>
       <input
@@ -1118,12 +1076,7 @@ function NumberStepper(props: {
         inputmode="numeric"
         onInput={(event) => props.onChange(event.currentTarget.value)}
       />
-      <button
-        type="button"
-        class="stepper-btn"
-        onClick={() => nudge(1)}
-        title="Increment"
-      >
+      <button type="button" class="stepper-btn" onClick={() => nudge(1)} title="Increment">
         +
       </button>
       <div class="stepper-presets">
@@ -1237,7 +1190,9 @@ function BoardEntry(props: {
   const priorCount = createMemo(() => STREET_CARD_COUNTS[Math.max(0, props.street - 1)] ?? 0);
   const editCount = createMemo(() => props.count - priorCount());
   const priorCards = createMemo(() => props.cards.slice(0, priorCount()).filter(Boolean));
-  const editableCards = createMemo(() => props.cards.slice(priorCount(), props.count).filter(Boolean));
+  const editableCards = createMemo(() =>
+    props.cards.slice(priorCount(), props.count).filter(Boolean),
+  );
 
   return (
     <div class="board-entry-row">
@@ -1255,7 +1210,9 @@ function BoardEntry(props: {
             disabled={props.disabled}
             placeholder={editCount() === 3 ? "As Kd Qh" : "Js"}
             autoOpenKey={`${props.street}:${props.count}`}
-            onChange={(cards) => props.onTextChange([...props.cards.slice(0, priorCount()), ...cards])}
+            onChange={(cards) =>
+              props.onTextChange([...props.cards.slice(0, priorCount()), ...cards])
+            }
           />
         </div>
       </div>
@@ -1626,7 +1583,11 @@ function App(): JSX.Element {
     const nextHash = serializedHash();
     if (!hashHydrated() || applyingHash) return;
     if (nextHash === window.location.hash) return;
-    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${nextHash}`);
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}${nextHash}`,
+    );
   });
   createEffect(() => {
     if (!runtime()) return;
@@ -1989,11 +1950,19 @@ function App(): JSX.Element {
                 onComboChange={selectHeroCombo}
               />
             </div>
-            <Show when={!descriptorError()} fallback={<p class="inline-error">{descriptorError()}</p>}>
+            <Show
+              when={!descriptorError()}
+              fallback={<p class="inline-error">{descriptorError()}</p>}
+            >
               <For each={(descriptor() as StateDescriptor).rows}>
                 {(row, index) => (
                   <>
-                    <Show when={shouldShowBoardBeforeRow((descriptor() as StateDescriptor).rows, index())}>
+                    <Show
+                      when={shouldShowBoardBeforeRow(
+                        (descriptor() as StateDescriptor).rows,
+                        index(),
+                      )}
+                    >
                       <BoardEntry
                         street={row.street}
                         count={STREET_CARD_COUNTS[row.street] ?? 0}
@@ -2003,7 +1972,9 @@ function App(): JSX.Element {
                       />
                     </Show>
                     <div class="action-row">
-                      <span class="street-marker">{streetMarkerForRow((descriptor() as StateDescriptor).rows, index()) ?? ""}</span>
+                      <span class="street-marker">
+                        {streetMarkerForRow((descriptor() as StateDescriptor).rows, index()) ?? ""}
+                      </span>
                       <span class={`actor-pill ${row.actor === HERO_PLAYER ? "hero" : "villain"}`}>
                         {playerLabel(row.actor)}
                       </span>
@@ -2098,7 +2069,9 @@ function App(): JSX.Element {
               onClick={() => void solve()}
             >
               <Play size={18} />
-              <span>{isSolving() ? `Solving ${Math.floor(solveProgress() ?? 0)}%` : "Solve Spot"}</span>
+              <span>
+                {isSolving() ? `Solving ${Math.floor(solveProgress() ?? 0)}%` : "Solve Spot"}
+              </span>
             </button>
             <Show when={solveProgress() !== undefined}>
               <div class="progress-track solve-progress-track" aria-label="Solve progress">
@@ -2134,7 +2107,9 @@ function App(): JSX.Element {
             fallback={
               <Show
                 when={isSolving()}
-                fallback={<div class="empty-state">Run a solve to populate strategy and range output.</div>}
+                fallback={
+                  <div class="empty-state">Run a solve to populate strategy and range output.</div>
+                }
               >
                 <div class="empty-state solving-state" aria-label="Solving">
                   <div class="spinner" />
@@ -2150,8 +2125,8 @@ function App(): JSX.Element {
                     <div class="notice">
                       <AlertTriangle size={18} />
                       <span>
-                        Villain is to act, so the selected hero hand is a blocker,
-                        not an exact-hand policy row.
+                        Villain is to act, so the selected hero hand is a blocker, not an exact-hand
+                        policy row.
                       </span>
                     </div>
                   }
@@ -2201,7 +2176,10 @@ function HeroPolicy(props: {
               <div class={`bar-row ${item.legal ? "" : "muted"}`}>
                 <span class="bar-label">{item.label}</span>
                 <div class="bar-track">
-                  <div class="bar-fill alt" style={{ width: `${Math.min(100, item.value * 100)}%` }} />
+                  <div
+                    class="bar-fill alt"
+                    style={{ width: `${Math.min(100, item.value * 100)}%` }}
+                  />
                 </div>
                 <span class="bar-value">{formatPercent(item.value)}</span>
               </div>
@@ -2213,9 +2191,7 @@ function HeroPolicy(props: {
   );
 }
 
-function RangeGridCollapses(props: {
-  beliefs: Float32Array<ArrayBufferLike>;
-}): JSX.Element {
+function RangeGridCollapses(props: { beliefs: Float32Array<ArrayBufferLike> }): JSX.Element {
   const grids = createMemo(() => [
     buildRangeGrid(props.beliefs, HERO_PLAYER),
     buildRangeGrid(props.beliefs, 1),

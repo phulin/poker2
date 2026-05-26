@@ -2,15 +2,15 @@ import { makeEmptyStorageBuffer, makeStorageBuffer, readUintBuffer } from "./gpu
 import { createComputePipeline, dispatchCompute } from "./gpuPipeline.js";
 import { PublicHunlEnv } from "./hunlEnv.js";
 import {
+  STATE_ACTED_SINCE_RESET,
   STATE_ACTIONS_LAST_ROUND,
   STATE_ACTIONS_THIS_ROUND,
-  STATE_ACTED_SINCE_RESET,
   STATE_BOARD0,
   STATE_BUTTON,
   STATE_COMMITTED0,
   STATE_COMMITTED1,
-  STATE_DECK0,
   STATE_DECK_POS,
+  STATE_DECK0,
   STATE_DONE,
   STATE_HAS_FOLDED0,
   STATE_HAS_FOLDED1,
@@ -257,19 +257,12 @@ export class GpuPokerState {
       0,
       new Uint32Array([Math.max(0, Math.trunc(modelActionCount)), 0, 0, 0]),
     );
-    this.encode3d(
-      encoder,
-      this.scatterModelValuesPipeline,
-      21,
-      2,
-      modelActionCount,
-      [
-        { binding: 0, resource: { buffer: modelValues } },
-        { binding: 1, resource: { buffer: modelActionMap } },
-        { binding: 2, resource: { buffer: childValues } },
-        { binding: 3, resource: { buffer: this.paramsBuffer } },
-      ],
-    );
+    this.encode3d(encoder, this.scatterModelValuesPipeline, 21, 2, modelActionCount, [
+      { binding: 0, resource: { buffer: modelValues } },
+      { binding: 1, resource: { buffer: modelActionMap } },
+      { binding: 2, resource: { buffer: childValues } },
+      { binding: 3, resource: { buffer: this.paramsBuffer } },
+    ]);
   }
 
   dispose(): void {
@@ -298,15 +291,12 @@ export class GpuPokerState {
   }
 
   private acquireChildBatchStorage(elements: number): PooledStorageBuffer {
-    const key = Math.max(4, Math.ceil(elements * Float32Array.BYTES_PER_ELEMENT / 4) * 4);
+    const key = Math.max(4, Math.ceil((elements * Float32Array.BYTES_PER_ELEMENT) / 4) * 4);
     const buffer =
       this.childBatchPool.get(key)?.pop() ??
       this.device.createBuffer({
         size: key,
-        usage:
-          GPUBufferUsage.STORAGE |
-          GPUBufferUsage.COPY_SRC |
-          GPUBufferUsage.COPY_DST,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
       });
     return { buffer, key };
   }
@@ -387,11 +377,7 @@ function sharedResources(device: GPUDevice): GpuPokerStateSharedResources {
   return resources;
 }
 
-function pipeline(
-  device: GPUDevice,
-  source: string,
-  label: string,
-): GPUComputePipeline {
+function pipeline(device: GPUDevice, source: string, label: string): GPUComputePipeline {
   return createComputePipeline(device, source, label);
 }
 

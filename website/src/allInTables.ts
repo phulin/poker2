@@ -1,10 +1,10 @@
-import { HAND_COMBOS } from "./cards.js";
-import { WebGpuAllInTableGenerator } from "./allInTableGenerator.js";
 import {
+  type CachedAllInTableKind,
   readCachedAllInTable,
   writeCachedAllInTable,
-  type CachedAllInTableKind,
 } from "./allInTableCache.js";
+import { WebGpuAllInTableGenerator } from "./allInTableGenerator.js";
+import { HAND_COMBOS } from "./cards.js";
 import { NUM_HANDS, type PublicHunlEnv } from "./hunlEnv.js";
 import type { BetterFfnAllInManifest } from "./types.js";
 
@@ -60,9 +60,7 @@ export function computeAllInTableValues(
   const p0Base = nodeBase;
   const p1Base = nodeBase + NUM_HANDS;
   const permBase =
-    context.permId !== undefined && context.comboPerms
-      ? context.permId * NUM_HANDS
-      : -1;
+    context.permId !== undefined && context.comboPerms ? context.permId * NUM_HANDS : -1;
   const tableHand = (hand: number): number =>
     permBase >= 0 ? context.comboPerms![permBase + hand]! : hand;
   const tableAt = (hero: number, opp: number): number =>
@@ -70,10 +68,8 @@ export function computeAllInTableValues(
 
   const total0 = beliefCardStats(beliefs, p0Base);
   const total1 = beliefCardStats(beliefs, p1Base);
-  const scale0 =
-    (env.stacks[0] + env.pot - env.startingStacks[0]) / Math.max(env.scale, 1.0e-8);
-  const scale1 =
-    (env.stacks[1] + env.pot - env.startingStacks[1]) / Math.max(env.scale, 1.0e-8);
+  const scale0 = (env.stacks[0] + env.pot - env.startingStacks[0]) / Math.max(env.scale, 1.0e-8);
+  const scale1 = (env.stacks[1] + env.pot - env.startingStacks[1]) / Math.max(env.scale, 1.0e-8);
 
   for (let hand = 0; hand < NUM_HANDS; hand += 1) {
     const c0 = HAND_CARD0[hand]!;
@@ -157,7 +153,10 @@ class ManifestAllInTableProvider implements AllInTableProvider {
       };
     }
     if (env.street === 1) {
-      const flop = env.boardIndices.slice(0, 3).filter((card) => card >= 0).sort((a, b) => a - b);
+      const flop = env.boardIndices
+        .slice(0, 3)
+        .filter((card) => card >= 0)
+        .sort((a, b) => a - b);
       if (flop.length !== 3) throw new Error("flop all-in table requires three public cards");
       if (!this.config.flop) return this.generatedFlopIfOffline(flop);
       try {
@@ -211,10 +210,7 @@ class ManifestAllInTableProvider implements AllInTableProvider {
     ]);
     const actual = flopCombinationIndex(flop[0]!, flop[1]!, flop[2]!);
     const canonical = actualToCanon[actual]!;
-    await this.loadInt16(
-      templatePath(this.config.flop.tablePathTemplate, canonical, flop),
-      "flop",
-    );
+    await this.loadInt16(templatePath(this.config.flop.tablePathTemplate, canonical, flop), "flop");
   }
 
   private async generatedFlopIfOffline(
@@ -265,10 +261,7 @@ class ManifestAllInTableProvider implements AllInTableProvider {
     return new Uint32Array(buffer.slice(0));
   }
 
-  private async load(
-    path: string,
-    cacheKind?: CachedAllInTableKind,
-  ): Promise<ArrayBuffer> {
+  private async load(path: string, cacheKind?: CachedAllInTableKind): Promise<ArrayBuffer> {
     const url = new URL(path, this.manifestUrl).toString();
     const cached = this.cache.get(url);
     if (cached) return cached;

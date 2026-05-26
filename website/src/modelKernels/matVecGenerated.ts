@@ -1,8 +1,5 @@
+import { LEAKY_RELU_MAT_VEC_BATCH_WGSL, MAT_VEC_BATCH_WGSL } from "./matVec.js";
 import { REDUCE_4X_256_WGSL } from "./reductions.js";
-import {
-  LEAKY_RELU_MAT_VEC_BATCH_WGSL,
-  MAT_VEC_BATCH_WGSL,
-} from "./matVec.js";
 
 function removeMatVecBatchRowBounds(source: string): string {
   return source
@@ -88,11 +85,11 @@ function removeMatVecBatchRowBounds(source: string): string {
     );
 }
 
-export const MAT_VEC_BATCH_EXACT_ROWS_WGSL =
-  removeMatVecBatchRowBounds(MAT_VEC_BATCH_WGSL);
+export const MAT_VEC_BATCH_EXACT_ROWS_WGSL = removeMatVecBatchRowBounds(MAT_VEC_BATCH_WGSL);
 
-export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL =
-  removeMatVecBatchRowBounds(LEAKY_RELU_MAT_VEC_BATCH_WGSL);
+export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL = removeMatVecBatchRowBounds(
+  LEAKY_RELU_MAT_VEC_BATCH_WGSL,
+);
 
 function unrollMatVecBatchColumns(
   source: string,
@@ -127,10 +124,16 @@ function unrollMatVecBatchColumns(
   return source.replace(loopBlock, chunks.join("\n"));
 }
 
-export const MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
-  unrollMatVecBatchColumns(MAT_VEC_BATCH_EXACT_ROWS_WGSL, 512, false);
-export const MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL =
-  unrollMatVecBatchColumns(MAT_VEC_BATCH_EXACT_ROWS_WGSL, 1024, false);
+export const MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL = unrollMatVecBatchColumns(
+  MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+  512,
+  false,
+);
+export const MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL = unrollMatVecBatchColumns(
+  MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+  1024,
+  false,
+);
 
 export const MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL = /* wgsl */ `
 enable subgroups;
@@ -953,10 +956,7 @@ function makeMatVecBatchExactRowsCols1326BatchSubgroup(batchCount: number): stri
         )
         .join("\n");
       const matrixLoads = rows
-        .map(
-          (row) =>
-            `  let m${row}${chunk} = matrix[row${row} * 1326u + col${chunk}];`,
-        )
+        .map((row) => `  let m${row}${chunk} = matrix[row${row} * 1326u + col${chunk}];`)
         .join("\n");
       const adds = cells
         .map(
@@ -981,10 +981,7 @@ ${adds}`;
     )
     .join("\n");
   const lastAdds = cells
-    .map(
-      ({ batch, row, name }) =>
-        `    sum${name} = sum${name} + m${row}5 * x${batch}5;`,
-    )
+    .map(({ batch, row, name }) => `    sum${name} = sum${name} + m${row}5 * x${batch}5;`)
     .join("\n");
   const reductions = cells
     .map(({ name }) => `  let reduced${name} = subgroupAdd(sum${name});`)
@@ -1097,10 +1094,16 @@ export const MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH2_SUBGROUP_WGSL =
 export const MAT_VEC_BATCH_EXACT_ROWS_COLS_1326_BATCH4_SUBGROUP_WGSL =
   makeMatVecBatchExactRowsCols1326BatchSubgroup(4);
 
-export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
-  unrollMatVecBatchColumns(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL, 512, true);
-export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL =
-  unrollMatVecBatchColumns(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL, 1024, true);
+export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL = unrollMatVecBatchColumns(
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+  512,
+  true,
+);
+export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL = unrollMatVecBatchColumns(
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+  1024,
+  true,
+);
 
 export const LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_SUBGROUP_WGSL = /* wgsl */ `
 enable subgroups;
@@ -1614,10 +1617,12 @@ function addLeakyReluResidualOutput(source: string): string {
     );
 }
 
-export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL =
-  addLeakyReluResidualOutput(LEAKY_RELU_MAT_VEC_BATCH_WGSL);
-export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL =
-  addLeakyReluResidualOutput(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL);
+export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_WGSL = addLeakyReluResidualOutput(
+  LEAKY_RELU_MAT_VEC_BATCH_WGSL,
+);
+export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_WGSL = addLeakyReluResidualOutput(
+  LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_WGSL,
+);
 export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL =
   addLeakyReluResidualOutput(LEAKY_RELU_MAT_VEC_BATCH_EXACT_ROWS_COLS_512_WGSL);
 export const LEAKY_RELU_RESIDUAL_MAT_VEC_BATCH_EXACT_ROWS_COLS_1024_WGSL =
@@ -1772,9 +1777,7 @@ function makeLeakyReluResidualMatVecBatchExactRowsCols1024BatchSubgroup(
     )
     .join("\n");
   const firstSums = batches
-    .flatMap((batch) =>
-      rows.map((row) => `  var sum${batch}${row} = m${row}0 * x${batch}0;`),
-    )
+    .flatMap((batch) => rows.map((row) => `  var sum${batch}${row} = m${row}0 * x${batch}0;`))
     .join("\n");
   const chunks = [1, 2, 3, 4, 5, 6, 7]
     .map((chunk) => {
@@ -1811,9 +1814,7 @@ ${adds}`;
   const partialWrites = cells
     .map(({ name }) => `    subgroupPartial${name}[subgroupIndex] = reduced${name};`)
     .join("\n");
-  const outDecls = cells
-    .map(({ name }) => `    var out${name} = 0.0;`)
-    .join("\n");
+  const outDecls = cells.map(({ name }) => `    var out${name} = 0.0;`).join("\n");
   const outAdds = cells
     .map(({ name }) => `      out${name} = out${name} + subgroupPartial${name}[i];`)
     .join("\n");

@@ -57,9 +57,7 @@ export async function loadModelBytesWithCache(
   }
   const manifest = parseBetterFfnManifest(await manifestResponse.json());
   const baseUrl =
-    typeof globalThis.location === "undefined"
-      ? "http://localhost/"
-      : globalThis.location.href;
+    typeof globalThis.location === "undefined" ? "http://localhost/" : globalThis.location.href;
   const manifestAbsoluteUrl = new URL(manifestUrl, baseUrl);
   const weightsUrl =
     options.weightsUrl ?? new URL(manifest.weights.file, manifestAbsoluteUrl).toString();
@@ -110,9 +108,7 @@ async function fetchWeights(
   const contentLength = Number.parseInt(response.headers.get("Content-Length") ?? "", 10);
   const expectedDownloadBytes =
     manifest.weights.compression?.byteLength ?? manifest.weights.byteLength;
-  const totalBytes = Number.isFinite(contentLength)
-    ? contentLength
-    : expectedDownloadBytes;
+  const totalBytes = Number.isFinite(contentLength) ? contentLength : expectedDownloadBytes;
 
   if (!response.body) {
     onProgress?.({
@@ -175,23 +171,15 @@ export async function decodeModelWeights(
   if (typeof DecompressionStream === "undefined") {
     throw new Error("this browser does not support DecompressionStream for gzip weights");
   }
-  const stream = new Blob([payload]).stream().pipeThrough(
-    new DecompressionStream("gzip"),
-  );
+  const stream = new Blob([payload]).stream().pipeThrough(new DecompressionStream("gzip"));
   const decoded = await new Response(stream).arrayBuffer();
   assertWeightsLength(decoded, manifest.weights.byteLength, "decoded weights");
   return decoded;
 }
 
-function assertWeightsLength(
-  weights: ArrayBuffer,
-  expectedBytes: number,
-  label: string,
-): void {
+function assertWeightsLength(weights: ArrayBuffer, expectedBytes: number, label: string): void {
   if (weights.byteLength !== expectedBytes) {
-    throw new Error(
-      `${label} has ${weights.byteLength} bytes, expected ${expectedBytes}`,
-    );
+    throw new Error(`${label} has ${weights.byteLength} bytes, expected ${expectedBytes}`);
   }
 }
 
@@ -210,10 +198,7 @@ function openModelCacheDb(): Promise<IDBDatabase | undefined> {
   });
 }
 
-function getCachedRecord(
-  db: IDBDatabase,
-  key: string,
-): Promise<CachedModelRecord | undefined> {
+function getCachedRecord(db: IDBDatabase, key: string): Promise<CachedModelRecord | undefined> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readonly");
     const request = tx.objectStore(STORE_NAME).get(key);
@@ -222,10 +207,7 @@ function getCachedRecord(
   });
 }
 
-function putCachedRecord(
-  db: IDBDatabase,
-  record: CachedModelRecord,
-): Promise<void> {
+function putCachedRecord(db: IDBDatabase, record: CachedModelRecord): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readwrite");
     tx.onerror = () => reject(tx.error ?? new Error("failed to write model cache"));

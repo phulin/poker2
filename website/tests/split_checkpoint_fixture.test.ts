@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { handComboIndex, parseCard } from "../src/cards.js";
 import { buildPublicBeliefs, normalizeBeliefVector } from "../src/beliefs.js";
 import { BrowserCfrEvaluator } from "../src/browserEvaluator.js";
+import { handComboIndex, parseCard } from "../src/cards.js";
 import { createDawnDevice } from "../src/gpu.js";
 import { readFloatBuffer } from "../src/gpuBuffers.js";
 import { initialUniformBeliefs, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js";
@@ -13,20 +13,12 @@ import { loadNodeModel } from "../src/nodeModel.js";
 import { SparseCfrResolver } from "../src/sparseResolver.js";
 
 const ROOT = join(import.meta.dirname, "..", "..");
-const FIXTURE_DIR = join(
-  import.meta.dirname,
-  "fixtures",
-  "rebel_296_4000",
-);
+const FIXTURE_DIR = join(import.meta.dirname, "fixtures", "rebel_296_4000");
 const CHECKPOINT = join(FIXTURE_DIR, "checkpoint.pt");
 const MANIFEST = join(FIXTURE_DIR, "model.json");
 const WEIGHTS = join(FIXTURE_DIR, "weights.bin.gz");
 const PREFLOP_ALL_IN = join(FIXTURE_DIR, "allin", "preflop.i16");
-const PYTORCH_PREFLOP_ALL_IN = join(
-  FIXTURE_DIR,
-  "allin",
-  "preflop_allin_table.pt.zst",
-);
+const PYTORCH_PREFLOP_ALL_IN = join(FIXTURE_DIR, "allin", "preflop_allin_table.pt.zst");
 
 interface SplitReference {
   schemaVersion: number;
@@ -85,10 +77,7 @@ function loadPythonReference(extraArgs: string[] = []): SplitReference {
   return JSON.parse(result.stdout) as SplitReference;
 }
 
-function loadPythonCfrReference(
-  iterations: number,
-  extraArgs: string[] = [],
-): SplitCfrReference {
+function loadPythonCfrReference(iterations: number, extraArgs: string[] = []): SplitCfrReference {
   const result = spawnSync(
     "uv",
     [
@@ -225,10 +214,7 @@ test("rebel_296_4000 WebGPU export matches PyTorch split checkpoint on root PBS"
       );
       const policyStart = expected.index * reference.numActions;
       assertCloseArray(
-        prediction.policyLogits.subarray(
-          policyStart,
-          policyStart + reference.numActions,
-        ),
+        prediction.policyLogits.subarray(policyStart, policyStart + reference.numActions),
         expected.policyLogits,
         3e-2,
         `${label} policy logits`,
@@ -282,11 +268,7 @@ test("rebel_296_4000 pre-chance value leaves use PyTorch street-boundary feature
   env.stepBin(1);
   env.stepBin(1);
   try {
-    const values = await model.predictBatchHandValues(
-      [env],
-      buildPublicBeliefs(),
-      [true],
-    );
+    const values = await model.predictBatchHandValues([env], buildPublicBeliefs(), [true]);
     for (const [label, expected] of Object.entries(reference.hands)) {
       assert.equal(
         expected.index,
@@ -294,10 +276,7 @@ test("rebel_296_4000 pre-chance value leaves use PyTorch street-boundary feature
         `${label} combo index`,
       );
       assertCloseArray(
-        [
-          values[expected.index]!,
-          values[NUM_HANDS + expected.index]!,
-        ],
+        [values[expected.index]!, values[NUM_HANDS + expected.index]!],
         expected.handValues,
         3e-5,
         `${label} pre-chance hand values`,
@@ -342,22 +321,15 @@ test("rebel_296_4000 shifted exact-belief value path matches dense pre-chance in
 
       const publicCards = env.boardIndices.filter((card) => card >= 0);
       const beliefs = buildPublicBeliefs({ publicCards });
-      beliefs.fill(
-        0,
-        testCase.exactPlayer * NUM_HANDS,
-        (testCase.exactPlayer + 1) * NUM_HANDS,
-      );
+      beliefs.fill(0, testCase.exactPlayer * NUM_HANDS, (testCase.exactPlayer + 1) * NUM_HANDS);
       beliefs[testCase.exactPlayer * NUM_HANDS + handIndex] = 1;
       const prepared = model.prepareBatchFeatures([env], [true]);
       try {
         const dense = await model.predictBatchHandValues([env], beliefs, [true]);
-        const exact = await model.predictBatchHandValuesGpu(
-          [env],
-          beliefs,
-          prepared,
-          undefined,
-          { player: testCase.exactPlayer, hand: handIndex },
-        );
+        const exact = await model.predictBatchHandValuesGpu([env], beliefs, prepared, undefined, {
+          player: testCase.exactPlayer,
+          hand: handIndex,
+        });
         try {
           const exactValues = await readFloatBuffer(
             device,
@@ -507,10 +479,7 @@ test("rebel_296_4000 sparse solve keeps AsKd mostly betting on root PBS", async 
       initialBeliefs: buildPublicBeliefs(),
       readPolicy: true,
     });
-    const policy = result.policy.subarray(
-      heroIndex * numActions,
-      (heroIndex + 1) * numActions,
-    );
+    const policy = result.policy.subarray(heroIndex * numActions, (heroIndex + 1) * numActions);
     const betMass = policy[4]! + policy[5]! + policy[6]! + policy[7]!;
     assert.ok(policy[1]! < 0.05, `AsKd call ${policy[1]} should stay low`);
     assert.ok(betMass > 0.95, `AsKd bet mass ${betMass} should stay high`);
@@ -572,10 +541,7 @@ test("rebel_296_4000 sparse solve matches PyTorch CFR on root PBS", async () => 
 
     const aces = reference.hands.AsAh!;
     const acesPolicyStart = aces.index * numActions;
-    const acesPolicy = result.policy.subarray(
-      acesPolicyStart,
-      acesPolicyStart + numActions,
-    );
+    const acesPolicy = result.policy.subarray(acesPolicyStart, acesPolicyStart + numActions);
     const acesBetMass = acesPolicy[4]! + acesPolicy[5]! + acesPolicy[6]! + acesPolicy[7]!;
     assert.ok(acesBetMass > 0.95, `AsAh bet mass ${acesBetMass} should stay high`);
   } finally {

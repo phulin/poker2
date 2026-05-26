@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createDawnDevice } from "../src/gpu.js";
 import { evaluateFixture } from "../src/evaluator.js";
+import { createDawnDevice } from "../src/gpu.js";
 import { loadPythonReference } from "../src/pythonBridge.js";
 
 function assertCloseArray(
@@ -30,18 +30,8 @@ test("Dawn WebGPU CFR kernel matches BetterFFN Python reference", async () => {
   try {
     const result = await evaluateFixture(device, fixture);
 
-    assertCloseArray(
-      result.beliefsAtSpot,
-      fixture.expected.beliefsAtSpot,
-      5e-6,
-      "beliefsAtSpot",
-    );
-    assertCloseArray(
-      result.actionProbs,
-      fixture.expected.actionProbs,
-      5e-6,
-      "actionProbs",
-    );
+    assertCloseArray(result.beliefsAtSpot, fixture.expected.beliefsAtSpot, 5e-6, "beliefsAtSpot");
+    assertCloseArray(result.actionProbs, fixture.expected.actionProbs, 5e-6, "actionProbs");
     assertCloseArray(result.policy, fixture.expected.policy, 5e-6, "policy");
   } finally {
     device.destroy();

@@ -1,8 +1,7 @@
 :root {
   color-scheme: light;
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #1c2526;
   background: #f6f7f4;
   font-synthesis: none;
@@ -18,8 +17,7 @@ body {
   min-width: 320px;
   min-height: 100vh;
   background:
-    linear-gradient(180deg, rgba(226, 232, 218, 0.72), rgba(246, 247, 244, 0) 260px),
-    #f6f7f4;
+    linear-gradient(180deg, rgba(226, 232, 218, 0.72), rgba(246, 247, 244, 0) 260px), #f6f7f4;
 }
 
 button,
@@ -319,7 +317,9 @@ h3 {
   border: 1px solid #b9c7c0;
   background: #e6ece8;
   padding: 0;
-  transition: background-color 120ms ease, border-color 120ms ease;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
 }
 
 .toggle.on {
@@ -1130,7 +1130,9 @@ h3 {
   background: #168575;
   border-radius: 0 0 4px 4px;
   opacity: calc(0.22 + var(--range-alpha, 0) * 0.66);
-  transition: height 160ms ease, opacity 160ms ease;
+  transition:
+    height 160ms ease,
+    opacity 160ms ease;
 }
 
 .range-matrix-cell.pair::before {
@@ -1163,7 +1165,9 @@ h3 {
   opacity: 0;
   pointer-events: none;
   transform: translate(-50%, 4px);
-  transition: opacity 120ms ease, transform 120ms ease;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
 }
 
 .range-popover::after {

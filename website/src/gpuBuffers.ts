@@ -10,11 +10,7 @@ export function makeStorageBuffer(
   const size = paddedSize(data.byteLength);
   const buffer = device.createBuffer({
     size,
-    usage:
-      GPUBufferUsage.STORAGE |
-      GPUBufferUsage.COPY_SRC |
-      GPUBufferUsage.COPY_DST |
-      extraUsage,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | extraUsage,
     mappedAtCreation: true,
   });
   const range = buffer.getMappedRange();
@@ -34,11 +30,7 @@ export function makeEmptyStorageBuffer(
 ): GPUBuffer {
   return device.createBuffer({
     size: paddedSize(elementCount * Float32Array.BYTES_PER_ELEMENT),
-    usage:
-      GPUBufferUsage.STORAGE |
-      GPUBufferUsage.COPY_SRC |
-      GPUBufferUsage.COPY_DST |
-      extraUsage,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | extraUsage,
   });
 }
 

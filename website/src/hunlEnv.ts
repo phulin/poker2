@@ -1,8 +1,3 @@
-import type {
-  BetterFfnManifest,
-  BrowserCfrInitialState,
-  PlayerIndex,
-} from "./types.js";
 import {
   assertUniqueCards,
   HAND_COMBOS,
@@ -10,6 +5,7 @@ import {
   handsOverlap,
   NUM_CARDS,
 } from "./cards.js";
+import type { BetterFfnManifest, BrowserCfrInitialState, PlayerIndex } from "./types.js";
 
 export const NUM_HANDS = 1326;
 export const DEFAULT_FORCE_DECK = [12, 25, 38, 51, 0, 13, 26, 1, 14];
@@ -129,14 +125,9 @@ export class PublicHunlEnv {
       bb: initialState?.bb ?? manifest.env.bb,
       betBins: initialState?.betBins ?? manifest.env.betBins,
       button: initialState?.button ?? manifest.env.defaultButton,
-      forceDeck:
-        initialState?.forceDeck ??
-        manifest.env.defaultForceDeck ??
-        DEFAULT_FORCE_DECK,
+      forceDeck: initialState?.forceDeck ?? manifest.env.defaultForceDeck ?? DEFAULT_FORCE_DECK,
       flopShowdown: initialState?.flopShowdown ?? manifest.env.flopShowdown,
-      ...(manifest.env.maxStackBb !== undefined
-        ? { maxStackBb: manifest.env.maxStackBb }
-        : {}),
+      ...(manifest.env.maxStackBb !== undefined ? { maxStackBb: manifest.env.maxStackBb } : {}),
     });
   }
 
@@ -183,10 +174,7 @@ export class PublicHunlEnv {
     heroHand?: readonly [number, number];
   }): void {
     const publicCards = options.publicCards ?? [];
-    assertUniqueCards([
-      ...publicCards,
-      ...(options.heroHand ? [...options.heroHand] : []),
-    ]);
+    assertUniqueCards([...publicCards, ...(options.heroHand ? [...options.heroHand] : [])]);
     const street = streetForPublicCardCount(publicCards.length);
 
     const knownPrivate: Array<number | undefined> = [
@@ -214,9 +202,7 @@ export class PublicHunlEnv {
         blocked.add(known);
         continue;
       }
-      const next = candidates.find(
-        (card) => !blocked.has(card) && !privateCards.includes(card),
-      );
+      const next = candidates.find((card) => !blocked.has(card) && !privateCards.includes(card));
       if (next === undefined) {
         throw new Error("could not construct deterministic deck placeholders");
       }
@@ -274,8 +260,7 @@ export class PublicHunlEnv {
       const additional = Math.trunc(this.betBins[i]! * this.pot);
       const amount = toCall + additional;
       amounts[bin] = amount;
-      mask[bin] =
-        canBetRaise && amount <= meStack && additional >= this.minRaise ? 1 : 0;
+      mask[bin] = canBetRaise && amount <= meStack && additional >= this.minRaise ? 1 : 0;
     }
 
     const allInIndex = numBins - 1;
@@ -382,9 +367,7 @@ export class PublicHunlEnv {
       (this.isAllin[0] && this.committed[0] <= this.committed[1]) ||
       (this.isAllin[1] && this.committed[1] <= this.committed[0]);
     const roundClosed =
-      !this.done &&
-      (equalCommitted || allInCommitted) &&
-      this.actionsThisRound >= 2;
+      !this.done && (equalCommitted || allInCommitted) && this.actionsThisRound >= 2;
 
     if (roundClosed) {
       this.committed = [0, 0];
@@ -438,8 +421,7 @@ export class PublicHunlEnv {
   private finishAndAssignRewards(winner: number): number {
     this.winner = winner;
     this.done = true;
-    const potShare =
-      winner === 0 ? this.pot : winner === 2 ? this.pot / 2.0 : 0.0;
+    const potShare = winner === 0 ? this.pot : winner === 2 ? this.pot / 2.0 : 0.0;
     return (this.stacks[0] + potShare - this.startingStacks[0]) / this.scale;
   }
 
@@ -484,8 +466,7 @@ export function showdownTerminalValues(
 
   const winValue = (env.stacks[0] + env.pot - env.startingStacks[0]) / env.scale;
   const loseValue = (env.stacks[0] - env.startingStacks[0]) / env.scale;
-  const tieValue =
-    (env.stacks[0] + env.pot / 2 - env.startingStacks[0]) / env.scale;
+  const tieValue = (env.stacks[0] + env.pot / 2 - env.startingStacks[0]) / env.scale;
   const payoffForPlayer0 = (cmp: number): number =>
     cmp > 0 ? winValue : cmp < 0 ? loseValue : tieValue;
 
@@ -544,7 +525,10 @@ function encodeRankCode(rank: RankVector): number {
   return out;
 }
 
-export function encodeBetterFeatures(env: PublicHunlEnv, valuePreChance = false): {
+export function encodeBetterFeatures(
+  env: PublicHunlEnv,
+  valuePreChance = false,
+): {
   context: Float32Array<ArrayBuffer>;
   policyContext: Float32Array<ArrayBuffer>;
   valueContext: Float32Array<ArrayBuffer>;
@@ -589,9 +573,7 @@ export function encodeBetterFeatures(env: PublicHunlEnv, valuePreChance = false)
   const valueContext = new Float32Array(shared);
   valueContext[2] = valuePreChance ? 1 : 0;
   const street =
-    valuePreChance && env.actionsThisRound === 0
-      ? Math.max(0, env.street - 1)
-      : env.street;
+    valuePreChance && env.actionsThisRound === 0 ? Math.max(0, env.street - 1) : env.street;
   return {
     context: legacyContext,
     policyContext,
@@ -613,13 +595,7 @@ function evaluateSeven(cards: number[]): RankVector {
       for (let c = b + 1; c < 5; c += 1) {
         for (let d = c + 1; d < 6; d += 1) {
           for (let e = d + 1; e < 7; e += 1) {
-            const rank = evaluateFive([
-              cards[a]!,
-              cards[b]!,
-              cards[c]!,
-              cards[d]!,
-              cards[e]!,
-            ]);
+            const rank = evaluateFive([cards[a]!, cards[b]!, cards[c]!, cards[d]!, cards[e]!]);
             if (!best || compareRanks(rank, best) > 0) best = rank;
           }
         }
@@ -637,9 +613,7 @@ function evaluateFive(cards: number[]): RankVector {
   const straightHigh = getStraightHigh(ranks);
   const counts = new Map<number, number>();
   for (const rank of ranks) counts.set(rank, (counts.get(rank) ?? 0) + 1);
-  const groups = [...counts.entries()].sort(
-    (a, b) => b[1] - a[1] || b[0] - a[0],
-  );
+  const groups = [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]);
 
   if (flush && straightHigh >= 0) return [8, straightHigh];
   if (groups[0]?.[1] === 4) {
@@ -653,11 +627,7 @@ function evaluateFive(cards: number[]): RankVector {
   if (flush) return [5, ...ranks];
   if (straightHigh >= 0) return [4, straightHigh];
   if (groups[0]?.[1] === 3) {
-    return [
-      3,
-      groups[0][0],
-      ...groups.filter(([, count]) => count === 1).map(([rank]) => rank),
-    ];
+    return [3, groups[0][0], ...groups.filter(([, count]) => count === 1).map(([rank]) => rank)];
   }
   if (groups[0]?.[1] === 2 && groups[1]?.[1] === 2) {
     const pairRanks = groups
@@ -668,11 +638,7 @@ function evaluateFive(cards: number[]): RankVector {
     return [2, ...pairRanks, kicker];
   }
   if (groups[0]?.[1] === 2) {
-    return [
-      1,
-      groups[0][0],
-      ...groups.filter(([, count]) => count === 1).map(([rank]) => rank),
-    ];
+    return [1, groups[0][0], ...groups.filter(([, count]) => count === 1).map(([rank]) => rank)];
   }
   return [0, ...ranks];
 }

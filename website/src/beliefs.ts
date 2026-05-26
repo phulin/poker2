@@ -1,8 +1,4 @@
-import {
-  assertUniqueCards,
-  handOverlapsCards,
-  NUM_HAND_COMBOS,
-} from "./cards.js";
+import { assertUniqueCards, handOverlapsCards, NUM_HAND_COMBOS } from "./cards.js";
 import type { PlayerIndex } from "./types.js";
 
 export function normalizeBeliefVector(
@@ -32,9 +28,7 @@ export function normalizeBeliefs(
   input: Float32Array<ArrayBufferLike> | ArrayLike<number>,
 ): Float32Array<ArrayBuffer> {
   if (input.length !== 2 * NUM_HAND_COMBOS) {
-    throw new Error(
-      `initialBeliefs has ${input.length} entries, expected ${2 * NUM_HAND_COMBOS}`,
-    );
+    throw new Error(`initialBeliefs has ${input.length} entries, expected ${2 * NUM_HAND_COMBOS}`);
   }
   const beliefs = new Float32Array(2 * NUM_HAND_COMBOS);
   for (let i = 0; i < input.length; i += 1) {
@@ -45,9 +39,9 @@ export function normalizeBeliefs(
   return beliefs;
 }
 
-export function buildPublicBeliefs(options: {
-  publicCards?: readonly number[];
-} = {}): Float32Array<ArrayBuffer> {
+export function buildPublicBeliefs(
+  options: { publicCards?: readonly number[] } = {},
+): Float32Array<ArrayBuffer> {
   const publicCards = options.publicCards ?? [];
   assertUniqueCards(publicCards);
 

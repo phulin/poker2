@@ -1,15 +1,8 @@
 import { createManifestAllInTableProvider } from "./allInTables.js";
-import {
-  BetterFfnWebGpuModel,
-  createBrowserCfrEvaluator,
-  createBrowserDevice,
-} from "./browser.js";
-import { loadModelBytesWithCache } from "./modelCache.js";
+import { BetterFfnWebGpuModel, createBrowserCfrEvaluator, createBrowserDevice } from "./browser.js";
 import type { BrowserCfrEvaluator } from "./browserEvaluator.js";
-import type {
-  SolverWorkerRequest,
-  SolverWorkerResponse,
-} from "./solverWorkerMessages.js";
+import { loadModelBytesWithCache } from "./modelCache.js";
+import type { SolverWorkerRequest, SolverWorkerResponse } from "./solverWorkerMessages.js";
 
 const workerScope = globalThis as unknown as {
   addEventListener: (
@@ -52,11 +45,7 @@ async function initRuntime(manifestUrl: string): Promise<void> {
       type: "model-progress",
       progress: { phase: "manifest", message: "Creating WebGPU model" },
     });
-    const nextModel = BetterFfnWebGpuModel.fromBuffers(
-      nextDevice,
-      loaded.manifest,
-      loaded.weights,
-    );
+    const nextModel = BetterFfnWebGpuModel.fromBuffers(nextDevice, loaded.manifest, loaded.weights);
     nextModel.allInTableProvider = createManifestAllInTableProvider(
       nextModel.manifest,
       absoluteManifestUrl,
@@ -79,9 +68,7 @@ async function initRuntime(manifestUrl: string): Promise<void> {
       type: "model-progress",
       progress: {
         phase: loaded.cached ? "cache-hit" : "stored",
-        message: loaded.cached
-          ? "Model loaded from IndexedDB"
-          : "Model loaded and cached",
+        message: loaded.cached ? "Model loaded from IndexedDB" : "Model loaded and cached",
       },
     });
   })();

@@ -1,18 +1,9 @@
 import { performance } from "node:perf_hooks";
-import {
-  makeEmptyStorageBuffer,
-  makeStorageBuffer,
-  readFloatBuffer,
-} from "./gpuBuffers.js";
 import { createDawnDevice } from "./gpu.js";
-import {
-  SparseCfrGpuKernels,
-} from "./sparseCfr/SparseCfrGpuKernels.js";
-import type {
-  SparseGpuTreeBuffers,
-  SparseGpuTreeData,
-} from "./sparseCfr/treeBuffers.js";
+import { makeEmptyStorageBuffer, makeStorageBuffer, readFloatBuffer } from "./gpuBuffers.js";
 import { NUM_HANDS } from "./hunlEnv.js";
+import { SparseCfrGpuKernels } from "./sparseCfr/SparseCfrGpuKernels.js";
+import type { SparseGpuTreeBuffers, SparseGpuTreeData } from "./sparseCfr/treeBuffers.js";
 
 interface Options {
   warmups: number;
@@ -196,12 +187,7 @@ function overlapData(
     const a = card0[hand]!;
     const b = card1[hand]!;
     for (let other = 0; other < NUM_HANDS; other += 1) {
-      if (
-        card0[other] === a ||
-        card0[other] === b ||
-        card1[other] === a ||
-        card1[other] === b
-      ) {
+      if (card0[other] === a || card0[other] === b || card1[other] === a || card1[other] === b) {
         overlaps.push(other);
       }
     }
@@ -258,7 +244,7 @@ function makeTreeData(): { data: SparseGpuTreeData; depthOffsets: number[] } {
   for (let node = 0; node < nodeCount; node += 1) {
     let allowed = 0;
     for (let hand = 0; hand < NUM_HANDS; hand += 1) {
-      const ok = ((hand * 17 + node * 31) % 97) !== 0;
+      const ok = (hand * 17 + node * 31) % 97 !== 0;
       allowedMask[node * NUM_HANDS + hand] = ok ? 1 : 0;
       if (ok) allowed += 1;
     }
@@ -301,7 +287,7 @@ function normalizeBeliefs(data: SparseGpuTreeData): Float32Array<ArrayBuffer> {
       const base = (node * 2 + player) * NUM_HANDS;
       for (let hand = 0; hand < NUM_HANDS; hand += 1) {
         const value = data.allowedMask[node * NUM_HANDS + hand]
-          ? 0.5 + (((hand * 13 + node * 7 + player * 19) % 1000) / 1000)
+          ? 0.5 + ((hand * 13 + node * 7 + player * 19) % 1000) / 1000
           : 0;
         out[base + hand] = value;
         sum += value;
@@ -335,7 +321,10 @@ function makePolicy(data: SparseGpuTreeData): Float32Array<ArrayBuffer> {
   return out;
 }
 
-function makeRankOrdinals(batch: number, maxRanks: number): {
+function makeRankOrdinals(
+  batch: number,
+  maxRanks: number,
+): {
   ordinals: Uint32Array<ArrayBuffer>;
   counts: Uint32Array<ArrayBuffer>;
   handOffsets: Uint32Array<ArrayBuffer>;
@@ -449,7 +438,10 @@ function makeBenchData(device: GPUDevice): SparseBenchData {
   };
 }
 
-function diffStats(a: Float32Array<ArrayBufferLike>, b: Float32Array<ArrayBufferLike>): {
+function diffStats(
+  a: Float32Array<ArrayBufferLike>,
+  b: Float32Array<ArrayBufferLike>,
+): {
   maxDiff: number;
   maxIndex: number;
   referenceValue: number;
@@ -572,8 +564,14 @@ async function timeOpEnvInterleaved(
   for (let round = 0; round < rounds; round += 1) {
     const baselineFirst = round % 2 === 0;
     for (const item of baselineFirst
-      ? ([["baseline", baselineValue], ["candidate", candidateValue]] as const)
-      : ([["candidate", candidateValue], ["baseline", baselineValue]] as const)) {
+      ? ([
+          ["baseline", baselineValue],
+          ["candidate", candidateValue],
+        ] as const)
+      : ([
+          ["candidate", candidateValue],
+          ["baseline", baselineValue],
+        ] as const)) {
       const [name, value] = item;
       setVariantEnv(envName, value);
       const encoder = device.createCommandEncoder();
@@ -595,7 +593,11 @@ async function timeOpEnvInterleaved(
   return samples;
 }
 
-function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseBenchData): BenchOp[] {
+function buildOps(
+  device: GPUDevice,
+  kernels: SparseCfrGpuKernels,
+  data: SparseBenchData,
+): BenchOp[] {
   const start = 1;
   const end = data.nodeCount;
   const lastParentStart = data.depthOffsets[data.depthOffsets.length - 3]!;
@@ -617,8 +619,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
       name: "regret_match",
       output: data.policy,
       outputElements: data.policyCount,
-      encode: (encoder) =>
-        kernels.encodeRegretMatch(encoder, data.tree, data.regrets, data.policy),
+      encode: (encoder) => kernels.encodeRegretMatch(encoder, data.tree, data.regrets, data.policy),
     },
     {
       name: "regret_weight_reference",
@@ -717,12 +718,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
             end,
           ),
         );
-        return validatePair(
-          reference,
-          candidate,
-          data.policyCount,
-          "regret_weight_reference",
-        );
+        return validatePair(reference, candidate, data.policyCount, "regret_weight_reference");
       },
     },
     {
@@ -890,12 +886,7 @@ function buildOps(device: GPUDevice, kernels: SparseCfrGpuKernels, data: SparseB
             end,
           ),
         );
-        return validatePair(
-          reference,
-          candidate,
-          data.policyCount,
-          "opponent_policy_reference",
-        );
+        return validatePair(reference, candidate, data.policyCount, "opponent_policy_reference");
       },
     },
     {
@@ -1613,13 +1604,7 @@ async function main(): Promise<void> {
   const results = [];
   for (const op of ops) {
     const validation = options.validate && op.validate ? await op.validate() : undefined;
-    const samples = await timeOp(
-      device,
-      op,
-      options.warmups,
-      options.runs,
-      options.dispatches,
-    );
+    const samples = await timeOp(device, op, options.warmups, options.runs, options.dispatches);
     results.push({
       name: op.name,
       outputElements: op.outputElements,
