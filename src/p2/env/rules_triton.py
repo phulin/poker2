@@ -36,8 +36,7 @@ def _validate_input(ab_batch: torch.Tensor) -> torch.Tensor:
 def compare_7_single_batch_triton(ab_batch: torch.Tensor) -> torch.Tensor:
     """CUDA Triton implementation of ``compare_7_single_batch``.
 
-    This mirrors the current ``rules.py`` comparison semantics, including the
-    existing straight-selection behavior for hands with multiple straights.
+    This mirrors ``rules.py`` comparison semantics.
     """
     ab_batch_i8 = _validate_input(ab_batch)
     out = torch.empty((ab_batch_i8.shape[0],), device=ab_batch_i8.device, dtype=torch.int32)
@@ -203,19 +202,8 @@ if triton is not None:
         rank_bits = tl.where(valid_ranks, tl.full([RANK_LANES], 1, tl.int32) << ranks, 0)
         rank_mask = tl.sum(tl.where(rank_presence, rank_bits, 0), axis=0)
         quads = tl.sum(tl.where(rank_counts == 4, rank_bits, 0), axis=0)
-        trips = tl.sum(tl.where(rank_counts == 3, rank_bits, 0), axis=0)
-        pairs = tl.sum(tl.where(rank_counts == 2, rank_bits, 0), axis=0)
-        singles = tl.sum(tl.where(rank_counts == 1, rank_bits, 0), axis=0)
-        zeros = ((tl.full((), 1, tl.int32) << 13) - 1) & ~rank_mask
-
-        top_scores_0, top_idx_0, quads, trips, pairs, singles, zeros = _pop_top_rank(quads, trips, pairs, singles, zeros)
-        top_scores_1, top_idx_1, quads, trips, pairs, singles, zeros = _pop_top_rank(quads, trips, pairs, singles, zeros)
-        top_scores_2, top_idx_2, quads, trips, pairs, singles, zeros = _pop_top_rank(quads, trips, pairs, singles, zeros)
-        top_scores_3, top_idx_3, quads, trips, pairs, singles, zeros = _pop_top_rank(quads, trips, pairs, singles, zeros)
-        top_scores_4, top_idx_4, quads, trips, pairs, singles, zeros = _pop_top_rank(quads, trips, pairs, singles, zeros)
-
-        top_val_0 = top_scores_0 // 16
-        top_val_1 = top_scores_1 // 16
+        trips_or_better = tl.sum(tl.where(rank_counts >= 3, rank_bits, 0), axis=0)
+        pairs_or_better = tl.sum(tl.where(rank_counts >= 2, rank_bits, 0), axis=0)
 
         suit_count_0 = tl.sum(suit0, axis=0)
         suit_count_1 = tl.sum(suit1, axis=0)
@@ -251,31 +239,34 @@ if triton is not None:
         flush_idx_3, flush_mask = _pop_highest_rank(flush_mask)
         flush_idx_4, flush_mask = _pop_highest_rank(flush_mask)
 
-        straight_found = tl.full((), 0, tl.int32)
-        straight_low = tl.full((), 0, tl.int32)
-        for low in range(10):
-            if low == 0:
-                straight_mask = (tl.full((), 1, tl.int32) << 12) | 15
-            else:
-                straight_mask = 31 << (low - 1)
-            hit = (rank_mask & straight_mask) == straight_mask
-            straight_low = tl.where((straight_found == 0) & hit, low, straight_low)
-            straight_found = straight_found | hit.to(tl.int32)
+        straight_found, straight_high = _straight_high(rank_mask)
+        sf_found_0, sf_high_0 = _straight_high(suit_mask_0)
+        sf_found_1, sf_high_1 = _straight_high(suit_mask_1)
+        sf_found_2, sf_high_2 = _straight_high(suit_mask_2)
+        sf_found_3, sf_high_3 = _straight_high(suit_mask_3)
+        sf_found = sf_found_0 | sf_found_1 | sf_found_2 | sf_found_3
+        sf_high = tl.maximum(
+            tl.maximum(tl.where(sf_found_0 > 0, sf_high_0, 0), tl.where(sf_found_1 > 0, sf_high_1, 0)),
+            tl.maximum(tl.where(sf_found_2 > 0, sf_high_2, 0), tl.where(sf_found_3 > 0, sf_high_3, 0)),
+        )
 
-        sf_found = tl.full((), 0, tl.int32)
-        sf_high = tl.full((), 0, tl.int32)
-        for low in range(10):
-            if low == 0:
-                sf_mask = (tl.full((), 1, tl.int32) << 12) | 15
-            else:
-                sf_mask = 31 << (low - 1)
-            hit0 = (suit_mask_0 & sf_mask) == sf_mask
-            hit1 = (suit_mask_1 & sf_mask) == sf_mask
-            hit2 = (suit_mask_2 & sf_mask) == sf_mask
-            hit3 = (suit_mask_3 & sf_mask) == sf_mask
-            hit = hit0 | hit1 | hit2 | hit3
-            sf_high = tl.where(hit, low, sf_high)
-            sf_found = sf_found | hit.to(tl.int32)
+        quad_rank, _ = _pop_highest_rank(quads)
+        quad_kicker, _ = _pop_highest_rank(_clear_rank(rank_mask, quad_rank))
+        trip_rank, _ = _pop_highest_rank(trips_or_better)
+        pair_for_boat, _ = _pop_highest_rank(_clear_rank(pairs_or_better, trip_rank))
+        trip_kicker_0, trip_kickers = _pop_highest_rank(_clear_rank(rank_mask, trip_rank))
+        trip_kicker_1, _ = _pop_highest_rank(trip_kickers)
+        pair_rank_0, pair_ranks_rest = _pop_highest_rank(pairs_or_better)
+        pair_rank_1, _ = _pop_highest_rank(pair_ranks_rest)
+        two_pair_kicker, _ = _pop_highest_rank(_clear_rank(_clear_rank(rank_mask, pair_rank_0), pair_rank_1))
+        one_pair_kicker_0, one_pair_kickers = _pop_highest_rank(_clear_rank(rank_mask, pair_rank_0))
+        one_pair_kicker_1, one_pair_kickers = _pop_highest_rank(one_pair_kickers)
+        one_pair_kicker_2, _ = _pop_highest_rank(one_pair_kickers)
+        high_idx_0, high_rest = _pop_highest_rank(rank_mask)
+        high_idx_1, high_rest = _pop_highest_rank(high_rest)
+        high_idx_2, high_rest = _pop_highest_rank(high_rest)
+        high_idx_3, high_rest = _pop_highest_rank(high_rest)
+        high_idx_4, _ = _pop_highest_rank(high_rest)
 
         straight_flush_score = _pack_fields(
             sf_found * 9,
@@ -286,18 +277,18 @@ if triton is not None:
             0,
         )
         four_kind_score = _pack_fields(
-            (top_val_0 >= 4) * 8,
-            tl.where(top_val_0 >= 4, top_idx_0, 0),
-            tl.where(top_val_0 >= 4, top_idx_1, 0),
+            (quads != 0) * 8,
+            tl.where(quads != 0, quad_rank, 0),
+            tl.where(quads != 0, quad_kicker, 0),
             0,
             0,
             0,
         )
-        full_house_mask = (top_val_0 >= 3) & (top_val_1 >= 2)
+        full_house_mask = (trips_or_better != 0) & (_clear_rank(pairs_or_better, trip_rank) != 0)
         full_house_score = _pack_fields(
             full_house_mask * 7,
-            tl.where(full_house_mask, top_idx_0, 0),
-            tl.where(full_house_mask, top_idx_1, 0),
+            tl.where(full_house_mask, trip_rank, 0),
+            tl.where(full_house_mask, pair_for_boat, 0),
             0,
             0,
             0,
@@ -312,40 +303,40 @@ if triton is not None:
         )
         straight_score = _pack_fields(
             straight_found * 5,
-            tl.where(straight_found > 0, straight_low, 0),
+            tl.where(straight_found > 0, straight_high, 0),
             0,
             0,
             0,
             0,
         )
-        three_kind_mask = top_val_0 >= 3
+        three_kind_mask = trips_or_better != 0
         three_kind_score = _pack_fields(
             three_kind_mask * 4,
-            tl.where(three_kind_mask, top_idx_0, 0),
-            tl.where(three_kind_mask, top_idx_1, 0),
-            tl.where(three_kind_mask, top_idx_2, 0),
+            tl.where(three_kind_mask, trip_rank, 0),
+            tl.where(three_kind_mask, trip_kicker_0, 0),
+            tl.where(three_kind_mask, trip_kicker_1, 0),
             0,
             0,
         )
-        two_pair_mask = (top_val_0 >= 2) & (top_val_1 >= 2)
+        two_pair_mask = pair_ranks_rest != 0
         two_pair_score = _pack_fields(
             two_pair_mask * 3,
-            tl.where(two_pair_mask, top_idx_0, 0),
-            tl.where(two_pair_mask, top_idx_1, 0),
-            tl.where(two_pair_mask, top_idx_2, 0),
+            tl.where(two_pair_mask, pair_rank_0, 0),
+            tl.where(two_pair_mask, pair_rank_1, 0),
+            tl.where(two_pair_mask, two_pair_kicker, 0),
             0,
             0,
         )
-        one_pair_mask = top_val_0 >= 2
+        one_pair_mask = pairs_or_better != 0
         one_pair_score = _pack_fields(
             one_pair_mask * 2,
-            tl.where(one_pair_mask, top_idx_0, 0),
-            tl.where(one_pair_mask, top_idx_1, 0),
-            tl.where(one_pair_mask, top_idx_2, 0),
-            tl.where(one_pair_mask, top_idx_3, 0),
+            tl.where(one_pair_mask, pair_rank_0, 0),
+            tl.where(one_pair_mask, one_pair_kicker_0, 0),
+            tl.where(one_pair_mask, one_pair_kicker_1, 0),
+            tl.where(one_pair_mask, one_pair_kicker_2, 0),
             0,
         )
-        high_card_score = _pack_fields(1, top_idx_0, top_idx_1, top_idx_2, top_idx_3, top_idx_4)
+        high_card_score = _pack_fields(1, high_idx_0, high_idx_1, high_idx_2, high_idx_3, high_idx_4)
 
         score = high_card_score
         score = tl.maximum(score, one_pair_score)
@@ -357,6 +348,27 @@ if triton is not None:
         score = tl.maximum(score, four_kind_score)
         score = tl.maximum(score, straight_flush_score)
         return score
+
+
+    @triton.jit
+    def _clear_rank(rank_mask, rank):
+        return rank_mask & ~(tl.full((), 1, tl.int32) << rank)
+
+
+    @triton.jit
+    def _straight_high(rank_mask):
+        found = tl.full((), 0, tl.int32)
+        high = tl.full((), 0, tl.int32)
+        wheel_mask = (tl.full((), 1, tl.int32) << 12) | 15
+        wheel = (rank_mask & wheel_mask) == wheel_mask
+        found = found | wheel.to(tl.int32)
+        high = tl.where(wheel, 3, high)
+        for low in range(1, 10):
+            straight_mask = 31 << (low - 1)
+            hit = (rank_mask & straight_mask) == straight_mask
+            found = found | hit.to(tl.int32)
+            high = tl.where(hit, low + 3, high)
+        return found, high
 
 
     @triton.jit
@@ -440,19 +452,6 @@ if triton is not None:
             seen = seen | bit
 
         rank_mask = seen
-        trips = trips_or_better & ~quads
-        pairs = pairs_or_better & ~trips_or_better
-        singles = seen & ~pairs_or_better
-        zeros = ((tl.full((), 1, tl.int32) << 13) - 1) & ~seen
-
-        top_scores_0, top_idx_0, quads, trips, pairs, singles, zeros = _pop_top_rank(quads, trips, pairs, singles, zeros)
-        top_scores_1, top_idx_1, quads, trips, pairs, singles, zeros = _pop_top_rank(quads, trips, pairs, singles, zeros)
-        top_scores_2, top_idx_2, quads, trips, pairs, singles, zeros = _pop_top_rank(quads, trips, pairs, singles, zeros)
-        top_scores_3, top_idx_3, quads, trips, pairs, singles, zeros = _pop_top_rank(quads, trips, pairs, singles, zeros)
-        top_scores_4, top_idx_4, quads, trips, pairs, singles, zeros = _pop_top_rank(quads, trips, pairs, singles, zeros)
-
-        top_val_0 = top_scores_0 // 16
-        top_val_1 = top_scores_1 // 16
 
         flush_score_0 = tl.where(suit_count_0 >= 5, 0, -1)
         flush_score_1 = tl.where(suit_count_1 >= 5, 1, -1)
@@ -478,26 +477,34 @@ if triton is not None:
         flush_idx_3, flush_mask = _pop_highest_rank(flush_mask)
         flush_idx_4, flush_mask = _pop_highest_rank(flush_mask)
 
-        straight_found = tl.full((), 0, tl.int32)
-        straight_low = tl.full((), 0, tl.int32)
-        sf_found = tl.full((), 0, tl.int32)
-        sf_high = tl.full((), 0, tl.int32)
-        for low in range(10):
-            if low == 0:
-                straight_mask = (tl.full((), 1, tl.int32) << 12) | 15
-            else:
-                straight_mask = 31 << (low - 1)
-            hit = (rank_mask & straight_mask) == straight_mask
-            straight_low = tl.where((straight_found == 0) & hit, low, straight_low)
-            straight_found = straight_found | hit.to(tl.int32)
+        straight_found, straight_high = _straight_high(rank_mask)
+        sf_found_0, sf_high_0 = _straight_high(suit_mask_0)
+        sf_found_1, sf_high_1 = _straight_high(suit_mask_1)
+        sf_found_2, sf_high_2 = _straight_high(suit_mask_2)
+        sf_found_3, sf_high_3 = _straight_high(suit_mask_3)
+        sf_found = sf_found_0 | sf_found_1 | sf_found_2 | sf_found_3
+        sf_high = tl.maximum(
+            tl.maximum(tl.where(sf_found_0 > 0, sf_high_0, 0), tl.where(sf_found_1 > 0, sf_high_1, 0)),
+            tl.maximum(tl.where(sf_found_2 > 0, sf_high_2, 0), tl.where(sf_found_3 > 0, sf_high_3, 0)),
+        )
 
-            hit0 = (suit_mask_0 & straight_mask) == straight_mask
-            hit1 = (suit_mask_1 & straight_mask) == straight_mask
-            hit2 = (suit_mask_2 & straight_mask) == straight_mask
-            hit3 = (suit_mask_3 & straight_mask) == straight_mask
-            sf_hit = hit0 | hit1 | hit2 | hit3
-            sf_high = tl.where(sf_hit, low, sf_high)
-            sf_found = sf_found | sf_hit.to(tl.int32)
+        quad_rank, _ = _pop_highest_rank(quads)
+        quad_kicker, _ = _pop_highest_rank(_clear_rank(rank_mask, quad_rank))
+        trip_rank, _ = _pop_highest_rank(trips_or_better)
+        pair_for_boat, _ = _pop_highest_rank(_clear_rank(pairs_or_better, trip_rank))
+        trip_kicker_0, trip_kickers = _pop_highest_rank(_clear_rank(rank_mask, trip_rank))
+        trip_kicker_1, _ = _pop_highest_rank(trip_kickers)
+        pair_rank_0, pair_ranks_rest = _pop_highest_rank(pairs_or_better)
+        pair_rank_1, _ = _pop_highest_rank(pair_ranks_rest)
+        two_pair_kicker, _ = _pop_highest_rank(_clear_rank(_clear_rank(rank_mask, pair_rank_0), pair_rank_1))
+        one_pair_kicker_0, one_pair_kickers = _pop_highest_rank(_clear_rank(rank_mask, pair_rank_0))
+        one_pair_kicker_1, one_pair_kickers = _pop_highest_rank(one_pair_kickers)
+        one_pair_kicker_2, _ = _pop_highest_rank(one_pair_kickers)
+        high_idx_0, high_rest = _pop_highest_rank(rank_mask)
+        high_idx_1, high_rest = _pop_highest_rank(high_rest)
+        high_idx_2, high_rest = _pop_highest_rank(high_rest)
+        high_idx_3, high_rest = _pop_highest_rank(high_rest)
+        high_idx_4, _ = _pop_highest_rank(high_rest)
 
         straight_flush_score = _pack_fields(
             sf_found * 9,
@@ -508,18 +515,18 @@ if triton is not None:
             0,
         )
         four_kind_score = _pack_fields(
-            (top_val_0 >= 4) * 8,
-            tl.where(top_val_0 >= 4, top_idx_0, 0),
-            tl.where(top_val_0 >= 4, top_idx_1, 0),
+            (quads != 0) * 8,
+            tl.where(quads != 0, quad_rank, 0),
+            tl.where(quads != 0, quad_kicker, 0),
             0,
             0,
             0,
         )
-        full_house_mask = (top_val_0 >= 3) & (top_val_1 >= 2)
+        full_house_mask = (trips_or_better != 0) & (_clear_rank(pairs_or_better, trip_rank) != 0)
         full_house_score = _pack_fields(
             full_house_mask * 7,
-            tl.where(full_house_mask, top_idx_0, 0),
-            tl.where(full_house_mask, top_idx_1, 0),
+            tl.where(full_house_mask, trip_rank, 0),
+            tl.where(full_house_mask, pair_for_boat, 0),
             0,
             0,
             0,
@@ -534,40 +541,40 @@ if triton is not None:
         )
         straight_score = _pack_fields(
             straight_found * 5,
-            tl.where(straight_found > 0, straight_low, 0),
+            tl.where(straight_found > 0, straight_high, 0),
             0,
             0,
             0,
             0,
         )
-        three_kind_mask = top_val_0 >= 3
+        three_kind_mask = trips_or_better != 0
         three_kind_score = _pack_fields(
             three_kind_mask * 4,
-            tl.where(three_kind_mask, top_idx_0, 0),
-            tl.where(three_kind_mask, top_idx_1, 0),
-            tl.where(three_kind_mask, top_idx_2, 0),
+            tl.where(three_kind_mask, trip_rank, 0),
+            tl.where(three_kind_mask, trip_kicker_0, 0),
+            tl.where(three_kind_mask, trip_kicker_1, 0),
             0,
             0,
         )
-        two_pair_mask = (top_val_0 >= 2) & (top_val_1 >= 2)
+        two_pair_mask = pair_ranks_rest != 0
         two_pair_score = _pack_fields(
             two_pair_mask * 3,
-            tl.where(two_pair_mask, top_idx_0, 0),
-            tl.where(two_pair_mask, top_idx_1, 0),
-            tl.where(two_pair_mask, top_idx_2, 0),
+            tl.where(two_pair_mask, pair_rank_0, 0),
+            tl.where(two_pair_mask, pair_rank_1, 0),
+            tl.where(two_pair_mask, two_pair_kicker, 0),
             0,
             0,
         )
-        one_pair_mask = top_val_0 >= 2
+        one_pair_mask = pairs_or_better != 0
         one_pair_score = _pack_fields(
             one_pair_mask * 2,
-            tl.where(one_pair_mask, top_idx_0, 0),
-            tl.where(one_pair_mask, top_idx_1, 0),
-            tl.where(one_pair_mask, top_idx_2, 0),
-            tl.where(one_pair_mask, top_idx_3, 0),
+            tl.where(one_pair_mask, pair_rank_0, 0),
+            tl.where(one_pair_mask, one_pair_kicker_0, 0),
+            tl.where(one_pair_mask, one_pair_kicker_1, 0),
+            tl.where(one_pair_mask, one_pair_kicker_2, 0),
             0,
         )
-        high_card_score = _pack_fields(1, top_idx_0, top_idx_1, top_idx_2, top_idx_3, top_idx_4)
+        high_card_score = _pack_fields(1, high_idx_0, high_idx_1, high_idx_2, high_idx_3, high_idx_4)
 
         score = high_card_score
         score = tl.maximum(score, one_pair_score)

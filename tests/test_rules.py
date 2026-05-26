@@ -110,6 +110,21 @@ def test_straight_vs_straight_highcard():
     assert_all_compares(a, b, 1)
 
 
+def test_straight_uses_highest_available_straight():
+    # A has wheel plus 6 and 7, so the best straight is 3-4-5-6-7.
+    a = [C(12, 0), C(0, 1), C(1, 2), C(2, 3), C(3, 0), C(4, 1), C(5, 2)]
+    # B only has the wheel.
+    b = [C(12, 1), C(0, 2), C(1, 3), C(2, 0), C(3, 1), C(9, 2), C(10, 3)]
+    assert_all_compares(a, b, 1)
+
+
+def test_quads_kicker_uses_highest_remaining_rank():
+    # Both have quad 2s. A's best kicker is an ace; B has a lower paired kicker.
+    a = [C(0, 0), C(0, 1), C(0, 2), C(0, 3), C(12, 0), C(4, 1), C(5, 2)]
+    b = [C(0, 0), C(0, 1), C(0, 2), C(0, 3), C(11, 0), C(11, 1), C(10, 2)]
+    assert_all_compares(a, b, 1)
+
+
 def test_three_kind_vs_two_pair():
     # Trips 7s vs two pair 9s and 2s
     a = [C(5, 0), C(5, 1), C(5, 2), C(12, 0), C(11, 0), C(2, 1), C(3, 2)]

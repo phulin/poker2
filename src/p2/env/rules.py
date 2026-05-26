@@ -152,61 +152,83 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
         N, P, HandType.NUM_HAND_TYPES.value, 6, device=device, dtype=dtype
     )
 
-    # Sort ranks by count (descending), then by rank (descending)
-    # Use topk instead of full argsort for better performance
     rank_sum = ab_batch.sum(dim=2, dtype=dtype)  # [N, P, 13]
-    composite_key = (rank_sum << 8) | torch.arange(13, device=device, dtype=dtype)
-    top_ranks_values, top_ranks_indices = torch.topk(
-        composite_key, k=5, dim=2
-    )  # [N, P, 5] - only need top 5 for all hand types
-    top_ranks_values = top_ranks_values >> 8  # Convert back to actual counts
+    rank_values = torch.arange(13, device=device, dtype=dtype)
+    rank_values_b = rank_values.view(1, 1, 13)
+    rank_present = rank_sum > 0
+
+    def top_ranks(mask: torch.Tensor, k: int) -> torch.Tensor:
+        scores = torch.where(mask, rank_values_b, -torch.ones((), dtype=dtype, device=device))
+        return torch.topk(scores, k=k, dim=2).values
+
+    def exclude_ranks(*ranks: torch.Tensor) -> torch.Tensor:
+        mask = rank_present
+        for r in ranks:
+            mask = mask & (rank_values_b != r.unsqueeze(-1))
+        return mask
+
+    def straight_high_from_presence(presence: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        regular = presence.unfold(-1, 5, 1).all(dim=-1)
+        regular_highs = torch.arange(4, 13, device=device, dtype=dtype)
+        regular_high = torch.where(
+            regular,
+            regular_highs.view(*([1] * (regular.dim() - 1)), 9),
+            -torch.ones((), dtype=dtype, device=device),
+        ).amax(dim=-1)
+        wheel = (
+            presence[..., 12]
+            & presence[..., 0]
+            & presence[..., 1]
+            & presence[..., 2]
+            & presence[..., 3]
+        )
+        high = torch.maximum(
+            regular_high,
+            torch.where(wheel, torch.full_like(regular_high, 3), -torch.ones_like(regular_high)),
+        )
+        return high >= 0, high
 
     # == 9. STRAIGHT FLUSH ==
-    # Stack to [N, P, 4, 13] and check each for straight flush using a convolution with [1, 1, 1, 1]
-    # Create a second tensor for straight-checking which copies the last rank column back to the beginning
-    # For straight checking, pad/copy last rank (Ace) to the front for wheel
-    ab_ext_straight = torch.cat(
-        [ab_batch[..., 12:13], ab_batch], dim=-1
-    )  # [N, P, 4, 14]
-    conv_sf = unfold_conv1d_ones(ab_ext_straight, 5)  # [N, P, 4, 10]
-    sf_win_max = torch.amax(
-        conv_sf, dim=2
-    )  # [N, P, 10] - max convolution values per window
-    sf_win_mask = sf_win_max == 5  # [N, P, 10] - which windows have straight flush
-    windows = torch.arange(10, device=device, dtype=dtype)  # [10] - window indices
-    sf_last = (sf_win_mask.to(windows.dtype) * windows).amax(
-        dim=2, keepdim=True
-    )  # [N, P, 1]
-    has_sf = sf_win_mask.any(dim=2)
+    has_sf_by_suit, sf_high_by_suit = straight_high_from_presence(ab_batch.bool())
+    sf_high = torch.where(
+        has_sf_by_suit,
+        sf_high_by_suit,
+        -torch.ones((), dtype=dtype, device=device),
+    ).amax(dim=2)
+    has_sf = sf_high >= 0
     result[:, :, HandType.STRAIGHT_FLUSH.value, 0] = torch.where(
         has_sf, HandType.STRAIGHT_FLUSH.value, 0
     )
     result[:, :, HandType.STRAIGHT_FLUSH.value, 1:2] = torch.where(
-        has_sf[:, :, None], sf_last, -1
+        has_sf[:, :, None], sf_high[:, :, None], 0
     )  # [N, P, 1]
 
     # == 8. FOUR OF A KIND ==
-    has_quads_0 = (top_ranks_values[:, :, 0] >= 4).view(N, P, 1)
+    quad_rank = top_ranks(rank_sum == 4, 1).squeeze(2)
+    has_quads_0 = (quad_rank >= 0).view(N, P, 1)
+    quad_kicker = top_ranks(exclude_ranks(quad_rank), 1).squeeze(2)
     result[:, :, HandType.FOUR_OF_A_KIND.value, 0:1].masked_fill_(
         has_quads_0, HandType.FOUR_OF_A_KIND.value
     )
     result[:, :, HandType.FOUR_OF_A_KIND.value, 1:3] = torch.where(
         has_quads_0,
-        top_ranks_indices[:, :, :2],
+        torch.stack([quad_rank, quad_kicker], dim=2),
         0,
     )  # [N, P, 2]
 
     # == 7. FULL HOUSE ==
-    has_triple_0 = (top_ranks_values[:, :, 0] >= 3).view(N, P, 1)
-    has_pair_0 = (top_ranks_values[:, :, 0] >= 2).view(N, P, 1)
-    has_pair_1 = (top_ranks_values[:, :, 1] >= 2).view(N, P, 1)
-    has_full_house = has_triple_0 & has_pair_1
+    trip_rank_for_boat = top_ranks(rank_sum >= 3, 1).squeeze(2)
+    pair_rank_for_boat = top_ranks(
+        (rank_sum >= 2) & (rank_values_b != trip_rank_for_boat.unsqueeze(-1)),
+        1,
+    ).squeeze(2)
+    has_full_house = ((trip_rank_for_boat >= 0) & (pair_rank_for_boat >= 0)).view(N, P, 1)
     result[:, :, HandType.FULL_HOUSE.value, 0:1].masked_fill_(
         has_full_house, HandType.FULL_HOUSE.value
     )
     result[:, :, HandType.FULL_HOUSE.value, 1:3] = torch.where(
         has_full_house,
-        top_ranks_indices[:, :, :2],
+        torch.stack([trip_rank_for_boat, pair_rank_for_boat], dim=2),
         0,
     )
 
@@ -237,59 +259,60 @@ def create_comparison_vector(ab_batch: torch.Tensor) -> torch.Tensor:
     )
 
     # == 5. STRAIGHT ==
-    # Straight: take rank presence, convolve like with straight-flush
-    rank_presence_straight = ab_ext_straight.sum(dim=2, dtype=dtype).clamp(
-        0, 1
-    )  # [N, P, 14]
-    conv_straight = unfold_conv1d_ones(rank_presence_straight, 5)
-    straight_mask = torch.amax(conv_straight, dim=2) == 5  # [N, P]
-    straight_low = conv_straight.argmax(dim=2)  # [N, P]
+    straight_mask, straight_high = straight_high_from_presence(rank_present)
     result[:, :, HandType.STRAIGHT.value, 0].masked_fill_(
         straight_mask, HandType.STRAIGHT.value
     )
     result[:, :, HandType.STRAIGHT.value, 1] = torch.where(
         straight_mask,
-        straight_low,
+        straight_high,
         0,
     )
 
     # == 4. THREE OF A KIND ==
-    has_three = (top_ranks_values[:, :, 0] >= 3).view(N, P, 1)
+    trip_rank = top_ranks(rank_sum >= 3, 1).squeeze(2)
+    trip_kickers = top_ranks(exclude_ranks(trip_rank), 2)
+    has_three = (trip_rank >= 0).view(N, P, 1)
     result[:, :, HandType.THREE_OF_A_KIND.value, 0:1].masked_fill_(
         has_three, HandType.THREE_OF_A_KIND.value
     )
     result[:, :, HandType.THREE_OF_A_KIND.value, 1:4] = torch.where(
         has_three,
-        top_ranks_indices[:, :, :3],
+        torch.cat([trip_rank.unsqueeze(2), trip_kickers], dim=2),
         0,
     )
 
     # == 3. TWO PAIR ==
-    has_two_pair = (top_ranks_values[:, :, 0] >= 2).view(N, P, 1) & (
-        top_ranks_values[:, :, 1] >= 2
-    ).view(N, P, 1)
+    pair_ranks = top_ranks(rank_sum >= 2, 2)
+    two_pair_kicker = top_ranks(
+        exclude_ranks(pair_ranks[:, :, 0], pair_ranks[:, :, 1]),
+        1,
+    )
+    has_two_pair = (pair_ranks[:, :, 1] >= 0).view(N, P, 1)
     result[:, :, HandType.TWO_PAIR.value, 0:1].masked_fill_(
         has_two_pair, HandType.TWO_PAIR.value
     )
     result[:, :, HandType.TWO_PAIR.value, 1:4] = torch.where(
         has_two_pair,
-        top_ranks_indices[:, :, :3],
+        torch.cat([pair_ranks, two_pair_kicker], dim=2),
         0,
     )
 
     # == 2. ONE PAIR ==
-    has_pair_0 = (top_ranks_values[:, :, 0] >= 2).view(N, P, 1)
+    pair_rank = pair_ranks[:, :, 0]
+    pair_kickers = top_ranks(exclude_ranks(pair_rank), 3)
+    has_pair_0 = (pair_rank >= 0).view(N, P, 1)
     result[:, :, HandType.ONE_PAIR.value, 0:1].masked_fill_(
         has_pair_0, HandType.ONE_PAIR.value
     )
     result[:, :, HandType.ONE_PAIR.value, 1:5] = torch.where(
         has_pair_0,
-        top_ranks_indices[:, :, :4],
+        torch.cat([pair_rank.unsqueeze(2), pair_kickers], dim=2),
         0,
     )
 
     # == 1. HIGH CARD ==
-    high_card_with_kickers = top_ranks_indices[:, :, :5]
+    high_card_with_kickers = top_ranks(rank_present, 5)
     result[:, :, HandType.HIGH_CARD.value, 0] = 1
     result[:, :, HandType.HIGH_CARD.value, 1:6] = high_card_with_kickers
 
