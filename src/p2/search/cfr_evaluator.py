@@ -18,6 +18,7 @@ from p2.env.card_utils import (
     hand_combos_tensor,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.pbs_env import PBSEnv
 from p2.env.rules import rank_hands
 from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
@@ -62,7 +63,7 @@ class HandRankData:
 
 @dataclass
 class PublicBeliefState:
-    """Public belief state for both players.
+    """Public belief state for a vectorized poker environment.
 
     Attributes:
         env: Vectorised poker environment standing at a public state.
@@ -70,13 +71,13 @@ class PublicBeliefState:
             regular states, pre-chance for street-end nodes).
     """
 
-    env: HUNLTensorEnv
+    env: HUNLTensorEnv | PBSEnv
     beliefs: torch.Tensor  # [batch_size, num_players, NUM_HANDS]
 
     @classmethod
     def from_proto(
         cls,
-        env_proto: HUNLTensorEnv,
+        env_proto: HUNLTensorEnv | PBSEnv,
         beliefs: torch.Tensor,
         num_envs: int | None = None,
     ) -> PublicBeliefState:
@@ -87,8 +88,9 @@ class PublicBeliefState:
             beliefs: Belief tensor shaped `[batch, players, NUM_HANDS]`.
             num_envs: Optional override for the number of vectorised environments.
         """
+        env_cls = type(env_proto)
         return PublicBeliefState(
-            env=HUNLTensorEnv.from_proto(env_proto, num_envs=num_envs),
+            env=env_cls.from_proto(env_proto, num_envs=num_envs),
             beliefs=beliefs,
         )
 
@@ -121,7 +123,7 @@ class CFREvaluator(ABC):
 
     model: BaseMLPModel
     device: torch.device
-    env: HUNLTensorEnv
+    env: HUNLTensorEnv | PBSEnv
     feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder
     cfr_type: CFRType
     num_supervisions: int
@@ -205,7 +207,7 @@ class CFREvaluator(ABC):
 
     def _construct_subgame(
         self,
-        src_env: HUNLTensorEnv,
+        src_env: HUNLTensorEnv | PBSEnv,
         src_indices: torch.Tensor,
     ) -> None:
         """Construct the subgame tree structure (subclass-specific implementation).
@@ -582,11 +584,15 @@ class CFREvaluator(ABC):
 
     def _allin_call_child_mask(
         self,
-        parent_env: HUNLTensorEnv,
+        parent_env: HUNLTensorEnv | PBSEnv,
         parent_local_indices: torch.Tensor,
         action_bins: torch.Tensor,
     ) -> torch.Tensor:
-        if not self._allin_abstraction_enabled() or action_bins.numel() == 0:
+        if (
+            self.num_players != 2
+            or not self._allin_abstraction_enabled()
+            or action_bins.numel() == 0
+        ):
             return torch.zeros_like(action_bins, dtype=torch.bool)
 
         actor = parent_env.to_act[parent_local_indices]
@@ -1344,7 +1350,7 @@ class CFREvaluator(ABC):
 
     def initialize_subgame(
         self,
-        src_env: HUNLTensorEnv,
+        src_env: HUNLTensorEnv | PBSEnv,
         src_indices: torch.Tensor,
         initial_beliefs: torch.Tensor | None = None,
     ) -> None:
@@ -2386,9 +2392,7 @@ class CFREvaluator(ABC):
             if tree_indices.numel() == 0:
                 continue
 
-            env_state = HUNLTensorEnv.from_proto(
-                self.env, num_envs=tree_indices.numel()
-            )
+            env_state = type(self.env).from_proto(self.env, num_envs=tree_indices.numel())
             env_state.copy_state_from(
                 self.env,
                 tree_indices.to(self.device),

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import torch
 
-from p2.env.card_utils import combo_index
+from p2.env.card_utils import NUM_HANDS, combo_index
 from p2.env.nl_env import NLEnv
 from p2.env.pbs_env import PBSEnv
+from p2.search.cfr_evaluator import PublicBeliefState
 
 STREET_TO_INT = {
     "preflop": 0,
@@ -48,6 +49,17 @@ def _make_ref(num_players: int = 3, starting_stack: int = 1000) -> NLEnv:
     )
     env.reset(force_button=0, force_deck=[10, 11, 12, 13, 14])
     return env
+
+
+def test_public_belief_state_clones_pbs_env_type():
+    env = _make_pbs(num_envs=2, num_players=3)
+    beliefs = torch.full((2, 3, NUM_HANDS), 1.0 / NUM_HANDS)
+
+    pbs = PublicBeliefState.from_proto(env, beliefs, num_envs=2)
+
+    assert isinstance(pbs.env, PBSEnv)
+    assert pbs.env.num_players == 3
+    assert pbs.beliefs.shape == (2, 3, NUM_HANDS)
 
 
 def _assert_public_state_matches(ref: NLEnv, pbs: PBSEnv, idx: int = 0) -> None:

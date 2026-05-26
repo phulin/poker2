@@ -9,6 +9,7 @@ from p2.core.action_schedule import (
 from p2.core.structured_config import Config
 from p2.env.card_utils import NUM_HANDS, combo_to_onehot_tensor
 from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.pbs_env import PBSEnv
 from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
@@ -38,7 +39,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.cfg = cfg
 
         self.float_dtype = torch.float32
-        self.num_players = 2
+        self.num_players = int(cfg.env.num_players)
         self.action_schedule: ActionSchedule = make_action_schedule(
             cfg.env.bet_bins,
             cfg.search.bet_bins_by_depth,
@@ -102,7 +103,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.tree_depth = 0
         self.root_nodes = cfg.num_envs
         self.depth_offsets = [0]
-        self.env: HUNLTensorEnv | None = None
+        self.env: HUNLTensorEnv | PBSEnv | None = None
 
         self.leaf_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.new_street_mask = torch.empty(0, dtype=torch.bool, device=self.device)
@@ -173,7 +174,7 @@ class SparseCFREvaluator(CFREvaluator):
     @profile
     def _construct_subgame(
         self,
-        src_env: HUNLTensorEnv,
+        src_env: HUNLTensorEnv | PBSEnv,
         src_indices: torch.Tensor,
     ) -> None:
         """Construct the sparse subgame tree structure."""
@@ -181,19 +182,24 @@ class SparseCFREvaluator(CFREvaluator):
         num_roots = src_indices.shape[0]
         assert num_roots > 0, "must supply at least one root state"
 
-        root_env = HUNLTensorEnv.from_proto(src_env, num_envs=num_roots)
+        env_cls = type(src_env)
+        root_env = env_cls.from_proto(src_env, num_envs=num_roots)
         root_dest = torch.arange(num_roots, device=self.device)
         root_env.copy_state_from(src_env, src_indices, root_dest)
 
-        env_levels: list[HUNLTensorEnv] = [root_env]
+        env_levels: list[HUNLTensorEnv | PBSEnv] = [root_env]
         parent_index_levels = [
             torch.full((num_roots,), -1, dtype=torch.long, device=self.device)
         ]
         action_levels = [
             torch.full((num_roots,), -1, dtype=torch.long, device=self.device)
         ]
+        vector_rewards = isinstance(src_env, PBSEnv)
+        reward_shape = (
+            (num_roots, self.num_players) if vector_rewards else (num_roots,)
+        )
         reward_levels = [
-            torch.zeros(num_roots, dtype=self.float_dtype, device=self.device)
+            torch.zeros(reward_shape, dtype=self.float_dtype, device=self.device)
         ]
         allin_leaf_levels = [
             torch.zeros(num_roots, dtype=torch.bool, device=self.device)
@@ -251,7 +257,7 @@ class SparseCFREvaluator(CFREvaluator):
             self.total_nodes, dtype=torch.bool, device=self.device
         )
 
-        self.env = HUNLTensorEnv.from_proto(env_levels[-1], num_envs=self.total_nodes)
+        self.env = env_cls.from_proto(env_levels[-1], num_envs=self.total_nodes)
         cursor = 0
         for level_env in env_levels:
             count = level_env.N
@@ -351,8 +357,11 @@ class SparseCFREvaluator(CFREvaluator):
         # Showdown and leaf values are set in set_leaf_values, as they vary by beliefs.
         self.latest_values = torch.zeros_like(self.beliefs)
         folded_mask = (self.action_from_parent == 0) & self.env.done
-        self.latest_values[folded_mask, 0] = rewards_tensor[folded_mask][:, None]
-        self.latest_values[folded_mask, 1] = -rewards_tensor[folded_mask][:, None]
+        if rewards_tensor.dim() == 2:
+            self.latest_values[folded_mask] = rewards_tensor[folded_mask, :, None]
+        else:
+            self.latest_values[folded_mask, 0] = rewards_tensor[folded_mask][:, None]
+            self.latest_values[folded_mask, 1] = -rewards_tensor[folded_mask][:, None]
         self.values_avg = self.latest_values.clone()
         self.last_model_values = None
 

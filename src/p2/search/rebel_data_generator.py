@@ -2,6 +2,7 @@ import torch
 
 from p2.env.card_utils import NUM_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.pbs_env import PBSEnv
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.rebel_replay import RebelReplayBuffer
 from p2.search.cfr_evaluator import CFREvaluator, PublicBeliefState
@@ -40,7 +41,7 @@ _ENV_STATE_FIELDS = (
 class RebelDataGenerator:
     def __init__(
         self,
-        env_proto: HUNLTensorEnv,
+        env_proto: HUNLTensorEnv | PBSEnv,
         evaluator: CFREvaluator,
         value_buffer: RebelReplayBuffer,
         policy_buffer: RebelReplayBuffer,
