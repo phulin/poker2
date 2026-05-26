@@ -138,3 +138,66 @@ def test_triton_pbs_env_copy_and_gather_preserve_class_and_state() -> None:
     gathered = triton_env.gather_rows(torch.tensor([3, 1, 0], device="cuda"))
     assert gathered.__class__.__name__ == "TritonPBSEnv"
     assert torch.equal(gathered.pot, triton_env.pot[torch.tensor([3, 1, 0], device="cuda")])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_triton_pbs_env_reset_subset_matches_pbs_env() -> None:
+    pytest.importorskip("triton")
+    from p2.env.triton_pbs_env import TritonPBSEnv
+
+    base = PBSEnv(num_envs=5, num_players=4, starting_stack=100, device="cuda")
+    triton_env = TritonPBSEnv(num_envs=5, num_players=4, starting_stack=100, device="cuda")
+    button = torch.tensor([0, 1, 2, 3, 0], dtype=torch.long, device="cuda")
+    deck = torch.tensor(
+        [
+            [1, 2, 3, 4, 5],
+            [6, 7, 8, 9, 10],
+            [11, 12, 13, 14, 15],
+            [16, 17, 18, 19, 20],
+            [21, 22, 23, 24, 25],
+        ],
+        dtype=torch.long,
+        device="cuda",
+    )
+    base.reset(force_button=button, force_deck=deck)
+    triton_env.reset(force_button=button, force_deck=deck)
+    _assert_envs_equal(base, triton_env)
+
+    ids = torch.tensor([1, 3], dtype=torch.long, device="cuda")
+    subset_button = torch.tensor([2, 1], dtype=torch.long, device="cuda")
+    subset_deck = torch.tensor(
+        [[30, 31, 32, 33, 34], [35, 36, 37, 38, 39]],
+        dtype=torch.long,
+        device="cuda",
+    )
+    base.reset(env_indices=ids, force_button=subset_button, force_deck=subset_deck)
+    triton_env.reset(env_indices=ids, force_button=subset_button, force_deck=subset_deck)
+    _assert_envs_equal(base, triton_env)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_triton_pbs_env_copy_state_from_and_repeat_match_pbs_env() -> None:
+    pytest.importorskip("triton")
+    base, triton_env = _make_envs()
+    actions = torch.tensor([1, 4, 0, triton_env.num_bet_bins - 1], device="cuda")
+    base.step_bins(actions)
+    triton_env.step_bins(actions)
+
+    base_dst = PBSEnv(
+        num_envs=3, num_players=3, starting_stack=40, sb=5, bb=10, device="cuda"
+    )
+    triton_dst = triton_env.__class__(
+        num_envs=3, num_players=3, starting_stack=40, sb=5, bb=10, device="cuda"
+    )
+    src = torch.tensor([3, 1, 0], device="cuda")
+    dst = torch.arange(3, device="cuda")
+    base_dst.copy_state_from(base, src, dst)
+    triton_dst.copy_state_from(triton_env, src, dst)
+    _assert_envs_equal(base_dst, triton_dst)
+
+    repeats = torch.tensor([2, 0, 1, 3], device="cuda")
+    base_repeated = base.repeat_interleave(repeats, output_size=int(repeats.sum().item()))
+    triton_repeated = triton_env.repeat_interleave(
+        repeats, output_size=int(repeats.sum().item())
+    )
+    _assert_envs_equal(base_repeated, triton_repeated)
