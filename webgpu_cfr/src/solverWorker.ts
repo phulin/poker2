@@ -60,6 +60,8 @@ async function initRuntime(manifestUrl: string): Promise<void> {
     nextModel.allInTableProvider = createManifestAllInTableProvider(
       nextModel.manifest,
       absoluteManifestUrl,
+      undefined,
+      nextDevice,
     );
     const nextEvaluator = createBrowserCfrEvaluator(nextDevice, nextModel);
     device = nextDevice;

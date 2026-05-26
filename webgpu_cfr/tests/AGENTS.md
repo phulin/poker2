@@ -2,6 +2,7 @@
 Node test suite for WebGPU CFR parity, full exported-model evaluator behavior, and shared card/belief/cache helpers.
 
 ### Source files
+- `all_in_tables.test.ts`: Checks manifest-backed all-in table provider behavior for partial street asset metadata.
 - `cfr_parity.test.ts`: Compares low-level GPU CFR fixture output against Python reference data.
 - `full_evaluator.test.ts`: Exports/loads a model and checks full evaluator results against Python references.
 - `split_checkpoint_fixture.test.ts`: Loads the committed `rebel_296_4000` split checkpoint/export fixture, checks selected WebGPU policy/value outputs against PyTorch, compares the WebGPU sparse solve with the Python sparse CFR loop, and guards the root `AsKd` sparse-solve policy.

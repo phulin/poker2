@@ -36,6 +36,7 @@ export async function loadNodeModel(
       const data = await readFile(fileURLToPath(url));
       return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
     },
+    device,
   );
   return model;
 }

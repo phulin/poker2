@@ -130,14 +130,17 @@ export async function loadBrowserModel(
     await weightsResponse.arrayBuffer(),
     manifest,
   );
+  const modelDevice = device ?? (await createBrowserDevice());
   const model = BetterFfnWebGpuModel.fromBuffers(
-    device ?? (await createBrowserDevice()),
+    modelDevice,
     manifest,
     weights,
   );
   model.allInTableProvider = createManifestAllInTableProvider(
     manifest,
     absoluteBrowserUrl(manifestUrl),
+    undefined,
+    modelDevice,
   );
   return model;
 }
@@ -157,14 +160,17 @@ export async function loadBrowserModelCached(
   if (options.weightsUrl) cacheOptions.weightsUrl = options.weightsUrl;
   if (options.onProgress) cacheOptions.onProgress = options.onProgress;
   const loaded = await loadModelBytesWithCache(manifestUrl, cacheOptions);
+  const modelDevice = options.device ?? (await createBrowserDevice());
   const model = BetterFfnWebGpuModel.fromBuffers(
-    options.device ?? (await createBrowserDevice()),
+    modelDevice,
     loaded.manifest,
     loaded.weights,
   );
   model.allInTableProvider = createManifestAllInTableProvider(
     loaded.manifest,
     absoluteBrowserUrl(manifestUrl),
+    undefined,
+    modelDevice,
   );
   return model;
 }
@@ -180,7 +186,12 @@ export function loadBrowserModelFromBuffers(
       typeof globalThis.location === "undefined"
         ? "http://localhost/"
         : globalThis.location.href;
-    model.allInTableProvider = createManifestAllInTableProvider(model.manifest, baseUrl);
+    model.allInTableProvider = createManifestAllInTableProvider(
+      model.manifest,
+      baseUrl,
+      undefined,
+      device,
+    );
   }
   return model;
 }

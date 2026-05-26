@@ -1,4 +1,5 @@
 import { HAND_COMBOS } from "./cards.js";
+import { WebGpuAllInTableGenerator } from "./allInTableGenerator.js";
 import { NUM_HANDS, type PublicHunlEnv } from "./hunlEnv.js";
 import type { BetterFfnAllInManifest } from "./types.js";
 
@@ -107,10 +108,11 @@ export function createManifestAllInTableProvider(
   manifest: { allIn?: BetterFfnAllInManifest },
   manifestUrl: string,
   loadBinary: BinaryLoader = fetchBinary,
+  device?: GPUDevice,
 ): AllInTableProvider | undefined {
   const config = manifest.allIn;
   if (!config || config.enabled === false) return undefined;
-  return new ManifestAllInTableProvider(config, manifestUrl, loadBinary);
+  return new ManifestAllInTableProvider(config, manifestUrl, loadBinary, device);
 }
 
 class ManifestAllInTableProvider implements AllInTableProvider {
@@ -120,12 +122,17 @@ class ManifestAllInTableProvider implements AllInTableProvider {
     private readonly config: BetterFfnAllInManifest,
     private readonly manifestUrl: string,
     private readonly loadBinary: BinaryLoader,
-  ) {}
+    device?: GPUDevice,
+  ) {
+    this.generator = device ? new WebGpuAllInTableGenerator(device) : undefined;
+  }
+
+  private readonly generator: WebGpuAllInTableGenerator | undefined;
 
   async tableForRoot(env: PublicHunlEnv): Promise<AllInTableContext | undefined> {
     const scale = this.config.scale ?? ALL_IN_I16_SCALE;
     if (env.street === 0) {
-      if (!this.config.preflop) return this.missing("preflop");
+      if (!this.config.preflop) return undefined;
       return {
         street: 0,
         table: await this.loadInt16(this.config.preflop.file),
@@ -133,43 +140,69 @@ class ManifestAllInTableProvider implements AllInTableProvider {
       };
     }
     if (env.street === 1) {
-      if (!this.config.flop) return this.missing("flop");
       const flop = env.boardIndices.slice(0, 3).filter((card) => card >= 0).sort((a, b) => a - b);
       if (flop.length !== 3) throw new Error("flop all-in table requires three public cards");
-      const [actualToCanon, actualPerm, comboPerms] = await Promise.all([
-        this.loadUint32(this.config.flop.actualToCanonFile),
-        this.loadUint32(this.config.flop.actualPermFile),
-        this.loadUint32(this.config.flop.comboPermsFile),
-      ]);
-      const actual = flopCombinationIndex(flop[0]!, flop[1]!, flop[2]!);
-      const canonical = actualToCanon[actual]!;
-      const permId = actualPerm[actual]!;
-      return {
-        street: 1,
-        table: await this.loadInt16(templatePath(this.config.flop.tablePathTemplate, canonical, flop)),
-        scale: this.config.flop.scale ?? scale,
-        permId,
-        comboPerms,
-      };
+      if (!this.config.flop) return this.generated(flop);
+      try {
+        const [actualToCanon, actualPerm, comboPerms] = await Promise.all([
+          this.loadUint32(this.config.flop.actualToCanonFile),
+          this.loadUint32(this.config.flop.actualPermFile),
+          this.loadUint32(this.config.flop.comboPermsFile),
+        ]);
+        const actual = flopCombinationIndex(flop[0]!, flop[1]!, flop[2]!);
+        const canonical = actualToCanon[actual]!;
+        const permId = actualPerm[actual]!;
+        return {
+          street: 1,
+          table: await this.loadInt16(
+            templatePath(this.config.flop.tablePathTemplate, canonical, flop),
+          ),
+          scale: this.config.flop.scale ?? scale,
+          permId,
+          comboPerms,
+        };
+      } catch (error) {
+        const generated = await this.generated(flop);
+        if (generated) return generated;
+        throw error;
+      }
     }
     if (env.street === 2) {
-      if (!this.config.turn) return this.missing("turn");
       const turn = env.boardIndices.slice(0, 4).filter((card) => card >= 0);
       if (turn.length !== 4) throw new Error("turn all-in table requires four public cards");
+      if (!this.config.turn) return this.generated(turn);
       return {
         street: 2,
-        table: await this.loadInt16(templatePath(this.config.turn.tablePathTemplate, 0, turn)),
+        table: await this.loadInt16OrGenerate(
+          templatePath(this.config.turn.tablePathTemplate, 0, turn),
+          turn,
+        ),
         scale: this.config.turn.scale ?? scale,
       };
     }
     return undefined;
   }
 
-  private missing(street: string): undefined {
-    if (this.config.enabled === true) {
-      throw new Error(`all-in table metadata is missing for ${street}`);
+  private async generated(board: readonly number[]): Promise<AllInTableContext | undefined> {
+    const table = await this.generator?.tableForBoard(board);
+    if (!table) return undefined;
+    return {
+      street: board.length === 3 ? 1 : 2,
+      table,
+      scale: ALL_IN_I16_SCALE,
+    };
+  }
+
+  private async loadInt16OrGenerate(
+    path: string,
+    board: readonly number[],
+  ): Promise<Int16Array<ArrayBuffer>> {
+    try {
+      return await this.loadInt16(path);
+    } catch (error) {
+      if (!this.generator) throw error;
+      return await this.generator.tableForBoard(board);
     }
-    return undefined;
   }
 
   private async loadInt16(path: string): Promise<Int16Array<ArrayBuffer>> {
