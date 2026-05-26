@@ -358,6 +358,39 @@ def test_better_split_ffn_policy_and_value_shapes_and_parameters():
     assert not any("policy" in name for name, _ in value_model.named_parameters())
 
 
+def test_better_policy_ffn_multiway_forward_shape():
+    batch_size = 2
+    num_actions = 4
+    num_players = 3
+    policy_model = BetterPolicyFFN(
+        num_actions=num_actions,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=48,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+    )
+    policy_model.init_weights(torch.Generator(device="cpu").manual_seed(0))
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    features = MLPFeatures(
+        context=torch.zeros(batch_size, context_length(num_players)),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.tensor([0, 2], dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.reshape(batch_size, -1),
+    )
+
+    logits = policy_model.forward_policy(features)
+
+    assert logits.shape == (batch_size, NUM_HANDS, num_actions)
+
+
 def test_better_split_ffn_fixed_value_head_uses_compiled_value_forward():
     batch_size = 3
     num_actions = 4

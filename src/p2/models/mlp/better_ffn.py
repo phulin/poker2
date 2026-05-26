@@ -510,27 +510,28 @@ class BetterFFN(BaseMLPModel):
         coeff: torch.Tensor,
         board_stats: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        if self.num_players != 2:
-            raise ValueError("BetterFFN dynamic hand features require two players")
         actor_belief = player_beliefs.gather(
             1,
             actor[:, None, None].expand(-1, 1, NUM_HANDS),
         ).squeeze(1)
-        opp = 1 - actor
 
         card_mass = self._card_mass(player_beliefs)
         actor_card_mass = card_mass.gather(
             1,
             actor[:, None, None].expand(-1, 1, 52),
         ).squeeze(1)
-        opp_card_mass = card_mass.gather(
-            1,
-            opp[:, None, None].expand(-1, 1, 52),
-        ).squeeze(1)
-        opp_belief = player_beliefs.gather(
-            1,
-            opp[:, None, None].expand(-1, 1, NUM_HANDS),
-        ).squeeze(1)
+        player_ids = torch.arange(self.num_players, device=player_beliefs.device)
+        non_actor = player_ids[None, :] != actor[:, None]
+        opp_card_mass = torch.where(
+            non_actor[:, :, None],
+            card_mass,
+            torch.zeros_like(card_mass),
+        ).sum(dim=1)
+        opp_belief = torch.where(
+            non_actor[:, :, None],
+            player_beliefs,
+            torch.zeros_like(player_beliefs),
+        ).sum(dim=1)
         opp_unblocked = self._unblocked_mass_from_card_mass(opp_belief, opp_card_mass)
         dynamic_logits = self._dynamic_hand_feature_dot_from_stats(
             actor_belief,
@@ -551,27 +552,28 @@ class BetterFFN(BaseMLPModel):
         dtype: torch.dtype,
         board_stats: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        if self.num_players != 2:
-            raise ValueError("BetterFFN dynamic hand features require two players")
         actor_belief = player_beliefs.gather(
             1,
             actor[:, None, None].expand(-1, 1, NUM_HANDS),
         ).squeeze(1)
-        opp = 1 - actor
 
         card_mass = self._card_mass(player_beliefs)
         actor_card_mass = card_mass.gather(
             1,
             actor[:, None, None].expand(-1, 1, 52),
         ).squeeze(1)
-        opp_card_mass = card_mass.gather(
-            1,
-            opp[:, None, None].expand(-1, 1, 52),
-        ).squeeze(1)
-        opp_belief = player_beliefs.gather(
-            1,
-            opp[:, None, None].expand(-1, 1, NUM_HANDS),
-        ).squeeze(1)
+        player_ids = torch.arange(self.num_players, device=player_beliefs.device)
+        non_actor = player_ids[None, :] != actor[:, None]
+        opp_card_mass = torch.where(
+            non_actor[:, :, None],
+            card_mass,
+            torch.zeros_like(card_mass),
+        ).sum(dim=1)
+        opp_belief = torch.where(
+            non_actor[:, :, None],
+            player_beliefs,
+            torch.zeros_like(player_beliefs),
+        ).sum(dim=1)
         opp_unblocked = self._unblocked_mass_from_card_mass(opp_belief, opp_card_mass)
         return self._dynamic_hand_features_from_stats(
             actor_belief,
