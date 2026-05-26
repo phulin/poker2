@@ -8,6 +8,7 @@ Isolated TypeScript/WebGPU CFR evaluator for exported BetterFFN models, with Nod
 - `tsconfig.json`: TypeScript compiler configuration.
 - `tsconfig.app.json`: Vite/Solid typecheck configuration for TSX browser app files.
 - `vite.config.ts`: Solid plugin and app build output configuration.
+- `.env.production.example`: Example public Vite production asset manifest URL for the deployed model on R2.
 - `index.html`: Vite application HTML entry point for the spot solver.
 - `.gitignore`: WebGPU subproject ignore rules.
 
@@ -15,6 +16,8 @@ Isolated TypeScript/WebGPU CFR evaluator for exported BetterFFN models, with Nod
 - `src/`: TypeScript evaluator, WebGPU buffer helpers, WGSL kernels, browser/Node loaders, HUNL env port, card/belief/cache helpers, Solid app files, and CLI/benchmark entry points.
 - `python/`: Python reference and model export utilities that bridge PyTorch checkpoints to the WebGPU runtime.
 - `public/`: Static Vite assets, including benchmark HTML and exported model artifacts under `models/`.
+- `scripts/`: TypeScript deployment helpers for pruning Pages output and uploading model/all-in assets to R2.
+- `cloudflare/`: Cloudflare R2/Pages deployment configuration files.
 - `tests/`: Node tests comparing WebGPU output with Python references.
 - `dist/`: Generated TypeScript build output; do not edit as source.
 - `node_modules/`: Installed Node dependencies; do not edit.

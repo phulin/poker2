@@ -1,5 +1,10 @@
 import { HAND_COMBOS } from "./cards.js";
 import { WebGpuAllInTableGenerator } from "./allInTableGenerator.js";
+import {
+  readCachedAllInTable,
+  writeCachedAllInTable,
+  type CachedAllInTableKind,
+} from "./allInTableCache.js";
 import { NUM_HANDS, type PublicHunlEnv } from "./hunlEnv.js";
 import type { BetterFfnAllInManifest } from "./types.js";
 
@@ -17,9 +22,15 @@ export interface AllInTableContext {
 
 export interface AllInTableProvider {
   tableForRoot(env: PublicHunlEnv): Promise<AllInTableContext | undefined>;
+  prefetchForBoard?(board: readonly number[]): Promise<void>;
 }
 
 type BinaryLoader = (url: string) => Promise<ArrayBuffer>;
+
+export interface AllInTableProviderOptions {
+  isOffline?: () => boolean;
+  persistentCache?: boolean;
+}
 
 const HAND_CARD0 = new Uint8Array(NUM_HANDS);
 const HAND_CARD1 = new Uint8Array(NUM_HANDS);
@@ -109,10 +120,11 @@ export function createManifestAllInTableProvider(
   manifestUrl: string,
   loadBinary: BinaryLoader = fetchBinary,
   device?: GPUDevice,
+  options: AllInTableProviderOptions = {},
 ): AllInTableProvider | undefined {
   const config = manifest.allIn;
   if (!config || config.enabled === false) return undefined;
-  return new ManifestAllInTableProvider(config, manifestUrl, loadBinary, device);
+  return new ManifestAllInTableProvider(config, manifestUrl, loadBinary, device, options);
 }
 
 class ManifestAllInTableProvider implements AllInTableProvider {
@@ -123,11 +135,16 @@ class ManifestAllInTableProvider implements AllInTableProvider {
     private readonly manifestUrl: string,
     private readonly loadBinary: BinaryLoader,
     device?: GPUDevice,
+    options: AllInTableProviderOptions = {},
   ) {
     this.generator = device ? new WebGpuAllInTableGenerator(device) : undefined;
+    this.isOffline = options.isOffline ?? defaultIsOffline;
+    this.persistentCache = options.persistentCache ?? true;
   }
 
   private readonly generator: WebGpuAllInTableGenerator | undefined;
+  private readonly isOffline: () => boolean;
+  private readonly persistentCache: boolean;
 
   async tableForRoot(env: PublicHunlEnv): Promise<AllInTableContext | undefined> {
     const scale = this.config.scale ?? ALL_IN_I16_SCALE;
@@ -135,14 +152,14 @@ class ManifestAllInTableProvider implements AllInTableProvider {
       if (!this.config.preflop) return undefined;
       return {
         street: 0,
-        table: await this.loadInt16(this.config.preflop.file),
+        table: await this.loadInt16(this.config.preflop.file, "preflop"),
         scale: this.config.preflop.scale ?? scale,
       };
     }
     if (env.street === 1) {
       const flop = env.boardIndices.slice(0, 3).filter((card) => card >= 0).sort((a, b) => a - b);
       if (flop.length !== 3) throw new Error("flop all-in table requires three public cards");
-      if (!this.config.flop) return this.generated(flop);
+      if (!this.config.flop) return this.generatedFlopIfOffline(flop);
       try {
         const [actualToCanon, actualPerm, comboPerms] = await Promise.all([
           this.loadUint32(this.config.flop.actualToCanonFile),
@@ -156,13 +173,14 @@ class ManifestAllInTableProvider implements AllInTableProvider {
           street: 1,
           table: await this.loadInt16(
             templatePath(this.config.flop.tablePathTemplate, canonical, flop),
+            "flop",
           ),
           scale: this.config.flop.scale ?? scale,
           permId,
           comboPerms,
         };
       } catch (error) {
-        const generated = await this.generated(flop);
+        const generated = await this.generatedFlopIfOffline(flop);
         if (generated) return generated;
         throw error;
       }
@@ -181,6 +199,29 @@ class ManifestAllInTableProvider implements AllInTableProvider {
       };
     }
     return undefined;
+  }
+
+  async prefetchForBoard(board: readonly number[]): Promise<void> {
+    if (this.isOffline() || board.length !== 3 || !this.config.flop) return;
+    const flop = [...board].sort((a, b) => a - b);
+    const [actualToCanon] = await Promise.all([
+      this.loadUint32(this.config.flop.actualToCanonFile),
+      this.loadUint32(this.config.flop.actualPermFile),
+      this.loadUint32(this.config.flop.comboPermsFile),
+    ]);
+    const actual = flopCombinationIndex(flop[0]!, flop[1]!, flop[2]!);
+    const canonical = actualToCanon[actual]!;
+    await this.loadInt16(
+      templatePath(this.config.flop.tablePathTemplate, canonical, flop),
+      "flop",
+    );
+  }
+
+  private async generatedFlopIfOffline(
+    board: readonly number[],
+  ): Promise<AllInTableContext | undefined> {
+    if (!this.isOffline()) return undefined;
+    return await this.generated(board);
   }
 
   private async generated(board: readonly number[]): Promise<AllInTableContext | undefined> {
@@ -205,8 +246,11 @@ class ManifestAllInTableProvider implements AllInTableProvider {
     }
   }
 
-  private async loadInt16(path: string): Promise<Int16Array<ArrayBuffer>> {
-    const buffer = await this.load(path);
+  private async loadInt16(
+    path: string,
+    cacheKind?: CachedAllInTableKind,
+  ): Promise<Int16Array<ArrayBuffer>> {
+    const buffer = await this.load(path, cacheKind);
     if (buffer.byteLength % Int16Array.BYTES_PER_ELEMENT !== 0) {
       throw new Error(`${path} byte length is not aligned for int16`);
     }
@@ -221,14 +265,31 @@ class ManifestAllInTableProvider implements AllInTableProvider {
     return new Uint32Array(buffer.slice(0));
   }
 
-  private async load(path: string): Promise<ArrayBuffer> {
+  private async load(
+    path: string,
+    cacheKind?: CachedAllInTableKind,
+  ): Promise<ArrayBuffer> {
     const url = new URL(path, this.manifestUrl).toString();
     const cached = this.cache.get(url);
     if (cached) return cached;
+    if (cacheKind && this.persistentCache) {
+      const persistent = await readCachedAllInTable(url);
+      if (persistent) {
+        this.cache.set(url, persistent);
+        return persistent;
+      }
+    }
     const buffer = await this.loadBinary(url);
     this.cache.set(url, buffer);
+    if (cacheKind && this.persistentCache) {
+      await writeCachedAllInTable(url, cacheKind, buffer).catch(() => undefined);
+    }
     return buffer;
   }
+}
+
+function defaultIsOffline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
 }
 
 function templatePath(template: string, canonical: number, cards: readonly number[]): string {

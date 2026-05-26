@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && node dist/scripts/prune-pages-assets.js",
     "build:evaluator": "tsc",
     "build:app": "vite build",
     "preview": "vite preview --host 0.0.0.0",
@@ -18,7 +18,10 @@
     "bench:model-kernels": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchModelKernels.ts",
     "bench:sparse-cfr-kernels": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchSparseCfrKernels.ts",
     "bench:spots": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchSpots.ts",
-    "bench:spots:extract": "cd .. && uv run python webgpu_cfr/python/extract_bench_spots.py"
+    "bench:spots:extract": "cd .. && uv run python webgpu_cfr/python/extract_bench_spots.py",
+    "upload:assets": "tsc && node dist/scripts/upload_assets.js",
+    "r2:cors": "wrangler r2 bucket cors set p2-webgpu-cfr-assets --file cloudflare/r2-cors.json --force",
+    "deploy:pages": "npm run build && wrangler pages deploy dist/app --project-name holdem-computer --branch main --commit-dirty=true"
   },
   "dependencies": {
     "lucide-solid": "^1.16.0",
@@ -31,6 +34,7 @@
     "tsx": "^4.20.5",
     "typescript": "^5.9.3",
     "vite": "^8.0.13",
-    "vite-plugin-solid": "^2.11.12"
+    "vite-plugin-solid": "^2.11.12",
+    "wrangler": "^4.94.0"
   }
 }

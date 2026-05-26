@@ -101,6 +101,15 @@ async function solve(id: number, request: SolverWorkerRequest & { type: "solve" 
   }
 }
 
+async function prefetchAllInTable(board: readonly number[]): Promise<void> {
+  try {
+    await initPromise;
+    await model?.allInTableProvider?.prefetchForBoard?.(board);
+  } catch {
+    // Prefetch is opportunistic; the solve path will surface any required fetch errors.
+  }
+}
+
 function disposeRuntime(): void {
   evaluator?.dispose();
   model?.dispose();
@@ -119,6 +128,8 @@ workerScope.addEventListener("message", (event) => {
     });
   } else if (message.type === "solve") {
     void solve(message.id, message);
+  } else if (message.type === "prefetch-allin") {
+    void prefetchAllInTable(message.board);
   } else {
     disposeRuntime();
     workerScope.close();

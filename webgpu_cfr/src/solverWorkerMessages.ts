@@ -25,6 +25,10 @@ export type SolverWorkerRequest =
       request: SolverEvaluateSpotRequest;
     }
   | {
+      type: "prefetch-allin";
+      board: number[];
+    }
+  | {
       type: "dispose";
     };
 

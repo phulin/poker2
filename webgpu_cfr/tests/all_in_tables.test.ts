@@ -44,6 +44,41 @@ test("manifest all-in provider skips streets without table metadata and no devic
   assert.equal(await provider.tableForRoot(flopEnv([0, 13, 26])), undefined);
 });
 
+test("manifest all-in provider does not generate missing flop metadata while online", async (t) => {
+  let device: GPUDevice;
+  try {
+    device = await createDawnDevice();
+  } catch (error) {
+    t.skip(`WebGPU device unavailable: ${error}`);
+    return;
+  }
+  try {
+    const provider = createManifestAllInTableProvider(
+      {
+        allIn: {
+          enabled: true,
+          preflop: {
+            file: "allin/preflop.i16",
+            dtype: "int16",
+          },
+        },
+      },
+      "https://example.test/model.json",
+      async () => {
+        throw new Error("missing flop metadata should not load assets");
+      },
+      device,
+      { isOffline: () => false },
+    );
+    assert.ok(provider);
+
+    assert.equal(await provider.tableForRoot(flopEnv([0, 13, 26])), undefined);
+  } finally {
+    device.destroy();
+  }
+});
+
+
 function pythonGeneratedTable(board: readonly number[]): Int16Array<ArrayBuffer> {
   const result = spawnSync(
     "uv",
@@ -108,7 +143,7 @@ test("WebGPU all-in table generator matches Python turn table", async (t) => {
   }
 });
 
-test("manifest all-in provider generates missing flop table metadata with WebGPU", async (t) => {
+test("manifest all-in provider generates missing flop table metadata only while offline", async (t) => {
   let device: GPUDevice;
   try {
     device = await createDawnDevice();
@@ -133,6 +168,7 @@ test("manifest all-in provider generates missing flop table metadata with WebGPU
         throw new Error("missing flop metadata should generate without loading assets");
       },
       device,
+      { isOffline: () => true },
     );
     assert.ok(provider);
 

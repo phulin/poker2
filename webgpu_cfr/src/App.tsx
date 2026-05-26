@@ -30,7 +30,8 @@ import type {
   SolverWorkerResponse,
 } from "./solverWorkerMessages.js";
 
-const MODEL_MANIFEST_URL = "/models/rebel_latest/model.json";
+const MODEL_MANIFEST_URL =
+  import.meta.env.VITE_MODEL_MANIFEST_URL ?? "/models/rebel_latest/model.json";
 const CARD_OPTIONS = Array.from({ length: 52 }, (_, index) => formatCard(index));
 const STREET_CARD_COUNTS = [0, 3, 4, 5] as const;
 const STREET_NAMES = ["Preflop", "Flop", "Turn", "River"] as const;
@@ -1287,6 +1288,7 @@ function App(): JSX.Element {
   const [hashHydrated, setHashHydrated] = createSignal(false);
   let solverWorker: Worker | undefined;
   let nextSolveId = 0;
+  const prefetchedFlops = new Set<string>();
   let activeSolve:
     | {
         id: number;
@@ -1625,6 +1627,20 @@ function App(): JSX.Element {
     if (!hashHydrated() || applyingHash) return;
     if (nextHash === window.location.hash) return;
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${nextHash}`);
+  });
+  createEffect(() => {
+    if (!runtime()) return;
+    const flop = boardCards().slice(0, 3);
+    if (!flop.every(Boolean)) return;
+    try {
+      const cards = flop.map((card) => cardFromOption(card));
+      const key = [...cards].sort((a, b) => a - b).join("-");
+      if (prefetchedFlops.has(key)) return;
+      prefetchedFlops.add(key);
+      postWorkerMessage({ type: "prefetch-allin", board: cards });
+    } catch {
+      return;
+    }
   });
   const solveInputError = createMemo(() => {
     const descriptorMessage = descriptorError();
