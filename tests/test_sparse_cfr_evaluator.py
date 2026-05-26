@@ -333,6 +333,49 @@ def test_initialize_pbs_multiway_subgame() -> None:
     assert evaluator.latest_values.shape == evaluator.beliefs.shape
 
 
+def test_evaluate_pbs_multiway_cfr_smoke() -> None:
+    device = get_device()
+    num_players = 3
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.allin_call_terminal_abstraction = False
+    cfg.search.iterations = 1
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+    )
+    model = MockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = SparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+    beliefs = torch.full((1, num_players, NUM_HANDS), 1.0 / NUM_HANDS)
+    evaluator.initialize_subgame(env, torch.arange(1, device=device), beliefs)
+
+    next_pbs = evaluator.evaluate_cfr()
+    value_batch, augmented_value_batch, policy_batch = evaluator.training_data()
+
+    assert isinstance(next_pbs.env, PBSEnv)
+    assert next_pbs.beliefs.shape[1:] == (num_players, NUM_HANDS)
+    assert value_batch.features.beliefs.shape[1] == num_players * NUM_HANDS
+    assert augmented_value_batch.features.beliefs.shape[1] == num_players * NUM_HANDS
+    assert policy_batch.features.beliefs.shape[1] == num_players * NUM_HANDS
+
+
 def test_initialize_policy_and_beliefs() -> None:
     """Test that policy and beliefs can be initialized."""
     device = get_device()
