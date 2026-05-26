@@ -6,7 +6,11 @@ from collections.abc import Callable
 import torch
 
 from p2.env.pbs_env import PBSEnv
-from p2.env.triton_pbs_env import TritonPBSEnv, triton_is_available
+from p2.env.triton_pbs_env import (
+    TritonPBSEnv,
+    TritonPBSEnvBuffer,
+    triton_is_available,
+)
 
 
 def synchronize() -> None:
@@ -258,6 +262,37 @@ def bench_gather(
     print_result("gather", torch_ms, triton_ms, num_envs)
 
 
+def bench_gather_into(
+    num_envs: int,
+    num_players: int,
+    stack: int,
+    sb: int,
+    bb: int,
+    warmup: int,
+    repeats: int,
+) -> None:
+    base, triton_env, _, _ = make_env_pair(num_envs, num_players, stack, sb, bb, 65)
+    indices = torch.arange(num_envs, device="cuda").flip(0)
+    dst_ids = torch.arange(num_envs, device="cuda")
+    base_dst = PBSEnv(
+        num_envs=num_envs,
+        num_players=num_players,
+        starting_stack=stack,
+        sb=sb,
+        bb=bb,
+        device="cuda",
+    )
+    buffer = TritonPBSEnvBuffer(triton_env, initial_capacity=num_envs)
+    dst_view = buffer.view(num_envs)
+
+    base_dst.copy_state_from(base, indices, dst_ids)
+    triton_env.gather_rows_into(indices, dst_view)
+    assert_same_fields(base_dst, dst_view)
+    torch_ms = cuda_time_ms(lambda: base_dst.copy_state_from(base, indices, dst_ids), warmup, repeats)
+    triton_ms = cuda_time_ms(lambda: triton_env.gather_rows_into(indices, dst_view), warmup, repeats)
+    print_result("gather_into", torch_ms, triton_ms, num_envs)
+
+
 def bench_repeat(
     num_envs: int,
     num_players: int,
@@ -284,6 +319,58 @@ def bench_repeat(
         repeats_count,
     )
     print_result("repeat", torch_ms, triton_ms, output_size)
+
+
+def bench_repeat_into(
+    num_envs: int,
+    num_players: int,
+    stack: int,
+    sb: int,
+    bb: int,
+    warmup: int,
+    repeats_count: int,
+) -> None:
+    base, triton_env, _, _ = make_env_pair(num_envs, num_players, stack, sb, bb, 75)
+    repeat_counts = torch.full((num_envs,), 2, dtype=torch.long, device="cuda")
+    output_size = num_envs * 2
+    indices = torch.arange(num_envs, device="cuda").repeat_interleave(
+        repeat_counts, output_size=output_size
+    )
+    dst_ids = torch.arange(output_size, device="cuda")
+    base_dst = PBSEnv(
+        num_envs=output_size,
+        num_players=num_players,
+        starting_stack=stack,
+        sb=sb,
+        bb=bb,
+        device="cuda",
+    )
+    buffer = TritonPBSEnvBuffer(triton_env, initial_capacity=output_size)
+    dst_view = buffer.view(output_size)
+    offsets = buffer.long_workspace(num_envs)
+
+    base_dst.copy_state_from(base, indices, dst_ids)
+    triton_env.repeat_interleave_into(
+        repeat_counts,
+        dst_view,
+        output_size=output_size,
+        max_repeat=2,
+        offsets_out=offsets,
+    )
+    assert_same_fields(base_dst, dst_view)
+    torch_ms = cuda_time_ms(lambda: base_dst.copy_state_from(base, indices, dst_ids), warmup, repeats_count)
+    triton_ms = cuda_time_ms(
+        lambda: triton_env.repeat_interleave_into(
+            repeat_counts,
+            dst_view,
+            output_size=output_size,
+            max_repeat=2,
+            offsets_out=offsets,
+        ),
+        warmup,
+        repeats_count,
+    )
+    print_result("repeat_into", torch_ms, triton_ms, output_size)
 
 
 def main() -> None:
@@ -313,7 +400,9 @@ def main() -> None:
     bench_step_direct(args.num_envs, args.num_players, args.stack, args.sb, args.bb, args.warmup, args.repeats)
     bench_copy(args.num_envs, args.num_players, args.stack, args.sb, args.bb, args.warmup, args.repeats)
     bench_gather(args.num_envs, args.num_players, args.stack, args.sb, args.bb, args.warmup, args.repeats)
+    bench_gather_into(args.num_envs, args.num_players, args.stack, args.sb, args.bb, args.warmup, args.repeats)
     bench_repeat(args.num_envs, args.num_players, args.stack, args.sb, args.bb, args.warmup, args.repeats)
+    bench_repeat_into(args.num_envs, args.num_players, args.stack, args.sb, args.bb, args.warmup, args.repeats)
 
 
 if __name__ == "__main__":

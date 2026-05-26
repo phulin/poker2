@@ -201,3 +201,41 @@ def test_triton_pbs_env_copy_state_from_and_repeat_match_pbs_env() -> None:
         repeats, output_size=int(repeats.sum().item())
     )
     _assert_envs_equal(base_repeated, triton_repeated)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_triton_pbs_env_buffer_views_and_into_materialization() -> None:
+    pytest.importorskip("triton")
+    from p2.env.triton_pbs_env import TritonPBSEnvBuffer
+
+    base, triton_env = _make_envs()
+    actions = torch.tensor([1, 4, 0, triton_env.num_bet_bins - 1], device="cuda")
+    base.step_bins(actions)
+    triton_env.step_bins(actions)
+
+    buffer = TritonPBSEnvBuffer(triton_env, initial_capacity=2)
+    view = buffer.view(3)
+    assert buffer.capacity >= 3
+    assert view.N == 3
+    assert view.deck.data_ptr() == buffer.env.deck.data_ptr()
+
+    src = torch.tensor([3, 1, 0], device="cuda")
+    base_dst = PBSEnv(
+        num_envs=3, num_players=3, starting_stack=40, sb=5, bb=10, device="cuda"
+    )
+    base_dst.copy_state_from(base, src, torch.arange(3, device="cuda"))
+    triton_env.gather_rows_into(src, view)
+    _assert_envs_equal(base_dst, view)
+
+    repeat_view = buffer.view(6)
+    repeats = torch.tensor([2, 0, 1, 3], device="cuda")
+    offsets = buffer.long_workspace(repeats.numel())
+    base_repeated = base.repeat_interleave(repeats, output_size=6)
+    triton_env.repeat_interleave_into(
+        repeats,
+        repeat_view,
+        output_size=6,
+        max_repeat=3,
+        offsets_out=offsets,
+    )
+    _assert_envs_equal(base_repeated, repeat_view)

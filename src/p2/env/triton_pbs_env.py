@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import torch
 
 from p2.env.pbs_env import PBSEnv
@@ -18,6 +20,71 @@ def triton_is_available() -> bool:
 
 def _next_power_of_2(value: int) -> int:
     return 1 << (value - 1).bit_length()
+
+
+TRITON_PBS_ENV_ROW_FIELDS = (
+    "deck",
+    "deck_pos",
+    "button",
+    "street",
+    "to_act",
+    "last_to_act",
+    "pot",
+    "min_raise",
+    "last_aggressive_amount",
+    "actions_this_round",
+    "actions_last_round",
+    "stacks",
+    "starting_stacks",
+    "scale",
+    "committed",
+    "chips_placed",
+    "has_folded",
+    "is_allin",
+    "acted_this_round",
+    "done",
+    "winner",
+    "winners",
+    "board_indices",
+    "last_board_indices",
+    "board_onehot",
+)
+
+
+class TritonPBSEnvBuffer:
+    """Size-doubling scratch buffer for reusable TritonPBSEnv row materialization."""
+
+    def __init__(self, proto: PBSEnv, initial_capacity: int = 0) -> None:
+        self.proto = proto
+        self.capacity = 0
+        self.env: TritonPBSEnv | None = None
+        self._long_capacity = 0
+        self._long_workspace: torch.Tensor | None = None
+        if initial_capacity > 0:
+            self.ensure_capacity(initial_capacity)
+
+    def ensure_capacity(self, capacity: int) -> None:
+        if self.env is not None and self.capacity >= capacity:
+            return
+        new_capacity = max(1, int(capacity), self.capacity * 2)
+        self.capacity = new_capacity
+        self.env = TritonPBSEnv.from_proto(
+            self.proto, num_envs=new_capacity, init_state=False
+        )
+
+    def view(self, size: int) -> TritonPBSEnv:
+        self.ensure_capacity(size)
+        assert self.env is not None
+        return self.env.capacity_view(size)
+
+    def long_workspace(self, size: int) -> torch.Tensor:
+        if self._long_workspace is None or self._long_capacity < size:
+            new_capacity = max(1, int(size), self._long_capacity * 2)
+            self._long_capacity = new_capacity
+            self._long_workspace = torch.empty(
+                new_capacity, dtype=torch.long, device=self.proto.device
+            )
+        return self._long_workspace[:size]
 
 
 class TritonPBSEnv(PBSEnv):
@@ -293,84 +360,200 @@ class TritonPBSEnv(PBSEnv):
             self.board_onehot,
             self.num_players,
             copy_deck,
+            0,
+            False,
+            BLOCK_P=_next_power_of_2(self.num_players),
+            BLOCK_BOARD=_next_power_of_2(5 * 4 * 13),
+            num_warps=4,
+        )
+
+    def capacity_view(self, size: int) -> TritonPBSEnv:
+        if size < 0 or size > self.N:
+            raise ValueError(f"size must be in [0, {self.N}], got {size}")
+        env = copy.copy(self)
+        env.N = int(size)
+        env.arange_n = self.arange_n[:size]
+        for field in TRITON_PBS_ENV_ROW_FIELDS:
+            setattr(env, field, getattr(self, field)[:size])
+        return env
+
+    def gather_rows_into(
+        self,
+        indices: torch.Tensor,
+        dst_env: TritonPBSEnv,
+        dst_start: int = 0,
+        copy_deck: bool = True,
+    ) -> None:
+        indices = indices.to(self.device).contiguous()
+        count = indices.numel()
+        if count == 0:
+            return
+        if dst_start < 0 or dst_start + count > dst_env.N:
+            raise ValueError("destination range is out of bounds")
+        if dst_env.num_players != self.num_players:
+            raise ValueError("source and destination must have same num_players")
+        _pbs_copy_rows_kernel[(count,)](
+            indices,
+            dst_env.arange_n,
+            self.deck,
+            self.deck_pos,
+            self.button,
+            self.street,
+            self.to_act,
+            self.last_to_act,
+            self.pot,
+            self.min_raise,
+            self.last_aggressive_amount,
+            self.actions_this_round,
+            self.actions_last_round,
+            self.stacks,
+            self.starting_stacks,
+            self.scale,
+            self.committed,
+            self.chips_placed,
+            self.has_folded,
+            self.is_allin,
+            self.acted_this_round,
+            self.done,
+            self.winner,
+            self.winners,
+            self.board_indices,
+            self.last_board_indices,
+            self.board_onehot,
+            dst_env.deck,
+            dst_env.deck_pos,
+            dst_env.button,
+            dst_env.street,
+            dst_env.to_act,
+            dst_env.last_to_act,
+            dst_env.pot,
+            dst_env.min_raise,
+            dst_env.last_aggressive_amount,
+            dst_env.actions_this_round,
+            dst_env.actions_last_round,
+            dst_env.stacks,
+            dst_env.starting_stacks,
+            dst_env.scale,
+            dst_env.committed,
+            dst_env.chips_placed,
+            dst_env.has_folded,
+            dst_env.is_allin,
+            dst_env.acted_this_round,
+            dst_env.done,
+            dst_env.winner,
+            dst_env.winners,
+            dst_env.board_indices,
+            dst_env.last_board_indices,
+            dst_env.board_onehot,
+            self.num_players,
+            copy_deck,
+            dst_start,
+            True,
+            BLOCK_P=_next_power_of_2(self.num_players),
+            BLOCK_BOARD=_next_power_of_2(5 * 4 * 13),
+            num_warps=4,
+        )
+
+    def repeat_interleave_into(
+        self,
+        repeats: torch.Tensor,
+        dst_env: TritonPBSEnv,
+        output_size: int,
+        dst_start: int = 0,
+        max_repeat: int | None = None,
+        offsets_out: torch.Tensor | None = None,
+    ) -> None:
+        repeats = repeats.to(self.device).contiguous()
+        if repeats.shape[0] != self.N:
+            raise ValueError("repeats must have shape [N]")
+        if output_size == 0:
+            return
+        if dst_start < 0 or dst_start + output_size > dst_env.N:
+            raise ValueError("destination range is out of bounds")
+        if offsets_out is None:
+            offsets = torch.cumsum(repeats, dim=0) - repeats
+        else:
+            if offsets_out.shape[0] < self.N:
+                raise ValueError("offsets_out must have at least N elements")
+            offsets = offsets_out[: self.N]
+            if offsets.device != repeats.device:
+                raise ValueError("offsets_out must be on the env device")
+            torch.cumsum(repeats, dim=0, out=offsets)
+            offsets.sub_(repeats)
+        if max_repeat is None:
+            max_repeat = max(int(repeats.max().item()), 1)
+        block_r = _next_power_of_2(max(max_repeat, 1))
+        _pbs_repeat_rows_block_kernel[(self.N,)](
+            repeats,
+            offsets,
+            self.deck,
+            self.deck_pos,
+            self.button,
+            self.street,
+            self.to_act,
+            self.last_to_act,
+            self.pot,
+            self.min_raise,
+            self.last_aggressive_amount,
+            self.actions_this_round,
+            self.actions_last_round,
+            self.stacks,
+            self.starting_stacks,
+            self.scale,
+            self.committed,
+            self.chips_placed,
+            self.has_folded,
+            self.is_allin,
+            self.acted_this_round,
+            self.done,
+            self.winner,
+            self.winners,
+            self.board_indices,
+            self.last_board_indices,
+            self.board_onehot,
+            dst_env.deck,
+            dst_env.deck_pos,
+            dst_env.button,
+            dst_env.street,
+            dst_env.to_act,
+            dst_env.last_to_act,
+            dst_env.pot,
+            dst_env.min_raise,
+            dst_env.last_aggressive_amount,
+            dst_env.actions_this_round,
+            dst_env.actions_last_round,
+            dst_env.stacks,
+            dst_env.starting_stacks,
+            dst_env.scale,
+            dst_env.committed,
+            dst_env.chips_placed,
+            dst_env.has_folded,
+            dst_env.is_allin,
+            dst_env.acted_this_round,
+            dst_env.done,
+            dst_env.winner,
+            dst_env.winners,
+            dst_env.board_indices,
+            dst_env.last_board_indices,
+            dst_env.board_onehot,
+            self.num_players,
+            dst_start,
+            BLOCK_R=block_r,
             BLOCK_P=_next_power_of_2(self.num_players),
             BLOCK_BOARD=_next_power_of_2(5 * 4 * 13),
             num_warps=4,
         )
 
     def repeat_interleave(self, repeats: torch.Tensor, output_size: int) -> PBSEnv:
-        repeats = repeats.to(self.device).contiguous()
         dst = type(self).from_proto(self, num_envs=output_size, init_state=False)
         if output_size > 0:
-            offsets = torch.cumsum(repeats, dim=0) - repeats
-            block_r = _next_power_of_2(max(int(repeats.max().item()), 1))
-            _pbs_repeat_rows_kernel[(self.N, block_r)](
-                repeats,
-                offsets,
-                self.deck,
-                self.deck_pos,
-                self.button,
-                self.street,
-                self.to_act,
-                self.last_to_act,
-                self.pot,
-                self.min_raise,
-                self.last_aggressive_amount,
-                self.actions_this_round,
-                self.actions_last_round,
-                self.stacks,
-                self.starting_stacks,
-                self.scale,
-                self.committed,
-                self.chips_placed,
-                self.has_folded,
-                self.is_allin,
-                self.acted_this_round,
-                self.done,
-                self.winner,
-                self.winners,
-                self.board_indices,
-                self.last_board_indices,
-                self.board_onehot,
-                dst.deck,
-                dst.deck_pos,
-                dst.button,
-                dst.street,
-                dst.to_act,
-                dst.last_to_act,
-                dst.pot,
-                dst.min_raise,
-                dst.last_aggressive_amount,
-                dst.actions_this_round,
-                dst.actions_last_round,
-                dst.stacks,
-                dst.starting_stacks,
-                dst.scale,
-                dst.committed,
-                dst.chips_placed,
-                dst.has_folded,
-                dst.is_allin,
-                dst.acted_this_round,
-                dst.done,
-                dst.winner,
-                dst.winners,
-                dst.board_indices,
-                dst.last_board_indices,
-                dst.board_onehot,
-                self.num_players,
-                BLOCK_R=block_r,
-                BLOCK_P=_next_power_of_2(self.num_players),
-                BLOCK_BOARD=_next_power_of_2(5 * 4 * 13),
-                num_warps=4,
-            )
+            self.repeat_interleave_into(repeats, dst, output_size)
         return dst
 
     def gather_rows(self, indices: torch.Tensor) -> PBSEnv:
         indices = indices.to(self.device).contiguous()
         dst = type(self).from_proto(self, num_envs=indices.numel(), init_state=False)
-        if indices.numel() > 0:
-            dst_ids = torch.arange(indices.numel(), device=self.device)
-            dst.copy_state_from(self, indices, dst_ids)
+        self.gather_rows_into(indices, dst)
         return dst
 
     def _validate_triton_ready(self) -> None:
@@ -533,12 +716,17 @@ if triton is not None:
         dst_board_onehot_ptr,
         P: tl.constexpr,
         COPY_DECK: tl.constexpr,
+        DST_START: tl.constexpr,
+        CONTIGUOUS_DST: tl.constexpr,
         BLOCK_P: tl.constexpr,
         BLOCK_BOARD: tl.constexpr,
     ):
         row = tl.program_id(0)
         src = tl.load(src_ids_ptr + row)
-        dst = tl.load(dst_ids_ptr + row)
+        if CONTIGUOUS_DST:
+            dst = DST_START + row
+        else:
+            dst = tl.load(dst_ids_ptr + row)
         if COPY_DECK:
             deck_offsets = tl.arange(0, 8)
             deck_mask = deck_offsets < 5
@@ -647,7 +835,7 @@ if triton is not None:
         tl.store(indices_ptr + start + offsets, row, mask=mask)
 
     @triton.jit
-    def _pbs_repeat_rows_kernel(
+    def _pbs_repeat_rows_block_kernel(
         repeats_ptr,
         offsets_ptr,
         src_deck_ptr,
@@ -701,106 +889,131 @@ if triton is not None:
         dst_last_board_indices_ptr,
         dst_board_onehot_ptr,
         P: tl.constexpr,
+        DST_START: tl.constexpr,
         BLOCK_R: tl.constexpr,
         BLOCK_P: tl.constexpr,
         BLOCK_BOARD: tl.constexpr,
     ):
         src = tl.program_id(0)
-        repeat_lane = tl.program_id(1)
         repeats = tl.load(repeats_ptr + src)
-        if repeat_lane < repeats:
-            dst = tl.load(offsets_ptr + src) + repeat_lane
-            deck_offsets = tl.arange(0, 8)
-            deck_mask = deck_offsets < 5
-            deck = tl.load(src_deck_ptr + src * 5 + deck_offsets, mask=deck_mask, other=0)
-            tl.store(dst_deck_ptr + dst * 5 + deck_offsets, deck, mask=deck_mask)
-            tl.store(dst_deck_pos_ptr + dst, tl.load(src_deck_pos_ptr + src))
-            tl.store(dst_button_ptr + dst, tl.load(src_button_ptr + src))
-            tl.store(dst_street_ptr + dst, tl.load(src_street_ptr + src))
-            tl.store(dst_to_act_ptr + dst, tl.load(src_to_act_ptr + src))
-            tl.store(dst_last_to_act_ptr + dst, tl.load(src_last_to_act_ptr + src))
-            tl.store(dst_pot_ptr + dst, tl.load(src_pot_ptr + src))
-            tl.store(dst_min_raise_ptr + dst, tl.load(src_min_raise_ptr + src))
-            tl.store(
-                dst_last_aggressive_amount_ptr + dst,
-                tl.load(src_last_aggressive_amount_ptr + src),
-            )
-            tl.store(
-                dst_actions_this_round_ptr + dst,
-                tl.load(src_actions_this_round_ptr + src),
-            )
-            tl.store(
-                dst_actions_last_round_ptr + dst,
-                tl.load(src_actions_last_round_ptr + src),
-            )
-            tl.store(dst_scale_ptr + dst, tl.load(src_scale_ptr + src))
-            tl.store(dst_done_ptr + dst, tl.load(src_done_ptr + src))
-            tl.store(dst_winner_ptr + dst, tl.load(src_winner_ptr + src))
+        r_offsets = tl.arange(0, BLOCK_R)
+        r_mask = r_offsets < repeats
+        dsts = DST_START + tl.load(offsets_ptr + src) + r_offsets
 
-            p_offsets = tl.arange(0, BLOCK_P)
-            p_mask = p_offsets < P
-            src_p = src * P
-            dst_p = dst * P
-            tl.store(
-                dst_stacks_ptr + dst_p + p_offsets,
-                tl.load(src_stacks_ptr + src_p + p_offsets, mask=p_mask, other=0),
-                mask=p_mask,
-            )
-            tl.store(
-                dst_starting_stacks_ptr + dst_p + p_offsets,
-                tl.load(src_starting_stacks_ptr + src_p + p_offsets, mask=p_mask, other=0),
-                mask=p_mask,
-            )
-            tl.store(
-                dst_committed_ptr + dst_p + p_offsets,
-                tl.load(src_committed_ptr + src_p + p_offsets, mask=p_mask, other=0),
-                mask=p_mask,
-            )
-            tl.store(
-                dst_chips_placed_ptr + dst_p + p_offsets,
-                tl.load(src_chips_placed_ptr + src_p + p_offsets, mask=p_mask, other=0),
-                mask=p_mask,
-            )
-            tl.store(
-                dst_has_folded_ptr + dst_p + p_offsets,
-                tl.load(src_has_folded_ptr + src_p + p_offsets, mask=p_mask, other=0),
-                mask=p_mask,
-            )
-            tl.store(
-                dst_is_allin_ptr + dst_p + p_offsets,
-                tl.load(src_is_allin_ptr + src_p + p_offsets, mask=p_mask, other=0),
-                mask=p_mask,
-            )
-            tl.store(
-                dst_acted_ptr + dst_p + p_offsets,
-                tl.load(src_acted_ptr + src_p + p_offsets, mask=p_mask, other=0),
-                mask=p_mask,
-            )
-            tl.store(
-                dst_winners_ptr + dst_p + p_offsets,
-                tl.load(src_winners_ptr + src_p + p_offsets, mask=p_mask, other=0),
-                mask=p_mask,
-            )
+        tl.store(dst_deck_pos_ptr + dsts, tl.load(src_deck_pos_ptr + src), mask=r_mask)
+        tl.store(dst_button_ptr + dsts, tl.load(src_button_ptr + src), mask=r_mask)
+        tl.store(dst_street_ptr + dsts, tl.load(src_street_ptr + src), mask=r_mask)
+        tl.store(dst_to_act_ptr + dsts, tl.load(src_to_act_ptr + src), mask=r_mask)
+        tl.store(dst_last_to_act_ptr + dsts, tl.load(src_last_to_act_ptr + src), mask=r_mask)
+        tl.store(dst_pot_ptr + dsts, tl.load(src_pot_ptr + src), mask=r_mask)
+        tl.store(dst_min_raise_ptr + dsts, tl.load(src_min_raise_ptr + src), mask=r_mask)
+        tl.store(
+            dst_last_aggressive_amount_ptr + dsts,
+            tl.load(src_last_aggressive_amount_ptr + src),
+            mask=r_mask,
+        )
+        tl.store(
+            dst_actions_this_round_ptr + dsts,
+            tl.load(src_actions_this_round_ptr + src),
+            mask=r_mask,
+        )
+        tl.store(
+            dst_actions_last_round_ptr + dsts,
+            tl.load(src_actions_last_round_ptr + src),
+            mask=r_mask,
+        )
+        tl.store(dst_scale_ptr + dsts, tl.load(src_scale_ptr + src), mask=r_mask)
+        tl.store(dst_done_ptr + dsts, tl.load(src_done_ptr + src), mask=r_mask)
+        tl.store(dst_winner_ptr + dsts, tl.load(src_winner_ptr + src), mask=r_mask)
 
-            board_small = tl.arange(0, 8)
-            board_small_mask = board_small < 5
-            tl.store(
-                dst_board_indices_ptr + dst * 5 + board_small,
-                tl.load(src_board_indices_ptr + src * 5 + board_small, mask=board_small_mask, other=-1),
-                mask=board_small_mask,
-            )
-            tl.store(
-                dst_last_board_indices_ptr + dst * 5 + board_small,
-                tl.load(src_last_board_indices_ptr + src * 5 + board_small, mask=board_small_mask, other=-1),
-                mask=board_small_mask,
-            )
-            board_offsets = tl.arange(0, BLOCK_BOARD)
-            board_mask = board_offsets < 260
-            tl.store(
-                dst_board_onehot_ptr + dst * 260 + board_offsets,
-                tl.load(src_board_onehot_ptr + src * 260 + board_offsets, mask=board_mask, other=0),
-                mask=board_mask,
-            )
+        deck_offsets = tl.arange(0, 8)
+        deck_mask = deck_offsets < 5
+        deck = tl.load(src_deck_ptr + src * 5 + deck_offsets, mask=deck_mask, other=0)
+        tl.store(
+            dst_deck_ptr + dsts[:, None] * 5 + deck_offsets[None, :],
+            deck[None, :],
+            mask=r_mask[:, None] & deck_mask[None, :],
+        )
+
+        p_offsets = tl.arange(0, BLOCK_P)
+        p_mask = p_offsets < P
+        src_p = src * P
+        dst_p = dsts[:, None] * P + p_offsets[None, :]
+        tl.store(
+            dst_stacks_ptr + dst_p,
+            tl.load(src_stacks_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            mask=r_mask[:, None] & p_mask[None, :],
+        )
+        tl.store(
+            dst_starting_stacks_ptr + dst_p,
+            tl.load(src_starting_stacks_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            mask=r_mask[:, None] & p_mask[None, :],
+        )
+        tl.store(
+            dst_committed_ptr + dst_p,
+            tl.load(src_committed_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            mask=r_mask[:, None] & p_mask[None, :],
+        )
+        tl.store(
+            dst_chips_placed_ptr + dst_p,
+            tl.load(src_chips_placed_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            mask=r_mask[:, None] & p_mask[None, :],
+        )
+        tl.store(
+            dst_has_folded_ptr + dst_p,
+            tl.load(src_has_folded_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            mask=r_mask[:, None] & p_mask[None, :],
+        )
+        tl.store(
+            dst_is_allin_ptr + dst_p,
+            tl.load(src_is_allin_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            mask=r_mask[:, None] & p_mask[None, :],
+        )
+        tl.store(
+            dst_acted_ptr + dst_p,
+            tl.load(src_acted_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            mask=r_mask[:, None] & p_mask[None, :],
+        )
+        tl.store(
+            dst_winners_ptr + dst_p,
+            tl.load(src_winners_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            mask=r_mask[:, None] & p_mask[None, :],
+        )
+
+        board_small = tl.arange(0, 8)
+        board_small_mask = board_small < 5
+        board = tl.load(
+            src_board_indices_ptr + src * 5 + board_small,
+            mask=board_small_mask,
+            other=-1,
+        )
+        last_board = tl.load(
+            src_last_board_indices_ptr + src * 5 + board_small,
+            mask=board_small_mask,
+            other=-1,
+        )
+        tl.store(
+            dst_board_indices_ptr + dsts[:, None] * 5 + board_small[None, :],
+            board[None, :],
+            mask=r_mask[:, None] & board_small_mask[None, :],
+        )
+        tl.store(
+            dst_last_board_indices_ptr + dsts[:, None] * 5 + board_small[None, :],
+            last_board[None, :],
+            mask=r_mask[:, None] & board_small_mask[None, :],
+        )
+        board_offsets = tl.arange(0, BLOCK_BOARD)
+        board_mask = board_offsets < 260
+        board_onehot = tl.load(
+            src_board_onehot_ptr + src * 260 + board_offsets,
+            mask=board_mask,
+            other=0,
+        )
+        tl.store(
+            dst_board_onehot_ptr + dsts[:, None] * 260 + board_offsets[None, :],
+            board_onehot[None, :],
+            mask=r_mask[:, None] & board_mask[None, :],
+        )
 
     @triton.jit
     def _pbs_legal_kernel(
