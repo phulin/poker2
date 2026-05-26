@@ -1,5 +1,6 @@
 node_modules/
 fixtures/
 dist/
-public/models/rebel_latest/
+public/models/
+public/allin/
 bench_spots.json
