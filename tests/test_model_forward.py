@@ -95,7 +95,6 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
         num_players=num_players,
         policy_rank=8,
         policy_hand_bias_rank=4,
-        policy_factor_scale=0.5,
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(0))
 
@@ -127,7 +126,7 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
         num_players * NUM_HANDS,
         model.hidden_dim,
     )
-    torch.testing.assert_close(model.policy_factor_scale.detach(), torch.tensor(0.5))
+    assert not hasattr(model, "policy_factor_scale")
 
     beliefs = torch.full(
         (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
@@ -172,7 +171,6 @@ def test_better_ffn_initial_policy_is_near_uniform():
         board_interaction_dim=16,
         policy_rank=16,
         policy_hand_bias_rank=8,
-        policy_factor_scale=1.0,
         nonlinearity="leaky_relu",
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(0))
@@ -206,8 +204,7 @@ def test_better_ffn_initial_policy_is_near_uniform():
     assert 0.01 < output.hand_values.std() < 0.2
 
 
-def test_better_ffn_policy_factor_scale_applies_to_final_logits():
-    batch_size = 3
+def test_better_ffn_policy_logit_branches_initialize_with_small_gains():
     num_actions = 5
     num_players = 2
     model = BetterFFN(
@@ -221,33 +218,26 @@ def test_better_ffn_policy_factor_scale_applies_to_final_logits():
         num_players=num_players,
         policy_rank=8,
         policy_hand_bias_rank=4,
-        policy_factor_scale=1.0,
         nonlinearity="leaky_relu",
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(1))
-    model.eval()
 
-    beliefs = torch.full(
-        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    expected_gains = (
+        (model.policy_action_head, 0.1),
+        (model.policy_hand_bias_action, 0.01),
+        (model.policy_dynamic_coeff, 0.01),
+        (model.policy_action_bias, 0.01),
     )
-    features = MLPFeatures(
-        context=torch.zeros(batch_size, context_length(num_players)),
-        street=torch.zeros(batch_size, dtype=torch.long),
-        to_act=torch.arange(batch_size, dtype=torch.long) % num_players,
-        board=torch.full((batch_size, 5), -1, dtype=torch.long),
-        beliefs=beliefs.view(batch_size, -1),
-    )
-
-    with torch.no_grad():
-        base_logits = model(
-            features, include_policy=True, include_value=False
-        ).policy_logits
-        model.policy_factor_scale.fill_(2.0)
-        scaled_logits = model(
-            features, include_policy=True, include_value=False
-        ).policy_logits
-
-    torch.testing.assert_close(scaled_logits, base_logits * 2.0)
+    for projection, expected_gain in expected_gains:
+        spectral_norm = torch.linalg.matrix_norm(
+            projection.linear_out.weight.detach(), ord=2
+        )
+        torch.testing.assert_close(
+            spectral_norm,
+            torch.tensor(expected_gain),
+            atol=1e-6,
+            rtol=1e-6,
+        )
 
 
 def test_better_ffn_range_hidden_dim_zero_uses_hand_embedding_with_ffn_width():

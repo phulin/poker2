@@ -145,13 +145,12 @@ def test_muon_optimizer_uses_separate_policy_head_lr():
     assert optimizer.optimizers[1][1].param_groups[0]["lr_role"] == "policy_head_muon"
 
 
-def test_adamw_excludes_policy_factor_scale_and_norm_params_from_weight_decay():
+def test_adamw_excludes_norm_params_from_weight_decay():
     class Model(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.linear = nn.Linear(4, 4)
             self.norm = nn.RMSNorm(4)
-            self.policy_factor_scale = nn.Parameter(torch.tensor(1.0))
 
     model = Model()
     cfg = TrainingConfig(optimizer="adamw", learning_rate=1e-3, weight_decay=0.01)
@@ -166,7 +165,6 @@ def test_adamw_excludes_policy_factor_scale_and_norm_params_from_weight_decay():
     }
     assert set(no_decay_groups[0]["params"]) == {
         model.norm.weight,
-        model.policy_factor_scale,
     }
 
 
@@ -199,12 +197,11 @@ def test_cfr_schedule_scales_policy_head_muon_lr():
     assert trainer.optimizer.param_groups[2]["lr"] == pytest.approx(1.1e-4)
 
 
-def test_cfr_train_step_logs_policy_factor_scale():
+def test_cfr_train_step_logs_schedule_and_cfr_iterations():
     trainer = RebelCFRTrainer.__new__(RebelCFRTrainer)
     trainer._apply_schedules = lambda step: None
     trainer._update_model = lambda step: {"loss": 0.0}
     trainer.model = nn.Module()
-    trainer.model.policy_factor_scale = nn.Parameter(torch.tensor(1.25))
     trainer.optimizer = type("_Opt", (), {})()
     trainer.optimizer.param_groups = [{"lr": 1e-3}]
     trainer.cfr_evaluator = type("_Evaluator", (), {"cfr_iterations": 400})()
@@ -212,7 +209,7 @@ def test_cfr_train_step_logs_policy_factor_scale():
     metrics = trainer.train_step(7)
 
     assert metrics["step"] == 8
-    assert metrics["policy_factor_scale"] == pytest.approx(1.25)
+    assert "policy_factor_scale" not in metrics
     assert metrics["cfr_iterations"] == 400
 
 

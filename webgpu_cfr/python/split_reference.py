@@ -41,7 +41,6 @@ def _load_split_model(
         "board_interaction_dim": cfg.model.board_interaction_dim,
         "policy_rank": cfg.model.policy_rank,
         "policy_hand_bias_rank": cfg.model.policy_hand_bias_rank,
-        "policy_factor_scale": cfg.model.policy_factor_scale,
         "nonlinearity": cfg.model.nonlinearity,
     }
     model = BetterSplitFFN(
@@ -53,6 +52,7 @@ def _load_split_model(
             value.to(torch.float32) if value.dtype.is_floating_point else value
         )
         for key, value in checkpoint["model"].items()
+        if not key.removeprefix("_orig_mod.").endswith("policy_factor_scale")
     }
     model.load_state_dict(state)
     model.to(device)

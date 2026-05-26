@@ -28,7 +28,6 @@ def make_model(device: torch.device, compile_model: bool) -> BetterFFN:
         policy_rank=128,
         policy_hand_bias_rank=32,
         value_rank=128,
-        policy_factor_scale=1.0,
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(123))
     model = model.to(device)

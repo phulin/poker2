@@ -332,7 +332,6 @@ class RebelCFRTrainer:
             board_interaction_dim=cfg.model.board_interaction_dim,
             policy_rank=cfg.model.policy_rank,
             policy_hand_bias_rank=cfg.model.policy_hand_bias_rank,
-            policy_factor_scale=cfg.model.policy_factor_scale,
             nonlinearity=cfg.model.nonlinearity,
         )
         return BetterSplitFFN(
@@ -1930,11 +1929,6 @@ class RebelCFRTrainer:
         ]
         if adamw_lrs:
             update_info["adamw_learning_rate"] = adamw_lrs[0]
-        policy_factor_scale = getattr(self.model, "policy_factor_scale", None)
-        if policy_factor_scale is not None:
-            update_info["policy_factor_scale"] = float(
-                policy_factor_scale.detach().float().item()
-            )
         update_info["cfr_iterations"] = self.cfr_evaluator.cfr_iterations
 
         return update_info

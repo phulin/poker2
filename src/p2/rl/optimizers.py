@@ -130,10 +130,6 @@ def _is_policy_head_param(name: str) -> bool:
 def _no_weight_decay_param_ids(model: nn.Module) -> set[int]:
     """Parameters that should not be pulled toward smaller logit/activation scale."""
     no_decay: set[int] = set()
-    for name, param in model.named_parameters():
-        if name.rsplit(".", maxsplit=1)[-1] == "policy_factor_scale":
-            no_decay.add(id(param))
-
     for module in model.modules():
         if isinstance(module, _NORM_MODULES):
             no_decay.update(

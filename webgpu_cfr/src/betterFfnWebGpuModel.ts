@@ -1525,7 +1525,6 @@ export class BetterFfnWebGpuModel {
         actions * biasRank,
         "policy_model.policy_hand_bias_action",
       );
-      const policyScale = this.tensor("policy_model.policy_factor_scale").data[0]!;
       const cardMass = this.cardMasses(batchedBeliefs, beliefBase);
       const actor = env.toAct;
       const opp = 1 - actor;
@@ -1562,7 +1561,7 @@ export class BetterFfnWebGpuModel {
           for (let f = 0; f < 15; f += 1) {
             logit += dyn[f]! * dynamicCoeff[a * 15 + f]!;
           }
-          out[(b * NUM_HANDS + hand) * actions + a] = logit * policyScale;
+          out[(b * NUM_HANDS + hand) * actions + a] = logit;
         }
       }
     }
@@ -1576,7 +1575,6 @@ export class BetterFfnWebGpuModel {
     actions: number,
   ): void {
     const prefix = "policy_model.";
-    requireTensor(tensors, `${prefix}policy_factor_scale`, []);
     for (let i = 0; i < this.manifest.architecture.numPolicyLayers; i += 1) {
       this.requireLinearBlock(tensors, `${prefix}policy_tower.${i}.inner`, hidden, ffn, hidden);
     }

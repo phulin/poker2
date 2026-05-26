@@ -98,7 +98,6 @@ class BetterFFN(BaseMLPModel):
         board_interaction_dim: int = 0,
         policy_rank: int = 64,
         policy_hand_bias_rank: int = 32,
-        policy_factor_scale: float = 0.5,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
         super().__init__()
@@ -228,9 +227,6 @@ class BetterFFN(BaseMLPModel):
             hidden_dim, num_actions * self.policy_hand_bias_rank
         )
         self.policy_hand_norm = nn.RMSNorm(hidden_dim, eps=1e-5)
-        self.policy_factor_scale = nn.Parameter(
-            torch.tensor(float(policy_factor_scale))
-        )
 
         layers = [
             ResidualBlock(
@@ -632,7 +628,7 @@ class BetterFFN(BaseMLPModel):
                 player_beliefs, actor, board, dynamic_coeff, board_stats
             )
         logits = logits + self.policy_action_bias(policy_state)[:, None, :]
-        return logits * self.policy_factor_scale
+        return logits
 
     def _belief_board_interaction(
         self,
@@ -920,19 +916,18 @@ class BetterFFN(BaseMLPModel):
         if hasattr(self, "belief_phase_shift"):
             nn.init.zeros_(self.belief_phase_shift.weight)
 
-        # Start CFR warm-start policies close to uniform. The policy logits are
-        # assembled from several additive branches; leaving all policy output
-        # projections at orthogonal scale makes the random initial policy very
-        # sharp, especially through dynamic log-belief features.
+        # Start CFR warm-start policies close to uniform. The dominant low-rank
+        # policy logit branch uses gain 0.1; auxiliary additive correction
+        # branches start smaller because dynamic log-belief features have a
+        # much larger raw magnitude.
         if hasattr(self, "policy_action_head"):
             self.policy_action_head.get_submodule("linear_out").weight.data.mul_(0.1)
-            self.policy_hand_bias_action.get_submodule("linear_out").weight.data.mul_(
-                0.01
-            )
-            self.policy_dynamic_coeff.get_submodule("linear_out").weight.data.mul_(
-                0.01
-            )
-            self.policy_action_bias.get_submodule("linear_out").weight.data.mul_(0.01)
+            for projection in (
+                self.policy_hand_bias_action,
+                self.policy_dynamic_coeff,
+                self.policy_action_bias,
+            ):
+                projection.get_submodule("linear_out").weight.data.mul_(0.01)
 
     def create_feature_encoder(
         self,
@@ -1025,7 +1020,6 @@ class BetterStreetValueFFN(BetterFFN):
         del self.policy_hand_bias
         del self.policy_hand_bias_action
         del self.policy_hand_norm
-        del self.policy_factor_scale
 
         self.pre_value_head = self.hand_value_head
         del self.hand_value_head
@@ -1299,10 +1293,6 @@ class BetterSplitFFN(BaseMLPModel):
         self.num_players = policy_model.num_players
         self.num_actions = policy_model.num_actions
         self.enforce_zero_sum = value_model.enforce_zero_sum
-
-    @property
-    def policy_factor_scale(self) -> nn.Parameter:
-        return self.policy_model.policy_factor_scale
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
         self.policy_model.init_weights(rng)

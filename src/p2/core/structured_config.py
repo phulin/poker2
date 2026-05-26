@@ -240,7 +240,6 @@ class ModelConfig:
     policy_rank: int = 64
     policy_hand_bias_rank: int = 32
     value_rank: int = 128
-    policy_factor_scale: float = 0.5
 
     # Better TRM parameters
     num_recursions: int = 6
@@ -435,6 +434,7 @@ class Config:
         compile_setting = model_container.get("compile", "default")
         if isinstance(compile_setting, bool):
             model_container["compile"] = "default" if compile_setting else "off"
+        model_container.pop("policy_factor_scale", None)
         container["model"] = ModelConfig(**model_container)
         container["env"] = EnvConfig(**(container.get("env", {})))
         container["exploiter"] = ExploiterConfig(**(container.get("exploiter", {})))

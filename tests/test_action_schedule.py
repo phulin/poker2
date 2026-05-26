@@ -40,3 +40,9 @@ def test_config_derives_action_space_from_depth_schedule() -> None:
     assert cfg.env.bet_bins == [0.25, 0.5, 0.75, 1.0, 1.5]
     assert cfg.model.num_actions == 8
     assert cfg.search.depth == 6
+
+
+def test_config_ignores_removed_policy_factor_scale() -> None:
+    cfg = Config.from_dict({"model": {"policy_factor_scale": 0.05}})
+
+    assert not hasattr(cfg.model, "policy_factor_scale")
