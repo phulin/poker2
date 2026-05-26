@@ -133,12 +133,18 @@ if (await exists(stagedAllInDir)) {
   }
 }
 
-console.log(JSON.stringify({
-  bucket,
-  modelManifestUrl: `${assetOrigin}/${modelPrefix}/model.json`,
-  stagedFiles: uploads.length,
-  stagingRoot,
-}, null, 2));
+console.log(
+  JSON.stringify(
+    {
+      bucket,
+      modelManifestUrl: `${assetOrigin}/${modelPrefix}/model.json`,
+      stagedFiles: uploads.length,
+      stagingRoot,
+    },
+    null,
+    2,
+  ),
+);
 
 if (dryRun) process.exit(0);
 
@@ -165,7 +171,7 @@ async function buildAllInManifest(
   if (!(await exists(sourceDir))) return undefined;
   const sourceManifestPath = join(sourceDir, "allin_manifest.json");
   const sourceManifest = (await exists(sourceManifestPath))
-    ? JSON.parse(await readFile(sourceManifestPath, "utf8")) as AllInManifest
+    ? (JSON.parse(await readFile(sourceManifestPath, "utf8")) as AllInManifest)
     : { enabled: true, scale: 32768 };
   const allIn = structuredClone(sourceManifest);
   const stagedDir = join(stagingRoot, prefix);
@@ -237,7 +243,7 @@ async function listFiles(root: string): Promise<string[]> {
     const path = join(root, entry);
     const entryStat = await stat(path);
     if (entryStat.isDirectory()) {
-      out.push(...await listFiles(path));
+      out.push(...(await listFiles(path)));
     } else {
       out.push(path);
     }
@@ -246,7 +252,10 @@ async function listFiles(root: string): Promise<string[]> {
 }
 
 function toObjectKey(root: string, file: string): string {
-  return file.slice(resolve(root).length + 1).split("/").join("/");
+  return file
+    .slice(resolve(root).length + 1)
+    .split("/")
+    .join("/");
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {

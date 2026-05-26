@@ -143,7 +143,7 @@ def build_fixture(args: argparse.Namespace) -> dict[str, Any]:
     }
     return {
         "schemaVersion": 1,
-        "source": "p2.webgpu_cfr.split_reference",
+        "source": "p2.website.split_reference",
         "snapshot": str(args.snapshot),
         "numHands": NUM_HANDS,
         "numActions": cfg.model.num_actions,

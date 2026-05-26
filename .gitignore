@@ -93,7 +93,7 @@ celerybeat.pid
 # Environments
 .env
 .env.*
-!/webgpu_cfr/.env.production.example
+!/website/.env.production.example
 .venv
 .venv*/
 venv/
@@ -159,5 +159,5 @@ profile_output*.txt
 /secret*
 /outputs/
 /profiler_logs/
-/webgpu_cfr/.wrangler/
+/website/.wrangler/
 spots.pt

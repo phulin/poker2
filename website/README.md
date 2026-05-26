@@ -67,28 +67,28 @@ npm run export:model
 This writes:
 
 ```text
-webgpu_cfr/public/models/rebel_latest/model.json
-webgpu_cfr/public/models/rebel_latest/weights.bin.gz
+website/public/models/rebel_latest/model.json
+website/public/models/rebel_latest/weights.bin.gz
 ```
 
 For custom snapshots or output paths, call the exporter directly from the repo
 root:
 
 ```bash
-uv run python webgpu_cfr/python/export_model.py --snapshot checkpoints-rebel/rebel_latest.pt --out webgpu_cfr/public/models/rebel_latest
+uv run python website/python/export_model.py --snapshot checkpoints-rebel/rebel_latest.pt --out website/public/models/rebel_latest
 ```
 
 Generate optional WebGPU all-in payoff assets for the exported model:
 
 ```bash
-uv run python webgpu_cfr/python/precompute_allin_assets.py \
-  --out webgpu_cfr/public/models/rebel_latest/allin \
+uv run python website/python/precompute_allin_assets.py \
+  --out website/public/models/rebel_latest/allin \
   --device cuda \
   --batch-size 1
-uv run python webgpu_cfr/python/export_model.py \
+uv run python website/python/export_model.py \
   --snapshot checkpoints-rebel/rebel_latest.pt \
-  --out webgpu_cfr/public/models/rebel_latest \
-  --allin-manifest webgpu_cfr/public/models/rebel_latest/allin/allin_manifest.json
+  --out website/public/models/rebel_latest \
+  --allin-manifest website/public/models/rebel_latest/allin/allin_manifest.json
 ```
 
 The flop asset generator writes canonical int16 table shards plus lookup files.
@@ -121,12 +121,12 @@ npm run eval -- --snapshot checkpoints-rebel/rebel_latest.pt --spot 1 --iteratio
 `WEBGPU_BACKEND` defaults to `vulkan`. Set it if you need another Dawn backend.
 
 For the browser spot solver, export the model into
-`webgpu_cfr/public/models/rebel_latest` and run `npm run dev` or
+`website/public/models/rebel_latest` and run `npm run dev` or
 `npm run build && npm run preview`. The app loads `/models/rebel_latest/model.json`
 and the manifest-referenced `/models/rebel_latest/weights.bin.gz`, decompressing
 and caching the decoded weights in IndexedDB until the manifest weight hash or
 byte length changes.
 
-The same build/export flow also enables `webgpu_cfr/public/benchmark.html`,
+The same build/export flow also enables `website/public/benchmark.html`,
 which times repeated browser evaluations with configurable spots, CFR settings,
 warmups, and run counts.

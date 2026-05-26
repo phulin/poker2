@@ -119,7 +119,7 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("webgpu_cfr/public/models/rebel_latest/allin"),
+        default=Path("website/public/models/rebel_latest/allin"),
         help="Output all-in asset directory, usually under an exported model directory.",
     )
     parser.add_argument(

@@ -1,20 +1,20 @@
 # Notes: WebGPU CFR Asset Deployment
 
 ## Local Findings
-- The app hardcodes `MODEL_MANIFEST_URL = "/models/rebel_latest/model.json"` in `webgpu_cfr/src/App.tsx`.
+- The app hardcodes `MODEL_MANIFEST_URL = "/models/rebel_latest/model.json"` in `website/src/App.tsx`.
 - The current model cache stores decoded weights in IndexedDB under `p2-webgpu-cfr-model-cache`.
 - There is no all-in table IndexedDB cache yet.
 - Current local production assets are:
-  - `webgpu_cfr/public/models/rebel_latest/model.json`
-  - `webgpu_cfr/public/models/rebel_latest/weights.bin.gz`
-  - `webgpu_cfr/public/models/rebel_latest/allin/preflop.i16`
-  - `webgpu_cfr/public/models/rebel_latest/allin/allin_manifest.json`
-- No flop shard files are present locally under `webgpu_cfr/public/models/rebel_latest/allin`.
-- `webgpu_cfr/python/precompute_allin_assets.py` can generate canonical flop assets, but full flop generation requires CUDA unless `--limit` is used.
+  - `website/public/models/rebel_latest/model.json`
+  - `website/public/models/rebel_latest/weights.bin.gz`
+  - `website/public/models/rebel_latest/allin/preflop.i16`
+  - `website/public/models/rebel_latest/allin/allin_manifest.json`
+- No flop shard files are present locally under `website/public/models/rebel_latest/allin`.
+- `website/python/precompute_allin_assets.py` can generate canonical flop assets, but full flop generation requires CUDA unless `--limit` is used.
 - Wrangler is not currently installed in this workspace (`wrangler` not found; no local `node_modules/.bin/wrangler`).
 - Wrangler 4.94.0 was later installed as a dev dependency.
 - R2 bucket `p2-webgpu-cfr-assets` was created.
-- R2 CORS was applied from `webgpu_cfr/cloudflare/r2-cors.json`.
+- R2 CORS was applied from `website/cloudflare/r2-cors.json`.
 - Remote R2 uploads completed for:
   - `models/rebel_296_4000/model.json`
   - `models/rebel_296_4000/weights.bin.gz`

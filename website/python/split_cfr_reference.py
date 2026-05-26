@@ -199,7 +199,7 @@ def build_cfr_fixture(args: argparse.Namespace) -> dict[str, Any]:
     }
     return {
         "schemaVersion": 1,
-        "source": "p2.webgpu_cfr.split_cfr_reference",
+        "source": "p2.website.split_cfr_reference",
         "snapshot": str(args.snapshot),
         "numHands": NUM_HANDS,
         "numActions": num_actions,

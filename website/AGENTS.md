@@ -5,6 +5,7 @@ Isolated TypeScript/WebGPU CFR evaluator for exported BetterFFN models, with Nod
 - `README.md`: WebGPU evaluator overview, shape, commands, and export flow.
 - `package.json`: Node scripts and dependencies for build, typecheck, tests, export, eval, and benchmark commands.
 - `package-lock.json`: Locked Node dependency graph.
+- `biome.json`: Biome formatter/linter configuration for TypeScript, TSX, JSON, and deployment scripts.
 - `tsconfig.json`: TypeScript compiler configuration.
 - `tsconfig.app.json`: Vite/Solid typecheck configuration for TSX browser app files.
 - `vite.config.ts`: Solid plugin and app build output configuration.

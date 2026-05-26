@@ -1,0 +1,17 @@
+{
+  "rules": [
+    {
+      "allowed": {
+        "origins": [
+          "https://holdem.computer",
+          "https://www.holdem.computer",
+          "http://localhost:5173"
+        ],
+        "methods": ["GET", "HEAD"],
+        "headers": ["Content-Type", "Range"]
+      },
+      "exposeHeaders": ["Content-Length", "Content-Encoding", "Accept-Ranges"],
+      "maxAgeSeconds": 3000
+    }
+  ]
+}

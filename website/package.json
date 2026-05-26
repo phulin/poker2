@@ -1,5 +1,5 @@
 {
-  "name": "p2-webgpu-cfr",
+  "name": "p2-website",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,15 +10,18 @@
     "build:app": "vite build",
     "preview": "vite preview --host 0.0.0.0",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.app.json",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "biome:check": "biome check --formatter-enabled=false --assist-enabled=false .",
     "test": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} node --test --test-concurrency=1 --import tsx tests/*.test.ts",
-    "fixture": "cd .. && uv run python webgpu_cfr/python/reference.py --snapshot checkpoints-rebel/rebel_latest.pt --spot 1 --iterations 8 --out webgpu_cfr/fixtures/latest_preflop_call.json",
-    "export:model": "cd .. && uv run python webgpu_cfr/python/export_model.py --snapshot checkpoints-rebel/rebel_latest.pt --out webgpu_cfr/public/models/rebel_latest",
+    "fixture": "cd .. && uv run python website/python/reference.py --snapshot checkpoints-rebel/rebel_latest.pt --spot 1 --iterations 8 --out website/fixtures/latest_preflop_call.json",
+    "export:model": "cd .. && uv run python website/python/export_model.py --snapshot checkpoints-rebel/rebel_latest.pt --out website/public/models/rebel_latest",
     "eval": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/cli.ts",
     "bench": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/bench.ts",
     "bench:model-kernels": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchModelKernels.ts",
     "bench:sparse-cfr-kernels": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchSparseCfrKernels.ts",
     "bench:spots": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchSpots.ts",
-    "bench:spots:extract": "cd .. && uv run python webgpu_cfr/python/extract_bench_spots.py",
+    "bench:spots:extract": "cd .. && uv run python website/python/extract_bench_spots.py",
     "upload:assets": "tsc && node dist/scripts/upload_assets.js",
     "r2:cors": "wrangler r2 bucket cors set p2-webgpu-cfr-assets --file cloudflare/r2-cors.json --force",
     "deploy:pages": "npm run build && wrangler pages deploy dist/app --project-name holdem-computer --branch main --commit-dirty=true"
@@ -29,6 +32,7 @@
     "webgpu": "^0.4.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
     "@types/node": "^24.10.1",
     "@webgpu/types": "^0.1.64",
     "tsx": "^4.20.5",

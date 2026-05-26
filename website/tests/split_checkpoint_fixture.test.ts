@@ -66,7 +66,7 @@ function loadPythonReference(extraArgs: string[] = []): SplitReference {
     [
       "run",
       "python",
-      "webgpu_cfr/python/split_reference.py",
+      "website/python/split_reference.py",
       "--snapshot",
       CHECKPOINT,
       "--force-button",
@@ -94,7 +94,7 @@ function loadPythonCfrReference(
     [
       "run",
       "python",
-      "webgpu_cfr/python/split_cfr_reference.py",
+      "website/python/split_cfr_reference.py",
       "--snapshot",
       CHECKPOINT,
       "--preflop-allin-table",

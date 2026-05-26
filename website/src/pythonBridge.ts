@@ -20,7 +20,7 @@ export function loadPythonReference(options: ReferenceOptions): WebgpuCfrFixture
     [
       "run",
       "python",
-      "webgpu_cfr/python/reference.py",
+      "website/python/reference.py",
       "--snapshot",
       options.snapshot,
       "--spot",

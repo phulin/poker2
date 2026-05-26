@@ -45,7 +45,7 @@ function exportModel(t: TestContext): { manifest: string; weights: string } | un
     [
       "run",
       "python",
-      "webgpu_cfr/python/export_model.py",
+      "website/python/export_model.py",
       "--snapshot",
       "checkpoints-rebel/rebel_latest.pt",
       "--out",

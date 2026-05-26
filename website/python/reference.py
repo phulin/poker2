@@ -283,7 +283,7 @@ def build_fixture(
 
     return {
         "schemaVersion": 1,
-        "source": "p2.webgpu_cfr.reference",
+        "source": "p2.website.reference",
         "snapshot": str(snapshot),
         "spot": spot,
         "iterations": iterations,

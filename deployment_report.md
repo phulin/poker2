@@ -15,7 +15,7 @@
   - `scripts/upload_assets.ts`
 - Production build removes `dist/app/models` so Pages only ships app/static files.
 - Created R2 bucket `p2-webgpu-cfr-assets`.
-- Applied R2 CORS policy from `webgpu_cfr/cloudflare/r2-cors.json`.
+- Applied R2 CORS policy from `website/cloudflare/r2-cors.json`.
 - Uploaded remote R2 assets:
   - `models/rebel_296_4000/model.json`
   - `models/rebel_296_4000/weights.bin.gz`

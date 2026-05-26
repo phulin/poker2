@@ -75,10 +75,10 @@ def _validate_supported(cfg: Config) -> None:
         raise ValueError(f"unsupported model type {cfg.model.name}")
     if _enum_value(cfg.model.nonlinearity) != NonlinearityType.leaky_relu.value:
         raise ValueError(
-            "webgpu_cfr currently supports only BetterFFN checkpoints with leaky_relu"
+            "website exporter currently supports only BetterFFN checkpoints with leaky_relu"
         )
     if not cfg.model.shared_trunk:
-        raise ValueError("webgpu_cfr currently requires shared_trunk=True")
+        raise ValueError("website exporter currently requires shared_trunk=True")
     if cfg.model.num_actions != len(cfg.env.bet_bins) + 3:
         raise ValueError("num_actions must equal len(env.bet_bins) + 3")
 
@@ -221,7 +221,7 @@ def export_model(
         "format": "p2.better_ffn.webgpu",
         "source": {
             "snapshot": str(snapshot),
-            "exporter": "webgpu_cfr.python.export_model",
+            "exporter": "website.python.export_model",
         },
         "architecture": {
             "numHands": NUM_HANDS,
