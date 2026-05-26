@@ -35,6 +35,7 @@ const CARD_OPTIONS = Array.from({ length: 52 }, (_, index) => formatCard(index))
 const STREET_CARD_COUNTS = [0, 3, 4, 5] as const;
 const STREET_NAMES = ["Preflop", "Flop", "Turn", "River"] as const;
 const HERO_PLAYER: PlayerIndex = 0;
+const CUSTOM_FIRST_RAISE_ACTION = -1;
 
 interface PublicEnvDefaults {
   stack: number;
@@ -78,12 +79,15 @@ interface ActionContext {
   toCall: number;
   meCommitted: number;
   stack: number;
+  oppStack: number;
+  minRaise: number;
   allInIndex: number;
   pot: number;
 }
 
 interface ActionRow {
   action: number;
+  customRaiseTo?: number;
   actor: PlayerIndex;
   legalMask: number[];
   context: ActionContext;
@@ -106,6 +110,11 @@ interface HashInputs {
   stack: string;
   sb: string;
   bb: string;
+}
+
+interface ParsedActions {
+  actions: number[];
+  customFirstRaiseTo?: number;
 }
 
 interface SolveResult {
@@ -133,6 +142,8 @@ function contextFromEnv(env: PublicHunlEnv, legal: LegalBins): ActionContext {
     toCall: env.committed[opp] - env.committed[me],
     meCommitted: env.committed[me],
     stack: env.stacks[me],
+    oppStack: env.stacks[opp],
+    minRaise: env.minRaise,
     allInIndex: legal.amounts.length - 1,
     pot: env.pot,
   };
@@ -146,6 +157,7 @@ function formatChips(amount: number): string {
 }
 
 function formatActionLabel(bin: number, ctx: ActionContext): string {
+  if (bin === CUSTOM_FIRST_RAISE_ACTION) return ctx.toCall > 0 ? "Custom raise" : "Custom bet";
   if (bin === 0) return "Fold";
   if (bin === 1) {
     return ctx.toCall > 0 ? `Call ${formatChips(ctx.toCall)}` : "Check";
@@ -161,7 +173,12 @@ function formatActionLabel(bin: number, ctx: ActionContext): string {
   return `Bet ${formatChips(amount)}`;
 }
 
+function formatCustomRaiseLabel(amount: number, ctx: ActionContext): string {
+  return ctx.toCall > 0 ? `Raise to ${formatChips(amount)}` : `Bet ${formatChips(amount)}`;
+}
+
 function shortActionLabel(bin: number, ctx: ActionContext): string {
+  if (bin === CUSTOM_FIRST_RAISE_ACTION) return ctx.toCall > 0 ? "R" : "B";
   if (bin === 0) return "F";
   if (bin === 1) return "C";
   if (bin === ctx.allInIndex) return "A";
@@ -299,8 +316,8 @@ function actionFromHashToken(
 function actionsFromHash(
   value: string | undefined,
   options: Pick<HashInputs, "button" | "stack" | "sb" | "bb">,
-): number[] {
-  if (!value) return [];
+): ParsedActions {
+  if (!value) return { actions: [] };
   const env = createPublicEnv(LOCAL_ENV_DEFAULTS, {
     button: options.button,
     stack: options.stack,
@@ -308,19 +325,50 @@ function actionsFromHash(
     bb: options.bb,
   });
   const parsed: number[] = [];
-  for (const token of value.split("-")) {
+  let customFirstRaiseTo: number | undefined;
+  const tokens = value.split("-");
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
     const legal = env.legalBinsAmountAndMask();
-    const action = actionFromHashToken(token, legalActionList(legal.mask), contextFromEnv(env, legal));
+    const context = contextFromEnv(env, legal);
+    let action = actionFromHashToken(token, legalActionList(legal.mask), context);
+    const normalized = token.trim().toLowerCase();
+    if (
+      index === 0 &&
+      action !== undefined &&
+      (normalized.startsWith("r") || normalized.startsWith("b"))
+    ) {
+      const amount = Number(normalized.slice(1));
+      const exact = Number.isFinite(amount)
+        ? exactStandardRaiseAction(amount, legalActionList(legal.mask), context)
+        : undefined;
+      if (
+        Number.isFinite(amount) &&
+        exact === undefined &&
+        customRaiseToIsLegal(amount, context)
+      ) {
+        action = CUSTOM_FIRST_RAISE_ACTION;
+        customFirstRaiseTo = amount;
+      }
+    }
+    if (action === CUSTOM_FIRST_RAISE_ACTION) {
+      if (customFirstRaiseTo === undefined) break;
+      parsed.push(action);
+      env.stepRaiseTo(customFirstRaiseTo);
+      if (env.done) break;
+      continue;
+    }
     if (action === undefined || !legal.mask[action]) break;
     parsed.push(action);
     env.stepBin(action, legal);
     if (env.done) break;
   }
-  return parsed;
+  return { actions: parsed, ...(customFirstRaiseTo !== undefined ? { customFirstRaiseTo } : {}) };
 }
 
 function actionTokensForActions(
   actionsIn: readonly number[],
+  customFirstRaiseTo: number | undefined,
   options: {
     button: PlayerIndex;
     stack: string;
@@ -335,8 +383,18 @@ function actionTokensForActions(
     bb: options.bb,
   });
   const tokens: string[] = [];
-  for (const action of actionsIn) {
+  for (let index = 0; index < actionsIn.length; index += 1) {
+    const action = actionsIn[index]!;
     const legal = env.legalBinsAmountAndMask();
+    if (index === 0 && action === CUSTOM_FIRST_RAISE_ACTION) {
+      if (customFirstRaiseTo === undefined) break;
+      const other = (1 - env.toAct) as PlayerIndex;
+      const prefix = env.committed[other] > env.committed[env.toAct] ? "r" : "b";
+      tokens.push(`${prefix}${formatChips(customFirstRaiseTo)}`);
+      env.stepRaiseTo(customFirstRaiseTo);
+      if (env.done) break;
+      continue;
+    }
     if (!legal.mask[action]) break;
     tokens.push(actionTokenFor(action, contextFromEnv(env, legal)));
     env.stepBin(action, legal);
@@ -711,6 +769,8 @@ function ActionInput(props: {
   legalActions: number[];
   context: ActionContext;
   onAction: (action: number) => void;
+  allowCustomFirstRaise?: boolean | undefined;
+  onCustomRaise?: ((amount: number) => void) | undefined;
 }): JSX.Element {
   const [editingRaise, setEditingRaise] = createSignal(false);
   const [raiseValue, setRaiseValue] = createSignal("");
@@ -745,6 +805,16 @@ function ActionInput(props: {
     const target = Number(raiseValue());
     if (!Number.isFinite(target) || target <= 0) {
       setEditingRaise(false);
+      return;
+    }
+    const exact = exactStandardRaiseAction(target, props.legalActions, props.context);
+    if (
+      exact === undefined &&
+      props.allowCustomFirstRaise &&
+      customRaiseToIsLegal(target, props.context)
+    ) {
+      setEditingRaise(false);
+      props.onCustomRaise?.(target);
       return;
     }
     let bestAction = raiseActions()[0];
@@ -848,17 +918,50 @@ function closestRaiseAction(
   return bestAction;
 }
 
+function exactStandardRaiseAction(
+  target: number,
+  legalActionsIn: readonly number[],
+  context: ActionContext,
+): number | undefined {
+  for (const action of raiseActionOptions(legalActionsIn, context)) {
+    if (Math.abs(displayAmountForRaise(action, context) - target) <= 1.0e-9) {
+      return action;
+    }
+  }
+  return undefined;
+}
+
+function customRaiseToIsLegal(target: number, context: ActionContext): boolean {
+  if (!Number.isFinite(target) || target <= 0) return false;
+  if (Math.trunc(target) !== target) return false;
+  const amount =
+    context.toCall > 0 ? Math.trunc(target - context.meCommitted) : Math.trunc(target);
+  const additional = amount - context.toCall;
+  return (
+    context.stack > 0 &&
+    context.oppStack > 0 &&
+    amount > context.toCall &&
+    amount < context.stack &&
+    additional >= context.minRaise
+  );
+}
+
 function ActionRowButtons(props: {
   action: number;
+  customRaiseTo?: number | undefined;
   legalActions: number[];
   context: ActionContext;
   onAction: (action: number) => void;
+  onCustomRaise?: ((amount: number) => void) | undefined;
 }): JSX.Element {
   const [editingRaise, setEditingRaise] = createSignal(false);
   const [raiseValue, setRaiseValue] = createSignal("");
   let raiseInput: HTMLInputElement | undefined;
   const raiseActions = createMemo(() => raiseActionOptions(props.legalActions, props.context));
-  const isRaiseAction = createMemo(() => props.action >= 2 && props.action < props.context.allInIndex);
+  const isRaiseAction = createMemo(() =>
+    props.action === CUSTOM_FIRST_RAISE_ACTION ||
+    (props.action >= 2 && props.action < props.context.allInIndex),
+  );
   const directActions = createMemo(() => props.legalActions.filter((action) => action === 1));
   const allInAction = createMemo(() =>
     props.legalActions.includes(props.context.allInIndex) ? props.context.allInIndex : undefined,
@@ -870,7 +973,13 @@ function ActionRowButtons(props: {
   );
 
   function openRaiseInput(): void {
-    setRaiseValue(isRaiseAction() ? formatChips(displayAmountForRaise(props.action, props.context)) : "");
+    setRaiseValue(
+      props.action === CUSTOM_FIRST_RAISE_ACTION && props.customRaiseTo !== undefined
+        ? formatChips(props.customRaiseTo)
+        : isRaiseAction()
+          ? formatChips(displayAmountForRaise(props.action, props.context))
+          : "",
+    );
     setEditingRaise(true);
     queueMicrotask(() => {
       raiseInput?.focus();
@@ -879,8 +988,20 @@ function ActionRowButtons(props: {
   }
 
   function commitRaise(): void {
-    const action = closestRaiseAction(raiseValue(), props.legalActions, props.context);
+    const target = Number(raiseValue());
+    const exact = Number.isFinite(target)
+      ? exactStandardRaiseAction(target, props.legalActions, props.context)
+      : undefined;
     setEditingRaise(false);
+    if (
+      exact === undefined &&
+      props.onCustomRaise &&
+      customRaiseToIsLegal(target, props.context)
+    ) {
+      props.onCustomRaise(target);
+      return;
+    }
+    const action = closestRaiseAction(raiseValue(), props.legalActions, props.context);
     if (action !== undefined) props.onAction(action);
   }
 
@@ -889,6 +1010,11 @@ function ActionRowButtons(props: {
   }
 
   function historyButtonLabel(action: number): string {
+    if (props.action === CUSTOM_FIRST_RAISE_ACTION && action === CUSTOM_FIRST_RAISE_ACTION) {
+      return props.customRaiseTo === undefined
+        ? formatActionLabel(action, props.context)
+        : formatCustomRaiseLabel(props.customRaiseTo, props.context);
+    }
     return action === props.action
       ? formatActionLabel(action, props.context)
       : shortActionLabel(action, props.context);
@@ -919,7 +1045,9 @@ function ActionRowButtons(props: {
                 onClick={openRaiseInput}
                 title={raiseLabel()}
               >
-                {isRaiseAction()
+                {props.action === CUSTOM_FIRST_RAISE_ACTION && props.customRaiseTo !== undefined
+                  ? formatCustomRaiseLabel(props.customRaiseTo, props.context)
+                  : isRaiseAction()
                   ? formatActionLabel(props.action, props.context)
                   : shortActionLabel(raiseActions()[0]!, props.context)}
               </button>
@@ -1151,6 +1279,7 @@ function App(): JSX.Element {
   const [heroHandText, setHeroHandText] = createSignal("As Kd");
   const [boardCards, setBoardCards] = createSignal(["", "", "", "", ""]);
   const [actions, setActions] = createSignal<number[]>([]);
+  const [customFirstRaiseTo, setCustomFirstRaiseTo] = createSignal<number | undefined>();
   const [solveError, setSolveError] = createSignal("");
   const [solveResult, setSolveResult] = createSignal<SolveResult>();
   const [isSolving, setIsSolving] = createSignal(false);
@@ -1272,7 +1401,9 @@ function App(): JSX.Element {
       setSb(input.sb);
       setBb(input.bb);
       setBoardCards(input.boardCards);
-      setActions(actionsFromHash(input.actions, input));
+      const parsedActions = actionsFromHash(input.actions, input);
+      setActions(parsedActions.actions);
+      setCustomFirstRaiseTo(parsedActions.customFirstRaiseTo);
       clearSolveOutput();
       setSolveError("");
     } catch (error) {
@@ -1346,13 +1477,32 @@ function App(): JSX.Element {
       }
 
       const rows: ActionRow[] = [];
-      for (const action of actions()) {
+      const currentActions = actions();
+      for (let index = 0; index < currentActions.length; index += 1) {
+        const action = currentActions[index]!;
         const legal = env.legalBinsAmountAndMask();
+        const context = contextFromEnv(env, legal);
+        if (index === 0 && action === CUSTOM_FIRST_RAISE_ACTION) {
+          const amount = customFirstRaiseTo();
+          if (amount === undefined || !customRaiseToIsLegal(amount, context)) {
+            throw new Error("Custom first raise is no longer legal");
+          }
+          rows.push({
+            action,
+            customRaiseTo: amount,
+            actor: env.toAct,
+            legalMask: legal.mask,
+            context,
+            street: env.street,
+          });
+          env.stepRaiseTo(amount);
+          continue;
+        }
         rows.push({
           action,
           actor: env.toAct,
           legalMask: legal.mask,
-          context: contextFromEnv(env, legal),
+          context,
           street: env.street,
         });
         if (!legal.mask[action]) {
@@ -1455,7 +1605,7 @@ function App(): JSX.Element {
     setHashNumberParam(params, "stack", stack(), LOCAL_ENV_DEFAULTS.stack);
     setHashNumberParam(params, "sb", sb(), LOCAL_ENV_DEFAULTS.sb);
     setHashNumberParam(params, "bb", bb(), LOCAL_ENV_DEFAULTS.bb);
-    const actionTokens = actionTokensForActions(actions(), {
+    const actionTokens = actionTokensForActions(actions(), customFirstRaiseTo(), {
       button: button(),
       stack: stack(),
       sb: sb(),
@@ -1543,16 +1693,40 @@ function App(): JSX.Element {
 
   function setActionAt(index: number, action: number): void {
     setActions((current) => current.map((value, i) => (i === index ? action : value)));
+    if (index === 0 && action !== CUSTOM_FIRST_RAISE_ACTION) {
+      setCustomFirstRaiseTo(undefined);
+    }
+    clearSolveOutput();
+  }
+
+  function setCustomFirstActionAt(index: number, amount: number): void {
+    if (index !== 0) return;
+    setCustomFirstRaiseTo(amount);
+    setActions((current) =>
+      current.map((value, i) => (i === index ? CUSTOM_FIRST_RAISE_ACTION : value)),
+    );
     clearSolveOutput();
   }
 
   function removeAction(index: number): void {
     setActions((current) => current.filter((_, i) => i !== index));
+    if (index === 0) setCustomFirstRaiseTo(undefined);
     clearSolveOutput();
   }
 
   function addAction(action: number): void {
+    const wasEmpty = actions().length === 0;
     setActions((current) => [...current, action]);
+    if (wasEmpty && action !== CUSTOM_FIRST_RAISE_ACTION) {
+      setCustomFirstRaiseTo(undefined);
+    }
+    clearSolveOutput();
+  }
+
+  function addCustomFirstAction(amount: number): void {
+    if (actions().length !== 0) return;
+    setCustomFirstRaiseTo(amount);
+    setActions([CUSTOM_FIRST_RAISE_ACTION]);
     clearSolveOutput();
   }
 
@@ -1571,8 +1745,17 @@ function App(): JSX.Element {
       setIsSolving(true);
       setSolveProgress(0);
       setSolveResult(undefined);
+      const requestSpot = actions().map((action, index) =>
+        index === 0 && action === CUSTOM_FIRST_RAISE_ACTION
+          ? current.manifest.architecture.numActions
+          : action,
+      );
+      const customRaiseTo = customFirstRaiseTo();
       const request: SolverEvaluateSpotRequest = {
-        spot: [...actions()],
+        spot: requestSpot,
+        ...(actions()[0] === CUSTOM_FIRST_RAISE_ACTION && customRaiseTo !== undefined
+          ? { customFirstRaiseTo: customRaiseTo }
+          : {}),
         iterations: solveIterations,
         depth: solveDepth,
         cfrAvg: solveCfrAvg,
@@ -1701,6 +1884,7 @@ function App(): JSX.Element {
               title="Reset actions"
               onClick={() => {
                 setActions([]);
+                setCustomFirstRaiseTo(undefined);
                 clearSolveOutput();
               }}
             >
@@ -1718,6 +1902,7 @@ function App(): JSX.Element {
                   onChange={(event) => {
                     setButton(asPlayer(event.currentTarget.value));
                     setActions([]);
+                    setCustomFirstRaiseTo(undefined);
                     clearSolveOutput();
                   }}
                 >
@@ -1770,6 +1955,7 @@ function App(): JSX.Element {
                   class="link-button"
                   onClick={() => {
                     setActions(actions().slice(0, -1));
+                    if (actions().length <= 1) setCustomFirstRaiseTo(undefined);
                     clearSolveOutput();
                   }}
                 >
@@ -1807,9 +1993,11 @@ function App(): JSX.Element {
                       </span>
                       <ActionRowButtons
                         action={row.action}
+                        customRaiseTo={row.customRaiseTo}
                         legalActions={legalActions(row.legalMask)}
                         context={row.context}
                         onAction={(action) => setActionAt(index(), action)}
+                        onCustomRaise={(amount) => setCustomFirstActionAt(index(), amount)}
                       />
                       <button
                         type="button"
@@ -1851,6 +2039,8 @@ function App(): JSX.Element {
                   legalActions={legalActions((descriptor() as StateDescriptor).finalLegalMask)}
                   context={(descriptor() as StateDescriptor).finalContext}
                   onAction={addAction}
+                  allowCustomFirstRaise={(descriptor() as StateDescriptor).rows.length === 0}
+                  onCustomRaise={addCustomFirstAction}
                 />
               </Show>
             </Show>

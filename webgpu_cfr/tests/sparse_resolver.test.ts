@@ -227,6 +227,91 @@ test("sparse resolver selected action uses root action lookup", async () => {
   }
 });
 
+test("public env steps exact custom raise-to amounts", () => {
+  const env = new PublicHunlEnv({
+    stack: 20,
+    sb: 1,
+    bb: 2,
+    betBins: [0.5],
+    button: 1,
+    forceDeck: DEFAULT_FORCE_DECK,
+  });
+
+  env.stepRaiseTo(5);
+
+  assert.equal(env.pot, 7);
+  assert.deepEqual(env.committed, [2, 5]);
+  assert.equal(env.minRaise, 3);
+  assert.equal(env.toAct, 0);
+});
+
+test("sparse resolver exposes custom root raise action", async () => {
+  const betBins = [1.0, 2.0];
+  const numActions = betBins.length + 3;
+  const env = new PublicHunlEnv({
+    stack: 20,
+    sb: 1,
+    bb: 2,
+    betBins,
+    button: 1,
+    forceDeck: DEFAULT_FORCE_DECK,
+  });
+  const resolver = new SparseCfrResolver(fakeModel(numActions));
+
+  const result = await resolver.solve(env, uniformBeliefs(), {
+    depth: 1,
+    iterations: 1,
+    rootCustomRaiseTo: 6,
+  });
+
+  const actionCount = numActions + 1;
+  assert.equal(result.policy.length, NUM_HANDS * actionCount);
+  assert.equal(result.actionProbs.length, actionCount);
+  let hand = -1;
+  for (let candidate = 0; candidate < NUM_HANDS; candidate += 1) {
+    const mass = result.policy[candidate * actionCount + 1]!;
+    if (mass > 0) {
+      hand = candidate;
+      break;
+    }
+  }
+  assert.notEqual(hand, -1, "expected at least one unblocked hand policy");
+  const custom = result.policy[hand * actionCount + numActions]!;
+  const mass = Array.from(result.actionProbs).reduce((sum, value) => sum + value, 0);
+  assert.ok(custom > 0, `custom ${custom}`);
+  assert.ok(result.actionProbs[numActions]! > 0, `custom action ${result.actionProbs[numActions]}`);
+  assert.ok(Math.abs(mass - 1) < 1e-5, `action mass ${mass}`);
+});
+
+test("browser evaluator applies custom first raise exactly", async () => {
+  const betBins = [1.0, 2.0];
+  const numActions = betBins.length + 3;
+  const evaluator = new BrowserCfrEvaluator(
+    undefined as unknown as GPUDevice,
+    fakeModel(numActions),
+  );
+
+  const result = await evaluator.evaluateSpot({
+    spot: [numActions],
+    customFirstRaiseTo: 6,
+    iterations: 1,
+    depth: 1,
+    initialState: {
+      stack: 20,
+      sb: 1,
+      bb: 2,
+      betBins,
+      button: 1,
+      forceDeck: DEFAULT_FORCE_DECK,
+      flopShowdown: false,
+    },
+  });
+
+  assert.equal(result.actor, 0);
+  assert.equal(result.legalMask.length, numActions);
+  assert.equal(result.actionProbs.length, numActions);
+});
+
 test("sparse resolver reports progress once per CFR iteration", async () => {
   const betBins = [0.5];
   const numActions = betBins.length + 3;

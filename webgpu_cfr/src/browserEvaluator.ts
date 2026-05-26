@@ -87,13 +87,24 @@ export class BrowserCfrEvaluator {
 
     for (let solveIndex = 0; solveIndex < request.spot.length; solveIndex += 1) {
       const action = request.spot[solveIndex]!;
-      this.assertAction(action, numActions);
-      this.assertLegalAction(env, action);
+      const customFirstRaise =
+        solveIndex === 0 && action === numActions
+          ? request.customFirstRaiseTo
+          : undefined;
+      if (customFirstRaise === undefined) {
+        this.assertAction(action, numActions);
+        this.assertLegalAction(env, action);
+      } else if (!Number.isFinite(customFirstRaise) || customFirstRaise <= 0) {
+        throw new Error(`invalid custom first raise ${customFirstRaise}`);
+      }
       const solved = await this.sparseCfr.solve(env, beliefs, {
         depth,
         iterations,
         cfrAvg,
         selectedAction: action,
+        ...(customFirstRaise !== undefined
+          ? { rootCustomRaiseTo: customFirstRaise }
+          : {}),
         readPolicy: false,
         readActionProbs: false,
         readBeliefs: true,
@@ -102,7 +113,11 @@ export class BrowserCfrEvaluator {
       if (!solved.beliefsAfter) {
         throw new Error("internal error: sparse prefix solve did not produce beliefs");
       }
-      env.stepBin(action);
+      if (customFirstRaise !== undefined) {
+        env.stepRaiseTo(customFirstRaise);
+      } else {
+        env.stepBin(action);
+      }
       beliefs = solved.beliefsAfter;
     }
 

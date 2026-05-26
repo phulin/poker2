@@ -187,6 +187,7 @@ export interface SolveProgress {
 
 export interface EvaluateSpotRequest {
   spot: number[];
+  customFirstRaiseTo?: number;
   iterations?: number;
   depth?: number;
   cfrAvg?: boolean;

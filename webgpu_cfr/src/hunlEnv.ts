@@ -319,6 +319,32 @@ export class PublicHunlEnv {
     return this.step(action, amount);
   }
 
+  stepRaiseTo(displayAmount: number): StepResult {
+    if (!Number.isFinite(displayAmount) || displayAmount <= 0) {
+      throw new Error(`invalid raise amount ${displayAmount}`);
+    }
+    if (Math.trunc(displayAmount) !== displayAmount) {
+      throw new Error(`custom raise amount ${displayAmount} must be an integer`);
+    }
+    const actor = this.toAct;
+    const other = (1 - actor) as PlayerIndex;
+    const toCall = this.committed[other] - this.committed[actor];
+    const amount =
+      toCall > 0 ? Math.trunc(displayAmount - this.committed[actor]) : Math.trunc(displayAmount);
+    const additional = amount - toCall;
+    if (this.done) throw new Error("cannot raise in a completed state");
+    if (this.stacks[actor] <= 0 || this.stacks[other] <= 0) {
+      throw new Error("custom raise is not legal when a player is all-in");
+    }
+    if (amount <= toCall || amount >= this.stacks[actor]) {
+      throw new Error(`custom raise ${displayAmount} is outside legal stack bounds`);
+    }
+    if (additional < this.minRaise) {
+      throw new Error(`custom raise ${displayAmount} is below minimum raise`);
+    }
+    return this.step(2, amount);
+  }
+
   private step(action: number, betAmount: number): StepResult {
     const actor = this.toAct;
     const other = (1 - actor) as PlayerIndex;

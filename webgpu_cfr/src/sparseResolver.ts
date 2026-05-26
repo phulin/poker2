@@ -55,11 +55,21 @@ interface SparseNode {
   newStreet: boolean;
 }
 
+interface RootCustomAction {
+  action: number;
+  raiseTo: number;
+  lowerAction?: number;
+  upperAction?: number;
+  t: number;
+}
+
 interface SparseTree {
   nodes: SparseNode[];
   depthOffsets: number[];
   treeDepth: number;
   rootActionToChild: Int32Array;
+  rootActionCount: number;
+  rootCustomAction?: RootCustomAction;
 }
 
 interface SparseLeafGpuBatch {
@@ -149,6 +159,7 @@ export interface SparseResolveOptions {
   iterations: number;
   cfrAvg?: boolean;
   selectedAction?: number;
+  rootCustomRaiseTo?: number;
   readPolicy?: boolean;
   readActionProbs?: boolean;
   readBeliefs?: boolean;
@@ -184,7 +195,7 @@ export class SparseCfrResolver {
     }
     const cfrAvg = options.cfrAvg ?? true;
 
-    const cachedTree = this.cachedTree(env, options.depth);
+    const cachedTree = this.cachedTree(env, options.depth, options.rootCustomRaiseTo);
     const tree = cachedTree.tree;
     const allInContext = await this.resolveAllInContext(tree);
     if (this.gpuKernels && !cachedTree.gpu) {
@@ -356,11 +367,15 @@ export class SparseCfrResolver {
     this.treeCache.clear();
   }
 
-  private cachedTree(rootEnv: PublicHunlEnv, maxDepth: number): SparseTreeCacheEntry {
-    const key = this.treeCacheKey(rootEnv, maxDepth);
+  private cachedTree(
+    rootEnv: PublicHunlEnv,
+    maxDepth: number,
+    rootCustomRaiseTo?: number,
+  ): SparseTreeCacheEntry {
+    const key = this.treeCacheKey(rootEnv, maxDepth, rootCustomRaiseTo);
     const cached = this.treeCache.get(key);
     if (cached) return cached;
-    const tree = this.buildTree(rootEnv, maxDepth);
+    const tree = this.buildTree(rootEnv, maxDepth, rootCustomRaiseTo);
     const entry: SparseTreeCacheEntry = { tree, initialStates: new Map() };
     this.treeCache.set(key, entry);
     return entry;
@@ -589,9 +604,14 @@ export class SparseCfrResolver {
     }
   }
 
-  private treeCacheKey(rootEnv: PublicHunlEnv, maxDepth: number): string {
+  private treeCacheKey(
+    rootEnv: PublicHunlEnv,
+    maxDepth: number,
+    rootCustomRaiseTo?: number,
+  ): string {
     return JSON.stringify([
       maxDepth,
+      rootCustomRaiseTo ?? null,
       rootEnv.betBins,
       rootEnv.sb,
       rootEnv.bb,
@@ -668,12 +688,20 @@ export class SparseCfrResolver {
     return undefined;
   }
 
-  private buildTree(rootEnv: PublicHunlEnv, maxDepth: number): SparseTree {
+  private buildTree(
+    rootEnv: PublicHunlEnv,
+    maxDepth: number,
+    rootCustomRaiseTo?: number,
+  ): SparseTree {
     const rootAllowedMask = this.allowedMask(rootEnv);
     const nodes: SparseNode[] = [
       this.makeNode(rootEnv.clone(), -1, -1, 0, 0, rootAllowedMask),
     ];
     const depthOffsets = [0, 1];
+    const rootCustomAction =
+      rootCustomRaiseTo === undefined
+        ? undefined
+        : this.rootCustomAction(rootEnv, rootCustomRaiseTo);
 
     for (let depth = 0; depth < maxDepth; depth += 1) {
       const start = depthOffsets[depth]!;
@@ -704,6 +732,22 @@ export class SparseCfrResolver {
             ),
           );
         }
+        if (depth === 0 && nodeIndex === 0 && rootCustomAction) {
+          const childEnv = node.env.clone();
+          const step = childEnv.stepRaiseTo(rootCustomAction.raiseTo);
+          const childIndex = nodes.length;
+          node.children.push(childIndex);
+          nodes.push(
+            this.makeNode(
+              childEnv,
+              nodeIndex,
+              rootCustomAction.action,
+              step.reward,
+              depth + 1,
+              rootAllowedMask,
+            ),
+          );
+        }
       }
       if (nodes.length === end) {
         break;
@@ -719,12 +763,17 @@ export class SparseCfrResolver {
       nodes,
       depthOffsets,
       treeDepth,
-      rootActionToChild: this.rootActionLookup(nodes),
+      rootActionToChild: this.rootActionLookup(nodes, rootCustomAction),
+      rootActionCount: rootCustomAction ? this.numActions + 1 : this.numActions,
+      ...(rootCustomAction ? { rootCustomAction } : {}),
     };
   }
 
-  private rootActionLookup(nodes: SparseNode[]): Int32Array {
-    const out = new Int32Array(this.numActions);
+  private rootActionLookup(
+    nodes: SparseNode[],
+    rootCustomAction?: RootCustomAction,
+  ): Int32Array {
+    const out = new Int32Array(rootCustomAction ? this.numActions + 1 : this.numActions);
     out.fill(-1);
     const root = nodes[0];
     if (!root) return out;
@@ -733,6 +782,68 @@ export class SparseCfrResolver {
       out[child.actionFromParent] = childIndex;
     }
     return out;
+  }
+
+  private rootCustomAction(rootEnv: PublicHunlEnv, raiseTo: number): RootCustomAction {
+    if (!Number.isFinite(raiseTo) || raiseTo <= 0) {
+      throw new Error(`invalid custom raise amount ${raiseTo}`);
+    }
+    const legal = rootEnv.legalBinsAmountAndMask();
+    const context = this.displayAmounts(rootEnv, legal);
+    const customAction = this.numActions;
+    const raiseActions: Array<{ action: number; amount: number }> = [];
+    for (let action = 2; action < this.numActions - 1; action += 1) {
+      if (!legal.mask[action]) continue;
+      const amount = context[action];
+      if (amount === undefined) continue;
+      if (Math.abs(amount - raiseTo) <= EPS) {
+        throw new Error(`custom raise ${raiseTo} matches a standard action`);
+      }
+      raiseActions.push({ action, amount });
+    }
+    const childEnv = rootEnv.clone();
+    childEnv.stepRaiseTo(raiseTo);
+    if (raiseActions.length === 0) {
+      throw new Error("custom raise requires at least one legal standard raise bin");
+    }
+    let lower: { action: number; amount: number } | undefined;
+    let upper: { action: number; amount: number } | undefined;
+    for (const candidate of raiseActions) {
+      if (candidate.amount < raiseTo) {
+        if (!lower || candidate.amount > lower.amount) lower = candidate;
+      } else if (candidate.amount > raiseTo) {
+        if (!upper || candidate.amount < upper.amount) upper = candidate;
+      }
+    }
+    if (lower && upper) {
+      return {
+        action: customAction,
+        raiseTo,
+        lowerAction: lower.action,
+        upperAction: upper.action,
+        t: (raiseTo - lower.amount) / (upper.amount - lower.amount),
+      };
+    }
+    const nearest = lower ?? upper;
+    if (!nearest) throw new Error("custom raise has no adjacent standard raise bin");
+    return {
+      action: customAction,
+      raiseTo,
+      lowerAction: nearest.action,
+      t: 0,
+    };
+  }
+
+  private displayAmounts(
+    env: PublicHunlEnv,
+    legal: { amounts: readonly number[] },
+  ): Array<number | undefined> {
+    const actor = env.toAct;
+    const other = (1 - actor) as PlayerIndex;
+    const toCall = env.committed[other] - env.committed[actor];
+    return legal.amounts.map((amount) =>
+      amount >= 0 ? (toCall > 0 ? env.committed[actor] + amount : amount) : undefined,
+    );
   }
 
   private makeNode(
@@ -954,10 +1065,46 @@ export class SparseCfrResolver {
     for (const childIndex of node.children) {
       const child = tree.nodes[childIndex]!;
       const action = child.actionFromParent;
+      if (action >= this.numActions) continue;
       const childBase = childIndex * NUM_HANDS;
       for (let hand = 0; hand < NUM_HANDS; hand += 1) {
         policy[childBase + hand] = modelPolicy[hand * this.numActions + action]!;
       }
+    }
+    if (node.parent === -1 && tree.rootCustomAction) {
+      this.initializeRootCustomPolicy(tree, modelPolicy, policy);
+    }
+  }
+
+  private initializeRootCustomPolicy(
+    tree: SparseTree,
+    modelPolicy: Float32Array<ArrayBuffer>,
+    policy: Float32Array,
+  ): void {
+    const custom = tree.rootCustomAction;
+    if (!custom) return;
+    const customChild = tree.rootActionToChild[custom.action]!;
+    const lowerAction = custom.lowerAction;
+    const upperAction = custom.upperAction;
+    if (customChild < 0 || lowerAction === undefined) return;
+    const lowerChild = tree.rootActionToChild[lowerAction]!;
+    const upperChild =
+      upperAction === undefined ? -1 : tree.rootActionToChild[upperAction]!;
+    if (lowerChild < 0 || (upperAction !== undefined && upperChild < 0)) return;
+
+    for (let hand = 0; hand < NUM_HANDS; hand += 1) {
+      const lowerProbability = modelPolicy[hand * this.numActions + lowerAction]!;
+      if (upperAction === undefined) {
+        const split = lowerProbability * 0.5;
+        policy[customChild * NUM_HANDS + hand] = split;
+        policy[lowerChild * NUM_HANDS + hand] = split;
+        continue;
+      }
+      const upperProbability = modelPolicy[hand * this.numActions + upperAction]!;
+      const combined = lowerProbability + upperProbability;
+      policy[customChild * NUM_HANDS + hand] = combined * 0.5;
+      policy[lowerChild * NUM_HANDS + hand] = combined * 0.5 * (1 - custom.t);
+      policy[upperChild * NUM_HANDS + hand] = combined * 0.5 * custom.t;
     }
   }
 
@@ -2178,11 +2325,12 @@ export class SparseCfrResolver {
   }
 
   private rootPolicy(tree: SparseTree, policy: Float32Array): Float32Array<ArrayBuffer> {
-    const out = new Float32Array(NUM_HANDS * this.numActions);
+    const actionCount = tree.rootActionCount;
+    const out = new Float32Array(NUM_HANDS * actionCount);
     for (const childIndex of tree.nodes[0]!.children) {
       const action = tree.nodes[childIndex]!.actionFromParent;
       for (let hand = 0; hand < NUM_HANDS; hand += 1) {
-        out[hand * this.numActions + action] = policy[childIndex * NUM_HANDS + hand]!;
+        out[hand * actionCount + action] = policy[childIndex * NUM_HANDS + hand]!;
       }
     }
     return out;
@@ -2193,7 +2341,7 @@ export class SparseCfrResolver {
     rootBeliefs: Float32Array<ArrayBuffer>,
     policy: Float32Array,
   ): Float32Array<ArrayBuffer> {
-    const out = new Float32Array(this.numActions);
+    const out = new Float32Array(tree.rootActionCount);
     const root = tree.nodes[0]!;
     const actor = root.env.toAct;
     const beliefBase = actor * NUM_HANDS;
@@ -2215,8 +2363,8 @@ export class SparseCfrResolver {
     selectedAction: number,
   ): Float32Array<ArrayBuffer> {
     const root = tree.nodes[0]!;
-    if (!Number.isInteger(selectedAction) || selectedAction < 0 || selectedAction >= this.numActions) {
-      throw new Error(`action ${selectedAction} is outside [0, ${this.numActions})`);
+    if (!Number.isInteger(selectedAction) || selectedAction < 0 || selectedAction >= tree.rootActionCount) {
+      throw new Error(`action ${selectedAction} is outside [0, ${tree.rootActionCount})`);
     }
     const childIndex = tree.rootActionToChild[selectedAction]!;
     if (childIndex < 0) {
