@@ -78,17 +78,19 @@ root:
 uv run python website/python/export_model.py --snapshot checkpoints-rebel/rebel_latest.pt --out website/public/models/rebel_latest
 ```
 
-Generate optional WebGPU all-in payoff assets for the exported model:
+Generate optional WebGPU all-in payoff assets. These are model-independent and
+served from `/allin`, while the exported model manifest embeds references to
+that shared asset root:
 
 ```bash
 uv run python website/python/precompute_allin_assets.py \
-  --out website/public/models/rebel_latest/allin \
+  --out website/public/allin \
   --device cuda \
   --batch-size 1
 uv run python website/python/export_model.py \
   --snapshot checkpoints-rebel/rebel_latest.pt \
   --out website/public/models/rebel_latest \
-  --allin-manifest website/public/models/rebel_latest/allin/allin_manifest.json
+  --allin-manifest website/public/allin/allin_manifest.json
 ```
 
 The flop asset generator writes canonical int16 table shards plus lookup files.

@@ -7,6 +7,9 @@ const DEFAULT_BUCKET = "p2-webgpu-cfr-assets";
 const DEFAULT_MODEL_VERSION = "rebel_296_4000";
 const DEFAULT_ALLIN_VERSION = "holdem_v1";
 const DEFAULT_ASSET_ORIGIN = "https://assets.holdem.computer";
+const NUM_HANDS = 1326;
+const FLOP_COMBINATIONS = (52 * 51 * 50) / 6;
+const ALLIN_TABLE_BYTES = NUM_HANDS * NUM_HANDS * Int16Array.BYTES_PER_ELEMENT;
 
 interface CliArgs {
   bucket?: string;
@@ -62,7 +65,7 @@ const modelVersion = args["model-version"] ?? DEFAULT_MODEL_VERSION;
 const allinVersion = args["allin-version"] ?? DEFAULT_ALLIN_VERSION;
 const assetOrigin = stripTrailingSlash(args["asset-origin"] ?? DEFAULT_ASSET_ORIGIN);
 const sourceModel = resolve(args["source-model"] ?? "public/models/rebel_latest");
-const sourceAllIn = resolve(args["source-allin"] ?? join(sourceModel, "allin"));
+const sourceAllIn = resolve(args["source-allin"] ?? "public/allin");
 const stagingRoot = resolve(args.staging ?? "dist/r2-assets");
 const dryRun = isTruthy(args["dry-run"]);
 const latestAlias = isTruthy(args.latest);
@@ -191,6 +194,10 @@ async function buildAllInManifest(
   const sourceFlop = join(sourceDir, "flop");
   if (await exists(sourceFlop)) {
     await cp(sourceFlop, join(stagedDir, "flop"), { recursive: true });
+    if (!allIn.flop) {
+      const inferredFlop = await inferFlopManifest(sourceFlop);
+      if (inferredFlop) allIn.flop = inferredFlop;
+    }
     if (allIn.flop) {
       allIn.flop.actualToCanonFile = publicAllInPath(prefix, allIn.flop.actualToCanonFile);
       allIn.flop.actualPermFile = publicAllInPath(prefix, allIn.flop.actualPermFile);
@@ -205,6 +212,52 @@ async function buildAllInManifest(
   };
   await writeJson(join(stagedDir, "allin_manifest.json"), allIn);
   return allIn;
+}
+
+async function inferFlopManifest(sourceFlop: string): Promise<AllInManifest["flop"] | undefined> {
+  const actualToCanon = join(sourceFlop, "actual_to_canon.u32");
+  const actualPerm = join(sourceFlop, "actual_perm.u32");
+  const comboPerms = join(sourceFlop, "combo_perms.u32");
+  const tablesDir = join(sourceFlop, "tables");
+  if (
+    !(await exists(actualToCanon)) ||
+    !(await exists(actualPerm)) ||
+    !(await exists(comboPerms)) ||
+    !(await exists(tablesDir))
+  ) {
+    return undefined;
+  }
+  await expectBytes(actualToCanon, FLOP_COMBINATIONS * Uint32Array.BYTES_PER_ELEMENT);
+  await expectBytes(actualPerm, FLOP_COMBINATIONS * Uint32Array.BYTES_PER_ELEMENT);
+  const tableCount = await countContiguousFlopTables(tablesDir);
+  if (tableCount === 0) return undefined;
+  return {
+    actualToCanonFile: "/allin/flop/actual_to_canon.u32",
+    actualPermFile: "/allin/flop/actual_perm.u32",
+    comboPermsFile: "/allin/flop/combo_perms.u32",
+    tablePathTemplate: "/allin/flop/tables/{id4}.i16",
+    dtype: "int16",
+    scale: 32768,
+  };
+}
+
+async function countContiguousFlopTables(tablesDir: string): Promise<number> {
+  const names = (await readdir(tablesDir)).filter((name) => /^\d{4}\.i16$/.test(name)).sort();
+  for (let index = 0; index < names.length; index += 1) {
+    const expected = `${index.toString().padStart(4, "0")}.i16`;
+    if (names[index] !== expected) {
+      throw new Error(`missing contiguous flop table ${expected} in ${tablesDir}`);
+    }
+    await expectBytes(join(tablesDir, expected), ALLIN_TABLE_BYTES);
+  }
+  return names.length;
+}
+
+async function expectBytes(file: string, byteLength: number): Promise<void> {
+  const fileStat = await stat(file);
+  if (fileStat.size !== byteLength) {
+    throw new Error(`${file} has ${fileStat.size} bytes, expected ${byteLength}`);
+  }
 }
 
 function publicAllInPath(prefix: string, value: string): string {

@@ -262,7 +262,7 @@ class ManifestAllInTableProvider implements AllInTableProvider {
   }
 
   private async load(path: string, cacheKind?: CachedAllInTableKind): Promise<ArrayBuffer> {
-    const url = new URL(path, this.manifestUrl).toString();
+    const url = resolveAssetUrl(path, this.manifestUrl);
     const cached = this.cache.get(url);
     if (cached) return cached;
     if (cacheKind && this.persistentCache) {
@@ -279,6 +279,18 @@ class ManifestAllInTableProvider implements AllInTableProvider {
     }
     return buffer;
   }
+}
+
+function resolveAssetUrl(path: string, manifestUrl: string): string {
+  const base = new URL(manifestUrl);
+  if (base.protocol === "file:" && path.startsWith("/")) {
+    const modelRootIndex = base.pathname.lastIndexOf("/models/");
+    if (modelRootIndex >= 0) {
+      const publicRoot = base.pathname.slice(0, modelRootIndex);
+      return new URL(`${publicRoot}${path}`, base).toString();
+    }
+  }
+  return new URL(path, base).toString();
 }
 
 function defaultIsOffline(): boolean {

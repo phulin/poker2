@@ -6,3 +6,4 @@ Static browser assets for the WebGPU CFR evaluator and Vite spot solver.
 
 ### Subdirectories
 - `models/`: Exported model directories such as `rebel_latest/` may be generated here by `npm run export:model`; treat generated model files as artifacts.
+- `allin/`: Generated model-independent all-in payoff assets served from `/allin`; treat table binaries as artifacts.

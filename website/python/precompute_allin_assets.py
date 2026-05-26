@@ -101,10 +101,10 @@ def precompute_flop_assets(
         print(f"wrote flop tables {pending[0]}..{pending[-1]} ({len(pending)})")
 
     return {
-        "actualToCanonFile": "allin/flop/actual_to_canon.u32",
-        "actualPermFile": "allin/flop/actual_perm.u32",
-        "comboPermsFile": "allin/flop/combo_perms.u32",
-        "tablePathTemplate": "allin/flop/tables/{id4}.i16",
+        "actualToCanonFile": "/allin/flop/actual_to_canon.u32",
+        "actualPermFile": "/allin/flop/actual_perm.u32",
+        "comboPermsFile": "/allin/flop/combo_perms.u32",
+        "tablePathTemplate": "/allin/flop/tables/{id4}.i16",
         "dtype": "int16",
         "scale": I16_SCALE,
         "canonicalCount": canonical_total,
@@ -119,8 +119,8 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("website/public/models/rebel_latest/allin"),
-        help="Output all-in asset directory, usually under an exported model directory.",
+        default=Path("website/public/allin"),
+        help="Output model-independent all-in asset directory served from Vite public root.",
     )
     parser.add_argument(
         "--device",

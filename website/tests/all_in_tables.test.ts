@@ -26,7 +26,7 @@ test("manifest all-in provider skips streets without table metadata and no devic
       allIn: {
         enabled: true,
         preflop: {
-          file: "allin/preflop.i16",
+          file: "/allin/preflop.i16",
           dtype: "int16",
         },
       },
@@ -39,6 +39,38 @@ test("manifest all-in provider skips streets without table metadata and no devic
   assert.ok(provider);
 
   assert.equal(await provider.tableForRoot(flopEnv([0, 13, 26])), undefined);
+});
+
+test("manifest all-in provider resolves local root-relative all-in paths from public root", async () => {
+  const loadedUrls: string[] = [];
+  const provider = createManifestAllInTableProvider(
+    {
+      allIn: {
+        enabled: true,
+        preflop: {
+          file: "/allin/preflop.i16",
+          dtype: "int16",
+        },
+      },
+    },
+    "file:///tmp/p2/website/public/models/rebel_latest/model.json",
+    async (url) => {
+      loadedUrls.push(url);
+      return new Int16Array([0, 1]).buffer;
+    },
+  );
+  assert.ok(provider);
+
+  const env = new PublicHunlEnv({
+    stack: 20,
+    sb: 1,
+    bb: 2,
+    betBins: [],
+    button: 1,
+    forceDeck: DEFAULT_FORCE_DECK,
+  });
+  assert.equal((await provider.tableForRoot(env))?.street, 0);
+  assert.deepEqual(loadedUrls, ["file:///tmp/p2/website/public/allin/preflop.i16"]);
 });
 
 test("manifest all-in provider does not generate missing flop metadata while online", async (t) => {
@@ -55,7 +87,7 @@ test("manifest all-in provider does not generate missing flop metadata while onl
         allIn: {
           enabled: true,
           preflop: {
-            file: "allin/preflop.i16",
+            file: "/allin/preflop.i16",
             dtype: "int16",
           },
         },
@@ -151,7 +183,7 @@ test("manifest all-in provider generates missing flop table metadata only while 
         allIn: {
           enabled: true,
           preflop: {
-            file: "allin/preflop.i16",
+            file: "/allin/preflop.i16",
             dtype: "int16",
           },
         },
