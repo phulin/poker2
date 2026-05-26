@@ -249,6 +249,7 @@ class ModelConfig:
 
 @dataclass
 class EnvConfig:
+    num_players: int = 2
     stack: int = 10000
     stack_mode: str = "fixed"
     min_stack_bb: int = 10

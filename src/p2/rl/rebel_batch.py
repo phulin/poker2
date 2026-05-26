@@ -114,7 +114,8 @@ class RebelBatch:
             board_valid, new_suits * 13 + ranks, permuted_features.board
         )
 
-        beliefs = permuted_features.beliefs.view(-1, 2, NUM_HANDS)
+        feature_players = permuted_features.num_players
+        beliefs = permuted_features.beliefs.view(-1, feature_players, NUM_HANDS)
         permuted_features.beliefs[:] = torch.gather(
             beliefs,
             2,

@@ -61,6 +61,18 @@ def test_rebel_replay_buffer_roundtrip():
     assert sample.legal_masks.shape == (2, 5)
 
 
+def test_rebel_replay_buffer_allocates_multiway_beliefs():
+    buffer = RebelReplayBuffer(
+        capacity=16,
+        num_actions=5,
+        num_players=3,
+        num_context_features=4,
+        device=torch.device("cpu"),
+    )
+    assert buffer.features.beliefs.shape == (16, 3 * NUM_HANDS)
+    assert buffer.value_targets.shape == (16, 3, NUM_HANDS)
+
+
 def test_rebel_replay_buffer_state_dict_roundtrip():
     device = torch.device("cpu")
     source = RebelReplayBuffer(

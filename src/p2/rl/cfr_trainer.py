@@ -126,7 +126,12 @@ class RebelCFRTrainer:
             self.rng.manual_seed(int(cfg.seed))
             self.buffer_rng.manual_seed(int(cfg.seed))
         self.num_actions = len(self.bet_bins) + 3
-        self.num_players = 2
+        self.num_players = int(cfg.env.num_players)
+        if self.num_players != 2:
+            raise ValueError(
+                "RebelCFRTrainer multiway search is not enabled yet; "
+                "use env.num_players=2 until the PBSEnv-backed sparse path lands."
+            )
         self.policy_extra_updates_per_step = cfg.train.policy_extra_updates_per_step
         if self.policy_extra_updates_per_step < 0:
             raise ValueError("train.policy_extra_updates_per_step must be >= 0")
@@ -1342,7 +1347,9 @@ class RebelCFRTrainer:
             metrics["fresh_value_target_mean_abs"] = (
                 (
                     fresh_value_batch.value_targets
-                    * fresh_value_batch.features.beliefs.view(-1, 2, NUM_HANDS)
+                    * fresh_value_batch.features.beliefs.view(
+                        -1, self.num_players, NUM_HANDS
+                    )
                 )
                 .abs()
                 .sum(dim=2)
@@ -1352,7 +1359,9 @@ class RebelCFRTrainer:
             metrics["fresh_value_target_mean_abs_street"] = by_street(
                 (
                     fresh_value_batch.value_targets
-                    * fresh_value_batch.features.beliefs.view(-1, 2, NUM_HANDS)
+                    * fresh_value_batch.features.beliefs.view(
+                        -1, self.num_players, NUM_HANDS
+                    )
                 )
                 .abs()
                 .sum(dim=2)

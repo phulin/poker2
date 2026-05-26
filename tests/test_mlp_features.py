@@ -67,6 +67,23 @@ def test_bool_mask_indexing_keeps_feature_fields_aligned(monkeypatch):
     torch.testing.assert_close(indexed.beliefs, features.beliefs[mask])
 
 
+def test_mlp_features_accepts_multiway_beliefs():
+    batch_size = 3
+    num_players = 4
+    features = MLPFeatures(
+        context=torch.zeros(batch_size, 3),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=torch.zeros(batch_size, num_players * NUM_HANDS),
+    )
+
+    assert features.num_players == num_players
+    indexed = features[torch.tensor([0, 2])]
+    assert indexed.beliefs.shape == (2, num_players * NUM_HANDS)
+    assert indexed.num_players == num_players
+
+
 def build_hand_name_to_combos(device: torch.device) -> dict[str, list[int]]:
     """Build a mapping from hand name to list of combo indices."""
     combos = hand_combos_tensor(device=device)

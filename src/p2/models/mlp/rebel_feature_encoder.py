@@ -121,5 +121,5 @@ class RebelFeatureEncoder:
                 get_env_tensor("last_board_indices"),
                 get_env_tensor("board_indices"),
             ),
-            beliefs=beliefs.view(-1, 2 * NUM_HANDS),
+            beliefs=beliefs.reshape(M, num_players * NUM_HANDS),
         )

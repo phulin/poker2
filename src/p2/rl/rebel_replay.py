@@ -49,7 +49,10 @@ class RebelReplayBuffer:
             to_act=torch.zeros(self.capacity, dtype=torch.long, device=device),
             board=torch.zeros(self.capacity, 5, dtype=torch.long, device=device),
             beliefs=torch.zeros(
-                self.capacity, 2 * NUM_HANDS, dtype=dtype, device=device
+                self.capacity,
+                self.num_players * NUM_HANDS,
+                dtype=dtype,
+                device=device,
             ),
         )
 

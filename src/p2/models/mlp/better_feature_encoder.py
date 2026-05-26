@@ -171,7 +171,7 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
                 self._env_tensor("last_board_indices", indices),
                 self._env_tensor("board_indices", indices),
             ),
-            beliefs=beliefs.view(-1, 2 * NUM_HANDS),
+            beliefs=beliefs.reshape(N, num_players * NUM_HANDS),
         )
 
 
@@ -261,7 +261,7 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
                 self._env_tensor("last_board_indices", indices),
                 self._env_tensor("board_indices", indices),
             ),
-            beliefs=beliefs.view(-1, 2 * NUM_HANDS),
+            beliefs=beliefs.reshape(N, num_players * NUM_HANDS),
         )
 
 

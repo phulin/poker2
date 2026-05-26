@@ -840,7 +840,7 @@ class RebelSupervisedLoss(nn.Module):
     def _base_weights(
         self, batch: RebelBatch
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        player_beliefs = batch.features.beliefs.view(-1, 2, NUM_HANDS)
+        player_beliefs = batch.features.beliefs.view(-1, self.num_players, NUM_HANDS)
         allowed_hands = self._board_allowed_hands(batch.features.board)
         allowed_hands_float = allowed_hands.to(dtype=player_beliefs.dtype)
         unblocked_mass = self._calculate_unblocked_mass(player_beliefs)
@@ -849,6 +849,11 @@ class RebelSupervisedLoss(nn.Module):
     def _policy_weights(
         self, batch: RebelBatch
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.num_players != 2:
+            raise NotImplementedError(
+                "Multiway policy weighting needs aggregate blocker-compatible "
+                "opponent reach; this path is currently heads-up only."
+            )
         actor = batch.features.to_act
         opp = 1 - actor
         player_beliefs, allowed_hands_float, unblocked_mass = self._base_weights(batch)
@@ -1009,6 +1014,10 @@ class RebelSupervisedLoss(nn.Module):
         output: ModelOutput,
         batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
+        if self.num_players != 2:
+            raise NotImplementedError(
+                "Multiway value weighting is not implemented in RebelSupervisedLoss yet."
+            )
         hand_values = output.hand_values
         device = hand_values.device
         _, allowed_hands_float, unblocked_mass = self._base_weights(batch)
@@ -1050,6 +1059,10 @@ class RebelSupervisedLoss(nn.Module):
         output: ModelOutput,
         batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
+        if self.num_players != 2:
+            raise NotImplementedError(
+                "Multiway supervised loss is not implemented yet."
+            )
         logits = output.policy_logits
         hand_values = output.hand_values
         device = logits.device

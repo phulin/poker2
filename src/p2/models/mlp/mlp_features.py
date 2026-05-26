@@ -45,7 +45,13 @@ class MLPFeatures:
         assert self.street.shape == (N,)
         assert self.to_act.shape == (N,)
         assert self.board.shape == (N, 5)
-        assert self.beliefs.shape == (N, 2 * NUM_HANDS)
+        assert self.beliefs.dim() == 2
+        assert self.beliefs.shape[0] == N
+        assert self.beliefs.shape[1] % NUM_HANDS == 0
+
+    @property
+    def num_players(self) -> int:
+        return self.beliefs.shape[1] // NUM_HANDS
 
     def __len__(self) -> int:
         """Get batch size."""
@@ -185,11 +191,12 @@ class MLPFeatures:
         remap = combo_lookup[min_cards, max_cards].to(torch.long)
         inverse_remap = torch.argsort(remap, dim=1)
 
-        # Remap beliefs based on shape.
-        p0_beliefs = self.beliefs[:, :NUM_HANDS]
-        p1_beliefs = self.beliefs[:, NUM_HANDS:]
-        p0_remapped = torch.gather(p0_beliefs, 1, inverse_remap)
-        p1_remapped = torch.gather(p1_beliefs, 1, inverse_remap)
-        self.beliefs[:] = torch.cat([p0_remapped, p1_remapped], dim=1)
+        player_beliefs = self.beliefs.view(batch_size, self.num_players, NUM_HANDS)
+        remapped = torch.gather(
+            player_beliefs,
+            2,
+            inverse_remap[:, None, :].expand(-1, self.num_players, -1),
+        )
+        self.beliefs[:] = remapped.reshape(batch_size, -1)
 
         return suit_permutations
