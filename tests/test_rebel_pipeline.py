@@ -44,6 +44,40 @@ def test_value_samples_per_step_allows_fractional_reuse_goal():
         _value_samples_per_step(batch_size=512, value_reuse_goal=0.0)
 
 
+def test_rebel_cfr_trainer_constructs_multiway_pbs_env():
+    cfg = Config()
+    cfg.num_envs = 1
+    cfg.env.num_players = 3
+    cfg.env.bet_bins = [0.5]
+    cfg.search.depth = 1
+    cfg.search.iterations = 1
+    cfg.search.warm_start_iterations = 0
+    cfg.search.sparse = True
+    cfg.search.sparse_fused = False
+    cfg.search.allin_call_terminal_abstraction = False
+    cfg.train.batch_size = 1
+    cfg.train.replay_buffer_batches = 1
+    cfg.train.value_reuse_goal = 1.0
+    cfg.train.policy_capacity_factor = 1.0
+    cfg.model.hidden_dim = 16
+    cfg.model.range_hidden_dim = 8
+    cfg.model.ffn_dim = 48
+    cfg.model.num_hidden_layers = 1
+    cfg.model.num_policy_layers = 1
+    cfg.model.num_value_layers = 1
+    cfg.model.policy_rank = 8
+    cfg.model.policy_hand_bias_rank = 4
+    cfg.model.board_interaction_dim = 4
+    cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+    cfg.model.enforce_zero_sum = True
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+
+    assert trainer.num_players == 3
+    assert trainer.env.num_players == 3
+    assert cfg.model.enforce_zero_sum is False
+
+
 def test_rebel_feature_encoder_shapes():
     env = make_env(2)
     encoder = RebelFeatureEncoder(env, device=env.device, dtype=torch.float32)

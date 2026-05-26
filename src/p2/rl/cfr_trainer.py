@@ -248,8 +248,10 @@ class RebelCFRTrainer:
         ) ** self.cfg.search.depth / self.cfg.train.policy_capacity_factor
 
         C_over_K = self.cfg.train.replay_buffer_batches
-        value_capacity = C_over_K * self.K_value
-        policy_capacity = value_capacity * self.cfg.train.policy_capacity_factor
+        value_capacity = int(math.ceil(C_over_K * self.K_value))
+        policy_capacity = int(
+            math.ceil(value_capacity * self.cfg.train.policy_capacity_factor)
+        )
 
         # Replay buffers
         self.value_buffer = RebelValueBuffer(
