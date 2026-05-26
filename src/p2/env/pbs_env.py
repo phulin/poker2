@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from p2.env.card_utils import NUM_HANDS, board_allowed_hands, hand_combos_tensor
+from p2.env.card_utils import NUM_HANDS, board_allowed_hands
 from p2.env.hunl_tensor_env import DEFAULT_BET_BINS
 from p2.env.rules import rank_hands
 
@@ -508,10 +508,10 @@ class PBSEnv:
 
         ``beliefs`` must have shape ``[M, P, 1326]`` where each player axis is a
         marginal distribution over private two-card combos for the matching env
-        row. The joint private-hand distribution is approximated as the product
-        of those marginals after conditioning each opponent on the hero's two
-        cards and the public board. Opponent-opponent card collisions are not
-        enumerated.
+        row. The return is ``[M, P]`` with one chip-accounting reward per seat.
+        The joint private-hand distribution is the product of the per-seat
+        marginals after masking public board blockers. Private-card collisions
+        between seats are not conditioned out.
         """
         if env_indices is None:
             ids = self.arange_n
@@ -530,16 +530,30 @@ class PBSEnv:
             raise ValueError("expected_showdown_rewards requires a full public board")
 
         beliefs_f = beliefs.to(device=self.device, dtype=torch.float32)
-        rewards = torch.empty(
-            ids.numel(), self.num_players, dtype=torch.float32, device=self.device
+        boards = self.board_indices[ids]
+        hand_ranks, sorted_indices = rank_hands(boards)
+        hand_ranks = hand_ranks.to(torch.long)
+        sorted_ranks = hand_ranks.gather(1, sorted_indices)
+        board_allowed = board_allowed_hands(boards)
+        weights = torch.where(board_allowed[:, None, :], beliefs_f.clamp_min(0.0), 0.0)
+        hand_probs = weights / weights.sum(dim=2, keepdim=True).clamp_min(1.0e-12)
+        lower_probs, tie_probs = self._rank_mass_probs(
+            weights,
+            hand_ranks,
+            sorted_ranks,
+            sorted_indices,
         )
-        combos = hand_combos_tensor(device=self.device)
-        for out_row in range(ids.numel()):
-            rewards[out_row] = self._expected_showdown_reward_row(
-                ids[out_row],
-                beliefs_f[out_row],
-                combos,
-            )
+        payouts = self._expected_showdown_payouts_from_rank_probs(
+            ids,
+            hand_probs,
+            lower_probs,
+            tie_probs,
+        )
+        rewards = (
+            self.stacks[ids].to(torch.float32)
+            + payouts
+            - self.starting_stacks[ids].to(torch.float32)
+        ) / self.starting_stacks[ids].clamp_min(1).to(torch.float32)
         return rewards.to(self.float_dtype)
 
     def reset_done(self) -> None:
@@ -673,187 +687,125 @@ class PBSEnv:
         )
         return shares.sum(dim=1)
 
-    def _expected_showdown_reward_row(
-        self,
-        env_id: torch.Tensor,
-        beliefs: torch.Tensor,
-        combos: torch.Tensor,
-    ) -> torch.Tensor:
-        board = self.board_indices[env_id].unsqueeze(0)
-        ranks = rank_hands(board)[0].squeeze(0).to(torch.long)
-        allowed = board_allowed_hands(board).squeeze(0)
-        beliefs = torch.where(allowed[None, :], beliefs.clamp_min(0.0), 0.0)
-        live = ~self.has_folded[env_id]
-        contrib = self.chips_placed[env_id].to(torch.float32)
-        stacks = self.stacks[env_id].to(torch.float32)
-        starting = self.starting_stacks[env_id].to(torch.float32)
-        payouts = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
-
-        lower_masses: list[torch.Tensor] = []
-        tie_masses: list[torch.Tensor] = []
-        valid_masses: list[torch.Tensor] = []
-        for player in range(self.num_players):
-            lower, tie, valid = self._opponent_rank_masses(
-                beliefs[player],
-                ranks,
-                combos,
-            )
-            lower_masses.append(lower)
-            tie_masses.append(tie)
-            valid_masses.append(valid.clamp_min(1.0e-12))
-
-        levels = contrib.sort().values
-        previous = torch.zeros((), dtype=torch.float32, device=self.device)
-        for level in levels:
-            width = level - previous
-            previous = level
-            contributors = contrib >= level
-            layer_amount = width * contributors.to(torch.float32).sum()
-            eligible = live & contributors
-            for hero in range(self.num_players):
-                hero_belief = beliefs[hero]
-                hero_mass = hero_belief.sum().clamp_min(1.0e-12)
-                lower_probs = []
-                tie_probs = []
-                for opp in range(self.num_players):
-                    if opp == hero:
-                        continue
-                    opp_eligible = eligible[opp]
-                    lower_probs.append(
-                        torch.where(
-                            opp_eligible,
-                            lower_masses[opp] / valid_masses[opp],
-                            torch.ones_like(lower_masses[opp]),
-                        )
-                    )
-                    tie_probs.append(
-                        torch.where(
-                            opp_eligible,
-                            tie_masses[opp] / valid_masses[opp],
-                            torch.zeros_like(tie_masses[opp]),
-                        )
-                    )
-                share = self._hero_tie_split_share(
-                    lower_probs,
-                    tie_probs,
-                    hero_belief.shape[0],
-                )
-                hero_eligible = eligible[hero].to(torch.float32)
-                payouts[hero] += (
-                    hero_eligible
-                    * layer_amount
-                    * (hero_belief * share).sum()
-                    / hero_mass
-                )
-
-        denom = starting.clamp_min(1.0).to(torch.float32)
-        return (stacks + payouts - starting) / denom
-
-    def _opponent_rank_masses(
+    def _rank_mass_probs(
         self,
         weights: torch.Tensor,
         ranks: torch.Tensor,
-        combos: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        order = torch.argsort(ranks, stable=True)
-        sorted_ranks = ranks[order]
-        sorted_weights = weights[order]
-        sorted_combos = combos[order]
-        hand_count = weights.shape[0]
-        positions = torch.arange(hand_count, device=self.device)
-
-        card_increments = torch.zeros(
-            hand_count, 52, dtype=torch.float32, device=self.device
-        )
-        card_increments[positions, sorted_combos[:, 0]] += sorted_weights
-        card_increments[positions, sorted_combos[:, 1]] += sorted_weights
-        prefix_cards = torch.cat(
+        sorted_ranks: torch.Tensor,
+        sorted_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, players, hand_count = weights.shape
+        lower_pos = torch.searchsorted(sorted_ranks.contiguous(), ranks, right=False)
+        upper_pos = torch.searchsorted(sorted_ranks.contiguous(), ranks, right=True)
+        expanded_order = sorted_indices[:, None, :].expand(batch_size, players, hand_count)
+        sorted_weights = weights.gather(2, expanded_order)
+        prefix = torch.cat(
             (
-                torch.zeros(1, 52, dtype=torch.float32, device=self.device),
-                card_increments.cumsum(dim=0),
+                torch.zeros(
+                    batch_size,
+                    players,
+                    1,
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
+                sorted_weights.cumsum(dim=2),
             ),
-            dim=0,
+            dim=2,
         )
-        prefix_total = torch.cat(
-            (
-                torch.zeros(1, dtype=torch.float32, device=self.device),
-                sorted_weights.cumsum(dim=0),
-            )
-        )
+        lower = prefix.gather(2, lower_pos[:, None, :].expand(batch_size, players, hand_count))
+        upper = prefix.gather(2, upper_pos[:, None, :].expand(batch_size, players, hand_count))
+        denom = weights.sum(dim=2, keepdim=True).clamp_min(1.0e-12)
+        return lower / denom, (upper - lower).clamp_min(0.0) / denom
 
-        lower_pos = torch.searchsorted(sorted_ranks, ranks, right=False)
-        upper_pos = torch.searchsorted(sorted_ranks, ranks, right=True)
-        card_a = combos[:, 0]
-        card_b = combos[:, 1]
-        lower = self._blocked_prefix_mass(
-            lower_pos,
-            prefix_total,
-            prefix_cards,
-            card_a,
-            card_b,
-            torch.zeros_like(weights),
-        )
-        upper = self._blocked_prefix_mass(
-            upper_pos,
-            prefix_total,
-            prefix_cards,
-            card_a,
-            card_b,
-            weights,
-        )
-        valid = self._blocked_prefix_mass(
-            torch.full_like(lower_pos, hand_count),
-            prefix_total,
-            prefix_cards,
-            card_a,
-            card_b,
-            weights,
-        )
-        tie = (upper - lower).clamp_min(0.0)
-        return lower.clamp_min(0.0), tie, valid.clamp_min(0.0)
-
-    def _blocked_prefix_mass(
+    def _expected_showdown_payouts_from_rank_probs(
         self,
-        prefix_pos: torch.Tensor,
-        prefix_total: torch.Tensor,
-        prefix_cards: torch.Tensor,
-        card_a: torch.Tensor,
-        card_b: torch.Tensor,
-        intersection: torch.Tensor,
+        ids: torch.Tensor,
+        hand_probs: torch.Tensor,
+        lower_probs: torch.Tensor,
+        tie_probs: torch.Tensor,
     ) -> torch.Tensor:
-        rows = torch.arange(prefix_pos.numel(), device=self.device)
-        mass = prefix_total[prefix_pos]
-        card_mass = prefix_cards[prefix_pos]
-        return (
-            mass
-            - card_mass[rows, card_a]
-            - card_mass[rows, card_b]
-            + intersection
+        batch_size, players, hand_count = hand_probs.shape
+        contrib = self.chips_placed[ids].to(torch.float32)
+        levels = contrib.sort(dim=1).values
+        previous = torch.cat(
+            (
+                torch.zeros(batch_size, 1, dtype=torch.float32, device=self.device),
+                levels[:, :-1],
+            ),
+            dim=1,
         )
+        widths = (levels - previous).clamp_min(0)
+        participants = contrib[:, None, :] >= levels[:, :, None]
+        eligible = participants & (~self.has_folded[ids])[:, None, :]
+        layer_amounts = widths * participants.to(torch.float32).sum(dim=2)
+        payouts = torch.zeros(
+            batch_size, players, dtype=torch.float32, device=self.device
+        )
+        for layer in range(players):
+            for focal in range(players):
+                focal_eligible = eligible[:, layer, focal].to(torch.float32)
+                lower_terms = []
+                tie_terms = []
+                for opp in range(players):
+                    if opp == focal:
+                        continue
+                    active = eligible[:, layer, opp][:, None]
+                    lower_terms.append(
+                        torch.where(
+                            active,
+                            lower_probs[:, opp],
+                            torch.ones(batch_size, hand_count, device=self.device),
+                        )
+                    )
+                    tie_terms.append(
+                        torch.where(
+                            active,
+                            tie_probs[:, opp],
+                            torch.zeros(batch_size, hand_count, device=self.device),
+                        )
+                    )
+                share = self._focal_tie_split_share(
+                    lower_terms,
+                    tie_terms,
+                    batch_size,
+                    hand_count,
+                )
+                expected_share = (hand_probs[:, focal] * share).sum(dim=1)
+                payouts[:, focal] += (
+                    focal_eligible * layer_amounts[:, layer] * expected_share
+                )
+        return payouts
 
-    def _hero_tie_split_share(
+    def _focal_tie_split_share(
         self,
         lower_probs: list[torch.Tensor],
         tie_probs: list[torch.Tensor],
+        batch_size: int,
         hand_count: int,
     ) -> torch.Tensor:
         if not lower_probs:
-            return torch.ones(hand_count, dtype=torch.float32, device=self.device)
+            return torch.ones(
+                batch_size, hand_count, dtype=torch.float32, device=self.device
+            )
 
         coeff = torch.zeros(
-            hand_count, len(lower_probs) + 1, dtype=torch.float32, device=self.device
+            batch_size,
+            hand_count,
+            len(lower_probs) + 1,
+            dtype=torch.float32,
+            device=self.device,
         )
-        coeff[:, 0] = 1.0
+        coeff[:, :, 0] = 1.0
         degree = 0
         for lower, tie in zip(lower_probs, tie_probs, strict=True):
             nxt = torch.zeros_like(coeff)
-            active = coeff[:, : degree + 1]
-            nxt[:, : degree + 1] += active * lower[:, None]
-            nxt[:, 1 : degree + 2] += active * tie[:, None]
+            active = coeff[:, :, : degree + 1]
+            nxt[:, :, : degree + 1] += active * lower[:, :, None]
+            nxt[:, :, 1 : degree + 2] += active * tie[:, :, None]
             coeff = nxt
             degree += 1
         denom = torch.arange(1, degree + 2, dtype=torch.float32, device=self.device)
-        return (coeff[:, : degree + 1] / denom[None, :]).sum(dim=1)
+        return (coeff[:, :, : degree + 1] / denom[None, None, :]).sum(dim=2)
 
     def _finish_no_more_betting(
         self,

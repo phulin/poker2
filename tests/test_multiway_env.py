@@ -308,3 +308,47 @@ def test_pbs_expected_showdown_rewards_use_marginal_beliefs_and_side_pots():
         rewards[0],
         torch.tensor([2.0, 0.2, -1.0]),
     )
+
+
+def test_pbs_expected_showdown_rewards_conserve_chips_under_product_marginals():
+    env = PBSEnv(
+        num_envs=2,
+        num_players=4,
+        starting_stack=100,
+        sb=0,
+        bb=0,
+        device="cpu",
+    )
+    env.reset(
+        force_button=torch.zeros(2, dtype=torch.long),
+        force_deck=torch.tensor(
+            [[0, 14, 28, 42, 7], [1, 15, 29, 43, 8]],
+            dtype=torch.long,
+        ),
+    )
+    env.board_indices[:] = env.deck
+    env.starting_stacks[:] = torch.tensor(
+        [[40, 80, 120, 120], [50, 50, 100, 200]],
+        dtype=torch.long,
+    )
+    env.chips_placed[:] = torch.tensor(
+        [[40, 80, 120, 120], [50, 50, 75, 200]],
+        dtype=torch.long,
+    )
+    env.stacks[:] = env.starting_stacks - env.chips_placed
+    env.pot[:] = env.chips_placed.sum(dim=1)
+    env.has_folded[:] = False
+
+    generator = torch.Generator(device="cpu").manual_seed(11)
+    beliefs = torch.rand(2, 4, 1326, generator=generator)
+    beliefs = beliefs / beliefs.sum(dim=2, keepdim=True)
+
+    rewards = env.expected_showdown_rewards(beliefs)
+    net_chips = rewards * env.starting_stacks.to(torch.float32)
+
+    torch.testing.assert_close(
+        net_chips.sum(dim=1),
+        torch.zeros(2),
+        atol=2.0e-4,
+        rtol=1.0e-5,
+    )
