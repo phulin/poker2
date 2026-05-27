@@ -743,6 +743,7 @@ class RebelSupervisedLoss(nn.Module):
         num_players: int = 2,
         policy_node_weighting: PolicyNodeWeighting | str = PolicyNodeWeighting.uniform,
         policy_loss_type: PolicyLossType | str = PolicyLossType.cross_entropy,
+        policy_logit_l2_coef: float = 0.0,
     ) -> None:
         super().__init__()
         self.policy_weight = policy_weight
@@ -750,6 +751,9 @@ class RebelSupervisedLoss(nn.Module):
         self.entropy_coef = entropy_coef
         self.permutation_weight = permutation_weight
         self.num_players = num_players
+        self.policy_logit_l2_coef = float(policy_logit_l2_coef)
+        if self.policy_logit_l2_coef < 0.0:
+            raise ValueError("policy_logit_l2_coef must be non-negative")
         self.policy_node_weighting = (
             policy_node_weighting
             if isinstance(policy_node_weighting, PolicyNodeWeighting)
@@ -926,6 +930,21 @@ class RebelSupervisedLoss(nn.Module):
             return F.mse_loss(probs, targets, reduction="none").mean(dim=-1)
         raise ValueError(f"Unsupported policy loss type: {self.policy_loss_type}")
 
+    def _policy_logit_l2(
+        self,
+        logits: torch.Tensor,
+        legal_masks: torch.Tensor,
+        policy_weights: torch.Tensor,
+        node_weights: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        legal = legal_masks.to(dtype=logits.dtype)
+        legal_count = legal.sum(dim=-1, keepdim=True).clamp(min=1.0)
+        legal_mean = (logits * legal).sum(dim=-1, keepdim=True) / legal_count
+        centered = (logits - legal_mean) * legal
+        per_hand = centered.square().sum(dim=-1) / legal_count.squeeze(-1)
+        per_sample = (per_hand * policy_weights).sum(dim=-1)
+        return self._reduce_policy_node_metric(per_sample, node_weights), per_sample
+
     def _permutation_loss(
         self,
         output: ModelOutput,
@@ -991,9 +1010,18 @@ class RebelSupervisedLoss(nn.Module):
         target_model_kl = self._reduce_policy_node_metric(
             target_model_kl_all, node_weights
         )
+        if self.policy_logit_l2_coef != 0.0:
+            policy_logit_l2, policy_logit_l2_all = self._policy_logit_l2(
+                logits, legal_masks, policy_weights, node_weights
+            )
+        else:
+            policy_logit_l2 = self._zero(device)
+            policy_logit_l2_all = None
 
         entropy = -(probs * log_probs).sum(dim=-1).mean()
         total_loss = self.policy_weight * policy_loss
+        if self.policy_logit_l2_coef != 0.0:
+            total_loss = total_loss + self.policy_logit_l2_coef * policy_logit_l2
         if self.entropy_coef is not None and self.entropy_coef != 0.0:
             total_loss -= self.entropy_coef * entropy
 
@@ -1010,6 +1038,12 @@ class RebelSupervisedLoss(nn.Module):
             "entropy_gap_all": entropy_gap_all.detach(),
             "target_model_kl": target_model_kl,
             "target_model_kl_all": target_model_kl_all.detach(),
+            "policy_logit_l2": policy_logit_l2,
+            "policy_logit_l2_all": (
+                policy_logit_l2_all.detach()
+                if policy_logit_l2_all is not None
+                else None
+            ),
             "policy_weights": policy_weights,
             "policy_node_weights": node_weights,
             "value_loss": zero,
@@ -1051,6 +1085,8 @@ class RebelSupervisedLoss(nn.Module):
             "entropy_gap_all": None,
             "target_model_kl": zero,
             "target_model_kl_all": None,
+            "policy_logit_l2": zero,
+            "policy_logit_l2_all": None,
             "policy_weights": None,
             "policy_node_weights": None,
             "value_loss": value_loss,
@@ -1114,6 +1150,13 @@ class RebelSupervisedLoss(nn.Module):
         target_model_kl = self._reduce_policy_node_metric(
             target_model_kl_all, node_weights
         )
+        if self.policy_logit_l2_coef != 0.0:
+            policy_logit_l2, policy_logit_l2_all = self._policy_logit_l2(
+                logits, legal_masks, policy_weights, node_weights
+            )
+        else:
+            policy_logit_l2 = self._zero(device)
+            policy_logit_l2_all = None
         entropy = -(probs * log_probs).sum(dim=-1).mean()
 
         value_weights = self._value_weights(unblocked_mass, allowed_hands_float)
@@ -1126,6 +1169,8 @@ class RebelSupervisedLoss(nn.Module):
         )
 
         total_loss = self.policy_weight * policy_loss + self.value_weight * value_loss
+        if self.policy_logit_l2_coef != 0.0:
+            total_loss = total_loss + self.policy_logit_l2_coef * policy_logit_l2
         if self.entropy_coef is not None and self.entropy_coef != 0.0:
             total_loss -= self.entropy_coef * entropy
 
@@ -1141,6 +1186,12 @@ class RebelSupervisedLoss(nn.Module):
             "entropy_gap_all": entropy_gap_all.detach(),
             "target_model_kl": target_model_kl,
             "target_model_kl_all": target_model_kl_all.detach(),
+            "policy_logit_l2": policy_logit_l2,
+            "policy_logit_l2_all": (
+                policy_logit_l2_all.detach()
+                if policy_logit_l2_all is not None
+                else None
+            ),
             "policy_weights": policy_weights,
             "policy_node_weights": node_weights,
             "value_loss": value_loss,
@@ -1181,6 +1232,8 @@ class RebelSupervisedLoss(nn.Module):
                 "policy_loss": zero,
                 "policy_loss_all": None,
                 "policy_weights": None,
+                "policy_logit_l2": zero,
+                "policy_logit_l2_all": None,
                 "value_loss": zero,
                 "value_loss_all": None,
                 "value_weights": None,

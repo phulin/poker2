@@ -264,6 +264,50 @@ def test_rebel_policy_loss_has_saturated_wrong_action_gradient():
     assert logits.grad[..., 0].mean() > 1e-4
 
 
+def test_rebel_policy_logit_l2_is_centered_and_legal_only():
+    batch_size, num_actions = 1, 3
+    beliefs = torch.full((batch_size, 2, NUM_HANDS), 1.0 / NUM_HANDS)
+    features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+    policy_targets = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    policy_targets[..., 0] = 1.0
+    batch = RebelBatch(
+        features=features,
+        policy_targets=policy_targets,
+        value_targets=None,
+        legal_masks=torch.tensor([[True, True, False]]),
+    )
+    logits = torch.zeros(batch_size, NUM_HANDS, num_actions)
+    logits[..., 0] = 12.0
+    logits[..., 1] = 8.0
+    logits[..., 2] = 1_000_000.0
+    shifted_logits = logits.clone()
+    shifted_logits[..., :2] += 123.0
+
+    loss_fn = RebelSupervisedLoss(policy_logit_l2_coef=0.5)
+    output = ModelOutput(policy_logits=logits, value=None, hand_values=None)
+    shifted_output = ModelOutput(
+        policy_logits=shifted_logits, value=None, hand_values=None
+    )
+
+    loss_dict = loss_fn.forward_policy(output, batch)
+    shifted_loss_dict = loss_fn.forward_policy(shifted_output, batch)
+
+    torch.testing.assert_close(loss_dict["policy_logit_l2"], torch.tensor(4.0))
+    torch.testing.assert_close(
+        shifted_loss_dict["policy_logit_l2"], loss_dict["policy_logit_l2"]
+    )
+    torch.testing.assert_close(
+        loss_dict["total_loss"],
+        loss_dict["policy_loss"] + 0.5 * loss_dict["policy_logit_l2"],
+    )
+
+
 def test_rebel_policy_loss_supports_node_reach_weighting_modes():
     batch_size, num_actions = 2, 2
     beliefs = torch.full((batch_size, 2, NUM_HANDS), 1.0 / NUM_HANDS)

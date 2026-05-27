@@ -287,6 +287,7 @@ class RebelCFRTrainer:
             num_players=self.num_players,
             policy_node_weighting=cfg.train.policy_node_weighting,
             policy_loss_type=cfg.train.policy_loss_type,
+            policy_logit_l2_coef=cfg.train.policy_logit_l2_coef,
         )
         self.loss_fn.to(self.device)
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
@@ -1243,6 +1244,7 @@ class RebelCFRTrainer:
             "policy_model_entropy": step_stats["policy_model_entropy"] / episodes,
             "policy_entropy_gap": step_stats["policy_entropy_gap"] / episodes,
             "policy_target_model_kl": (step_stats["policy_target_model_kl"] / episodes),
+            "policy_logit_l2": step_stats["policy_logit_l2"] / episodes,
             "value_loss": step_stats["value_loss"] / episodes,
             "entropy_loss": step_stats["entropy_loss"] / episodes,
             "permutation_loss": step_stats["permutation_loss"] / episodes,
@@ -1320,6 +1322,8 @@ class RebelCFRTrainer:
                     "extra_policy_target_model_kl": step_stats[
                         "extra_policy_target_model_kl"
                     ]
+                    / extra_updates,
+                    "extra_policy_logit_l2": step_stats["extra_policy_logit_l2"]
                     / extra_updates,
                     "extra_entropy_loss": step_stats["extra_entropy_loss"]
                     / extra_updates,
@@ -1425,6 +1429,9 @@ class RebelCFRTrainer:
                 ].item()
                 metrics["fresh_policy_entropy_gap"] = fresh_policy_loss_dict[
                     "entropy_gap"
+                ].item()
+                metrics["fresh_policy_logit_l2"] = fresh_policy_loss_dict[
+                    "policy_logit_l2"
                 ].item()
                 metrics["fresh_policy_target_model_kl_depth"] = policy_metric_by_depth(
                     fresh_policy_loss_dict["target_model_kl_all"],
@@ -1577,6 +1584,7 @@ class RebelCFRTrainer:
         policy_kl_update = loss_dict["target_model_kl_all"]
         target_entropy = loss_dict["target_entropy"]
         target_model_kl = loss_dict["target_model_kl"]
+        policy_logit_l2 = loss_dict["policy_logit_l2"]
         model_entropy = loss_dict["model_entropy"]
         entropy_gap = loss_dict["entropy_gap"]
         entropy_loss = loss_dict["entropy"]
@@ -1629,6 +1637,7 @@ class RebelCFRTrainer:
                 "policy_model_entropy": model_entropy.detach(),
                 "policy_entropy_gap": entropy_gap.detach(),
                 "policy_target_model_kl": target_model_kl.detach(),
+                "policy_logit_l2": policy_logit_l2.detach(),
                 "value_loss": value_loss.detach(),
                 "entropy_loss": entropy_loss.detach(),
                 "permutation_loss": permutation_loss_tensor.detach(),
@@ -1702,6 +1711,7 @@ class RebelCFRTrainer:
             "policy_model_entropy": loss_dict["model_entropy"].detach(),
             "policy_entropy_gap": loss_dict["entropy_gap"].detach(),
             "policy_target_model_kl": loss_dict["target_model_kl"].detach(),
+            "policy_logit_l2": loss_dict["policy_logit_l2"].detach(),
             "entropy_loss": loss_dict["entropy"].detach(),
             "total_loss": total_loss.detach(),
             "update_norm": update_norm.detach(),
@@ -1763,6 +1773,7 @@ class RebelCFRTrainer:
             "policy_model_entropy": None,
             "policy_entropy_gap": None,
             "policy_target_model_kl": None,
+            "policy_logit_l2": None,
             "value_loss": None,
             "entropy_loss": None,
             "permutation_loss": None,
@@ -1775,6 +1786,7 @@ class RebelCFRTrainer:
             "policy_model_entropy": None,
             "policy_entropy_gap": None,
             "policy_target_model_kl": None,
+            "policy_logit_l2": None,
             "entropy_loss": None,
             "total_loss": None,
             "update_norm": None,
