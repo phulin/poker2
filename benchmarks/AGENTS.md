@@ -12,6 +12,7 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 - `bench_reach_weights.py`: Reach-weight computation benchmark.
 - `bench_rules_triton.py`: Triton hand-rules benchmark.
 - `bench_triton_pbs_env.py`: PBSEnv versus TritonPBSEnv microbenchmarks for legal, step, reset, copy, gather, repeat, and persistent `*_into` materialization paths.
+- `multiway_showdown_estimators.py`: GPU validation harness for n-way showdown equity estimators, including naive rejection sampling, sequential importance sampling, restricted-support brute force, batched single-board belief-update benchmarking, and exact inclusion-exclusion prototypes.
 - `bench_set_model_values_indexing.py`: Model-value indexing benchmark.
 - `cfr_optimizations_bench.py`: CFR optimization comparison benchmark.
 - `profile_chance_helper.py`: Chance-node helper profiler.
