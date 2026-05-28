@@ -1798,8 +1798,8 @@ def prepare_fast_sis_board(prepared: PreparedShowdown) -> PreparedFastSISBoard:
     torch.cuda.synchronize(prepared.beliefs.device)
     return PreparedFastSISBoard(
         active_ids=active_ids,
-        hand_cards0=active_combos[:, 0].to(torch.int32).contiguous(),
-        hand_cards1=active_combos[:, 1].to(torch.int32).contiguous(),
+        hand_cards0=active_combos[:, 0].to(torch.int16).contiguous(),
+        hand_cards1=active_combos[:, 1].to(torch.int16).contiguous(),
         pair_to_active=pair_to_active.contiguous(),
         hand_masks=hand_masks,
         hand_ranks=hand_ranks,
@@ -3201,8 +3201,8 @@ if triton is not None:
                 selected_mask = tl.load(hand_masks_ptr + selected, mask=ok, other=0)
                 used = tl.where(ok, used | selected_mask, used)
                 alive = alive & found
-                a = tl.load(hand_cards0_ptr + selected, mask=ok, other=0)
-                b = tl.load(hand_cards1_ptr + selected, mask=ok, other=0)
+                a = tl.load(hand_cards0_ptr + selected, mask=ok, other=0).to(tl.int32)
+                b = tl.load(hand_cards1_ptr + selected, mask=ok, other=0).to(tl.int32)
                 rank = tl.load(hand_ranks_ptr + selected, mask=ok, other=-1)
                 if player == 0:
                     c0 = a
@@ -3371,8 +3371,8 @@ if triton is not None:
                 selected_mask = tl.load(hand_masks_ptr + selected, mask=ok, other=0)
                 used = tl.where(ok, used | selected_mask, used)
                 alive = alive & found
-                a = tl.load(hand_cards0_ptr + selected, mask=ok, other=0)
-                b = tl.load(hand_cards1_ptr + selected, mask=ok, other=0)
+                a = tl.load(hand_cards0_ptr + selected, mask=ok, other=0).to(tl.int32)
+                b = tl.load(hand_cards1_ptr + selected, mask=ok, other=0).to(tl.int32)
                 rank = tl.load(hand_ranks_ptr + selected, mask=ok, other=-1)
                 if player == 0:
                     c0 = a
@@ -3666,8 +3666,8 @@ if triton is not None:
                 selected_mask = tl.load(hand_masks_ptr + selected, mask=ok, other=0)
                 used = tl.where(ok, used | selected_mask, used)
                 alive = alive & found
-                a = tl.load(hand_cards0_ptr + selected, mask=ok, other=0)
-                b = tl.load(hand_cards1_ptr + selected, mask=ok, other=0)
+                a = tl.load(hand_cards0_ptr + selected, mask=ok, other=0).to(tl.int32)
+                b = tl.load(hand_cards1_ptr + selected, mask=ok, other=0).to(tl.int32)
                 rank = tl.load(hand_ranks_ptr + selected, mask=ok, other=-1)
                 if player == 0:
                     c0 = a
