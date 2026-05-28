@@ -3513,7 +3513,6 @@ if triton is not None:
             large_idx = tl.load(large_stack_ptr + row_offset + large_count - 1)
             small_value = tl.load(alias_prob_ptr + row_offset + small_idx)
             large_value = tl.load(alias_prob_ptr + row_offset + large_idx)
-            tl.store(alias_prob_ptr + row_offset + small_idx, small_value)
             tl.store(alias_idx_ptr + row_offset + small_idx, large_idx)
             new_large_value = large_value + small_value - 1.0
             tl.store(alias_prob_ptr + row_offset + large_idx, new_large_value)
