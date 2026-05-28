@@ -5039,6 +5039,12 @@ def run_batched_belief_benchmark(
             sample_count=sample_count,
             max_tries=max_tries,
         )
+        if args.batch_belief_reuse_alias:
+            build_batched_alias_tables_triton_into(
+                belief_workspace,
+                reject_workspace,
+                synchronize=False,
+            )
         alias_setup_seconds = reject_workspace.setup_seconds
     else:
         reject_workspace = make_batched_triton_reject_sis_workspace(
@@ -5064,11 +5070,12 @@ def run_batched_belief_benchmark(
                 generator=generator,
             )
         else:
-            build_batched_alias_tables_triton_into(
-                belief_workspace,
-                reject_workspace,
-                synchronize=False,
-            )
+            if not args.batch_belief_reuse_alias:
+                build_batched_alias_tables_triton_into(
+                    belief_workspace,
+                    reject_workspace,
+                    synchronize=False,
+                )
             alias_triton_reject_sis_batched_fixed_into(
                 belief_workspace,
                 reject_workspace,
@@ -5098,11 +5105,12 @@ def run_batched_belief_benchmark(
                 generator=generator,
             )
         else:
-            build_batched_alias_tables_triton_into(
-                belief_workspace,
-                reject_workspace,
-                synchronize=False,
-            )
+            if not args.batch_belief_reuse_alias:
+                build_batched_alias_tables_triton_into(
+                    belief_workspace,
+                    reject_workspace,
+                    synchronize=False,
+                )
             alias_triton_reject_sis_batched_fixed_into(
                 belief_workspace,
                 reject_workspace,
@@ -5127,7 +5135,7 @@ def run_batched_belief_benchmark(
         f"include_prep={args.batch_belief_include_prep} "
         f"board_setup={fast_board.setup_seconds:.6f} "
         f"alias_workspace_setup={alias_setup_seconds:.6f} "
-        f"alias_build_in_loop={args.batch_belief_sampler == 'alias'} "
+        f"alias_build_in_loop={args.batch_belief_sampler == 'alias' and not args.batch_belief_reuse_alias} "
         f"warmup={warmup_seconds:.6f} "
         f"device_seconds={device_seconds:.6f} wall_seconds={wall_seconds:.6f} "
         f"ms_per_batch={device_seconds / max(iterations, 1) * 1_000.0:.6f} "
@@ -5726,6 +5734,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-belief-samples", type=int, default=10_240)
     parser.add_argument("--batch-belief-block-s", type=int, default=128)
     parser.add_argument("--batch-belief-max-tries", type=int, default=4)
+    parser.add_argument("--batch-belief-reuse-alias", action="store_true")
     parser.add_argument(
         "--batch-belief-include-prep",
         action=argparse.BooleanOptionalAction,
