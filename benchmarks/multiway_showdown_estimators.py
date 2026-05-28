@@ -4656,6 +4656,7 @@ def build_batched_alias_tables_triton_into(
         workspace.large_stack,
         workspace.counts,
         active_hands=active_hands,
+        num_warps=1,
     )
     if synchronize:
         torch.cuda.synchronize(prepared.beliefs.device)
