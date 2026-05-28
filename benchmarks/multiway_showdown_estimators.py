@@ -1977,7 +1977,7 @@ def make_batched_fast_sis_belief_workspace(
         board=board,
         beliefs=torch.empty(rows, active_hands, dtype=torch.float32, device=device),
         card_mass=torch.empty(rows, 52, dtype=torch.float32, device=device),
-        pair_mass=torch.empty(rows, 52, 52, dtype=torch.float32, device=device),
+        pair_mass=torch.empty(rows, 52, 52, dtype=torch.float16, device=device),
         batch_size=batch_size,
         players=players,
         setup_seconds=0.0,
