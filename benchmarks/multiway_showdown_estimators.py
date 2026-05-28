@@ -5733,7 +5733,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-belief-iterations", type=int, default=10_000)
     parser.add_argument("--batch-belief-warmup-iterations", type=int, default=3)
     parser.add_argument("--batch-belief-samples", type=int, default=10_240)
-    parser.add_argument("--batch-belief-block-s", type=int, default=128)
+    parser.add_argument("--batch-belief-block-s", type=int, default=256)
     parser.add_argument("--batch-belief-max-tries", type=int, default=4)
     parser.add_argument("--batch-belief-reuse-alias", action="store_true")
     parser.add_argument(
