@@ -96,6 +96,7 @@ class PreparedBatchedFastSISBelief:
     board: PreparedFastSISBoard
     beliefs: torch.Tensor
     card_mass: torch.Tensor
+    pair_mass: torch.Tensor
     batch_size: int
     players: int
     setup_seconds: float
@@ -1976,6 +1977,7 @@ def make_batched_fast_sis_belief_workspace(
         board=board,
         beliefs=torch.empty(rows, active_hands, dtype=torch.float32, device=device),
         card_mass=torch.empty(rows, 52, dtype=torch.float32, device=device),
+        pair_mass=torch.empty(rows, 52, 52, dtype=torch.float32, device=device),
         batch_size=batch_size,
         players=players,
         setup_seconds=0.0,
@@ -2005,6 +2007,7 @@ def prepare_batched_fast_sis_belief_no_pair_triton_into(
         workspace.board.hand_cards1,
         workspace.beliefs,
         workspace.card_mass,
+        workspace.pair_mass,
         active_hands=active_hands,
         PLAYERS=workspace.players,
         NORMALIZE=normalize,
@@ -2070,6 +2073,7 @@ if triton is not None:
         hand_cards1_ptr,
         active_beliefs_ptr,
         card_mass_ptr,
+        pair_mass_ptr,
         active_hands: tl.constexpr,
         PLAYERS: tl.constexpr,
         NORMALIZE: tl.constexpr,
@@ -2104,6 +2108,9 @@ if triton is not None:
         c1 = tl.load(hand_cards1_ptr + hand_offsets, mask=hand_mask, other=0)
         tl.atomic_add(card_mass_ptr + row * 52 + c0, values, sem="relaxed", mask=hand_mask)
         tl.atomic_add(card_mass_ptr + row * 52 + c1, values, sem="relaxed", mask=hand_mask)
+        pair_base = row * 2704
+        tl.store(pair_mass_ptr + pair_base + c0 * 52 + c1, values, mask=hand_mask)
+        tl.store(pair_mass_ptr + pair_base + c1 * 52 + c0, values, mask=hand_mask)
 
     @triton.jit
     def _unary4_product_sum_kernel(
@@ -2387,6 +2394,54 @@ if triton is not None:
                             other=0.0,
                         )
                         blocked -= pair_value
+        return tl.maximum(1.0 - blocked, 1.0e-12)
+
+    @triton.jit
+    def _active_normalizer_pair_mass_batched(
+        card_mass_ptr,
+        pair_mass_ptr,
+        belief_row,
+        used_count: tl.constexpr,
+        c0,
+        c1,
+        c2,
+        c3,
+        c4,
+        c5,
+        c6,
+        c7,
+        c8,
+        c9,
+        c10,
+        c11,
+        MAX_USED: tl.constexpr,
+    ):
+        blocked = c0.to(tl.float32) * 0.0
+        for i in tl.static_range(0, MAX_USED):
+            if i < used_count:
+                ci = _slot12(i, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11)
+                blocked += tl.load(card_mass_ptr + belief_row * 52 + ci)
+        for i in tl.static_range(0, MAX_USED):
+            if i < used_count:
+                ci = _slot12(i, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11)
+                for j in tl.static_range(i + 1, MAX_USED):
+                    if j < used_count:
+                        cj = _slot12(
+                            j,
+                            c0,
+                            c1,
+                            c2,
+                            c3,
+                            c4,
+                            c5,
+                            c6,
+                            c7,
+                            c8,
+                            c9,
+                            c10,
+                            c11,
+                        )
+                        blocked -= tl.load(pair_mass_ptr + belief_row * 2704 + ci * 52 + cj)
         return tl.maximum(1.0 - blocked, 1.0e-12)
 
     @triton.jit
@@ -3518,7 +3573,7 @@ if triton is not None:
         alias_idx_ptr,
         beliefs_ptr,
         card_mass_ptr,
-        pair_to_active_ptr,
+        pair_mass_ptr,
         hand_masks_ptr,
         hand_cards0_ptr,
         hand_cards1_ptr,
@@ -3564,12 +3619,10 @@ if triton is not None:
             if player < PLAYERS:
                 belief_row = batch * PLAYERS + player
                 if player > 0:
-                    weight *= _active_normalizer_pair_lookup_batched(
-                        beliefs_ptr,
+                    weight *= _active_normalizer_pair_mass_batched(
                         card_mass_ptr,
-                        pair_to_active_ptr,
+                        pair_mass_ptr,
                         belief_row,
-                        active_hands,
                         player * 2,
                         c0,
                         c1,
@@ -4707,7 +4760,7 @@ def alias_triton_reject_sis_batched_fixed_into(
         workspace.alias_idx,
         prepared.beliefs,
         prepared.card_mass,
-        prepared.board.pair_to_active,
+        prepared.pair_mass,
         prepared.board.hand_masks,
         prepared.board.hand_cards0,
         prepared.board.hand_cards1,
