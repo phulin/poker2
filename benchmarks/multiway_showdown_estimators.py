@@ -3652,14 +3652,15 @@ if triton is not None:
                     u_col = x0.to(tl.float32) * 2.3283064365386963e-10
                     u_pick = x1.to(tl.float32) * 2.3283064365386963e-10
                     column = tl.minimum((u_col * active_hands).to(tl.int32), active_hands - 1)
-                    cutoff = tl.load(alias_prob_ptr + row_offset + column, mask=alive, other=1.0)
-                    alias = tl.load(alias_idx_ptr + row_offset + column, mask=alive, other=0)
+                    searching = alive & ~found
+                    cutoff = tl.load(alias_prob_ptr + row_offset + column, mask=searching, other=1.0)
+                    alias = tl.load(alias_idx_ptr + row_offset + column, mask=searching, other=0)
                     candidate = tl.where(u_pick < cutoff, column, alias)
-                    candidate_mask = tl.load(hand_masks_ptr + candidate, mask=alive, other=0)
+                    candidate_mask = tl.load(hand_masks_ptr + candidate, mask=searching, other=0)
                     compatible = (candidate_mask & used) == 0
-                    take = alive & compatible & ~found
+                    take = searching & compatible
                     selected = tl.where(take, candidate, selected)
-                    found = found | (alive & compatible)
+                    found = found | take
 
                 ok = alive & found
                 selected_mask = tl.load(hand_masks_ptr + selected, mask=ok, other=0)
