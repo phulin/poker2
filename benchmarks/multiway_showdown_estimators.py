@@ -4647,7 +4647,7 @@ def build_batched_alias_tables_triton_into(
         workspace.counts,
         active_hands=active_hands,
         BLOCK_H=block_h,
-        num_warps=8,
+        num_warps=2,
     )
     _alias_resolve_stacks_kernel[(prepared.beliefs.shape[0],)](
         workspace.alias_prob,
