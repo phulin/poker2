@@ -4591,7 +4591,7 @@ def make_batched_alias_reject_sis_workspace(
     rows, active_hands = prepared.beliefs.shape
     return BatchedAliasRejectSISWorkspace(
         alias_prob=torch.empty(rows, active_hands, dtype=torch.float32, device=device),
-        alias_idx=torch.empty(rows, active_hands, dtype=torch.int32, device=device),
+        alias_idx=torch.empty(rows, active_hands, dtype=torch.int16, device=device),
         candidates=torch.empty(
             rows,
             sample_count * max_tries,
