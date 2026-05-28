@@ -117,6 +117,10 @@ class BatchedAliasRejectSISWorkspace:
     alias_prob: torch.Tensor
     alias_idx: torch.Tensor
     candidates: torch.Tensor
+    seed: torch.Tensor
+    small_stack: torch.Tensor
+    large_stack: torch.Tensor
+    counts: torch.Tensor
     accum: torch.Tensor
     equity: torch.Tensor
     stderr: torch.Tensor
@@ -3397,6 +3401,85 @@ if triton is not None:
             tl.atomic_add(accum_ptr + accum_base + 8 + PLAYERS, tl.sum(weight * share5 * share5, axis=0), sem="relaxed")
 
     @triton.jit
+    def _pcg_hash_u32(x):
+        state = x * 747796405 + 2891336453
+        shift = (state >> 28) + 4
+        word = ((state >> shift) ^ state) * 277803737
+        return (word >> 22) ^ word
+
+    @triton.jit
+    def _alias_partition_kernel(
+        beliefs_ptr,
+        alias_prob_ptr,
+        alias_idx_ptr,
+        small_stack_ptr,
+        large_stack_ptr,
+        counts_ptr,
+        active_hands: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        offs = tl.arange(0, BLOCK_H)
+        active = offs < active_hands
+        row_offset = row * active_hands
+        scaled = tl.load(beliefs_ptr + row_offset + offs, mask=active, other=0.0)
+        scaled = scaled * active_hands
+        tl.store(alias_prob_ptr + row_offset + offs, scaled, mask=active)
+        tl.store(alias_idx_ptr + row_offset + offs, offs, mask=active)
+
+        small_mask = active & (scaled < 1.0)
+        large_mask = active & ~small_mask
+        small_rank = tl.cumsum(small_mask.to(tl.int32), 0) - 1
+        large_rank = tl.cumsum(large_mask.to(tl.int32), 0) - 1
+        small_count = tl.sum(small_mask.to(tl.int32), axis=0)
+        large_count = tl.sum(large_mask.to(tl.int32), axis=0)
+        tl.store(small_stack_ptr + row_offset + small_rank, offs, mask=small_mask)
+        tl.store(large_stack_ptr + row_offset + large_rank, offs, mask=large_mask)
+        tl.store(counts_ptr + row * 2, small_count)
+        tl.store(counts_ptr + row * 2 + 1, large_count)
+
+    @triton.jit
+    def _alias_resolve_stacks_kernel(
+        alias_prob_ptr,
+        alias_idx_ptr,
+        small_stack_ptr,
+        large_stack_ptr,
+        counts_ptr,
+        active_hands: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        row_offset = row * active_hands
+        small_count = tl.load(counts_ptr + row * 2)
+        large_count = tl.load(counts_ptr + row * 2 + 1)
+
+        while (small_count > 0) & (large_count > 0):
+            small_count -= 1
+            small_idx = tl.load(small_stack_ptr + row_offset + small_count)
+            large_idx = tl.load(large_stack_ptr + row_offset + large_count - 1)
+            small_value = tl.load(alias_prob_ptr + row_offset + small_idx)
+            large_value = tl.load(alias_prob_ptr + row_offset + large_idx)
+            tl.store(alias_prob_ptr + row_offset + small_idx, small_value)
+            tl.store(alias_idx_ptr + row_offset + small_idx, large_idx)
+            new_large_value = large_value + small_value - 1.0
+            tl.store(alias_prob_ptr + row_offset + large_idx, new_large_value)
+            if new_large_value < 1.0:
+                large_count -= 1
+                tl.store(small_stack_ptr + row_offset + small_count, large_idx)
+                small_count += 1
+
+        while large_count > 0:
+            large_count -= 1
+            idx = tl.load(large_stack_ptr + row_offset + large_count)
+            tl.store(alias_prob_ptr + row_offset + idx, 1.0)
+            tl.store(alias_idx_ptr + row_offset + idx, idx)
+
+        while small_count > 0:
+            small_count -= 1
+            idx = tl.load(small_stack_ptr + row_offset + small_count)
+            tl.store(alias_prob_ptr + row_offset + idx, 1.0)
+            tl.store(alias_idx_ptr + row_offset + idx, idx)
+
+    @triton.jit
     def _alias_sample_batched_kernel(
         alias_prob_ptr,
         alias_idx_ptr,
@@ -3412,16 +3495,11 @@ if triton is not None:
         active = sample_idx < sample_count
         row_offset = row * active_hands
         candidate_row_offset = row * sample_count * TRIES
+        seed_mix = seed * tl.full((), 0x9E3779B9, tl.uint32)
         for attempt in tl.static_range(0, TRIES):
             random_offset = (row * sample_count + sample_idx) * (TRIES * 2) + attempt * 2
-            x0 = (random_offset.to(tl.uint32) ^ seed) + 0x9E3779B9
-            x0 = (x0 ^ (x0 >> 16)) * 0x7FEB352D
-            x0 = (x0 ^ (x0 >> 15)) * 0x846CA68B
-            x0 = x0 ^ (x0 >> 16)
-            x1 = ((random_offset + 1).to(tl.uint32) ^ seed) + 0x9E3779B9
-            x1 = (x1 ^ (x1 >> 16)) * 0x7FEB352D
-            x1 = (x1 ^ (x1 >> 15)) * 0x846CA68B
-            x1 = x1 ^ (x1 >> 16)
+            x0 = _pcg_hash_u32(random_offset.to(tl.uint32) + seed_mix)
+            x1 = _pcg_hash_u32((random_offset + 1).to(tl.uint32) + seed_mix)
             u_col = x0.to(tl.float32) * 2.3283064365386963e-10
             u_pick = x1.to(tl.float32) * 2.3283064365386963e-10
             column = tl.minimum((u_col * active_hands).to(tl.int32), active_hands - 1)
@@ -3446,7 +3524,7 @@ if triton is not None:
         hand_cards1_ptr,
         hand_ranks_ptr,
         accum_ptr,
-        seed,
+        seed_ptr,
         sample_count,
         active_hands: tl.constexpr,
         PLAYERS: tl.constexpr,
@@ -3479,6 +3557,8 @@ if triton is not None:
         r5 = tl.full((BLOCK_S,), -1, tl.int32)
         weight = tl.full((BLOCK_S,), 1.0, tl.float32)
         base_sample = batch * sample_count + sample_idx
+        seed_value = tl.load(seed_ptr).to(tl.uint32)
+        seed_mix = seed_value * tl.full((), 0x9E3779B9, tl.uint32)
 
         for player in tl.static_range(0, 6):
             if player < PLAYERS:
@@ -3514,14 +3594,8 @@ if triton is not None:
                         + player * (TRIES * 2)
                         + attempt * 2
                     )
-                    x0 = (random_offset.to(tl.uint32) ^ seed) + 0x9E3779B9
-                    x0 = (x0 ^ (x0 >> 16)) * 0x7FEB352D
-                    x0 = (x0 ^ (x0 >> 15)) * 0x846CA68B
-                    x0 = x0 ^ (x0 >> 16)
-                    x1 = ((random_offset + 1).to(tl.uint32) ^ seed) + 0x9E3779B9
-                    x1 = (x1 ^ (x1 >> 16)) * 0x7FEB352D
-                    x1 = (x1 ^ (x1 >> 15)) * 0x846CA68B
-                    x1 = x1 ^ (x1 >> 16)
+                    x0 = _pcg_hash_u32(random_offset.to(tl.uint32) + seed_mix)
+                    x1 = _pcg_hash_u32((random_offset + 1).to(tl.uint32) + seed_mix)
                     u_col = x0.to(tl.float32) * 2.3283064365386963e-10
                     u_pick = x1.to(tl.float32) * 2.3283064365386963e-10
                     column = tl.minimum((u_col * active_hands).to(tl.int32), active_hands - 1)
@@ -4461,43 +4535,19 @@ def make_batched_alias_reject_sis_workspace(
     start = time.perf_counter()
     device = prepared.beliefs.device
     rows, active_hands = prepared.beliefs.shape
-    probs_cpu = prepared.beliefs.detach().cpu().float()
-    alias_prob_cpu = torch.empty_like(probs_cpu)
-    alias_idx_cpu = torch.empty(rows, active_hands, dtype=torch.int32)
-    for row in range(rows):
-        scaled = (probs_cpu[row] * active_hands).tolist()
-        small = [idx for idx, value in enumerate(scaled) if value < 1.0]
-        large = [idx for idx, value in enumerate(scaled) if value >= 1.0]
-        while small and large:
-            small_idx = small.pop()
-            large_idx = large.pop()
-            alias_prob_cpu[row, small_idx] = scaled[small_idx]
-            alias_idx_cpu[row, small_idx] = large_idx
-            scaled[large_idx] = scaled[large_idx] + scaled[small_idx] - 1.0
-            if scaled[large_idx] < 1.0:
-                small.append(large_idx)
-            else:
-                large.append(large_idx)
-        for idx in small:
-            alias_prob_cpu[row, idx] = 1.0
-            alias_idx_cpu[row, idx] = idx
-        for idx in large:
-            alias_prob_cpu[row, idx] = 1.0
-            alias_idx_cpu[row, idx] = idx
-
-    alias_prob = alias_prob_cpu.to(device=device, non_blocking=True).contiguous()
-    alias_idx = alias_idx_cpu.to(device=device, non_blocking=True).contiguous()
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
     return BatchedAliasRejectSISWorkspace(
-        alias_prob=alias_prob,
-        alias_idx=alias_idx,
+        alias_prob=torch.empty(rows, active_hands, dtype=torch.float32, device=device),
+        alias_idx=torch.empty(rows, active_hands, dtype=torch.int32, device=device),
         candidates=torch.empty(
             rows,
             sample_count * max_tries,
             dtype=torch.int32,
             device=device,
         ),
+        seed=torch.empty((), dtype=torch.int64, device=device),
+        small_stack=torch.empty(rows, active_hands, dtype=torch.int32, device=device),
+        large_stack=torch.empty(rows, active_hands, dtype=torch.int32, device=device),
+        counts=torch.empty(rows, 2, dtype=torch.int32, device=device),
         accum=torch.empty(
             prepared.batch_size,
             3 + 2 * prepared.players,
@@ -4521,6 +4571,41 @@ def make_batched_alias_reject_sis_workspace(
         max_tries=max_tries,
         setup_seconds=time.perf_counter() - start,
     )
+
+
+def build_batched_alias_tables_triton_into(
+    prepared: PreparedBatchedFastSISBelief,
+    workspace: BatchedAliasRejectSISWorkspace,
+    *,
+    synchronize: bool = False,
+) -> None:
+    if triton is None:
+        raise RuntimeError("triton is not available")
+    if workspace.alias_prob.shape != prepared.beliefs.shape:
+        raise ValueError("alias workspace shape does not match prepared batch")
+    active_hands = prepared.beliefs.shape[1]
+    block_h = triton.next_power_of_2(active_hands)
+    _alias_partition_kernel[(prepared.beliefs.shape[0],)](
+        prepared.beliefs,
+        workspace.alias_prob,
+        workspace.alias_idx,
+        workspace.small_stack,
+        workspace.large_stack,
+        workspace.counts,
+        active_hands=active_hands,
+        BLOCK_H=block_h,
+        num_warps=8,
+    )
+    _alias_resolve_stacks_kernel[(prepared.beliefs.shape[0],)](
+        workspace.alias_prob,
+        workspace.alias_idx,
+        workspace.small_stack,
+        workspace.large_stack,
+        workspace.counts,
+        active_hands=active_hands,
+    )
+    if synchronize:
+        torch.cuda.synchronize(prepared.beliefs.device)
 
 
 def torch_multinomial_triton_reject_sis_batched_fixed_into(
@@ -4614,6 +4699,7 @@ def alias_triton_reject_sis_batched_fixed_into(
         raise ValueError("alias workspace shape does not match prepared batch")
     sample_count = workspace.sample_count
     max_tries = workspace.max_tries
+    workspace.seed.fill_(seed)
     workspace.accum.zero_()
     grid = (prepared.batch_size, triton.cdiv(sample_count, block_s))
     _alias_accumulate_batched_kernel[grid](
@@ -4627,7 +4713,7 @@ def alias_triton_reject_sis_batched_fixed_into(
         prepared.board.hand_cards1,
         prepared.board.hand_ranks,
         workspace.accum,
-        seed,
+        workspace.seed,
         sample_count,
         active_hands=prepared.beliefs.shape[1],
         PLAYERS=prepared.players,
@@ -4925,6 +5011,11 @@ def run_batched_belief_benchmark(
                 generator=generator,
             )
         else:
+            build_batched_alias_tables_triton_into(
+                belief_workspace,
+                reject_workspace,
+                synchronize=False,
+            )
             alias_triton_reject_sis_batched_fixed_into(
                 belief_workspace,
                 reject_workspace,
@@ -4954,6 +5045,11 @@ def run_batched_belief_benchmark(
                 generator=generator,
             )
         else:
+            build_batched_alias_tables_triton_into(
+                belief_workspace,
+                reject_workspace,
+                synchronize=False,
+            )
             alias_triton_reject_sis_batched_fixed_into(
                 belief_workspace,
                 reject_workspace,
@@ -4977,7 +5073,8 @@ def run_batched_belief_benchmark(
         f"sampler={args.batch_belief_sampler} "
         f"include_prep={args.batch_belief_include_prep} "
         f"board_setup={fast_board.setup_seconds:.6f} "
-        f"alias_setup={alias_setup_seconds:.6f} "
+        f"alias_workspace_setup={alias_setup_seconds:.6f} "
+        f"alias_build_in_loop={args.batch_belief_sampler == 'alias'} "
         f"warmup={warmup_seconds:.6f} "
         f"device_seconds={device_seconds:.6f} wall_seconds={wall_seconds:.6f} "
         f"ms_per_batch={device_seconds / max(iterations, 1) * 1_000.0:.6f} "
