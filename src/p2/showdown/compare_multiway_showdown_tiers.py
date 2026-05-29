@@ -49,6 +49,7 @@ class _ActiveTierContext:
 
 
 _P4_PLAYER_PAIRS = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+_P4_PLAYER_PAIR_INDEX = {pair: idx for idx, pair in enumerate(_P4_PLAYER_PAIRS)}
 
 
 def random_full_board(
@@ -306,6 +307,26 @@ def _subtract_same_pair_events(
         return
     for mode in range(3):
         pair_event_all[:, :, mode, mode] -= same_all[:, :, mode]
+
+
+def _pair_event_lookup(
+    pair_event_all: torch.Tensor,
+    opponents: list[int],
+    left: int,
+    right: int,
+) -> torch.Tensor:
+    if pair_event_all.dim() == 5:
+        return pair_event_all[_P4_PLAYER_PAIR_INDEX[(opponents[left], opponents[right])]]
+    return pair_event_all[opponents[left], opponents[right]]
+
+
+def _pair_event_all_from_card(card_all: torch.Tensor, same_all: torch.Tensor) -> torch.Tensor:
+    compact = _p4_pair_event_triton(card_all, same_all)
+    if compact is not None:
+        return compact
+    pair_event_all = torch.einsum("pmbhc,qnbhc->pqmnbh", card_all, card_all)
+    _subtract_same_pair_events(pair_event_all, same_all)
+    return pair_event_all
 
 
 def _build_local_mats_from_indices(
@@ -776,6 +797,47 @@ if triton is not None:
         tl.store(wedge_den_out + out_base, den_total, mask=h_mask)
         tl.store(wedge_num_out + out_base, num_total, mask=h_mask)
 
+    @triton.jit
+    def _p4_pair_event_kernel(
+        card_all,
+        same_all,
+        pair_event_out,
+        B: tl.constexpr,
+        H: tl.constexpr,
+        CARD_COUNT: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        BLOCK_C: tl.constexpr,
+    ):
+        b = tl.program_id(0)
+        pair = tl.program_id(1)
+        h_block = tl.program_id(2)
+        h = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        card = tl.arange(0, BLOCK_C)
+        h_mask = h < H
+        hc_mask = h_mask[:, None] & (card[None, :] < CARD_COUNT)
+        left = tl.where(pair < 3, 0, tl.where(pair < 5, 1, 2))
+        right = tl.where(pair < 3, pair + 1, tl.where(pair < 5, pair - 1, 3))
+
+        for left_mode in tl.static_range(0, 3):
+            left_base = (((left * 3 + left_mode) * B + b) * H + h[:, None]) * CARD_COUNT
+            left_cards = tl.load(card_all + left_base + card[None, :], mask=hc_mask, other=0.0)
+            for right_mode in tl.static_range(0, 3):
+                right_base = (((right * 3 + right_mode) * B + b) * H + h[:, None]) * CARD_COUNT
+                right_cards = tl.load(
+                    card_all + right_base + card[None, :],
+                    mask=hc_mask,
+                    other=0.0,
+                )
+                value = tl.sum(left_cards * right_cards, axis=1)
+                if left_mode == right_mode:
+                    value -= tl.load(
+                        same_all + (((left * 4 + right) * 3 + left_mode) * B + b) * H + h,
+                        mask=h_mask,
+                        other=0.0,
+                    )
+                out_base = (((pair * 3 + left_mode) * 3 + right_mode) * B + b) * H
+                tl.store(pair_event_out + out_base + h, value, mask=h_mask)
+
 
 def _tier2_prefix_factors_triton(
     *,
@@ -904,6 +966,39 @@ def _tier3_wedge_p4_triton(
         num_warps=4,
     )
     return partial_num.sum(dim=2), partial_den.sum(dim=2)
+
+
+def _p4_pair_event_triton(
+    card_all: torch.Tensor,
+    same_all: torch.Tensor,
+) -> torch.Tensor | None:
+    if triton is None or card_all.device.type != "cuda" or card_all.shape[0] != 4:
+        return None
+    batch_size = card_all.shape[2]
+    active_count = card_all.shape[3]
+    block_h = 16
+    out = torch.empty(
+        6,
+        3,
+        3,
+        batch_size,
+        active_count,
+        dtype=card_all.dtype,
+        device=card_all.device,
+    )
+    grid = (batch_size, 6, triton.cdiv(active_count, block_h))
+    _p4_pair_event_kernel[grid](
+        card_all.contiguous(),
+        same_all.contiguous(),
+        out,
+        B=batch_size,
+        H=active_count,
+        CARD_COUNT=47,
+        BLOCK_H=block_h,
+        BLOCK_C=64,
+        num_warps=2,
+    )
+    return out
 
 
 def _tier2_prefix_factors(
@@ -1142,8 +1237,7 @@ def tier2_first_order_opp_collision_by_hand(
 
     active_count = ctx.active_ids.shape[1]
     scalar_all, card_all, same_all = _tier2_prefix_factors(prepared, ctx, dtype=dtype)
-    pair_event_all = torch.einsum("pmbhc,qnbhc->pqmnbh", card_all, card_all)
-    _subtract_same_pair_events(pair_event_all, same_all)
+    pair_event_all = _pair_event_all_from_card(card_all, same_all)
 
     equities: list[torch.Tensor] = []
     numerator_active = torch.zeros(
@@ -1181,7 +1275,7 @@ def tier2_first_order_opp_collision_by_hand(
         for left in range(opp_count):
             for right in range(left + 1, opp_count):
                 other = [idx for idx in range(opp_count) if idx not in (left, right)]
-                pair_lr = pair_event_all[opponents[left], opponents[right]]
+                pair_lr = _pair_event_lookup(pair_event_all, opponents, left, right)
                 if opp_count == 3:
                     other_idx = other[0]
                     denominator = (
@@ -1332,8 +1426,7 @@ def _tier3_second_order_opp_collision_by_hand_impl(
     active_count = ctx.active_ids.shape[1]
 
     scalar_all, card_all, same_all = _tier2_prefix_factors(prepared, ctx, dtype=dtype)
-    pair_event_all = torch.einsum("pmbhc,qnbhc->pqmnbh", card_all, card_all)
-    _subtract_same_pair_events(pair_event_all, same_all)
+    pair_event_all = _pair_event_all_from_card(card_all, same_all)
 
     local_c0, local_c1 = _active_local_combo_cards(ctx)
     use_streaming_wedge = (
@@ -1423,7 +1516,7 @@ def _tier3_second_order_opp_collision_by_hand_impl(
 
         for left, right in edges:
             other = [idx for idx in range(opp_count) if idx not in (left, right)]
-            pair_lr = pair_event_all[opponents[left], opponents[right]]
+            pair_lr = _pair_event_lookup(pair_event_all, opponents, left, right)
             if opp_count == 3:
                 other_idx = other[0]
                 denominator = denominator - pair_lr[2, 2] * scalar[other_idx, 2]
@@ -1476,8 +1569,8 @@ def _tier3_second_order_opp_collision_by_hand_impl(
                 if len(nodes) == 4:
                     left_a, left_b = first
                     right_a, right_b = second
-                    pair_first = pair_event_all[opponents[left_a], opponents[left_b]]
-                    pair_second = pair_event_all[opponents[right_a], opponents[right_b]]
+                    pair_first = _pair_event_lookup(pair_event_all, opponents, left_a, left_b)
+                    pair_second = _pair_event_lookup(pair_event_all, opponents, right_a, right_b)
                     denominator = denominator + (
                         pair_first[2, 2]
                         * pair_second[2, 2]
