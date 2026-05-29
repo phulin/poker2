@@ -721,12 +721,14 @@ if triton is not None:
         H: tl.constexpr,
         H1: tl.constexpr,
         CARD_COUNT: tl.constexpr,
+        BLOCK_H: tl.constexpr,
         USE_P4_UNORDERED: tl.constexpr,
     ):
-        row = tl.program_id(0)
-        pair_mode = tl.program_id(1)
-        h = row % H
-        b = row // H
+        b = tl.program_id(0)
+        h_block = tl.program_id(1)
+        pair_mode = tl.program_id(2)
+        h = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        h_mask = h < H
         mode = pair_mode % 3
         pair = pair_mode // 3
         if USE_P4_UNORDERED:
@@ -740,13 +742,13 @@ if triton is not None:
             pair_prefix_base = ((b * P + left) * P + right) * H1
             pair_card_base = (((b * P + left) * P + right) * H1) * CARD_COUNT
 
-        lower = tl.load(lower_end + b * H + h)
-        tie = tl.load(tie_end + b * H + h)
+        lower = tl.load(lower_end + b * H + h, mask=h_mask, other=0)
+        tie = tl.load(tie_end + b * H + h, mask=h_mask, other=0)
         start = tl.where(mode == 1, lower, 0)
         end = tl.where(mode == 0, lower, tl.where(mode == 1, tie, H))
 
-        c0 = tl.load(local_c0 + b * H + h)
-        c1 = tl.load(local_c1 + b * H + h)
+        c0 = tl.load(local_c0 + b * H + h, mask=h_mask, other=0)
+        c1 = tl.load(local_c1 + b * H + h, mask=h_mask, other=0)
         scalar = tl.load(pair_prefix + pair_prefix_base + end) - tl.load(
             pair_prefix + pair_prefix_base + start
         )
@@ -756,12 +758,18 @@ if triton is not None:
         card1 = tl.load(pair_card_prefix + pair_card_base + end * CARD_COUNT + c1) - tl.load(
             pair_card_prefix + pair_card_base + start * CARD_COUNT + c1
         )
-        edge = tl.load(beliefs + (b * P + left) * H + h) * tl.load(
-            beliefs + (b * P + right) * H + h
+        edge = tl.load(beliefs + (b * P + left) * H + h, mask=h_mask, other=0.0) * tl.load(
+            beliefs + (b * P + right) * H + h,
+            mask=h_mask,
+            other=0.0,
         )
         edge = tl.where(mode == 0, 0.0, edge)
         value = scalar - card0 - card1 + edge
-        tl.store(same_out + (((left * P + right) * 3 + mode) * B + b) * H + h, value)
+        tl.store(
+            same_out + (((left * P + right) * 3 + mode) * B + b) * H + h,
+            value,
+            mask=h_mask,
+        )
 
     @triton.jit
     def _tier3_wedge_p4_kernel(
@@ -985,7 +993,8 @@ def _tier2_prefix_factors_triton(
         num_warps=2,
     )
     same_pair_count = 6 if players == 4 else players * players
-    grid_same = (batch_size * active_count, same_pair_count * 3)
+    same_block_h = 8
+    grid_same = (batch_size, triton.cdiv(active_count, same_block_h), same_pair_count * 3)
     _tier2_prefix_same_kernel[grid_same](
         pair_prefix,
         pair_card_prefix,
@@ -1000,6 +1009,7 @@ def _tier2_prefix_factors_triton(
         H=active_count,
         H1=active_count + 1,
         CARD_COUNT=47,
+        BLOCK_H=same_block_h,
         USE_P4_UNORDERED=players == 4,
         num_warps=1,
     )
