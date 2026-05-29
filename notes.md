@@ -168,6 +168,7 @@
   - `P2_RELEASE_LEAF_TEMPS_EVERY=32`: retesting a larger leaf-temp release chunk after later buffer-pooling changes was output-identical but effectively tied, 416.2 ms chunk-16 baseline vs 416.1 ms candidate; default remains 16.
   - `P2_RELEASE_LEAF_TEMPS_EVERY=64`: had two noisy positive runs against chunk 16, but final confirmation reversed, 408.8 ms chunk-16 baseline vs 409.2 ms candidate; default remains 16.
   - `P2_EXACT_BELIEF_BATCH3=1`: a generated batch-3 exact-belief linear-in kernel was output-identical and had two positive runs, but post-flip standalone confirmation reversed, 553.2 ms old batch-2 path vs 564.2 ms candidate; reverted. The exact-value fixture passed, while the broader sparse PyTorch split-checkpoint checks currently fail on the committed baseline with the same public/root action-prob deltas.
+  - `P2_RMS_NORM_BATCH2=1`: a batch-2 RMS norm kernel had one fast but slightly different-output run, then slowed after adding the missing reduction barrier, 490.4 ms baseline vs 503.5 ms candidate with policy diff about 8.4e-5; reverted.
 
 ## Verification
 - `yarn typecheck`: pass.
