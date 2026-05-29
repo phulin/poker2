@@ -35,6 +35,25 @@ class TierResult:
 
 
 @dataclass
+class _TierBoardContext:
+    ranks: torch.Tensor
+    masks: torch.Tensor
+    combos: torch.Tensor
+    active_ids: torch.Tensor
+    active_cards: torch.Tensor
+    local_c0: torch.Tensor
+    local_c1: torch.Tensor
+    local_pair_ids: torch.Tensor
+    allowed: torch.Tensor
+    order: torch.Tensor
+    sorted_ranks: torch.Tensor
+    sorted_c0: torch.Tensor
+    sorted_c1: torch.Tensor
+    lower_end: torch.Tensor
+    tie_end: torch.Tensor
+
+
+@dataclass
 class _ActiveTierContext:
     beliefs: torch.Tensor
     ranks: torch.Tensor
@@ -46,6 +65,12 @@ class _ActiveTierContext:
     local_c1: torch.Tensor
     local_pair_ids: torch.Tensor
     allowed: torch.Tensor
+    order: torch.Tensor
+    sorted_ranks: torch.Tensor
+    sorted_c0: torch.Tensor
+    sorted_c1: torch.Tensor
+    lower_end: torch.Tensor
+    tie_end: torch.Tensor
 
 
 _P4_PLAYER_PAIRS = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
@@ -178,11 +203,7 @@ def _zero_blocked_hands(
     equity_by_hand *= allowed[:, None, :]
 
 
-def _active_context(
-    prepared: PreparedShowdown,
-    *,
-    dtype: torch.dtype,
-) -> _ActiveTierContext:
+def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
     allowed = board_allowed_hands(prepared.board)
     batch_size = prepared.beliefs.shape[0]
     active_count = 1081
@@ -192,10 +213,6 @@ def _active_context(
     ranks = prepared.hand_ranks.reshape(batch_size, NUM_HANDS).gather(1, active_ids)
     hand_masks = prepared.hand_masks.reshape(NUM_HANDS)
     masks = hand_masks[active_ids]
-    beliefs = prepared.beliefs.to(dtype).gather(
-        2,
-        active_ids[:, None, :].expand(-1, prepared.beliefs.shape[1], -1),
-    )
 
     board_mask = torch.ones(batch_size, 52, dtype=torch.bool, device=prepared.beliefs.device)
     board_mask.scatter_(1, prepared.board.long(), False)
@@ -215,8 +232,13 @@ def _active_context(
     local_c1 = card_to_local.gather(1, active_combos[..., 1])
     pair_lookup = _pair_lookup(prepared.beliefs.device)
     local_pair_ids = pair_lookup[active_cards[:, :, None], active_cards[:, None, :]]
-    return _ActiveTierContext(
-        beliefs=beliefs,
+    order = torch.argsort(ranks, dim=1)
+    sorted_ranks = ranks.gather(1, order)
+    sorted_c0 = local_c0.gather(1, order)
+    sorted_c1 = local_c1.gather(1, order)
+    lower_end = torch.searchsorted(sorted_ranks, ranks, right=False)
+    tie_end = torch.searchsorted(sorted_ranks, ranks, right=True)
+    return _TierBoardContext(
         ranks=ranks,
         masks=masks,
         combos=active_combos,
@@ -226,6 +248,50 @@ def _active_context(
         local_c1=local_c1,
         local_pair_ids=local_pair_ids,
         allowed=allowed,
+        order=order,
+        sorted_ranks=sorted_ranks,
+        sorted_c0=sorted_c0,
+        sorted_c1=sorted_c1,
+        lower_end=lower_end,
+        tie_end=tie_end,
+    )
+
+
+def _tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
+    cached = getattr(prepared, "_p2_tier_board_context", None)
+    if cached is None:
+        cached = _build_tier_board_context(prepared)
+        setattr(prepared, "_p2_tier_board_context", cached)
+    return cached
+
+
+def _active_context(
+    prepared: PreparedShowdown,
+    *,
+    dtype: torch.dtype,
+) -> _ActiveTierContext:
+    board_ctx = _tier_board_context(prepared)
+    beliefs = prepared.beliefs.to(dtype).gather(
+        2,
+        board_ctx.active_ids[:, None, :].expand(-1, prepared.beliefs.shape[1], -1),
+    )
+    return _ActiveTierContext(
+        beliefs=beliefs,
+        ranks=board_ctx.ranks,
+        masks=board_ctx.masks,
+        combos=board_ctx.combos,
+        active_ids=board_ctx.active_ids,
+        active_cards=board_ctx.active_cards,
+        local_c0=board_ctx.local_c0,
+        local_c1=board_ctx.local_c1,
+        local_pair_ids=board_ctx.local_pair_ids,
+        allowed=board_ctx.allowed,
+        order=board_ctx.order,
+        sorted_ranks=board_ctx.sorted_ranks,
+        sorted_c0=board_ctx.sorted_c0,
+        sorted_c1=board_ctx.sorted_c1,
+        lower_end=board_ctx.lower_end,
+        tie_end=board_ctx.tie_end,
     )
 
 
@@ -1011,11 +1077,7 @@ def _tier2_prefix_factors(
     batch_size, players, active_count = beliefs.shape
     device = beliefs.device
     local_c0, local_c1 = _active_local_combo_cards(ctx)
-    order = torch.argsort(ctx.ranks, dim=1)
-    sorted_ranks = ctx.ranks.gather(1, order)
-    sorted_beliefs = beliefs.gather(2, order[:, None, :].expand(-1, players, -1))
-    sorted_c0 = local_c0.gather(1, order)
-    sorted_c1 = local_c1.gather(1, order)
+    sorted_beliefs = beliefs.gather(2, ctx.order[:, None, :].expand(-1, players, -1))
     sorted_contains = torch.zeros(
         batch_size,
         active_count,
@@ -1025,8 +1087,8 @@ def _tier2_prefix_factors(
     )
     board_ids = torch.arange(batch_size, device=device)[:, None]
     hand_ids = torch.arange(active_count, device=device)[None, :]
-    sorted_contains[board_ids, hand_ids, sorted_c0] = 1.0
-    sorted_contains[board_ids, hand_ids, sorted_c1] = 1.0
+    sorted_contains[board_ids, hand_ids, ctx.sorted_c0] = 1.0
+    sorted_contains[board_ids, hand_ids, ctx.sorted_c1] = 1.0
 
     scalar_prefix = torch.empty(
         batch_size,
@@ -1101,8 +1163,8 @@ def _tier2_prefix_factors(
         pair_card_prefix[:, :, :, 0] = 0.0
         torch.cumsum(pair_card_values, dim=3, out=pair_card_prefix[:, :, :, 1:])
 
-    lower_end = torch.searchsorted(sorted_ranks, ctx.ranks, right=False)
-    tie_end = torch.searchsorted(sorted_ranks, ctx.ranks, right=True)
+    lower_end = ctx.lower_end
+    tie_end = ctx.tie_end
     pair_ids = ctx.local_pair_ids
     full_beliefs = prepared.beliefs.to(dtype).contiguous()
     pair_p_ids = pair_ids.gather(2, local_c0[:, None, :].expand(-1, 47, -1)).permute(0, 2, 1)
