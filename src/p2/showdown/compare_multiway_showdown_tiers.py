@@ -963,7 +963,7 @@ def _tier3_wedge_p4_triton(
         K_BLOCKS=k_blocks,
         BLOCK_H=block_h,
         BLOCK_K=block_k,
-        num_warps=4,
+        num_warps=2,
     )
     return partial_num.sum(dim=2), partial_den.sum(dim=2)
 
