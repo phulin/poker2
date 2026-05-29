@@ -156,8 +156,19 @@ def _measure(
 def _summarize(values: list[float]) -> dict[str, float]:
     if not values:
         return {}
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        median = ordered[mid]
+    else:
+        median = 0.5 * (ordered[mid - 1] + ordered[mid])
+    p90_index = min(len(ordered) - 1, int(0.9 * (len(ordered) - 1)))
+    trimmed = ordered[1:-1] if len(ordered) >= 5 else ordered
     return {
         "mean": sum(values) / len(values),
+        "median": median,
+        "trimmed_mean": sum(trimmed) / len(trimmed),
+        "p90": ordered[p90_index],
         "min": min(values),
         "max": max(values),
     }
