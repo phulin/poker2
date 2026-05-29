@@ -1144,6 +1144,14 @@ export class SparseCfrResolver {
       const encodePrefixCommands = (encoder: GPUCommandEncoder, t: number): GPUBuffer[] => {
         const averageDelayed = this.averageAccumulationDelayed(t);
         const regretBeliefsBuffer = cfrAvg ? beliefsAvgBuffer! : beliefsBuffer;
+        const deferDelayedPolicyAvgCopy =
+          !cfrAvg && globalThis.process?.env?.P2_DEFER_DELAYED_POLICY_AVG_COPY !== "0";
+        const copyPolicyToAverage =
+          averageDelayed &&
+          readPolicyAvg &&
+          (!deferDelayedPolicyAvgCopy ||
+            t + 1 >= iterations ||
+            !this.averageAccumulationDelayed(t + 1));
         return this.encodeIterationPrefixGpuResidentCommands(
           encoder,
           tree,
@@ -1162,7 +1170,7 @@ export class SparseCfrResolver {
           policyAvgBuffer,
           (readPolicyAvg || cfrAvg) && !averageDelayed,
           cfrAvg ? beliefsAvgBuffer! : undefined,
-          averageDelayed && readPolicyAvg,
+          copyPolicyToAverage,
           t,
           iterations,
         );

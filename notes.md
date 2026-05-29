@@ -19,6 +19,7 @@
 - GPU sparse solves now skip `beliefsAvgBuffer` uploads when `cfrAvg=false`; set `P2_SKIP_UNUSED_BELIEFS_AVG_UPLOAD=0` to benchmark the old unused upload path.
 - Sparse CFR kernels now pool tiny uniform buffers across dispatches instead of creating and destroying each param buffer per dispatch. Set `P2_POOL_SPARSE_UNIFORMS=0` to benchmark the old path.
 - Model warm-start now reuses the cumulative-regret buffer as temporary regret scratch instead of allocating a separate same-sized array. Set `P2_INPLACE_WARMSTART_REGRETS=0` to benchmark the old extra-scratch path.
+- During the delayed DCFR average window with `cfrAvg=false`, GPU sparse solves now defer copying current policy into the average-policy buffer until the last delayed iteration. Set `P2_DEFER_DELAYED_POLICY_AVG_COPY=0` to benchmark the old every-delayed-iteration copy path.
 - Tried a two-input add kernel for belief phase shifts; it was output-identical but slightly slower, so it was reverted.
 - Tried caching repeated model uniform buffers; key-building overhead made it slower, so it was reverted.
 - Tried caching the zero input used by the three-input belief phase-shift add; it was output-identical but slower, so it was reverted.
@@ -96,6 +97,9 @@
 - 2026-05-29 in-place warm-start regret scratch reuse, `bench_spots_root.json`, depth 6, iterations 128, `--compare-outputs`:
   - old extra scratch path (`P2_INPLACE_WARMSTART_REGRETS=0`) 392.8 ms, in-place scratch 392.0 ms, speedup 1.002x, exact output match.
   - longer confirmation with runs 17: old extra scratch path 394.8 ms, in-place scratch 393.5 ms, speedup 1.003x, exact output match.
+- 2026-05-29 deferred delayed policy-average copy, `bench_spots_root.json`, depth 6, iterations 128, `--compare-outputs`:
+  - old every-delayed-iteration copy path (`P2_DEFER_DELAYED_POLICY_AVG_COPY=0`) 396.3 ms, deferred copy 395.5 ms, speedup 1.002x, exact output match.
+  - longer confirmation with runs 17 after default flip: old every-delayed-iteration copy path 412.9 ms, deferred copy 412.3 ms, speedup 1.001x, exact output match.
 - 2026-05-29 sparse kernel microbench after uniform pooling:
   - `allin_table_values_both_players` was about 0.256 ms for 24 leaves, close to the packed all-in production path; all-in is not the dominant remaining full-solve bottleneck.
   - Aggregate regret/opponent kernels are much faster than their direct reference kernels in isolation, but prior full-CFR attempts to switch aggregate variants changed accumulation too much or slowed down.
