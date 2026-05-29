@@ -163,6 +163,8 @@
   - `P2_DISABLE_BATCH4_MATVEC=1`: falling back from both active batch-4 plain matvec paths was output-identical but slightly slower, 413.7 ms baseline vs 414.0 ms candidate; reverted.
   - `P2_DISABLE_BATCH4_LINEAR_IN=1`: falling back from the active batch-4 1024x512 linear-in path alone was output-identical but flat/slower, 408.0 ms baseline vs 408.1 ms candidate; reverted.
   - `P2_DISABLE_BATCH4_HAND_EMBEDDING=1`: falling back from the active batch-4 hand-embedding path alone was output-identical but slower, 411.0 ms baseline vs 414.3 ms candidate; reverted.
+  - `P2_LEAKY_VALUE_HEAD_BATCH4=1`: adding a generated batch-4 leaky value-head output kernel had one short positive run, but longer confirmation reversed, 412.3 ms baseline vs 414.7 ms candidate; reverted.
+  - `P2_LEAKY_VALUE_HEAD_BATCH3=1`: adding a generated batch-3 leaky value-head output kernel was output-identical but slower, 407.6 ms baseline vs 408.5 ms candidate; reverted.
 
 ## Verification
 - `yarn typecheck`: pass.
