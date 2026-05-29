@@ -129,27 +129,22 @@ def _sync(device: torch.device) -> None:
 def _measure(
     fn: Callable[[PreparedShowdown], PerHandEquityResult],
     prepared: PreparedShowdown,
-    *,
-    pause: bool,
-    pause_pattern: str,
 ) -> tuple[float, float, PerHandEquityResult]:
     device = prepared.beliefs.device
     if device.type == "cuda":
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         _sync(device)
-        with pause_train(pause, pause_pattern):
-            t0 = time.perf_counter()
-            start_event.record()
-            result = fn(prepared)
-            end_event.record()
-            _sync(device)
-            wall_ms = 1.0e3 * (time.perf_counter() - t0)
-        return float(start_event.elapsed_time(end_event)), wall_ms, result
-    with pause_train(pause, pause_pattern):
         t0 = time.perf_counter()
+        start_event.record()
         result = fn(prepared)
+        end_event.record()
+        _sync(device)
         wall_ms = 1.0e3 * (time.perf_counter() - t0)
+        return float(start_event.elapsed_time(end_event)), wall_ms, result
+    t0 = time.perf_counter()
+    result = fn(prepared)
+    wall_ms = 1.0e3 * (time.perf_counter() - t0)
     return wall_ms, wall_ms, result
 
 
@@ -266,44 +261,35 @@ def main() -> None:
         f"device={device}",
         flush=True,
     )
-    for name in requested:
-        for _ in range(args.warmup):
-            _measure(
-                functions[name],
-                prepared,
-                pause=False,
-                pause_pattern=args.pause_pattern,
-            )
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
-
     rows: list[dict[str, float | int | str]] = []
     rng = random.Random(args.seed)
-    for iteration in range(args.iters):
-        order = requested[:]
-        rng.shuffle(order)
-        for name in order:
-            cuda_ms, wall_ms, result = _measure(
-                functions[name],
-                prepared,
-                pause=args.pause_train,
-                pause_pattern=args.pause_pattern,
-            )
-            row: dict[str, float | int | str] = {
-                "iteration": iteration,
-                "tier": name,
-                "cuda_ms": cuda_ms,
-                "wall_ms": wall_ms,
-                "result_seconds": result.seconds,
-                "ms_per_board": cuda_ms / args.batch_size,
-            }
-            rows.append(row)
-            print(
-                f"{name} iter={iteration} cuda={cuda_ms:.3f}ms "
-                f"wall={wall_ms:.3f}ms per_board={cuda_ms / args.batch_size:.6f}ms",
-                flush=True,
-            )
-            del result
+    with pause_train(args.pause_train, args.pause_pattern):
+        for name in requested:
+            for _ in range(args.warmup):
+                _measure(functions[name], prepared)
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+
+        for iteration in range(args.iters):
+            order = requested[:]
+            rng.shuffle(order)
+            for name in order:
+                cuda_ms, wall_ms, result = _measure(functions[name], prepared)
+                row: dict[str, float | int | str] = {
+                    "iteration": iteration,
+                    "tier": name,
+                    "cuda_ms": cuda_ms,
+                    "wall_ms": wall_ms,
+                    "result_seconds": result.seconds,
+                    "ms_per_board": cuda_ms / args.batch_size,
+                }
+                rows.append(row)
+                print(
+                    f"{name} iter={iteration} cuda={cuda_ms:.3f}ms "
+                    f"wall={wall_ms:.3f}ms per_board={cuda_ms / args.batch_size:.6f}ms",
+                    flush=True,
+                )
+                del result
 
     grouped: dict[str, list[float]] = defaultdict(list)
     grouped_wall: dict[str, list[float]] = defaultdict(list)

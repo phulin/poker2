@@ -678,23 +678,31 @@ if triton is not None:
         CARD_COUNT: tl.constexpr,
         BLOCK_H: tl.constexpr,
         BLOCK_C: tl.constexpr,
+        MODE: tl.constexpr,
     ):
         b = tl.program_id(0)
         h_block = tl.program_id(1)
-        pmode = tl.program_id(2)
+        player = tl.program_id(2)
         h = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
         h_mask = h < H
-        mode = pmode % 3
-        player = pmode // 3
 
-        lower = tl.load(lower_end + b * H + h, mask=h_mask, other=0)
-        tie = tl.load(tie_end + b * H + h, mask=h_mask, other=0)
-        start = tl.where(mode == 1, lower, 0)
-        end = tl.where(mode == 0, lower, tl.where(mode == 1, tie, H))
+        if MODE == 0:
+            lower = tl.load(lower_end + b * H + h, mask=h_mask, other=0)
+            start = 0
+            end = lower
+            rank = tl.load(ranks + b * H + h, mask=h_mask, other=0)
+        elif MODE == 1:
+            lower = tl.load(lower_end + b * H + h, mask=h_mask, other=0)
+            tie = tl.load(tie_end + b * H + h, mask=h_mask, other=0)
+            start = lower
+            end = tie
+            rank = tl.load(ranks + b * H + h, mask=h_mask, other=0)
+        else:
+            start = 0
+            end = H
 
         c0 = tl.load(local_c0 + b * H + h, mask=h_mask, other=0)
         c1 = tl.load(local_c1 + b * H + h, mask=h_mask, other=0)
-        rank = tl.load(ranks + b * H + h, mask=h_mask, other=0)
 
         scalar_base = (b * P + player) * H1
         scalar = tl.load(scalar_prefix + scalar_base + end) - tl.load(
@@ -707,11 +715,13 @@ if triton is not None:
         hero1 = tl.load(card_prefix + (card_base + end * CARD_COUNT + c1)) - tl.load(
             card_prefix + (card_base + start * CARD_COUNT + c1)
         )
-        edge = tl.load(beliefs + (b * P + player) * H + h, mask=h_mask, other=0.0)
-        edge = tl.where(mode == 0, 0.0, edge)
+        if MODE == 0:
+            edge = 0.0
+        else:
+            edge = tl.load(beliefs + (b * P + player) * H + h, mask=h_mask, other=0.0)
         scalar = scalar - hero0 - hero1 + edge
         tl.store(
-            scalar_out + ((player * 3 + mode) * B + b) * H + h,
+            scalar_out + ((player * 3 + MODE) * B + b) * H + h,
             scalar,
             mask=h_mask,
         )
@@ -734,24 +744,25 @@ if triton is not None:
         pair_q = tl.load(pair_q_ids + pair_base, mask=hc_mask, other=-1)
         valid_p = hc_mask & (pair_p >= 0)
         valid_q = hc_mask & (pair_q >= 0)
-        rank_p = tl.load(hand_ranks + b * FULL_H + pair_p, mask=valid_p, other=-1)
-        rank_q = tl.load(hand_ranks + b * FULL_H + pair_q, mask=valid_q, other=-1)
-        row_p = valid_p & tl.where(
-            mode == 0,
-            rank_p < rank[:, None],
-            tl.where(mode == 1, rank_p == rank[:, None], True),
-        )
-        row_q = valid_q & tl.where(
-            mode == 0,
-            rank_q < rank[:, None],
-            tl.where(mode == 1, rank_q == rank[:, None], True),
-        )
+        if MODE == 0:
+            rank_p = tl.load(hand_ranks + b * FULL_H + pair_p, mask=valid_p, other=-1)
+            rank_q = tl.load(hand_ranks + b * FULL_H + pair_q, mask=valid_q, other=-1)
+            row_p = valid_p & (rank_p < rank[:, None])
+            row_q = valid_q & (rank_q < rank[:, None])
+        elif MODE == 1:
+            rank_p = tl.load(hand_ranks + b * FULL_H + pair_p, mask=valid_p, other=-1)
+            rank_q = tl.load(hand_ranks + b * FULL_H + pair_q, mask=valid_q, other=-1)
+            row_p = valid_p & (rank_p == rank[:, None])
+            row_q = valid_q & (rank_q == rank[:, None])
+        else:
+            row_p = valid_p
+            row_q = valid_q
         weight_base = (b * P + player) * FULL_H
         corr = tl.load(full_beliefs + weight_base + pair_p, mask=row_p, other=0.0)
         corr += tl.load(full_beliefs + weight_base + pair_q, mask=row_q, other=0.0)
         value = interval - corr
         value = tl.where((card[None, :] == c0[:, None]) | (card[None, :] == c1[:, None]), 0.0, value)
-        card_out_base = (((player * 3 + mode) * B + b) * H + h[:, None]) * CARD_COUNT
+        card_out_base = (((player * 3 + MODE) * B + b) * H + h[:, None]) * CARD_COUNT
         tl.store(card_out + card_out_base + card[None, :], value, mask=hc_mask)
 
     @triton.jit
@@ -1162,33 +1173,35 @@ def _tier2_prefix_factors_triton(
         dtype=dtype,
         device=device,
     )
-    scalar_block_h = 2
-    grid_scalar = (batch_size, triton.cdiv(active_count, scalar_block_h), players * 3)
-    _tier2_prefix_scalar_card_kernel[grid_scalar](
-        scalar_prefix,
-        card_prefix,
-        beliefs,
-        full_beliefs,
-        hand_ranks,
-        local_c0,
-        local_c1,
-        pair_p_ids,
-        pair_q_ids,
-        ranks,
-        lower_end,
-        tie_end,
-        scalar_all,
-        card_all,
-        B=batch_size,
-        P=players,
-        H=active_count,
-        H1=active_count + 1,
-        FULL_H=NUM_HANDS,
-        CARD_COUNT=47,
-        BLOCK_H=scalar_block_h,
-        BLOCK_C=64,
-        num_warps=2,
-    )
+    scalar_block_h = 4
+    grid_scalar = (batch_size, triton.cdiv(active_count, scalar_block_h), players)
+    for mode in range(3):
+        _tier2_prefix_scalar_card_kernel[grid_scalar](
+            scalar_prefix,
+            card_prefix,
+            beliefs,
+            full_beliefs,
+            hand_ranks,
+            local_c0,
+            local_c1,
+            pair_p_ids,
+            pair_q_ids,
+            ranks,
+            lower_end,
+            tie_end,
+            scalar_all,
+            card_all,
+            B=batch_size,
+            P=players,
+            H=active_count,
+            H1=active_count + 1,
+            FULL_H=NUM_HANDS,
+            CARD_COUNT=47,
+            BLOCK_H=scalar_block_h,
+            BLOCK_C=64,
+            MODE=mode,
+            num_warps=2,
+        )
     same_pair_count = 6 if players == 4 else players * players
     same_block_h = 16
     grid_same = (batch_size, triton.cdiv(active_count, same_block_h), same_pair_count * 3)
