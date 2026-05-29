@@ -1123,7 +1123,6 @@ def tier2_first_order_opp_collision_by_hand(
         opponents = [player for player in range(players) if player != hero]
         opp_count = len(opponents)
         scalar = scalar_all[opponents]
-        pair_event = pair_event_all[opponents][:, opponents]
 
         if opp_count == 3:
             l0, l1, l2 = scalar[0, 0], scalar[1, 0], scalar[2, 0]
@@ -1145,17 +1144,18 @@ def tier2_first_order_opp_collision_by_hand(
         for left in range(opp_count):
             for right in range(left + 1, opp_count):
                 other = [idx for idx in range(opp_count) if idx not in (left, right)]
+                pair_lr = pair_event_all[opponents[left], opponents[right]]
                 if opp_count == 3:
                     other_idx = other[0]
                     denominator = (
-                        denominator - pair_event[left, right, 2, 2] * scalar[other_idx, 2]
+                        denominator - pair_lr[2, 2] * scalar[other_idx, 2]
                     )
                     pair_num = _tier2_pair_num_three_opponents(
-                        pair_event[left, right],
+                        pair_lr,
                         scalar[other_idx],
                     )
                 else:
-                    pair_total = pair_event[left, right, 2, 2]
+                    pair_total = pair_lr[2, 2]
                     denom_other = torch.ones(
                         beliefs.shape[0],
                         active_count,
@@ -1181,7 +1181,7 @@ def tier2_first_order_opp_collision_by_hand(
                             ties += mode
                         left_mode = modes[left]
                         right_mode = modes[right]
-                        pair_factor = pair_event[left, right, left_mode, right_mode]
+                        pair_factor = pair_lr[left_mode, right_mode]
                         other_factor = torch.ones(
                             beliefs.shape[0],
                             active_count,
@@ -1360,7 +1360,6 @@ def _tier3_second_order_opp_collision_by_hand_impl(
             for right in range(left + 1, opp_count)
         ]
         scalar = scalar_all[opponents]
-        pair_event = pair_event_all[opponents][:, opponents]
         if wedge_p4 is None:
             weighted_rel = weighted_rel_all[opponents]
             conflict_response = conflict_response_all[opponents]
@@ -1384,18 +1383,19 @@ def _tier3_second_order_opp_collision_by_hand_impl(
 
         for left, right in edges:
             other = [idx for idx in range(opp_count) if idx not in (left, right)]
+            pair_lr = pair_event_all[opponents[left], opponents[right]]
             if opp_count == 3:
                 other_idx = other[0]
-                denominator = denominator - pair_event[left, right, 2, 2] * scalar[other_idx, 2]
+                denominator = denominator - pair_lr[2, 2] * scalar[other_idx, 2]
                 pair_num = _tier2_pair_num_three_opponents(
-                    pair_event[left, right],
+                    pair_lr,
                     scalar[other_idx],
                 )
             else:
                 denom_other = torch.ones(beliefs.shape[0], active_count, dtype=dtype, device=device)
                 for opp_idx in other:
                     denom_other = denom_other * scalar[opp_idx, 2]
-                denominator = denominator - pair_event[left, right, 2, 2] * denom_other
+                denominator = denominator - pair_lr[2, 2] * denom_other
 
                 pair_num = torch.zeros(beliefs.shape[0], active_count, dtype=dtype, device=device)
                 for subset in range(1 << opp_count):
@@ -1414,7 +1414,7 @@ def _tier3_second_order_opp_collision_by_hand_impl(
                     for opp_idx in other:
                         other_factor = other_factor * scalar[opp_idx, modes[opp_idx]]
                     pair_num = pair_num + (
-                        pair_event[left, right, modes[left], modes[right]]
+                        pair_lr[modes[left], modes[right]]
                         * other_factor
                         / float(ties + 1)
                     )
@@ -1436,9 +1436,11 @@ def _tier3_second_order_opp_collision_by_hand_impl(
                 if len(nodes) == 4:
                     left_a, left_b = first
                     right_a, right_b = second
+                    pair_first = pair_event_all[opponents[left_a], opponents[left_b]]
+                    pair_second = pair_event_all[opponents[right_a], opponents[right_b]]
                     denominator = denominator + (
-                        pair_event[left_a, left_b, 2, 2]
-                        * pair_event[right_a, right_b, 2, 2]
+                        pair_first[2, 2]
+                        * pair_second[2, 2]
                     )
 
                     pair_pair_num = torch.zeros(
@@ -1455,13 +1457,8 @@ def _tier3_second_order_opp_collision_by_hand_impl(
                             modes.append(mode)
                             ties += mode
                         pair_pair_num = pair_pair_num + (
-                            pair_event[left_a, left_b, modes[left_a], modes[left_b]]
-                            * pair_event[
-                                right_a,
-                                right_b,
-                                modes[right_a],
-                                modes[right_b],
-                            ]
+                            pair_first[modes[left_a], modes[left_b]]
+                            * pair_second[modes[right_a], modes[right_b]]
                             / float(ties + 1)
                         )
                     numerator = numerator + pair_pair_num
