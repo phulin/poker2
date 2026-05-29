@@ -50,6 +50,7 @@
 - Tried a parallel-reduction all-in table shader; it was slower and changed CFR output too much because of changed accumulation order, so it was reverted.
 - Tried a pre-unpacked f32 all-in table lookup path; it was output-identical but within noise on confirmation, so it was reverted.
 - Tried skipping the BetterFFN zero-sum value postprocess; it barely changed timing and destroyed CFR output parity, so it was reverted.
+- Tried disabling model warm-start; it was slower and changed CFR output too much, so it was reverted.
 
 ## Measurements
 - 2026-05-29 short no-op interleaved run, `bench_spots.json`, depth 4, iterations 32, runs 3:
@@ -129,6 +130,7 @@
   - `P2_PARALLEL_ALLIN=1`: 407.2 ms baseline vs 437.3 ms candidate, speedup 0.931x, policy diff about 0.090 and action-prob diff about 0.0029.
   - `P2_FLOAT_ALLIN_TABLE=1`: short run was 394.7 ms baseline vs 394.6 ms candidate and longer confirmation was 392.7 ms baseline vs 392.2 ms candidate, but final confirmations were 396.4 ms baseline vs 396.8 ms candidate and 391.2 ms baseline vs 391.2 ms candidate; exact output match, but timing stayed within noise.
   - `P2_SKIP_ZERO_SUM=1`: 390.4 ms baseline vs 390.5 ms candidate, speedup 1.000x, policy diff about 0.998 and action-prob diff about 0.290.
+  - `P2_DISABLE_WARMSTART=1`: 399.4 ms baseline vs 411.2 ms candidate, speedup 0.971x, policy diff about 0.833 and action-prob diff about 0.478.
 
 ## Verification
 - `yarn typecheck`: pass.

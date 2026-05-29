@@ -64,6 +64,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - A parallel-reduction all-in table shader was slower and changed CFR output too much due to different accumulation order, so it was reverted.
 - A pre-unpacked f32 all-in table lookup path was output-identical but stayed within noise on confirmation, so it was reverted.
 - Skipping BetterFFN zero-sum value postprocessing barely changed timing and destroyed CFR output parity, so it was reverted.
+- Disabling model warm-start was slower and changed CFR output too much, so it was reverted.
 
 ## Status
 **Current pass complete; goal remains active** - Added chunked leaf temporary-buffer release for an additional output-identical speedup. Continue with more leaf/model kernel candidates next.
