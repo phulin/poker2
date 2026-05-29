@@ -37,6 +37,7 @@
 - Tried preferring batch-3 subgroup linear-in kernels at the actual leaf batch size; it was output-identical but slower, so it was reverted.
 - Tried skipping initial policy-average/regret uploads that warm start later overwrites; it was output-identical but within noise, so it was reverted.
 - Tried initializing zeroed policy-sized buffers by GPU copy from a persistent zero buffer; it was output-identical but within noise, so it was reverted.
+- Tried skipping the initial policy-average upload; it was output-identical but slower on confirmation, so it was reverted.
 
 ## Measurements
 - 2026-05-29 short no-op interleaved run, `bench_spots.json`, depth 4, iterations 32, runs 3:
@@ -98,6 +99,7 @@
   - `P2_LINEAR_IN_BATCH3=1`: 408.2 ms baseline vs 409.8 ms candidate, speedup 0.996x, exact output match and exact value fixture pass.
   - `P2_SKIP_WARMSTART_OVERWRITTEN_UPLOADS=1`: 407.7 ms baseline vs 407.4 ms candidate, speedup 1.001x, exact output match.
   - `P2_GPU_ZERO_INIT=1`: 404.6 ms baseline vs 404.7 ms candidate, speedup 1.000x, exact output match.
+  - `P2_SKIP_INITIAL_POLICY_AVG_UPLOAD=1`: short run was 408.0 ms baseline vs 407.2 ms candidate, but longer confirmation was 405.7 ms baseline vs 406.3 ms candidate, speedup 0.998x; exact output match.
 
 ## Verification
 - `yarn typecheck`: pass.

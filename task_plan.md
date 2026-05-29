@@ -51,6 +51,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Preferring batch-3 subgroup linear-in kernels was output-identical but slower than the current batch-4 selection, so it was reverted.
 - Skipping warm-start-overwritten initial policy-average/regret uploads was output-identical but within timing noise, so it was reverted.
 - GPU-copy zero initialization for policy-sized buffers was output-identical but within timing noise, so it was reverted.
+- Skipping initial policy-average upload was output-identical but lost on longer confirmation, so it was reverted.
 
 ## Status
 **Current pass complete; goal remains active** - Added chunked leaf temporary-buffer release for an additional output-identical speedup. Continue with more leaf/model kernel candidates next.
