@@ -32,6 +32,7 @@
 - Tried reading back one contiguous root-policy slice after GPU CFR; it was output-identical but slower than the single full-policy readback, so it was reverted.
 - Tried skipping the explicit queue wait before readback `mapAsync`; it was output-identical but slower, so it was reverted.
 - Tried a 128-thread all-in table shader workgroup; it was output-identical but slower, so it was reverted.
+- Tried reference aggregate/apply kernels for regret weights and opponent policies; both were slower and changed CFR accumulation too much, so they were reverted.
 
 ## Measurements
 - 2026-05-29 short no-op interleaved run, `bench_spots.json`, depth 4, iterations 32, runs 3:
@@ -84,6 +85,8 @@
   - `P2_ROOT_POLICY_SLICE_READBACK=1`: 408.8 ms baseline vs 409.3 ms candidate, speedup 0.999x, exact output match.
   - `P2_FAST_READBACK=1`: 408.1 ms baseline vs 410.3 ms candidate, speedup 0.995x, exact output match.
   - `P2_ALLIN_WG128=1`: 408.2 ms baseline vs 409.4 ms candidate, speedup 0.997x, exact output match.
+  - `P2_REF_REGRET_WEIGHT_AGG=1`: 412.9 ms baseline vs 421.8 ms candidate, speedup 0.979x, policy diff about 0.002.
+  - `P2_REF_OPP_POLICY_AGG=1`: 416.0 ms baseline vs 429.0 ms candidate, speedup 0.970x, policy diff about 0.053.
 
 ## Verification
 - `yarn typecheck`: pass.

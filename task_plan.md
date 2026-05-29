@@ -46,6 +46,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Contiguous root-policy slice readback was also output-identical but slower than the single full-policy readback, so it was reverted.
 - Skipping the explicit queue wait before readback `mapAsync` was output-identical but slower, so it was reverted.
 - A 128-thread all-in table shader workgroup was output-identical but slower than the current 64-thread shader, so it was reverted.
+- Reference aggregate/apply kernels for regret weights and opponent policies were slower and changed CFR accumulation too much, so they were reverted.
 
 ## Status
 **Current pass complete; goal remains active** - Added chunked leaf temporary-buffer release for an additional output-identical speedup. Continue with more leaf/model kernel candidates next.
