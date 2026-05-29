@@ -313,7 +313,9 @@ def main() -> None:
     summary = {
         name: {
             "cuda_ms": _summarize(grouped[name]),
+            "steady_cuda_ms": _summarize(grouped[name][1:]),
             "wall_ms": _summarize(grouped_wall[name]),
+            "steady_wall_ms": _summarize(grouped_wall[name][1:]),
             "cuda_ms_per_board_mean": _summarize(grouped[name]).get("mean", 0.0)
             / args.batch_size,
         }
