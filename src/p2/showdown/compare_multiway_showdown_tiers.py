@@ -630,9 +630,13 @@ if triton is not None:
         if USE_P4_UNORDERED:
             left = tl.where(pair < 3, 0, tl.where(pair < 5, 1, 2))
             right = tl.where(pair < 3, pair + 1, tl.where(pair < 5, pair - 1, 3))
+            pair_prefix_base = (b * 6 + pair) * H1
+            pair_card_base = ((b * 6 + pair) * H1) * CARD_COUNT
         else:
             right = pair % P
             left = pair // P
+            pair_prefix_base = ((b * P + left) * P + right) * H1
+            pair_card_base = (((b * P + left) * P + right) * H1) * CARD_COUNT
 
         lower = tl.load(lower_end + b * H + h)
         tie = tl.load(tie_end + b * H + h)
@@ -641,11 +645,9 @@ if triton is not None:
 
         c0 = tl.load(local_c0 + b * H + h)
         c1 = tl.load(local_c1 + b * H + h)
-        pair_prefix_base = ((b * P + left) * P + right) * H1
         scalar = tl.load(pair_prefix + pair_prefix_base + end) - tl.load(
             pair_prefix + pair_prefix_base + start
         )
-        pair_card_base = (((b * P + left) * P + right) * H1) * CARD_COUNT
         card0 = tl.load(pair_card_prefix + pair_card_base + end * CARD_COUNT + c0) - tl.load(
             pair_card_prefix + pair_card_base + start * CARD_COUNT + c0
         )
@@ -926,20 +928,31 @@ def _tier2_prefix_factors(
     zero_card = torch.zeros(batch_size, players, 1, 47, dtype=dtype, device=device)
     card_prefix = torch.cat([zero_card, card_values.cumsum(dim=2)], dim=2)
 
-    pair_values = sorted_beliefs[:, :, None, :] * sorted_beliefs[:, None, :, :]
-    zero_pair = torch.zeros(batch_size, players, players, 1, dtype=dtype, device=device)
-    pair_prefix = torch.cat([zero_pair, pair_values.cumsum(dim=3)], dim=3)
-    pair_card_values = pair_values[:, :, :, :, None] * sorted_contains[:, None, None, :, :]
-    zero_pair_card = torch.zeros(
-        batch_size,
-        players,
-        players,
-        1,
-        47,
-        dtype=dtype,
-        device=device,
-    )
-    pair_card_prefix = torch.cat([zero_pair_card, pair_card_values.cumsum(dim=3)], dim=3)
+    use_compact_p4_pairs = triton is not None and device.type == "cuda" and players == 4
+    if use_compact_p4_pairs:
+        pair_left = torch.tensor([0, 0, 0, 1, 1, 2], dtype=torch.long, device=device)
+        pair_right = torch.tensor([1, 2, 3, 2, 3, 3], dtype=torch.long, device=device)
+        pair_values = sorted_beliefs[:, pair_left] * sorted_beliefs[:, pair_right]
+        zero_pair = torch.zeros(batch_size, 6, 1, dtype=dtype, device=device)
+        pair_prefix = torch.cat([zero_pair, pair_values.cumsum(dim=2)], dim=2)
+        pair_card_values = pair_values[:, :, :, None] * sorted_contains[:, None, :, :]
+        zero_pair_card = torch.zeros(batch_size, 6, 1, 47, dtype=dtype, device=device)
+        pair_card_prefix = torch.cat([zero_pair_card, pair_card_values.cumsum(dim=2)], dim=2)
+    else:
+        pair_values = sorted_beliefs[:, :, None, :] * sorted_beliefs[:, None, :, :]
+        zero_pair = torch.zeros(batch_size, players, players, 1, dtype=dtype, device=device)
+        pair_prefix = torch.cat([zero_pair, pair_values.cumsum(dim=3)], dim=3)
+        pair_card_values = pair_values[:, :, :, :, None] * sorted_contains[:, None, None, :, :]
+        zero_pair_card = torch.zeros(
+            batch_size,
+            players,
+            players,
+            1,
+            47,
+            dtype=dtype,
+            device=device,
+        )
+        pair_card_prefix = torch.cat([zero_pair_card, pair_card_values.cumsum(dim=3)], dim=3)
 
     lower_end = torch.searchsorted(sorted_ranks, ctx.ranks, right=False)
     tie_end = torch.searchsorted(sorted_ranks, ctx.ranks, right=True)
