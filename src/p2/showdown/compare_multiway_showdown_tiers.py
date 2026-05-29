@@ -1122,19 +1122,20 @@ def tier2_first_order_opp_collision_by_hand(
     for hero in range(players):
         opponents = [player for player in range(players) if player != hero]
         opp_count = len(opponents)
-        scalar = scalar_all[opponents]
 
         if opp_count == 3:
-            l0, l1, l2 = scalar[0, 0], scalar[1, 0], scalar[2, 0]
-            t0, t1, t2 = scalar[0, 1], scalar[1, 1], scalar[2, 1]
+            scalar = [scalar_all[player] for player in opponents]
+            l0, l1, l2 = scalar[0][0], scalar[1][0], scalar[2][0]
+            t0, t1, t2 = scalar[0][1], scalar[1][1], scalar[2][1]
             numerator = (
                 l0 * l1 * l2
                 + 0.5 * (t0 * l1 * l2 + l0 * t1 * l2 + l0 * l1 * t2)
                 + (t0 * t1 * l2 + t0 * l1 * t2 + l0 * t1 * t2) / 3.0
                 + 0.25 * t0 * t1 * t2
             )
-            denominator = scalar[0, 2] * scalar[1, 2] * scalar[2, 2]
+            denominator = scalar[0][2] * scalar[1][2] * scalar[2][2]
         else:
+            scalar = scalar_all[opponents]
             lower = scalar[:, 0].permute(1, 2, 0).contiguous()
             tied = scalar[:, 1].permute(1, 2, 0).contiguous()
             denom_terms = scalar[:, 2].permute(1, 2, 0).contiguous()
@@ -1148,7 +1149,7 @@ def tier2_first_order_opp_collision_by_hand(
                 if opp_count == 3:
                     other_idx = other[0]
                     denominator = (
-                        denominator - pair_lr[2, 2] * scalar[other_idx, 2]
+                        denominator - pair_lr[2, 2] * scalar[other_idx][2]
                     )
                     pair_num = _tier2_pair_num_three_opponents(
                         pair_lr,
