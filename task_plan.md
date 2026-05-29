@@ -44,6 +44,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Leaf-temp release chunks 8 and 24 both lost against the current default chunk 16.
 - Root-only policy readback was output-identical but slower than the single full-policy readback, so it was reverted.
 - Contiguous root-policy slice readback was also output-identical but slower than the single full-policy readback, so it was reverted.
+- Skipping the explicit queue wait before readback `mapAsync` was output-identical but slower, so it was reverted.
 
 ## Status
 **Current pass complete; goal remains active** - Added chunked leaf temporary-buffer release for an additional output-identical speedup. Continue with more leaf/model kernel candidates next.
