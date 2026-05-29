@@ -1219,14 +1219,12 @@ def _tier2_pair_num_three_opponents(
     pair_event: torch.Tensor,
     other_scalar: torch.Tensor,
 ) -> torch.Tensor:
-    out = torch.zeros_like(other_scalar[0])
-    for left_mode in range(2):
-        for right_mode in range(2):
-            pair_factor = pair_event[left_mode, right_mode]
-            for other_mode in range(2):
-                ties = left_mode + right_mode + other_mode
-                out = out + pair_factor * other_scalar[other_mode] / float(ties + 1)
-    return out
+    pair00 = pair_event[0, 0]
+    pair10_plus_01 = pair_event[1, 0] + pair_event[0, 1]
+    pair11 = pair_event[1, 1]
+    other0 = pair00 + 0.5 * pair10_plus_01 + pair11 / 3.0
+    other1 = 0.5 * pair00 + pair10_plus_01 / 3.0 + 0.25 * pair11
+    return other0 * other_scalar[0] + other1 * other_scalar[1]
 
 
 def tier2_first_order_opp_collision(prepared: PreparedShowdown) -> TierResult:
