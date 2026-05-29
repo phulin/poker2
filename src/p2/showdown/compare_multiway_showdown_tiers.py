@@ -946,33 +946,9 @@ if triton is not None:
         den_total += tl.sum(w22 * r02 * r12, axis=1)
         num_total += tl.sum(w20 * combo0 + w21 * combo1, axis=1)
 
-        out_base = ((b * 4 + hero) * K_BLOCKS + k_block) * H + h
-        tl.store(wedge_den_out + out_base, den_total, mask=h_mask)
-        tl.store(wedge_num_out + out_base, num_total, mask=h_mask)
-
-    @triton.jit
-    def _tier3_reduce_wedge_partials_kernel(
-        partial_num,
-        partial_den,
-        num_out,
-        den_out,
-        B: tl.constexpr,
-        H: tl.constexpr,
-        K_BLOCKS: tl.constexpr,
-        BLOCK_H: tl.constexpr,
-        BLOCK_K: tl.constexpr,
-    ):
-        b = tl.program_id(0)
-        hero = tl.program_id(1)
-        h = tl.program_id(2) * BLOCK_H + tl.arange(0, BLOCK_H)
-        k = tl.arange(0, BLOCK_K)
-        mask = (h[None, :] < H) & (k[:, None] < K_BLOCKS)
-        base = ((b * 4 + hero) * K_BLOCKS + k[:, None]) * H + h[None, :]
-        num = tl.load(partial_num + base, mask=mask, other=0.0)
-        den = tl.load(partial_den + base, mask=mask, other=0.0)
         out_base = (b * 4 + hero) * H + h
-        tl.store(num_out + out_base, tl.sum(num, axis=0), mask=h < H)
-        tl.store(den_out + out_base, tl.sum(den, axis=0), mask=h < H)
+        tl.atomic_add(wedge_den_out + out_base, den_total, sem="relaxed", mask=h_mask)
+        tl.atomic_add(wedge_num_out + out_base, num_total, sem="relaxed", mask=h_mask)
 
     @triton.jit
     def _p4_pair_event_kernel(
@@ -1239,15 +1215,14 @@ def _tier3_wedge_p4_triton(
     block_h = 8
     block_k = 32
     k_blocks = triton.cdiv(active_count, block_k)
-    partial_num = torch.empty(
+    num_out = torch.zeros(
         batch_size,
         4,
-        k_blocks,
         active_count,
         dtype=beliefs.dtype,
         device=beliefs.device,
     )
-    partial_den = torch.empty_like(partial_num)
+    den_out = torch.zeros_like(num_out)
     h_blocks = triton.cdiv(active_count, block_h)
     grid = (batch_size, 4, h_blocks * k_blocks)
     _tier3_wedge_p4_kernel[grid](
@@ -1256,8 +1231,8 @@ def _tier3_wedge_p4_triton(
         local_c0.contiguous(),
         local_c1.contiguous(),
         card_all.contiguous(),
-        partial_num,
-        partial_den,
+        num_out,
+        den_out,
         B=batch_size,
         H=active_count,
         CARD_COUNT=47,
@@ -1265,29 +1240,7 @@ def _tier3_wedge_p4_triton(
         BLOCK_H=block_h,
         BLOCK_K=block_k,
         num_warps=2,
-    )
-    num_out = torch.empty(
-        batch_size,
-        4,
-        active_count,
-        dtype=beliefs.dtype,
-        device=beliefs.device,
-    )
-    den_out = torch.empty_like(num_out)
-    reduce_block_h = 16
-    reduce_block_k = 64
-    reduce_grid = (batch_size, 4, triton.cdiv(active_count, reduce_block_h))
-    _tier3_reduce_wedge_partials_kernel[reduce_grid](
-        partial_num,
-        partial_den,
-        num_out,
-        den_out,
-        B=batch_size,
-        H=active_count,
-        K_BLOCKS=k_blocks,
-        BLOCK_H=reduce_block_h,
-        BLOCK_K=reduce_block_k,
-        num_warps=4,
+        num_stages=5,
     )
     return num_out, den_out
 
