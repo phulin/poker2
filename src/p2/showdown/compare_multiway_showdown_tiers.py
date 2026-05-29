@@ -959,6 +959,236 @@ if triton is not None:
         tl.store(wedge_num_out + out_base, num_total, mask=h_mask)
 
     @triton.jit
+    def _tier3_wedge_p4_all_heroes_kernel(
+        beliefs,
+        ranks,
+        local_c0,
+        local_c1,
+        card_all,
+        wedge_num_out,
+        wedge_den_out,
+        B: tl.constexpr,
+        H: tl.constexpr,
+        CARD_COUNT: tl.constexpr,
+        K_BLOCKS: tl.constexpr,
+        PART_K_BLOCKS: tl.constexpr,
+        SPLIT_K: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        b = tl.program_id(0)
+        h_block = tl.program_id(1)
+        k_part = tl.program_id(2)
+        h = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        h_mask = h < H
+        hero_c0 = tl.load(local_c0 + b * H + h, mask=h_mask, other=-1)
+        hero_c1 = tl.load(local_c1 + b * H + h, mask=h_mask, other=-1)
+        rank_h = tl.load(ranks + b * H + h, mask=h_mask, other=0)
+
+        p0_base0 = (((0 * 3 + 0) * B + b) * H + h[:, None]) * CARD_COUNT
+        p0_base1 = p0_base0 + B * H * CARD_COUNT
+        p0_base2 = p0_base0 + 2 * B * H * CARD_COUNT
+        p1_base0 = (((1 * 3 + 0) * B + b) * H + h[:, None]) * CARD_COUNT
+        p1_base1 = p1_base0 + B * H * CARD_COUNT
+        p1_base2 = p1_base0 + 2 * B * H * CARD_COUNT
+        p2_base0 = (((2 * 3 + 0) * B + b) * H + h[:, None]) * CARD_COUNT
+        p2_base1 = p2_base0 + B * H * CARD_COUNT
+        p2_base2 = p2_base0 + 2 * B * H * CARD_COUNT
+        p3_base0 = (((3 * 3 + 0) * B + b) * H + h[:, None]) * CARD_COUNT
+        p3_base1 = p3_base0 + B * H * CARD_COUNT
+        p3_base2 = p3_base0 + 2 * B * H * CARD_COUNT
+
+        den0 = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        den1 = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        den2 = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        den3 = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        num0 = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        num1 = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        num2 = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        num3 = tl.zeros((BLOCK_H,), dtype=tl.float32)
+
+        for k_local in tl.range(0, PART_K_BLOCKS):
+            k_block = k_part * PART_K_BLOCKS + k_local
+            k = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+            hk_mask = (h[:, None] < H) & (k[None, :] < H)
+            k_mask = k < H
+            k_c0 = tl.load(local_c0 + b * H + k, mask=k_mask, other=-2)
+            k_c1 = tl.load(local_c1 + b * H + k, mask=k_mask, other=-3)
+            rank_k = tl.load(ranks + b * H + k, mask=k_mask, other=-1)
+            disjoint = (
+                (k_c0[None, :] != hero_c0[:, None])
+                & (k_c0[None, :] != hero_c1[:, None])
+                & (k_c1[None, :] != hero_c0[:, None])
+                & (k_c1[None, :] != hero_c1[:, None])
+                & hk_mask
+            )
+            lower = disjoint & (rank_k[None, :] < rank_h[:, None])
+            tied = disjoint & (rank_k[None, :] == rank_h[:, None])
+
+            b0 = tl.load(beliefs + (b * 4 + 0) * H + k, mask=k_mask, other=0.0)
+            b1 = tl.load(beliefs + (b * 4 + 1) * H + k, mask=k_mask, other=0.0)
+            b2 = tl.load(beliefs + (b * 4 + 2) * H + k, mask=k_mask, other=0.0)
+            b3 = tl.load(beliefs + (b * 4 + 3) * H + k, mask=k_mask, other=0.0)
+            w00 = tl.where(lower, b0[None, :], 0.0)
+            w01 = tl.where(tied, b0[None, :], 0.0)
+            w02 = tl.where(disjoint, b0[None, :], 0.0)
+            w10 = tl.where(lower, b1[None, :], 0.0)
+            w11 = tl.where(tied, b1[None, :], 0.0)
+            w12 = tl.where(disjoint, b1[None, :], 0.0)
+            w20 = tl.where(lower, b2[None, :], 0.0)
+            w21 = tl.where(tied, b2[None, :], 0.0)
+            w22 = tl.where(disjoint, b2[None, :], 0.0)
+            w30 = tl.where(lower, b3[None, :], 0.0)
+            w31 = tl.where(tied, b3[None, :], 0.0)
+            w32 = tl.where(disjoint, b3[None, :], 0.0)
+
+            r00 = tl.load(card_all + p0_base0 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r00 += tl.load(card_all + p0_base0 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r00 -= w00
+            r01 = tl.load(card_all + p0_base1 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r01 += tl.load(card_all + p0_base1 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r01 -= w01
+            r02 = tl.load(card_all + p0_base2 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r02 += tl.load(card_all + p0_base2 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r02 -= w02
+
+            r10 = tl.load(card_all + p1_base0 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r10 += tl.load(card_all + p1_base0 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r10 -= w10
+            r11 = tl.load(card_all + p1_base1 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r11 += tl.load(card_all + p1_base1 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r11 -= w11
+            r12 = tl.load(card_all + p1_base2 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r12 += tl.load(card_all + p1_base2 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r12 -= w12
+
+            r20 = tl.load(card_all + p2_base0 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r20 += tl.load(card_all + p2_base0 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r20 -= w20
+            r21 = tl.load(card_all + p2_base1 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r21 += tl.load(card_all + p2_base1 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r21 -= w21
+            r22 = tl.load(card_all + p2_base2 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r22 += tl.load(card_all + p2_base2 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r22 -= w22
+
+            r30 = tl.load(card_all + p3_base0 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r30 += tl.load(card_all + p3_base0 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r30 -= w30
+            r31 = tl.load(card_all + p3_base1 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r31 += tl.load(card_all + p3_base1 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r31 -= w31
+            r32 = tl.load(card_all + p3_base2 + k_c0[None, :], mask=hk_mask, other=0.0)
+            r32 += tl.load(card_all + p3_base2 + k_c1[None, :], mask=hk_mask, other=0.0)
+            r32 -= w32
+
+            pair00_12 = r10 * r20
+            pair01_12 = r11 * r20 + r10 * r21
+            pair11_12 = r11 * r21
+            combo0_12 = pair00_12 + 0.5 * pair01_12 + (1.0 / 3.0) * pair11_12
+            combo1_12 = 0.5 * pair00_12 + (1.0 / 3.0) * pair01_12 + 0.25 * pair11_12
+            den_12 = r12 * r22
+
+            pair00_13 = r10 * r30
+            pair01_13 = r11 * r30 + r10 * r31
+            pair11_13 = r11 * r31
+            combo0_13 = pair00_13 + 0.5 * pair01_13 + (1.0 / 3.0) * pair11_13
+            combo1_13 = 0.5 * pair00_13 + (1.0 / 3.0) * pair01_13 + 0.25 * pair11_13
+            den_13 = r12 * r32
+
+            pair00_23 = r20 * r30
+            pair01_23 = r21 * r30 + r20 * r31
+            pair11_23 = r21 * r31
+            combo0_23 = pair00_23 + 0.5 * pair01_23 + (1.0 / 3.0) * pair11_23
+            combo1_23 = 0.5 * pair00_23 + (1.0 / 3.0) * pair01_23 + 0.25 * pair11_23
+            den_23 = r22 * r32
+
+            num0 += tl.sum(
+                w10 * combo0_23
+                + w11 * combo1_23
+                + w20 * combo0_13
+                + w21 * combo1_13
+                + w30 * combo0_12
+                + w31 * combo1_12,
+                axis=1,
+            )
+            den0 += tl.sum(w12 * den_23 + w22 * den_13 + w32 * den_12, axis=1)
+
+            pair00_02 = r00 * r20
+            pair01_02 = r01 * r20 + r00 * r21
+            pair11_02 = r01 * r21
+            combo0_02 = pair00_02 + 0.5 * pair01_02 + (1.0 / 3.0) * pair11_02
+            combo1_02 = 0.5 * pair00_02 + (1.0 / 3.0) * pair01_02 + 0.25 * pair11_02
+            den_02 = r02 * r22
+
+            pair00_03 = r00 * r30
+            pair01_03 = r01 * r30 + r00 * r31
+            pair11_03 = r01 * r31
+            combo0_03 = pair00_03 + 0.5 * pair01_03 + (1.0 / 3.0) * pair11_03
+            combo1_03 = 0.5 * pair00_03 + (1.0 / 3.0) * pair01_03 + 0.25 * pair11_03
+            den_03 = r02 * r32
+
+            num1 += tl.sum(
+                w00 * combo0_23
+                + w01 * combo1_23
+                + w20 * combo0_03
+                + w21 * combo1_03
+                + w30 * combo0_02
+                + w31 * combo1_02,
+                axis=1,
+            )
+            den1 += tl.sum(w02 * den_23 + w22 * den_03 + w32 * den_02, axis=1)
+
+            pair00_01 = r00 * r10
+            pair01_01 = r01 * r10 + r00 * r11
+            pair11_01 = r01 * r11
+            combo0_01 = pair00_01 + 0.5 * pair01_01 + (1.0 / 3.0) * pair11_01
+            combo1_01 = 0.5 * pair00_01 + (1.0 / 3.0) * pair01_01 + 0.25 * pair11_01
+            den_01 = r02 * r12
+
+            num2 += tl.sum(
+                w00 * combo0_13
+                + w01 * combo1_13
+                + w10 * combo0_03
+                + w11 * combo1_03
+                + w30 * combo0_01
+                + w31 * combo1_01,
+                axis=1,
+            )
+            den2 += tl.sum(w02 * den_13 + w12 * den_03 + w32 * den_01, axis=1)
+
+            num3 += tl.sum(
+                w00 * combo0_12
+                + w01 * combo1_12
+                + w10 * combo0_02
+                + w11 * combo1_02
+                + w20 * combo0_01
+                + w21 * combo1_01,
+                axis=1,
+            )
+            den3 += tl.sum(w02 * den_12 + w12 * den_02 + w22 * den_01, axis=1)
+
+        out_base = (b * 4) * H + h
+        if SPLIT_K == 1:
+            tl.store(wedge_den_out + out_base, den0, mask=h_mask)
+            tl.store(wedge_num_out + out_base, num0, mask=h_mask)
+            tl.store(wedge_den_out + out_base + H, den1, mask=h_mask)
+            tl.store(wedge_num_out + out_base + H, num1, mask=h_mask)
+            tl.store(wedge_den_out + out_base + 2 * H, den2, mask=h_mask)
+            tl.store(wedge_num_out + out_base + 2 * H, num2, mask=h_mask)
+            tl.store(wedge_den_out + out_base + 3 * H, den3, mask=h_mask)
+            tl.store(wedge_num_out + out_base + 3 * H, num3, mask=h_mask)
+        else:
+            tl.atomic_add(wedge_den_out + out_base, den0, sem="relaxed", mask=h_mask)
+            tl.atomic_add(wedge_num_out + out_base, num0, sem="relaxed", mask=h_mask)
+            tl.atomic_add(wedge_den_out + out_base + H, den1, sem="relaxed", mask=h_mask)
+            tl.atomic_add(wedge_num_out + out_base + H, num1, sem="relaxed", mask=h_mask)
+            tl.atomic_add(wedge_den_out + out_base + 2 * H, den2, sem="relaxed", mask=h_mask)
+            tl.atomic_add(wedge_num_out + out_base + 2 * H, num2, sem="relaxed", mask=h_mask)
+            tl.atomic_add(wedge_den_out + out_base + 3 * H, den3, sem="relaxed", mask=h_mask)
+            tl.atomic_add(wedge_num_out + out_base + 3 * H, num3, sem="relaxed", mask=h_mask)
+
+    @triton.jit
     def _p4_pair_event_kernel(
         card_all,
         same_all,
@@ -1220,9 +1450,15 @@ def _tier3_wedge_p4_triton(
     if triton is None or beliefs.device.type != "cuda" or beliefs.shape[1] != 4:
         return None
     batch_size, _, active_count = beliefs.shape
-    block_h = _env_int("P2_SHOWDOWN_WEDGE_BLOCK_H", 2)
-    block_k = 32
+    block_h = _env_int("P2_SHOWDOWN_WEDGE_BLOCK_H", 4)
+    block_k = _env_int("P2_SHOWDOWN_WEDGE_BLOCK_K", 16)
     k_blocks = triton.cdiv(active_count, block_k)
+    all_heroes = _env_int("P2_SHOWDOWN_WEDGE_ALL_HEROES", 1)
+    split_k = _env_int("P2_SHOWDOWN_WEDGE_SPLIT_K", 2 if all_heroes else 1)
+    part_k_blocks = triton.cdiv(k_blocks, split_k)
+    num_warps = _env_int("P2_SHOWDOWN_WEDGE_NUM_WARPS", 1)
+    num_stages = _env_int("P2_SHOWDOWN_WEDGE_NUM_STAGES", 2 if all_heroes else 3)
+    maxnreg = _env_int("P2_SHOWDOWN_WEDGE_MAXNREG", 0)
     num_out = torch.empty(
         batch_size,
         4,
@@ -1232,24 +1468,91 @@ def _tier3_wedge_p4_triton(
     )
     den_out = torch.empty_like(num_out)
     h_blocks = triton.cdiv(active_count, block_h)
-    grid = (batch_size, 4, h_blocks)
-    _tier3_wedge_p4_kernel[grid](
-        beliefs.contiguous(),
-        ranks.contiguous(),
-        local_c0.contiguous(),
-        local_c1.contiguous(),
-        card_all.contiguous(),
-        num_out,
-        den_out,
-        B=batch_size,
-        H=active_count,
-        CARD_COUNT=47,
-        K_BLOCKS=k_blocks,
-        BLOCK_H=block_h,
-        BLOCK_K=block_k,
-        num_warps=_env_int("P2_SHOWDOWN_WEDGE_NUM_WARPS", 1),
-        num_stages=_env_int("P2_SHOWDOWN_WEDGE_NUM_STAGES", 3),
-    )
+    if all_heroes:
+        if split_k > 1:
+            num_out.zero_()
+            den_out.zero_()
+        grid_all = (batch_size, h_blocks, split_k)
+        if maxnreg > 0:
+            _tier3_wedge_p4_all_heroes_kernel[grid_all](
+                beliefs.contiguous(),
+                ranks.contiguous(),
+                local_c0.contiguous(),
+                local_c1.contiguous(),
+                card_all.contiguous(),
+                num_out,
+                den_out,
+                B=batch_size,
+                H=active_count,
+                CARD_COUNT=47,
+                K_BLOCKS=k_blocks,
+                PART_K_BLOCKS=part_k_blocks,
+                SPLIT_K=split_k,
+                BLOCK_H=block_h,
+                BLOCK_K=block_k,
+                num_warps=num_warps,
+                num_stages=num_stages,
+                maxnreg=maxnreg,
+            )
+        else:
+            _tier3_wedge_p4_all_heroes_kernel[grid_all](
+                beliefs.contiguous(),
+                ranks.contiguous(),
+                local_c0.contiguous(),
+                local_c1.contiguous(),
+                card_all.contiguous(),
+                num_out,
+                den_out,
+                B=batch_size,
+                H=active_count,
+                CARD_COUNT=47,
+                K_BLOCKS=k_blocks,
+                PART_K_BLOCKS=part_k_blocks,
+                SPLIT_K=split_k,
+                BLOCK_H=block_h,
+                BLOCK_K=block_k,
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+    else:
+        grid = (batch_size, 4, h_blocks)
+        if maxnreg > 0:
+            _tier3_wedge_p4_kernel[grid](
+                beliefs.contiguous(),
+                ranks.contiguous(),
+                local_c0.contiguous(),
+                local_c1.contiguous(),
+                card_all.contiguous(),
+                num_out,
+                den_out,
+                B=batch_size,
+                H=active_count,
+                CARD_COUNT=47,
+                K_BLOCKS=k_blocks,
+                BLOCK_H=block_h,
+                BLOCK_K=block_k,
+                num_warps=num_warps,
+                num_stages=num_stages,
+                maxnreg=maxnreg,
+            )
+        else:
+            _tier3_wedge_p4_kernel[grid](
+                beliefs.contiguous(),
+                ranks.contiguous(),
+                local_c0.contiguous(),
+                local_c1.contiguous(),
+                card_all.contiguous(),
+                num_out,
+                den_out,
+                B=batch_size,
+                H=active_count,
+                CARD_COUNT=47,
+                K_BLOCKS=k_blocks,
+                BLOCK_H=block_h,
+                BLOCK_K=block_k,
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
     return num_out, den_out
 
 

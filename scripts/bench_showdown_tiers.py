@@ -234,21 +234,42 @@ def _parse_sweep_tuples(spec: str | None, *, kernel: str) -> list[dict[str, int 
             label = ""
             values = chunk
         parts = [part.strip() for part in values.split(",")]
-        if len(parts) != 3:
+        if len(parts) not in (3, 4, 5):
             raise ValueError(
-                "--sweep-tuples entries must be h,warps,stages or label:h,warps,stages"
+                "--sweep-tuples entries must be h,warps,stages, h,k,warps,stages, "
+                "h,k,warps,stages,maxnreg, or label-prefixed forms"
             )
-        block_h, num_warps, num_stages = (int(part) for part in parts)
+        values_int = [int(part) for part in parts]
+        if len(values_int) == 3:
+            block_h, num_warps, num_stages = values_int
+            block_k = None
+            maxnreg = None
+        elif len(values_int) == 4:
+            block_h, block_k, num_warps, num_stages = values_int
+            maxnreg = None
+        else:
+            block_h, block_k, num_warps, num_stages, maxnreg = values_int
         if not label:
-            label = f"{kernel}_h{block_h}_w{num_warps}_s{num_stages}"
-        configs.append(
-            {
-                "label": label,
-                "block_h": block_h,
-                "num_warps": num_warps,
-                "num_stages": num_stages,
-            }
-        )
+            if block_k is None:
+                label = f"{kernel}_h{block_h}_w{num_warps}_s{num_stages}"
+            elif maxnreg is None:
+                label = f"{kernel}_h{block_h}_k{block_k}_w{num_warps}_s{num_stages}"
+            else:
+                label = (
+                    f"{kernel}_h{block_h}_k{block_k}_w{num_warps}_s{num_stages}"
+                    f"_r{maxnreg}"
+                )
+        config = {
+            "label": label,
+            "block_h": block_h,
+            "num_warps": num_warps,
+            "num_stages": num_stages,
+        }
+        if block_k is not None:
+            config["block_k"] = block_k
+        if maxnreg is not None:
+            config["maxnreg"] = maxnreg
+        configs.append(config)
     if not configs:
         raise ValueError("--sweep-tuples did not contain any tuples")
     return configs
@@ -259,11 +280,16 @@ def _sweep_env(config: dict[str, int | str], *, kernel: str) -> dict[str, str]:
         return {}
     if kernel != "wedge":
         raise ValueError(f"Unsupported sweep kernel {kernel!r}")
-    return {
+    updates = {
         "P2_SHOWDOWN_WEDGE_BLOCK_H": str(config["block_h"]),
         "P2_SHOWDOWN_WEDGE_NUM_WARPS": str(config["num_warps"]),
         "P2_SHOWDOWN_WEDGE_NUM_STAGES": str(config["num_stages"]),
     }
+    if "block_k" in config:
+        updates["P2_SHOWDOWN_WEDGE_BLOCK_K"] = str(config["block_k"])
+    if "maxnreg" in config:
+        updates["P2_SHOWDOWN_WEDGE_MAXNREG"] = str(config["maxnreg"])
+    return updates
 
 
 @contextmanager
@@ -295,7 +321,10 @@ def main() -> None:
     parser.add_argument("--check-small", action="store_true")
     parser.add_argument(
         "--sweep-tuples",
-        help="Semicolon-separated h,warps,stages tuples, optionally label:h,warps,stages.",
+        help=(
+            "Semicolon-separated h,warps,stages or h,k,warps,stages tuples, "
+            "optionally with maxnreg as a fifth value and label-prefixed."
+        ),
     )
     parser.add_argument("--sweep-kernel", choices=["wedge"], default="wedge")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
