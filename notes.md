@@ -46,6 +46,8 @@
 - Tried using the leaky 1024 batch-2 subgroup shader for hidden 512x1024 linear-out projections as well as the value head; it was output-identical and exact-value-safe but slower in the full CFR benchmark, so it was reverted.
 - Retested leaf-temp release chunk 12 against the current chunk 16; it was output-identical but within noise, so the default remains 16.
 - Tried caching the gather-node-beliefs bind group; it was output-identical but slower, so it was reverted.
+- Tried a parallel-reduction all-in table shader; it was slower and changed CFR output too much because of changed accumulation order, so it was reverted.
+- Tried a pre-unpacked f32 all-in table lookup path; it was output-identical but within noise on confirmation, so it was reverted.
 
 ## Measurements
 - 2026-05-29 short no-op interleaved run, `bench_spots.json`, depth 4, iterations 32, runs 3:
@@ -118,6 +120,8 @@
   - `P2_LEAKY_OUT_BATCH2=1`: 394.0 ms baseline vs 395.3 ms candidate, speedup 0.996x; exact output match and exact value fixture pass.
   - `P2_RELEASE_LEAF_TEMPS_EVERY=12`: 394.2 ms chunk-16 baseline vs 394.2 ms candidate, speedup 1.000x, exact output match.
   - `P2_CACHE_GATHER_BIND_GROUP=1`: 395.1 ms baseline vs 395.7 ms candidate, speedup 0.998x, exact output match.
+  - `P2_PARALLEL_ALLIN=1`: 407.2 ms baseline vs 437.3 ms candidate, speedup 0.931x, policy diff about 0.090 and action-prob diff about 0.0029.
+  - `P2_FLOAT_ALLIN_TABLE=1`: short run was 394.7 ms baseline vs 394.6 ms candidate and longer confirmation was 392.7 ms baseline vs 392.2 ms candidate, but final confirmations were 396.4 ms baseline vs 396.8 ms candidate and 391.2 ms baseline vs 391.2 ms candidate; exact output match, but timing stayed within noise.
 
 ## Verification
 - `yarn typecheck`: pass.
