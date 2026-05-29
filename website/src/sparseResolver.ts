@@ -1098,11 +1098,17 @@ export class SparseCfrResolver {
     writeFloatBuffer(avgNumeratorBuffer, avgNumerator);
     writeFloatBuffer(avgDenominatorBuffer, avgDenominator);
     writeFloatBuffer(beliefsBuffer, beliefs);
-    writeFloatBuffer(beliefsAvgBuffer, beliefsAvg);
+    const skipUnusedBeliefsAvgUpload =
+      !cfrAvg && globalThis.process?.env?.P2_SKIP_UNUSED_BELIEFS_AVG_UPLOAD !== "0";
+    if (!skipUnusedBeliefsAvgUpload) {
+      writeFloatBuffer(beliefsAvgBuffer, beliefsAvg);
+    }
     writeFloatBuffer(valuesBuffer, staticGpu.foldTerminalValues);
     device.queue.writeBuffer(reachBuffer, 0, rootReach);
     device.queue.writeBuffer(beliefsBuffer, 0, rootBeliefs);
-    device.queue.writeBuffer(beliefsAvgBuffer, 0, rootBeliefs);
+    if (!skipUnusedBeliefsAvgUpload) {
+      device.queue.writeBuffer(beliefsAvgBuffer, 0, rootBeliefs);
+    }
 
     const profile = Boolean(globalThis.process?.env?.P2_PROFILE);
     const combinePrefixWithLeaf =
@@ -1231,7 +1237,9 @@ export class SparseCfrResolver {
         writeFloatBuffer(policyAvgBuffer, policyAvg);
         writeFloatBuffer(regretsBuffer, cumulativeRegrets);
         writeFloatBuffer(beliefsBuffer, beliefs);
-        writeFloatBuffer(beliefsAvgBuffer, beliefsAvg);
+        if (!skipUnusedBeliefsAvgUpload) {
+          writeFloatBuffer(beliefsAvgBuffer, beliefsAvg);
+        }
         const warmLeafDispose = await time("leafValuesWarm", () =>
           this.updateLeafValuesGpuBridge(
             treeBuffers,

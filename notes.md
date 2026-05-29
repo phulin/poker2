@@ -16,6 +16,7 @@
 - Prepared leaf features now cache exact-belief phase-shift GPU buffers per exact player/hand. Set `P2_CACHE_EXACT_PHASE_SHIFT=0` to benchmark the old rebuild/upload behavior.
 - Prepared leaf features now mark all-empty boards so BetterFFN can skip the board-interaction branch when it is mathematically zero. Set `P2_SKIP_EMPTY_BOARD_INTERACTION=0` to benchmark the old explicit-zero path.
 - Leaf prediction temporary buffers are now returned to the model buffer pool every 16 predictions instead of only at solve end. Set `P2_RELEASE_LEAF_TEMPS_EVERY=0` to benchmark the old retained-until-end path.
+- GPU sparse solves now skip `beliefsAvgBuffer` uploads when `cfrAvg=false`; set `P2_SKIP_UNUSED_BELIEFS_AVG_UPLOAD=0` to benchmark the old unused upload path.
 - Tried a two-input add kernel for belief phase shifts; it was output-identical but slightly slower, so it was reverted.
 - Tried caching repeated model uniform buffers; key-building overhead made it slower, so it was reverted.
 - Tried caching the zero input used by the three-input belief phase-shift add; it was output-identical but slower, so it was reverted.
@@ -68,6 +69,10 @@
   - release at solve end (`P2_RELEASE_LEAF_TEMPS_EVERY=0`) 534.9 ms, release every 16 predictions 525.6 ms, speedup 1.018x, exact output match.
   - longer confirmation with runs 9: release at solve end 747.6 ms, release every 16 predictions 727.2 ms, speedup 1.028x, exact output match.
   - release every 32 predictions was not stable: a direct 0 vs 32 run measured speedup 0.988x.
+- 2026-05-29 unused CFR-average belief upload skip, `bench_spots_root.json`, depth 6, iterations 128, `--compare-outputs`:
+  - old upload path (`P2_SKIP_UNUSED_BELIEFS_AVG_UPLOAD=0`) 409.0 ms, skipped path 406.2 ms, speedup 1.007x, exact output match.
+  - longer confirmation with runs 15: old upload path 406.6 ms, skipped path 406.1 ms, speedup 1.001x, exact output match.
+  - final confirmation after default flip with runs 9: old upload path 409.2 ms, skipped path 408.1 ms, speedup 1.003x, exact output match.
 - 2026-05-29 failed experiments:
   - `P2_ADD2_BELIEF_SHIFT=1`: 503.2 ms baseline vs 504.1 ms candidate, speedup 0.998x, exact output match.
   - `P2_CACHE_MODEL_UNIFORMS=1`: 506.7 ms baseline vs 534.4 ms candidate, speedup 0.948x, exact output match.
