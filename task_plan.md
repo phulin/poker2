@@ -47,6 +47,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Skipping the explicit queue wait before readback `mapAsync` was output-identical but slower, so it was reverted.
 - A 128-thread all-in table shader workgroup was output-identical but slower than the current 64-thread shader, so it was reverted.
 - Reference aggregate/apply kernels for regret weights and opponent policies were slower and changed CFR accumulation too much, so they were reverted.
+- Preferring batch-3 subgroup linear-in kernels was output-identical but slower than the current batch-4 selection, so it was reverted.
 
 ## Status
 **Current pass complete; goal remains active** - Added chunked leaf temporary-buffer release for an additional output-identical speedup. Continue with more leaf/model kernel candidates next.
