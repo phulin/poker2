@@ -858,7 +858,7 @@ def _tier3_wedge_p4_triton(
         return None
     batch_size, _, active_count = beliefs.shape
     block_h = 4
-    block_k = 256
+    block_k = 32
     k_blocks = triton.cdiv(active_count, block_k)
     partial_num = torch.empty(
         batch_size,
