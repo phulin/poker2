@@ -165,6 +165,8 @@
   - `P2_DISABLE_BATCH4_HAND_EMBEDDING=1`: falling back from the active batch-4 hand-embedding path alone was output-identical but slower, 411.0 ms baseline vs 414.3 ms candidate; reverted.
   - `P2_LEAKY_VALUE_HEAD_BATCH4=1`: adding a generated batch-4 leaky value-head output kernel had one short positive run, but longer confirmation reversed, 412.3 ms baseline vs 414.7 ms candidate; reverted.
   - `P2_LEAKY_VALUE_HEAD_BATCH3=1`: adding a generated batch-3 leaky value-head output kernel was output-identical but slower, 407.6 ms baseline vs 408.5 ms candidate; reverted.
+  - `P2_RELEASE_LEAF_TEMPS_EVERY=32`: retesting a larger leaf-temp release chunk after later buffer-pooling changes was output-identical but effectively tied, 416.2 ms chunk-16 baseline vs 416.1 ms candidate; default remains 16.
+  - `P2_RELEASE_LEAF_TEMPS_EVERY=64`: had two noisy positive runs against chunk 16, but final confirmation reversed, 408.8 ms chunk-16 baseline vs 409.2 ms candidate; default remains 16.
 
 ## Verification
 - `yarn typecheck`: pass.
