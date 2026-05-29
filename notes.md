@@ -26,6 +26,7 @@
 - Tried an exact-belief zero-sum value-head postprocess; it was exact-value-safe but slower, so it was reverted.
 - Tried an exact-belief all-in table shader; it was output-identical but within noise, so it was reverted.
 - Tried batch-3 subgroup value-head selection; it was output-identical but within noise, so it was reverted.
+- Tried skipping empty-board low-feature precompute kernels; it was output-identical but within noise, so it was reverted.
 
 ## Measurements
 - 2026-05-29 short no-op interleaved run, `bench_spots.json`, depth 4, iterations 32, runs 3:
@@ -71,6 +72,7 @@
   - `P2_EXACT_ZERO_SUM=1`: 540.4 ms baseline vs 544.7 ms candidate, speedup 0.992x, exact output match and exact value fixture pass.
   - `P2_EXACT_ALLIN_TABLE=1`: 525.9 ms baseline vs 525.0 ms candidate, speedup 1.002x, exact output match.
   - `P2_VALUE_HEAD_BATCH3=1`: 407.3 ms baseline vs 407.5 ms candidate, speedup 0.999x, exact output match and exact value fixture pass.
+  - `P2_SKIP_EMPTY_BOARD_PRECOMPUTE=1`: 408.2 ms baseline vs 408.0 ms candidate, speedup 1.000x, exact output match.
 
 ## Verification
 - `yarn typecheck`: pass.
