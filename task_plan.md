@@ -37,6 +37,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Compute-pipeline bind-group-layout caching was output-identical but within timing noise, so it was reverted.
 - Fusing exact-belief phase shifts into the BetterFFN half-norm path sped up root policy/action output but failed exact value fixture parity, so it was reverted.
 - Sparse solve CPU scratch-array reuse was output-identical but within timing noise, so it was reverted.
+- Exact-belief zero-sum value-head postprocess specialization was exact-value-safe but slower, so it was reverted.
 
 ## Status
 **Current pass complete; goal remains active** - Added chunked leaf temporary-buffer release for an additional output-identical speedup. Continue with more leaf/model kernel candidates next.
