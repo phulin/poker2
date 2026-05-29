@@ -1107,6 +1107,16 @@ export class SparseCfrResolver {
     const profile = Boolean(globalThis.process?.env?.P2_PROFILE);
     const combinePrefixWithLeaf =
       globalThis.process?.env?.P2_COMBINE_PREFIX_WITH_LEAF !== "0";
+    const leafDisposalChunk = Math.max(
+      0,
+      Number.parseInt(globalThis.process?.env?.P2_RELEASE_LEAF_TEMPS_EVERY ?? "16", 10) || 0,
+    );
+    const trackLeafDisposal = (dispose: () => void): void => {
+      pendingLeafDisposals.push(dispose);
+      if (leafDisposalChunk > 0 && pendingLeafDisposals.length >= leafDisposalChunk) {
+        for (const pending of pendingLeafDisposals.splice(0)) pending();
+      }
+    };
     const phaseTotals = new Map<string, number>();
     const phaseCounts = new Map<string, number>();
     const time = async <T>(label: string, fn: () => T | Promise<T>): Promise<T> => {
@@ -1202,7 +1212,7 @@ export class SparseCfrResolver {
           ),
         ),
       );
-      pendingLeafDisposals.push(initialLeafDispose);
+      trackLeafDisposal(initialLeafDispose);
 
       if (warmStartIterations > 0) {
         const values = await readFloatBuffer(device, valuesBuffer, valueCount);
@@ -1254,7 +1264,7 @@ export class SparseCfrResolver {
             ),
           ),
         );
-        pendingLeafDisposals.push(warmLeafDispose);
+        trackLeafDisposal(warmLeafDispose);
       }
 
       let prefixAlreadyEncoded = combinePrefixWithLeaf && warmStartIterations < iterations;
@@ -1299,7 +1309,7 @@ export class SparseCfrResolver {
               encodeExpectedThenMaybeNextPrefix(combinePrefixWithLeaf ? t + 1 : undefined),
             ),
           );
-          pendingLeafDisposals.push(disposeLeafPrediction);
+          trackLeafDisposal(disposeLeafPrediction);
           prefixAlreadyEncoded = combinePrefixWithLeaf;
         }
         onProgress?.({ iteration: t + 1, iterations });
