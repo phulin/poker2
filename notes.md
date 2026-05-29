@@ -135,6 +135,7 @@
   - `P2_SINGLE_MODEL_PASS=1`: keeping one compute pass open across consecutive BetterFFN dispatches was exact-value-safe and CFR output-identical, but slightly slower in the full benchmark, 392.9 ms baseline vs 393.3 ms candidate.
   - `P2_SPARSE_SINGLE_PASS=1`: keeping one compute pass open across sparse-CFR dispatches crossed command-encoder copy operations, produced invalid command buffers, changed CFR output, and was slightly slower; reverted.
   - `P2_RELEASE_LEAF_TEMPS_EVERY=20`: exact output and a tiny short-run positive against chunk 16, but longer confirmation was effectively tied, 391.036 ms vs 391.016 ms; default remains 16.
+  - `P2_PRECOMPUTE_ALPHA_BITS=1`: precomputing residual alpha bit patterns once per prediction was output-identical but slower, 393.2 ms old path vs 393.5 ms candidate; reverted.
 
 ## Verification
 - `yarn typecheck`: pass.
