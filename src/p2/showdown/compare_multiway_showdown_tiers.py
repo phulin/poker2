@@ -1336,11 +1336,15 @@ def _tier3_second_order_opp_collision_by_hand_impl(
         card_idx1 = card_idx1[None, None].expand(players, 3, -1, -1, -1)
         conflict_response_all = card_all.gather(4, card_idx0) + card_all.gather(4, card_idx1)
         conflict_response_all = conflict_response_all - weighted_rel_all
-    tie_weight_3 = torch.empty(2, 2, 2, dtype=dtype, device=device)
-    for mode0 in range(2):
-        for mode1 in range(2):
-            for mode2 in range(2):
-                tie_weight_3[mode0, mode1, mode2] = 1.0 / float(mode0 + mode1 + mode2 + 1)
+    tie_weight_3 = None
+    if wedge_p4 is None:
+        tie_weight_3 = torch.empty(2, 2, 2, dtype=dtype, device=device)
+        for mode0 in range(2):
+            for mode1 in range(2):
+                for mode2 in range(2):
+                    tie_weight_3[mode0, mode1, mode2] = 1.0 / float(
+                        mode0 + mode1 + mode2 + 1
+                    )
 
     equities: list[torch.Tensor] = []
     numerator_active = torch.zeros(
@@ -1481,6 +1485,8 @@ def _tier3_second_order_opp_collision_by_hand_impl(
                 denominator = denominator + wedge * denom_other
 
                 if opp_count == 3:
+                    if tie_weight_3 is None:
+                        raise RuntimeError("tie_weight_3 is required for dense tier3")
                     wedge_modes = torch.einsum(
                         "xbhk,ybhk,zbhk->xyzbh",
                         weighted_rel[center, :2],
