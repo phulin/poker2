@@ -160,6 +160,9 @@
   - `P2_COPY_STATIC_FOLD_VALUES=1`: cached GPU fold-terminal value initialization had positive early runs, but a later confirmation reversed, 428.0 ms CPU write path vs 440.0 ms cached GPU copy path; reverted.
   - `P2_CACHE_ALLIN_CONTEXT=1`: caching the resolved all-in table context on sparse tree entries was output-identical and had positive runs, but post-flip confirmation reversed, 494.3 ms old provider lookup path vs 504.5 ms cached path; reverted.
   - `P2_CACHE_MODEL_UNIFORMS=1`: caching repeated BetterFFN uniform buffers was output-identical and had one tiny positive run, 414.0 ms baseline vs 413.7 ms candidate, but repeat confirmation was slower, 414.1 ms baseline vs 414.9 ms candidate; reverted.
+  - `P2_DISABLE_BATCH4_MATVEC=1`: falling back from both active batch-4 plain matvec paths was output-identical but slightly slower, 413.7 ms baseline vs 414.0 ms candidate; reverted.
+  - `P2_DISABLE_BATCH4_LINEAR_IN=1`: falling back from the active batch-4 1024x512 linear-in path alone was output-identical but flat/slower, 408.0 ms baseline vs 408.1 ms candidate; reverted.
+  - `P2_DISABLE_BATCH4_HAND_EMBEDDING=1`: falling back from the active batch-4 hand-embedding path alone was output-identical but slower, 411.0 ms baseline vs 414.3 ms candidate; reverted.
 
 ## Verification
 - `yarn typecheck`: pass.
