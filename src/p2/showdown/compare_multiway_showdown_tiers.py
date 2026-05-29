@@ -848,75 +848,80 @@ if triton is not None:
         lower = disjoint & (rank_k[None, :] < rank_h[:, None])
         tied = disjoint & (rank_k[None, :] == rank_h[:, None])
 
-        den_total = tl.zeros((BLOCK_H,), dtype=tl.float32)
-        num_total = tl.zeros((BLOCK_H,), dtype=tl.float32)
-        for center_local in tl.static_range(0, 3):
-            center = tl.where(center_local < hero, center_local, center_local + 1)
-            side_a_local = tl.where(center_local == 0, 1, 0)
-            side_b_local = tl.where(center_local == 2, 1, 2)
-            side_a = tl.where(side_a_local < hero, side_a_local, side_a_local + 1)
-            side_b = tl.where(side_b_local < hero, side_b_local, side_b_local + 1)
+        opp0 = tl.where(0 < hero, 0, 1)
+        opp1 = tl.where(1 < hero, 1, 2)
+        opp2 = tl.where(2 < hero, 2, 3)
 
-            center_belief = tl.load(
-                beliefs + (b * 4 + center) * H + k,
-                mask=k < H,
-                other=0.0,
-            )
-            w0 = tl.where(lower, center_belief[None, :], 0.0)
-            w1 = tl.where(tied, center_belief[None, :], 0.0)
-            w2 = tl.where(disjoint, center_belief[None, :], 0.0)
+        b0 = tl.load(beliefs + (b * 4 + opp0) * H + k, mask=k < H, other=0.0)
+        b1 = tl.load(beliefs + (b * 4 + opp1) * H + k, mask=k < H, other=0.0)
+        b2 = tl.load(beliefs + (b * 4 + opp2) * H + k, mask=k < H, other=0.0)
+        w00 = tl.where(lower, b0[None, :], 0.0)
+        w01 = tl.where(tied, b0[None, :], 0.0)
+        w02 = tl.where(disjoint, b0[None, :], 0.0)
+        w10 = tl.where(lower, b1[None, :], 0.0)
+        w11 = tl.where(tied, b1[None, :], 0.0)
+        w12 = tl.where(disjoint, b1[None, :], 0.0)
+        w20 = tl.where(lower, b2[None, :], 0.0)
+        w21 = tl.where(tied, b2[None, :], 0.0)
+        w22 = tl.where(disjoint, b2[None, :], 0.0)
 
-            side_a_belief = tl.load(
-                beliefs + (b * 4 + side_a) * H + k,
-                mask=k < H,
-                other=0.0,
-            )
-            side_b_belief = tl.load(
-                beliefs + (b * 4 + side_b) * H + k,
-                mask=k < H,
-                other=0.0,
-            )
-            side_a_w0 = tl.where(lower, side_a_belief[None, :], 0.0)
-            side_a_w1 = tl.where(tied, side_a_belief[None, :], 0.0)
-            side_a_w2 = tl.where(disjoint, side_a_belief[None, :], 0.0)
-            side_b_w0 = tl.where(lower, side_b_belief[None, :], 0.0)
-            side_b_w1 = tl.where(tied, side_b_belief[None, :], 0.0)
-            side_b_w2 = tl.where(disjoint, side_b_belief[None, :], 0.0)
+        o0_base0 = (((opp0 * 3 + 0) * B + b) * H + h[:, None]) * CARD_COUNT
+        o0_base1 = o0_base0 + B * H * CARD_COUNT
+        o0_base2 = o0_base0 + 2 * B * H * CARD_COUNT
+        o1_base0 = (((opp1 * 3 + 0) * B + b) * H + h[:, None]) * CARD_COUNT
+        o1_base1 = o1_base0 + B * H * CARD_COUNT
+        o1_base2 = o1_base0 + 2 * B * H * CARD_COUNT
+        o2_base0 = (((opp2 * 3 + 0) * B + b) * H + h[:, None]) * CARD_COUNT
+        o2_base1 = o2_base0 + B * H * CARD_COUNT
+        o2_base2 = o2_base0 + 2 * B * H * CARD_COUNT
 
-            ca0_base = (((side_a * 3 + 0) * B + b) * H + h[:, None]) * CARD_COUNT
-            ca1_base = ca0_base + B * H * CARD_COUNT
-            ca2_base = ca0_base + 2 * B * H * CARD_COUNT
-            cb0_base = (((side_b * 3 + 0) * B + b) * H + h[:, None]) * CARD_COUNT
-            cb1_base = cb0_base + B * H * CARD_COUNT
-            cb2_base = cb0_base + 2 * B * H * CARD_COUNT
+        r00 = tl.load(card_all + o0_base0 + k_c0[None, :], mask=hk_mask, other=0.0)
+        r00 += tl.load(card_all + o0_base0 + k_c1[None, :], mask=hk_mask, other=0.0)
+        r00 -= w00
+        r01 = tl.load(card_all + o0_base1 + k_c0[None, :], mask=hk_mask, other=0.0)
+        r01 += tl.load(card_all + o0_base1 + k_c1[None, :], mask=hk_mask, other=0.0)
+        r01 -= w01
+        r02 = tl.load(card_all + o0_base2 + k_c0[None, :], mask=hk_mask, other=0.0)
+        r02 += tl.load(card_all + o0_base2 + k_c1[None, :], mask=hk_mask, other=0.0)
+        r02 -= w02
 
-            a0 = tl.load(card_all + ca0_base + k_c0[None, :], mask=hk_mask, other=0.0)
-            a0 += tl.load(card_all + ca0_base + k_c1[None, :], mask=hk_mask, other=0.0)
-            a0 -= side_a_w0
-            a1 = tl.load(card_all + ca1_base + k_c0[None, :], mask=hk_mask, other=0.0)
-            a1 += tl.load(card_all + ca1_base + k_c1[None, :], mask=hk_mask, other=0.0)
-            a1 -= side_a_w1
-            a2 = tl.load(card_all + ca2_base + k_c0[None, :], mask=hk_mask, other=0.0)
-            a2 += tl.load(card_all + ca2_base + k_c1[None, :], mask=hk_mask, other=0.0)
-            a2 -= side_a_w2
-            c0 = tl.load(card_all + cb0_base + k_c0[None, :], mask=hk_mask, other=0.0)
-            c0 += tl.load(card_all + cb0_base + k_c1[None, :], mask=hk_mask, other=0.0)
-            c0 -= side_b_w0
-            c1 = tl.load(card_all + cb1_base + k_c0[None, :], mask=hk_mask, other=0.0)
-            c1 += tl.load(card_all + cb1_base + k_c1[None, :], mask=hk_mask, other=0.0)
-            c1 -= side_b_w1
-            c2 = tl.load(card_all + cb2_base + k_c0[None, :], mask=hk_mask, other=0.0)
-            c2 += tl.load(card_all + cb2_base + k_c1[None, :], mask=hk_mask, other=0.0)
-            c2 -= side_b_w2
+        r10 = tl.load(card_all + o1_base0 + k_c0[None, :], mask=hk_mask, other=0.0)
+        r10 += tl.load(card_all + o1_base0 + k_c1[None, :], mask=hk_mask, other=0.0)
+        r10 -= w10
+        r11 = tl.load(card_all + o1_base1 + k_c0[None, :], mask=hk_mask, other=0.0)
+        r11 += tl.load(card_all + o1_base1 + k_c1[None, :], mask=hk_mask, other=0.0)
+        r11 -= w11
+        r12 = tl.load(card_all + o1_base2 + k_c0[None, :], mask=hk_mask, other=0.0)
+        r12 += tl.load(card_all + o1_base2 + k_c1[None, :], mask=hk_mask, other=0.0)
+        r12 -= w12
 
-            ac00 = a0 * c0
-            ac10 = a1 * c0
-            ac01 = a0 * c1
-            ac11 = a1 * c1
-            combo0 = ac00 + 0.5 * (ac10 + ac01) + (1.0 / 3.0) * ac11
-            combo1 = 0.5 * ac00 + (1.0 / 3.0) * (ac10 + ac01) + 0.25 * ac11
-            den_total += tl.sum(w2 * a2 * c2, axis=1)
-            num_total += tl.sum(w0 * combo0 + w1 * combo1, axis=1)
+        r20 = tl.load(card_all + o2_base0 + k_c0[None, :], mask=hk_mask, other=0.0)
+        r20 += tl.load(card_all + o2_base0 + k_c1[None, :], mask=hk_mask, other=0.0)
+        r20 -= w20
+        r21 = tl.load(card_all + o2_base1 + k_c0[None, :], mask=hk_mask, other=0.0)
+        r21 += tl.load(card_all + o2_base1 + k_c1[None, :], mask=hk_mask, other=0.0)
+        r21 -= w21
+        r22 = tl.load(card_all + o2_base2 + k_c0[None, :], mask=hk_mask, other=0.0)
+        r22 += tl.load(card_all + o2_base2 + k_c1[None, :], mask=hk_mask, other=0.0)
+        r22 -= w22
+
+        combo0 = r10 * r20 + 0.5 * (r11 * r20 + r10 * r21) + (1.0 / 3.0) * r11 * r21
+        combo1 = 0.5 * r10 * r20 + (1.0 / 3.0) * (r11 * r20 + r10 * r21)
+        combo1 += 0.25 * r11 * r21
+        den_total = tl.sum(w02 * r12 * r22, axis=1)
+        num_total = tl.sum(w00 * combo0 + w01 * combo1, axis=1)
+
+        combo0 = r00 * r20 + 0.5 * (r01 * r20 + r00 * r21) + (1.0 / 3.0) * r01 * r21
+        combo1 = 0.5 * r00 * r20 + (1.0 / 3.0) * (r01 * r20 + r00 * r21)
+        combo1 += 0.25 * r01 * r21
+        den_total += tl.sum(w12 * r02 * r22, axis=1)
+        num_total += tl.sum(w10 * combo0 + w11 * combo1, axis=1)
+
+        combo0 = r00 * r10 + 0.5 * (r01 * r10 + r00 * r11) + (1.0 / 3.0) * r01 * r11
+        combo1 = 0.5 * r00 * r10 + (1.0 / 3.0) * (r01 * r10 + r00 * r11)
+        combo1 += 0.25 * r01 * r11
+        den_total += tl.sum(w22 * r02 * r12, axis=1)
+        num_total += tl.sum(w20 * combo0 + w21 * combo1, axis=1)
 
         out_base = ((b * 4 + hero) * K_BLOCKS + k_block) * H + h
         tl.store(wedge_den_out + out_base, den_total, mask=h_mask)
