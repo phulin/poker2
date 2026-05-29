@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from dataclasses import dataclass
 
@@ -81,6 +82,11 @@ class _ActiveTierContext:
 
 _P4_PLAYER_PAIRS = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
 _P4_PLAYER_PAIR_INDEX = {pair: idx for idx, pair in enumerate(_P4_PLAYER_PAIRS)}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    return default if value is None else int(value)
 
 
 def random_full_board(
@@ -1214,7 +1220,7 @@ def _tier3_wedge_p4_triton(
     if triton is None or beliefs.device.type != "cuda" or beliefs.shape[1] != 4:
         return None
     batch_size, _, active_count = beliefs.shape
-    block_h = 8
+    block_h = _env_int("P2_SHOWDOWN_WEDGE_BLOCK_H", 8)
     block_k = 32
     k_blocks = triton.cdiv(active_count, block_k)
     num_out = torch.empty(
@@ -1241,8 +1247,8 @@ def _tier3_wedge_p4_triton(
         K_BLOCKS=k_blocks,
         BLOCK_H=block_h,
         BLOCK_K=block_k,
-        num_warps=1,
-        num_stages=5,
+        num_warps=_env_int("P2_SHOWDOWN_WEDGE_NUM_WARPS", 1),
+        num_stages=_env_int("P2_SHOWDOWN_WEDGE_NUM_STAGES", 5),
     )
     return num_out, den_out
 

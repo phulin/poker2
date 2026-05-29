@@ -219,6 +219,67 @@ def _check_small_correctness(device: torch.device, players: int, seed: int) -> d
     return out
 
 
+def _parse_sweep_tuples(spec: str | None, *, kernel: str) -> list[dict[str, int | str]]:
+    if not spec:
+        return [{"label": "default"}]
+    configs: list[dict[str, int | str]] = []
+    for raw_chunk in spec.split(";"):
+        chunk = raw_chunk.strip()
+        if not chunk:
+            continue
+        if ":" in chunk:
+            label, values = chunk.split(":", 1)
+            label = label.strip()
+        else:
+            label = ""
+            values = chunk
+        parts = [part.strip() for part in values.split(",")]
+        if len(parts) != 3:
+            raise ValueError(
+                "--sweep-tuples entries must be h,warps,stages or label:h,warps,stages"
+            )
+        block_h, num_warps, num_stages = (int(part) for part in parts)
+        if not label:
+            label = f"{kernel}_h{block_h}_w{num_warps}_s{num_stages}"
+        configs.append(
+            {
+                "label": label,
+                "block_h": block_h,
+                "num_warps": num_warps,
+                "num_stages": num_stages,
+            }
+        )
+    if not configs:
+        raise ValueError("--sweep-tuples did not contain any tuples")
+    return configs
+
+
+def _sweep_env(config: dict[str, int | str], *, kernel: str) -> dict[str, str]:
+    if "block_h" not in config:
+        return {}
+    if kernel != "wedge":
+        raise ValueError(f"Unsupported sweep kernel {kernel!r}")
+    return {
+        "P2_SHOWDOWN_WEDGE_BLOCK_H": str(config["block_h"]),
+        "P2_SHOWDOWN_WEDGE_NUM_WARPS": str(config["num_warps"]),
+        "P2_SHOWDOWN_WEDGE_NUM_STAGES": str(config["num_stages"]),
+    }
+
+
+@contextmanager
+def temporary_env(updates: dict[str, str]):
+    previous = {key: os.environ.get(key) for key in updates}
+    os.environ.update(updates)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-size", type=int, default=512)
@@ -232,6 +293,11 @@ def main() -> None:
     parser.add_argument("--pause-train", action="store_true")
     parser.add_argument("--pause-pattern", default="train_rebel")
     parser.add_argument("--check-small", action="store_true")
+    parser.add_argument(
+        "--sweep-tuples",
+        help="Semicolon-separated h,warps,stages tuples, optionally label:h,warps,stages.",
+    )
+    parser.add_argument("--sweep-kernel", choices=["wedge"], default="wedge")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
 
@@ -263,50 +329,75 @@ def main() -> None:
     )
     rows: list[dict[str, float | int | str]] = []
     rng = random.Random(args.seed)
+    sweep_configs = _parse_sweep_tuples(args.sweep_tuples, kernel=args.sweep_kernel)
     with pause_train(args.pause_train, args.pause_pattern):
-        for name in requested:
-            for _ in range(args.warmup):
-                _measure(functions[name], prepared)
-        if device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(device)
+        for config in sweep_configs:
+            config_label = str(config["label"])
+            env_updates = _sweep_env(config, kernel=args.sweep_kernel)
+            if env_updates:
+                print(f"Sweep config {config_label}: {env_updates}", flush=True)
+            with temporary_env(env_updates):
+                for name in requested:
+                    for _ in range(args.warmup):
+                        _measure(functions[name], prepared)
+                if device.type == "cuda":
+                    torch.cuda.reset_peak_memory_stats(device)
 
-        for iteration in range(args.iters):
-            order = requested[:]
-            rng.shuffle(order)
-            for name in order:
-                cuda_ms, wall_ms, result = _measure(functions[name], prepared)
-                row: dict[str, float | int | str] = {
-                    "iteration": iteration,
-                    "tier": name,
-                    "cuda_ms": cuda_ms,
-                    "wall_ms": wall_ms,
-                    "result_seconds": result.seconds,
-                    "ms_per_board": cuda_ms / args.batch_size,
-                }
-                rows.append(row)
-                print(
-                    f"{name} iter={iteration} cuda={cuda_ms:.3f}ms "
-                    f"wall={wall_ms:.3f}ms per_board={cuda_ms / args.batch_size:.6f}ms",
-                    flush=True,
-                )
-                del result
+                for iteration in range(args.iters):
+                    order = requested[:]
+                    rng.shuffle(order)
+                    for name in order:
+                        cuda_ms, wall_ms, result = _measure(functions[name], prepared)
+                        row: dict[str, float | int | str] = {
+                            "config": config_label,
+                            "iteration": iteration,
+                            "tier": name,
+                            "cuda_ms": cuda_ms,
+                            "wall_ms": wall_ms,
+                            "result_seconds": result.seconds,
+                            "ms_per_board": cuda_ms / args.batch_size,
+                        }
+                        if "block_h" in config:
+                            row["block_h"] = int(config["block_h"])
+                            row["num_warps"] = int(config["num_warps"])
+                            row["num_stages"] = int(config["num_stages"])
+                        rows.append(row)
+                        prefix = f"{config_label} " if args.sweep_tuples else ""
+                        print(
+                            f"{prefix}{name} iter={iteration} cuda={cuda_ms:.3f}ms "
+                            f"wall={wall_ms:.3f}ms per_board={cuda_ms / args.batch_size:.6f}ms",
+                            flush=True,
+                        )
+                        del result
 
-    grouped: dict[str, list[float]] = defaultdict(list)
-    grouped_wall: dict[str, list[float]] = defaultdict(list)
+    grouped: dict[tuple[str, str], list[float]] = defaultdict(list)
+    grouped_wall: dict[tuple[str, str], list[float]] = defaultdict(list)
     for row in rows:
-        grouped[str(row["tier"])].append(float(row["cuda_ms"]))
-        grouped_wall[str(row["tier"])].append(float(row["wall_ms"]))
-    summary = {
-        name: {
-            "cuda_ms": _summarize(grouped[name]),
-            "steady_cuda_ms": _summarize(grouped[name][1:]),
-            "wall_ms": _summarize(grouped_wall[name]),
-            "steady_wall_ms": _summarize(grouped_wall[name][1:]),
-            "cuda_ms_per_board_mean": _summarize(grouped[name]).get("mean", 0.0)
-            / args.batch_size,
+        key = (str(row["config"]), str(row["tier"]))
+        grouped[key].append(float(row["cuda_ms"]))
+        grouped_wall[key].append(float(row["wall_ms"]))
+
+    nested_summary = {}
+    for config in sweep_configs:
+        config_label = str(config["label"])
+        config_tiers = sorted(
+            {key_tier for key_config, key_tier in grouped if key_config == config_label}
+        )
+        nested_summary[config_label] = {
+            tier: {
+                "cuda_ms": _summarize(grouped[(config_label, tier)]),
+                "steady_cuda_ms": _summarize(grouped[(config_label, tier)][1:]),
+                "wall_ms": _summarize(grouped_wall[(config_label, tier)]),
+                "steady_wall_ms": _summarize(grouped_wall[(config_label, tier)][1:]),
+                "cuda_ms_per_board_mean": _summarize(grouped[(config_label, tier)]).get(
+                    "mean",
+                    0.0,
+                )
+                / args.batch_size,
+            }
+            for tier in config_tiers
         }
-        for name in sorted(grouped)
-    }
+    summary = nested_summary if args.sweep_tuples else nested_summary["default"]
     checks = _check_small_correctness(device, args.players, args.seed + 999) if args.check_small else {}
     output = {
         "batch_size": args.batch_size,
@@ -315,6 +406,8 @@ def main() -> None:
         "seed": args.seed,
         "warmup": args.warmup,
         "iters": args.iters,
+        "sweep_kernel": args.sweep_kernel if args.sweep_tuples else None,
+        "sweep_configs": sweep_configs if args.sweep_tuples else [],
         "rows": rows,
         "summary": summary,
         "checks": checks,
