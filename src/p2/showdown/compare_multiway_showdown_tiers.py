@@ -47,6 +47,8 @@ class _TierBoardContext:
     local_pair_ids: torch.Tensor
     pair_p_ids: torch.Tensor
     pair_q_ids: torch.Tensor
+    pair_p_rank_flags: torch.Tensor
+    pair_q_rank_flags: torch.Tensor
     allowed: torch.Tensor
     order: torch.Tensor
     sorted_ranks: torch.Tensor
@@ -70,6 +72,8 @@ class _ActiveTierContext:
     local_pair_ids: torch.Tensor
     pair_p_ids: torch.Tensor
     pair_q_ids: torch.Tensor
+    pair_p_rank_flags: torch.Tensor
+    pair_q_rank_flags: torch.Tensor
     allowed: torch.Tensor
     order: torch.Tensor
     sorted_ranks: torch.Tensor
@@ -256,6 +260,26 @@ def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
         2,
         local_c1[:, None, :].expand(-1, 47, -1),
     ).permute(0, 2, 1).contiguous()
+    full_ranks = prepared.hand_ranks.reshape(batch_size, NUM_HANDS)
+    pair_p_rank = full_ranks.gather(
+        1,
+        pair_p_ids.clamp_min(0).long().reshape(batch_size, -1),
+    ).reshape(batch_size, active_count, 47)
+    pair_q_rank = full_ranks.gather(
+        1,
+        pair_q_ids.clamp_min(0).long().reshape(batch_size, -1),
+    ).reshape(batch_size, active_count, 47)
+    valid_p = pair_p_ids >= 0
+    valid_q = pair_q_ids >= 0
+    rank_h = ranks[:, :, None]
+    pair_p_rank_flags = (
+        ((valid_p & (pair_p_rank < rank_h)).to(torch.uint8))
+        | ((valid_p & (pair_p_rank == rank_h)).to(torch.uint8) << 1)
+    ).contiguous()
+    pair_q_rank_flags = (
+        ((valid_q & (pair_q_rank < rank_h)).to(torch.uint8))
+        | ((valid_q & (pair_q_rank == rank_h)).to(torch.uint8) << 1)
+    ).contiguous()
     order = torch.argsort(ranks, dim=1).to(torch.int32)
     sorted_ranks = ranks.gather(1, order)
     sorted_c0 = local_c0.gather(1, order)
@@ -292,6 +316,8 @@ def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
         local_pair_ids=local_pair_ids,
         pair_p_ids=pair_p_ids,
         pair_q_ids=pair_q_ids,
+        pair_p_rank_flags=pair_p_rank_flags,
+        pair_q_rank_flags=pair_q_rank_flags,
         allowed=allowed,
         order=order,
         sorted_ranks=sorted_ranks,
@@ -333,6 +359,8 @@ def _active_context(
         local_pair_ids=board_ctx.local_pair_ids,
         pair_p_ids=board_ctx.pair_p_ids,
         pair_q_ids=board_ctx.pair_q_ids,
+        pair_p_rank_flags=board_ctx.pair_p_rank_flags,
+        pair_q_rank_flags=board_ctx.pair_q_rank_flags,
         allowed=board_ctx.allowed,
         order=board_ctx.order,
         sorted_ranks=board_ctx.sorted_ranks,
@@ -666,12 +694,12 @@ if triton is not None:
         card_prefix,
         beliefs,
         full_beliefs,
-        hand_ranks,
         local_c0,
         local_c1,
         pair_p_ids,
         pair_q_ids,
-        ranks,
+        pair_p_rank_flags,
+        pair_q_rank_flags,
         lower_end,
         tie_end,
         scalar_out,
@@ -696,13 +724,11 @@ if triton is not None:
             lower = tl.load(lower_end + b * H + h, mask=h_mask, other=0)
             start = 0
             end = lower
-            rank = tl.load(ranks + b * H + h, mask=h_mask, other=0)
         elif MODE == 1:
             lower = tl.load(lower_end + b * H + h, mask=h_mask, other=0)
             tie = tl.load(tie_end + b * H + h, mask=h_mask, other=0)
             start = lower
             end = tie
-            rank = tl.load(ranks + b * H + h, mask=h_mask, other=0)
         else:
             start = 0
             end = H
@@ -751,15 +777,15 @@ if triton is not None:
         valid_p = hc_mask & (pair_p >= 0)
         valid_q = hc_mask & (pair_q >= 0)
         if MODE == 0:
-            rank_p = tl.load(hand_ranks + b * FULL_H + pair_p, mask=valid_p, other=-1)
-            rank_q = tl.load(hand_ranks + b * FULL_H + pair_q, mask=valid_q, other=-1)
-            row_p = valid_p & (rank_p < rank[:, None])
-            row_q = valid_q & (rank_q < rank[:, None])
+            flags_p = tl.load(pair_p_rank_flags + pair_base, mask=hc_mask, other=0)
+            flags_q = tl.load(pair_q_rank_flags + pair_base, mask=hc_mask, other=0)
+            row_p = valid_p & ((flags_p & 1) != 0)
+            row_q = valid_q & ((flags_q & 1) != 0)
         elif MODE == 1:
-            rank_p = tl.load(hand_ranks + b * FULL_H + pair_p, mask=valid_p, other=-1)
-            rank_q = tl.load(hand_ranks + b * FULL_H + pair_q, mask=valid_q, other=-1)
-            row_p = valid_p & (rank_p == rank[:, None])
-            row_q = valid_q & (rank_q == rank[:, None])
+            flags_p = tl.load(pair_p_rank_flags + pair_base, mask=hc_mask, other=0)
+            flags_q = tl.load(pair_q_rank_flags + pair_base, mask=hc_mask, other=0)
+            row_p = valid_p & ((flags_p & 2) != 0)
+            row_q = valid_q & ((flags_q & 2) != 0)
         else:
             row_p = valid_p
             row_q = valid_q
@@ -1355,12 +1381,12 @@ def _tier2_prefix_factors_triton(
     pair_card_prefix: torch.Tensor,
     beliefs: torch.Tensor,
     full_beliefs: torch.Tensor,
-    hand_ranks: torch.Tensor,
     local_c0: torch.Tensor,
     local_c1: torch.Tensor,
     pair_p_ids: torch.Tensor,
     pair_q_ids: torch.Tensor,
-    ranks: torch.Tensor,
+    pair_p_rank_flags: torch.Tensor,
+    pair_q_rank_flags: torch.Tensor,
     lower_end: torch.Tensor,
     tie_end: torch.Tensor,
     dtype: torch.dtype,
@@ -1395,12 +1421,12 @@ def _tier2_prefix_factors_triton(
             card_prefix,
             beliefs,
             full_beliefs,
-            hand_ranks,
             local_c0,
             local_c1,
             pair_p_ids,
             pair_q_ids,
-            ranks,
+            pair_p_rank_flags,
+            pair_q_rank_flags,
             lower_end,
             tie_end,
             scalar_all,
@@ -1756,12 +1782,12 @@ def _tier2_prefix_factors(
             pair_card_prefix=pair_card_prefix.contiguous(),
             beliefs=beliefs.contiguous(),
             full_beliefs=full_beliefs,
-            hand_ranks=prepared.hand_ranks.reshape(batch_size, NUM_HANDS).contiguous(),
             local_c0=local_c0.contiguous(),
             local_c1=local_c1.contiguous(),
             pair_p_ids=pair_p_ids.contiguous(),
             pair_q_ids=pair_q_ids.contiguous(),
-            ranks=ctx.ranks.contiguous(),
+            pair_p_rank_flags=ctx.pair_p_rank_flags.contiguous(),
+            pair_q_rank_flags=ctx.pair_q_rank_flags.contiguous(),
             lower_end=lower_end.contiguous(),
             tie_end=tie_end.contiguous(),
             dtype=dtype,
