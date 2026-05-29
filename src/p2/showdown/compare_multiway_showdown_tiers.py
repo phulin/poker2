@@ -1220,7 +1220,7 @@ def _tier3_wedge_p4_triton(
     if triton is None or beliefs.device.type != "cuda" or beliefs.shape[1] != 4:
         return None
     batch_size, _, active_count = beliefs.shape
-    block_h = _env_int("P2_SHOWDOWN_WEDGE_BLOCK_H", 8)
+    block_h = _env_int("P2_SHOWDOWN_WEDGE_BLOCK_H", 2)
     block_k = 32
     k_blocks = triton.cdiv(active_count, block_k)
     num_out = torch.empty(
@@ -1248,7 +1248,7 @@ def _tier3_wedge_p4_triton(
         BLOCK_H=block_h,
         BLOCK_K=block_k,
         num_warps=_env_int("P2_SHOWDOWN_WEDGE_NUM_WARPS", 1),
-        num_stages=_env_int("P2_SHOWDOWN_WEDGE_NUM_STAGES", 5),
+        num_stages=_env_int("P2_SHOWDOWN_WEDGE_NUM_STAGES", 3),
     )
     return num_out, den_out
 
