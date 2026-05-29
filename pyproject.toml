@@ -90,6 +90,9 @@ src_paths = ["src", "tests", "debugging"]
 known_first_party = ["p2"]
 
 [tool.pytest.ini_options]
+markers = [
+    "slow: expensive exact showdown or training tests",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:wandb.*",
     "ignore::DeprecationWarning:wandb.analytics.sentry.*",
