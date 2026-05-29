@@ -113,6 +113,15 @@ function uniformBeliefs(): Float32Array<ArrayBuffer> {
   return beliefs;
 }
 
+function maxArrayDiff(a: Float32Array, b: Float32Array): number {
+  assert.equal(a.length, b.length);
+  let maxDiff = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    maxDiff = Math.max(maxDiff, Math.abs(a[i]! - b[i]!));
+  }
+  return maxDiff;
+}
+
 test("sparse resolver supports depth greater than one", async () => {
   const betBins = [0.5];
   const numActions = betBins.length + 3;
@@ -418,6 +427,61 @@ test("sparse resolver can route CFR tensor operations through WGSL kernels", asy
       assert.ok(maxDiff < 1e-5, `cfrAvg=${cfrAvg} action prob max diff ${maxDiff}`);
     }
   } finally {
+    device.destroy();
+  }
+});
+
+test("combined sparse prefix command buffers match separate submissions", async () => {
+  const device = await createDawnDevice();
+  const original = process.env.P2_COMBINE_PREFIX_WITH_LEAF;
+  try {
+    const betBins = [0.5];
+    const numActions = betBins.length + 3;
+    const env = new PublicHunlEnv({
+      stack: 20,
+      sb: 1,
+      bb: 2,
+      betBins,
+      button: 1,
+      forceDeck: DEFAULT_FORCE_DECK,
+    });
+    const oldPath = new SparseCfrResolver(fakeModel(numActions, device));
+    const combinedPath = new SparseCfrResolver(fakeModel(numActions, device));
+    try {
+      process.env.P2_COMBINE_PREFIX_WITH_LEAF = "0";
+      const oldResult = await oldPath.solve(env.clone(), uniformBeliefs(), {
+        depth: 3,
+        iterations: 4,
+        selectedAction: 1,
+        readPolicy: true,
+        readActionProbs: true,
+        readBeliefs: true,
+      });
+      process.env.P2_COMBINE_PREFIX_WITH_LEAF = "1";
+      const combinedResult = await combinedPath.solve(env.clone(), uniformBeliefs(), {
+        depth: 3,
+        iterations: 4,
+        selectedAction: 1,
+        readPolicy: true,
+        readActionProbs: true,
+        readBeliefs: true,
+      });
+
+      assert.equal(maxArrayDiff(combinedResult.policy, oldResult.policy), 0);
+      assert.equal(maxArrayDiff(combinedResult.actionProbs, oldResult.actionProbs), 0);
+      assert.ok(combinedResult.beliefsAfter);
+      assert.ok(oldResult.beliefsAfter);
+      assert.equal(maxArrayDiff(combinedResult.beliefsAfter, oldResult.beliefsAfter), 0);
+    } finally {
+      oldPath.dispose();
+      combinedPath.dispose();
+    }
+  } finally {
+    if (original === undefined) {
+      delete process.env.P2_COMBINE_PREFIX_WITH_LEAF;
+    } else {
+      process.env.P2_COMBINE_PREFIX_WITH_LEAF = original;
+    }
     device.destroy();
   }
 });

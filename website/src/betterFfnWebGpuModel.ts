@@ -101,6 +101,7 @@ export interface PreparedBatchFeatures {
   contextFeatures: GPUBuffer;
   beliefPhaseShift?: GPUBuffer;
   beliefPhaseKeys?: Uint32Array<ArrayBuffer>;
+  exactBeliefPhaseShiftCache?: Map<string, ExactBeliefPhaseShiftBuffers>;
   boardRankLow?: GPUBuffer;
   boardSuitLow?: GPUBuffer;
   dispose: () => void;
@@ -633,6 +634,7 @@ export class BetterFfnWebGpuModel {
       if (beliefPhaseShiftBuffer) detach(beliefPhaseShiftBuffer);
       if (boardRankLow) detach(boardRankLow);
       if (boardSuitLow) detach(boardSuitLow);
+      const exactBeliefPhaseShiftCache = new Map<string, ExactBeliefPhaseShiftBuffers>();
       let disposed = false;
       return {
         batch,
@@ -640,11 +642,17 @@ export class BetterFfnWebGpuModel {
         contextFeatures,
         ...(beliefPhaseShiftBuffer ? { beliefPhaseShift: beliefPhaseShiftBuffer } : {}),
         beliefPhaseKeys,
+        exactBeliefPhaseShiftCache,
         ...(boardRankLow ? { boardRankLow } : {}),
         ...(boardSuitLow ? { boardSuitLow } : {}),
         dispose: () => {
           if (disposed) return;
           disposed = true;
+          for (const cached of exactBeliefPhaseShiftCache.values()) {
+            cached.embeddingRows.destroy();
+            cached.contributionRows.destroy();
+          }
+          exactBeliefPhaseShiftCache.clear();
           for (const temp of persistent) {
             temp.buffer.destroy();
           }
@@ -833,17 +841,13 @@ export class BetterFfnWebGpuModel {
         (computedBeliefPhaseShift ? storage(computedBeliefPhaseShift) : undefined);
       const exactPhaseShift =
         exactBelief && beliefPhaseShift
-          ? this.exactBeliefPhaseShiftForKeys(
-              prepared?.beliefPhaseKeys ?? computedBeliefPhaseKeys,
+          ? this.exactBeliefPhaseShiftBuffers(
+              prepared,
+              computedBeliefPhaseKeys,
               exactBelief,
+              storage,
             )
           : undefined;
-      const exactPhaseShiftBuffers = exactPhaseShift
-        ? {
-            embeddingRows: storage(exactPhaseShift.embeddingRows),
-            contributionRows: storage(exactPhaseShift.contributionRows),
-          }
-        : undefined;
 
       const perPlayerBelief = empty(batch * numPlayers * hiddenDim);
       for (let player = 0; player < numPlayers; player += 1) {
@@ -888,7 +892,7 @@ export class BetterFfnWebGpuModel {
         empty,
         uniform,
         exactBelief,
-        exactPhaseShiftBuffers,
+        exactPhaseShift,
       );
 
       const interactionFeatures = this.buildBeliefBoardInteractionGpu(
@@ -2293,6 +2297,37 @@ export class BetterFfnWebGpuModel {
       contributionRows.set(contribution, row * ffnDim);
     }
     return { embeddingRows, contributionRows };
+  }
+
+  private exactBeliefPhaseShiftBuffers(
+    prepared: PreparedBatchFeatures | undefined,
+    computedBeliefPhaseKeys: Uint32Array<ArrayBuffer> | undefined,
+    exactBelief: ExactBelief,
+    storage: (data: Float32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>) => GPUBuffer,
+  ): ExactBeliefPhaseShiftBuffers | undefined {
+    const phaseKeys = prepared?.beliefPhaseKeys ?? computedBeliefPhaseKeys;
+    const cache = prepared?.exactBeliefPhaseShiftCache;
+    const useCache = cache && globalThis.process?.env?.P2_CACHE_EXACT_PHASE_SHIFT !== "0";
+    const cacheKey = `${exactBelief.player}:${exactBelief.hand}`;
+    if (useCache) {
+      const cached = cache.get(cacheKey);
+      if (cached) return cached;
+    }
+    const phaseShift = this.exactBeliefPhaseShiftForKeys(phaseKeys, exactBelief);
+    if (!phaseShift) return undefined;
+    const buffers = useCache
+      ? {
+          embeddingRows: makeStorageBuffer(this.device, phaseShift.embeddingRows),
+          contributionRows: makeStorageBuffer(this.device, phaseShift.contributionRows),
+        }
+      : {
+          embeddingRows: storage(phaseShift.embeddingRows),
+          contributionRows: storage(phaseShift.contributionRows),
+        };
+    if (useCache) {
+      cache.set(cacheKey, buffers);
+    }
+    return buffers;
   }
 
   private baseEmbeddingForBatch(

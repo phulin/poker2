@@ -1,0 +1,12 @@
+[
+  {
+    "spot_index": 0,
+    "street": 0,
+    "street_name": "preflop",
+    "button": 0,
+    "hero_player": 0,
+    "hero_hand": [51, 24],
+    "public_cards": [],
+    "pot": 3
+  }
+]

@@ -29,6 +29,7 @@ interface CliOptions {
   variantEnv: string;
   baselineValue?: string;
   candidateValue: string;
+  compareOutputs: boolean;
 }
 
 interface TimingSet {
@@ -79,6 +80,7 @@ function readOptions(): CliOptions {
     runs: parsePositiveInt(getArg(args, "--runs", "3"), "runs"),
     variantEnv: getArg(args, "--variant-env"),
     candidateValue: getArg(args, "--candidate-value"),
+    compareOutputs: args.includes("--compare-outputs"),
   };
   if (iterations) opts.iterations = parsePositiveInt(iterations, "iterations");
   if (args.includes("--cfr-avg")) opts.cfrAvg = true;
@@ -113,6 +115,18 @@ function setVariant(envName: string, value: string | undefined): void {
 
 function variantLabel(value: string | undefined): string {
   return value && value.length > 0 ? value : "baseline";
+}
+
+function maxAbsDiff(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) {
+    throw new Error(`output length mismatch ${a.length} vs ${b.length}`);
+  }
+  let max = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const diff = Math.abs(a[i]! - b[i]!);
+    if (diff > max) max = diff;
+  }
+  return max;
 }
 
 const options = readOptions();
@@ -162,6 +176,10 @@ interface SpotResult {
   candidate: VariantResult;
   deltaMs: number;
   speedup: number;
+  outputDiff?: {
+    policyMaxAbs: number;
+    actionProbsMaxAbs: number;
+  };
 }
 
 const results: SpotResult[] = [];
@@ -203,6 +221,26 @@ try {
     const candidate = summarize(candidateSamples);
     const deltaMs = candidate.meanMs - baseline.meanMs;
     const speedup = baseline.meanMs / candidate.meanMs;
+    let outputDiff: SpotResult["outputDiff"];
+    if (options.compareOutputs) {
+      const outputRequest: EvaluateSpotRequest = {
+        ...request,
+        readPolicy: true,
+        readActionProbs: true,
+        readBeliefs: false,
+      };
+      setVariant(options.variantEnv, options.baselineValue);
+      const baselineOutput = await evaluator.evaluateSpot(outputRequest);
+      setVariant(options.variantEnv, options.candidateValue);
+      const candidateOutput = await evaluator.evaluateSpot(outputRequest);
+      outputDiff = {
+        policyMaxAbs: maxAbsDiff(baselineOutput.policy, candidateOutput.policy),
+        actionProbsMaxAbs: maxAbsDiff(
+          baselineOutput.actionProbs,
+          candidateOutput.actionProbs,
+        ),
+      };
+    }
     results.push({
       spot_index: spot.spot_index,
       street: spot.street_name,
@@ -210,12 +248,17 @@ try {
       candidate,
       deltaMs,
       speedup,
+      ...(outputDiff ? { outputDiff } : {}),
     });
     console.error(
       `  spot ${spot.spot_index} (${spot.street_name}): ` +
         `baseline=${baseline.meanMs.toFixed(1)}ms ` +
         `candidate=${candidate.meanMs.toFixed(1)}ms ` +
-        `speedup=${speedup.toFixed(3)}x`,
+        `speedup=${speedup.toFixed(3)}x` +
+        (outputDiff
+          ? ` policyDiff=${outputDiff.policyMaxAbs.toExponential(2)} ` +
+            `actionDiff=${outputDiff.actionProbsMaxAbs.toExponential(2)}`
+          : ""),
     );
   }
 
@@ -251,6 +294,7 @@ try {
         cfrAvg,
         warmups: options.warmups,
         runs: options.runs,
+        compareOutputs: options.compareOutputs,
         spotsFile: options.spotsFile,
         variantEnv: options.variantEnv,
         baselineValue: options.baselineValue ?? "",

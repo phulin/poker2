@@ -34,7 +34,7 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `bench.ts`: Command-line benchmark entry point.
 - `benchModelKernels.ts`: Dawn/Node microbenchmark harness for individual BetterFFN model WGSL kernels, including shape compatibility checks, generic-reference validation, and repeated-dispatch timing.
 - `benchSparseCfrKernels.ts`: Dawn/Node microbenchmark harness for non-model sparse CFR WGSL operations, including synthetic sparse-tree buffers, aggregate-vs-direct overlap validation, and repeated-dispatch timing.
-- `benchSpotsInterleaved.ts`: Dawn/Node spot benchmark that alternates baseline and candidate runtime variants in one process to reduce timing noise.
+- `benchSpotsInterleaved.ts`: Dawn/Node spot benchmark that alternates baseline and candidate runtime variants in one process to reduce timing noise, with optional baseline-vs-candidate output diff checks.
 - `webgpu.d.ts`: WebGPU ambient type declarations.
 
 ### Subdirectories

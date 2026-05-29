@@ -11,6 +11,7 @@ Isolated TypeScript/WebGPU CFR evaluator for exported BetterFFN models, with Nod
 - `vite.config.ts`: Solid plugin and app build output configuration.
 - `.env.production.example`: Example public Vite production asset manifest URL for the deployed model on R2.
 - `index.html`: Vite application HTML entry point for the spot solver.
+- `bench_spots_root.json`: Tracked deterministic root-PBS benchmark spot set for the Node/Dawn spot benchmark harnesses. `bench_spots.json` is an ignored generated spot sample when extracted locally.
 - `.gitignore`: WebGPU subproject ignore rules.
 
 ### Subdirectories

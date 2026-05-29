@@ -1,33 +1,36 @@
-# Task Plan: WebGPU CFR Asset Deployment
+# Task Plan: Website CFR Benchmark Optimization
 
 ## Goal
-Make the app fetch model/all-in assets from R2, cache the right all-in tables, generate flop tables only offline, and prepare/deploy the versioned assets for holdem.computer.
+Make the `website/` CFR benchmark faster while preserving CFR outputs up to floating-point noise/accumulation-order differences, using interleaved benchmarks to reduce timing noise.
 
 ## Phases
-- [x] Phase 1: Inspect current app loading, caching, build, and asset state
-- [x] Phase 2: Implement runtime URL/config/cache behavior
-- [x] Phase 3: Add production build/upload scripts and metadata handling
-- [x] Phase 4: Verify locally
-- [x] Phase 5: Attempt R2/Pages deployment and report any external blockers
+- [x] Phase 1: Establish current benchmark/parity baseline
+- [x] Phase 2: Identify CFR hot paths and existing experimental switches
+- [x] Phase 3: Implement and tune faster CFR/runtime variants
+- [x] Phase 4: Verify parity and interleaved benchmark speedup
+- [x] Phase 5: Update AGENTS/docs if source layout or benchmark behavior changes
 
 ## Key Questions
-1. What current IndexedDB cache can be extended for preflop/flop tables?
-2. How does the current manifest embed all-in table paths?
-3. Which Wrangler project/bucket resources already exist?
+1. Which benchmark spots and iteration/depth settings best expose the production CFR bottleneck?
+2. Which existing runtime flags already select experimental CFR variants?
+3. What output comparison gives strong evidence that the optimized path is unchanged except FP noise?
 
 ## Decisions Made
-- Use R2-hosted `model.json` as the base URL for model weights.
-- Store model weights under `models/<model_version>/...`.
-- Store all-in payoff assets separately under `allin/<allin_version>/...` because they are model-independent win-rate tables.
-- Let model manifests reference all-in assets with explicit R2 URLs or root-relative R2 paths instead of nesting all-in assets under model directories.
+- Use `website/src/benchSpotsInterleaved.ts` for baseline-vs-candidate timing comparisons.
+- Prefer production-compatible speedups, but allow high-risk experimental changes while tuning.
+- Make command-buffer combining the default sparse CFR path; `P2_COMBINE_PREFIX_WITH_LEAF=0` restores the old path for A/B benchmarks.
+- Remove the GPU-resident model warm-start experiment because it was faster but changed CFR parity beyond current tolerances.
+- Cache prepared exact-belief phase-shift buffers by exact player/hand; `P2_CACHE_EXACT_PHASE_SHIFT=0` restores old rebuild behavior for A/B benchmarks.
 
 ## Errors Encountered
-- Wrangler CLI is not installed locally, so R2/Pages deployment will require installing or otherwise providing Wrangler credentials/tooling.
-- Initial R2 upload script omitted `--remote`; the first object puts went to local R2 emulation. Fixed script and reran remote uploads successfully.
-- Initial CORS file used S3-style keys; Wrangler requires Cloudflare lowercase keys under `allowed`. Fixed and applied.
-- Full flop table generation failed locally because CUDA is unavailable.
-- R2 custom domain attach requires the `holdem.computer` zone ID, which is not available from the repo or Wrangler Pages listing.
-- Wrangler Pages CLI created/deployed the project but does not expose custom-domain attach.
+- `yarn exec tsx ...` consumed benchmark flags before `tsx`; use `./node_modules/.bin/tsx ...` for ad hoc runs.
+- Sandbox blocked `tsx` IPC pipe creation under `/var/folders/.../T`; reran benchmark with approved escalation.
+- Mixed street benchmark hit `production all-in table values require 1326 HUNL hands without permutations` on the flop spot, so current local assets/harness need either no-permutation states or all-in disablement for postflop spot timing.
+- GPU-resident warm-start removed a CPU readback/writeback path but drifted CFR policy/action outputs too far versus the current default/PyTorch checks; removed from source.
+- Batch-4 value-head subgroup selection microbenchmarked slightly faster but also moved CFR outputs outside tolerance, so it was reverted.
+- Skipping unused average-buffer writes benchmarked slower, so that experiment was not kept.
+- Two-input belief-shift add and model-uniform caching were both output-identical but slower, so both were reverted.
+- Caching the belief-shift zero addend was output-identical but slower, so it was reverted.
 
 ## Status
-**Completed with external blockers** - Code, bucket, CORS, asset upload, and Pages preview deploy are done. Remaining custom-domain attachment and full flop asset generation need Cloudflare zone ID/dashboard/API access and a CUDA machine.
+**Current pass complete; goal remains active** - Added exact phase-shift caching for a small additional output-identical speedup. Continue with more leaf/model kernel candidates next.

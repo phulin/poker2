@@ -21,6 +21,7 @@
     "bench:model-kernels": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchModelKernels.ts",
     "bench:sparse-cfr-kernels": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchSparseCfrKernels.ts",
     "bench:spots": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchSpots.ts",
+    "bench:spots:interleaved": "WEBGPU_BACKEND=${WEBGPU_BACKEND:-$(node -p \"process.platform==='darwin'?'metal':'vulkan'\")} tsx src/benchSpotsInterleaved.ts",
     "bench:spots:extract": "cd .. && uv run python website/python/extract_bench_spots.py",
     "upload:assets": "tsc && node dist/scripts/upload_assets.js",
     "r2:cors": "wrangler r2 bucket cors set p2-webgpu-cfr-assets --file cloudflare/r2-cors.json --force",

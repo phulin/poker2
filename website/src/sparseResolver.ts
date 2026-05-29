@@ -1105,6 +1105,8 @@ export class SparseCfrResolver {
     device.queue.writeBuffer(beliefsAvgBuffer, 0, rootBeliefs);
 
     const profile = Boolean(globalThis.process?.env?.P2_PROFILE);
+    const combinePrefixWithLeaf =
+      globalThis.process?.env?.P2_COMBINE_PREFIX_WITH_LEAF !== "0";
     const phaseTotals = new Map<string, number>();
     const phaseCounts = new Map<string, number>();
     const time = async <T>(label: string, fn: () => T | Promise<T>): Promise<T> => {
@@ -1119,6 +1121,57 @@ export class SparseCfrResolver {
     };
 
     try {
+      const encodePrefixCommands = (
+        encoder: GPUCommandEncoder,
+        t: number,
+      ): GPUBuffer[] => {
+        const averageDelayed = this.averageAccumulationDelayed(t);
+        const regretBeliefsBuffer = cfrAvg ? beliefsAvgBuffer! : beliefsBuffer;
+        return this.encodeIterationPrefixGpuResidentCommands(
+          encoder,
+          tree,
+          treeBuffers,
+          regretBeliefsBuffer,
+          valuesBuffer,
+          regretWeightsBuffer,
+          regretWeightAggregatesBuffer,
+          regretsBuffer,
+          policyBuffer,
+          reachBuffer,
+          beliefsBuffer,
+          denomBuffer,
+          avgNumeratorBuffer,
+          avgDenominatorBuffer,
+          policyAvgBuffer,
+          (readPolicyAvg || cfrAvg) && !averageDelayed,
+          cfrAvg ? beliefsAvgBuffer! : undefined,
+          averageDelayed && readPolicyAvg,
+          t,
+          iterations,
+        );
+      };
+
+      const encodeExpectedThenMaybeNextPrefix = (
+        nextPrefixIteration: number | undefined,
+      ): ((encoder: GPUCommandEncoder) => GPUBuffer[]) => {
+        return (encoder) => {
+          const params = this.encodeExpectedValuesGpuResidentCommands(
+            encoder,
+            tree,
+            treeBuffers,
+            policyBuffer,
+            beliefsBuffer,
+            opponentPolicyBuffer,
+            opponentPolicyAggregatesBuffer,
+            valuesBuffer,
+          );
+          if (nextPrefixIteration !== undefined) {
+            params.push(...encodePrefixCommands(encoder, nextPrefixIteration));
+          }
+          return params;
+        };
+      };
+
       const initialLeafDispose = await time("leafValues0", () =>
         this.updateLeafValuesGpuBridge(
           treeBuffers,
@@ -1144,17 +1197,9 @@ export class SparseCfrResolver {
           staticGpu.preparedLeafFeatures,
           exactBelief,
           undefined,
-          (encoder) =>
-            this.encodeExpectedValuesGpuResidentCommands(
-              encoder,
-              tree,
-              treeBuffers,
-              policyBuffer,
-              beliefsBuffer,
-              opponentPolicyBuffer,
-              opponentPolicyAggregatesBuffer,
-              valuesBuffer,
-            ),
+          encodeExpectedThenMaybeNextPrefix(
+            combinePrefixWithLeaf && warmStartIterations === 0 && iterations > 0 ? 0 : undefined,
+          ),
         ),
       );
       pendingLeafDisposals.push(initialLeafDispose);
@@ -1202,48 +1247,28 @@ export class SparseCfrResolver {
             staticGpu.preparedLeafFeatures,
             exactBelief,
             undefined,
-            (encoder) =>
-              this.encodeExpectedValuesGpuResidentCommands(
-                encoder,
-                tree,
-                treeBuffers,
-                policyBuffer,
-                beliefsBuffer,
-                opponentPolicyBuffer,
-                opponentPolicyAggregatesBuffer,
-                valuesBuffer,
-              ),
+            encodeExpectedThenMaybeNextPrefix(
+              combinePrefixWithLeaf && warmStartIterations < iterations
+                ? warmStartIterations
+                : undefined,
+            ),
           ),
         );
         pendingLeafDisposals.push(warmLeafDispose);
       }
 
+      let prefixAlreadyEncoded = combinePrefixWithLeaf && warmStartIterations < iterations;
       for (let t = warmStartIterations; t < iterations; t += 1) {
-        const regretBeliefsBuffer = cfrAvg ? beliefsAvgBuffer! : beliefsBuffer;
-        await time("iterationPrefix", () => {
-          const averageDelayed = this.averageAccumulationDelayed(t);
-          this.encodeIterationPrefixGpuResident(
-            tree,
-            treeBuffers,
-            regretBeliefsBuffer,
-            valuesBuffer,
-            regretWeightsBuffer,
-            regretWeightAggregatesBuffer,
-            regretsBuffer,
-            policyBuffer,
-            reachBuffer,
-            beliefsBuffer,
-            denomBuffer,
-            avgNumeratorBuffer,
-            avgDenominatorBuffer,
-            policyAvgBuffer,
-            (readPolicyAvg || cfrAvg) && !averageDelayed,
-            cfrAvg ? beliefsAvgBuffer! : undefined,
-            averageDelayed && readPolicyAvg,
-            t,
-            iterations,
-          );
-        });
+        if (prefixAlreadyEncoded) {
+          prefixAlreadyEncoded = false;
+        } else {
+          await time("iterationPrefix", () => {
+            const encoder = this.model.device.createCommandEncoder();
+            const params = encodePrefixCommands(encoder, t);
+            this.model.device.queue.submit([encoder.finish()]);
+            for (const param of params) param.destroy();
+          });
+        }
 
         if (t + 1 < iterations) {
           const disposeLeafPrediction = await time("leafValues", () =>
@@ -1271,20 +1296,11 @@ export class SparseCfrResolver {
               staticGpu.preparedLeafFeatures,
               exactBelief,
               undefined,
-              (encoder) =>
-                this.encodeExpectedValuesGpuResidentCommands(
-                  encoder,
-                  tree,
-                  treeBuffers,
-                  policyBuffer,
-                  beliefsBuffer,
-                  opponentPolicyBuffer,
-                  opponentPolicyAggregatesBuffer,
-                  valuesBuffer,
-                ),
+              encodeExpectedThenMaybeNextPrefix(combinePrefixWithLeaf ? t + 1 : undefined),
             ),
           );
           pendingLeafDisposals.push(disposeLeafPrediction);
+          prefixAlreadyEncoded = combinePrefixWithLeaf;
         }
         onProgress?.({ iteration: t + 1, iterations });
       }
