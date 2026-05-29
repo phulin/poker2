@@ -993,7 +993,7 @@ def _tier2_prefix_factors_triton(
         num_warps=2,
     )
     same_pair_count = 6 if players == 4 else players * players
-    same_block_h = 8
+    same_block_h = 16
     grid_same = (batch_size, triton.cdiv(active_count, same_block_h), same_pair_count * 3)
     _tier2_prefix_same_kernel[grid_same](
         pair_prefix,
