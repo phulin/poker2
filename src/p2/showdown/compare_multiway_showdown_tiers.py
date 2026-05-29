@@ -935,7 +935,7 @@ def _tier3_wedge_p4_triton(
     if triton is None or beliefs.device.type != "cuda" or beliefs.shape[1] != 4:
         return None
     batch_size, _, active_count = beliefs.shape
-    block_h = 4
+    block_h = 8
     block_k = 32
     k_blocks = triton.cdiv(active_count, block_k)
     partial_num = torch.empty(
@@ -976,7 +976,7 @@ def _p4_pair_event_triton(
         return None
     batch_size = card_all.shape[2]
     active_count = card_all.shape[3]
-    block_h = 8
+    block_h = 4
     out = torch.empty(
         6,
         3,
