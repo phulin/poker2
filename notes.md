@@ -145,6 +145,7 @@
   - `P2_RELEASE_LEAF_TEMPS_EVERY=20`: exact output and a tiny short-run positive against chunk 16, but longer confirmation was effectively tied, 391.036 ms vs 391.016 ms; default remains 16.
   - `P2_PRECOMPUTE_ALPHA_BITS=1`: precomputing residual alpha bit patterns once per prediction was output-identical but slower, 393.2 ms old path vs 393.5 ms candidate; reverted.
   - `P2_SKIP_UNUSED_AVG_INIT=1`: after delayed-copy deferral, skipping initial average-policy CPU sets/uploads was output-identical and had one noisy positive run, but repeat confirmation was slower, 665.8 ms baseline vs 680.5 ms candidate; reverted.
+  - `P2_SKIP_FINAL_DELAYED_POLICY_AVG_COPY=1`: skipping the remaining last delayed-window policy-average copy was output-identical but flat/slightly slower, 414.0 ms baseline vs 414.0 ms candidate; reverted.
 
 ## Verification
 - `yarn typecheck`: pass.
