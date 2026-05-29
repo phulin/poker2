@@ -48,6 +48,9 @@ class _ActiveTierContext:
     allowed: torch.Tensor
 
 
+_P4_PLAYER_PAIRS = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+
+
 def random_full_board(
     *,
     device: torch.device,
@@ -289,6 +292,20 @@ def _scatter_active_outputs(
 
 def _active_local_combo_cards(ctx: _ActiveTierContext) -> tuple[torch.Tensor, torch.Tensor]:
     return ctx.local_c0, ctx.local_c1
+
+
+def _subtract_same_pair_events(
+    pair_event_all: torch.Tensor,
+    same_all: torch.Tensor,
+) -> None:
+    players = pair_event_all.shape[0]
+    if players == 4:
+        for left, right in _P4_PLAYER_PAIRS:
+            for mode in range(3):
+                pair_event_all[left, right, mode, mode] -= same_all[left, right, mode]
+        return
+    for mode in range(3):
+        pair_event_all[:, :, mode, mode] -= same_all[:, :, mode]
 
 
 def _build_local_mats_from_indices(
@@ -602,6 +619,7 @@ if triton is not None:
         H: tl.constexpr,
         H1: tl.constexpr,
         CARD_COUNT: tl.constexpr,
+        USE_P4_UNORDERED: tl.constexpr,
     ):
         row = tl.program_id(0)
         pair_mode = tl.program_id(1)
@@ -609,8 +627,12 @@ if triton is not None:
         b = row // H
         mode = pair_mode % 3
         pair = pair_mode // 3
-        right = pair % P
-        left = pair // P
+        if USE_P4_UNORDERED:
+            left = tl.where(pair < 3, 0, tl.where(pair < 5, 1, 2))
+            right = tl.where(pair < 3, pair + 1, tl.where(pair < 5, pair - 1, 3))
+        else:
+            right = pair % P
+            left = pair // P
 
         lower = tl.load(lower_end + b * H + h)
         tie = tl.load(tie_end + b * H + h)
@@ -817,7 +839,8 @@ def _tier2_prefix_factors_triton(
         BLOCK_C=64,
         num_warps=2,
     )
-    grid_same = (batch_size * active_count, players * players * 3)
+    same_pair_count = 6 if players == 4 else players * players
+    grid_same = (batch_size * active_count, same_pair_count * 3)
     _tier2_prefix_same_kernel[grid_same](
         pair_prefix,
         pair_card_prefix,
@@ -832,6 +855,7 @@ def _tier2_prefix_factors_triton(
         H=active_count,
         H1=active_count + 1,
         CARD_COUNT=47,
+        USE_P4_UNORDERED=players == 4,
         num_warps=1,
     )
     return scalar_all, card_all, same_all
@@ -1106,8 +1130,7 @@ def tier2_first_order_opp_collision_by_hand(
     active_count = ctx.active_ids.shape[1]
     scalar_all, card_all, same_all = _tier2_prefix_factors(prepared, ctx, dtype=dtype)
     pair_event_all = torch.einsum("pmbhc,qnbhc->pqmnbh", card_all, card_all)
-    for mode in range(3):
-        pair_event_all[:, :, mode, mode] -= same_all[:, :, mode]
+    _subtract_same_pair_events(pair_event_all, same_all)
 
     equities: list[torch.Tensor] = []
     numerator_active = torch.zeros(
@@ -1297,8 +1320,7 @@ def _tier3_second_order_opp_collision_by_hand_impl(
 
     scalar_all, card_all, same_all = _tier2_prefix_factors(prepared, ctx, dtype=dtype)
     pair_event_all = torch.einsum("pmbhc,qnbhc->pqmnbh", card_all, card_all)
-    for mode in range(3):
-        pair_event_all[:, :, mode, mode] -= same_all[:, :, mode]
+    _subtract_same_pair_events(pair_event_all, same_all)
 
     local_c0, local_c1 = _active_local_combo_cards(ctx)
     use_streaming_wedge = (
