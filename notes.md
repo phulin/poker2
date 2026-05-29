@@ -40,6 +40,7 @@
 - Tried skipping the initial policy-average upload; it was output-identical but slower on confirmation, so it was reverted.
 - Tried skipping all unused average-policy uploads when no average policy is read; it was output-identical but slower on confirmation, so it was reverted.
 - Tried skipping the initial reach-buffer upload when no average policy is read; it was output-identical but slower, so it was reverted.
+- Tried caching fold-terminal values in a static GPU buffer and copying them into the solve values buffer in the first leaf command buffer; it was output-identical but within noise/slightly slower on confirmation, so it was reverted.
 
 ## Measurements
 - 2026-05-29 short no-op interleaved run, `bench_spots.json`, depth 4, iterations 32, runs 3:
@@ -104,6 +105,7 @@
   - `P2_SKIP_INITIAL_POLICY_AVG_UPLOAD=1`: short run was 408.0 ms baseline vs 407.2 ms candidate, but longer confirmation was 405.7 ms baseline vs 406.3 ms candidate, speedup 0.998x; exact output match.
   - `P2_SKIP_UNUSED_AVG_UPLOADS=1`: short run was 407.1 ms baseline vs 406.7 ms candidate, but longer confirmation was 408.4 ms baseline vs 409.3 ms candidate, speedup 0.998x; exact output match.
   - `P2_SKIP_UNUSED_REACH_UPLOAD=1`: 391.1 ms baseline vs 392.0 ms candidate, speedup 0.998x, exact output match.
+  - `P2_GPU_FOLD_VALUES=1`: short run was 393.4 ms baseline vs 393.2 ms candidate, but longer confirmation was 392.6 ms baseline vs 392.6 ms candidate, speedup 1.000x/slightly negative; exact output match.
 
 ## Verification
 - `yarn typecheck`: pass.
