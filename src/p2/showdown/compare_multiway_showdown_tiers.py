@@ -1837,11 +1837,12 @@ def _tier3_second_order_opp_collision_by_hand_impl(
     )
     p4_finish = _tier2_p4_finish_triton(scalar_all, pair_event_all) if wedge_p4 is not None else None
     if wedge_p4 is not None and p4_finish is not None:
-        numerator_active, denominator_active, _ = p4_finish
+        numerator_active, denominator_active, equity_active = p4_finish
         wedge_num_all, wedge_den_all = wedge_p4
         numerator_active.add_(wedge_num_all)
         denominator_active.add_(wedge_den_all)
-        equity_active = safe_divide_by_hand(numerator_active, denominator_active)
+        torch.div(numerator_active, denominator_active.clamp_min(1.0e-30), out=equity_active)
+        equity_active.masked_fill_(denominator_active <= 0.0, 0.0)
         numerator_by_hand, denominator_by_hand, equity_by_hand = _scatter_active_outputs(
             ctx,
             numerator_active,
