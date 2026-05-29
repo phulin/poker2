@@ -928,6 +928,30 @@ if triton is not None:
         tl.store(wedge_num_out + out_base, num_total, mask=h_mask)
 
     @triton.jit
+    def _tier3_reduce_wedge_partials_kernel(
+        partial_num,
+        partial_den,
+        num_out,
+        den_out,
+        B: tl.constexpr,
+        H: tl.constexpr,
+        K_BLOCKS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        b = tl.program_id(0)
+        hero = tl.program_id(1)
+        h = tl.program_id(2) * BLOCK_H + tl.arange(0, BLOCK_H)
+        k = tl.arange(0, BLOCK_K)
+        mask = (h[None, :] < H) & (k[:, None] < K_BLOCKS)
+        base = ((b * 4 + hero) * K_BLOCKS + k[:, None]) * H + h[None, :]
+        num = tl.load(partial_num + base, mask=mask, other=0.0)
+        den = tl.load(partial_den + base, mask=mask, other=0.0)
+        out_base = (b * 4 + hero) * H + h
+        tl.store(num_out + out_base, tl.sum(num, axis=0), mask=h < H)
+        tl.store(den_out + out_base, tl.sum(den, axis=0), mask=h < H)
+
+    @triton.jit
     def _p4_pair_event_kernel(
         card_all,
         same_all,
@@ -1217,7 +1241,30 @@ def _tier3_wedge_p4_triton(
         BLOCK_K=block_k,
         num_warps=2,
     )
-    return partial_num.sum(dim=2), partial_den.sum(dim=2)
+    num_out = torch.empty(
+        batch_size,
+        4,
+        active_count,
+        dtype=beliefs.dtype,
+        device=beliefs.device,
+    )
+    den_out = torch.empty_like(num_out)
+    reduce_block_h = 16
+    reduce_block_k = 64
+    reduce_grid = (batch_size, 4, triton.cdiv(active_count, reduce_block_h))
+    _tier3_reduce_wedge_partials_kernel[reduce_grid](
+        partial_num,
+        partial_den,
+        num_out,
+        den_out,
+        B=batch_size,
+        H=active_count,
+        K_BLOCKS=k_blocks,
+        BLOCK_H=reduce_block_h,
+        BLOCK_K=reduce_block_k,
+        num_warps=4,
+    )
+    return num_out, den_out
 
 
 def _p4_pair_event_triton(
