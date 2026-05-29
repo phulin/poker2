@@ -18,6 +18,8 @@
 - Tried a two-input add kernel for belief phase shifts; it was output-identical but slightly slower, so it was reverted.
 - Tried caching repeated model uniform buffers; key-building overhead made it slower, so it was reverted.
 - Tried caching the zero input used by the three-input belief phase-shift add; it was output-identical but slower, so it was reverted.
+- Tried batch-4 subgroup residual matvec selection; it was output-identical but slower, so it was reverted.
+- Tried caching compute-pipeline bind-group layouts; it was output-identical but within noise, so it was reverted.
 
 ## Measurements
 - 2026-05-29 short no-op interleaved run, `bench_spots.json`, depth 4, iterations 32, runs 3:
@@ -42,10 +44,15 @@
 - 2026-05-29 empty-board interaction skip interleaved run, `bench_spots_root.json`, depth 6, iterations 128, warmups 2, runs 7, `--compare-outputs`:
   - explicit zero interaction path (`P2_SKIP_EMPTY_BOARD_INTERACTION=0`) 549.9 ms, skipped path 511.1 ms, speedup 1.076x.
   - Output comparison: `policyMaxAbs=0`, `actionProbsMaxAbs=0`.
+- 2026-05-29 current cumulative combined-prefix interleaved run after empty-board skip, `bench_spots_root.json`, depth 6, iterations 128, warmups 2, runs 7, `--compare-outputs`:
+  - old command path (`P2_COMBINE_PREFIX_WITH_LEAF=0`) 623.3 ms, current default 475.4 ms, speedup 1.311x.
+  - Output comparison: `policyMaxAbs=0`, `actionProbsMaxAbs=0`.
 - 2026-05-29 failed experiments:
   - `P2_ADD2_BELIEF_SHIFT=1`: 503.2 ms baseline vs 504.1 ms candidate, speedup 0.998x, exact output match.
   - `P2_CACHE_MODEL_UNIFORMS=1`: 506.7 ms baseline vs 534.4 ms candidate, speedup 0.948x, exact output match.
   - `P2_CACHE_BELIEF_SHIFT_ZERO=1`: 487.1 ms baseline vs 532.0 ms candidate, speedup 0.916x, exact output match.
+  - `P2_RESIDUAL_BATCH4=1`: 409.2 ms baseline vs 413.7 ms candidate, speedup 0.989x, exact output match.
+  - `P2_CACHE_BIND_GROUP_LAYOUT=1`: 544.6 ms baseline vs 543.7 ms candidate, speedup 1.002x, exact output match.
 
 ## Verification
 - `yarn typecheck`: pass.

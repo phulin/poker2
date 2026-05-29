@@ -32,6 +32,8 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Skipping unused average-buffer writes benchmarked slower, so that experiment was not kept.
 - Two-input belief-shift add and model-uniform caching were both output-identical but slower, so both were reverted.
 - Caching the belief-shift zero addend was output-identical but slower, so it was reverted.
+- Batch-4 subgroup residual matvec selection was output-identical but slower, so it was reverted.
+- Compute-pipeline bind-group-layout caching was output-identical but within timing noise, so it was reverted.
 
 ## Status
 **Current pass complete; goal remains active** - Added empty-board board-interaction skipping for an additional output-identical speedup. Continue with more leaf/model kernel candidates next.
