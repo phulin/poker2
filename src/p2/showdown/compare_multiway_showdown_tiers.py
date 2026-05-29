@@ -960,6 +960,7 @@ def _tier2_prefix_factors_triton(
     lower_end: torch.Tensor,
     tie_end: torch.Tensor,
     dtype: torch.dtype,
+    same_num_warps: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     batch_size, players, active_count = beliefs.shape
     device = beliefs.device
@@ -1028,7 +1029,7 @@ def _tier2_prefix_factors_triton(
         CARD_COUNT=47,
         BLOCK_H=same_block_h,
         USE_P4_UNORDERED=players == 4,
-        num_warps=1,
+        num_warps=same_num_warps,
     )
     return scalar_all, card_all, same_all
 
@@ -1114,6 +1115,7 @@ def _tier2_prefix_factors(
     ctx: _ActiveTierContext,
     *,
     dtype: torch.dtype,
+    same_num_warps: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     beliefs = ctx.beliefs
     batch_size, players, active_count = beliefs.shape
@@ -1222,6 +1224,7 @@ def _tier2_prefix_factors(
             lower_end=lower_end.contiguous(),
             tie_end=tie_end.contiguous(),
             dtype=dtype,
+            same_num_warps=same_num_warps,
         )
 
     zero_index = torch.zeros_like(lower_end)
@@ -1575,7 +1578,12 @@ def _tier3_second_order_opp_collision_by_hand_impl(
     device = beliefs.device
     active_count = ctx.active_ids.shape[1]
 
-    scalar_all, card_all, same_all = _tier2_prefix_factors(prepared, ctx, dtype=dtype)
+    scalar_all, card_all, same_all = _tier2_prefix_factors(
+        prepared,
+        ctx,
+        dtype=dtype,
+        same_num_warps=2,
+    )
     pair_event_all = _pair_event_all_from_card(card_all, same_all)
 
     local_c0, local_c1 = _active_local_combo_cards(ctx)
