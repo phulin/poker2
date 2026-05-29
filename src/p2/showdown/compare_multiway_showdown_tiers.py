@@ -976,7 +976,7 @@ def _p4_pair_event_triton(
         return None
     batch_size = card_all.shape[2]
     active_count = card_all.shape[3]
-    block_h = 16
+    block_h = 8
     out = torch.empty(
         6,
         3,
@@ -996,7 +996,7 @@ def _p4_pair_event_triton(
         CARD_COUNT=47,
         BLOCK_H=block_h,
         BLOCK_C=64,
-        num_warps=2,
+        num_warps=1,
     )
     return out
 
