@@ -148,6 +148,7 @@
   - `P2_SKIP_FINAL_DELAYED_POLICY_AVG_COPY=1`: skipping the remaining last delayed-window policy-average copy was output-identical but flat/slightly slower, 414.0 ms baseline vs 414.0 ms candidate; reverted.
   - `P2_SKIP_WARM_POLICY_AVG_UPLOAD=1`: skipping the warm-start policy-average CPU set/upload was output-identical but slower on mean, 412.1 ms baseline vs 413.1 ms candidate; reverted.
   - `P2_SKIP_UNUSED_AVG_CPU_STATE=1`: skipping unused average-policy CPU arrays and uploads when policy/action output is not requested was output-identical but slower, 413.2 ms baseline vs 414.6 ms candidate; reverted.
+  - `P2_REUSE_UNBLOCKED_SCRATCH=1`: reusing a card-sum scratch array inside CPU warm-start regret accumulation was output-identical but slower, 562.7 ms baseline vs 584.2 ms candidate; reverted.
 
 ## Verification
 - `yarn typecheck`: pass.
