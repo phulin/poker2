@@ -213,8 +213,8 @@ def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
     allowed = board_allowed_hands(prepared.board)
     batch_size = prepared.beliefs.shape[0]
     active_count = 1081
-    active_ids = torch.topk(allowed.to(torch.int8), active_count, dim=1).indices
-    combos = prepared.combos.long()
+    active_ids = torch.topk(allowed.to(torch.int8), active_count, dim=1).indices.to(torch.int32)
+    combos = prepared.combos.to(torch.int32)
     active_combos = combos[active_ids]
     ranks = prepared.hand_ranks.reshape(batch_size, NUM_HANDS).gather(1, active_ids)
     hand_masks = prepared.hand_masks.reshape(NUM_HANDS)
@@ -222,22 +222,26 @@ def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
 
     board_mask = torch.ones(batch_size, 52, dtype=torch.bool, device=prepared.beliefs.device)
     board_mask.scatter_(1, prepared.board.long(), False)
-    active_cards = torch.topk(board_mask.to(torch.int8), 47, dim=1).indices
+    active_cards = torch.topk(board_mask.to(torch.int8), 47, dim=1).indices.to(torch.int32)
     card_to_local = torch.full(
         (batch_size, 52),
         -1,
-        dtype=torch.long,
+        dtype=torch.int32,
         device=prepared.beliefs.device,
     )
     card_to_local.scatter_(
         1,
         active_cards,
-        torch.arange(47, device=prepared.beliefs.device)[None, :].expand(batch_size, -1),
+        torch.arange(
+            47,
+            device=prepared.beliefs.device,
+            dtype=torch.int32,
+        )[None, :].expand(batch_size, -1),
     )
     local_c0 = card_to_local.gather(1, active_combos[..., 0])
     local_c1 = card_to_local.gather(1, active_combos[..., 1])
     pair_lookup = _pair_lookup(prepared.beliefs.device)
-    local_pair_ids = pair_lookup[active_cards[:, :, None], active_cards[:, None, :]]
+    local_pair_ids = pair_lookup[active_cards[:, :, None], active_cards[:, None, :]].to(torch.int32)
     pair_p_ids = local_pair_ids.gather(
         2,
         local_c0[:, None, :].expand(-1, 47, -1),
@@ -246,7 +250,7 @@ def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
         2,
         local_c1[:, None, :].expand(-1, 47, -1),
     ).permute(0, 2, 1).contiguous()
-    order = torch.argsort(ranks, dim=1)
+    order = torch.argsort(ranks, dim=1).to(torch.int32)
     sorted_ranks = ranks.gather(1, order)
     sorted_c0 = local_c0.gather(1, order)
     sorted_c1 = local_c1.gather(1, order)
@@ -257,12 +261,20 @@ def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
         dtype=torch.float32,
         device=prepared.beliefs.device,
     )
-    board_ids = torch.arange(batch_size, device=prepared.beliefs.device)[:, None]
-    hand_ids = torch.arange(active_count, device=prepared.beliefs.device)[None, :]
+    board_ids = torch.arange(
+        batch_size,
+        device=prepared.beliefs.device,
+        dtype=torch.int32,
+    )[:, None]
+    hand_ids = torch.arange(
+        active_count,
+        device=prepared.beliefs.device,
+        dtype=torch.int32,
+    )[None, :]
     sorted_contains[board_ids, hand_ids, sorted_c0] = 1.0
     sorted_contains[board_ids, hand_ids, sorted_c1] = 1.0
-    lower_end = torch.searchsorted(sorted_ranks, ranks, right=False)
-    tie_end = torch.searchsorted(sorted_ranks, ranks, right=True)
+    lower_end = torch.searchsorted(sorted_ranks, ranks, right=False).to(torch.int32)
+    tie_end = torch.searchsorted(sorted_ranks, ranks, right=True).to(torch.int32)
     return _TierBoardContext(
         ranks=ranks,
         masks=masks,
