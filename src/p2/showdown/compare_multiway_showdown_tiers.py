@@ -890,7 +890,7 @@ def _tier2_prefix_factors(
     batch_size, players, active_count = beliefs.shape
     device = beliefs.device
     local_c0, local_c1 = _active_local_combo_cards(ctx)
-    order = torch.argsort(ctx.ranks, dim=1, stable=True)
+    order = torch.argsort(ctx.ranks, dim=1)
     sorted_ranks = ctx.ranks.gather(1, order)
     sorted_beliefs = beliefs.gather(2, order[:, None, :].expand(-1, players, -1))
     active_contains = _active_contains_matrix(ctx, dtype=dtype)
