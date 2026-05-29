@@ -59,6 +59,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Using the batch-4 subgroup matvec for the biased value-head projection was output-identical and exact-value-safe but slightly slower, so it was reverted.
 - Extending the leaky 1024 batch-2 subgroup shader to hidden 512x1024 linear-out projections was output-identical and exact-value-safe but slower in the full CFR benchmark, so it was reverted.
 - Leaf-temp release chunk 12 was output-identical but within noise against chunk 16, so the default remains 16.
+- Leaf-temp release chunk 4 was output-identical but slower against chunk 16, so the default remains 16.
 - Caching the gather-node-beliefs bind group was output-identical but slower, so it was reverted.
 - A parallel-reduction all-in table shader was slower and changed CFR output too much due to different accumulation order, so it was reverted.
 - A pre-unpacked f32 all-in table lookup path was output-identical but stayed within noise on confirmation, so it was reverted.

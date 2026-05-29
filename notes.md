@@ -45,6 +45,7 @@
 - Tried the batch-4 subgroup matvec for the biased value-head projection; it was output-identical and exact-value-safe but slightly slower, so it was reverted.
 - Tried using the leaky 1024 batch-2 subgroup shader for hidden 512x1024 linear-out projections as well as the value head; it was output-identical and exact-value-safe but slower in the full CFR benchmark, so it was reverted.
 - Retested leaf-temp release chunk 12 against the current chunk 16; it was output-identical but within noise, so the default remains 16.
+- Retested leaf-temp release chunk 4 against the current chunk 16; it was output-identical but slower, so the default remains 16.
 - Tried caching the gather-node-beliefs bind group; it was output-identical but slower, so it was reverted.
 - Tried a parallel-reduction all-in table shader; it was slower and changed CFR output too much because of changed accumulation order, so it was reverted.
 - Tried a pre-unpacked f32 all-in table lookup path; it was output-identical but within noise on confirmation, so it was reverted.
@@ -89,6 +90,9 @@
 - 2026-05-29 sparse uniform-buffer pooling, `bench_spots_root.json`, depth 6, iterations 128, `--compare-outputs`:
   - old create/destroy path (`P2_POOL_SPARSE_UNIFORMS=0`) 394.7 ms, pooled path 394.2 ms, speedup 1.001x, exact output match.
   - final confirmation after default flip with runs 9: old create/destroy path 394.3 ms, pooled path 394.2 ms, speedup 1.000x, exact output match.
+- 2026-05-29 sparse kernel microbench after uniform pooling:
+  - `allin_table_values_both_players` was about 0.256 ms for 24 leaves, close to the packed all-in production path; all-in is not the dominant remaining full-solve bottleneck.
+  - Aggregate regret/opponent kernels are much faster than their direct reference kernels in isolation, but prior full-CFR attempts to switch aggregate variants changed accumulation too much or slowed down.
 - 2026-05-29 failed experiments:
   - `P2_ADD2_BELIEF_SHIFT=1`: 503.2 ms baseline vs 504.1 ms candidate, speedup 0.998x, exact output match.
   - `P2_CACHE_MODEL_UNIFORMS=1`: 506.7 ms baseline vs 534.4 ms candidate, speedup 0.948x, exact output match.
@@ -119,6 +123,7 @@
   - `P2_VALUE_HEAD_BATCH4=1`: 393.1 ms baseline vs 393.3 ms candidate, speedup 1.000x/slightly negative; exact output match and exact value fixture pass.
   - `P2_LEAKY_OUT_BATCH2=1`: 394.0 ms baseline vs 395.3 ms candidate, speedup 0.996x; exact output match and exact value fixture pass.
   - `P2_RELEASE_LEAF_TEMPS_EVERY=12`: 394.2 ms chunk-16 baseline vs 394.2 ms candidate, speedup 1.000x, exact output match.
+  - `P2_RELEASE_LEAF_TEMPS_EVERY=4`: 391.5 ms chunk-16 baseline vs 392.3 ms candidate, speedup 0.998x, exact output match.
   - `P2_CACHE_GATHER_BIND_GROUP=1`: 395.1 ms baseline vs 395.7 ms candidate, speedup 0.998x, exact output match.
   - `P2_PARALLEL_ALLIN=1`: 407.2 ms baseline vs 437.3 ms candidate, speedup 0.931x, policy diff about 0.090 and action-prob diff about 0.0029.
   - `P2_FLOAT_ALLIN_TABLE=1`: short run was 394.7 ms baseline vs 394.6 ms candidate and longer confirmation was 392.7 ms baseline vs 392.2 ms candidate, but final confirmations were 396.4 ms baseline vs 396.8 ms candidate and 391.2 ms baseline vs 391.2 ms candidate; exact output match, but timing stayed within noise.
