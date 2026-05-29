@@ -1014,8 +1014,19 @@ def _tier2_prefix_factors(
     order = torch.argsort(ctx.ranks, dim=1)
     sorted_ranks = ctx.ranks.gather(1, order)
     sorted_beliefs = beliefs.gather(2, order[:, None, :].expand(-1, players, -1))
-    active_contains = _active_contains_matrix(ctx, dtype=dtype)
-    sorted_contains = active_contains.gather(1, order[:, :, None].expand(-1, -1, 47))
+    sorted_c0 = local_c0.gather(1, order)
+    sorted_c1 = local_c1.gather(1, order)
+    sorted_contains = torch.zeros(
+        batch_size,
+        active_count,
+        47,
+        dtype=dtype,
+        device=device,
+    )
+    board_ids = torch.arange(batch_size, device=device)[:, None]
+    hand_ids = torch.arange(active_count, device=device)[None, :]
+    sorted_contains[board_ids, hand_ids, sorted_c0] = 1.0
+    sorted_contains[board_ids, hand_ids, sorted_c1] = 1.0
 
     zero_scalar = torch.zeros(batch_size, players, 1, dtype=dtype, device=device)
     scalar_prefix = torch.cat([zero_scalar, sorted_beliefs.cumsum(dim=2)], dim=2)
