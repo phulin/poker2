@@ -55,6 +55,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Skipping all unused average-policy uploads when no average policy is read was output-identical but lost on longer confirmation, so it was reverted.
 - Skipping unused reach-buffer upload when no average policy is read was output-identical but slower, so it was reverted.
 - Copying cached fold-terminal values from a static GPU buffer into the solve values buffer was output-identical but within noise/slightly slower on confirmation, so it was reverted.
+- Using the batch-4 subgroup matvec for the biased value-head projection was output-identical and exact-value-safe but slightly slower, so it was reverted.
 
 ## Status
 **Current pass complete; goal remains active** - Added chunked leaf temporary-buffer release for an additional output-identical speedup. Continue with more leaf/model kernel candidates next.
