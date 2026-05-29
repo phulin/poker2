@@ -134,6 +134,7 @@
   - Retried fusing exact-belief phase-shift addition into the half-RMS norm path with `P2_FUSE_EXACT_SHIFT_NORM=1`; the exact-value fixture still failed with about 0.095 max diff, so it was reverted before full benchmarking.
   - `P2_SINGLE_MODEL_PASS=1`: keeping one compute pass open across consecutive BetterFFN dispatches was exact-value-safe and CFR output-identical, but slightly slower in the full benchmark, 392.9 ms baseline vs 393.3 ms candidate.
   - `P2_SPARSE_SINGLE_PASS=1`: keeping one compute pass open across sparse-CFR dispatches crossed command-encoder copy operations, produced invalid command buffers, changed CFR output, and was slightly slower; reverted.
+  - `P2_RELEASE_LEAF_TEMPS_EVERY=20`: exact output and a tiny short-run positive against chunk 16, but longer confirmation was effectively tied, 391.036 ms vs 391.016 ms; default remains 16.
 
 ## Verification
 - `yarn typecheck`: pass.
