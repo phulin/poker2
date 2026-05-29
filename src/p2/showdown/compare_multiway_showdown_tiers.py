@@ -1334,15 +1334,15 @@ def tier1_hero_removal_by_hand(prepared: PreparedShowdown) -> PerHandEquityResul
     rel_f = [lower_rel, tie_rel, total_rel]
 
     equities: list[torch.Tensor] = []
-    numerator_active = torch.zeros(
+    numerator_active = torch.empty(
         beliefs.shape[0],
         players,
         ctx.active_ids.shape[1],
         dtype=dtype,
         device=beliefs.device,
     )
-    denominator_active = torch.zeros_like(numerator_active)
-    equity_active = torch.zeros_like(numerator_active)
+    denominator_active = torch.empty_like(numerator_active)
+    equity_active = torch.empty_like(numerator_active)
     for hero in range(players):
         opponents = [player for player in range(players) if player != hero]
         opp_beliefs = beliefs[:, opponents].transpose(1, 2).contiguous()
@@ -1393,15 +1393,15 @@ def tier2_first_order_opp_collision_by_hand(
     pair_event_all = _pair_event_all_from_card(card_all, same_all)
 
     equities: list[torch.Tensor] = []
-    numerator_active = torch.zeros(
+    numerator_active = torch.empty(
         beliefs.shape[0],
         players,
         active_count,
         dtype=dtype,
         device=device,
     )
-    denominator_active = torch.zeros_like(numerator_active)
-    equity_active = torch.zeros_like(numerator_active)
+    denominator_active = torch.empty_like(numerator_active)
+    equity_active = torch.empty_like(numerator_active)
     for hero in range(players):
         opponents = [player for player in range(players) if player != hero]
         opp_count = len(opponents)
@@ -1633,15 +1633,15 @@ def _tier3_second_order_opp_collision_by_hand_impl(
                     )
 
     equities: list[torch.Tensor] = []
-    numerator_active = torch.zeros(
+    numerator_active = torch.empty(
         beliefs.shape[0],
         players,
         active_count,
         dtype=dtype,
         device=device,
     )
-    denominator_active = torch.zeros_like(numerator_active)
-    equity_active = torch.zeros_like(numerator_active)
+    denominator_active = torch.empty_like(numerator_active)
+    equity_active = torch.empty_like(numerator_active)
     for hero in range(players):
         opponents = [player for player in range(players) if player != hero]
         opp_count = len(opponents)
@@ -1971,15 +1971,15 @@ def tier4_third_degree_card_collision_by_hand(
             pair_all[player, mode] = pair_rel.to(dtype) * pair_mass[:, None, :, :]
 
     equities: list[torch.Tensor] = []
-    numerator_active = torch.zeros(
+    numerator_active = torch.empty(
         beliefs.shape[0],
         players,
         active_count,
         dtype=dtype,
         device=device,
     )
-    denominator_active = torch.zeros_like(numerator_active)
-    equity_active = torch.zeros_like(numerator_active)
+    denominator_active = torch.empty_like(numerator_active)
+    equity_active = torch.empty_like(numerator_active)
     for hero in range(players):
         opponents = [player for player in range(players) if player != hero]
         opp_count = len(opponents)
