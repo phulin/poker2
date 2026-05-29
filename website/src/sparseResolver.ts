@@ -918,11 +918,16 @@ export class SparseCfrResolver {
     beliefs: Float32Array,
     warmStartIterations: number,
   ): void {
-    const regrets = new Float32Array(cumulativeRegrets.length);
+    const useInPlaceRegrets = globalThis.process?.env?.P2_INPLACE_WARMSTART_REGRETS !== "0";
+    const regrets = useInPlaceRegrets
+      ? cumulativeRegrets
+      : new Float32Array(cumulativeRegrets.length);
     this.accumulateRegrets(tree, beliefs, values, regrets);
     const scale = warmStartIterations * (this.model.manifest.cfr?.warmStartMultiplier ?? 1);
     const bottom = tree.depthOffsets[1] ?? tree.nodes.length;
-    cumulativeRegrets.fill(0);
+    if (!useInPlaceRegrets) {
+      cumulativeRegrets.fill(0);
+    }
     for (let nodeIndex = bottom; nodeIndex < tree.nodes.length; nodeIndex += 1) {
       let positiveMean = 0;
       const regretBase = nodeIndex * NUM_HANDS;

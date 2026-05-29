@@ -18,6 +18,7 @@
 - Leaf prediction temporary buffers are now returned to the model buffer pool every 16 predictions instead of only at solve end. Set `P2_RELEASE_LEAF_TEMPS_EVERY=0` to benchmark the old retained-until-end path.
 - GPU sparse solves now skip `beliefsAvgBuffer` uploads when `cfrAvg=false`; set `P2_SKIP_UNUSED_BELIEFS_AVG_UPLOAD=0` to benchmark the old unused upload path.
 - Sparse CFR kernels now pool tiny uniform buffers across dispatches instead of creating and destroying each param buffer per dispatch. Set `P2_POOL_SPARSE_UNIFORMS=0` to benchmark the old path.
+- Model warm-start now reuses the cumulative-regret buffer as temporary regret scratch instead of allocating a separate same-sized array. Set `P2_INPLACE_WARMSTART_REGRETS=0` to benchmark the old extra-scratch path.
 - Tried a two-input add kernel for belief phase shifts; it was output-identical but slightly slower, so it was reverted.
 - Tried caching repeated model uniform buffers; key-building overhead made it slower, so it was reverted.
 - Tried caching the zero input used by the three-input belief phase-shift add; it was output-identical but slower, so it was reverted.
@@ -92,6 +93,9 @@
 - 2026-05-29 sparse uniform-buffer pooling, `bench_spots_root.json`, depth 6, iterations 128, `--compare-outputs`:
   - old create/destroy path (`P2_POOL_SPARSE_UNIFORMS=0`) 394.7 ms, pooled path 394.2 ms, speedup 1.001x, exact output match.
   - final confirmation after default flip with runs 9: old create/destroy path 394.3 ms, pooled path 394.2 ms, speedup 1.000x, exact output match.
+- 2026-05-29 in-place warm-start regret scratch reuse, `bench_spots_root.json`, depth 6, iterations 128, `--compare-outputs`:
+  - old extra scratch path (`P2_INPLACE_WARMSTART_REGRETS=0`) 392.8 ms, in-place scratch 392.0 ms, speedup 1.002x, exact output match.
+  - longer confirmation with runs 17: old extra scratch path 394.8 ms, in-place scratch 393.5 ms, speedup 1.003x, exact output match.
 - 2026-05-29 sparse kernel microbench after uniform pooling:
   - `allin_table_values_both_players` was about 0.256 ms for 24 leaves, close to the packed all-in production path; all-in is not the dominant remaining full-solve bottleneck.
   - Aggregate regret/opponent kernels are much faster than their direct reference kernels in isolation, but prior full-CFR attempts to switch aggregate variants changed accumulation too much or slowed down.
