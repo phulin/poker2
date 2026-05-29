@@ -24,6 +24,7 @@
 - Tried fusing exact-belief phase shifts into the half-norm path; it sped up root CFR policy/action output but failed the stronger exact value fixture, so it was reverted.
 - Tried reusing sparse solve CPU scratch arrays; it was output-identical but within noise, so it was reverted.
 - Tried an exact-belief zero-sum value-head postprocess; it was exact-value-safe but slower, so it was reverted.
+- Tried an exact-belief all-in table shader; it was output-identical but within noise, so it was reverted.
 
 ## Measurements
 - 2026-05-29 short no-op interleaved run, `bench_spots.json`, depth 4, iterations 32, runs 3:
@@ -67,6 +68,7 @@
   - `P2_FUSE_EXACT_BELIEF_SHIFT=1`: 673.0 ms baseline vs 637.6 ms candidate, speedup 1.056x, policy/action output match, but exact value fixture drifted by about 0.095; reverted.
   - `P2_REUSE_SPARSE_SOLVE_ARRAYS=1`: 539.8 ms baseline vs 540.2 ms candidate, speedup 0.999x, exact output match.
   - `P2_EXACT_ZERO_SUM=1`: 540.4 ms baseline vs 544.7 ms candidate, speedup 0.992x, exact output match and exact value fixture pass.
+  - `P2_EXACT_ALLIN_TABLE=1`: 525.9 ms baseline vs 525.0 ms candidate, speedup 1.002x, exact output match.
 
 ## Verification
 - `yarn typecheck`: pass.
