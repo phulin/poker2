@@ -293,6 +293,8 @@ class RebelCFRTrainer:
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
             self.loss_fn.compile_forward_modes(**_compile_kwargs(cfg))
         self.grad_clip = cfg.train.grad_clip
+        self.policy_grad_clip = cfg.train.policy_grad_clip
+        self._compute_grad_clip_groups()
 
         # EMA setup. If enabled, the dedicated inference model is synced from
         # these shadow weights after training updates.
@@ -350,6 +352,60 @@ class RebelCFRTrainer:
         if self.device.type == "cuda":
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         return nullcontext()
+
+    def _compute_grad_clip_groups(self) -> None:
+        """Partition parameters into policy/value groups for separate gradient
+        clipping. Only possible when the two heads have disjoint parameters
+        (separate nets, or a TRM whose policy head detaches from the trunk).
+        With a shared trunk we fall back to a single combined clip."""
+        model = self.model
+        policy_model = getattr(model, "policy_model", None)
+        value_model = getattr(model, "value_model", None)
+        if isinstance(policy_model, nn.Module) and isinstance(value_model, nn.Module):
+            self._grad_clip_policy_params = list(policy_model.parameters())
+            self._grad_clip_value_params = list(value_model.parameters())
+            self._split_grad_clip = True
+            return
+        if isinstance(model, BetterTRM) and not model.shared_trunk:
+            policy_params = list(model.policy_head.parameters())
+            policy_ids = {id(p) for p in policy_params}
+            self._grad_clip_policy_params = policy_params
+            self._grad_clip_value_params = [
+                p for p in model.parameters() if id(p) not in policy_ids
+            ]
+            self._split_grad_clip = True
+            return
+        self._grad_clip_policy_params = []
+        self._grad_clip_value_params = []
+        self._split_grad_clip = False
+
+    @staticmethod
+    def _clip_grad_group(
+        params: list[nn.Parameter], clip: float | None
+    ) -> torch.Tensor:
+        if clip is not None and clip > 0:
+            return nn.utils.clip_grad_norm_(params, clip)
+        return torch.nn.utils.get_total_norm(
+            p.grad for p in params if p.grad is not None
+        )
+
+    def _clip_grads(self) -> torch.Tensor:
+        """Clip gradients and return the pre-clip total grad norm for logging.
+
+        When policy and value have disjoint parameters each group is clipped with
+        its own threshold (``policy_grad_clip`` vs ``grad_clip``); otherwise a
+        single combined clip is applied across all parameters. In the policy-only
+        path the value group has no gradients, so its norm is 0 and the combined
+        norm collapses to the policy norm."""
+        if self._split_grad_clip:
+            policy_norm = self._clip_grad_group(
+                self._grad_clip_policy_params, self.policy_grad_clip
+            )
+            value_norm = self._clip_grad_group(
+                self._grad_clip_value_params, self.grad_clip
+            )
+            return torch.sqrt(policy_norm.square() + value_norm.square())
+        return self._clip_grad_group(list(self.model.parameters()), self.grad_clip)
 
     def _make_better_split_ffn(self) -> BetterSplitFFN:
         cfg = self.cfg
@@ -1603,14 +1659,7 @@ class RebelCFRTrainer:
             ).all()
             assert grad_finite.item(), "NaN/Inf in model gradients"
 
-        if self.grad_clip is not None and self.grad_clip > 0:
-            grad_norm = nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.grad_clip
-            )
-        else:
-            grad_norm = torch.nn.utils.get_total_norm(
-                p.grad for p in self.model.parameters() if p.grad is not None
-            )
+        grad_norm = self._clip_grads()
 
         self.optimizer.step()
 
@@ -1688,14 +1737,7 @@ class RebelCFRTrainer:
             ).all()
             assert grad_finite.item(), "NaN/Inf in model gradients"
 
-        if self.grad_clip is not None and self.grad_clip > 0:
-            grad_norm = nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.grad_clip
-            )
-        else:
-            grad_norm = torch.nn.utils.get_total_norm(
-                p.grad for p in self.model.parameters() if p.grad is not None
-            )
+        grad_norm = self._clip_grads()
 
         self.optimizer.step()
 

@@ -138,6 +138,11 @@ class TrainingConfig:
     entropy_decay_portion: float = 0.6  # Portion of training for linear entropy decay
     permutation_coef: float = 0.01
     grad_clip: float = 1.0
+    # Separate clip for the policy net's gradients. Only takes effect when the
+    # policy and value heads have disjoint parameters (separate nets, or a TRM
+    # with shared_trunk=False); with a shared trunk grad_clip is used for all
+    # parameters. Looser than grad_clip because policy CE gradients run hotter.
+    policy_grad_clip: float = 10.0
     value_loss_type: ValueLossType = ValueLossType.huber
     huber_delta: float = 1.0
     return_clipping: bool = True  # Enable return clipping in value loss
