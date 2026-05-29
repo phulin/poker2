@@ -24,6 +24,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Skip BetterFFN board-interaction work for prepared empty-board batches; `P2_SKIP_EMPTY_BOARD_INTERACTION=0` restores the old explicit-zero path for A/B benchmarks.
 - Release leaf prediction temporary buffers back to the BetterFFN buffer pool every 16 predictions; `P2_RELEASE_LEAF_TEMPS_EVERY=0` restores the old solve-end release behavior for A/B benchmarks.
 - Skip unused GPU `beliefsAvgBuffer` uploads when `cfrAvg=false`; `P2_SKIP_UNUSED_BELIEFS_AVG_UPLOAD=0` restores the old upload path for A/B benchmarks.
+- Pool sparse CFR uniform parameter buffers across dispatches; `P2_POOL_SPARSE_UNIFORMS=0` restores the old create/destroy-per-dispatch path for A/B benchmarks.
 
 ## Errors Encountered
 - `yarn exec tsx ...` consumed benchmark flags before `tsx`; use `./node_modules/.bin/tsx ...` for ad hoc runs.

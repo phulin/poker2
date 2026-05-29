@@ -1,4 +1,4 @@
-import { makeStorageBuffer, makeUniformBuffer } from "../gpuBuffers.js";
+import { makeStorageBuffer } from "../gpuBuffers.js";
 import { createComputePipeline, dispatchCompute } from "../gpuPipeline.js";
 import {
   alignedSampleChunk,
@@ -64,6 +64,8 @@ function mixedUniform(words: UniformWord[]): Uint32Array<ArrayBuffer> {
 
 export class SparseCfrGpuKernels {
   readonly device: GPUDevice;
+  private readonly uniformPool = new Map<number, GPUBuffer[]>();
+  private readonly uniformSizes = new WeakMap<GPUBuffer, number>();
   private readonly regretMatchPipeline: GPUComputePipeline;
   private readonly beliefPropagateFusedPipeline: GPUComputePipeline;
   private readonly reachApplyPipeline: GPUComputePipeline;
@@ -207,6 +209,49 @@ export class SparseCfrGpuKernels {
     );
   }
 
+  private makeUniformBuffer(
+    words: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+  ): GPUBuffer {
+    const size = Math.ceil(words.byteLength / 16) * 16;
+    if (globalThis.process?.env?.P2_POOL_SPARSE_UNIFORMS === "0") {
+      const buffer = this.device.createBuffer({
+        size,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(buffer, 0, words);
+      return buffer;
+    }
+    const bucket = this.uniformPool.get(size);
+    const buffer =
+      bucket && bucket.length > 0
+        ? bucket.pop()!
+        : this.device.createBuffer({
+            size,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+    this.uniformSizes.set(buffer, size);
+    this.device.queue.writeBuffer(buffer, 0, words);
+    return buffer;
+  }
+
+  releaseParams(params: Iterable<GPUBuffer>): void {
+    const usePool = globalThis.process?.env?.P2_POOL_SPARSE_UNIFORMS !== "0";
+    for (const param of params) {
+      if (!usePool) {
+        param.destroy();
+        continue;
+      }
+      const size = this.uniformSizes.get(param);
+      if (!size) {
+        param.destroy();
+        continue;
+      }
+      const bucket = this.uniformPool.get(size);
+      if (bucket) bucket.push(param);
+      else this.uniformPool.set(size, [param]);
+    }
+  }
+
   createTreeBuffers(data: SparseGpuTreeData): SparseGpuTreeBuffers {
     const buffers = [
       makeStorageBuffer(this.device, data.childOffsets),
@@ -256,10 +301,7 @@ export class SparseCfrGpuKernels {
     const nodeChunk = alignedSampleChunk(tree.numHands, 64);
     for (let start = 0; start < tree.nodeCount; start += nodeChunk) {
       const nodeCount = Math.min(nodeChunk, tree.nodeCount - start);
-      const params = makeUniformBuffer(
-        this.device,
-        new Uint32Array([nodeCount, tree.numHands, 0, 0]),
-      );
+      const params = this.makeUniformBuffer(new Uint32Array([nodeCount, tree.numHands, 0, 0]));
       const bindGroup = this.device.createBindGroup({
         layout: this.regretMatchPipeline.getBindGroupLayout(0),
         entries: [
@@ -309,8 +351,7 @@ export class SparseCfrGpuKernels {
       end,
       MAX_DISPATCH_WORKGROUPS_PER_DIMENSION,
     )) {
-      const params = makeUniformBuffer(
-        this.device,
+      const params = this.makeUniformBuffer(
         new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
       );
       const bindGroup = this.device.createBindGroup({
@@ -352,8 +393,7 @@ export class SparseCfrGpuKernels {
       end,
       dispatchLimitedCount(2 * tree.numHands, 64),
     )) {
-      const params = makeUniformBuffer(
-        this.device,
+      const params = this.makeUniformBuffer(
         new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
       );
       const bindGroup = this.device.createBindGroup({
@@ -396,8 +436,7 @@ export class SparseCfrGpuKernels {
       end,
       dispatchLimitedCount(tree.numHands, 64),
     )) {
-      const params = makeUniformBuffer(
-        this.device,
+      const params = this.makeUniformBuffer(
         mixedUniform([
           ["u32", tree.numHands],
           ["u32", chunkStart],
@@ -445,8 +484,7 @@ export class SparseCfrGpuKernels {
       end,
       dispatchLimitedCount(2 * tree.numHands, 128),
     )) {
-      const params = makeUniformBuffer(
-        this.device,
+      const params = this.makeUniformBuffer(
         new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
       );
       const bindGroup = this.device.createBindGroup({
@@ -494,8 +532,7 @@ export class SparseCfrGpuKernels {
       end,
       dispatchLimitedCount(tree.numHands, 64),
     )) {
-      const params = makeUniformBuffer(
-        this.device,
+      const params = this.makeUniformBuffer(
         mixedUniform([
           ["u32", tree.numHands],
           ["u32", chunkStart],
@@ -538,7 +575,7 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer {
-    const params = makeUniformBuffer(this.device, new Uint32Array([tree.numHands, start, end, 0]));
+    const params = this.makeUniformBuffer(new Uint32Array([tree.numHands, start, end, 0]));
     const bindGroup = this.device.createBindGroup({
       layout: this.opponentPolicyPipeline.getBindGroupLayout(0),
       entries: [
@@ -593,7 +630,7 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer[] {
-    const params = makeUniformBuffer(this.device, new Uint32Array([tree.numHands, start, end, 0]));
+    const params = this.makeUniformBuffer(new Uint32Array([tree.numHands, start, end, 0]));
     const aggregateBindGroup = this.device.createBindGroup({
       layout: this.opponentPolicyAggregatePipeline.getBindGroupLayout(0),
       entries: [
@@ -653,8 +690,7 @@ export class SparseCfrGpuKernels {
       end,
       dispatchLimitedCount(tree.numHands, 64),
     )) {
-      const params = makeUniformBuffer(
-        this.device,
+      const params = this.makeUniformBuffer(
         new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
       );
       const aggregateBindGroup = this.device.createBindGroup({
@@ -710,7 +746,7 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer {
-    const params = makeUniformBuffer(this.device, new Uint32Array([tree.numHands, start, end, 0]));
+    const params = this.makeUniformBuffer(new Uint32Array([tree.numHands, start, end, 0]));
     const bindGroup = this.device.createBindGroup({
       layout: this.regretWeightPipeline.getBindGroupLayout(0),
       entries: [
@@ -761,7 +797,7 @@ export class SparseCfrGpuKernels {
     start: number,
     end: number,
   ): GPUBuffer[] {
-    const params = makeUniformBuffer(this.device, new Uint32Array([tree.numHands, start, end, 0]));
+    const params = this.makeUniformBuffer(new Uint32Array([tree.numHands, start, end, 0]));
     const aggregateBindGroup = this.device.createBindGroup({
       layout: this.regretWeightAggregatePipeline.getBindGroupLayout(0),
       entries: [
@@ -817,8 +853,7 @@ export class SparseCfrGpuKernels {
       end,
       dispatchLimitedCount(tree.numHands, 64),
     )) {
-      const params = makeUniformBuffer(
-        this.device,
+      const params = this.makeUniformBuffer(
         new Uint32Array([tree.numHands, chunkStart, chunkEnd, 0]),
       );
       const aggregateBindGroup = this.device.createBindGroup({
@@ -874,10 +909,7 @@ export class SparseCfrGpuKernels {
     const paramsList: GPUBuffer[] = [];
     for (let start = 0; start < batch; start += LEAF_SAMPLE_CHUNK) {
       const chunkBatch = Math.min(LEAF_SAMPLE_CHUNK, batch - start);
-      const params = makeUniformBuffer(
-        this.device,
-        new Uint32Array([tree.numHands, chunkBatch, 0, 0]),
-      );
+      const params = this.makeUniformBuffer(new Uint32Array([tree.numHands, chunkBatch, 0, 0]));
       const bindGroup = this.device.createBindGroup({
         layout: this.gatherNodeBeliefsPipeline.getBindGroupLayout(0),
         entries: [
@@ -909,10 +941,7 @@ export class SparseCfrGpuKernels {
     const paramsList: GPUBuffer[] = [];
     for (let start = 0; start < batch; start += LEAF_SAMPLE_CHUNK) {
       const chunkBatch = Math.min(LEAF_SAMPLE_CHUNK, batch - start);
-      const params = makeUniformBuffer(
-        this.device,
-        new Uint32Array([tree.numHands, chunkBatch, 0, 0]),
-      );
+      const params = this.makeUniformBuffer(new Uint32Array([tree.numHands, chunkBatch, 0, 0]));
       const bindGroup = this.device.createBindGroup({
         layout: this.scatterNodeValuesPipeline.getBindGroupLayout(0),
         entries: [
@@ -946,10 +975,7 @@ export class SparseCfrGpuKernels {
     const paramsList: GPUBuffer[] = [];
     for (let start = 0; start < batch; start += TERMINAL_SAMPLE_CHUNK) {
       const chunkBatch = Math.min(TERMINAL_SAMPLE_CHUNK, batch - start);
-      const params = makeUniformBuffer(
-        this.device,
-        new Uint32Array([tree.numHands, chunkBatch, 0, 0]),
-      );
+      const params = this.makeUniformBuffer(new Uint32Array([tree.numHands, chunkBatch, 0, 0]));
       const bindGroup = this.device.createBindGroup({
         layout: this.showdownValuesPipeline.getBindGroupLayout(0),
         entries: [
@@ -1069,8 +1095,7 @@ export class SparseCfrGpuKernels {
     const rankMassOffset = 0;
     const rankPrefixOffset = aggregateCount;
     const rankTotalOffset = aggregateCount * 2;
-    const params = makeUniformBuffer(
-      this.device,
+    const params = this.makeUniformBuffer(
       new Uint32Array([
         tree.numHands,
         batch,
@@ -1201,10 +1226,7 @@ export class SparseCfrGpuKernels {
   ): GPUBuffer {
     const params =
       existingParams ??
-      makeUniformBuffer(
-        this.device,
-        new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
-      );
+      this.makeUniformBuffer(new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]));
     const bindGroup = this.device.createBindGroup({
       layout: this.showdownRankMassByHandsBothPlayersPipeline.getBindGroupLayout(0),
       entries: [
@@ -1245,10 +1267,7 @@ export class SparseCfrGpuKernels {
   ): GPUBuffer {
     const params =
       existingParams ??
-      makeUniformBuffer(
-        this.device,
-        new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
-      );
+      this.makeUniformBuffer(new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]));
     const bindGroup = this.device.createBindGroup({
       layout: this.showdownRankMassByHandsPipeline.getBindGroupLayout(0),
       entries: [
@@ -1281,10 +1300,7 @@ export class SparseCfrGpuKernels {
   ): GPUBuffer {
     const params =
       existingParams ??
-      makeUniformBuffer(
-        this.device,
-        new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
-      );
+      this.makeUniformBuffer(new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]));
     const massBindGroup = this.device.createBindGroup({
       layout: this.showdownRankMassPipeline.getBindGroupLayout(0),
       entries: [
@@ -1312,7 +1328,7 @@ export class SparseCfrGpuKernels {
     existingParams?: GPUBuffer,
   ): GPUBuffer {
     const params =
-      existingParams ?? makeUniformBuffer(this.device, new Uint32Array([0, batch, maxRanks, 0]));
+      existingParams ?? this.makeUniformBuffer(new Uint32Array([0, batch, maxRanks, 0]));
     const prefixBindGroup = this.device.createBindGroup({
       layout: this.showdownRankPrefixPipeline.getBindGroupLayout(0),
       entries: [
@@ -1340,8 +1356,7 @@ export class SparseCfrGpuKernels {
   ): GPUBuffer {
     const params =
       existingParams ??
-      makeUniformBuffer(
-        this.device,
+      this.makeUniformBuffer(
         new Uint32Array([
           0,
           batch,
@@ -1388,10 +1403,7 @@ export class SparseCfrGpuKernels {
     }
     const params =
       existingParams ??
-      makeUniformBuffer(
-        this.device,
-        new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
-      );
+      this.makeUniformBuffer(new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]));
     const valuesBindGroup = this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1436,10 +1448,7 @@ export class SparseCfrGpuKernels {
     }
     const params =
       existingParams ??
-      makeUniformBuffer(
-        this.device,
-        new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
-      );
+      this.makeUniformBuffer(new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]));
     const valuesBindGroup = this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1487,10 +1496,7 @@ export class SparseCfrGpuKernels {
     }
     const params =
       existingParams ??
-      makeUniformBuffer(
-        this.device,
-        new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]),
-      );
+      this.makeUniformBuffer(new Uint32Array([tree.numHands, batch, maxRanks, tree.overlapSlots]));
     const valuesBindGroup = this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1533,8 +1539,7 @@ export class SparseCfrGpuKernels {
     if (tree.numHands !== 1326 || tree.overlapSlots !== 101) {
       throw new Error("packed both-player showdown values require 1326 HUNL hands");
     }
-    const params = makeUniformBuffer(
-      this.device,
+    const params = this.makeUniformBuffer(
       new Uint32Array([
         tree.numHands,
         batch,
@@ -1634,7 +1639,7 @@ export class SparseCfrGpuKernels {
     u32[0] = tree.numHands;
     u32[1] = batch;
     f32[4] = tableScale;
-    const params = makeUniformBuffer(this.device, u32);
+    const params = this.makeUniformBuffer(u32);
     const bindGroup = this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1679,7 +1684,7 @@ export class SparseCfrGpuKernels {
     u32[2] = permId;
     u32[3] = hasPerm ? 1 : 0;
     f32[4] = tableScale;
-    const params = makeUniformBuffer(this.device, u32);
+    const params = this.makeUniformBuffer(u32);
     const bindGroup = this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1724,7 +1729,7 @@ export class SparseCfrGpuKernels {
     u32[2] = permId;
     u32[3] = hasPerm ? 1 : 0;
     f32[4] = tableScale;
-    const params = makeUniformBuffer(this.device, u32);
+    const params = this.makeUniformBuffer(u32);
     const bindGroup = this.device.createBindGroup({
       layout: this.allInTableValues1326NoPermPipeline.getBindGroupLayout(0),
       entries: [
@@ -1773,7 +1778,7 @@ export class SparseCfrGpuKernels {
     u32[2] = permId;
     u32[3] = hasPerm ? 1 : 0;
     f32[4] = tableScale;
-    const params = makeUniformBuffer(this.device, u32);
+    const params = this.makeUniformBuffer(u32);
     const bindGroup = this.device.createBindGroup({
       layout: this.allInTableValues1326NoPermBothPlayersPipeline.getBindGroupLayout(0),
       entries: [

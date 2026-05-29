@@ -1111,8 +1111,7 @@ export class SparseCfrResolver {
     }
 
     const profile = Boolean(globalThis.process?.env?.P2_PROFILE);
-    const combinePrefixWithLeaf =
-      globalThis.process?.env?.P2_COMBINE_PREFIX_WITH_LEAF !== "0";
+    const combinePrefixWithLeaf = globalThis.process?.env?.P2_COMBINE_PREFIX_WITH_LEAF !== "0";
     const leafDisposalChunk = Math.max(
       0,
       Number.parseInt(globalThis.process?.env?.P2_RELEASE_LEAF_TEMPS_EVERY ?? "16", 10) || 0,
@@ -1137,10 +1136,7 @@ export class SparseCfrResolver {
     };
 
     try {
-      const encodePrefixCommands = (
-        encoder: GPUCommandEncoder,
-        t: number,
-      ): GPUBuffer[] => {
+      const encodePrefixCommands = (encoder: GPUCommandEncoder, t: number): GPUBuffer[] => {
         const averageDelayed = this.averageAccumulationDelayed(t);
         const regretBeliefsBuffer = cfrAvg ? beliefsAvgBuffer! : beliefsBuffer;
         return this.encodeIterationPrefixGpuResidentCommands(
@@ -1284,7 +1280,7 @@ export class SparseCfrResolver {
             const encoder = this.model.device.createCommandEncoder();
             const params = encodePrefixCommands(encoder, t);
             this.model.device.queue.submit([encoder.finish()]);
-            for (const param of params) param.destroy();
+            this.gpuKernels?.releaseParams(params);
           });
         }
 
@@ -1451,7 +1447,7 @@ export class SparseCfrResolver {
       deferredParams.push(...(afterLeafValues?.(terminalEncoder) ?? []));
       if (deferredParams.length > 0) {
         device.queue.submit([terminalEncoder.finish()]);
-        for (const params of deferredParams.splice(0)) params.destroy();
+        this.gpuKernels.releaseParams(deferredParams.splice(0));
       }
       return () => undefined;
     }
@@ -1489,8 +1485,8 @@ export class SparseCfrResolver {
         );
       },
     );
-    for (const params of scatterParams ?? []) params.destroy();
-    for (const params of deferredParams.splice(0)) params.destroy();
+    this.gpuKernels.releaseParams(scatterParams ?? []);
+    this.gpuKernels.releaseParams(deferredParams.splice(0));
     return () => prediction.dispose();
   }
 
@@ -1697,7 +1693,7 @@ export class SparseCfrResolver {
       valuesBuffer,
     );
     this.model.device.queue.submit([encoder.finish()]);
-    for (const param of params) param.destroy();
+    this.gpuKernels.releaseParams(params);
   }
 
   private encodeExpectedValuesGpuResidentCommands(
@@ -1785,7 +1781,7 @@ export class SparseCfrResolver {
       iterations,
     );
     this.model.device.queue.submit([encoder.finish()]);
-    for (const param of params) param.destroy();
+    this.gpuKernels.releaseParams(params);
   }
 
   private encodeIterationPrefixGpuResidentCommands(
@@ -1911,7 +1907,7 @@ export class SparseCfrResolver {
       policyBuffer,
     );
     this.model.device.queue.submit([encoder.finish()]);
-    for (const param of params) param.destroy();
+    this.gpuKernels.releaseParams(params);
   }
 
   private encodePropagateGpuResident(
@@ -1941,7 +1937,7 @@ export class SparseCfrResolver {
       denomBuffer,
     );
     device.queue.submit([encoder.finish()]);
-    for (const param of params) param.destroy();
+    this.gpuKernels.releaseParams(params);
   }
 
   private encodePropagateInto(
@@ -2032,7 +2028,7 @@ export class SparseCfrResolver {
       tree.nodes.length,
     );
     this.model.device.queue.submit([encoder.finish()]);
-    for (const param of params) param.destroy();
+    this.gpuKernels.releaseParams(params);
   }
 
   private updatePolicy(
